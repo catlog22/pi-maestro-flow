@@ -90,20 +90,59 @@ function accumulateUsage(total: Usage, partial: Partial<Usage>): void {
 // AC3: Windows-safe pi binary resolution
 // ---------------------------------------------------------------------------
 
-function getPiSpawnCommand(args: string[]): { command: string; args: string[] } {
+let resolvedPiEntryPoint: string | null | undefined;
+
+function resolvePiEntryPoint(): string | null {
+  if (resolvedPiEntryPoint !== undefined) return resolvedPiEntryPoint;
+
+  // Try current process argv (if pi is the host)
+  const argv1 = process.argv[1];
+  if (argv1 && (argv1.endsWith(".mjs") || argv1.endsWith(".js"))) {
+    resolvedPiEntryPoint = argv1;
+    return resolvedPiEntryPoint;
+  }
+
+  if (process.platform === "win32") {
+    // Parse pi.cmd to find the real .js entry point
+    const npmDir = process.env.APPDATA
+      ? path.join(process.env.APPDATA, "npm")
+      : null;
+    if (npmDir) {
+      const cmdFile = path.join(npmDir, "pi.cmd");
+      try {
+        const content = fs.readFileSync(cmdFile, "utf-8");
+        // pi.cmd contains: "%_prog%" "%dp0%\node_modules\...\cli.js" %*
+        const match = content.match(/"?%dp0%\\([^"*%\r\n]+\.(?:js|mjs))"?/);
+        if (match) {
+          const entryPoint = path.join(npmDir, match[1]);
+          if (fs.existsSync(entryPoint)) {
+            resolvedPiEntryPoint = entryPoint;
+            return resolvedPiEntryPoint;
+          }
+        }
+      } catch { /* fallback */ }
+    }
+  }
+
+  resolvedPiEntryPoint = null;
+  return null;
+}
+
+function getPiSpawnCommand(args: string[]): { command: string; args: string[]; shell: boolean } {
   const envBinary = process.env.PI_TEAMMATE_PI_BINARY;
   if (envBinary) {
-    return { command: envBinary, args };
+    return { command: envBinary, args, shell: false };
   }
+
+  const entryPoint = resolvePiEntryPoint();
+  if (entryPoint) {
+    return { command: process.execPath, args: [entryPoint, ...args], shell: false };
+  }
+
   if (process.platform === "win32") {
-    const argv1 = process.argv[1];
-    if (argv1 && argv1.endsWith(".mjs")) {
-      return { command: process.execPath, args: [argv1, ...args] };
-    }
-    // Windows: pi is installed as pi.cmd (batch file); spawn requires shell:true for .cmd files
-    return { command: "pi.cmd", args };
+    return { command: "pi.cmd", args, shell: true };
   }
-  return { command: "pi", args };
+  return { command: "pi", args, shell: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -386,11 +425,8 @@ async function runSingleAttempt(
         cwd,
         stdio: ["pipe", "pipe", "pipe"],
         env: spawnEnv,
+        shell: spawnSpec.shell,
       };
-      // .cmd batch files require shell:true on Windows for child_process.spawn
-      if (process.platform === "win32") {
-        spawnOpts.shell = true;
-      }
       child = spawn(spawnSpec.command, spawnSpec.args, spawnOpts);
     } catch (error) {
       cleanupFile(systemPromptFile);
