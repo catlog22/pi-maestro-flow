@@ -499,7 +499,7 @@ Views:
   }
 
   // Ctrl+T — shortcut to open agent selector/attach
-  pi.registerShortcut("ctrl+b", {
+  pi.registerShortcut("alt+r", {
     description: "Attach to a running teammate agent",
     async handler(ctx) {
       await showAgentSelector(ctx);
