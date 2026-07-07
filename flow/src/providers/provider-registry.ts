@@ -20,7 +20,7 @@ function mapToolToProviderConfig(
   name: string,
   config: CliToolConfig,
 ): {
-  apiType: string;
+  api: string;
   envVar: string;
   baseUrl?: string;
 } {
@@ -28,49 +28,49 @@ function mapToolToProviderConfig(
   switch (name) {
     case "claude":
       return {
-        apiType: "anthropic-messages",
+        api: "anthropic-messages",
         envVar: "ANTHROPIC_API_KEY",
         baseUrl: "https://api.anthropic.com",
       };
 
     case "gemini":
       return {
-        apiType: "google-genai",
+        api: "google-genai",
         envVar: "GOOGLE_API_KEY",
         baseUrl: "https://generativelanguage.googleapis.com",
       };
 
     case "codex":
       return {
-        apiType: "openai-completions",
+        api: "openai-completions",
         envVar: "OPENAI_API_KEY",
         baseUrl: "https://api.openai.com/v1",
       };
 
     case "opencode":
       return {
-        apiType: "openai-compatible",
+        api: "openai-compatible",
         envVar: "OPENAI_API_KEY",
         baseUrl: "https://api.openai.com/v1",
       };
 
     case "agy":
       return {
-        apiType: "openai-compatible",
+        api: "openai-compatible",
         envVar: "AGY_API_KEY",
         baseUrl: "https://api.openai.com/v1",
       };
 
     case "api-explore":
       return {
-        apiType: "openai-compatible",
+        api: "openai-compatible",
         envVar: "API_EXPLORE_KEY",
         baseUrl: "https://api.openai.com/v1",
       };
 
     default:
       return {
-        apiType: "openai-compatible",
+        api: "openai-compatible",
         envVar: `${name.toUpperCase()}_API_KEY`,
         baseUrl: "https://api.openai.com/v1",
       };
@@ -107,7 +107,7 @@ export function registerMaestroProviders(pi: ExtensionAPI): void {
       // pi-agent-core version.
       if (typeof pi.registerProvider === "function") {
         pi.registerProvider(name, {
-          apiType: providerMapping.apiType,
+          api: providerMapping.api,
           apiKey: `$${providerMapping.envVar}`,
           ...(providerMapping.baseUrl
             ? { baseUrl: providerMapping.baseUrl }
