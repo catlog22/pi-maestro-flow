@@ -8,7 +8,9 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 Debug issues using scientific method with subagent isolation and persistent debug state. Three entry modes (standalone, from-UAT, parallel) and structured root cause collection with UAT feedback loop. Full algorithm defined in workflow debug.md.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/debug.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/debug.md
+</required_reading>
 
 <context>
 User's issue: $ARGUMENTS

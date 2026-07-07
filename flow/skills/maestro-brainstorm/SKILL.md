@@ -10,13 +10,16 @@ Multi-role brainstorming with cross-role conflict resolution. Auto mode: guidanc
 Pipeline: grill (optional) → **brainstorm** → roadmap / analyze / blueprint.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/brainstorm.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/brainstorm.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [scratch-index.json](~/.pi/agent/packages/pi-maestro-flow/templates/scratch-index.json) — read when operating in scratch mode
-> - [index.json](~/.pi/agent/packages/pi-maestro-flow/templates/index.json) — read when operating in phase mode
-> - [brainstorm-visualize.md](~/.pi/agent/packages/pi-maestro-flow/workflows/brainstorm-visualize.md) — read when html-prototypes/ produced and user wants to browse them
-> - [boundary-grill.md](~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md) — read when boundary conflicts detected (in cross-role review)
+<deferred_reading>
+- [scratch-index.json](~/.pi/agent/packages/pi-maestro-flow/templates/scratch-index.json) — read when operating in scratch mode
+- [index.json](~/.pi/agent/packages/pi-maestro-flow/templates/index.json) — read when operating in phase mode
+- [brainstorm-visualize.md](~/.pi/agent/packages/pi-maestro-flow/workflows/brainstorm-visualize.md) — read when html-prototypes/ produced and user wants to browse them
+- [boundary-grill.md](~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md) — read when boundary conflicts detected (in cross-role review)
+</deferred_reading>
 
 <context>
 $ARGUMENTS -- topic text for auto mode, or role name for single role mode.
@@ -54,7 +57,7 @@ $ARGUMENTS -- topic text for auto mode, or role name for single role mode.
 </context>
 
 <interview_protocol>
-Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
+Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (flexible order — user may jump between branches): mode (auto / single-role / review-only) → role selection and --count → --from upstream source (grill:ID, blueprint:ID, @file, path) → whether to enable design-research and DESIGN.md sub-pipeline
@@ -186,5 +189,5 @@ Status verdicts:
 </success_criteria>
 
 <on_complete>
-Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md`. — SESSION_DIR={output_dir}, SESSION_TYPE=brainstorm, SESSION_ID={artifact_id}, LINKED_MILESTONE=null
+~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md — SESSION_DIR={output_dir}, SESSION_TYPE=brainstorm, SESSION_ID={artifact_id}, LINKED_MILESTONE=null
 </on_complete>

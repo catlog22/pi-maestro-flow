@@ -8,7 +8,9 @@ allowed-tools: Read Bash Glob Grep maestro
 Project dashboard: artifact progress, task counts, active work, next-step suggestions.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/status.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/status.md
+</required_reading>
 
 <context>
 $ARGUMENTS (no arguments required)

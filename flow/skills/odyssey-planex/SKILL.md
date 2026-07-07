@@ -4,7 +4,7 @@ description: "Requirement-driven iterative cycle — plan, execute, strict verif
 allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
-<base>`~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>`
+<base>~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>
 
 <purpose>
 Requirement-to-delivery closed loop: parse requirement → define acceptance criteria →

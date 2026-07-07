@@ -9,8 +9,8 @@ Signal-driven overlay generator — collect workflow deficiency signals from mul
 </purpose>
 
 <required_reading>
-Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/overlays.md`.
-@~/.maestro/cli-tools.json
+~/.pi/agent/packages/pi-maestro-flow/workflows/overlays.md
+~/.maestro/cli-tools.json
 </required_reading>
 
 <context>

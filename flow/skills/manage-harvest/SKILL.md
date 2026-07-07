@@ -8,11 +8,14 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 Extract knowledge from workflow artifacts → route to wiki/spec/issue stores. Works on any artifact (vs retrospective which is phase-scoped).
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/harvest.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/harvest.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - `~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md` (issues.jsonl schema for issue routing — read when creating issues in Stage 6c)
-> - `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md` (spec entry format — read when routing to spec in Stage 6b)
+<deferred_reading>
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md (issues.jsonl schema for issue routing — read when creating issues in Stage 6c)
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md (spec entry format — read when routing to spec in Stage 6b)
+</deferred_reading>
 
 <context>
 Arguments: $ARGUMENTS

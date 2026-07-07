@@ -8,11 +8,14 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 Automated issue discovery: multi-perspective (8 perspectives) or prompt-driven. Deduplicates and records to `issues.jsonl`. For CRUD operations, use `/manage-issue`.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/issue-discover.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/issue-discover.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [issue.json template](~/.pi/agent/packages/pi-maestro-flow/templates/issue.json) — read when creating issue records from findings (Step 6/11)
-> - [search-tools](~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md) — search tool priority, passed to agents via workflow
+<deferred_reading>
+- [issue.json template](~/.pi/agent/packages/pi-maestro-flow/templates/issue.json) — read when creating issue records from findings (Step 6/11)
+- [search-tools](~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md) — search tool priority, passed to agents via workflow
+</deferred_reading>
 
 <context>
 $ARGUMENTS -- optional. Parse first token to determine mode.

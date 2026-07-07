@@ -10,8 +10,9 @@ Adaptive lifecycle orchestrator: locate step → resolve args → load context �
 Session: `.workflow/.maestro/ralph-v2-{YYYYMMDD-HHmmss}/status.json`
 </purpose>
 
-> **Reference files** (read when needed):
-> - [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read when `--amend` flag active for goal amendment flow
+<deferred_reading>
+- [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read when `--amend` flag active for goal amendment flow
+</deferred_reading>
 
 <context>
 $ARGUMENTS — intent text, flags, or keywords.

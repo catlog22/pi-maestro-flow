@@ -115,35 +115,11 @@ function remapAgentTools(content) {
 function transformBody(body) {
   let result = body;
 
-  // 1. @~/.maestro/workflows/xxx.md → read instruction
-  //    <required_reading>@~/.maestro/workflows/xxx.md</required_reading>
-  //    → **Required**: Read `~/.maestro/workflows/xxx.md` before proceeding.
+  // Keep XML tags as-is — they're prompt structure, not platform-specific.
+  // Only strip the @ prefix from file references (Claude-specific inlining syntax).
   result = result.replace(
-    /<required_reading>\s*@?(~\/.maestro\/workflows\/[^\s<]+)\s*<\/required_reading>/g,
-    '> **Required**: Read `$1` before proceeding.'
-  );
-
-  // 2. <deferred_reading> blocks → reference list
-  result = result.replace(
-    /<deferred_reading>\s*([\s\S]*?)\s*<\/deferred_reading>/g,
-    (_, content) => {
-      const items = content.trim().split('\n').map(l => l.trim()).filter(Boolean);
-      return '> **Reference files** (read when needed):\n' + items.map(item => {
-        return '> ' + item.replace(/@(~\/.maestro\/[^\s)]+)/g, '`$1`');
-      }).join('\n');
-    }
-  );
-
-  // 3. Standalone @~/.maestro/workflows/ references in body
-  result = result.replace(
-    /^@(~\/.maestro\/workflows\/\S+)/gm,
-    'Read and follow `$1`.'
-  );
-
-  // 4. Inline @ references (not at line start, not in code blocks)
-  result = result.replace(
-    /(?<![`"])@(~\/.maestro\/workflows\/\S+)/g,
-    '`$1`'
+    /(@)(~\/.maestro\/)/g,
+    '$2'
   );
 
   // 5. "Agent tool" / "Agent(" references → teammate

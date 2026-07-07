@@ -9,7 +9,9 @@ Capture reusable knowledge into `.workflow/knowhow/` with type-specific structur
 Auto-indexed by WikiIndexer (type=knowhow), searchable via `maestro search --type knowhow`.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md
+</required_reading>
 
 <context>
 $ARGUMENTS — type token + description + optional flags.

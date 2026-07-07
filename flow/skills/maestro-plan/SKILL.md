@@ -9,13 +9,16 @@ Create, revise, or verify execution plans (5-stage pipeline).
 Produces plan.json + TASK files; registers PLN artifact in state.json.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/plan.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/plan.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [plan.json](~/.pi/agent/packages/pi-maestro-flow/templates/plan.json) — read when generating plan output
-> - [task.json](~/.pi/agent/packages/pi-maestro-flow/templates/task.json) — read when generating task files
-> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
-> - [boundary-grill.md](~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md) — read when boundary conflicts detected (in P4)
+<deferred_reading>
+- [plan.json](~/.pi/agent/packages/pi-maestro-flow/templates/plan.json) — read when generating plan output
+- [task.json](~/.pi/agent/packages/pi-maestro-flow/templates/task.json) — read when generating task files
+- [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
+- [boundary-grill.md](~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md) — read when boundary conflicts detected (in P4)
+</deferred_reading>
 
 <context>
 $ARGUMENTS — milestone number, or no args for current milestone, with optional flags.

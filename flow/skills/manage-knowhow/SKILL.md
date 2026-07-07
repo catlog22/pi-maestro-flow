@@ -8,7 +8,9 @@ allowed-tools: Read Write Edit Bash Glob Grep maestro
 Manage knowhow across two stores: workflow (`.workflow/knowhow/`) and system memory (`~/.claude/projects/*/memory/`). Operations: list, search, view, edit, delete, prune.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md
+</required_reading>
 
 <context>
 Arguments: $ARGUMENTS

@@ -8,11 +8,14 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 审查 spec/knowhow/artifact 存储，识别矛盾/失效/孤儿，通过 keep/deprecate/delete 三态清理。对称于 `manage-harvest`（写入入口）。
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/knowledge-audit.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/knowledge-audit.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - `~/.pi/agent/packages/pi-maestro-flow/workflows/harvest.md` (audit 检测的 artifact 是 harvest 的产物源)
-> - `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md` (deprecate 操作所需的 `<spec-entry>` 变形)
+<deferred_reading>
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/harvest.md (audit 检测的 artifact 是 harvest 的产物源)
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md (deprecate 操作所需的 `<spec-entry>` 变形)
+</deferred_reading>
 
 <context>
 Arguments: $ARGUMENTS

@@ -8,10 +8,13 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 Multi-dimensional code review on a phase's changed files. Three levels (quick/standard/deep), auto-detected from file count. Level and dimension details in workflow review.md.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/review.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/review.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [index.json](~/.pi/agent/packages/pi-maestro-flow/templates/index.json) — read when updating phase index after review
+<deferred_reading>
+- [index.json](~/.pi/agent/packages/pi-maestro-flow/templates/index.json) — read when updating phase index after review
+</deferred_reading>
 
 <context>
 Phase: $ARGUMENTS (required — phase number or slug)

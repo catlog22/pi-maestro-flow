@@ -4,7 +4,7 @@ description: "Deep review + fix cycle — archaeology, exploration, multi-dimens
 allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
-<base>`~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>`
+<base>~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>
 
 <purpose>
 archaeology → explore → multi-dimensional review → fix ALL findings → confirm → generalize → discover → persist. Zero-residual: every finding gets an action.

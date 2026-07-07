@@ -8,7 +8,9 @@ allowed-tools: Read Write Edit Bash Glob Grep maestro
 Wiki graph management: health, search, cleanup, stats, connect, digest.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/wiki-manage.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/wiki-manage.md
+</required_reading>
 
 <context>
 $ARGUMENTS — subcommand and optional flags.

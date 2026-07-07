@@ -9,11 +9,12 @@ Extract design system from source code into tokens, reference package, and knowl
 4-phase pipeline: validate → extract → package → knowhow.
 </purpose>
 
-> **Reference files** (read when needed):
-> - [ui-codify.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify.md) — read always (main workflow orchestrator)
-> - [ui-codify-extract.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-extract.md) — read when Phase 2 starts (style extraction with 3 agents)
-> - [ui-codify-package.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-package.md) — read when Phase 3 starts (reference package generation)
-> - [ui-codify-knowhow.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-knowhow.md) — read when Phase 4 starts (knowledge asset generation)
+<deferred_reading>
+- [ui-codify.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify.md) — read always (main workflow orchestrator)
+- [ui-codify-extract.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-extract.md) — read when Phase 2 starts (style extraction with 3 agents)
+- [ui-codify-package.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-package.md) — read when Phase 3 starts (reference package generation)
+- [ui-codify-knowhow.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-knowhow.md) — read when Phase 4 starts (knowledge asset generation)
+</deferred_reading>
 
 <context>
 $ARGUMENTS — source path (required) with optional flags.

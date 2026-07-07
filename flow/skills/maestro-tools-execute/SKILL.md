@@ -9,7 +9,9 @@ Load registered tool documents and execute them step-by-step.
 Direct (by name) or category-based (list + select) invocation.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/tools-spec.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/tools-spec.md
+</required_reading>
 
 <context>
 $ARGUMENTS — Tool name, keyword, or --category filter

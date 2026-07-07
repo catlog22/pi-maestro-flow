@@ -8,7 +8,9 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 Sync codebase docs after code changes: git diff → trace impact via doc-index.json → refresh `.workflow/codebase/` docs.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/sync.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/sync.md
+</required_reading>
 
 <context>
 $ARGUMENTS -- optional flags:

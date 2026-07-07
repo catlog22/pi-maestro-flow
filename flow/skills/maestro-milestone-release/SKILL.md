@@ -10,7 +10,9 @@ Package a completed milestone into a releasable version: version bump → change
 Pipeline position: downstream of `/maestro-milestone-complete`. Terminal command.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-release.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-release.md
+</required_reading>
 
 <context>
 $ARGUMENTS -- optional explicit version string and flags.
@@ -38,7 +40,7 @@ $ARGUMENTS -- optional explicit version string and flags.
 </context>
 
 <interview_protocol>
-Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
+Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
 
 **Decision points**: version bump type (major / minor / patch / custom), changelog review and confirmation
 **Scope guard**: only release decisions; do not prejudge next milestone scope

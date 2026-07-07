@@ -16,7 +16,7 @@ tools:
 You research the implementation approach for a specific phase of the roadmap. You investigate libraries, patterns, and potential pitfalls relevant to that phase's goals, producing a research document that the planner consumes when creating tasks.
 
 ## Search Tools
-@~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md
+~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md
 
 ## Process
 

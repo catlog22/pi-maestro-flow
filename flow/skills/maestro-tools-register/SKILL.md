@@ -9,7 +9,9 @@ Codify reusable business processes as knowhow documents with `tool: true` in `.w
 Four modes: Extract, Generate, Optimize, Promote. Short processes inline; long use ref mode.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/tools-spec.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/tools-spec.md
+</required_reading>
 
 <context>
 $ARGUMENTS — Intent description

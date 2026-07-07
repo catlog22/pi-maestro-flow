@@ -9,9 +9,10 @@ Interactive workflow template composer: natural language to DAG template.
 Three modes: new design (default), resume (`--resume`), edit (`--edit <path>`).
 </purpose>
 
-> **Reference files** (read when needed):
-> - [node-catalog](~/.pi/agent/packages/pi-maestro-flow/templates/workflows/specs/node-catalog.md) — read at Phase 2 (Resolve)
-> - [template-schema](~/.pi/agent/packages/pi-maestro-flow/templates/workflows/specs/template-schema.md) — read at Phase 5 (Persist)
+<deferred_reading>
+- [node-catalog](~/.pi/agent/packages/pi-maestro-flow/templates/workflows/specs/node-catalog.md) — read at Phase 2 (Resolve)
+- [template-schema](~/.pi/agent/packages/pi-maestro-flow/templates/workflows/specs/template-schema.md) — read at Phase 5 (Persist)
+</deferred_reading>
 
 <context>
 $ARGUMENTS — natural language description, or flags.

@@ -9,7 +9,9 @@ Systematic security audit covering OWASP Top 10, dependency supply chain, secret
 CI/CD pipeline review, and optional STRIDE threat modeling. Three tiers control depth vs speed.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/review.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/review.md
+</required_reading>
 
 <context>
 $ARGUMENTS — Parse tier and scope:

@@ -8,7 +8,9 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 Full rebuild of `.workflow/codebase/` docs: 4 parallel mapper agents → tech-stack, architecture, features, concerns. Destructive — overwrites existing docs.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/codebase-rebuild.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/codebase-rebuild.md
+</required_reading>
 
 <context>
 $ARGUMENTS -- optional flags.

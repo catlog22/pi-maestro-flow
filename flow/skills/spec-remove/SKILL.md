@@ -9,7 +9,9 @@ Remove a `<spec-entry>` from a specs file. Symmetric with `/spec-add`.
 Uses `maestro wiki remove-entry` for atomic removal with index auto-update.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-remove.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/specs-remove.md
+</required_reading>
 
 <context>
 $ARGUMENTS -- expects `<entry-id>` (e.g., `spec-learnings-003`, `spec-coding-conventions-001`)

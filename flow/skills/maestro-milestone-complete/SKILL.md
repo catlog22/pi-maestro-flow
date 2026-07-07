@@ -9,10 +9,13 @@ Archive passed milestone: validate, archive artifacts, extract knowhow, advance 
 Requires audit PASS; produces milestone archive and learnings.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-complete.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-complete.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when updating milestone_history and advancing state
+<deferred_reading>
+- [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when updating milestone_history and advancing state
+</deferred_reading>
 
 <context>
 Milestone: $ARGUMENTS (optional -- defaults to current_milestone from state.json).

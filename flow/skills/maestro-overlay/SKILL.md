@@ -10,8 +10,8 @@ Turn natural-language instructions into command overlays — JSON patch files th
 </purpose>
 
 <required_reading>
-Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/overlays.md`.
-@~/.maestro/cli-tools.json
+~/.pi/agent/packages/pi-maestro-flow/workflows/overlays.md
+~/.maestro/cli-tools.json
 </required_reading>
 
 <context>
@@ -22,7 +22,7 @@ Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/overlays.md`.
 
 **Where overlays live**
 - User overlays: `~/.maestro/overlays/*.json` — created by this skill
-- Shared docs: `~/.maestro/overlays/docs/*.md` — referenced via `@~/.maestro/overlays/docs/*.md` inside patch content
+- Shared docs: `~/.maestro/overlays/docs/*.md` — referenced via `~/.maestro/overlays/docs/*.md` inside patch content
 - Shipped examples: `~/.maestro/overlays/_shipped/` — read-only, do not edit
 
 **Management** — listing and removing overlays is handled by `maestro overlay list` (ink TUI with interactive delete). This skill focuses solely on creation.
@@ -111,7 +111,7 @@ Build a slug from the user's intent (kebab-case, lowercase). Write to `~/.maestr
 **Content guidelines**
 - Lead the injected block with a heading that includes `(overlay)` so readers see it's machine-injected
 - Keep content concise — overlays should add a step, not rewrite the command
-- `@~/.maestro/...` references are encouraged for pointing at docs
+- `~/.maestro/...` references are encouraged for pointing at docs
 - Escape `\n` in JSON strings; use a HEREDOC via Bash if content is long
 
 **Skill chain content** — if a chain was configured in Step 2.5, append a Skill Handoff block at the end of the patch `content`. The handoff uses user prompt so the user controls whether to proceed:

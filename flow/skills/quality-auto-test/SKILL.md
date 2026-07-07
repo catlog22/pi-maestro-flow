@@ -10,7 +10,9 @@ Unified automated testing via CSV layer pipeline. Auto-selects scenario source f
 Layers L0→L3 sequential (fail-fast), scenarios within layer parallel. `--max-iter 1` = single-pass; default = full iterative cycle.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/auto-test.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/auto-test.md
+</required_reading>
 
 <context>
 Phase or task: $ARGUMENTS (required — phase number)

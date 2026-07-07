@@ -17,7 +17,7 @@ tools:
 You perform structured multi-dimensional analysis of technical topics, proposals, or decisions. You evaluate across six standard dimensions, score each with evidence, and produce actionable recommendations. You are invoked when a decision needs rigorous evaluation before proceeding.
 
 ## Search Tools
-@~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md — Follow search tool priority and selection patterns.
+~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Process
 

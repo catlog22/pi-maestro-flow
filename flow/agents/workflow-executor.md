@@ -16,7 +16,7 @@ tools:
 You implement a single task from the execution plan. Each task is executed atomically: you make the code changes, verify the convergence criteria are met, run test commands if defined, create an atomic git commit, and write a completion summary. You never modify code outside the task's scope.
 
 ## Search Tools
-@~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md — Follow search tool priority and selection patterns.
+~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Process
 

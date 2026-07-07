@@ -10,10 +10,13 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 Pipeline: brainstorm (optional) → **blueprint** → analyze / roadmap / plan.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/blueprint.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/blueprint.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [blueprint-config.json](~/.pi/agent/packages/pi-maestro-flow/templates/blueprint-config.json) — read when initializing blueprint configuration
+<deferred_reading>
+- [blueprint-config.json](~/.pi/agent/packages/pi-maestro-flow/templates/blueprint-config.json) — read when initializing blueprint configuration
+</deferred_reading>
 
 <context>
 $ARGUMENTS -- idea text, @file reference, or upstream context source.
@@ -43,7 +46,7 @@ $ARGUMENTS -- idea text, @file reference, or upstream context source.
 </context>
 
 <interview_protocol>
-Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
+Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven, depth-first
 **Decision tree** (strict depth-first): scope (full product / feature set / single feature) → spec type (service / api / library / platform) → focus areas → whether to run codebase exploration → requirement priorities
@@ -152,5 +155,5 @@ Status verdicts:
 </success_criteria>
 
 <on_complete>
-Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md`. — SESSION_DIR={session_dir}, SESSION_TYPE=blueprint, SESSION_ID={session_id}, LINKED_MILESTONE=null
+~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md — SESSION_DIR={session_dir}, SESSION_TYPE=blueprint, SESSION_ID={session_id}, LINKED_MILESTONE=null
 </on_complete>

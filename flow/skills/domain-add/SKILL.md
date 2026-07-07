@@ -8,7 +8,9 @@ allowed-tools: Read Write Bash Glob Grep maestro
 Register a domain term into `.workflow/domain/glossary.yaml`. Domain terms are automatically injected into agent context via hooks (domain-compact for all prompts, domain-expanded on keyword match).
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/domain-add.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/domain-add.md
+</required_reading>
 
 <context>
 $ARGUMENTS -- expects `<canonical> "<definition>"`

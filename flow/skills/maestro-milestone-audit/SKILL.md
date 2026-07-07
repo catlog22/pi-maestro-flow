@@ -9,7 +9,9 @@ Audit milestone for phase coverage, execution completeness, and integration gaps
 Produces audit-report.md with PASS/FAIL verdict.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-audit.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-audit.md
+</required_reading>
 
 <context>
 Milestone: $ARGUMENTS (optional -- defaults to current_milestone from state.json).

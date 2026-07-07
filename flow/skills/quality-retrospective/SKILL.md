@@ -8,13 +8,16 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 Post-execution retrospective (复盘): four parallel lenses (technical/process/quality/decision) → distill insights → route to spec/knowhow/issue stores.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/retrospective.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/retrospective.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - `~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md` (issues.jsonl schema for auto-creation)
-> - `~/.pi/agent/packages/pi-maestro-flow/workflows/learn.md` (tip routing via manage-knowhow-capture tip)
-> - `~/.pi/agent/packages/pi-maestro-flow/workflows/verify.md` (verification.json schema for quality lens parsing)
-> - `~/.pi/agent/packages/pi-maestro-flow/workflows/review.md` (review.json schema for quality lens parsing)
+<deferred_reading>
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md (issues.jsonl schema for auto-creation)
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/learn.md (tip routing via manage-knowhow-capture tip)
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/verify.md (verification.json schema for quality lens parsing)
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/review.md (review.json schema for quality lens parsing)
+</deferred_reading>
 
 <context>
 Arguments: $ARGUMENTS

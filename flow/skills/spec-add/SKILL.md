@@ -8,7 +8,9 @@ allowed-tools: Read Write Bash Glob Grep maestro
 Add `<spec-entry>` to specs by category. 4 scopes: project (default), global, team, personal.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md
+</required_reading>
 
 <context>
 $ARGUMENTS -- expects `[--scope <scope>] [--uid <uid>] <category> <content>`

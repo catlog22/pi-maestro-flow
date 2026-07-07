@@ -10,10 +10,13 @@ Socratic stress-testing of plans/ideas against codebase reality. Produces grill-
 Pipeline position: BEFORE brainstorm (stress-test → then elaborate).
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/grill.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/grill.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
+<deferred_reading>
+- [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
+</deferred_reading>
 
 <context>
 $ARGUMENTS -- topic/plan text for interactive mode, or --from source for upstream input.
@@ -44,7 +47,7 @@ $ARGUMENTS -- topic/plan text for interactive mode, or --from source for upstrea
 </context>
 
 <interview_protocol>
-Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
+Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
 
 **Interaction mode override**: adversarial Socratic — NOT menu-driven
 **Question style**:
@@ -144,5 +147,5 @@ Status verdicts:
 </success_criteria>
 
 <on_complete>
-Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md`. — SESSION_DIR={output_dir}, SESSION_TYPE=grill, SESSION_ID={artifact_id}, LINKED_MILESTONE=null
+~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md — SESSION_DIR={output_dir}, SESSION_TYPE=grill, SESSION_ID={artifact_id}, LINKED_MILESTONE=null
 </on_complete>

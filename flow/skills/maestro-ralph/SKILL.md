@@ -9,8 +9,9 @@ Closed-loop decision engine: read project state → infer position → build ada
 Ralph builds/evaluates; ralph-execute runs steps. Session: `.workflow/.maestro/ralph-{YYYYMMDD-HHmmss}/status.json`.
 </purpose>
 
-> **Reference files** (read when needed):
-> - [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read when `--amend` flag active for goal amendment flow
+<deferred_reading>
+- [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read when `--amend` flag active for goal amendment flow
+</deferred_reading>
 
 <context>
 $ARGUMENTS — intent text, flags, or keywords.

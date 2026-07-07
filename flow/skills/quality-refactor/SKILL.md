@@ -8,7 +8,9 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 Targeted refactoring with safety guarantees: plan → confirm → execute with test verification per change → reflection-log.md.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/refactor.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/refactor.md
+</required_reading>
 
 <context>
 Scope: $ARGUMENTS (required)

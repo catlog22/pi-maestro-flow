@@ -9,11 +9,14 @@ Execute confirmed plan tasks via wave-based parallel dispatch.
 Consumes plan from maestro-plan; registers EXC artifact in state.json.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/execute.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/execute.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [task.json](~/.pi/agent/packages/pi-maestro-flow/templates/task.json) — read when reading task definitions
-> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
+<deferred_reading>
+- [task.json](~/.pi/agent/packages/pi-maestro-flow/templates/task.json) — read when reading task definitions
+- [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
+</deferred_reading>
 
 <context>
 $ARGUMENTS — milestone number, or no args for current milestone, with optional flags.

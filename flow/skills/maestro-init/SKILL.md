@@ -9,12 +9,15 @@ Initialize project: detect state, create `.workflow/` with project.md, state.jso
 Entry point; downstream: maestro-roadmap or maestro-brainstorm.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/init.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/init.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [project.md](~/.pi/agent/packages/pi-maestro-flow/templates/project.md) — read when generating project description
-> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when creating initial state
-> - [config.json](~/.pi/agent/packages/pi-maestro-flow/templates/config.json) — read when creating workflow configuration
+<deferred_reading>
+- [project.md](~/.pi/agent/packages/pi-maestro-flow/templates/project.md) — read when generating project description
+- [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when creating initial state
+- [config.json](~/.pi/agent/packages/pi-maestro-flow/templates/config.json) — read when creating workflow configuration
+</deferred_reading>
 
 <context>
 $ARGUMENTS — none for interactive mode, or `-y` with `@file` reference for auto mode.
@@ -41,7 +44,7 @@ Check for `.workflow/state.json` -- loads context if project already initialized
 </invariants>
 
 <interview_protocol>
-Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
+Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (strict order): project type (greenfield / existing codebase onboarding) → tech stack detection and confirmation → directory structure preferences → initial configuration (specs categories, wiki bootstrap)

@@ -9,7 +9,9 @@ Merge a milestone worktree branch back into main, sync scratch artifacts, and re
 Two-phase: git merge first, artifact sync second (only after git succeeds).
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/merge.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/merge.md
+</required_reading>
 
 <context>
 $ARGUMENTS -- milestone number and optional flags.

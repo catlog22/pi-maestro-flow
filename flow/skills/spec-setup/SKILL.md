@@ -8,7 +8,9 @@ allowed-tools: Read Write Bash Glob Grep maestro
 Initialize `.workflow/specs/` by scanning codebase for conventions. Core files always created; optional files created when signals detected. Also generates recipe knowhow for detected workflows.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-setup.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/specs-setup.md
+</required_reading>
 
 <context>
 $ARGUMENTS (no arguments expected)

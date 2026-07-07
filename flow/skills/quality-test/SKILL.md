@@ -8,7 +8,9 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 UAT-style conversational testing for a completed phase. Interactive scenario walk-through with severity inference. Issues trigger parallel debug agents and optional gap-fix loop (--auto-fix).
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/test.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/test.md
+</required_reading>
 
 <context>
 Phase or task: $ARGUMENTS (optional)

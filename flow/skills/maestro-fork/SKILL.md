@@ -9,11 +9,14 @@ Create or sync a milestone-level git worktree for parallel development.
 Supports `--sync` mode to pull latest main changes into an active worktree.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/fork.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/fork.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [worktrees.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktrees.json) — read when updating registry
-> - [worktree-scope.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktree-scope.json) — read when writing scope marker
+<deferred_reading>
+- [worktrees.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktrees.json) — read when updating registry
+- [worktree-scope.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktree-scope.json) — read when writing scope marker
+</deferred_reading>
 
 <context>
 $ARGUMENTS -- milestone number and optional flags.

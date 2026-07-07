@@ -8,12 +8,15 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 检测代码重构/增量变更后，代码现实与 .workflow/ 文档之间的漂移。互补于 `manage-knowledge-audit`（检测知识存储内部矛盾）。本命令通过 git 时间线 + session 历史检测 code↔document 漂移。
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/drift-realign.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/drift-realign.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - ~/.pi/agent/packages/pi-maestro-flow/workflows/knowledge-audit.md (交叉引用已有审计发现)
-> - ~/.pi/agent/packages/pi-maestro-flow/workflows/sync.md (codebase 文档严重漂移时自动触发)
-> - ~/.pi/agent/packages/pi-maestro-flow/workflows/codebase-rebuild.md (sync 不足时的回退方案)
+<deferred_reading>
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/knowledge-audit.md (交叉引用已有审计发现)
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/sync.md (codebase 文档严重漂移时自动触发)
+- ~/.pi/agent/packages/pi-maestro-flow/workflows/codebase-rebuild.md (sync 不足时的回退方案)
+</deferred_reading>
 
 <context>
 Arguments: $ARGUMENTS

@@ -9,9 +9,10 @@ Orchestrate all maestro commands: classify intent → select chain → create se
 Session: `.workflow/.maestro/{session_id}/status.json`.
 </purpose>
 
-> **Reference files** (read when needed):
-> - [maestro.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro.md) — read at execution start for intent analysis + chain selection
-> - [maestro-super.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro-super.md) — read when `--super` flag active
+<deferred_reading>
+- [maestro.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro.md) — read at execution start for intent analysis + chain selection
+- [maestro-super.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro-super.md) — read when `--super` flag active
+</deferred_reading>
 
 <context>
 $ARGUMENTS — user intent text, or special keywords.

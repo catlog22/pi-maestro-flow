@@ -10,7 +10,9 @@ Category-based loading: loads the category's primary doc in full + matching entr
 By default, loads from both global (~/.maestro/specs/) and project (.workflow/specs/) layers.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-load.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/specs-load.md
+</required_reading>
 
 <context>
 $ARGUMENTS -- optional flags and keyword

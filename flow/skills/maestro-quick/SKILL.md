@@ -10,7 +10,9 @@ Flags --discuss and --full enable additional pipeline stages.
 **Implicit write**: state.json scratch task entry is written automatically as part of workflow tracking (no confirmation gate).
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/quick.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/quick.md
+</required_reading>
 
 <context>
 $ARGUMENTS

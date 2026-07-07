@@ -8,12 +8,15 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 Multi-dimensional analysis of a proposal, decision, or architecture choice via CLI-assisted exploration and interactive discussion. Produces analysis.md (6-dimension scoring), context.md (Locked/Free/Deferred decisions), conclusions.json, and discussion.md with Go/No-Go recommendation. Use `--gaps` for issue root cause analysis feeding `plan --gaps`.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/analyze.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/analyze.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
-> - [issue-gaps-analyze.md](~/.pi/agent/packages/pi-maestro-flow/workflows/issue-gaps-analyze.md) — read when --gaps is triggered
-> - [boundary-grill.md](~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md) — read when boundary conflicts detected (between Phase 4 and Phase 5)
+<deferred_reading>
+- [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
+- [issue-gaps-analyze.md](~/.pi/agent/packages/pi-maestro-flow/workflows/issue-gaps-analyze.md) — read when --gaps is triggered
+- [boundary-grill.md](~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md) — read when boundary conflicts detected (between Phase 4 and Phase 5)
+</deferred_reading>
 
 <context>
 $ARGUMENTS -- milestone number for micro mode, topic text for macro/adhoc mode, no args for current milestone.
@@ -61,7 +64,7 @@ Output directory format, artifact registration schema, and output artifact listi
 </context>
 
 <interview_protocol>
-Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
+Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (strict order): scope (phase / topic / milestone-wide / adhoc / --gaps) → depth (quick / standard / deep) → dimensions (which of the 6 to keep) → Go/No-Go threshold
@@ -122,7 +125,7 @@ Status verdicts:
 
 ### Session seal
 
-Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md`. — SESSION_DIR=OUTPUT_DIR, SESSION_TYPE=analyze, SESSION_ID={artifact_id}, LINKED_MILESTONE={target_milestone or null}
+~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md — SESSION_DIR=OUTPUT_DIR, SESSION_TYPE=analyze, SESSION_ID={artifact_id}, LINKED_MILESTONE={target_milestone or null}
 </completion>
 
 <error_codes>

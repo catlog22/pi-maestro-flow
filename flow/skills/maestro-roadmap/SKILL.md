@@ -11,12 +11,13 @@ Pipeline: brainstorm/blueprint/analyze → **roadmap** → analyze {milestone} �
 </purpose>
 
 <required_reading>
-Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap-common.md`.
-@~/.pi/agent/packages/pi-maestro-flow/templates/roadmap.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap-common.md
+~/.pi/agent/packages/pi-maestro-flow/templates/roadmap.md
 </required_reading>
 
-> **Reference files** (read when needed):
-> - [roadmap.md](~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap.md) — read for roadmap generation workflow
+<deferred_reading>
+- [roadmap.md](~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap.md) — read for roadmap generation workflow
+</deferred_reading>
 
 <context>
 $ARGUMENTS -- requirement text, @file reference, or upstream context source.
@@ -47,7 +48,7 @@ $ARGUMENTS -- requirement text, @file reference, or upstream context source.
 </context>
 
 <interview_protocol>
-Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
+Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (strict order): mode (create / revise / review) → requirement scope (MVP / complete / phased) → decomposition strategy (progressive / direct / auto) → milestone boundaries → phase dependencies and order
@@ -59,8 +60,8 @@ Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` 
 
 <execution>
 
-1. Read `@~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap-common.md` (always — shared logic)
-2. Read `@~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap.md`, follow its process
+1. Read `~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap-common.md` (always — shared logic)
+2. Read `~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap.md`, follow its process
 
 Sub-modes:
 - **Create** (default): Build roadmap from requirements or upstream context

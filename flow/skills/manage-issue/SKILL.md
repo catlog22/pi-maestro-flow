@@ -8,10 +8,13 @@ allowed-tools: Read Write Edit Bash Glob Grep maestro
 Issue lifecycle management: create, list, status, update, close, link. Stored in `.workflow/issues/issues.jsonl`. For automated discovery, use `/manage-issue-discover`.
 </purpose>
 
-> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md` before proceeding.
+<required_reading>
+~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md
+</required_reading>
 
-> **Reference files** (read when needed):
-> - [issue.json template](~/.pi/agent/packages/pi-maestro-flow/templates/issue.json) — read when creating or updating issue records (create, update, close)
+<deferred_reading>
+- [issue.json template](~/.pi/agent/packages/pi-maestro-flow/templates/issue.json) — read when creating or updating issue records (create, update, close)
+</deferred_reading>
 
 <context>
 $ARGUMENTS -- subcommand + options. Parse first token as subcommand.
