@@ -18,10 +18,12 @@ function StringEnum<T extends string[]>(values: [...T]) {
 }
 
 export const TeammateParams = Type.Object({
-  // Required: agent definition to use
-  agent: Type.String({
-    description: "Agent name to dispatch (matches agents/*.md filename)",
-  }),
+  // Agent definition to use (required for single mode, optional for parallel/chain which specify per-task)
+  agent: Type.Optional(
+    Type.String({
+      description: "Agent name to dispatch (matches agents/*.md filename). Required for single mode, optional when using tasks/chain.",
+    }),
+  ),
 
   // Required: task description for the agent
   task: Type.Optional(
@@ -153,6 +155,18 @@ export const TeammateSendParams = Type.Object({
 export const TeammateListParams = Type.Object({
   view: Type.Optional(
     StringEnum(["active", "named", "all"]),
+  ),
+});
+
+export const TeammateWatchParams = Type.Object({
+  name: Type.String({
+    description: "Name of the agent to watch",
+  }),
+  lines: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      description: "Number of recent output lines to return (default: 20)",
+    }),
   ),
 });
 

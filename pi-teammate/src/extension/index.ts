@@ -13,7 +13,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { TeammateParams, TeammateSendParams, TeammateListParams } from "./schemas.ts";
+import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams } from "./schemas.ts";
 import {
   runTeammate,
   runParallel,
@@ -84,6 +84,16 @@ Structured output:
         | undefined,
       ctx: ExtensionContext,
     ): Promise<AgentToolResult<Details>> {
+      // Validate: single mode requires agent
+      const isSingle = !params.tasks?.length && !params.chain?.length;
+      if (isSingle && !params.agent) {
+        return {
+          content: [{ type: "text", text: 'Single mode requires "agent" field. For parallel use "tasks", for chain use "chain".' }],
+          isError: true,
+          details: { mode: "single", results: [] },
+        };
+      }
+
       const correlationId = randomUUID();
 
       const abortController = new AbortController();
@@ -109,6 +119,7 @@ Structured output:
         startedAt: Date.now(),
         abortController,
         inbox: [],
+        outputLog: [],
         lastActivityAt: Date.now(),
         replyTo: params.reply_to,
       };
@@ -143,6 +154,23 @@ Structured output:
 
           return (data: AgentProgress) => {
           activeAgent.lastActivityAt = Date.now();
+
+          // Record to outputLog
+          const MAX_LOG = 200;
+          if (data.recentTools?.length) {
+            const last = data.recentTools[data.recentTools.length - 1];
+            activeAgent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ${last.status === "running" ? "~" : "✓"} ${last.name}`);
+          }
+          if (data.lastMessage) {
+            const lines = data.lastMessage.split("\n");
+            const lastLine = lines[lines.length - 1]?.trim();
+            if (lastLine && activeAgent.outputLog[activeAgent.outputLog.length - 1] !== lastLine) {
+              activeAgent.outputLog.push(lastLine);
+            }
+          }
+          if (activeAgent.outputLog.length > MAX_LOG) {
+            activeAgent.outputLog.splice(0, activeAgent.outputLog.length - MAX_LOG);
+          }
 
           // Broadcast to overlay listeners (always)
           pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
@@ -503,12 +531,68 @@ Views:
   };
 
   // =========================================================================
+  // Tool 4: teammate-watch — view agent output and activity
+  // =========================================================================
+
+  const watchTool: ToolDefinition<typeof TeammateWatchParams, { output: string[] }> = {
+    name: "teammate-watch",
+    label: "Teammate Watch",
+    description: `View a running agent's recent output and activity log. Returns the last N lines of tool calls, streaming text, and inbox messages.`,
+
+    parameters: TeammateWatchParams,
+
+    async execute(
+      _id: string,
+      params: { name: string; lines?: number },
+    ): Promise<AgentToolResult<{ output: string[] }>> {
+      const lines = params.lines ?? 20;
+
+      const correlationId = state.namedAgents.get(params.name);
+      if (!correlationId) {
+        const available = Array.from(state.namedAgents.keys());
+        return {
+          content: [{
+            type: "text",
+            text: `Agent "${params.name}" not found. ${available.length > 0 ? `Available: ${available.join(", ")}` : "No named agents running."}`,
+          }],
+          isError: true,
+          details: { output: [] },
+        };
+      }
+
+      const agent = state.activeRuns.get(correlationId);
+      if (!agent) {
+        state.namedAgents.delete(params.name);
+        return {
+          content: [{ type: "text", text: `Agent "${params.name}" is no longer running.` }],
+          isError: true,
+          details: { output: [] },
+        };
+      }
+
+      const log = agent.outputLog.slice(-lines);
+      const uptime = Math.round((Date.now() - agent.startedAt) / 1000);
+      const idle = Math.round((Date.now() - agent.lastActivityAt) / 1000);
+
+      const header = `[${agent.agent}/${params.name}] up ${uptime}s | idle ${idle}s | log ${agent.outputLog.length} lines | inbox ${agent.inbox.length}`;
+      const output = [header, "---", ...log];
+
+      return {
+        content: [{ type: "text", text: output.join("\n") }],
+        isError: false,
+        details: { output: log },
+      };
+    },
+  };
+
+  // =========================================================================
   // Register tools (LLM-callable)
   // =========================================================================
 
   pi.registerTool(tool);
   pi.registerTool(sendTool);
   pi.registerTool(listTool);
+  pi.registerTool(watchTool);
 
   // =========================================================================
   // Alt+R shortcut — attach overlay (user-facing TUI)

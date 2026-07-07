@@ -17,12 +17,15 @@ Dispatch tasks to teammate agents. Teammates run as pi subprocesses (RPC mode).
 
 ```
 teammate({
-  agent: "delegate",          // Agent definition name (matches agents/*.md)
+  agent: "delegate",          // Agent name (required for single mode, optional for parallel/chain)
   task: "Implement the auth module",
-  name: "auth",               // Optional: addressable name (enables teammate-send)
+  name: "auth",               // Optional: addressable name (enables teammate-send/watch)
 
-  // --- Multi-agent ---
-  tasks: [...],               // Parallel: multiple agents concurrently
+  // --- Multi-agent (agent field NOT needed at top level) ---
+  tasks: [                    // Parallel: each item has its own agent + task
+    { agent: "scout", task: "Find auth code" },
+    { agent: "reviewer", task: "Review auth patterns" }
+  ],
   chain: [...],               // Chain: sequential pipeline with {previous}
   concurrency: 4,
 
@@ -52,6 +55,22 @@ teammate-send({
   message: "Also fix the login handler",
   mode: "follow_up"             // "steer" (打断当前执行) | "follow_up" (等完成后) | "abort" (取消)
 })
+```
+
+### teammate-watch
+
+查看指定 agent 的实时输出和活动日志。
+
+```
+teammate-watch({
+  name: "auth",                  // 目标 agent 名称（必须是 named + running）
+  lines: 30                     // 返回最近 N 行（默认 20）
+})
+// → [delegate/auth] up 45s | idle 3s | log 82 lines | inbox 1
+// → ---
+// → [09:15:32] ~ Read src/auth.ts
+// → [09:15:33] ✓ Read src/auth.ts
+// → I'll fix the login handler...
 ```
 
 ### teammate-list

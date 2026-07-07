@@ -72,6 +72,7 @@ export interface ActiveAgent {
   abortController: AbortController;
   stdin?: import("node:stream").Writable;
   inbox: MessageEnvelope[];
+  outputLog: string[];
   pendingResolve?: (result: SingleResult) => void;
   lastActivityAt: number;
   replyTo?: string;
