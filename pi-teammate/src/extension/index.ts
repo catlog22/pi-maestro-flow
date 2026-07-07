@@ -1,12 +1,9 @@
 /**
  * Teammate Extension Entry Point
  *
- * Registers tools:
- *   - teammate: dispatch tasks to sub-agents (single/parallel/chain, await/detach)
- *   - teammate-send: send messages to named running agents
- *   - teammate-list: list active/named agents
- *
- * P1: inbox message queue + named agent registry + detach mode
+ * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status)
+ * TUI: Alt+R overlay, widget below editor, Alt+B foreground→background detach
+ * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 
 import { randomUUID } from "node:crypto";
@@ -240,7 +237,7 @@ Structured output:
         }
 
         if (params.background === false) {
-          // --- FOREGROUND: block until completion, Ctrl+D to detach ---
+          // --- FOREGROUND: block until completion, Alt+B to detach ---
           let detachResolve: (() => void) | null = null;
           const detachPromise = new Promise<void>((r) => { detachResolve = r; });
 
@@ -273,7 +270,7 @@ Structured output:
             return toolResult;
           }
 
-          // Ctrl+D: detach to background
+          // Alt+B: detach to background
           detached = true;
           runPromise.then((result) => {
             emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
