@@ -21,7 +21,9 @@ import {
   runTeammate,
   runParallel,
   runChain,
+  sendRpcMessage,
   type RunTeammateParams,
+  type RpcMessageMode,
 } from "../runs/execution.ts";
 import {
   renderTeammateCall,
@@ -139,6 +141,9 @@ Structured output:
         baseCwd: state.baseCwd || ctx.cwd,
         signal: abortController.signal,
         parentSessionFile,
+        onChildSpawned: (stdin: import("node:stream").Writable) => {
+          activeAgent.stdin = stdin;
+        },
         onProgress: (() => {
           let lastUpdateTime = 0;
           const UPDATE_INTERVAL = 300; // ms — throttle TUI updates
@@ -372,19 +377,18 @@ Structured output:
   const sendTool: ToolDefinition<typeof TeammateSendParams, { delivered: boolean }> = {
     name: "teammate-send",
     label: "Teammate Send",
-    description: `Record a message for a named teammate agent.
+    description: `Send a message to a named, running teammate agent.
 
-Note: Messages are stored in the agent's inbox for reference but cannot be injected
-into a running subprocess (pi json mode limitation). To give an agent additional work,
-dispatch a new teammate call instead.
-
-The message is recorded and can be viewed via teammate-list.`,
+Modes:
+  - "steer" — interrupt current turn, inject message immediately (打断当前执行)
+  - "follow_up" (default) — queue after current turn completes (等当前完成后执行)
+  - "abort" — cancel current execution (取消执行, message field ignored)`,
 
     parameters: TeammateSendParams,
 
     async execute(
       _id: string,
-      params: { to: string; message: string; kind?: "notification" | "task" },
+      params: { to: string; message: string; mode?: RpcMessageMode },
     ): Promise<AgentToolResult<{ delivered: boolean }>> {
       const correlationId = state.namedAgents.get(params.to);
       if (!correlationId) {
@@ -409,26 +413,42 @@ The message is recorded and can be viewed via teammate-list.`,
         };
       }
 
-      const envelope: MessageEnvelope = {
-        id: randomUUID(),
+      const mode = params.mode ?? "follow_up";
+
+      if (!agent.stdin || !agent.stdin.writable) {
+        return {
+          content: [{ type: "text", text: `Agent "${params.to}" stdin is not available.` }],
+          isError: true,
+          details: { delivered: false },
+        };
+      }
+
+      const sent = sendRpcMessage(agent.stdin, params.message, mode);
+      if (!sent) {
+        return {
+          content: [{ type: "text", text: `Failed to send message to "${params.to}".` }],
+          isError: true,
+          details: { delivered: false },
+        };
+      }
+
+      agent.lastActivityAt = Date.now();
+      pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+        correlationId,
         from: "caller",
         to: params.to,
-        kind: params.kind ?? "notification",
-        payload: params.message,
-        timestamp: Date.now(),
-      };
+        mode,
+        message: params.message,
+      });
 
-      agent.inbox.push(envelope);
-      agent.lastActivityAt = Date.now();
-      pi.events.emit(TEAMMATE_MESSAGE_EVENT, envelope);
-
+      const modeLabel = mode === "steer" ? "interrupted + injected" : mode === "abort" ? "aborted" : "queued after current turn";
       return {
         content: [{
           type: "text",
-          text: `Message recorded for "${params.to}" (inbox: ${agent.inbox.length}). Note: cannot inject into running subprocess — dispatch a new agent for additional tasks.`,
+          text: `Message ${modeLabel} for "${params.to}" (mode: ${mode}).`,
         }],
         isError: false,
-        details: { delivered: false },
+        details: { delivered: true },
       };
     },
   };
@@ -476,7 +496,7 @@ Views:
           durationMs: Date.now() - entry.startedAt,
           idleMs: Date.now() - entry.lastActivityAt,
           inboxSize: entry.inbox.length,
-          hasStdin: false,
+          hasStdin: Boolean(entry.stdin?.writable),
         });
       }
 
@@ -616,7 +636,7 @@ Views:
     const lines = agents.map((a) => {
       const label = agentLabel(a);
       const uptime = Math.round((Date.now() - a.startedAt) / 1000);
-      const status = "●";
+      const status = a.stdin?.writable ? "●" : "○";
       return `  ${status} ${a.agent}/${label}  ${uptime}s`;
     });
 
@@ -740,4 +760,8 @@ function ts(): string {
 
 function releaseAgentMemory(agent: ActiveAgent): void {
   agent.inbox.length = 0;
+  if (agent.stdin) {
+    try { agent.stdin.end(); } catch { /* already closed */ }
+    agent.stdin = undefined;
+  }
 }

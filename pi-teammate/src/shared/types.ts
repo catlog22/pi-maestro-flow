@@ -70,6 +70,7 @@ export interface ActiveAgent {
   correlationId: string;
   startedAt: number;
   abortController: AbortController;
+  stdin?: import("node:stream").Writable;
   inbox: MessageEnvelope[];
   pendingResolve?: (result: SingleResult) => void;
   lastActivityAt: number;

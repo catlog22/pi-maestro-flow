@@ -65,13 +65,13 @@ teammate({ agent: "delegate", task: "Quick analysis", background: false })
 
 ### teammate-send
 
-向已命名的运行中 agent 发送消息。消息通过 stdin 注入到 agent 子进程。
+向已命名的运行中 agent 发送消息。通过 RPC 协议注入。
 
 ```
 teammate-send({
-  to: "refactor-worker",         // 目标 agent 名称（必须是 named + running）
-  message: "Also fix the login handler while you're at it",
-  kind: "notification"           // "notification" (上下文注入) | "task" (追加任务)
+  to: "auth",                    // 目标 agent 名称（必须是 named + running）
+  message: "Also fix the login handler",
+  mode: "follow_up"             // "steer" (打断当前执行) | "follow_up" (等完成后) | "abort" (取消)
 })
 ```
 
@@ -83,7 +83,7 @@ teammate-send({
 teammate-list({
   view: "active"                 // "active" (默认) | "named" (仅可寻址) | "all"
 })
-// → [delegate] name="auth" | up 45s | idle 3s | inbox: 0 | stdin: ready
+// → [delegate] name="auth" | up 45s | idle 3s | inbox: 0
 ```
 
 ### maestro

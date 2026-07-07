@@ -43,6 +43,7 @@ export interface RunTeammateOptions {
   signal?: AbortSignal;
   onProgress?: (data: AgentProgress) => void;
   parentSessionFile?: string;
+  onChildSpawned?: (stdin: import("node:stream").Writable) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -218,11 +219,8 @@ function buildPiArgs(
   modelOverride?: string,
   sessionDir?: string,
 ): string[] {
-  const args: string[] = ["--mode", "json", "-p"];
-
-  if (params.task) {
-    args.push(params.task);
-  }
+  // RPC mode: stdin stays open for bidirectional messaging (steer/follow_up/abort)
+  const args: string[] = ["--mode", "rpc"];
 
   const model = modelOverride ?? params.model ?? agentConfig.model;
   if (model) {
@@ -463,9 +461,17 @@ async function runSingleAttempt(
       return;
     }
 
-    // pi reads piped stdin to EOF before starting (readPipedStdin).
-    // End stdin immediately so pi doesn't block.
-    child.stdin?.end();
+    // RPC mode: stdin stays open for bidirectional messaging.
+    // Send initial prompt via RPC command.
+    if (child.stdin && params.task) {
+      const rpcCmd = JSON.stringify({ type: "prompt", message: params.task });
+      child.stdin.write(rpcCmd + "\n");
+    }
+
+    // Expose stdin for teammate-send message injection
+    if (child.stdin) {
+      options.onChildSpawned?.(child.stdin);
+    }
 
     // Report initial progress
     options.onProgress?.(progress);
@@ -760,5 +766,25 @@ export async function runChain(
   }
 
   return results;
+}
+
+// ---------------------------------------------------------------------------
+// RPC: Send message to running agent via stdin
+// ---------------------------------------------------------------------------
+
+export type RpcMessageMode = "steer" | "follow_up" | "abort";
+
+export function sendRpcMessage(
+  stdin: import("node:stream").Writable,
+  message: string,
+  mode: RpcMessageMode = "follow_up",
+): boolean {
+  if (!stdin.writable) return false;
+  if (mode === "abort") {
+    stdin.write(JSON.stringify({ type: "abort" }) + "\n");
+    return true;
+  }
+  stdin.write(JSON.stringify({ type: mode, message }) + "\n");
+  return true;
 }
 

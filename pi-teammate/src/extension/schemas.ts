@@ -145,8 +145,8 @@ export const TeammateSendParams = Type.Object({
   message: Type.String({
     description: "Message content to send to the agent",
   }),
-  kind: Type.Optional(
-    StringEnum(["notification", "task"]),
+  mode: Type.Optional(
+    StringEnum(["steer", "follow_up", "abort"]),
   ),
 });
 
