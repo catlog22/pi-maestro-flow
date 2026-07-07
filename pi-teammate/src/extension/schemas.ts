@@ -107,6 +107,13 @@ export const TeammateParams = Type.Object({
 
   // === Execution Control ===
 
+  background: Type.Optional(
+    Type.Boolean({
+      default: true,
+      description: "Run in background (default: true). Set false to block until completion.",
+    }),
+  ),
+
   context: Type.Optional(
     StringEnum(["fresh", "fork"]),
   ),

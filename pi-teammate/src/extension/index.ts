@@ -237,7 +237,24 @@ Structured output:
           };
         }
 
-        // --- BACKGROUND (only mode) ---
+        if (params.background === false) {
+          // --- FOREGROUND: block until completion ---
+          const result = await runTeammate(params, makeOptions());
+          emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
+
+          const lastMessage = result.messages[result.messages.length - 1]?.content ?? "(no output)";
+          const toolResult: AgentToolResult<Details> = {
+            content: [{ type: "text", text: lastMessage }],
+            isError: result.exitCode !== 0,
+            details: { mode: "single", results: [result] },
+          };
+          if (result.structuredOutput !== undefined) {
+            toolResult.details!.structuredOutput = result.structuredOutput;
+          }
+          return toolResult;
+        }
+
+        // --- BACKGROUND (default) ---
         const bgPromise = runTeammate(params, makeOptions());
 
         bgPromise.then((result) => {
@@ -269,6 +286,9 @@ Structured output:
           details: { mode: "single", results: [] },
         };
       } finally {
+        if (params.background === false) {
+          cleanupAgent(state, correlationId, params.name);
+        }
         signal.removeEventListener("abort", abortForward);
       }
     },
