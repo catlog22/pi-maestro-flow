@@ -469,12 +469,13 @@ Views:
     }
 
     await ctx.ui.custom(
-      (_tui, _theme, _keybindings, done) => {
+      (tui, _theme, _keybindings, done) => {
         const overlay = new AttachOverlay(
           agent,
           () => done(undefined),
           () => state.activeRuns,
         );
+        overlay.setRequestRender(() => tui.requestRender());
 
         overlay.appendLog(agent.correlationId, `Agent: ${agent.agent} | ${agentLabel(agent)}`);
         overlay.appendLog(agent.correlationId, `Started: ${new Date(agent.startedAt).toISOString()}`);

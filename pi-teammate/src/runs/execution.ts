@@ -445,8 +445,11 @@ async function runSingleAttempt(
 
     // Parse JSON lines from stdout
     let stdoutBuffer = "";
+    let stdoutChunkCount = 0;
     child.stdout?.on("data", (chunk: Buffer) => {
-      stdoutBuffer += chunk.toString();
+      stdoutChunkCount++;
+      const text = chunk.toString();
+      stdoutBuffer += text;
       const lines = stdoutBuffer.split("\n");
       stdoutBuffer = lines.pop() ?? "";
 
@@ -556,6 +559,8 @@ async function runSingleAttempt(
       const status = code === 0 ? "completed" : "failed";
       progress.status = status;
       progress.durationMs = Date.now() - startTime;
+      const lastMsg = messages[messages.length - 1]?.content;
+      if (lastMsg) progress.lastMessage = lastMsg;
       options.onProgress?.(progress);
 
       // AC6: Read structured output if available

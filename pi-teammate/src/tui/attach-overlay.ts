@@ -23,6 +23,7 @@ export class AttachOverlay implements Component {
   private agentOrder: string[] = [];
   private onDone: () => void;
   private getActiveRuns: () => Map<string, ActiveAgent>;
+  private requestRender: (() => void) | null = null;
 
   constructor(
     initialAgent: ActiveAgent,
@@ -33,6 +34,10 @@ export class AttachOverlay implements Component {
     this.getActiveRuns = getActiveRuns ?? (() => new Map());
     this.activeId = initialAgent.correlationId;
     this.addAgent(initialAgent);
+  }
+
+  setRequestRender(fn: () => void): void {
+    this.requestRender = fn;
   }
 
   private addAgent(agent: ActiveAgent): void {
@@ -70,6 +75,7 @@ export class AttachOverlay implements Component {
     if (correlationId === this.activeId) {
       log.scrollOffset = Math.max(0, log.lines.length - 28);
     }
+    this.requestRender?.();
   }
 
   handleInput(data: string): void {
@@ -85,12 +91,14 @@ export class AttachOverlay implements Component {
       this.syncAgents();
       const idx = this.agentOrder.indexOf(this.activeId);
       this.activeId = this.agentOrder[(idx + 1) % this.agentOrder.length];
+      this.requestRender?.();
       return;
     }
     if (data === "\x1b[Z") { // Shift+Tab
       this.syncAgents();
       const idx = this.agentOrder.indexOf(this.activeId);
       this.activeId = this.agentOrder[(idx - 1 + this.agentOrder.length) % this.agentOrder.length];
+      this.requestRender?.();
       return;
     }
 
@@ -99,11 +107,13 @@ export class AttachOverlay implements Component {
     // Scroll up/down
     if (data === "\x1b[A" || data === "k") {
       currentLog.scrollOffset = Math.max(0, currentLog.scrollOffset - 1);
+      this.requestRender?.();
     } else if (data === "\x1b[B" || data === "j") {
       currentLog.scrollOffset = Math.min(
         Math.max(0, currentLog.lines.length - 10),
         currentLog.scrollOffset + 1,
       );
+      this.requestRender?.();
     }
   }
 
