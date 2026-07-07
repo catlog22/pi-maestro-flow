@@ -243,21 +243,10 @@ Structured output:
           // --- FOREGROUND: block until completion, Ctrl+D to detach ---
           let detachResolve: (() => void) | null = null;
           const detachPromise = new Promise<void>((r) => { detachResolve = r; });
-          let firstEsc = 0;
 
           const removeListener = ctx.hasUI
             ? ctx.ui.onTerminalInput((data: string) => {
-                if (data === "\x1b") {
-                  const now = Date.now();
-                  if (now - firstEsc < 1500) {
-                    // Second ESC within 1.5s — abort
-                    abortController.abort();
-                  } else {
-                    // First ESC — detach to background
-                    firstEsc = now;
-                    detachResolve?.();
-                  }
-                }
+                if (data === "\x1b") detachResolve?.();
               })
             : null;
 
