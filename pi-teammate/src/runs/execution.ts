@@ -27,7 +27,6 @@ export interface RunTeammateParams {
   name?: string;
   reply_to?: "caller" | "main";
   protocol_version?: number;
-  background?: boolean;
   context?: "fresh" | "fork";
   model?: string;
   cwd?: string;

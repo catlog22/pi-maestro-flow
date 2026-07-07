@@ -69,10 +69,6 @@ Modes:
   - Parallel: { tasks: [{ agent: "scout", task: "..." }, { agent: "reviewer", task: "..." }] }
   - Chain: { chain: [{ agent: "scout", task: "Find auth code" }, { agent: "delegate", task: "Fix: {previous}" }] }
 
-Execution:
-  - background: true (default) — returns immediately, agent runs in background. Use teammate-list to check status.
-  - background: false — blocks until agent completes and returns full result.
-
 Routing:
   - name: Optional addressable name for cross-agent routing (enables teammate-send)
   - reply_to: Result routing — "caller" (direct return) or "main" (broadcast to parent session)
@@ -194,8 +190,6 @@ Structured output:
         })(),
       });
 
-      let detached = false;
-
       try {
         // --- PARALLEL MODE ---
         if (params.tasks && params.tasks.length > 0) {
@@ -243,120 +237,38 @@ Structured output:
           };
         }
 
-        const isBackground = params.background !== false;
+        // --- BACKGROUND (only mode) ---
+        const bgPromise = runTeammate(params, makeOptions());
 
-        if (isBackground) {
-          // --- BACKGROUND (default) ---
-          const bgPromise = runTeammate(params, makeOptions());
-
-          bgPromise.then((result) => {
-            emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
-            cleanupAgent(state, correlationId, params.name);
-
-            const label = params.name ?? correlationId.slice(0, 8);
-            const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-            const status = result.exitCode === 0 ? "completed" : "failed";
-            const summary = lastMsg.length > 500 ? lastMsg.slice(0, 500) + "…" : lastMsg;
-
-            pi.sendMessage(
-              {
-                customType: "teammate-complete",
-                content: `[teammate] Agent "${params.agent}/${label}" ${status} (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
-                display: true,
-                details: { agent: params.agent, name: params.name, correlationId, result },
-              },
-              { triggerTurn: true },
-            );
-          });
-
-          return {
-            content: [{
-              type: "text",
-              text: `Agent "${params.agent}" running in background. correlationId=${correlationId}${params.name ? `, name="${params.name}"` : ""}. Use teammate-list to check status, teammate-send to message.`,
-            }],
-            isError: false,
-            details: { mode: "single", results: [] },
-          };
-        }
-
-        // --- FOREGROUND (background: false) — detachable via Ctrl+D ---
-        let detachResolve: (() => void) | null = null;
-        const detachPromise = new Promise<void>((resolve) => { detachResolve = resolve; });
-
-        // Listen for Ctrl+D to detach
-        const removeInputListener = ctx.hasUI
-          ? ctx.ui.onTerminalInput((data: string) => {
-              if (data === "\x04") { // Ctrl+D
-                detached = true;
-                detachResolve?.();
-              }
-            })
-          : null;
-
-        const runPromise = runTeammate(params, makeOptions());
-
-        const raceResult = await Promise.race([
-          runPromise.then((r) => ({ type: "completed" as const, result: r })),
-          detachPromise.then(() => ({ type: "detached" as const, result: null })),
-        ]);
-
-        removeInputListener?.();
-
-        if (raceResult.type === "detached") {
-          // Move to background — subprocess keeps running
-          runPromise.then((result) => {
-            emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
-            cleanupAgent(state, correlationId, params.name);
-
-            const label = params.name ?? correlationId.slice(0, 8);
-            const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-            const status = result.exitCode === 0 ? "completed" : "failed";
-            const summary = lastMsg.length > 500 ? lastMsg.slice(0, 500) + "…" : lastMsg;
-
-            pi.sendMessage(
-              {
-                customType: "teammate-complete",
-                content: `[teammate] Agent "${params.agent}/${label}" ${status} (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
-                display: true,
-                details: { agent: params.agent, name: params.name, correlationId, result },
-              },
-              { triggerTurn: true },
-            );
-          });
-
-          return {
-            content: [{
-              type: "text",
-              text: `Agent "${params.agent}" detached to background (Ctrl+D). correlationId=${correlationId}. Will notify on completion.`,
-            }],
-            isError: false,
-            details: { mode: "single", results: [] },
-          };
-        }
-
-        // Normal completion
-        const result = raceResult.result!;
-        const lastMessage =
-          result.messages[result.messages.length - 1]?.content ?? "(no output)";
-
-        const toolResult: AgentToolResult<Details> = {
-          content: [{ type: "text", text: lastMessage }],
-          isError: result.exitCode !== 0,
-          details: { mode: "single", results: [result] },
-        };
-
-        if (result.structuredOutput !== undefined) {
-          toolResult.details!.structuredOutput = result.structuredOutput;
-        }
-
-        emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
-
-        return toolResult;
-      } finally {
-        const isBackground = params.background !== false;
-        if (!isBackground && !detached) {
+        bgPromise.then((result) => {
+          emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
           cleanupAgent(state, correlationId, params.name);
-        }
+
+          const label = params.name ?? correlationId.slice(0, 8);
+          const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
+          const status = result.exitCode === 0 ? "completed" : "failed";
+          const summary = lastMsg.length > 500 ? lastMsg.slice(0, 500) + "…" : lastMsg;
+
+          pi.sendMessage(
+            {
+              customType: "teammate-complete",
+              content: `[teammate] Agent "${params.agent}/${label}" ${status} (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
+              display: true,
+              details: { agent: params.agent, name: params.name, correlationId, result },
+            },
+            { triggerTurn: true },
+          );
+        });
+
+        return {
+          content: [{
+            type: "text",
+            text: `Agent "${params.agent}" running in background. correlationId=${correlationId}${params.name ? `, name="${params.name}"` : ""}. Use teammate-list to check status, teammate-send to message.`,
+          }],
+          isError: false,
+          details: { mode: "single", results: [] },
+        };
+      } finally {
         signal.removeEventListener("abort", abortForward);
       }
     },
