@@ -68,11 +68,13 @@ Modes:
   - Parallel: { tasks: [{ agent: "scout", task: "..." }, { agent: "reviewer", task: "..." }] }
   - Chain: { chain: [{ agent: "scout", task: "Find auth code" }, { agent: "delegate", task: "Fix: {previous}" }] }
 
-Three-axis control:
+Execution:
+  - background: true (default) — returns immediately, agent runs in background. Use teammate-list to check status.
+  - background: false — blocks until agent completes and returns full result.
+
+Routing:
   - name: Optional addressable name for cross-agent routing (enables teammate-send)
   - reply_to: Result routing — "caller" (direct return) or "main" (broadcast to parent session)
-Execution mode:
-  - mode: "await" (default) blocks until result; "detach" returns immediately with a handle
 
 Structured output:
   - outputSchema: JSON Schema to validate and parse child output as structured data`,
@@ -216,11 +218,13 @@ Structured output:
           };
         }
 
-        // --- DETACH MODE ---
-        if (params.mode === "detach") {
-          const detachPromise = runTeammate(params, makeOptions());
+        const isBackground = params.background !== false;
 
-          detachPromise.then((result) => {
+        if (isBackground) {
+          // --- BACKGROUND (default) ---
+          const bgPromise = runTeammate(params, makeOptions());
+
+          bgPromise.then((result) => {
             emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
             cleanupAgent(state, correlationId, params.name);
           });
@@ -228,14 +232,14 @@ Structured output:
           return {
             content: [{
               type: "text",
-              text: `[detached] Agent "${params.agent}" dispatched in background. correlationId=${correlationId}${params.name ? `, name="${params.name}"` : ""}. Use teammate-send to inject messages, teammate-list to check status.`,
+              text: `Agent "${params.agent}" running in background. correlationId=${correlationId}${params.name ? `, name="${params.name}"` : ""}. Use teammate-list to check status, teammate-send to message.`,
             }],
             isError: false,
             details: { mode: "single", results: [] },
           };
         }
 
-        // --- SINGLE AWAIT MODE ---
+        // --- FOREGROUND (background: false) ---
         const result = await runTeammate(params, makeOptions());
 
         const lastMessage =
@@ -255,7 +259,8 @@ Structured output:
 
         return toolResult;
       } finally {
-        if (params.mode !== "detach") {
+        const isBackground = params.background !== false;
+        if (!isBackground) {
           cleanupAgent(state, correlationId, params.name);
         }
         signal.removeEventListener("abort", abortForward);

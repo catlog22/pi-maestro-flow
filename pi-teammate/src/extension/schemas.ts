@@ -107,8 +107,11 @@ export const TeammateParams = Type.Object({
 
   // === Execution Control ===
 
-  mode: Type.Optional(
-    StringEnum(["await", "detach"]),
+  background: Type.Optional(
+    Type.Boolean({
+      default: true,
+      description: "Run in background (default: true). Set false to block until completion.",
+    }),
   ),
 
   context: Type.Optional(
@@ -124,12 +127,6 @@ export const TeammateParams = Type.Object({
   cwd: Type.Optional(
     Type.String({
       description: "Working directory for the teammate subprocess",
-    }),
-  ),
-
-  async: Type.Optional(
-    Type.Boolean({
-      description: "Run in background (default: false)",
     }),
   ),
 

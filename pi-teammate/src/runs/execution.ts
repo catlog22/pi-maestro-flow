@@ -28,11 +28,10 @@ export interface RunTeammateParams {
   name?: string;
   reply_to?: "caller" | "main";
   protocol_version?: number;
-  mode?: "await" | "detach";
+  background?: boolean;
   context?: "fresh" | "fork";
   model?: string;
   cwd?: string;
-  async?: boolean;
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
   tasks?: Array<{ agent: string; task: string; model?: string; cwd?: string }>;
@@ -101,6 +100,8 @@ function getPiSpawnCommand(args: string[]): { command: string; args: string[] } 
     if (argv1 && argv1.endsWith(".mjs")) {
       return { command: process.execPath, args: [argv1, ...args] };
     }
+    // Windows spawn needs .cmd extension or shell:true to find npm-linked binaries
+    return { command: "pi.cmd", args };
   }
   return { command: "pi", args };
 }
@@ -385,6 +386,7 @@ async function runSingleAttempt(
         cwd,
         stdio: ["pipe", "pipe", "pipe"],
         env: spawnEnv,
+        shell: process.platform === "win32",
       });
     } catch (error) {
       cleanupFile(systemPromptFile);
