@@ -377,9 +377,9 @@ Views:
         agent: string;
         name?: string;
         correlationId: string;
-        lifecycle: string;
         startedAt: string;
         durationMs: number;
+        idleMs: number;
         inboxSize: number;
         hasStdin: boolean;
       }> = [];
@@ -462,6 +462,13 @@ Views:
         pi.events.on(TEAMMATE_MESSAGE_EVENT, msgHandler);
         pi.events.on(TEAMMATE_COMPLETE_EVENT, completeHandler);
 
+        const origDispose = overlay.dispose.bind(overlay);
+        overlay.dispose = () => {
+          pi.events.off(TEAMMATE_MESSAGE_EVENT, msgHandler);
+          pi.events.off(TEAMMATE_COMPLETE_EVENT, completeHandler);
+          origDispose();
+        };
+
         return overlay;
       },
       { overlay: true },
@@ -529,15 +536,12 @@ Views:
     setTimeout(updateAgentWidget, 100);
   });
 
-  pi.on("session_start", (_event, ctx) => {
-    widgetCtx = ctx;
-  });
-
   // =========================================================================
   // Session lifecycle — agents live until session ends
   // =========================================================================
 
   pi.on("session_start", (_event, ctx) => {
+    widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
   });
@@ -619,10 +623,6 @@ function detectReplyCycle(
 
   return false;
 }
-
-// ===========================================================================
-// P2-2: Resident agent idle timeout + reaper
-// ===========================================================================
 
 function ts(): string {
   return new Date().toISOString().slice(11, 19);

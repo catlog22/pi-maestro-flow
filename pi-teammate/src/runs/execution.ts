@@ -15,7 +15,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { resolveAgent, type AgentConfig } from "../agents/agents.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
-import type { SingleResult, Usage, AgentProgress, ActiveAgent } from "../shared/types.ts";
+import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
 import type { Writable } from "node:stream";
 
 // ---------------------------------------------------------------------------

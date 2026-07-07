@@ -159,8 +159,3 @@ export const TeammateListParams = Type.Object({
   ),
 });
 
-export const TeammateAttachParams = Type.Object({
-  name: Type.String({
-    description: "Name of the running agent to attach to (view its real-time activity)",
-  }),
-});

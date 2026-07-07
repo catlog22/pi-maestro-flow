@@ -1,7 +1,7 @@
 {
   "name": "pi-maestro-teammate",
   "version": "0.2.0",
-  "description": "Pi extension for teammate dispatch with P0 three-axis decoupling (name, reply_to, lifecycle)",
+  "description": "Pi extension for teammate dispatch with P0 three-axis decoupling (name, reply_to)",
   "type": "module",
   "keywords": [
     "pi-package",
