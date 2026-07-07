@@ -541,11 +541,23 @@ async function runSingleAttempt(
           break;
         }
         case "message_update": {
-          const text = extractTextContent(event);
-          if (text) {
-            lastContent = text;
-            progress.lastMessage = text;
-            options.onProgress?.(progress);
+          // Extract text from streaming delta or full message snapshot
+          const ame = event.assistantMessageEvent as Record<string, unknown> | undefined;
+          const deltaType = ame?.type as string | undefined;
+          if (deltaType === "text_delta") {
+            const delta = ame?.delta as string | undefined;
+            if (delta) {
+              lastContent += delta;
+              progress.lastMessage = lastContent;
+              options.onProgress?.(progress);
+            }
+          } else {
+            const text = extractTextContent(event);
+            if (text) {
+              lastContent = text;
+              progress.lastMessage = text;
+              options.onProgress?.(progress);
+            }
           }
           break;
         }
