@@ -48,6 +48,7 @@ export interface Details {
     recentTools?: Array<{ name: string; status: string }>;
     toolCount?: number;
     tokens?: number;
+    lastMessage?: string;
   }>;
 }
 

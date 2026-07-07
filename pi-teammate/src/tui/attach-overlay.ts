@@ -1,19 +1,18 @@
 /**
- * Attach overlay component — multi-agent view with tab switching.
+ * Attach overlay — multi-agent view with tab switching.
  *
- * Shows real-time activity for the selected agent.
- * Tab/Shift+Tab to switch between agents.
- * ESC to dismiss and return to main session.
+ * Shows real-time tool activity and output content for agents.
+ * Tab/Shift+Tab to switch. ↑↓ to scroll. ESC to dismiss.
  */
 
 import type { Component } from "@earendil-works/pi-tui";
 import type { ActiveAgent } from "../shared/types.ts";
 
-const MAX_LOG_LINES = 200;
+const MAX_LOG_LINES = 500;
 
 interface AgentLog {
   agent: ActiveAgent;
-  lines: string[];
+  lines: Array<{ text: string; kind: "info" | "tool" | "output" | "system" }>;
   scrollOffset: number;
 }
 
@@ -51,29 +50,47 @@ export class AttachOverlay implements Component {
   }
 
   syncAgents(): void {
-    const runs = this.getActiveRuns();
-    for (const [cid, agent] of runs) {
+    for (const [cid, agent] of this.getActiveRuns()) {
       this.addAgent(agent);
     }
   }
 
-  appendLog(correlationId: string, line: string): void {
+  appendLog(correlationId: string, text: string, kind: "info" | "tool" | "output" | "system" = "info"): void {
     let log = this.agents.get(correlationId);
     if (!log) {
-      const runs = this.getActiveRuns();
-      const agent = runs.get(correlationId);
+      const agent = this.getActiveRuns().get(correlationId);
       if (agent) {
         this.addAgent(agent);
         log = this.agents.get(correlationId);
       }
     }
     if (!log) return;
-    log.lines.push(line);
+    log.lines.push({ text, kind });
     if (log.lines.length > MAX_LOG_LINES) {
       log.lines.shift();
     }
     if (correlationId === this.activeId) {
-      log.scrollOffset = Math.max(0, log.lines.length - 28);
+      log.scrollOffset = Math.max(0, log.lines.length - 25);
+    }
+    this.requestRender?.();
+  }
+
+  setOutput(correlationId: string, content: string): void {
+    const log = this.agents.get(correlationId);
+    if (!log) return;
+    // Replace last output block with new content
+    while (log.lines.length > 0 && log.lines[log.lines.length - 1].kind === "output") {
+      log.lines.pop();
+    }
+    const lines = content.split("\n").slice(-12);
+    for (const line of lines) {
+      log.lines.push({ text: line, kind: "output" });
+    }
+    if (content.split("\n").length > 12) {
+      log.lines.push({ text: `… ${content.split("\n").length - 12} earlier lines`, kind: "output" });
+    }
+    if (correlationId === this.activeId) {
+      log.scrollOffset = Math.max(0, log.lines.length - 25);
     }
     this.requestRender?.();
   }
@@ -83,10 +100,6 @@ export class AttachOverlay implements Component {
       this.onDone();
       return;
     }
-
-    const currentLog = this.agents.get(this.activeId);
-
-    // Tab / Shift+Tab — switch agent
     if (data === "\t") {
       this.syncAgents();
       const idx = this.agentOrder.indexOf(this.activeId);
@@ -94,76 +107,73 @@ export class AttachOverlay implements Component {
       this.requestRender?.();
       return;
     }
-    if (data === "\x1b[Z") { // Shift+Tab
+    if (data === "\x1b[Z") {
       this.syncAgents();
       const idx = this.agentOrder.indexOf(this.activeId);
       this.activeId = this.agentOrder[(idx - 1 + this.agentOrder.length) % this.agentOrder.length];
       this.requestRender?.();
       return;
     }
-
-    if (!currentLog) return;
-
-    // Scroll up/down
+    const log = this.agents.get(this.activeId);
+    if (!log) return;
     if (data === "\x1b[A" || data === "k") {
-      currentLog.scrollOffset = Math.max(0, currentLog.scrollOffset - 1);
+      log.scrollOffset = Math.max(0, log.scrollOffset - 1);
       this.requestRender?.();
     } else if (data === "\x1b[B" || data === "j") {
-      currentLog.scrollOffset = Math.min(
-        Math.max(0, currentLog.lines.length - 10),
-        currentLog.scrollOffset + 1,
-      );
+      log.scrollOffset = Math.min(Math.max(0, log.lines.length - 10), log.scrollOffset + 1);
       this.requestRender?.();
     }
   }
 
   render(width: number): string[] {
     this.syncAgents();
-    const output: string[] = [];
+    const out: string[] = [];
 
     // Tab bar
     const tabs = this.agentOrder.map((cid) => {
       const log = this.agents.get(cid);
       if (!log) return "";
-      const label = log.agent.name ?? cid.slice(0, 6);
+      const a = log.agent;
+      const label = a.name ?? cid.slice(0, 6);
       const active = cid === this.activeId;
-      return active ? `[${log.agent.agent}/${label}]` : ` ${log.agent.agent}/${label} `;
-    }).join(" │ ");
-    output.push(tabs.slice(0, width));
-    output.push("─".repeat(Math.min(width, 80)));
+      const status = a.stdin?.destroyed === false ? "" : "·";
+      return active ? `[${a.agent}/${label}]` : ` ${a.agent}/${label}${status} `;
+    }).join("│");
+    out.push(tabs.slice(0, width));
+    out.push("─".repeat(Math.min(width, 80)));
 
-    const currentLog = this.agents.get(this.activeId);
-    if (!currentLog) {
-      output.push("(no agent selected)");
-      return output;
+    const log = this.agents.get(this.activeId);
+    if (!log) {
+      out.push("(no agent selected)");
+      return out;
     }
 
-    // Agent info
-    const a = currentLog.agent;
+    // Agent header
+    const a = log.agent;
     const uptime = Math.round((Date.now() - a.startedAt) / 1000);
-    const stdinStatus = a.stdin?.writable ? "ACTIVE" : "ENDED";
-    output.push(`${a.agent}/${a.name ?? a.correlationId.slice(0, 8)}  ${stdinStatus}  ${uptime}s  inbox:${a.inbox.length}`);
-    output.push("");
+    out.push(`${a.agent}/${a.name ?? a.correlationId.slice(0, 8)}  ${uptime}s  inbox:${a.inbox.length}`);
+    out.push("");
 
     // Log content
-    const viewHeight = 28;
-    const visible = currentLog.lines.slice(currentLog.scrollOffset, currentLog.scrollOffset + viewHeight);
-    for (const line of visible) {
-      output.push(("  " + line).slice(0, width));
+    const viewH = 25;
+    const visible = log.lines.slice(log.scrollOffset, log.scrollOffset + viewH);
+    for (const entry of visible) {
+      let prefix = "  ";
+      if (entry.kind === "tool") prefix = "  ";
+      else if (entry.kind === "output") prefix = "  │ ";
+      else if (entry.kind === "system") prefix = "  ═ ";
+      out.push((prefix + entry.text).slice(0, width));
     }
 
-    while (output.length < viewHeight + 4) {
-      output.push("");
-    }
+    while (out.length < viewH + 4) out.push("");
 
     // Footer
-    const scrollInfo = currentLog.lines.length > viewHeight
-      ? ` ${currentLog.scrollOffset + 1}-${Math.min(currentLog.scrollOffset + viewHeight, currentLog.lines.length)}/${currentLog.lines.length}`
-      : "";
-    const agentCount = this.agentOrder.length;
-    output.push(`─ [ESC] back │ [Tab] switch (${agentCount}) │ [↑↓] scroll${scrollInfo} ─`.slice(0, width));
+    const total = log.lines.length;
+    const scrollInfo = total > viewH ? ` ${log.scrollOffset + 1}-${Math.min(log.scrollOffset + viewH, total)}/${total}` : "";
+    const n = this.agentOrder.length;
+    out.push(`─ [ESC] back │ [Tab] switch (${n}) │ [↑↓] scroll${scrollInfo} ─`.slice(0, width));
 
-    return output;
+    return out;
   }
 
   dispose(): void {

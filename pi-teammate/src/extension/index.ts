@@ -174,6 +174,7 @@ Structured output:
                 recentTools: data.recentTools,
                 toolCount: data.toolCount,
                 tokens: data.tokens,
+                lastMessage: data.lastMessage,
                 ...(data.status !== "running"
                   ? { completedAt: new Date().toISOString() }
                   : {}),
@@ -477,10 +478,9 @@ Views:
         );
         overlay.setRequestRender(() => tui.requestRender());
 
-        overlay.appendLog(agent.correlationId, `Agent: ${agent.agent} | ${agentLabel(agent)}`);
-        overlay.appendLog(agent.correlationId, `Started: ${new Date(agent.startedAt).toISOString()}`);
-        overlay.appendLog(agent.correlationId, `Inbox: ${agent.inbox.length} messages`);
-        overlay.appendLog(agent.correlationId, "");
+        overlay.appendLog(agent.correlationId, `Agent: ${agent.agent} | ${agentLabel(agent)}`, "info");
+        overlay.appendLog(agent.correlationId, `Started: ${new Date(agent.startedAt).toISOString()}`, "info");
+        overlay.appendLog(agent.correlationId, "", "info");
 
         const msgHandler = (data: unknown) => {
           const evt = data as Record<string, unknown>;
@@ -489,13 +489,7 @@ Views:
 
           const lastMsg = evt.lastMessage as string | undefined;
           if (lastMsg) {
-            const lines = lastMsg.split("\n").slice(0, 5);
-            for (const line of lines) {
-              overlay.appendLog(cid, `  ${line}`);
-            }
-            if (lastMsg.split("\n").length > 5) {
-              overlay.appendLog(cid, `  … (${lastMsg.split("\n").length - 5} more lines)`);
-            }
+            overlay.setOutput(cid, lastMsg);
             return;
           }
 
@@ -503,18 +497,14 @@ Views:
           if (tools && tools.length > 0) {
             const last = tools[tools.length - 1];
             const icon = last.status === "running" ? "~" : "✓";
-            overlay.appendLog(cid, `[${ts()}] ${icon} ${last.name}`);
-          } else {
-            const tokens = evt.tokens as number ?? 0;
-            const toolCount = evt.toolCount as number ?? 0;
-            overlay.appendLog(cid, `[${ts()}] ${toolCount} tools | ${tokens} tokens`);
+            overlay.appendLog(cid, `[${ts()}] ${icon} ${last.name}`, "tool");
           }
         };
         const completeHandler = (data: unknown) => {
           const evt = data as Record<string, unknown>;
           const cid = evt.correlationId as string;
           if (!cid) return;
-          overlay.appendLog(cid, `[${ts()}] ═══ COMPLETED exitCode=${evt.exitCode} duration=${evt.durationMs}ms ═══`);
+          overlay.appendLog(cid, `COMPLETED exitCode=${evt.exitCode} ${evt.durationMs}ms`, "system");
         };
         pi.events.on(TEAMMATE_MESSAGE_EVENT, msgHandler);
         pi.events.on(TEAMMATE_COMPLETE_EVENT, completeHandler);
