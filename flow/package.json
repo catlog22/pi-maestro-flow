@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Pi extension for Maestro workflow orchestration — explore, delegate, MOA tools, 113 skills, 82 workflow docs, and 28 agent definitions",
   "type": "module",
   "keywords": [
@@ -33,7 +33,7 @@
     ]
   },
   "dependencies": {
-    "pi-maestro-teammate": "^0.1.0",
+    "pi-maestro-teammate": "^0.2.0",
     "@earendil-works/pi-tui": "0.74.0",
     "typebox": "1.1.24"
   },
