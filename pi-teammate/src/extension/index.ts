@@ -422,19 +422,17 @@ Views:
   pi.registerTool(listTool);
 
   // =========================================================================
-  // /teammate-attach command + Ctrl+T shortcut (user-facing TUI)
+  // Alt+R shortcut — attach overlay (user-facing TUI)
   // =========================================================================
 
-  async function showAttachOverlay(agentName: string, ctx: ExtensionContext): Promise<void> {
-    const correlationId = state.namedAgents.get(agentName);
-    if (!correlationId) {
-      ctx.ui.notify(`Agent "${agentName}" not found.`, "error");
-      return;
-    }
+  function agentLabel(a: ActiveAgent): string {
+    return a.name ?? a.correlationId.slice(0, 8);
+  }
+
+  async function showAttachOverlay(correlationId: string, ctx: ExtensionContext): Promise<void> {
     const agent = state.activeRuns.get(correlationId);
     if (!agent) {
-      state.namedAgents.delete(agentName);
-      ctx.ui.notify(`Agent "${agentName}" is no longer active.`, "error");
+      ctx.ui.notify("Agent is no longer active.", "error");
       return;
     }
 
@@ -442,7 +440,7 @@ Views:
       (_tui, _theme, _keybindings, done) => {
         const overlay = new AttachOverlay(agent, () => done(undefined));
 
-        overlay.appendLog(`Agent: ${agent.agent} | correlationId: ${agent.correlationId}`);
+        overlay.appendLog(`Agent: ${agent.agent} | ${agentLabel(agent)}`);
         overlay.appendLog(`Started: ${new Date(agent.startedAt).toISOString()}`);
         overlay.appendLog(`Inbox: ${agent.inbox.length} messages`);
         overlay.appendLog("");
@@ -476,29 +474,27 @@ Views:
   }
 
   async function showAgentSelector(ctx: ExtensionContext): Promise<void> {
-    const names = Array.from(state.namedAgents.keys());
-    if (names.length === 0) {
-      ctx.ui.notify("No named agents running.", "warning");
+    const entries = Array.from(state.activeRuns.entries());
+    if (entries.length === 0) {
+      ctx.ui.notify("No active agents.", "warning");
       return;
     }
-    if (names.length === 1) {
-      await showAttachOverlay(names[0], ctx);
+    if (entries.length === 1) {
+      await showAttachOverlay(entries[0][0], ctx);
       return;
     }
     const selected = await ctx.ui.select(
       "Attach to agent",
-      names.map((n) => {
-        const cid = state.namedAgents.get(n)!;
-        const a = state.activeRuns.get(cid);
-        return { value: n, label: `${n} (${a?.agent ?? "?"})` };
-      }),
+      entries.map(([cid, a]) => ({
+        value: cid,
+        label: `${a.agent}/${agentLabel(a)}`,
+      })),
     );
     if (selected) {
       await showAttachOverlay(selected, ctx);
     }
   }
 
-  // Ctrl+T — shortcut to open agent selector/attach
   pi.registerShortcut("alt+r", {
     description: "Attach to a running teammate agent",
     async handler(ctx) {
@@ -521,13 +517,13 @@ Views:
     }
 
     const lines = agents.map((a) => {
-      const name = a.name ? `${a.name}` : a.correlationId.slice(0, 8);
-      const idle = Math.round((Date.now() - a.lastActivityAt) / 1000);
+      const label = agentLabel(a);
+      const uptime = Math.round((Date.now() - a.startedAt) / 1000);
       const status = a.stdin?.writable ? "●" : "○";
-      return `  ${status} ${a.agent}/${name}  idle ${idle}s`;
+      return `  ${status} ${a.agent}/${label}  ${uptime}s`;
     });
 
-    lines.unshift("─ agents ─ Ctrl+E attach");
+    lines.unshift("─ agents ─ Alt+R attach");
     widgetCtx.ui.setWidget("teammate-agents", lines, { placement: "belowEditor" });
   }
 
