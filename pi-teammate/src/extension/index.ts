@@ -16,7 +16,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateAttachParams } from "./schemas.ts";
+import { TeammateParams, TeammateSendParams, TeammateListParams } from "./schemas.ts";
 import {
   runTeammate,
   runParallel,
@@ -414,100 +414,142 @@ Views:
   };
 
   // =========================================================================
-  // Tool 4: teammate-attach — overlay view of sub-agent activity
-  // =========================================================================
-
-  const attachTool: ToolDefinition<typeof TeammateAttachParams, { attached: boolean }> = {
-    name: "teammate-attach",
-    label: "Teammate Attach",
-    description: `Attach to a named running agent to view its real-time activity in a full-screen overlay.
-
-Shows live tool calls, output, and status. ESC to return to main session.
-The agent continues running in the background while attached.`,
-
-    parameters: TeammateAttachParams,
-
-    async execute(
-      _id: string,
-      params: { name: string },
-      _signal: AbortSignal,
-      _onUpdate: unknown,
-      ctx: ExtensionContext,
-    ): Promise<AgentToolResult<{ attached: boolean }>> {
-      const correlationId = state.namedAgents.get(params.name);
-      if (!correlationId) {
-        return {
-          content: [{ type: "text", text: `Agent "${params.name}" not found or not running.` }],
-          isError: true,
-          details: { attached: false },
-        };
-      }
-
-      const agent = state.activeRuns.get(correlationId);
-      if (!agent) {
-        state.namedAgents.delete(params.name);
-        return {
-          content: [{ type: "text", text: `Agent "${params.name}" is no longer active.` }],
-          isError: true,
-          details: { attached: false },
-        };
-      }
-
-      if (!ctx.hasUI) {
-        return {
-          content: [{ type: "text", text: "Attach requires interactive TUI mode." }],
-          isError: true,
-          details: { attached: false },
-        };
-      }
-
-      // Show overlay with agent activity stream
-      await ctx.ui.custom(
-        (_tui, _theme, _keybindings, done) => {
-          const overlay = new AttachOverlay(agent, () => done(undefined));
-
-          // Feed existing progress info
-          overlay.appendLog(`Agent: ${agent.agent} | correlationId: ${agent.correlationId}`);
-          overlay.appendLog(`Started: ${new Date(agent.startedAt).toISOString()}`);
-          overlay.appendLog(`Inbox: ${agent.inbox.length} messages`);
-          overlay.appendLog("");
-
-          // Listen for events from this agent
-          const handler = (data: unknown) => {
-            const evt = data as Record<string, unknown>;
-            if (evt.correlationId === agent.correlationId) {
-              overlay.appendLog(`[${new Date().toISOString().slice(11, 19)}] ${JSON.stringify(evt)}`);
-            }
-          };
-          pi.events.on(TEAMMATE_MESSAGE_EVENT, handler);
-          pi.events.on(TEAMMATE_COMPLETE_EVENT, (data: unknown) => {
-            const evt = data as Record<string, unknown>;
-            if (evt.correlationId === agent.correlationId) {
-              overlay.appendLog(`[COMPLETED] exitCode=${evt.exitCode} durationMs=${evt.durationMs}`);
-            }
-          });
-
-          return overlay;
-        },
-        { overlay: true },
-      );
-
-      return {
-        content: [{ type: "text", text: `Detached from "${params.name}".` }],
-        isError: false,
-        details: { attached: true },
-      };
-    },
-  };
-
-  // =========================================================================
-  // Register all tools
+  // Register tools (LLM-callable)
   // =========================================================================
 
   pi.registerTool(tool);
   pi.registerTool(sendTool);
   pi.registerTool(listTool);
-  pi.registerTool(attachTool);
+
+  // =========================================================================
+  // /teammate-attach command + Ctrl+T shortcut (user-facing TUI)
+  // =========================================================================
+
+  async function showAttachOverlay(agentName: string, ctx: ExtensionContext): Promise<void> {
+    const correlationId = state.namedAgents.get(agentName);
+    if (!correlationId) {
+      ctx.ui.notify(`Agent "${agentName}" not found.`, "error");
+      return;
+    }
+    const agent = state.activeRuns.get(correlationId);
+    if (!agent) {
+      state.namedAgents.delete(agentName);
+      ctx.ui.notify(`Agent "${agentName}" is no longer active.`, "error");
+      return;
+    }
+
+    await ctx.ui.custom(
+      (_tui, _theme, _keybindings, done) => {
+        const overlay = new AttachOverlay(agent, () => done(undefined));
+
+        overlay.appendLog(`Agent: ${agent.agent} | correlationId: ${agent.correlationId}`);
+        overlay.appendLog(`Started: ${new Date(agent.startedAt).toISOString()}`);
+        overlay.appendLog(`Inbox: ${agent.inbox.length} messages`);
+        overlay.appendLog("");
+
+        const msgHandler = (data: unknown) => {
+          const evt = data as Record<string, unknown>;
+          if (evt.correlationId === agent.correlationId) {
+            overlay.appendLog(`[${ts()}] ${JSON.stringify(evt)}`);
+          }
+        };
+        const completeHandler = (data: unknown) => {
+          const evt = data as Record<string, unknown>;
+          if (evt.correlationId === agent.correlationId) {
+            overlay.appendLog(`[${ts()}] COMPLETED exitCode=${evt.exitCode}`);
+          }
+        };
+        pi.events.on(TEAMMATE_MESSAGE_EVENT, msgHandler);
+        pi.events.on(TEAMMATE_COMPLETE_EVENT, completeHandler);
+
+        return overlay;
+      },
+      { overlay: true },
+    );
+  }
+
+  async function showAgentSelector(ctx: ExtensionContext): Promise<void> {
+    const names = Array.from(state.namedAgents.keys());
+    if (names.length === 0) {
+      ctx.ui.notify("No named agents running.", "warning");
+      return;
+    }
+    if (names.length === 1) {
+      await showAttachOverlay(names[0], ctx);
+      return;
+    }
+    const selected = await ctx.ui.select(
+      "Attach to agent",
+      names.map((n) => {
+        const cid = state.namedAgents.get(n)!;
+        const a = state.activeRuns.get(cid);
+        return { value: n, label: `${n} (${a?.agent ?? "?"})` };
+      }),
+    );
+    if (selected) {
+      await showAttachOverlay(selected, ctx);
+    }
+  }
+
+  // /teammate-attach [name] — slash command
+  pi.registerCommand("teammate-attach", {
+    description: "Attach to a running teammate agent to view its activity",
+    async handler(args: string, ctx) {
+      const name = args.trim();
+      if (name) {
+        await showAttachOverlay(name, ctx);
+      } else {
+        await showAgentSelector(ctx);
+      }
+    },
+    getArgumentCompletions(prefix: string) {
+      return Array.from(state.namedAgents.keys())
+        .filter((n) => n.startsWith(prefix))
+        .map((n) => ({ value: n, label: n }));
+    },
+  });
+
+  // Ctrl+T — shortcut to open agent selector
+  pi.registerShortcut("ctrl+t", {
+    description: "Attach to a running teammate agent",
+    async handler(ctx) {
+      await showAgentSelector(ctx);
+    },
+  });
+
+  // =========================================================================
+  // Widget: active agents list below editor (auto-updated)
+  // =========================================================================
+
+  let widgetCtx: ExtensionContext | null = null;
+
+  function updateAgentWidget(): void {
+    if (!widgetCtx) return;
+    const agents = Array.from(state.activeRuns.values());
+    if (agents.length === 0) {
+      widgetCtx.ui.setWidget("teammate-agents", undefined);
+      return;
+    }
+
+    const lines = agents.map((a) => {
+      const name = a.name ? `${a.name}` : a.correlationId.slice(0, 8);
+      const idle = Math.round((Date.now() - a.lastActivityAt) / 1000);
+      const status = a.stdin?.writable ? "●" : "○";
+      return `  ${status} ${a.agent}/${name}  idle ${idle}s`;
+    });
+
+    lines.unshift("─ agents ─ Ctrl+T attach");
+    widgetCtx.ui.setWidget("teammate-agents", lines, { placement: "belowEditor" });
+  }
+
+  pi.events.on(TEAMMATE_STARTED_EVENT, () => updateAgentWidget());
+  pi.events.on(TEAMMATE_COMPLETE_EVENT, () => {
+    setTimeout(updateAgentWidget, 100);
+  });
+
+  pi.on("session_start", (_event, ctx) => {
+    widgetCtx = ctx;
+  });
 
   // =========================================================================
   // Session lifecycle — agents live until session ends
@@ -599,6 +641,10 @@ function detectReplyCycle(
 // ===========================================================================
 // P2-2: Resident agent idle timeout + reaper
 // ===========================================================================
+
+function ts(): string {
+  return new Date().toISOString().slice(11, 19);
+}
 
 function releaseAgentMemory(agent: ActiveAgent): void {
   agent.inbox.length = 0;
