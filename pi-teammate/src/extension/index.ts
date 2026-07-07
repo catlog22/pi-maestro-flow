@@ -190,6 +190,8 @@ Structured output:
         })(),
       });
 
+      let detached = false;
+
       try {
         // --- PARALLEL MODE ---
         if (params.tasks && params.tasks.length > 0) {
@@ -238,20 +240,62 @@ Structured output:
         }
 
         if (params.background === false) {
-          // --- FOREGROUND: block until completion ---
-          const result = await runTeammate(params, makeOptions());
-          emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
+          // --- FOREGROUND: block until completion, Ctrl+D to detach ---
+          let detachResolve: (() => void) | null = null;
+          const detachPromise = new Promise<void>((r) => { detachResolve = r; });
 
-          const lastMessage = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-          const toolResult: AgentToolResult<Details> = {
-            content: [{ type: "text", text: lastMessage }],
-            isError: result.exitCode !== 0,
-            details: { mode: "single", results: [result] },
-          };
-          if (result.structuredOutput !== undefined) {
-            toolResult.details!.structuredOutput = result.structuredOutput;
+          const removeListener = ctx.hasUI
+            ? ctx.ui.onTerminalInput((data: string) => {
+                if (data === "\x04") detachResolve?.();
+              })
+            : null;
+
+          const runPromise = runTeammate(params, makeOptions());
+          const race = await Promise.race([
+            runPromise.then((r) => ({ done: true as const, result: r })),
+            detachPromise.then(() => ({ done: false as const, result: null })),
+          ]);
+
+          removeListener?.();
+
+          if (race.done) {
+            const result = race.result!;
+            emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
+            const lastMessage = result.messages[result.messages.length - 1]?.content ?? "(no output)";
+            const toolResult: AgentToolResult<Details> = {
+              content: [{ type: "text", text: lastMessage }],
+              isError: result.exitCode !== 0,
+              details: { mode: "single", results: [result] },
+            };
+            if (result.structuredOutput !== undefined) {
+              toolResult.details!.structuredOutput = result.structuredOutput;
+            }
+            return toolResult;
           }
-          return toolResult;
+
+          // Ctrl+D: detach to background
+          detached = true;
+          runPromise.then((result) => {
+            emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
+            cleanupAgent(state, correlationId, params.name);
+            const label = params.name ?? correlationId.slice(0, 8);
+            const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
+            const summary = lastMsg.length > 500 ? lastMsg.slice(0, 500) + "…" : lastMsg;
+            pi.sendMessage(
+              {
+                customType: "teammate-complete",
+                content: `[teammate] Agent "${params.agent}/${label}" ${result.exitCode === 0 ? "completed" : "failed"} (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
+                display: true,
+                details: { agent: params.agent, name: params.name, correlationId, result },
+              },
+              { triggerTurn: true },
+            );
+          });
+          return {
+            content: [{ type: "text", text: `Agent "${params.agent}" detached to background (Ctrl+D). Will notify on completion.` }],
+            isError: false,
+            details: { mode: "single", results: [] },
+          };
         }
 
         // --- BACKGROUND (default) ---
@@ -286,7 +330,7 @@ Structured output:
           details: { mode: "single", results: [] },
         };
       } finally {
-        if (params.background === false) {
+        if (params.background === false && !detached) {
           cleanupAgent(state, correlationId, params.name);
         }
         signal.removeEventListener("abort", abortForward);
