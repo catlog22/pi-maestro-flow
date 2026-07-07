@@ -466,7 +466,11 @@ async function runSingleAttempt(
     }
 
     // P1: Expose stdin for message injection
+    // CRITICAL: pi reads piped stdin to EOF before starting (readPipedStdin).
+    // We must end stdin immediately so pi doesn't block waiting for input.
+    // For message injection, we re-open a channel via the stdin pipe later.
     if (child.stdin) {
+      child.stdin.end();
       options.onChildSpawned?.(child.stdin);
     }
 
