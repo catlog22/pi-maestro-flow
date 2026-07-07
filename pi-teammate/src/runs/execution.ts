@@ -65,6 +65,22 @@ interface JsonLineEvent {
 // Utilities
 // ---------------------------------------------------------------------------
 
+function extractTextContent(event: JsonLineEvent): string | undefined {
+  if (typeof event.content === "string") return event.content;
+  // AgentMessage format: { message: { content: [{type:"text", text:"..."}] } }
+  const msg = event.message as Record<string, unknown> | undefined;
+  if (msg?.content) {
+    if (typeof msg.content === "string") return msg.content;
+    if (Array.isArray(msg.content)) {
+      return (msg.content as Array<{ type: string; text?: string }>)
+        .filter((c) => c.type === "text" && c.text)
+        .map((c) => c.text!)
+        .join("\n") || undefined;
+    }
+  }
+  return undefined;
+}
+
 function emptyUsage(): Usage {
   return {
     inputTokens: 0,
@@ -481,9 +497,7 @@ async function runSingleAttempt(
 
     // Parse JSON lines from stdout
     let stdoutBuffer = "";
-    let stdoutChunkCount = 0;
     child.stdout?.on("data", (chunk: Buffer) => {
-      stdoutChunkCount++;
       const text = chunk.toString();
       stdoutBuffer += text;
       const lines = stdoutBuffer.split("\n");
@@ -509,10 +523,11 @@ async function runSingleAttempt(
       switch (event.type) {
         case "message_end":
         case "assistant": {
-          if (event.content) {
-            lastContent = event.content;
-            messages.push({ role: "assistant", content: event.content });
-            progress.lastMessage = event.content;
+          const text = extractTextContent(event);
+          if (text) {
+            lastContent = text;
+            messages.push({ role: "assistant", content: text });
+            progress.lastMessage = text;
             options.onProgress?.(progress);
           }
           if (event.usage) {
@@ -522,6 +537,15 @@ async function runSingleAttempt(
           }
           if (event.model) {
             resolvedModel = event.model;
+          }
+          break;
+        }
+        case "message_update": {
+          const text = extractTextContent(event);
+          if (text) {
+            lastContent = text;
+            progress.lastMessage = text;
+            options.onProgress?.(progress);
           }
           break;
         }
