@@ -481,7 +481,7 @@ async function runSingleAttempt(
           break;
         }
         case "tool_execution_start": {
-          const toolName = (event.name as string) ?? "unknown";
+          const toolName = (event.toolName as string) ?? (event.name as string) ?? "unknown";
           progress.recentTools.push({ name: toolName, status: "running" });
           if (progress.recentTools.length > 10) progress.recentTools.shift();
           options.onProgress?.(progress);

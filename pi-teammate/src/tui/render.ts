@@ -126,7 +126,18 @@ export function renderTeammateResult(
           : p.status === "completed"
             ? theme.fg("success", "✓")
             : theme.fg("error", "✗");
-        lines.push(`${pIcon} ${theme.bold(p.agent)} ${theme.fg("dim", p.status)}`);
+
+        const tokenInfo = p.tokens ? ` ${theme.fg("dim", formatTokens(p.tokens))}` : "";
+        const toolInfo = p.toolCount ? ` ${theme.fg("dim", `${p.toolCount} tools`)}` : "";
+        lines.push(`${pIcon} ${theme.bold(p.agent)}${tokenInfo}${toolInfo}`);
+
+        if (p.recentTools && p.recentTools.length > 0) {
+          const last5 = p.recentTools.slice(-5);
+          for (const t of last5) {
+            const tIcon = toolStatusIcon(t.status, theme);
+            lines.push(`  ${tIcon} ${theme.fg("dim", t.name)}`);
+          }
+        }
       }
       return new Text(lines.join("\n"), 0, 0);
     }
@@ -157,7 +168,7 @@ export function renderTeammateResult(
     const agentProgress = progress?.find((p) => p.agent === singleResult.agent);
     if (agentProgress?.status === "running") {
       // Show recent tools as live activity
-      const recentTools = (agentProgress as unknown as { recentTools?: Array<{ name: string; status: string }> }).recentTools;
+      const recentTools = agentProgress.recentTools;
       if (recentTools && recentTools.length > 0) {
         const last5 = recentTools.slice(-5);
         for (const t of last5) {

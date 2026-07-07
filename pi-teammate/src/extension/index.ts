@@ -532,7 +532,31 @@ Views:
     widgetCtx.ui.setWidget("teammate-agents", lines, { placement: "belowEditor" });
   }
 
-  pi.events.on(TEAMMATE_STARTED_EVENT, () => updateAgentWidget());
+  let widgetTimer: ReturnType<typeof setInterval> | null = null;
+
+  function startWidgetTimer(): void {
+    if (widgetTimer) return;
+    widgetTimer = setInterval(() => {
+      if (state.activeRuns.size === 0) {
+        stopWidgetTimer();
+        updateAgentWidget();
+        return;
+      }
+      updateAgentWidget();
+    }, 2000);
+  }
+
+  function stopWidgetTimer(): void {
+    if (widgetTimer) {
+      clearInterval(widgetTimer);
+      widgetTimer = null;
+    }
+  }
+
+  pi.events.on(TEAMMATE_STARTED_EVENT, () => {
+    updateAgentWidget();
+    startWidgetTimer();
+  });
   pi.events.on(TEAMMATE_COMPLETE_EVENT, () => {
     setTimeout(updateAgentWidget, 100);
   });
@@ -548,6 +572,7 @@ Views:
   });
 
   pi.on("session_shutdown", () => {
+    stopWidgetTimer();
     for (const run of state.activeRuns.values()) {
       releaseAgentMemory(run);
       run.abortController.abort();
