@@ -491,25 +491,7 @@ Views:
     }
   }
 
-  // /teammate-attach [name] — slash command
-  pi.registerCommand("teammate-attach", {
-    description: "Attach to a running teammate agent to view its activity",
-    async handler(args: string, ctx) {
-      const name = args.trim();
-      if (name) {
-        await showAttachOverlay(name, ctx);
-      } else {
-        await showAgentSelector(ctx);
-      }
-    },
-    getArgumentCompletions(prefix: string) {
-      return Array.from(state.namedAgents.keys())
-        .filter((n) => n.startsWith(prefix))
-        .map((n) => ({ value: n, label: n }));
-    },
-  });
-
-  // Ctrl+T — shortcut to open agent selector
+  // Ctrl+T — shortcut to open agent selector/attach
   pi.registerShortcut("ctrl+t", {
     description: "Attach to a running teammate agent",
     async handler(ctx) {
