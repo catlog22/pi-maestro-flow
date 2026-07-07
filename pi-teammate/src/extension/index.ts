@@ -146,6 +146,18 @@ Structured output:
         },
         onProgress: (data: AgentProgress) => {
           activeAgent.lastActivityAt = Date.now();
+
+          // Broadcast to overlay listeners
+          pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+            correlationId,
+            agent: data.agent,
+            status: data.status,
+            toolCount: data.toolCount,
+            tokens: data.tokens,
+            recentTools: data.recentTools,
+            lastMessage: data.lastMessage,
+          });
+
           if (!onUpdate) return;
           onUpdate({
             content: [{
@@ -227,6 +239,21 @@ Structured output:
           bgPromise.then((result) => {
             emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
             cleanupAgent(state, correlationId, params.name);
+
+            const label = params.name ?? correlationId.slice(0, 8);
+            const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
+            const status = result.exitCode === 0 ? "completed" : "failed";
+            const summary = lastMsg.length > 500 ? lastMsg.slice(0, 500) + "…" : lastMsg;
+
+            pi.sendMessage(
+              {
+                customType: "teammate-complete",
+                content: `[teammate] Agent "${params.agent}/${label}" ${status} (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
+                display: true,
+                details: { agent: params.agent, name: params.name, correlationId, result },
+              },
+              { triggerTurn: true },
+            );
           });
 
           return {
@@ -443,24 +470,50 @@ Views:
 
     await ctx.ui.custom(
       (_tui, _theme, _keybindings, done) => {
-        const overlay = new AttachOverlay(agent, () => done(undefined));
+        const overlay = new AttachOverlay(
+          agent,
+          () => done(undefined),
+          () => state.activeRuns,
+        );
 
-        overlay.appendLog(`Agent: ${agent.agent} | ${agentLabel(agent)}`);
-        overlay.appendLog(`Started: ${new Date(agent.startedAt).toISOString()}`);
-        overlay.appendLog(`Inbox: ${agent.inbox.length} messages`);
-        overlay.appendLog("");
+        overlay.appendLog(agent.correlationId, `Agent: ${agent.agent} | ${agentLabel(agent)}`);
+        overlay.appendLog(agent.correlationId, `Started: ${new Date(agent.startedAt).toISOString()}`);
+        overlay.appendLog(agent.correlationId, `Inbox: ${agent.inbox.length} messages`);
+        overlay.appendLog(agent.correlationId, "");
 
         const msgHandler = (data: unknown) => {
           const evt = data as Record<string, unknown>;
-          if (evt.correlationId === agent.correlationId) {
-            overlay.appendLog(`[${ts()}] ${JSON.stringify(evt)}`);
+          const cid = evt.correlationId as string;
+          if (!cid) return;
+
+          const lastMsg = evt.lastMessage as string | undefined;
+          if (lastMsg) {
+            const lines = lastMsg.split("\n").slice(0, 5);
+            for (const line of lines) {
+              overlay.appendLog(cid, `  ${line}`);
+            }
+            if (lastMsg.split("\n").length > 5) {
+              overlay.appendLog(cid, `  … (${lastMsg.split("\n").length - 5} more lines)`);
+            }
+            return;
+          }
+
+          const tools = evt.recentTools as Array<{ name: string; status: string }> | undefined;
+          if (tools && tools.length > 0) {
+            const last = tools[tools.length - 1];
+            const icon = last.status === "running" ? "~" : "✓";
+            overlay.appendLog(cid, `[${ts()}] ${icon} ${last.name}`);
+          } else {
+            const tokens = evt.tokens as number ?? 0;
+            const toolCount = evt.toolCount as number ?? 0;
+            overlay.appendLog(cid, `[${ts()}] ${toolCount} tools | ${tokens} tokens`);
           }
         };
         const completeHandler = (data: unknown) => {
           const evt = data as Record<string, unknown>;
-          if (evt.correlationId === agent.correlationId) {
-            overlay.appendLog(`[${ts()}] COMPLETED exitCode=${evt.exitCode}`);
-          }
+          const cid = evt.correlationId as string;
+          if (!cid) return;
+          overlay.appendLog(cid, `[${ts()}] ═══ COMPLETED exitCode=${evt.exitCode} duration=${evt.durationMs}ms ═══`);
         };
         pi.events.on(TEAMMATE_MESSAGE_EVENT, msgHandler);
         pi.events.on(TEAMMATE_COMPLETE_EVENT, completeHandler);

@@ -33,6 +33,7 @@ export interface AgentProgress {
   durationMs: number;
   lastActivityAt: number;
   startedAt: number;
+  lastMessage?: string;
 }
 
 export interface Details {

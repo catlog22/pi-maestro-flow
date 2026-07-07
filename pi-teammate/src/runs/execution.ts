@@ -100,7 +100,7 @@ function getPiSpawnCommand(args: string[]): { command: string; args: string[] } 
     if (argv1 && argv1.endsWith(".mjs")) {
       return { command: process.execPath, args: [argv1, ...args] };
     }
-    // Windows spawn needs .cmd extension or shell:true to find npm-linked binaries
+    // Windows: pi is installed as pi.cmd (batch file); spawn requires shell:true for .cmd files
     return { command: "pi.cmd", args };
   }
   return { command: "pi", args };
@@ -382,12 +382,16 @@ async function runSingleAttempt(
 
     try {
       const spawnSpec = getPiSpawnCommand(piArgs);
-      child = spawn(spawnSpec.command, spawnSpec.args, {
+      const spawnOpts: Parameters<typeof spawn>[2] = {
         cwd,
         stdio: ["pipe", "pipe", "pipe"],
         env: spawnEnv,
-        shell: process.platform === "win32",
-      });
+      };
+      // .cmd batch files require shell:true on Windows for child_process.spawn
+      if (process.platform === "win32") {
+        spawnOpts.shell = true;
+      }
+      child = spawn(spawnSpec.command, spawnSpec.args, spawnOpts);
     } catch (error) {
       cleanupFile(systemPromptFile);
       if (schemaFile) cleanupFile(schemaFile);
@@ -469,6 +473,8 @@ async function runSingleAttempt(
           if (event.content) {
             lastContent = event.content;
             messages.push({ role: "assistant", content: event.content });
+            progress.lastMessage = event.content;
+            options.onProgress?.(progress);
           }
           if (event.usage) {
             accumulateUsage(usage, event.usage);
