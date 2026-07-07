@@ -12,55 +12,34 @@ Maestro workflow orchestration for Pi coding agent.
 
 ### teammate
 
-Dispatch tasks to teammate agents. Teammates run as pi subprocesses with their own tools and context.
-**默认后台运行** — 立即返回，agent 在后台执行。
+Dispatch tasks to teammate agents. Teammates run as pi subprocesses (RPC mode).
+**后台运行** — 立即返回，agent 在后台执行，完成后自动通知。
 
 ```
 teammate({
-  // --- Single mode (最常用) ---
   agent: "delegate",          // Agent definition name (matches agents/*.md)
   task: "Implement the auth module",
+  name: "auth",               // Optional: addressable name (enables teammate-send)
 
-  // --- Routing ---
-  name: "auth-worker",        // Optional: addressable name (enables teammate-send)
-  reply_to: "caller",         // "caller" (direct return) | "main" (broadcast)
-
-  // --- Parallel mode ---
-  tasks: [
-    { agent: "scout", task: "Find auth code" },
-    { agent: "reviewer", task: "Review auth patterns" }
-  ],
+  // --- Multi-agent ---
+  tasks: [...],               // Parallel: multiple agents concurrently
+  chain: [...],               // Chain: sequential pipeline with {previous}
   concurrency: 4,
 
-  // --- Chain mode ---
-  chain: [
-    { agent: "scout", task: "Find all API endpoints" },
-    { agent: "delegate", task: "Fix issues found: {previous}" }
-  ],
-
-  // --- Structured output ---
-  outputSchema: { type: "object", properties: { bugs: { type: "array" } } },
-
-  // --- Execution ---
-  background: true,           // true (默认): 后台运行，立即返回; false: 阻塞等完成
-  model: "claude-opus-4-6",   // Model override
-  context: "fresh",           // "fresh" | "fork"
-  cwd: "/path/to/project",
+  // --- Options ---
+  model: "deepseek-v4-pro",
+  outputSchema: {...},        // JSON Schema for structured output
   timeoutMs: 300000
 })
 ```
 
-**典型用法** — 后台派发多个 agent，用 teammate-list 跟踪：
+**典型用法**：
 ```
-// 派发后台任务（默认 background: true）
+// 派发后台 agent
 teammate({ agent: "delegate", task: "Refactor auth module", name: "auth" })
-teammate({ agent: "scout", task: "Find all API endpoints", name: "scout" })
-// → 立即返回，两个 agent 并行后台运行
-// → 用 teammate-list 查看状态，teammate-send 注入消息
-
-// 阻塞等待结果（需要即时返回值时）
-teammate({ agent: "delegate", task: "Quick analysis", background: false })
-// → 等 agent 完成后返回完整结果
+// → 立即返回，agent 后台运行
+// → teammate-send 可打断/追加任务
+// → 完成后自动通知结果
 ```
 
 ### teammate-send
