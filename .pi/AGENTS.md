@@ -13,17 +13,17 @@ Maestro workflow orchestration for Pi coding agent.
 ### teammate
 
 Dispatch tasks to teammate agents. Teammates run as pi subprocesses with their own tools and context.
+**默认后台运行** — 立即返回，agent 在后台执行。
 
 ```
 teammate({
-  // --- Single mode ---
+  // --- Single mode (最常用) ---
   agent: "delegate",          // Agent definition name (matches agents/*.md)
   task: "Implement the auth module",
 
-  // --- P0 Three-axis control ---
-  name: "auth-worker",        // Optional: addressable name for routing
+  // --- Routing ---
+  name: "auth-worker",        // Optional: addressable name (enables teammate-send)
   reply_to: "caller",         // "caller" (direct return) | "main" (broadcast)
-  lifecycle: "ephemeral",     // "ephemeral" (one-shot) | "resident" (persistent)
 
   // --- Parallel mode ---
   tasks: [
@@ -42,24 +42,25 @@ teammate({
   outputSchema: { type: "object", properties: { bugs: { type: "array" } } },
 
   // --- Execution ---
+  background: true,           // true (默认): 后台运行，立即返回; false: 阻塞等完成
   model: "claude-opus-4-6",   // Model override
   context: "fresh",           // "fresh" | "fork"
-  mode: "await",              // "await" | "detach"
   cwd: "/path/to/project",
   timeoutMs: 300000
 })
 ```
 
-**Detach 模式** — 后台运行，立即返回 handle：
+**典型用法** — 后台派发多个 agent，用 teammate-list 跟踪：
 ```
-teammate({
-  agent: "delegate",
-  task: "Long running refactor",
-  name: "refactor-worker",       // 必须命名，否则无法后续通信
-  lifecycle: "resident",
-  mode: "detach"                 // 立即返回，不阻塞
-})
-// → 返回 correlationId，用 teammate-send 注入消息，teammate-list 查状态
+// 派发后台任务（默认 background: true）
+teammate({ agent: "delegate", task: "Refactor auth module", name: "auth" })
+teammate({ agent: "scout", task: "Find all API endpoints", name: "scout" })
+// → 立即返回，两个 agent 并行后台运行
+// → 用 teammate-list 查看状态，teammate-send 注入消息
+
+// 阻塞等待结果（需要即时返回值时）
+teammate({ agent: "delegate", task: "Quick analysis", background: false })
+// → 等 agent 完成后返回完整结果
 ```
 
 ### teammate-send
@@ -82,7 +83,7 @@ teammate-send({
 teammate-list({
   view: "active"                 // "active" (默认) | "named" (仅可寻址) | "all"
 })
-// → [delegate] name="refactor-worker" resident | 45s | inbox: 0 | stdin: ready
+// → [delegate] name="auth" | up 45s | idle 3s | inbox: 0 | stdin: ready
 ```
 
 ### maestro
