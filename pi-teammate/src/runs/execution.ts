@@ -596,6 +596,61 @@ async function runSingleAttempt(
           }
           break;
         }
+        case "turn_end": {
+          const msg = event.message as Record<string, unknown> | undefined;
+          if (msg) {
+            const text = extractTextContent({ message: msg } as JsonLineEvent);
+            if (text && !messages.some((m) => m.content === text)) {
+              lastContent = text;
+              messages.push({ role: "assistant", content: text });
+              progress.lastMessage = text;
+            }
+          }
+          break;
+        }
+        case "agent_end": {
+          // RPC mode: process stays alive after agent_end — we must resolve manually
+          progress.status = "completed";
+          progress.durationMs = Date.now() - startTime;
+          if (messages.length === 0 && lastContent) {
+            messages.push({ role: "assistant", content: lastContent });
+          }
+          options.onProgress?.(progress);
+
+          if (timeoutTimer) clearTimeout(timeoutTimer);
+          if (options.signal) {
+            options.signal.removeEventListener("abort", abortHandler);
+          }
+          cleanupFile(systemPromptFile);
+          if (schemaFile) cleanupFile(schemaFile);
+
+          let structuredOutput: unknown;
+          if (outputFile) {
+            try {
+              if (fs.existsSync(outputFile)) {
+                structuredOutput = JSON.parse(fs.readFileSync(outputFile, "utf-8"));
+              }
+            } catch { /* ignore */ }
+            cleanupFile(outputFile);
+          }
+
+          child.stdin?.end();
+          child.kill();
+
+          resolve({
+            agent: params.agent,
+            task: params.task ?? "",
+            exitCode: 0,
+            messages,
+            usage,
+            model: resolvedModel,
+            correlationId,
+            durationMs: Date.now() - startTime,
+            structuredOutput,
+            attemptedModels: undefined,
+          });
+          return;
+        }
         case "error": {
           messages.push({
             role: "system",
