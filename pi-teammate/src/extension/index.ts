@@ -408,13 +408,24 @@ Modes:
         };
       }
 
+      const envelope: MessageEnvelope = {
+        id: randomUUID(),
+        from: "caller",
+        to: params.to,
+        kind: mode === "abort" ? "notification" : "task",
+        payload: params.message,
+        timestamp: Date.now(),
+      };
+      agent.inbox.push(envelope);
       agent.lastActivityAt = Date.now();
+
       pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
         correlationId,
         from: "caller",
         to: params.to,
         mode,
         message: params.message,
+        isSend: true,
       });
 
       const modeLabel = mode === "steer" ? "interrupted + injected" : mode === "abort" ? "aborted" : "queued after current turn";
@@ -524,12 +535,26 @@ Views:
 
         overlay.appendLog(agent.correlationId, `Agent: ${agent.agent} | ${agentLabel(agent)}`, "info");
         overlay.appendLog(agent.correlationId, `Started: ${new Date(agent.startedAt).toISOString()}`, "info");
+        if (agent.inbox.length > 0) {
+          overlay.appendLog(agent.correlationId, `Inbox: ${agent.inbox.length} messages`, "info");
+          for (const msg of agent.inbox.slice(-5)) {
+            overlay.appendLog(agent.correlationId, `  ◀ [${msg.kind}] ${msg.payload.slice(0, 60)}`, "system");
+          }
+        }
         overlay.appendLog(agent.correlationId, "", "info");
 
         const msgHandler = (data: unknown) => {
           const evt = data as Record<string, unknown>;
           const cid = evt.correlationId as string;
           if (!cid) return;
+
+          // teammate-send message
+          if (evt.isSend) {
+            const mode = evt.mode as string;
+            const msg = (evt.message as string)?.slice(0, 60) ?? "";
+            overlay.appendLog(cid, `[${ts()}] ◀ ${mode}: ${msg}`, "system");
+            return;
+          }
 
           const lastMsg = evt.lastMessage as string | undefined;
           if (lastMsg) {
