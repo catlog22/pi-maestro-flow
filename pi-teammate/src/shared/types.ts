@@ -66,11 +66,11 @@ export interface ActiveAgent {
   startedAt: number;
   abortController: AbortController;
   stdin?: import("node:stream").Writable;
-  lifecycle: "ephemeral" | "resident";
   inbox: MessageEnvelope[];
   pendingResolve?: (result: SingleResult) => void;
   lastActivityAt: number;
   replyTo?: string;
+  idleTimeoutMs: number;
 }
 
 export interface TeammateState {

@@ -70,7 +70,7 @@ Modes:
 Three-axis control:
   - name: Optional addressable name for cross-agent routing (enables teammate-send)
   - reply_to: Result routing — "caller" (direct return) or "main" (broadcast to parent session)
-  - lifecycle: "ephemeral" (default, one-shot) or "resident" (persistent, stays alive for messages)
+  - lifecycle: "ephemeral" (5m idle timeout) or "resident" (10m idle timeout, for long-running agents)
 
 Execution mode:
   - mode: "await" (default) blocks until result; "detach" returns immediately with a handle
@@ -107,16 +107,17 @@ Structured output:
         }
       }
 
+      const isResident = params.lifecycle === "resident" || params.mode === "detach";
       const activeAgent: ActiveAgent = {
         agent: params.agent ?? "parallel",
         name: params.name,
         correlationId,
         startedAt: Date.now(),
         abortController,
-        lifecycle: params.lifecycle ?? "ephemeral",
         inbox: [],
         lastActivityAt: Date.now(),
         replyTo: params.reply_to,
+        idleTimeoutMs: isResident ? 10 * 60 * 1000 : 5 * 60 * 1000,
       };
       state.activeRuns.set(correlationId, activeAgent);
 
@@ -386,14 +387,15 @@ Views:
       for (const [cid, entry] of state.activeRuns) {
         if (view === "named" && !entry.name) continue;
 
+        const idleMs = Date.now() - entry.lastActivityAt;
         agents.push({
           agent: entry.agent,
           name: entry.name,
           correlationId: cid,
-          lifecycle: entry.lifecycle,
           startedAt: new Date(entry.startedAt).toISOString(),
           durationMs: Date.now() - entry.startedAt,
-          idleMs: Date.now() - entry.lastActivityAt,
+          idleMs,
+          timeoutIn: Math.max(0, entry.idleTimeoutMs - idleMs),
           inboxSize: entry.inbox.length,
           hasStdin: Boolean(entry.stdin?.writable),
         });
@@ -401,7 +403,7 @@ Views:
 
       const lines = agents.length > 0
         ? agents.map((a) =>
-          `[${a.agent}]${a.name ? ` name="${a.name}"` : ""} ${a.lifecycle} | up ${Math.round(a.durationMs / 1000)}s | idle ${Math.round(a.idleMs / 1000)}s | inbox: ${a.inboxSize} | stdin: ${a.hasStdin ? "ready" : "pending"}`
+          `[${a.agent}]${a.name ? ` name="${a.name}"` : ""} | up ${Math.round(a.durationMs / 1000)}s | idle ${Math.round(a.idleMs / 1000)}s | timeout ${Math.round(a.timeoutIn / 1000)}s | inbox: ${a.inboxSize} | stdin: ${a.hasStdin ? "ready" : "pending"}`
         ).join("\n")
         : "No active teammate agents.";
 
@@ -469,6 +471,8 @@ function cleanupAgent(
   correlationId: string,
   name?: string,
 ): void {
+  const agent = state.activeRuns.get(correlationId);
+  if (agent) releaseAgentMemory(agent);
   state.activeRuns.delete(correlationId);
   if (name) {
     state.namedAgents.delete(name);
@@ -516,9 +520,7 @@ function detectReplyCycle(
 // P2-2: Resident agent idle timeout + reaper
 // ===========================================================================
 
-const IDLE_WARN_MS = 5 * 60 * 1000;     // 5 min: send nudge
-const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min: force terminate
-const REAPER_INTERVAL_MS = 60 * 1000;
+const REAPER_INTERVAL_MS = 30 * 1000;
 
 function startReaper(state: TeammateState, pi: ExtensionAPI): ReturnType<typeof setInterval> {
   const nudged = new Set<string>();
@@ -527,29 +529,46 @@ function startReaper(state: TeammateState, pi: ExtensionAPI): ReturnType<typeof 
     const now = Date.now();
 
     for (const [cid, agent] of state.activeRuns) {
-      if (agent.lifecycle !== "resident") continue;
       const idle = now - agent.lastActivityAt;
+      const warnAt = agent.idleTimeoutMs * 0.5;
 
-      if (idle > IDLE_TIMEOUT_MS) {
-        agent.abortController.abort();
-        pi.events.emit(TEAMMATE_COMPLETE_EVENT, {
-          id: cid,
-          agent: agent.agent,
-          correlationId: agent.correlationId,
-          exitCode: 0,
-          durationMs: now - agent.startedAt,
-          reason: "idle_timeout",
-        });
-        nudged.delete(cid);
-        cleanupAgent(state, cid, agent.name);
-      } else if (idle > IDLE_WARN_MS && !nudged.has(cid)) {
+      if (idle > agent.idleTimeoutMs) {
         if (agent.stdin) {
           sendToChildStdin(agent.stdin,
-            `[system] Idle for ${Math.round(idle / 60000)} minutes. Continue your current task or wrap up. You will be terminated after ${Math.round(IDLE_TIMEOUT_MS / 60000)} minutes of inactivity.`);
+            `[system] Idle timeout reached (${Math.round(agent.idleTimeoutMs / 60000)}m). Wrap up now.`);
+        }
+        setTimeout(() => {
+          if (state.activeRuns.has(cid)) {
+            agent.abortController.abort();
+            pi.events.emit(TEAMMATE_COMPLETE_EVENT, {
+              id: cid,
+              agent: agent.agent,
+              correlationId: agent.correlationId,
+              exitCode: 0,
+              durationMs: Date.now() - agent.startedAt,
+              reason: "idle_timeout",
+            });
+            nudged.delete(cid);
+            releaseAgentMemory(agent);
+            cleanupAgent(state, cid, agent.name);
+          }
+        }, 10_000);
+      } else if (idle > warnAt && !nudged.has(cid)) {
+        if (agent.stdin) {
+          sendToChildStdin(agent.stdin,
+            `[system] Idle for ${Math.round(idle / 60000)}m. Continue your task or send a message to stay alive. Timeout in ${Math.round((agent.idleTimeoutMs - idle) / 60000)}m.`);
           agent.lastActivityAt = now;
         }
         nudged.add(cid);
       }
     }
   }, REAPER_INTERVAL_MS);
+}
+
+function releaseAgentMemory(agent: ActiveAgent): void {
+  agent.inbox.length = 0;
+  if (agent.stdin) {
+    try { agent.stdin.end(); } catch { /* already closed */ }
+    agent.stdin = undefined;
+  }
 }
