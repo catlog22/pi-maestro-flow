@@ -408,6 +408,7 @@ async function runSingleAttempt(
   const messages: Array<{ role: string; content: string }> = [];
   let resolvedModel = modelOverride ?? params.model ?? agentConfig.model ?? "unknown";
   let lastContent = "";
+  let streamingText = "";
 
   // AC8: Rich progress tracking
   const progress = createProgress(params.agent, startTime);
@@ -526,9 +527,10 @@ async function runSingleAttempt(
       switch (event.type) {
         case "message_end":
         case "assistant": {
-          const text = extractTextContent(event);
+          const text = extractTextContent(event) || streamingText || undefined;
           if (text) {
             lastContent = text;
+            streamingText = "";
             messages.push({ role: "assistant", content: text });
             progress.lastMessage = text;
             options.onProgress?.(progress);
@@ -544,24 +546,32 @@ async function runSingleAttempt(
           break;
         }
         case "message_update": {
-          // Extract text from streaming delta or full message snapshot
           const ame = event.assistantMessageEvent as Record<string, unknown> | undefined;
           const deltaType = ame?.type as string | undefined;
+
           if (deltaType === "text_delta") {
             const delta = ame?.delta as string | undefined;
             if (delta) {
-              lastContent += delta;
-              progress.lastMessage = lastContent;
+              streamingText += delta;
+              progress.lastMessage = streamingText;
               options.onProgress?.(progress);
             }
-          } else {
-            const text = extractTextContent(event);
-            if (text) {
-              lastContent = text;
-              progress.lastMessage = text;
-              options.onProgress?.(progress);
-            }
+          } else if (deltaType === "text_start") {
+            streamingText = "";
           }
+          // Ignore thinking_delta, thinking_start, etc.
+
+          // Extract usage from message snapshot
+          const msg = event.message as Record<string, unknown> | undefined;
+          const msgUsage = msg?.usage as Partial<Usage> | undefined;
+          if (msgUsage) {
+            accumulateUsage(usage, msgUsage);
+            progress.tokens = usage.inputTokens + usage.outputTokens;
+          }
+          break;
+        }
+        case "response": {
+          // RPC acknowledgement — ignore
           break;
         }
         case "tool_execution_start": {
