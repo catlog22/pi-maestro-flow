@@ -1,5 +1,5 @@
 {
-  "name": "@pi-maestro/agent",
+  "name": "pi-maestro-agent",
   "version": "0.1.0",
   "description": "Pi extension for Maestro flow commands — explore, delegate, and MOA tools built on pi-teammate",
   "type": "module",
@@ -25,7 +25,7 @@
     ]
   },
   "dependencies": {
-    "@pi-maestro/teammate": "0.1.0",
+    "pi-maestro-teammate": "0.1.0",
     "@earendil-works/pi-tui": "0.74.0",
     "typebox": "1.1.24"
   },

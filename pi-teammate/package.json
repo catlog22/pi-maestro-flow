@@ -1,5 +1,5 @@
 {
-  "name": "@pi-maestro/teammate",
+  "name": "pi-maestro-teammate",
   "version": "0.1.0",
   "description": "Pi extension for teammate dispatch with P0 three-axis decoupling (name, reply_to, lifecycle)",
   "type": "module",
