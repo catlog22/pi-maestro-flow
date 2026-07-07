@@ -290,6 +290,8 @@ Structured output:
               },
               { triggerTurn: true },
             );
+          }).catch(() => {
+            cleanupAgent(state, correlationId, params.name);
           });
           return {
             content: [{ type: "text", text: `Agent "${params.agent}" detached to background (Alt+B). Will notify on completion.` }],
@@ -319,6 +321,8 @@ Structured output:
             },
             { triggerTurn: true },
           );
+        }).catch(() => {
+          cleanupAgent(state, correlationId, params.name);
         });
 
         return {

@@ -180,7 +180,6 @@ function renderSingleResult(
 
 function renderParallelProgress(progress: ProgressItem[], theme: Theme): string[] {
   const lines: string[] = [];
-  const running = progress.filter((p) => p.status === "running").length;
   const done = progress.filter((p) => p.status !== "running").length;
   lines.push(theme.fg("accent", `▸ parallel`) + theme.fg("dim", ` ${done}/${progress.length} done`));
   lines.push("");

@@ -362,12 +362,6 @@ export async function runTeammate(
     // Model error and more candidates — try next
   }
 
-  // Should not reach here, but fallback
-  const fallback = await runSingleAttempt(
-    params, agentConfig, cwd, correlationId, replyTo, startTime, undefined, options,
-  );
-  fallback.attemptedModels = attemptedModels;
-  return fallback;
 }
 
 async function runSingleAttempt(

@@ -136,8 +136,7 @@ export class AttachOverlay implements Component {
       const a = log.agent;
       const label = a.name ?? cid.slice(0, 6);
       const active = cid === this.activeId;
-      const status = "";
-      return active ? `[${a.agent}/${label}]` : ` ${a.agent}/${label}${status} `;
+      return active ? `[${a.agent}/${label}]` : ` ${a.agent}/${label} `;
     }).join("│");
     out.push(tabs.slice(0, width));
     out.push("─".repeat(Math.min(width, 80)));
