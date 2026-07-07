@@ -44,6 +44,9 @@ export interface Details {
     status: "running" | "completed" | "failed";
     startedAt: string;
     completedAt?: string;
+    recentTools?: Array<{ name: string; status: string }>;
+    toolCount?: number;
+    tokens?: number;
   }>;
 }
 

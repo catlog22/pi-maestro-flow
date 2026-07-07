@@ -16,7 +16,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { TeammateParams, TeammateSendParams, TeammateListParams } from "./schemas.ts";
+import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateAttachParams } from "./schemas.ts";
 import {
   runTeammate,
   runParallel,
@@ -28,6 +28,7 @@ import {
   renderTeammateCall,
   renderTeammateResult,
 } from "../tui/render.ts";
+import { AttachOverlay } from "../tui/attach-overlay.ts";
 import type {
   Details,
   TeammateState,
@@ -156,6 +157,9 @@ Structured output:
                 agent: data.agent,
                 status: data.status,
                 startedAt: new Date(data.startedAt).toISOString(),
+                recentTools: data.recentTools,
+                toolCount: data.toolCount,
+                tokens: data.tokens,
                 ...(data.status !== "running"
                   ? { completedAt: new Date().toISOString() }
                   : {}),
@@ -410,12 +414,100 @@ Views:
   };
 
   // =========================================================================
+  // Tool 4: teammate-attach — overlay view of sub-agent activity
+  // =========================================================================
+
+  const attachTool: ToolDefinition<typeof TeammateAttachParams, { attached: boolean }> = {
+    name: "teammate-attach",
+    label: "Teammate Attach",
+    description: `Attach to a named running agent to view its real-time activity in a full-screen overlay.
+
+Shows live tool calls, output, and status. ESC to return to main session.
+The agent continues running in the background while attached.`,
+
+    parameters: TeammateAttachParams,
+
+    async execute(
+      _id: string,
+      params: { name: string },
+      _signal: AbortSignal,
+      _onUpdate: unknown,
+      ctx: ExtensionContext,
+    ): Promise<AgentToolResult<{ attached: boolean }>> {
+      const correlationId = state.namedAgents.get(params.name);
+      if (!correlationId) {
+        return {
+          content: [{ type: "text", text: `Agent "${params.name}" not found or not running.` }],
+          isError: true,
+          details: { attached: false },
+        };
+      }
+
+      const agent = state.activeRuns.get(correlationId);
+      if (!agent) {
+        state.namedAgents.delete(params.name);
+        return {
+          content: [{ type: "text", text: `Agent "${params.name}" is no longer active.` }],
+          isError: true,
+          details: { attached: false },
+        };
+      }
+
+      if (!ctx.hasUI) {
+        return {
+          content: [{ type: "text", text: "Attach requires interactive TUI mode." }],
+          isError: true,
+          details: { attached: false },
+        };
+      }
+
+      // Show overlay with agent activity stream
+      await ctx.ui.custom(
+        (_tui, _theme, _keybindings, done) => {
+          const overlay = new AttachOverlay(agent, () => done(undefined));
+
+          // Feed existing progress info
+          overlay.appendLog(`Agent: ${agent.agent} | correlationId: ${agent.correlationId}`);
+          overlay.appendLog(`Started: ${new Date(agent.startedAt).toISOString()}`);
+          overlay.appendLog(`Inbox: ${agent.inbox.length} messages`);
+          overlay.appendLog("");
+
+          // Listen for events from this agent
+          const handler = (data: unknown) => {
+            const evt = data as Record<string, unknown>;
+            if (evt.correlationId === agent.correlationId) {
+              overlay.appendLog(`[${new Date().toISOString().slice(11, 19)}] ${JSON.stringify(evt)}`);
+            }
+          };
+          pi.events.on(TEAMMATE_MESSAGE_EVENT, handler);
+          pi.events.on(TEAMMATE_COMPLETE_EVENT, (data: unknown) => {
+            const evt = data as Record<string, unknown>;
+            if (evt.correlationId === agent.correlationId) {
+              overlay.appendLog(`[COMPLETED] exitCode=${evt.exitCode} durationMs=${evt.durationMs}`);
+            }
+          });
+
+          return overlay;
+        },
+        { overlay: true },
+      );
+
+      return {
+        content: [{ type: "text", text: `Detached from "${params.name}".` }],
+        isError: false,
+        details: { attached: true },
+      };
+    },
+  };
+
+  // =========================================================================
   // Register all tools
   // =========================================================================
 
   pi.registerTool(tool);
   pi.registerTool(sendTool);
   pi.registerTool(listTool);
+  pi.registerTool(attachTool);
 
   // =========================================================================
   // Session lifecycle — agents live until session ends

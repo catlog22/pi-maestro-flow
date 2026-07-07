@@ -1,8 +1,8 @@
 /**
  * TUI rendering for the teammate tool.
  *
- * Provides renderCall (shows agent name and mode) and renderResult
- * (shows execution status with progress and usage stats).
+ * B: Real-time streaming in tool result (onUpdate driven)
+ * A: Overlay view via teammate-attach (separate component)
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
@@ -31,14 +31,20 @@ function statusIcon(
   result: AgentToolResult<Details>,
   theme: Theme,
 ): string {
-  if (result.isError) return theme.fg("error", "x");
+  if (result.isError) return theme.fg("error", "✗");
 
   const progress = result.details?.progress;
   if (progress?.some((p) => p.status === "running")) {
-    return theme.fg("warning", "~");
+    return theme.fg("warning", "⟳");
   }
 
-  return theme.fg("success", "v");
+  return theme.fg("success", "✓");
+}
+
+function toolStatusIcon(status: string, theme: Theme): string {
+  if (status === "running") return theme.fg("warning", "~");
+  if (status === "completed") return theme.fg("success", "✓");
+  return theme.fg("dim", "·");
 }
 
 function buildUsageLine(result: SingleResult, theme: Theme): string {
@@ -67,25 +73,37 @@ function buildUsageLine(result: SingleResult, theme: Theme): string {
 }
 
 /**
- * Render the teammate tool call (shows agent name and async label).
+ * Render the teammate tool call (shows agent name, mode, name).
  */
 export function renderTeammateCall(
   args: Record<string, unknown>,
   theme: Theme,
 ): Component {
   const agentName = (args.agent as string) ?? "?";
-  const asyncLabel =
-    args.async === true ? theme.fg("warning", " [async]") : "";
+  const name = args.name ? theme.fg("dim", ` name="${args.name}"`) : "";
+  const mode = args.mode === "detach" ? theme.fg("warning", " [detach]") : "";
 
   return new Text(
-    `${theme.fg("toolTitle", theme.bold("teammate "))}${theme.fg("accent", agentName)}${asyncLabel}`,
+    `${theme.fg("toolTitle", theme.bold("teammate "))}${theme.fg("accent", agentName)}${name}${mode}`,
     0,
     0,
   );
 }
 
 /**
- * Render the teammate tool result with status, model, task preview, and usage.
+ * Render the teammate tool result — real-time streaming via onUpdate.
+ *
+ * During execution (progress has running items):
+ *   ⟳ scout  deepseek-v4-pro  12s
+ *     ~ Reading src/auth/jwt.ts
+ *     ✓ grep "validateToken"
+ *     ~ Writing analysis...
+ *     2.3kin/1.1kout | 12s | 3 turns
+ *
+ * After completion:
+ *   ✓ scout  deepseek-v4-pro
+ *     Find all auth middleware...
+ *     2.3kin/1.1kout | $0.0012 | 15s | 5 turns
  */
 export function renderTeammateResult(
   result: AgentToolResult<Details>,
@@ -95,7 +113,25 @@ export function renderTeammateResult(
   const icon = statusIcon(result, theme);
   const details = result.details;
 
+  // No details yet (early update or detach response)
   if (!details || details.results.length === 0) {
+    const progress = details?.progress;
+
+    // Live progress view
+    if (progress && progress.length > 0) {
+      const lines: string[] = [];
+      for (const p of progress) {
+        const pIcon = p.status === "running"
+          ? theme.fg("warning", "⟳")
+          : p.status === "completed"
+            ? theme.fg("success", "✓")
+            : theme.fg("error", "✗");
+        lines.push(`${pIcon} ${theme.bold(p.agent)} ${theme.fg("dim", p.status)}`);
+      }
+      return new Text(lines.join("\n"), 0, 0);
+    }
+
+    // Static text fallback
     const content =
       typeof result.content === "string"
         ? result.content
@@ -111,12 +147,28 @@ export function renderTeammateResult(
   const lines: string[] = [];
 
   for (const singleResult of details.results) {
-    // Header: icon + agent + model
-    const header = `${icon} ${theme.bold(singleResult.agent)} ${theme.fg("dim", singleResult.model)}`;
+    // Header: icon + agent + model + duration
+    const dur = singleResult.durationMs > 0 ? ` ${theme.fg("dim", formatDuration(singleResult.durationMs))}` : "";
+    const header = `${icon} ${theme.bold(singleResult.agent)} ${theme.fg("dim", singleResult.model)}${dur}`;
     lines.push(header);
 
+    // Live tool activity (from progress)
+    const progress = details.progress;
+    const agentProgress = progress?.find((p) => p.agent === singleResult.agent);
+    if (agentProgress?.status === "running") {
+      // Show recent tools as live activity
+      const recentTools = (agentProgress as unknown as { recentTools?: Array<{ name: string; status: string }> }).recentTools;
+      if (recentTools && recentTools.length > 0) {
+        const last5 = recentTools.slice(-5);
+        for (const t of last5) {
+          const tIcon = toolStatusIcon(t.status, theme);
+          lines.push(`  ${tIcon} ${theme.fg("dim", t.name)}`);
+        }
+      }
+    }
+
     // Task preview (truncated)
-    if (singleResult.task) {
+    if (singleResult.task && !agentProgress?.status) {
       const taskPreview = singleResult.task.split("\n")[0]?.slice(0, 60) ?? "";
       if (taskPreview) {
         lines.push(`  ${theme.fg("dim", taskPreview)}`);
@@ -138,11 +190,11 @@ export function renderTeammateResult(
         const maxLines = 20;
         const displayLines = contentLines.slice(0, maxLines);
         for (const line of displayLines) {
-          lines.push(`  ${theme.fg("dim", `|  ${line}`)}`);
+          lines.push(`  ${theme.fg("dim", `│ ${line}`)}`);
         }
         if (contentLines.length > maxLines) {
           lines.push(
-            `  ${theme.fg("dim", `... ${contentLines.length - maxLines} more lines`)}`,
+            `  ${theme.fg("dim", `… ${contentLines.length - maxLines} more lines`)}`,
           );
         }
       }
