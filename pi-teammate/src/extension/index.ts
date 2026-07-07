@@ -21,7 +21,6 @@ import {
   runTeammate,
   runParallel,
   runChain,
-  sendToChildStdin,
   type RunTeammateParams,
 } from "../runs/execution.ts";
 import {
@@ -140,14 +139,14 @@ Structured output:
         baseCwd: state.baseCwd || ctx.cwd,
         signal: abortController.signal,
         parentSessionFile,
-        onChildSpawned: (stdin: import("node:stream").Writable) => {
-          activeAgent.stdin = stdin;
-          drainInbox(activeAgent);
-        },
-        onProgress: (data: AgentProgress) => {
+        onProgress: (() => {
+          let lastUpdateTime = 0;
+          const UPDATE_INTERVAL = 300; // ms — throttle TUI updates
+
+          return (data: AgentProgress) => {
           activeAgent.lastActivityAt = Date.now();
 
-          // Broadcast to overlay listeners
+          // Broadcast to overlay listeners (always)
           pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
             correlationId,
             agent: data.agent,
@@ -159,6 +158,11 @@ Structured output:
           });
 
           if (!onUpdate) return;
+          // Throttle TUI updates — skip if too frequent (except completion)
+          const now = Date.now();
+          if (data.status === "running" && now - lastUpdateTime < UPDATE_INTERVAL) return;
+          lastUpdateTime = now;
+
           onUpdate({
             content: [{
               type: "text",
@@ -181,7 +185,8 @@ Structured output:
               }],
             },
           });
-        },
+        };
+        })(),
       });
 
       let detached = false;
@@ -367,13 +372,13 @@ Structured output:
   const sendTool: ToolDefinition<typeof TeammateSendParams, { delivered: boolean }> = {
     name: "teammate-send",
     label: "Teammate Send",
-    description: `Send a message to a named, running teammate agent.
+    description: `Record a message for a named teammate agent.
 
-The target agent must have been dispatched with a "name" field and still be running.
-Messages are injected into the agent's stdin as user messages.
+Note: Messages are stored in the agent's inbox for reference but cannot be injected
+into a running subprocess (pi json mode limitation). To give an agent additional work,
+dispatch a new teammate call instead.
 
-Use "kind: notification" for context injection (fire-and-forget).
-Use "kind: task" to assign additional work.`,
+The message is recorded and can be viewed via teammate-list.`,
 
     parameters: TeammateSendParams,
 
@@ -413,27 +418,14 @@ Use "kind: task" to assign additional work.`,
         timestamp: Date.now(),
       };
 
-      if (agent.stdin) {
-        const sent = sendToChildStdin(agent.stdin, params.message);
-        if (sent) {
-          agent.lastActivityAt = Date.now();
-          pi.events.emit(TEAMMATE_MESSAGE_EVENT, envelope);
-          return {
-            content: [{
-              type: "text",
-              text: `Message delivered to "${params.to}" (kind: ${envelope.kind}).`,
-            }],
-            isError: false,
-            details: { delivered: true },
-          };
-        }
-      }
-
       agent.inbox.push(envelope);
+      agent.lastActivityAt = Date.now();
+      pi.events.emit(TEAMMATE_MESSAGE_EVENT, envelope);
+
       return {
         content: [{
           type: "text",
-          text: `Message queued for "${params.to}" (stdin not ready yet, will deliver when available).`,
+          text: `Message recorded for "${params.to}" (inbox: ${agent.inbox.length}). Note: cannot inject into running subprocess — dispatch a new agent for additional tasks.`,
         }],
         isError: false,
         details: { delivered: false },
@@ -484,13 +476,13 @@ Views:
           durationMs: Date.now() - entry.startedAt,
           idleMs: Date.now() - entry.lastActivityAt,
           inboxSize: entry.inbox.length,
-          hasStdin: Boolean(entry.stdin?.writable),
+          hasStdin: false,
         });
       }
 
       const lines = agents.length > 0
         ? agents.map((a) =>
-          `[${a.agent}]${a.name ? ` name="${a.name}"` : ""} | up ${Math.round(a.durationMs / 1000)}s | idle ${Math.round(a.idleMs / 1000)}s | inbox: ${a.inboxSize} | stdin: ${a.hasStdin ? "ready" : "pending"}`
+          `[${a.agent}]${a.name ? ` name="${a.name}"` : ""} | up ${Math.round(a.durationMs / 1000)}s | idle ${Math.round(a.idleMs / 1000)}s | inbox: ${a.inboxSize}`
         ).join("\n")
         : "No active teammate agents.";
 
@@ -624,7 +616,7 @@ Views:
     const lines = agents.map((a) => {
       const label = agentLabel(a);
       const uptime = Math.round((Date.now() - a.startedAt) / 1000);
-      const status = a.stdin?.writable ? "●" : "○";
+      const status = "●";
       return `  ${status} ${a.agent}/${label}  ${uptime}s`;
     });
 
@@ -713,14 +705,6 @@ function cleanupAgent(
   }
 }
 
-function drainInbox(agent: ActiveAgent): void {
-  if (!agent.stdin || !agent.inbox.length) return;
-  for (const msg of agent.inbox) {
-    sendToChildStdin(agent.stdin, msg.payload);
-  }
-  agent.inbox.length = 0;
-}
-
 // ===========================================================================
 // P2-1: Reply-cycle deadlock detection
 // ===========================================================================
@@ -756,8 +740,4 @@ function ts(): string {
 
 function releaseAgentMemory(agent: ActiveAgent): void {
   agent.inbox.length = 0;
-  if (agent.stdin) {
-    try { agent.stdin.end(); } catch { /* already closed */ }
-    agent.stdin = undefined;
-  }
 }

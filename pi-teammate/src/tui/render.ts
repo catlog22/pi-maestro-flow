@@ -99,31 +99,33 @@ export function renderTeammateResult(
 
 // ─── Single agent ────────────────────────────────────────────────────────────
 
+const FIXED_HEIGHT = 12;
+
 function renderSingleProgress(p: ProgressItem, icon: string, theme: Theme): string[] {
   const lines: string[] = [];
   const tokens = p.tokens ? ` ${formatTokens(p.tokens)}` : "";
   const tools = p.toolCount ? ` ${p.toolCount}t` : "";
   lines.push(`${icon} ${theme.bold(p.agent)}${theme.fg("dim", `${tokens}${tools}`)}`);
 
-  // Tool activity
+  // Tool activity (last 2)
   if (p.recentTools && p.recentTools.length > 0) {
-    for (const t of p.recentTools.slice(-3)) {
+    for (const t of p.recentTools.slice(-2)) {
       lines.push(`  ${toolIcon(t.status, theme)} ${theme.fg("dim", t.name)}`);
     }
   }
 
-  // Live output content
+  // Live output (fill remaining height)
   if (p.lastMessage) {
-    lines.push("");
+    const remaining = FIXED_HEIGHT - lines.length - 1;
     const msgLines = p.lastMessage.split("\n");
-    const show = msgLines.slice(-8);
+    const show = msgLines.slice(-Math.max(remaining, 3));
     for (const line of show) {
-      lines.push(`  ${theme.fg("dim", `│ ${line}`)}`);
-    }
-    if (msgLines.length > 8) {
-      lines.push(`  ${theme.fg("dim", `│ … ${msgLines.length - 8} earlier lines`)}`);
+      lines.push(`  ${theme.fg("dim", `│ ${line.slice(0, 76)}`)}`);
     }
   }
+
+  // Pad to fixed height
+  while (lines.length < FIXED_HEIGHT) lines.push("");
 
   return lines;
 }
@@ -143,11 +145,12 @@ function renderSingleResult(
     }
   }
 
-  // Live output
+  // Live output (fixed window)
   if (p?.lastMessage) {
-    const msgLines = p.lastMessage.split("\n").slice(-8);
+    const remaining = FIXED_HEIGHT - lines.length - 1;
+    const msgLines = p.lastMessage.split("\n").slice(-Math.max(remaining, 3));
     for (const line of msgLines) {
-      lines.push(`  ${theme.fg("dim", `│ ${line}`)}`);
+      lines.push(`  ${theme.fg("dim", `│ ${line.slice(0, 76)}`)}`);
     }
   }
 
