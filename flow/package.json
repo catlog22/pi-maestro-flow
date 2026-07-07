@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Pi extension for Maestro workflow orchestration — explore, delegate, MOA tools, 113 skills, 82 workflow docs, and 28 agent definitions",
   "type": "module",
   "keywords": [
@@ -61,7 +61,12 @@
   "maestro": {
     "required": true,
     "minVersion": "1.0.0",
-    "features": ["search", "load", "delegate", "explore"],
+    "features": [
+      "search",
+      "load",
+      "delegate",
+      "explore"
+    ],
     "installUrl": "https://github.com/catlog22/maestro2"
   }
 }
