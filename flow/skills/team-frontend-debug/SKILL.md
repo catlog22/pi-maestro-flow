@@ -1,7 +1,7 @@
 ---
 name: team-frontend-debug
 description: "Frontend debugging team using Chrome DevTools MCP. Dual-mode — feature-list testing or bug-report debugging. Triggers on \"team-frontend-debug\", \"frontend debug\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg mcp__chrome-devtools__*
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__chrome-devtools__* maestro
 ---
 
 # Frontend Debug Team
@@ -113,7 +113,7 @@ All browser inspection operations use Chrome DevTools MCP. Reproducer and Verifi
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: <team-name>,
@@ -154,7 +154,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 When pipeline completes, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Pipeline complete. What would you like to do?",
     header: "Completion",

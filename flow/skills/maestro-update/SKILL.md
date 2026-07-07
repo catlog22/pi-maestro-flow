@@ -1,12 +1,12 @@
 ---
 name: maestro-update
 description: "Detect version, preview changes, apply workflow upgrades Arguments: [--dry-run] [--force] [--setup-only]"
-allowed-tools: Read Write Edit Bash Glob Grep AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 <purpose>
 Detect current version, run schema migration to latest, then follow the version-specific upgrade workflow.
-Schema migrations are handled by `maestro update --migrate`; workflow docs (`~/.maestro/workflows/updates/`) handle setup.
+Schema migrations are handled by `maestro update --migrate`; workflow docs (`~/.pi/agent/packages/pi-maestro-flow/workflows/updates/`) handle setup.
 </purpose>
 
 <context>
@@ -19,7 +19,7 @@ $ARGUMENTS — optional flags.
 
 **Version source:** `.workflow/state.json` → `version` field
 
-**Workflow docs:** `~/.maestro/workflows/updates/`
+**Workflow docs:** `~/.pi/agent/packages/pi-maestro-flow/workflows/updates/`
 - `update-v{TO}-setup.md` — post-migration setup for version {TO}
 
 **Schema registry:** `maestro update --migrate` — handles all intermediate version bumps automatically
@@ -30,7 +30,7 @@ $ARGUMENTS — optional flags.
 <invariants>
 1. **Backup before migration** — a timestamped backup of `.workflow/state.json` MUST be created before any schema migration runs; NEVER execute migration without backup
 2. **Idempotent** — running update when already on latest version MUST be a no-op (display "up to date"); NEVER re-apply migrations
-3. **Confirmation before execute** — migration diff MUST be displayed and user MUST confirm via AskUserQuestion before execution (unless `--force`); NEVER silently apply schema changes
+3. **Confirmation before execute** — migration diff MUST be displayed and user MUST confirm via user prompt before execution (unless `--force`); NEVER silently apply schema changes
 4. **Migration diff always visible** — even with `--force`, the migration diff MUST be displayed for audit visibility; NEVER skip diff display
 5. **Restore path on failure** — if migration fails, the backup restore command MUST be displayed; NEVER leave user without recovery instructions
 6. **Sequential migration** — all intermediate version steps MUST be applied in order by the schema registry; NEVER skip intermediate versions
@@ -65,7 +65,7 @@ $ARGUMENTS — optional flags.
 ```
 
 IF `--setup-only`:
-  → Glob: ~/.maestro/workflows/updates/update-v{version}-setup.md
+  → Glob: ~/.pi/agent/packages/pi-maestro-flow/workflows/updates/update-v{version}-setup.md
   → IF exists: follow that document completely, then EXIT
   → IF not exists: display "No setup script for v{version}" → EXIT
 
@@ -76,8 +76,8 @@ IF `--setup-only`:
 2. Parse JSON output
 3. IF status = "up-to-date":
      Display "Already up to date (v{version})"
-     → Glob: ~/.maestro/workflows/updates/update-v{version}-setup.md
-     → IF exists: AskUserQuestion "Run setup for v{version}?" → load and follow
+     → Glob: ~/.pi/agent/packages/pi-maestro-flow/workflows/updates/update-v{version}-setup.md
+     → IF exists: user prompt "Run setup for v{version}?" → load and follow
      → EXIT
 
 4. Display target:
@@ -94,7 +94,7 @@ IF `--dry-run` → display info and EXIT.
    Show schema changes that will be applied.
 
 2. Confirm (unless --force):
-   AskUserQuestion: "Upgrade v{current} → v{target}?"
+   user prompt: "Upgrade v{current} → v{target}?"
    Options: [执行 / 取消]
 
 3. Create backup:
@@ -107,7 +107,7 @@ IF `--dry-run` → display info and EXIT.
 5. IF failed → display backup restore command → EXIT
 
 6. Load version-specific setup:
-   Read: ~/.maestro/workflows/updates/update-v{target}-setup.md
+   Read: ~/.pi/agent/packages/pi-maestro-flow/workflows/updates/update-v{target}-setup.md
    IF exists → follow completely (hooks, deps, knowledge system config)
 
 7. Display: "v{current} → v{target}: done"
@@ -132,7 +132,7 @@ Next steps:
 |------|----------|-----------|----------|
 | E001 | error | `.workflow/state.json` not found or unreadable | Run `/maestro-init` first |
 | E002 | error | Schema migration failed (npx tsx returned error) | Display backup restore command: `cp .workflow/state.json.backup-* .workflow/state.json` |
-| E003 | error | Version-specific setup doc failed to execute | Manual setup: read `~/.maestro/workflows/updates/update-v{target}-setup.md` |
+| E003 | error | Version-specific setup doc failed to execute | Manual setup: read `~/.pi/agent/packages/pi-maestro-flow/workflows/updates/update-v{target}-setup.md` |
 | W001 | warning | No version-specific setup doc found for target version | Proceed without setup; schema migration alone is sufficient |
 | W002 | warning | `--setup-only` but no setup script exists for current version | Display message and exit |
 </error_codes>

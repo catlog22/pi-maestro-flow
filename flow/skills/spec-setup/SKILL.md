@@ -1,16 +1,14 @@
 ---
 name: spec-setup
 description: "Initialize specs from project structure Arguments: "
-allowed-tools: Read Write Bash Glob Grep AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep maestro
 ---
 
 <purpose>
 Initialize `.workflow/specs/` by scanning codebase for conventions. Core files always created; optional files created when signals detected. Also generates recipe knowhow for detected workflows.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/specs-setup.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-setup.md` before proceeding.
 
 <context>
 $ARGUMENTS (no arguments expected)
@@ -23,14 +21,14 @@ $ARGUMENTS (no arguments expected)
 <invariants>
 1. **Non-destructive** — NEVER overwrite existing spec files; if a file already exists, skip it and report as already-initialized
 2. **Idempotent** — safe to re-run on an initialized project; re-running MUST NOT duplicate entries or corrupt existing content
-3. **Confirmation gate** — MUST AskUserQuestion showing all files to be created before writing; NEVER write without user confirmation
+3. **Confirmation gate** — MUST user prompt showing all files to be created before writing; NEVER write without user confirmation
 4. **Output boundary** — ALL file writes MUST target .workflow/specs/ (spec files) and .workflow/knowhow/ (recipe knowhow) only. NEVER modify source code, .workflow/state.json, or files outside these paths
 5. **Core files mandatory** — coding-conventions.md, architecture-constraints.md, and learnings.md MUST always be created (unless they already exist)
 6. **Signal-driven optionals** — optional spec files (quality-rules.md, test-conventions.md, ui-conventions.md) MUST only be created when corresponding framework/tool signals are detected in the codebase; NEVER create optional files without evidence
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/specs-setup.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/specs-setup.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 
@@ -53,7 +51,7 @@ Follow '~/.maestro/workflows/specs-setup.md' completely.
 - REQUIRED: Existing files skipped (not overwritten).
 - REQUIRED: .proposed.md files created when slug collision detected (W003).
 
-**Confirmation gate**: After scanning codebase and determining which files/directories will be created (core specs, optional specs, recipe knowhow), AskUserQuestion showing the full list of files to create with their categories and detected signals. Proceed only on user confirm.
+**Confirmation gate**: After scanning codebase and determining which files/directories will be created (core specs, optional specs, recipe knowhow), user prompt showing the full list of files to create with their categories and detected signals. Proceed only on user confirm.
 </execution>
 
 <error_codes>
@@ -70,6 +68,6 @@ Follow '~/.maestro/workflows/specs-setup.md' completely.
 - [ ] `.workflow/specs/` directory created
 - [ ] Core spec files always created: `coding-conventions.md`, `architecture-constraints.md`, `learnings.md`
 - [ ] Optional spec files created when detected: `quality-rules.md` (linter/CI), `test-conventions.md` (test framework), `ui-conventions.md` (frontend framework). `debug-notes.md` / `review-standards.md` deferred (on demand via `/spec-add`).
-- [ ] Workflow recipe knowhow created in `.workflow/knowhow/` for each detected operational workflow (test / debug / build / dev / lint). Each recipe matches the `recipe` schema in `~/.maestro/workflows/knowhow.md` Part B and contains at least one runnable command.
+- [ ] Workflow recipe knowhow created in `.workflow/knowhow/` for each detected operational workflow (test / debug / build / dev / lint). Each recipe matches the `recipe` schema in `~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md` Part B and contains at least one runnable command.
 - [ ] Report displayed grouped by destination (specs / recipes / skipped / deferred), with `.proposed.md` files surfaced when an existing recipe slug was preserved.
 </success_criteria>

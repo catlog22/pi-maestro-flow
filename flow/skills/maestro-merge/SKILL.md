@@ -1,7 +1,7 @@
 ---
 name: maestro-merge
 description: "Merge milestone worktree branch back to main Arguments: -m <milestone-number> [--force] [--dry-run] [--no-cleanup] [--continue]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,9 +9,7 @@ Merge a milestone worktree branch back into main, sync scratch artifacts, and re
 Two-phase: git merge first, artifact sync second (only after git succeeds).
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/merge.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/merge.md` before proceeding.
 
 <context>
 $ARGUMENTS -- milestone number and optional flags.
@@ -20,7 +18,7 @@ Flags (`-m`, `--force`, `--dry-run`, `--no-cleanup`, `--continue`), merge sequen
 </context>
 
 <execution>
-Follow '~/.maestro/workflows/merge.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/merge.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 
@@ -44,7 +42,7 @@ Follow '~/.maestro/workflows/merge.md' completely.
 <completion>
 ### Knowledge inquiry
 
-After successful merge, use `AskUserQuestion` to confirm knowledge persistence:
+After successful merge, use `user prompt` to confirm knowledge persistence:
 
 ```
 question: "Merge 完成。是否记录里程碑经验教训？"
@@ -61,8 +59,8 @@ User selects "记录经验" → prompt for title/insight, then persist via `Skil
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Merge complete | Skill({ skill: "manage-status" }) |
-| Audit needed | Skill({ skill: "maestro-milestone-audit" }) |
+| Merge complete | invoke /skill: "manage-status" }) |
+| Audit needed | invoke /skill: "maestro-milestone-audit" }) |
 </completion>
 
 <error_codes>

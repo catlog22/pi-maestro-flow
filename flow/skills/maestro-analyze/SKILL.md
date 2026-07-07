@@ -1,22 +1,19 @@
 ---
 name: maestro-analyze
 description: "Use when a topic needs structured multi-dimensional investigation before planning or decision-making Arguments: [milestone|topic] [-y] [-c] [-q] [--gaps [ISS-ID]]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 Multi-dimensional analysis of a proposal, decision, or architecture choice via CLI-assisted exploration and interactive discussion. Produces analysis.md (6-dimension scoring), context.md (Locked/Free/Deferred decisions), conclusions.json, and discussion.md with Go/No-Go recommendation. Use `--gaps` for issue root cause analysis feeding `plan --gaps`.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/analyze.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/analyze.md` before proceeding.
 
-<deferred_reading>
-- [state.json](~/.maestro/templates/state.json) — read when registering artifact
-- [issue-gaps-analyze.md](~/.maestro/workflows/issue-gaps-analyze.md) — read when --gaps is triggered
-- [boundary-grill.md](~/.maestro/workflows/boundary-grill.md) — read when boundary conflicts detected (between Phase 4 and Phase 5)
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
+> - [issue-gaps-analyze.md](~/.pi/agent/packages/pi-maestro-flow/workflows/issue-gaps-analyze.md) — read when --gaps is triggered
+> - [boundary-grill.md](~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md) — read when boundary conflicts detected (between Phase 4 and Phase 5)
 
 <context>
 $ARGUMENTS -- milestone number for micro mode, topic text for macro/adhoc mode, no args for current milestone.
@@ -64,7 +61,7 @@ Output directory format, artifact registration schema, and output artifact listi
 </context>
 
 <interview_protocol>
-Follows @~/.maestro/workflows/interview-mechanics.md standard.
+Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (strict order): scope (phase / topic / milestone-wide / adhoc / --gaps) → depth (quick / standard / deep) → dimensions (which of the 6 to keep) → Go/No-Go threshold
@@ -76,11 +73,11 @@ Follows @~/.maestro/workflows/interview-mechanics.md standard.
 </interview_protocol>
 
 <execution>
-Follow '~/.maestro/workflows/analyze.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/analyze.md' completely.
 
 ### --gaps Mode
 
-When `--gaps` is present, follow `~/.maestro/workflows/issue-gaps-analyze.md` instead of the standard pipeline.
+When `--gaps` is present, follow `~/.pi/agent/packages/pi-maestro-flow/workflows/issue-gaps-analyze.md` instead of the standard pipeline.
 </execution>
 
 <completion>
@@ -125,7 +122,7 @@ Status verdicts:
 
 ### Session seal
 
-@~/.maestro/workflows/finish-work.md — SESSION_DIR=OUTPUT_DIR, SESSION_TYPE=analyze, SESSION_ID={artifact_id}, LINKED_MILESTONE={target_milestone or null}
+Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md`. — SESSION_DIR=OUTPUT_DIR, SESSION_TYPE=analyze, SESSION_ID={artifact_id}, LINKED_MILESTONE={target_milestone or null}
 </completion>
 
 <error_codes>

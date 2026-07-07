@@ -1,7 +1,7 @@
 ---
 name: team-designer
 description: "Meta-skill for generating team skills following the v4 architecture pattern. Produces complete skill packages with SKILL.md router, coordinator, worker roles, specs, and templates. Triggers on \"team-designer\", \"design team\"."
-allowed-tools: Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Skill Designer

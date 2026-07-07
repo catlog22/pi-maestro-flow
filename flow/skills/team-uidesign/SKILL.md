@@ -1,7 +1,7 @@
 ---
 name: team-uidesign
 description: "Unified team skill for UI design team. Research -> design tokens -> audit -> implementation. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates dual-track pipeline with GC loops and sync points. Triggers on \"team ui design\", \"ui design team\"."
-allowed-tools: Agent AskUserQuestion Read Write Edit Bash Glob Grep TaskList TaskGet TaskUpdate TaskCreate TeamCreate TeamDelete SendMessage mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file maestro
 ---
 
 # Team UI Design
@@ -66,7 +66,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker for <task-id>",
   team_name: "uidesign",

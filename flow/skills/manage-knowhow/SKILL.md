@@ -1,16 +1,14 @@
 ---
 name: manage-knowhow
 description: "Manage knowhow entries (workflow and system) Arguments: <subcommand: list|search|view|edit|delete|prune> [query|id] [--store workflow|system|all] [--tag <tag>] [--type compact|tip]"
-allowed-tools: Read Write Edit Bash Glob Grep AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 <purpose>
 Manage knowhow across two stores: workflow (`.workflow/knowhow/`) and system memory (`~/.claude/projects/*/memory/`). Operations: list, search, view, edit, delete, prune.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/knowhow.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md` before proceeding.
 
 <context>
 Arguments: $ARGUMENTS
@@ -38,7 +36,7 @@ Dual store architecture (paths, formats, index) defined in workflow knowhow.md.
 </context>
 
 <execution>
-Follow '~/.maestro/workflows/knowhow.md' Part A (KnowHow Management) completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md' Part A (KnowHow Management) completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

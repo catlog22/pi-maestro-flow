@@ -1,7 +1,7 @@
 ---
 name: team-frontend
 description: "Unified team skill for frontend development. Pure router — all roles read this file. Beat model is coordinator-only in monitor.md. Built-in ui-ux-pro-max design intelligence. Triggers on \"team frontend\"."
-allowed-tools: Agent TaskCreate TaskList TaskGet TaskUpdate TeamCreate TeamDelete SendMessage AskUserQuestion Read Write Edit Bash Glob Grep WebFetch WebSearch mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep WebFetch WebSearch maestro
 ---
 
 # Team Frontend Development
@@ -66,7 +66,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "frontend",

@@ -1,21 +1,18 @@
 ---
 name: manage-harvest
 description: "Extract knowledge from artifacts into wiki/spec/issues Arguments: [<session-id|path>] [--to wiki|spec|issue|auto] [--source <type>] [--recent N] [--dry-run] [-y]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 Extract knowledge from workflow artifacts → route to wiki/spec/issue stores. Works on any artifact (vs retrospective which is phase-scoped).
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/harvest.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/harvest.md` before proceeding.
 
-<deferred_reading>
-- @~/.maestro/workflows/issue.md (issues.jsonl schema for issue routing — read when creating issues in Stage 6c)
-- @~/.maestro/workflows/specs-add.md (spec entry format — read when routing to spec in Stage 6b)
-</deferred_reading>
+> **Reference files** (read when needed):
+> - `~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md` (issues.jsonl schema for issue routing — read when creating issues in Stage 6c)
+> - `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md` (spec entry format — read when routing to spec in Stage 6b)
 
 <context>
 Arguments: $ARGUMENTS
@@ -44,7 +41,7 @@ Additional flags, source registry (scan paths), and storage locations defined in
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/harvest.md' Stages 1-8 in order.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/harvest.md' Stages 1-8 in order.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

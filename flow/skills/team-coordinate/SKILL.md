@@ -1,7 +1,7 @@
 ---
 name: team-coordinate
 description: "Universal team coordination skill with dynamic role generation. Uses team-worker agent architecture with role-spec files. Only coordinator is built-in -- all worker roles are generated at runtime as role-specs and spawned via team-worker agent. Beat/cadence model for orchestration. Triggers on \"Team Coordinate \"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Coordinate 
@@ -110,7 +110,7 @@ User provides task description
 When coordinator spawns workers, use `team-worker` agent with role-spec path:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: <team-name>,
@@ -147,7 +147,7 @@ Execute built-in Phase 1 (task discovery) -> role-spec Phase 2-4 -> built-in Pha
 When pipeline completes (all tasks done), coordinator presents an interactive choice:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Team pipeline complete. What would you like to do?",
     header: "Completion",
@@ -243,7 +243,7 @@ AskUserQuestion({
 Coordinator supports `resume` / `continue` for interrupted sessions:
 
 1. Scan `.workflow/.team/TC-*/team-session.json` for active/paused sessions
-2. Multiple matches -> AskUserQuestion for selection
+2. Multiple matches -> user prompt for selection
 3. Audit TaskList -> reconcile session state <-> task status
 4. Reset in_progress -> pending (interrupted tasks)
 5. Rebuild team and spawn needed workers only

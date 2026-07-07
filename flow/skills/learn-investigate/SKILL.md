@@ -1,7 +1,7 @@
 ---
 name: learn-investigate
 description: "Investigate questions with hypothesis testing and evidence logging Arguments: <question> [--scope <path>] [--max-hypotheses N] [-y]"
-allowed-tools: Read Write Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -34,8 +34,8 @@ $ARGUMENTS — question text and optional flags.
 3. **Scope lock** — once `--scope` is resolved in S_FRAME, NEVER expand search scope without explicit user confirmation via S_ESCALATE
 4. **Hypothesis cap** — MUST NOT generate more than `--max-hypotheses` (default 3) before triggering escalation; NEVER silently exceed the cap
 5. **Structured evidence format** — every evidence entry MUST include `{ts, type, source, relevance, content, note}`; incomplete entries SHALL NOT be appended
-6. **3-strike escalation** — after all hypotheses fail, MUST escalate to user via AskUserQuestion; NEVER silently conclude as INCONCLUSIVE without user interaction
-7. **Confirmation gate** — unless `-y` is set, MUST present report.md path and spec-entries via AskUserQuestion before final writes
+6. **3-strike escalation** — after all hypotheses fail, MUST escalate to user via user prompt; NEVER silently conclude as INCONCLUSIVE without user interaction
+7. **Confirmation gate** — unless `-y` is set, MUST present report.md path and spec-entries via user prompt before final writes
 </invariants>
 
 <state_machine>
@@ -75,11 +75,11 @@ S_TEST:
   → S_ESCALATE    WHEN: max_hypotheses all failed              DO: A_TEST_HYPOTHESIS
 
 S_ESCALATE:
-  → S_HYPOTHESIZE WHEN: user broadens scope or provides new hypothesis   DO: AskUserQuestion
+  → S_HYPOTHESIZE WHEN: user broadens scope or provides new hypothesis   DO: user prompt
   → S_REPORT      WHEN: user selects "Escalate" or still stuck          DO: mark INCONCLUSIVE
 
 S_REPORT:
-  → END           GATE: unless -y, AskUserQuestion showing report.md path and spec-entries to append — proceed only on confirm
+  → END           GATE: unless -y, user prompt showing report.md path and spec-entries to append — proceed only on confirm
                   DO: A_SYNTHESIZE_REPORT
 
 </transitions>

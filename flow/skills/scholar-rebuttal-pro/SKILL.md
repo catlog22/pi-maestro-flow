@@ -1,7 +1,7 @@
 ---
 name: scholar-rebuttal-pro
 description: "Enhanced academic paper review response workflow with Agy/CLI collaborative analysis and multi-perspective discussion. Produces structured rebuttal documents with evidence-based strategies. Triggers on \"rebuttal\", \"respond to reviewers\", \"review response\", \"审稿回复\"."
-allowed-tools: Task AskUserQuestion TodoWrite Read Write Edit Bash Glob Grep Skill mcp__ace-tool__search_context mcp__ccw-tools__read_file mcp__ccw-tools__edit_file
+allowed-tools: Task Read Write Edit Bash Glob Grep mcp__ace-tool__search_context mcp__ccw-tools__read_file mcp__ccw-tools__edit_file maestro
 ---
 
 # Scholar Rebuttal Pro
@@ -43,10 +43,10 @@ Enhanced academic paper review response workflow combining Agy/CLI collaborative
 
 ## Interactive Preference Collection
 
-Collect workflow preferences via AskUserQuestion before dispatching to phases:
+Collect workflow preferences via user prompt before dispatching to phases:
 
 ```javascript
-const prefResponse = AskUserQuestion({
+const prefResponse = ask user ({
   questions: [
     {
       question: "是否跳过所有确认步骤（自动模式）？",

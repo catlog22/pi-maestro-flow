@@ -1,7 +1,7 @@
 ---
 name: team-swarm
 description: "Swarm intelligence team skill — ACO-driven multi-agent exploration with hybrid LLM coordinator + Python optimization controller. Coordinator generates swarm-config from user task, then runs K iterations of N parallel ants guided by pheromone state. Universal task space via config (nodes + scoring rule). Triggers on \"team swarm\", \"swarm intelligence\", \"蚁群\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Swarm
@@ -66,7 +66,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "swarm",
@@ -150,7 +150,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 When swarm converges, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Swarm pipeline complete. What would you like to do?",
     header: "Completion",
@@ -171,7 +171,7 @@ AskUserQuestion({
 |----------|------------|
 | `aco.py` not found | Verify `<skill_root>/scripts/aco.py`; check Python install |
 | Python version < 3.10 | Use `python3` or report dependency error |
-| Config validation fails | AskUserQuestion to fix, regenerate, retry |
+| Config validation fails | user prompt to fix, regenerate, retry |
 | All ants fail in iteration | Halt, AskUserQuestion (retry / abort / refine config) |
 | Hallucination cluster (>50%) | Pause, AskUserQuestion (continue / refine scoring) |
 | Convergence never trips | `max_iterations` safety net always fires |

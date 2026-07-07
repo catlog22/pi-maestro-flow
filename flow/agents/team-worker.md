@@ -77,7 +77,7 @@ Before executing role-specific logic, load available cross-role context:
 Follow the instructions loaded from the role_spec body. This contains the domain-specific execution phases for the role. Key rules:
 
 - Team workers cannot call Agent() to spawn other agents
-- Use CLI tools (`maestro delegate`) or direct tools (Read, Grep, Glob) for analysis — see @~/.maestro/templates/search-tools.md for tool selection
+- Use CLI tools (`maestro delegate`) or direct tools (Read, Grep, Glob) for analysis — see @~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md for tool selection
 - If agent delegation is needed, send a request to the coordinator via SendMessage
 
 ### Context-Aware Signal Emission (Optional)

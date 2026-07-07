@@ -1,7 +1,7 @@
 ---
 name: security-audit
 description: "OWASP Top 10 and STRIDE security auditing with supply chain analysis Arguments: [quick|standard|deep] [--scope <path>]"
-allowed-tools: Read Write Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,9 +9,7 @@ Systematic security audit covering OWASP Top 10, dependency supply chain, secret
 CI/CD pipeline review, and optional STRIDE threat modeling. Three tiers control depth vs speed.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/review.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/review.md` before proceeding.
 
 <context>
 $ARGUMENTS — Parse tier and scope:

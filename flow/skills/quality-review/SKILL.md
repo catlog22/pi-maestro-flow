@@ -1,20 +1,17 @@
 ---
 name: quality-review
 description: "Use after execution to evaluate code quality across correctness, security, performance, and architecture Arguments: <phase> [--level quick|standard|deep] [--dimensions security,architecture,...] [--skip-specs]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 Multi-dimensional code review on a phase's changed files. Three levels (quick/standard/deep), auto-detected from file count. Level and dimension details in workflow review.md.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/review.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/review.md` before proceeding.
 
-<deferred_reading>
-- [index.json](~/.maestro/templates/index.json) — read when updating phase index after review
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [index.json](~/.pi/agent/packages/pi-maestro-flow/templates/index.json) — read when updating phase index after review
 
 <context>
 Phase: $ARGUMENTS (required — phase number or slug)
@@ -60,7 +57,7 @@ Each artifact's type determines its outputs at `.workflow/{a.path}/`:
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/review.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/review.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

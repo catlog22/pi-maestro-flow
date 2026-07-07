@@ -1,7 +1,7 @@
 ---
 name: maestro-grill
 description: "Use when stress-testing a plan, idea, or requirement against codebase reality before brainstorming Arguments: <topic|plan> [-y] [-c] [--from <source>] [--depth shallow|standard|deep]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -10,13 +10,10 @@ Socratic stress-testing of plans/ideas against codebase reality. Produces grill-
 Pipeline position: BEFORE brainstorm (stress-test → then elaborate).
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/grill.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/grill.md` before proceeding.
 
-<deferred_reading>
-- [state.json](~/.maestro/templates/state.json) — read when registering artifact
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
 
 <context>
 $ARGUMENTS -- topic/plan text for interactive mode, or --from source for upstream input.
@@ -47,7 +44,7 @@ $ARGUMENTS -- topic/plan text for interactive mode, or --from source for upstrea
 </context>
 
 <interview_protocol>
-Follows @~/.maestro/workflows/interview-mechanics.md standard.
+Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
 
 **Interaction mode override**: adversarial Socratic — NOT menu-driven
 **Question style**:
@@ -62,7 +59,7 @@ Follows @~/.maestro/workflows/interview-mechanics.md standard.
 </interview_protocol>
 
 <execution>
-Follow '~/.maestro/workflows/grill.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/grill.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 
@@ -116,11 +113,11 @@ Status verdicts:
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Need multi-role elaboration | `Skill({ skill: "maestro-brainstorm", args: "{topic} --from grill:{artifact_id}" })` |
-| Need deep technical analysis | `Skill({ skill: "maestro-analyze", args: "{topic} --from grill:{artifact_id}" })` |
-| Scope is clear, ready for roadmap | `Skill({ skill: "maestro-roadmap", args: "--from grill:{artifact_id}" })` |
-| Need formal spec package | `Skill({ skill: "maestro-blueprint", args: "--from grill:{artifact_id}" })` |
-| More branches to walk | `Skill({ skill: "maestro-grill", args: "{topic} -c" })` |
+| Need multi-role elaboration | `invoke /skill: "maestro-brainstorm", args: "{topic} --from grill:{artifact_id}" })` |
+| Need deep technical analysis | `invoke /skill: "maestro-analyze", args: "{topic} --from grill:{artifact_id}" })` |
+| Scope is clear, ready for roadmap | `invoke /skill: "maestro-roadmap", args: "--from grill:{artifact_id}" })` |
+| Need formal spec package | `invoke /skill: "maestro-blueprint", args: "--from grill:{artifact_id}" })` |
+| More branches to walk | `invoke /skill: "maestro-grill", args: "{topic} -c" })` |
 </completion>
 
 <error_codes>
@@ -143,9 +140,9 @@ Status verdicts:
 - [ ] Risk register captures all unresolved tensions
 - [ ] `context-package.json` generated with schema "context-package/1.0"
 - [ ] Artifact registered in state.json (type=grill, id=GRL-xxx)
-- [ ] Session sealed via finish-work (finish-work.md includes AskUserQuestion confirmation before state.json artifact registration and optional spec/knowhow extraction)
+- [ ] Session sealed via finish-work (finish-work.md includes user prompt confirmation before state.json artifact registration and optional spec/knowhow extraction)
 </success_criteria>
 
 <on_complete>
-@~/.maestro/workflows/finish-work.md — SESSION_DIR={output_dir}, SESSION_TYPE=grill, SESSION_ID={artifact_id}, LINKED_MILESTONE=null
+Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md`. — SESSION_DIR={output_dir}, SESSION_TYPE=grill, SESSION_ID={artifact_id}, LINKED_MILESTONE=null
 </on_complete>

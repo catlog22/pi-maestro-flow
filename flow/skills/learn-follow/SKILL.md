@@ -1,7 +1,7 @@
 ---
 name: learn-follow
 description: "Guided reading of code or wiki to extract patterns Arguments: <path|wiki-id|topic> [--depth shallow|deep] [--save-wiki] [-y]"
-allowed-tools: Read Write Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -36,7 +36,7 @@ $ARGUMENTS — target and optional flags.
 3. **Anchor requirement** — every extracted pattern MUST include a `file:line` anchor; unanchored patterns SHALL NOT be persisted to learnings.md
 4. **Convention cross-ref** — MUST check every finding against `coding-conventions.md` and mark status (documented/candidate); NEVER persist without status tag
 5. **Append-only learnings** — `.workflow/specs/learnings.md` MUST be appended, NEVER overwritten or truncated
-6. **Confirmation gate** — unless `-y` is set, MUST present findings and target files via AskUserQuestion before any writes
+6. **Confirmation gate** — unless `-y` is set, MUST present findings and target files via user prompt before any writes
 7. **Depth contract** — `--depth shallow` MUST NOT descend into function bodies; `--depth deep` MUST cover every branch and sub-expression
 </invariants>
 
@@ -59,7 +59,7 @@ $ARGUMENTS — target and optional flags.
 - BLOCKED if: unanchored patterns remain in extraction results.
 
 **GATE 4: Persistence → Completion** (S_PERSIST → END)
-- REQUIRED: Unless `-y`, AskUserQuestion showing files to write and spec-entries to append — user must confirm.
+- REQUIRED: Unless `-y`, user prompt showing files to write and spec-entries to append — user must confirm.
 - REQUIRED: KNW-follow-{slug}-{date}.md written with understanding map.
 - REQUIRED: learnings.md appended (not overwritten) with new spec-entry blocks.
 - BLOCKED if: user declines confirmation — offer to adjust findings before retry.
@@ -81,7 +81,7 @@ S_PERSIST      — 写 understanding map + spec-entry 块         PERSIST: knowh
 
 S_RESOLVE:
   → S_CONTEXT     WHEN: target resolved
-  → S_RESOLVE     WHEN: unresolvable                       DO: AskUserQuestion with suggestions
+  → S_RESOLVE     WHEN: unresolvable                       DO: user prompt with suggestions
 
 S_CONTEXT:
   → S_ORDER       DO: A_BUILD_CONTEXT_WEB
@@ -96,7 +96,7 @@ S_EXTRACT:
   → S_PERSIST     DO: A_EXTRACT_PATTERNS
 
 S_PERSIST:
-  → END           GATE: unless -y, AskUserQuestion showing files to write and spec-entries to append — proceed only on confirm
+  → END           GATE: unless -y, user prompt showing files to write and spec-entries to append — proceed only on confirm
                   DO: write KNW-follow + append .workflow/specs/learnings.md [+ wiki note if --save-wiki]
 
 </transitions>

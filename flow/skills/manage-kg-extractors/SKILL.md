@@ -1,7 +1,7 @@
 ---
 name: manage-kg-extractors
 description: "Analyze codebase patterns and generate .workflow/kg/extractors.yaml for custom symbol extraction Arguments: [--scan-only] [--append] [--language <lang>] [--min-count <n>]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -89,7 +89,7 @@ Each agent returns: `[{pattern_type, regex_evidence, file_count, sample_matches:
 
 **GATE 2: Generation → Write** (Phase 2 → Phase 3)
 - REQUIRED: At least 1 pattern meets `--min-count` threshold.
-- REQUIRED: User confirmed pattern groups via AskUserQuestion.
+- REQUIRED: User confirmed pattern groups via user prompt.
 - BLOCKED if `--scan-only` is set — stop after summary.
 
 **GATE 3: Write → Validation** (Phase 3 → KG Index)
@@ -108,7 +108,7 @@ For each discovered pattern with ≥3 occurrences:
 ### Phase 3: Validate & write
 
 1. Show discovered patterns summary to user
-2. AskUserQuestion: confirm/edit/skip each pattern group
+2. user prompt: confirm/edit/skip each pattern group
 3. Write `.workflow/kg/extractors.yaml`
 4. Run `maestro kg index` to verify new symbols are extracted
 

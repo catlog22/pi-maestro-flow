@@ -1,7 +1,7 @@
 ---
 name: team-executor
 description: "Lightweight session execution skill. Resumes existing team-coordinate sessions for pure execution via team-worker agents. No analysis, no role generation -- only loads and executes. Session path required. Triggers on \"Team Executor\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Executor
@@ -107,7 +107,7 @@ Validate session
 When executor spawns workers, use `team-worker` agent with role-spec path:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: <team-name>,
@@ -139,7 +139,7 @@ Read role_spec file to load Phase 2-4 domain instructions.`
 When pipeline completes (all tasks done), executor presents an interactive choice:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Team pipeline complete. What would you like to do?",
     header: "Completion",

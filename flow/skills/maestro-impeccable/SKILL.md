@@ -1,7 +1,7 @@
 ---
 name: maestro-impeccable
 description: "Use when designing, auditing, polishing, or improving frontend UI — websites, dashboards, landing pages, components Arguments: <command|intent> [target] [flags] — 可选 chain: build|redesign|improve|enhance|launch|harden|foundation|live"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion TodoWrite
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -25,7 +25,7 @@ $ARGUMENTS first word determines mode:
 
 ## Command Routing
 
-All workflows at `~/.maestro/workflows/impeccable/{command}.md`:
+All workflows at `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{command}.md`:
 
 | Command | Category | Description |
 |---------|----------|-------------|
@@ -61,7 +61,7 @@ responsive-design.md, spatial-design.md, typography.md, ux-writing.md
 
 ## Chains
 
-Chain step names below reuse Command Routing names but resolve through the chain runner. To avoid ambiguity with Direct command invocation, internal display, todo items, and session status records always tag chain steps with the `impeccable:` prefix (e.g. `impeccable:craft`, `impeccable:critique`). The bare names in this table refer to the workflow file at `~/.maestro/workflows/impeccable/{name}.md` that the chain step reads.
+Chain step names below reuse Command Routing names but resolve through the chain runner. To avoid ambiguity with Direct command invocation, internal display, todo items, and session status records always tag chain steps with the `impeccable:` prefix (e.g. `impeccable:craft`, `impeccable:critique`). The bare names in this table refer to the workflow file at `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{name}.md` that the chain step reads.
 
 | Chain | Steps | Scenario |
 |-------|-------|----------|
@@ -153,7 +153,7 @@ Before reading any command workflow:
 
 1. **Context**: `maestro load --type spec --category ui` → if empty → `maestro impeccable load-context`
 2. **PRODUCT.md**: missing/placeholder (<200 chars / `[TODO]`) → execute teach first, then resume original task
-3. **Register**: identify brand/product → Read `~/.maestro/workflows/impeccable/{brand|product}.md`
+3. **Register**: identify brand/product → Read `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{brand|product}.md`
 
 ## Direct Execution
 
@@ -164,7 +164,7 @@ Before reading any command workflow:
    Category: {category} | Target: {target}
    ─────────────────────────────────────────
    ```
-3. Read `~/.maestro/workflows/impeccable/{command}.md`
+3. Read `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{command}.md`
 4. **TodoWrite tracking**: create todo items for each major phase in the workflow file
    - Format: `[{command}] {phase description}`
    - Mark each phase completed immediately upon finishing
@@ -192,7 +192,7 @@ Before reading any command workflow:
    - `↺` marks refine loop with max iteration count
    - Conditional steps show trigger condition
    - Skipped conditional steps marked `(skipped)`
-3. **Confirm chain session**: AskUserQuestion "Create chain session for '{chain_type}' targeting '{target}'?" — proceed only if user confirms. On decline, abort chain.
+3. **Confirm chain session**: user prompt "Create chain session for '{chain_type}' targeting '{target}'?" — proceed only if user confirms. On decline, abort chain.
    Create session: `.workflow/.maestro/ui-craft-{YYYYMMDD-HHmmss}/status.json`
    ```json
    { "chain_type": "...", "target": "...", "steps": [...], "current_step": 0,
@@ -203,7 +203,7 @@ Before reading any command workflow:
    - If conditional step is skipped, immediately mark completed
    - Quality gate steps include threshold: `[chain] step 5: impeccable:critique ◆ gate ≥26/40`
 5. For each step:
-   - Read `~/.maestro/workflows/impeccable/{command}.md` → execute
+   - Read `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{command}.md` → execute
    - **Step start**: TodoWrite marks current step in_progress
    - **Step done**: TodoWrite marks completed + update status.json (`current_step`, step `status`)
    - **Step failed**: TodoWrite marks completed (with note) + record reason

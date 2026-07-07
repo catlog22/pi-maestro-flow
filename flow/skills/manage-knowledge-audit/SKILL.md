@@ -1,21 +1,18 @@
 ---
 name: manage-knowledge-audit
 description: "Audit and prune knowledge across spec / knowhow / artifact stores Arguments: --scope <spec|knowhow|artifact|all> [--level P0|P1|P2] [--timeline T1..T6] [--since YYYY-MM-DD] [--milestone <name>] [--include-archive] [--interactive] [--mark|--delete|--purge] [--dry-run] [--report]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 审查 spec/knowhow/artifact 存储，识别矛盾/失效/孤儿，通过 keep/deprecate/delete 三态清理。对称于 `manage-harvest`（写入入口）。
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/knowledge-audit.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/knowledge-audit.md` before proceeding.
 
-<deferred_reading>
-- @~/.maestro/workflows/harvest.md (audit 检测的 artifact 是 harvest 的产物源)
-- @~/.maestro/workflows/specs-add.md (deprecate 操作所需的 `<spec-entry>` 变形)
-</deferred_reading>
+> **Reference files** (read when needed):
+> - `~/.pi/agent/packages/pi-maestro-flow/workflows/harvest.md` (audit 检测的 artifact 是 harvest 的产物源)
+> - `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md` (deprecate 操作所需的 `<spec-entry>` 变形)
 
 <context>
 Arguments: $ARGUMENTS
@@ -43,7 +40,7 @@ Flag 全集、scope 对应的扫描路径、Stage 步骤、检测算法定义在
 </invariants>
 
 <execution>
-Follow `~/.maestro/workflows/knowledge-audit.md` Stages 1-8 in order.
+Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/knowledge-audit.md` Stages 1-8 in order.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

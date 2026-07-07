@@ -1,7 +1,7 @@
 ---
 name: maestro-overlay
 description: "Create or edit command overlays from natural language Arguments: <intent> — 描述要添加的规则或步骤，如 'always verify after execute'"
-allowed-tools: Read Write Bash Glob Grep AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -10,7 +10,7 @@ Turn natural-language instructions into command overlays — JSON patch files th
 </purpose>
 
 <required_reading>
-@~/.maestro/workflows/overlays.md
+Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/overlays.md`.
 @~/.maestro/cli-tools.json
 </required_reading>
 
@@ -37,14 +37,14 @@ Turn natural-language instructions into command overlays — JSON patch files th
 2. **Idempotent** — re-running `maestro overlay apply` with the same overlay JSON MUST produce no file changes
 3. **Creation only** — this skill MUST only create overlays; listing and removal are handled by `maestro overlay list` (ink TUI)
 4. **Pristine source preferred** — injection point analysis MUST read from `$PKG_ROOT/.claude/commands/` (untouched originals) first, fall back to `~/.claude/commands/` only if pristine unavailable
-5. **User approval before write** — overlay JSON MUST be shown and approved via AskUserQuestion before writing to disk; NEVER auto-install without confirmation
-6. **Chain skip option mandatory** — if a skill chain is configured, the injected content MUST include a "Skip" option in AskUserQuestion; NEVER force the user into a chain
+5. **User approval before write** — overlay JSON MUST be shown and approved via user prompt before writing to disk; NEVER auto-install without confirmation
+6. **Chain skip option mandatory** — if a skill chain is configured, the injected content MUST include a "Skip" option in user prompt; NEVER force the user into a chain
 </invariants>
 
 <execution>
 ### 1. Parse user intent
 
-Treat the argument as natural-language intent. If unclear, ask up to 2 questions with AskUserQuestion: (a) which command(s) to target, (b) where in the command flow the injection should happen.
+Treat the argument as natural-language intent. If unclear, ask up to 2 questions with user prompt: (a) which command(s) to target, (b) where in the command flow the injection should happen.
 
 ### 2. Identify targets, injection points, and visualize
 
@@ -71,16 +71,16 @@ If the user wants a whole new section, use `mode: new-section` with `afterSectio
   <success_criteria>
 ```
 
-Use AskUserQuestion to confirm:
+Use user prompt to confirm:
 - **"Confirm"** — proceed with this injection point
 - **"Pick different section"** — re-select section/mode
 - **"Cancel"** — abort
 
 ### 2.5. Skill chain configuration
 
-After confirming the injection point, ask whether this overlay should chain to another skill upon completion. This enables the overlay's injected content to hand off to a skill via AskUserQuestion at runtime, using `Skill({ skill: "...", args: "..." })` syntax.
+After confirming the injection point, ask whether this overlay should chain to another skill upon completion. This enables the overlay's injected content to hand off to a skill via user prompt at runtime, using `invoke /skill: "...", args: "..." })` syntax.
 
-Use AskUserQuestion:
+Use user prompt:
 - **"No chain"** — standard overlay, no skill handoff
 - **"Chain to skill"** → ask for the target skill name (e.g., `quality-review`, `maestro-execute`, `quality-test`)
 - **"Chain with alternatives"** → ask for primary skill + 1-2 alternative skills
@@ -114,34 +114,34 @@ Build a slug from the user's intent (kebab-case, lowercase). Write to `~/.maestr
 - `@~/.maestro/...` references are encouraged for pointing at docs
 - Escape `\n` in JSON strings; use a HEREDOC via Bash if content is long
 
-**Skill chain content** — if a chain was configured in Step 2.5, append a Skill Handoff block at the end of the patch `content`. The handoff uses AskUserQuestion so the user controls whether to proceed:
+**Skill chain content** — if a chain was configured in Step 2.5, append a Skill Handoff block at the end of the patch `content`. The handoff uses user prompt so the user controls whether to proceed:
 
 ```markdown
 ---
 
 **Skill Handoff** (overlay)
 
-After the above step completes, use AskUserQuestion:
+After the above step completes, use user prompt:
 - "Proceed to /quality-review" — Hand off to quality review
 - "Skip" — Continue with current command flow
 - "Alternative: /maestro-execute" — Run execution with built-in verification instead
 
 On user selection:
-- Proceed → Skill({ skill: "quality-review", args: "{phase}" })
-- Alternative → Skill({ skill: "maestro-execute", args: "{phase}" })
+- Proceed → invoke /skill: "quality-review", args: "{phase}" })
+- Alternative → invoke /skill: "maestro-execute", args: "{phase}" })
 - Skip → continue normally
 ```
 
 Handoff rules:
 - Always include a **"Skip"** option — the user can always decline the chain
-- Use `Skill({ skill: "<name>", args: "..." })` syntax for handoff calls
+- Use `invoke /skill: "<name>", args: "..." })` syntax for handoff calls
 - Mark handoff heading with `(overlay)` tag
 - Support runtime variable placeholders: `{phase}`, `{description}`, `{session_id}`
 - Keep handoff block under 10 lines of markdown
 
 ### 3.5. Content approval
 
-Display the full overlay JSON to the user. AskUserQuestion:
+Display the full overlay JSON to the user. user prompt:
 - **"Approve & install"** — proceed to installation
 - **"Edit"** — user provides corrections, re-draft
 - **"Cancel"** — discard overlay, do not write
@@ -172,7 +172,7 @@ Show the user:
 Name:    <slug>
 Path:    ~/.maestro/overlays/<slug>.json
 Targets: maestro-execute (applied), maestro-plan (skipped: missing)
-Chain:   quality-review (via AskUserQuestion) | none
+Chain:   quality-review (via user prompt) | none
 Scopes:  [global]
 
 Re-apply: maestro overlay apply
@@ -190,7 +190,7 @@ After the report, remind the user they can run `maestro overlay list` for the in
 - [ ] Re-running `maestro overlay apply` produces no file changes (idempotent)
 - [ ] User shown the report with target list and removal instructions
 - [ ] Injection point preview shown (with existing overlays + `>>>` marker) and confirmed before drafting
-- [ ] If chain configured, `content` includes Skill Handoff block with AskUserQuestion + Skip option + `Skill()` calls
+- [ ] If chain configured, `content` includes Skill Handoff block with user prompt + Skip option + `Skill()` calls
 </success_criteria>
 
 <completion>

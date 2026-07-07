@@ -1,7 +1,7 @@
 ---
 name: quality-auto-test
 description: "Use when test coverage needs automated expansion or existing tests need iterative convergence Arguments: <phase> [-y] [-c N] [--max-iter N] [--layer L0|L1|L2|L3] [--dry-run] [--re-run]"
-allowed-tools: Read Write Edit Bash Glob Grep AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -10,9 +10,7 @@ Unified automated testing via CSV layer pipeline. Auto-selects scenario source f
 Layers L0→L3 sequential (fail-fast), scenarios within layer parallel. `--max-iter 1` = single-pass; default = full iterative cycle.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/auto-test.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/auto-test.md` before proceeding.
 
 <context>
 Phase or task: $ARGUMENTS (required — phase number)
@@ -60,7 +58,7 @@ Flags, artifact context resolution, and output formats defined in workflow auto-
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/auto-test.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/auto-test.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

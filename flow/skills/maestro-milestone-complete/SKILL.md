@@ -1,7 +1,7 @@
 ---
 name: maestro-milestone-complete
 description: "Archive completed milestone and prepare for next Arguments: [<milestone>]"
-allowed-tools: Read Write Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,13 +9,10 @@ Archive passed milestone: validate, archive artifacts, extract knowhow, advance 
 Requires audit PASS; produces milestone archive and learnings.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/milestone-complete.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-complete.md` before proceeding.
 
-<deferred_reading>
-- [state.json](~/.maestro/templates/state.json) — read when updating milestone_history and advancing state
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when updating milestone_history and advancing state
 
 <context>
 Milestone: $ARGUMENTS (optional -- defaults to current_milestone from state.json).
@@ -30,7 +27,7 @@ If $ARGUMENTS is empty AND current_milestone is null → raise E001 with message
 </context>
 
 <execution>
-Follow '~/.maestro/workflows/milestone-complete.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-complete.md' completely.
 
 Archive flow steps (validation, directory archival, artifact history, knowhow extraction, state advancement, cleanup) are defined in workflow `milestone-complete.md`.
 
@@ -52,7 +49,7 @@ Archive flow steps (validation, directory archival, artifact history, knowhow ex
 - BLOCKED if missing: knowhow extraction not attempted or project.md not updated — state advancement requires completed knowledge capture.
 
 **GATE 4: State Advancement → Completion**
-- REQUIRED: AskUserQuestion confirmation before state.json advancement — show current milestone, next milestone (or null for adhoc), and artifacts to clear. User must confirm or abort.
+- REQUIRED: user prompt confirmation before state.json advancement — show current milestone, next milestone (or null for adhoc), and artifacts to clear. User must confirm or abort.
 - REQUIRED: state.json updated — next milestone as current (standard) or current_milestone=null (adhoc) (after confirmation).
 - REQUIRED: Roadmap snapshot saved (standard only).
 - BLOCKED if missing: state.json not advanced — project remains stuck on completed milestone.
@@ -67,10 +64,10 @@ After knowhow extraction (step 4), scan `learnings.md` for promotion candidates:
 2. **Convention drift detection**: Compare executed task summaries against `coding-conventions.md` and `architecture-constraints.md`:
    → Ask: "Were any established conventions bypassed during this milestone? Should conventions be updated?"
 
-3. **Wiki island check**: AskUserQuestion "Run wiki-connect --fix to link newly extracted knowledge?" — execute `manage-wiki connect --fix` only if user confirms.
+3. **Wiki island check**: user prompt "Run wiki-connect --fix to link newly extracted knowledge?" — execute `manage-wiki connect --fix` only if user confirms.
 
-Each promotion candidate requires explicit user confirmation via AskUserQuestion before writing:
-- **"Promote"** → invoke `Skill({ skill: "spec-add", args: "<category> <content>" })` with promoted content, preserving original date and source traceability.
+Each promotion candidate requires explicit user confirmation via user prompt before writing:
+- **"Promote"** → invoke `invoke /skill: "spec-add", args: "<category> <content>" })` with promoted content, preserving original date and source traceability.
 - **"Skip"** → do not promote this candidate; proceed to next.
 - **"Skip all"** → skip remaining candidates.
 

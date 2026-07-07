@@ -1,7 +1,7 @@
 ---
 name: team-tech-debt
 description: "Unified team skill for tech debt identification and remediation. Scans codebase for tech debt, assesses severity, plans and executes fixes with validation. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team tech debt\"."
-allowed-tools: Agent AskUserQuestion Read Write Edit Bash Glob Grep TaskList TaskGet TaskUpdate TaskCreate TeamCreate TeamDelete SendMessage mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file maestro
 ---
 
 # Team Tech Debt
@@ -60,7 +60,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker for <task-id>",
   team_name: "tech-debt",

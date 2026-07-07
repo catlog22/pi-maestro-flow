@@ -1,7 +1,7 @@
 ---
 name: team-issue
 description: "Unified team skill for issue resolution. Uses team-worker agent architecture with role directories for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team issue\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Issue Resolution
@@ -67,7 +67,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "issue",
@@ -96,7 +96,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 **Parallel spawn** (Batch mode, N explorer or M implementer instances):
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   name: "<role>-<N>",
   team_name: "issue",

@@ -1,7 +1,7 @@
 ---
 name: maestro-collab
 description: "Use when a question needs cross-verification from multiple CLI tools or diverse analytical perspectives Arguments: <requirement> [--tools agy,qwen,claude] [--mode analysis|write] [--rule <template>] [-y]"
-allowed-tools: Read Write Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -45,7 +45,7 @@ S_REPORT          — 显示摘要 + next-step routing               PERSIST: �
 
 S_PARSE:
   → S_DISCOVER    WHEN: requirement non-empty              DO: extract requirement, tools, mode, rule, autoYes
-  → S_PARSE       WHEN: requirement empty                  DO: AskUserQuestion for requirement
+  → S_PARSE       WHEN: requirement empty                  DO: user prompt for requirement
 
 S_DISCOVER:
   → S_CONFIRM     WHEN: eligible tools >= 2                DO: A_DISCOVER_TOOLS
@@ -79,7 +79,7 @@ S_SYNTHESIZE:
 S_REGISTER:
   → S_REPORT        WHEN: user confirms or -y    DO: append CLB artifact to state.json (type: collab, scope: adhoc)
   → S_REPORT        WHEN: user declines           DO: skip artifact registration, proceed to report
-  GUARD: AskUserQuestion "Register collab artifact to state.json?" (skipped if -y)
+  GUARD: user prompt "Register collab artifact to state.json?" (skipped if -y)
 
 S_REPORT:
   → END             DO: display summary (requirement, tools, consensus_level, per-tool status, artifact id, output dir)
@@ -137,7 +137,7 @@ If consensus_level < 40%: W003.
 
 ### A_BOUNDARY_GRILL
 
-Run boundary grill per `~/.maestro/workflows/boundary-grill.md`.
+Run boundary grill per `~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md`.
 Input: classified CONFLICT findings + per-tool outputs. Check upstream scope if `--from` used.
 IF conflicts → tag with resolution, feed into A_GENERATE_OUTPUTS. No conflicts → pass through.
 

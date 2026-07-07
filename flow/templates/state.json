@@ -1,0 +1,18 @@
+{
+  "version": "3.1",
+  "project_name": "{{PROJECT_NAME}}",
+  "status": "idle",
+  "current_milestone": null,
+  "current_task_id": null,
+  "milestones": [],
+  "_milestone_schema": "{ id, name, type: 'standard'|'adhoc', status, phases[], phase_slugs{}, roadmap_ref, created_at }",
+  "artifacts": [],
+  "last_updated": "{{TIMESTAMP}}",
+  "accumulated_context": {
+    "key_decisions": [],
+    "blockers": [],
+    "deferred": []
+  },
+  "transition_history": [],
+  "milestone_history": []
+}

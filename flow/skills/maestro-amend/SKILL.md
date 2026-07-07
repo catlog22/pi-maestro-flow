@@ -1,7 +1,7 @@
 ---
 name: maestro-amend
 description: "Generate overlays to fix workflow command deficiencies Arguments: [description] [--from-verify <dir>] [--from-review <dir>] [--from-session <id>] [--from-issues ISS-xxx,...] [--scan] [--dry-run] [-y]"
-allowed-tools: Read Write Bash Glob Grep AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -9,7 +9,7 @@ Signal-driven overlay generator — collect workflow deficiency signals from mul
 </purpose>
 
 <required_reading>
-@~/.maestro/workflows/overlays.md
+Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/overlays.md`.
 @~/.maestro/cli-tools.json
 </required_reading>
 
@@ -27,7 +27,7 @@ $ARGUMENTS — optional description and/or source flags.
 | `--scan` | Auto-scan .workflow/ | Discover all workflow-related signals |
 | _(positional text)_ | User description | Direct observation |
 
-Multiple combinable. No flags + no description → interactive (scan + AskUserQuestion).
+Multiple combinable. No flags + no description → interactive (scan + user prompt).
 
 **Control**: `--dry-run` (preview, don't install), `-y` (skip confirmations)
 

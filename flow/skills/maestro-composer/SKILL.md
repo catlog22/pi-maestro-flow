@@ -1,7 +1,7 @@
 ---
 name: maestro-composer
 description: "Compose reusable workflow templates from natural language Arguments: <workflow-description> [--resume] [--edit <template-path>]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion Skill
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,10 +9,9 @@ Interactive workflow template composer: natural language to DAG template.
 Three modes: new design (default), resume (`--resume`), edit (`--edit <path>`).
 </purpose>
 
-<deferred_reading>
-- [node-catalog](~/.maestro/templates/workflows/specs/node-catalog.md) — read at Phase 2 (Resolve)
-- [template-schema](~/.maestro/templates/workflows/specs/template-schema.md) — read at Phase 5 (Persist)
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [node-catalog](~/.pi/agent/packages/pi-maestro-flow/templates/workflows/specs/node-catalog.md) — read at Phase 2 (Resolve)
+> - [template-schema](~/.pi/agent/packages/pi-maestro-flow/templates/workflows/specs/template-schema.md) — read at Phase 5 (Persist)
 
 <context>
 $ARGUMENTS — natural language description, or flags.
@@ -20,8 +19,8 @@ $ARGUMENTS — natural language description, or flags.
 **Flags**: `--resume` (resume in-progress design), `--edit <path>` (edit existing template)
 
 **Constants**:
-- Template dir: `~/.maestro/templates/workflows/`
-- Template index: `~/.maestro/templates/workflows/index.json`
+- Template dir: `~/.pi/agent/packages/pi-maestro-flow/templates/workflows/`
+- Template index: `~/.pi/agent/packages/pi-maestro-flow/templates/workflows/index.json`
 - Design drafts: `.workflow/templates/design-drafts/`
 - Template ID: `wft-<slug>-<YYYYMMDD>`, Node ID: `N-<seq>`, Checkpoint: `CP-<seq>`
 - Max nodes: 20
@@ -31,14 +30,14 @@ $ARGUMENTS — natural language description, or flags.
 2. **Coding specs**: Run `maestro load --type spec --category coding` to load coding conventions. Informs executor argument defaults and context injection.
 3. Optional — proceed without if unavailable.
 
-**Output boundary**: ALL file writes MUST target `~/.maestro/templates/workflows/` (template JSON + index.json) and `.workflow/templates/design-drafts/` (intermediate drafts) only. NEVER modify source code or `.claude/commands/` files.
+**Output boundary**: ALL file writes MUST target `~/.pi/agent/packages/pi-maestro-flow/templates/workflows/` (template JSON + index.json) and `.workflow/templates/design-drafts/` (intermediate drafts) only. NEVER modify source code or `.claude/commands/` files.
 </context>
 
 <invariants>
 1. **Max 20 nodes** — workflow templates MUST NOT exceed 20 nodes; larger workflows MUST be split into sub-workflows
 2. **Acyclic DAG** — generated template MUST be a directed acyclic graph; cycles MUST be detected and rejected before persistence
 3. **No orphan nodes** — every node MUST be reachable from at least one edge; unreachable nodes MUST be flagged
-4. **Confirmation before write** — template JSON MUST be shown to user via AskUserQuestion before writing to `~/.maestro/templates/workflows/`; cancellation saves draft only
+4. **Confirmation before write** — template JSON MUST be shown to user via user prompt before writing to `~/.pi/agent/packages/pi-maestro-flow/templates/workflows/`; cancellation saves draft only
 5. **Draft preservation** — abandoning at any confirmation gate MUST save current progress to design-drafts directory; NEVER discard user's partial work
 6. **Deferred reading only** — node-catalog and template-schema MUST be read at their designated phases (P2, P5), NEVER loaded eagerly at startup
 </invariants>
@@ -98,7 +97,7 @@ S_PERSIST:
 
 ### A_PARSE_INTENT
 
-1. Parse description (if empty: AskUserQuestion for workflow description)
+1. Parse description (if empty: user prompt for workflow description)
 2. Extract candidate nodes via semantic signals:
 
 | Signal | Type hint |
@@ -156,8 +155,8 @@ Write `nodes.json`. Display resolved node list.
 
 Read deferred `template-schema.md` (fallback to built-in structure).
 Assemble template JSON: template_id, name, nodes, edges, checkpoints, context_schema, execution_mode.
-**Confirmation gate**: AskUserQuestion showing template summary (ID, node count, variables) before writing.
-- User confirms → write to `~/.maestro/templates/workflows/<slug>.json` and update index.json.
+**Confirmation gate**: user prompt showing template summary (ID, node count, variables) before writing.
+- User confirms → write to `~/.pi/agent/packages/pi-maestro-flow/templates/workflows/<slug>.json` and update index.json.
 - User cancels → save draft, do not write template or index.
 Display: path, ID, node count, variables, execute/edit commands. Clean up draft dir.
 

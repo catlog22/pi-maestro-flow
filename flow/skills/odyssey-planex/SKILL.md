@@ -1,10 +1,10 @@
 ---
 name: odyssey-planex
 description: "Requirement-driven iterative cycle — plan, execute, strict verify, fix loop until acceptance criteria met Arguments: <requirement> [--template <name>] [--max-iterations N] [--skip-generalize] [--auto] [--method agent|cli|auto] [--executor <tool>] [--skip-verify] [--heartbeat] [-y] [-c]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
-<base>@~/.maestro/workflows/odyssey-base.md</base>
+<base>`~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>`
 
 <purpose>
 Requirement-to-delivery closed loop: parse requirement → define acceptance criteria →
@@ -153,7 +153,7 @@ S_INTAKE → S_PLAN → S_EXECUTE → S_VERIFY → S_FIX → S_GENERALIZE → S_
 <transitions>
 S_INTAKE → S_INTAKE       : -c + session found (resume)
 S_INTAKE → S_PLAN         : requirement + criteria defined
-S_INTAKE → S_INTAKE       : no requirement → AskUserQuestion
+S_INTAKE → S_INTAKE       : no requirement → user prompt
 
 S_PLAN    → S_EXECUTE
 S_EXECUTE → S_VERIFY
@@ -182,7 +182,7 @@ S_RECORD → END
 
 1. Parse requirement and flags, generate slug, create SESSION_DIR
 2. **Define acceptance criteria** — analyze requirement → derive testable criteria. Each gets `verify_method`: test | grep | cli-review | manual
-   - Normal: AskUserQuestion to confirm/edit
+   - Normal: user prompt to confirm/edit
    - `-y`: auto-derive, record `{"phase":"decision","type":"criteria-confirmation","status":"deferred"}`
 3. Search prior knowledge: `maestro search`, related sessions
 4. Write session.json + understanding.md section 1. Mark G1 done. Emit Goal Prompt.
@@ -214,7 +214,7 @@ Commit: `"odyssey-planex({slug}): PLAN — create execution plan"`
 
 Load available tools: `maestro delegate-config show --json`.
 
-Present AskUserQuestion with 3 questions:
+Present user prompt with 3 questions:
 1. **Executor** — Auto (domain routing) | Agent (all tasks) | specific CLI tool | Other (custom domain routing)
 2. **Review** — Skip | {tool} review (git diff quality check)
 3. **Verify** — Auto (delegate convergence + structure + anti-pattern check) | specific tool | Skip
@@ -239,7 +239,7 @@ Execute tasks per plan order. Independent tasks may run in parallel.
 
 **Agent path:**
 ```
-Spawn Agent with: task definition, acceptance criteria refs, prior task summaries, specs_content
+dispatch via teammate with: task definition, acceptance criteria refs, prior task summaries, specs_content
 Agent implements → verifies convergence → auto-fix (max 3) → returns result
 ```
 
@@ -335,7 +335,7 @@ Iron gate — every acceptance criterion checked objectively.
 | `test` | Run relevant tests, check pass/fail |
 | `grep` | Grep for expected pattern |
 | `cli-review` | `maestro delegate "PURPOSE: Verify criterion {criterion_id}: {criterion}\nTASK: Read implementation code \| Check behavior matches criterion \| Report pass/fail with file:line evidence\nMODE: analysis\nCONTEXT: @{relevant_files}\nEXPECTED: JSON {criterion_id, status: passed\|failed, evidence: [{file, line, detail}]}" --role review --mode analysis` |
-| `manual` | Normal: AskUserQuestion / `-y`: record `deferred` |
+| `manual` | Normal: user prompt / `-y`: record `deferred` |
 
 Record per criterion: `{"phase":"verification","type":"criterion-check","criterion_id":"AC1","method":"","result":"passed|failed","evidence":"","iteration":N}`. Update acceptance_criteria[].status. Append to iterations[].
 
@@ -421,7 +421,7 @@ Commit: `"odyssey-planex({slug}): GENERALIZE — pattern scan complete"`
    | risk + complex | Create issue |
    | safe | Skip with logged per-item reason |
 
-   Normal: AskUserQuestion per hit | `-y`: auto-route to execute, create issue for rest
+   Normal: user prompt per hit | `-y`: auto-route to execute, create issue for rest
 
 3. **Cross-phase loops:** `loops >= max_loops` → must log per-item reasons, advance to S_RECORD.
 
@@ -438,12 +438,12 @@ Commit: `"odyssey-planex({slug}): DISCOVER — findings classified"`
    - Acceptance criteria template → `/spec-add review`
    - Generalization pattern → `/spec-add coding`
 
-3. Mark G7 done. Pending decisions: Normal → AskUserQuestion | `-y` → skip (show deferred count).
+3. Mark G7 done. Pending decisions: Normal → user prompt | `-y` → skip (show deferred count).
 
 4. **Goal audit (hardened):**
    - `done` → confirmed
    - `skipped` → confirmed ONLY if corresponding `skip_when` flag is true
-   - **Hard rule:** G5 and G6 CANNOT be `skipped` unless `skip_generalize == true`. Pending without flag → `failed` (Normal: AskUserQuestion | `-y`: record `failed`)
+   - **Hard rule:** G5 and G6 CANNOT be `skipped` unless `skip_generalize == true`. Pending without flag → `failed` (Normal: user prompt | `-y`: record `failed`)
    - `phase_goals_all_done = true` only when all goals pass this audit
 
 5. `current_state = "COMPLETED"`, emit completion summary.
@@ -474,12 +474,12 @@ Commit: `"odyssey-planex({slug}): RECORD — session summary"`
 
 | Decision Point | Normal | `-y` |
 |---------------|--------|------|
-| S_INTAKE criteria confirmation | AskUserQuestion | auto-derive, `deferred` |
-| S_EXECUTE execution options | AskUserQuestion | use defaults (auto/Skip/Auto), `confirmed: true` |
-| S_EXECUTE task blocked (3 retries) | AskUserQuestion: continue or stop | auto continue, log blocked |
-| S_VERIFY manual criterion | AskUserQuestion | `deferred` |
-| S_VERIFY max iteration reached | AskUserQuestion | auto accept, `deferred` |
-| A_DISCOVER hit routing | AskUserQuestion | auto-route to execute, create issue for rest |
+| S_INTAKE criteria confirmation | user prompt | auto-derive, `deferred` |
+| S_EXECUTE execution options | user prompt | use defaults (auto/Skip/Auto), `confirmed: true` |
+| S_EXECUTE task blocked (3 retries) | user prompt: continue or stop | auto continue, log blocked |
+| S_VERIFY manual criterion | user prompt | `deferred` |
+| S_VERIFY max iteration reached | user prompt | auto accept, `deferred` |
+| A_DISCOVER hit routing | user prompt | auto-route to execute, create issue for rest |
 
 ### Goal Prompt convergence rules
 

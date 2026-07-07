@@ -1,7 +1,7 @@
 ---
 name: team-quality-assurance
 description: "Unified team skill for quality assurance. Full closed-loop QA combining issue discovery and software testing. Triggers on \"team quality-assurance\", \"team qa\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Quality Assurance
@@ -60,7 +60,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "quality-assurance",
@@ -101,7 +101,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 When pipeline completes, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Quality Assurance pipeline complete. What would you like to do?",
     header: "Completion",

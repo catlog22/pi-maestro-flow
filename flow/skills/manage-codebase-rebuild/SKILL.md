@@ -1,16 +1,14 @@
 ---
 name: manage-codebase-rebuild
 description: "Rebuild all codebase documentation from scratch Arguments: [--focus <area>] [--force] [--skip-commit]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 Full rebuild of `.workflow/codebase/` docs: 4 parallel mapper agents → tech-stack, architecture, features, concerns. Destructive — overwrites existing docs.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/codebase-rebuild.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/codebase-rebuild.md` before proceeding.
 
 <context>
 $ARGUMENTS -- optional flags.
@@ -20,7 +18,7 @@ $ARGUMENTS -- optional flags.
 - `--force` -- Skip confirmation prompt and proceed directly
 - `--skip-commit` -- Do not auto-commit after rebuild
 
-**Confirmation gate:** Unless `--force` is set, prompt the user (AskUserQuestion) before executing git commit. Show the list of changed files and proposed commit message. If `--skip-commit` is set, skip the commit entirely.
+**Confirmation gate:** Unless `--force` is set, prompt the user (user prompt) before executing git commit. Show the list of changed files and proposed commit message. If `--skip-commit` is set, skip the commit entirely.
 
 **Mapper agent assignments (when `--focus` omitted):**
 | Agent | Focus | Output file |
@@ -49,7 +47,7 @@ $ARGUMENTS -- optional flags.
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/codebase-rebuild.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/codebase-rebuild.md' completely.
 
 **When `--focus <area>` is set:** pass the area string to each mapper agent as scoping context; only regenerate the docs relevant to that scope (leave others untouched unless missing).
 

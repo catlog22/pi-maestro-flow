@@ -1,16 +1,14 @@
 ---
 name: quality-refactor
 description: "Use when accumulated tech debt needs systematic identification and safe reduction Arguments: [<scope>]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 Targeted refactoring with safety guarantees: plan → confirm → execute with test verification per change → reflection-log.md.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/refactor.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/refactor.md` before proceeding.
 
 <context>
 Scope: $ARGUMENTS (required)
@@ -42,7 +40,7 @@ If not provided, prompt user for scope.
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/refactor.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/refactor.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

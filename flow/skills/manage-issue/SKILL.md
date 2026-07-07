@@ -1,20 +1,17 @@
 ---
 name: manage-issue
 description: "Create, query, update, close, and link issues Arguments: <subcommand: create|list|status|update|close|link> [--title text] [--severity S] [--status S] [--resolution text]"
-allowed-tools: Read Write Edit Bash Glob Grep AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 <purpose>
 Issue lifecycle management: create, list, status, update, close, link. Stored in `.workflow/issues/issues.jsonl`. For automated discovery, use `/manage-issue-discover`.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/issue.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md` before proceeding.
 
-<deferred_reading>
-- [issue.json template](~/.maestro/templates/issue.json) — read when creating or updating issue records (create, update, close)
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [issue.json template](~/.pi/agent/packages/pi-maestro-flow/templates/issue.json) — read when creating or updating issue records (create, update, close)
 
 <context>
 $ARGUMENTS -- subcommand + options. Parse first token as subcommand.
@@ -45,7 +42,7 @@ $ARGUMENTS -- subcommand + options. Parse first token as subcommand.
 
 <execution>
 Parse subcommand from first token of $ARGUMENTS.
-Follow '~/.maestro/workflows/issue.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

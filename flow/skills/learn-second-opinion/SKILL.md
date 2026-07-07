@@ -1,7 +1,7 @@
 ---
 name: learn-second-opinion
 description: "Get alternative perspectives — review, challenge, or consult Arguments: <target> [--mode review|challenge|consult] [-y]"
-allowed-tools: Read Write Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -37,7 +37,7 @@ $ARGUMENTS — target and optional mode flag.
 3. **Evidence-backed verdicts** — every finding MUST include a `location` reference (file:line or section); ungrounded opinions SHALL NOT appear in the report
 4. **Mode contract** — MUST execute exactly the mode specified (review/challenge/consult); NEVER mix mode behaviors within a single execution
 5. **Append-only learnings** — `.workflow/specs/learnings.md` MUST be appended, NEVER overwritten or truncated
-6. **Confirmation gate** — unless `-y` is set, MUST present findings and target files via AskUserQuestion before any writes
+6. **Confirmation gate** — unless `-y` is set, MUST present findings and target files via user prompt before any writes
 </invariants>
 
 <state_machine>
@@ -54,7 +54,7 @@ S_PERSIST    — 写文件、append .workflow/specs/learnings.md      PERSIST: k
 
 S_RESOLVE:
   → S_CONTEXT     WHEN: target resolved                DO: read target content
-  → S_RESOLVE     WHEN: unresolvable                   DO: AskUserQuestion for clarification
+  → S_RESOLVE     WHEN: unresolvable                   DO: user prompt for clarification
 
 S_CONTEXT:
   → S_EXECUTE     DO: load specs + wiki search (optional, proceed without)
@@ -68,7 +68,7 @@ S_SYNTHESIZE:
   → S_PERSIST     DO: merge perspectives → agreements, disagreements, verdict, top 3 recommendations
 
 S_PERSIST:
-  → END           GATE: unless -y, AskUserQuestion showing files to write and spec-entries to append — proceed only on confirm
+  → END           GATE: unless -y, user prompt showing files to write and spec-entries to append — proceed only on confirm
                   DO: write KNW-opinion + append <spec-entry> blocks to .workflow/specs/learnings.md
 
 </transitions>
@@ -98,7 +98,7 @@ Spawn 1 adversarial Agent:
 Interactive loop:
 1. Agent studies target
 2. Display "Target loaded. What would you like to know?"
-3. AskUserQuestion → Agent answers with code refs → repeat until "done"
+3. user prompt → Agent answers with code refs → repeat until "done"
 4. Compile Q&A into report
 
 </actions>

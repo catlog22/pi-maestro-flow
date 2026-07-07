@@ -1,7 +1,7 @@
 ---
 name: maestro-companion
 description: "Knowledge companion — load context, record companion doc, capture insights, route to skills Arguments: [before|note|after|route] [--task <description>] [--type <task_type>] [--category <cat>]"
-allowed-tools: Read Write Edit Bash Glob Grep Skill AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -439,7 +439,7 @@ Promotable entries:
 
 ### 3. Promote entries
 
-If promotable entries exist, AskUserQuestion:
+If promotable entries exist, user prompt:
 
 - Option 1: "Promote to spec" — short coding/arch/test constraint
 - Option 2: "Promote to knowhow" — detailed recipe/template/decision/tip
@@ -517,7 +517,7 @@ Delegates intent routing to maestro-next, which recommends the best single comma
 - [ ] note: typed entries cross-posted to matching context tables (decisions→Decisions, hypothesis→Hypotheses, etc.)
 - [ ] after: companion doc entries reviewed and promotable items identified
 - [ ] after: outcome fields populated (files_changed, completed, status)
-- [ ] after: AskUserQuestion routes to spec-add or manage-knowhow-capture
+- [ ] after: user prompt routes to spec-add or manage-knowhow-capture
 - [ ] after: todo entries extracted to follow_up field
 - [ ] after: companion doc marked completed, active pointer cleared
 - [ ] after: accumulation reminder + next-step routing displayed

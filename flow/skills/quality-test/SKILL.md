@@ -1,16 +1,14 @@
 ---
 name: quality-test
 description: "Use when implementation needs user acceptance testing with interactive verification and gap closure Arguments: [phase] [--smoke] [--auto-fix] [--frontend-verify]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 UAT-style conversational testing for a completed phase. Interactive scenario walk-through with severity inference. Issues trigger parallel debug agents and optional gap-fix loop (--auto-fix).
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/test.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/test.md` before proceeding.
 
 <context>
 Phase or task: $ARGUMENTS (optional)
@@ -31,7 +29,7 @@ Flags, artifact context resolution, and output directory format defined in workf
 </invariants>
 
 <execution>
-**Mode select:** `--frontend-verify` → 走下方 **Frontend Verify Mode**（确定性浏览器 smoke，**不是**对话式 UAT）；否则 Follow '~/.maestro/workflows/test.md' completely.
+**Mode select:** `--frontend-verify` → 走下方 **Frontend Verify Mode**（确定性浏览器 smoke，**不是**对话式 UAT）；否则 Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/test.md' completely.
 
 ### Frontend Verify Mode (`--frontend-verify`)
 
@@ -54,7 +52,7 @@ Ralph-invoked 完成：`maestro ralph complete <idx> --status {STATUS} --evidenc
 
 ---
 
-Follow '~/.maestro/workflows/test.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/test.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

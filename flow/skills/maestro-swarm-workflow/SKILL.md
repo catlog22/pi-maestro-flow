@@ -1,7 +1,7 @@
 ---
 name: maestro-swarm-workflow
 description: "Parallel workflow accelerator — route intent to fixed Workflow scripts for multi-agent concurrent execution Arguments: <intent> [--script <name>] [--dims <d1,d2>] [--roles <r1,r2>] [--count N] [--tier quick|standard] [--resume <runId>]"
-allowed-tools: Read Write Edit Bash Glob Grep Workflow AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep Workflow maestro
 ---
 
 <purpose>
@@ -23,7 +23,7 @@ $ARGUMENTS — intent text with optional flags.
 Remaining        → intent
 ```
 
-**Script inventory** (`~/.maestro/workflows/swarm/`):
+**Script inventory** (`~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/`):
 
 | Script | args 接口 |
 |--------|-----------|
@@ -36,7 +36,7 @@ Remaining        → intent
 | `wf-execute` | `{ plan_dir, specs?, codebase_context?, wiki_context?, auto_commit? }` |
 | `wf-milestone-audit` | `{ milestone?, is_adhoc? }` |
 
-**Output boundary**: ALL file writes MUST target `.workflow/scratch/{YYYYMMDD}-swarm-{script}-{slug}/` (results, ralph-compatible artifacts). When inside a ralph session, writes target the corresponding step's scratch directory. NEVER modify source code, workflow scripts (`~/.maestro/workflows/swarm/`), or `.claude/commands/` files.
+**Output boundary**: ALL file writes MUST target `.workflow/scratch/{YYYYMMDD}-swarm-{script}-{slug}/` (results, ralph-compatible artifacts). When inside a ralph session, writes target the corresponding step's scratch directory. NEVER modify source code, workflow scripts (`~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/`), or `.claude/commands/` files.
 </context>
 
 <state_machine>
@@ -58,7 +58,7 @@ S_PARSE:
 
 S_ROUTE:
   → S_CONTEXT   WHEN: script resolved              DO: A_ROUTE_SCRIPT
-  → S_FALLBACK  WHEN: ambiguous intent              DO: AskUserQuestion
+  → S_FALLBACK  WHEN: ambiguous intent              DO: user prompt
 
 S_CONTEXT:
   → S_DISPATCH  DO: A_ASSEMBLE_CONTEXT
@@ -101,7 +101,7 @@ Intent-to-script routing（按关键词匹配，--script 优先级最高）。
 | 7 | 头脑风暴 / brainstorm / 方案 / 评估 / evaluate / 多角度 | `wf-brainstorm` |
 | 8 | 分析 / analyze / 探索 / explore / 架构 / architecture / 复杂度 / 风险 | `wf-analyze` |
 
-**Disambiguation**: 多命中（同一优先级内多个关键词匹配不同脚本）→ AskUserQuestion 让用户选择。跨优先级命中取高优先级。
+**Disambiguation**: 多命中（同一优先级内多个关键词匹配不同脚本）→ user prompt 让用户选择。跨优先级命中取高优先级。
 
 ### A_ASSEMBLE_CONTEXT
 
@@ -134,7 +134,7 @@ Intent-to-script routing（按关键词匹配，--script 优先级最高）。
 
 ### A_DISPATCH_WORKFLOW
 
-1. 确定 scriptPath = `~/.maestro/workflows/swarm/{script}.js`（展开为绝对路径）
+1. 确定 scriptPath = `~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/{script}.js`（展开为绝对路径）
 2. 构建 Workflow 调用：
    ```
    Workflow({
@@ -186,7 +186,7 @@ Workflow 返回 JSON 后：
 2. **args 预编译** — 所有 FS 读取在 A_ASSEMBLE_CONTEXT 完成，脚本内 agent 通过工具自行读取补充
 3. **产出格式兼容** — 写入的 artifact 格式必须与对应命令（analyze/brainstorm/review/verify）的产出一致
 4. **resume 透传** — resumeFromRunId 直接透传给 Workflow 工具，利用内置缓存机制
-5. **脚本只读** — 路由命令不修改 `~/.maestro/workflows/swarm/wf-*.js` 脚本文件
+5. **脚本只读** — 路由命令不修改 `~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/wf-*.js` 脚本文件
 6. **结果必须展示** — Workflow 返回后必须向用户展示格式化摘要，不得静默完成
 </invariants>
 
@@ -204,7 +204,7 @@ Workflow 返回 JSON 后：
 
 **GATE 3: Context → Dispatch**
 - REQUIRED: Args payload assembled with all required fields for target script.
-- REQUIRED: Script file exists at `~/.maestro/workflows/swarm/{script}.js`.
+- REQUIRED: Script file exists at `~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/{script}.js`.
 - BLOCKED if: script file not found (E003) or required args missing.
 
 **GATE 4: Dispatch → Ingest**
@@ -264,7 +264,7 @@ ralph-execute 正常通过 `maestro ralph next` 加载并执行，swarm-workflow
 | Code | Description | Recovery |
 |------|-------------|----------|
 | E001 | No intent and no --script | Prompt for intent |
-| E002 | Ambiguous routing | AskUserQuestion |
+| E002 | Ambiguous routing | user prompt |
 | E003 | Script file not found | Check .claude/workflows/ |
 | E004 | Workflow execution failed | Show error, suggest --resume |
 | E005 | Result ingestion failed | Write raw JSON to scratch |

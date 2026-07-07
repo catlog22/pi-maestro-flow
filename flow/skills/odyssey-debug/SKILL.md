@@ -1,10 +1,10 @@
 ---
 name: odyssey-debug
 description: "Long-running debug cycle — archaeology, diagnosis, fix, confirmation, generalization, discovery, and knowledge persistence Arguments: <issue> [--template <name>] [--skip-fix] [--skip-generalize] [--auto] [-y] [-c] [--heartbeat]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
-<base>@~/.maestro/workflows/odyssey-base.md</base>
+<base>`~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>`
 
 <purpose>
 archaeology → explore → diagnose → fix & confirm → generalize → discover siblings → persist.
@@ -95,7 +95,7 @@ S_INTAKE → S_ARCHAEOLOGY → S_EXPLORE → S_DIAGNOSE → S_FIX → S_CONFIRM 
 <transitions>
 S_INTAKE → S_INTAKE       : -c + session found → A_RESUME_SESSION
 S_INTAKE → S_ARCHAEOLOGY  : issue parsed → A_INTAKE
-S_INTAKE → S_INTAKE       : no issue, no session → AskUserQuestion
+S_INTAKE → S_INTAKE       : no issue, no session → user prompt
 
 S_ARCHAEOLOGY → S_EXPLORE     : complete
 S_EXPLORE     → S_DIAGNOSE    : complete
@@ -156,16 +156,16 @@ Write `explore.json` + evidence phase=explore. Update §3. Mark G2. Commit: `"od
 ### A_DIAGNOSE
 1. Hypotheses from evidence, ranked [HIGH]/[MEDIUM]/[LOW] → §4
 2. Test each → evidence phase=diagnosis
-3. Ambiguity → evidence phase=decision; Normal: AskUserQuestion | `-y`: defer
+3. Ambiguity → evidence phase=decision; Normal: user prompt | `-y`: defer
 4. Confirmed → `session.json.root_cause` + §5. Mark G1.
 
 Commit: `"odyssey-debug({slug}): DIAGNOSE — root cause confirmed"`
 
 ### A_ESCALATE_DIAGNOSIS
-`diagnosis_retries++`. < 3: `maestro delegate --role analyze`, new hypotheses, → S_DIAGNOSE. >= 3: Normal → AskUserQuestion | `-y` → INCONCLUSIVE → S_RECORD.
+`diagnosis_retries++`. < 3: `maestro delegate --role analyze`, new hypotheses, → S_DIAGNOSE. >= 3: Normal → user prompt | `-y` → INCONCLUSIVE → S_RECORD.
 
 ### A_FIX
-1. Present root cause + proposed fix. Normal: AskUserQuestion | `-y`: auto proceed
+1. Present root cause + proposed fix. Normal: user prompt | `-y`: auto proceed
 2. Implement fix, evidence phase=decision
 
 Commit: `"odyssey-debug({slug}): FIX — {summary}"`
@@ -238,7 +238,7 @@ Commit: `"odyssey-debug({slug}): GENERALIZE — pattern scan complete"`
    | risk + complex | Create issue |
    | safe | Skip with logged per-item reason |
 
-   Normal: AskUserQuestion per hit | `-y`: auto-fix bugs with fix_template, create issue for rest
+   Normal: user prompt per hit | `-y`: auto-fix bugs with fix_template, create issue for rest
 
 3. **Cross-phase loops:** `cross_phase_loops++` on fix/diagnose return. `loops >= max_loops` → must log per-item reasons.
 
@@ -254,12 +254,12 @@ Commit: `"odyssey-debug({slug}): DISCOVER — sibling triage complete"`
    - Architecture boundary violation → `/spec-add arch`
    - Reusable generalization pattern → `/spec-add coding`
 
-2. Mark G6 done. Pending decisions: Normal → AskUserQuestion | `-y` → skip (show deferred count).
+2. Mark G6 done. Pending decisions: Normal → user prompt | `-y` → skip (show deferred count).
 
 3. **Goal audit (hardened):**
    - `done` → confirmed
    - `skipped` → confirmed ONLY if corresponding `skip_when` flag is true
-   - **Hard rule:** G4 and G5 CANNOT be `skipped` unless `skip_generalize == true`. Pending without flag → `failed` (Normal: AskUserQuestion | `-y`: record `failed`)
+   - **Hard rule:** G4 and G5 CANNOT be `skipped` unless `skip_generalize == true`. Pending without flag → `failed` (Normal: user prompt | `-y`: record `failed`)
    - `phase_goals_all_done = true` only when all goals pass this audit
 
 4. `current_state = "COMPLETED"`, emit completion summary.
@@ -290,10 +290,10 @@ Commit: `"odyssey-debug({slug}): RECORD — summary and knowledge persistence"`
 
 | Decision Point | Normal | `-y` |
 |---------------|--------|------|
-| A_DIAGNOSE ambiguity | AskUserQuestion | deferred |
-| A_ESCALATE 3-strike | AskUserQuestion | INCONCLUSIVE |
-| A_FIX direction | AskUserQuestion | auto proceed |
-| A_DISCOVER hit routing | AskUserQuestion | auto-fix bugs with template, create issue for rest |
+| A_DIAGNOSE ambiguity | user prompt | deferred |
+| A_ESCALATE 3-strike | user prompt | INCONCLUSIVE |
+| A_FIX direction | user prompt | auto proceed |
+| A_DISCOVER hit routing | user prompt | auto-fix bugs with template, create issue for rest |
 
 ### Goal Prompt convergence rules
 

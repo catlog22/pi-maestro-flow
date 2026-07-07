@@ -1,16 +1,14 @@
 ---
 name: domain-add
 description: "Register a domain term into project glossary Arguments: <canonical> \\\"<definition>\\\""
-allowed-tools: Read Write Bash Glob Grep AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep maestro
 ---
 
 <purpose>
 Register a domain term into `.workflow/domain/glossary.yaml`. Domain terms are automatically injected into agent context via hooks (domain-compact for all prompts, domain-expanded on keyword match).
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/domain-add.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/domain-add.md` before proceeding.
 
 <context>
 $ARGUMENTS -- expects `<canonical> "<definition>"`
@@ -35,15 +33,15 @@ Domain term lifecycle: discover/manual → register → active → (optional) de
 1. **Single-term atomic operation** — each invocation registers exactly ONE term; NEVER batch-write multiple terms in a single execution
 2. **Glossary append-only** — existing terms in `glossary.yaml` SHALL NOT be modified or removed; only new entries are appended
 3. **Duplicate guard** — MUST check for exact canonical name match AND near-matches before writing; NEVER create duplicate entries
-4. **Confirmation mandatory** — MUST present term details (canonical, definition, aliases, tier, path) via AskUserQuestion before any glossary write; NEVER write without user confirmation
+4. **Confirmation mandatory** — MUST present term details (canonical, definition, aliases, tier, path) via user prompt before any glossary write; NEVER write without user confirmation
 5. **Schema compliance** — every term entry MUST include canonical name, definition, tier, and at least one alias/keyword; incomplete entries SHALL NOT be persisted
 6. **Domain directory prerequisite** — `.workflow/domain/` MUST exist before writing; NEVER auto-create the directory (E002 if missing)
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/domain-add.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/domain-add.md' completely.
 
-**Confirmation gate**: Before writing to glossary.yaml, AskUserQuestion showing the term canonical name, definition, extracted aliases/keywords, tier, and target file path. Proceed only on user confirm.
+**Confirmation gate**: Before writing to glossary.yaml, user prompt showing the term canonical name, definition, extracted aliases/keywords, tier, and target file path. Proceed only on user confirm.
 </execution>
 
 <error_codes>

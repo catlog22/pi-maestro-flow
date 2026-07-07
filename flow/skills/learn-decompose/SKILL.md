@@ -1,7 +1,7 @@
 ---
 name: learn-decompose
 description: "Extract design patterns from code into specs and wiki Arguments: <path|module> [--patterns <list>] [--save-spec] [--save-wiki] [-y]"
-allowed-tools: Read Write Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -30,7 +30,7 @@ $ARGUMENTS — target path/module and optional flags.
 2. **Evidence-anchored findings** — every pattern MUST include at least one `file:line` anchor from source; unanchored patterns SHALL NOT be persisted
 3. **Dedup before persist** — MUST cross-reference against existing `learnings.md` and `coding-conventions.md` before writing; duplicate entries SHALL NOT be appended
 4. **Parallel agent isolation** — each dimension agent operates independently; NEVER share state between agents during analysis
-5. **Confirmation gate** — unless `-y` is set, MUST present all findings and target files via AskUserQuestion before any writes
+5. **Confirmation gate** — unless `-y` is set, MUST present all findings and target files via user prompt before any writes
 6. **Append-only learnings** — `.workflow/specs/learnings.md` MUST be appended, NEVER overwritten or truncated
 </invariants>
 
@@ -49,7 +49,7 @@ S_PERSIST    — 写文件 + 可选 spec-add/wiki create         PERSIST: knowho
 
 S_RESOLVE:
   → S_DEDUP       WHEN: file list resolved
-  → S_RESOLVE     WHEN: unresolvable                     DO: AskUserQuestion
+  → S_RESOLVE     WHEN: unresolvable                     DO: user prompt
 
 S_DEDUP:
   → S_ANALYZE     DO: read coding-conventions.md + .workflow/specs/learnings.md → build known pattern set
@@ -64,7 +64,7 @@ S_CATALOG:
   → S_PERSIST     DO: write KNW-decompose report (grouped by dimension: pattern table + details)
 
 S_PERSIST:
-  → END           GATE: unless -y, AskUserQuestion showing files to write and patterns to persist — proceed only on confirm
+  → END           GATE: unless -y, user prompt showing files to write and patterns to persist — proceed only on confirm
                   DO: append .workflow/specs/learnings.md [+ spec-add if --save-spec] [+ wiki note if --save-wiki]
 
 </transitions>

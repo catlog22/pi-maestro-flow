@@ -1,7 +1,7 @@
 ---
 name: maestro-milestone-release
 description: "Bump version, generate changelog, tag milestone Arguments: [<version>] [--bump patch|minor|major] [--dry-run] [--no-tag] [--no-push]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -10,9 +10,7 @@ Package a completed milestone into a releasable version: version bump → change
 Pipeline position: downstream of `/maestro-milestone-complete`. Terminal command.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/milestone-release.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-release.md` before proceeding.
 
 <context>
 $ARGUMENTS -- optional explicit version string and flags.
@@ -40,14 +38,14 @@ $ARGUMENTS -- optional explicit version string and flags.
 </context>
 
 <interview_protocol>
-Follows @~/.maestro/workflows/interview-mechanics.md standard.
+Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
 
 **Decision points**: version bump type (major / minor / patch / custom), changelog review and confirmation
 **Scope guard**: only release decisions; do not prejudge next milestone scope
 </interview_protocol>
 
 <execution>
-Follow '~/.maestro/workflows/milestone-release.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-release.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 
@@ -61,13 +59,13 @@ Follow '~/.maestro/workflows/milestone-release.md' completely.
 
 **GATE 3: Changelog → Tag/Push**
 - REQUIRED: CHANGELOG.md entry written with milestone summary + grouped changes.
-- REQUIRED: AskUserQuestion confirmation before creating release commit — show version, changelog diff, and files to be committed. User must confirm or abort.
+- REQUIRED: user prompt confirmation before creating release commit — show version, changelog diff, and files to be committed. User must confirm or abort.
 - REQUIRED: Release commit created with conventional message (after confirmation).
 
 **GATE 4: Tag → Push → Completion**
-- REQUIRED: AskUserQuestion confirmation before git tag creation — show tag name and annotation (unless --no-tag). User must confirm or abort.
+- REQUIRED: user prompt confirmation before git tag creation — show tag name and annotation (unless --no-tag). User must confirm or abort.
 - REQUIRED: Annotated git tag created (unless --no-tag) (after confirmation).
-- REQUIRED: AskUserQuestion confirmation before git push — show remote and refs to push (unless --no-push). User must confirm or abort.
+- REQUIRED: user prompt confirmation before git push — show remote and refs to push (unless --no-push). User must confirm or abort.
 - REQUIRED: state.json updated with last_release_version + last_release_at.
 
 For `--dry-run`: print computed version, changelog diff, and tag name without side effects.
@@ -126,6 +124,6 @@ Status verdicts:
 - [ ] Release commit created with conventional message
 - [ ] Annotated git tag created (unless `--no-tag`)
 - [ ] Commit + tag pushed to remote (unless `--no-push` or push failed → W002)
-- [ ] User confirmed before each destructive git operation (commit, tag, push) via AskUserQuestion
-- [ ] state.json updated with last_release_version + last_release_at timestamp (after AskUserQuestion confirmation)
+- [ ] User confirmed before each destructive git operation (commit, tag, push) via user prompt
+- [ ] state.json updated with last_release_version + last_release_at timestamp (after user prompt confirmation)
 </success_criteria>

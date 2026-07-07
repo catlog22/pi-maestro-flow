@@ -1,7 +1,7 @@
 ---
 name: maestro-ralph
 description: "[LEGACY — prefer maestro-ralph-v2] Inline lifecycle orchestrator — state-based determination with main-session execution Arguments: <intent> [-y] | status | continue | --amend [change]"
-allowed-tools: Read Write Edit Bash Glob Grep Skill AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -9,9 +9,8 @@ Closed-loop decision engine: read project state → infer position → build ada
 Ralph builds/evaluates; ralph-execute runs steps. Session: `.workflow/.maestro/ralph-{YYYYMMDD-HHmmss}/status.json`.
 </purpose>
 
-<deferred_reading>
-- [ralph-amend-goal.md](~/.maestro/workflows/ralph-amend-goal.md) — read when `--amend` flag active for goal amendment flow
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read when `--amend` flag active for goal amendment flow
 
 <context>
 $ARGUMENTS — intent text, flags, or keywords.
@@ -46,7 +45,7 @@ Remaining     → intent (amend_mode 时为 change_request)
 12. **Invariant violation = BLOCK** — 违反上述任一 invariant 即阻断当前操作。不得以 "效率" 或 "意图明确" 为由绕过。特别是 invariant 1（ralph 不执行 step）和 invariant 6（completion_confirmed 由 CLI 写入）不可隐性违反。
 13. **Delegate fallback 必须标记** — A_DELEGATE_EVALUATE 解析 verdict 失败时 fallback 为 "fix"，但 MUST 在 decisions.ndjson 记录 `"parse_failed": true, "confidence_score": 0`，后续 step 继承 LOW CONFIDENCE 标记。
 14. **auto_confirm 单一来源** — `auto_confirm` 仅由用户 `-y` 标志设定；ralph 不得内部推断。`session.auto_mode` 仅反映用户输入。
-15. **分解契约单一所有者** — `boundary_contract` / `task_decomposition` 由 session 创建者拥有（`source=="ralph"` → `decomposition_owner="ralph"`；`source=="maestro"` → `"maestro"`）。contract 已存在时，后续 S_DECOMPOSE MUST 跳过 AskUserQuestion，仅做 shape 校验 + 缺省补齐；goal-audit 只更新 `task_decomposition[*].status/completion_confirmed/completed_at`，禁止改 `goal/done_when/boundary`。
+15. **分解契约单一所有者** — `boundary_contract` / `task_decomposition` 由 session 创建者拥有（`source=="ralph"` → `decomposition_owner="ralph"`；`source=="maestro"` → `"maestro"`）。contract 已存在时，后续 S_DECOMPOSE MUST 跳过 user prompt，仅做 shape 校验 + 缺省补齐；goal-audit 只更新 `task_decomposition[*].status/completion_confirmed/completed_at`，禁止改 `goal/done_when/boundary`。
 16. **控制权优先级（范式治理）** — FSM 独占 session 生命周期 + step 排序 + retry/fix/escalate + cross-step decision 节点；Pipeline 命令只拥有自身 artifact GATE（GATE 失败 → `maestro ralph complete <idx> --status BLOCKED|NEEDS_RETRY`，自身 GATE 全过 → DONE）；Router 命令不得出现在 FSM step 内。
 </invariants>
 
@@ -129,7 +128,7 @@ S_CONFIRM:
   → END             WHEN: user selects "Cancel"
 
 S_DISPATCH:
-  → END             DO: Skill({ skill: "maestro-ralph-execute" })
+  → END             DO: invoke /skill: "maestro-ralph-execute" })
 
 S_DECISION_EVAL: (decision 节点 == `step.decision` 非空，下述 gate 名取自该字段)
   → S_APPLY_VERDICT WHEN: quality-gate (post-execute, post-business-test, post-review, post-test, post-frontend-verify)
@@ -162,16 +161,16 @@ S_APPLY_VERDICT:
   GUARD: confidence_score < 60 AND proceed → override to fix
   GUARD: confidence_score > 95 AND fix AND retry > 0 → suggest proceed
   GUARD: auto_confirm → skip user prompt, apply adjusted verdict
-  GUARD: not auto_confirm → AskUserQuestion with override options
+  GUARD: not auto_confirm → user prompt with override options
   GUARD: post-reground + drifted + confidence_score >= 60 → A_REGROUND_HALT（漂移熔断为安全门，auto_confirm 不跳过）
 
 S_AMEND_GOAL:
   → S_DISPATCH      WHEN: change applied + user confirmed    DO: A_AMEND_GOAL
   → END             WHEN: user cancels
-  GUARD: RISK_LEVEL=high → auto_confirm 无效，必须 AskUserQuestion
+  GUARD: RISK_LEVEL=high → auto_confirm 无效，必须 user prompt
 
 S_FALLBACK:
-  → S_PARSE_ROUTE   WHEN: user provides input               DO: AskUserQuestion
+  → S_PARSE_ROUTE   WHEN: user provides input               DO: user prompt
   → END             WHEN: user cancels
 
 </transitions>
@@ -203,7 +202,7 @@ S_FALLBACK:
 | 3 | 未派生 → 取最新 in-progress artifact 的 phase | false |
 | 4 | 仍无 → state.json 首个 incomplete phase | false |
 | 5 | position 将是 brainstorm/blueprint/init/roadmap/analyze-macro → phase = null | n/a |
-| 6 | 仍模糊 → `AskUserQuestion` | 由用户回答确定 |
+| 6 | 仍模糊 → `user prompt` | 由用户回答确定 |
 
 **D-007 Phase→Milestone 反查**（数字 phase 已解析时）：
 ```
@@ -317,9 +316,9 @@ wants_roadmap = (--roadmap flag)
 | intent 显式指定 phase 编号（如 "phase 2"、"P3"） | `independent` | 用户明确针对单个 phase |
 | milestone 仅含 1 个 phase（读 state.json） | `independent` | 统一无意义 |
 | milestone 含多个 phase + `auto_confirm` | `unified` | 自动模式倾向高效 |
-| milestone 含多个 phase + 非 `auto_confirm` | → AskUserQuestion | 征询用户选择 |
+| milestone 含多个 phase + 非 `auto_confirm` | → user prompt | 征询用户选择 |
 
-**AskUserQuestion** (仅当 milestone 含 ≥2 phase 且非 auto_confirm):
+**user prompt** (仅当 milestone 含 ≥2 phase 且非 auto_confirm):
 
 ```
 question: "当前里程碑含 {N} 个 phase，选择规划模式？"
@@ -346,7 +345,7 @@ Runs once before chain build; additive to status.json. 设 `session.decompositio
 | named single file/function/bug, "fix X", "add Y to Z" | narrow | skip — auto-derive |
 | otherwise | medium | clarify unless auto_confirm |
 
-**2. Clarify boundary** (broad/medium) — `AskUserQuestion`, ≤3 rounds, options pre-filled from intent + a quick Glob/Grep scan of the target module:
+**2. Clarify boundary** (broad/medium) — `user prompt`, ≤3 rounds, options pre-filled from intent + a quick Glob/Grep scan of the target module:
 
 | Round | Question | Drives |
 |-------|----------|--------|
@@ -632,7 +631,7 @@ GUARD: `task_decomposition` 存在（周期触发，见 build rule 5.5）
    - 把下一个未完成的 `plan` step 改为 `maestro-plan --from analyze:{analyze_macro_id}`，去掉 `{phase}`，`source_artifact_ref = analyze:{analyze_macro_id}`
    - 后续 `execute` 等沿用同一 standalone scope（不带 `{phase}`，由 plan 写出的 task 列表驱动）
 4. 路径 C（`unknown`）：
-   - 非 auto_confirm → AskUserQuestion 二选一（roadmap 多发布 / 单一计划）；auto_confirm → 默认路径 B（单一计划，不引入 roadmap）
+   - 非 auto_confirm → user prompt 二选一（roadmap 多发布 / 单一计划）；auto_confirm → 默认路径 B（单一计划，不引入 roadmap）
 5. Reindex steps，标 decision completed，write status.json
 6. Display: ◆ Scope verdict: {verdict} → {kept|collapsed to standalone via analyze:{ANL_ID}}
 
@@ -668,12 +667,12 @@ GUARD: `task_decomposition` 存在（周期触发，见 build rule 5.5）
 | Phase | 行为 | 产出 |
 |-------|------|------|
 | 1. 快照 | 读 `task_decomposition` + `boundary_contract` + 已完成 steps 的 `completion_summary` | Display: 目标列表 + 进度 |
-| 2. 解析 | `change_request` 非空 → 直接用；为空 → AskUserQuestion（修改/新增/移除/调整边界） | `change_type` + `change_request` |
+| 2. 解析 | `change_request` 非空 → 直接用；为空 → user prompt（修改/新增/移除/调整边界） | `change_type` + `change_request` |
 | 3. Mini Grill | `maestro delegate --to {session.cli_tool} --mode analysis`：评估影响 | RISK_LEVEL + AFFECTED_GOALS + INVALIDATED_STEPS + NEW_GAPS |
-| 4. 确认 | AskUserQuestion：应用并继续 / 仅改目标 / 取消 | 用户选择 |
+| 4. 确认 | user prompt：应用并继续 / 仅改目标 / 取消 | 用户选择 |
 | 5. 应用 | 归档旧目标（`superseded`）→ 写入新目标（`origin: CHG-xxx`）→ 重建链路 → write status.json | handoff ralph-execute |
 
-GUARD: `RISK_LEVEL == high` → AskUserQuestion 不跳过（auto_confirm 无效）
+GUARD: `RISK_LEVEL == high` → user prompt 不跳过（auto_confirm 无效）
 GUARD: 已完成（`status: "done"`）的目标不可 supersede（skip + warn）
 
 </actions>

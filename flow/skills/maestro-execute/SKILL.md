@@ -1,7 +1,7 @@
 ---
 name: maestro-execute
 description: "Use when a confirmed plan is ready for implementation Arguments: [milestone] [--auto-commit] [--method agent|cli|auto] [--executor <tool>] [--dir <path>] [-y]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,14 +9,11 @@ Execute confirmed plan tasks via wave-based parallel dispatch.
 Consumes plan from maestro-plan; registers EXC artifact in state.json.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/execute.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/execute.md` before proceeding.
 
-<deferred_reading>
-- [task.json](~/.maestro/templates/task.json) — read when reading task definitions
-- [state.json](~/.maestro/templates/state.json) — read when registering artifact
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [task.json](~/.pi/agent/packages/pi-maestro-flow/templates/task.json) — read when reading task definitions
+> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
 
 <context>
 $ARGUMENTS — milestone number, or no args for current milestone, with optional flags.
@@ -26,7 +23,7 @@ $ARGUMENTS — milestone number, or no args for current milestone, with optional
 | Flag | Effect | Default |
 |------|--------|---------|
 | `--auto-commit` | Auto-commit after each completed task | false |
-| `--method agent\|cli\|auto` | Execution method: Agent tool, CLI delegate, or auto-select | `auto` |
+| `--method agent\|cli\|auto` | Execution method: teammate tool, CLI delegate, or auto-select | `auto` |
 | `--executor <tool>` | Explicit executor tool for CLI delegate mode | First enabled in config |
 | `--dir <path>` | Execute a specific plan directory instead of auto-discovery | — |
 | `-y` / `--yes` | Auto mode — skip ALL interactive questions (executor selection, wave progression, blocked prompts) | false |
@@ -63,7 +60,7 @@ Bash("maestro collab preflight --phase <phase-number>")
 ```
 If exit code is 1, present warnings and ask whether to proceed.
 
-Follow '~/.maestro/workflows/execute.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/execute.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 
@@ -82,7 +79,7 @@ Follow '~/.maestro/workflows/execute.md' completely.
 - IF all tasks in a wave failed: halt wave progression, report E005 with per-task failure reasons. Do NOT proceed to next wave — downstream waves depend on current wave outputs.
 - IF cascading failure (wave N fails → wave N+1 has unmet dependencies): mark all dependent tasks in subsequent waves as `blocked` with reason `"upstream_wave_failed"`. Skip blocked waves and proceed to completion with partial results.
 - `-y` mode: auto-skip blocked waves without prompting, log warning W002.
-- Non `-y` mode: `AskUserQuestion` with options [retry wave / skip and continue / abort execution].
+- Non `-y` mode: `user prompt` with options [retry wave / skip and continue / abort execution].
 
 **GATE 3: All Tasks → Completion**
 - REQUIRED: All waves executed in dependency order (or explicitly skipped via Gate 2.5).
@@ -127,7 +124,7 @@ For each completed/failed TASK with issue_id:
     all task_refs completed → proposed issue.status = "resolved"
     any task_ref failed    → proposed issue.status = "in_progress"
   IF NOT auto_mode (-y):
-    AskUserQuestion: "Update issue {issue_id} status to {proposed_status}?" [Yes / Skip]
+    user prompt: "Update issue {issue_id} status to {proposed_status}?" [Yes / Skip]
     IF Skip → continue to next task without writing
   Append history entry: { action: "executed", at: <ISO>, by: "maestro-execute", summary: "TASK-{NNN} {status}" }
   Write updated issue back to issues.jsonl

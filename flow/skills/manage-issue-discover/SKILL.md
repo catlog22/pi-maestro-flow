@@ -1,27 +1,24 @@
 ---
 name: manage-issue-discover
 description: "Discover issues via multi-perspective analysis Arguments: [multi-perspective | by-prompt <prompt>] [-y] [--scope <glob>] [--depth standard|deep]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 Automated issue discovery: multi-perspective (8 perspectives) or prompt-driven. Deduplicates and records to `issues.jsonl`. For CRUD operations, use `/manage-issue`.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/issue-discover.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/issue-discover.md` before proceeding.
 
-<deferred_reading>
-- [issue.json template](~/.maestro/templates/issue.json) — read when creating issue records from findings (Step 6/11)
-- [search-tools](~/.maestro/templates/search-tools.md) — search tool priority, passed to agents via workflow
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [issue.json template](~/.pi/agent/packages/pi-maestro-flow/templates/issue.json) — read when creating issue records from findings (Step 6/11)
+> - [search-tools](~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md) — search tool priority, passed to agents via workflow
 
 <context>
 $ARGUMENTS -- optional. Parse first token to determine mode.
 
 **Modes:**
-- _(empty)_ -- interactive mode selection (AskUserQuestion)
+- _(empty)_ -- interactive mode selection (user prompt)
 - `multi-perspective` -- 8-perspective parallel agent scan
 - `by-prompt "..."` -- prompt-driven iterative agent exploration (CLI-planned)
 
@@ -52,11 +49,11 @@ $ARGUMENTS -- optional. Parse first token to determine mode.
 
 <execution>
 Determine mode from $ARGUMENTS:
-- No arguments or empty → interactive selection via AskUserQuestion
+- No arguments or empty → interactive selection via user prompt
 - First token is `multi-perspective` → multi-perspective mode
 - First token is `by-prompt` → prompt-driven mode, remaining tokens are the user prompt
 
-Follow '~/.maestro/workflows/issue-discover.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/issue-discover.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

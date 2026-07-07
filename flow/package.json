@@ -1,7 +1,7 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.2.0",
-  "description": "Pi extension for Maestro workflow orchestration — explore, delegate, MOA tools, 113 skills, and 28 agent definitions",
+  "version": "0.3.0",
+  "description": "Pi extension for Maestro workflow orchestration — explore, delegate, MOA tools, 113 skills, 82 workflow docs, and 28 agent definitions",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -13,12 +13,15 @@
     "delegate",
     "moa",
     "workflow",
-    "orchestration"
+    "orchestration",
+    "skills"
   ],
   "files": [
     "src/**/*.ts",
     "agents/",
     "skills/",
+    "workflows/",
+    "templates/",
     "README.md"
   ],
   "pi": {
@@ -30,7 +33,7 @@
     ]
   },
   "dependencies": {
-    "pi-maestro-teammate": "0.1.0",
+    "pi-maestro-teammate": "^0.1.0",
     "@earendil-works/pi-tui": "0.74.0",
     "typebox": "1.1.24"
   },
@@ -54,5 +57,11 @@
     "@earendil-works/pi-agent-core": "0.74.0",
     "@earendil-works/pi-ai": "0.74.0",
     "@earendil-works/pi-coding-agent": "0.74.0"
+  },
+  "maestro": {
+    "required": true,
+    "minVersion": "1.0.0",
+    "features": ["search", "load", "delegate", "explore"],
+    "installUrl": "https://github.com/catlog22/maestro2"
   }
 }

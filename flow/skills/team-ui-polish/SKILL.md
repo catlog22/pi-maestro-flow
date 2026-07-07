@@ -1,7 +1,7 @@
 ---
 name: team-ui-polish
 description: "Unified team skill for UI polish. Auto-discover and fix UI design issues using Impeccable design standards. Anti-AI-slop detection, color/typography/spacing quality, motion, interaction states, visual hierarchy. Uses team-worker agent architecture. Triggers on \"team ui polish\", \"ui polish\", \"design polish\"."
-allowed-tools: Agent AskUserQuestion Read Write Edit Bash Glob Grep TaskList TaskGet TaskUpdate TaskCreate TeamCreate TeamDelete SendMessage mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__maestro__team_msg mcp__chrome-devtools__evaluate_script mcp__chrome-devtools__take_screenshot mcp__chrome-devtools__navigate_page mcp__chrome-devtools__resize_page
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__chrome-devtools__evaluate_script mcp__chrome-devtools__take_screenshot mcp__chrome-devtools__navigate_page mcp__chrome-devtools__resize_page maestro
 ---
 
 # Team UI Polish
@@ -67,7 +67,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker for <task-id>",
   team_name: "ui-polish",

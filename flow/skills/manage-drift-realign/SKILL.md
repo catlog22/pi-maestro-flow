@@ -1,22 +1,19 @@
 ---
 name: manage-drift-realign
 description: "Detect and realign .workflow/ artifact drift against code reality after refactoring Arguments: [--scope <roadmap|spec|codebase|state|issue|knowhow|project|all>] [--since YYYY-MM-DD|commit|HEAD~N] [--depth shallow|deep] [--dry-run] [--report] [--auto-archive] [--interactive]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 检测代码重构/增量变更后，代码现实与 .workflow/ 文档之间的漂移。互补于 `manage-knowledge-audit`（检测知识存储内部矛盾）。本命令通过 git 时间线 + session 历史检测 code↔document 漂移。
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/drift-realign.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/drift-realign.md` before proceeding.
 
-<deferred_reading>
-- ~/.maestro/workflows/knowledge-audit.md (交叉引用已有审计发现)
-- ~/.maestro/workflows/sync.md (codebase 文档严重漂移时自动触发)
-- ~/.maestro/workflows/codebase-rebuild.md (sync 不足时的回退方案)
-</deferred_reading>
+> **Reference files** (read when needed):
+> - ~/.pi/agent/packages/pi-maestro-flow/workflows/knowledge-audit.md (交叉引用已有审计发现)
+> - ~/.pi/agent/packages/pi-maestro-flow/workflows/sync.md (codebase 文档严重漂移时自动触发)
+> - ~/.pi/agent/packages/pi-maestro-flow/workflows/codebase-rebuild.md (sync 不足时的回退方案)
 
 <context>
 Arguments: $ARGUMENTS
@@ -65,7 +62,7 @@ Arguments: $ARGUMENTS
 </invariants>
 
 <execution>
-Follow `~/.maestro/workflows/drift-realign.md` Stages 1-9 in order.
+Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/drift-realign.md` Stages 1-9 in order.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 
@@ -100,7 +97,7 @@ Follow `~/.maestro/workflows/drift-realign.md` Stages 1-9 in order.
 
 ### Platform Inquiry（Stage 2a，交互式）
 
-当 `session_summary.by_platform` 包含多个平台且 session 总量 > 20 时，使用 AskUserQuestion 询问用户修改主要在哪个平台进行。用户选择后以 `--platform` 参数重新获取 timeline，缩小后续分析范围。
+当 `session_summary.by_platform` 包含多个平台且 session 总量 > 20 时，使用 user prompt 询问用户修改主要在哪个平台进行。用户选择后以 `--platform` 参数重新获取 timeline，缩小后续分析范围。
 
 ### Session 详情加载策略（Stage 2b）
 

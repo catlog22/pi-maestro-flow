@@ -1,16 +1,14 @@
 ---
 name: manage-status
 description: "Show project dashboard with progress and next steps Arguments: "
-allowed-tools: Read Bash Glob Grep
+allowed-tools: Read Bash Glob Grep maestro
 ---
 
 <purpose>
 Project dashboard: artifact progress, task counts, active work, next-step suggestions.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/status.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/status.md` before proceeding.
 
 <context>
 $ARGUMENTS (no arguments required)
@@ -33,7 +31,7 @@ $ARGUMENTS (no arguments required)
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/status.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/status.md' completely.
 
 Next-step decision table defined in workflow status.md Step 5.
 

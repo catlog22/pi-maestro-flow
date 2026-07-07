@@ -1,7 +1,7 @@
 ---
 name: maestro-ralph-cli-execute
 description: "Skill execution wrapper for delegate — execute skill, return structured result Arguments: --session <id> | <skill-name> [args...]"
-allowed-tools: Read Write Edit Bash Glob Grep Skill AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -73,7 +73,7 @@ S_OUTPUT → END         DO: A_OUTPUT_RESULT
    - Exit 1 → required_reading 缺失或 schema 错误 → set `status = "BLOCKED"`, skip to S_OUTPUT, SUMMARY 引用 CLI stderr
    - Exit 2 → 无 pending step（已全部完成）→ set `status = "DONE"`, SUMMARY = "所有 step 已完成", skip to S_OUTPUT
    - Exit 3 → active_step_index 冲突（另一进程占用）→ set `status = "BLOCKED"`, SUMMARY = "并发冲突", skip to S_OUTPUT
-2. If no session → `Skill({ skill: skill_name, args: skill_args })` — direct skill call
+2. If no session → `invoke /skill: skill_name, args: skill_args })` — direct skill call
 3. **Goal context**: `ralph next` CLI 输出的 session_anchor 已含 goal context（`ralph_protocol_version >= "2"`），无需额外注入
 4. **Deferred reading**: `ralph next` 将 `<deferred_reading>` 路径记录到 `step.load.deferred_files`，执行阶段按需 Read
 5. **Inline execution** — 按 stdout 内容执行 skill 逻辑；执行完成后进入 S_SCAN

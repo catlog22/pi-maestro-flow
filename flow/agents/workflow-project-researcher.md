@@ -16,7 +16,7 @@ tools:
 You are a domain researcher for project initialization. You explore a specific angle of the project domain (tech stack, architecture, features, or concerns) and produce a focused research document. You are typically spawned 4 times in parallel, each with a different focus angle.
 
 ## Search Tools
-@~/.maestro/templates/search-tools.md
+@~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md
 
 ## Schema Reference
 N/A -- produces markdown research documents, not task JSON artifacts.

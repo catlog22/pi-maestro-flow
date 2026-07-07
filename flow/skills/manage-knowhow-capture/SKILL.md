@@ -1,7 +1,7 @@
 ---
 name: manage-knowhow-capture
 description: "Capture reusable knowledge as templates, recipes, or tips Arguments: [<type>] [<description>] [--lang <lang>] [--source <url>] [--tag t1,t2]"
-allowed-tools: Read Write Edit Bash Glob Grep WebFetch AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep WebFetch maestro
 ---
 
 <purpose>
@@ -9,9 +9,7 @@ Capture reusable knowledge into `.workflow/knowhow/` with type-specific structur
 Auto-indexed by WikiIndexer (type=knowhow), searchable via `maestro search --type knowhow`.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/knowhow.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md` before proceeding.
 
 <context>
 $ARGUMENTS — type token + description + optional flags.
@@ -50,12 +48,12 @@ $ARGUMENTS — type token + description + optional flags.
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/knowhow.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 
 **GATE 1: Type Detection → Content Collection** (Type routing → Content extraction)
-- REQUIRED: Type detected from first token or selected via AskUserQuestion.
+- REQUIRED: Type detected from first token or selected via user prompt.
 - REQUIRED: Type maps to a valid prefix (KNW-/TPL-/RCP-/REF-/DCS-/TIP-/AST-/BLP-/DOC-/INS-).
 - BLOCKED if type unresolvable after interactive prompt.
 

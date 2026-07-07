@@ -1,7 +1,7 @@
 ---
 name: team-arch-opt
 description: "Unified team skill for architecture optimization. Uses team-worker agent architecture with role directories for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team arch-opt\"."
-allowed-tools: Agent TaskCreate TaskList TaskGet TaskUpdate TeamCreate TeamDelete SendMessage AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Architecture Optimization
@@ -66,7 +66,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "arch-opt",

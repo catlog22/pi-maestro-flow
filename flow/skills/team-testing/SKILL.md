@@ -1,7 +1,7 @@
 ---
 name: team-testing
 description: "Unified team skill for testing team. Progressive test coverage through Generator-Critic loops, shared memory, and dynamic layer selection. Triggers on \"team testing\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Testing
@@ -59,7 +59,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "testing",
@@ -99,7 +99,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 When pipeline completes, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Testing pipeline complete. What would you like to do?",
     header: "Completion",

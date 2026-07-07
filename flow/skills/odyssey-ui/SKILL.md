@@ -1,10 +1,10 @@
 ---
 name: odyssey-ui
 description: "Long-running UI optimization cycle — visual survey, multi-dimensional audit, divergent exploration, fix, verify, generalize, and design knowledge persistence Arguments: <target> [--dimensions <list>] [--fix-threshold <severity>] [--skip-fix] [--skip-generalize] [--auto] [-y] [-c] [--heartbeat]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
-<base>@~/.maestro/workflows/odyssey-base.md</base>
+<base>`~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>`
 
 <purpose>
 survey → 6-dimension audit → divergent exploration → fix → verify → generalize → discover → persist.
@@ -138,7 +138,7 @@ S_INTAKE → S_SURVEY → S_AUDIT → S_DIVERGE → S_FIX → S_VERIFY → S_GEN
 <transitions>
 S_INTAKE → S_INTAKE       : -c + session found → A_RESUME
 S_INTAKE → S_SURVEY       : target resolved → A_INTAKE
-S_INTAKE → S_INTAKE       : no target → AskUserQuestion
+S_INTAKE → S_INTAKE       : no target → user prompt
 
 S_SURVEY  → S_AUDIT       : complete
 S_AUDIT   → S_DIVERGE     : complete
@@ -221,7 +221,7 @@ Commit: `"odyssey-ui({slug}): DIVERGE — creative exploration"`
 Skip if `--skip-fix`.
 1. **Exhaustive fix**: ALL findings/ideas by priority tier (critical → high → medium → low + high-impact ideas). After each tier, re-review — new findings append.
 2. Each fix → evidence phase=fix
-3. Normal: AskUserQuestion per-fix | `-y`: auto-proceed, record `deferred`
+3. Normal: user prompt per-fix | `-y`: auto-proceed, record `deferred`
 
 Commit: `"odyssey-ui({slug}): FIX — implement improvements"`
 
@@ -291,7 +291,7 @@ Commit: `"odyssey-ui({slug}): GENERALIZE — pattern scan complete"`
    | risk + design decision needed | Create issue |
    | safe | Skip with logged per-item reason |
 
-   Normal: AskUserQuestion per hit | `-y`: auto-fix with template, create issue for rest
+   Normal: user prompt per hit | `-y`: auto-fix with template, create issue for rest
 
 3. **Cross-phase loops:** `loops >= max_loops` → must log per-item reasons, advance to S_RECORD.
 
@@ -307,12 +307,12 @@ Commit: `"odyssey-ui({slug}): DISCOVER — sibling triage complete"`
    - Accessibility rule: WCAG requirement + implementation approach → `/spec-add ui`
    - Reusable generalization pattern: signature + application scope → `/spec-add coding`
 
-2. Mark G7 done. Pending decisions: Normal → AskUserQuestion | `-y` → skip (show deferred count).
+2. Mark G7 done. Pending decisions: Normal → user prompt | `-y` → skip (show deferred count).
 
 3. **Goal audit (hardened):**
    - `done` → confirmed
    - `skipped` → confirmed ONLY if corresponding `skip_when` flag is true
-   - **Hard rule:** G5 and G6 CANNOT be `skipped` unless `skip_generalize == true`. Pending without flag → `failed` (Normal: AskUserQuestion | `-y`: record `failed`)
+   - **Hard rule:** G5 and G6 CANNOT be `skipped` unless `skip_generalize == true`. Pending without flag → `failed` (Normal: user prompt | `-y`: record `failed`)
    - `phase_goals_all_done = true` only when all goals pass this audit
 
 4. `current_state = "COMPLETED"`, emit completion summary.
@@ -343,8 +343,8 @@ Commit: `"odyssey-ui({slug}): RECORD — summary and knowledge persistence"`
 
 | Decision Point | Normal | `-y` |
 |---------------|--------|------|
-| A_FIX improvement confirmation | AskUserQuestion | auto-proceed, deferred |
-| A_DISCOVER hit routing | AskUserQuestion | auto-fix with template, create issue for rest |
+| A_FIX improvement confirmation | user prompt | auto-proceed, deferred |
+| A_DISCOVER hit routing | user prompt | auto-fix with template, create issue for rest |
 
 ### Goal Prompt convergence rules
 
@@ -352,7 +352,7 @@ Commit: `"odyssey-ui({slug}): RECORD — summary and knowledge persistence"`
 Stop when audit + diverge findings all addressed (fix/issue/decision),
 phase_goals_all_done=true. Fix by impact x severity per tier.
 Re-review after each tier — new findings append and continue.
-Pending decisions must AskUserQuestion — no self-resolve.
+Pending decisions must user prompt — no self-resolve.
 ```
 
 </appendix>

@@ -1,7 +1,7 @@
 ---
 name: team-ultra-analyze
 description: "Deep collaborative analysis team skill. Multi-role investigation with coordinator-driven synthesis. Triggers on \"team ultra-analyze\", \"team analyze\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Ultra Analyze
@@ -74,7 +74,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "ultra-analyze",
@@ -136,7 +136,7 @@ Execute built-in Phase 1 (task discovery, owner=<agent-name>) -> role Phase 2-4 
 When pipeline completes, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Ultra-Analyze pipeline complete. What would you like to do?",
     header: "Completion",
@@ -154,7 +154,7 @@ AskUserQuestion({
 |--------|--------|
 | Archive & Clean | Update session status="completed" -> TeamDelete() -> output final summary |
 | Keep Active | Update session status="paused" -> output resume instructions |
-| Export Results | AskUserQuestion for target path -> copy deliverables -> Archive & Clean |
+| Export Results | user prompt for target path -> copy deliverables -> Archive & Clean |
 
 ## Specs Reference
 

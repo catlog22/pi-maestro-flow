@@ -1,7 +1,7 @@
 ---
 name: maestro-fork
 description: "Create or sync milestone worktree for parallel dev Arguments: -m <milestone-number> [--base <branch>] [--sync]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,14 +9,11 @@ Create or sync a milestone-level git worktree for parallel development.
 Supports `--sync` mode to pull latest main changes into an active worktree.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/fork.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/fork.md` before proceeding.
 
-<deferred_reading>
-- [worktrees.json](~/.maestro/templates/worktrees.json) — read when updating registry
-- [worktree-scope.json](~/.maestro/templates/worktree-scope.json) — read when writing scope marker
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [worktrees.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktrees.json) — read when updating registry
+> - [worktree-scope.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktree-scope.json) — read when writing scope marker
 
 <context>
 $ARGUMENTS -- milestone number and optional flags.
@@ -25,7 +22,7 @@ Modes (`Fork` / `Sync`), flags (`-m`, `--base`, `--sync`), milestone resolution,
 </context>
 
 <execution>
-Follow '~/.maestro/workflows/fork.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/fork.md' completely.
 
 Fork and sync algorithm steps are defined in workflow `fork.md`.
 
@@ -45,7 +42,7 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 - BLOCKED if missing: worktree creation failed or shared files not copied — do not proceed to artifact scoping.
 
 **GATE 3: Artifact Copy → Completion**
-- REQUIRED: AskUserQuestion confirmation before registry writes — show milestone scope, worktree path, and state entries to be written. User must confirm or abort.
+- REQUIRED: user prompt confirmation before registry writes — show milestone scope, worktree path, and state entries to be written. User must confirm or abort.
 - REQUIRED: `worktree-scope.json` written with milestone scope (after confirmation).
 - REQUIRED: Scoped `state.json` written (only this milestone's artifacts) (after confirmation).
 - REQUIRED: `worktrees.json` registry updated in main worktree (after confirmation).
@@ -67,7 +64,7 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 |-----------|-----------|
 | Fork complete | `cd {wt.path} && /maestro-analyze` |
 | Fork + automated | `maestro delegate "run full lifecycle for milestone" --cd {wt.path} --mode write` |
-| Fork + status check | Skill({ skill: "manage-status" }) |
+| Fork + status check | invoke /skill: "manage-status" }) |
 | Sync complete | Resume work in worktree |
 | Sync conflicts found | Resolve manually, then retry |
 </completion>

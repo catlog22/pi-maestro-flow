@@ -1,0 +1,48 @@
+{
+  "workflow": {
+    "research": true,
+    "reflection": true
+  },
+
+  "execution": {
+    "method": "auto",
+    "auto_commit": true,
+    "default_executor": ""
+  },
+
+  "git": {
+    "commit_docs": true
+  },
+
+  "gates": {
+    "confirm_roadmap": true,
+    "confirm_plan": true
+  },
+
+  "codebase": {
+    "auto_sync_after_execute": true
+  },
+
+  "guard": {
+    "enabled": false,
+    "mode": "allow",
+    "paths": []
+  },
+
+  "collab": {
+    "preflight_mode": "warn",
+    "preflight_window_min": 30,
+    "auto_preflight": true
+  },
+
+  "specInjection": {},
+
+  "dashboard": {
+    "port": 3001
+  },
+
+  "worktree": {
+    "root": ".worktrees",
+    "branch_prefix": "milestone/"
+  }
+}

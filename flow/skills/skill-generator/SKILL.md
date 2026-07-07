@@ -1,7 +1,7 @@
 ---
 name: skill-generator
 description: "Meta-skill for creating new Claude Code skills with configurable execution modes. Supports sequential (fixed order) and autonomous (stateless) phase patterns. Use for skill scaffolding, skill creation, or building new workflows. Triggers on \"create skill\", \"new skill\", \"skill generator\"."
-allowed-tools: Agent AskUserQuestion Read Bash Glob Grep Write
+allowed-tools: teammate Read Bash Glob Grep Write maestro
 ---
 
 # Skill Generator
@@ -150,7 +150,7 @@ Phase 0: Specification Study (MANDATORY - Must complete before proceeding)
 
 Phase 1: Requirements Discovery
    - Gather skill requirements via user interaction
-   - Tool: AskUserQuestion
+   - Tool: user prompt
    - Collect: Skill name, purpose, execution mode
    - Collect: Phase/Action definition
    - Collect: Tool dependencies, output format
@@ -217,7 +217,7 @@ Read('.claude/skills/_shared/SKILL-DESIGN-SPEC.md');
 Read('.claude/skills/skill-generator/templates/*.md'); // All templates
 
 // Phase 1: Gather requirements
-const answers = AskUserQuestion({
+const answers = ask user ({
   questions: [
     { question: "Skill name?", header: "Name", options: [...] },
     { question: "Execution mode?", header: "Mode", options: ["Sequential", "Autonomous"] }

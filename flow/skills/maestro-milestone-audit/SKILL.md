@@ -1,7 +1,7 @@
 ---
 name: maestro-milestone-audit
 description: "Audit current milestone for cross-phase integration gaps Arguments: [<milestone>]"
-allowed-tools: Read Write Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,9 +9,7 @@ Audit milestone for phase coverage, execution completeness, and integration gaps
 Produces audit-report.md with PASS/FAIL verdict.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/milestone-audit.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-audit.md` before proceeding.
 
 <context>
 Milestone: $ARGUMENTS (optional -- defaults to current_milestone from state.json).
@@ -40,7 +38,7 @@ If $ARGUMENTS is empty AND current_milestone is null → raise E001 with message
 </context>
 
 <execution>
-Follow '~/.maestro/workflows/milestone-audit.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-audit.md' completely.
 
 Audit checklist steps (phase coverage, ad-hoc completeness, execution completeness, cross-artifact integration) are defined in workflow `milestone-audit.md`.
 

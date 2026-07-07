@@ -1,7 +1,7 @@
 ---
 name: spec-load
 description: "Load specs and lessons for current context Arguments: [--scope <scope>] [--category <category>] [--keyword <word>]"
-allowed-tools: Read Bash Glob Grep
+allowed-tools: Read Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -10,9 +10,7 @@ Category-based loading: loads the category's primary doc in full + matching entr
 By default, loads from both global (~/.maestro/specs/) and project (.workflow/specs/) layers.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/specs-load.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-load.md` before proceeding.
 
 <context>
 $ARGUMENTS -- optional flags and keyword
@@ -63,7 +61,7 @@ Use the load command to read the full referenced document.
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/specs-load.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/specs-load.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

@@ -1,7 +1,7 @@
 ---
 name: team-roadmap-dev
 description: "Unified team skill for roadmap-driven development workflow. Coordinator discusses roadmap with user, then dispatches phased execution pipeline (plan -> execute -> verify). All roles invoke this skill with --role arg. Triggers on \"team roadmap-dev\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Roadmap Dev
@@ -72,7 +72,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "roadmap-dev",
@@ -138,7 +138,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 When the pipeline completes:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Roadmap Dev pipeline complete. What would you like to do?",
     header: "Completion",

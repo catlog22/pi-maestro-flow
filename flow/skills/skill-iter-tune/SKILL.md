@@ -1,7 +1,7 @@
 ---
 name: skill-iter-tune
 description: "Iterative skill tuning via execute-evaluate-improve feedback loop. Uses maestro delegate Claude to execute skill, Agy to evaluate quality, and Agent to apply improvements. Iterates until quality threshold or max iterations. Triggers on \"skill iter tune\", \"iterative skill tuning\", \"tune skill\"."
-allowed-tools: Skill Agent AskUserQuestion TaskCreate TaskUpdate TaskList Read Write Edit Bash Glob Grep
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Skill Iter Tune
@@ -70,7 +70,7 @@ if (autoYes) {
     executionMode: 'single'
   }
 } else {
-  const prefResponse = AskUserQuestion({
+  const prefResponse = ask user ({
     questions: [
       {
         question: "选择迭代调优配置：",
@@ -96,7 +96,7 @@ if (autoYes) {
   workflowPreferences = { autoYes: false, ...configMap[selected] }
 
   // ★ Mode selection: chain vs single
-  const modeResponse = AskUserQuestion({
+  const modeResponse = ask user ({
     questions: [{
       question: "选择调优模式：",
       header: "Tune Mode",

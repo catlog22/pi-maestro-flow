@@ -1,7 +1,7 @@
 ---
 name: maestro-ralph-execute
 description: "Execute next pending step in ralph session Arguments: [-y] [session-id]"
-allowed-tools: Read Write Edit Bash Glob Grep Skill
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -31,7 +31,7 @@ Also read `session.auto_mode` from status.json — if true, treat as `-y`.
 
 HARD RULES:
 - 执行 step：**统一通过 `maestro ralph next` CLI 加载**。CLI 负责读 command_path、解析 `<required_reading>` + `<deferred_reading>`、拼接 prompt、写 `step.load.*` + `active_step_index` + `step.status="running"`。不要再在会话里手动 Read + 解析 required_reading
-- decision step：A_EXEC_DECISION 通过 `Skill({ skill: "maestro-ralph" })` handoff 给 ralph 评估（不走 CLI）
+- decision step：A_EXEC_DECISION 通过 `invoke /skill: "maestro-ralph" })` handoff 给 ralph 评估（不走 CLI）
 - `command_path` 由 ralph 在 A_BUILD_STEPS 写入 status.json（缺失 → ralph next 返回 E006/E007 并拒绝执行）
 - 每个 step 结束必须调用 `maestro ralph complete N --status <S>` 或 `maestro ralph retry N`。STATUS 仅 4 个合法值：`DONE | DONE_WITH_CONCERNS | NEEDS_RETRY | BLOCKED`（**`NEEDS_CONTEXT` 已废除**，context 容量由 harness 自动压缩处理）
 </context>
@@ -203,7 +203,7 @@ Write enriched args + source_artifact_ref back to status.json.
 
 1. Mark step running, write status.json
 2. Display: `[{index}/{total}] ◆ {step.decision} Retry: {retry}/{max}`
-3. `Skill({ skill: "maestro-ralph" })` — ralph 评估 + handoff
+3. `invoke /skill: "maestro-ralph" })` — ralph 评估 + handoff
 4. 执行在此结束
 
 ### A_EXEC_STEP
@@ -271,7 +271,7 @@ Write enriched args + source_artifact_ref back to status.json.
 
 6. **Propagate context signals** — 按 4c checklist 将关键信号写入 `status.json.context`
 
-完成后 S_LOCATE 触发 `Skill({ skill: "maestro-ralph-execute" })` 自调用。
+完成后 S_LOCATE 触发 `invoke /skill: "maestro-ralph-execute" })` 自调用。
 
 ### A_POST_ANALYZE_DRIFT
 

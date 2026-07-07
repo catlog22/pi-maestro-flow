@@ -1,7 +1,7 @@
 ---
 name: maestro-quick
 description: "Quick task execution, skip optional agents Arguments: [description] [--full] [--discuss] [-y]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -10,9 +10,7 @@ Flags --discuss and --full enable additional pipeline stages.
 **Implicit write**: state.json scratch task entry is written automatically as part of workflow tracking (no confirmation gate).
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/quick.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/quick.md` before proceeding.
 
 <context>
 $ARGUMENTS
@@ -40,7 +38,7 @@ Parse for:
 2. **Evidence-based summaries** — task summaries MUST include concrete evidence (files changed, tests run, commands executed); NEVER accept "task completed successfully" as a summary
 3. **Plan before execute** — plan.json MUST be written before any task execution begins; NEVER skip planning even for single-task workflows
 4. **Scratch isolation** — all workflow artifacts MUST live under `.workflow/scratch/{task-dir}/`; NEVER write workflow metadata outside this directory
-5. **Commit confirmation** — staged files and commit message MUST be shown via AskUserQuestion before committing (unless `-y`); NEVER auto-commit without user awareness
+5. **Commit confirmation** — staged files and commit message MUST be shown via user prompt before committing (unless `-y`); NEVER auto-commit without user awareness
 </invariants>
 
 <execution>
@@ -63,7 +61,7 @@ Parse for:
 - REQUIRED: --full verification passed (if flag set).
 - BLOCKED if: any task summary missing or lacking evidence.
 
-Follow '~/.maestro/workflows/quick.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/quick.md' completely.
 
 ### Artifact Verification (before completion)
 
@@ -113,5 +111,5 @@ maestro ralph complete <idx> --status {DONE|DONE_WITH_CONCERNS|NEEDS_RETRY|BLOCK
 - [ ] plan.json written with task definitions
 - [ ] All tasks executed with summaries written
 - [ ] state.json updated with scratch task entry (implicit — part of workflow tracking, no confirmation needed)
-- [ ] Commit created with task changes: stage ONLY files modified by the task (from `.summaries/TASK-*-summary.md` "Files modified" list); confirm with `AskUserQuestion` showing staged files and proposed commit message — unless `-y` is active, in which case auto-commit
+- [ ] Commit created with task changes: stage ONLY files modified by the task (from `.summaries/TASK-*-summary.md` "Files modified" list); confirm with `user prompt` showing staged files and proposed commit message — unless `-y` is active, in which case auto-commit
 </success_criteria>

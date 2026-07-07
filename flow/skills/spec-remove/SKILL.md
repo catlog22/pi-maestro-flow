@@ -1,7 +1,7 @@
 ---
 name: spec-remove
 description: "Remove spec entry by ID Arguments: <entry-id> [--cascade] [-y]"
-allowed-tools: Read Write Edit Bash Glob Grep AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -9,9 +9,7 @@ Remove a `<spec-entry>` from a specs file. Symmetric with `/spec-add`.
 Uses `maestro wiki remove-entry` for atomic removal with index auto-update.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/specs-remove.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/specs-remove.md` before proceeding.
 
 <context>
 $ARGUMENTS -- expects `<entry-id>` (e.g., `spec-learnings-003`, `spec-coding-conventions-001`)
@@ -25,7 +23,7 @@ $ARGUMENTS -- expects `<entry-id>` (e.g., `spec-learnings-003`, `spec-coding-con
 </context>
 
 <invariants>
-1. **Confirmation required** — MUST AskUserQuestion before deletion (unless -y flag); NEVER remove entries silently
+1. **Confirmation required** — MUST user prompt before deletion (unless -y flag); NEVER remove entries silently
 2. **Referential integrity** — before removing, check if other spec entries reference the target entry; warn user if references exist
 3. **Cascade explicit** — ref-type entries MUST NOT cascade-delete the linked knowhow file unless --cascade is explicitly passed; default leaves orphan knowhow intact
 4. **Atomic removal** — use `maestro wiki remove-entry` for atomic operation; NEVER manually edit spec files to remove entries
@@ -34,7 +32,7 @@ $ARGUMENTS -- expects `<entry-id>` (e.g., `spec-learnings-003`, `spec-coding-con
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/specs-remove.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/specs-remove.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

@@ -1,7 +1,7 @@
 ---
 name: team-ux-improve
 description: "Unified team skill for UX improvement. Systematically discovers and fixes UI/UX interaction issues including unresponsive buttons, missing feedback, and state refresh problems. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team ux improve\"."
-allowed-tools: Agent AskUserQuestion Read Write Edit Bash Glob Grep TaskList TaskGet TaskUpdate TaskCreate TeamCreate TeamDelete SendMessage mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file maestro
 ---
 
 # Team UX Improve
@@ -75,7 +75,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker for <task-id>",
   team_name: "ux-improve",
@@ -144,7 +144,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 | Unknown command | Error with available command list |
 | Role not found | Error with role registry |
 | Project path invalid | Re-prompt user for valid path |
-| Framework detection fails | AskUserQuestion for framework selection |
+| Framework detection fails | user prompt for framework selection |
 | Session corruption | Attempt recovery, fallback to manual |
 | Fast-advance conflict | Coordinator reconciles on next callback |
 | No UI issues found | Complete with empty fix list, generate clean bill report |

@@ -1,7 +1,7 @@
 ---
 name: maestro-tools-register
 description: "Register tool specs - extract, generate, or optimize Arguments: [<description>] [--extract <path>] [--optimize <name>]"
-allowed-tools: Read Write Edit Bash Glob Grep AskUserQuestion Agent
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,9 +9,7 @@ Codify reusable business processes as knowhow documents with `tool: true` in `.w
 Four modes: Extract, Generate, Optimize, Promote. Short processes inline; long use ref mode.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/tools-spec.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/tools-spec.md` before proceeding.
 
 <context>
 $ARGUMENTS — Intent description
@@ -31,7 +29,7 @@ $ARGUMENTS — Intent description
 1. **Schema validation** — tool knowhow document MUST include `tool: true`, `category`, `keywords`, and `summary` in YAML frontmatter; missing fields → reject write
 2. **No duplicate names** — tool title MUST be unique within its category; duplicate detection → E002 warning with overwrite/optimize confirmation
 3. **Category required** — every tool MUST declare exactly one category from: coding, test, review, arch, debug; empty category → E003
-4. **Confirmation gate** — MUST AskUserQuestion before writing knowhow document and spec ref entry; NEVER persist without user confirmation
+4. **Confirmation gate** — MUST user prompt before writing knowhow document and spec ref entry; NEVER persist without user confirmation
 5. **Promote is in-place** — promote mode MUST update existing knowhow frontmatter via `maestro wiki update`; NEVER recreate the document
 6. **Output boundary** — ALL file writes MUST target .workflow/knowhow/ (tool documents) and .workflow/specs/ (ref entries via maestro spec add) only. NEVER modify source code or files outside these paths
 7. **Description format** — first line after `### Title` MUST state "Use when ..." (usage timing); this is critical for ref entry summary visibility in spec-load
@@ -44,7 +42,7 @@ $ARGUMENTS — Intent description
 **GATE 1: Parse → Gather**
 - REQUIRED: Mode determined (extract/generate/optimize/promote) from argument parsing.
 - REQUIRED: For optimize/promote modes, target tool/document exists and is loadable.
-- BLOCKED if: empty args without user response to AskUserQuestion.
+- BLOCKED if: empty args without user response to user prompt.
 
 **GATE 2: Gather → Write**
 - REQUIRED: Tool name, category, and usage timing confirmed.
@@ -65,7 +63,7 @@ Parse $ARGUMENTS to determine mode:
 - Contains "optimize/improve" → optimize mode
 - Contains "promote" or references existing knowhow doc (path/ID) → promote mode
 - Other → generate mode
-- Empty → ask user with AskUserQuestion
+- Empty → ask user with user prompt
 
 ### Step 2: Gather Information
 
@@ -75,7 +73,7 @@ Parse $ARGUMENTS to determine mode:
 
 **Generate mode**:
 - Confirm tool name, applicable roles, target scenario
-- If unclear, ask user with AskUserQuestion
+- If unclear, ask user with user prompt
 
 **Optimize mode**:
 - Load existing tool: `maestro search "<name>" --type knowhow` → `maestro load --type knowhow --id <id>`
@@ -121,7 +119,7 @@ Use when {timing/trigger condition}.
 1. Step one ...
 ```
 
-**Confirm before writing** — Use `AskUserQuestion` to show the user the planned knowhow document (title, category, keywords, summary, step count) and spec ref entry before persisting:
+**Confirm before writing** — Use `user prompt` to show the user the planned knowhow document (title, category, keywords, summary, step count) and spec ref entry before persisting:
 
 ```
 question: "确认写入以下 knowhow 工具文档？"

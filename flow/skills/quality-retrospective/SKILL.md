@@ -1,23 +1,20 @@
 ---
 name: quality-retrospective
 description: "Use after completing a phase to extract lessons, patterns, and improvement opportunities Arguments: [phase|N..M] [--lens technical|process|quality|decision] [--all] [--no-route] [--compare N] [-y]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 Post-execution retrospective (复盘): four parallel lenses (technical/process/quality/decision) → distill insights → route to spec/knowhow/issue stores.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/retrospective.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/retrospective.md` before proceeding.
 
-<deferred_reading>
-- @~/.maestro/workflows/issue.md (issues.jsonl schema for auto-creation)
-- @~/.maestro/workflows/learn.md (tip routing via manage-knowhow-capture tip)
-- @~/.maestro/workflows/verify.md (verification.json schema for quality lens parsing)
-- @~/.maestro/workflows/review.md (review.json schema for quality lens parsing)
-</deferred_reading>
+> **Reference files** (read when needed):
+> - `~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md` (issues.jsonl schema for auto-creation)
+> - `~/.pi/agent/packages/pi-maestro-flow/workflows/learn.md` (tip routing via manage-knowhow-capture tip)
+> - `~/.pi/agent/packages/pi-maestro-flow/workflows/verify.md` (verification.json schema for quality lens parsing)
+> - `~/.pi/agent/packages/pi-maestro-flow/workflows/review.md` (review.json schema for quality lens parsing)
 
 <context>
 Arguments: $ARGUMENTS
@@ -44,7 +41,7 @@ Modes (scan/single/range/all) and storage paths defined in workflow retrospectiv
 </invariants>
 
 <execution>
-Follow `~/.maestro/workflows/retrospective.md` Stages 1–8 in order.
+Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/retrospective.md` Stages 1–8 in order.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 
@@ -64,7 +61,7 @@ Follow `~/.maestro/workflows/retrospective.md` Stages 1–8 in order.
 - REQUIRED: `retrospective.json` written with metrics, findings, insights, routing.
 - REQUIRED: `retrospective.md` written (human-readable).
 - REQUIRED: Issue rows match canonical `issues.jsonl` schema (status "open", full fields).
-- REQUIRED: Note tips routed via `Skill({ skill: "manage-knowhow-capture", args: "tip ..." })`.
+- REQUIRED: Note tips routed via `invoke /skill: "manage-knowhow-capture", args: "tip ..." })`.
 - REQUIRED: Unless `-y` flag is set, confirm before each external write (issues.jsonl append, spec-entry append, knowhow-capture). With `-y`, skip all confirmation prompts.
 - BLOCKED if routing incomplete: finish all write operations before reporting.
 
@@ -100,7 +97,7 @@ Follow `~/.maestro/workflows/retrospective.md` Stages 1–8 in order.
 - [ ] If routing enabled (default): every recommendation either created an artifact or was explicitly skipped by user
 - [ ] Spec entries (if any) appended as `<spec-entry>` to matching `.workflow/specs/{category-file}.md`
 - [ ] Issue rows (if any) match canonical issues.jsonl schema (status "open", full issue_history, all required fields)
-- [ ] Note tips (if any) created via `Skill({ skill: "manage-knowhow-capture", args: "tip ..." })`
+- [ ] Note tips (if any) created via `invoke /skill: "manage-knowhow-capture", args: "tip ..." })`
 - [ ] `.workflow/specs/learnings.md` appended with one `<spec-entry>` per insight regardless of routing target
 - [ ] No existing phase artifacts modified (verification.json, review.json, plan.json untouched)
 - [ ] Confirmation banner displays routing counts and next-step suggestions

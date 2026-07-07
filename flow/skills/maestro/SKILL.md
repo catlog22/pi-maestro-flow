@@ -1,7 +1,7 @@
 ---
 name: maestro
 description: "Auto-route intent to optimal command chain Arguments: <intent> [-y] [-c] [--dry-run] [--super]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion TodoWrite
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,10 +9,9 @@ Orchestrate all maestro commands: classify intent → select chain → create se
 Session: `.workflow/.maestro/{session_id}/status.json`.
 </purpose>
 
-<deferred_reading>
-- [maestro.md](~/.maestro/workflows/maestro.md) — read at execution start for intent analysis + chain selection
-- [maestro-super.md](~/.maestro/workflows/maestro-super.md) — read when `--super` flag active
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [maestro.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro.md) — read at execution start for intent analysis + chain selection
+> - [maestro-super.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro-super.md) — read when `--super` flag active
 
 <context>
 $ARGUMENTS — user intent text, or special keywords.
@@ -95,10 +94,10 @@ S_CONFIRM:
   → END           WHEN: user cancels
 
 S_DISPATCH:
-  → END           DO: Skill({ skill: "maestro-ralph-execute" })
+  → END           DO: invoke /skill: "maestro-ralph-execute" })
 
 S_FALLBACK:
-  → S_CLASSIFY    WHEN: user provides new intent           DO: AskUserQuestion
+  → S_CLASSIFY    WHEN: user provides new intent           DO: user prompt
   → END           WHEN: user cancels
 
 </transitions>
@@ -117,7 +116,7 @@ S_FALLBACK:
 
 ### A_CLASSIFY_INTENT
 
-1. Read `~/.maestro/workflows/maestro.md` from deferred_reading
+1. Read `~/.pi/agent/packages/pi-maestro-flow/workflows/maestro.md` from deferred_reading
 2. Match intent to task_type via chain catalog (semantic)
 3. Select chain from chainMap，遵循拓扑约束：
    - 压力测试/拷问/验证假设/grill/stress-test → `grill`（**-y 模式透传 `-y` 到 grill，grill 以 Auto mode 执行，不跳过**）
@@ -133,7 +132,7 @@ S_FALLBACK:
 
 ### A_CLARIFY
 
-1. `AskUserQuestion` with parsed intent + available chain options
+1. `user prompt` with parsed intent + available chain options
 2. Re-classify with user response
 
 ### A_DECOMPOSE_TASKS
@@ -141,7 +140,7 @@ S_FALLBACK:
 设 `session.decomposition_owner = "maestro"`。下游 ralph 只消费不二次提问（invariant 4）。Condensed:
 
 1. 分类意图广度。narrow / 单步 / `{status,init,quick}` 链跳过
-2. broad/medium → `AskUserQuestion` ≤3 轮：Scope / Constraints / Definition of Done
+2. broad/medium → `user prompt` ≤3 轮：Scope / Constraints / Definition of Done
 3. 派生 `execution_criteria` + `task_decomposition`（每个 sub-goal 含 `done_when` + `evidence` + `lifecycle` + `completion_confirmed: false`）
 4. **status.json 唯一真源**：写入 `boundary_contract` / `execution_criteria` / `task_decomposition`；不生成 markdown 清单
 5. 在最后一个 evidence-producing stage（execute/review/test）之后、`milestone-complete` 之前追加 `decision:post-goal-audit`。ralph-execute 在该节点按需动态生长 `steps[]`

@@ -1,7 +1,7 @@
 ---
 name: maestro-ralph-cli
 description: "[LEGACY — prefer maestro-ralph-v2] CLI-delegated lifecycle orchestrator — compose, delegate, analyze, decide in one loop Arguments: <intent> [-y] [--to <tool>] [--amend [change]] [--roadmap] | status | continue"
-allowed-tools: Read Write Edit Bash Glob Grep Skill AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -191,7 +191,7 @@ S_APPLY_VERDICT:
   GUARD: confidence_score < 60 AND proceed → override to fix
   GUARD: confidence_score > 95 AND fix AND retry > 0 → suggest proceed
   GUARD: auto_confirm → skip user prompt, apply adjusted verdict
-  GUARD: not auto_confirm → AskUserQuestion with override options
+  GUARD: not auto_confirm → user prompt with override options
   GUARD: post-reground + drifted + confidence >= 60 → A_REGROUND_HALT（auto_confirm 不跳过）
 
 S_HANDLE_FAIL:
@@ -221,7 +221,7 @@ S_SESSION_DONE:
 | 3 | 未派生 → 取最新 in-progress artifact 的 phase | false |
 | 4 | 仍无 → state.json 首个 incomplete phase | false |
 | 5 | position 将是 brainstorm/blueprint/init/roadmap/analyze-macro → phase = null | n/a |
-| 6 | 仍模糊 → `AskUserQuestion` | 由用户回答确定 |
+| 6 | 仍模糊 → `user prompt` | 由用户回答确定 |
 
 **D-007 Phase→Milestone 反查**（数字 phase 已解析时）：
 ```
@@ -335,9 +335,9 @@ wants_roadmap = (--roadmap flag)
 | intent 显式指定 phase 编号（如 "phase 2"、"P3"） | `independent` | 用户明确针对单个 phase |
 | milestone 仅含 1 个 phase（读 state.json） | `independent` | 统一无意义 |
 | milestone 含多个 phase + `auto_confirm` | `unified` | 自动模式倾向高效 |
-| milestone 含多个 phase + 非 `auto_confirm` | → AskUserQuestion | 征询用户选择 |
+| milestone 含多个 phase + 非 `auto_confirm` | → user prompt | 征询用户选择 |
 
-**AskUserQuestion** (仅当 milestone 含 ≥2 phase 且非 auto_confirm):
+**user prompt** (仅当 milestone 含 ≥2 phase 且非 auto_confirm):
 
 ```
 question: "当前里程碑含 {N} 个 phase，选择规划模式？"
@@ -364,7 +364,7 @@ Runs once before chain build; additive to status.json. 设 `session.decompositio
 | named single file/function/bug, "fix X", "add Y to Z" | narrow | skip — auto-derive |
 | otherwise | medium | clarify unless auto_confirm |
 
-**2. Clarify boundary** (broad/medium) — `AskUserQuestion`, ≤3 rounds, options pre-filled from intent + a quick Glob/Grep scan of the target module:
+**2. Clarify boundary** (broad/medium) — `user prompt`, ≤3 rounds, options pre-filled from intent + a quick Glob/Grep scan of the target module:
 
 | Round | Question | Drives |
 |-------|----------|--------|

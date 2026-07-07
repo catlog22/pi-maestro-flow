@@ -1,7 +1,7 @@
 ---
 name: maestro-tools-execute
 description: "Load and execute tool specs by category or name Arguments: [<tool-name> | --category <category>] [--list]"
-allowed-tools: Read Write Edit Bash Glob Grep AskUserQuestion Agent
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,9 +9,7 @@ Load registered tool documents and execute them step-by-step.
 Direct (by name) or category-based (list + select) invocation.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/tools-spec.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/tools-spec.md` before proceeding.
 
 <context>
 $ARGUMENTS — Tool name, keyword, or --category filter
@@ -28,7 +26,7 @@ Empty arguments enters interactive mode: list all tools for user selection.
 </context>
 
 <invariants>
-1. **Confirmation before execution** — MUST AskUserQuestion before executing tool steps; NEVER auto-execute without user consent
+1. **Confirmation before execution** — MUST user prompt before executing tool steps; NEVER auto-execute without user consent
 2. **Sequential step execution** — steps MUST be executed in defined order; NEVER skip or reorder steps unless user explicitly requests skip
 3. **Blocker escalation** — step failure MUST be reported to user with retry/skip/abort options; NEVER silently skip failed steps
 4. **Read-only tool definition** — tool execution MUST NOT modify the tool's knowhow document or spec entry; only the target codebase is modified per tool steps
@@ -73,7 +71,7 @@ maestro load --type spec --category <category>
 Extract tool entries from the "Available Tools" section in output.
 
 **Empty args**:
-Load all categories, collect tool entries, present to user with AskUserQuestion for selection.
+Load all categories, collect tool entries, present to user with user prompt for selection.
 
 ### Step 2: Display Tool
 
@@ -104,7 +102,7 @@ Follow the tool definition steps in order:
 
 **Blocker handling**:
 - Step fails → report error, ask user: retry / skip / abort
-- Needs user input → AskUserQuestion for parameters
+- Needs user input → user prompt for parameters
 - Prerequisites unmet → show missing items, ask how to proceed
 
 ### Step 5: Report Results

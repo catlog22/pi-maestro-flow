@@ -1,7 +1,7 @@
 ---
 name: maestro-roadmap
 description: "Generate roadmap with milestone/phase structure from requirements or upstream context Arguments: <requirement> [-y] [-c] [-m progressive|direct|auto] [--from <source>] [--from-brainstorm SESSION-ID] [--revise [instructions]] [--review]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -11,13 +11,12 @@ Pipeline: brainstorm/blueprint/analyze → **roadmap** → analyze {milestone} �
 </purpose>
 
 <required_reading>
-@~/.maestro/workflows/roadmap-common.md
-@~/.maestro/templates/roadmap.md
+Read and follow `~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap-common.md`.
+@~/.pi/agent/packages/pi-maestro-flow/templates/roadmap.md
 </required_reading>
 
-<deferred_reading>
-- [roadmap.md](~/.maestro/workflows/roadmap.md) — read for roadmap generation workflow
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [roadmap.md](~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap.md) — read for roadmap generation workflow
 
 <context>
 $ARGUMENTS -- requirement text, @file reference, or upstream context source.
@@ -48,7 +47,7 @@ $ARGUMENTS -- requirement text, @file reference, or upstream context source.
 </context>
 
 <interview_protocol>
-Follows @~/.maestro/workflows/interview-mechanics.md standard.
+Follows `~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md` standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (strict order): mode (create / revise / review) → requirement scope (MVP / complete / phased) → decomposition strategy (progressive / direct / auto) → milestone boundaries → phase dependencies and order
@@ -60,8 +59,8 @@ Follows @~/.maestro/workflows/interview-mechanics.md standard.
 
 <execution>
 
-1. Read `@~/.maestro/workflows/roadmap-common.md` (always — shared logic)
-2. Read `@~/.maestro/workflows/roadmap.md`, follow its process
+1. Read `@~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap-common.md` (always — shared logic)
+2. Read `@~/.pi/agent/packages/pi-maestro-flow/workflows/roadmap.md`, follow its process
 
 Sub-modes:
 - **Create** (default): Build roadmap from requirements or upstream context

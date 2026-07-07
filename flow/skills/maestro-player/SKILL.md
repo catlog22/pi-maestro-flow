@@ -1,7 +1,7 @@
 ---
 name: maestro-player
 description: "Play workflow templates with checkpoint resume Arguments: <template-slug|path> [--context key=value...] [-c [session-id]] [--list] [--dry-run]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion Skill
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -59,7 +59,7 @@ $ARGUMENTS — template slug/path, or flags.
 }
 ```
 
-**Output boundary**: ALL file writes MUST target `.workflow/.maestro/player-*/` (session status.json + step outputs) only. Template files (`~/.maestro/templates/workflows/`) are read-only. NEVER modify source code or `.claude/commands/` files.
+**Output boundary**: ALL file writes MUST target `.workflow/.maestro/player-*/` (session status.json + step outputs) only. Template files (`~/.pi/agent/packages/pi-maestro-flow/templates/workflows/`) are read-only. NEVER modify source code or `.claude/commands/` files.
 </context>
 
 <invariants>
@@ -88,7 +88,7 @@ S_ROUTE:
   → handleList    WHEN: --list                              DO: scan index.json, display templates
   → S_RESUME      WHEN: -c flag
   → S_LOAD        WHEN: template slug/path provided
-  → handleList    WHEN: no args                             DO: display templates + AskUserQuestion
+  → handleList    WHEN: no args                             DO: display templates + user prompt
 
 S_RESUME:
   → S_EXEC_LOOP   WHEN: session found                      DO: A_RESUME_SESSION
@@ -107,7 +107,7 @@ S_EXEC_LOOP:
   → END           WHEN: checkpoint pause                    DO: set status=paused, display resume command
   → END           WHEN: abort chosen                        DO: set status=aborted, save progress
   GUARD: cli nodes → Bash(run_in_background: true) + STOP, wait for callback
-  GUARD: on failure → on_fail: skip (log, advance) | retry (once) | abort (AskUserQuestion: Retry/Skip/Abort). Default on_fail when not specified: `abort` (prompt user via AskUserQuestion).
+  GUARD: on failure → on_fail: skip (log, advance) | retry (once) | abort (user prompt: Retry/Skip/Abort). Default on_fail when not specified: `abort` (prompt user via user prompt).
   GUARD: after step 3+ → display context hint "可随时 /maestro-player -c 恢复"
 
 S_COMPLETE:
@@ -129,7 +129,7 @@ S_COMPLETE:
 1. Resolve template: absolute path → as-is; relative → from cwd; slug → index.json lookup
 2. Parse `--context key=value` pairs
 3. Validate template (template_id, nodes, edges, context_schema required)
-4. Collect missing required variables via AskUserQuestion
+4. Collect missing required variables via user prompt
 5. Bind {variable} placeholders (leave {N-xxx.field} and {prev_*} for runtime)
 
 ### A_INIT_SESSION

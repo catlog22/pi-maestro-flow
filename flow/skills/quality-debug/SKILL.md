@@ -1,16 +1,14 @@
 ---
 name: quality-debug
 description: "Use when bugs, test failures, or unexpected behavior need systematic root cause investigation Arguments: [issue description] [-c] [--from-uat <phase>] [--parallel]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 Debug issues using scientific method with subagent isolation and persistent debug state. Three entry modes (standalone, from-UAT, parallel) and structured root cause collection with UAT feedback loop. Full algorithm defined in workflow debug.md.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/debug.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/debug.md` before proceeding.
 
 <context>
 User's issue: $ARGUMENTS
@@ -54,7 +52,7 @@ Each artifact's type determines its outputs at `.workflow/{a.path}/`:
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/debug.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/debug.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

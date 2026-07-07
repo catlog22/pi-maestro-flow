@@ -1,16 +1,14 @@
 ---
 name: quality-sync
 description: "Sync codebase docs by tracing git diff impact Arguments: [--full] [--since <commit|HEAD~N>] [--dry-run]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
 Sync codebase docs after code changes: git diff → trace impact via doc-index.json → refresh `.workflow/codebase/` docs.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/sync.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/sync.md` before proceeding.
 
 <context>
 $ARGUMENTS -- optional flags:
@@ -30,7 +28,7 @@ $ARGUMENTS -- optional flags:
 </invariants>
 
 <execution>
-Follow '~/.maestro/workflows/sync.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/sync.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

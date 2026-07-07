@@ -43,7 +43,7 @@ Single-step skill executor with multi-agent orchestration capability. Call `maes
 ### Worker Dispatch Template
 
 ```
-Agent({
+teammate({
   description: "执行子任务: {task_description}",
   prompt: "执行以下任务：\n{task_content}\n\n返回执行结果摘要 + 产物路径。"
 })

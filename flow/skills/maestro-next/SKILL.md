@@ -1,7 +1,7 @@
 ---
 name: maestro-next
 description: "Single-command recommendation — pick the best next command from the pool and execute it Arguments: <intent> [-y] [--dry-run] [--top N] [--list]"
-allowed-tools: Read Bash Glob Grep Skill AskUserQuestion
+allowed-tools: Read Bash Glob Grep maestro
 ---
 
 <purpose>
@@ -38,7 +38,7 @@ S_STATE     — 读 project state、推断 lifecycle_position         PERSIST: �
 S_RANK      — 路由表评分、生成 top-N candidates                 PERSIST: —
 S_LIST      — `--list` 模式：分组展示候选池                     PERSIST: —
 S_PRESENT   — 显示 top pick + 备选 + 推荐理由 + 执行参数        PERSIST: —
-S_CONFIRM   — AskUserQuestion 选择/修改参数（auto_mode 跳过）    PERSIST: —
+S_CONFIRM   — user prompt 选择/修改参数（auto_mode 跳过）    PERSIST: —
 S_EXECUTE   — `Skill({ skill, args })` 单次调用                 PERSIST: —
 S_FALLBACK  — intent 空且 clarification 失败                    PERSIST: —
 </states>
@@ -49,7 +49,7 @@ S_PARSE:
   → S_LIST       WHEN: --list flag
   → S_STATE      WHEN: intent text present
   → S_STATE      WHEN: keyword "continue"/"next"/"go"/"继续"/"下一步"/"接下来"
-  → S_PARSE      WHEN: no intent (max 1 clarify round)    DO: AskUserQuestion
+  → S_PARSE      WHEN: no intent (max 1 clarify round)    DO: user prompt
   → S_FALLBACK   WHEN: clarification empty
 
 S_STATE:
@@ -71,7 +71,7 @@ S_CONFIRM:
   → END          WHEN: 用户取消
 
 S_EXECUTE:
-  → END          DO: Skill({ skill: <chosen>, args: <args> }) → 输出 "✅ 已执行 /<command>"
+  → END          DO: invoke /skill: <chosen>, args: <args> }) → 输出 "✅ 已执行 /<command>"
 
 S_FALLBACK:
   → END          DO: raise E001
@@ -261,7 +261,7 @@ AskUserQuestion (single-select, header: "执行确认"):
 - [ ] top pick 展示附"推荐理由"（命中规则 + lifecycle 位置）
 - [ ] `--dry-run` 仅展示，不执行
 - [ ] `-y` 自动执行 top pick；用户传入时透传到 skill args
-- [ ] 非自动模式通过 AskUserQuestion 确认或选备选
+- [ ] 非自动模式通过 user prompt 确认或选备选
 - [ ] 选定命令通过单次 `Skill()` 调用执行
 - [ ] 不创建 session / 不生成 status.json / 不触发后续 chain
 - [ ] `--list` 模式按 workflow 簇分组展示

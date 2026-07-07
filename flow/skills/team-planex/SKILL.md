@@ -1,7 +1,7 @@
 ---
 name: team-planex
 description: "Unified team skill for plan-and-execute pipeline. Pure router — coordinator always. Beat model is coordinator-only in monitor.md. Triggers on \"team planex\"."
-allowed-tools: Agent TaskCreate TaskList TaskGet TaskUpdate TeamCreate TeamDelete SendMessage AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team PlanEx
@@ -65,7 +65,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "planex",

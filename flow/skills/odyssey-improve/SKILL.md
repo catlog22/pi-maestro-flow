@@ -1,10 +1,10 @@
 ---
 name: odyssey-improve
 description: "Long-running codebase improvement cycle — multi-dimensional audit, deep diagnosis, targeted fix, verify, generalize, and engineering knowledge persistence Arguments: <target> [--dimensions <list>] [--fix-threshold <severity>] [--skip-fix] [--skip-generalize] [--auto] [-y] [-c] [--heartbeat]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
-<base>@~/.maestro/workflows/odyssey-base.md</base>
+<base>`~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>`
 
 <purpose>
 survey → 6-dimension audit → diagnose → fix → verify → generalize → discover → persist.
@@ -154,7 +154,7 @@ S_INTAKE → S_SURVEY → S_AUDIT → S_DIAGNOSE → S_FIX → S_VERIFY → S_GE
 <transitions>
 S_INTAKE → S_INTAKE      : -c + session found → A_RESUME
 S_INTAKE → S_SURVEY      : target resolved → A_INTAKE
-S_INTAKE → S_INTAKE      : no target → AskUserQuestion
+S_INTAKE → S_INTAKE      : no target → user prompt
 
 S_SURVEY   → S_AUDIT       : complete
 
@@ -222,19 +222,19 @@ Commit: `"odyssey-improve({slug}): AUDIT — multi-dimension review"`
 Root cause analysis for critical/high findings — don't fix symptoms.
 
 1. Group by dimension, prioritize by severity. For each: hypothesis → trace code path + git history → evidence phase=diagnosis
-2. Ambiguity → evidence phase=decision; Normal: AskUserQuestion | `-y`: defer
+2. Ambiguity → evidence phase=decision; Normal: user prompt | `-y`: defer
 3. CLI-assisted for complex findings: `maestro delegate --role analyze --mode analysis` (`run_in_background: true`)
 4. Write `session.json.diagnoses[]`. Update §4. Mark G3.
 
 Commit: `"odyssey-improve({slug}): DIAGNOSE — root cause analysis"`
 
 ### A_ESCALATE_DIAGNOSIS
-`retries++`. < 3: `maestro delegate --role analyze`, new hypotheses, → S_DIAGNOSE. >= 3: Normal → AskUserQuestion | `-y` → INCONCLUSIVE → S_RECORD.
+`retries++`. < 3: `maestro delegate --role analyze`, new hypotheses, → S_DIAGNOSE. >= 3: Normal → user prompt | `-y` → INCONCLUSIVE → S_RECORD.
 
 ### A_FIX
 1. Exhaustive fix: ALL diagnosed issues by severity tier (critical → high → medium → low within fix_threshold), one dimension at a time. After each tier, re-verify **current tier's dimension only** (not all dimensions) — new findings at same or higher severity append to current tier. Cross-dimension regression checks run once at S_VERIFY after all tiers complete.
 2. For each fix: implement → evidence phase=fix
-3. Normal: AskUserQuestion per-fix confirmation | `-y`: auto-proceed, record `deferred`
+3. Normal: user prompt per-fix confirmation | `-y`: auto-proceed, record `deferred`
 
 Commit: `"odyssey-improve({slug}): FIX — improvements applied"`
 
@@ -306,7 +306,7 @@ Commit: `"odyssey-improve({slug}): GENERALIZE — generalization scan complete"`
    | risk + complex | Create issue |
    | safe | Skip with logged per-item reason |
 
-   Normal: AskUserQuestion per hit | `-y`: auto-fix bugs with fix_template, create issue for rest
+   Normal: user prompt per hit | `-y`: auto-fix bugs with fix_template, create issue for rest
 
 3. **Cross-phase loops:** `cross_phase_loops++` on fix/diagnose return. `loops >= max_loops` → must log per-item reasons.
 
@@ -324,12 +324,12 @@ Commit: `"odyssey-improve({slug}): DISCOVER — discovery triage complete"`
    - Reliability pattern → `/spec-add coding`
    Completion summary lists suggested `/spec-add` commands.
 
-3. Mark G7 done. Pending decisions: Normal → AskUserQuestion | `-y` → skip (show deferred count).
+3. Mark G7 done. Pending decisions: Normal → user prompt | `-y` → skip (show deferred count).
 
 4. **Goal audit (hardened):**
    - `done` → confirmed
    - `skipped` → confirmed ONLY if corresponding `skip_when` flag is true
-   - **Hard rule:** G5 and G6 CANNOT be `skipped` unless `skip_generalize == true`. Pending without flag → `failed` (Normal: AskUserQuestion | `-y`: record `failed`)
+   - **Hard rule:** G5 and G6 CANNOT be `skipped` unless `skip_generalize == true`. Pending without flag → `failed` (Normal: user prompt | `-y`: record `failed`)
    - `phase_goals_all_done = true` only when all goals pass this audit
 
 5. `current_state = "COMPLETED"`, emit completion summary.
@@ -364,11 +364,11 @@ Commit: `"odyssey-improve({slug}): RECORD — summary and knowledge persistence"
 
 | Decision Point | Normal | `-y` |
 |---------------|--------|------|
-| A_FIX improvement confirmation | AskUserQuestion | auto-proceed, `deferred` |
-| A_DIAGNOSE ambiguity | AskUserQuestion | best-effort, `deferred` |
-| A_ESCALATE 3-strike | AskUserQuestion 3-way | auto INCONCLUSIVE |
-| A_DISCOVER hit routing | AskUserQuestion | auto create issue |
-| A_DISCOVER ambiguous items | AskUserQuestion | all `deferred` |
+| A_FIX improvement confirmation | user prompt | auto-proceed, `deferred` |
+| A_DIAGNOSE ambiguity | user prompt | best-effort, `deferred` |
+| A_ESCALATE 3-strike | user prompt 3-way | auto INCONCLUSIVE |
+| A_DISCOVER hit routing | user prompt | auto create issue |
+| A_DISCOVER ambiguous items | user prompt | all `deferred` |
 
 `deferred` items shown in completion summary; recoverable via `-c`.
 
@@ -379,7 +379,7 @@ Exhaust iteration until all findings actioned (fix/issue/decision)
 and phase_goals_all_done=true.
 Fix by severity tiers, re-verify after each tier.
 Baseline captured before fix, compared after to confirm improvement.
-Pending decisions must AskUserQuestion — no silent resolve.
+Pending decisions must user prompt — no silent resolve.
 ```
 
 </appendix>

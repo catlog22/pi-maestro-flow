@@ -1,7 +1,7 @@
 ---
 name: maestro-ui-codify
 description: "Extract design system from code, generate reference package, persist as knowledge assets Arguments: <source-path> [--package-name <name>] [--output-dir <path>] [--overwrite]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent Skill AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,12 +9,11 @@ Extract design system from source code into tokens, reference package, and knowl
 4-phase pipeline: validate → extract → package → knowhow.
 </purpose>
 
-<deferred_reading>
-- [ui-codify.md](~/.maestro/workflows/ui-codify.md) — read always (main workflow orchestrator)
-- [ui-codify-extract.md](~/.maestro/workflows/ui-codify-extract.md) — read when Phase 2 starts (style extraction with 3 agents)
-- [ui-codify-package.md](~/.maestro/workflows/ui-codify-package.md) — read when Phase 3 starts (reference package generation)
-- [ui-codify-knowhow.md](~/.maestro/workflows/ui-codify-knowhow.md) — read when Phase 4 starts (knowledge asset generation)
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [ui-codify.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify.md) — read always (main workflow orchestrator)
+> - [ui-codify-extract.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-extract.md) — read when Phase 2 starts (style extraction with 3 agents)
+> - [ui-codify-package.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-package.md) — read when Phase 3 starts (reference package generation)
+> - [ui-codify-knowhow.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-knowhow.md) — read when Phase 4 starts (knowledge asset generation)
 
 <context>
 $ARGUMENTS — source path (required) with optional flags.
@@ -31,7 +30,7 @@ Flags:
 <invariants>
 1. **Source read-only** — the source path being analyzed MUST NOT be modified; extraction is purely read-only
 2. **Phase-sequential loading** — workflow files (ui-codify-extract, ui-codify-package, ui-codify-knowhow) MUST be read only when their phase starts; NEVER load all phases eagerly
-3. **User confirmation before knowhow** — Phase 3→4 gate MUST present AskUserQuestion before generating knowledge assets; NEVER auto-proceed to knowhow generation
+3. **User confirmation before knowhow** — Phase 3→4 gate MUST present user prompt before generating knowledge assets; NEVER auto-proceed to knowhow generation
 4. **Overwrite protection** — existing package directory MUST NOT be overwritten without `--overwrite` flag (E003)
 5. **Artifact completeness** — all 5 required artifacts MUST exist before reporting completion; NEVER skip artifact verification
 6. **Token-first extraction** — design-tokens.json MUST be generated before layout-templates.json; layout extraction depends on token foundation
@@ -48,7 +47,7 @@ maestro load --type spec --category ui
 
 ## 2. Execute Workflow
 
-Route to `~/.maestro/workflows/ui-codify.md` and follow completely.
+Route to `~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify.md` and follow completely.
 
 The workflow orchestrates 4 phases with deferred loading of phase-specific workflow files. Each phase reads its workflow file only when execution reaches that phase.
 
@@ -66,7 +65,7 @@ The workflow orchestrates 4 phases with deferred loading of phase-specific workf
 **GATE Phase 3 → Phase 4: Package → Knowhow**
 - REQUIRED: preview.html + preview.css generated as interactive showcase.
 - BLOCKED if missing: preview artifacts not generated — knowhow phase needs rendered reference for validation.
-- REQUIRED: AskUserQuestion confirmation before proceeding to knowhow generation:
+- REQUIRED: user prompt confirmation before proceeding to knowhow generation:
   ```
   question: "Preview 生成完成。是否继续将设计系统持久化为 knowhow 知识资产？"
   options:

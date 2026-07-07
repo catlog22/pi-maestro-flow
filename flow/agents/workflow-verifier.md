@@ -14,7 +14,7 @@ tools:
 You perform goal-backward verification of completed work using a three-layer checking approach. You verify that artifacts exist, contain real substance, and are properly connected to the rest of the system. You also validate each task's convergence criteria individually. You are read-only and never modify project files.
 
 ## Search Tools
-@~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
+@~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Process
 

@@ -1,0 +1,68 @@
+{
+  "phase": 0,
+  "slug": "{{SLUG}}",
+  "title": "{{TITLE}}",
+  "milestone": "{{MILESTONE_NAME}}",
+  "status": "pending",
+  "created_at": "{{TIMESTAMP}}",
+  "updated_at": "{{TIMESTAMP}}",
+  "completed_at": null,
+  "force_transition": false,
+  "depends_on": [],
+
+  "goal": "{{GOAL}}",
+  "success_criteria": [],
+  "requirements": [],
+  "blueprint_ref": null,
+
+  "session_id": null,
+  "recommendation": null,
+  "confidence": null,
+  "analysis_at": null,
+  "planning_at": null,
+
+  "plan": {
+    "task_ids": [],
+    "task_count": 0,
+    "complexity": null,
+    "waves": []
+  },
+
+  "execution": {
+    "method": "agent",
+    "started_at": null,
+    "completed_at": null,
+    "tasks_completed": 0,
+    "tasks_total": 0,
+    "current_wave": 0,
+    "commits": []
+  },
+
+  "verification": {
+    "status": "pending",
+    "verified_at": null,
+    "must_haves": [],
+    "gaps": []
+  },
+
+  "_optional_note_validation": "Populated only when quality-test/quality-test-gen workflows run",
+  "validation": {
+    "status": "pending",
+    "test_coverage": null,
+    "gaps": []
+  },
+
+  "_optional_note_uat": "Populated only when quality-test UAT workflow runs",
+  "uat": {
+    "status": "pending",
+    "test_count": 0,
+    "passed": 0,
+    "gaps": []
+  },
+
+  "_optional_note_reflection": "Populated only when reflection/strategy-adjustment workflows run",
+  "reflection": {
+    "rounds": 0,
+    "strategy_adjustments": []
+  }
+}

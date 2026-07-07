@@ -1,10 +1,10 @@
 ---
 name: odyssey-review-test-fix
 description: "Deep review + fix cycle — archaeology, exploration, multi-dimensional review, targeted fix, generalization, discovery, and knowledge persistence Arguments: <target> [--dimensions <list>] [--fix-threshold critical|high|medium|low|all] [--skip-fix] [--skip-generalize] [--auto] [-y] [-c] [--heartbeat]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
-<base>@~/.maestro/workflows/odyssey-base.md</base>
+<base>`~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>`
 
 <purpose>
 archaeology → explore → multi-dimensional review → fix ALL findings → confirm → generalize → discover → persist. Zero-residual: every finding gets an action.
@@ -139,7 +139,7 @@ S_INTAKE → S_ARCHAEOLOGY → S_EXPLORE → S_REVIEW → S_FIX → S_CONFIRM �
 <transitions>
 S_INTAKE → S_INTAKE       : -c + session found → A_RESUME_SESSION
 S_INTAKE → S_ARCHAEOLOGY  : target resolved → A_INTAKE
-S_INTAKE → S_INTAKE       : no target → AskUserQuestion
+S_INTAKE → S_INTAKE       : no target → user prompt
 
 S_ARCHAEOLOGY → S_EXPLORE     : complete
 S_EXPLORE     → S_REVIEW      : complete
@@ -214,7 +214,7 @@ for tier in [critical, high, medium, low].filter(>= threshold):
   tier done → auto-commit
 ```
 
-Normal: AskUserQuestion per tier. `-y`: auto-fix all.
+Normal: user prompt per tier. `-y`: auto-fix all.
 Remaining > 0 → retry (max_fix_rounds = 5). Unchanged 2 rounds → classify each individually. After 5 rounds with remaining > 0 → escalate: Normal: AskUserQuestion (continue/accept/reclassify) | `-y`: classify remaining as `deferred`, proceed.
 Blanket "pre-existing" forbidden.
 
@@ -288,7 +288,7 @@ Commit: `"odyssey-review({slug}): GENERALIZE — pattern scan complete"`
    | risk + complex | Create issue |
    | safe | Skip with logged per-item reason |
 
-   Normal: AskUserQuestion per hit | `-y`: auto-fix with template, create issue for rest
+   Normal: user prompt per hit | `-y`: auto-fix with template, create issue for rest
 
 3. **Cross-phase loops:** `loops >= max_loops` → must log per-item reasons, advance to S_RECORD.
 
@@ -304,12 +304,12 @@ Commit: `"odyssey-review({slug}): DISCOVER — sibling triage complete"`
    - Architecture violation pattern → `/spec-add arch`
    - Reusable generalization pattern → `/spec-add coding`
 
-2. Mark G6 done. Pending decisions: Normal → AskUserQuestion | `-y` → skip (show deferred count).
+2. Mark G6 done. Pending decisions: Normal → user prompt | `-y` → skip (show deferred count).
 
 3. **Goal audit (hardened):**
    - `done` → confirmed
    - `skipped` → confirmed ONLY if corresponding `skip_when` flag is true
-   - **Hard rule:** G4 and G5 CANNOT be `skipped` unless `skip_generalize == true`. Pending without flag → `failed` (Normal: AskUserQuestion | `-y`: record `failed`)
+   - **Hard rule:** G4 and G5 CANNOT be `skipped` unless `skip_generalize == true`. Pending without flag → `failed` (Normal: user prompt | `-y`: record `failed`)
    - `phase_goals_all_done = true` only when all goals pass this audit
 
 4. `current_state = "COMPLETED"`, emit completion summary.
@@ -338,10 +338,10 @@ Commit: `"odyssey-review({slug}): RECORD — summary and knowledge persistence"`
 
 | Decision Point | Normal | `-y` |
 |---------------|--------|------|
-| S_FIX tier candidates | AskUserQuestion | auto-fix, deferred |
-| S_FIX re-review new findings | AskUserQuestion | auto-append |
+| S_FIX tier candidates | user prompt | auto-fix, deferred |
+| S_FIX re-review new findings | user prompt | auto-append |
 | S_CONFIRM needs_rework | Display → S_FIX | auto proceed |
-| A_DISCOVER hit routing | AskUserQuestion | auto-fix with template, create issue for rest |
+| A_DISCOVER hit routing | user prompt | auto-fix with template, create issue for rest |
 
 ### Goal Prompt convergence rules
 
@@ -349,7 +349,7 @@ Commit: `"odyssey-review({slug}): RECORD — summary and knowledge persistence"`
 Stop when remaining_actionable == 0, confirmation == confirmed,
 generalization exhausted, phase_goals_all_done=true.
 Fix iterates by severity tier; each tier re-reviews modified area, new findings appended.
-Every finding must have action (fix/issue/decision). Decision pending must AskUserQuestion.
+Every finding must have action (fix/issue/decision). Decision pending must user prompt.
 ```
 
 </appendix>

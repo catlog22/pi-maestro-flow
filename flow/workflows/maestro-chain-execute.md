@@ -1,0 +1,20 @@
+# Workflow: maestro-chain-execute [DEPRECATED]
+
+> **DEPRECATED**: This workflow has been replaced by the unified executor `maestro-ralph-execute`.
+> Both maestro and ralph sessions now use `maestro-ralph-execute` for step execution.
+> This file is kept for reference only and will be removed in a future version.
+
+## Migration
+
+- Caller dispatching from `maestro.md` → use `Skill({ skill: "maestro-ralph-execute" })`
+- Resume from session → `Skill({ skill: "maestro-ralph-execute" })` (auto-discovers latest running session via `.workflow/.maestro/*/status.json`)
+
+## References
+
+- `~/.maestro/workflows/maestro.md` — coordinator that creates sessions and dispatches to the unified executor
+- `~/.maestro/workflows/maestro-ralph-execute.md` — current canonical executor (handles both maestro static chains and ralph adaptive chains)
+
+The unified executor preserves all behaviour previously documented here:
+status.json persistence, TodoWrite dual-tracking, per-step engine selection (`Skill` vs `CLI`),
+context propagation across steps, post-step Gemini analysis for CLI steps,
+and retry/skip/abort on failure.

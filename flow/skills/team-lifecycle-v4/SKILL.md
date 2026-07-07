@@ -1,7 +1,7 @@
 ---
 name: team-lifecycle-v4
 description: "Full lifecycle team skill — plan, develop, test, review in one coordinated session. Role-based architecture with coordinator-driven beat model. Triggers on \"team lifecycle v4\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Lifecycle v4
@@ -63,7 +63,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: <team-name>,
@@ -96,7 +96,7 @@ Supervisor is a **resident agent** (independent from team-worker). Spawned once 
 ### Spawn (Phase 2 — once per session)
 
 ```
-Agent({
+teammate({
   subagent_type: "team-supervisor",
   description: "Spawn resident supervisor",
   team_name: <team-name>,
@@ -162,7 +162,7 @@ SendMessage({
 When pipeline completes, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Pipeline complete. What would you like to do?",
     header: "Completion",

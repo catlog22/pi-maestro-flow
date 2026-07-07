@@ -1,7 +1,7 @@
 ---
 name: team-perf-opt
 description: "Unified team skill for performance optimization. Coordinator orchestrates pipeline, workers are team-worker agents. Supports single/fan-out/independent parallel modes. Triggers on \"team perf-opt\"."
-allowed-tools: Agent TaskCreate TaskList TaskGet TaskUpdate TeamCreate TeamDelete SendMessage AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 ---
 
 # Team Performance Optimization
@@ -77,7 +77,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "perf-opt",
@@ -142,7 +142,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 When the pipeline completes:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Team pipeline complete. What would you like to do?",
     header: "Completion",

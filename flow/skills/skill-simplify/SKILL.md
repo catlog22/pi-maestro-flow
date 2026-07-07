@@ -1,7 +1,7 @@
 ---
 name: skill-simplify
 description: "SKILL.md simplification with functional integrity verification. Analyze redundancy, optimize content, check no functionality lost. Triggers on \"simplify skill\", \"optimize skill\", \"skill-simplify\"."
-allowed-tools: AskUserQuestion Read Write Edit Bash Glob Grep
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 ---
 
 # Skill Simplify

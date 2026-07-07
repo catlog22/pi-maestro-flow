@@ -1,7 +1,7 @@
 ---
 name: maestro-plan
 description: "Use when creating, revising, or verifying an execution plan for a milestone or task Arguments: [milestone] [--spec SPEC-xxx] [-y] [--gaps] [--tdd] [--dir <path>] [--from <source>] [--revise [instructions]] [--check <plan-dir>]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
 <purpose>
@@ -9,16 +9,13 @@ Create, revise, or verify execution plans (5-stage pipeline).
 Produces plan.json + TASK files; registers PLN artifact in state.json.
 </purpose>
 
-<required_reading>
-@~/.maestro/workflows/plan.md
-</required_reading>
+> **Required**: Read `~/.pi/agent/packages/pi-maestro-flow/workflows/plan.md` before proceeding.
 
-<deferred_reading>
-- [plan.json](~/.maestro/templates/plan.json) — read when generating plan output
-- [task.json](~/.maestro/templates/task.json) — read when generating task files
-- [state.json](~/.maestro/templates/state.json) — read when registering artifact
-- [boundary-grill.md](~/.maestro/workflows/boundary-grill.md) — read when boundary conflicts detected (in P4)
-</deferred_reading>
+> **Reference files** (read when needed):
+> - [plan.json](~/.pi/agent/packages/pi-maestro-flow/templates/plan.json) — read when generating plan output
+> - [task.json](~/.pi/agent/packages/pi-maestro-flow/templates/task.json) — read when generating task files
+> - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
+> - [boundary-grill.md](~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md) — read when boundary conflicts detected (in P4)
 
 <context>
 $ARGUMENTS — milestone number, or no args for current milestone, with optional flags.
@@ -59,7 +56,7 @@ Bash("maestro collab preflight --phase <phase-number>")
 ```
 If exit code is 1, present warnings and ask whether to proceed.
 
-Follow '~/.maestro/workflows/plan.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/plan.md' completely.
 
 ### Plan Agent Model
 
@@ -149,7 +146,7 @@ Status verdicts:
 - **NEEDS_RETRY** — Plan failed (tooling error, transient issue); ralph will retry
 - **BLOCKED** — External hard blocker (e.g., upstream artifact missing, dependency unavailable); pass `--reason "..."`
 
-> Ambiguous requirements are NOT a completion status — resolve them in-place via `AskUserQuestion` during planning (≤3 rounds), then proceed to DONE. `NEEDS_CONTEXT` has been removed; context shortage is handled by the harness's automatic compaction.
+> Ambiguous requirements are NOT a completion status — resolve them in-place via `user prompt` during planning (≤3 rounds), then proceed to DONE. `NEEDS_CONTEXT` has been removed; context shortage is handled by the harness's automatic compaction.
 
 ### Next-step routing
 
