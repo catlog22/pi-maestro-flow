@@ -326,6 +326,7 @@ Use "kind: task" to assign additional work.`,
       if (agent.stdin) {
         const sent = sendToChildStdin(agent.stdin, params.message);
         if (sent) {
+          agent.lastActivityAt = Date.now();
           pi.events.emit(TEAMMATE_MESSAGE_EVENT, envelope);
           return {
             content: [{
@@ -392,6 +393,7 @@ Views:
           lifecycle: entry.lifecycle,
           startedAt: new Date(entry.startedAt).toISOString(),
           durationMs: Date.now() - entry.startedAt,
+          idleMs: Date.now() - entry.lastActivityAt,
           inboxSize: entry.inbox.length,
           hasStdin: Boolean(entry.stdin?.writable),
         });
@@ -399,7 +401,7 @@ Views:
 
       const lines = agents.length > 0
         ? agents.map((a) =>
-          `[${a.agent}]${a.name ? ` name="${a.name}"` : ""} ${a.lifecycle} | ${Math.round(a.durationMs / 1000)}s | inbox: ${a.inboxSize} | stdin: ${a.hasStdin ? "ready" : "pending"}`
+          `[${a.agent}]${a.name ? ` name="${a.name}"` : ""} ${a.lifecycle} | up ${Math.round(a.durationMs / 1000)}s | idle ${Math.round(a.idleMs / 1000)}s | inbox: ${a.inboxSize} | stdin: ${a.hasStdin ? "ready" : "pending"}`
         ).join("\n")
         : "No active teammate agents.";
 
