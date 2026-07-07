@@ -1,0 +1,62 @@
+/**
+ * Core types for the teammate tool.
+ */
+
+export interface Usage {
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadTokens: number;
+  cacheWriteTokens: number;
+  cost: number;
+  turns: number;
+}
+
+export interface SingleResult {
+  agent: string;
+  task: string;
+  exitCode: number;
+  messages: Array<{ role: string; content: string }>;
+  usage: Usage;
+  model: string;
+  correlationId: string;
+  durationMs: number;
+  structuredOutput?: unknown;
+  attemptedModels?: string[];
+}
+
+export interface AgentProgress {
+  agent: string;
+  status: "running" | "completed" | "failed";
+  recentTools: Array<{ name: string; status: string }>;
+  toolCount: number;
+  tokens: number;
+  durationMs: number;
+  lastActivityAt: number;
+  startedAt: number;
+}
+
+export interface Details {
+  mode: "single" | "parallel" | "chain";
+  results: SingleResult[];
+  structuredOutput?: unknown;
+  progress?: Array<{
+    agent: string;
+    status: "running" | "completed" | "failed";
+    startedAt: string;
+    completedAt?: string;
+  }>;
+}
+
+export interface TeammateState {
+  baseCwd: string;
+  currentSessionId: string | null;
+  activeRuns: Map<string, {
+    agent: string;
+    correlationId: string;
+    startedAt: number;
+    abortController: AbortController;
+  }>;
+}
+
+export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
+export const TEAMMATE_STARTED_EVENT = "teammate:started";
