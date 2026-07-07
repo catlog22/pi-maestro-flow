@@ -27,7 +27,6 @@ export interface RunTeammateParams {
   task?: string;
   name?: string;
   reply_to?: "caller" | "main";
-  lifecycle?: "ephemeral" | "resident";
   protocol_version?: number;
   mode?: "await" | "detach";
   context?: "fresh" | "fork";

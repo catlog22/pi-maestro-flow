@@ -4,7 +4,6 @@
  * P0 three-axis decoupling:
  *   - name: addressability (optional agent name for routing)
  *   - reply_to: result routing (caller | main)
- *   - lifecycle: lifecycle management (ephemeral | resident)
  *
  * Plus protocol_version gate and correlation_id (runtime-generated).
  */
@@ -45,11 +44,6 @@ export const TeammateParams = Type.Object({
   // Axis 2: Result Routing
   reply_to: Type.Optional(
     StringEnum(["caller", "main"]),
-  ),
-
-  // Axis 3: Lifecycle
-  lifecycle: Type.Optional(
-    StringEnum(["ephemeral", "resident"]),
   ),
 
   // === Protocol & Correlation ===

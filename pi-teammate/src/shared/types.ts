@@ -70,7 +70,6 @@ export interface ActiveAgent {
   pendingResolve?: (result: SingleResult) => void;
   lastActivityAt: number;
   replyTo?: string;
-  idleTimeoutMs: number;
 }
 
 export interface TeammateState {
