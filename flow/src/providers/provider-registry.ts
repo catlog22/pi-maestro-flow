@@ -30,18 +30,21 @@ function mapToolToProviderConfig(
       return {
         apiType: "anthropic-messages",
         envVar: "ANTHROPIC_API_KEY",
+        baseUrl: "https://api.anthropic.com",
       };
 
     case "gemini":
       return {
         apiType: "google-genai",
         envVar: "GOOGLE_API_KEY",
+        baseUrl: "https://generativelanguage.googleapis.com",
       };
 
     case "codex":
       return {
         apiType: "openai-completions",
         envVar: "OPENAI_API_KEY",
+        baseUrl: "https://api.openai.com/v1",
       };
 
     case "opencode":
@@ -55,19 +58,21 @@ function mapToolToProviderConfig(
       return {
         apiType: "openai-compatible",
         envVar: "AGY_API_KEY",
+        baseUrl: "https://api.openai.com/v1",
       };
 
     case "api-explore":
       return {
         apiType: "openai-compatible",
         envVar: "API_EXPLORE_KEY",
+        baseUrl: "https://api.openai.com/v1",
       };
 
     default:
-      // Generic OpenAI-compatible fallback
       return {
         apiType: "openai-compatible",
         envVar: `${name.toUpperCase()}_API_KEY`,
+        baseUrl: "https://api.openai.com/v1",
       };
   }
 }
