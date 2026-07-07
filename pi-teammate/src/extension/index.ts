@@ -246,7 +246,7 @@ Structured output:
 
           const removeListener = ctx.hasUI
             ? ctx.ui.onTerminalInput((data: string) => {
-                if (data === "\x04") detachResolve?.();
+                if (data === "\x1b") detachResolve?.(); // ESC to detach
               })
             : null;
 
@@ -292,7 +292,7 @@ Structured output:
             );
           });
           return {
-            content: [{ type: "text", text: `Agent "${params.agent}" detached to background (Ctrl+D). Will notify on completion.` }],
+            content: [{ type: "text", text: `Agent "${params.agent}" detached to background (ESC). Will notify on completion.` }],
             isError: false,
             details: { mode: "single", results: [] },
           };
