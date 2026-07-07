@@ -47,16 +47,37 @@ export interface Details {
   }>;
 }
 
+export type MessageKind = "task" | "notification" | "result";
+
+export interface MessageEnvelope {
+  id: string;
+  from: string;
+  to: string;
+  kind: MessageKind;
+  correlation_id?: string;
+  payload: string;
+  timestamp: number;
+}
+
+export interface ActiveAgent {
+  agent: string;
+  name?: string;
+  correlationId: string;
+  startedAt: number;
+  abortController: AbortController;
+  stdin?: import("node:stream").Writable;
+  lifecycle: "ephemeral" | "resident";
+  inbox: MessageEnvelope[];
+  pendingResolve?: (result: SingleResult) => void;
+}
+
 export interface TeammateState {
   baseCwd: string;
   currentSessionId: string | null;
-  activeRuns: Map<string, {
-    agent: string;
-    correlationId: string;
-    startedAt: number;
-    abortController: AbortController;
-  }>;
+  activeRuns: Map<string, ActiveAgent>;
+  namedAgents: Map<string, string>;
 }
 
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
 export const TEAMMATE_STARTED_EVENT = "teammate:started";
+export const TEAMMATE_MESSAGE_EVENT = "teammate:message";

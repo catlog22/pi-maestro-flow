@@ -146,3 +146,21 @@ export const TeammateParams = Type.Object({
     }),
   ),
 });
+
+export const TeammateSendParams = Type.Object({
+  to: Type.String({
+    description: "Target agent name (must be a named, running agent)",
+  }),
+  message: Type.String({
+    description: "Message content to send to the agent",
+  }),
+  kind: Type.Optional(
+    StringEnum(["notification", "task"]),
+  ),
+});
+
+export const TeammateListParams = Type.Object({
+  view: Type.Optional(
+    StringEnum(["active", "named", "all"]),
+  ),
+});

@@ -50,6 +50,41 @@ teammate({
 })
 ```
 
+**Detach 模式** — 后台运行，立即返回 handle：
+```
+teammate({
+  agent: "delegate",
+  task: "Long running refactor",
+  name: "refactor-worker",       // 必须命名，否则无法后续通信
+  lifecycle: "resident",
+  mode: "detach"                 // 立即返回，不阻塞
+})
+// → 返回 correlationId，用 teammate-send 注入消息，teammate-list 查状态
+```
+
+### teammate-send
+
+向已命名的运行中 agent 发送消息。消息通过 stdin 注入到 agent 子进程。
+
+```
+teammate-send({
+  to: "refactor-worker",         // 目标 agent 名称（必须是 named + running）
+  message: "Also fix the login handler while you're at it",
+  kind: "notification"           // "notification" (上下文注入) | "task" (追加任务)
+})
+```
+
+### teammate-list
+
+列出活跃的 teammate agent。
+
+```
+teammate-list({
+  view: "active"                 // "active" (默认) | "named" (仅可寻址) | "all"
+})
+// → [delegate] name="refactor-worker" resident | 45s | inbox: 0 | stdin: ready
+```
+
 ### maestro
 
 Main dispatch tool with action-based routing.
