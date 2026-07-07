@@ -92,6 +92,21 @@ Structured output:
       const correlationId = randomUUID();
 
       const abortController = new AbortController();
+      // P2-1: Deadlock detection — check if reply_to creates a cycle
+      if (params.name && params.reply_to !== "main" && params.reply_to !== "caller") {
+        const wouldCycle = detectReplyCycle(state, params.name, params.reply_to);
+        if (wouldCycle) {
+          return {
+            content: [{
+              type: "text",
+              text: `[deadlock] reply_to="${params.reply_to}" would create a cycle with agent "${params.name}". Falling back to reply_to="caller".`,
+            }],
+            isError: false,
+            details: { mode: "single", results: [] },
+          };
+        }
+      }
+
       const activeAgent: ActiveAgent = {
         agent: params.agent ?? "parallel",
         name: params.name,
@@ -100,6 +115,8 @@ Structured output:
         abortController,
         lifecycle: params.lifecycle ?? "ephemeral",
         inbox: [],
+        lastActivityAt: Date.now(),
+        replyTo: params.reply_to,
       };
       state.activeRuns.set(correlationId, activeAgent);
 
@@ -128,6 +145,7 @@ Structured output:
           drainInbox(activeAgent);
         },
         onProgress: (data: AgentProgress) => {
+          activeAgent.lastActivityAt = Date.now();
           if (!onUpdate) return;
           onUpdate({
             content: [{
@@ -402,15 +420,22 @@ Views:
   pi.registerTool(listTool);
 
   // =========================================================================
-  // Session lifecycle
+  // Session lifecycle + P2-2 reaper
   // =========================================================================
+
+  let reaperTimer: ReturnType<typeof setInterval> | null = null;
 
   pi.on("session_start", (_event, ctx) => {
     state.baseCwd = ctx.cwd;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
+    reaperTimer = startReaper(state, pi);
   });
 
   pi.on("session_shutdown", () => {
+    if (reaperTimer) {
+      clearInterval(reaperTimer);
+      reaperTimer = null;
+    }
     for (const run of state.activeRuns.values()) {
       run.abortController.abort();
     }
@@ -454,4 +479,75 @@ function drainInbox(agent: ActiveAgent): void {
     sendToChildStdin(agent.stdin, msg.payload);
   }
   agent.inbox.length = 0;
+}
+
+// ===========================================================================
+// P2-1: Reply-cycle deadlock detection
+// ===========================================================================
+
+function detectReplyCycle(
+  state: TeammateState,
+  fromName: string | undefined,
+  replyToName: string | undefined,
+): boolean {
+  if (!fromName || !replyToName) return false;
+  if (fromName === replyToName) return true;
+
+  const visited = new Set<string>([fromName]);
+  let current = replyToName;
+
+  while (current) {
+    if (visited.has(current)) return true;
+    visited.add(current);
+
+    const cid = state.namedAgents.get(current);
+    if (!cid) break;
+    const agent = state.activeRuns.get(cid);
+    if (!agent?.replyTo) break;
+    current = agent.replyTo;
+  }
+
+  return false;
+}
+
+// ===========================================================================
+// P2-2: Resident agent idle timeout + reaper
+// ===========================================================================
+
+const IDLE_WARN_MS = 5 * 60 * 1000;     // 5 min: send nudge
+const IDLE_TIMEOUT_MS = 10 * 60 * 1000; // 10 min: force terminate
+const REAPER_INTERVAL_MS = 60 * 1000;
+
+function startReaper(state: TeammateState, pi: ExtensionAPI): ReturnType<typeof setInterval> {
+  const nudged = new Set<string>();
+
+  return setInterval(() => {
+    const now = Date.now();
+
+    for (const [cid, agent] of state.activeRuns) {
+      if (agent.lifecycle !== "resident") continue;
+      const idle = now - agent.lastActivityAt;
+
+      if (idle > IDLE_TIMEOUT_MS) {
+        agent.abortController.abort();
+        pi.events.emit(TEAMMATE_COMPLETE_EVENT, {
+          id: cid,
+          agent: agent.agent,
+          correlationId: agent.correlationId,
+          exitCode: 0,
+          durationMs: now - agent.startedAt,
+          reason: "idle_timeout",
+        });
+        nudged.delete(cid);
+        cleanupAgent(state, cid, agent.name);
+      } else if (idle > IDLE_WARN_MS && !nudged.has(cid)) {
+        if (agent.stdin) {
+          sendToChildStdin(agent.stdin,
+            `[system] Idle for ${Math.round(idle / 60000)} minutes. Continue your current task or wrap up. You will be terminated after ${Math.round(IDLE_TIMEOUT_MS / 60000)} minutes of inactivity.`);
+          agent.lastActivityAt = now;
+        }
+        nudged.add(cid);
+      }
+    }
+  }, REAPER_INTERVAL_MS);
 }

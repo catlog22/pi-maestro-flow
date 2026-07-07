@@ -69,6 +69,8 @@ export interface ActiveAgent {
   lifecycle: "ephemeral" | "resident";
   inbox: MessageEnvelope[];
   pendingResolve?: (result: SingleResult) => void;
+  lastActivityAt: number;
+  replyTo?: string;
 }
 
 export interface TeammateState {
