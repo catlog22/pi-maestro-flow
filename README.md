@@ -4,7 +4,7 @@
 
 ### Maestro 工作流编排 → Pi 原生扩展
 
-**将 [Maestro-Flow](https://github.com/catlog22/maestro2) 的多智能体编排能力带入 [Pi Coding Agent](https://github.com/earendil-works/pi)**
+**将 [Maestro-Flow](https://github.com/catlog22/maestro-flow) 的多智能体编排能力带入 [Pi Coding Agent](https://github.com/earendil-works/pi)**
 
 [![npm: pi-maestro-flow](https://img.shields.io/npm/v/pi-maestro-flow?color=cb3837&logo=npm&logoColor=white&label=pi-maestro-flow)](https://www.npmjs.com/package/pi-maestro-flow)
 [![npm: pi-maestro-teammate](https://img.shields.io/npm/v/pi-maestro-teammate?color=cb3837&logo=npm&logoColor=white&label=pi-maestro-teammate)](https://www.npmjs.com/package/pi-maestro-teammate)
@@ -15,9 +15,9 @@
 
 ## 概述
 
-pi-maestro-flow 是 [Maestro-Flow](https://github.com/catlog22/maestro2) 的 Pi 扩展版本，将 Maestro 的意图驱动多智能体编排框架转化为 Pi 原生工具和技能。
+pi-maestro-flow 是 [Maestro-Flow](https://github.com/catlog22/maestro-flow) 的 Pi 扩展版本，将 Maestro 的意图驱动多智能体编排框架转化为 Pi 原生工具和技能。
 
-**原项目**: [catlog22/maestro2](https://github.com/catlog22/maestro2) — 意图驱动的多智能体工作流编排框架
+**原项目**: [catlog22/maestro-flow](https://github.com/catlog22/maestro-flow) — 意图驱动的多智能体工作流编排框架
 **文档站**: [Maestro-Flow Docs](https://catlog22.github.io/maestro2/)
 
 ## 包含内容
@@ -41,7 +41,7 @@ pi install ./pi-teammate
 pi install ./flow
 ```
 
-> **前置依赖**: 需要安装 [Maestro CLI](https://github.com/catlog22/maestro2)（`npm install -g maestro-flow`）以使用 `maestro search`、`maestro load`、`maestro delegate`、`maestro explore` 等命令。
+> **前置依赖**: 需要安装 [Maestro CLI](https://github.com/catlog22/maestro-flow)（`npm install -g maestro-flow`）以使用 `maestro search`、`maestro load`、`maestro delegate`、`maestro explore` 等命令。
 
 ## 包结构
 
@@ -100,7 +100,7 @@ maestro({ action: "moa", prompts: ["分析支付流程架构"] })
 
 ## 致谢
 
-本项目基于 [Maestro-Flow](https://github.com/catlog22/maestro2) 构建，将其工作流编排能力移植到 [Pi Coding Agent](https://github.com/earendil-works/pi) 生态系统。
+本项目基于 [Maestro-Flow](https://github.com/catlog22/maestro-flow) 构建，将其工作流编排能力移植到 [Pi Coding Agent](https://github.com/earendil-works/pi) 生态系统。
 
 - **Maestro-Flow**: 意图驱动的多智能体工作流编排框架 — [@catlog22](https://github.com/catlog22)
 - **Pi**: AI agent toolkit — [@earendil-works](https://github.com/earendil-works)
