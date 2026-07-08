@@ -64,6 +64,8 @@ export interface MessageEnvelope {
   timestamp: number;
 }
 
+export type AgentStatus = "running" | "sleeping" | "completed";
+
 export interface ActiveAgent {
   agent: string;
   name?: string;
@@ -77,6 +79,10 @@ export interface ActiveAgent {
   lastActivityAt: number;
   replyTo?: string;
   spawnedBy?: string;
+  status: AgentStatus;
+  lastResult?: string;
+  sleptAt?: number;
+  sleepMs: number;
 }
 
 export interface TeammateState {

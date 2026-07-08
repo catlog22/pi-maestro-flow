@@ -45,6 +45,7 @@ export interface RunTeammateOptions {
   onChildRequest?: (event: Record<string, unknown>, reply: (msg: unknown) => void) => void;
   parentSessionFile?: string;
   onChildSpawned?: (stdin: import("node:stream").Writable) => void;
+  onTurnComplete?: (result: SingleResult) => void;
 }
 
 // ---------------------------------------------------------------------------
@@ -389,7 +390,9 @@ function buildPiArgs(
   }
 
   if (agentConfig.tools && agentConfig.tools.length > 0) {
-    args.push("--tools", agentConfig.tools.join(","));
+    const proxyTools = ["teammate", "teammate-send", "teammate-list", "teammate-watch"];
+    const toolSet = new Set([...agentConfig.tools, ...proxyTools]);
+    args.push("--tools", [...toolSet].join(","));
   }
 
   args.push("--append-system-prompt", systemPromptFile);
@@ -476,23 +479,18 @@ export async function runTeammate(
     };
   }
 
-  // Resolve agent
-  const agentConfig = resolveAgent(cwd, params.agent);
-  if (!agentConfig) {
-    return {
-      agent: params.agent,
-      task: params.task ?? "",
-      exitCode: 1,
-      messages: [{
-        role: "system",
-        content: `Agent "${params.agent}" not found. Available agents can be discovered from agents/ directories.`,
-      }],
-      usage: emptyUsage(),
-      model: params.model ?? "unknown",
-      correlationId,
-      durationMs: Date.now() - startTime,
-    };
-  }
+  // Resolve agent — fall back to generic config if no definition file exists
+  const agentConfig: AgentConfig = resolveAgent(cwd, params.agent) ?? {
+    name: params.agent,
+    description: `Generic teammate agent "${params.agent}"`,
+    tools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
+    systemPromptMode: "append" as const,
+    inheritProjectContext: true,
+    inheritSkills: false,
+    systemPrompt: `You are a teammate agent named "${params.agent}". Execute the assigned task using the provided tools. Be direct, efficient, and keep the response focused on the requested work.`,
+    source: "builtin" as const,
+    filePath: "",
+  };
 
   // Resolve routing
   const replyTo: ReplyTarget = resolveReplyTo({
@@ -570,6 +568,7 @@ async function runSingleAttempt(
 
   return new Promise<SingleResult>((resolve) => {
     let child: ChildProcess;
+    let resolved = false;
 
     const spawnEnv: Record<string, string | undefined> = {
       ...process.env,
@@ -587,9 +586,10 @@ async function runSingleAttempt(
       spawnEnv.PI_TEAMMATE_PARENT_SESSION = options.parentSessionFile;
     }
 
+    let useIpc = false;
     try {
       const spawnSpec = getPiSpawnCommand(piArgs);
-      const useIpc = !spawnSpec.shell;
+      useIpc = !spawnSpec.shell;
       const spawnOpts: Parameters<typeof spawn>[2] = {
         cwd,
         stdio: useIpc ? ["pipe", "pipe", "pipe", "ipc"] : ["pipe", "pipe", "pipe"],
@@ -630,6 +630,18 @@ async function runSingleAttempt(
       options.onChildSpawned?.(child.stdin);
     }
 
+    // IPC message listener — proxy requests from child extensions
+    if (useIpc) {
+      child.on("message", (msg: unknown) => {
+        const m = msg as Record<string, unknown>;
+        if (m?.type === "teammate_proxy_request" && options.onChildRequest) {
+          const replyFn = (reply: unknown) => {
+            try { child.send(reply); } catch { /* child disconnected */ }
+          };
+          options.onChildRequest(m, replyFn);
+        }
+      });
+    }
 
     // Report initial progress
     options.onProgress?.(progress);
@@ -772,7 +784,6 @@ async function runSingleAttempt(
           break;
         }
         case "agent_end": {
-          // RPC mode: process stays alive after agent_end — we must resolve manually
           progress.status = "completed";
           progress.durationMs = Date.now() - startTime;
           if (messages.length === 0 && lastContent) {
@@ -781,9 +792,6 @@ async function runSingleAttempt(
           options.onProgress?.(progress);
 
           if (timeoutTimer) clearTimeout(timeoutTimer);
-          if (options.signal) {
-            options.signal.removeEventListener("abort", abortHandler);
-          }
           cleanupFile(systemPromptFile);
           if (schemaFile) cleanupFile(schemaFile);
 
@@ -797,32 +805,25 @@ async function runSingleAttempt(
             cleanupFile(outputFile);
           }
 
-          child.stdin?.end();
-          child.kill();
-
-          resolve({
+          const turnResult: SingleResult = {
             agent: params.agent,
             task: params.task ?? "",
             exitCode: 0,
-            messages,
-            usage,
+            messages: [...messages],
+            usage: { ...usage },
             model: resolvedModel,
             correlationId,
             durationMs: Date.now() - startTime,
             structuredOutput,
             attemptedModels: undefined,
-          });
-          return;
-        }
-        case "teammate_proxy_request": {
-          if (options.onChildRequest) {
-            const replyFn = (msg: unknown) => {
-              if (useIpc && typeof child.send === "function") {
-                try { child.send(msg); } catch { /* child disconnected */ }
-              }
-            };
-            options.onChildRequest(event as Record<string, unknown>, replyFn);
+          };
+
+          if (!resolved) {
+            resolved = true;
+            resolve(turnResult);
           }
+          options.onTurnComplete?.(turnResult);
+          // Process stays alive — stdin open for follow_up/steer to wake agent
           break;
         }
         case "error": {
@@ -885,17 +886,20 @@ async function runSingleAttempt(
       }
       if (schemaFile) cleanupFile(schemaFile);
 
-      resolve({
-        agent: params.agent,
-        task: params.task ?? "",
-        exitCode: code ?? 1,
-        messages,
-        usage,
-        model: resolvedModel,
-        correlationId,
-        durationMs: Date.now() - startTime,
-        structuredOutput,
-      });
+      if (!resolved) {
+        resolved = true;
+        resolve({
+          agent: params.agent,
+          task: params.task ?? "",
+          exitCode: code ?? 1,
+          messages,
+          usage,
+          model: resolvedModel,
+          correlationId,
+          durationMs: Date.now() - startTime,
+          structuredOutput,
+        });
+      }
     });
 
     child.on("error", (error) => {

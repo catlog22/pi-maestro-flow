@@ -16,6 +16,17 @@ interface AgentLog {
   scrollOffset: number;
 }
 
+function wrapLine(text: string, maxW: number): string[] {
+  if (text.length <= maxW) return [text];
+  const lines: string[] = [];
+  let pos = 0;
+  while (pos < text.length) {
+    lines.push(text.slice(pos, pos + maxW));
+    pos += maxW;
+  }
+  return lines;
+}
+
 export class AttachOverlay implements Component {
   private agents: Map<string, AgentLog> = new Map();
   private activeId: string;
@@ -125,9 +136,19 @@ export class AttachOverlay implements Component {
     }
   }
 
-  render(width: number): string[] {
+  render(width: number, height?: number): string[] {
     this.syncAgents();
+    const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
+    const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
+    const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
+    const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
+    const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
+    const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
     const out: string[] = [];
+    const w = Math.min(width, 120);
+
+    // Top border
+    out.push(dim("╭" + "─".repeat(w - 2) + "╮"));
 
     // Tab bar
     const tabs = this.agentOrder.map((cid) => {
@@ -135,43 +156,89 @@ export class AttachOverlay implements Component {
       if (!log) return "";
       const a = log.agent;
       const label = a.name ?? cid.slice(0, 6);
-      const active = cid === this.activeId;
-      const depth = a.spawnedBy ? "↳" : "";
-      return active ? `[${depth}${a.agent}/${label}]` : ` ${depth}${a.agent}/${label} `;
-    }).join("│");
-    out.push(tabs.slice(0, width));
-    out.push("─".repeat(Math.min(width, 80)));
+      const prefix = a.spawnedBy ? "↳" : "";
+      const statusIcon = a.status === "sleeping" ? yellow("◉") : green("●");
+      if (cid === this.activeId) {
+        return ` ${statusIcon} ${bold(`${prefix}${a.agent}/${label}`)} `;
+      }
+      return ` ${statusIcon} ${dim(`${prefix}${a.agent}/${label}`)} `;
+    }).join(dim("│"));
+    out.push(dim("│") + tabs.slice(0, w - 2).padEnd(w - 2) + dim("│"));
+    out.push(dim("├" + "─".repeat(w - 2) + "┤"));
 
     const log = this.agents.get(this.activeId);
     if (!log) {
-      out.push("(no agent selected)");
+      out.push(dim("│") + " (no agent selected)".padEnd(w - 2) + dim("│"));
+      out.push(dim("╰" + "─".repeat(w - 2) + "╯"));
       return out;
     }
 
     // Agent header
     const a = log.agent;
-    const uptime = Math.round((Date.now() - a.startedAt) / 1000);
-    out.push(`${a.agent}/${a.name ?? a.correlationId.slice(0, 8)}  ${uptime}s  inbox:${a.inbox.length}`);
-    out.push("");
+    const activeMs = (() => {
+      const total = Date.now() - a.startedAt;
+      const sleeping = a.sleptAt ? Date.now() - a.sleptAt : 0;
+      return total - a.sleepMs - sleeping;
+    })();
+    const uptime = Math.round(activeMs / 1000);
+    const statusLabel = a.status === "sleeping" ? yellow(" SLEEPING") : a.status === "completed" ? dim(" DONE") : green(" RUNNING");
+    const headerText = `${a.agent}/${a.name ?? a.correlationId.slice(0, 8)}  ${uptime}s  inbox:${a.inbox.length}`;
+    out.push(dim("│") + ` ${bold(headerText)}${statusLabel}`.padEnd(w - 2) + dim("│"));
+    out.push(dim("├" + "─".repeat(w - 2) + "┤"));
 
-    // Log content
-    const viewH = 25;
-    const visible = log.lines.slice(log.scrollOffset, log.scrollOffset + viewH);
-    for (const entry of visible) {
-      let prefix = "  ";
-      if (entry.kind === "tool") prefix = "  ";
-      else if (entry.kind === "output") prefix = "  │ ";
-      else if (entry.kind === "system") prefix = "  ═ ";
-      out.push((prefix + entry.text).slice(0, width));
+    // Build wrapped content lines
+    const contentW = w - 6;
+    const wrappedLines: Array<{ text: string; kind: string }> = [];
+    for (const entry of log.lines) {
+      const wrapped = wrapLine(entry.text, contentW);
+      for (const wl of wrapped) {
+        wrappedLines.push({ text: wl, kind: entry.kind });
+      }
+    }
+    // Inbox messages
+    if (a.inbox.length > 0) {
+      wrappedLines.push({ text: "── inbox ──", kind: "system" });
+      for (const msg of a.inbox.slice(-5)) {
+        const time = new Date(msg.timestamp).toISOString().slice(11, 19);
+        const msgText = `[${time}] ◀ ${msg.from}: ${msg.payload}`;
+        for (const wl of wrapLine(msgText, contentW)) {
+          wrappedLines.push({ text: wl, kind: "system" });
+        }
+      }
     }
 
-    while (out.length < viewH + 4) out.push("");
+    // Log content — fill available height
+    const extraRows = a.status === "sleeping" ? 2 : 0;
+    const viewH = (height ?? 30) - 7 - extraRows;
+    log.scrollOffset = Math.max(0, Math.min(log.scrollOffset, wrappedLines.length - viewH));
+    const visible = wrappedLines.slice(log.scrollOffset, log.scrollOffset + viewH);
+    for (const entry of visible) {
+      let line = "";
+      if (entry.kind === "tool") line = `  ${cyan(entry.text)}`;
+      else if (entry.kind === "output") line = `  ${dim("│")} ${entry.text}`;
+      else if (entry.kind === "system") line = `  ${yellow(entry.text)}`;
+      else line = `  ${entry.text}`;
+      out.push(dim("│") + ` ${line}`.padEnd(w - 2) + dim("│"));
+    }
+
+    const fillLines = viewH - visible.length;
+    for (let i = 0; i < fillLines; i++) {
+      out.push(dim("│") + " ".repeat(w - 2) + dim("│"));
+    }
+
+    // Sleeping hint
+    if (a.status === "sleeping") {
+      out.push(dim("├" + "─".repeat(w - 2) + "┤"));
+      out.push(dim("│") + yellow(" ◉ sleeping — teammate-send to wake").padEnd(w - 2) + dim("│"));
+    }
 
     // Footer
-    const total = log.lines.length;
+    const total = wrappedLines.length;
     const scrollInfo = total > viewH ? ` ${log.scrollOffset + 1}-${Math.min(log.scrollOffset + viewH, total)}/${total}` : "";
     const n = this.agentOrder.length;
-    out.push(`─ [ESC] back │ [Tab] switch (${n}) │ [↑↓] scroll${scrollInfo} ─`.slice(0, width));
+    const footer = ` ${dim("ESC")} back  ${dim("Tab")} switch(${n})  ${dim("↑↓")} scroll${dim(scrollInfo)}`;
+    out.push(dim("╰" + "─".repeat(w - 2) + "╯"));
+    out.push(footer.slice(0, w));
 
     return out;
   }
