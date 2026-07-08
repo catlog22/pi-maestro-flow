@@ -1,11 +1,14 @@
 /**
  * TypeBox schemas for teammate tool parameters.
  *
- * P0 three-axis decoupling:
- *   - name: addressability (optional agent name for routing)
- *   - reply_to: result routing (caller | main)
+ * Unified TaskSpec model:
+ *   - Single agent: { agent, task }
+ *   - Multi-task: { tasks: TaskSpec[] } with {name} variable references defining execution order
+ *   - Top-level fields serve as defaults, per-task overrides win
  *
- * Plus protocol_version gate and correlation_id (runtime-generated).
+ * P0 three-axis decoupling:
+ *   - name: addressability + variable referencing
+ *   - reply_to: result routing (caller | main)
  */
 
 import { Type } from "typebox";
@@ -17,40 +20,80 @@ function StringEnum<T extends string[]>(values: [...T]) {
   });
 }
 
-export const TeammateParams = Type.Object({
-  // Agent definition to use (required for single mode, optional for parallel/chain which specify per-task)
-  agent: Type.Optional(
-    Type.String({
-      description: "Agent name to dispatch (matches agents/*.md filename). Required for single mode, optional when using tasks/chain.",
-    }),
-  ),
+// ---------------------------------------------------------------------------
+// TaskSpec — unified task shape used by single and multi-task modes
+// ---------------------------------------------------------------------------
 
-  // Required: task description for the agent
+export const TaskSpec = Type.Object({
+  agent: Type.String({
+    description: "Agent name to dispatch (matches agents/*.md filename)",
+  }),
   task: Type.Optional(
     Type.String({
       description:
-        "Task description for the agent (optional for self-contained agents)",
+        "Task description. Use {name} to reference another task's output, {name.field} for structured output fields.",
+    }),
+  ),
+  name: Type.Optional(
+    Type.String({
+      description:
+        "Task identifier — enables referencing via {name} in other tasks and addressing via teammate-send",
+    }),
+  ),
+  model: Type.Optional(
+    Type.String({ description: "Override model for this task" }),
+  ),
+  cwd: Type.Optional(
+    Type.String({ description: "Working directory for this task" }),
+  ),
+  outputSchema: Type.Optional(
+    Type.Unsafe({
+      type: "object",
+      additionalProperties: true,
+      description:
+        "JSON Schema for structured output. Output becomes accessible as {name.field} in dependent tasks.",
+    }),
+  ),
+  timeoutMs: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      description: "Timeout in milliseconds for this task",
+    }),
+  ),
+});
+
+// ---------------------------------------------------------------------------
+// TeammateParams — top-level tool parameters
+// ---------------------------------------------------------------------------
+
+export const TeammateParams = Type.Object({
+  // === Single Agent Sugar (top-level is itself a TaskSpec) ===
+
+  agent: Type.Optional(
+    Type.String({
+      description:
+        "Agent name to dispatch. Required for single mode, optional when using tasks.",
+    }),
+  ),
+
+  task: Type.Optional(
+    Type.String({
+      description:
+        "Task description. Supports {name} variable references in multi-task mode.",
     }),
   ),
 
   // === P0 Three-Axis Fields ===
 
-  // Axis 1: Addressability
   name: Type.Optional(
     Type.String({
       description:
-        "Optional addressable name for the teammate instance (enables cross-agent routing)",
+        "Addressable name — enables variable referencing via {name} and cross-agent routing via teammate-send",
     }),
   ),
 
-  // Axis 2: Result Routing
-  reply_to: Type.Optional(
-    StringEnum(["caller", "main"]),
-  ),
+  reply_to: Type.Optional(StringEnum(["caller", "main"])),
 
-  // === Protocol & Correlation ===
-
-  // Protocol version gate — v2 defaults reply_to=caller; v1 defaults reply_to=main for named agents
   protocol_version: Type.Optional(
     Type.Integer({
       default: 2,
@@ -59,20 +102,13 @@ export const TeammateParams = Type.Object({
     }),
   ),
 
-  // correlation_id is auto-generated at runtime, not user-provided
-
-  // === Multi-Agent Modes ===
+  // === Multi-Task ===
 
   tasks: Type.Optional(
-    Type.Array(
-      Type.Object({
-        agent: Type.String(),
-        task: Type.String(),
-        model: Type.Optional(Type.String()),
-        cwd: Type.Optional(Type.String()),
-      }),
-      { description: "PARALLEL mode: run multiple agents concurrently" },
-    ),
+    Type.Array(TaskSpec, {
+      description:
+        "Multiple tasks to execute. Use {name} references in task descriptions to define dependencies — referenced tasks are awaited; unreferenced tasks run in parallel.",
+    }),
   ),
 
   chain: Type.Optional(
@@ -86,59 +122,69 @@ export const TeammateParams = Type.Object({
         ),
         model: Type.Optional(Type.String()),
       }),
-      { description: "CHAIN mode: sequential pipeline, each step gets {previous} result" },
+      {
+        description:
+          "[Deprecated] Use tasks with {name} references instead. Sequential pipeline where each step receives {previous} result.",
+      },
     ),
   ),
 
   concurrency: Type.Optional(
     Type.Integer({
       minimum: 1,
-      description: "Max concurrent parallel tasks (default: 4)",
+      description: "Max concurrent tasks (default: 4)",
     }),
   ),
 
-  // === Structured Output ===
+  // === Structured Output (default for tasks without their own) ===
 
   outputSchema: Type.Optional(
     Type.Unsafe({
       type: "object",
       additionalProperties: true,
-      description: "JSON Schema for structured output validation",
+      description:
+        "JSON Schema for structured output validation. In multi-task mode, serves as default for tasks without their own outputSchema.",
     }),
   ),
 
-  // === Execution Control ===
+  // === Execution Control (applies to all modes) ===
 
   background: Type.Optional(
     Type.Boolean({
       default: true,
-      description: "Run in background (default: true). Set false to block until completion.",
+      description:
+        "Run in background (default: true). Set false to block until completion.",
     }),
   ),
 
-  context: Type.Optional(
-    StringEnum(["fresh", "fork"]),
-  ),
+  context: Type.Optional(StringEnum(["fresh", "fork"])),
 
   model: Type.Optional(
     Type.String({
-      description: "Override model for this teammate run",
+      description:
+        "Default model override. Per-task model takes precedence.",
     }),
   ),
 
   cwd: Type.Optional(
     Type.String({
-      description: "Working directory for the teammate subprocess",
+      description:
+        "Default working directory. Per-task cwd takes precedence.",
     }),
   ),
 
   timeoutMs: Type.Optional(
     Type.Integer({
       minimum: 1,
-      description: "Timeout in milliseconds for the teammate run",
+      description:
+        "Default timeout in milliseconds. Per-task timeoutMs takes precedence.",
     }),
   ),
 });
+
+// ---------------------------------------------------------------------------
+// Other tool schemas (unchanged)
+// ---------------------------------------------------------------------------
 
 export const TeammateSendParams = Type.Object({
   to: Type.String({
@@ -169,4 +215,3 @@ export const TeammateWatchParams = Type.Object({
     }),
   ),
 });
-

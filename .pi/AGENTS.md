@@ -15,12 +15,16 @@ Maestro workflow orchestration for Pi coding agent.
 Dispatch tasks to teammate agents. Teammates run as pi subprocesses via RPC mode.
 **默认后台运行** — 立即返回，agent 在后台执行，完成后自动通知主会话。
 
-**Single mode** (requires `agent`):
+统一 TaskSpec 模型 — 两条规则：
+1. **引用即依赖**: task 中写 `{name}` 引用其他任务输出 → 自动等待
+2. **无引用即并行**: 没有依赖的任务并发执行（受 `concurrency` 限制）
+
+**Single agent**:
 ```
 teammate({ agent: "delegate", task: "Implement the auth module", name: "auth" })
 ```
 
-**Parallel mode** (top-level `agent` optional):
+**Parallel** (无引用 = 并发):
 ```
 teammate({
   tasks: [
@@ -31,32 +35,59 @@ teammate({
 })
 ```
 
-**Chain mode** (sequential pipeline):
+**Chain** (线性引用 = 顺序):
 ```
 teammate({
-  chain: [
-    { agent: "explorer", task: "Find all auth endpoints" },
-    { agent: "delegate", task: "Fix security issues in: {previous}" }
+  tasks: [
+    { agent: "scout", name: "recon", task: "Find the auth module structure" },
+    { agent: "delegate", task: "Based on this context: {recon}\n\nRefactor the auth module" }
   ]
 })
 ```
 
-**Full parameters:**
+**DAG** (混合引用 = fan-in/fan-out):
+```
+teammate({
+  tasks: [
+    { agent: "scout", name: "api", task: "List all API routes",
+      outputSchema: { type: "object", properties: { routes: { type: "array" } }, required: ["routes"] } },
+    { agent: "scout", name: "db", task: "Map the database schema" },
+    { agent: "reviewer", task: "Routes: {api.routes}\nDB: {db}\n\nCheck consistency" }
+  ]
+})
+```
+
+**变量引用语法:**
+
+| 语法 | 解析为 |
+|------|--------|
+| `{name}` | 任务全文输出；若有 outputSchema 则为 JSON |
+| `{name.field}` | 结构化输出的指定字段 |
+| `{name.arr[0].path}` | 嵌套字段 + 数组索引 |
+
+仅命名任务可被引用。非任务名的 `{braces}` 不受影响。
+
+**TaskSpec (单任务 + tasks 项共用):**
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `agent` | string | Single mode | Agent definition name (matches `agents/*.md`) |
-| `task` | string | No | Task description |
-| `name` | string | No | Addressable name (enables send/watch) |
-| `reply_to` | `"caller"` \| `"main"` | No | Result routing (default: caller) |
-| `tasks` | array | Parallel | `[{ agent, task, model?, cwd? }]` |
-| `chain` | array | Chain | `[{ agent, task?, model? }]` with `{previous}` |
-| `concurrency` | integer | No | Max parallel tasks (default: 4) |
-| `background` | boolean | No | Default `true`. Set `false` to block (Alt+B detaches) |
-| `model` | string | No | Model override |
-| `outputSchema` | object | No | JSON Schema for structured output |
-| `timeoutMs` | integer | No | Timeout in ms |
-| `cwd` | string | No | Working directory |
+| `agent` | string | Yes | Agent definition name (matches `agents/*.md`) |
+| `task` | string | No | Task description，支持 `{name}` 变量引用 |
+| `name` | string | No | 任务标识 — 变量引用 + teammate-send 寻址 |
+| `model` | string | No | 模型覆盖（per-task 优先于 top-level） |
+| `cwd` | string | No | 工作目录（per-task 优先于 top-level） |
+| `outputSchema` | object | No | JSON Schema 结构化输出，下游可用 `{name.field}` |
+| `timeoutMs` | integer | No | 超时（per-task 优先于 top-level） |
+
+**Top-level 控制字段 (所有模式生效):**
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `tasks` | TaskSpec[] | — | 多任务，`{name}` 引用定义执行顺序 |
+| `concurrency` | integer | 4 | 最大并发任务数 |
+| `background` | boolean | `true` | 后台运行；`false` 阻塞（Alt+B 可分离） |
+| `reply_to` | `"caller"` \| `"main"` | caller | 结果路由 |
+| `chain` | array | — | **[Deprecated]** 用 tasks + `{name}` 引用代替 |
 
 ### teammate-send
 
@@ -109,7 +140,22 @@ teammate-list({ view: "active" })
 | `named` | 仅可寻址（有 name）的 agent |
 | `all` | 所有 agent 含已完成元数据 |
 
-输出: `[delegate] name="auth" | up 45s | idle 3s | inbox: 0`
+输出（含嵌套树形显示）:
+```
+[coordinator/worker] name="worker" | up 45s | idle 3s | inbox: 0
+  └─ [scout] name="recon" | up 30s | idle 2s | depth 1
+  └─ [delegate] name="impl" | up 20s | idle 1s | depth 1
+```
+
+`teammate-watch` 也支持查看嵌套 agent（按 name 查找，只读）。
+
+## 平铺 Agent 模型
+
+所有 agent 由 root 进程统一管理，平铺在同一个 `activeRuns` 池中。子 agent 调用 teammate 工具时，通过 proxy 请求 root spawn 新 agent——新 agent 是 root 的直属子进程，不是嵌套子进程。
+
+**直达发送**: `teammate-send({ to: "name" })` = `namedAgents.get(name) → stdin`。一次查找，直接投递，无 IPC 链，无中继。
+
+**coordinator**: 已配置 teammate 全套工具（proxy 版），可动态 spawn、send、list、watch。
 
 ## TUI 交互
 
@@ -230,8 +276,8 @@ maestro explore "FIND: ...\nSCOPE: ..." [more prompts...] [--json] [--all]
 
 | Agent | Role |
 |-------|------|
-| `delegate` | 通用任务执行（读写、编辑、bash） |
-| `coordinator` | 多 agent 编排协调 |
+| `delegate` | 通用单任务执行（读写、编辑、bash） |
+| `coordinator` | DAG 多任务编排协调，使用 `{name}` 变量引用定义数据流 |
 
 ## Architecture
 

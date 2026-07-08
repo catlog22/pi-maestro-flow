@@ -16,11 +16,14 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams } from "./schemas.ts";
 import {
   runTeammate,
-  runParallel,
-  runChain,
+  runGraph,
+  normalizeChainToTasks,
+  inferGraphMode,
   sendRpcMessage,
   type RunTeammateParams,
+  type RunTeammateOptions,
   type RpcMessageMode,
+  type NormalizedTask,
 } from "../runs/execution.ts";
 import {
   renderTeammateCall,
@@ -41,9 +44,93 @@ import {
 } from "../shared/types.ts";
 
 export default function registerTeammateExtension(pi: ExtensionAPI): void {
-  if (process.env.PI_TEAMMATE_CHILD === "1") {
-    return;
+  const isChild = process.env.PI_TEAMMATE_CHILD === "1";
+
+  // =========================================================================
+  // Child mode: register proxy tools that forward to root via stdout/IPC
+  // =========================================================================
+
+  if (isChild) {
+    const pendingRequests = new Map<string, (result: unknown) => void>();
+
+    // IPC listener: receive results from root
+    if (typeof process.send === "function") {
+      process.on("message", (msg: unknown) => {
+        const m = msg as Record<string, unknown>;
+        if (m?.type === "teammate_proxy_result") {
+          const resolve = pendingRequests.get(m.requestId as string);
+          if (resolve) {
+            pendingRequests.delete(m.requestId as string);
+            resolve(m.result);
+          }
+        }
+      });
+    }
+
+    async function proxyCall<T>(tool: string, params: unknown): Promise<AgentToolResult<T>> {
+      if (typeof process.send !== "function") {
+        return {
+          content: [{ type: "text", text: "IPC not available. Teammate proxy requires IPC channel." }],
+          isError: true,
+        } as AgentToolResult<T>;
+      }
+      const requestId = randomUUID();
+      const parentCid = process.env.PI_TEAMMATE_CORRELATION_ID;
+      process.stdout.write(
+        JSON.stringify({ type: "teammate_proxy_request", tool, requestId, params, parentCid }) + "\n",
+      );
+      const result = await new Promise<unknown>((resolve) => {
+        pendingRequests.set(requestId, resolve);
+      });
+      return result as AgentToolResult<T>;
+    }
+
+    pi.registerTool({
+      name: "teammate",
+      label: "Teammate",
+      description: "Dispatch tasks to teammate agents (proxy to root orchestrator).",
+      parameters: TeammateParams,
+      async execute(_id: string, params: RunTeammateParams) {
+        return proxyCall<Details>("teammate", params);
+      },
+    });
+
+    pi.registerTool({
+      name: "teammate-send",
+      label: "Teammate Send",
+      description: "Send a message to a named teammate agent (proxy to root).",
+      parameters: TeammateSendParams,
+      async execute(_id: string, params: { to: string; message: string; mode?: RpcMessageMode }) {
+        return proxyCall<{ delivered: boolean }>("teammate-send", params);
+      },
+    });
+
+    pi.registerTool({
+      name: "teammate-list",
+      label: "Teammate List",
+      description: "List active teammate agents (proxy to root).",
+      parameters: TeammateListParams,
+      async execute(_id: string, params: { view?: "active" | "named" | "all" }) {
+        return proxyCall<{ agents: unknown[] }>("teammate-list", params);
+      },
+    });
+
+    pi.registerTool({
+      name: "teammate-watch",
+      label: "Teammate Watch",
+      description: "View a running agent's output (proxy to root).",
+      parameters: TeammateWatchParams,
+      async execute(_id: string, params: { name: string; lines?: number }) {
+        return proxyCall<{ output: string[] }>("teammate-watch", params);
+      },
+    });
+
+    return; // Child mode done — skip root-mode registration
   }
+
+  // =========================================================================
+  // ROOT MODE — full tool implementations below
+  // =========================================================================
 
   const state: TeammateState = {
     baseCwd: "",
@@ -61,17 +148,32 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     label: "Teammate",
     description: `Dispatch tasks to teammate agents. Teammates run as pi subprocesses with their own tools and context.
 
-Modes:
-  - Single: { agent: "delegate", task: "..." }
-  - Parallel: { tasks: [{ agent: "scout", task: "..." }, { agent: "reviewer", task: "..." }] }
-  - Chain: { chain: [{ agent: "scout", task: "Find auth code" }, { agent: "delegate", task: "Fix: {previous}" }] }
+Single agent:
+  { agent: "delegate", task: "..." }
+
+Multiple tasks (no references = parallel):
+  { tasks: [
+      { agent: "scout", task: "Find API endpoints" },
+      { agent: "scout", task: "Map database schema" }
+    ] }
+
+Multiple tasks ({name} references = DAG — dependencies auto-resolved):
+  { tasks: [
+      { agent: "scout", name: "api", task: "List all API routes",
+        outputSchema: { type: "object", properties: { routes: { type: "array" } } } },
+      { agent: "scout", name: "db", task: "Map the database schema" },
+      { agent: "reviewer", task: "Routes: {api.routes}\\nDB: {db}\\n\\nCheck consistency" }
+    ] }
+
+Variable references:
+  - {name} — full output of the named task (text or JSON if outputSchema set)
+  - {name.field} — specific field from structured output
 
 Routing:
-  - name: Optional addressable name for cross-agent routing (enables teammate-send)
-  - reply_to: Result routing — "caller" (direct return) or "main" (broadcast to parent session)
+  - name: addressable name for variable referencing and teammate-send
+  - reply_to: "caller" (direct return) or "main" (broadcast to parent)
 
-Structured output:
-  - outputSchema: JSON Schema to validate and parse child output as structured data`,
+Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task unless overridden per-task.`,
 
     parameters: TeammateParams,
 
@@ -84,15 +186,46 @@ Structured output:
         | undefined,
       ctx: ExtensionContext,
     ): Promise<AgentToolResult<Details>> {
-      // Validate: single mode requires agent
-      const isSingle = !params.tasks?.length && !params.chain?.length;
-      if (isSingle && !params.agent) {
+      // --- Normalize to task list ---
+      let normalizedTasks: NormalizedTask[];
+      let isMultiTask = false;
+
+      if (params.chain?.length) {
+        normalizedTasks = normalizeChainToTasks(params.chain, params.task ?? "");
+        isMultiTask = true;
+      } else if (params.tasks?.length) {
+        normalizedTasks = params.tasks.map((t: { agent: string; task?: string; name?: string; model?: string; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }) => ({
+          agent: t.agent,
+          task: t.task ?? "",
+          name: t.name,
+          model: t.model ?? params.model,
+          cwd: t.cwd ?? params.cwd,
+          outputSchema: (t.outputSchema ?? params.outputSchema) as Record<string, unknown> | undefined,
+          timeoutMs: t.timeoutMs ?? params.timeoutMs,
+        }));
+        isMultiTask = true;
+      } else if (params.agent) {
+        normalizedTasks = [];
+      } else {
         return {
-          content: [{ type: "text", text: 'Single mode requires "agent" field. For parallel use "tasks", for chain use "chain".' }],
+          content: [{ type: "text", text: 'Requires "agent" field for single mode, or "tasks" for multi-task mode.' }],
           isError: true,
           details: { mode: "single", results: [] },
         };
       }
+
+      // Apply top-level defaults to chain tasks
+      if (params.chain?.length) {
+        for (const t of normalizedTasks) {
+          t.model ??= params.model;
+          t.cwd ??= params.cwd;
+          t.outputSchema ??= params.outputSchema as Record<string, unknown> | undefined;
+          t.timeoutMs ??= params.timeoutMs;
+        }
+      }
+
+      const isSingle = !isMultiTask;
+      const graphMode = isMultiTask ? inferGraphMode(normalizedTasks) : null;
 
       const correlationId = randomUUID();
 
@@ -112,8 +245,10 @@ Structured output:
         }
       }
 
+      const agentLabel = isMultiTask ? `graph(${normalizedTasks.length})` : params.agent!;
+
       const activeAgent: ActiveAgent = {
-        agent: params.agent ?? "parallel",
+        agent: agentLabel,
         name: params.name,
         correlationId,
         startedAt: Date.now(),
@@ -131,7 +266,7 @@ Structured output:
 
       pi.events.emit(TEAMMATE_STARTED_EVENT, {
         id,
-        agent: params.agent ?? "parallel",
+        agent: agentLabel,
         name: params.name,
         correlationId,
       });
@@ -195,7 +330,7 @@ Structured output:
               text: `[${data.agent}] ${data.status} | tools: ${data.toolCount} | tokens: ${data.tokens}`,
             }],
             details: {
-              mode: "single",
+              mode: (graphMode ?? "single") as Details["mode"],
               results: [],
               progress: [{
                 agent: data.agent,
@@ -213,54 +348,96 @@ Structured output:
           });
         };
         })(),
+        onChildRequest: (event: Record<string, unknown>, reply: (msg: unknown) => void) => {
+          handleProxyRequest(state, event, reply, correlationId);
+        },
       });
 
       let detached = false;
 
       try {
-        // --- PARALLEL MODE ---
-        if (params.tasks && params.tasks.length > 0) {
-          const concurrency = params.concurrency ?? 4;
-          const results = await runParallel(
-            params.tasks,
-            concurrency,
-            makeOptions(),
-          );
+        // --- MULTI-TASK MODE (parallel / chain / graph) ---
+        if (isMultiTask) {
+          const executeGraph = async () => {
+            const results = await runGraph(
+              normalizedTasks,
+              params.concurrency ?? 4,
+              makeOptions(),
+            );
 
-          const hasError = results.some((r) => r.exitCode !== 0);
-          const summaries = results
-            .map((r) => `[${r.agent}] ${r.exitCode === 0 ? "OK" : "FAIL"}: ${r.messages[r.messages.length - 1]?.content ?? "(no output)"}`)
-            .join("\n\n");
+            const hasError = results.some((r) => r.exitCode !== 0);
+            const totalDur = graphMode === "chain"
+              ? results.reduce((s, r) => s + r.durationMs, 0)
+              : Math.max(...results.map((r) => r.durationMs), 0);
 
-          emitComplete(pi, id, "parallel", correlationId, hasError ? 1 : 0,
-            Math.max(...results.map((r) => r.durationMs)));
+            const summaries = results
+              .map((r, i) => `[${r.agent}${normalizedTasks[i]?.name ? "/" + normalizedTasks[i].name : ""}] ${r.exitCode === 0 ? "OK" : "FAIL"}: ${r.messages[r.messages.length - 1]?.content ?? "(no output)"}`)
+              .join("\n\n");
 
-          return {
-            content: [{ type: "text", text: summaries }],
-            isError: hasError,
-            details: { mode: "parallel", results },
+            // Aggregate structured outputs by task name (fallback to index for unnamed)
+            const structuredOutputs: Record<string, unknown> = {};
+            for (let i = 0; i < results.length; i++) {
+              const task = normalizedTasks[i];
+              if (results[i].structuredOutput !== undefined) {
+                const key = task.name ?? String(i);
+                structuredOutputs[key] = results[i].structuredOutput;
+              }
+            }
+            const structuredOutput = Object.keys(structuredOutputs).length > 0
+              ? structuredOutputs
+              : undefined;
+
+            return { results, hasError, totalDur, summaries, structuredOutput };
           };
-        }
 
-        // --- CHAIN MODE ---
-        if (params.chain && params.chain.length > 0) {
-          const results = await runChain(
-            params.chain,
-            params.task ?? "",
-            makeOptions(),
-          );
+          if (params.background === false) {
+            // Foreground: block until completion
+            const { results, hasError, totalDur, summaries, structuredOutput } = await executeGraph();
 
-          const lastResult = results[results.length - 1];
-          const hasError = results.some((r) => r.exitCode !== 0);
-          const lastMessage = lastResult?.messages[lastResult.messages.length - 1]?.content ?? "(no output)";
+            emitComplete(pi, id, graphMode, correlationId, hasError ? 1 : 0, totalDur);
 
-          emitComplete(pi, id, "chain", correlationId, hasError ? 1 : 0,
-            results.reduce((sum, r) => sum + r.durationMs, 0));
+            return {
+              content: [{ type: "text", text: summaries }],
+              isError: hasError,
+              details: {
+                mode: graphMode as Details["mode"],
+                results,
+                ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+              },
+            };
+          }
+
+          // Background (default)
+          const bgPromise = executeGraph();
+
+          bgPromise.then(({ results, hasError, summaries }) => {
+            cleanupAgent(state, correlationId, params.name);
+            const label = params.name ?? correlationId.slice(0, 8);
+            const status = hasError ? "failed" : "completed";
+            const summary = summaries.length > 500
+              ? summaries.slice(0, 500) + "…"
+              : summaries;
+
+            pi.sendMessage(
+              {
+                customType: "teammate-complete",
+                content: `[teammate] ${graphMode} "${label}" ${status}\n\n${summary}`,
+                display: true,
+                details: { mode: graphMode, results },
+              },
+              { triggerTurn: true },
+            );
+          }).catch(() => {
+            cleanupAgent(state, correlationId, params.name);
+          });
 
           return {
-            content: [{ type: "text", text: lastMessage }],
-            isError: hasError,
-            details: { mode: "chain", results },
+            content: [{
+              type: "text",
+              text: `${normalizedTasks.length} tasks (${graphMode}) running in background. correlationId=${correlationId}. Use teammate-list to check status.`,
+            }],
+            isError: false,
+            details: { mode: graphMode as Details["mode"], results: [] },
           };
         }
 
@@ -395,34 +572,23 @@ Modes:
       _id: string,
       params: { to: string; message: string; mode?: RpcMessageMode },
     ): Promise<AgentToolResult<{ delivered: boolean }>> {
-      const correlationId = state.namedAgents.get(params.to);
-      if (!correlationId) {
+      const mode = params.mode ?? "follow_up";
+
+      const cid = state.namedAgents.get(params.to);
+      if (!cid) {
         const available = Array.from(state.namedAgents.keys());
         return {
-          content: [{
-            type: "text",
-            text: `Agent "${params.to}" not found. ${available.length > 0 ? `Available named agents: ${available.join(", ")}` : "No named agents are currently running."}`,
-          }],
+          content: [{ type: "text", text: `Agent "${params.to}" not found. ${available.length > 0 ? `Available: ${available.join(", ")}` : "No named agents running."}` }],
           isError: true,
           details: { delivered: false },
         };
       }
 
-      const agent = state.activeRuns.get(correlationId);
-      if (!agent) {
+      const agent = state.activeRuns.get(cid);
+      if (!agent?.stdin?.writable) {
         state.namedAgents.delete(params.to);
         return {
           content: [{ type: "text", text: `Agent "${params.to}" is no longer running.` }],
-          isError: true,
-          details: { delivered: false },
-        };
-      }
-
-      const mode = params.mode ?? "follow_up";
-
-      if (!agent.stdin || !agent.stdin.writable) {
-        return {
-          content: [{ type: "text", text: `Agent "${params.to}" stdin is not available.` }],
           isError: true,
           details: { delivered: false },
         };
@@ -437,32 +603,14 @@ Modes:
         };
       }
 
-      const envelope: MessageEnvelope = {
-        id: randomUUID(),
-        from: "caller",
-        to: params.to,
-        kind: mode === "abort" ? "notification" : "task",
-        payload: params.message,
-        timestamp: Date.now(),
-      };
-      agent.inbox.push(envelope);
+      agent.inbox.push({ id: randomUUID(), from: "caller", to: params.to, kind: mode === "abort" ? "notification" : "task", payload: params.message, timestamp: Date.now() });
       agent.lastActivityAt = Date.now();
 
-      pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
-        correlationId,
-        from: "caller",
-        to: params.to,
-        mode,
-        message: params.message,
-        isSend: true,
-      });
+      pi.events.emit(TEAMMATE_MESSAGE_EVENT, { correlationId: cid, from: "caller", to: params.to, mode, message: params.message, isSend: true });
 
       const modeLabel = mode === "steer" ? "interrupted + injected" : mode === "abort" ? "aborted" : "queued after current turn";
       return {
-        content: [{
-          type: "text",
-          text: `Message ${modeLabel} for "${params.to}" (mode: ${mode}).`,
-        }],
+        content: [{ type: "text", text: `Message ${modeLabel} for "${params.to}" (mode: ${mode}).` }],
         isError: false,
         details: { delivered: true },
       };
@@ -490,7 +638,7 @@ Views:
       params: { view?: "active" | "named" | "all" },
     ): Promise<AgentToolResult<{ agents: unknown[] }>> {
       const view = params.view ?? "active";
-      const agents: Array<{
+      const entries: Array<{
         agent: string;
         name?: string;
         correlationId: string;
@@ -499,12 +647,29 @@ Views:
         idleMs: number;
         inboxSize: number;
         hasStdin: boolean;
+        spawnedBy?: string;
+        depth: number;
       }> = [];
 
+      // Build parent→children index for tree rendering
+      const childrenOf = new Map<string, string[]>();
+      const roots: string[] = [];
       for (const [cid, entry] of state.activeRuns) {
         if (view === "named" && !entry.name) continue;
+        if (entry.spawnedBy && state.activeRuns.has(entry.spawnedBy)) {
+          const siblings = childrenOf.get(entry.spawnedBy) ?? [];
+          siblings.push(cid);
+          childrenOf.set(entry.spawnedBy, siblings);
+        } else {
+          roots.push(cid);
+        }
+      }
 
-        agents.push({
+      function collectTree(cid: string, depth: number): void {
+        const entry = state.activeRuns.get(cid);
+        if (!entry) return;
+        if (view === "named" && !entry.name) return;
+        entries.push({
           agent: entry.agent,
           name: entry.name,
           correlationId: cid,
@@ -513,19 +678,29 @@ Views:
           idleMs: Date.now() - entry.lastActivityAt,
           inboxSize: entry.inbox.length,
           hasStdin: Boolean(entry.stdin?.writable),
+          spawnedBy: entry.spawnedBy,
+          depth,
         });
+        for (const childCid of childrenOf.get(cid) ?? []) {
+          collectTree(childCid, depth + 1);
+        }
+      }
+      for (const rootCid of roots) {
+        collectTree(rootCid, 0);
       }
 
-      const lines = agents.length > 0
-        ? agents.map((a) =>
-          `[${a.agent}]${a.name ? ` name="${a.name}"` : ""} | up ${Math.round(a.durationMs / 1000)}s | idle ${Math.round(a.idleMs / 1000)}s | inbox: ${a.inboxSize}`
-        ).join("\n")
+      const lines = entries.length > 0
+        ? entries.map((a) => {
+          const indent = a.depth > 0 ? "  ".repeat(a.depth) + "└─ " : "";
+          const depthLabel = a.depth > 0 ? ` | depth ${a.depth}` : "";
+          return `${indent}[${a.agent}]${a.name ? ` name="${a.name}"` : ""} | up ${Math.round(a.durationMs / 1000)}s | idle ${Math.round(a.idleMs / 1000)}s | inbox: ${a.inboxSize}${depthLabel}`;
+        }).join("\n")
         : "No active teammate agents.";
 
       return {
         content: [{ type: "text", text: lines }],
         isError: false,
-        details: { agents },
+        details: { agents: entries },
       };
     },
   };
@@ -547,20 +722,18 @@ Views:
     ): Promise<AgentToolResult<{ output: string[] }>> {
       const lines = params.lines ?? 20;
 
-      const correlationId = state.namedAgents.get(params.name);
-      if (!correlationId) {
+      // Check direct agents first
+      const cid = state.namedAgents.get(params.name);
+      if (!cid) {
         const available = Array.from(state.namedAgents.keys());
         return {
-          content: [{
-            type: "text",
-            text: `Agent "${params.name}" not found. ${available.length > 0 ? `Available: ${available.join(", ")}` : "No named agents running."}`,
-          }],
+          content: [{ type: "text", text: `Agent "${params.name}" not found. ${available.length > 0 ? `Available: ${available.join(", ")}` : "No named agents running."}` }],
           isError: true,
           details: { output: [] },
         };
       }
 
-      const agent = state.activeRuns.get(correlationId);
+      const agent = state.activeRuns.get(cid);
       if (!agent) {
         state.namedAgents.delete(params.name);
         return {
@@ -573,15 +746,9 @@ Views:
       const log = agent.outputLog.slice(-lines);
       const uptime = Math.round((Date.now() - agent.startedAt) / 1000);
       const idle = Math.round((Date.now() - agent.lastActivityAt) / 1000);
-
       const header = `[${agent.agent}/${params.name}] up ${uptime}s | idle ${idle}s | log ${agent.outputLog.length} lines | inbox ${agent.inbox.length}`;
       const output = [header, "---", ...log];
 
-      return {
-        content: [{ type: "text", text: output.join("\n") }],
-        isError: false,
-        details: { output: log },
-      };
     },
   };
 
@@ -698,6 +865,10 @@ Views:
     }
   }
 
+  // =========================================================================
+  // TUI — only in parent mode (child processes have no terminal)
+  // =========================================================================
+
   pi.registerShortcut("alt+r", {
     description: "Attach to a running teammate agent",
     async handler(ctx) {
@@ -705,28 +876,48 @@ Views:
     },
   });
 
-  // =========================================================================
-  // Widget: active agents list below editor (auto-updated)
-  // =========================================================================
-
   let widgetCtx: ExtensionContext | null = null;
 
   function updateAgentWidget(): void {
     if (!widgetCtx) return;
-    const agents = Array.from(state.activeRuns.values());
-    if (agents.length === 0) {
+    const allAgents = Array.from(state.activeRuns.entries());
+    if (allAgents.length === 0) {
       widgetCtx.ui.setWidget("teammate-agents", undefined);
       return;
     }
 
-    const lines = agents.map((a) => {
+    // Build tree: roots first, then children indented
+    const childrenOf = new Map<string, string[]>();
+    const roots: string[] = [];
+    for (const [cid, a] of allAgents) {
+      if (a.spawnedBy && state.activeRuns.has(a.spawnedBy)) {
+        const siblings = childrenOf.get(a.spawnedBy) ?? [];
+        siblings.push(cid);
+        childrenOf.set(a.spawnedBy, siblings);
+      } else {
+        roots.push(cid);
+      }
+    }
+
+    const lines: string[] = ["─ agents ─ Alt+R attach"];
+
+    function renderNode(cid: string, depth: number): void {
+      const a = state.activeRuns.get(cid);
+      if (!a) return;
       const label = agentLabel(a);
       const uptime = Math.round((Date.now() - a.startedAt) / 1000);
       const status = a.stdin?.writable ? "●" : "○";
-      return `  ${status} ${a.agent}/${label}  ${uptime}s`;
-    });
+      const indent = depth > 0 ? "  ".repeat(depth) + "└─ " : "  ";
+      lines.push(`${indent}${status} ${a.agent}/${label}  ${uptime}s`);
+      for (const childCid of childrenOf.get(cid) ?? []) {
+        renderNode(childCid, depth + 1);
+      }
+    }
 
-    lines.unshift("─ agents ─ Alt+R attach");
+    for (const rootCid of roots) {
+      renderNode(rootCid, 0);
+    }
+
     widgetCtx.ui.setWidget("teammate-agents", lines, { placement: "belowEditor" });
   }
 
@@ -751,6 +942,7 @@ Views:
     }
   }
 
+  if (!isChild) {
   pi.events.on(TEAMMATE_STARTED_EVENT, () => {
     updateAgentWidget();
     startWidgetTimer();
@@ -849,5 +1041,187 @@ function releaseAgentMemory(agent: ActiveAgent): void {
   if (agent.stdin) {
     try { agent.stdin.end(); } catch { /* already closed */ }
     agent.stdin = undefined;
+  }
+}
+
+// ===========================================================================
+// Flat model: handle proxy requests from child processes
+// ===========================================================================
+
+async function handleProxyRequest(
+  state: TeammateState,
+  event: Record<string, unknown>,
+  reply: (msg: unknown) => void,
+  spawnedBy?: string,
+): Promise<void> {
+  const tool = event.tool as string;
+  const requestId = event.requestId as string;
+  const params = event.params as Record<string, unknown>;
+  const parentCid = event.parentCid as string | undefined;
+
+  switch (tool) {
+    case "teammate": {
+      const p = params as RunTeammateParams;
+      const cid = randomUUID();
+
+      // Normalize
+      let normalizedTasks: NormalizedTask[] | null = null;
+      if (p.chain?.length) {
+        normalizedTasks = normalizeChainToTasks(p.chain, p.task ?? "");
+        for (const t of normalizedTasks) {
+          t.model ??= p.model;
+          t.cwd ??= p.cwd;
+          t.outputSchema ??= p.outputSchema as Record<string, unknown> | undefined;
+          t.timeoutMs ??= p.timeoutMs;
+        }
+      } else if (p.tasks?.length) {
+        normalizedTasks = p.tasks.map((t) => ({
+          agent: t.agent,
+          task: t.task ?? "",
+          name: t.name,
+          model: t.model ?? p.model,
+          cwd: t.cwd ?? p.cwd,
+          outputSchema: (t.outputSchema ?? p.outputSchema) as Record<string, unknown> | undefined,
+          timeoutMs: t.timeoutMs ?? p.timeoutMs,
+        }));
+      }
+
+      if (!normalizedTasks && !p.agent) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: 'Requires "agent" or "tasks".' }],
+          isError: true, details: { mode: "single", results: [] },
+        }});
+        return;
+      }
+
+      const abortCtrl = new AbortController();
+      const activeAgent: ActiveAgent = {
+        agent: p.agent ?? `graph(${normalizedTasks?.length ?? 0})`,
+        name: p.name,
+        correlationId: cid,
+        startedAt: Date.now(),
+        abortController: abortCtrl,
+        inbox: [],
+        outputLog: [],
+        lastActivityAt: Date.now(),
+        spawnedBy: parentCid,
+      };
+      state.activeRuns.set(cid, activeAgent);
+      if (p.name) state.namedAgents.set(p.name, cid);
+
+      const runOpts: RunTeammateOptions = {
+        baseCwd: state.baseCwd,
+        signal: abortCtrl.signal,
+        onChildSpawned: (stdin) => { activeAgent.stdin = stdin; },
+        onChildRequest: (evt, rep) => handleProxyRequest(state, evt, rep, cid),
+      };
+
+      try {
+        let resultPayload: unknown;
+        if (normalizedTasks) {
+          const mode = inferGraphMode(normalizedTasks);
+          const results = await runGraph(normalizedTasks, p.concurrency ?? 4, runOpts);
+          const hasError = results.some((r) => r.exitCode !== 0);
+          const summaries = results
+            .map((r, i) => `[${r.agent}${normalizedTasks![i]?.name ? "/" + normalizedTasks![i].name : ""}] ${r.exitCode === 0 ? "OK" : "FAIL"}: ${r.messages[r.messages.length - 1]?.content ?? "(no output)"}`)
+            .join("\n\n");
+          resultPayload = { content: [{ type: "text", text: summaries }], isError: hasError, details: { mode, results } };
+        } else {
+          const result = await runTeammate(p, runOpts);
+          const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
+          resultPayload = {
+            content: [{ type: "text", text: lastMsg }],
+            isError: result.exitCode !== 0,
+            details: { mode: "single", results: [result] },
+          };
+        }
+        reply({ type: "teammate_proxy_result", requestId, result: resultPayload });
+      } finally {
+        cleanupAgent(state, cid, p.name);
+      }
+      return;
+    }
+
+    case "teammate-send": {
+      const to = params.to as string;
+      const message = params.message as string;
+      const mode = (params.mode as RpcMessageMode) ?? "follow_up";
+
+      const cid = state.namedAgents.get(to);
+      if (!cid) {
+        const available = Array.from(state.namedAgents.keys());
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Agent "${to}" not found. ${available.length > 0 ? `Available: ${available.join(", ")}` : "No named agents."}` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+
+      const agent = state.activeRuns.get(cid);
+      if (!agent?.stdin?.writable) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Agent "${to}" is no longer running.` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+
+      sendRpcMessage(agent.stdin, message, mode);
+      const modeLabel = mode === "steer" ? "interrupted + injected" : mode === "abort" ? "aborted" : "queued after current turn";
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: `Message ${modeLabel} for "${to}".` }],
+        isError: false, details: { delivered: true },
+      }});
+      return;
+    }
+
+    case "teammate-list": {
+      const view = (params.view as string) ?? "active";
+      const agents: unknown[] = [];
+      for (const [c, entry] of state.activeRuns) {
+        if (view === "named" && !entry.name) continue;
+        agents.push({
+          agent: entry.agent, name: entry.name, correlationId: c,
+          startedAt: new Date(entry.startedAt).toISOString(),
+          durationMs: Date.now() - entry.startedAt,
+          idleMs: Date.now() - entry.lastActivityAt,
+          inboxSize: entry.inbox.length,
+        });
+      }
+      const lines = agents.length > 0
+        ? (agents as Array<Record<string, unknown>>).map((a) =>
+          `[${a.agent}]${a.name ? ` name="${a.name}"` : ""} | up ${Math.round((a.durationMs as number) / 1000)}s`
+        ).join("\n")
+        : "No active agents.";
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: lines }], isError: false, details: { agents },
+      }});
+      return;
+    }
+
+    case "teammate-watch": {
+      const name = params.name as string;
+      const lineCount = (params.lines as number) ?? 20;
+      const cid = state.namedAgents.get(name);
+      if (!cid) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Agent "${name}" not found.` }], isError: true, details: { output: [] },
+        }});
+        return;
+      }
+      const agent = state.activeRuns.get(cid);
+      if (!agent) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Agent "${name}" is no longer running.` }], isError: true, details: { output: [] },
+        }});
+        return;
+      }
+      const log = agent.outputLog.slice(-lineCount);
+      const header = `[${agent.agent}/${name}] up ${Math.round((Date.now() - agent.startedAt) / 1000)}s | log ${agent.outputLog.length} lines`;
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: [header, "---", ...log].join("\n") }], isError: false, details: { output: log },
+      }});
+      return;
+    }
   }
 }

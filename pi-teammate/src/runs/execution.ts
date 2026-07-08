@@ -33,7 +33,7 @@ export interface RunTeammateParams {
   cwd?: string;
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
-  tasks?: Array<{ agent: string; task: string; model?: string; cwd?: string }>;
+  tasks?: Array<{ agent: string; task?: string; name?: string; model?: string; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }>;
   chain?: Array<{ agent: string; task?: string; model?: string }>;
   concurrency?: number;
 }
@@ -42,8 +42,23 @@ export interface RunTeammateOptions {
   baseCwd: string;
   signal?: AbortSignal;
   onProgress?: (data: AgentProgress) => void;
+  onChildRequest?: (event: Record<string, unknown>, reply: (msg: unknown) => void) => void;
   parentSessionFile?: string;
   onChildSpawned?: (stdin: import("node:stream").Writable) => void;
+}
+
+// ---------------------------------------------------------------------------
+// Normalized task specification (unified across single/parallel/chain/graph)
+// ---------------------------------------------------------------------------
+
+export interface NormalizedTask {
+  agent: string;
+  task: string;
+  name?: string;
+  model?: string;
+  cwd?: string;
+  outputSchema?: Record<string, unknown>;
+  timeoutMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -99,6 +114,152 @@ function accumulateUsage(total: Usage, partial: Partial<Usage>): void {
   if (partial.cacheWriteTokens)
     total.cacheWriteTokens += partial.cacheWriteTokens;
   if (partial.cost) total.cost += partial.cost;
+}
+
+// ---------------------------------------------------------------------------
+// Variable reference resolution
+// ---------------------------------------------------------------------------
+
+const VAR_PATTERN_SOURCE = "\\{([a-zA-Z_][a-zA-Z0-9_-]*)((?:\\.[a-zA-Z_][a-zA-Z0-9_-]*|\\[\\d+\\])*)\\}";
+
+interface TaskOutput {
+  text: string;
+  structured?: unknown;
+}
+
+export function extractDependencies(
+  template: string | undefined,
+  taskNames: Set<string>,
+): string[] {
+  if (!template) return [];
+  const deps: string[] = [];
+  const pattern = new RegExp(VAR_PATTERN_SOURCE, "g");
+  let m;
+  while ((m = pattern.exec(template)) !== null) {
+    const name = m[1];
+    if (taskNames.has(name) && !deps.includes(name)) {
+      deps.push(name);
+    }
+  }
+  return deps;
+}
+
+function resolvePath(obj: unknown, pathStr: string): unknown {
+  const parts = pathStr.split(/\.|\[|\]/).filter(Boolean);
+  let current = obj;
+  for (const part of parts) {
+    if (current === null || current === undefined) return undefined;
+    if (typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function resolveVariables(
+  template: string,
+  outputs: Map<string, TaskOutput>,
+  taskNames: Set<string>,
+): string {
+  return template.replace(
+    new RegExp(VAR_PATTERN_SOURCE, "g"),
+    (match, name: string, pathSuffix: string) => {
+      if (!taskNames.has(name)) return match;
+      const output = outputs.get(name);
+      if (!output) return match;
+
+      if (!pathSuffix) {
+        if (output.structured !== undefined) {
+          return typeof output.structured === "string"
+            ? output.structured
+            : JSON.stringify(output.structured);
+        }
+        return output.text;
+      }
+
+      if (output.structured === undefined) {
+        throw new Error(
+          `Task "${name}" has no structured output for field access "${pathSuffix}"`,
+        );
+      }
+      const value = resolvePath(output.structured, pathSuffix.slice(1));
+      if (value === undefined) {
+        throw new Error(
+          `Field "${pathSuffix}" not found in task "${name}" structured output`,
+        );
+      }
+      return typeof value === "string" ? value : JSON.stringify(value);
+    },
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Dependency graph utilities
+// ---------------------------------------------------------------------------
+
+function hasCycle(adjList: number[][]): boolean {
+  const n = adjList.length;
+  const state = new Array<number>(n).fill(0);
+
+  function dfs(node: number): boolean {
+    if (state[node] === 1) return true;
+    if (state[node] === 2) return false;
+    state[node] = 1;
+    for (const dep of adjList[node]) {
+      if (dfs(dep)) return true;
+    }
+    state[node] = 2;
+    return false;
+  }
+
+  for (let i = 0; i < n; i++) {
+    if (dfs(i)) return true;
+  }
+  return false;
+}
+
+export function inferGraphMode(
+  tasks: NormalizedTask[],
+): "parallel" | "chain" | "graph" {
+  const taskNames = new Set(tasks.filter((t) => t.name).map((t) => t.name!));
+  if (taskNames.size === 0) return "parallel";
+
+  let hasDeps = false;
+  let allLinear = true;
+
+  for (let i = 0; i < tasks.length; i++) {
+    const deps = extractDependencies(tasks[i].task, taskNames);
+    if (deps.length > 0) hasDeps = true;
+    if (deps.length > 1) allLinear = false;
+    if (deps.length === 1 && i > 0 && deps[0] !== tasks[i - 1].name) {
+      allLinear = false;
+    }
+  }
+
+  if (!hasDeps) return "parallel";
+  if (allLinear) return "chain";
+  return "graph";
+}
+
+// ---------------------------------------------------------------------------
+// Chain → tasks normalization (backward compat)
+// ---------------------------------------------------------------------------
+
+export function normalizeChainToTasks(
+  chain: Array<{ agent: string; task?: string; model?: string }>,
+  initialTask: string,
+): NormalizedTask[] {
+  return chain.map((step, i) => {
+    const name = `_step${i}`;
+    let task: string;
+    if (i === 0) {
+      task = step.task ?? initialTask;
+    } else {
+      const prevName = `_step${i - 1}`;
+      const template = step.task ?? `{${prevName}}`;
+      task = template.replace(/\{previous\}/g, `{${prevName}}`);
+    }
+    return { agent: step.agent, task, name, model: step.model };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -428,9 +589,10 @@ async function runSingleAttempt(
 
     try {
       const spawnSpec = getPiSpawnCommand(piArgs);
+      const useIpc = !spawnSpec.shell;
       const spawnOpts: Parameters<typeof spawn>[2] = {
         cwd,
-        stdio: ["pipe", "pipe", "pipe"],
+        stdio: useIpc ? ["pipe", "pipe", "pipe", "ipc"] : ["pipe", "pipe", "pipe"],
         env: spawnEnv,
         shell: spawnSpec.shell,
       };
@@ -467,6 +629,7 @@ async function runSingleAttempt(
     if (child.stdin) {
       options.onChildSpawned?.(child.stdin);
     }
+
 
     // Report initial progress
     options.onProgress?.(progress);
@@ -651,6 +814,17 @@ async function runSingleAttempt(
           });
           return;
         }
+        case "teammate_proxy_request": {
+          if (options.onChildRequest) {
+            const replyFn = (msg: unknown) => {
+              if (useIpc && typeof child.send === "function") {
+                try { child.send(msg); } catch { /* child disconnected */ }
+              }
+            };
+            options.onChildRequest(event as Record<string, unknown>, replyFn);
+          }
+          break;
+        }
         case "error": {
           messages.push({
             role: "system",
@@ -756,74 +930,224 @@ async function runSingleAttempt(
 }
 
 // ---------------------------------------------------------------------------
-// AC1: Parallel execution (tasks[])
+// Graph execution (unified: parallel, chain, and DAG)
 // ---------------------------------------------------------------------------
 
-export async function runParallel(
-  tasks: Array<{ agent: string; task: string; model?: string; cwd?: string }>,
+export async function runGraph(
+  tasks: NormalizedTask[],
   concurrency: number,
   options: RunTeammateOptions,
 ): Promise<SingleResult[]> {
-  const results: SingleResult[] = new Array(tasks.length);
-  let nextIndex = 0;
+  const taskNames = new Set(tasks.filter((t) => t.name).map((t) => t.name!));
+  const indexByName = new Map<string, number>();
+  for (let i = 0; i < tasks.length; i++) {
+    if (tasks[i].name) indexByName.set(tasks[i].name!, i);
+  }
 
-  async function runNext(): Promise<void> {
-    while (nextIndex < tasks.length) {
-      const idx = nextIndex++;
-      const t = tasks[idx];
-      results[idx] = await runTeammate(
-        { agent: t.agent, task: t.task, model: t.model, cwd: t.cwd },
+  // Build dependency adjacency list
+  const deps: number[][] = tasks.map((t) => {
+    return extractDependencies(t.task, taskNames).map((name) => {
+      const idx = indexByName.get(name);
+      if (idx === undefined) throw new Error(`Task references unknown name "${name}"`);
+      return idx;
+    });
+  });
+
+  if (hasCycle(deps)) {
+    return tasks.map((t) => ({
+      agent: t.agent,
+      task: t.task,
+      exitCode: 1,
+      messages: [{ role: "system", content: "Circular dependency detected in task graph" }],
+      usage: emptyUsage(),
+      model: t.model ?? "unknown",
+      correlationId: randomUUID(),
+      durationMs: 0,
+    }));
+  }
+
+  // Validate unique names
+  const nameCount = new Map<string, number>();
+  for (const t of tasks) {
+    if (t.name) nameCount.set(t.name, (nameCount.get(t.name) ?? 0) + 1);
+  }
+  for (const [name, count] of nameCount) {
+    if (count > 1) {
+      return tasks.map((t) => ({
+        agent: t.agent,
+        task: t.task,
+        exitCode: 1,
+        messages: [{ role: "system", content: `Duplicate task name "${name}"` }],
+        usage: emptyUsage(),
+        model: t.model ?? "unknown",
+        correlationId: randomUUID(),
+        durationMs: 0,
+      }));
+    }
+  }
+
+  const results: SingleResult[] = new Array(tasks.length);
+  const outputs = new Map<string, TaskOutput>();
+  const completed = new Set<number>();
+  const failed = new Set<number>();
+
+  // Concurrency semaphore
+  let running = 0;
+  const waiters: Array<() => void> = [];
+
+  function acquire(): Promise<void> {
+    if (running < concurrency) {
+      running++;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      waiters.push(() => {
+        running++;
+        resolve();
+      });
+    });
+  }
+
+  function release(): void {
+    running--;
+    const next = waiters.shift();
+    if (next) next();
+  }
+
+  // Dependency completion tracking
+  const completionListeners = new Map<number, Array<() => void>>();
+
+  function waitForDeps(taskIdx: number): Promise<boolean> {
+    const taskDeps = deps[taskIdx];
+    if (taskDeps.length === 0) return Promise.resolve(true);
+
+    if (taskDeps.every((d) => completed.has(d) || failed.has(d))) {
+      return Promise.resolve(!taskDeps.some((d) => failed.has(d)));
+    }
+
+    return new Promise((resolve) => {
+      let remaining = taskDeps.filter(
+        (d) => !completed.has(d) && !failed.has(d),
+      ).length;
+      if (remaining === 0) {
+        resolve(!taskDeps.some((d) => failed.has(d)));
+        return;
+      }
+
+      for (const dep of taskDeps) {
+        if (completed.has(dep) || failed.has(dep)) continue;
+        const cbs = completionListeners.get(dep) ?? [];
+        cbs.push(() => {
+          remaining--;
+          if (remaining === 0) {
+            resolve(!taskDeps.some((d) => failed.has(d)));
+          }
+        });
+        completionListeners.set(dep, cbs);
+      }
+    });
+  }
+
+  function notifyComplete(taskIdx: number): void {
+    const cbs = completionListeners.get(taskIdx);
+    if (cbs) {
+      for (const cb of cbs) cb();
+      completionListeners.delete(taskIdx);
+    }
+  }
+
+  const promises = tasks.map(async (task, idx) => {
+    const depsOk = await waitForDeps(idx);
+
+    if (!depsOk) {
+      failed.add(idx);
+      results[idx] = {
+        agent: task.agent,
+        task: task.task,
+        exitCode: 1,
+        messages: [{ role: "system", content: "Skipped: upstream dependency failed" }],
+        usage: emptyUsage(),
+        model: task.model ?? "unknown",
+        correlationId: randomUUID(),
+        durationMs: 0,
+      };
+      notifyComplete(idx);
+      return;
+    }
+
+    let resolvedTask = task.task;
+    try {
+      resolvedTask = resolveVariables(task.task, outputs, taskNames);
+    } catch (err) {
+      failed.add(idx);
+      results[idx] = {
+        agent: task.agent,
+        task: task.task,
+        exitCode: 1,
+        messages: [{
+          role: "system",
+          content: `Variable resolution failed: ${err instanceof Error ? err.message : String(err)}`,
+        }],
+        usage: emptyUsage(),
+        model: task.model ?? "unknown",
+        correlationId: randomUUID(),
+        durationMs: 0,
+      };
+      notifyComplete(idx);
+      return;
+    }
+
+    await acquire();
+
+    try {
+      const result = await runTeammate(
+        {
+          agent: task.agent,
+          task: resolvedTask,
+          model: task.model,
+          cwd: task.cwd,
+          outputSchema: task.outputSchema,
+          timeoutMs: task.timeoutMs,
+        },
         options,
       );
+      results[idx] = result;
+
+      if (result.exitCode === 0) {
+        completed.add(idx);
+        if (task.name) {
+          const lastMsg =
+            result.messages[result.messages.length - 1]?.content ?? "";
+          outputs.set(task.name, {
+            text: lastMsg,
+            structured: result.structuredOutput,
+          });
+        }
+      } else {
+        failed.add(idx);
+      }
+    } catch (err) {
+      failed.add(idx);
+      results[idx] = {
+        agent: task.agent,
+        task: resolvedTask,
+        exitCode: 1,
+        messages: [{
+          role: "system",
+          content: `Execution error: ${err instanceof Error ? err.message : String(err)}`,
+        }],
+        usage: emptyUsage(),
+        model: task.model ?? "unknown",
+        correlationId: randomUUID(),
+        durationMs: 0,
+      };
+    } finally {
+      release();
+      notifyComplete(idx);
     }
-  }
+  });
 
-  const workers = Array.from(
-    { length: Math.min(concurrency, tasks.length) },
-    () => runNext(),
-  );
-  await Promise.all(workers);
-
-  return results;
-}
-
-// ---------------------------------------------------------------------------
-// AC2: Chain execution (chain[])
-// ---------------------------------------------------------------------------
-
-export async function runChain(
-  steps: Array<{ agent: string; task?: string; model?: string }>,
-  initialTask: string,
-  options: RunTeammateOptions,
-): Promise<SingleResult[]> {
-  const results: SingleResult[] = [];
-  let previousOutput = "";
-
-  for (let i = 0; i < steps.length; i++) {
-    const step = steps[i];
-    let task: string;
-
-    if (i === 0) {
-      task = step.task ?? initialTask;
-    } else {
-      const template = step.task ?? "{previous}";
-      task = template.replace(/\{previous\}/g, previousOutput);
-    }
-
-    const result = await runTeammate(
-      { agent: step.agent, task, model: step.model },
-      options,
-    );
-    results.push(result);
-
-    // Extract last message content for {previous}
-    const lastMsg = result.messages[result.messages.length - 1];
-    previousOutput = lastMsg?.content ?? "";
-
-    // Stop chain on failure
-    if (result.exitCode !== 0) break;
-  }
-
+  await Promise.all(promises);
   return results;
 }
 

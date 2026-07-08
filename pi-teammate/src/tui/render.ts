@@ -56,7 +56,8 @@ export function renderTeammateCall(
   const agent = (args.agent as string) ?? "?";
   const name = args.name ? theme.fg("dim", ` name="${args.name}"`) : "";
   const bg = args.background === false ? "" : theme.fg("dim", " [bg]");
-  const mode = args.tasks ? theme.fg("accent", " parallel") : args.chain ? theme.fg("accent", " chain") : "";
+  const taskCount = (args.tasks as unknown[] | undefined)?.length ?? (args.chain as unknown[] | undefined)?.length ?? 0;
+  const mode = taskCount > 0 ? theme.fg("accent", ` ${taskCount} tasks`) : "";
   return new Text(
     `${theme.fg("toolTitle", theme.bold("teammate "))}${theme.fg("accent", agent)}${name}${mode}${bg}`,
     0, 0,
@@ -94,6 +95,7 @@ export function renderTeammateResult(
   const mode = details.mode;
   if (mode === "parallel") return new Text(renderParallelResults(details.results, icon, options, theme).join("\n"), 0, 0);
   if (mode === "chain") return new Text(renderChainResults(details.results, icon, options, theme).join("\n"), 0, 0);
+  if (mode === "graph") return new Text(renderGraphResults(details.results, icon, options, theme).join("\n"), 0, 0);
   return new Text(renderSingleResult(details.results[0], icon, details.progress?.[0], options, theme).join("\n"), 0, 0);
 }
 
@@ -217,6 +219,37 @@ function renderParallelResults(
   const lines: string[] = [];
   const failed = results.filter((r) => r.exitCode !== 0).length;
   lines.push(`${icon} ${theme.fg("accent", "parallel")} ${theme.fg("dim", `${results.length} agents`)}${failed > 0 ? theme.fg("error", ` ${failed} failed`) : ""}`);
+  lines.push("");
+
+  for (const r of results) {
+    const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+    const dur = r.durationMs > 0 ? ` ${formatDuration(r.durationMs)}` : "";
+    lines.push(`  ${rIcon} ${theme.bold(r.agent)} ${theme.fg("dim", r.model)}${theme.fg("dim", dur)}`);
+
+    const last = r.messages[r.messages.length - 1]?.content ?? "";
+    const preview = last.split("\n")[0]?.slice(0, 60) ?? "";
+    if (preview) lines.push(`    ${theme.fg("dim", preview)}`);
+
+    if (options.expanded) {
+      const u = usageLine(r, theme);
+      if (u) lines.push(`    ${u}`);
+    }
+  }
+
+  return lines;
+}
+
+// ─── Graph (DAG) ────────────────────────────────────────────────────────────
+
+function renderGraphResults(
+  results: SingleResult[], icon: string,
+  options: { expanded: boolean }, theme: Theme,
+): string[] {
+  const lines: string[] = [];
+  const failed = results.filter((r) => r.exitCode !== 0).length;
+  const skipped = results.filter((r) => r.messages[0]?.content?.startsWith("Skipped:")).length;
+  const totalDur = Math.max(...results.map((r) => r.durationMs), 0);
+  lines.push(`${icon} ${theme.fg("accent", "graph")} ${theme.fg("dim", `${results.length} tasks ${formatDuration(totalDur)}`)}${failed > 0 ? theme.fg("error", ` ${failed} failed`) : ""}${skipped > 0 ? theme.fg("warning", ` ${skipped} skipped`) : ""}`);
   lines.push("");
 
   for (const r of results) {

@@ -37,7 +37,7 @@ export interface AgentProgress {
 }
 
 export interface Details {
-  mode: "single" | "parallel" | "chain";
+  mode: "single" | "parallel" | "chain" | "graph";
   results: SingleResult[];
   structuredOutput?: unknown;
   progress?: Array<{
@@ -76,6 +76,7 @@ export interface ActiveAgent {
   pendingResolve?: (result: SingleResult) => void;
   lastActivityAt: number;
   replyTo?: string;
+  spawnedBy?: string;
 }
 
 export interface TeammateState {

@@ -136,7 +136,8 @@ export class AttachOverlay implements Component {
       const a = log.agent;
       const label = a.name ?? cid.slice(0, 6);
       const active = cid === this.activeId;
-      return active ? `[${a.agent}/${label}]` : ` ${a.agent}/${label} `;
+      const depth = a.spawnedBy ? "↳" : "";
+      return active ? `[${depth}${a.agent}/${label}]` : ` ${depth}${a.agent}/${label} `;
     }).join("│");
     out.push(tabs.slice(0, width));
     out.push("─".repeat(Math.min(width, 80)));
