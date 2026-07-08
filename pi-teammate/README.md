@@ -1,6 +1,6 @@
 # pi-teammate
 
-> Teammate dispatch tool for [Pi](https://github.com/earendil-works/pi) — unified TaskSpec with DAG variable referencing
+> Teammate dispatch tool for [Pi](https://github.com/earendil-works/pi) — unified TaskSpec with DAG variable referencing + resident agent model
 
 Pi extension implementing teammate dispatch with **unified TaskSpec model**. Single agent, parallel fan-out, sequential chains, and arbitrary DAGs all use the same schema — execution order is determined by `{name}` variable references between tasks.
 
@@ -106,11 +106,48 @@ Top-level fields serve as defaults for all tasks:
 
 **Protocol version gate** — v2 (default) routes results to `caller`; v1 compat routes named agents to `main`. Explicit `reply_to` always wins.
 
+## Resident Agent Model
+
+Agents don't exit after completing a task. Instead they enter a **sleeping** state and can be woken up for follow-up work.
+
+### Lifecycle
+
+```
+dispatch → running → turn complete → sleeping → teammate-send → running → ...
+                                                                         ↓
+                                                              abort → terminated
+```
+
+| Status | Description |
+|--------|-------------|
+| `running` | Agent is actively processing a task |
+| `sleeping` | Turn complete, process alive, waiting for `teammate-send` to wake |
+| `completed` | Agent terminated (via abort or session shutdown) |
+
+### How It Works
+
+1. Agent completes its turn → `agent_end` event fires
+2. Result is reported to the main session (background notification)
+3. Agent enters **sleeping** state — RPC process stays alive, stdin open
+4. `teammate-send({ to: "name", message: "new task" })` sends a `follow_up` → agent wakes up and processes the new message
+5. `teammate-send({ to: "name", mode: "abort" })` terminates the agent
+
+### Active Time Tracking
+
+Time spent sleeping is excluded from the displayed duration. `sleepMs` accumulates total sleep time; displayed uptime = wall clock − sleep time.
+
+### Agent Fallback
+
+Any agent name works — if no `.md` definition file exists, a generic config is used:
+- `tools`: read, grep, find, ls, bash, edit, write (+ teammate proxy tools)
+- `systemPromptMode`: append (inherits pi default system prompt)
+- `inheritProjectContext`: true
+
 ## TaskSpec Schema
 
 ```typescript
 interface TaskSpec {
-  agent: string;        // Agent name (matches agents/*.md filename)
+  agent: string;        // Agent name (matches agents/*.md, or any name with fallback)
   task?: string;        // Task description with {name} variable support
   name?: string;        // Identifier for referencing and teammate-send
   model?: string;       // Model override
@@ -171,16 +208,16 @@ The `chain` field is preserved for backward compatibility. It normalizes interna
 
 ## Flat Agent Model
 
-All agents are managed by the root process in a single flat `activeRuns` pool, regardless of who requested the spawn. Child agents that call the teammate tool send a proxy request to the root, which spawns the new agent as a peer — not a nested subprocess.
+All agents are managed by the root process in a single flat `activeRuns` pool, regardless of who requested the spawn. Child agents that call the teammate tool send a proxy request to the root via IPC, which spawns the new agent as a peer — not a nested subprocess.
 
 ### How It Works
 
 ```
 coordinator calls teammate({ agent: "scout", name: "recon" })
-  │  stdout: teammate_proxy_request
+  │  IPC: teammate_proxy_request (process.send)
   ▼
 Root spawns scout → registers in root's activeRuns/namedAgents
-  │  IPC: teammate_proxy_result
+  │  IPC: teammate_proxy_result (child.send)
   ▼
 coordinator receives result
 ```
@@ -192,16 +229,18 @@ All agents are flat peers:
 
 ### Child Proxy Tools
 
-Child processes register proxy versions of all teammate tools. Each proxy:
-1. Writes a `teammate_proxy_request` JSON line to stdout
-2. Awaits the result via Node.js IPC (`process.on("message")`)
+Every child process automatically gets proxy versions of all 4 teammate tools (injected into `--tools` whitelist regardless of agent definition). Each proxy:
+1. Sends a `teammate_proxy_request` via Node.js IPC (`process.send()`)
+2. Awaits the result via IPC (`process.on("message")`)
 
-The root's event parser intercepts these requests and executes them locally. The IPC channel is established via `stdio: ["pipe","pipe","pipe","ipc"]` at spawn time.
+The root's IPC message listener (`child.on("message")`) intercepts these requests and executes them locally.
 
 ## Reliability
 
 - **Model fallback chain** — primary model → `fallbackModels[]` from agent config → automatic retry
 - **Flat agent pool** — all agents managed by root process; child proxy tools forward spawn requests to root; depth guard (`PI_TEAMMATE_DEPTH`) prevents runaway recursion
+- **Resident lifecycle** — agents sleep after turn completion; process stays alive for follow-up; only killed on explicit abort or session shutdown
+- **IPC disconnect guard** — child proxy resolves all pending requests with error on disconnect (root crash / agent abort)
 - **Windows-safe pi resolution** — `getPiSpawnCommand()` resolves the pi binary via env override, Windows script detection, or PATH
 - **Abort signal** — SIGTERM → 5s grace → SIGKILL
 
@@ -243,7 +282,7 @@ You are a specialized agent. Your system prompt goes here.
 ## Install
 
 ```bash
-pi install npm:@pi-maestro/teammate
+pi install npm:pi-maestro-teammate
 # or from local path
 pi install ./pi-teammate
 ```
