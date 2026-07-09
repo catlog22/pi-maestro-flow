@@ -11,7 +11,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { readFileSync, existsSync } from "node:fs";
 import { join, basename } from "node:path";
 import {
-	type RGB,
 	ansiFg,
 	ANSI_RESET,
 	ICONS,
@@ -267,22 +266,9 @@ const GIT_REFRESH_INTERVAL = 30_000;
 const GIT_DEBOUNCE_MS = 500;
 const WORKFLOW_REFRESH_INTERVAL = 15_000;
 
-interface TodoTaskLike {
-	id: string;
-	subject: string;
-	description?: string;
-	status: string;
-	blockedBy: string[];
-	owner?: string;
-	decision?: string;
-	completion?: { completionStatus: string; summary: string; caveats?: string };
-	injection?: { skillRef?: string; goalContext?: string };
-}
-
 export function installStatusline(
 	pi: ExtensionAPI,
 	getMaestroState: () => MaestroState,
-	getTodoTasks?: () => TodoTaskLike[],
 ): void {
 	const rs: RuntimeState = {
 		model: "Claude",
@@ -356,12 +342,6 @@ export function installStatusline(
 					// Line 2: workflow (if active)
 					if (rs.workflow?.milestone) {
 						lines.push(renderLine2(rs.workflow));
-					}
-
-					// Todo panel: persistent task list
-					const todoTasks = getTodoTasks?.() ?? [];
-					if (todoTasks.length > 0) {
-						lines.push(...renderTodoPanel(todoTasks, rs.isAgentRunning));
 					}
 
 					return lines;
@@ -496,142 +476,3 @@ export function installStatusline(
 	});
 }
 
-// ---------------------------------------------------------------------------
-// Todo panel — persistent task list in footer
-// ---------------------------------------------------------------------------
-
-const TODO_ICONS: Record<string, string> = {
-	completed: "✓",
-	in_progress: "■",
-	blocked: "!",
-	pending: "□",
-	deleted: "×",
-};
-
-const TODO_ICON_COLORS: Record<string, RGB> = {
-	completed: COLORS.git,
-	in_progress: COLORS.runs,
-	blocked: [243, 139, 168] as const,
-	pending: [150, 150, 160] as const,
-};
-const DIM_COLOR: RGB = [150, 150, 160] as const;
-
-const MAX_COLLAPSED_COMPLETED = 2;
-
-function renderTodoPanel(tasks: TodoTaskLike[], isAgentRunning: boolean): string[] {
-	const lines: string[] = [];
-
-	const done = tasks.filter((t) => t.status === "completed").length;
-	const running = tasks.filter((t) => t.status === "in_progress").length;
-	const open = tasks.filter((t) => t.status === "pending" || t.status === "blocked").length;
-
-	// Summary
-	const counts: string[] = [];
-	if (done > 0) counts.push(`${done} done`);
-	if (running > 0) counts.push(`${running} in progress`);
-	if (open > 0) counts.push(`${open} open`);
-	lines.push(`${ansiFg(COLORS.separator)}──${ANSI_RESET} ${ansiFg(COLORS.model)}${tasks.length} tasks${ANSI_RESET} ${ansiFg(DIM_COLOR)}(${counts.join(", ")})${ANSI_RESET}`);
-
-	// Active tasks (in_progress, pending, blocked) — always shown with details
-	const active = tasks.filter((t) => t.status !== "completed");
-	for (const t of active) {
-		lines.push(renderTodoLine(t, !isAgentRunning, tasks));
-	}
-
-	// Completed tasks
-	const completed = tasks.filter((t) => t.status === "completed");
-	if (completed.length > 0) {
-		if (!isAgentRunning) {
-			// Stopped: show all completed
-			for (const t of completed) {
-				lines.push(renderTodoLine(t, true, tasks));
-			}
-		} else {
-			// Running: collapse completed
-			const preview = completed.slice(0, MAX_COLLAPSED_COMPLETED);
-			for (const t of preview) {
-				lines.push(renderTodoLine(t, false, tasks));
-			}
-			if (completed.length > MAX_COLLAPSED_COMPLETED) {
-				lines.push(`  ${ansiFg(DIM_COLOR)}… +${completed.length - MAX_COLLAPSED_COMPLETED} completed${ANSI_RESET}`);
-			}
-		}
-	}
-
-	return lines;
-}
-
-function renderTodoLine(task: TodoTaskLike, showDetails: boolean, allTasks: TodoTaskLike[]): string {
-	const iconColor = TODO_ICON_COLORS[task.status] ?? DIM_COLOR;
-	const icon = task.decision
-		? `${ansiFg(COLORS.milestone)}◆${ANSI_RESET}`
-		: `${ansiFg(iconColor)}${TODO_ICONS[task.status] ?? "?"}${ANSI_RESET}`;
-
-	const subject = task.status === "completed"
-		? `${ansiFg(DIM_COLOR)}${task.subject}${ANSI_RESET}`
-		: task.subject;
-
-	let ownerTag = task.owner ? ` ${ansiFg(DIM_COLOR)}@${task.owner}${ANSI_RESET}` : "";
-
-	let line = `  ${icon} ${subject}${ownerTag}`;
-
-	// blocked: always append dependency arrows
-	if (task.status === "blocked" && task.blockedBy.length > 0) {
-		const arrows = task.blockedBy.map((depId) => {
-			const dep = allTasks.find((t) => t.id === depId);
-			if (!dep) return `${ansiFg(DIM_COLOR)}← ?${ANSI_RESET}`;
-			const depIconColor = TODO_ICON_COLORS[dep.status] ?? DIM_COLOR;
-			return `${ansiFg(DIM_COLOR)}← ${ANSI_RESET}${ansiFg(depIconColor)}${TODO_ICONS[dep.status] ?? "?"}${ANSI_RESET} ${ansiFg(DIM_COLOR)}${dep.subject}${ANSI_RESET}`;
-		});
-		line += `  ${arrows.join("  ")}`;
-	}
-
-	if (!showDetails) return line;
-
-	// Details below the main line
-	const details: string[] = [];
-
-	if (task.description) {
-		details.push(`${ansiFg(DIM_COLOR)}├─ ${task.description}${ANSI_RESET}`);
-	}
-
-	if (task.injection?.skillRef) {
-		details.push(`${ansiFg(DIM_COLOR)}├─ Skill: ${task.injection.skillRef}${ANSI_RESET}`);
-	}
-
-	// Non-blocked tasks: show deps in expanded details
-	if (task.status !== "blocked" && task.blockedBy.length > 0) {
-		const depLabels = task.blockedBy.map((depId) => {
-			const dep = allTasks.find((t) => t.id === depId);
-			const depIcon = dep ? (TODO_ICONS[dep.status] ?? "?") : "?";
-			return `${depId} ${depIcon}`;
-		});
-		details.push(`${ansiFg(DIM_COLOR)}├─ Depends: ${depLabels.join(", ")}${ANSI_RESET}`);
-	}
-
-	if (task.completion) {
-		const cColor: RGB = task.completion.completionStatus === "DONE" ? COLORS.git
-			: task.completion.completionStatus === "DONE_WITH_CONCERNS" ? COLORS.runs
-			: [243, 139, 168] as const;
-		const prefix = task.completion.completionStatus === "DONE_WITH_CONCERNS" ? "⚠ " : "";
-		details.push(`${ansiFg(cColor)}└─ ${prefix}${task.completion.completionStatus}: ${task.completion.summary}${ANSI_RESET}`);
-	}
-
-	if (task.decision) {
-		details.push(`${ansiFg(COLORS.milestone)}└─ Type: ${task.decision}${ANSI_RESET}`);
-	}
-
-	// Fix last connector
-	if (details.length > 0) {
-		const lastIdx = details.length - 1;
-		if (details[lastIdx].includes("├─")) {
-			details[lastIdx] = details[lastIdx].replace("├─", "└─");
-		}
-	}
-
-	if (details.length > 0) {
-		line += "\n" + details.map((d) => `    ${d}`).join("\n");
-	}
-
-	return line;
-}

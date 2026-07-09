@@ -443,18 +443,35 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   });
 
   // === Statusline ===
-  installStatusline(pi, () => state, getVisibleTasks);
+  installStatusline(pi, () => state);
+
+  // === Todo Widget (above editor) ===
+  let widgetCtx: ExtensionContext | undefined;
+
+  function updateTodoWidget(): void {
+    if (!widgetCtx) return;
+    const tasks = getVisibleTasks();
+    if (tasks.length === 0) {
+      widgetCtx.ui.setWidget("todo-panel", undefined);
+      return;
+    }
+    widgetCtx.ui.setWidget("todo-panel", renderTodoWidget(tasks));
+  }
 
   // === Session lifecycle ===
   pi.on("session_start", (_event, ctx) => {
     state.baseCwd = ctx.cwd;
+    widgetCtx = ctx;
     goalSessionStart(ctx);
     todoSessionStart(ctx);
     onSessionStartPlan(ctx);
+    updateTodoWidget();
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
     state.activeRuns.clear();
+    widgetCtx?.ui.setWidget("todo-panel", undefined);
+    widgetCtx = undefined;
     goalSessionShutdown(ctx);
     todoSessionShutdown(ctx);
     onSessionShutdownPlan(ctx);
@@ -496,5 +513,102 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   pi.on("agent_end", async (event, ctx) => {
     onAgentEndPlan(event, ctx);
     await goalAgentEnd(event, ctx);
+    updateTodoWidget();
   });
+
+  pi.on("tool_execution_end", (event) => {
+    if (event.toolName === "todo") updateTodoWidget();
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Todo widget renderer — string[] for setWidget (above editor)
+// ---------------------------------------------------------------------------
+
+const ANSI_RESET = "\x1b[0m";
+const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
+const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
+const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
+const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
+const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
+
+interface TodoTaskLike {
+  id: string;
+  subject: string;
+  status: string;
+  blockedBy: string[];
+  owner?: string;
+  decision?: string;
+  completion?: { completionStatus: string; summary: string };
+  injection?: { skillRef?: string; goalContext?: string };
+}
+
+const WICON: Record<string, string> = {
+  completed: "✓",
+  in_progress: "■",
+  blocked: "!",
+  pending: "□",
+};
+
+const WCOLOR: Record<string, (s: string) => string> = {
+  completed: green,
+  in_progress: yellow,
+  blocked: red,
+  pending: dim,
+};
+
+function renderTodoWidget(tasks: TodoTaskLike[]): string[] {
+  const lines: string[] = [];
+  const done = tasks.filter((t) => t.status === "completed").length;
+  const running = tasks.filter((t) => t.status === "in_progress").length;
+  const open = tasks.filter((t) => t.status === "pending" || t.status === "blocked").length;
+
+  const counts: string[] = [];
+  if (done > 0) counts.push(`${done} done`);
+  if (running > 0) counts.push(`${running} in progress`);
+  if (open > 0) counts.push(`${open} open`);
+  lines.push(`${dim("──")} ${tasks.length} tasks ${dim(`(${counts.join(", ")})`)}`);
+
+  // Active tasks
+  for (const t of tasks.filter((t) => t.status !== "completed")) {
+    lines.push(widgetTaskLine(t, tasks));
+  }
+
+  // Completed: collapsed
+  const completed = tasks.filter((t) => t.status === "completed");
+  if (completed.length > 0) {
+    const show = completed.slice(0, 2);
+    for (const t of show) {
+      lines.push(`  ${green(WICON.completed)} ${dim(t.subject)}`);
+    }
+    if (completed.length > 2) {
+      lines.push(`  ${dim(`… +${completed.length - 2} completed`)}`);
+    }
+  }
+
+  return lines;
+}
+
+function widgetTaskLine(task: TodoTaskLike, allTasks: TodoTaskLike[]): string {
+  const colorFn = WCOLOR[task.status] ?? dim;
+  const icon = task.decision
+    ? cyan("◆")
+    : colorFn(WICON[task.status] ?? "?");
+
+  const goalTag = task.injection?.goalContext ? cyan(" ⦿") : "";
+  const ownerTag = task.owner ? dim(` @${task.owner}`) : "";
+  let line = `  ${icon} ${task.subject}${goalTag}${ownerTag}`;
+
+  // blocked: always show dependency arrows
+  if (task.status === "blocked" && task.blockedBy.length > 0) {
+    const arrows = task.blockedBy.map((depId) => {
+      const dep = allTasks.find((t) => t.id === depId);
+      if (!dep) return dim("← ?");
+      const depColorFn = WCOLOR[dep.status] ?? dim;
+      return `${dim("←")} ${depColorFn(WICON[dep.status] ?? "?")} ${dim(dep.subject)}`;
+    });
+    line += `  ${arrows.join("  ")}`;
+  }
+
+  return line;
 }
