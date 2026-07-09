@@ -16,8 +16,5 @@
     "isolatedModules": true
   },
   "include": ["src/**/*.ts"],
-  "exclude": ["node_modules", "dist", "test"],
-  "references": [
-    { "path": "../pi-teammate" }
-  ]
+  "exclude": ["node_modules", "dist", "test"]
 }

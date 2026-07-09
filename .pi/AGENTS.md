@@ -26,6 +26,11 @@ Dispatch tasks to teammate agents. Teammates run as pi subprocesses via RPC mode
 teammate({ agent: "delegate", task: "Implement the auth module", name: "auth" })
 ```
 
+**Fork current session** (子 agent 继承完整对话历史):
+```
+teammate({ agent: "delegate", task: "基于前面的讨论，继续实现 auth 模块", context: "fork" })
+```
+
 **Parallel** (无引用 = 并发):
 ```
 teammate({
@@ -88,8 +93,25 @@ teammate({
 | `tasks` | TaskSpec[] | — | 多任务，`{name}` 引用定义执行顺序 |
 | `concurrency` | integer | 4 | 最大并发任务数 |
 | `background` | boolean | `true` | 后台运行；`false` 阻塞（Alt+B 可分离） |
+| `context` | `"fresh"` \| `"fork"` | fresh | 会话上下文模式（见下方说明） |
 | `reply_to` | `"caller"` \| `"main"` | caller | 结果路由 |
 | `chain` | array | — | **[Deprecated]** 用 tasks + `{name}` 引用代替 |
+
+### context 模式
+
+| 模式 | 行为 |
+|------|------|
+| `fresh` | 空白对话，无历史上下文（默认） |
+| `fork` | 继承当前会话的完整对话历史 — 子 agent 看到 fork 前的所有对话，独立继续执行 |
+
+**Fork 机制**: 通过 pi CLI 的 `--fork` 参数将父会话 session 文件传给子进程。子进程加载父会话的完整消息历史，然后 task 作为新 turn 发送。子 agent 使用自己的 tools 和 model 独立工作。
+
+**适用场景**:
+- 需要完整讨论上下文才能执行的任务
+- 将大任务分叉到后台，主会话继续其他工作
+- Agent 定义中可设置 `defaultContext: fork` 使该 agent 默认继承上下文
+
+**注意**: fork 仅适用于单 agent 模式。multi-task（tasks 数组）中的子任务不继承 fork 上下文。
 
 ### teammate-send
 
@@ -310,7 +332,7 @@ maestro explore "FIND: ...\nSCOPE: ..." [more prompts...] [--json] [--all]
 
 ## Agent Definitions
 
-`pi-teammate/agents/` 下的 agent 定义文件：
+`packages/pi-maestro-teammate/agents/` 下的 builtin agent 定义文件：
 
 | Agent | Role |
 |-------|------|
@@ -321,16 +343,24 @@ maestro explore "FIND: ...\nSCOPE: ..." [more prompts...] [--json] [--all]
 
 ```
 pi-maestro-flow/
-├── pi-teammate/          — Core teammate dispatch extension
-│   ├── src/
-│   │   ├── extension/    — index.ts (tools), schemas.ts
-│   │   ├── runs/         — execution.ts (RPC subprocess)
-│   │   ├── tui/          — render.ts, attach-overlay.ts
-│   │   ├── shared/       — types.ts
-│   │   └── agents/       — agent discovery
-│   └── agents/           — Agent definitions (*.md)
-├── flow/                 — Maestro tools extension (explore, delegate, moa)
-└── .pi/                  — AGENTS.md (this file)
+├── .pi/
+│   ├── skills/               — 113 skills (project-level, Pi native)
+│   ├── agents/               — 29 agent definitions (teammate discoverAgents)
+│   └── AGENTS.md             — This file
+├── packages/
+│   ├── pi-maestro-teammate/  — Core teammate dispatch extension
+│   │   ├── src/
+│   │   │   ├── extension/    — index.ts (tools), schemas.ts
+│   │   │   ├── runs/         — execution.ts (RPC subprocess)
+│   │   │   ├── tui/          — render.ts, attach-overlay.ts
+│   │   │   ├── shared/       — types.ts
+│   │   │   └── agents/       — agent discovery
+│   │   └── agents/           — Builtin agent definitions (*.md)
+│   └── pi-maestro-flow/      — Maestro tools extension (explore, delegate, moa)
+│       ├── src/
+│       ├── workflows/        — 82 workflow reference docs
+│       └── templates/        — 23 template files
+└── docs/                     — Development guides
 ```
 
 ### Subprocess Model
@@ -338,11 +368,17 @@ pi-maestro-flow/
 ```
 [Pi main session]
   └── teammate tool call
-       └── spawn: pi --mode rpc (with IPC channel)
-            ├── stdin: RPC JSON lines (prompt/steer/follow_up/abort)
-            ├── stdout: JSON line events (agent_start/end, message_update, tool_execution_*)
-            ├── IPC: teammate_proxy_request/result (child ↔ root)
-            └── agent_end → resolve Promise → sleeping (process stays alive)
-                          → teammate-send follow_up → new turn → agent_end → sleeping → ...
-                          → teammate-send abort → kill process → completed
+       ├── context: "fresh" (default)
+       │    └── spawn: pi --mode rpc
+       └── context: "fork"
+            └── spawn: pi --mode rpc --fork <parent-session.jsonl> --session-dir <child-dir>
+                 (子进程加载父会话完整对话历史，task 作为新 turn 继续)
+
+  [spawned subprocess]
+       ├── stdin: RPC JSON lines (prompt/steer/follow_up/abort)
+       ├── stdout: JSON line events (agent_start/end, message_update, tool_execution_*)
+       ├── IPC: teammate_proxy_request/result (child ↔ root)
+       └── agent_end → resolve Promise → sleeping (process stays alive)
+                     → teammate-send follow_up → new turn → agent_end → sleeping → ...
+                     → teammate-send abort → kill process → completed
 ```

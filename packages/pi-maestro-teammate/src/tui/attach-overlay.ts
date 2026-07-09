@@ -1,250 +1,267 @@
-/**
- * Attach overlay — multi-agent view with tab switching.
- *
- * Shows real-time tool activity and output content for agents.
- * Tab/Shift+Tab to switch. ↑↓ to scroll. ESC to dismiss.
- */
-
-import type { Component } from "@earendil-works/pi-tui";
+// Attach overlay — multi-agent view. pi-tui: Box (border), TabBar, ScrollView.
+import {
+  Box, type BoxBorder, ScrollView, TabBar, type Tab, type TabBarTheme,
+  type Component, visibleWidth, truncateToWidth, wrapTextWithAnsi,
+} from "@earendil-works/pi-tui";
 import type { ActiveAgent } from "../shared/types.ts";
 
 const MAX_LOG_LINES = 500;
+const STREAMING_MAX_LINES = 8;
+const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_MS = 80;
 
+interface ToolEntry { name: string; status: "running" | "completed" | "failed"; startedAt: number }
 interface AgentLog {
   agent: ActiveAgent;
   lines: Array<{ text: string; kind: "info" | "tool" | "output" | "system" }>;
-  scrollOffset: number;
+  scrollOffset: number; streamingText: string; activeTools: ToolEntry[];
 }
 
-function wrapLine(text: string, maxW: number): string[] {
-  if (text.length <= maxW) return [text];
-  const lines: string[] = [];
-  let pos = 0;
-  while (pos < text.length) {
-    lines.push(text.slice(pos, pos + maxW));
-    pos += maxW;
-  }
-  return lines;
+const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
+const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
+const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
+const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
+const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
+
+const BORDER: BoxBorder = {
+  chars: { topLeft: "╭", topRight: "╮", bottomLeft: "╰", bottomRight: "╯", horizontal: "─", vertical: "│" },
+  color: dim,
+};
+const TAB_THEME: TabBarTheme = { label: dim, activeTab: (s) => bold(green(s)), inactiveTab: dim, hint: dim };
+
+class LinesProxy implements Component {
+  lines: readonly string[] = [];
+  invalidate(): void {}
+  render(): readonly string[] { return this.lines; }
+}
+
+function activeMs(a: ActiveAgent): number {
+  return Date.now() - a.startedAt - a.sleepMs - (a.sleptAt ? Date.now() - a.sleptAt : 0);
 }
 
 export class AttachOverlay implements Component {
   private agents: Map<string, AgentLog> = new Map();
   private activeId: string;
-  private agentOrder: string[] = [];
+  private order: string[] = [];
   private onDone: () => void;
   private getActiveRuns: () => Map<string, ActiveAgent>;
   private requestRender: (() => void) | null = null;
 
+  private tabBar: TabBar;
+  private scroll: ScrollView;
+  private proxy = new LinesProxy();
+  private box: Box;
+  private frame = 0;
+  private timer: ReturnType<typeof setInterval> | null = null;
+
   constructor(
-    initialAgent: ActiveAgent,
+    initial: ActiveAgent,
     onDone: () => void,
     getActiveRuns?: () => Map<string, ActiveAgent>,
   ) {
     this.onDone = onDone;
     this.getActiveRuns = getActiveRuns ?? (() => new Map());
-    this.activeId = initialAgent.correlationId;
-    this.addAgent(initialAgent);
+    this.activeId = initial.correlationId;
+    this.addAgent(initial);
+
+    this.tabBar = new TabBar("", this.buildTabs(), TAB_THEME);
+    this.tabBar.showHint = false;
+    this.tabBar.onTabChange = (tab) => { this.activeId = tab.id; };
+
+    this.scroll = new ScrollView([], {
+      height: 10, scrollbar: "auto", theme: { track: dim, thumb: green },
+    });
+
+    this.box = new Box(0, 0, undefined, BORDER);
+    this.box.addChild(this.proxy);
+
+    this.timer = setInterval(() => {
+      this.frame = (this.frame + 1) % SPINNER.length;
+      const log = this.agents.get(this.activeId);
+      if (log?.activeTools.some(t => t.status === "running")) this.requestRender?.();
+    }, SPINNER_MS);
   }
 
-  setRequestRender(fn: () => void): void {
-    this.requestRender = fn;
-  }
+  setRequestRender(fn: () => void): void { this.requestRender = fn; }
 
   private addAgent(agent: ActiveAgent): void {
     if (this.agents.has(agent.correlationId)) return;
     this.agents.set(agent.correlationId, {
-      agent,
-      lines: [],
-      scrollOffset: 0,
+      agent, lines: [], scrollOffset: 0, streamingText: "", activeTools: [],
     });
-    this.agentOrder.push(agent.correlationId);
+    this.order.push(agent.correlationId);
   }
 
   syncAgents(): void {
-    for (const [cid, agent] of this.getActiveRuns()) {
-      this.addAgent(agent);
-    }
+    for (const [, a] of this.getActiveRuns()) this.addAgent(a);
   }
 
-  appendLog(correlationId: string, text: string, kind: "info" | "tool" | "output" | "system" = "info"): void {
-    let log = this.agents.get(correlationId);
-    if (!log) {
-      const agent = this.getActiveRuns().get(correlationId);
-      if (agent) {
-        this.addAgent(agent);
-        log = this.agents.get(correlationId);
-      }
-    }
+  setStreamingText(cid: string, text: string): void {
+    const log = this.ensureLog(cid);
+    if (log) { log.streamingText = text; this.requestRender?.(); }
+  }
+
+  setActiveTools(cid: string, tools: ToolEntry[]): void {
+    const log = this.ensureLog(cid);
+    if (log) { log.activeTools = tools; this.requestRender?.(); }
+  }
+
+  appendLog(cid: string, text: string, kind: AgentLog["lines"][0]["kind"] = "info"): void {
+    const log = this.ensureLog(cid);
     if (!log) return;
     log.lines.push({ text, kind });
-    if (log.lines.length > MAX_LOG_LINES) {
-      log.lines.shift();
-    }
-    if (correlationId === this.activeId) {
-      log.scrollOffset = Math.max(0, log.lines.length - 25);
-    }
+    if (log.lines.length > MAX_LOG_LINES) log.lines.shift();
+    if (cid === this.activeId) log.scrollOffset = Infinity;
     this.requestRender?.();
   }
 
-  setOutput(correlationId: string, content: string): void {
-    const log = this.agents.get(correlationId);
-    if (!log) return;
-    // Replace last output block with new content
-    while (log.lines.length > 0 && log.lines[log.lines.length - 1].kind === "output") {
-      log.lines.pop();
+  private ensureLog(cid: string): AgentLog | undefined {
+    let log = this.agents.get(cid);
+    if (!log) {
+      const a = this.getActiveRuns().get(cid);
+      if (a) { this.addAgent(a); log = this.agents.get(cid); }
     }
-    const lines = content.split("\n").slice(-12);
-    for (const line of lines) {
-      log.lines.push({ text: line, kind: "output" });
-    }
-    if (content.split("\n").length > 12) {
-      log.lines.push({ text: `… ${content.split("\n").length - 12} earlier lines`, kind: "output" });
-    }
-    if (correlationId === this.activeId) {
-      log.scrollOffset = Math.max(0, log.lines.length - 25);
-    }
-    this.requestRender?.();
+    return log;
   }
 
   handleInput(data: string): void {
-    if (data === "\x1b" || data === "q") {
-      this.onDone();
-      return;
-    }
-    if (data === "\t") {
-      this.syncAgents();
-      const idx = this.agentOrder.indexOf(this.activeId);
-      this.activeId = this.agentOrder[(idx + 1) % this.agentOrder.length];
-      this.requestRender?.();
-      return;
-    }
-    if (data === "\x1b[Z") {
-      this.syncAgents();
-      const idx = this.agentOrder.indexOf(this.activeId);
-      this.activeId = this.agentOrder[(idx - 1 + this.agentOrder.length) % this.agentOrder.length];
-      this.requestRender?.();
-      return;
-    }
+    if (data === "\x1b" || data === "q") { this.onDone(); return; }
+    this.syncAgents();
+    if (this.tabBar.handleInput(data)) { this.requestRender?.(); return; }
+
     const log = this.agents.get(this.activeId);
     if (!log) return;
-    if (data === "\x1b[A" || data === "k") {
-      log.scrollOffset = Math.max(0, log.scrollOffset - 1);
+    this.scroll.setScrollOffset(log.scrollOffset);
+
+    if (this.scroll.handleScrollKey(data)) {
+      log.scrollOffset = this.scroll.getScrollOffset();
       this.requestRender?.();
-    } else if (data === "\x1b[B" || data === "j") {
-      log.scrollOffset = Math.min(Math.max(0, log.lines.length - 10), log.scrollOffset + 1);
+      return;
+    }
+    if (data === "j") {
+      this.scroll.scroll(1);
+      log.scrollOffset = this.scroll.getScrollOffset();
+      this.requestRender?.();
+    } else if (data === "k") {
+      this.scroll.scroll(-1);
+      log.scrollOffset = this.scroll.getScrollOffset();
       this.requestRender?.();
     }
   }
 
   render(width: number, height?: number): string[] {
     this.syncAgents();
-    const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
-    const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-    const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
-    const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
-    const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
-    const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
-    const out: string[] = [];
     const w = Math.min(width, 120);
-
-    // Top border
-    out.push(dim("╭" + "─".repeat(w - 2) + "╮"));
-
-    // Tab bar
-    const tabs = this.agentOrder.map((cid) => {
-      const log = this.agents.get(cid);
-      if (!log) return "";
-      const a = log.agent;
-      const label = a.name ?? cid.slice(0, 6);
-      const prefix = a.spawnedBy ? "↳" : "";
-      const statusIcon = a.status === "sleeping" ? yellow("◉") : green("●");
-      if (cid === this.activeId) {
-        return ` ${statusIcon} ${bold(`${prefix}${a.agent}/${label}`)} `;
-      }
-      return ` ${statusIcon} ${dim(`${prefix}${a.agent}/${label}`)} `;
-    }).join(dim("│"));
-    out.push(dim("│") + tabs.slice(0, w - 2).padEnd(w - 2) + dim("│"));
-    out.push(dim("├" + "─".repeat(w - 2) + "┤"));
+    const inner = w - 2;
+    this.tabBar.setTabs(this.buildTabs(), this.activeId);
 
     const log = this.agents.get(this.activeId);
+    const rows: string[] = [];
+
+    rows.push(...this.tabBar.render(inner));
+    rows.push(dim("─".repeat(inner)));
+
     if (!log) {
-      out.push(dim("│") + " (no agent selected)".padEnd(w - 2) + dim("│"));
-      out.push(dim("╰" + "─".repeat(w - 2) + "╯"));
-      return out;
+      rows.push(" (no agent selected)");
+      this.proxy.lines = rows;
+      return [...this.box.render(w)];
     }
 
-    // Agent header
     const a = log.agent;
-    const activeMs = (() => {
-      const total = Date.now() - a.startedAt;
-      const sleeping = a.sleptAt ? Date.now() - a.sleptAt : 0;
-      return total - a.sleepMs - sleeping;
-    })();
-    const uptime = Math.round(activeMs / 1000);
-    const statusLabel = a.status === "sleeping" ? yellow(" SLEEPING") : a.status === "completed" ? dim(" DONE") : green(" RUNNING");
-    const headerText = `${a.agent}/${a.name ?? a.correlationId.slice(0, 8)}  ${uptime}s  inbox:${a.inbox.length}`;
-    out.push(dim("│") + ` ${bold(headerText)}${statusLabel}`.padEnd(w - 2) + dim("│"));
-    out.push(dim("├" + "─".repeat(w - 2) + "┤"));
+    const up = Math.round(activeMs(a) / 1000);
+    const st = a.status === "sleeping" ? yellow("SLEEPING") : a.status === "completed" ? dim("DONE") : green("RUNNING");
+    const hL = `${bold(a.agent)}/${bold(a.name ?? a.correlationId.slice(0, 8))}`;
+    const hR = `${st}  ${dim(`${up}s`)}  ${dim(`inbox:${a.inbox.length}`)}`;
+    rows.push(visibleWidth(hL) + 2 + visibleWidth(hR) <= inner ? `${hL}  ${hR}` : truncateToWidth(hL, inner, "…"));
+    rows.push(dim("─".repeat(inner)));
 
-    // Build wrapped content lines
-    const contentW = w - 6;
-    const wrappedLines: Array<{ text: string; kind: string }> = [];
-    for (const entry of log.lines) {
-      const wrapped = wrapLine(entry.text, contentW);
-      for (const wl of wrapped) {
-        wrappedLines.push({ text: wl, kind: entry.kind });
-      }
-    }
-    // Inbox messages
-    if (a.inbox.length > 0) {
-      wrappedLines.push({ text: "── inbox ──", kind: "system" });
-      for (const msg of a.inbox.slice(-5)) {
-        const time = new Date(msg.timestamp).toISOString().slice(11, 19);
-        const msgText = `[${time}] ◀ ${msg.from}: ${msg.payload}`;
-        for (const wl of wrapLine(msgText, contentW)) {
-          wrappedLines.push({ text: wl, kind: "system" });
-        }
-      }
-    }
+    rows.push(...this.renderTools(log, inner));
+    rows.push(dim("─".repeat(inner)));
+    rows.push(...this.renderStream(log, inner));
+    if (log.streamingText || log.activeTools.some(t => t.status === "running"))
+      rows.push(dim("─".repeat(inner)));
 
-    // Log content — fill available height
-    const extraRows = a.status === "sleeping" ? 2 : 0;
-    const viewH = (height ?? 30) - 7 - extraRows;
-    log.scrollOffset = Math.max(0, Math.min(log.scrollOffset, wrappedLines.length - viewH));
-    const visible = wrappedLines.slice(log.scrollOffset, log.scrollOffset + viewH);
-    for (const entry of visible) {
-      let line = "";
-      if (entry.kind === "tool") line = `  ${cyan(entry.text)}`;
-      else if (entry.kind === "output") line = `  ${dim("│")} ${entry.text}`;
-      else if (entry.kind === "system") line = `  ${yellow(entry.text)}`;
-      else line = `  ${entry.text}`;
-      out.push(dim("│") + ` ${line}`.padEnd(w - 2) + dim("│"));
-    }
+    const logLines = this.buildLog(log, inner - 2);
+    const fixedH = rows.length + 2 + (a.status === "sleeping" ? 2 : 0) + 1;
+    const logH = Math.max(3, (height ?? 30) - fixedH);
+    this.scroll.setHeight(logH);
+    this.scroll.setLines(logLines);
+    this.scroll.setScrollOffset(log.scrollOffset);
+    rows.push(...this.scroll.render(inner));
+    log.scrollOffset = this.scroll.getScrollOffset();
 
-    const fillLines = viewH - visible.length;
-    for (let i = 0; i < fillLines; i++) {
-      out.push(dim("│") + " ".repeat(w - 2) + dim("│"));
-    }
-
-    // Sleeping hint
     if (a.status === "sleeping") {
-      out.push(dim("├" + "─".repeat(w - 2) + "┤"));
-      out.push(dim("│") + yellow(" ◉ sleeping — teammate-send to wake").padEnd(w - 2) + dim("│"));
+      rows.push(dim("─".repeat(inner)));
+      rows.push(`${yellow(" ◉")} ${dim("sleeping — teammate-send to wake")}`);
     }
 
-    // Footer
-    const total = wrappedLines.length;
-    const scrollInfo = total > viewH ? ` ${log.scrollOffset + 1}-${Math.min(log.scrollOffset + viewH, total)}/${total}` : "";
-    const n = this.agentOrder.length;
-    const footer = ` ${dim("ESC")} back  ${dim("Tab")} switch(${n})  ${dim("↑↓")} scroll${dim(scrollInfo)}`;
-    out.push(dim("╰" + "─".repeat(w - 2) + "╯"));
-    out.push(footer.slice(0, w));
+    this.proxy.lines = rows;
+    const out = [...this.box.render(w)];
 
+    const off = this.scroll.getScrollOffset(), total = logLines.length;
+    const si = total > logH ? ` ${off + 1}-${Math.min(off + logH, total)}/${total}` : "";
+    out.push(truncateToWidth(` ${dim("ESC")} back  ${dim("Tab")} switch(${this.order.length})  ${dim("↑↓")} scroll${dim(si)}`, w, "…"));
     return out;
   }
 
+  private buildTabs(): Tab[] {
+    return this.order.map(cid => {
+      const log = this.agents.get(cid);
+      if (!log) return { id: cid, label: cid.slice(0, 6) };
+      const a = log.agent, name = a.name ?? cid.slice(0, 6);
+      const pre = a.spawnedBy ? "↳" : "";
+      const icon = a.status === "sleeping" ? "◉" : a.status === "completed" ? "✓" : "■";
+      return { id: cid, label: `${icon} ${pre}${a.agent}/${name}`, short: `${icon} ${name}`, muted: a.status === "completed" };
+    });
+  }
+
+  private renderTools(log: AgentLog, w: number): string[] {
+    if (log.activeTools.length === 0) return [dim(" tools: idle")];
+    const parts: string[] = [];
+    const sp = SPINNER[this.frame];
+    for (const t of log.activeTools.slice(-6)) {
+      const s = Math.round((Date.now() - t.startedAt) / 1000);
+      if (t.status === "running") parts.push(yellow(`${sp} ${bold(t.name)} ${dim(`${s}s`)}`));
+      else if (t.status === "failed") parts.push(red(`✗ ${t.name}`));
+      else parts.push(dim(`└ ${t.name}`));
+    }
+    if (log.activeTools.length > 6) parts.unshift(dim(`+${log.activeTools.length - 6}`));
+    return [truncateToWidth(dim(" tools: ") + parts.join(dim("  ")), w, "…")];
+  }
+
+  private renderStream(log: AgentLog, w: number): string[] {
+    if (!log.streamingText) return [dim(" output: waiting...")];
+    const all = log.streamingText.split("\n"), tail = all.slice(-STREAMING_MAX_LINES);
+    const header = all.length > STREAMING_MAX_LINES ? dim(` output: (${all.length - STREAMING_MAX_LINES} earlier)`) : dim(" output:");
+    const cw = w - 4;
+    return [header, ...tail.map(l => `${dim(" │")} ${truncateToWidth(l, cw, "…")}`)];
+  }
+
+  private buildLog(log: AgentLog, w: number): string[] {
+    const result: string[] = [];
+    for (const e of log.lines) {
+      for (const wl of wrapTextWithAnsi(e.text, w)) {
+        if (e.kind === "tool") result.push(`${green("■")} ${bold(wl)}`);
+        else if (e.kind === "output") result.push(`${dim("│")} ${wl}`);
+        else if (e.kind === "system") result.push(`${dim("»")} ${yellow(wl)}`);
+        else result.push(`  ${wl}`);
+      }
+    }
+    if (log.agent.inbox.length > 0) {
+      result.push(dim("── inbox ──"));
+      for (const msg of log.agent.inbox.slice(-5)) {
+        const t = new Date(msg.timestamp).toISOString().slice(11, 19);
+        for (const wl of wrapTextWithAnsi(`[${t}] ◀ ${msg.from}: ${msg.payload}`, w)) {
+          result.push(`${yellow("◀")} ${wl}`);
+        }
+      }
+    }
+    return result;
+  }
+
   dispose(): void {
+    if (this.timer) { clearInterval(this.timer); this.timer = null; }
     this.agents.clear();
-    this.agentOrder.length = 0;
+    this.order.length = 0;
   }
 }

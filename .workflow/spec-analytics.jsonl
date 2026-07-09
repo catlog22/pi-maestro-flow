@@ -1,1 +1,3 @@
 {"type":"cli","id":"CLI-1783435479038-1","timestamp":"2026-07-07T14:44:39.038Z","command":"load","args":{"type":"session","list":true}}
+{"type":"cli","id":"CLI-1783525357516-1","timestamp":"2026-07-08T15:42:37.516Z","command":"spec add","args":{"category":"coding","keywords":"plan,hooks,chain,tool_call","stdin":false}}
+{"type":"cli","id":"CLI-1783525379651-1","timestamp":"2026-07-08T15:42:59.651Z","command":"spec add","args":{"category":"coding","keywords":"plan,bash,safety,patterns","stdin":false}}

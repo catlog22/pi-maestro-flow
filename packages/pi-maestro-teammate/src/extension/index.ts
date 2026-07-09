@@ -150,6 +150,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
 Single agent:
   { agent: "delegate", task: "..." }
 
+Fork current session (child inherits full conversation history):
+  { agent: "delegate", task: "...", context: "fork" }
+
 Multiple tasks (no references = parallel):
   { tasks: [
       { agent: "scout", task: "Find API endpoints" },
@@ -168,11 +171,25 @@ Variable references:
   - {name} — full output of the named task (text or JSON if outputSchema set)
   - {name.field} — specific field from structured output
 
+Context modes:
+  - "fresh" (default): blank conversation, no prior context
+  - "fork": inherits current session's full conversation history — the child sees everything before the fork and continues independently
+
 Routing:
   - name: addressable name for variable referencing and teammate-send
   - reply_to: "caller" (direct return) or "main" (broadcast to parent)
 
 Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task unless overridden per-task.`,
+
+    promptSnippet: "Use teammate to dispatch background agents for parallel or sequential work.",
+    promptGuidelines: [
+      "Prefer background mode (default) for long-running tasks — foreground (background: false) only for short tasks where you need the result immediately",
+      "Use the name field to make agents addressable via teammate-send and referenceable via {name} in other tasks",
+      "Use {name} and {name.field} variable references in tasks array to create DAG dependencies — referenced tasks are awaited, unreferenced run in parallel",
+      "Set outputSchema for structured output when downstream tasks need specific fields",
+      "Use teammate-list to check running agents, teammate-send to send follow-up messages or steer/abort",
+      'Use context: "fork" to spawn a child that inherits the current conversation history — useful when the child needs full context of what has been discussed',
+    ],
 
     parameters: TeammateParams,
 
@@ -436,18 +453,18 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
           // Background (default)
           const bgPromise = executeGraph();
 
-          bgPromise.then(({ results, hasError, summaries }) => {
+          bgPromise.then(({ results, hasError, totalDur, summaries }) => {
             const label = params.name ?? correlationId.slice(0, 8);
-            const status = hasError ? "failed" : "completed";
-            const summary = summaries.length > 500
-              ? summaries.slice(0, 500) + "…"
+            const okCount = results.filter((r: { exitCode: number }) => r.exitCode === 0).length;
+            const summary = summaries.length > 300
+              ? summaries.slice(0, 300) + "…"
               : summaries;
             retireAgent(state, correlationId, summary);
 
             pi.sendMessage(
               {
                 customType: "teammate-complete",
-                content: `[teammate] ${graphMode} "${label}" ${status} → sleeping\n\n${summary}`,
+                content: `● ${okCount}/${results.length} agents completed (${graphMode}, ${Math.round(totalDur / 1000)}s)${hasError ? " — has failures" : ""}\n\n${summary}`,
                 display: true,
                 details: { mode: graphMode, results },
               },
@@ -505,14 +522,14 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
           detached = true;
           runPromise.then((result) => {
             emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
-            const label = params.name ?? correlationId.slice(0, 8);
+            const label = params.name ?? params.agent;
             const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-            const summary = lastMsg.length > 500 ? lastMsg.slice(0, 500) + "…" : lastMsg;
+            const summary = lastMsg.length > 300 ? lastMsg.slice(0, 300) + "…" : lastMsg;
             retireAgent(state, correlationId, summary);
             pi.sendMessage(
               {
                 customType: "teammate-complete",
-                content: `[teammate] Agent "${params.agent}/${label}" → sleeping (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
+                content: `● @${label} came to rest (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
                 display: true,
                 details: { agent: params.agent, name: params.name, correlationId, result },
               },
@@ -522,7 +539,7 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
             retireAgent(state, correlationId);
           });
           return {
-            content: [{ type: "text", text: `Agent "${params.agent}" detached to background (Alt+B). Will notify on completion.` }],
+            content: [{ type: "text", text: `● @${params.name ?? params.agent} detached to background. Will notify on completion.` }],
             isError: false,
             details: { mode: "single", results: [] },
           };
@@ -533,15 +550,15 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
 
         bgPromise.then((result) => {
           emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
-          const label = params.name ?? correlationId.slice(0, 8);
+          const label = params.name ?? params.agent;
           const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-          const summary = lastMsg.length > 500 ? lastMsg.slice(0, 500) + "…" : lastMsg;
+          const summary = lastMsg.length > 300 ? lastMsg.slice(0, 300) + "…" : lastMsg;
           retireAgent(state, correlationId, summary);
 
           pi.sendMessage(
             {
               customType: "teammate-complete",
-              content: `[teammate] Agent "${params.agent}/${label}" → sleeping (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
+              content: `● @${label} came to rest (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
               display: true,
               details: { agent: params.agent, name: params.name, correlationId, result },
             },
@@ -554,7 +571,7 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
         return {
           content: [{
             type: "text",
-            text: `Agent "${params.agent}" running in background. correlationId=${correlationId}${params.name ? `, name="${params.name}"` : ""}. Use teammate-list to check status, teammate-send to message.`,
+            text: `● @${params.name ?? params.agent} running in background. Use teammate-list to check, teammate-send to message.`,
           }],
           isError: false,
           details: { mode: "single", results: [] },
@@ -586,9 +603,11 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
     description: `Send a message to a named, running teammate agent.
 
 Modes:
-  - "steer" — interrupt current turn, inject message immediately (打断当前执行)
-  - "follow_up" (default) — queue after current turn completes (等当前完成后执行)
-  - "abort" — cancel current execution (取消执行, message field ignored)`,
+  - "steer" — interrupt current turn, inject message immediately
+  - "follow_up" (default) — queue after current turn completes
+  - "abort" — cancel current execution (message field ignored)`,
+
+    promptSnippet: "Use teammate-send to communicate with running teammate agents by name.",
 
     parameters: TeammateSendParams,
 
@@ -668,12 +687,9 @@ Modes:
   const listTool: ToolDefinition<typeof TeammateListParams, { agents: unknown[] }> = {
     name: "teammate-list",
     label: "Teammate List",
-    description: `List active teammate agents.
+    description: `List active teammate agents with status and timing.`,
 
-Views:
-  - "active": All running agents (default)
-  - "named": Only named/addressable agents
-  - "all": All agents including completed metadata`,
+    promptSnippet: "Use teammate-list to check on running background agents before dispatching new work.",
 
     parameters: TeammateListParams,
 
@@ -760,7 +776,9 @@ Views:
   const watchTool: ToolDefinition<typeof TeammateWatchParams, { output: string[] }> = {
     name: "teammate-watch",
     label: "Teammate Watch",
-    description: `View a running agent's recent output and activity log. Returns the last N lines of tool calls, streaming text, and inbox messages.`,
+    description: `View a running agent's recent output log — tool calls, streaming text, and inbox messages.`,
+
+    promptSnippet: "Use teammate-watch to inspect a specific agent's live activity log.",
 
     parameters: TeammateWatchParams,
 
@@ -862,12 +880,13 @@ Views:
           overlay.appendLog(agent.correlationId, `Started: ${new Date(agent.startedAt).toISOString()}`, "info");
         }
 
+        const completedToolLog = new Set<string>();
+
         const msgHandler = (data: unknown) => {
           const evt = data as Record<string, unknown>;
           const cid = evt.correlationId as string;
           if (!cid) return;
 
-          // teammate-send message
           if (evt.isSend) {
             const mode = evt.mode as string;
             const msg = (evt.message as string)?.slice(0, 60) ?? "";
@@ -875,17 +894,27 @@ Views:
             return;
           }
 
-          const lastMsg = evt.lastMessage as string | undefined;
-          if (lastMsg) {
-            overlay.setOutput(cid, lastMsg);
-            return;
-          }
-
           const tools = evt.recentTools as Array<{ name: string; status: string }> | undefined;
           if (tools && tools.length > 0) {
-            const last = tools[tools.length - 1];
-            const icon = last.status === "running" ? "~" : "✓";
-            overlay.appendLog(cid, `[${ts()}] ${icon} ${last.name}`, "tool");
+            const toolEntries = tools.map((t) => ({
+              name: t.name,
+              status: t.status as "running" | "completed" | "failed",
+              startedAt: Date.now(),
+            }));
+            overlay.setActiveTools(cid, toolEntries);
+
+            for (const t of tools) {
+              const key = `${t.name}:${t.status}`;
+              if (t.status !== "running" && !completedToolLog.has(key)) {
+                completedToolLog.add(key);
+                overlay.appendLog(cid, `[${ts()}] ✓ ${t.name}`, "tool");
+              }
+            }
+          }
+
+          const lastMsg = evt.lastMessage as string | undefined;
+          if (lastMsg) {
+            overlay.setStreamingText(cid, lastMsg);
           }
         };
         const completeHandler = (data: unknown) => {
@@ -928,16 +957,96 @@ Views:
       await showAttachOverlay(entries[0][0], ctx);
       return;
     }
-    const labels = entries.map(([, a]) => {
-      const icon = a.status === "sleeping" ? "◉" : "●";
-      return `${icon} ${a.agent}/${agentLabel(a)}`;
-    });
-    const selected = await ctx.ui.select("Attach to agent", labels);
+
+    // Fuzzy search overlay for agent selection
+    const { fuzzyRank, visibleWidth: vw, truncateToWidth: trunc } = await import("@earendil-works/pi-tui");
+    type AgentEntry = [string, ActiveAgent];
+
+    const selected = await ctx.ui.custom<string | null>(
+      (tui, _theme, _keybindings, done) => {
+        let query = "";
+        let cursor = 0;
+
+        function filtered(): AgentEntry[] {
+          if (!query) return entries;
+          return fuzzyRank(entries, query, ([, a]: AgentEntry) =>
+            `${a.agent} ${a.name ?? ""} ${a.correlationId.slice(0, 8)}`,
+          ).map((r: { item: AgentEntry }) => r.item);
+        }
+
+        return {
+          render(width: number) {
+            const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
+            const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
+            const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
+            const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
+            const w = Math.min(width, 60);
+            const out: string[] = [];
+
+            out.push(dim("╭" + "─".repeat(w - 2) + "╮"));
+            const prompt = ` ${green("❯")} ${query}${dim("│")}`;
+            const promptPlain = 3 + query.length + 1;
+            out.push(dim("│") + prompt + " ".repeat(Math.max(0, w - 2 - promptPlain)) + dim("│"));
+            out.push(dim("├" + "─".repeat(w - 2) + "┤"));
+
+            const matches = filtered();
+            const inner = w - 4;
+            for (let i = 0; i < matches.length && i < 10; i++) {
+              const [cid, a] = matches[i];
+              const icon = a.status === "sleeping" ? yellow("◉") : green("■");
+              const name = a.name ?? cid.slice(0, 8);
+              const up = Math.round((Date.now() - a.startedAt) / 1000);
+              const line = ` ${icon} ${bold(`${a.agent}/${name}`)} ${dim(`${up}s`)}`;
+              const prefix = i === cursor ? green("▸") : " ";
+              out.push(dim("│") + prefix + trunc(line, inner - 1, "…") + " ".repeat(Math.max(0, inner - 1 - vw(line))) + dim("│"));
+            }
+            if (matches.length === 0) {
+              out.push(dim("│") + dim("  no matches") + " ".repeat(Math.max(0, w - 2 - 12)) + dim("│"));
+            }
+
+            out.push(dim("╰" + "─".repeat(w - 2) + "╯"));
+            out.push(dim(` type to filter · ↑↓ select · Enter attach · Esc cancel`));
+            return out;
+          },
+
+          handleInput(data: string) {
+            const matches = filtered();
+            if (data === "\r" || data === "\n") {
+              done(matches[cursor]?.[0] ?? null);
+            } else if (data === "\x1b") {
+              done(null);
+            } else if (data === "\x1b[A" || (data === "k" && !query)) {
+              cursor = Math.max(0, cursor - 1);
+              tui.requestRender();
+            } else if (data === "\x1b[B" || (data === "j" && !query)) {
+              cursor = Math.min(Math.max(0, matches.length - 1), cursor + 1);
+              tui.requestRender();
+            } else if (data === "\x7f" || data === "\b") {
+              if (query.length > 0) { query = query.slice(0, -1); cursor = 0; tui.requestRender(); }
+            } else if (data.length === 1 && data >= " ") {
+              query += data;
+              cursor = 0;
+              tui.requestRender();
+            }
+          },
+
+          invalidate() {},
+          dispose() {},
+        };
+      },
+      {
+        overlay: true,
+        overlayOptions: {
+          width: "60%",
+          maxHeight: "50%",
+          anchor: "top-left" as const,
+          margin: 2,
+        },
+      },
+    );
+
     if (selected) {
-      const idx = labels.indexOf(selected);
-      if (idx >= 0) {
-        await showAttachOverlay(entries[idx][0], ctx);
-      }
+      await showAttachOverlay(selected, ctx);
     }
   }
 
@@ -984,16 +1093,16 @@ Views:
       sleepCount > 0 ? `${sleepCount} sleeping` : "",
       hiddenCount > 0 ? `${hiddenCount} hidden` : "",
     ].filter(Boolean).join(" · ");
-    const lines: string[] = [`─ agents (${summary}) ─ Alt+R attach`];
-    for (const [, a] of visible) {
+    const lines: string[] = [`● agents (${summary}) — Alt+R attach`];
+    for (let i = 0; i < visible.length; i++) {
+      const [, a] = visible[i];
       const label = agentLabel(a);
-      const uptime = Math.round(agentActiveMs(a) / 1000);
-      const lastLog = a.outputLog[a.outputLog.length - 1];
-      const brief = lastLog ? `  ${lastLog.slice(0, 40)}` : "";
+      const connector = i === visible.length - 1 ? "└" : "├";
       if (a.status === "running") {
-        lines.push(`  ● ${a.agent}/${label}  ${uptime}s${brief}`);
+        const uptime = Math.round(agentActiveMs(a) / 1000);
+        lines.push(`  ${connector} @${label} (${a.agent}) ${uptime}s`);
       } else {
-        lines.push(`  \x1b[90m◉ ${a.agent}/${label}  sleep${brief}\x1b[0m`);
+        lines.push(`  \x1b[90m${connector} @${label} (${a.agent}) sleep\x1b[0m`);
       }
     }
 
@@ -1038,6 +1147,13 @@ Views:
     widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
+  });
+
+  pi.on("session_compact", (_event, ctx) => {
+    widgetCtx = ctx;
+    state.baseCwd = ctx.cwd;
+    state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
+    updateAgentWidget();
   });
 
   pi.on("session_shutdown", () => {
@@ -1215,7 +1331,7 @@ async function handleProxyRequest(
       pi.sendMessage(
         {
           customType: "teammate-started",
-          content: `[teammate] ${spawnerLabel} spawned ${p.agent}${p.name ? `/"${p.name}"` : ""}`,
+          content: `● @${spawnerLabel} spawned @${p.name ?? p.agent}`,
           display: true,
         },
         { triggerTurn: true },
@@ -1291,7 +1407,7 @@ async function handleProxyRequest(
       pi.sendMessage(
         {
           customType: "teammate-message",
-          content: `[teammate-send] ${senderLabel} → ${to} (${mode}): ${message.slice(0, 120)}`,
+          content: `● @${senderLabel} → @${to} (${mode}): ${message.slice(0, 120)}`,
           display: true,
         },
         { triggerTurn: true },

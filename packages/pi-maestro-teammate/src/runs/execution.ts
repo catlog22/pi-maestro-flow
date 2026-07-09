@@ -380,9 +380,14 @@ function buildPiArgs(
   systemPromptFile: string,
   modelOverride?: string,
   sessionDir?: string,
+  forkSessionFile?: string,
 ): string[] {
   // RPC mode: stdin stays open for bidirectional messaging (steer/follow_up/abort)
   const args: string[] = ["--mode", "rpc"];
+
+  if (forkSessionFile) {
+    args.push("--fork", forkSessionFile);
+  }
 
   const model = modelOverride ?? params.model ?? agentConfig.model;
   if (model) {
@@ -535,14 +540,22 @@ async function runSingleAttempt(
 ): Promise<SingleResult> {
   const systemPromptFile = writeSystemPromptFile(agentConfig, correlationId);
 
-  // AC5: Session directory
+  // AC5: Session directory + fork context
+  const effectiveContext = params.context ?? agentConfig.defaultContext;
   let sessionDir: string | undefined;
-  if (params.context === "fork") {
+  let forkSessionFile: string | undefined;
+  let forkWarning: string | undefined;
+  if (effectiveContext === "fork") {
     const parentSession = options.parentSessionFile ?? process.env.PI_TEAMMATE_PARENT_SESSION ?? null;
-    const sessionRoot = getTeammateSessionRoot(parentSession);
-    if (sessionRoot) {
-      sessionDir = path.join(sessionRoot, correlationId);
-      fs.mkdirSync(sessionDir, { recursive: true });
+    if (parentSession && fs.existsSync(parentSession)) {
+      const sessionRoot = getTeammateSessionRoot(parentSession);
+      if (sessionRoot) {
+        sessionDir = path.join(sessionRoot, correlationId);
+        fs.mkdirSync(sessionDir, { recursive: true });
+      }
+      forkSessionFile = parentSession;
+    } else if (params.context === "fork") {
+      forkWarning = "Fork requested but parent session file not available. Starting with fresh context.";
     }
   }
 
@@ -555,10 +568,13 @@ async function runSingleAttempt(
     outputFile = files.outputFile;
   }
 
-  const piArgs = buildPiArgs(agentConfig, params, systemPromptFile, modelOverride, sessionDir);
+  const piArgs = buildPiArgs(agentConfig, params, systemPromptFile, modelOverride, sessionDir, forkSessionFile);
 
   const usage = emptyUsage();
   const messages: Array<{ role: string; content: string }> = [];
+  if (forkWarning) {
+    messages.push({ role: "system", content: forkWarning });
+  }
   let resolvedModel = modelOverride ?? params.model ?? agentConfig.model ?? "unknown";
   let lastContent = "";
   let streamingText = "";

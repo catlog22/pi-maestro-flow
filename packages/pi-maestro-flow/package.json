@@ -1,7 +1,7 @@
 {
   "name": "pi-maestro-flow",
   "version": "0.4.0",
-  "description": "Pi extension for Maestro workflow orchestration — explore, delegate, MOA tools, 113 skills, 82 workflow docs, and 28 agent definitions",
+  "description": "Pi extension for Maestro workflow orchestration — explore, delegate, MOA tools",
   "type": "module",
   "keywords": [
     "pi-package",
@@ -18,8 +18,6 @@
   ],
   "files": [
     "src/**/*.ts",
-    "agents/",
-    "skills/",
     "workflows/",
     "templates/",
     "README.md"
@@ -27,20 +25,17 @@
   "pi": {
     "extensions": [
       "./src/extension/index.ts"
-    ],
-    "skills": [
-      "./skills"
     ]
   },
   "dependencies": {
-    "pi-maestro-teammate": "^0.2.0",
     "@earendil-works/pi-tui": "0.74.0",
     "typebox": "1.1.24"
   },
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "pi-maestro-teammate": ">=0.2.0"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-agent-core": {
@@ -50,6 +45,9 @@
       "optional": true
     },
     "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "pi-maestro-teammate": {
       "optional": true
     }
   },

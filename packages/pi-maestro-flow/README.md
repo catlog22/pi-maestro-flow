@@ -1,39 +1,37 @@
 # pi-maestro-flow
 
-> Maestro workflow orchestration for [Pi](https://github.com/earendil-works/pi) — tools, skills, workflows, and agent definitions
+> Maestro workflow orchestration for [Pi](https://github.com/earendil-works/pi) — tools, workflows, and templates
 
-Pi extension providing Maestro's full workflow toolkit. Built on [pi-teammate](../pi-teammate/) for the execution engine.
+Pi extension providing Maestro's workflow tools. Built on [pi-maestro-teammate](../pi-maestro-teammate/) for the execution engine. Skills and agents live in project-level `.pi/` directory (see root README).
 
 ## Contents
 
 | Resource | Count | Description |
 |----------|-------|-------------|
 | **Extension tools** | 3 | `maestro`, `maestro-wait`, `maestro-status` |
-| **Skills** | 113 | All maestro commands + skills as `/skill:name` |
-| **Agent definitions** | 28 | For teammate dispatch |
 | **Workflow docs** | 82 | Bundled reference documentation |
 | **Templates** | 23 | Bundled template files |
+
+Skills (113) and agents (29) are in the project root `.pi/` directory, not in this package.
 
 ## Prerequisites
 
 - **Pi coding agent** — the host runtime
 - **Maestro CLI** — `maestro search`, `maestro load`, `maestro delegate`, `maestro explore`
-- **pi-maestro-teammate** — installed automatically as dependency
+- **pi-maestro-teammate** — peer dependency (optional)
 
 ## Install
 
 ```bash
-# From npm (installs pi-maestro-teammate automatically)
+# From npm
 pi install npm:pi-maestro-flow
 
-# Or from local path
-pi install ./flow
+# Or from local path (development)
+pi install ./packages/pi-maestro-flow
 ```
 
 After installation:
 - 3 tools available: `maestro`, `maestro-wait`, `maestro-status`
-- 113 skills available as `/skill:name` slash commands
-- 28 agent definitions for teammate dispatch
 - 82 workflow docs bundled at `~/.pi/agent/packages/pi-maestro-flow/workflows/`
 
 ## Skills Categories
@@ -71,24 +69,18 @@ After installation:
 
 ```
 ┌──────────────────────────────────────────┐
-│  pi-maestro-flow                         │
+│  pi-maestro-flow (extension package)     │
 │                                          │
-│  Extension:                              │
+│  Extension tools:                        │
 │    maestro / maestro-wait / maestro-status│
 │                                          │
-│  Skills (113):                           │
-│    maestro-* / odyssey-* / quality-*     │
-│    team-* / manage-* / spec-* / learn-*  │
-│    scholar-* / skill-*                   │
-│                                          │
-│  Agents (28):                            │
-│    workflow-* / team-* / role-*          │
-│                                          │
-│  Workflows (82) + Templates (23):        │
-│    Bundled reference docs                │
+│  Bundled assets:                         │
+│    Workflows (82) + Templates (23)       │
 │                                          │
 │  Dispatch via ──► pi-maestro-teammate    │
 └──────────────────────────────────────────┘
+
+Skills (113) and agents (29) are in .pi/ at project root.
 ```
 
 ## License

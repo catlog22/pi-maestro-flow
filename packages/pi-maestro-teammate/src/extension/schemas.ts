@@ -157,7 +157,14 @@ export const TeammateParams = Type.Object({
     }),
   ),
 
-  context: Type.Optional(StringEnum(["fresh", "fork"])),
+  context: Type.Optional(
+    Type.Unsafe<"fresh" | "fork">({
+      type: "string",
+      enum: ["fresh", "fork"],
+      description:
+        'Session context mode. "fresh" (default) starts a blank conversation. "fork" inherits the current session\'s full conversation history — the child sees everything that happened before the fork and continues independently.',
+    }),
+  ),
 
   model: Type.Optional(
     Type.String({

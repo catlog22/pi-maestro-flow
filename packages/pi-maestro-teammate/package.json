@@ -1,12 +1,12 @@
 {
   "name": "pi-maestro-teammate",
-  "version": "0.3.0",
-  "description": "Pi extension for teammate dispatch with P0 three-axis decoupling (name, reply_to)",
+  "version": "0.4.0",
+  "description": "Pi extension — teammate agent dispatch with DAG task graphs, RPC messaging, and compact TUI",
   "type": "module",
   "keywords": [
     "pi-package",
+    "pi-extension",
     "pi",
-    "pi-coding-agent",
     "teammate",
     "agents"
   ],
@@ -23,7 +23,8 @@
   "peerDependencies": {
     "@earendil-works/pi-agent-core": "*",
     "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
   },
   "peerDependenciesMeta": {
     "@earendil-works/pi-agent-core": {
@@ -34,15 +35,18 @@
     },
     "@earendil-works/pi-coding-agent": {
       "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
     }
   },
   "dependencies": {
-    "@earendil-works/pi-tui": "0.74.0",
-    "typebox": "1.1.24"
+    "typebox": "^1.1.24"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.74.0",
-    "@earendil-works/pi-ai": "0.74.0",
-    "@earendil-works/pi-coding-agent": "0.74.0"
+    "@earendil-works/pi-agent-core": "0.80.3",
+    "@earendil-works/pi-ai": "0.80.3",
+    "@earendil-works/pi-coding-agent": "0.80.3",
+    "@earendil-works/pi-tui": "0.80.3"
   }
 }

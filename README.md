@@ -22,13 +22,13 @@ pi-maestro-flow 是 [Maestro-Flow](https://github.com/catlog22/maestro-flow) 的
 
 ## 包含内容
 
-| 资源 | 数量 | 说明 |
-|------|------|------|
-| **Extension 工具** | 3+1 | `teammate`, `maestro`, `maestro-wait`, `maestro-status` |
-| **Skills** | 113 | 全部 maestro 命令 + 技能，`/skill:name` 调用 |
-| **Agent 定义** | 28 | teammate 子进程代理定义 |
-| **Workflow 文档** | 82 | 打包的工作流参考文档 |
-| **Templates** | 23 | 打包的模板文件 |
+| 资源 | 位置 | 数量 | 说明 |
+|------|------|------|------|
+| **Extension 工具** | `packages/` | 3+1 | `teammate`, `maestro`, `maestro-wait`, `maestro-status` |
+| **Skills** | `.pi/skills/` | 113 | 全部 maestro 命令 + 技能，`/skill:name` 调用 |
+| **Agent 定义** | `.pi/agents/` | 29 | teammate 子进程代理定义 |
+| **Workflow 文档** | `packages/pi-maestro-flow/workflows/` | 82 | 打包的工作流参考文档 |
+| **Templates** | `packages/pi-maestro-flow/templates/` | 23 | 打包的模板文件 |
 
 ## 安装
 
@@ -36,19 +36,30 @@ pi-maestro-flow 是 [Maestro-Flow](https://github.com/catlog22/maestro-flow) 的
 # 从 npm 安装（自动安装 pi-maestro-teammate 依赖）
 pi install npm:pi-maestro-flow
 
-# 或从本地路径安装
-pi install ./pi-teammate
-pi install ./flow
+# 或从本地路径安装（开发模式）
+pi install ./packages/pi-maestro-teammate
+pi install ./packages/pi-maestro-flow
 ```
 
 > **前置依赖**: 需要安装 [Maestro CLI](https://github.com/catlog22/maestro-flow)（`npm install -g maestro-flow`）以使用 `maestro search`、`maestro load`、`maestro delegate`、`maestro explore` 等命令。
 
-## 包结构
+## 项目结构
+
+```
+pi-maestro-flow/
+├── .pi/
+│   ├── skills/                     # 113 skills（Pi 项目级）
+│   └── agents/                     # 29 agents（teammate discoverAgents）
+├── packages/
+│   ├── pi-maestro-flow/            # 主扩展包（纯代码 + workflows + templates）
+│   └── pi-maestro-teammate/        # teammate dispatch 引擎
+└── docs/                           # 开发参考文档
+```
 
 | 包 | 目录 | npm | 说明 |
 |---|---|---|---|
-| **pi-teammate** | `pi-teammate/` | [`pi-maestro-teammate`](https://www.npmjs.com/package/pi-maestro-teammate) | 核心 teammate dispatch — P0 三轴解耦 (name × reply_to × lifecycle) |
-| **pi-maestro-flow** | `flow/` | [`pi-maestro-flow`](https://www.npmjs.com/package/pi-maestro-flow) | Maestro 工具 + 113 skills + 28 agents + 82 workflows |
+| **pi-maestro-teammate** | `packages/pi-maestro-teammate/` | [`pi-maestro-teammate`](https://www.npmjs.com/package/pi-maestro-teammate) | 核心 teammate dispatch — P0 三轴解耦 (name × reply_to × lifecycle) |
+| **pi-maestro-flow** | `packages/pi-maestro-flow/` | [`pi-maestro-flow`](https://www.npmjs.com/package/pi-maestro-flow) | Maestro 工具 + 82 workflows + 23 templates |
 
 ## 工具
 

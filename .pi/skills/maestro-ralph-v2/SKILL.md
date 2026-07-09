@@ -1,13 +1,13 @@
 ---
 name: maestro-ralph-v2
 description: "[RECOMMENDED] Adaptive lifecycle orchestrator — compose, dispatch ralph-executor agent, evaluate decision, loop Arguments: <intent> [-y] [--amend [change]] [--roadmap] | status | continue"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro todo ask-user-question
 ---
 
 <purpose>
-Adaptive lifecycle orchestrator: locate step → resolve args → load context → dispatch Agent(ralph-executor) per step (agent 调 `ralph next` + 执行) → extract signals → drift check → ralph complete → evaluate decision → next step → loop.
+Adaptive lifecycle orchestrator: locate step → resolve args → load context → dispatch Agent(ralph-executor) per step (agent 调 `todo next` + 执行) → extract signals → drift check → todo update completed → evaluate decision → next step → loop.
 
-Session: `.workflow/.maestro/ralph-v2-{YYYYMMDD-HHmmss}/status.json`
+Session state: Pi `appendEntry("todo-state")` — persisted via Pi extension lifecycle, replay on session restart.
 </purpose>
 
 <deferred_reading>
@@ -29,26 +29,26 @@ Remaining      → intent (amend_mode 时为 change_request)
 
 **State files**:
 - `.workflow/state.json` — artifact registry
-- `.workflow/.maestro/ralph-v2-*/status.json` — session state
+- Pi `appendEntry("todo-state")` — session step state (todo tasks)
 </context>
 
 <invariants>
 1. **Ralph-v2 owns the full loop** — locate step → resolve args → load context → dispatch agent → wait for task-notification → extract signals → drift → complete，全部在本命令内完成
 2. **One agent per step** — 每个执行 step 派发一个 unnamed executor agent，结果通过 task-notification `<result>` 回传，主流程解析结果后决定下一步
-3. **Agent is a thin wrapper** — executor agent 调 `ralph next` 获取 skill prompt 并执行，返回输出文本；arg resolution、context loading、signal extraction、drift analysis、ralph complete 均由主流程完成
+3. **Agent is a thin wrapper** — executor agent 调 `todo({ action: "next" })` 获取 skill prompt + 注入内容并执行，返回输出文本；arg resolution、context loading、signal extraction、drift analysis、completion 标记均由主流程完成
 4. **Unified unnamed dispatch** — 执行 Agent 和评估 Agent 均使用 unnamed Agent()，结果通过 task-notification `<result>` 回传：
    - **执行 Agent**（A_STEP_DISPATCH）：`Agent()` 不传 name — executor 内部编排也用 unnamed Agent（子结果自动回流 executor，嵌套套娃模型）
    - **评估 Agent**（A_AGENT_EVALUATE / A_AGENT_GOAL_AUDIT / A_AGENT_REGROUND）：同样 `Agent()` 不传 name
    - `agent_exec_name` 仅用于 display/日志标识，不作为 Agent name 参数
-5. **主流程调 `ralph complete`** — 每个 step 完成后由主流程调 `maestro ralph complete`，非 agent 上报
+5. **主流程调 `todo update`** — 每个 step 完成后由主流程调 `todo({ action: "update", status: "completed", completion: {...} })`，非 agent 上报
 6. **Decision evaluation inline** — decision 节点不 handoff，通过 Agent 或 CLI delegate 在本循环内评估
 7. **CLI delegation for evaluation only** — CLI delegate（`maestro delegate --mode analysis`）仅限评估环节；执行仍通过 executor Agent 完成
 8. **Decision delegates read-only** — 评估 Agent 通过 prompt 中的 CONSTRAINTS 约束为只读
-9. **执行 step 通过 `maestro ralph next` CLI 加载并内联执行**（由 execute Agent 完成）
-10. **status.json 是唯一真源** — 不生成 markdown 清单或侧文件
-11. **每个 step 必须 `completion_confirmed: true`** — 由 `maestro ralph complete N --status DONE`（或 DONE_WITH_CONCERNS）写入；CLI 是唯一合法写入路径
-12. **command_path 在 A_BUILD_STEPS 解析** — 通过 `maestro ralph skills --platform claude --json --quiet` 预校验
-13. **执行 step 加载契约** — 由 `maestro ralph next` CLI 在执行期完成
+9. **执行 step 通过 `todo({ action: "next" })` 加载并内联执行**（由 executor Agent 完成）
+10. **todo state 是唯一真源** — 通过 Pi `appendEntry` 持久化，不生成 markdown 清单或侧文件
+11. **每个 step 必须标记 completed** — 由 `todo({ action: "update", status: "completed", completion: {...} })` 写入；主流程是唯一合法写入路径
+12. **skill 在 A_BUILD_STEPS 校验** — 通过 todo 的 `findSkillFile()` 预校验
+13. **执行 step 加载契约** — 由 `todo next` 的 `load: { type: "skill" }` 在执行期完成
 14. **Decomposition is outcome-oriented** — sub-goals 为可观测交付，禁止 lifecycle 复刻
 15. **planning_mode governs arg granularity** — `unified` → skill args 无 `{phase}`；`independent` → 含 `{phase}`
 16. **task_decomposition 驱动 steps[] 动态生长** — `post-goal-audit` 按 unmet 子目标插入 scoped mini-loop
@@ -73,16 +73,16 @@ S_RESOLVE_SCOPE — 读 macro analyze conclusions.scope_verdict            PERSI
 S_QUALITY_MODE  — 决定质量管线模式                                      PERSIST: session.quality_mode
 S_PLANNING_MODE — 决定统一/独立规划模式                                  PERSIST: session.planning_mode
 S_DECOMPOSE     — 边界澄清 + 执行准则 + 子目标清单                      PERSIST: session.boundary_contract, .execution_criteria, .task_decomposition
-S_BUILD_CHAIN   — 构建步骤链（build rules 0-14）                        PERSIST: session.steps[]
-S_CREATE_SESSION — 写 status.json                                       PERSIST: session (全量)
+S_BUILD_CHAIN   — 构建步骤链（build rules 0-14）                        PERSIST: todo tasks[]
+S_CREATE_SESSION — 批量 todo create                                     PERSIST: todo state (全量)
 S_CONFIRM       — 用户确认
 
 S_STEP_LOCATE     — 找下一个 pending step                    PERSIST: —
 S_STEP_RESOLVE    — 解析占位符 + 丰富参数                    PERSIST: step.args (enriched)
-S_STEP_DISPATCH   — 组装上下文 + 派发 unnamed executor agent    PERSIST: step.agent_exec_name, step.status = "running"
+S_STEP_DISPATCH   — 组装上下文 + 派发 unnamed executor agent    PERSIST: task.status = "in_progress" (via todo next)
 S_STEP_ANALYZE    — 提取信号 + 组装 completion 参数            PERSIST: —
-S_STEP_DRIFT      — 产物 vs 目标偏离分析                      PERSIST: step.drift_score
-S_STEP_COMPLETE   — 调 `ralph complete` 上报                  PERSIST: step.completion_*
+S_STEP_DRIFT      — 产物 vs 目标偏离分析                      PERSIST: task.metadata.drift_score
+S_STEP_COMPLETE   — 调 `todo update` 上报                     PERSIST: task.completion
 S_DECISION_EVAL   — 启动分析 Agent 评估质量门              PERSIST: —
 S_APPLY_VERDICT   — 应用裁决                              PERSIST: session.steps[]
 S_SESSION_DONE    — 所有 step 完成                        PERSIST: session.status
@@ -143,7 +143,7 @@ S_STEP_ANALYZE:
 
 S_STEP_DRIFT:
   → S_STEP_COMPLETE  WHEN: ALIGNED|MINOR_DRIFT                   DO: A_STEP_DRIFT_ANALYZE
-  → S_STEP_DISPATCH      WHEN: MAJOR_DRIFT + not retried             DO: A_STEP_DRIFT_ANALYZE (ralph retry + re-execute)
+  → S_STEP_DISPATCH      WHEN: MAJOR_DRIFT + not retried             DO: A_STEP_DRIFT_ANALYZE (todo update pending + re-execute)
   → S_STEP_COMPLETE  WHEN: MAJOR_DRIFT + retried                 DO: A_STEP_DRIFT_ANALYZE (DONE_WITH_CONCERNS)
 
 S_STEP_COMPLETE:
@@ -341,7 +341,7 @@ options:
 
 ### A_DECOMPOSE_TASKS
 
-Runs once before chain build; additive to status.json. 设 `session.decomposition_owner = "ralph"`。
+Runs once before chain build; additive to todo state. 设 `session.decomposition_owner = "ralph"`。
 
 **0. Ownership guard** (invariant 20): 若 `session.boundary_contract` 或 `session.task_decomposition` 已非空（上游 maestro 已写入，`decomposition_owner == "maestro"`）→ MUST 跳过下述提问，仅做 shape 校验 + 缺省字段补齐，直接进入步骤 6。
 
@@ -382,7 +382,7 @@ narrow → derive defaults from intent + codebase, skip questions.
 
 Generate steps from `session.lifecycle_position` to `milestone-complete`（`session.milestone` 存在时）或最后一个质量门（standalone 时）。
 
-> **v2 执行模型**：每个 step 由 Agent(ralph-executor) 派发执行，非主会话内联。Agent 内部调 `maestro ralph next` 获取 skill prompt 并执行，结果通过 task-notification 回传主流程。
+> **v2 执行模型**：每个 step 由 Agent(ralph-executor) 派发执行，非主会话内联。Agent 内部调 `todo({ action: "next" })` 获取 skill prompt + 注入内容并执行，结果通过 task-notification 回传主流程。
 
 | Stage | Skill (independent) | Skill (unified) | Decision after | quality_mode |
 |-------|---------------------|-----------------|----------------|--------------|
@@ -414,24 +414,22 @@ Generate steps from `session.lifecycle_position` to `milestone-complete`（`sess
 3. **quality_mode 过滤**：按 `session.quality_mode` 排除不匹配 stage
 3.5. **grill auto_confirm 透传**：`auto_confirm == true` 时为 `grill` step args 追加 `-y`（grill 自身 Auto mode 用代码代答，见 maestro-grill `<context>` Mode selection）；保留 `grill` stage 与 brainstorm 的 `--from grill:*`（grill 仍产出 grill-report/terminology/context-package）
 3.6. **frontend-verify UI 门控**：仅当当前 phase 交付前端（检出 `dashboard/` 目录，或 phase 目标/计划含 UI 关键词 `landing|page|dashboard|frontend|UI|component|界面`）时保留 `frontend-verify` stage + `post-frontend-verify` decision；纯后端 phase 删除该 stage
-4. **决策节点**：每个 Decision after 非空的 stage 之后插入 `{ decision: "<gate>", retry_count: 0, max_retries: 2, command_scope: null, command_path: null }`
+4. **决策节点**：每个 Decision after 非空的 stage 之后，通过 `todo create` 插入决策 task：`{ subject: "<gate> evaluation", decision: "<gate>", metadata: { retry_count: 0, max_retries: 2 } }`
 5. **goal-audit 插入**：`task_decomposition` 存在时，在最后一个 evidence-producing stage（execute/review/test）之后、`milestone-complete` 之前插入 `decision:post-goal-audit`
 5.5. **re-grounding 插入**：WHEN `task_decomposition` 存在 AND 执行 step（不含 decision）≥3
-   - 从第 3 个执行 step 起每隔 3 个插入 `{ decision: "post-reground", retry_count: 0, max_retries: 0, command_scope: null, command_path: null }`
+   - 从第 3 个执行 step 起每隔 3 个插入 decision task：`{ subject: "re-grounding check", decision: "post-reground", metadata: { retry_count: 0, max_retries: 0 } }`
    - 不在最后一个执行 step 后插入（由 goal-audit 覆盖）
    - 不与已有 quality-gate decision 节点相邻（顺延到下一个 3-step 边界）
    - fix-loop 动态插入的 step **纳入**计数（从插入点起重新计算 3-step 间隔）
 6. **终点硬约束**：`session.milestone` 存在时 chain 以 `milestone-complete` 结尾；`session.milestone=null`（standalone）时跳过 `milestone-audit` + `milestone-complete` stage，chain 以最后一个质量门 stage 结尾
 7. **goal_ref 传播**：`task_decomposition` 存在时，每个 step 按 `step.stage ∈ g.lifecycle` 匹配 `step.goal_ref = g.id`（多匹配取字典序最小）；decision 节点不打 goal_ref
 8. **占位符**：independent 保留 `{phase}` `{intent}`；unified 不带 `{phase}`
-9. **command_path 解析**（每个执行 step，decision 节点跳过）：
+9. **skill 校验**（每个执行 step，decision 节点跳过）：
    - 取 skill 名（args 前的第一个 token）
-   - **预校验通过 `Bash("maestro ralph skills --platform claude --json --quiet")`** 一次性拉取 claude 平台可用 commands + skills（global + project，project 覆盖 global），匹配 skill 名得到：
-     - 命中 commands → `command_scope = "global" | "project"`，`command_path = <绝对路径>`
-     - 命中 skills → 同上（type=skill）
-     - 未命中 → `command_scope = "missing"`, `command_path = null`，A_CREATE_SESSION 报错 E006
-   - **不在 build 阶段读取 .md 内容**；`<required_reading>` / `<deferred_reading>` 解析与加载由 `maestro ralph next` CLI 在执行期完成
-10. **每个 step 初始化** `completion_confirmed: false`, `completion_status: null`, `completion_evidence: null`, `completion_summary: null`, `completion_decisions: null`, `completion_caveats: null`, `completion_deferred: null`, `deferred_reads: []`, `load: null`（由 `ralph next` 写入）
+   - 通过 todo 的 `load: { type: "skill", source: "{skill_name}" }` 构建 task 时隐式校验（`findSkillFile()` 查找 project skills → global skills）
+   - 未找到 → A_CREATE_SESSION 报错 E006
+   - **不在 build 阶段读取 .md 内容**；skill prompt 解析与加载由 `todo next` 在执行期通过 load 完成
+10. **每个 step 初始化为 todo task**：通过 `todo({ action: "create" })` 创建，携带 `injection`（goalContext/stepContext/boundaryContract）+ `load: { type: "skill", source: "{skill_name}" }` + `decision`（决策节点标记）+ `metadata`（stage/args/index 等追踪信息）
 11. **scope_verdict gating**（仅当 chain 起点 = `analyze-macro`）：
     - `scope_verdict == large` **且** `wants_roadmap` → 保留 `roadmap` + `analyze`；`plan` 选 phase 列（`{phase}`）
     - 其余（`medium` / `small`，或 `large` 但非 `wants_roadmap`）→ 跳过 `roadmap` + `analyze` 两 stage；`plan` 选 standalone 列（`--from analyze:{analyze_macro_id}`），不带 `{phase}`
@@ -448,15 +446,14 @@ Generate steps from `session.lifecycle_position` to `milestone-complete`（`sess
 14. **动态插入步骤**（A_APPLY_*）同样应用规则 7-13
 
 ### A_CREATE_SESSION
-1. `session_id` format: `ralph-v2-{YYYYMMDD-HHmmss}`
-2. Validate: 所有 step 的 `command_scope != "missing"`；否则 raise E006 + 列出缺失 skill
-3. Additional fields: `execution_mode: "agent"`，无 `cli_tool` 字段
-4. Each step: `agent_exec_name: null`（执行 Agent 名称标识）
-5. Step mode/role/rule assigned per stage (see Stage Mapping table)
+1. `session_id` format: `ralph-v2-{YYYYMMDD-HHmmss}`（存入每个 task 的 metadata.session_id）
+2. Validate: 所有执行 task 的 `load.type == "skill"` 引用通过 `findSkillFile()` 校验存在；否则 raise E006 + 列出缺失 skill
+3. 批量调用 `todo({ action: "create" })` 创建全部 step task（按 chain 顺序，依赖关系通过 blockedBy 编排）
+4. Step mode/role/rule assigned per stage (see Stage Mapping table)
 
 ### A_STEP_RESOLVE_ARGS
 
-解析占位符 + 丰富参数。在 `ralph next` 之前执行。
+解析占位符 + 丰富参数。在 `todo next` 之前执行。
 
 **1. Placeholder substitution:**
 
@@ -514,80 +511,63 @@ if goal:
   → 传递给 A_STEP_DISPATCH 注入 agent prompt
 ```
 
-**5. Write** enriched args + source_artifact_ref back to status.json.
+**5. Write** enriched args + source_artifact_ref via `todo({ action: "update", id, injection: {...}, metadata: { source_artifact_ref } })`.
 
 ### A_STEP_DISPATCH
 
-加载前序产出 + 组装上下文 + 派发 executor agent 执行单步。Agent 内部调 `maestro ralph next` 获取 skill prompt 并执行。
+组装上下文 + 派发 executor agent 执行单步。Agent 内部调 `todo({ action: "next" })` 获取注入内容（含 skill prompt + prev context）并执行。
 
-**1. Load previous step context:**
+**1. Context enrichment（主流程侧）:**
 
-- 读前一 completed step 的 `completion_summary` + `completion_caveats` + `completion_decisions` + `completion_deferred`
-- 按 `session.context` 中的路径逐个 Read，提取与当前 step 相关的内容：
+在 dispatch 前，按 stage 类型丰富当前 todo task 的 injection：
 
-   | 当前 stage | 加载什么 | Source |
+   | 当前 stage | 注入到 injection.stepContext | Source |
    |-----------|---------|--------|
    | plan | analysis conclusions + scope_verdict | `{context.analysis_dir}/conclusions.json` |
    | execute | task list + wave assignments | `{context.plan_dir}/TASK-*.json` |
    | review | changed files + verification results | `{context.scratch_dir}/verification.json` |
    | test | review findings | `review.json` |
-   | debug | error traces + failing test details | 前一 step 的 `completion_evidence` |
+   | debug | error traces + failing test details | 前一 task 的 `completion.evidence` |
    | brainstorm | grill report | `{context.grill_id}` report |
 
-- Explore if needed — 产物指向代码位置但缺少上下文 → `maestro explore` 补充（仅 execute/debug/test 且有文件路径引用时）
-- Accumulated signals — 遍历 ALL completed steps → 聚合 caveats + deferred
+通过 `todo({ action: "update", id: "{task_id}", injection: { stepContext: "{enriched}" } })` 写入。
+
+Explore if needed — 产物指向代码位置但缺少上下文 → `maestro explore` 补充（仅 execute/debug/test 且有文件路径引用时）
+
+> 注：`<prev_steps>` 滑动窗口由 `todo next` 自动注入（最近 5 个 completed task 的 completion 摘要），无需手动组装。
 
 **2. Goal context pre-injection:**
 
-- GUARD: `ralph_protocol_version >= "2"` → skip（session_anchor 已含 goal context）
-- WHEN `ralph_protocol_version < "2"` 或缺失 AND `step.goal_ref` 非空 → 组装 `<goal_context>` 块注入 prompt：
+WHEN `step.goal_ref` 非空 → 通过 `todo({ action: "update", id, injection: { goalContext: "..." } })` 注入 goal context：
 ```
-<goal_context>
 Sub-goal: {goal.id} — {goal.goal}
 Done when: {goal.done_when}
 Boundary: {goal.boundary}
 Evidence target: {goal.evidence}
 Execution criteria: {session.execution_criteria joined by '; '}
-</goal_context>
 ```
 
-**3. Resolve agent name:** `{stage_prefix}-{session_id_short}-{HHmmss}`
+**3. Dispatch（unnamed executor）:**
 
-   | Stage | Prefix |
-   |-------|--------|
-   | grill | `grl` |
-   | brainstorm | `brn` |
-   | analyze-macro | `anm` |
-   | analyze | `ana` |
-   | plan | `pln` |
-   | execute | `exe` |
-   | review | `rev` |
-   | test | `tst` |
-   | debug | `dbg` |
-   | Other | `run` |
-
-**4. Dispatch（unnamed executor）:**
-
-> 执行 Agent 不传 name，结果通过 task-notification `<result>` 自动回传主流程。executor 内部编排也用 unnamed Agent（子结果自动回流 executor，嵌套套娃模型）。
+> 执行 Agent 不传 name，结果通过 task-notification `<result>` 自动回传主流程。executor 内部调 `todo next` 获取注入内容 + skill prompt 并执行。
 
 ```
 teammate({
   subagent_type: "ralph-executor",
-  description: "执行 step {index}: {step.skill} [{resolved_agent_name}]",
-  prompt: `Session: {session_id}
+  description: "执行 step: {step.skill}",
+  prompt: `执行下一个待处理任务。
 
-{goal_context 块，仅 protocol < 2 时}
+调用 todo({ action: "next" }) 获取任务内容和 skill prompt，内联执行。
 
-{loaded_step_context}
+{additional_context}
 `
 })
 ```
 
-5. Write `step.agent_exec_name` to status.json（仅日志标识）
-6. Display: `[{index}/{total}] ⟶ {step.skill} → {resolved_agent_name}`
-7. Agent() 返回 agentId → 等待 task-notification（status=completed 时 `<result>` 含 executor 输出）
-8. task-notification 到达后，`agent_output` = `<result>` 内容 → 进入 S_STEP_ANALYZE
-9. task-notification status=failed → STATUS=BLOCKED，转 S_HANDLE_FAIL
+4. Display: `[{index}/{total}] ⟶ {step.skill}`
+5. Agent() 返回 agentId → 等待 task-notification（status=completed 时 `<result>` 含 executor 输出）
+6. task-notification 到达后，`agent_output` = `<result>` 内容 → 进入 S_STEP_ANALYZE
+7. task-notification status=failed → STATUS=BLOCKED，转 S_HANDLE_FAIL
 
 ### A_STEP_EXTRACT
 
@@ -636,7 +616,7 @@ teammate({
 | Skill 正常完成 + 有产物 | `DONE` |
 | 完成但有 warnings/concerns | `DONE_WITH_CONCERNS` |
 | 执行出错但可重试（临时错误、网络问题） | `NEEDS_RETRY` |
-| 执行出错且无法重试（schema 错误、command_path 不可达） | `BLOCKED` |
+| 执行出错且无法重试（schema 错误、skill 不可达） | `BLOCKED` |
 | Agent 返回 null（崩溃/超时） | `BLOCKED` |
 
 **5. Compose completion params:**
@@ -682,34 +662,46 @@ teammate({
 |-------------|------|
 | ALIGNED | 正常进入 S_STEP_COMPLETE |
 | MINOR_DRIFT | 偏离项追加到 caveats，正常 complete |
-| MAJOR_DRIFT + 未重试 | `Bash("maestro ralph retry {index}")` → 回到 S_STEP_DISPATCH 重执行（drift_correction 作修正上下文注入 prompt） |
+| MAJOR_DRIFT + 未重试 | `todo({ action: "update", id, status: "pending", metadata: { retried: true, drift_correction: "..." } })` → 回到 S_STEP_DISPATCH 重执行 |
 | MAJOR_DRIFT + 已重试 | 以 DONE_WITH_CONCERNS complete |
 
 **4. 写入:** `step.drift_score`, `step.drift_correction`
 
 ### A_STEP_COMPLETE
 
-调 `ralph complete` 上报 + 传播上下文信号 + 循环。
+通过 `todo update` 上报完成 + 传播上下文信号 + 循环。
 
-1. 使用 A_STEP_EXTRACT 组装的参数调用 `ralph complete`:
+1. 使用 A_STEP_EXTRACT 组装的参数调用 todo update：
    ```
-   Bash("maestro ralph complete {index} --status DONE --summary \"{SUMMARY}\" [--evidence ...] [--decisions ...] [--caveats ...] [--deferred ...]")
+   todo({ action: "update", id: "{task_id}", status: "completed",
+     completion: {
+       completionStatus: "DONE",  // or "DONE_WITH_CONCERNS"
+       summary: "{SUMMARY}",
+       evidence: "{evidence_paths}",
+       decisions: "{decisions}",
+       caveats: "{caveats}",
+       deferred: "{deferred}"
+     },
+     metadata: { ...context_signals }
+   })
    ```
-   DONE_WITH_CONCERNS 时 caveats 同时映射 `--concerns`。BLOCKED 时用 `--reason`。
+   DONE_WITH_CONCERNS 时 caveats 同时写入 `completion.concerns`。
 
-2. **Context signals propagation** — 将关键信号写入 `status.json.context`:
+2. **Context signals propagation** — 将关键信号写入 task 的 `metadata`：
 
-   | Signal | 写入字段 |
+   | Signal | metadata key |
    |--------|---------|
-   | `analysis_dir` | `context.analysis_dir` |
-   | `plan_dir` | `context.plan_dir` |
-   | `scratch_dir` | `context.scratch_dir` |
-   | `grill_id` | `context.grill_id` |
-   | `brainstorm_dir` | `context.brainstorm_dir` |
-   | `blueprint_dir` | `context.blueprint_dir` |
-   | `ANL-xxx` | `session.analyze_macro_id` |
-   | `BLP-xxx` | `session.blueprint_id` |
-   | `phase` | `session.context.phase` |
+   | `analysis_dir` | `context_analysis_dir` |
+   | `plan_dir` | `context_plan_dir` |
+   | `scratch_dir` | `context_scratch_dir` |
+   | `grill_id` | `context_grill_id` |
+   | `brainstorm_dir` | `context_brainstorm_dir` |
+   | `blueprint_dir` | `context_blueprint_dir` |
+   | `ANL-xxx` | `analyze_macro_id` |
+   | `BLP-xxx` | `blueprint_id` |
+   | `phase` | `context_phase` |
+
+   > 注：task 完成后自动触发 `autoUnblock`，解除下游 blockedBy 依赖。
 
 3. Display: `[{index}/{total}] ✓ {step.skill} → {SUMMARY}`
 4. Loop back to S_STEP_LOCATE
@@ -744,7 +736,7 @@ teammate({
   prompt: "PURPOSE: 评估 {decision} 质量门结果
 TASK: 读取以下结果文件 | 分析状态 | 评估严重性 | 给出建议
 FILES: {result_file_paths}
-SESSION: {session_dir}/status.json
+SESSION: todo({ action: "list" }) + todo({ action: "get" })
 EXPECTED: 输出以下格式：
 ---VERDICT---
 STATUS: PASS|FAIL|PARTIAL|BLOCKED
@@ -800,19 +792,19 @@ Bash({
 
 通过 Agent 和/或 CLI delegate 审计子目标完成情况。支持 `evaluate_via` 三种模式（同 A_AGENT_EVALUATE）。
 
-1. Read `session.task_decomposition` from status.json
+1. Read `session.task_decomposition` from session metadata（存储在 task metadata 中）
 2. Dispatch audit（按 `evaluate_via` 模式，默认 `agent`）:
    ```
    teammate({
      description: "审计子目标完成情况（同步评估 Agent，不传 name）",
      prompt: "PURPOSE: 审计未完成子目标，判定 met / unmet
    TASK:
-     1. 读取 {session_dir}/status.json 中 task_decomposition 的 status!=done 子目标
+     1. 读取 todo({ action: "list" }) + todo({ action: "get" }) 中 task_decomposition 的 status!=done 子目标
      2. 打开 evidence 产物，对照 done_when 严格判定
      3. 输出 met / unmet，unmet 给出 gap + target_phase
      4. 对照 intent + definition_of_done 判定意图保真
    CONTEXT:
-     status.json        = {session_dir}/status.json
+     session_state      = via todo({ action: "list" }) + todo({ action: "get" })
      intent             = {session.intent}
      definition_of_done = {boundary_contract.definition_of_done}
      execution_criteria = {execution_criteria}
@@ -836,7 +828,7 @@ Bash({
 
 通过 Agent 和/或 CLI delegate 执行意图保真检查。支持 `evaluate_via` 三种模式（同 A_AGENT_EVALUATE）。
 
-1. Read status.json：intent, boundary_contract, completed steps, done goals
+1. Read session state：intent, boundary_contract, completed tasks, done goals（via `todo list` + `todo get`）
 2. Dispatch reground（按 `evaluate_via` 模式，默认 `agent`）:
    ```
    teammate({
@@ -848,7 +840,7 @@ Bash({
      3. 判定累积产出是否仍服务 intent
      4. 输出 aligned / drifted + drift_description + corrective_action
    CONTEXT:
-     status.json        = {session_dir}/status.json
+     session_state      = via todo({ action: "list" }) + todo({ action: "get" })
      intent             = {session.intent}
      definition_of_done = {boundary_contract.definition_of_done}
      in_scope           = {boundary_contract.in_scope}
@@ -888,14 +880,14 @@ Bash({
 
 ### A_SHOW_STATUS
 
-1. Find latest `ralph-v2-*` session（by created_at）
-2. Display: Session, Status, Position, Progress, Current step
-3. List steps: [✓] confirmed, [▸] current, [ ] pending, [◆] decision；执行 step 附 `command_scope` + `command_path`
+1. 调用 `todo({ action: "list" })` 获取全部 task 列表
+2. Display: Progress（completed/total）, Current step（in_progress）, Pending count
+3. List tasks: [x] completed, [>] in_progress, [ ] pending, [!] blocked, ◆ decision；每个 task 附 skill 引用
 4. If `task_decomposition` present → 显示 sub-goals 进度（done/total）
 
 ### A_APPLY_PROCEED / A_APPLY_FIX / A_APPLY_ESCALATE
 
-- **A_APPLY_PROCEED**: Mark decision completed, write status.json
+- **A_APPLY_PROCEED**: Mark decision task completed via `todo update`
 - **A_APPLY_FIX**: Insert fix-loop steps after current step（见 Fix-Loop Templates），reindex，increment retry_count
 - **A_APPLY_ESCALATE**: Insert `[quality-debug "{gap_summary}", decision:post-debug-escalate]`，reindex
 
@@ -917,7 +909,7 @@ Bash({
 
 1. Update session: milestone, phase, reset passed_gates
 2. Insert full lifecycle steps for next milestone
-3. Reindex, write status.json
+3. 通过 `todo create` 插入新 tasks，blockedBy 编排顺序
 
 ### A_REGROUND_HALT / A_PAUSE_ESCALATE
 
@@ -934,7 +926,7 @@ Bash({
 | 2. 解析 | `change_request` 非空 → 直接用；为空 → user prompt（修改/新增/移除/调整边界） | `change_type` + `change_request` |
 | 3. Mini Grill | Agent 评估影响 | RISK_LEVEL + AFFECTED_GOALS + INVALIDATED_STEPS + NEW_GAPS |
 | 4. 确认 | user prompt：应用并继续 / 仅改目标 / 取消 | 用户选择 |
-| 5. 应用 | 归档旧目标（`superseded`）→ 写入新目标（`origin: CHG-xxx`）→ 重建链路 → write status.json | re-dispatch |
+| 5. 应用 | 归档旧目标（`superseded`）→ 写入新目标（`origin: CHG-xxx`）→ 重建链路 → todo create/update | re-dispatch |
 
 **Phase 3 Agent prompt:**
 ```
@@ -942,14 +934,14 @@ teammate({
   description: "Amend impact analysis（同步评估 Agent，不传 name）",
   prompt: "PURPOSE: 评估目标修改对 running session 的影响
 TASK:
-  1. 读取 {session_dir}/status.json 的 task_decomposition + boundary_contract + 已完成 steps
+  1. 读取 todo({ action: "list" }) + todo({ action: "get" }) 的 task_decomposition + boundary_contract + 已完成 steps
   2. 分析 change_request 对既有目标/步骤的影响
   3. 判定 RISK_LEVEL (low/medium/high)
   4. 列出 AFFECTED_GOALS / INVALIDATED_STEPS / NEW_GAPS
 CONTEXT:
   change_request    = {change_request}
   change_type       = {change_type}
-  session           = {session_dir}/status.json
+  session           = todo({ action: "list" }) + todo({ action: "get" })
 EXPECTED:
   ---AMEND-VERDICT---
   RISK_LEVEL: low|medium|high
@@ -968,8 +960,8 @@ GUARD: 已完成（`status: "done"`）的目标不可 supersede（skip + warn）
 
 ### A_RETRY / A_PAUSE_SESSION / A_COMPLETE_SESSION
 
-- **A_RETRY**: `Bash("maestro ralph retry {index}")` — CLI 设 `step.retried = true`, `step.status = "pending"`, 清 `active_step_index`
-- **A_PAUSE_SESSION**: `ralph complete N --status BLOCKED --reason "..."` — CLI 写 `session.status = "paused"`
+- **A_RETRY**: `todo({ action: "update", id: "{task_id}", status: "pending", metadata: { retried: true } })` — 重置为 pending，todo next 会重新拾取
+- **A_PAUSE_SESSION**: `todo({ action: "update", id: "{task_id}", status: "blocked", completion: { completionStatus: "BLOCKED", summary: "{reason}" } })` — 标记当前 task 为 blocked
 - **A_COMPLETE_SESSION**: 校验所有 step `completion_confirmed == true` + `task_decomposition_all_done == true`（若存在），通过后写 `session.status = "completed"`。unnamed executor 执行完自动终止，无需 shutdown 清理
 
 </actions>
@@ -1030,38 +1022,47 @@ Build rules 0-14 全部适用，包括 spec-setup 预检（rule 0.5）、grill a
   "passed_gates": [],
   "context": { "issue_id": null, "scratch_dir": null, "plan_dir": null,
     "analysis_dir": null, "brainstorm_dir": null, "blueprint_dir": null },
-  "steps": [{
-    "index": 0,
-    "skill": "",
-    "args": "",
-    "stage": "",
-    "scope": null,
-    "decision": null,
-    "evaluate_via": "agent|cli|dual",
-    "retry_count": 0,
-    "max_retries": 2,
-    "command_scope": "global|project|missing|null",
-    "command_path": "<absolute path> | null",
-    "milestone_id": null,
-    "source_artifact_ref": null,
-    "status": "pending|running|completed|skipped|failed",
-    "goal_ref": null,
-    "completion_confirmed": false,
-    "completion_status": null,
-    "completion_evidence": null,
-    "completion_summary": null,
-    "completion_decisions": null,
-    "completion_caveats": null,
-    "completion_deferred": null,
-    "completed_at": null,
-    "deferred_reads": [],
-    "load": null,
-    "agent_exec_name": null,
-    "artifacts_produced": [],
-    "drift_score": null,
-    "drift_correction": null
-  }],
-  "waves": [], "current_step": 0,
+  "steps (as todo tasks)": "Each step is a todo task with the following structure:",
+  "todo_task": {
+    "id": "<uuid-8>",
+    "subject": "<skill_name> {args}",
+    "description": "<stage description>",
+    "status": "pending|in_progress|completed|blocked|deleted",
+    "blockedBy": ["<prev_task_id>"],
+    "owner": null,
+    "decision": "null | post-execute | post-review | post-test | post-goal-audit | post-reground | post-milestone",
+    "injection": {
+      "skillRef": "<skill_name>",
+      "goalContext": "<goal context block>",
+      "stepContext": "<previous step output>",
+      "boundaryContract": "<boundary rules>",
+      "deferredReads": ["<file paths>"]
+    },
+    "load": { "type": "skill", "source": "<skill_name>" },
+    "completion": {
+      "completionStatus": "DONE|DONE_WITH_CONCERNS|BLOCKED|NEEDS_RETRY",
+      "summary": "<verb-led ≤100 chars>",
+      "evidence": "<artifact paths>",
+      "decisions": "<tech decisions>",
+      "caveats": "<downstream concerns>",
+      "deferred": "<deferred items>",
+      "concerns": "<DONE_WITH_CONCERNS only>"
+    },
+    "metadata": {
+      "session_id": "ralph-v2-{YYYYMMDD-HHmmss}",
+      "stage": "<lifecycle stage>",
+      "index": 0,
+      "evaluate_via": "agent|cli|dual",
+      "retry_count": 0,
+      "max_retries": 2,
+      "milestone_id": null,
+      "source_artifact_ref": null,
+      "goal_ref": null,
+      "drift_score": null,
+      "drift_correction": null,
+      "retried": false
+    }
+  },
 
   "boundary_contract": {
     "in_scope": [], "out_of_scope": [], "constraints": [], "definition_of_done": ""
@@ -1089,7 +1090,7 @@ Build rules 0-14 全部适用，包括 spec-setup 预检（rule 0.5）、grill a
 
 ### Fix-Loop Templates
 
-所有插入的执行 step 按 A_BUILD_STEPS 规则 9 解析 `command_path` + `command_scope`；`decision:*` 条目为 decision 节点（`step.decision` 字段）。插入的 step 通过 A_STEP_DISPATCH 派发 executor agent 逐步执行，由主流程调 `ralph complete` 上报。
+所有插入的执行 step 通过 `todo create` 创建（含 `load: { type: "skill" }` 校验）；`decision:*` 条目为 decision 节点（`task.decision` 字段）。插入的 task 通过 A_STEP_DISPATCH 派发 executor agent 逐步执行，由主流程调 `todo update` 上报完成。
 
 **post-execute:**
 ```
@@ -1162,11 +1163,11 @@ E001–E006, W001–W004 适用。Agent 新增：
 
 ### Success Criteria
 
-- [ ] ralph-v2 owns full step loop: locate → resolve → dispatch → wait task-notification → extract → drift → complete → next
+- [ ] ralph-v2 owns full step loop: locate → resolve → dispatch → wait task-notification → extract → drift → todo update completed → next
 - [ ] One agent per step — `teammate({ subagent_type: "ralph-executor" })` 每步派发一个 unnamed executor
-- [ ] Executor 内调 `maestro ralph next` 获取 skill prompt 并执行，内部编排用 unnamed Agent（子结果回流 executor）
+- [ ] Executor 内调 `todo({ action: "next" })` 获取 skill prompt + 注入内容并执行，内部编排用 unnamed Agent（子结果回流 executor）
 - [ ] Executor 结果通过 task-notification `<result>` 自动回传主流程
-- [ ] 主流程调 `maestro ralph complete` 上报（非 agent 上报）
+- [ ] 主流程调 `todo({ action: "update", status: "completed", completion: {...} })` 上报（非 agent 上报）
 - [ ] 主流程负责 arg resolution、context loading、signal extraction、drift analysis
 - [ ] task-notification status=failed → STATUS=BLOCKED，转 S_HANDLE_FAIL
 - [ ] Unified unnamed dispatch: 执行 Agent 和评估 Agent 均不传 name，结果通过 task-notification 回传。CLI delegate 仅限评估环节
@@ -1175,15 +1176,14 @@ E001–E006, W001–W004 适用。Agent 新增：
 - [ ] dual 模式合并策略：一致取共识、分歧保守降级、CLI 未返回用 Agent 结果
 - [ ] Verdict 解析保持 `---VERDICT---` 格式，parse 失败 → fallback fix + parse_failed: true
 - [ ] decisions.ndjson 追加：source 字段为 `"ralph-v2"`
-- [ ] Session schema: `execution_mode: "agent"`，`agent_exec_name`（display 标识），含 `artifacts_produced`
-- [ ] Chain building（S_RESOLVE_PHASE through S_BUILD_CHAIN）自包含执行
-- [ ] A_STEP_DISPATCH 含前序产出加载（滑动窗口 5 step + accumulated signals + stage-specific artifacts）
-- [ ] `agent_exec_name` 含 stage prefix（grl/brn/anm/ana/pln/exe/rev/tst/dbg）——仅用于 display/日志标识
-- [ ] `--summary` 在 DONE/DONE_WITH_CONCERNS 时为 MUST（动词开头，≤100 字）
-- [ ] CAVEATS 在 DONE_WITH_CONCERNS 时同时映射 --concerns
+- [ ] Todo tasks 替代 status.json steps：每个 step 一个 todo task（含 injection + load + decision + completion + metadata）
+- [ ] Chain building（S_RESOLVE_PHASE through S_BUILD_CHAIN）通过 `todo create` 批量构建 task 链
+- [ ] A_STEP_DISPATCH 前序产出由 `todo next` 自动注入（`<prev_steps>` 滑动窗口 5 task + stage-specific context enrichment）
+- [ ] `completion.summary` 在 DONE/DONE_WITH_CONCERNS 时为 MUST（动词开头，≤100 字）
+- [ ] CAVEATS 在 DONE_WITH_CONCERNS 时同时写入 completion.concerns
 - [ ] A_STEP_EXTRACT 从 executor 输出提取 artifact IDs、path signals、phase signals
-- [ ] A_STEP_DRIFT_ANALYZE：ALIGNED/MINOR_DRIFT → complete；MAJOR_DRIFT+未重试 → retry；MAJOR_DRIFT+已重试 → DONE_WITH_CONCERNS
-- [ ] A_STEP_COMPLETE 将 context signals 写入 status.json.context
+- [ ] A_STEP_DRIFT_ANALYZE：ALIGNED/MINOR_DRIFT → complete；MAJOR_DRIFT+未重试 → todo update pending + retried；MAJOR_DRIFT+已重试 → DONE_WITH_CONCERNS
+- [ ] A_STEP_COMPLETE 将 context signals 写入 task metadata
 - [ ] A_AMEND_GOAL：完整 5 步流程 + deferred_reading ralph-amend-goal.md + Agent mini grill 含完整 prompt
 - [ ] 旧目标标 superseded（superseded_by + superseded_at），新目标 origin: "CHG-xxx"
 - [ ] goal_changelog 含完整 before/after + impact_assessment

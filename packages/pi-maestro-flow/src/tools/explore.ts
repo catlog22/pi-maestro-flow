@@ -8,8 +8,8 @@
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { runTeammate } from "../../../pi-teammate/src/runs/execution.ts";
-import type { SingleResult } from "../../../pi-teammate/src/shared/types.ts";
+import { runTeammate } from "pi-maestro-teammate/src/runs/execution.ts";
+import type { SingleResult } from "pi-maestro-teammate/src/shared/types.ts";
 
 export interface ExploreParams {
   prompts?: string[];
