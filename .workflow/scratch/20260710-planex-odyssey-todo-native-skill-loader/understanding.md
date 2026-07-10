@@ -29,7 +29,12 @@
 
 ## 3. Execution
 
-待执行。
+- T1：新增 `src/skills/skill-loader.ts` 与 `skill-config.ts`，包装 Pi `DefaultResourceLoader`，支持 required/deferred reading、global/project defaults、task args override、cache 和硬预算。
+- T2：`TodoTask` 收敛为纯文本 `context` + 可空 `skill`；`next` 在 loader 成功后才切换 `in_progress`；持久化升级到 version 2，并迁移旧 inject/injection/load/completion。
+- T3：TypeBox schema 移除 legacy public fields；todo tool description 使用新 contract；widget 展示 `/skill-name`。
+- T4：新增 10 个 focused tests 与 `npm run test:todo`。
+
+执行验证：`npm run test:todo --workspace packages/pi-maestro-flow` → 10/10 passed。`git diff --check` 通过。全包 `tsc` 仍被既有 `.ts` import/generic API 基线错误阻塞；过滤后未出现新增的业务类型错误。
 
 ## 4. Verification
 

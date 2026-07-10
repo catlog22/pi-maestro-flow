@@ -178,57 +178,27 @@ const QuestionSchema = Type.Object({
 export const AskUserQuestionParams = Type.Object({
   questions: Type.Array(QuestionSchema, {
     minItems: 1,
-    description: "1-4 questions to ask the user",
+    maxItems: 4,
+    description: "1-4 questions collected through the keyboard-first TUI wizard",
   }),
 });
 
 // === Todo Tool Schema ===
 
-const LoadSpecSchema = Type.Object({
-  type: StringEnum(["file", "skill", "text"]),
-  source: Type.String({
-    description: "File path, skill name, or plain text content",
+const TodoSkillSchema = Type.Object({
+  name: Type.String({
+    minLength: 1,
+    description: "Pi skill name resolved by the native skill loader during next",
   }),
-  label: Type.Optional(
-    Type.String({ description: "XML tag name for the injected block" }),
+  args: Type.Optional(
+    Type.String({ description: "Task-level skill arguments; override matching skill-config defaults" }),
   ),
-});
-
-const InjectionSchema = Type.Object({
-  skillRef: Type.Optional(
-    Type.String({ description: "Skill path reference (e.g., maestro-execute)" }),
-  ),
-  goalContext: Type.Optional(
-    Type.String({ description: "Goal context block for downstream injection" }),
-  ),
-  stepContext: Type.Optional(
-    Type.String({ description: "Previous step output / carry-forward context" }),
-  ),
-  boundaryContract: Type.Optional(
-    Type.String({ description: "Boundary rules for the execution scope" }),
-  ),
-  deferredReads: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "File paths to load on demand",
-    }),
-  ),
-});
-
-const CompletionSchema = Type.Object({
-  completionStatus: StringEnum(["DONE", "DONE_WITH_CONCERNS", "BLOCKED", "NEEDS_RETRY"]),
-  summary: Type.String({ description: "Completion summary (verb-led, ≤100 chars)" }),
-  evidence: Type.Optional(Type.String({ description: "Verification artifact paths" })),
-  decisions: Type.Optional(Type.String({ description: "Architectural/technical decisions made" })),
-  caveats: Type.Optional(Type.String({ description: "Issues for downstream steps" })),
-  deferred: Type.Optional(Type.String({ description: "Deferred work items" })),
-  concerns: Type.Optional(Type.String({ description: "Concerns (DONE_WITH_CONCERNS only)" })),
 });
 
 const TodoFilterSchema = Type.Object({
   status: Type.Optional(
     StringEnum(["pending", "in_progress", "completed", "blocked"]),
   ),
-  owner: Type.Optional(Type.String()),
 });
 
 export const TodoToolParams = Type.Object({
@@ -254,20 +224,16 @@ export const TodoToolParams = Type.Object({
   blockedBy: Type.Optional(
     Type.Array(Type.String(), { description: "Task IDs this depends on" }),
   ),
-  owner: Type.Optional(
-    Type.String({ description: "Assigned agent or step owner" }),
+  context: Type.Optional(
+    Type.String({ description: "Plain-text execution context. On update, an empty string clears the stored context" }),
   ),
-
-  injection: Type.Optional(InjectionSchema),
-  load: Type.Optional(LoadSpecSchema),
-  completion: Type.Optional(CompletionSchema),
-  decision: Type.Optional(
-    Type.String({ description: "Decision gate type (e.g., post-execute, post-review). Marks task as a decision node" }),
-  ),
-  metadata: Type.Optional(
-    Type.Record(Type.String(), Type.Unknown(), {
-      description: "Arbitrary key-value metadata for tracking",
+  skill: Type.Optional(
+    Type.Union([TodoSkillSchema, Type.Null()], {
+      description: "Optional Pi skill configuration. On update, null clears the stored skill",
     }),
+  ),
+  summary: Type.Optional(
+    Type.String({ description: "Short completion summary carried into later todo steps" }),
   ),
 
   id: Type.Optional(

@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
-import { readFile } from "node:fs/promises";
-import { join, resolve } from "node:path";
-import { existsSync } from "node:fs";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
+import { getActiveGoal } from "./goal.ts";
+import {
+  TodoSkillLoader,
+  type LoadedTodoSkill,
+  type TodoSkillConfig,
+} from "../skills/skill-loader.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -14,28 +17,12 @@ import type {
 
 export type TaskStatus = "pending" | "in_progress" | "completed" | "blocked" | "deleted";
 
-interface InjectionPayload {
-  skillRef?: string;
-  goalContext?: string;
-  stepContext?: string;
-  boundaryContract?: string;
-  deferredReads?: string[];
-}
-
-interface LoadSpec {
-  type: "file" | "skill" | "text";
-  source: string;
-  label?: string;
-}
-
-interface CompletionRecord {
-  completionStatus: "DONE" | "DONE_WITH_CONCERNS" | "BLOCKED" | "NEEDS_RETRY";
-  summary: string;
-  evidence?: string;
-  decisions?: string;
-  caveats?: string;
-  deferred?: string;
-  concerns?: string;
+export interface TodoSkillLoadRecord {
+  loadedAt: string;
+  filePath: string;
+  requiredFiles: string[];
+  deferredFiles: string[];
+  totalBytes: number;
 }
 
 export interface TodoTask {
@@ -44,12 +31,10 @@ export interface TodoTask {
   description?: string;
   status: TaskStatus;
   blockedBy: string[];
-  owner?: string;
-  metadata: Record<string, unknown>;
-  injection?: InjectionPayload;
-  load?: LoadSpec;
-  completion?: CompletionRecord;
-  decision?: string;
+  context?: string;
+  skill?: TodoSkillConfig;
+  skillLoad?: TodoSkillLoadRecord;
+  summary?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -60,27 +45,21 @@ export interface TodoParams {
   description?: string;
   status?: TaskStatus;
   blockedBy?: string[];
-  owner?: string;
-  injection?: InjectionPayload;
-  load?: LoadSpec;
-  completion?: CompletionRecord;
-  decision?: string;
-  metadata?: Record<string, unknown>;
+  context?: string;
+  skill?: TodoSkillConfig | null;
+  summary?: string;
   id?: string;
-  filter?: { status?: TaskStatus; owner?: string };
+  filter?: { status?: TaskStatus };
 }
 
 export interface InjectableContent {
   taskId: string;
   subject: string;
   description?: string;
-  skillRef?: string;
   goalContext?: string;
-  stepContext?: string;
-  boundaryContract?: string;
-  deferredReads?: string[];
-  loadedContent?: string;
-  metadata: Record<string, unknown>;
+  context?: string;
+  skill?: LoadedTodoSkill;
+  blocks: Array<{ tag: string; content: string }>;
 }
 
 export interface TodoResultDetails {
@@ -89,12 +68,13 @@ export interface TodoResultDetails {
   error?: string;
 }
 
-interface TodoContext {
+export interface TodoContext {
   cwd: string;
   ui: {
     setStatus: (key: string, value: string | undefined) => void;
   };
   sessionManager?: unknown;
+  skillLoader?: TodoSkillLoader;
 }
 
 // ---------------------------------------------------------------------------
@@ -102,11 +82,12 @@ interface TodoContext {
 // ---------------------------------------------------------------------------
 
 const TODO_STATE_ENTRY_TYPE = "todo-state";
+const TODO_STATE_VERSION = 2;
 const STATUS_KEY = "todo";
 
 let tasks: Map<string, TodoTask> = new Map();
 let extensionApi: ExtensionAPI | undefined;
-let baseCwd = "";
+let skillLoader: TodoSkillLoader | undefined;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -117,13 +98,14 @@ export function initTodo(pi: ExtensionAPI): void {
 }
 
 export function onSessionStart(ctx: TodoContext): void {
-  baseCwd = ctx.cwd;
+  skillLoader = ctx.skillLoader ?? new TodoSkillLoader({ cwd: ctx.cwd });
   tasks = loadTasksFromSession(ctx);
   updateStatusLine(ctx);
 }
 
 export function onSessionShutdown(ctx: TodoContext): void {
   tasks.clear();
+  skillLoader = undefined;
   ctx.ui.setStatus(STATUS_KEY, undefined);
 }
 
@@ -137,23 +119,21 @@ export async function getInjectableContent(taskId: string): Promise<InjectableCo
   const task = tasks.get(taskId);
   if (!task) return null;
 
-  let loadedContent: string | undefined;
-  if (task.load) {
-    const content = await loadContent(task.load);
-    if (content) loadedContent = content;
-  }
+  const loader = requireSkillLoader();
+  await loader.validateContext(task.context ?? "");
+  const loadedSkill = task.skill ? await loader.load(task.skill, task.context ?? "") : undefined;
+  const blocks: Array<{ tag: string; content: string }> = [];
+  if (task.context) blocks.push({ tag: "context", content: task.context });
+  if (loadedSkill) blocks.push({ tag: "skill_prompt", content: loadedSkill.prompt });
 
   return {
     taskId: task.id,
     subject: task.subject,
     description: task.description,
-    skillRef: task.injection?.skillRef,
-    goalContext: task.injection?.goalContext,
-    stepContext: task.injection?.stepContext,
-    boundaryContract: task.injection?.boundaryContract,
-    deferredReads: task.injection?.deferredReads,
-    loadedContent,
-    metadata: task.metadata,
+    goalContext: getActiveGoal()?.text,
+    context: task.context,
+    skill: loadedSkill,
+    blocks,
   };
 }
 
@@ -209,12 +189,8 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext): AgentToolResul
     description: params.description,
     status: blockedBy.length > 0 ? "blocked" : "pending",
     blockedBy,
-    owner: params.owner,
-    metadata: params.metadata ?? {},
-    injection: params.injection,
-    load: params.load,
-    completion: params.completion,
-    decision: params.decision,
+    ...(params.context ? { context: params.context } : {}),
+    ...(params.skill ? { skill: normalizeSkillConfig(params.skill) } : {}),
     createdAt: now,
     updatedAt: now,
   };
@@ -238,20 +214,18 @@ function handleUpdate(params: TodoParams, ctx: ExtensionContext): AgentToolResul
 
   if (params.subject !== undefined) task.subject = params.subject;
   if (params.description !== undefined) task.description = params.description;
-  if (params.owner !== undefined) task.owner = params.owner;
-  if (params.injection !== undefined) task.injection = params.injection;
-  if (params.load !== undefined) task.load = params.load;
-  if (params.completion !== undefined) task.completion = params.completion;
-  if (params.decision !== undefined) task.decision = params.decision;
+  if (params.summary !== undefined) task.summary = params.summary;
 
-  if (params.metadata !== undefined) {
-    for (const [k, v] of Object.entries(params.metadata)) {
-      if (v === null) {
-        delete task.metadata[k];
-      } else {
-        task.metadata[k] = v;
-      }
-    }
+  if (params.context !== undefined) {
+    if (params.context === "") delete task.context;
+    else task.context = params.context;
+    task.skillLoad = undefined;
+  }
+
+  if (params.skill !== undefined) {
+    if (params.skill === null) delete task.skill;
+    else task.skill = normalizeSkillConfig(params.skill);
+    task.skillLoad = undefined;
   }
 
   if (params.blockedBy !== undefined) {
@@ -286,28 +260,19 @@ function handleUpdate(params: TodoParams, ctx: ExtensionContext): AgentToolResul
 }
 
 function handleList(params: TodoParams): AgentToolResult {
-  const visible = [...tasks.values()].filter((t) => t.status !== "deleted");
-  let filtered = visible;
+  let filtered = getVisibleTasks();
 
   if (params.filter?.status) {
     filtered = filtered.filter((t) => t.status === params.filter!.status);
   }
-  if (params.filter?.owner) {
-    filtered = filtered.filter((t) => t.owner === params.filter!.owner);
-  }
-
-  filtered.sort((a, b) => a.createdAt - b.createdAt);
 
   if (filtered.length === 0) {
     return ok("No tasks found.", "list");
   }
 
   const lines = filtered.map((t) => {
-    const icon = t.decision ? "◆" : statusIcon(t.status);
-    const ownerTag = t.owner ? ` @${t.owner}` : "";
     const depTag = t.blockedBy.length > 0 ? ` [blocked by: ${t.blockedBy.join(", ")}]` : "";
-    const decTag = t.decision ? ` [decision: ${t.decision}]` : "";
-    return `${icon} #${t.id} ${t.subject}${decTag}${ownerTag}${depTag}`;
+    return `${statusIcon(t.status)} #${t.id} ${t.subject}${depTag}`;
   });
 
   return ok(lines.join("\n"), "list");
@@ -323,7 +288,6 @@ function handleGet(params: TodoParams): AgentToolResult {
     `Status: ${task.status}`,
   ];
   if (task.description) lines.push(`Description: ${task.description}`);
-  if (task.owner) lines.push(`Owner: ${task.owner}`);
   if (task.blockedBy.length > 0) lines.push(`Blocked by: ${task.blockedBy.join(", ")}`);
 
   const blockers = [...tasks.values()].filter(
@@ -333,37 +297,17 @@ function handleGet(params: TodoParams): AgentToolResult {
     lines.push(`Blocks: ${blockers.map((b) => `#${b.id}`).join(", ")}`);
   }
 
-  if (task.decision) lines.push(`Decision: ${task.decision}`);
+  if (task.summary) lines.push(`Summary: ${task.summary}`);
 
-  if (task.completion) {
-    lines.push("", "## Completion");
-    lines.push(`Status: ${task.completion.completionStatus}`);
-    lines.push(`Summary: ${task.completion.summary}`);
-    if (task.completion.evidence) lines.push(`Evidence: ${task.completion.evidence}`);
-    if (task.completion.decisions) lines.push(`Decisions: ${task.completion.decisions}`);
-    if (task.completion.caveats) lines.push(`Caveats: ${task.completion.caveats}`);
-    if (task.completion.deferred) lines.push(`Deferred: ${task.completion.deferred}`);
-    if (task.completion.concerns) lines.push(`Concerns: ${task.completion.concerns}`);
+  if (task.context) lines.push(`Context: ${truncate(task.context, 120)}`);
+  if (task.skill) {
+    lines.push(`Skill: ${task.skill.name}${task.skill.args ? ` ${task.skill.args}` : ""}`);
   }
-
-  if (task.injection) {
-    lines.push("", "## Injection");
-    if (task.injection.skillRef) lines.push(`Skill: ${task.injection.skillRef}`);
-    if (task.injection.goalContext) lines.push(`Goal context: ${task.injection.goalContext}`);
-    if (task.injection.stepContext) lines.push(`Step context: ${task.injection.stepContext}`);
-    if (task.injection.boundaryContract) lines.push(`Boundary: ${task.injection.boundaryContract}`);
-    if (task.injection.deferredReads?.length) {
-      lines.push(`Deferred reads: ${task.injection.deferredReads.join(", ")}`);
+  if (task.skillLoad) {
+    lines.push(`Skill loaded: ${task.skillLoad.loadedAt}`);
+    if (task.skillLoad.deferredFiles.length > 0) {
+      lines.push(`Deferred reads: ${task.skillLoad.deferredFiles.join(", ")}`);
     }
-  }
-
-  if (task.load) {
-    lines.push(`Load: [${task.load.type}] ${task.load.source}`);
-  }
-
-  if (Object.keys(task.metadata).length > 0) {
-    lines.push("", "## Metadata");
-    lines.push(JSON.stringify(task.metadata, null, 2));
   }
 
   return ok(lines.join("\n"), "get");
@@ -414,23 +358,12 @@ async function handleNext(ctx: ExtensionContext): Promise<AgentToolResult> {
   }
 
   const task = pending[0];
-  task.status = "in_progress";
-  task.updatedAt = Date.now();
-  persist();
-  updateStatusLine(ctx);
-
-  const allTasks = [...tasks.values()].sort((a, b) => a.createdAt - b.createdAt);
+  const allTasks = getVisibleTasks();
   const taskIndex = allTasks.findIndex((t) => t.id === task.id);
-  const totalVisible = allTasks.filter((t) => t.status !== "deleted").length;
 
-  const parts: string[] = [];
-
-  if (task.decision) {
-    parts.push(`## Decision Node #${task.id} [${taskIndex + 1}/${totalVisible}]: ${task.subject}`);
-    parts.push(`Decision type: ${task.decision}`);
-  } else {
-    parts.push(`## Task #${task.id} [${taskIndex + 1}/${totalVisible}]: ${task.subject}`);
-  }
+  const parts: string[] = [
+    `## Task #${task.id} [${taskIndex + 1}/${allTasks.length}]: ${task.subject}`,
+  ];
   if (task.description) parts.push(task.description);
 
   const prevContext = buildPrevContext(task.id);
@@ -438,35 +371,28 @@ async function handleNext(ctx: ExtensionContext): Promise<AgentToolResult> {
     parts.push(`\n<prev_steps>\n${prevContext}\n</prev_steps>`);
   }
 
-  if (task.injection) {
-    if (task.injection.goalContext) {
-      parts.push(`\n<goal_context>\n${task.injection.goalContext}\n</goal_context>`);
-    }
-    if (task.injection.stepContext) {
-      parts.push(`\n<step_context>\n${task.injection.stepContext}\n</step_context>`);
-    }
-    if (task.injection.boundaryContract) {
-      parts.push(`\n<boundary_contract>\n${task.injection.boundaryContract}\n</boundary_contract>`);
-    }
-    if (task.injection.deferredReads?.length) {
-      parts.push(`\n<deferred_reads>\n${task.injection.deferredReads.join("\n")}\n</deferred_reads>`);
-    }
-    if (task.injection.skillRef) {
-      parts.push(`\nSkill reference: ${task.injection.skillRef}`);
-    }
+  const goalText = getActiveGoal()?.text;
+  if (goalText) {
+    parts.push(`\n<goal_context>\n${goalText}\n</goal_context>`);
   }
 
-  if (task.load) {
-    const loaded = await loadContent(task.load);
-    if (loaded) {
-      const tag = task.load.label ?? defaultTag(task.load.type);
-      parts.push(`\n<${tag}>\n${loaded}\n</${tag}>`);
-    }
+  const loader = requireSkillLoader();
+  await loader.validateContext(task.context ?? "");
+  if (task.context) {
+    parts.push(`\n<context>\n${task.context}\n</context>`);
   }
 
-  if (Object.keys(task.metadata).length > 0) {
-    parts.push(`\n<metadata>\n${JSON.stringify(task.metadata, null, 2)}\n</metadata>`);
+  let loadedSkill: LoadedTodoSkill | undefined;
+  if (task.skill) {
+    loadedSkill = await loader.load(task.skill, task.context ?? "");
+    parts.push(`\n<skill_prompt>\n${loadedSkill.prompt}\n</skill_prompt>`);
   }
+
+  task.status = "in_progress";
+  task.skillLoad = loadedSkill ? toSkillLoadRecord(loadedSkill) : undefined;
+  task.updatedAt = Date.now();
+  persist();
+  updateStatusLine(ctx);
 
   return ok(parts.join("\n"), "next");
 }
@@ -475,80 +401,15 @@ const PREV_CONTEXT_WINDOW = 5;
 
 function buildPrevContext(currentId: string): string | null {
   const completed = [...tasks.values()]
-    .filter((t) => t.status === "completed" && t.id !== currentId && t.completion)
+    .filter((t) => t.status === "completed" && t.id !== currentId && t.summary)
     .sort((a, b) => a.updatedAt - b.updatedAt);
 
   if (completed.length === 0) return null;
 
-  const recent = completed.slice(-PREV_CONTEXT_WINDOW);
-  const lines = recent.map((t) => {
-    const parts = [`[#${t.id}] ${t.subject}: ${t.completion!.summary}`];
-    if (t.completion!.caveats) parts.push(`  Caveats: ${t.completion!.caveats}`);
-    if (t.completion!.deferred) parts.push(`  Deferred: ${t.completion!.deferred}`);
-    if (t.completion!.decisions) parts.push(`  Decisions: ${t.completion!.decisions}`);
-    return parts.join("\n");
-  });
-
-  return lines.join("\n");
-}
-
-// ---------------------------------------------------------------------------
-// Content Loader
-// ---------------------------------------------------------------------------
-
-async function loadContent(spec: LoadSpec): Promise<string | null> {
-  switch (spec.type) {
-    case "text":
-      return spec.source;
-
-    case "file": {
-      const filePath = resolve(baseCwd, spec.source);
-      try {
-        return await readFile(filePath, "utf-8");
-      } catch {
-        return `[Error: could not read file "${filePath}"]`;
-      }
-    }
-
-    case "skill": {
-      const skillPath = await findSkillFile(spec.source);
-      if (!skillPath) return `[Error: skill "${spec.source}" not found]`;
-      try {
-        return await readFile(skillPath, "utf-8");
-      } catch {
-        return `[Error: could not read skill file "${skillPath}"]`;
-      }
-    }
-
-    default:
-      return null;
-  }
-}
-
-function defaultTag(type: LoadSpec["type"]): string {
-  switch (type) {
-    case "file": return "file_content";
-    case "skill": return "skill_prompt";
-    case "text": return "content";
-  }
-}
-
-async function findSkillFile(skillName: string): Promise<string | null> {
-  const candidates = [
-    join(baseCwd, "skills", skillName, "SKILL.md"),
-    join(baseCwd, ".pi", "skills", skillName, "SKILL.md"),
-    join(baseCwd, "flow", "skills", skillName, "SKILL.md"),
-  ];
-
-  const homeDir = process.env.HOME ?? process.env.USERPROFILE ?? "";
-  if (homeDir) {
-    candidates.push(join(homeDir, ".pi", "agent", "packages", "pi-maestro-flow", "skills", skillName, "SKILL.md"));
-  }
-
-  for (const p of candidates) {
-    if (existsSync(p)) return p;
-  }
-  return null;
+  return completed
+    .slice(-PREV_CONTEXT_WINDOW)
+    .map((t) => `[#${t.id}] ${t.subject}: ${t.summary}`)
+    .join("\n");
 }
 
 // ---------------------------------------------------------------------------
@@ -604,6 +465,7 @@ function autoUnblock(completedId: string, ctx: ExtensionContext): void {
 
 function persist(): void {
   extensionApi?.appendEntry?.(TODO_STATE_ENTRY_TYPE, {
+    version: TODO_STATE_VERSION,
     tasks: Object.fromEntries(tasks),
   });
 }
@@ -617,9 +479,14 @@ function loadTasksFromSession(ctx: TodoContext): Map<string, TodoTask> {
   const entry = entries
     .filter((e) => e.type === "custom" && e.customType === TODO_STATE_ENTRY_TYPE)
     .pop();
-  const data = entry?.data as { tasks?: Record<string, TodoTask> } | undefined;
-  if (!data?.tasks) return new Map();
-  return new Map(Object.entries(data.tasks));
+  const data = asRecord(entry?.data);
+  const rawTasks = asRecord(data?.tasks);
+  if (!rawTasks) return new Map();
+  const loaded = new Map<string, TodoTask>();
+  for (const [id, rawTask] of Object.entries(rawTasks)) {
+    loaded.set(id, normalizeLoadedTask(id, rawTask));
+  }
+  return loaded;
 }
 
 // ---------------------------------------------------------------------------
@@ -648,24 +515,155 @@ function statusIcon(status: TaskStatus): string {
   }
 }
 
+function truncate(s: string, max: number): string {
+  return s.length > max ? `${s.slice(0, max)}…` : s;
+}
+
 function taskChanged(before: TodoTask, after: TodoTask): boolean {
   return (
     before.subject !== after.subject ||
     before.description !== after.description ||
     before.status !== after.status ||
-    before.owner !== after.owner ||
-    before.decision !== after.decision ||
+    before.summary !== after.summary ||
     JSON.stringify(before.blockedBy) !== JSON.stringify(after.blockedBy) ||
-    JSON.stringify(before.metadata) !== JSON.stringify(after.metadata) ||
-    JSON.stringify(before.injection) !== JSON.stringify(after.injection) ||
-    JSON.stringify(before.load) !== JSON.stringify(after.load) ||
-    JSON.stringify(before.completion) !== JSON.stringify(after.completion)
+    before.context !== after.context ||
+    JSON.stringify(before.skill) !== JSON.stringify(after.skill)
   );
 }
 
+function requireSkillLoader(): TodoSkillLoader {
+  if (!skillLoader) throw new Error("todo skill loader is not initialized");
+  return skillLoader;
+}
+
+function normalizeSkillConfig(skill: TodoSkillConfig): TodoSkillConfig {
+  const name = skill.name.trim();
+  if (!name) throw new Error("skill.name must be non-empty");
+  const args = skill.args?.trim();
+  return { name, ...(args ? { args } : {}) };
+}
+
+function toSkillLoadRecord(skill: LoadedTodoSkill): TodoSkillLoadRecord {
+  return {
+    loadedAt: skill.loadedAt,
+    filePath: skill.filePath,
+    requiredFiles: skill.requiredFiles,
+    deferredFiles: skill.deferredFiles,
+    totalBytes: skill.totalBytes,
+  };
+}
+
+function normalizeLoadedTask(id: string, raw: unknown): TodoTask {
+  const task = asRecord(raw) ?? {};
+  const contextParts: string[] = [];
+  if (typeof task.context === "string" && task.context) contextParts.push(task.context);
+
+  let skill = readSkillConfig(task.skill);
+  const legacyInject = Array.isArray(task.inject) ? task.inject : [];
+  for (const item of legacyInject) {
+    const entry = asRecord(item);
+    if (!entry || typeof entry.source !== "string") continue;
+    if (entry.type === "skill" && !skill) {
+      skill = { name: entry.source };
+    } else if (entry.type === "text") {
+      contextParts.push(wrapLegacyBlock(typeof entry.tag === "string" ? entry.tag : "content", entry.source));
+    } else if (entry.type === "file") {
+      contextParts.push(wrapLegacyBlock("legacy_file_reference", entry.source));
+    }
+  }
+
+  const legacyInjection = asRecord(task.injection);
+  if (legacyInjection) {
+    if (!skill && typeof legacyInjection.skillRef === "string") skill = { name: legacyInjection.skillRef };
+    appendLegacyValue(contextParts, "legacy_goal_context", legacyInjection.goalContext);
+    appendLegacyValue(contextParts, "step_context", legacyInjection.stepContext);
+    appendLegacyValue(contextParts, "boundary_contract", legacyInjection.boundaryContract);
+    if (Array.isArray(legacyInjection.deferredReads)) {
+      const paths = legacyInjection.deferredReads.filter((value): value is string => typeof value === "string");
+      if (paths.length > 0) contextParts.push(wrapLegacyBlock("deferred_reads", paths.join("\n")));
+    }
+  }
+
+  const legacyLoad = asRecord(task.load);
+  if (legacyLoad && typeof legacyLoad.source === "string") {
+    if (legacyLoad.type === "skill" && !skill) skill = { name: legacyLoad.source };
+    else if (legacyLoad.type === "text") contextParts.push(legacyLoad.source);
+    else if (legacyLoad.type === "file") contextParts.push(wrapLegacyBlock("legacy_file_reference", legacyLoad.source));
+  }
+
+  const completion = asRecord(task.completion);
+  const summary = typeof task.summary === "string"
+    ? task.summary
+    : typeof completion?.summary === "string"
+      ? completion.summary
+      : undefined;
+  const status = isTaskStatus(task.status) ? task.status : "pending";
+  const blockedBy = Array.isArray(task.blockedBy)
+    ? task.blockedBy.filter((value): value is string => typeof value === "string")
+    : [];
+  const now = Date.now();
+  const skillLoad = readSkillLoadRecord(task.skillLoad);
+
+  return {
+    id: typeof task.id === "string" ? task.id : id,
+    subject: typeof task.subject === "string" ? task.subject : `Task ${id}`,
+    ...(typeof task.description === "string" ? { description: task.description } : {}),
+    status,
+    blockedBy,
+    ...(contextParts.length > 0 ? { context: contextParts.join("\n\n") } : {}),
+    ...(skill ? { skill } : {}),
+    ...(skillLoad ? { skillLoad } : {}),
+    ...(summary ? { summary } : {}),
+    createdAt: typeof task.createdAt === "number" ? task.createdAt : now,
+    updatedAt: typeof task.updatedAt === "number" ? task.updatedAt : now,
+  };
+}
+
+function readSkillConfig(value: unknown): TodoSkillConfig | undefined {
+  const skill = asRecord(value);
+  if (!skill || typeof skill.name !== "string" || !skill.name.trim()) return undefined;
+  return normalizeSkillConfig({
+    name: skill.name,
+    ...(typeof skill.args === "string" ? { args: skill.args } : {}),
+  });
+}
+
+function readSkillLoadRecord(value: unknown): TodoSkillLoadRecord | undefined {
+  const record = asRecord(value);
+  if (!record || typeof record.loadedAt !== "string" || typeof record.filePath !== "string") return undefined;
+  return {
+    loadedAt: record.loadedAt,
+    filePath: record.filePath,
+    requiredFiles: stringArray(record.requiredFiles),
+    deferredFiles: stringArray(record.deferredFiles),
+    totalBytes: typeof record.totalBytes === "number" ? record.totalBytes : 0,
+  };
+}
+
+function appendLegacyValue(parts: string[], tag: string, value: unknown): void {
+  if (typeof value === "string" && value) parts.push(wrapLegacyBlock(tag, value));
+}
+
+function wrapLegacyBlock(tag: string, value: string): string {
+  return `<${tag}>\n${value}\n</${tag}>`;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function isTaskStatus(value: unknown): value is TaskStatus {
+  return ["pending", "in_progress", "completed", "blocked", "deleted"].includes(String(value));
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
 function snapshotDetails(action: string, error?: string): TodoResultDetails {
-  const visible = [...tasks.values()].filter((t) => t.status !== "deleted");
-  visible.sort((a, b) => a.createdAt - b.createdAt);
+  const visible = getVisibleTasks();
   return { action, tasks: visible, ...(error ? { error } : {}) };
 }
 

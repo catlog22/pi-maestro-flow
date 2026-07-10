@@ -7,7 +7,7 @@
  *   - maestro-status: Inspect active/completed runs
  *   - goal: Autonomous goal management (set/done/pause/clear) with independent verifier
  *   - ask-user-question: Structured questionnaire for user input
- *   - todo: Task management with content injection and step tracking
+ *   - todo: Task management with plain context, optional skills, and step tracking
  *
  * Also registers:
  *   - /goal command
@@ -21,7 +21,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Text } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   MaestroParams,
   MaestroWaitParams,
@@ -85,6 +85,9 @@ interface MaestroState {
     }
   >;
 }
+
+const TODO_TOGGLE_KEY = "alt+t";
+const TODO_TOGGLE_LABEL = "Alt+T";
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const state: MaestroState = {
@@ -354,10 +357,11 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const todoTool: ToolDefinition<typeof TodoToolParams> = {
     name: "todo",
     label: "Todo",
-    description: `Task management with content injection — 7 actions.
+    description: `Task management with plain-text context and optional Pi skill execution — 7 actions.
 
-- create: { action: "create", subject: "...", injection: {...}, load: {...} }
-- update: { action: "update", id: "...", status: "completed" }
+- create: { action: "create", subject: "...", context: "...", skill: { name: "maestro-execute", args: "..." } }
+- update: { action: "update", id: "...", status: "completed", summary: "..." }
+- clear context/skill: { action: "update", id: "...", context: "", skill: null }
 - list: { action: "list", filter: { status: "pending" } }
 - get: { action: "get", id: "..." }
 - delete: { action: "delete", id: "..." }
@@ -447,6 +451,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
   // === Todo Widget (above editor) ===
   let widgetCtx: ExtensionContext | undefined;
+  let todoExpanded = false;
 
   function updateTodoWidget(): void {
     if (!widgetCtx) return;
@@ -455,13 +460,32 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       widgetCtx.ui.setWidget("todo-panel", undefined);
       return;
     }
-    widgetCtx.ui.setWidget("todo-panel", renderTodoWidget(tasks));
+    widgetCtx.ui.setWidget("todo-panel", () => ({
+      render(width: number): string[] {
+        return renderTodoWidget(tasks, todoExpanded, width);
+      },
+      invalidate() {},
+    }));
   }
+
+  pi.registerShortcut(TODO_TOGGLE_KEY, {
+    description: "Toggle Todo details",
+    handler(ctx: ExtensionContext) {
+      if (getVisibleTasks().length === 0) {
+        ctx.ui.notify("No Todo tasks to display.", "info");
+        return;
+      }
+      todoExpanded = !todoExpanded;
+      widgetCtx = ctx;
+      updateTodoWidget();
+    },
+  });
 
   // === Session lifecycle ===
   pi.on("session_start", (_event, ctx) => {
     state.baseCwd = ctx.cwd;
     widgetCtx = ctx;
+    todoExpanded = false;
     goalSessionStart(ctx);
     todoSessionStart(ctx);
     onSessionStartPlan(ctx);
@@ -472,6 +496,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     state.activeRuns.clear();
     widgetCtx?.ui.setWidget("todo-panel", undefined);
     widgetCtx = undefined;
+    todoExpanded = false;
     goalSessionShutdown(ctx);
     todoSessionShutdown(ctx);
     onSessionShutdownPlan(ctx);
@@ -522,25 +547,21 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 }
 
 // ---------------------------------------------------------------------------
-// Todo widget renderer — string[] for setWidget (above editor)
+// Todo widget renderer — width-aware string[] for setWidget (above editor)
 // ---------------------------------------------------------------------------
 
-const ANSI_RESET = "\x1b[0m";
+const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
 const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
 const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
 const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
-const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
 
 interface TodoTaskLike {
   id: string;
   subject: string;
   status: string;
   blockedBy: string[];
-  owner?: string;
-  decision?: string;
-  completion?: { completionStatus: string; summary: string };
-  injection?: { skillRef?: string; goalContext?: string };
+  skill?: { name: string };
 }
 
 const WICON: Record<string, string> = {
@@ -557,47 +578,64 @@ const WCOLOR: Record<string, (s: string) => string> = {
   pending: dim,
 };
 
-function renderTodoWidget(tasks: TodoTaskLike[]): string[] {
-  const lines: string[] = [];
-  const done = tasks.filter((t) => t.status === "completed").length;
-  const running = tasks.filter((t) => t.status === "in_progress").length;
-  const open = tasks.filter((t) => t.status === "pending" || t.status === "blocked").length;
+export function renderTodoWidget(
+  tasks: TodoTaskLike[],
+  expanded = false,
+  width = 120,
+): string[] {
+  const safeWidth = Math.max(1, width);
+  const lines = [renderTodoSummary(tasks, expanded, safeWidth)];
+  if (!expanded) return lines;
 
-  const counts: string[] = [];
-  if (done > 0) counts.push(`${done} done`);
-  if (running > 0) counts.push(`${running} in progress`);
-  if (open > 0) counts.push(`${open} open`);
-  lines.push(`${dim("──")} ${tasks.length} tasks ${dim(`(${counts.join(", ")})`)}`);
-
-  // Active tasks
-  for (const t of tasks.filter((t) => t.status !== "completed")) {
-    lines.push(widgetTaskLine(t, tasks));
-  }
-
-  // Completed: collapsed
+  const active = tasks.filter((t) => t.status !== "completed");
   const completed = tasks.filter((t) => t.status === "completed");
-  if (completed.length > 0) {
-    const show = completed.slice(0, 2);
-    for (const t of show) {
-      lines.push(`  ${green(WICON.completed)} ${dim(t.subject)}`);
-    }
-    if (completed.length > 2) {
-      lines.push(`  ${dim(`… +${completed.length - 2} completed`)}`);
-    }
+
+  for (const task of [...active, ...completed]) {
+    lines.push(truncateToWidth(widgetTaskLine(task, tasks), safeWidth, "…"));
   }
 
   return lines;
 }
 
+function renderTodoSummary(tasks: TodoTaskLike[], expanded: boolean, width: number): string {
+  const done = tasks.filter((t) => t.status === "completed").length;
+  const toggleVerb = expanded ? "collapse" : "expand";
+  const fullMeta = `${done}/${tasks.length} completed  (${TODO_TOGGLE_LABEL} to ${toggleVerb})`;
+  const compactMeta = `${done}/${tasks.length}  (${TODO_TOGGLE_LABEL})`;
+  const minimalMeta = `${done}/${tasks.length}`;
+  const next = findNextTodoTask(tasks);
+
+  const nextText = next
+    ? next.status === "blocked"
+      ? `${red("»")} ${red(`Blocked: ${next.subject}`)}`
+      : `${green("»")} ${green(next.subject)}`
+    : green("✓ All tasks completed");
+
+  const candidates = [fullMeta, compactMeta, minimalMeta];
+  let meta = minimalMeta;
+  for (const candidate of candidates) {
+    const prefix = `${bold("Todo")}  ${dim(candidate)}  `;
+    if (visibleWidth(prefix) + Math.min(18, visibleWidth(nextText)) <= width) {
+      meta = candidate;
+      break;
+    }
+  }
+
+  return truncateToWidth(`${bold("Todo")}  ${dim(meta)}  ${nextText}`, width, "…");
+}
+
+function findNextTodoTask(tasks: TodoTaskLike[]): TodoTaskLike | undefined {
+  return tasks.find((t) => t.status === "in_progress")
+    ?? tasks.find((t) => t.status === "pending" && t.blockedBy.length === 0)
+    ?? tasks.find((t) => t.status === "blocked" || t.status === "pending");
+}
+
 function widgetTaskLine(task: TodoTaskLike, allTasks: TodoTaskLike[]): string {
   const colorFn = WCOLOR[task.status] ?? dim;
-  const icon = task.decision
-    ? cyan("◆")
-    : colorFn(WICON[task.status] ?? "?");
-
-  const goalTag = task.injection?.goalContext ? cyan(" ⦿") : "";
-  const ownerTag = task.owner ? dim(` @${task.owner}`) : "";
-  let line = `  ${icon} ${task.subject}${goalTag}${ownerTag}`;
+  const icon = colorFn(WICON[task.status] ?? "?");
+  const subject = task.status === "completed" ? dim(task.subject) : task.subject;
+  let line = `  ${icon} ${subject}`;
+  if (task.skill) line += dim(`  /${task.skill.name}`);
 
   // blocked: always show dependency arrows
   if (task.status === "blocked" && task.blockedBy.length > 0) {

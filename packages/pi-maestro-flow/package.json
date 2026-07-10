@@ -3,6 +3,9 @@
   "version": "0.4.0",
   "description": "Pi extension for Maestro workflow orchestration — explore, delegate, MOA tools",
   "type": "module",
+  "scripts": {
+    "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/todo.test.ts"
+  },
   "keywords": [
     "pi-package",
     "pi",
