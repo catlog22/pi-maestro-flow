@@ -58,7 +58,14 @@
 
 ## 6. Generalization
 
-待提取。
+提取 4 个可复用模式：
+
+1. Syntax：public schema 与 runtime model 必须只有一个 contract，并用 property test 防漂移。
+2. Semantic：任何可能失败的 loader/validation 必须先于 `running/in_progress` 持久化。
+3. Structural：资源发现委托 host `DefaultResourceLoader`，feature loader 只处理内容语义。
+4. Structural：持久化模型变更必须在 read boundary 做 versioned normalization。
+
+Wave 2 结果：syntax/structural worker 完成，semantic/historical worker 超时；已用本地 grep 与 `git log -S` 补齐。扫描命中 5 个，1 个 actionable（plan show 截断无省略标记），其余经上下文核对为 safe/intentional 或已有回归保护。
 
 ## 7. Discoveries
 
