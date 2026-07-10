@@ -81,4 +81,7 @@ Wave 2 结果：syntax/structural worker 完成，semantic/historical worker 超
 
 ## 8. Learnings
 
-待记录。
+- `S-20260710-kwdz`（arch）：Pi todo 的原生 skill 控制边界。
+- `S-20260710-wz12`（coding）：持久化 todo contract 的版本化迁移模式。
+
+最终状态：AC1–AC7 全部通过；10/10 focused tests；1 次 verify；4 个模式；5 个 scan hits 全部分类；1 个额外 bug 已修复；`remaining_actionable == 0`。
