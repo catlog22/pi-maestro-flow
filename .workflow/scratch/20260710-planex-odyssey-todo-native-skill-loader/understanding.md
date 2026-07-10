@@ -38,7 +38,19 @@
 
 ## 4. Verification
 
-待验证。
+### Iteration 1
+
+| Criterion | Result | Evidence |
+|-----------|--------|----------|
+| AC1 | Passed | schema/runtime grep + public schema test |
+| AC2 | Passed | preserve/replace/clear test |
+| AC3 | Passed | real `DefaultResourceLoader` discovery + required/deferred tests；无 Ralph import |
+| AC4 | Passed | global/project/task override + invalid config tests |
+| AC5 | Passed | loader/budget before state transition；missing skill keeps pending |
+| AC6 | Passed | legacy migration + widget/tool contract tests |
+| AC7 | Passed | `npm run test:todo` 10/10；negative greps |
+
+全包 `tsc` 仍存在项目既有的 `.ts` import、`AgentToolResult<T>` 等基线错误；过滤 task files 后未发现本轮新增的业务类型错误。该基线不降低 AC1–AC7，因为 focused runtime tests 直接加载并执行了新 TypeScript 模块。
 
 ## 5. Fix Log
 
