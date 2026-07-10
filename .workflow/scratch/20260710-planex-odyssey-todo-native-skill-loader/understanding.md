@@ -18,7 +18,14 @@
 
 ## 2. Plan
 
-待 S_PLAN 写入。
+| Task | 内容 | Criteria | 主要文件 |
+|------|------|----------|----------|
+| T1 | 实现 Pi 原生 skill loader 与 skill-config | AC3/AC4/AC5/AC7 | `src/skills/skill-loader.ts`、`src/skills/skill-config.ts` |
+| T2 | 收敛 todo runtime model、update 语义、原子 `next`、legacy migration | AC1/AC2/AC5/AC6 | `src/tools/todo.ts` |
+| T3 | 同步 TypeBox schema、tool description 与 widget contract | AC1/AC6/AC7 | `src/extension/schemas.ts`、`src/extension/index.ts` |
+| T4 | 新增 focused tests 与 contract checks | AC2–AC7 | `test/*.test.ts`、`package.json` |
+
+依赖顺序：T1 → T2 → T3 → T4。现有工作树包含用户的 ask/plan/widget 等未提交改动；实施与暂存必须限定到 todo 相关 hunks，避免扩大提交范围。
 
 ## 3. Execution
 
