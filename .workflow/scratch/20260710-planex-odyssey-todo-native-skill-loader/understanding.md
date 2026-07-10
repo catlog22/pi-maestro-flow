@@ -69,7 +69,15 @@ Wave 2 结果：syntax/structural worker 完成，semantic/historical worker 超
 
 ## 7. Discoveries
 
-待扫描。
+| Hit | Classification | Action / Reason |
+|-----|----------------|-----------------|
+| `plan.ts` no-UI preview uses raw `slice(0,300)` | bug | Fixed in `de2bbd2` with explicit ellipsis；plan module import + todo tests re-run passed |
+| `goal.ts` verifier fallback limits reasoning to 500 chars | safe | Bounded diagnostic text，not source content；prevents verifier output amplification |
+| teammate progress/status becomes running before child work | safe | In-memory lifecycle signal；guard checks precede creation and completion/failure handlers reconcile state |
+| `todo.ts` remains a large aggregate | safe/intentional | Resource discovery/loading moved out；remaining code owns one domain aggregate: task state、dependency、persistence、prompt assembly、migration |
+| historical injection/skillRef commits | regression risk mitigated | versioned migration + public schema contract test + focused behavior tests prevent reintroduction |
+
+所有 5 个命中已分类；`remaining_actionable == 0`。两个超时 worker 已由本地语义 grep 与 historical `git log -S` 补齐，无未分类项。
 
 ## 8. Learnings
 
