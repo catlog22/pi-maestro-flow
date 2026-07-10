@@ -609,7 +609,9 @@ export function registerPlanCommand(pi: ExtensionAPI): void {
 				if (ctx.ui.custom) {
 					await showPlanOverlay(ctx);
 				} else {
-					ctx.ui.notify(getPlanText().slice(0, 300), "info");
+					const planText = getPlanText();
+					const preview = planText.length > 300 ? `${planText.slice(0, 299)}…` : planText;
+					ctx.ui.notify(preview, "info");
 				}
 				return;
 			}
