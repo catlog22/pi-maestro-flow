@@ -7,10 +7,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import * as fs from "node:fs";
-import * as path from "node:path";
 import type {
   ExtensionAPI,
+  ExtensionCommandContext,
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -28,9 +27,12 @@ import {
 import {
   confirmChildReloaded,
   confirmParked,
+  canChildWrite,
   createChildLease,
   fenceLease,
   leaseToken,
+  handoffBarrierReached,
+  isSessionPathContained,
   requestHandback,
   requestPark,
   recoverChild,
@@ -68,6 +70,14 @@ import {
 interface AgentWidgetTheme {
   fg(name: string, text: string): string;
   bold(text: string): string;
+}
+
+export async function switchConversationSession(
+  ctx: Pick<ExtensionCommandContext, "switchSession">,
+  sessionFile: string,
+  onSwitched: () => Promise<void> | void,
+): Promise<void> {
+  await ctx.switchSession(sessionFile, { withSession: async () => { await onSwitched(); } });
 }
 
 interface AgentWidgetRow {
@@ -341,7 +351,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           bridge.pollTimer = setInterval(() => {
             if (!bridge.parking || bridge.completedPromptSeq < bridge.requiredPromptSeq) return;
             bridge.idleStableTicks = bridge.ctx?.isIdle() ? bridge.idleStableTicks + 1 : 0;
-            if (bridge.idleStableTicks < 2) return;
+            if (!handoffBarrierReached(bridge.requiredPromptSeq, bridge.completedPromptSeq, bridge.idleStableTicks)) return;
             if (bridge.pollTimer) clearInterval(bridge.pollTimer);
             bridge.pollTimer = undefined;
             bridge.parking = false;
@@ -379,9 +389,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         } as AgentToolResult<T>;
       }
       const requestId = randomUUID();
-      process.send({ type: "teammate_proxy_request", tool, requestId, params });
       const result = await new Promise<unknown>((resolve) => {
         pendingRequests.set(requestId, resolve);
+        process.send?.({ type: "teammate_proxy_request", tool, requestId, params });
       });
       return result as AgentToolResult<T>;
     }
@@ -449,19 +459,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     const agent = state.activeRuns.get(correlationId);
     if (!agent) return;
     const eventSessionFile = event.sessionFile as string | undefined;
-    if (eventSessionFile && !agent.sessionDir) return;
-    if (eventSessionFile && agent.sessionDir) {
-      let sessionRoot: string;
-      let sessionPath: string;
-      try {
-        sessionRoot = fs.realpathSync(agent.sessionDir);
-        sessionPath = fs.realpathSync(eventSessionFile);
-      } catch {
-        return;
-      }
-      const relative = path.relative(sessionRoot, sessionPath);
-      if (relative.startsWith("..") || path.isAbsolute(relative)) return;
-    }
+    if (eventSessionFile && !isSessionPathContained(agent.sessionDir, eventSessionFile)) return;
 
     if (event.type === "teammate_session_ready") {
       agent.sessionId = event.sessionId as string | undefined;
@@ -1083,7 +1081,7 @@ Modes:
         };
       }
 
-      if (agent.lease && (agent.lease.owner !== "child" || agent.lease.state !== "active")) {
+      if (!canChildWrite(agent.lease)) {
         return {
           content: [{ type: "text", text: `Agent "${params.to}" is currently owned by ${agent.lease.owner} (${agent.lease.state}).` }],
           isError: true,
@@ -1294,7 +1292,7 @@ Modes:
             if (!target?.stdin?.writable) {
               return { ok: false, message: "Agent is no longer writable" };
             }
-            if (target.lease && (target.lease.owner !== "child" || target.lease.state !== "active")) {
+            if (!canChildWrite(target.lease)) {
               return { ok: false, message: `Session owned by ${target.lease.owner} (${target.lease.state})` };
             }
             const sendMode: RpcMessageMode = target.status === "sleeping" ? "prompt" : "follow_up";
@@ -1616,20 +1614,23 @@ Modes:
         }
         state.handoffSwitching = true;
         try {
-          await ctx.switchSession(state.mainSessionFile, {
-            withSession: async () => {
+          await switchConversationSession(ctx, state.mainSessionFile, async () => {
               state.handoffSwitching = false;
               if (!attached.stdin || !attached.sessionFile) return;
               sendRpcMessage(attached.stdin, `/teammate-handoff-reload ${encodeURIComponent(attached.sessionFile)}`, "prompt");
               setTimeout(() => {
                 if (attached.lease?.state === "reloading") {
+                  const cancelNonce = attached.pendingHandback?.nonce;
                   attached.lease = fenceLease(attached.lease);
                   attached.sendControl?.({ type: "teammate_lease_update", token: leaseToken(attached.lease) });
                   attached.pendingHandback = undefined;
+                  if (cancelNonce) {
+                    attached.pendingCancel = { nonce: cancelNonce, fencedEpoch: attached.lease.epoch };
+                    attached.sendControl?.({ type: "teammate_handoff_cancel", nonce: cancelNonce });
+                  }
                   attached.status = "sleeping";
                 }
               }, 15_000);
-            },
           });
         } catch (error) {
           state.handoffSwitching = false;
@@ -1664,10 +1665,8 @@ Modes:
       agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
       state.handoffSwitching = true;
       try {
-        await ctx.switchSession(agent.sessionFile, {
-          withSession: async () => {
+        await switchConversationSession(ctx, agent.sessionFile, async () => {
             state.handoffSwitching = false;
-          },
         });
       } catch (error) {
         state.handoffSwitching = false;
@@ -2300,7 +2299,7 @@ async function handleProxyRequest(
         }});
         return;
       }
-      if (agent.lease && (agent.lease.owner !== "child" || agent.lease.state !== "active")) {
+      if (!canChildWrite(agent.lease)) {
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: `Agent "${to}" is currently owned by ${agent.lease.owner} (${agent.lease.state}).` }],
           isError: true, details: { delivered: false },

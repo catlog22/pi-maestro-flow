@@ -40,6 +40,14 @@ Pending.
 - child lifecycle event 绑定实际 child correlationId；sessionFile 必须 realpath 位于 canonical sessionDir。
 - 修复 owner gate/promptSeq 误入 watchTool 的回归。
 
+### Iteration 2
+
+- 修复 proxyCall 在发送 IPC 后才登记 pending request 的竞态。
+- handback timeout 现在进入 nonce-scoped cancel/recover，而非永久 fenced。
+- 生产路径复用 canChildWrite、handoffBarrierReached、isSessionPathContained gate。
+- 增加真实 switchSession helper 的可执行 mock test，以及 canonical session containment test。
+- focused tests 提升至 14/14。
+
 ## 6. Generalization
 
 Pending.

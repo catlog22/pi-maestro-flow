@@ -12,13 +12,17 @@ import registerTeammateExtension, {
   buildWatchOutput,
   renderAgentStatusWidget,
   resolveWatchTarget,
+  switchConversationSession,
 } from "../src/extension/index.ts";
 import { buildPiArgs, resolveVariables, sendRpcMessage } from "../src/runs/execution.ts";
 import {
   confirmChildReloaded,
   confirmParked,
+  canChildWrite,
   createChildLease,
   fenceLease,
+  handoffBarrierReached,
+  isSessionPathContained,
   leaseToken,
   ownsLease,
   requestHandback,
@@ -127,6 +131,7 @@ test("session ownership handoff fences stale writers and requires reload before 
   const fenced = fenceLease(lease);
   assert.equal(fenced.state, "fenced");
   assert.equal(ownsLease(fenced, leaseToken(fenced)), false);
+  assert.equal(canChildWrite(fenced), false);
 
   const currentToken = leaseToken(lease);
   const wrapped = wrapLeasedMessage("continue", currentToken);
@@ -134,6 +139,40 @@ test("session ownership handoff fences stale writers and requires reload before 
   assert.equal(decoded.message, "continue");
   assert.equal(sameLeaseToken(currentToken, decoded.token), true);
   assert.equal(sameLeaseToken(staleChild, decoded.token), false);
+  assert.equal(handoffBarrierReached(1, 0, 2), false);
+  assert.equal(handoffBarrierReached(1, 1, 1), false);
+  assert.equal(handoffBarrierReached(1, 1, 2), true);
+});
+
+test("session identity is accepted only inside the canonical child session directory", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-handoff-root-"));
+  const childDir = path.join(root, "child");
+  const outsideDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-handoff-outside-"));
+  fs.mkdirSync(childDir);
+  const inside = path.join(childDir, "session.jsonl");
+  const outside = path.join(outsideDir, "session.jsonl");
+  fs.writeFileSync(inside, "{}\n");
+  fs.writeFileSync(outside, "{}\n");
+  try {
+    assert.equal(isSessionPathContained(childDir, inside), true);
+    assert.equal(isSessionPathContained(childDir, outside), false);
+    assert.equal(isSessionPathContained(undefined, inside), false);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+    fs.rmSync(outsideDir, { recursive: true, force: true });
+  }
+});
+
+test("conversation switch helper invokes the native switchSession replacement path", async () => {
+  const calls: string[] = [];
+  await switchConversationSession({
+    async switchSession(sessionFile, options) {
+      calls.push(sessionFile);
+      await options?.withSession?.({} as never);
+      return { cancelled: false };
+    },
+  }, "C:/sessions/agent.jsonl", async () => { calls.push("switched"); });
+  assert.deepEqual(calls, ["C:/sessions/agent.jsonl", "switched"]);
 });
 
 test("idle teammate wake-up uses the RPC prompt command", async () => {

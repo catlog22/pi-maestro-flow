@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
+import * as path from "node:path";
 
 export type SessionOwner = "child" | "main" | "none";
 export type HandoffState =
@@ -65,6 +67,26 @@ export function ownsLease(lease: SessionLease, token: LeaseToken): boolean {
     && lease.nonce === token.nonce
     && lease.state !== "fenced"
     && lease.state !== "recovery";
+}
+
+export function canChildWrite(lease: SessionLease | undefined): boolean {
+  return !lease || (lease.owner === "child" && lease.state === "active");
+}
+
+export function handoffBarrierReached(requiredPromptSeq: number, completedPromptSeq: number, idleStableTicks: number): boolean {
+  return completedPromptSeq >= requiredPromptSeq && idleStableTicks >= 2;
+}
+
+export function isSessionPathContained(sessionDir: string | undefined, sessionFile: string | undefined): boolean {
+  if (!sessionDir || !sessionFile) return false;
+  try {
+    const root = fs.realpathSync(sessionDir);
+    const file = fs.realpathSync(sessionFile);
+    const relative = path.relative(root, file);
+    return relative !== "" && !relative.startsWith("..") && !path.isAbsolute(relative);
+  } catch {
+    return false;
+  }
 }
 
 function advance(lease: SessionLease, owner: SessionOwner, state: HandoffState): SessionLease {
