@@ -68,6 +68,21 @@ Iteration 2 external Codex review:
 
 Routing: S_FIX iteration 2. Acceptance criteria remain unchanged.
 
+Iteration 3 external Codex review:
+
+| Criterion | Result | Evidence |
+|---|---|---|
+| AC1 | Passed | exact dynamic tool snapshot lifecycle remains correct |
+| AC2 | Failed | structurally damaged manifest can still authorize orphan deletion; mtime-only stale takeover lacks lock ownership |
+| AC3 | Passed | full-screen editor contract remains correct |
+| AC4 | Failed | a transaction longer than the stale threshold can lose its lock and in-flight archive |
+| AC5 | Passed | six plain-Markdown tools and gating remain correct |
+| AC6 | Passed | adversarial shell/delegate and compatibility checks passed |
+| AC7 | Passed | shutdown and restart semantics remain correct |
+| AC8 | Failed | damaged-manifest and stale-owner regression tests are still missing because the implementation is incomplete |
+
+The default maximum of 3 verification iterations was reached. The session is therefore `ESCALATED`; no criterion was weakened or manually overridden.
+
 ## 5. Fix Log
 
 Iteration 1 targeted repairs:
@@ -94,12 +109,20 @@ After the second repair round: Plan 19/19, Todo 10/10, Hooks 7/7 and Ask 2/2 pas
 
 ## 6. Generalization
 
-Pending.
+Skipped by the Planex state machine because the maximum verification iteration ended with failed criteria. No implementation pattern is marked complete.
 
 ## 7. Discoveries
 
-Pending.
+Residual findings were triaged as actionable bugs:
+
+1. High — `validateManifest()` accepts structurally inconsistent values, allowing a damaged manifest to produce an empty committed set and delete valid approval history.
+2. High — the fixed-path lock uses only directory `mtime`; a long transaction can be declared stale, lose ownership and later delete a newer owner's lock.
+3. Medium — deterministic tests are missing for damaged manifest invariants, owner-checked stale takeover, old-owner release and clock rollback/latest-revision selection.
+
+Because the Planex maximum iteration was reached, these are routed to a follow-up `$odyssey-debug` rather than silently fixed outside the confirmed loop.
 
 ## 8. Learnings
 
-Pending.
+Persisted project debug spec `S-20260711-5vq1`: Plan persistence recovery must validate the full manifest invariant before deleting archives, and cross-process transaction locks require owner token, heartbeat and owner-checked release.
+
+Final status: `ESCALATED` — 5/8 acceptance criteria passed after 3 verification cycles. The implementation is materially improved and committed, but AC2, AC4 and AC8 remain open.
