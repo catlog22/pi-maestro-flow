@@ -26,7 +26,15 @@
 
 ## 4. Verification
 
-Pending.
+| Criterion | Result | Evidence |
+|---|---|---|
+| AC1 | passed | session identity IPC + canonical path gate |
+| AC2 | passed | prompt completion sequence + stable idle + parked input fence |
+| AC3 | passed | native switchSession helper test and final Codex gate |
+| AC4 | passed | epoch/nonce envelope + reload identity validation |
+| AC5 | passed | idle uses prompt in root, overlay and proxy paths |
+| AC6 | passed | cancel/recover transaction and ordering test |
+| AC7 | passed | 14/14 tests, diff check, no P0/P1 blocker |
 
 ## 5. Fix Log
 
@@ -56,12 +64,21 @@ Pending.
 
 ## 6. Generalization
 
-Pending.
+提取 P1：跨进程 session ownership transfer 必须采用单 writer lease、prompt completion barrier、epoch/nonce fencing、ordered cancel recovery 与 reload handback。
+
+4 角度扫描均已尝试：syntax、semantic 完成；structural、historical 因 worker timeout 降级，但本地主流程与两轮 Codex gate 已覆盖关键结构。
 
 ## 7. Discoveries
 
-Pending.
+- Bug：handoff request 未发送成功却 fence root；已改为 cancelPark 恢复 active。
+- Risk：switchSession failure 永久 fenced；已按当前 owner 恢复并同步 lease。
+- Risk：handback reload send 返回值被忽略；已接入 cancel/recovery。
+- Safe：内部 reload 命令是唯一允许不携带 child-owner token 的控制路径，且仅在 expected owner=none 时放行。
+
+Remaining actionable：0。
 
 ## 8. Learnings
 
-Pending.
+- 已写入 arch spec：Pi teammate session 单所有者接管协议。
+- 关键规则：cancel 必须使用旧 transaction nonce，并在新 fenced token 发布前发送。
+- 最终状态：AC1-AC7 全部通过，14/14 focused tests，外部 Codex gate 无 P0/P1。
