@@ -148,3 +148,10 @@ A local transaction-boundary self-review found and closed two additional cases b
 - Atomic write helpers now remove temporary files when rename fails, and persisted timestamps require canonical ISO format.
 
 PlanStore coverage increased to 17/17; total Plan coverage is now 27 tests.
+
+The final AGY independent review passed AC1–AC8 and reported two medium cleanup findings. Both were fixed:
+
+- A failed session-start store is cleared so a later `plan-enter` creates a fresh store and can recover.
+- `initPlan` and session-start reset leaked module state and restore any exact active-tool snapshot before reinitialization.
+
+Two lifecycle regressions cover retry after initial storage failure and reinitialization after a leaked Plan state. Final focused Plan coverage: 29/29.

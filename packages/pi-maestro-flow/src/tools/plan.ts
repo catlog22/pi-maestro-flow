@@ -99,6 +99,8 @@ let awaitingAction = false;
 let activeToolsSnapshot: string[] | undefined;
 
 export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): void {
+  if (extensionApi && activeToolsSnapshot) extensionApi.setActiveTools(activeToolsSnapshot);
+  resetRuntimeState();
   extensionApi = pi;
   storeFactory = options.storeFactory ?? ((cwd) => new PlanStore(cwd));
 }
@@ -199,14 +201,16 @@ export async function toggleMode(ctx: PlanContext): Promise<Mode> {
 }
 
 export async function onSessionStartPlan(ctx: PlanContext): Promise<void> {
-  mode = "act";
-  activeToolsSnapshot = undefined;
+  restoreActToolSurface();
+  resetRuntimeState();
   ensureActToolSurface();
   ctx.ui.setStatus(STATUS_KEY, undefined);
   try {
     const store = await ensureStore(ctx);
     applyLoadedPlan(await store.load());
   } catch (error) {
+    currentStore = undefined;
+    currentWorkspace = "";
     clearPlan();
     ctx.ui.notify(`Plan draft unavailable: ${errorMessage(error)}`, "warning");
   }
@@ -214,6 +218,11 @@ export async function onSessionStartPlan(ctx: PlanContext): Promise<void> {
 
 export function onSessionShutdownPlan(ctx: PlanContext): void {
   restoreActToolSurface();
+  resetRuntimeState();
+  ctx.ui.setStatus(STATUS_KEY, undefined);
+}
+
+function resetRuntimeState(): void {
   mode = "act";
   currentStore = undefined;
   currentWorkspace = "";
@@ -221,7 +230,7 @@ export function onSessionShutdownPlan(ctx: PlanContext): void {
   latestRevision = 0;
   latestStatus = "empty";
   awaitingAction = false;
-  ctx.ui.setStatus(STATUS_KEY, undefined);
+  activeToolsSnapshot = undefined;
 }
 
 export function onCompactPlan(ctx: PlanContext): void {

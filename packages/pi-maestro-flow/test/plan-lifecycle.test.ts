@@ -19,7 +19,7 @@ interface ToolLike {
   execute(id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext): Promise<any>;
 }
 
-function createHarness(root: string, autoConfirm = false, failingApproval = false, failingSave = false) {
+function createHarness(root: string, autoConfirm = false, failingApproval = false, failingSave = false, failFirstLoad = false) {
   let active = ["Read", "Write", "todo", "custom-tool"];
   const tools = new Map<string, ToolLike>();
   const messages: string[] = [];
@@ -67,15 +67,27 @@ function createHarness(root: string, autoConfirm = false, failingApproval = fals
     }
   }
 
+  class FailingLoadStore extends PlanStore {
+    override async load(): Promise<never> {
+      throw new Error("draft load failed");
+    }
+  }
+
+  let storeCalls = 0;
+
   initPlan(pi, {
-    storeFactory: (cwd) => failingSave ? new FailingSaveStore(cwd, {
-      rootDir: join(root, "global"),
-    }) : new PlanStore(cwd, {
+    storeFactory: (cwd) => {
+      const call = storeCalls++;
+      if (failFirstLoad && call === 0) return new FailingLoadStore(cwd, { rootDir: join(root, "global") });
+      return failingSave ? new FailingSaveStore(cwd, {
+        rootDir: join(root, "global"),
+      }) : new PlanStore(cwd, {
       rootDir: join(root, "global"),
       ...(failingApproval
         ? { approvalCommitHook: async () => { throw new Error("approval storage failed"); } }
         : {}),
-    }),
+      });
+    },
   });
   registerPlanTools(pi);
   return {
@@ -250,5 +262,42 @@ test("Session restart stays in Act and resumes the persisted draft only after pl
     onSessionShutdownPlan(second.ctx);
   } finally {
     await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Session-start storage failure clears the failed store so plan-enter can retry", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-start-retry-"));
+  const harness = createHarness(root, false, false, false, true);
+  try {
+    await onSessionStartPlan(harness.ctx);
+    assert.match(harness.notifications.join("\n"), /draft unavailable/);
+    const entered = await execute(harness, "plan-enter");
+    assert.equal(entered.details.mode, "plan");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Reinitializing Plan restores a leaked tool snapshot and resets module state", async () => {
+  const firstRoot = await mkdtemp(join(tmpdir(), "pi-plan-reinit-first-"));
+  const secondRoot = await mkdtemp(join(tmpdir(), "pi-plan-reinit-second-"));
+  const first = createHarness(firstRoot);
+  try {
+    await onSessionStartPlan(first.ctx);
+    const firstActTools = first.active;
+    await execute(first, "plan-enter");
+    assert.equal(getMode(), "plan");
+
+    const second = createHarness(secondRoot);
+    assert.deepEqual(first.active, firstActTools);
+    assert.equal(getMode(), "act");
+    await onSessionStartPlan(second.ctx);
+    assert.equal(second.active.includes("plan-enter"), true);
+    onSessionShutdownPlan(second.ctx);
+  } finally {
+    onSessionShutdownPlan(first.ctx);
+    await rm(firstRoot, { recursive: true, force: true });
+    await rm(secondRoot, { recursive: true, force: true });
   }
 });
