@@ -19,6 +19,7 @@ import {
   confirmChildReloaded,
   confirmParked,
   canChildWrite,
+  buildFenceRecoveryMessages,
   createChildLease,
   fenceLease,
   handoffBarrierReached,
@@ -142,6 +143,10 @@ test("session ownership handoff fences stale writers and requires reload before 
   assert.equal(handoffBarrierReached(1, 0, 2), false);
   assert.equal(handoffBarrierReached(1, 1, 1), false);
   assert.equal(handoffBarrierReached(1, 1, 2), true);
+  assert.deepEqual(
+    buildFenceRecoveryMessages(fenced, "old-handback-nonce").map((message) => message.type),
+    ["teammate_handoff_cancel", "teammate_lease_update"],
+  );
 });
 
 test("session identity is accepted only inside the canonical child session directory", () => {

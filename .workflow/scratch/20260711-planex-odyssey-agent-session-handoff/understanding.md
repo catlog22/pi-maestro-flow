@@ -48,6 +48,12 @@ Pending.
 - 增加真实 switchSession helper 的可执行 mock test，以及 canonical session containment test。
 - focused tests 提升至 14/14。
 
+### Iteration 3
+
+- 修复 handback timeout 中 cancel 与 lease_update 的 nonce 覆盖顺序。
+- 抽取 buildFenceRecoveryMessages，并以测试锁定 cancel 必须先于 token update。
+- focused tests 保持 14/14。
+
 ## 6. Generalization
 
 Pending.

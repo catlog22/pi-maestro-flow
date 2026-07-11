@@ -89,6 +89,13 @@ export function isSessionPathContained(sessionDir: string | undefined, sessionFi
   }
 }
 
+export function buildFenceRecoveryMessages(lease: SessionLease, cancelNonce?: string): Record<string, unknown>[] {
+  const messages: Record<string, unknown>[] = [];
+  if (cancelNonce) messages.push({ type: "teammate_handoff_cancel", nonce: cancelNonce });
+  messages.push({ type: "teammate_lease_update", token: leaseToken(lease) });
+  return messages;
+}
+
 function advance(lease: SessionLease, owner: SessionOwner, state: HandoffState): SessionLease {
   return { owner, state, epoch: lease.epoch + 1, nonce: randomUUID() };
 }

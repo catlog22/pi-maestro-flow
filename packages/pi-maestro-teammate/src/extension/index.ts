@@ -28,6 +28,7 @@ import {
   confirmChildReloaded,
   confirmParked,
   canChildWrite,
+  buildFenceRecoveryMessages,
   createChildLease,
   fenceLease,
   leaseToken,
@@ -1622,11 +1623,12 @@ Modes:
                 if (attached.lease?.state === "reloading") {
                   const cancelNonce = attached.pendingHandback?.nonce;
                   attached.lease = fenceLease(attached.lease);
-                  attached.sendControl?.({ type: "teammate_lease_update", token: leaseToken(attached.lease) });
                   attached.pendingHandback = undefined;
                   if (cancelNonce) {
                     attached.pendingCancel = { nonce: cancelNonce, fencedEpoch: attached.lease.epoch };
-                    attached.sendControl?.({ type: "teammate_handoff_cancel", nonce: cancelNonce });
+                  }
+                  for (const message of buildFenceRecoveryMessages(attached.lease, cancelNonce)) {
+                    attached.sendControl?.(message);
                   }
                   attached.status = "sleeping";
                 }
