@@ -180,6 +180,15 @@ The final AGY independent review passed AC1–AC8 and reported two medium cleanu
 
 Two lifecycle regressions cover retry after initial storage failure and reinitialization after a leaked Plan state. Final focused Plan coverage: 29/29.
 
+Final record:
+
+- `S-20260711-5vq1` — debug invariant for manifest recovery and lock ownership.
+- `S-20260711-zekz` — reusable durable approval transaction and tokenized lease pattern.
+- `S-20260711-w3ha` — AC1–AC8 lifecycle verification matrix.
+- The earlier `ESCALATED` result is retained as historical evidence; the continued session subsequently closed every failed criterion without lowering acceptance standards.
+
+Final status: `ALL_PASSED` — AC1–AC8 passed, all 7 phase goals confirmed, 3 implementation patterns extracted, 4 scan hits classified, and 0 actionable discoveries remain.
+
 Iteration 4 final verification:
 
 | Criterion | Result | Evidence |
