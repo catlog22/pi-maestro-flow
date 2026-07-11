@@ -669,8 +669,6 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
         status: "running",
         sleepMs: 0,
         lease: createChildLease(),
-        promptSeq: p.task ? 1 : 0,
-        lease: createChildLease(),
         promptSeq: params.task ? 1 : 0,
         ...(isMultiTask ? { progress: progressSnapshot() } : {}),
       };
@@ -2239,6 +2237,8 @@ async function handleProxyRequest(
         spawnedBy: parentCid,
         status: "running",
         sleepMs: 0,
+        lease: createChildLease(),
+        promptSeq: p.task ? 1 : 0,
       };
       state.activeRuns.set(cid, activeAgent);
       if (p.name) state.namedAgents.set(p.name, cid);

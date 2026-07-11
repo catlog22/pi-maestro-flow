@@ -40,6 +40,27 @@ import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 import { renderTeammateResult } from "../src/tui/render.ts";
 import type { SingleResult, TeammateState } from "../src/shared/types.ts";
 
+test("root and proxy teammate initialization use their own request params", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const rootStart = source.indexOf("const activeAgent: ActiveAgent = {");
+  const rootEnd = source.indexOf("state.activeRuns.set(correlationId, activeAgent);", rootStart);
+  assert.ok(rootStart >= 0 && rootEnd > rootStart);
+
+  const rootInitialization = source.slice(rootStart, rootEnd);
+  assert.match(rootInitialization, /promptSeq:\s*params\.task \? 1 : 0/);
+  assert.doesNotMatch(rootInitialization, /\bp\.task\b/);
+  assert.equal(rootInitialization.match(/lease:\s*createChildLease\(\)/g)?.length, 1);
+
+  const proxyStart = source.indexOf("const activeAgent: ActiveAgent = {", rootEnd);
+  const proxyEnd = source.indexOf("state.activeRuns.set(cid, activeAgent);", proxyStart);
+  assert.ok(proxyStart > rootEnd && proxyEnd > proxyStart);
+
+  const proxyInitialization = source.slice(proxyStart, proxyEnd);
+  assert.match(proxyInitialization, /promptSeq:\s*p\.task \? 1 : 0/);
+  assert.doesNotMatch(proxyInitialization, /promptSeq:\s*params\.task/);
+  assert.equal(proxyInitialization.match(/lease:\s*createChildLease\(\)/g)?.length, 1);
+});
+
 test("structured_output writes the validated tool payload for field references", async () => {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-test-"));
   const schemaPath = path.join(tmpDir, "schema.json");
