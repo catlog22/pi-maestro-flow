@@ -126,3 +126,17 @@ Because the Planex maximum iteration was reached, these are routed to a follow-u
 Persisted project debug spec `S-20260711-5vq1`: Plan persistence recovery must validate the full manifest invariant before deleting archives, and cross-process transaction locks require owner token, heartbeat and owner-checked release.
 
 Final status: `ESCALATED` — 5/8 acceptance criteria passed after 3 verification cycles. The implementation is materially improved and committed, but AC2, AC4 and AC8 remain open.
+
+### Goal continuation repair
+
+The active thread goal explicitly continued the full AC1–AC8 objective after the original iteration cap. The session was reopened without weakening any criterion.
+
+- Manifest validation now checks workspace identity, non-negative integer revision, status, checksums, timestamps, canonical archive paths, strictly increasing approval revisions and approved-field consistency.
+- A valid-looking manifest that omits recoverable archives now triggers archive-based reconstruction instead of deletion.
+- Approval uses `approval.pending.json`; interrupted archives are quarantined and cannot be mistaken for committed approvals.
+- Recovery chooses the highest approval revision, remaining correct when the wall clock moves backwards.
+- Workspace locks now carry random owner token, PID and heartbeat. Stale takeover uses a token-specific claim and atomic quarantine.
+- Every mutation rechecks lock ownership; an old owner cannot commit, remove a replacement lock or delete the replacement pending transaction.
+- New deterministic tests cover damaged manifest invariants, clock rollback, interrupted pending approval, heartbeat protection, dead-owner recovery and old-owner handoff.
+
+Focused Plan verification after this repair: 25/25 passed; runtime imports passed.
