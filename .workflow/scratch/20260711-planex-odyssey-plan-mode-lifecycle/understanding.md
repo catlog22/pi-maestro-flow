@@ -155,3 +155,18 @@ The final AGY independent review passed AC1–AC8 and reported two medium cleanu
 - `initPlan` and session-start reset leaked module state and restore any exact active-tool snapshot before reinitialization.
 
 Two lifecycle regressions cover retry after initial storage failure and reinitialization after a leaked Plan state. Final focused Plan coverage: 29/29.
+
+Iteration 4 final verification:
+
+| Criterion | Result | Evidence |
+|---|---|---|
+| AC1 | Passed | exact Act snapshot restored across exit, approval, shutdown and reinit |
+| AC2 | Passed | strict manifest/archive validation, pending recovery, quarantine and revision-based reconstruction |
+| AC3 | Passed | full-screen editor tests plus width 1–120 live matrix |
+| AC4 | Passed | exact buffer commits before Act; failure/lost ownership remains in Plan; post-commit cleanup cannot roll back |
+| AC5 | Passed | all six plain-Markdown tools and mode gates |
+| AC6 | Passed | slash, shortcut, proposed-plan, hook order and adversarial shell/delegate checks |
+| AC7 | Passed | shutdown/restart/retry/reinitialization semantics |
+| AC8 | Passed | Plan 29/29, Todo 10/10, Hooks 7/7, Ask 2/2, runtime imports, width matrix and diff check |
+
+Independent AGY review: all AC1–AC8 passed. Codex and Claude review infrastructure failures were recorded separately and did not replace the successful independent review.
