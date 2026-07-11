@@ -105,6 +105,11 @@ export function requestPark(lease: SessionLease): SessionLease {
   return { ...lease, state: "parking" };
 }
 
+export function cancelPark(lease: SessionLease): SessionLease {
+  if (lease.owner !== "child" || lease.state !== "parking") return lease;
+  return { ...lease, state: "active" };
+}
+
 export function confirmParked(lease: SessionLease): SessionLease {
   if (lease.owner !== "child" || lease.state !== "parking") return lease;
   return { ...lease, state: "parked" };
@@ -123,6 +128,10 @@ export function requestHandback(lease: SessionLease): SessionLease {
 export function confirmChildReloaded(lease: SessionLease): SessionLease {
   if (lease.owner !== "none" || lease.state !== "reloading") return lease;
   return advance(lease, "child", "active");
+}
+
+export function restoreMainOwnership(lease: SessionLease): SessionLease {
+  return advance(lease, "main", "main_active");
 }
 
 export function fenceLease(lease: SessionLease): SessionLease {

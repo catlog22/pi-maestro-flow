@@ -20,6 +20,7 @@ import {
   confirmParked,
   canChildWrite,
   buildFenceRecoveryMessages,
+  cancelPark,
   createChildLease,
   fenceLease,
   handoffBarrierReached,
@@ -28,6 +29,7 @@ import {
   ownsLease,
   requestHandback,
   requestPark,
+  restoreMainOwnership,
   sameLeaseToken,
   transferToMain,
   unwrapLeasedMessage,
@@ -114,6 +116,7 @@ test("session ownership handoff fences stale writers and requires reload before 
 
   lease = requestPark(lease);
   assert.equal(lease.state, "parking");
+  assert.equal(cancelPark(lease).state, "active");
   lease = confirmParked(lease);
   assert.equal(lease.state, "parked");
   lease = transferToMain(lease);
@@ -124,6 +127,7 @@ test("session ownership handoff fences stale writers and requires reload before 
   assert.equal(ownsLease(lease, mainToken), true);
   lease = requestHandback(lease);
   assert.equal(lease.state, "reloading");
+  assert.equal(restoreMainOwnership(lease).owner, "main");
   assert.equal(ownsLease(lease, mainToken), false);
   lease = confirmChildReloaded(lease);
   assert.equal(lease.owner, "child");

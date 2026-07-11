@@ -29,6 +29,7 @@ import {
   confirmParked,
   canChildWrite,
   buildFenceRecoveryMessages,
+  cancelPark,
   createChildLease,
   fenceLease,
   leaseToken,
@@ -37,6 +38,7 @@ import {
   requestHandback,
   requestPark,
   recoverChild,
+  restoreMainOwnership,
   sameLeaseToken,
   transferToMain,
   unwrapLeasedMessage,
@@ -472,6 +474,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       agent.sessionId = event.sessionId as string | undefined;
       agent.sessionFile = eventSessionFile;
       if (agent.lease) agent.lease = confirmParked(agent.lease);
+      agent.lastParkNonce = pendingHandoff.nonce;
       clearTimeout(pendingHandoff.timer);
       pendingHandoff.resolve(true);
       agent.pendingHandoff = undefined;
@@ -1583,7 +1586,7 @@ Modes:
     })) {
       if (agent.pendingHandoff) clearTimeout(agent.pendingHandoff.timer);
       agent.pendingHandoff = undefined;
-      agent.lease = fenceLease(agent.lease);
+      agent.lease = cancelPark(agent.lease);
       return false;
     }
     return ready;
@@ -1618,7 +1621,17 @@ Modes:
           await switchConversationSession(ctx, state.mainSessionFile, async () => {
               state.handoffSwitching = false;
               if (!attached.stdin || !attached.sessionFile) return;
-              sendRpcMessage(attached.stdin, `/teammate-handoff-reload ${encodeURIComponent(attached.sessionFile)}`, "prompt");
+              const reloadSent = sendRpcMessage(attached.stdin, `/teammate-handoff-reload ${encodeURIComponent(attached.sessionFile)}`, "prompt");
+              if (!reloadSent && attached.lease) {
+                const cancelNonce = attached.pendingHandback?.nonce;
+                attached.lease = fenceLease(attached.lease);
+                attached.pendingHandback = undefined;
+                if (cancelNonce) attached.pendingCancel = { nonce: cancelNonce, fencedEpoch: attached.lease.epoch };
+                for (const message of buildFenceRecoveryMessages(attached.lease, cancelNonce)) {
+                  attached.sendControl?.(message);
+                }
+                return;
+              }
               setTimeout(() => {
                 if (attached.lease?.state === "reloading") {
                   const cancelNonce = attached.pendingHandback?.nonce;
@@ -1637,9 +1650,10 @@ Modes:
         } catch (error) {
           state.handoffSwitching = false;
           if (attached.lease) {
-            attached.lease = fenceLease(attached.lease);
+            attached.lease = restoreMainOwnership(attached.lease);
             attached.sendControl?.({ type: "teammate_lease_update", token: leaseToken(attached.lease) });
           }
+          attached.pendingHandback = undefined;
           throw error;
         }
         return;
@@ -1672,8 +1686,11 @@ Modes:
         });
       } catch (error) {
         state.handoffSwitching = false;
-        agent.lease = fenceLease(agent.lease);
-        agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
+        agent.lease = recoverChild(fenceLease(agent.lease));
+        for (const message of buildFenceRecoveryMessages(agent.lease, agent.lastParkNonce)) {
+          agent.sendControl?.(message);
+        }
+        agent.lastParkNonce = undefined;
         throw error;
       }
     },

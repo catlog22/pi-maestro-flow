@@ -90,6 +90,7 @@ export interface ActiveAgent {
   sessionFile?: string;
   sessionDir?: string;
   promptSeq?: number;
+  lastParkNonce?: string;
   lease?: import("../runs/session-handoff.ts").SessionLease;
   pendingHandoff?: {
     nonce: string;
