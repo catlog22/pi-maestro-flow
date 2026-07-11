@@ -134,13 +134,16 @@ Coverage, depth and actionability gates passed after the local fallback; no modu
 
 ## 7. Discoveries
 
-Residual findings were triaged as actionable bugs:
+All generalization hits were inspected with surrounding code and classified:
 
-1. High — `validateManifest()` accepts structurally inconsistent values, allowing a damaged manifest to produce an empty committed set and delete valid approval history.
-2. High — the fixed-path lock uses only directory `mtime`; a long transaction can be declared stale, lose ownership and later delete a newer owner's lock.
-3. Medium — deterministic tests are missing for damaged manifest invariants, owner-checked stale takeover, old-owner release and clock rollback/latest-revision selection.
+| Hit | Classification | Reason |
+|---|---|---|
+| `hooks/trust.ts` atomic JSON replacement | Safe | Trust corruption or write failure fails closed by returning an empty trust set; no durable history is deleted and no hook is authorized. |
+| Todo module-level task map | Safe | `onSessionStart` replaces it from session state and `onSessionShutdown` clears it; it owns no host tool snapshot. |
+| Goal module-level lifecycle state | Safe | Session start reloads the active goal and clears continuation/recovery state; no Plan-style storage cleanup or active-tool ownership applies. |
+| Historical Plan lock/manifest/snapshot fixes | Safe regression lineage | Current tests cover each previously observed failure and no reverted pattern was found. |
 
-Because the Planex maximum iteration was reached, these are routed to a follow-up `$odyssey-debug` rather than silently fixed outside the confirmed loop.
+The two medium findings from the final external review were fixed before this phase and have dedicated regressions. Remaining actionable discoveries: 0. Cross-phase loop was not required.
 
 ## 8. Learnings
 
