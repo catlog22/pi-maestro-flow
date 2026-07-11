@@ -7,6 +7,7 @@ import {
   readdir,
   rename,
   rm,
+  stat,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -66,6 +67,7 @@ export class PlanStore {
   readonly approvalsDir: string;
   readonly currentPath: string;
   readonly manifestPath: string;
+  readonly lockPath: string;
 
   private readonly now: () => Date;
   private readonly approvalCommitHook?: () => Promise<void>;
@@ -78,11 +80,55 @@ export class PlanStore {
     this.approvalsDir = join(this.plansDir, "approvals");
     this.currentPath = join(this.plansDir, "current.md");
     this.manifestPath = join(this.plansDir, "manifest.json");
+    this.lockPath = join(this.plansDir, ".transaction-lock");
     this.now = options.now ?? (() => new Date());
     this.approvalCommitHook = options.approvalCommitHook;
   }
 
   async load(): Promise<LoadedPlan> {
+    return this.withWorkspaceLock(() => this.loadUnlocked());
+  }
+
+  async saveDraft(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {
+    return this.withWorkspaceLock(() => this.saveDraftUnlocked(markdown, expectedRevision));
+  }
+
+  async approve(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {
+    return this.withWorkspaceLock(async () => {
+      const draft = await this.saveDraftUnlocked(markdown, expectedRevision);
+      let archivePath: string | undefined;
+      try {
+        const approvedAt = this.now().toISOString();
+        const checksum = checksumText(markdown);
+        const archiveName = `${archiveTimestamp(approvedAt)}-r${String(draft.manifest.revision).padStart(4, "0")}-${checksum.slice(0, 8)}.md`;
+        archivePath = join(this.approvalsDir, archiveName);
+        await atomicWriteText(archivePath, markdown);
+        await this.approvalCommitHook?.();
+        const approvedPath = join("approvals", archiveName);
+
+        const manifest: PlanManifest = {
+          ...draft.manifest,
+          status: "approved",
+          approvedAt,
+          approvedPath,
+          approvedChecksum: checksum,
+          approvals: [...draft.manifest.approvals, approvedPath],
+          updatedAt: approvedAt,
+        };
+        await atomicWriteJson(this.manifestPath, manifest);
+        return { ...draft, manifest };
+      } catch (error) {
+        if (archivePath) await rm(archivePath, { force: true }).catch(() => {});
+        throw new PlanApprovalError(
+          `Plan approval commit failed: ${errorMessage(error)}`,
+          draft.manifest.revision,
+          true,
+        );
+      }
+    });
+  }
+
+  private async loadUnlocked(): Promise<LoadedPlan> {
     await this.ensureDirectories();
     await this.removeStaleTemps();
     const markdown = await readOptionalText(this.currentPath);
@@ -90,7 +136,7 @@ export class PlanStore {
     const checksum = checksumText(markdown);
 
     if (!manifest) {
-      manifest = this.newManifest(markdown, checksum);
+      manifest = await this.rebuildManifest(markdown, checksum);
       await atomicWriteJson(this.manifestPath, manifest);
     } else if (manifest.draftChecksum !== checksum) {
       manifest = {
@@ -117,8 +163,8 @@ export class PlanStore {
     };
   }
 
-  async saveDraft(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {
-    const current = await this.load();
+  private async saveDraftUnlocked(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {
+    const current = await this.loadUnlocked();
     assertRevision(expectedRevision, current.manifest.revision);
     const updatedAt = this.now().toISOString();
     const manifest: PlanManifest = {
@@ -137,40 +183,6 @@ export class PlanStore {
     return { ...current, markdown, manifest };
   }
 
-  async approve(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {
-    const draft = await this.saveDraft(markdown, expectedRevision);
-    let archivePath: string | undefined;
-    try {
-      const approvedAt = this.now().toISOString();
-      const checksum = checksumText(markdown);
-      const archiveName = `${archiveTimestamp(approvedAt)}-r${String(draft.manifest.revision).padStart(4, "0")}-${checksum.slice(0, 8)}.md`;
-      archivePath = join(this.approvalsDir, archiveName);
-      await mkdir(this.approvalsDir, { recursive: true });
-      await atomicWriteText(archivePath, markdown);
-      await this.approvalCommitHook?.();
-      const approvedPath = join("approvals", archiveName);
-
-      const manifest: PlanManifest = {
-        ...draft.manifest,
-        status: "approved",
-        approvedAt,
-        approvedPath,
-        approvedChecksum: checksum,
-        approvals: [...draft.manifest.approvals, approvedPath],
-        updatedAt: approvedAt,
-      };
-      await atomicWriteJson(this.manifestPath, manifest);
-      return { ...draft, manifest };
-    } catch (error) {
-      if (archivePath) await rm(archivePath, { force: true }).catch(() => {});
-      throw new PlanApprovalError(
-        `Plan approval commit failed: ${errorMessage(error)}`,
-        draft.manifest.revision,
-        true,
-      );
-    }
-  }
-
   private async ensureDirectories(): Promise<void> {
     await mkdir(this.approvalsDir, { recursive: true });
   }
@@ -180,22 +192,78 @@ export class PlanStore {
       const raw: unknown = JSON.parse(await readFile(this.manifestPath, "utf8"));
       return validateManifest(raw, this.workspaceId, this.workspacePath);
     } catch (error) {
-      if (isMissingFile(error)) return null;
+      if (isMissingFile(error) || error instanceof SyntaxError || errorMessage(error) === "Invalid Plan manifest") return null;
       throw error;
     }
   }
 
-  private newManifest(markdown: string, checksum: string): PlanManifest {
+  private async rebuildManifest(markdown: string, checksum: string): Promise<PlanManifest> {
+    const approvals = await this.recoverableApprovalPaths();
+    const lastApproval = approvals.at(-1);
+    const lastArchive = lastApproval ? await readOptionalText(join(this.plansDir, lastApproval)) : "";
+    const lastRevision = approvals.reduce((highest, path) => {
+      const match = /-r(\d+)-[a-f0-9]{8}\.md$/i.exec(path);
+      return Math.max(highest, match ? Number(match[1]) : 0);
+    }, 0);
+    const approved = Boolean(lastApproval && checksumText(lastArchive) === checksum);
+    const updatedAt = this.now().toISOString();
     return {
       version: 1,
       workspaceId: this.workspaceId,
       workspacePath: this.workspacePath,
-      revision: markdown ? 1 : 0,
-      status: "draft",
+      revision: Math.max(lastRevision, markdown ? 1 : 0),
+      status: approved ? "approved" : "draft",
       draftChecksum: checksum,
-      updatedAt: this.now().toISOString(),
-      approvals: [],
+      updatedAt,
+      approvals,
+      ...(approved && lastApproval
+        ? { approvedAt: updatedAt, approvedPath: lastApproval, approvedChecksum: checksum }
+        : {}),
     };
+  }
+
+  private async recoverableApprovalPaths(): Promise<string[]> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.approvalsDir);
+    } catch {
+      return [];
+    }
+    return entries
+      .filter((entry) => /^\d{8}T\d{6}\d*Z-r\d+-[a-f0-9]{8}\.md$/i.test(entry))
+      .sort()
+      .map((entry) => join("approvals", entry));
+  }
+
+  private async withWorkspaceLock<T>(operation: () => Promise<T>): Promise<T> {
+    await mkdir(this.plansDir, { recursive: true });
+    for (let attempt = 0; attempt < 200; attempt += 1) {
+      try {
+        await mkdir(this.lockPath);
+        try {
+          return await operation();
+        } finally {
+          await rm(this.lockPath, { recursive: true, force: true });
+        }
+      } catch (error) {
+        if (!isAlreadyExists(error)) throw error;
+        if (await this.isStaleLock()) {
+          await rm(this.lockPath, { recursive: true, force: true }).catch(() => {});
+          continue;
+        }
+        await delay(25);
+      }
+    }
+    throw new Error(`Timed out waiting for Plan transaction lock: ${this.lockPath}`);
+  }
+
+  private async isStaleLock(): Promise<boolean> {
+    try {
+      const details = await stat(this.lockPath);
+      return Date.now() - details.mtimeMs > 5 * 60_000;
+    } catch {
+      return false;
+    }
   }
 
   private async removeStaleTemps(): Promise<void> {
@@ -301,6 +369,14 @@ function archiveTimestamp(iso: string): string {
 
 function isMissingFile(error: unknown): boolean {
   return isRecord(error) && error.code === "ENOENT";
+}
+
+function isAlreadyExists(error: unknown): boolean {
+  return isRecord(error) && error.code === "EEXIST";
+}
+
+function delay(milliseconds: number): Promise<void> {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

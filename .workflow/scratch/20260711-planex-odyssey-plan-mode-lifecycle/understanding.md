@@ -53,6 +53,21 @@ Iteration 1 external Codex review:
 
 Routing: S_FIX iteration 1. Acceptance criteria remain unchanged.
 
+Iteration 2 external Codex review:
+
+| Criterion | Result | Evidence |
+|---|---|---|
+| AC1 | Passed | exact tool snapshot restored on exit, approval and shutdown |
+| AC2 | Failed | manifest-loss recovery deleted valid history; recovery could race an in-flight approval |
+| AC3 | Passed | editor tests and width 1–120 live check |
+| AC4 | Failed | concurrent recovery could delete an archive before manifest commit |
+| AC5 | Passed | six tools and gating verified |
+| AC6 | Failed | missing shell command and safe-prefix arguments such as `find -delete` and `git diff --output` failed open |
+| AC7 | Passed | shutdown/restart behavior verified |
+| AC8 | Failed | adversarial storage and shell cases were not covered |
+
+Routing: S_FIX iteration 2. Acceptance criteria remain unchanged.
+
 ## 5. Fix Log
 
 Iteration 1 targeted repairs:
@@ -65,6 +80,16 @@ Iteration 1 targeted repairs:
 - Isolated compatibility `<proposed_plan>` capture failures so later hooks, including Goal processing, still run.
 
 Regression coverage was added for every repair. After the fixes: Plan 16/16, Todo 10/10, Hooks 7/7 and Ask 2/2 passed; runtime imports, editor width 1–120 and `git diff --check` also passed.
+
+Iteration 2 targeted repairs:
+
+- Replaced prefix-only shell approval with fail-closed input handling and command-specific argument validation.
+- Added negative coverage for missing commands, `find -delete/-exec`, `git --output/--ext-diff`, `fd --exec` and `npm audit --fix`.
+- Serialized load, save and approval through a workspace transaction lock so recovery cannot observe or delete an in-flight archive.
+- Rebuilt valid immutable approval history from archive filenames when `manifest.json` is missing or damaged instead of deleting it.
+- Added manifest-loss and concurrent approval/recovery regression tests.
+
+After the second repair round: Plan 18/18, Todo 10/10, Hooks 7/7 and Ask 2/2 passed; runtime imports and `git diff --check` passed. Width 1–120 remained covered by the unchanged editor implementation and prior live matrix.
 
 ## 6. Generalization
 

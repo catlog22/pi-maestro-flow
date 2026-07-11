@@ -73,16 +73,10 @@ const MUTATING_BASH_PATTERNS = [
   /\bsudo\b/i, /\bkill\b/i, /\bpkill\b/i,
 ];
 
-const SAFE_BASH_PATTERNS = [
-  /^\s*(cat|head|tail|less|more|grep|find|ls|pwd|echo|printf|wc|sort|uniq|diff|file|stat|du|df|tree|which|type|env|uname|whoami|id|date|ps|jq|awk|rg|fd|bat)\b/i,
-  /^\s*sed\s+-n\b/i,
-  /^\s*git\s+(status|log|diff|show|branch|remote|config\s+--get|ls-files|grep)\b/i,
-  /^\s*npm\s+(list|ls|view|info|search|outdated|audit)\b/i,
-  /^\s*(node|python|python3|npm|tsc|biome)\s+--version\b/i,
-  /^\s*(Get-Content|Get-ChildItem|Get-Item|Get-Location|Resolve-Path|Test-Path|Select-String|Measure-Object)\b/i,
-];
-
 const SHELL_CHAIN_PATTERN = /(?:\r|\n|;|&&|\|\||\||`|\$\(|<\()/;
+const SHELL_SIDE_EFFECT_ARGUMENTS = /(?:^|\s)(?:--output(?:=|\s)|--outfile(?:=|\s)|-o(?:\s|$)|--in-place(?:=|\s|$)|-i(?:\s|$)|--exec(?:=|\s|$)|--exec-batch(?:=|\s|$)|-x(?:\s|$)|-X(?:\s|$)|--ext-diff(?:\s|$)|--textconv(?:\s|$)|--fix(?:\s|$))/i;
+const SIMPLE_READ_COMMAND = /^\s*(?:cat|head|tail|grep|ls|pwd|echo|printf|wc|diff|file|stat|du|df|tree|which|type|uname|whoami|id|ps|jq|rg|bat)(?:\s|$)/i;
+const POWERSHELL_READ_COMMAND = /^\s*(?:Get-Content|Get-ChildItem|Get-Item|Get-Location|Resolve-Path|Test-Path|Select-String|Measure-Object)(?:\s|$)/i;
 
 const PlanEnterParams = Type.Object({
   prompt: Type.Optional(Type.String({ description: "Optional planning request to queue after entering Plan mode" })),
@@ -256,7 +250,7 @@ export function onToolCallPlan(event: {
   }
   if (["bash", "Bash", "powershell", "PowerShell"].includes(name)) {
     const command = readCommand(event.input);
-    if (command && !isSafeCommand(command)) {
+    if (!command || !isSafeCommand(command)) {
       return { block: true, reason: `Plan mode blocks mutating commands.\nCommand: ${command.slice(0, 120)}` };
     }
   }
@@ -472,7 +466,21 @@ function isSafeCommand(command: string): boolean {
   const trimmed = command.trim();
   if (!trimmed || SHELL_CHAIN_PATTERN.test(trimmed)) return false;
   if (MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(trimmed))) return false;
-  return SAFE_BASH_PATTERNS.some((pattern) => pattern.test(trimmed));
+  if (SHELL_SIDE_EFFECT_ARGUMENTS.test(trimmed)) return false;
+  if (/^\s*find(?:\s|$)/i.test(trimmed)) {
+    return !/(?:^|\s)-(?:delete|exec|execdir|ok|okdir|fprint|fprintf|fls)(?:\s|$)/i.test(trimmed);
+  }
+  if (/^\s*fd(?:\s|$)/i.test(trimmed)) return true;
+  if (/^\s*git\s+/i.test(trimmed)) {
+    return /^\s*git\s+(?:status|log|diff|show|branch|remote|ls-files|grep)(?:\s|$)/i.test(trimmed)
+      || /^\s*git\s+config\s+--get(?:\s|$)/i.test(trimmed);
+  }
+  if (/^\s*npm\s+/i.test(trimmed)) {
+    return /^\s*npm\s+(?:list|ls|view|info|search|outdated|audit)(?:\s|$)/i.test(trimmed);
+  }
+  if (/^\s*(?:node|python|python3|npm|tsc|biome)\s+--version\s*$/i.test(trimmed)) return true;
+  if (/^\s*date(?:\s+\+\S+)?\s*$/i.test(trimmed)) return true;
+  return SIMPLE_READ_COMMAND.test(trimmed) || POWERSHELL_READ_COMMAND.test(trimmed);
 }
 
 function extractProposedPlan(text: string): string | undefined {

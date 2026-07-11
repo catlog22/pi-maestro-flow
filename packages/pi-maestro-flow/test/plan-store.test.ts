@@ -101,6 +101,63 @@ test("PlanStore removes orphan approval files but preserves committed history", 
   }
 });
 
+test("PlanStore rebuilds approval history when manifest.json is missing", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-manifest-rebuild-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") });
+    const approved = await store.approve("durable approval", 0);
+    const archiveName = approved.manifest.approvedPath!.split(/[\\/]/).at(-1)!;
+    await rm(store.manifestPath, { force: true });
+
+    const recovered = await new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") }).load();
+    assert.equal(recovered.manifest.status, "approved");
+    assert.ok(recovered.manifest.approvals.some((path) => path.endsWith(archiveName)));
+    assert.equal(await readFile(join(store.approvalsDir, archiveName), "utf8"), "durable approval");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore serializes approval commit and concurrent recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-approval-lock-"));
+  let releaseCommit: (() => void) | undefined;
+  let commitStarted: (() => void) | undefined;
+  const started = new Promise<void>((resolve) => { commitStarted = resolve; });
+  const release = new Promise<void>((resolve) => { releaseCommit = resolve; });
+  try {
+    const cwd = join(root, "workspace");
+    const options = { rootDir: join(root, "global") };
+    const approvingStore = new PlanStore(cwd, {
+      ...options,
+      approvalCommitHook: async () => {
+        commitStarted?.();
+        await release;
+      },
+    });
+    const approval = approvingStore.approve("concurrent approval", 0);
+    await started;
+
+    let recoveryFinished = false;
+    const recovery = new PlanStore(cwd, options).load().then((loaded) => {
+      recoveryFinished = true;
+      return loaded;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(recoveryFinished, false);
+
+    releaseCommit?.();
+    const [approved, recovered] = await Promise.all([approval, recovery]);
+    assert.equal(recovered.manifest.approvedPath, approved.manifest.approvedPath);
+    assert.equal(
+      await readFile(join(approvingStore.plansDir, approved.manifest.approvedPath!), "utf8"),
+      "concurrent approval",
+    );
+  } finally {
+    releaseCommit?.();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("PlanStore keeps a recoverable draft revision when approval commit fails", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-approval-fail-"));
   try {

@@ -189,6 +189,13 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git status; node --version" } })?.reason ?? "", /mutating/);
     assert.match(onToolCallPlan({ toolName: "PowerShell", input: { command: "Get-Content x | Set-Content y" } })?.reason ?? "", /mutating/);
     assert.equal(onToolCallPlan({ toolName: "PowerShell", input: { command: "Get-Content x" } }), undefined);
+    assert.match(onToolCallPlan({ toolName: "bash", input: {} })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "find . -delete" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "find . -exec rm {} ;" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git diff --output=review.patch" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git log --ext-diff" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "fd pattern -x rm" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "npm audit --fix" } })?.reason ?? "", /mutating/);
 
     await onAgentEndPlan({
       messages: [{ role: "assistant", content: "<proposed_plan>\n# Legacy plan\n</proposed_plan>" }],
