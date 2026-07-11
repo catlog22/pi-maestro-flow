@@ -109,7 +109,28 @@ After the second repair round: Plan 19/19, Todo 10/10, Hooks 7/7 and Ask 2/2 pas
 
 ## 6. Generalization
 
-Skipped by the Planex state machine because the maximum verification iteration ended with failed criteria. No implementation pattern is marked complete.
+The reopened session completed all required generalization layers.
+
+Patterns extracted:
+
+1. Syntax — persisted metadata must be strictly validated before destructive cleanup. A parser that supplies defaults or filters malformed entries can convert corruption into authorized deletion.
+2. Semantic — the durable commit point must be explicit. Before manifest commit, failures roll back archive/pending artifacts; after commit, cleanup is best-effort and must never delete the committed archive.
+3. Structural — cross-process workspace transactions require lease ownership: random token, PID/liveness, heartbeat, token-specific stale claim, ownership checks before mutation and owner-checked release.
+
+Four-angle scan:
+
+- Syntax worker timed out; local fallback scanned persistence, temp, manifest, lock and cleanup patterns.
+- Semantic worker timed out; local fallback reviewed destructive recovery and catch/rollback flows.
+- Structural worker timed out; local fallback reviewed Todo, Goal and hook adapter module state and session lifecycle.
+- Historical worker completed and confirmed the Plan fixes across `90ac529`, `6986bd0`, `55adc2a` and `abcc2d5`, with no new regression lineage.
+
+Related hits:
+
+- `hooks/trust.ts` uses atomic replacement but is a fail-closed, replaceable trust cache: parse/write failure removes trust rather than authorizing execution. Safe for this pattern.
+- Todo module state is reloaded on session start and cleared on shutdown. Safe.
+- Goal module state is reloaded from the session at start and has no active-tool snapshot ownership. Safe.
+
+Coverage, depth and actionability gates passed after the local fallback; no module accumulated 3 actionable hits, so iterative deepening was not triggered.
 
 ## 7. Discoveries
 
