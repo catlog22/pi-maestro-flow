@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -78,6 +78,24 @@ test("PlanStore recovers an externally changed current.md as a new draft revisio
     assert.equal(recovered.markdown, "human edit");
     assert.equal(recovered.manifest.revision, 2);
     assert.equal(recovered.manifest.status, "draft");
+    assert.deepEqual(await readdir(store.approvalsDir), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore removes orphan approval files but preserves committed history", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-orphan-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") });
+    const approved = await store.approve("committed", 0);
+    assert.ok(approved.manifest.approvedPath);
+    await mkdir(store.approvalsDir, { recursive: true });
+    await writeFile(join(store.approvalsDir, "orphan.md"), "orphan", "utf8");
+    await store.load();
+    const entries = await readdir(store.approvalsDir);
+    assert.ok(entries.includes(approved.manifest.approvedPath!.split(/[\\/]/).at(-1)!));
+    assert.ok(!entries.includes("orphan.md"));
   } finally {
     await rm(root, { recursive: true, force: true });
   }

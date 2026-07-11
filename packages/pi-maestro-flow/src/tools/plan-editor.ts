@@ -160,6 +160,7 @@ export async function openPlanEditor(
         },
 
         handleInput(data: string): void {
+          if (busy) return;
           if (data === CTRL_S) {
             void save();
             return;
@@ -172,7 +173,6 @@ export async function openPlanEditor(
             done({ action: "cancelled", markdown: editor.getText(), revision });
             return;
           }
-          if (busy) return;
           editor.handleInput(data);
           tui.requestRender();
         },

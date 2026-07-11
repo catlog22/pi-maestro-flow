@@ -7,7 +7,6 @@ import {
   readdir,
   rename,
   rm,
-  writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 
@@ -22,6 +21,7 @@ export interface PlanManifest {
   approvedAt?: string;
   approvedPath?: string;
   approvedChecksum?: string;
+  approvals: string[];
 }
 
 export interface LoadedPlan {
@@ -106,6 +106,8 @@ export class PlanStore {
       await atomicWriteJson(this.manifestPath, manifest);
     }
 
+    await this.removeOrphanApprovals(manifest);
+
     return {
       markdown,
       manifest,
@@ -127,6 +129,7 @@ export class PlanStore {
       status: "draft",
       draftChecksum: checksumText(markdown),
       updatedAt,
+      approvals: [...current.manifest.approvals],
     };
 
     await atomicWriteText(this.currentPath, markdown);
@@ -136,26 +139,30 @@ export class PlanStore {
 
   async approve(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {
     const draft = await this.saveDraft(markdown, expectedRevision);
+    let archivePath: string | undefined;
     try {
       const approvedAt = this.now().toISOString();
       const checksum = checksumText(markdown);
       const archiveName = `${archiveTimestamp(approvedAt)}-r${String(draft.manifest.revision).padStart(4, "0")}-${checksum.slice(0, 8)}.md`;
-      const archivePath = join(this.approvalsDir, archiveName);
+      archivePath = join(this.approvalsDir, archiveName);
       await mkdir(this.approvalsDir, { recursive: true });
-      await writeFile(archivePath, markdown, { encoding: "utf8", flag: "wx" });
+      await atomicWriteText(archivePath, markdown);
       await this.approvalCommitHook?.();
+      const approvedPath = join("approvals", archiveName);
 
       const manifest: PlanManifest = {
         ...draft.manifest,
         status: "approved",
         approvedAt,
-        approvedPath: join("approvals", archiveName),
+        approvedPath,
         approvedChecksum: checksum,
+        approvals: [...draft.manifest.approvals, approvedPath],
         updatedAt: approvedAt,
       };
       await atomicWriteJson(this.manifestPath, manifest);
       return { ...draft, manifest };
     } catch (error) {
+      if (archivePath) await rm(archivePath, { force: true }).catch(() => {});
       throw new PlanApprovalError(
         `Plan approval commit failed: ${errorMessage(error)}`,
         draft.manifest.revision,
@@ -187,6 +194,7 @@ export class PlanStore {
       status: "draft",
       draftChecksum: checksum,
       updatedAt: this.now().toISOString(),
+      approvals: [],
     };
   }
 
@@ -200,6 +208,19 @@ export class PlanStore {
     await Promise.all(entries
       .filter((entry) => entry.endsWith(".tmp"))
       .map((entry) => rm(join(this.plansDir, entry), { force: true })));
+  }
+
+  private async removeOrphanApprovals(manifest: PlanManifest): Promise<void> {
+    let entries: string[];
+    try {
+      entries = await readdir(this.approvalsDir);
+    } catch {
+      return;
+    }
+    const committed = new Set(manifest.approvals.map((path) => basename(path)));
+    await Promise.all(entries
+      .filter((entry) => entry.endsWith(".md") && !committed.has(entry))
+      .map((entry) => rm(join(this.approvalsDir, entry), { force: true })));
   }
 }
 
@@ -268,6 +289,9 @@ function validateManifest(raw: unknown, workspaceId: string, workspacePath: stri
     ...(typeof raw.approvedAt === "string" ? { approvedAt: raw.approvedAt } : {}),
     ...(typeof raw.approvedPath === "string" ? { approvedPath: raw.approvedPath } : {}),
     ...(typeof raw.approvedChecksum === "string" ? { approvedChecksum: raw.approvedChecksum } : {}),
+    approvals: Array.isArray(raw.approvals)
+      ? raw.approvals.filter((value): value is string => typeof value === "string")
+      : typeof raw.approvedPath === "string" ? [raw.approvedPath] : [],
   };
 }
 

@@ -100,3 +100,24 @@ test("Plan editor keeps the buffer open when approval fails", async () => {
   assert.equal(result.action, "cancelled");
   assert.equal(result.markdown, "important draft");
 });
+
+test("Plan editor ignores Esc while approval is in flight", async () => {
+  const harness = createHarness();
+  let releaseApproval: (() => void) | undefined;
+  const pending = openPlanEditor(harness.ctx, {
+    markdown: "race-safe draft",
+    revision: 3,
+    allowConfirm: true,
+    async onSave() { return 4; },
+    async onConfirm() {
+      await new Promise<void>((resolve) => { releaseApproval = resolve; });
+    },
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("\x1b[13;5u");
+  harness.component.handleInput("\x1b");
+  assert.equal(harness.doneValue, undefined);
+  releaseApproval?.();
+  const result = await pending;
+  assert.equal(result.action, "approved");
+});

@@ -55,7 +55,16 @@ Routing: S_FIX iteration 1. Acceptance criteria remain unchanged.
 
 ## 5. Fix Log
 
-Pending.
+Iteration 1 targeted repairs:
+
+- Rejected shell chaining, pipelines, command substitution and multiline commands before applying the read-only allowlist.
+- Required `maestro delegate` to specify `mode: "analysis"`; omitted and write modes now fail closed.
+- Restored the exact Act tool snapshot during session shutdown before clearing Plan runtime state.
+- Ignored editor input, including `Esc`, while save or approval is in flight.
+- Made approval archives atomic, tracked committed approval history in the manifest and removed orphan archives during recovery.
+- Isolated compatibility `<proposed_plan>` capture failures so later hooks, including Goal processing, still run.
+
+Regression coverage was added for every repair. After the fixes: Plan 16/16, Todo 10/10, Hooks 7/7 and Ask 2/2 passed; runtime imports, editor width 1–120 and `git diff --check` also passed.
 
 ## 6. Generalization
 

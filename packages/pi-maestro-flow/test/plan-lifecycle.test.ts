@@ -19,7 +19,7 @@ interface ToolLike {
   execute(id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext): Promise<any>;
 }
 
-function createHarness(root: string, autoConfirm = false, failingApproval = false) {
+function createHarness(root: string, autoConfirm = false, failingApproval = false, failingSave = false) {
   let active = ["Read", "Write", "todo", "custom-tool"];
   const tools = new Map<string, ToolLike>();
   const messages: string[] = [];
@@ -61,8 +61,16 @@ function createHarness(root: string, autoConfirm = false, failingApproval = fals
     ui,
   } as unknown as ExtensionContext;
 
+  class FailingSaveStore extends PlanStore {
+    override async saveDraft(): Promise<never> {
+      throw new Error("draft storage failed");
+    }
+  }
+
   initPlan(pi, {
-    storeFactory: (cwd) => new PlanStore(cwd, {
+    storeFactory: (cwd) => failingSave ? new FailingSaveStore(cwd, {
+      rootDir: join(root, "global"),
+    }) : new PlanStore(cwd, {
       rootDir: join(root, "global"),
       ...(failingApproval
         ? { approvalCommitHook: async () => { throw new Error("approval storage failed"); } }
@@ -100,6 +108,8 @@ test("Plan lifecycle dynamically activates safe tools and restores the exact Act
     assert.deepEqual(harness.active, [
       "Read", "todo", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status",
     ]);
+    assert.match(onToolCallPlan({ toolName: "maestro", input: { action: "delegate" } })?.reason ?? "", /requires delegate mode='analysis'/);
+    assert.equal(onToolCallPlan({ toolName: "maestro", input: { action: "delegate", mode: "analysis" } }), undefined);
 
     const updated = await execute(harness, "plan-update", { markdown: "# Durable plan" });
     assert.equal(updated.details.revision, 1);
@@ -107,6 +117,12 @@ test("Plan lifecycle dynamically activates safe tools and restores the exact Act
 
     await execute(harness, "plan-exit");
     assert.equal(getMode(), "act");
+    assert.deepEqual(harness.active, actSnapshot);
+
+    await execute(harness, "plan-enter");
+    onSessionShutdownPlan(harness.ctx);
+    assert.deepEqual(harness.active, actSnapshot);
+    await onSessionStartPlan(harness.ctx);
     assert.deepEqual(harness.active, actSnapshot);
   } finally {
     onSessionShutdownPlan(harness.ctx);
@@ -170,6 +186,9 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.match(onToolCallPlan({ toolName: "custom-tool", input: {} })?.reason ?? "", /does not allow/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git status" } })?.reason ?? "allowed", /allowed/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git commit -am x" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git status; node --version" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "PowerShell", input: { command: "Get-Content x | Set-Content y" } })?.reason ?? "", /mutating/);
+    assert.equal(onToolCallPlan({ toolName: "PowerShell", input: { command: "Get-Content x" } }), undefined);
 
     await onAgentEndPlan({
       messages: [{ role: "assistant", content: "<proposed_plan>\n# Legacy plan\n</proposed_plan>" }],
@@ -177,6 +196,23 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     const status = await execute(harness, "plan-status");
     assert.equal(status.details.revision, 1);
     assert.equal(status.details.status, "draft");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Compatibility capture errors are isolated inside the Plan hook", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-capture-fail-"));
+  const harness = createHarness(root, false, false, true);
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await onAgentEndPlan({
+      messages: [{ role: "assistant", content: "<proposed_plan># Must not break goal hook</proposed_plan>" }],
+    }, harness.ctx);
+    assert.match(harness.notifications.join("\n"), /compatibility capture failed/);
+    assert.equal(getMode(), "plan");
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

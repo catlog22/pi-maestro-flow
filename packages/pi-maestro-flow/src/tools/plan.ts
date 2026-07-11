@@ -79,7 +79,10 @@ const SAFE_BASH_PATTERNS = [
   /^\s*git\s+(status|log|diff|show|branch|remote|config\s+--get|ls-files|grep)\b/i,
   /^\s*npm\s+(list|ls|view|info|search|outdated|audit)\b/i,
   /^\s*(node|python|python3|npm|tsc|biome)\s+--version\b/i,
+  /^\s*(Get-Content|Get-ChildItem|Get-Item|Get-Location|Resolve-Path|Test-Path|Select-String|Measure-Object)\b/i,
 ];
+
+const SHELL_CHAIN_PATTERN = /(?:\r|\n|;|&&|\|\||\||`|\$\(|<\()/;
 
 const PlanEnterParams = Type.Object({
   prompt: Type.Optional(Type.String({ description: "Optional planning request to queue after entering Plan mode" })),
@@ -216,8 +219,8 @@ export async function onSessionStartPlan(ctx: PlanContext): Promise<void> {
 }
 
 export function onSessionShutdownPlan(ctx: PlanContext): void {
+  restoreActToolSurface();
   mode = "act";
-  activeToolsSnapshot = undefined;
   currentStore = undefined;
   currentWorkspace = "";
   latestPlan = undefined;
@@ -248,8 +251,8 @@ export function onToolCallPlan(event: {
   if (!PLAN_ALLOWED_TOOLS.has(name)) {
     return { block: true, reason: `Plan mode tool surface does not allow "${name}".` };
   }
-  if (name === "maestro" && event.input?.action === "delegate" && event.input?.mode === "write") {
-    return { block: true, reason: "Plan mode blocks write-mode delegation. Use mode='analysis'." };
+  if (name === "maestro" && event.input?.action === "delegate" && event.input?.mode !== "analysis") {
+    return { block: true, reason: "Plan mode requires delegate mode='analysis'; missing or write modes are blocked." };
   }
   if (["bash", "Bash", "powershell", "PowerShell"].includes(name)) {
     const command = readCommand(event.input);
@@ -263,11 +266,15 @@ export async function onAgentEndPlan(event: { messages: unknown[] }, ctx: PlanCo
   if (mode !== "plan") return;
   const proposedPlan = extractProposedPlan(latestAssistantText(event.messages));
   if (!proposedPlan) return;
-  const store = await ensureStore(ctx);
-  const saved = await store.saveDraft(proposedPlan, latestRevision);
-  applyLoadedPlan(saved);
-  ctx.ui.setStatus(STATUS_KEY, "plan ready");
-  ctx.ui.notify("Compatibility plan captured to current.md. Use plan-review or plan-confirm.", "info");
+  try {
+    const store = await ensureStore(ctx);
+    const saved = await store.saveDraft(proposedPlan, latestRevision);
+    applyLoadedPlan(saved);
+    ctx.ui.setStatus(STATUS_KEY, "plan ready");
+    ctx.ui.notify("Compatibility plan captured to current.md. Use plan-review or plan-confirm.", "info");
+  } catch (error) {
+    ctx.ui.notify(`Plan compatibility capture failed: ${errorMessage(error)}`, "warning");
+  }
 }
 
 async function savePlan(ctx: PlanContext, markdown: string, expectedRevision = latestRevision): Promise<LoadedPlan> {
@@ -463,7 +470,8 @@ function readCommand(input: unknown): string {
 
 function isSafeCommand(command: string): boolean {
   const trimmed = command.trim();
-  if (!trimmed || MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(trimmed))) return false;
+  if (!trimmed || SHELL_CHAIN_PATTERN.test(trimmed)) return false;
+  if (MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(trimmed))) return false;
   return SAFE_BASH_PATTERNS.some((pattern) => pattern.test(trimmed));
 }
 
