@@ -37,6 +37,7 @@ export interface PlanStoreOptions {
   rootDir?: string;
   now?: () => Date;
   approvalCommitHook?: () => Promise<void>;
+  approvalCleanupHook?: () => Promise<void>;
   lockStaleMs?: number;
   lockRetryMs?: number;
   lockTimeoutMs?: number;
@@ -96,6 +97,7 @@ export class PlanStore {
 
   private readonly now: () => Date;
   private readonly approvalCommitHook?: () => Promise<void>;
+  private readonly approvalCleanupHook?: () => Promise<void>;
   private readonly lockStaleMs: number;
   private readonly lockRetryMs: number;
   private readonly lockTimeoutMs: number;
@@ -117,6 +119,7 @@ export class PlanStore {
     this.lockOwnerPath = join(this.lockPath, "owner.json");
     this.now = options.now ?? (() => new Date());
     this.approvalCommitHook = options.approvalCommitHook;
+    this.approvalCleanupHook = options.approvalCleanupHook;
     this.lockStaleMs = options.lockStaleMs ?? 5 * 60_000;
     this.lockRetryMs = options.lockRetryMs ?? 25;
     this.lockTimeoutMs = options.lockTimeoutMs ?? 5_000;
@@ -138,6 +141,7 @@ export class PlanStore {
       const draft = await this.saveDraftUnlocked(markdown, expectedRevision, ownerToken);
       let archivePath: string | undefined;
       let pendingToken: string | undefined;
+      let committed: LoadedPlan | undefined;
       try {
         const approvedAt = this.now().toISOString();
         const checksum = checksumText(markdown);
@@ -168,8 +172,7 @@ export class PlanStore {
           updatedAt: approvedAt,
         };
         await atomicWriteJson(this.manifestPath, manifest);
-        await this.removePendingIfOwned(pendingToken);
-        return { ...draft, manifest };
+        committed = { ...draft, manifest };
       } catch (error) {
         if (archivePath) await rm(archivePath, { force: true }).catch(() => {});
         if (pendingToken) await this.removePendingIfOwned(pendingToken);
@@ -179,6 +182,9 @@ export class PlanStore {
           true,
         );
       }
+      await this.approvalCleanupHook?.().catch(() => {});
+      if (pendingToken) await this.removePendingIfOwned(pendingToken).catch(() => {});
+      return committed!;
     });
   }
 
@@ -379,6 +385,15 @@ export class PlanStore {
   private async recoverPendingApproval(manifest: PlanManifest | null): Promise<void> {
     const pending = await this.readPendingApproval();
     if (!pending) return;
+    if (pending === "invalid") {
+      const committed = new Set(manifest?.approvals ?? []);
+      for (const approvalPath of await this.recoverableApprovalPaths()) {
+        if (!committed.has(approvalPath)) {
+          await this.quarantineArchive(basename(approvalPath), "invalid-pending");
+        }
+      }
+      return;
+    }
     const approvalPath = join("approvals", pending.archiveName);
     if (!manifest?.approvals.includes(approvalPath)) {
       await this.quarantineArchive(pending.archiveName, `pending-${safeLockToken(pending.token)}`);
@@ -386,10 +401,13 @@ export class PlanStore {
     await this.removePendingIfOwned(pending.token);
   }
 
-  private async readPendingApproval(): Promise<PendingApproval | null> {
+  private async readPendingApproval(): Promise<PendingApproval | "invalid" | null> {
     try {
       const raw: unknown = JSON.parse(await readFile(this.pendingPath, "utf8"));
-      return validatePendingApproval(raw);
+      const pending = validatePendingApproval(raw);
+      if (pending) return pending;
+      await this.quarantineFile(this.pendingPath, "invalid-pending.json");
+      return "invalid";
     } catch (error) {
       if (isMissingFile(error)) return null;
       if (error instanceof SyntaxError) {
@@ -402,7 +420,7 @@ export class PlanStore {
 
   private async removePendingIfOwned(token: string): Promise<void> {
     const pending = await this.readPendingApproval();
-    if (pending?.token === token) await rm(this.pendingPath, { force: true });
+    if (pending && pending !== "invalid" && pending.token === token) await rm(this.pendingPath, { force: true });
   }
 
   private async quarantineArchive(archiveName: string, suffix: string): Promise<void> {
@@ -555,14 +573,19 @@ export function checksumText(text: string): string {
 async function atomicWriteText(filePath: string, content: string): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}-${randomUUID()}.tmp`;
-  const handle = await open(temporaryPath, "wx");
   try {
-    await handle.writeFile(content, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
+    const handle = await open(temporaryPath, "wx");
+    try {
+      await handle.writeFile(content, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporaryPath, filePath);
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => {});
+    throw error;
   }
-  await rename(temporaryPath, filePath);
 }
 
 async function atomicWriteJson(filePath: string, value: unknown): Promise<void> {
@@ -571,14 +594,19 @@ async function atomicWriteJson(filePath: string, value: unknown): Promise<void> 
 
 async function atomicWriteJsonExistingDir(filePath: string, value: unknown): Promise<void> {
   const temporaryPath = `${filePath}.${process.pid}-${randomUUID()}.tmp`;
-  const handle = await open(temporaryPath, "wx");
   try {
-    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-    await handle.sync();
-  } finally {
-    await handle.close();
+    const handle = await open(temporaryPath, "wx");
+    try {
+      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+      await handle.sync();
+    } finally {
+      await handle.close();
+    }
+    await rename(temporaryPath, filePath);
+  } catch (error) {
+    await rm(temporaryPath, { force: true }).catch(() => {});
+    throw error;
   }
-  await rename(temporaryPath, filePath);
 }
 
 async function readOptionalText(filePath: string): Promise<string> {
@@ -675,7 +703,8 @@ function isChecksum(value: unknown): value is string {
 }
 
 function isIsoDate(value: unknown): value is string {
-  return typeof value === "string" && Number.isFinite(Date.parse(value));
+  if (typeof value !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) return false;
+  return new Date(value).toISOString() === value;
 }
 
 function validateLockOwner(raw: unknown): LockOwner | null {

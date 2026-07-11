@@ -210,6 +210,30 @@ test("PlanStore quarantines an interrupted pending approval instead of approving
   }
 });
 
+test("PlanStore quarantines archives associated with a structurally invalid pending marker", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-invalid-pending-"));
+  try {
+    const cwd = join(root, "workspace");
+    const options = { rootDir: join(root, "global") };
+    const store = new PlanStore(cwd, options);
+    await store.saveDraft("invalid pending draft", 0);
+    const checksum = checksumText("invalid pending draft");
+    const archiveName = `20260711T120000000Z-r0001-${checksum.slice(0, 8)}.md`;
+    await writeFile(join(store.approvalsDir, archiveName), "invalid pending draft", "utf8");
+    await writeFile(store.pendingPath, `${JSON.stringify({ version: 1, token: "missing-fields" })}\n`, "utf8");
+
+    const recovered = await new PlanStore(cwd, options).load();
+    assert.equal(recovered.manifest.status, "draft");
+    assert.deepEqual(recovered.manifest.approvals, []);
+    assert.equal((await readdir(store.approvalsDir)).includes(archiveName), false);
+    const recoveryEntries = await readdir(store.recoveryDir);
+    assert.ok(recoveryEntries.some((entry) => entry.startsWith(archiveName)));
+    assert.ok(recoveryEntries.some((entry) => entry.startsWith("invalid-pending.json")));
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("PlanStore heartbeat prevents a live long approval from being reclaimed as stale", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-lock-heartbeat-"));
   let releaseCommit: (() => void) | undefined;
@@ -404,6 +428,26 @@ test("PlanStore keeps a recoverable draft revision when approval commit fails", 
     assert.equal(recovered.markdown, "human buffer");
     assert.equal(recovered.manifest.revision, 1);
     assert.equal(recovered.manifest.status, "draft");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore keeps a committed approval when pending cleanup fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-cleanup-fail-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), {
+      rootDir: join(root, "global"),
+      approvalCleanupHook: async () => { throw new Error("cleanup unavailable"); },
+    });
+    const approved = await store.approve("committed before cleanup", 0);
+    assert.equal(approved.manifest.status, "approved");
+    assert.equal(
+      await readFile(join(store.plansDir, approved.manifest.approvedPath!), "utf8"),
+      "committed before cleanup",
+    );
+    const reloaded = await new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") }).load();
+    assert.equal(reloaded.manifest.approvedPath, approved.manifest.approvedPath);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

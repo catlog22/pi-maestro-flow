@@ -140,3 +140,11 @@ The active thread goal explicitly continued the full AC1–AC8 objective after t
 - New deterministic tests cover damaged manifest invariants, clock rollback, interrupted pending approval, heartbeat protection, dead-owner recovery and old-owner handoff.
 
 Focused Plan verification after this repair: 25/25 passed; runtime imports passed.
+
+A local transaction-boundary self-review found and closed two additional cases before final verification:
+
+- Once `manifest.json` is durably committed, failure to clean `approval.pending.json` no longer rolls back or deletes the committed archive.
+- Structurally invalid pending markers and their uncommitted archives are quarantined instead of being promoted during reconstruction.
+- Atomic write helpers now remove temporary files when rename fails, and persisted timestamps require canonical ISO format.
+
+PlanStore coverage increased to 17/17; total Plan coverage is now 27 tests.
