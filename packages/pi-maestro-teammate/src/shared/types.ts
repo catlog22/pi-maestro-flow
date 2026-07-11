@@ -24,9 +24,15 @@ export interface SingleResult {
   attemptedModels?: string[];
 }
 
+export type AgentProgressStatus = "pending" | "running" | "completed" | "failed";
+
 export interface AgentProgress {
   agent: string;
-  status: "running" | "completed" | "failed";
+  name?: string;
+  correlationId?: string;
+  taskIndex?: number;
+  dependencies?: number[];
+  status: AgentProgressStatus;
   recentTools: Array<{ name: string; status: string }>;
   toolCount: number;
   tokens: number;
@@ -36,20 +42,26 @@ export interface AgentProgress {
   lastMessage?: string;
 }
 
+export interface AgentProgressSnapshot {
+  agent: string;
+  name?: string;
+  correlationId: string;
+  taskIndex: number;
+  dependencies: number[];
+  status: AgentProgressStatus;
+  startedAt?: string;
+  completedAt?: string;
+  recentTools?: Array<{ name: string; status: string }>;
+  toolCount?: number;
+  tokens?: number;
+  lastMessage?: string;
+}
+
 export interface Details {
   mode: "single" | "parallel" | "chain" | "graph";
   results: SingleResult[];
   structuredOutput?: unknown;
-  progress?: Array<{
-    agent: string;
-    status: "running" | "completed" | "failed";
-    startedAt: string;
-    completedAt?: string;
-    recentTools?: Array<{ name: string; status: string }>;
-    toolCount?: number;
-    tokens?: number;
-    lastMessage?: string;
-  }>;
+  progress?: AgentProgressSnapshot[];
 }
 
 export type MessageKind = "task" | "notification" | "result";
@@ -73,6 +85,23 @@ export interface ActiveAgent {
   startedAt: number;
   abortController: AbortController;
   stdin?: import("node:stream").Writable;
+  sendControl?: (message: Record<string, unknown>) => boolean;
+  sessionId?: string;
+  sessionFile?: string;
+  sessionDir?: string;
+  promptSeq?: number;
+  lease?: import("../runs/session-handoff.ts").SessionLease;
+  pendingHandoff?: {
+    nonce: string;
+    resolve: (ready: boolean) => void;
+    timer: ReturnType<typeof setTimeout>;
+  };
+  pendingHandback?: {
+    nonce: string;
+    epoch: number;
+    sessionId?: string;
+    sessionFile?: string;
+  };
   inbox: MessageEnvelope[];
   outputLog: string[];
   pendingResolve?: (result: SingleResult) => void;
@@ -83,11 +112,14 @@ export interface ActiveAgent {
   lastResult?: string;
   sleptAt?: number;
   sleepMs: number;
+  progress?: AgentProgressSnapshot[];
 }
 
 export interface TeammateState {
   baseCwd: string;
   currentSessionId: string | null;
+  mainSessionFile?: string;
+  handoffSwitching?: boolean;
   activeRuns: Map<string, ActiveAgent>;
   namedAgents: Map<string, string>;
 }

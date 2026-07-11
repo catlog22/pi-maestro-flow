@@ -13,9 +13,11 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { fileURLToPath } from "node:url";
 import { resolveAgent, type AgentConfig } from "../agents/agents.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
 import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
+import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 
 // ---------------------------------------------------------------------------
 // Public param / option interfaces
@@ -40,11 +42,18 @@ export interface RunTeammateParams {
 
 export interface RunTeammateOptions {
   baseCwd: string;
+  correlationId?: string;
+  taskCorrelationIds?: string[];
   signal?: AbortSignal;
   onProgress?: (data: AgentProgress) => void;
   onChildRequest?: (event: Record<string, unknown>, reply: (msg: unknown) => void) => void;
+  onChildEvent?: (event: Record<string, unknown>) => void;
   parentSessionFile?: string;
-  onChildSpawned?: (stdin: import("node:stream").Writable) => void;
+  onChildSpawned?: (
+    stdin: import("node:stream").Writable,
+    sendControl: (message: Record<string, unknown>) => boolean,
+    sessionDir?: string,
+  ) => void;
   onTurnComplete?: (result: SingleResult) => void;
 }
 
@@ -156,7 +165,7 @@ function resolvePath(obj: unknown, pathStr: string): unknown {
   return current;
 }
 
-function resolveVariables(
+export function resolveVariables(
   template: string,
   outputs: Map<string, TaskOutput>,
   taskNames: Set<string>,
@@ -374,13 +383,14 @@ function isRetryableModelError(messages: Array<{ role: string; content: string }
 // Build pi CLI arguments
 // ---------------------------------------------------------------------------
 
-function buildPiArgs(
+export function buildPiArgs(
   agentConfig: AgentConfig,
   params: RunTeammateParams,
   systemPromptFile: string,
   modelOverride?: string,
   sessionDir?: string,
   forkSessionFile?: string,
+  schemaFile?: string,
 ): string[] {
   // RPC mode: stdin stays open for bidirectional messaging (steer/follow_up/abort)
   const args: string[] = ["--mode", "rpc"];
@@ -397,7 +407,15 @@ function buildPiArgs(
   if (agentConfig.tools && agentConfig.tools.length > 0) {
     const proxyTools = ["teammate", "teammate-send", "teammate-list", "teammate-watch"];
     const toolSet = new Set([...agentConfig.tools, ...proxyTools]);
+    if (schemaFile) toolSet.add("structured_output");
     args.push("--tools", [...toolSet].join(","));
+  }
+
+  if (schemaFile) {
+    const structuredOutputExtension = fileURLToPath(
+      new URL("../extension/structured-output.ts", import.meta.url),
+    );
+    args.push("--extension", structuredOutputExtension);
   }
 
   args.push("--append-system-prompt", systemPromptFile);
@@ -463,7 +481,7 @@ export async function runTeammate(
   options: RunTeammateOptions,
 ): Promise<SingleResult> {
   const startTime = Date.now();
-  const correlationId = randomUUID();
+  const correlationId = options.correlationId ?? randomUUID();
   const cwd = params.cwd ?? options.baseCwd;
 
   // AC4: Depth guard
@@ -545,14 +563,16 @@ async function runSingleAttempt(
   let sessionDir: string | undefined;
   let forkSessionFile: string | undefined;
   let forkWarning: string | undefined;
+  const parentSession = options.parentSessionFile ?? process.env.PI_TEAMMATE_PARENT_SESSION ?? null;
+  if (parentSession && fs.existsSync(parentSession)) {
+    const sessionRoot = getTeammateSessionRoot(parentSession);
+    if (sessionRoot) {
+      sessionDir = path.join(sessionRoot, correlationId);
+      fs.mkdirSync(sessionDir, { recursive: true });
+    }
+  }
   if (effectiveContext === "fork") {
-    const parentSession = options.parentSessionFile ?? process.env.PI_TEAMMATE_PARENT_SESSION ?? null;
     if (parentSession && fs.existsSync(parentSession)) {
-      const sessionRoot = getTeammateSessionRoot(parentSession);
-      if (sessionRoot) {
-        sessionDir = path.join(sessionRoot, correlationId);
-        fs.mkdirSync(sessionDir, { recursive: true });
-      }
       forkSessionFile = parentSession;
     } else if (params.context === "fork") {
       forkWarning = "Fork requested but parent session file not available. Starting with fresh context.";
@@ -568,7 +588,15 @@ async function runSingleAttempt(
     outputFile = files.outputFile;
   }
 
-  const piArgs = buildPiArgs(agentConfig, params, systemPromptFile, modelOverride, sessionDir, forkSessionFile);
+  const piArgs = buildPiArgs(
+    agentConfig,
+    params,
+    systemPromptFile,
+    modelOverride,
+    sessionDir,
+    forkSessionFile,
+    schemaFile,
+  );
 
   const usage = emptyUsage();
   const messages: Array<{ role: string; content: string }> = [];
@@ -596,6 +624,7 @@ async function runSingleAttempt(
 
     if (outputFile) {
       spawnEnv.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH = outputFile;
+      spawnEnv.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH = schemaFile;
     }
 
     if (options.parentSessionFile) {
@@ -643,7 +672,15 @@ async function runSingleAttempt(
 
     // Expose stdin for teammate-send message injection
     if (child.stdin) {
-      options.onChildSpawned?.(child.stdin);
+      options.onChildSpawned?.(child.stdin, (message) => {
+        if (!child.connected) return false;
+        try {
+          child.send(message as never);
+          return true;
+        } catch {
+          return false;
+        }
+      }, sessionDir);
     }
 
     // IPC message listener — proxy requests from child extensions
@@ -655,6 +692,8 @@ async function runSingleAttempt(
             try { child.send(reply); } catch { /* child disconnected */ }
           };
           options.onChildRequest(m, replyFn);
+        } else {
+          options.onChildEvent?.(m);
         }
       });
     }
@@ -839,7 +878,8 @@ async function runSingleAttempt(
             resolve(turnResult);
           }
           options.onTurnComplete?.(turnResult);
-          // Process stays alive — stdin open for follow_up/steer to wake agent
+          // Process stays alive. Idle agents must be resumed with an RPC prompt;
+          // steer/follow_up only queue while an agent loop is already running.
           break;
         }
         case "error": {
@@ -958,6 +998,9 @@ export async function runGraph(
   concurrency: number,
   options: RunTeammateOptions,
 ): Promise<SingleResult[]> {
+  const taskCorrelationIds = tasks.map(
+    (_, index) => options.taskCorrelationIds?.[index] ?? randomUUID(),
+  );
   const taskNames = new Set(tasks.filter((t) => t.name).map((t) => t.name!));
   const indexByName = new Map<string, number>();
   for (let i = 0; i < tasks.length; i++) {
@@ -974,14 +1017,14 @@ export async function runGraph(
   });
 
   if (hasCycle(deps)) {
-    return tasks.map((t) => ({
+    return tasks.map((t, index) => ({
       agent: t.agent,
       task: t.task,
       exitCode: 1,
       messages: [{ role: "system", content: "Circular dependency detected in task graph" }],
       usage: emptyUsage(),
       model: t.model ?? "unknown",
-      correlationId: randomUUID(),
+      correlationId: taskCorrelationIds[index],
       durationMs: 0,
     }));
   }
@@ -993,14 +1036,14 @@ export async function runGraph(
   }
   for (const [name, count] of nameCount) {
     if (count > 1) {
-      return tasks.map((t) => ({
+      return tasks.map((t, index) => ({
         agent: t.agent,
         task: t.task,
         exitCode: 1,
         messages: [{ role: "system", content: `Duplicate task name "${name}"` }],
         usage: emptyUsage(),
         model: t.model ?? "unknown",
-        correlationId: randomUUID(),
+        correlationId: taskCorrelationIds[index],
         durationMs: 0,
       }));
     }
@@ -1076,6 +1119,25 @@ export async function runGraph(
     }
   }
 
+  function reportTaskFailure(task: NormalizedTask, taskIndex: number, message: string): void {
+    const now = Date.now();
+    options.onProgress?.({
+      agent: task.agent,
+      name: task.name,
+      correlationId: taskCorrelationIds[taskIndex],
+      taskIndex,
+      dependencies: deps[taskIndex],
+      status: "failed",
+      recentTools: [],
+      toolCount: 0,
+      tokens: 0,
+      durationMs: 0,
+      lastActivityAt: now,
+      startedAt: now,
+      lastMessage: message,
+    });
+  }
+
   const promises = tasks.map(async (task, idx) => {
     const depsOk = await waitForDeps(idx);
 
@@ -1088,9 +1150,10 @@ export async function runGraph(
         messages: [{ role: "system", content: "Skipped: upstream dependency failed" }],
         usage: emptyUsage(),
         model: task.model ?? "unknown",
-        correlationId: randomUUID(),
+        correlationId: taskCorrelationIds[idx],
         durationMs: 0,
       };
+      reportTaskFailure(task, idx, "Skipped: upstream dependency failed");
       notifyComplete(idx);
       return;
     }
@@ -1110,9 +1173,10 @@ export async function runGraph(
         }],
         usage: emptyUsage(),
         model: task.model ?? "unknown",
-        correlationId: randomUUID(),
+        correlationId: taskCorrelationIds[idx],
         durationMs: 0,
       };
+      reportTaskFailure(task, idx, results[idx].messages[0].content);
       notifyComplete(idx);
       return;
     }
@@ -1129,7 +1193,19 @@ export async function runGraph(
           outputSchema: task.outputSchema,
           timeoutMs: task.timeoutMs,
         },
-        options,
+        {
+          ...options,
+          correlationId: taskCorrelationIds[idx],
+          onProgress: options.onProgress
+            ? (data) => options.onProgress?.({
+                ...data,
+                name: task.name,
+                correlationId: taskCorrelationIds[idx],
+                taskIndex: idx,
+                dependencies: deps[idx],
+              })
+            : undefined,
+        },
       );
       results[idx] = result;
 
@@ -1158,9 +1234,10 @@ export async function runGraph(
         }],
         usage: emptyUsage(),
         model: task.model ?? "unknown",
-        correlationId: randomUUID(),
+        correlationId: taskCorrelationIds[idx],
         durationMs: 0,
       };
+      reportTaskFailure(task, idx, results[idx].messages[0].content);
     } finally {
       release();
       notifyComplete(idx);
@@ -1175,19 +1252,25 @@ export async function runGraph(
 // RPC: Send message to running agent via stdin
 // ---------------------------------------------------------------------------
 
-export type RpcMessageMode = "steer" | "follow_up" | "abort";
+export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort";
 
 export function sendRpcMessage(
   stdin: import("node:stream").Writable,
   message: string,
   mode: RpcMessageMode = "follow_up",
+  token?: LeaseToken,
 ): boolean {
   if (!stdin.writable) return false;
   if (mode === "abort") {
     stdin.write(JSON.stringify({ type: "abort" }) + "\n");
     return true;
   }
-  stdin.write(JSON.stringify({ type: mode, message }) + "\n");
+  const leasedMessage = wrapLeasedMessage(message, token);
+  if (mode === "prompt") {
+    stdin.write(JSON.stringify({ type: "prompt", message: leasedMessage }) + "\n");
+    return true;
+  }
+  stdin.write(JSON.stringify({ type: mode, message: leasedMessage }) + "\n");
   return true;
 }
 

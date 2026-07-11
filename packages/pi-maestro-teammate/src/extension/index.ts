@@ -2,25 +2,42 @@
  * Teammate Extension Entry Point
  *
  * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status)
- * TUI: Alt+R overlay, widget below editor, Alt+B foreground→background detach
+ * TUI: Alt+R composer panel, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 
 import { randomUUID } from "node:crypto";
+import * as path from "node:path";
 import type {
   ExtensionAPI,
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams } from "./schemas.ts";
 import {
   runTeammate,
   runGraph,
   normalizeChainToTasks,
   inferGraphMode,
+  extractDependencies,
   sendRpcMessage,
 } from "../runs/execution.ts";
+import {
+  confirmChildReloaded,
+  confirmParked,
+  createChildLease,
+  fenceLease,
+  leaseToken,
+  requestHandback,
+  requestPark,
+  recoverChild,
+  sameLeaseToken,
+  transferToMain,
+  unwrapLeasedMessage,
+  type LeaseToken,
+} from "../runs/session-handoff.ts";
 import type {
   RunTeammateParams,
   RunTeammateOptions,
@@ -36,8 +53,10 @@ import type {
   Details,
   TeammateState,
   AgentProgress,
+  AgentProgressSnapshot,
   ActiveAgent,
   MessageEnvelope,
+  SingleResult,
 } from "../shared/types.ts";
 import {
   TEAMMATE_COMPLETE_EVENT,
@@ -45,7 +64,166 @@ import {
   TEAMMATE_MESSAGE_EVENT,
 } from "../shared/types.ts";
 
+interface AgentWidgetTheme {
+  fg(name: string, text: string): string;
+  bold(text: string): string;
+}
+
+interface AgentWidgetRow {
+  label: string;
+  agent: string;
+  status: AgentProgressSnapshot["status"] | "sleeping";
+  action: string;
+  direction: "↑" | "↓";
+  toolCount: number;
+  tokens: number;
+}
+
+function compactMetric(value: number): string {
+  if (value < 1000) return String(value);
+  if (value < 1_000_000) return `${(value / 1000).toFixed(value < 100_000 ? 1 : 0)}k`;
+  return `${(value / 1_000_000).toFixed(1)}m`;
+}
+
+function toolAction(name: string): string {
+  const normalized = name.toLowerCase();
+  if (normalized === "write" || normalized === "edit" || normalized.includes("patch")) return "writing file";
+  if (normalized === "read" || normalized === "grep" || normalized === "ls") return "reading files";
+  if (normalized === "bash" || normalized.includes("command")) return "running command";
+  return `using ${name}`;
+}
+
+function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
+  const rows: AgentWidgetRow[] = [];
+  for (const active of agents) {
+    const snapshots = active.progress ?? [];
+    const effective = snapshots.length > 1 ? snapshots : [snapshots[0]];
+    for (const progress of effective) {
+      const runningTool = progress?.recentTools?.find((tool) => tool.status === "running");
+      const status = active.status === "sleeping" ? "sleeping" : progress?.status ?? "running";
+      const action = runningTool
+        ? toolAction(runningTool.name)
+        : status === "sleeping"
+          ? "sleeping"
+          : status === "pending"
+            ? "waiting for dependencies"
+            : status === "failed"
+              ? "failed"
+              : status === "completed"
+                ? "completed"
+                : progress?.lastMessage
+                  ? "streaming"
+                  : "waiting for model";
+      rows.push({
+        label: progress?.name ?? active.name ?? active.correlationId.slice(0, 8),
+        agent: progress?.agent ?? active.agent,
+        status,
+        action,
+        direction: runningTool ? "↓" : "↑",
+        toolCount: progress?.toolCount ?? 0,
+        tokens: progress?.tokens ?? 0,
+      });
+    }
+  }
+  return rows;
+}
+
+export function renderAgentStatusWidget(
+  agents: ActiveAgent[],
+  width: number,
+  theme: AgentWidgetTheme,
+): string[] {
+  const safeWidth = Math.max(1, width);
+  const rows = agentWidgetRows(agents);
+  if (rows.length === 0) return [];
+  const statusRank = (status: AgentWidgetRow["status"]): number => {
+    if (status === "running") return 0;
+    if (status === "sleeping") return 1;
+    if (status === "pending") return 2;
+    if (status === "failed") return 3;
+    return 4;
+  };
+  rows.sort((a, b) => statusRank(a.status) - statusRank(b.status));
+
+  const maxVisible = safeWidth < 20 ? 3 : safeWidth < 40 ? 4 : 6;
+  const visible = rows.slice(0, maxVisible);
+  const hidden = rows.length - visible.length;
+  const icon = (row: AgentWidgetRow): string => {
+    if (row.status === "running") return theme.fg("success", "■");
+    if (row.status === "sleeping") return theme.fg("warning", "◉");
+    if (row.status === "failed") return theme.fg("error", "✗");
+    if (row.status === "completed") return theme.fg("muted", "✓");
+    return theme.fg("dim", "□");
+  };
+
+  if (safeWidth < 20) {
+    const compact = visible.map((row) => truncateToWidth(
+      `${icon(row)} @${row.label} ${row.action}`,
+      safeWidth,
+      "…",
+    ));
+    if (hidden > 0) compact.push(truncateToWidth(theme.fg("dim", `… ${hidden} more`), safeWidth, "…"));
+    return compact;
+  }
+
+  const running = rows.filter((row) => row.status === "running").length;
+  const sleeping = rows.filter((row) => row.status === "sleeping").length;
+  const pending = rows.filter((row) => row.status === "pending").length;
+  const failed = rows.filter((row) => row.status === "failed").length;
+  const summary = [
+    running ? `${running} running` : "",
+    sleeping ? `${sleeping} sleeping` : "",
+    pending ? `${pending} pending` : "",
+    failed ? `${failed} failed` : "",
+  ].filter(Boolean).join(" · ");
+  const lines = [truncateToWidth(
+    `${theme.bold("Agents")}  ${theme.fg("dim", `${summary} · Alt+R`)}`,
+    safeWidth,
+    "…",
+  )];
+  for (let index = 0; index < visible.length; index++) {
+    const row = visible[index];
+    const connector = index === visible.length - 1 && hidden === 0 ? "└─" : "├─";
+    const metrics = [
+      row.tokens ? `${row.direction} ${compactMetric(row.tokens)} tokens` : "",
+      row.toolCount ? `${row.toolCount} tools` : "",
+    ].filter(Boolean).join(" · ");
+    const meta = metrics ? ` · ${metrics}` : "";
+    lines.push(truncateToWidth(
+      `${theme.fg("dim", connector)} ${icon(row)} ${theme.fg("accent", `@${row.label}`)} ${theme.fg("muted", row.agent)} · ${row.action}${theme.fg("dim", meta)}`,
+      safeWidth,
+      "…",
+    ));
+  }
+  if (hidden > 0) {
+    lines.push(truncateToWidth(theme.fg("dim", `└─ … ${hidden} more · Alt+R to inspect`), safeWidth, "…"));
+  }
+  return lines;
+}
+
 export default function registerTeammateExtension(pi: ExtensionAPI): void {
+  pi.registerMessageRenderer<Details | { result?: SingleResult }>(
+    "teammate-complete",
+    (message, options, theme) => {
+      const rawDetails = message.details;
+      let details: Details | undefined;
+      if (rawDetails && "results" in rawDetails && Array.isArray(rawDetails.results)) {
+        details = rawDetails as Details;
+      } else if (rawDetails && "result" in rawDetails && rawDetails.result) {
+        details = { mode: "single", results: [rawDetails.result] };
+      }
+      if (!details) return undefined;
+
+      const content = typeof message.content === "string"
+        ? [{ type: "text" as const, text: message.content }]
+        : message.content;
+      return renderTeammateResult({
+        content,
+        details,
+      }, options, theme as ExtensionContext["ui"]["theme"]);
+    },
+  );
+
   const isChild = process.env.PI_TEAMMATE_CHILD === "1";
 
   // =========================================================================
@@ -53,10 +231,89 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   // =========================================================================
 
   if (isChild) {
-    const pendingRequests = new Map<string, (result: unknown) => void>();
+    const bridgeKey = Symbol.for("pi-maestro-teammate.child-handoff");
+    interface ChildHandoffBridge {
+      ctx?: ExtensionContext;
+      parked: boolean;
+      parking: boolean;
+      nonce?: string;
+      listenerInstalled: boolean;
+      pollTimer?: ReturnType<typeof setInterval>;
+      pendingRequests: Map<string, (result: unknown) => void>;
+      expectedLease?: LeaseToken;
+      acceptedPromptSeq: number;
+      requiredPromptSeq: number;
+    }
+    const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
+    const bridge: ChildHandoffBridge = (globals[bridgeKey] as ChildHandoffBridge | undefined) ?? {
+      parked: false,
+      parking: false,
+      listenerInstalled: false,
+      pendingRequests: new Map(),
+      acceptedPromptSeq: 0,
+      requiredPromptSeq: 0,
+    };
+    globals[bridgeKey] = bridge;
+    const pendingRequests = bridge.pendingRequests;
+
+    const sendChildEvent = (message: Record<string, unknown>): void => {
+      if (typeof process.send === "function") process.send(message);
+    };
+
+    const publishSessionIdentity = (ctx: ExtensionContext): void => {
+      bridge.ctx = ctx;
+      sendChildEvent({
+        type: "teammate_session_ready",
+        correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
+        sessionId: ctx.sessionManager.getSessionId(),
+        sessionFile: ctx.sessionManager.getSessionFile(),
+      });
+    };
+
+    pi.on("session_start", (_event, ctx) => publishSessionIdentity(ctx));
+    pi.on("session_compact", (_event, ctx) => publishSessionIdentity(ctx));
+    pi.on("message_end", (_event, ctx) => publishSessionIdentity(ctx));
+    pi.on("agent_end", (_event, ctx) => publishSessionIdentity(ctx));
+    pi.on("input", (event) => {
+      if (event.text.startsWith("/teammate-handoff-reload ")) {
+        return bridge.expectedLease?.owner === "none" ? { action: "continue" } : { action: "handled" };
+      }
+      if (bridge.parked) return { action: "handled" };
+      const unwrapped = unwrapLeasedMessage(event.text);
+      if (unwrapped.malformed) return { action: "handled" };
+      if (bridge.expectedLease && !sameLeaseToken(bridge.expectedLease, unwrapped.token)) {
+        return { action: "handled" };
+      }
+      bridge.acceptedPromptSeq++;
+      if (unwrapped.token) return { action: "transform", text: unwrapped.message };
+      return { action: "continue" };
+    });
+
+    pi.registerCommand("teammate-handoff-reload", {
+      description: "Internal: reload a parked teammate session before ownership return",
+      async handler(args, ctx) {
+        const sessionFile = decodeURIComponent(args.trim());
+        if (!sessionFile) return;
+        await ctx.switchSession(sessionFile, {
+          withSession: async (nextCtx) => {
+            bridge.ctx = nextCtx;
+            bridge.parked = false;
+            bridge.parking = false;
+            sendChildEvent({
+              type: "teammate_handoff_returned",
+              correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
+              nonce: bridge.nonce,
+              sessionId: nextCtx.sessionManager.getSessionId(),
+              sessionFile: nextCtx.sessionManager.getSessionFile(),
+            });
+          },
+        });
+      },
+    });
 
     // IPC listener: receive results from root
-    if (typeof process.send === "function") {
+    if (typeof process.send === "function" && !bridge.listenerInstalled) {
+      bridge.listenerInstalled = true;
       process.on("message", (msg: unknown) => {
         const m = msg as Record<string, unknown>;
         if (m?.type === "teammate_proxy_result") {
@@ -65,6 +322,38 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             pendingRequests.delete(m.requestId as string);
             resolve(m.result);
           }
+        } else if (m?.type === "teammate_handoff_request") {
+          bridge.parking = true;
+          bridge.nonce = m.nonce as string;
+          bridge.requiredPromptSeq = Number(m.requiredPromptSeq ?? bridge.acceptedPromptSeq);
+          if (bridge.pollTimer) clearInterval(bridge.pollTimer);
+          bridge.pollTimer = setInterval(() => {
+            if (!bridge.parking || !bridge.ctx?.isIdle() || bridge.acceptedPromptSeq < bridge.requiredPromptSeq) return;
+            if (bridge.pollTimer) clearInterval(bridge.pollTimer);
+            bridge.pollTimer = undefined;
+            bridge.parking = false;
+            bridge.parked = true;
+            sendChildEvent({
+              type: "teammate_handoff_ready",
+              correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
+              nonce: bridge.nonce,
+              sessionId: bridge.ctx.sessionManager.getSessionId(),
+              sessionFile: bridge.ctx.sessionManager.getSessionFile(),
+            });
+          }, 50);
+        } else if (m?.type === "teammate_lease_update") {
+          bridge.expectedLease = m.token as LeaseToken | undefined;
+          if (bridge.expectedLease?.owner === "none") bridge.nonce = bridge.expectedLease.nonce;
+        } else if (m?.type === "teammate_handoff_cancel" && m.nonce === bridge.nonce) {
+          bridge.parking = false;
+          bridge.parked = false;
+          if (bridge.pollTimer) clearInterval(bridge.pollTimer);
+          bridge.pollTimer = undefined;
+          sendChildEvent({
+            type: "teammate_handoff_cancelled",
+            correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
+            nonce: bridge.nonce,
+          });
         }
       });
     }
@@ -131,12 +420,60 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   // ROOT MODE — full tool implementations below
   // =========================================================================
 
-  const state: TeammateState = {
+  const registryKey = Symbol.for("pi-maestro-teammate.root-registry");
+  const rootGlobals = globalThis as typeof globalThis & Record<symbol, unknown>;
+  const state: TeammateState = (rootGlobals[registryKey] as TeammateState | undefined) ?? {
     baseCwd: "",
     currentSessionId: null,
     activeRuns: new Map(),
     namedAgents: new Map(),
   };
+  rootGlobals[registryKey] = state;
+
+  function handleChildLifecycleEvent(event: Record<string, unknown>): void {
+    const correlationId = event.correlationId as string | undefined;
+    if (!correlationId) return;
+    const agent = state.activeRuns.get(correlationId);
+    if (!agent) return;
+    const eventSessionFile = event.sessionFile as string | undefined;
+    if (eventSessionFile && agent.sessionDir) {
+      const relative = path.relative(path.resolve(agent.sessionDir), path.resolve(eventSessionFile));
+      if (relative.startsWith("..") || path.isAbsolute(relative)) return;
+    }
+
+    if (event.type === "teammate_session_ready") {
+      agent.sessionId = event.sessionId as string | undefined;
+      agent.sessionFile = eventSessionFile;
+      return;
+    }
+    const pendingHandoff = agent.pendingHandoff;
+    if (event.type === "teammate_handoff_ready" && pendingHandoff && event.nonce === pendingHandoff.nonce) {
+      agent.sessionId = event.sessionId as string | undefined;
+      agent.sessionFile = eventSessionFile;
+      if (agent.lease) agent.lease = confirmParked(agent.lease);
+      clearTimeout(pendingHandoff.timer);
+      pendingHandoff.resolve(true);
+      agent.pendingHandoff = undefined;
+      return;
+    }
+    if (event.type === "teammate_handoff_returned") {
+      const pending = agent.pendingHandback;
+      if (!pending
+        || event.nonce !== pending.nonce
+        || event.sessionId !== pending.sessionId
+        || event.sessionFile !== pending.sessionFile
+      ) return;
+      if (agent.lease) agent.lease = confirmChildReloaded(agent.lease);
+      if (agent.lease) agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
+      agent.pendingHandback = undefined;
+      agent.status = "running";
+      return;
+    }
+    if (event.type === "teammate_handoff_cancelled" && agent.lease?.state === "fenced") {
+      agent.lease = recoverChild(agent.lease);
+      agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
+    }
+  }
 
   // =========================================================================
   // Tool 1: teammate — dispatch
@@ -243,6 +580,33 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
       const isSingle = !isMultiTask;
       const graphMode = isMultiTask ? inferGraphMode(normalizedTasks) : null;
 
+      const taskNames = new Set(normalizedTasks.filter((task) => task.name).map((task) => task.name!));
+      const taskIndexByName = new Map<string, number>();
+      normalizedTasks.forEach((task, index) => {
+        if (task.name) taskIndexByName.set(task.name, index);
+      });
+      const taskCorrelationIds = isMultiTask
+        ? normalizedTasks.map(() => randomUUID())
+        : [];
+      const progressState = new Map<number, AgentProgressSnapshot>();
+      if (isMultiTask) {
+        normalizedTasks.forEach((task, index) => {
+          progressState.set(index, {
+            agent: task.agent,
+            ...(task.name ? { name: task.name } : {}),
+            correlationId: taskCorrelationIds[index],
+            taskIndex: index,
+            dependencies: extractDependencies(task.task, taskNames)
+              .map((name) => taskIndexByName.get(name))
+              .filter((dependency): dependency is number => dependency !== undefined),
+            status: "pending",
+          });
+        });
+      }
+
+      const progressSnapshot = (): AgentProgressSnapshot[] =>
+        [...progressState.values()].sort((a, b) => a.taskIndex - b.taskIndex);
+
       const correlationId = randomUUID();
 
       const abortController = new AbortController();
@@ -275,6 +639,9 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
         replyTo: params.reply_to,
         status: "running",
         sleepMs: 0,
+        lease: createChildLease(),
+        promptSeq: params.task ? 1 : 0,
+        ...(isMultiTask ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(correlationId, activeAgent);
 
@@ -296,100 +663,138 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
 
       const makeOptions = () => ({
         baseCwd: state.baseCwd || ctx.cwd,
+        ...(isSingle ? { correlationId } : {}),
+        ...(isMultiTask ? { taskCorrelationIds } : {}),
         signal: abortController.signal,
         parentSessionFile,
-        onChildSpawned: (stdin: import("node:stream").Writable) => {
+        onChildSpawned: (
+          stdin: import("node:stream").Writable,
+          sendControl: (message: Record<string, unknown>) => boolean,
+          sessionDir?: string,
+        ) => {
           activeAgent.stdin = stdin;
+          activeAgent.sendControl = sendControl;
+          activeAgent.sessionDir = sessionDir;
+          if (activeAgent.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(activeAgent.lease) });
         },
+        onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent({ ...event, correlationId }),
         onProgress: (() => {
           let lastUpdateTime = 0;
           const UPDATE_INTERVAL = 300; // ms — throttle TUI updates
-          let loggedToolCount = 0;
-          let streamingLineIdx = -1;
-          const loggedToolLines = new Map<number, number>();
+          const logStates = new Map<string, {
+            loggedToolCount: number;
+            streamingLineIdx: number;
+            loggedToolLines: Map<number, number>;
+          }>();
 
           return (data: AgentProgress) => {
-          activeAgent.lastActivityAt = Date.now();
+            activeAgent.lastActivityAt = Date.now();
+            const progressKey = data.taskIndex ?? 0;
+            const existing = progressState.get(progressKey);
+            const progressName = data.name ?? existing?.name;
+            const entry: AgentProgressSnapshot = {
+              agent: data.agent,
+              ...(progressName ? { name: progressName } : {}),
+              correlationId: data.correlationId ?? existing?.correlationId ?? taskCorrelationIds[progressKey] ?? correlationId,
+              taskIndex: progressKey,
+              dependencies: data.dependencies ?? existing?.dependencies ?? [],
+              status: data.status,
+              startedAt: new Date(data.startedAt).toISOString(),
+              recentTools: data.recentTools,
+              toolCount: data.toolCount,
+              tokens: data.tokens,
+              ...(data.lastMessage ? { lastMessage: data.lastMessage } : {}),
+              ...(data.status === "completed" || data.status === "failed"
+                ? { completedAt: new Date().toISOString() }
+                : {}),
+            };
+            progressState.set(progressKey, entry);
+            const currentProgress = progressSnapshot();
+            activeAgent.progress = currentProgress;
 
-          // Record to outputLog
-          const MAX_LOG = 200;
-          if (data.recentTools?.length) {
-            for (let ti = loggedToolCount; ti < data.recentTools.length; ti++) {
-              const t = data.recentTools[ti];
-              loggedToolLines.set(ti, activeAgent.outputLog.length);
-              activeAgent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ~ ${t.name}`);
-              streamingLineIdx = -1;
+            const shortId = entry.correlationId.slice(0, 8);
+            const logKey = entry.correlationId;
+            const logState = logStates.get(logKey) ?? {
+              loggedToolCount: 0,
+              streamingLineIdx: -1,
+              loggedToolLines: new Map<number, number>(),
+            };
+            logStates.set(logKey, logState);
+            const logLabel = data.name
+              ? `@${data.name}#${shortId}`
+              : `${data.agent}#${shortId}`;
+
+            // Record a bounded aggregate history while keeping per-agent cursors independent.
+            const MAX_LOG = 200;
+            if (data.recentTools?.length) {
+              for (let ti = logState.loggedToolCount; ti < data.recentTools.length; ti++) {
+                const tool = data.recentTools[ti];
+                logState.loggedToolLines.set(ti, activeAgent.outputLog.length);
+                activeAgent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ${logLabel} ~ ${tool.name}`);
+                logState.streamingLineIdx = -1;
+              }
+              for (let ti = 0; ti < data.recentTools.length; ti++) {
+                const tool = data.recentTools[ti];
+                if (tool.status !== "running") {
+                  const lineIndex = logState.loggedToolLines.get(ti);
+                  if (lineIndex !== undefined && activeAgent.outputLog[lineIndex]?.includes("~ ")) {
+                    activeAgent.outputLog[lineIndex] = activeAgent.outputLog[lineIndex].replace("~ ", "✓ ");
+                  }
+                }
+              }
+              logState.loggedToolCount = data.recentTools.length;
             }
-            // Update completed tools in-place
-            for (let ti = 0; ti < data.recentTools.length; ti++) {
-              const t = data.recentTools[ti];
-              if (t.status !== "running") {
-                const idx = loggedToolLines.get(ti);
-                if (idx !== undefined && activeAgent.outputLog[idx]?.includes("~ ")) {
-                  activeAgent.outputLog[idx] = activeAgent.outputLog[idx].replace("~ ", "✓ ");
+            if (data.lastMessage) {
+              const lastLine = data.lastMessage.split("\n").pop()?.trim();
+              if (lastLine) {
+                const streamLine = `${logLabel} │ ${lastLine}`;
+                if (logState.streamingLineIdx >= 0) {
+                  activeAgent.outputLog[logState.streamingLineIdx] = streamLine;
+                } else {
+                  logState.streamingLineIdx = activeAgent.outputLog.length;
+                  activeAgent.outputLog.push(streamLine);
                 }
               }
             }
-            loggedToolCount = data.recentTools.length;
-          }
-          if (data.lastMessage) {
-            const lastLine = data.lastMessage.split("\n").pop()?.trim();
-            if (lastLine) {
-              if (streamingLineIdx >= 0) {
-                activeAgent.outputLog[streamingLineIdx] = lastLine;
-              } else {
-                streamingLineIdx = activeAgent.outputLog.length;
-                activeAgent.outputLog.push(lastLine);
-              }
+            if (activeAgent.outputLog.length > MAX_LOG) {
+              activeAgent.outputLog.splice(0, activeAgent.outputLog.length - MAX_LOG);
+              logStates.clear();
             }
-          }
-          if (activeAgent.outputLog.length > MAX_LOG) {
-            activeAgent.outputLog.splice(0, activeAgent.outputLog.length - MAX_LOG);
-            streamingLineIdx = -1;
-            loggedToolLines.clear();
-            streamingLineIdx = -1;
-          }
 
-          // Broadcast to overlay listeners (always)
-          pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
-            correlationId,
-            agent: data.agent,
-            status: data.status,
-            toolCount: data.toolCount,
-            tokens: data.tokens,
-            recentTools: data.recentTools,
-            lastMessage: data.lastMessage,
-          });
+            // Broadcast the complete graph snapshot so overlays can switch views reliably.
+            pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+              correlationId,
+              agent: data.agent,
+              name: data.name,
+              taskCorrelationId: entry.correlationId,
+              taskIndex: progressKey,
+              dependencies: entry.dependencies,
+              status: data.status,
+              toolCount: data.toolCount,
+              tokens: data.tokens,
+              recentTools: data.recentTools,
+              lastMessage: data.lastMessage,
+              progress: currentProgress,
+            });
 
-          if (!onUpdate) return;
-          // Throttle TUI updates — skip if too frequent (except completion)
-          const now = Date.now();
-          if (data.status === "running" && now - lastUpdateTime < UPDATE_INTERVAL) return;
-          lastUpdateTime = now;
+            if (!onUpdate) return;
+            // Throttle TUI updates — skip if too frequent (except completion).
+            const now = Date.now();
+            if (data.status === "running" && now - lastUpdateTime < UPDATE_INTERVAL) return;
+            lastUpdateTime = now;
 
-          onUpdate({
-            content: [{
-              type: "text",
-              text: `[${data.agent}] ${data.status} | tools: ${data.toolCount} | tokens: ${data.tokens}`,
-            }],
-            details: {
-              mode: (graphMode ?? "single") as Details["mode"],
-              results: [],
-              progress: [{
-                agent: data.agent,
-                status: data.status,
-                startedAt: new Date(data.startedAt).toISOString(),
-                recentTools: data.recentTools,
-                toolCount: data.toolCount,
-                tokens: data.tokens,
-                lastMessage: data.lastMessage,
-                ...(data.status !== "running"
-                  ? { completedAt: new Date().toISOString() }
-                  : {}),
+            onUpdate({
+              content: [{
+                type: "text",
+                text: `[${data.name ?? data.agent}] ${data.status} · tools ${data.toolCount} · tokens ${data.tokens}`,
               }],
-            },
-          });
-        };
+              details: {
+                mode: (graphMode ?? "single") as Details["mode"],
+                results: [],
+                progress: currentProgress,
+              },
+            });
+          };
         })(),
         onChildRequest: (event: Record<string, unknown>, reply: (msg: unknown) => void) => {
           handleProxyRequest(pi, state, event, reply, correlationId);
@@ -430,12 +835,32 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
               ? structuredOutputs
               : undefined;
 
-            return { results, hasError, totalDur, summaries, structuredOutput };
+            results.forEach((result, index) => {
+              const current = progressState.get(index);
+              progressState.set(index, {
+                agent: result.agent,
+                ...(normalizedTasks[index]?.name ? { name: normalizedTasks[index].name } : {}),
+                correlationId: result.correlationId,
+                taskIndex: index,
+                dependencies: current?.dependencies ?? [],
+                status: result.exitCode === 0 ? "completed" : "failed",
+                ...(current?.startedAt ? { startedAt: current.startedAt } : {}),
+                completedAt: new Date().toISOString(),
+                recentTools: current?.recentTools ?? [],
+                toolCount: current?.toolCount ?? 0,
+                tokens: result.usage.inputTokens + result.usage.outputTokens,
+                lastMessage: result.messages[result.messages.length - 1]?.content ?? "",
+              });
+            });
+            const progress = progressSnapshot();
+            activeAgent.progress = progress;
+
+            return { results, hasError, totalDur, summaries, structuredOutput, progress };
           };
 
           if (params.background === false) {
             // Foreground: block until completion
-            const { results, hasError, totalDur, summaries, structuredOutput } = await executeGraph();
+            const { results, hasError, totalDur, summaries, structuredOutput, progress } = await executeGraph();
 
             emitComplete(pi, id, graphMode, correlationId, hasError ? 1 : 0, totalDur);
 
@@ -445,6 +870,7 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
               details: {
                 mode: graphMode as Details["mode"],
                 results,
+                progress,
                 ...(structuredOutput !== undefined ? { structuredOutput } : {}),
               },
             };
@@ -453,20 +879,15 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
           // Background (default)
           const bgPromise = executeGraph();
 
-          bgPromise.then(({ results, hasError, totalDur, summaries }) => {
-            const label = params.name ?? correlationId.slice(0, 8);
-            const okCount = results.filter((r: { exitCode: number }) => r.exitCode === 0).length;
-            const summary = summaries.length > 300
-              ? summaries.slice(0, 300) + "…"
-              : summaries;
-            retireAgent(state, correlationId, summary);
+          bgPromise.then(({ results, summaries, progress }) => {
+            retireAgent(state, correlationId, summaries);
 
             pi.sendMessage(
               {
                 customType: "teammate-complete",
-                content: `● ${okCount}/${results.length} agents completed (${graphMode}, ${Math.round(totalDur / 1000)}s)${hasError ? " — has failures" : ""}\n\n${summary}`,
+                content: summaries,
                 display: true,
-                details: { mode: graphMode, results },
+                details: { mode: graphMode, results, progress },
               },
               { triggerTurn: true },
             );
@@ -480,7 +901,7 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
               text: `${normalizedTasks.length} tasks (${graphMode}) running in background. correlationId=${correlationId}. Use teammate-list to check status.`,
             }],
             isError: false,
-            details: { mode: graphMode as Details["mode"], results: [] },
+            details: { mode: graphMode as Details["mode"], results: [], progress: progressSnapshot() },
           };
         }
 
@@ -522,16 +943,14 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
           detached = true;
           runPromise.then((result) => {
             emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
-            const label = params.name ?? params.agent;
             const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-            const summary = lastMsg.length > 300 ? lastMsg.slice(0, 300) + "…" : lastMsg;
-            retireAgent(state, correlationId, summary);
+            retireAgent(state, correlationId, lastMsg);
             pi.sendMessage(
               {
                 customType: "teammate-complete",
-                content: `● @${label} came to rest (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
+                content: lastMsg,
                 display: true,
-                details: { agent: params.agent, name: params.name, correlationId, result },
+                details: { mode: "single", results: [result] },
               },
               { triggerTurn: true },
             );
@@ -539,7 +958,7 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
             retireAgent(state, correlationId);
           });
           return {
-            content: [{ type: "text", text: `● @${params.name ?? params.agent} detached to background. Will notify on completion.` }],
+            content: [{ type: "text", text: `■ @${params.name ?? params.agent} detached · completion notification enabled` }],
             isError: false,
             details: { mode: "single", results: [] },
           };
@@ -550,17 +969,15 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
 
         bgPromise.then((result) => {
           emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
-          const label = params.name ?? params.agent;
           const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-          const summary = lastMsg.length > 300 ? lastMsg.slice(0, 300) + "…" : lastMsg;
-          retireAgent(state, correlationId, summary);
+          retireAgent(state, correlationId, lastMsg);
 
           pi.sendMessage(
             {
               customType: "teammate-complete",
-              content: `● @${label} came to rest (${Math.round(result.durationMs / 1000)}s)\n\n${summary}`,
+              content: lastMsg,
               display: true,
-              details: { agent: params.agent, name: params.name, correlationId, result },
+              details: { mode: "single", results: [result] },
             },
             { triggerTurn: true },
           );
@@ -571,7 +988,7 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
         return {
           content: [{
             type: "text",
-            text: `● @${params.name ?? params.agent} running in background. Use teammate-list to check, teammate-send to message.`,
+            text: `■ @${params.name ?? params.agent} running in background · teammate-list status · teammate-send message`,
           }],
           isError: false,
           details: { mode: "single", results: [] },
@@ -584,8 +1001,8 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
       }
     },
 
-    renderCall(args, theme) {
-      return renderTeammateCall(args, theme);
+    renderCall(args, theme, context) {
+      return renderTeammateCall(args, theme, context);
     },
 
     renderResult(result, options, theme) {
@@ -615,7 +1032,7 @@ Modes:
       _id: string,
       params: { to: string; message: string; mode?: RpcMessageMode },
     ): Promise<AgentToolResult<{ delivered: boolean }>> {
-      const mode = params.mode ?? "follow_up";
+      const requestedMode = params.mode ?? "follow_up";
 
       const cid = state.namedAgents.get(params.to);
       if (!cid) {
@@ -637,7 +1054,10 @@ Modes:
         };
       }
 
-      const sent = sendRpcMessage(agent.stdin, params.message, mode);
+      const mode: RpcMessageMode = agent.status === "sleeping" && requestedMode !== "abort"
+        ? "prompt"
+        : requestedMode;
+      const sent = sendRpcMessage(agent.stdin, params.message, mode, agent.lease ? leaseToken(agent.lease) : undefined);
       if (!sent) {
         return {
           content: [{ type: "text", text: `Failed to send message to "${params.to}".` }],
@@ -671,7 +1091,7 @@ Modes:
         };
       }
 
-      const modeLabel = wasSleeping ? `woken up + ${mode}` : mode === "steer" ? "interrupted + injected" : "queued after current turn";
+      const modeLabel = wasSleeping ? "woken up + prompt" : mode === "steer" ? "interrupted + injected" : "queued after current turn";
       return {
         content: [{ type: "text", text: `Message ${modeLabel} for "${params.to}".${wasSleeping ? " Agent woken up." : ""}` }],
         isError: false,
@@ -698,71 +1118,10 @@ Modes:
       params: { view?: "active" | "named" | "all" },
     ): Promise<AgentToolResult<{ agents: unknown[] }>> {
       const view = params.view ?? "active";
-      const entries: Array<{
-        agent: string;
-        name?: string;
-        correlationId: string;
-        startedAt: string;
-        durationMs: number;
-        idleMs: number;
-        inboxSize: number;
-        hasStdin: boolean;
-        spawnedBy?: string;
-        depth: number;
-        status: "running" | "completed" | "failed";
-      }> = [];
-
-      // Build parent→children index for tree rendering
-      const childrenOf = new Map<string, string[]>();
-      const roots: string[] = [];
-      for (const [cid, entry] of state.activeRuns) {
-        if (view === "active" && entry.status === "completed") continue;
-        if (view === "named" && !entry.name) continue;
-        if (entry.spawnedBy && state.activeRuns.has(entry.spawnedBy)) {
-          const siblings = childrenOf.get(entry.spawnedBy) ?? [];
-          siblings.push(cid);
-          childrenOf.set(entry.spawnedBy, siblings);
-        } else {
-          roots.push(cid);
-        }
-      }
-
-      function collectTree(cid: string, depth: number): void {
-        const entry = state.activeRuns.get(cid);
-        if (!entry) return;
-        if (view === "active" && entry.status === "completed") return;
-        if (view === "named" && !entry.name) return;
-        entries.push({
-          agent: entry.agent,
-          name: entry.name,
-          correlationId: cid,
-          startedAt: new Date(entry.startedAt).toISOString(),
-          durationMs: agentActiveMs(entry),
-          idleMs: Date.now() - entry.lastActivityAt,
-          inboxSize: entry.inbox.length,
-          hasStdin: Boolean(entry.stdin?.writable),
-          spawnedBy: entry.spawnedBy,
-          depth,
-          status: entry.status,
-        });
-        for (const childCid of childrenOf.get(cid) ?? []) {
-          collectTree(childCid, depth + 1);
-        }
-      }
-      for (const rootCid of roots) {
-        collectTree(rootCid, 0);
-      }
-
-      const lines = entries.length > 0
-        ? entries.map((a) => {
-          const indent = a.depth > 0 ? "  ".repeat(a.depth) + "└─ " : "";
-          const statusIcon = a.status === "running" ? "●" : a.status === "sleeping" ? "◉" : "✓";
-          return `${indent}${statusIcon} [${a.agent}]${a.name ? ` name="${a.name}"` : ""} | ${Math.round(a.durationMs / 1000)}s | inbox: ${a.inboxSize}`;
-        }).join("\n")
-        : "No active teammate agents.";
+      const { entries, text } = buildAgentList(state, view);
 
       return {
-        content: [{ type: "text", text: lines }],
+        content: [{ type: "text", text }],
         isError: false,
         details: { agents: entries },
       };
@@ -787,50 +1146,31 @@ Modes:
       params: { name: string; lines?: number },
     ): Promise<AgentToolResult<{ output: string[] }>> {
       const lines = params.lines ?? 20;
-
-      // Check direct agents first
-      const cid = state.namedAgents.get(params.name);
-      if (!cid) {
-        const available = Array.from(state.namedAgents.keys());
+      const resolved = resolveWatchTarget(state, params.name);
+      if (!resolved.match) {
+        const suffix = resolved.available.length > 0
+          ? ` Available: ${resolved.available.join(", ")}`
+          : " No agents are available.";
         return {
-          content: [{ type: "text", text: `Agent "${params.name}" not found. ${available.length > 0 ? `Available: ${available.join(", ")}` : "No named agents running."}` }],
+          content: [{ type: "text", text: resolved.error ?? `Agent "${params.name}" not found.${suffix}` }],
           isError: true,
           details: { output: [] },
         };
       }
-
-      const agent = state.activeRuns.get(cid);
-      if (!agent) {
-        state.namedAgents.delete(params.name);
+      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+      if (agent.lease && (agent.lease.owner !== "child" || agent.lease.state !== "active")) {
         return {
-          content: [{ type: "text", text: `Agent "${params.name}" is no longer running.` }],
+          content: [{ type: "text", text: `Agent "${params.to}" is currently owned by ${agent.lease.owner} (${agent.lease.state}).` }],
           isError: true,
-          details: { output: [] },
+          details: { delivered: false },
         };
       }
-
-      const log = agent.outputLog.slice(-lines);
-      const uptime = Math.round(agentActiveMs(agent) / 1000);
-      const idle = Math.round((Date.now() - agent.lastActivityAt) / 1000);
-      const statusLabel = agent.status === "sleeping" ? " | SLEEPING" : "";
-      const header = `[${agent.agent}/${params.name}] up ${uptime}s | idle ${idle}s | log ${agent.outputLog.length} lines | inbox ${agent.inbox.length}${statusLabel}`;
-      const output = [header, "---", ...log];
-      if (agent.status === "sleeping") {
-        output.push("", "[sleeping — use teammate-send to wake]");
-      }
-
-      if (agent.inbox.length > 0) {
-        output.push("--- inbox ---");
-        for (const msg of agent.inbox.slice(-5)) {
-          const time = new Date(msg.timestamp).toISOString().slice(11, 19);
-          output.push(`[${time}] ◀ ${msg.from}: ${msg.payload.slice(0, 120)}`);
-        }
-      }
+      const output = buildWatchOutput(resolved.match, lines);
 
       return {
         content: [{ type: "text", text: output.join("\n") }],
         isError: false,
-        details: { output: log },
+        details: { output },
       };
     },
   };
@@ -852,6 +1192,57 @@ Modes:
     return a.name ?? a.correlationId.slice(0, 8);
   }
 
+  interface ComposerPanel {
+    render(width: number): string[];
+    handleInput(data: string): void;
+    invalidate(): void;
+    dispose?(): void;
+  }
+
+  let interactivePanelActive = false;
+
+  async function showComposerPanel<T>(
+    ctx: ExtensionContext,
+    key: string,
+    create: (requestRender: () => void, done: (value: T) => void) => ComposerPanel,
+  ): Promise<T> {
+    interactivePanelActive = true;
+    updateAgentWidget();
+
+    return new Promise<T>((resolve, reject) => {
+      let panel: ComposerPanel | undefined;
+      let unsubscribe = () => {};
+      let settled = false;
+
+      const cleanup = (): void => {
+        unsubscribe();
+        ctx.ui.setWidget(key, undefined);
+        interactivePanelActive = false;
+        updateAgentWidget();
+      };
+      const done = (value: T): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      };
+
+      try {
+        ctx.ui.setWidget(key, (tui) => {
+          panel = create(() => tui.requestRender(), done);
+          return panel;
+        }, { placement: "aboveEditor" });
+        unsubscribe = ctx.ui.onTerminalInput((data) => {
+          panel?.handleInput(data === "\x03" ? "\x1b" : data);
+          return { consume: true };
+        });
+      } catch (error) {
+        cleanup();
+        reject(error);
+      }
+    });
+  }
+
   async function showAttachOverlay(correlationId: string, ctx: ExtensionContext): Promise<void> {
     const agent = state.activeRuns.get(correlationId);
     if (!agent) {
@@ -859,12 +1250,57 @@ Modes:
       return;
     }
 
-    await ctx.ui.custom(
-      (tui, _theme, _keybindings, done) => {
+    interactivePanelActive = true;
+    updateAgentWidget();
+    try {
+      await ctx.ui.custom<void>(
+        (tui, _theme, _keybindings, done) => {
         const overlay = new AttachOverlay(
           agent,
           () => done(undefined),
           () => state.activeRuns,
+          async (cid, message) => {
+            const target = state.activeRuns.get(cid);
+            if (!target?.stdin?.writable) {
+              return { ok: false, message: "Agent is no longer writable" };
+            }
+            if (target.lease && (target.lease.owner !== "child" || target.lease.state !== "active")) {
+              return { ok: false, message: `Session owned by ${target.lease.owner} (${target.lease.state})` };
+            }
+            const sendMode: RpcMessageMode = target.status === "sleeping" ? "prompt" : "follow_up";
+            const sent = sendRpcMessage(target.stdin, message, sendMode, target.lease ? leaseToken(target.lease) : undefined);
+            if (!sent) return { ok: false, message: "Send failed" };
+            if (sendMode === "prompt") target.promptSeq = (target.promptSeq ?? 0) + 1;
+
+            const now = Date.now();
+            const label = target.name ?? target.correlationId.slice(0, 8);
+            target.inbox.push({
+              id: randomUUID(),
+              from: "caller",
+              to: label,
+              kind: "task",
+              payload: message,
+              timestamp: now,
+            });
+            target.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ follow_up: ${message.slice(0, 100)}`);
+            target.lastActivityAt = now;
+            if (target.status === "sleeping") {
+              target.status = "running";
+              if (target.sleptAt) {
+                target.sleepMs += now - target.sleptAt;
+                target.sleptAt = undefined;
+              }
+            }
+            pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+              correlationId: cid,
+              from: "caller",
+              to: label,
+              mode: sendMode,
+              message,
+              isSend: true,
+            });
+            return { ok: true, message: `Queued for ${label}` };
+          },
         );
         overlay.setRequestRender(() => tui.requestRender());
 
@@ -894,6 +1330,9 @@ Modes:
             return;
           }
 
+          const progress = evt.progress as AgentProgressSnapshot[] | undefined;
+          if (progress) overlay.setProgress(cid, progress);
+
           const tools = evt.recentTools as Array<{ name: string; status: string }> | undefined;
           if (tools && tools.length > 0) {
             const toolEntries = tools.map((t) => ({
@@ -904,7 +1343,7 @@ Modes:
             overlay.setActiveTools(cid, toolEntries);
 
             for (const t of tools) {
-              const key = `${t.name}:${t.status}`;
+              const key = `${evt.taskIndex ?? "single"}:${t.name}:${t.status}`;
               if (t.status !== "running" && !completedToolLog.has(key)) {
                 completedToolLog.add(key);
                 overlay.appendLog(cid, `[${ts()}] ✓ ${t.name}`, "tool");
@@ -923,28 +1362,38 @@ Modes:
           if (!cid) return;
           overlay.appendLog(cid, `COMPLETED exitCode=${evt.exitCode} ${evt.durationMs}ms`, "system");
         };
-        pi.events.on(TEAMMATE_MESSAGE_EVENT, msgHandler);
-        pi.events.on(TEAMMATE_COMPLETE_EVENT, completeHandler);
+        const unsubscribeMessage = pi.events.on(TEAMMATE_MESSAGE_EVENT, msgHandler);
+        const unsubscribeComplete = pi.events.on(TEAMMATE_COMPLETE_EVENT, completeHandler);
 
         const origDispose = overlay.dispose.bind(overlay);
         overlay.dispose = () => {
-          pi.events.off(TEAMMATE_MESSAGE_EVENT, msgHandler);
-          pi.events.off(TEAMMATE_COMPLETE_EVENT, completeHandler);
+          unsubscribeMessage();
+          unsubscribeComplete();
           origDispose();
         };
 
-        return overlay;
-      },
-      {
-        overlay: true,
-        overlayOptions: {
-          width: "100%",
-          maxHeight: "100%",
-          anchor: "top-left" as const,
-          margin: 0,
+        return {
+          get focused() { return overlay.focused; },
+          set focused(value: boolean) { overlay.focused = value; },
+          render: (width: number) => overlay.render(width),
+          handleInput: (data: string) => overlay.handleInput(data),
+          invalidate: () => overlay.invalidate(),
+          dispose: () => overlay.dispose(),
+        };
         },
-      },
-    );
+        {
+          overlay: true,
+          overlayOptions: {
+            width: "88%",
+            maxHeight: "86%",
+            anchor: "center",
+          },
+        },
+      );
+    } finally {
+      interactivePanelActive = false;
+      updateAgentWidget();
+    }
   }
 
   async function showAgentSelector(ctx: ExtensionContext): Promise<void> {
@@ -958,20 +1407,43 @@ Modes:
       return;
     }
 
-    // Fuzzy search overlay for agent selection
-    const { fuzzyRank, visibleWidth: vw, truncateToWidth: trunc } = await import("@earendil-works/pi-tui");
+    // Fuzzy search panel above the editor for agent selection.
+    const { truncateToWidth: trunc } = await import("@earendil-works/pi-tui");
     type AgentEntry = [string, ActiveAgent];
 
-    const selected = await ctx.ui.custom<string | null>(
-      (tui, _theme, _keybindings, done) => {
+    function matchScore(entry: AgentEntry, rawQuery: string): number | undefined {
+      const [, agent] = entry;
+      const text = `${agent.agent} ${agent.name ?? ""} ${agent.correlationId.slice(0, 8)}`.toLowerCase();
+      const query = rawQuery.trim().toLowerCase();
+      if (!query) return 0;
+      const direct = text.indexOf(query);
+      if (direct >= 0) return 1000 - direct;
+
+      let position = -1;
+      let score = 0;
+      for (const char of query) {
+        const next = text.indexOf(char, position + 1);
+        if (next < 0) return undefined;
+        score += next === position + 1 ? 10 : 1;
+        position = next;
+      }
+      return score;
+    }
+
+    const selected = await showComposerPanel<string | null>(
+      ctx,
+      "teammate-agent-selector",
+      (requestRender, done) => {
         let query = "";
         let cursor = 0;
 
         function filtered(): AgentEntry[] {
           if (!query) return entries;
-          return fuzzyRank(entries, query, ([, a]: AgentEntry) =>
-            `${a.agent} ${a.name ?? ""} ${a.correlationId.slice(0, 8)}`,
-          ).map((r: { item: AgentEntry }) => r.item);
+          return entries
+            .map((entry, index) => ({ entry, index, score: matchScore(entry, query) }))
+            .filter((item): item is { entry: AgentEntry; index: number; score: number } => item.score !== undefined)
+            .sort((a, b) => b.score - a.score || a.index - b.index)
+            .map((item) => item.entry);
         }
 
         return {
@@ -980,32 +1452,51 @@ Modes:
             const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
             const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
             const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
-            const w = Math.min(width, 60);
-            const out: string[] = [];
-
-            out.push(dim("╭" + "─".repeat(w - 2) + "╮"));
-            const prompt = ` ${green("❯")} ${query}${dim("│")}`;
-            const promptPlain = 3 + query.length + 1;
-            out.push(dim("│") + prompt + " ".repeat(Math.max(0, w - 2 - promptPlain)) + dim("│"));
-            out.push(dim("├" + "─".repeat(w - 2) + "┤"));
-
+            const w = Math.max(1, Math.min(width, 60));
             const matches = filtered();
-            const inner = w - 4;
-            for (let i = 0; i < matches.length && i < 10; i++) {
-              const [cid, a] = matches[i];
+            if (w < 20) {
+              const current = matches[cursor];
+              const compact = current
+                ? `${current[1].status === "sleeping" ? yellow("◉") : green("■")} ${current[1].agent}/${current[1].name ?? current[0].slice(0, 6)} ${dim(current[1].status)}`
+                : `${dim("□")} no matches`;
+              const queryPrefix = query ? `${query} ${dim("»")} ` : "";
+              return [trunc(`${queryPrefix}${compact}`, w, "…")];
+            }
+
+            const inner = w - 2;
+            const out: string[] = [];
+            const frameLine = (content: string) =>
+              dim("│") + trunc(` ${content}`, inner, "…", true) + dim("│");
+            const maxVisible = 5;
+            const start = Math.max(0, Math.min(
+              Math.max(0, matches.length - maxVisible),
+              cursor - Math.floor(maxVisible / 2),
+            ));
+            const visibleMatches = matches.slice(start, start + maxVisible);
+            const range = matches.length > maxVisible
+              ? dim(` ${start + 1}-${start + visibleMatches.length}/${matches.length}`)
+              : "";
+
+            out.push(dim("╭" + "─".repeat(inner) + "╮"));
+            out.push(frameLine(`${green("❯")} ${query}${dim("│")}${range}`));
+            out.push(dim("├" + "─".repeat(inner) + "┤"));
+
+            for (let i = 0; i < visibleMatches.length; i++) {
+              const absoluteIndex = start + i;
+              const [cid, a] = visibleMatches[i];
               const icon = a.status === "sleeping" ? yellow("◉") : green("■");
               const name = a.name ?? cid.slice(0, 8);
               const up = Math.round((Date.now() - a.startedAt) / 1000);
-              const line = ` ${icon} ${bold(`${a.agent}/${name}`)} ${dim(`${up}s`)}`;
-              const prefix = i === cursor ? green("▸") : " ";
-              out.push(dim("│") + prefix + trunc(line, inner - 1, "…") + " ".repeat(Math.max(0, inner - 1 - vw(line))) + dim("│"));
+              const status = a.status === "sleeping" ? yellow("sleeping") : green("running");
+              const prefix = absoluteIndex === cursor ? green("▸") : " ";
+              out.push(frameLine(`${prefix} ${icon} ${bold(`${a.agent}/${name}`)} ${status} ${dim(`${up}s`)}`));
             }
             if (matches.length === 0) {
-              out.push(dim("│") + dim("  no matches") + " ".repeat(Math.max(0, w - 2 - 12)) + dim("│"));
+              out.push(frameLine(dim("□ no matches")));
             }
 
-            out.push(dim("╰" + "─".repeat(w - 2) + "╯"));
-            out.push(dim(` type to filter · ↑↓ select · Enter attach · Esc cancel`));
+            out.push(dim("╰" + "─".repeat(inner) + "╯"));
+            out.push(trunc(dim(" type to filter · ↑↓ select · Enter attach · Esc cancel"), w, "…"));
             return out;
           },
 
@@ -1017,31 +1508,22 @@ Modes:
               done(null);
             } else if (data === "\x1b[A" || (data === "k" && !query)) {
               cursor = Math.max(0, cursor - 1);
-              tui.requestRender();
+              requestRender();
             } else if (data === "\x1b[B" || (data === "j" && !query)) {
               cursor = Math.min(Math.max(0, matches.length - 1), cursor + 1);
-              tui.requestRender();
+              requestRender();
             } else if (data === "\x7f" || data === "\b") {
-              if (query.length > 0) { query = query.slice(0, -1); cursor = 0; tui.requestRender(); }
+              if (query.length > 0) { query = query.slice(0, -1); cursor = 0; requestRender(); }
             } else if (data.length === 1 && data >= " ") {
               query += data;
               cursor = 0;
-              tui.requestRender();
+              requestRender();
             }
           },
 
           invalidate() {},
           dispose() {},
         };
-      },
-      {
-        overlay: true,
-        overlayOptions: {
-          width: "60%",
-          maxHeight: "50%",
-          anchor: "top-left" as const,
-          margin: 2,
-        },
       },
     );
 
@@ -1050,14 +1532,124 @@ Modes:
     }
   }
 
+  async function prepareAgentHandoff(agent: ActiveAgent, timeoutMs = 15_000): Promise<boolean> {
+    if (!agent.lease || !agent.sendControl) return false;
+    agent.lease = requestPark(agent.lease);
+    const nonce = agent.lease.nonce;
+    const ready = new Promise<boolean>((resolve) => {
+      const timer = setTimeout(() => {
+        if (agent.pendingHandoff?.nonce !== nonce) return;
+        agent.pendingHandoff = undefined;
+        agent.lease = agent.lease ? fenceLease(agent.lease) : undefined;
+        agent.sendControl?.({ type: "teammate_handoff_cancel", nonce });
+        resolve(false);
+      }, timeoutMs);
+      agent.pendingHandoff = { nonce, resolve, timer };
+    });
+    if (!agent.sendControl({
+      type: "teammate_handoff_request",
+      nonce,
+      requiredPromptSeq: agent.promptSeq ?? 0,
+    })) {
+      if (agent.pendingHandoff) clearTimeout(agent.pendingHandoff.timer);
+      agent.pendingHandoff = undefined;
+      agent.lease = fenceLease(agent.lease);
+      return false;
+    }
+    return ready;
+  }
+
+  pi.registerCommand("teammate-session", {
+    description: "Switch the main Pi conversation to a teammate session or return to main",
+    async handler(_args, ctx) {
+      const currentFile = ctx.sessionManager.getSessionFile();
+      const attached = Array.from(state.activeRuns.values()).find((agent) =>
+        agent.sessionFile === currentFile && agent.lease?.owner === "main"
+      );
+      if (attached) {
+        if (!state.mainSessionFile) {
+          ctx.ui.notify("Main session path is unavailable.", "error");
+          return;
+        }
+        await ctx.waitForIdle();
+        if (attached.lease) attached.lease = requestHandback(attached.lease);
+        if (attached.lease) {
+          const token = leaseToken(attached.lease);
+          attached.pendingHandback = {
+            nonce: token.nonce,
+            epoch: token.epoch,
+            sessionId: attached.sessionId,
+            sessionFile: attached.sessionFile,
+          };
+          attached.sendControl?.({ type: "teammate_lease_update", token });
+        }
+        state.handoffSwitching = true;
+        try {
+          await ctx.switchSession(state.mainSessionFile, {
+            withSession: async () => {
+              state.handoffSwitching = false;
+              if (!attached.stdin || !attached.sessionFile) return;
+              sendRpcMessage(attached.stdin, `/teammate-handoff-reload ${encodeURIComponent(attached.sessionFile)}`, "prompt");
+              setTimeout(() => {
+                if (attached.lease?.state === "reloading") {
+                  attached.lease = fenceLease(attached.lease);
+                  attached.pendingHandback = undefined;
+                  attached.status = "sleeping";
+                }
+              }, 15_000);
+            },
+          });
+        } catch (error) {
+          state.handoffSwitching = false;
+          if (attached.lease) attached.lease = fenceLease(attached.lease);
+          throw error;
+        }
+        return;
+      }
+
+      const candidates = Array.from(state.activeRuns.values()).filter((agent) =>
+        Boolean(agent.sessionFile && agent.sendControl && agent.lease?.owner === "child")
+      );
+      if (candidates.length === 0) {
+        ctx.ui.notify("No attachable teammate sessions.", "warning");
+        return;
+      }
+      const labels = candidates.map((agent) => `${agent.name ?? agent.correlationId.slice(0, 8)} · ${agent.agent} · ${agent.status}`);
+      const selected = await ctx.ui.select("Switch to teammate session", labels);
+      const index = selected ? labels.indexOf(selected) : -1;
+      if (index < 0) return;
+      const agent = candidates[index];
+      ctx.ui.notify(`Waiting for ${agent.name ?? agent.agent} to finish its current loop…`, "info");
+      if (!await prepareAgentHandoff(agent)) {
+        ctx.ui.notify("Session handoff timed out and was fenced.", "error");
+        return;
+      }
+      if (!agent.sessionFile || !agent.lease) return;
+      agent.lease = transferToMain(agent.lease);
+      agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
+      state.handoffSwitching = true;
+      try {
+        await ctx.switchSession(agent.sessionFile, {
+          withSession: async () => {
+            state.handoffSwitching = false;
+          },
+        });
+      } catch (error) {
+        state.handoffSwitching = false;
+        agent.lease = fenceLease(agent.lease);
+        throw error;
+      }
+    },
+  });
+
   // =========================================================================
   // TUI — only in parent mode (child processes have no terminal)
   // =========================================================================
 
   pi.registerShortcut("alt+r", {
-    description: "Attach to a running teammate agent",
-    async handler(ctx) {
-      await showAgentSelector(ctx);
+    description: "Switch the main conversation to a teammate session",
+    handler() {
+      pi.sendUserMessage("/teammate-session");
     },
   });
 
@@ -1065,6 +1657,10 @@ Modes:
 
   function updateAgentWidget(): void {
     if (!widgetCtx) return;
+    if (interactivePanelActive) {
+      widgetCtx.ui.setWidget("teammate-agents", undefined);
+      return;
+    }
     const now = Date.now();
     const SLEEP_HIDE_MS = 60_000;
     const visible = Array.from(state.activeRuns.entries()).filter(([, a]) => {
@@ -1084,29 +1680,14 @@ Modes:
       return a.startedAt - b.startedAt;
     });
 
-    const runCount = visible.filter(([, a]) => a.status === "running").length;
-    const sleepCount = visible.length - runCount;
-    const totalCount = state.activeRuns.size;
-    const hiddenCount = totalCount - visible.length;
-    const summary = [
-      runCount > 0 ? `${runCount} running` : "",
-      sleepCount > 0 ? `${sleepCount} sleeping` : "",
-      hiddenCount > 0 ? `${hiddenCount} hidden` : "",
-    ].filter(Boolean).join(" · ");
-    const lines: string[] = [`● agents (${summary}) — Alt+R attach`];
-    for (let i = 0; i < visible.length; i++) {
-      const [, a] = visible[i];
-      const label = agentLabel(a);
-      const connector = i === visible.length - 1 ? "└" : "├";
-      if (a.status === "running") {
-        const uptime = Math.round(agentActiveMs(a) / 1000);
-        lines.push(`  ${connector} @${label} (${a.agent}) ${uptime}s`);
-      } else {
-        lines.push(`  \x1b[90m${connector} @${label} (${a.agent}) sleep\x1b[0m`);
-      }
-    }
+    const agents = visible.map(([, agent]) => agent);
 
-    widgetCtx.ui.setWidget("teammate-agents", lines, { placement: "belowEditor" });
+    widgetCtx.ui.setWidget("teammate-agents", (_tui, theme) => ({
+      render(width: number): string[] {
+        return renderAgentStatusWidget(agents, width, theme);
+      },
+      invalidate() {},
+    }), { placement: "belowEditor" });
   }
 
   let widgetTimer: ReturnType<typeof setInterval> | null = null;
@@ -1147,6 +1728,9 @@ Modes:
     widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
+    const sessionFile = ctx.sessionManager?.getSessionFile?.();
+    const isAgentSession = Array.from(state.activeRuns.values()).some((agent) => agent.sessionFile === sessionFile);
+    if (sessionFile && !isAgentSession) state.mainSessionFile = sessionFile;
   });
 
   pi.on("session_compact", (_event, ctx) => {
@@ -1158,6 +1742,11 @@ Modes:
 
   pi.on("session_shutdown", () => {
     stopWidgetTimer();
+    if (state.handoffSwitching) {
+      widgetCtx = null;
+      state.currentSessionId = null;
+      return;
+    }
     for (const [cid, run] of state.activeRuns) {
       killAgent(state, cid, run.name);
     }
@@ -1170,6 +1759,274 @@ Modes:
 // ===========================================================================
 // Helpers
 // ===========================================================================
+
+type AgentListView = "active" | "named" | "all";
+type ListedAgentStatus = ActiveAgent["status"] | AgentProgressSnapshot["status"];
+
+interface ListedAgent {
+  agent: string;
+  name?: string;
+  correlationId: string;
+  parentCorrelationId?: string;
+  startedAt: string;
+  durationMs: number;
+  idleMs: number;
+  inboxSize: number;
+  hasStdin: boolean;
+  spawnedBy?: string;
+  depth: number;
+  treePrefix: string;
+  status: ListedAgentStatus;
+  taskIndex?: number;
+  dependencies?: number[];
+  toolCount?: number;
+  tokens?: number;
+}
+
+function progressDurationMs(progress: AgentProgressSnapshot, parent: ActiveAgent): number {
+  const startedAt = progress.startedAt
+    ? new Date(progress.startedAt).getTime()
+    : parent.startedAt;
+  const completedAt = progress.completedAt
+    ? new Date(progress.completedAt).getTime()
+    : Date.now();
+  return Math.max(0, completedAt - startedAt);
+}
+
+export function buildAgentList(
+  state: TeammateState,
+  view: AgentListView,
+): { entries: ListedAgent[]; text: string } {
+  const entries: ListedAgent[] = [];
+  const childrenOf = new Map<string, string[]>();
+  const roots: string[] = [];
+
+  const physicalVisible = (entry: ActiveAgent): boolean => {
+    if (view === "active" && entry.status === "completed") return false;
+    if (view === "named" && !entry.name && !entry.progress?.some((item) => item.name)) return false;
+    return true;
+  };
+
+  for (const [cid, entry] of state.activeRuns) {
+    if (!physicalVisible(entry)) continue;
+    if (entry.spawnedBy && state.activeRuns.has(entry.spawnedBy)) {
+      const siblings = childrenOf.get(entry.spawnedBy) ?? [];
+      siblings.push(cid);
+      childrenOf.set(entry.spawnedBy, siblings);
+    } else {
+      roots.push(cid);
+    }
+  }
+
+  function visitPhysical(
+    cid: string,
+    treePrefix: string,
+    descendantsPrefix: string,
+    depth: number,
+  ): void {
+    const entry = state.activeRuns.get(cid);
+    if (!entry || !physicalVisible(entry)) return;
+
+    entries.push({
+      agent: entry.agent,
+      name: entry.name,
+      correlationId: cid,
+      startedAt: new Date(entry.startedAt).toISOString(),
+      durationMs: agentActiveMs(entry),
+      idleMs: Date.now() - entry.lastActivityAt,
+      inboxSize: entry.inbox.length,
+      hasStdin: Boolean(entry.stdin?.writable),
+      spawnedBy: entry.spawnedBy,
+      depth,
+      treePrefix,
+      status: entry.status,
+    });
+
+    const physicalChildren = (childrenOf.get(cid) ?? [])
+      .filter((childCid) => {
+        const child = state.activeRuns.get(childCid);
+        return Boolean(child && physicalVisible(child));
+      });
+    const graphChildren = (entry.progress ?? [])
+      .filter((progress) => view !== "named" || Boolean(progress.name))
+      .sort((a, b) => a.taskIndex - b.taskIndex);
+    const childCount = physicalChildren.length + graphChildren.length;
+    let childIndex = 0;
+
+    for (const childCid of physicalChildren) {
+      const isLast = childIndex === childCount - 1;
+      visitPhysical(
+        childCid,
+        `${descendantsPrefix}${isLast ? "└─ " : "├─ "}`,
+        `${descendantsPrefix}${isLast ? "   " : "│  "}`,
+        depth + 1,
+      );
+      childIndex++;
+    }
+
+    for (const progress of graphChildren) {
+      const isLast = childIndex === childCount - 1;
+      entries.push({
+        agent: progress.agent,
+        name: progress.name,
+        correlationId: progress.correlationId,
+        parentCorrelationId: cid,
+        startedAt: progress.startedAt ?? new Date(entry.startedAt).toISOString(),
+        durationMs: progressDurationMs(progress, entry),
+        idleMs: Date.now() - entry.lastActivityAt,
+        inboxSize: 0,
+        hasStdin: false,
+        spawnedBy: cid,
+        depth: depth + 1,
+        treePrefix: `${descendantsPrefix}${isLast ? "└─ " : "├─ "}`,
+        status: progress.status,
+        taskIndex: progress.taskIndex,
+        dependencies: progress.dependencies,
+        toolCount: progress.toolCount,
+        tokens: progress.tokens,
+      });
+      childIndex++;
+    }
+  }
+
+  roots.forEach((cid) => visitPhysical(cid, "", "", 0));
+
+  const iconFor = (status: ListedAgentStatus): string => {
+    if (status === "pending") return "○";
+    if (status === "running") return "●";
+    if (status === "sleeping") return "◉";
+    if (status === "failed") return "✗";
+    return "✓";
+  };
+  const text = entries.length > 0
+    ? entries.map((entry) => {
+        const identity = entry.name
+          ? `[${entry.agent}] name="${entry.name}"`
+          : `[${entry.agent}]`;
+        const metadata = [
+          `id=${entry.correlationId.slice(0, 8)}`,
+          entry.taskIndex !== undefined ? `task=${entry.taskIndex + 1}` : "",
+          entry.dependencies?.length
+            ? `deps=${entry.dependencies.map((dependency) => dependency + 1).join(",")}`
+            : "",
+          `${Math.round(entry.durationMs / 1000)}s`,
+          entry.toolCount ? `${entry.toolCount} tools` : "",
+          entry.tokens ? `${entry.tokens} tok` : "",
+          entry.inboxSize ? `inbox=${entry.inboxSize}` : "",
+        ].filter(Boolean).join(" · ");
+        return `${entry.treePrefix}${iconFor(entry.status)} ${identity} · ${metadata}`;
+      }).join("\n")
+    : "No active teammate agents.";
+
+  return { entries, text };
+}
+
+type WatchTarget =
+  | { kind: "agent"; agent: ActiveAgent }
+  | { kind: "graph-task"; agent: ActiveAgent; progress: AgentProgressSnapshot };
+
+export function resolveWatchTarget(
+  state: TeammateState,
+  target: string,
+): { match?: WatchTarget; error?: string; available: string[] } {
+  const available = new Set<string>();
+  for (const [cid, agent] of state.activeRuns) {
+    available.add(agent.name ?? cid.slice(0, 8));
+    for (const progress of agent.progress ?? []) {
+      available.add(progress.name ?? progress.correlationId.slice(0, 8));
+    }
+  }
+
+  const namedCid = state.namedAgents.get(target);
+  if (namedCid) {
+    const agent = state.activeRuns.get(namedCid);
+    if (agent) return { match: { kind: "agent", agent }, available: [...available] };
+  }
+
+  const exactAgent = state.activeRuns.get(target);
+  if (exactAgent) return { match: { kind: "agent", agent: exactAgent }, available: [...available] };
+
+  const exactTaskMatches: Array<{ agent: ActiveAgent; progress: AgentProgressSnapshot }> = [];
+  for (const agent of state.activeRuns.values()) {
+    for (const progress of agent.progress ?? []) {
+      if (progress.correlationId === target || progress.name === target) {
+        exactTaskMatches.push({ agent, progress });
+      }
+    }
+  }
+  if (exactTaskMatches.length === 1) {
+    return { match: { kind: "graph-task", ...exactTaskMatches[0] }, available: [...available] };
+  }
+  if (exactTaskMatches.length > 1) {
+    return { error: `Agent target "${target}" is ambiguous. Use its id from teammate-list.`, available: [...available] };
+  }
+
+  const prefixMatches: WatchTarget[] = [];
+  for (const [cid, agent] of state.activeRuns) {
+    if (cid.startsWith(target)) prefixMatches.push({ kind: "agent", agent });
+    for (const progress of agent.progress ?? []) {
+      if (progress.correlationId.startsWith(target)) {
+        prefixMatches.push({ kind: "graph-task", agent, progress });
+      }
+    }
+  }
+  if (prefixMatches.length === 1) return { match: prefixMatches[0], available: [...available] };
+  if (prefixMatches.length > 1) {
+    return { error: `Agent id prefix "${target}" is ambiguous. Use a longer id from teammate-list.`, available: [...available] };
+  }
+  return { available: [...available] };
+}
+
+export function buildWatchOutput(target: WatchTarget, lineCount: number): string[] {
+  if (target.kind === "agent") {
+    const { agent } = target;
+    const label = agent.name ?? agent.correlationId.slice(0, 8);
+    const log = agent.outputLog.slice(-lineCount);
+    const uptime = Math.round(agentActiveMs(agent) / 1000);
+    const idle = Math.round((Date.now() - agent.lastActivityAt) / 1000);
+    const output = [
+      `[${agent.agent}/${label}] id=${agent.correlationId.slice(0, 8)} | ${agent.status} | up ${uptime}s | idle ${idle}s | log ${agent.outputLog.length} | inbox ${agent.inbox.length}`,
+      "---",
+      ...log,
+    ];
+    const lastResult = agent.lastResult?.trim();
+    if (lastResult) {
+      output.push("--- last result ---", ...lastResult.split("\n").slice(-lineCount));
+    }
+    if (agent.status === "sleeping") {
+      output.push("", "[sleeping — messages remain visible; use teammate-send to wake]");
+    }
+    if (agent.inbox.length > 0) {
+      output.push("--- inbox ---");
+      for (const message of agent.inbox.slice(-5)) {
+        const time = new Date(message.timestamp).toISOString().slice(11, 19);
+        output.push(`[${time}] ◀ ${message.from}: ${message.payload.slice(0, 120)}`);
+      }
+    }
+    return output;
+  }
+
+  const { agent, progress } = target;
+  const shortId = progress.correlationId.slice(0, 8);
+  const marker = progress.name ? `@${progress.name}#${shortId}` : `${progress.agent}#${shortId}`;
+  const log = agent.outputLog.filter((line) => line.includes(marker)).slice(-lineCount);
+  const label = progress.name ?? shortId;
+  const output = [
+    `[${progress.agent}/${label}] id=${shortId} | ${progress.status} | parent=${agent.correlationId.slice(0, 8)} (${agent.status}) | task=${progress.taskIndex + 1}`,
+    "---",
+    ...log,
+  ];
+  const lastMessage = progress.lastMessage?.trim();
+  if (lastMessage) {
+    output.push("--- last message ---", ...lastMessage.split("\n").slice(-lineCount));
+  } else if (log.length === 0) {
+    output.push(progress.status === "pending" ? "Waiting for dependencies…" : "No message captured yet.");
+  }
+  if (agent.status === "sleeping") {
+    output.push("", "[graph is sleeping — this task's captured messages remain available]");
+  }
+  return output;
+}
 
 function emitComplete(
   pi: ExtensionAPI,
@@ -1251,11 +2108,17 @@ function ts(): string {
 }
 
 function releaseAgentMemory(agent: ActiveAgent): void {
+  if (agent.pendingHandoff) {
+    clearTimeout(agent.pendingHandoff.timer);
+    agent.pendingHandoff.resolve(false);
+    agent.pendingHandoff = undefined;
+  }
   agent.inbox.length = 0;
   if (agent.stdin) {
     try { agent.stdin.end(); } catch { /* already closed */ }
     agent.stdin = undefined;
   }
+  agent.sendControl = undefined;
 }
 
 // ===========================================================================
@@ -1422,25 +2285,10 @@ async function handleProxyRequest(
     }
 
     case "teammate-list": {
-      const view = (params.view as string) ?? "active";
-      const agents: unknown[] = [];
-      for (const [c, entry] of state.activeRuns) {
-        if (view === "named" && !entry.name) continue;
-        agents.push({
-          agent: entry.agent, name: entry.name, correlationId: c,
-          startedAt: new Date(entry.startedAt).toISOString(),
-          durationMs: agentActiveMs(entry),
-          idleMs: Date.now() - entry.lastActivityAt,
-          inboxSize: entry.inbox.length,
-        });
-      }
-      const lines = agents.length > 0
-        ? (agents as Array<Record<string, unknown>>).map((a) =>
-          `[${a.agent}]${a.name ? ` name="${a.name}"` : ""} | up ${Math.round((a.durationMs as number) / 1000)}s`
-        ).join("\n")
-        : "No active agents.";
+      const view = ((params.view as AgentListView | undefined) ?? "active");
+      const { entries, text } = buildAgentList(state, view);
       reply({ type: "teammate_proxy_result", requestId, result: {
-        content: [{ type: "text", text: lines }], isError: false, details: { agents },
+        content: [{ type: "text", text }], isError: false, details: { agents: entries },
       }});
       return;
     }
@@ -1448,24 +2296,16 @@ async function handleProxyRequest(
     case "teammate-watch": {
       const name = params.name as string;
       const lineCount = (params.lines as number) ?? 20;
-      const cid = state.namedAgents.get(name);
-      if (!cid) {
+      const resolved = resolveWatchTarget(state, name);
+      if (!resolved.match) {
         reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: `Agent "${name}" not found.` }], isError: true, details: { output: [] },
+          content: [{ type: "text", text: resolved.error ?? `Agent "${name}" not found.` }], isError: true, details: { output: [] },
         }});
         return;
       }
-      const agent = state.activeRuns.get(cid);
-      if (!agent) {
-        reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: `Agent "${name}" is no longer running.` }], isError: true, details: { output: [] },
-        }});
-        return;
-      }
-      const log = agent.outputLog.slice(-lineCount);
-      const header = `[${agent.agent}/${name}] up ${Math.round((Date.now() - agent.startedAt) / 1000)}s | log ${agent.outputLog.length} lines`;
+      const output = buildWatchOutput(resolved.match, lineCount);
       reply({ type: "teammate_proxy_result", requestId, result: {
-        content: [{ type: "text", text: [header, "---", ...log].join("\n") }], isError: false, details: { output: log },
+        content: [{ type: "text", text: output.join("\n") }], isError: false, details: { output },
       }});
       return;
     }

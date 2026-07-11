@@ -16,7 +16,13 @@
 
 ## 3. Execution
 
-Pending.
+- 新增 immutable session lease 状态机、epoch/nonce token envelope 与 stale writer 校验。
+- child 通过 IPC 发布 session identity，并在输入边界校验 lease token。
+- handoff 使用 requiredPromptSeq + isIdle barrier，超时发送 nonce-scoped cancel。
+- root 使用全局 registry 跨 switchSession 保留 child handles。
+- `/teammate-session` 真实调用 switchSession；Alt+R 路由到该 command。
+- handback 使用 reload command，并校验 nonce、sessionId 和 sessionFile。
+- focused tests 当前 12/12 通过。
 
 ## 4. Verification
 
