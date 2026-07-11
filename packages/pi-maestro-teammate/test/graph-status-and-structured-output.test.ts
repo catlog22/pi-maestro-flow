@@ -583,16 +583,17 @@ test("background completion renderer stays compact but expands to the full resul
   assert.equal(message.content, content);
 });
 
-test("Alt+R routes through the command context required for real session switching", async () => {
+test("Alt+R directly uses its command context without injecting a user message", async () => {
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
-  let shortcut: (() => void) | undefined;
+  let shortcut: ((ctx: unknown) => Promise<void>) | undefined;
   const sentMessages: string[] = [];
+  const notifications: Array<{ message: string; level: string }> = [];
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
     registerCommand(name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) {
       commands.set(name, command);
     },
-    registerShortcut(key: string, entry: { handler: () => void }) {
+    registerShortcut(key: string, entry: { handler: (ctx: unknown) => Promise<void> }) {
       if (key === "alt+r") shortcut = entry.handler;
     },
     sendUserMessage(message: string) {
@@ -608,6 +609,14 @@ test("Alt+R routes through the command context required for real session switchi
   registerTeammateExtension(pi as unknown as ExtensionAPI);
   assert.ok(commands.has("teammate-session"));
   assert.ok(shortcut);
-  shortcut();
-  assert.deepEqual(sentMessages, ["/teammate-session"]);
+  await shortcut({
+    sessionManager: { getSessionFile: () => "main-session.jsonl" },
+    ui: {
+      notify(message: string, level: string) {
+        notifications.push({ message, level });
+      },
+    },
+  });
+  assert.deepEqual(sentMessages, []);
+  assert.deepEqual(notifications, [{ message: "No attachable teammate sessions.", level: "warning" }]);
 });

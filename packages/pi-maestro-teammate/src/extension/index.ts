@@ -1590,9 +1590,7 @@ Modes:
     return ready;
   }
 
-  pi.registerCommand("teammate-session", {
-    description: "Switch the main Pi conversation to a teammate session or return to main",
-    async handler(_args, ctx) {
+  async function handleTeammateSession(ctx: ExtensionCommandContext): Promise<void> {
       const currentFile = ctx.sessionManager.getSessionFile();
       const attached = Array.from(state.activeRuns.values()).find((agent) =>
         agent.sessionFile === currentFile && agent.lease?.owner === "main"
@@ -1691,6 +1689,12 @@ Modes:
         agent.lastParkNonce = undefined;
         throw error;
       }
+  }
+
+  pi.registerCommand("teammate-session", {
+    description: "Switch the main Pi conversation to a teammate session or return to main",
+    async handler(_args, ctx) {
+      await handleTeammateSession(ctx);
     },
   });
 
@@ -1700,8 +1704,8 @@ Modes:
 
   pi.registerShortcut("alt+r", {
     description: "Switch the main conversation to a teammate session",
-    handler() {
-      pi.sendUserMessage("/teammate-session");
+    async handler(ctx) {
+      await handleTeammateSession(ctx);
     },
   });
 
