@@ -30,7 +30,15 @@ Pending.
 
 ## 5. Fix Log
 
-Pending.
+### Iteration 1
+
+- 将 lease token envelope 接入 child input 与所有 root/proxy send 边界。
+- 增加 requiredPromptSeq、agent_end completion 与稳定 idle barrier，消除 prompt 尚未消费时提前 parked。
+- handoff timeout 发送 nonce-scoped cancel，ack 按 nonce + fenced epoch 恢复。
+- handback returned 校验 nonce、sessionId、sessionFile。
+- owner/fence 变化同步发布 child expected lease。
+- child lifecycle event 绑定实际 child correlationId；sessionFile 必须 realpath 位于 canonical sessionDir。
+- 修复 owner gate/promptSeq 误入 watchTool 的回归。
 
 ## 6. Generalization
 

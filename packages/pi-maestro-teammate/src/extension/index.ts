@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import type {
   ExtensionAPI,
@@ -243,6 +244,8 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       expectedLease?: LeaseToken;
       acceptedPromptSeq: number;
       requiredPromptSeq: number;
+      completedPromptSeq: number;
+      idleStableTicks: number;
     }
     const globals = globalThis as typeof globalThis & Record<symbol, unknown>;
     const bridge: ChildHandoffBridge = (globals[bridgeKey] as ChildHandoffBridge | undefined) ?? {
@@ -252,6 +255,8 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       pendingRequests: new Map(),
       acceptedPromptSeq: 0,
       requiredPromptSeq: 0,
+      completedPromptSeq: 0,
+      idleStableTicks: 0,
     };
     globals[bridgeKey] = bridge;
     const pendingRequests = bridge.pendingRequests;
@@ -273,7 +278,11 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     pi.on("session_start", (_event, ctx) => publishSessionIdentity(ctx));
     pi.on("session_compact", (_event, ctx) => publishSessionIdentity(ctx));
     pi.on("message_end", (_event, ctx) => publishSessionIdentity(ctx));
-    pi.on("agent_end", (_event, ctx) => publishSessionIdentity(ctx));
+    pi.on("agent_end", (_event, ctx) => {
+      publishSessionIdentity(ctx);
+      bridge.completedPromptSeq = bridge.acceptedPromptSeq;
+      bridge.idleStableTicks = 0;
+    });
     pi.on("input", (event) => {
       if (event.text.startsWith("/teammate-handoff-reload ")) {
         return bridge.expectedLease?.owner === "none" ? { action: "continue" } : { action: "handled" };
@@ -285,6 +294,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         return { action: "handled" };
       }
       bridge.acceptedPromptSeq++;
+      bridge.idleStableTicks = 0;
       if (unwrapped.token) return { action: "transform", text: unwrapped.message };
       return { action: "continue" };
     });
@@ -326,9 +336,12 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           bridge.parking = true;
           bridge.nonce = m.nonce as string;
           bridge.requiredPromptSeq = Number(m.requiredPromptSeq ?? bridge.acceptedPromptSeq);
+          bridge.idleStableTicks = 0;
           if (bridge.pollTimer) clearInterval(bridge.pollTimer);
           bridge.pollTimer = setInterval(() => {
-            if (!bridge.parking || !bridge.ctx?.isIdle() || bridge.acceptedPromptSeq < bridge.requiredPromptSeq) return;
+            if (!bridge.parking || bridge.completedPromptSeq < bridge.requiredPromptSeq) return;
+            bridge.idleStableTicks = bridge.ctx?.isIdle() ? bridge.idleStableTicks + 1 : 0;
+            if (bridge.idleStableTicks < 2) return;
             if (bridge.pollTimer) clearInterval(bridge.pollTimer);
             bridge.pollTimer = undefined;
             bridge.parking = false;
@@ -436,8 +449,17 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     const agent = state.activeRuns.get(correlationId);
     if (!agent) return;
     const eventSessionFile = event.sessionFile as string | undefined;
+    if (eventSessionFile && !agent.sessionDir) return;
     if (eventSessionFile && agent.sessionDir) {
-      const relative = path.relative(path.resolve(agent.sessionDir), path.resolve(eventSessionFile));
+      let sessionRoot: string;
+      let sessionPath: string;
+      try {
+        sessionRoot = fs.realpathSync(agent.sessionDir);
+        sessionPath = fs.realpathSync(eventSessionFile);
+      } catch {
+        return;
+      }
+      const relative = path.relative(sessionRoot, sessionPath);
       if (relative.startsWith("..") || path.isAbsolute(relative)) return;
     }
 
@@ -469,9 +491,14 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       agent.status = "running";
       return;
     }
-    if (event.type === "teammate_handoff_cancelled" && agent.lease?.state === "fenced") {
+    if (event.type === "teammate_handoff_cancelled"
+      && agent.lease?.state === "fenced"
+      && agent.pendingCancel?.nonce === event.nonce
+      && agent.pendingCancel.fencedEpoch === agent.lease.epoch
+    ) {
       agent.lease = recoverChild(agent.lease);
       agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
+      agent.pendingCancel = undefined;
     }
   }
 
@@ -639,6 +666,8 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
         replyTo: params.reply_to,
         status: "running",
         sleepMs: 0,
+        lease: createChildLease(),
+        promptSeq: p.task ? 1 : 0,
         lease: createChildLease(),
         promptSeq: params.task ? 1 : 0,
         ...(isMultiTask ? { progress: progressSnapshot() } : {}),
@@ -1054,6 +1083,14 @@ Modes:
         };
       }
 
+      if (agent.lease && (agent.lease.owner !== "child" || agent.lease.state !== "active")) {
+        return {
+          content: [{ type: "text", text: `Agent "${params.to}" is currently owned by ${agent.lease.owner} (${agent.lease.state}).` }],
+          isError: true,
+          details: { delivered: false },
+        };
+      }
+
       const mode: RpcMessageMode = agent.status === "sleeping" && requestedMode !== "abort"
         ? "prompt"
         : requestedMode;
@@ -1066,6 +1103,7 @@ Modes:
         };
       }
 
+      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
       const wasSleeping = agent.status === "sleeping";
       if (wasSleeping && mode !== "abort") {
         agent.status = "running";
@@ -1155,14 +1193,6 @@ Modes:
           content: [{ type: "text", text: resolved.error ?? `Agent "${params.name}" not found.${suffix}` }],
           isError: true,
           details: { output: [] },
-        };
-      }
-      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
-      if (agent.lease && (agent.lease.owner !== "child" || agent.lease.state !== "active")) {
-        return {
-          content: [{ type: "text", text: `Agent "${params.to}" is currently owned by ${agent.lease.owner} (${agent.lease.state}).` }],
-          isError: true,
-          details: { delivered: false },
         };
       }
       const output = buildWatchOutput(resolved.match, lines);
@@ -1541,6 +1571,7 @@ Modes:
         if (agent.pendingHandoff?.nonce !== nonce) return;
         agent.pendingHandoff = undefined;
         agent.lease = agent.lease ? fenceLease(agent.lease) : undefined;
+        if (agent.lease) agent.pendingCancel = { nonce, fencedEpoch: agent.lease.epoch };
         agent.sendControl?.({ type: "teammate_handoff_cancel", nonce });
         resolve(false);
       }, timeoutMs);
@@ -1593,6 +1624,7 @@ Modes:
               setTimeout(() => {
                 if (attached.lease?.state === "reloading") {
                   attached.lease = fenceLease(attached.lease);
+                  attached.sendControl?.({ type: "teammate_lease_update", token: leaseToken(attached.lease) });
                   attached.pendingHandback = undefined;
                   attached.status = "sleeping";
                 }
@@ -1601,14 +1633,17 @@ Modes:
           });
         } catch (error) {
           state.handoffSwitching = false;
-          if (attached.lease) attached.lease = fenceLease(attached.lease);
+          if (attached.lease) {
+            attached.lease = fenceLease(attached.lease);
+            attached.sendControl?.({ type: "teammate_lease_update", token: leaseToken(attached.lease) });
+          }
           throw error;
         }
         return;
       }
 
       const candidates = Array.from(state.activeRuns.values()).filter((agent) =>
-        Boolean(agent.sessionFile && agent.sendControl && agent.lease?.owner === "child")
+        Boolean(agent.sessionDir && agent.sessionFile && agent.sendControl && agent.lease?.owner === "child")
       );
       if (candidates.length === 0) {
         ctx.ui.notify("No attachable teammate sessions.", "warning");
@@ -1637,6 +1672,7 @@ Modes:
       } catch (error) {
         state.handoffSwitching = false;
         agent.lease = fenceLease(agent.lease);
+        agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
         throw error;
       }
     },
@@ -2204,7 +2240,14 @@ async function handleProxyRequest(
       const runOpts: RunTeammateOptions = {
         baseCwd: state.baseCwd,
         signal: abortCtrl.signal,
-        onChildSpawned: (stdin) => { activeAgent.stdin = stdin; },
+        parentSessionFile: spawnerAgent?.sessionFile ?? state.mainSessionFile,
+        onChildSpawned: (stdin, sendControl, sessionDir) => {
+          activeAgent.stdin = stdin;
+          activeAgent.sendControl = sendControl;
+          activeAgent.sessionDir = sessionDir;
+          if (activeAgent.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(activeAgent.lease) });
+        },
+        onChildEvent: (event) => handleChildLifecycleEvent({ ...event, correlationId: cid }),
         onChildRequest: (evt, rep) => handleProxyRequest(pi, state, evt, rep, cid),
       };
 
@@ -2237,7 +2280,7 @@ async function handleProxyRequest(
     case "teammate-send": {
       const to = params.to as string;
       const message = params.message as string;
-      const mode = (params.mode as RpcMessageMode) ?? "follow_up";
+      const requestedMode = (params.mode as RpcMessageMode) ?? "follow_up";
 
       const cid = state.namedAgents.get(to);
       if (!cid) {
@@ -2257,8 +2300,32 @@ async function handleProxyRequest(
         }});
         return;
       }
-
-      sendRpcMessage(agent.stdin, message, mode);
+      if (agent.lease && (agent.lease.owner !== "child" || agent.lease.state !== "active")) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Agent "${to}" is currently owned by ${agent.lease.owner} (${agent.lease.state}).` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+      const mode: RpcMessageMode = agent.status === "sleeping" && requestedMode !== "abort"
+        ? "prompt"
+        : requestedMode;
+      const sent = sendRpcMessage(agent.stdin, message, mode, agent.lease ? leaseToken(agent.lease) : undefined);
+      if (!sent) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Failed to send message to "${to}".` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+      if (agent.status === "sleeping" && mode === "prompt") {
+        agent.status = "running";
+        if (agent.sleptAt) {
+          agent.sleepMs += Date.now() - agent.sleptAt;
+          agent.sleptAt = undefined;
+        }
+      }
       const now = Date.now();
       agent.inbox.push({ id: randomUUID(), from: spawnedBy ?? "proxy", to, kind: mode === "abort" ? "notification" : "task", payload: message, timestamp: now });
       agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);

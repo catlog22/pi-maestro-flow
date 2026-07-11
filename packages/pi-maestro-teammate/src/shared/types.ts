@@ -102,6 +102,7 @@ export interface ActiveAgent {
     sessionId?: string;
     sessionFile?: string;
   };
+  pendingCancel?: { nonce: string; fencedEpoch: number };
   inbox: MessageEnvelope[];
   outputLog: string[];
   pendingResolve?: (result: SingleResult) => void;
