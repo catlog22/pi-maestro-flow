@@ -118,6 +118,23 @@ test("PlanStore rebuilds approval history when manifest.json is missing", async 
   }
 });
 
+test("PlanStore advances the recovered revision when current.md diverges from the latest approval", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-manifest-diverged-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") });
+    const approved = await store.approve("approved text", 0);
+    await writeFile(store.currentPath, "later human draft", "utf8");
+    await rm(store.manifestPath, { force: true });
+
+    const recovered = await new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") }).load();
+    assert.equal(recovered.manifest.status, "draft");
+    assert.equal(recovered.manifest.revision, approved.manifest.revision + 1);
+    assert.equal(recovered.markdown, "later human draft");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("PlanStore serializes approval commit and concurrent recovery", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-approval-lock-"));
   let releaseCommit: (() => void) | undefined;

@@ -88,8 +88,9 @@ Iteration 2 targeted repairs:
 - Serialized load, save and approval through a workspace transaction lock so recovery cannot observe or delete an in-flight archive.
 - Rebuilt valid immutable approval history from archive filenames when `manifest.json` is missing or damaged instead of deleting it.
 - Added manifest-loss and concurrent approval/recovery regression tests.
+- Separated lock acquisition errors from transaction errors, advanced revisions for diverged recovered drafts, and blocked additional executable pager/preprocessor and Git mutation forms.
 
-After the second repair round: Plan 18/18, Todo 10/10, Hooks 7/7 and Ask 2/2 passed; runtime imports and `git diff --check` passed. Width 1–120 remained covered by the unchanged editor implementation and prior live matrix.
+After the second repair round: Plan 19/19, Todo 10/10, Hooks 7/7 and Ask 2/2 passed; runtime imports and `git diff --check` passed. Width 1–120 remained covered by the unchanged editor implementation and prior live matrix.
 
 ## 6. Generalization
 

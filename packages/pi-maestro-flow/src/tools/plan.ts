@@ -74,8 +74,8 @@ const MUTATING_BASH_PATTERNS = [
 ];
 
 const SHELL_CHAIN_PATTERN = /(?:\r|\n|;|&&|\|\||\||`|\$\(|<\()/;
-const SHELL_SIDE_EFFECT_ARGUMENTS = /(?:^|\s)(?:--output(?:=|\s)|--outfile(?:=|\s)|-o(?:\s|$)|--in-place(?:=|\s|$)|-i(?:\s|$)|--exec(?:=|\s|$)|--exec-batch(?:=|\s|$)|-x(?:\s|$)|-X(?:\s|$)|--ext-diff(?:\s|$)|--textconv(?:\s|$)|--fix(?:\s|$))/i;
-const SIMPLE_READ_COMMAND = /^\s*(?:cat|head|tail|grep|ls|pwd|echo|printf|wc|diff|file|stat|du|df|tree|which|type|uname|whoami|id|ps|jq|rg|bat)(?:\s|$)/i;
+const SHELL_SIDE_EFFECT_ARGUMENTS = /(?:^|\s)(?:--output(?:=|\s)|--outfile(?:=|\s)|-OutFile(?:\s|$)|-o(?:\s|$)|--in-place(?:=|\s|$)|-i(?:\s|$)|--exec(?:=|\s|$)|--exec-batch(?:=|\s|$)|-x(?:\s|$)|-X(?:\s|$)|--ext-diff(?:\s|$)|--textconv(?:\s|$)|--open-files-in-pager(?:=|\s|$)|--pager(?:=|\s|$)|--paging(?:=|\s|$)|--pre(?:=|\s|$)|--fix(?:\s|$))/i;
+const SIMPLE_READ_COMMAND = /^\s*(?:cat|head|tail|grep|ls|pwd|echo|printf|wc|diff|file|stat|du|df|tree|which|type|uname|whoami|id|ps|jq|rg)(?:\s|$)/i;
 const POWERSHELL_READ_COMMAND = /^\s*(?:Get-Content|Get-ChildItem|Get-Item|Get-Location|Resolve-Path|Test-Path|Select-String|Measure-Object)(?:\s|$)/i;
 
 const PlanEnterParams = Type.Object({
@@ -472,7 +472,9 @@ function isSafeCommand(command: string): boolean {
   }
   if (/^\s*fd(?:\s|$)/i.test(trimmed)) return true;
   if (/^\s*git\s+/i.test(trimmed)) {
-    return /^\s*git\s+(?:status|log|diff|show|branch|remote|ls-files|grep)(?:\s|$)/i.test(trimmed)
+    return /^\s*git\s+(?:status|log|diff|show|ls-files|grep)(?:\s|$)/i.test(trimmed)
+      || /^\s*git\s+branch(?:\s+(?:--show-current|--list(?:\s+\S+)?|-a|-r|-v{1,2}))?\s*$/i.test(trimmed)
+      || /^\s*git\s+remote(?:\s+-v|\s+show\s+\S+|\s+get-url\s+\S+)?\s*$/i.test(trimmed)
       || /^\s*git\s+config\s+--get(?:\s|$)/i.test(trimmed);
   }
   if (/^\s*npm\s+/i.test(trimmed)) {

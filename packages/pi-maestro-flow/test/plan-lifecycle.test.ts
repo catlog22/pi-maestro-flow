@@ -194,7 +194,11 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "find . -exec rm {} ;" } })?.reason ?? "", /mutating/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git diff --output=review.patch" } })?.reason ?? "", /mutating/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git log --ext-diff" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git branch -D old" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git remote set-url origin evil" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git grep x --open-files-in-pager=sh" } })?.reason ?? "", /mutating/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "fd pattern -x rm" } })?.reason ?? "", /mutating/);
+    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "rg pattern --pre 'rm file'" } })?.reason ?? "", /mutating/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "npm audit --fix" } })?.reason ?? "", /mutating/);
 
     await onAgentEndPlan({

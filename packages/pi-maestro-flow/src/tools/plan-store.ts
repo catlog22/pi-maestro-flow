@@ -211,7 +211,9 @@ export class PlanStore {
       version: 1,
       workspaceId: this.workspaceId,
       workspacePath: this.workspacePath,
-      revision: Math.max(lastRevision, markdown ? 1 : 0),
+      revision: lastRevision > 0
+        ? lastRevision + (approved ? 0 : 1)
+        : markdown ? 1 : 0,
       status: approved ? "approved" : "draft",
       draftChecksum: checksum,
       updatedAt,
@@ -237,14 +239,12 @@ export class PlanStore {
 
   private async withWorkspaceLock<T>(operation: () => Promise<T>): Promise<T> {
     await mkdir(this.plansDir, { recursive: true });
+    let acquired = false;
     for (let attempt = 0; attempt < 200; attempt += 1) {
       try {
         await mkdir(this.lockPath);
-        try {
-          return await operation();
-        } finally {
-          await rm(this.lockPath, { recursive: true, force: true });
-        }
+        acquired = true;
+        break;
       } catch (error) {
         if (!isAlreadyExists(error)) throw error;
         if (await this.isStaleLock()) {
@@ -254,7 +254,12 @@ export class PlanStore {
         await delay(25);
       }
     }
-    throw new Error(`Timed out waiting for Plan transaction lock: ${this.lockPath}`);
+    if (!acquired) throw new Error(`Timed out waiting for Plan transaction lock: ${this.lockPath}`);
+    try {
+      return await operation();
+    } finally {
+      await rm(this.lockPath, { recursive: true, force: true });
+    }
   }
 
   private async isStaleLock(): Promise<boolean> {
