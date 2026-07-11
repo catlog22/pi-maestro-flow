@@ -17,7 +17,13 @@ Acceptance criteria:
 
 ## 2. Plan
 
-Pending S_PLAN decomposition.
+1. Implement `PlanStore`: workspace identity, draft, manifest, immutable approvals, atomic writes and recovery.
+2. Refactor lifecycle state into a controller and add LLM-callable Plan tools with dynamic active-tool switching.
+3. Implement a full-screen multiline Markdown editor with line numbers, highlighting, cursor editing and save/confirm/cancel.
+4. Integrate the store/controller/editor into existing hooks, `/plan`, `Alt+P` and compatibility capture.
+5. Add focused regression tests, runtime matrices and documentation.
+
+Dependencies: T1 precedes T2/T3; T2 and T3 converge in T4; T5 verifies all criteria.
 
 ## 3. Execution
 
