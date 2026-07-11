@@ -1,0 +1,102 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { openPlanEditor } from "../src/tools/plan-editor.ts";
+
+function createHarness() {
+  let component: { render(width: number): string[]; handleInput(data: string): void } | undefined;
+  let doneValue: unknown;
+  let doneResolve: ((value: unknown) => void) | undefined;
+  const donePromise = new Promise<unknown>((resolve) => { doneResolve = resolve; });
+  const tui = { requestRender() {} };
+  const theme = {
+    fg: (_name: string, text: string) => text,
+    bg: (_name: string, text: string) => text,
+    bold: (text: string) => text,
+  };
+  const ui = {
+    async custom(factory: Function) {
+      component = factory(tui, theme, {}, (value: unknown) => {
+        doneValue = value;
+        doneResolve?.(value);
+      });
+      return donePromise;
+    },
+  };
+  return {
+    ctx: { hasUI: true, ui } as unknown as ExtensionContext,
+    get component() { return component; },
+    get doneValue() { return doneValue; },
+  };
+}
+
+test("Plan editor renders line numbers, current-line marker and bounded widths", async () => {
+  const harness = createHarness();
+  const pending = openPlanEditor(harness.ctx, {
+    markdown: "# Plan\n\nFirst step",
+    revision: 2,
+    allowConfirm: true,
+    async onSave() { return 3; },
+    async onConfirm() {},
+  });
+  assert.ok(harness.component);
+  for (const width of [20, 40, 80, 120]) {
+    const lines = harness.component.render(width);
+    assert.match(lines.join("\n"), />\s+3\s+│/);
+    if (width >= 80) assert.match(lines.join("\n"), /Ctrl\+Enter/);
+    for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+  }
+  harness.component.handleInput("\x1b");
+  const result = await pending;
+  assert.equal(result.action, "cancelled");
+});
+
+test("Plan editor saves without closing and confirms the exact edited buffer", async () => {
+  const harness = createHarness();
+  const saves: Array<{ markdown: string; revision: number }> = [];
+  const confirmations: Array<{ markdown: string; revision: number }> = [];
+  const pending = openPlanEditor(harness.ctx, {
+    markdown: "draft",
+    revision: 4,
+    allowConfirm: true,
+    async onSave(markdown, revision) {
+      saves.push({ markdown, revision });
+      return revision + 1;
+    },
+    async onConfirm(markdown, revision) {
+      confirmations.push({ markdown, revision });
+    },
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput(" updated");
+  harness.component.handleInput("\x13");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.doneValue, undefined);
+  assert.deepEqual(saves, [{ markdown: "draft updated", revision: 4 }]);
+
+  harness.component.handleInput("\x1b[13;5u");
+  const result = await pending;
+  assert.equal(result.action, "approved");
+  assert.deepEqual(confirmations, [{ markdown: "draft updated", revision: 5 }]);
+});
+
+test("Plan editor keeps the buffer open when approval fails", async () => {
+  const harness = createHarness();
+  const pending = openPlanEditor(harness.ctx, {
+    markdown: "important draft",
+    revision: 1,
+    allowConfirm: true,
+    async onSave() { return 2; },
+    async onConfirm() { throw new Error("disk full"); },
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("\x1b[13;5u");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.doneValue, undefined);
+  assert.match(harness.component.render(80).join("\n"), /approval failed: disk full/);
+  harness.component.handleInput("\x1b");
+  const result = await pending;
+  assert.equal(result.action, "cancelled");
+  assert.equal(result.markdown, "important draft");
+});

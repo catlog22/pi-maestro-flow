@@ -11,7 +11,7 @@
  *
  * Also registers:
  *   - /goal command
- *   - /plan command + Shift+Tab shortcut (Plan/Act mode toggle)
+ *   - /plan command + Alt+P shortcut (Plan/Act mode toggle)
  *   - Dynamic LLM providers
  */
 
@@ -63,7 +63,11 @@ import {
 } from "../tools/todo.ts";
 import {
   initPlan,
+  PLAN_TOGGLE_KEY,
+  PLAN_TOGGLE_LABEL,
   registerPlanCommand,
+  registerPlanTools,
+  isPlanMode,
   toggleMode as planToggleMode,
   onSessionStartPlan,
   onSessionShutdownPlan,
@@ -437,10 +441,11 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
   // === Plan Mode ===
   initPlan(pi);
+  registerPlanTools(pi);
   registerPlanCommand(pi);
 
-  pi.registerShortcut("shift+q", {
-    description: "Toggle Plan/Act mode",
+  pi.registerShortcut(PLAN_TOGGLE_KEY, {
+    description: `Toggle Plan/Act mode (${PLAN_TOGGLE_LABEL})`,
     async handler(ctx: ExtensionContext) {
       await planToggleMode(ctx);
     },
@@ -482,13 +487,13 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   });
 
   // === Session lifecycle ===
-  pi.on("session_start", (_event, ctx) => {
+  pi.on("session_start", async (_event, ctx) => {
     state.baseCwd = ctx.cwd;
     widgetCtx = ctx;
     todoExpanded = false;
     goalSessionStart(ctx);
     todoSessionStart(ctx);
-    onSessionStartPlan(ctx);
+    await onSessionStartPlan(ctx);
     updateTodoWidget();
   });
 
@@ -536,7 +541,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("agent_end", async (event, ctx) => {
-    onAgentEndPlan(event, ctx);
+    await onAgentEndPlan(event, ctx);
     await goalAgentEnd(event, ctx);
     updateTodoWidget();
   });

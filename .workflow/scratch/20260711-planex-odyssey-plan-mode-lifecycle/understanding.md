@@ -27,7 +27,14 @@ Dependencies: T1 precedes T2/T3; T2 and T3 converge in T4; T5 verifies all crite
 
 ## 3. Execution
 
-Pending.
+- Added `PlanStore` with workspace hashing, `current.md`, manifest, immutable approvals, revision checks, atomic writes and recovery.
+- Added a full-screen multiline Plan editor with logical line numbers, current-line marker/highlight, cursor editing, scrolling, save, cancel and fail-closed confirmation.
+- Rebuilt the Plan lifecycle around dynamic `getActiveTools()` / `setActiveTools()` snapshot and restoration.
+- Added `plan-enter`, `plan-update`, `plan-review`, `plan-confirm`, `plan-exit` and `plan-status`.
+- Preserved `/plan`, `Alt+P`, compatibility tag capture, Plan-before-Goal hooks and safe Bash filtering.
+- Added Plan documentation and focused tests.
+
+Local execution evidence: Plan 13/13, Todo 10/10, Hooks 7/7, Ask 2/2; runtime imports passed; editor width matrix 1–120 passed; diff check passed.
 
 ## 4. Verification
 

@@ -1,652 +1,571 @@
 /**
- * Plan mode — toggle between Plan (read-only analysis) and Act (execution).
+ * Durable Plan mode lifecycle.
  *
- * Shift+Tab toggles mode. In Plan mode:
- *   - Phased system prompt: Ground → Intent → Implementation → Finalization
- *   - Write tools blocked, bash commands filtered by safety patterns
- *   - Structured plan captured via <proposed_plan> tags
- *   - Switching back to Act shows confirmation overlay → injects approved plan
- *
- * State machine: ACT ↔ PLAN (Shift+Tab toggles)
+ * Act mode exposes plan-enter. Plan mode dynamically activates a safe read-only
+ * tool surface plus plan-update/review/confirm/exit/status. Markdown drafts are
+ * persisted by workspace and approval must commit before Act tools are restored.
  */
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { wrapTextWithAnsi, truncateToWidth } from "@earendil-works/pi-tui";
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { Text } from "@earendil-works/pi-tui";
+import { Type } from "typebox";
+import { openPlanEditor } from "./plan-editor.ts";
+import { PlanStore, type LoadedPlan } from "./plan-store.ts";
 
 type Mode = "act" | "plan";
+export type PlanContext = Pick<ExtensionContext, "cwd" | "hasUI" | "ui" | "isIdle">;
 
-export interface PlanContext {
-	cwd: string;
-	hasUI?: boolean;
-	ui: {
-		notify: (message: string, level?: "info" | "warning" | "error") => void;
-		setStatus: (key: string, value: string | undefined) => void;
-		confirm?: (title: string, message: string) => Promise<boolean>;
-		custom?: <T>(
-			callback: (
-				tui: { requestRender: () => void },
-				theme: Record<string, never>,
-				keybindings: unknown,
-				done: (value: T) => void,
-			) => {
-				render: (width: number) => string[];
-				handleInput: (data: string) => void;
-				invalidate: () => void;
-				dispose?: () => void;
-			},
-			opts?: unknown,
-		) => Promise<T | undefined>;
-	};
-	isIdle?: () => boolean;
-	sessionManager?: unknown;
+export interface PlanToolDetails {
+  action: "enter" | "update" | "review" | "confirm" | "exit" | "status";
+  mode: Mode;
+  revision: number;
+  path: string;
+  status: "empty" | "draft" | "approved";
+  approved?: boolean;
+  error?: string;
 }
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
+interface PlanRuntimeOptions {
+  storeFactory?: (cwd: string) => PlanStore;
+}
 
 const STATUS_KEY = "mode";
+export const PLAN_TOGGLE_KEY = "alt+p";
+export const PLAN_TOGGLE_LABEL = "Alt+P";
 const PROPOSED_PLAN_PATTERN = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
 
+const PLAN_ENTER_TOOL = "plan-enter";
+const PLAN_MODE_TOOL_NAMES = [
+  "plan-update",
+  "plan-review",
+  "plan-confirm",
+  "plan-exit",
+  "plan-status",
+] as const;
+const ALL_PLAN_TOOL_NAMES = new Set([PLAN_ENTER_TOOL, ...PLAN_MODE_TOOL_NAMES]);
+
 const BLOCKED_BUILTIN_TOOLS = new Set([
-	"Edit",
-	"Write",
-	"NotebookEdit",
-	"edit",
-	"write",
-	"notebook_edit",
+  "Edit", "Write", "NotebookEdit", "edit", "write", "notebook_edit",
 ]);
 
 const PLAN_ALLOWED_TOOLS = new Set([
-	"maestro",
-	"maestro-wait",
-	"maestro-status",
-	"ask-user-question",
-	"todo",
-	"teammate-list",
-	"teammate-watch",
-	"goal",
-	"Read",
-	"Grep",
-	"Glob",
-	"read",
-	"grep",
-	"glob",
-	"bash",
-	"Bash",
-	"powershell",
-	"PowerShell",
-	"LSP",
-	"WebSearch",
-	"WebFetch",
+  "maestro", "maestro-wait", "maestro-status", "ask-user-question", "todo",
+  "teammate-list", "teammate-watch", "goal", "Read", "Grep", "Glob",
+  "read", "grep", "glob", "bash", "Bash", "powershell", "PowerShell",
+  "LSP", "WebSearch", "WebFetch", ...PLAN_MODE_TOOL_NAMES,
 ]);
 
-// Bash: block mutating commands even though bash itself is allowed
 const MUTATING_BASH_PATTERNS = [
-	/\brm\b/i,
-	/\brmdir\b/i,
-	/\bmv\b/i,
-	/\bcp\b/i,
-	/\bmkdir\b/i,
-	/\btouch\b/i,
-	/\bchmod\b/i,
-	/\bchown\b/i,
-	/\bln\b/i,
-	/\btee\b/i,
-	/\btruncate\b/i,
-	/\bdd\b/i,
-	/(^|[^<])>(?!>)/,
-	/>>/,
-	/\bnpm\s+(install|uninstall|update|ci|link|publish|version)\b/i,
-	/\byarn\s+(add|remove|install|publish|upgrade)\b/i,
-	/\bpnpm\s+(add|remove|install|publish|update)\b/i,
-	/\bbun\s+(add|remove|install|update|publish)\b/i,
-	/\bpip\s+(install|uninstall)\b/i,
-	/\bgit\s+(add|commit|push|pull|merge|rebase|reset|checkout|switch|stash|cherry-pick|revert|tag|init|clone)\b/i,
-	/\bsudo\b/i,
-	/\bkill\b/i,
-	/\bpkill\b/i,
+  /\brm\b/i, /\brmdir\b/i, /\bmv\b/i, /\bcp\b/i, /\bmkdir\b/i,
+  /\btouch\b/i, /\bchmod\b/i, /\bchown\b/i, /\bln\b/i, /\btee\b/i,
+  /\btruncate\b/i, /\bdd\b/i, /(^|[^<])>(?!>)/, />>/,
+  /\bnpm\s+(install|uninstall|update|ci|link|publish|version)\b/i,
+  /\byarn\s+(add|remove|install|publish|upgrade)\b/i,
+  /\bpnpm\s+(add|remove|install|publish|update)\b/i,
+  /\bbun\s+(add|remove|install|update|publish)\b/i,
+  /\bpip\s+(install|uninstall)\b/i,
+  /\bgit\s+(add|commit|push|pull|merge|rebase|reset|checkout|switch|stash|cherry-pick|revert|tag|init|clone)\b/i,
+  /\bsudo\b/i, /\bkill\b/i, /\bpkill\b/i,
 ];
 
 const SAFE_BASH_PATTERNS = [
-	/^\s*(cat|head|tail|less|more|grep|find|ls|pwd|echo|printf|wc|sort|uniq|diff|file|stat|du|df|tree|which|type|env|uname|whoami|id|date|ps|jq|awk|rg|fd|bat)\b/i,
-	/^\s*sed\s+-n\b/i,
-	/^\s*git\s+(status|log|diff|show|branch|remote|config\s+--get|ls-files|grep)\b/i,
-	/^\s*npm\s+(list|ls|view|info|search|outdated|audit)\b/i,
-	/^\s*(node|python|python3|npm|tsc|biome)\s+--version\b/i,
+  /^\s*(cat|head|tail|less|more|grep|find|ls|pwd|echo|printf|wc|sort|uniq|diff|file|stat|du|df|tree|which|type|env|uname|whoami|id|date|ps|jq|awk|rg|fd|bat)\b/i,
+  /^\s*sed\s+-n\b/i,
+  /^\s*git\s+(status|log|diff|show|branch|remote|config\s+--get|ls-files|grep)\b/i,
+  /^\s*npm\s+(list|ls|view|info|search|outdated|audit)\b/i,
+  /^\s*(node|python|python3|npm|tsc|biome)\s+--version\b/i,
 ];
 
-// ---------------------------------------------------------------------------
-// Module state
-// ---------------------------------------------------------------------------
+const PlanEnterParams = Type.Object({
+  prompt: Type.Optional(Type.String({ description: "Optional planning request to queue after entering Plan mode" })),
+});
+const PlanUpdateParams = Type.Object({
+  markdown: Type.String({ description: "Complete Markdown text for current.md" }),
+  expectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),
+});
+const EmptyPlanParams = Type.Object({});
 
 let mode: Mode = "act";
 let extensionApi: ExtensionAPI | undefined;
+let storeFactory: (cwd: string) => PlanStore = (cwd) => new PlanStore(cwd);
+let currentStore: PlanStore | undefined;
+let currentWorkspace = "";
 let latestPlan: string | undefined;
+let latestRevision = 0;
+let latestStatus: PlanToolDetails["status"] = "empty";
 let awaitingAction = false;
+let activeToolsSnapshot: string[] | undefined;
 
-// ---------------------------------------------------------------------------
-// Public: init + getters
-// ---------------------------------------------------------------------------
-
-export function initPlan(pi: ExtensionAPI): void {
-	extensionApi = pi;
+export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): void {
+  extensionApi = pi;
+  storeFactory = options.storeFactory ?? ((cwd) => new PlanStore(cwd));
 }
 
 export function isPlanMode(): boolean {
-	return mode === "plan";
+  return mode === "plan";
 }
 
 export function getMode(): Mode {
-	return mode;
+  return mode;
 }
 
 export function hasPlan(): boolean {
-	return latestPlan !== undefined;
+  return Boolean(latestPlan?.trim());
 }
 
 export function getPlanText(): string {
-	return latestPlan ?? "";
+  return latestPlan ?? "";
 }
 
 export function clearPlan(): void {
-	latestPlan = undefined;
-	awaitingAction = false;
+  latestPlan = undefined;
+  latestRevision = 0;
+  latestStatus = "empty";
+  awaitingAction = false;
 }
 
-// ---------------------------------------------------------------------------
-// Mode transitions
-// ---------------------------------------------------------------------------
+async function ensureStore(ctx: PlanContext): Promise<PlanStore> {
+  if (!currentStore || currentWorkspace !== ctx.cwd) {
+    currentStore = storeFactory(ctx.cwd);
+    currentWorkspace = ctx.cwd;
+  }
+  return currentStore;
+}
 
-function enterPlanMode(ctx: PlanContext): void {
-	mode = "plan";
-	latestPlan = undefined;
-	awaitingAction = false;
-	ctx.ui.setStatus(STATUS_KEY, "PLAN");
-	ctx.ui.notify("Plan mode — exploring and planning, no file changes", "info");
+function applyLoadedPlan(loaded: LoadedPlan): void {
+  latestPlan = loaded.markdown || undefined;
+  latestRevision = loaded.manifest.revision;
+  latestStatus = loaded.markdown
+    ? loaded.manifest.status
+    : "empty";
+  awaitingAction = Boolean(loaded.markdown.trim());
+}
+
+function ensureActToolSurface(): void {
+  if (!extensionApi) return;
+  const active = extensionApi.getActiveTools();
+  const next = active.filter((name) => !ALL_PLAN_TOOL_NAMES.has(name));
+  if (!next.includes(PLAN_ENTER_TOOL)) next.push(PLAN_ENTER_TOOL);
+  extensionApi.setActiveTools(next);
+}
+
+function activatePlanToolSurface(): void {
+  if (!extensionApi) return;
+  if (!activeToolsSnapshot) activeToolsSnapshot = [...extensionApi.getActiveTools()];
+  const safe = activeToolsSnapshot.filter((name) => PLAN_ALLOWED_TOOLS.has(name));
+  extensionApi.setActiveTools([...new Set([...safe, ...PLAN_MODE_TOOL_NAMES])]);
+}
+
+function restoreActToolSurface(): void {
+  if (!extensionApi) return;
+  if (activeToolsSnapshot) {
+    extensionApi.setActiveTools(activeToolsSnapshot);
+    activeToolsSnapshot = undefined;
+    return;
+  }
+  ensureActToolSurface();
+}
+
+async function enterPlanMode(ctx: PlanContext): Promise<void> {
+  const store = await ensureStore(ctx);
+  applyLoadedPlan(await store.load());
+  mode = "plan";
+  activatePlanToolSurface();
+  ctx.ui.setStatus(STATUS_KEY, hasPlan() ? "plan ready" : "PLAN");
+  ctx.ui.notify(`Plan mode · ${store.currentPath}`, "info");
 }
 
 function exitPlanMode(ctx: PlanContext): void {
-	mode = "act";
-	ctx.ui.setStatus(STATUS_KEY, undefined);
+  mode = "act";
+  restoreActToolSurface();
+  ctx.ui.setStatus(STATUS_KEY, undefined);
 }
 
 export async function toggleMode(ctx: PlanContext): Promise<Mode> {
-	if (mode === "act") {
-		enterPlanMode(ctx);
-		return mode;
-	}
-
-	// PLAN → ACT: show confirmation if we have a proposed plan
-	if (hasPlan() && ctx.hasUI !== false) {
-		const approved = await showPlanOverlay(ctx);
-		if (approved) {
-			startImplementation(ctx);
-		} else {
-			ctx.ui.notify("Staying in Plan mode", "info");
-		}
-		return mode;
-	}
-
-	exitPlanMode(ctx);
-	ctx.ui.notify("Act mode", "info");
-	return mode;
+  if (mode === "act") {
+    await enterPlanMode(ctx);
+    return mode;
+  }
+  if (hasPlan() && ctx.hasUI !== false) {
+    const approved = await reviewPlan(ctx, true);
+    if (!approved) ctx.ui.notify("Staying in Plan mode", "info");
+    return mode;
+  }
+  exitPlanMode(ctx);
+  ctx.ui.notify("Act mode · draft preserved", "info");
+  return mode;
 }
 
-// ---------------------------------------------------------------------------
-// Hooks
-// ---------------------------------------------------------------------------
-
-export function onSessionStartPlan(ctx: PlanContext): void {
-	if (mode === "plan") {
-		ctx.ui.setStatus(STATUS_KEY, hasPlan() ? "plan ready" : "PLAN");
-	}
+export async function onSessionStartPlan(ctx: PlanContext): Promise<void> {
+  mode = "act";
+  activeToolsSnapshot = undefined;
+  ensureActToolSurface();
+  ctx.ui.setStatus(STATUS_KEY, undefined);
+  try {
+    const store = await ensureStore(ctx);
+    applyLoadedPlan(await store.load());
+  } catch (error) {
+    clearPlan();
+    ctx.ui.notify(`Plan draft unavailable: ${errorMessage(error)}`, "warning");
+  }
 }
 
 export function onSessionShutdownPlan(ctx: PlanContext): void {
-	mode = "act";
-	latestPlan = undefined;
-	awaitingAction = false;
-	ctx.ui.setStatus(STATUS_KEY, undefined);
+  mode = "act";
+  activeToolsSnapshot = undefined;
+  currentStore = undefined;
+  currentWorkspace = "";
+  latestPlan = undefined;
+  latestRevision = 0;
+  latestStatus = "empty";
+  awaitingAction = false;
+  ctx.ui.setStatus(STATUS_KEY, undefined);
 }
 
 export function onCompactPlan(ctx: PlanContext): void {
-	if (mode === "plan") {
-		ctx.ui.setStatus(STATUS_KEY, hasPlan() ? "plan ready" : "PLAN");
-	}
+  if (mode === "plan") ctx.ui.setStatus(STATUS_KEY, hasPlan() ? "plan ready" : "PLAN");
 }
 
-export function onBeforeAgentStartPlan(event: {
-	systemPrompt: string;
-}): { systemPrompt: string } | undefined {
-	if (mode !== "plan") return;
-
-	// Reset plan-ready state when a new turn starts
-	if (latestPlan || awaitingAction) {
-		latestPlan = undefined;
-		awaitingAction = false;
-	}
-
-	return {
-		systemPrompt: `${event.systemPrompt}\n\n${buildPlanModePrompt()}`,
-	};
+export function onBeforeAgentStartPlan(event: { systemPrompt: string }): { systemPrompt: string } | undefined {
+  if (mode !== "plan") return;
+  return { systemPrompt: `${event.systemPrompt}\n\n${buildPlanModePrompt()}` };
 }
 
 export function onToolCallPlan(event: {
-	toolName: string;
-	input: Record<string, unknown>;
+  toolName: string;
+  input: Record<string, unknown>;
 }): { block: true; reason: string } | undefined {
-	if (mode !== "plan") return;
-
-	const name = event.toolName;
-
-	// Blocked write tools
-	if (BLOCKED_BUILTIN_TOOLS.has(name)) {
-		return {
-			block: true,
-			reason: `Plan mode blocks "${name}". Use /plan and approve the plan, or Shift+Tab to switch to Act mode.`,
-		};
-	}
-
-	// Allowed tools — with special cases
-	if (PLAN_ALLOWED_TOOLS.has(name)) {
-		// Block maestro delegate in write mode
-		if (
-			name === "maestro" &&
-			event.input?.action === "delegate" &&
-			event.input?.mode === "write"
-		) {
-			return {
-				block: true,
-				reason: "Plan mode: write-mode delegate blocked. Use mode='analysis'.",
-			};
-		}
-
-		// Bash/PowerShell: filter by command safety
-		if (name === "bash" || name === "Bash" || name === "powershell" || name === "PowerShell") {
-			const command = readCommand(event.input);
-			if (command && !isSafeCommand(command)) {
-				return {
-					block: true,
-					reason: `Plan mode blocks mutating commands.\nCommand: ${command.slice(0, 120)}`,
-				};
-			}
-		}
-
-		return;
-	}
+  if (mode !== "plan") return;
+  const name = event.toolName;
+  if (BLOCKED_BUILTIN_TOOLS.has(name)) {
+    return { block: true, reason: `Plan mode blocks "${name}". Confirm or exit the plan first.` };
+  }
+  if (!PLAN_ALLOWED_TOOLS.has(name)) {
+    return { block: true, reason: `Plan mode tool surface does not allow "${name}".` };
+  }
+  if (name === "maestro" && event.input?.action === "delegate" && event.input?.mode === "write") {
+    return { block: true, reason: "Plan mode blocks write-mode delegation. Use mode='analysis'." };
+  }
+  if (["bash", "Bash", "powershell", "PowerShell"].includes(name)) {
+    const command = readCommand(event.input);
+    if (command && !isSafeCommand(command)) {
+      return { block: true, reason: `Plan mode blocks mutating commands.\nCommand: ${command.slice(0, 120)}` };
+    }
+  }
 }
 
-export function onAgentEndPlan(event: { messages: unknown[] }, ctx: PlanContext): void {
-	if (mode !== "plan") return;
-
-	const text = latestAssistantText(event.messages);
-	const proposedPlan = extractProposedPlan(text);
-
-	if (!proposedPlan) return;
-
-	latestPlan = proposedPlan;
-	awaitingAction = true;
-	ctx.ui.setStatus(STATUS_KEY, "plan ready");
-	ctx.ui.notify("Proposed plan ready. Use /plan or Shift+Tab to review.", "info");
+export async function onAgentEndPlan(event: { messages: unknown[] }, ctx: PlanContext): Promise<void> {
+  if (mode !== "plan") return;
+  const proposedPlan = extractProposedPlan(latestAssistantText(event.messages));
+  if (!proposedPlan) return;
+  const store = await ensureStore(ctx);
+  const saved = await store.saveDraft(proposedPlan, latestRevision);
+  applyLoadedPlan(saved);
+  ctx.ui.setStatus(STATUS_KEY, "plan ready");
+  ctx.ui.notify("Compatibility plan captured to current.md. Use plan-review or plan-confirm.", "info");
 }
 
-// ---------------------------------------------------------------------------
-// Bash command safety
-// ---------------------------------------------------------------------------
+async function savePlan(ctx: PlanContext, markdown: string, expectedRevision = latestRevision): Promise<LoadedPlan> {
+  const store = await ensureStore(ctx);
+  const saved = await store.saveDraft(markdown, expectedRevision);
+  applyLoadedPlan(saved);
+  ctx.ui.setStatus(STATUS_KEY, hasPlan() ? "plan ready" : "PLAN");
+  return saved;
+}
+
+async function reviewPlan(ctx: PlanContext, allowConfirm: boolean): Promise<boolean> {
+  if (!ctx.hasUI) {
+    ctx.ui.notify("Plan review requires an interactive UI.", "warning");
+    return false;
+  }
+  const store = await ensureStore(ctx);
+  if (mode !== "plan") await enterPlanMode(ctx);
+  const result = await openPlanEditor(ctx, {
+    markdown: latestPlan ?? "",
+    revision: latestRevision,
+    allowConfirm,
+    pathLabel: store.currentPath,
+    async onSave(markdown, expectedRevision) {
+      const saved = await savePlan(ctx, markdown, expectedRevision);
+      return saved.manifest.revision;
+    },
+    async onConfirm(markdown, expectedRevision) {
+      try {
+        const approved = await store.approve(markdown, expectedRevision);
+        applyLoadedPlan(approved);
+      } catch (error) {
+        applyLoadedPlan(await store.load());
+        throw error;
+      }
+    },
+  });
+  if (result.action !== "approved") return false;
+  startImplementation(ctx, result.markdown);
+  return true;
+}
+
+function startImplementation(ctx: PlanContext, markdown: string): void {
+  exitPlanMode(ctx);
+  latestPlan = markdown;
+  latestStatus = "approved";
+  awaitingAction = false;
+  ctx.ui.notify("Plan approved · Act tools restored", "info");
+  const opts = ctx.isIdle?.() ? undefined : { deliverAs: "followUp" as const };
+  extensionApi?.sendUserMessage([
+    "Plan mode is disabled and the approved Plan is committed. Implement it now:",
+    "",
+    markdown,
+    "",
+    "Execute each step and verify it before proceeding.",
+  ].join("\n"), opts);
+}
+
+function currentDetails(action: PlanToolDetails["action"]): PlanToolDetails {
+  return {
+    action,
+    mode,
+    revision: latestRevision,
+    path: currentStore?.currentPath ?? "",
+    status: latestStatus,
+  };
+}
+
+function result(
+  text: string,
+  details: PlanToolDetails,
+  isError = false,
+): AgentToolResult<PlanToolDetails> {
+  return {
+    content: [{ type: "text", text }],
+    details,
+    ...(isError ? { isError: true } : {}),
+  } as unknown as AgentToolResult<PlanToolDetails>;
+}
+
+function requirePlanMode(action: PlanToolDetails["action"]): AgentToolResult<PlanToolDetails> | undefined {
+  if (mode === "plan") return;
+  return result(`plan-${action} requires Plan mode. Call plan-enter first.`, {
+    ...currentDetails(action),
+    error: "E_PLAN_MODE_REQUIRED",
+  }, true);
+}
+
+export function registerPlanTools(pi: ExtensionAPI): void {
+  const enterTool: ToolDefinition<typeof PlanEnterParams, PlanToolDetails> = {
+    name: PLAN_ENTER_TOOL,
+    label: "Plan Enter",
+    description: "Enter durable Plan mode, load the workspace current.md draft, and activate Plan-only tools.",
+    promptSnippet: "Use plan-enter before producing or editing an implementation Plan.",
+    parameters: PlanEnterParams,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (mode !== "plan") await enterPlanMode(ctx);
+      if (params.prompt) {
+        const opts = ctx.isIdle?.() ? undefined : { deliverAs: "followUp" as const };
+        extensionApi?.sendUserMessage(params.prompt, opts);
+      }
+      return result(`Plan mode active. Draft: ${currentStore?.currentPath ?? ""}`, currentDetails("enter"));
+    },
+    renderCall(_args, theme) { return new Text(theme.fg("toolTitle", theme.bold("plan enter")), 0, 0); },
+  };
+
+  const updateTool: ToolDefinition<typeof PlanUpdateParams, PlanToolDetails> = {
+    name: "plan-update",
+    label: "Plan Update",
+    description: "Replace the workspace current.md draft with complete Markdown using optional revision checking.",
+    promptSnippet: "Use plan-update to persist the decision-complete Markdown Plan before review.",
+    parameters: PlanUpdateParams,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const blocked = requirePlanMode("update");
+      if (blocked) return blocked;
+      try {
+        const saved = await savePlan(ctx, params.markdown, params.expectedRevision ?? latestRevision);
+        return result(`Plan draft saved at revision ${saved.manifest.revision}.`, currentDetails("update"));
+      } catch (error) {
+        return result(errorMessage(error), { ...currentDetails("update"), error: errorMessage(error) }, true);
+      }
+    },
+  };
+
+  const reviewTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
+    name: "plan-review",
+    label: "Plan Review",
+    description: "Open the full-screen editable Markdown draft. Save or cancel without entering Act mode.",
+    parameters: EmptyPlanParams,
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const blocked = requirePlanMode("review");
+      if (blocked) return blocked;
+      await reviewPlan(ctx, false);
+      return result("Plan review closed; Plan mode remains active.", currentDetails("review"));
+    },
+  };
+
+  const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
+    name: "plan-confirm",
+    label: "Plan Confirm",
+    description: "Open the full-screen editor for human confirmation. Approval commits the Markdown archive before restoring Act mode.",
+    promptSnippet: "Use plan-confirm only after plan-update has produced a decision-complete draft.",
+    parameters: EmptyPlanParams,
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const blocked = requirePlanMode("confirm");
+      if (blocked) return blocked;
+      const approved = await reviewPlan(ctx, true);
+      return result(approved ? "Plan approved; Act mode restored." : "Plan not approved; Plan mode remains active.", {
+        ...currentDetails("confirm"),
+        approved,
+      });
+    },
+  };
+
+  const exitTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
+    name: "plan-exit",
+    label: "Plan Exit",
+    description: "Exit Plan mode without deleting the persisted draft and restore the exact prior active tool set.",
+    parameters: EmptyPlanParams,
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      const blocked = requirePlanMode("exit");
+      if (blocked) return blocked;
+      exitPlanMode(ctx);
+      ctx.ui.notify("Act mode · draft preserved", "info");
+      return result("Plan mode exited; draft preserved.", currentDetails("exit"));
+    },
+  };
+
+  const statusTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
+    name: "plan-status",
+    label: "Plan Status",
+    description: "Return current Plan mode, draft path, revision and approval status.",
+    parameters: EmptyPlanParams,
+    async execute() {
+      const blocked = requirePlanMode("status");
+      if (blocked) return blocked;
+      const details = currentDetails("status");
+      return result(`${details.mode} · ${details.status} · r${details.revision} · ${details.path}`, details);
+    },
+  };
+
+  for (const tool of [enterTool, updateTool, reviewTool, confirmTool, exitTool, statusTool]) {
+    pi.registerTool(tool as ToolDefinition);
+  }
+}
 
 function readCommand(input: unknown): string {
-	if (!input || typeof input !== "object") return "";
-	const rec = input as Record<string, unknown>;
-	return typeof rec.command === "string" ? rec.command : "";
+  if (!input || typeof input !== "object") return "";
+  const record = input as Record<string, unknown>;
+  if (typeof record.command === "string") return record.command;
+  if (typeof record.cmd === "string") return record.cmd;
+  return "";
 }
 
 function isSafeCommand(command: string): boolean {
-	const trimmed = command.trim();
-	if (!trimmed) return false;
-	if (MUTATING_BASH_PATTERNS.some((p) => p.test(trimmed))) return false;
-	return SAFE_BASH_PATTERNS.some((p) => p.test(trimmed));
+  const trimmed = command.trim();
+  if (!trimmed || MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(trimmed))) return false;
+  return SAFE_BASH_PATTERNS.some((pattern) => pattern.test(trimmed));
 }
 
-// ---------------------------------------------------------------------------
-// Plan extraction from assistant output
-// ---------------------------------------------------------------------------
-
 function extractProposedPlan(text: string): string | undefined {
-	const match = PROPOSED_PLAN_PATTERN.exec(text);
-	return match?.[1]?.trim() || undefined;
+  return PROPOSED_PLAN_PATTERN.exec(text)?.[1]?.trim() || undefined;
 }
 
 function latestAssistantText(messages: unknown): string {
-	if (!Array.isArray(messages)) return "";
-	for (let i = messages.length - 1; i >= 0; i--) {
-		const entry = messages[i] as Record<string, unknown>;
-		const message = (entry?.message as Record<string, unknown>) ?? entry;
-		if (message?.role !== "assistant") continue;
-		const text = contentText(message.content);
-		if (text) return text;
-	}
-	return "";
+  if (!Array.isArray(messages)) return "";
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const entry = messages[index] as Record<string, unknown>;
+    const message = (entry?.message as Record<string, unknown>) ?? entry;
+    if (message?.role !== "assistant") continue;
+    const text = contentText(message.content);
+    if (text) return text;
+  }
+  return "";
 }
 
 function contentText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.map((block) => {
-			const b = block as { type?: string; text?: string };
-			return b.type === "text" && typeof b.text === "string" ? b.text : "";
-		})
-		.filter(Boolean)
-		.join("\n");
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  return content.map((block) => {
+    const value = block as { type?: string; text?: string };
+    return value.type === "text" && typeof value.text === "string" ? value.text : "";
+  }).filter(Boolean).join("\n");
 }
-
-// ---------------------------------------------------------------------------
-// System prompt — phased planning protocol
-// ---------------------------------------------------------------------------
 
 function buildPlanModePrompt(): string {
-	return `[PLAN MODE ACTIVE]
+  return `[PLAN MODE ACTIVE]
 # Plan Mode
 
-You are in Plan Mode — a conversational collaboration mode for producing a decision-complete implementation plan. The plan must leave no implementation decisions unresolved.
+You are in durable Plan Mode. Explore and reason without modifying the project.
 
-## Mode rules
+- Use read-only tools and ask-user-question to resolve intent.
+- Use plan-update with complete Markdown to persist the current draft.
+- Use plan-review when the user needs to edit without approval.
+- Use plan-confirm when the draft is decision-complete and ready for human approval.
+- Use plan-exit to leave Plan mode while preserving current.md.
+- Do not use write tools, mutating shell commands, or write-mode delegation.
+- The legacy <proposed_plan> block is accepted only as a compatibility path; prefer plan-update.
 
-- Stay in Plan Mode until the user explicitly exits (Shift+Tab or /plan exit).
-- Treat requests to implement as requests to plan the implementation; do not edit files or carry out the plan.
-- Do not perform mutating actions: no edit/write tools, no patching, no dependency installation, no commits.
-- Bash/shell is allowed for read-only inspection (cat, grep, find, git log, etc.) but mutating commands are blocked.
-
-## Phase 1 — Ground in the environment
-
-- Explore first, ask second. Use read-only tools to read files, search, inspect config, and resolve discoverable facts.
-- Before asking the user any question, perform at least one targeted exploration pass.
-- Do not ask questions that can be answered from repository or system truth.
-
-## Phase 2 — Intent chat
-
-- Keep asking until you can clearly state: the goal, success criteria, in/out of scope, constraints, current state, and key preferences.
-- Bias toward questions over guessing: if a high-impact ambiguity remains, do not produce a proposed plan yet.
-
-## Phase 3 — Implementation chat
-
-- Once intent is stable, keep asking until the spec is decision-complete: approach, interfaces, data flow, edge cases, testing/acceptance criteria, and any migration or compatibility constraints.
-- Use ask-user-question for important preferences or tradeoffs that cannot be discovered by read-only exploration.
-
-## Finalization
-
-Only output the final plan when it is decision-complete. When presenting the plan, output exactly one proposed plan block with these tags:
-
-<proposed_plan>
-# Title
-
-## Summary
-...
-
-## Key Changes
-- file: path/to/file — what and why
-- ...
-
-## Implementation Steps
-1. ...
-2. ...
-
-## Test Plan
-...
-
-## Risks & Mitigations
-...
-
-## Assumptions
-...
-</proposed_plan>
-
-Keep the plan concise, actionable, and free of open decisions. Do not ask "should I proceed?" — the Plan-mode confirmation UI handles that.`;
+The public Plan contract is plain Markdown. Do not invent a parallel structured schema.`;
 }
-
-// ---------------------------------------------------------------------------
-// Plan confirmation overlay (Custom TUI)
-// ---------------------------------------------------------------------------
-
-const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
-const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-const cyan = (s: string) => `\x1b[36m${s}\x1b[39m`;
-const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
-const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
-
-function highlightPlanLine(line: string): string {
-	if (/^#{1,3}\s/.test(line)) return bold(line);
-	if (/^\s*[-*]\s/.test(line)) return line.replace(/^(\s*)([-*])/, `$1${cyan("$2")}`);
-	if (/^\s*\d+\.\s/.test(line)) return line.replace(/^(\s*)(\d+\.)/, `$1${cyan("$2")}`);
-	return line;
-}
-
-function padLine(content: string, innerW: number): string {
-	return dim("│") + truncateToWidth(` ${content}`, innerW, "…", true) + dim("│");
-}
-
-async function showPlanOverlay(ctx: PlanContext): Promise<boolean> {
-	if (!ctx.ui.custom) {
-		return ctx.ui.confirm?.("Approve plan?", "Execute the captured plan?") ?? false;
-	}
-	const planText = getPlanText();
-
-	const approved = await ctx.ui.custom<boolean>(
-		(tui, _theme, _keybindings, done) => {
-			let scrollOffset = 0;
-			let wrappedLines: string[] = [];
-			let cachedContentW = 0;
-
-			function rebuildWrapped(contentW: number): void {
-				if (contentW === cachedContentW) return;
-				cachedContentW = contentW;
-				wrappedLines = [];
-				for (const rawLine of planText.split("\n")) {
-					if (!rawLine.trim()) {
-						wrappedLines.push("");
-					} else {
-						const highlighted = highlightPlanLine(rawLine);
-						const wrapped = wrapTextWithAnsi(highlighted, contentW);
-						wrappedLines.push(...wrapped);
-					}
-				}
-			}
-
-			function clampScroll(viewH: number): void {
-				const max = Math.max(0, wrappedLines.length - viewH);
-				scrollOffset = Math.max(0, Math.min(scrollOffset, max));
-			}
-
-			return {
-				render(width: number): string[] {
-					const w = Math.min(width, 100);
-					const innerW = w - 2;
-					const contentW = innerW - 2;
-					rebuildWrapped(contentW);
-
-					const out: string[] = [];
-
-					// Top border
-					out.push(dim("╭" + "─".repeat(innerW) + "╮"));
-
-					// Header
-					const header = `  ${bold("Plan Review")}  ${dim("│")}  ${green("Enter")}: implement  ${dim("│")}  ${yellow("Esc")}: cancel  ${dim("│")}  ${dim("jk/↑↓")}: scroll`;
-					out.push(dim("│") + truncateToWidth(header, innerW, "…", true) + dim("│"));
-					out.push(dim("├" + "─".repeat(innerW) + "┤"));
-
-					// Content area with scroll
-					const viewH = Math.max(6, (process.stdout?.rows ?? 30) - 8);
-					clampScroll(viewH);
-					const visible = wrappedLines.slice(scrollOffset, scrollOffset + viewH);
-
-					for (const line of visible) {
-						out.push(padLine(line, innerW));
-					}
-					for (let i = visible.length; i < viewH; i++) {
-						out.push(padLine("", innerW));
-					}
-
-					// Footer
-					out.push(dim("├" + "─".repeat(innerW) + "┤"));
-					const total = wrappedLines.length;
-					const scrollInfo = total > viewH
-						? `${scrollOffset + 1}–${Math.min(scrollOffset + viewH, total)}/${total}`
-						: `${total} lines`;
-					const footer = `  ${cyan("proposed plan")}  ${dim("│")}  ${dim(scrollInfo)}`;
-					out.push(dim("│") + truncateToWidth(footer, innerW, "…", true) + dim("│"));
-					out.push(dim("╰" + "─".repeat(innerW) + "╯"));
-
-					return out;
-				},
-
-				handleInput(data: string): void {
-					const viewH = Math.max(6, (process.stdout?.rows ?? 30) - 8);
-					if (data === "\r" || data === "\n") { done(true); return; }
-					if (data === "\x1b" || data === "q") { done(false); return; }
-					if (data === "\x1b[A" || data === "k") {
-						scrollOffset = Math.max(0, scrollOffset - 1);
-						tui.requestRender();
-					} else if (data === "\x1b[B" || data === "j") {
-						scrollOffset = Math.min(Math.max(0, wrappedLines.length - viewH), scrollOffset + 1);
-						tui.requestRender();
-					} else if (data === "\x1b[5~") {
-						scrollOffset = Math.max(0, scrollOffset - viewH);
-						tui.requestRender();
-					} else if (data === "\x1b[6~") {
-						scrollOffset = Math.min(Math.max(0, wrappedLines.length - viewH), scrollOffset + viewH);
-						tui.requestRender();
-					}
-				},
-
-				invalidate(): void {},
-				dispose(): void {},
-			};
-		},
-		{
-			overlay: true,
-			overlayOptions: {
-				width: "100%",
-				maxHeight: "80%",
-				anchor: "top-left" as const,
-				margin: 1,
-			},
-		},
-	);
-
-	return approved ?? false;
-}
-
-// ---------------------------------------------------------------------------
-// Plan implementation — inject approved plan as execution context
-// ---------------------------------------------------------------------------
-
-function startImplementation(ctx: PlanContext): void {
-	const plan = latestPlan?.trim();
-	exitPlanMode(ctx);
-	clearPlan();
-
-	if (!plan) {
-		ctx.ui.notify("Plan mode disabled. No proposed plan available.", "warning");
-		return;
-	}
-
-	ctx.ui.notify("Plan approved — implementing", "info");
-
-	const opts = ctx.isIdle?.() ? undefined : { deliverAs: "followUp" as const };
-	extensionApi?.sendUserMessage(
-		[
-			"Plan mode is now disabled. Full tool access is restored. Implement this proposed plan now:",
-			"",
-			plan,
-			"",
-			"Execute each step. Verify each step works before proceeding to the next.",
-		].join("\n"),
-		opts,
-	);
-}
-
-// ---------------------------------------------------------------------------
-// /plan command
-// ---------------------------------------------------------------------------
 
 export function registerPlanCommand(pi: ExtensionAPI): void {
-	pi.registerCommand("plan", {
-		description: "Plan mode: /plan [<prompt>|exit|show|approve|clear|tools]",
+  pi.registerCommand("plan", {
+    description: "Plan mode: /plan [<prompt>|exit|show|approve|clear|tools]",
+    getArgumentCompletions(prefix: string) {
+      const options = [
+        { value: "exit", label: "exit", description: "Leave Plan mode and preserve draft" },
+        { value: "show", label: "show", description: "Open editable Plan review" },
+        { value: "approve", label: "approve", description: "Review, approve and implement" },
+        { value: "clear", label: "clear", description: "Clear current Markdown draft" },
+        { value: "tools", label: "tools", description: "Show active Plan tools" },
+      ];
+      const lower = prefix.trim().toLowerCase();
+      return lower ? options.filter((option) => option.value.startsWith(lower)) : options;
+    },
+    async handler(args: string, ctx: PlanContext) {
+      const trimmed = args.trim();
+      const command = trimmed.toLowerCase();
+      if (command === "exit" || command === "off") {
+        if (isPlanMode()) exitPlanMode(ctx);
+        ctx.ui.notify("Act mode · draft preserved", "info");
+        return;
+      }
+      if (command === "show") {
+        if (!isPlanMode()) await enterPlanMode(ctx);
+        await reviewPlan(ctx, false);
+        return;
+      }
+      if (command === "approve") {
+        if (!isPlanMode()) await enterPlanMode(ctx);
+        if (!hasPlan()) {
+          ctx.ui.notify("No Plan draft to approve.", "warning");
+          return;
+        }
+        await reviewPlan(ctx, true);
+        return;
+      }
+      if (command === "clear") {
+        if (!isPlanMode()) await enterPlanMode(ctx);
+        await savePlan(ctx, "", latestRevision);
+        ctx.ui.notify("Plan draft cleared.", "info");
+        return;
+      }
+      if (command === "tools") {
+        ctx.ui.notify(isPlanMode() ? PLAN_MODE_TOOL_NAMES.join(", ") : PLAN_ENTER_TOOL, "info");
+        return;
+      }
+      if (trimmed) {
+        if (!isPlanMode()) await enterPlanMode(ctx);
+        const opts = ctx.isIdle?.() ? undefined : { deliverAs: "followUp" as const };
+        extensionApi?.sendUserMessage(trimmed, opts);
+        return;
+      }
+      await toggleMode(ctx);
+    },
+  });
+}
 
-		getArgumentCompletions(prefix: string) {
-			const subs = [
-				{ value: "exit", label: "exit", description: "Leave Plan mode" },
-				{ value: "show", label: "show", description: "Show proposed plan" },
-				{ value: "approve", label: "approve", description: "Approve and implement plan" },
-				{ value: "clear", label: "clear", description: "Clear proposed plan" },
-			];
-			const lower = prefix.trim().toLowerCase();
-			if (!lower) return subs;
-			return subs.filter((s) => s.value.startsWith(lower));
-		},
-
-		async handler(args: string, ctx: PlanContext) {
-			const trimmed = args.trim();
-			const command = trimmed.toLowerCase();
-
-			if (command === "exit" || command === "off") {
-				exitPlanMode(ctx);
-				clearPlan();
-				ctx.ui.notify("Plan mode disabled.", "info");
-				return;
-			}
-
-			if (command === "show") {
-				if (!hasPlan()) {
-					ctx.ui.notify("No proposed plan yet.", "info");
-					return;
-				}
-				if (ctx.ui.custom) {
-					await showPlanOverlay(ctx);
-				} else {
-					const planText = getPlanText();
-					const preview = planText.length > 300 ? `${planText.slice(0, 299)}…` : planText;
-					ctx.ui.notify(preview, "info");
-				}
-				return;
-			}
-
-			if (command === "approve") {
-				if (!hasPlan()) {
-					ctx.ui.notify("No plan to approve.", "warning");
-					return;
-				}
-				startImplementation(ctx);
-				return;
-			}
-
-			if (command === "clear") {
-				clearPlan();
-				ctx.ui.notify("Proposed plan cleared.", "info");
-				return;
-			}
-
-			// /plan with a prompt: enter plan mode and forward the prompt
-			if (trimmed) {
-				if (!isPlanMode()) enterPlanMode(ctx);
-				const opts = ctx.isIdle?.() ? undefined : { deliverAs: "followUp" as const };
-				extensionApi?.sendUserMessage(trimmed, opts);
-				return;
-			}
-
-			// Bare /plan: toggle or show menu
-			if (!isPlanMode()) {
-				enterPlanMode(ctx);
-				return;
-			}
-
-			// Already in plan mode: toggle out
-			await toggleMode(ctx);
-		},
-	});
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
