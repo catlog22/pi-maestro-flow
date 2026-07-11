@@ -38,7 +38,20 @@ Local execution evidence: Plan 13/13, Todo 10/10, Hooks 7/7, Ask 2/2; runtime im
 
 ## 4. Verification
 
-Pending.
+Iteration 1 external Codex review:
+
+| Criterion | Result | Evidence |
+|---|---|---|
+| AC1 | Failed | shutdown discarded active-tool snapshot |
+| AC2 | Failed | archive write/orphan recovery incomplete |
+| AC3 | Passed | editor behavior and width tests |
+| AC4 | Failed | Esc/busy race and partial approval transaction |
+| AC5 | Passed | six tools and mode gating covered |
+| AC6 | Failed | shell chain and missing delegate mode bypasses |
+| AC7 | Failed | same-instance shutdown restoration missing |
+| AC8 | Failed | requires full rerun after fixes |
+
+Routing: S_FIX iteration 1. Acceptance criteria remain unchanged.
 
 ## 5. Fix Log
 
