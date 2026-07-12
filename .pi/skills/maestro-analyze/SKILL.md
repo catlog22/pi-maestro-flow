@@ -9,13 +9,13 @@ Multi-dimensional analysis of a proposal, decision, or architecture choice via C
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/analyze.md
+~/.maestro/workflows/analyze.md
 </required_reading>
 
 <deferred_reading>
 - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
-- [issue-gaps-analyze.md](~/.pi/agent/packages/pi-maestro-flow/workflows/issue-gaps-analyze.md) — read when --gaps is triggered
-- [boundary-grill.md](~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md) — read when boundary conflicts detected (between Phase 4 and Phase 5)
+- [issue-gaps-analyze.md](~/.maestro/workflows/issue-gaps-analyze.md) — read when --gaps is triggered
+- [boundary-grill.md](~/.maestro/workflows/boundary-grill.md) — read when boundary conflicts detected (between Phase 4 and Phase 5)
 </deferred_reading>
 
 <context>
@@ -64,7 +64,7 @@ Output directory format, artifact registration schema, and output artifact listi
 </context>
 
 <interview_protocol>
-Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
+Follows ~/.maestro/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (strict order): scope (phase / topic / milestone-wide / adhoc / --gaps) → depth (quick / standard / deep) → dimensions (which of the 6 to keep) → Go/No-Go threshold
@@ -76,11 +76,11 @@ Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md st
 </interview_protocol>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/analyze.md' completely.
+Follow '~/.maestro/workflows/analyze.md' completely.
 
 ### --gaps Mode
 
-When `--gaps` is present, follow `~/.pi/agent/packages/pi-maestro-flow/workflows/issue-gaps-analyze.md` instead of the standard pipeline.
+When `--gaps` is present, follow `~/.maestro/workflows/issue-gaps-analyze.md` instead of the standard pipeline.
 </execution>
 
 <completion>
@@ -125,7 +125,7 @@ Status verdicts:
 
 ### Session seal
 
-~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md — SESSION_DIR=OUTPUT_DIR, SESSION_TYPE=analyze, SESSION_ID={artifact_id}, LINKED_MILESTONE={target_milestone or null}
+~/.maestro/workflows/finish-work.md — SESSION_DIR=OUTPUT_DIR, SESSION_TYPE=analyze, SESSION_ID={artifact_id}, LINKED_MILESTONE={target_milestone or null}
 </completion>
 
 <error_codes>

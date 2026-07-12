@@ -11,7 +11,7 @@ Session state: Pi `appendEntry("todo-state")` — persisted via Pi extension lif
 </purpose>
 
 <deferred_reading>
-- [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read when `--amend` flag active for goal amendment flow
+- [ralph-amend-goal.md](~/.maestro/workflows/ralph-amend-goal.md) — read when `--amend` flag active for goal amendment flow
 </deferred_reading>
 
 <context>

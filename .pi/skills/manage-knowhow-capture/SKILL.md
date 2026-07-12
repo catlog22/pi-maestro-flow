@@ -10,7 +10,7 @@ Auto-indexed by WikiIndexer (type=knowhow), searchable via `maestro search --typ
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md
+~/.maestro/workflows/knowhow.md
 </required_reading>
 
 <context>
@@ -50,7 +50,7 @@ $ARGUMENTS — type token + description + optional flags.
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md' completely.
+Follow '~/.maestro/workflows/knowhow.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

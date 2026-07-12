@@ -11,7 +11,7 @@ By default, loads from both global (~/.maestro/specs/) and project (.workflow/sp
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/specs-load.md
+~/.maestro/workflows/specs-load.md
 </required_reading>
 
 <context>
@@ -63,7 +63,7 @@ Use the load command to read the full referenced document.
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/specs-load.md' completely.
+Follow '~/.maestro/workflows/specs-load.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

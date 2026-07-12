@@ -9,14 +9,14 @@ Post-execution retrospective (复盘): four parallel lenses (technical/process/q
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/retrospective.md
+~/.maestro/workflows/retrospective.md
 </required_reading>
 
 <deferred_reading>
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md (issues.jsonl schema for auto-creation)
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/learn.md (tip routing via manage-knowhow-capture tip)
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/verify.md (verification.json schema for quality lens parsing)
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/review.md (review.json schema for quality lens parsing)
+- ~/.maestro/workflows/issue.md (issues.jsonl schema for auto-creation)
+- ~/.maestro/workflows/learn.md (tip routing via manage-knowhow-capture tip)
+- ~/.maestro/workflows/verify.md (verification.json schema for quality lens parsing)
+- ~/.maestro/workflows/review.md (review.json schema for quality lens parsing)
 </deferred_reading>
 
 <context>
@@ -44,7 +44,7 @@ Modes (scan/single/range/all) and storage paths defined in workflow retrospectiv
 </invariants>
 
 <execution>
-Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/retrospective.md` Stages 1–8 in order.
+Follow `~/.maestro/workflows/retrospective.md` Stages 1–8 in order.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

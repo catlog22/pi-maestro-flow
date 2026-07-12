@@ -9,7 +9,7 @@ Full rebuild of `.workflow/codebase/` docs: 4 parallel mapper agents → tech-st
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/codebase-rebuild.md
+~/.maestro/workflows/codebase-rebuild.md
 </required_reading>
 
 <context>
@@ -49,7 +49,7 @@ $ARGUMENTS -- optional flags.
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/codebase-rebuild.md' completely.
+Follow '~/.maestro/workflows/codebase-rebuild.md' completely.
 
 **When `--focus <area>` is set:** pass the area string to each mapper agent as scoping context; only regenerate the docs relevant to that scope (leave others untouched unless missing).
 

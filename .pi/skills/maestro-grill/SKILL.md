@@ -11,7 +11,7 @@ Pipeline position: BEFORE brainstorm (stress-test → then elaborate).
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/grill.md
+~/.maestro/workflows/grill.md
 </required_reading>
 
 <deferred_reading>
@@ -47,7 +47,7 @@ $ARGUMENTS -- topic/plan text for interactive mode, or --from source for upstrea
 </context>
 
 <interview_protocol>
-Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
+Follows ~/.maestro/workflows/interview-mechanics.md standard.
 
 **Interaction mode override**: adversarial Socratic — NOT menu-driven
 **Question style**:
@@ -62,7 +62,7 @@ Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md st
 </interview_protocol>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/grill.md' completely.
+Follow '~/.maestro/workflows/grill.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 
@@ -147,5 +147,5 @@ Status verdicts:
 </success_criteria>
 
 <on_complete>
-~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md — SESSION_DIR={output_dir}, SESSION_TYPE=grill, SESSION_ID={artifact_id}, LINKED_MILESTONE=null
+~/.maestro/workflows/finish-work.md — SESSION_DIR={output_dir}, SESSION_TYPE=grill, SESSION_ID={artifact_id}, LINKED_MILESTONE=null
 </on_complete>

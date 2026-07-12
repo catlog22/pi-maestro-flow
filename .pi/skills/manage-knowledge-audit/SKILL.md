@@ -9,12 +9,12 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/knowledge-audit.md
+~/.maestro/workflows/knowledge-audit.md
 </required_reading>
 
 <deferred_reading>
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/harvest.md (audit 检测的 artifact 是 harvest 的产物源)
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md (deprecate 操作所需的 `<spec-entry>` 变形)
+- ~/.maestro/workflows/harvest.md (audit 检测的 artifact 是 harvest 的产物源)
+- ~/.maestro/workflows/specs-add.md (deprecate 操作所需的 `<spec-entry>` 变形)
 </deferred_reading>
 
 <context>
@@ -43,7 +43,7 @@ Flag 全集、scope 对应的扫描路径、Stage 步骤、检测算法定义在
 </invariants>
 
 <execution>
-Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/knowledge-audit.md` Stages 1-8 in order.
+Follow `~/.maestro/workflows/knowledge-audit.md` Stages 1-8 in order.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

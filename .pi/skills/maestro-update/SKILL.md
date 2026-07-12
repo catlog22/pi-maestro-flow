@@ -6,7 +6,7 @@ allowed-tools: Read Write Edit Bash Glob Grep maestro
 
 <purpose>
 Detect current version, run schema migration to latest, then follow the version-specific upgrade workflow.
-Schema migrations are handled by `maestro update --migrate`; workflow docs (`~/.pi/agent/packages/pi-maestro-flow/workflows/updates/`) handle setup.
+Schema migrations are handled by `maestro update --migrate`; workflow docs (`~/.maestro/workflows/updates/`) handle setup.
 </purpose>
 
 <context>
@@ -19,7 +19,7 @@ $ARGUMENTS — optional flags.
 
 **Version source:** `.workflow/state.json` → `version` field
 
-**Workflow docs:** `~/.pi/agent/packages/pi-maestro-flow/workflows/updates/`
+**Workflow docs:** `~/.maestro/workflows/updates/`
 - `update-v{TO}-setup.md` — post-migration setup for version {TO}
 
 **Schema registry:** `maestro update --migrate` — handles all intermediate version bumps automatically
@@ -65,7 +65,7 @@ $ARGUMENTS — optional flags.
 ```
 
 IF `--setup-only`:
-  → Glob: ~/.pi/agent/packages/pi-maestro-flow/workflows/updates/update-v{version}-setup.md
+  → Glob: ~/.maestro/workflows/updates/update-v{version}-setup.md
   → IF exists: follow that document completely, then EXIT
   → IF not exists: display "No setup script for v{version}" → EXIT
 
@@ -76,7 +76,7 @@ IF `--setup-only`:
 2. Parse JSON output
 3. IF status = "up-to-date":
      Display "Already up to date (v{version})"
-     → Glob: ~/.pi/agent/packages/pi-maestro-flow/workflows/updates/update-v{version}-setup.md
+     → Glob: ~/.maestro/workflows/updates/update-v{version}-setup.md
      → IF exists: user prompt "Run setup for v{version}?" → load and follow
      → EXIT
 
@@ -107,7 +107,7 @@ IF `--dry-run` → display info and EXIT.
 5. IF failed → display backup restore command → EXIT
 
 6. Load version-specific setup:
-   Read: ~/.pi/agent/packages/pi-maestro-flow/workflows/updates/update-v{target}-setup.md
+   Read: ~/.maestro/workflows/updates/update-v{target}-setup.md
    IF exists → follow completely (hooks, deps, knowledge system config)
 
 7. Display: "v{current} → v{target}: done"
@@ -132,7 +132,7 @@ Next steps:
 |------|----------|-----------|----------|
 | E001 | error | `.workflow/state.json` not found or unreadable | Run `/maestro-init` first |
 | E002 | error | Schema migration failed (npx tsx returned error) | Display backup restore command: `cp .workflow/state.json.backup-* .workflow/state.json` |
-| E003 | error | Version-specific setup doc failed to execute | Manual setup: read `~/.pi/agent/packages/pi-maestro-flow/workflows/updates/update-v{target}-setup.md` |
+| E003 | error | Version-specific setup doc failed to execute | Manual setup: read `~/.maestro/workflows/updates/update-v{target}-setup.md` |
 | W001 | warning | No version-specific setup doc found for target version | Proceed without setup; schema migration alone is sufficient |
 | W002 | warning | `--setup-only` but no setup script exists for current version | Display message and exit |
 </error_codes>

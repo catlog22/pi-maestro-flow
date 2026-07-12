@@ -10,7 +10,7 @@ Uses `maestro wiki remove-entry` for atomic removal with index auto-update.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/specs-remove.md
+~/.maestro/workflows/specs-remove.md
 </required_reading>
 
 <context>
@@ -34,7 +34,7 @@ $ARGUMENTS -- expects `<entry-id>` (e.g., `spec-learnings-003`, `spec-coding-con
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/specs-remove.md' completely.
+Follow '~/.maestro/workflows/specs-remove.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

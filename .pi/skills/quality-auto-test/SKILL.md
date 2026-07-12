@@ -11,7 +11,7 @@ Layers L0→L3 sequential (fail-fast), scenarios within layer parallel. `--max-i
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/auto-test.md
+~/.maestro/workflows/auto-test.md
 </required_reading>
 
 <context>
@@ -60,7 +60,7 @@ Flags, artifact context resolution, and output formats defined in workflow auto-
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/auto-test.md' completely.
+Follow '~/.maestro/workflows/auto-test.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

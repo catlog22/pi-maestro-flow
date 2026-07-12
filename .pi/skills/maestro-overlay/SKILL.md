@@ -10,7 +10,7 @@ Turn natural-language instructions into command overlays — JSON patch files th
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/overlays.md
+~/.maestro/workflows/overlays.md
 ~/.maestro/cli-tools.json
 </required_reading>
 

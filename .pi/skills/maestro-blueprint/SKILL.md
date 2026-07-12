@@ -11,7 +11,7 @@ Pipeline: brainstorm (optional) → **blueprint** → analyze / roadmap / plan.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/blueprint.md
+~/.maestro/workflows/blueprint.md
 </required_reading>
 
 <deferred_reading>
@@ -46,7 +46,7 @@ $ARGUMENTS -- idea text, @file reference, or upstream context source.
 </context>
 
 <interview_protocol>
-Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
+Follows ~/.maestro/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven, depth-first
 **Decision tree** (strict depth-first): scope (full product / feature set / single feature) → spec type (service / api / library / platform) → focus areas → whether to run codebase exploration → requirement priorities
@@ -57,7 +57,7 @@ Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md st
 </interview_protocol>
 
 <execution>
-Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/blueprint.md` completely.
+Follow `~/.maestro/workflows/blueprint.md` completely.
 
 ### Phase chain
 
@@ -155,5 +155,5 @@ Status verdicts:
 </success_criteria>
 
 <on_complete>
-~/.pi/agent/packages/pi-maestro-flow/workflows/finish-work.md — SESSION_DIR={session_dir}, SESSION_TYPE=blueprint, SESSION_ID={session_id}, LINKED_MILESTONE=null
+~/.maestro/workflows/finish-work.md — SESSION_DIR={session_dir}, SESSION_TYPE=blueprint, SESSION_ID={session_id}, LINKED_MILESTONE=null
 </on_complete>

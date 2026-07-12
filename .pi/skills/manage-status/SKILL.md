@@ -9,7 +9,7 @@ Project dashboard: artifact progress, task counts, active work, next-step sugges
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/status.md
+~/.maestro/workflows/status.md
 </required_reading>
 
 <context>
@@ -33,7 +33,7 @@ $ARGUMENTS (no arguments required)
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/status.md' completely.
+Follow '~/.maestro/workflows/status.md' completely.
 
 Next-step decision table defined in workflow status.md Step 5.
 

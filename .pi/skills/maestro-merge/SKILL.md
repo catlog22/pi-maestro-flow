@@ -10,7 +10,7 @@ Two-phase: git merge first, artifact sync second (only after git succeeds).
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/merge.md
+~/.maestro/workflows/merge.md
 </required_reading>
 
 <context>
@@ -20,7 +20,7 @@ Flags (`-m`, `--force`, `--dry-run`, `--no-cleanup`, `--continue`), merge sequen
 </context>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/merge.md' completely.
+Follow '~/.maestro/workflows/merge.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

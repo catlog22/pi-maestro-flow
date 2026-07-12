@@ -11,7 +11,7 @@ Flags --discuss and --full enable additional pipeline stages.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/quick.md
+~/.maestro/workflows/quick.md
 </required_reading>
 
 <context>
@@ -63,7 +63,7 @@ Parse for:
 - REQUIRED: --full verification passed (if flag set).
 - BLOCKED if: any task summary missing or lacking evidence.
 
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/quick.md' completely.
+Follow '~/.maestro/workflows/quick.md' completely.
 
 ### Artifact Verification (before completion)
 

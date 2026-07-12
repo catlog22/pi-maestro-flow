@@ -9,13 +9,13 @@ allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/drift-realign.md
+~/.maestro/workflows/drift-realign.md
 </required_reading>
 
 <deferred_reading>
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/knowledge-audit.md (交叉引用已有审计发现)
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/sync.md (codebase 文档严重漂移时自动触发)
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/codebase-rebuild.md (sync 不足时的回退方案)
+- ~/.maestro/workflows/knowledge-audit.md (交叉引用已有审计发现)
+- ~/.maestro/workflows/sync.md (codebase 文档严重漂移时自动触发)
+- ~/.maestro/workflows/codebase-rebuild.md (sync 不足时的回退方案)
 </deferred_reading>
 
 <context>
@@ -65,7 +65,7 @@ Arguments: $ARGUMENTS
 </invariants>
 
 <execution>
-Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/drift-realign.md` Stages 1-9 in order.
+Follow `~/.maestro/workflows/drift-realign.md` Stages 1-9 in order.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

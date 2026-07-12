@@ -9,7 +9,7 @@ Initialize `.workflow/specs/` by scanning codebase for conventions. Core files a
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/specs-setup.md
+~/.maestro/workflows/specs-setup.md
 </required_reading>
 
 <context>
@@ -30,7 +30,7 @@ $ARGUMENTS (no arguments expected)
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/specs-setup.md' completely.
+Follow '~/.maestro/workflows/specs-setup.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 
@@ -70,6 +70,6 @@ Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/specs-setup.md' completel
 - [ ] `.workflow/specs/` directory created
 - [ ] Core spec files always created: `coding-conventions.md`, `architecture-constraints.md`, `learnings.md`
 - [ ] Optional spec files created when detected: `quality-rules.md` (linter/CI), `test-conventions.md` (test framework), `ui-conventions.md` (frontend framework). `debug-notes.md` / `review-standards.md` deferred (on demand via `/spec-add`).
-- [ ] Workflow recipe knowhow created in `.workflow/knowhow/` for each detected operational workflow (test / debug / build / dev / lint). Each recipe matches the `recipe` schema in `~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md` Part B and contains at least one runnable command.
+- [ ] Workflow recipe knowhow created in `.workflow/knowhow/` for each detected operational workflow (test / debug / build / dev / lint). Each recipe matches the `recipe` schema in `~/.maestro/workflows/knowhow.md` Part B and contains at least one runnable command.
 - [ ] Report displayed grouped by destination (specs / recipes / skipped / deferred), with `.proposed.md` files surfaced when an existing recipe slug was preserved.
 </success_criteria>

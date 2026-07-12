@@ -10,7 +10,7 @@ Consumes plan from maestro-plan; registers EXC artifact in state.json.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/execute.md
+~/.maestro/workflows/execute.md
 </required_reading>
 
 <deferred_reading>
@@ -63,7 +63,7 @@ Bash("maestro collab preflight --phase <phase-number>")
 ```
 If exit code is 1, present warnings and ask whether to proceed.
 
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/execute.md' completely.
+Follow '~/.maestro/workflows/execute.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

@@ -9,12 +9,12 @@ Extract knowledge from workflow artifacts → route to wiki/spec/issue stores. W
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/harvest.md
+~/.maestro/workflows/harvest.md
 </required_reading>
 
 <deferred_reading>
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md (issues.jsonl schema for issue routing — read when creating issues in Stage 6c)
-- ~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md (spec entry format — read when routing to spec in Stage 6b)
+- ~/.maestro/workflows/issue.md (issues.jsonl schema for issue routing — read when creating issues in Stage 6c)
+- ~/.maestro/workflows/specs-add.md (spec entry format — read when routing to spec in Stage 6b)
 </deferred_reading>
 
 <context>
@@ -44,7 +44,7 @@ Additional flags, source registry (scan paths), and storage locations defined in
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/harvest.md' Stages 1-8 in order.
+Follow '~/.maestro/workflows/harvest.md' Stages 1-8 in order.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

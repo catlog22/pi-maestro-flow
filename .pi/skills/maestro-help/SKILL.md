@@ -314,8 +314,8 @@ Odyssey 长周期循环（独立路径）
 ## Related Resources
 
 - **Guide 目录**: `guide/` — 17 个专题指南文档
-- **Delegate 参考**: `~/.pi/agent/packages/pi-maestro-flow/workflows/delegate-usage.md`
-- **Coding 哲学**: `~/.pi/agent/packages/pi-maestro-flow/workflows/coding-philosophy.md`
+- **Delegate 参考**: `~/.maestro/workflows/delegate-usage.md`
+- **Coding 哲学**: `~/.maestro/workflows/coding-philosophy.md`
 - **CLI 工具配置**: `~/.maestro/cli-tools.json`
 
 ## Statistics

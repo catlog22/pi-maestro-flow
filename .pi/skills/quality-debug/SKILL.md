@@ -9,7 +9,7 @@ Debug issues using scientific method with subagent isolation and persistent debu
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/debug.md
+~/.maestro/workflows/debug.md
 </required_reading>
 
 <context>
@@ -54,7 +54,7 @@ Each artifact's type determines its outputs at `.workflow/{a.path}/`:
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/debug.md' completely.
+Follow '~/.maestro/workflows/debug.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

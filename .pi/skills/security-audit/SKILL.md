@@ -10,7 +10,7 @@ CI/CD pipeline review, and optional STRIDE threat modeling. Three tiers control 
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/review.md
+~/.maestro/workflows/review.md
 </required_reading>
 
 <context>

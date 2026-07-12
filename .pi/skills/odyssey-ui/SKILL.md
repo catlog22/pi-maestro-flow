@@ -4,7 +4,7 @@ description: "Long-running UI optimization cycle — visual survey, multi-dimens
 allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
-<base>~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>
+<base>~/.maestro/workflows/odyssey-base.md</base>
 
 <purpose>
 survey → 6-dimension audit → divergent exploration → fix → verify → generalize → discover → persist.

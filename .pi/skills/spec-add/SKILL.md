@@ -9,7 +9,7 @@ Add `<spec-entry>` to specs by category. 4 scopes: project (default), global, te
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md
+~/.maestro/workflows/specs-add.md
 </required_reading>
 
 <context>
@@ -49,7 +49,7 @@ Scope-to-directory mapping, category-to-file mapping, and entry format defined i
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/specs-add.md' completely.
+Follow '~/.maestro/workflows/specs-add.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

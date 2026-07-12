@@ -9,7 +9,7 @@ Automated issue discovery: multi-perspective (8 perspectives) or prompt-driven. 
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/issue-discover.md
+~/.maestro/workflows/issue-discover.md
 </required_reading>
 
 <deferred_reading>
@@ -56,7 +56,7 @@ Determine mode from $ARGUMENTS:
 - First token is `multi-perspective` → multi-perspective mode
 - First token is `by-prompt` → prompt-driven mode, remaining tokens are the user prompt
 
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/issue-discover.md' completely.
+Follow '~/.maestro/workflows/issue-discover.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

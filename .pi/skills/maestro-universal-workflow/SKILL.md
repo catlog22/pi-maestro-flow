@@ -6,7 +6,7 @@ allowed-tools: Read Write Edit Bash Glob Grep Workflow maestro
 
 <purpose>
 Dynamic workflow generator: scan library for matches or generate task-specific Workflow scripts
-on-the-fly with adversarial patterns. Scripts persist at `~/.pi/agent/packages/pi-maestro-flow/workflows/dynamic/uwf-*.js`.
+on-the-fly with adversarial patterns. Scripts persist at `~/.maestro/workflows/dynamic/uwf-*.js`.
 </purpose>
 
 <context>
@@ -23,10 +23,10 @@ Remaining         → intent
 ```
 
 **Library locations:**
-- Fixed scripts: `~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/wf-*.js`
-- Dynamic scripts: `~/.pi/agent/packages/pi-maestro-flow/workflows/dynamic/uwf-*.js`
+- Fixed scripts: `~/.maestro/workflows/swarm/wf-*.js`
+- Dynamic scripts: `~/.maestro/workflows/dynamic/uwf-*.js`
 
-**Output boundary**: ALL file writes MUST target `~/.pi/agent/packages/pi-maestro-flow/workflows/dynamic/` (generated scripts) and `.workflow/scratch/{YYYYMMDD}-uwf-*/` (execution results). Fixed scripts at `~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/` are read-only. NEVER modify source code or `.claude/commands/` files.
+**Output boundary**: ALL file writes MUST target `~/.maestro/workflows/dynamic/` (generated scripts) and `.workflow/scratch/{YYYYMMDD}-uwf-*/` (execution results). Fixed scripts at `~/.maestro/workflows/swarm/` are read-only. NEVER modify source code or `.claude/commands/` files.
 </context>
 
 <state_machine>
@@ -94,10 +94,10 @@ S_PERSIST:
 
 扫描两个目录，读取每个 `.js` 文件的 `meta` 块提取 `name`、`description`、`whenToUse`：
 
-1. **Fixed scripts**: 展开 `~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/wf-*.js` 为绝对路径
+1. **Fixed scripts**: 展开 `~/.maestro/workflows/swarm/wf-*.js` 为绝对路径
    - Glob 查找所有匹配文件
    - 读取每个文件前 10 行，提取 `meta.name`、`meta.description`、`meta.whenToUse`
-2. **Dynamic scripts**: 展开 `~/.pi/agent/packages/pi-maestro-flow/workflows/dynamic/uwf-*.js`
+2. **Dynamic scripts**: 展开 `~/.maestro/workflows/dynamic/uwf-*.js`
    - 同上
 3. **匹配评分**：对每个脚本，评估其 description/whenToUse 与 intent 的语义相关度
 4. **输出**：
@@ -265,7 +265,7 @@ const path = 'C:/Users/project/src'  // 或直接不在脚本中硬编码路径
 
 ```
 Write({
-  file_path: expandPath('~/.pi/agent/packages/pi-maestro-flow/workflows/dynamic/uwf-{slug}.js'),
+  file_path: expandPath('~/.maestro/workflows/dynamic/uwf-{slug}.js'),
   content: generatedScript
 })
 ```
@@ -307,7 +307,7 @@ User confirms → S_EXECUTE; user declines → S_PERSIST (save only); user cance
 
 ```
 Workflow({
-  scriptPath: expandPath('~/.pi/agent/packages/pi-maestro-flow/workflows/dynamic/uwf-{slug}.js'),
+  scriptPath: expandPath('~/.maestro/workflows/dynamic/uwf-{slug}.js'),
   args: taskSpecificArgs,   // 从 intent 推断
   resumeFromRunId: resumeId // 若有
 })
@@ -317,12 +317,12 @@ Workflow({
 
 ### A_PERSIST_SCRIPT
 
-脚本已在 A_GENERATE_SCRIPT Step 2 写入 `~/.pi/agent/packages/pi-maestro-flow/workflows/dynamic/uwf-{slug}.js`。
+脚本已在 A_GENERATE_SCRIPT Step 2 写入 `~/.maestro/workflows/dynamic/uwf-{slug}.js`。
 
 1. 确认文件存在（Glob 检查）
 2. 展示保存路径和使用方式：
    ```
-   Saved: ~/.pi/agent/packages/pi-maestro-flow/workflows/dynamic/uwf-{slug}.js
+   Saved: ~/.maestro/workflows/dynamic/uwf-{slug}.js
    Reuse: /maestro-universal-workflow --from uwf-{slug} "{new intent}"
    Resume: /maestro-universal-workflow --resume {runId}
    Via swarm: /maestro-swarm-workflow --script uwf-{slug}
@@ -522,7 +522,7 @@ Findings: ${digest}
 - BLOCKED if: task cannot be decomposed (E002).
 
 **GATE 4: Generate → Execute**
-- REQUIRED: Script written to `~/.pi/agent/packages/pi-maestro-flow/workflows/dynamic/uwf-{slug}.js`.
+- REQUIRED: Script written to `~/.maestro/workflows/dynamic/uwf-{slug}.js`.
 - REQUIRED: `node --check` syntax validation passed.
 - REQUIRED: User confirmation via AskUserQuestion (unless resuming).
 - BLOCKED if: syntax validation fails after 2 retries (E003).
@@ -617,6 +617,6 @@ universal-workflow 扫描时会同时检查 swarm/ 和 dynamic/ 目录，
 - [ ] `node --check` syntax validation passed
 - [ ] User confirmation obtained before execution (unless --resume)
 - [ ] Workflow executed via scriptPath (not inline script string)
-- [ ] Script persisted to `~/.pi/agent/packages/pi-maestro-flow/workflows/dynamic/uwf-{slug}.js`
+- [ ] Script persisted to `~/.maestro/workflows/dynamic/uwf-{slug}.js`
 - [ ] Completion summary displayed with reuse/resume commands
 </success_criteria>

@@ -9,7 +9,7 @@ Issue lifecycle management: create, list, status, update, close, link. Stored in
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md
+~/.maestro/workflows/issue.md
 </required_reading>
 
 <deferred_reading>
@@ -45,7 +45,7 @@ $ARGUMENTS -- subcommand + options. Parse first token as subcommand.
 
 <execution>
 Parse subcommand from first token of $ARGUMENTS.
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/issue.md' completely.
+Follow '~/.maestro/workflows/issue.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

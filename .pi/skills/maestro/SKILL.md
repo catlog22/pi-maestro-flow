@@ -10,8 +10,8 @@ Session: `.workflow/.maestro/{session_id}/status.json`.
 </purpose>
 
 <deferred_reading>
-- [maestro.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro.md) — read at execution start for intent analysis + chain selection
-- [maestro-super.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro-super.md) — read when `--super` flag active
+- [maestro.md](~/.maestro/workflows/maestro.md) — read at execution start for intent analysis + chain selection
+- [maestro-super.md](~/.maestro/workflows/maestro-super.md) — read when `--super` flag active
 </deferred_reading>
 
 <context>
@@ -117,7 +117,7 @@ S_FALLBACK:
 
 ### A_CLASSIFY_INTENT
 
-1. Read `~/.pi/agent/packages/pi-maestro-flow/workflows/maestro.md` from deferred_reading
+1. Read `~/.maestro/workflows/maestro.md` from deferred_reading
 2. Match intent to task_type via chain catalog (semantic)
 3. Select chain from chainMap，遵循拓扑约束：
    - 压力测试/拷问/验证假设/grill/stress-test → `grill`（**-y 模式透传 `-y` 到 grill，grill 以 Auto mode 执行，不跳过**）

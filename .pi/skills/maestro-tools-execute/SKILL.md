@@ -10,7 +10,7 @@ Direct (by name) or category-based (list + select) invocation.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/tools-spec.md
+~/.maestro/workflows/tools-spec.md
 </required_reading>
 
 <context>

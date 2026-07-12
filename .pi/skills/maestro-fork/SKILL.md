@@ -10,7 +10,7 @@ Supports `--sync` mode to pull latest main changes into an active worktree.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/fork.md
+~/.maestro/workflows/fork.md
 </required_reading>
 
 <deferred_reading>
@@ -25,7 +25,7 @@ Modes (`Fork` / `Sync`), flags (`-m`, `--base`, `--sync`), milestone resolution,
 </context>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/fork.md' completely.
+Follow '~/.maestro/workflows/fork.md' completely.
 
 Fork and sync algorithm steps are defined in workflow `fork.md`.
 

@@ -10,14 +10,14 @@ Produces plan.json + TASK files; registers PLN artifact in state.json.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/plan.md
+~/.maestro/workflows/plan.md
 </required_reading>
 
 <deferred_reading>
 - [plan.json](~/.pi/agent/packages/pi-maestro-flow/templates/plan.json) — read when generating plan output
 - [task.json](~/.pi/agent/packages/pi-maestro-flow/templates/task.json) — read when generating task files
 - [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when registering artifact
-- [boundary-grill.md](~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md) — read when boundary conflicts detected (in P4)
+- [boundary-grill.md](~/.maestro/workflows/boundary-grill.md) — read when boundary conflicts detected (in P4)
 </deferred_reading>
 
 <context>
@@ -59,7 +59,7 @@ Bash("maestro collab preflight --phase <phase-number>")
 ```
 If exit code is 1, present warnings and ask whether to proceed.
 
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/plan.md' completely.
+Follow '~/.maestro/workflows/plan.md' completely.
 
 ### Plan Agent Model
 

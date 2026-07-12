@@ -10,7 +10,7 @@ Four modes: Extract, Generate, Optimize, Promote. Short processes inline; long u
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/tools-spec.md
+~/.maestro/workflows/tools-spec.md
 </required_reading>
 
 <context>

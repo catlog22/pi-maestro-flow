@@ -9,7 +9,7 @@ Targeted refactoring with safety guarantees: plan → confirm → execute with t
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/refactor.md
+~/.maestro/workflows/refactor.md
 </required_reading>
 
 <context>
@@ -42,7 +42,7 @@ If not provided, prompt user for scope.
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/refactor.md' completely.
+Follow '~/.maestro/workflows/refactor.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

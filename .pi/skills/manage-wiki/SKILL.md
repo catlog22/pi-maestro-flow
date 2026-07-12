@@ -9,7 +9,7 @@ Wiki graph management: health, search, cleanup, stats, connect, digest.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/wiki-manage.md
+~/.maestro/workflows/wiki-manage.md
 </required_reading>
 
 <context>
@@ -51,9 +51,9 @@ $ARGUMENTS — subcommand and optional flags.
 
 <execution>
 **Subcommand routing:**
-- `health|search|cleanup|stats` → Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/wiki-manage.md` completely.
-- `connect` → Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/wiki-connect.md` completely (Stages 1-6).
-- `digest` → Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/wiki-digest.md` completely (Stages 1-8).
+- `health|search|cleanup|stats` → Follow `~/.maestro/workflows/wiki-manage.md` completely.
+- `connect` → Follow `~/.maestro/workflows/wiki-connect.md` completely (Stages 1-6).
+- `digest` → Follow `~/.maestro/workflows/wiki-digest.md` completely (Stages 1-8).
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

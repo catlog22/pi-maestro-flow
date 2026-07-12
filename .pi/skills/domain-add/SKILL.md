@@ -9,7 +9,7 @@ Register a domain term into `.workflow/domain/glossary.yaml`. Domain terms are a
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/domain-add.md
+~/.maestro/workflows/domain-add.md
 </required_reading>
 
 <context>
@@ -41,7 +41,7 @@ Domain term lifecycle: discover/manual → register → active → (optional) de
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/domain-add.md' completely.
+Follow '~/.maestro/workflows/domain-add.md' completely.
 
 **Confirmation gate**: Before writing to glossary.yaml, user prompt showing the term canonical name, definition, extracted aliases/keywords, tier, and target file path. Proceed only on user confirm.
 </execution>

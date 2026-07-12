@@ -9,7 +9,7 @@ Sync codebase docs after code changes: git diff → trace impact via doc-index.j
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/sync.md
+~/.maestro/workflows/sync.md
 </required_reading>
 
 <context>
@@ -30,7 +30,7 @@ $ARGUMENTS -- optional flags:
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/sync.md' completely.
+Follow '~/.maestro/workflows/sync.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

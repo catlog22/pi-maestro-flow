@@ -11,7 +11,7 @@ Pipeline position: downstream of `/maestro-milestone-complete`. Terminal command
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-release.md
+~/.maestro/workflows/milestone-release.md
 </required_reading>
 
 <context>
@@ -40,14 +40,14 @@ $ARGUMENTS -- optional explicit version string and flags.
 </context>
 
 <interview_protocol>
-Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
+Follows ~/.maestro/workflows/interview-mechanics.md standard.
 
 **Decision points**: version bump type (major / minor / patch / custom), changelog review and confirmation
 **Scope guard**: only release decisions; do not prejudge next milestone scope
 </interview_protocol>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-release.md' completely.
+Follow '~/.maestro/workflows/milestone-release.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

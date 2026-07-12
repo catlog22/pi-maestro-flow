@@ -9,7 +9,7 @@ UAT-style conversational testing for a completed phase. Interactive scenario wal
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/test.md
+~/.maestro/workflows/test.md
 </required_reading>
 
 <context>
@@ -31,7 +31,7 @@ Flags, artifact context resolution, and output directory format defined in workf
 </invariants>
 
 <execution>
-**Mode select:** `--frontend-verify` → 走下方 **Frontend Verify Mode**（确定性浏览器 smoke，**不是**对话式 UAT）；否则 Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/test.md' completely.
+**Mode select:** `--frontend-verify` → 走下方 **Frontend Verify Mode**（确定性浏览器 smoke，**不是**对话式 UAT）；否则 Follow '~/.maestro/workflows/test.md' completely.
 
 ### Frontend Verify Mode (`--frontend-verify`)
 
@@ -54,7 +54,7 @@ Ralph-invoked 完成：`maestro ralph complete <idx> --status {STATUS} --evidenc
 
 ---
 
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/test.md' completely.
+Follow '~/.maestro/workflows/test.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

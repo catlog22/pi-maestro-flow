@@ -9,7 +9,7 @@ Manage knowhow across two stores: workflow (`.workflow/knowhow/`) and system mem
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md
+~/.maestro/workflows/knowhow.md
 </required_reading>
 
 <context>
@@ -38,7 +38,7 @@ Dual store architecture (paths, formats, index) defined in workflow knowhow.md.
 </context>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/knowhow.md' Part A (KnowHow Management) completely.
+Follow '~/.maestro/workflows/knowhow.md' Part A (KnowHow Management) completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

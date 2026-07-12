@@ -4,7 +4,7 @@ description: "Long-running debug cycle — archaeology, diagnosis, fix, confirma
 allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 ---
 
-<base>~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md</base>
+<base>~/.maestro/workflows/odyssey-base.md</base>
 
 <purpose>
 archaeology → explore → diagnose → fix & confirm → generalize → discover siblings → persist.

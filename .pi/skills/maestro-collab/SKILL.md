@@ -137,7 +137,7 @@ If consensus_level < 40%: W003.
 
 ### A_BOUNDARY_GRILL
 
-Run boundary grill per `~/.pi/agent/packages/pi-maestro-flow/workflows/boundary-grill.md`.
+Run boundary grill per `~/.maestro/workflows/boundary-grill.md`.
 Input: classified CONFLICT findings + per-tool outputs. Check upstream scope if `--from` used.
 IF conflicts → tag with resolution, feed into A_GENERATE_OUTPUTS. No conflicts → pass through.
 

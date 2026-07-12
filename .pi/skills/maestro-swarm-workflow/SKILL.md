@@ -23,7 +23,7 @@ $ARGUMENTS — intent text with optional flags.
 Remaining        → intent
 ```
 
-**Script inventory** (`~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/`):
+**Script inventory** (`~/.maestro/workflows/swarm/`):
 
 | Script | args 接口 |
 |--------|-----------|
@@ -36,7 +36,7 @@ Remaining        → intent
 | `wf-execute` | `{ plan_dir, specs?, codebase_context?, wiki_context?, auto_commit? }` |
 | `wf-milestone-audit` | `{ milestone?, is_adhoc? }` |
 
-**Output boundary**: ALL file writes MUST target `.workflow/scratch/{YYYYMMDD}-swarm-{script}-{slug}/` (results, ralph-compatible artifacts). When inside a ralph session, writes target the corresponding step's scratch directory. NEVER modify source code, workflow scripts (`~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/`), or `.claude/commands/` files.
+**Output boundary**: ALL file writes MUST target `.workflow/scratch/{YYYYMMDD}-swarm-{script}-{slug}/` (results, ralph-compatible artifacts). When inside a ralph session, writes target the corresponding step's scratch directory. NEVER modify source code, workflow scripts (`~/.maestro/workflows/swarm/`), or `.claude/commands/` files.
 </context>
 
 <state_machine>
@@ -134,7 +134,7 @@ Intent-to-script routing（按关键词匹配，--script 优先级最高）。
 
 ### A_DISPATCH_WORKFLOW
 
-1. 确定 scriptPath = `~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/{script}.js`（展开为绝对路径）
+1. 确定 scriptPath = `~/.maestro/workflows/swarm/{script}.js`（展开为绝对路径）
 2. 构建 Workflow 调用：
    ```
    Workflow({
@@ -186,7 +186,7 @@ Workflow 返回 JSON 后：
 2. **args 预编译** — 所有 FS 读取在 A_ASSEMBLE_CONTEXT 完成，脚本内 agent 通过工具自行读取补充
 3. **产出格式兼容** — 写入的 artifact 格式必须与对应命令（analyze/brainstorm/review/verify）的产出一致
 4. **resume 透传** — resumeFromRunId 直接透传给 Workflow 工具，利用内置缓存机制
-5. **脚本只读** — 路由命令不修改 `~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/wf-*.js` 脚本文件
+5. **脚本只读** — 路由命令不修改 `~/.maestro/workflows/swarm/wf-*.js` 脚本文件
 6. **结果必须展示** — Workflow 返回后必须向用户展示格式化摘要，不得静默完成
 </invariants>
 
@@ -204,7 +204,7 @@ Workflow 返回 JSON 后：
 
 **GATE 3: Context → Dispatch**
 - REQUIRED: Args payload assembled with all required fields for target script.
-- REQUIRED: Script file exists at `~/.pi/agent/packages/pi-maestro-flow/workflows/swarm/{script}.js`.
+- REQUIRED: Script file exists at `~/.maestro/workflows/swarm/{script}.js`.
 - BLOCKED if: script file not found (E003) or required args missing.
 
 **GATE 4: Dispatch → Ingest**

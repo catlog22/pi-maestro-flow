@@ -9,7 +9,7 @@ Multi-dimensional code review on a phase's changed files. Three levels (quick/st
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/review.md
+~/.maestro/workflows/review.md
 </required_reading>
 
 <deferred_reading>
@@ -60,7 +60,7 @@ Each artifact's type determines its outputs at `.workflow/{a.path}/`:
 </invariants>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/review.md' completely.
+Follow '~/.maestro/workflows/review.md' completely.
 
 ### Phase Gates (MANDATORY, BLOCKING)
 

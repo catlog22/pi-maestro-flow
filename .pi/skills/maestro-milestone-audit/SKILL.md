@@ -10,7 +10,7 @@ Produces audit-report.md with PASS/FAIL verdict.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-audit.md
+~/.maestro/workflows/milestone-audit.md
 </required_reading>
 
 <context>
@@ -40,7 +40,7 @@ If $ARGUMENTS is empty AND current_milestone is null → raise E001 with message
 </context>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-audit.md' completely.
+Follow '~/.maestro/workflows/milestone-audit.md' completely.
 
 Audit checklist steps (phase coverage, ad-hoc completeness, execution completeness, cross-artifact integration) are defined in workflow `milestone-audit.md`.
 

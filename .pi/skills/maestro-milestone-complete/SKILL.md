@@ -10,7 +10,7 @@ Requires audit PASS; produces milestone archive and learnings.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-complete.md
+~/.maestro/workflows/milestone-complete.md
 </required_reading>
 
 <deferred_reading>
@@ -30,7 +30,7 @@ If $ARGUMENTS is empty AND current_milestone is null → raise E001 with message
 </context>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/milestone-complete.md' completely.
+Follow '~/.maestro/workflows/milestone-complete.md' completely.
 
 Archive flow steps (validation, directory archival, artifact history, knowhow extraction, state advancement, cleanup) are defined in workflow `milestone-complete.md`.
 

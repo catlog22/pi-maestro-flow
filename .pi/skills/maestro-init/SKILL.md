@@ -10,7 +10,7 @@ Entry point; downstream: maestro-roadmap or maestro-brainstorm.
 </purpose>
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/init.md
+~/.maestro/workflows/init.md
 </required_reading>
 
 <deferred_reading>
@@ -44,7 +44,7 @@ Check for `.workflow/state.json` -- loads context if project already initialized
 </invariants>
 
 <interview_protocol>
-Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
+Follows ~/.maestro/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (strict order): project type (greenfield / existing codebase onboarding) → tech stack detection and confirmation → directory structure preferences → initial configuration (specs categories, wiki bootstrap)
@@ -78,7 +78,7 @@ Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md st
 1. Check if `.workflow/` already exists — if so, load state and warn (E002 for greenfield conflicts)
 2. Validate `--from` source is accessible if provided
 
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/init.md' completely.
+Follow '~/.maestro/workflows/init.md' completely.
 
 ### Artifact Verification (before completion)
 
