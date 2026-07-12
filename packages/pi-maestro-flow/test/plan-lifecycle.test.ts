@@ -19,7 +19,14 @@ interface ToolLike {
   execute(id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext): Promise<any>;
 }
 
-function createHarness(root: string, autoConfirm = false, failingApproval = false, failingSave = false, failFirstLoad = false) {
+function createHarness(
+  root: string,
+  autoConfirm = false,
+  failingApproval = false,
+  failingSave = false,
+  failFirstLoad = false,
+  sessionId = "session-main",
+) {
   let active = ["Read", "Write", "todo", "custom-tool"];
   const tools = new Map<string, ToolLike>();
   const messages: string[] = [];
@@ -58,6 +65,11 @@ function createHarness(root: string, autoConfirm = false, failingApproval = fals
     cwd: join(root, "workspace"),
     hasUI: true,
     isIdle: () => true,
+    sessionManager: {
+      getSessionId: () => sessionId,
+      getSessionFile: () => join(root, `${sessionId}.jsonl`),
+      getSessionName: () => sessionId,
+    },
     ui,
   } as unknown as ExtensionContext;
 
@@ -76,13 +88,15 @@ function createHarness(root: string, autoConfirm = false, failingApproval = fals
   let storeCalls = 0;
 
   initPlan(pi, {
-    storeFactory: (cwd) => {
+    storeFactory: (cwd, session) => {
       const call = storeCalls++;
-      if (failFirstLoad && call === 0) return new FailingLoadStore(cwd, { rootDir: join(root, "global") });
+      if (failFirstLoad && call === 0) return new FailingLoadStore(cwd, { rootDir: join(root, "global"), session });
       return failingSave ? new FailingSaveStore(cwd, {
         rootDir: join(root, "global"),
+        session,
       }) : new PlanStore(cwd, {
       rootDir: join(root, "global"),
+      session,
       ...(failingApproval
         ? { approvalCommitHook: async () => { throw new Error("approval storage failed"); } }
         : {}),
@@ -112,11 +126,13 @@ test("Plan lifecycle dynamically activates safe tools and restores the exact Act
   const harness = createHarness(root);
   try {
     await onSessionStartPlan(harness.ctx);
+    assert.equal(harness.statuses.at(-1), "ACT");
     const actSnapshot = [...harness.active];
     assert.deepEqual(actSnapshot, ["Read", "Write", "todo", "custom-tool", "plan-enter"]);
 
     await execute(harness, "plan-enter");
     assert.equal(getMode(), "plan");
+    assert.equal(harness.statuses.at(-1), "PLAN");
     assert.deepEqual(harness.active, [
       "Read", "todo", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status",
     ]);
@@ -125,10 +141,12 @@ test("Plan lifecycle dynamically activates safe tools and restores the exact Act
 
     const updated = await execute(harness, "plan-update", { markdown: "# Durable plan" });
     assert.equal(updated.details.revision, 1);
-    assert.equal(await readFile(join(root, "global", new PlanStore(harness.ctx.cwd, { rootDir: join(root, "global") }).workspaceId, "plans", "current.md"), "utf8"), "# Durable plan");
+    assert.equal(harness.statuses.at(-1), "READY");
+    assert.equal(await readFile(updated.details.path, "utf8"), "# Durable plan");
 
     await execute(harness, "plan-exit");
     assert.equal(getMode(), "act");
+    assert.equal(harness.statuses.at(-1), "ACT");
     assert.deepEqual(harness.active, actSnapshot);
 
     await execute(harness, "plan-enter");
@@ -153,10 +171,14 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     const confirmed = await execute(harness, "plan-confirm");
     assert.equal(confirmed.details.approved, true);
     assert.equal(getMode(), "act");
+    assert.equal(harness.statuses.at(-1), "ACT");
     assert.deepEqual(harness.active, actSnapshot);
     assert.match(harness.messages.at(-1) ?? "", /# Approved/);
 
-    const store = new PlanStore(harness.ctx.cwd, { rootDir: join(root, "global") });
+    const store = new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: harness.ctx.sessionManager.getSessionId() },
+    });
     const loaded = await store.load();
     assert.equal(loaded.manifest.status, "approved");
     assert.ok(loaded.manifest.approvedPath);
@@ -178,9 +200,13 @@ test("Approval failure leaves Plan mode and Plan tools active", async () => {
     assert.equal(confirmed.details.approved, false);
     assert.equal(confirmed.details.revision, 2);
     assert.equal(getMode(), "plan");
+    assert.equal(harness.statuses.at(-1), "READY");
     assert.ok(harness.active.includes("plan-confirm"));
     assert.ok(!harness.active.includes("Write"));
-    const store = new PlanStore(harness.ctx.cwd, { rootDir: join(root, "global") });
+    const store = new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: harness.ctx.sessionManager.getSessionId() },
+    });
     assert.equal((await store.load()).markdown, "must survive");
   } finally {
     onSessionShutdownPlan(harness.ctx);
@@ -254,12 +280,45 @@ test("Session restart stays in Act and resumes the persisted draft only after pl
     const second = createHarness(root);
     await onSessionStartPlan(second.ctx);
     assert.equal(getMode(), "act");
+    assert.equal(second.statuses.at(-1), "ACT");
     assert.deepEqual(second.active, ["Read", "Write", "todo", "custom-tool", "plan-enter"]);
     await execute(second, "plan-enter");
     const status = await execute(second, "plan-status");
     assert.equal(status.details.status, "draft");
     assert.equal(status.details.revision, 1);
     onSessionShutdownPlan(second.ctx);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Different chat sessions in one workspace keep independent Plan drafts", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-chat-isolation-"));
+  try {
+    const chatA = createHarness(root, false, false, false, false, "chat-a");
+    await onSessionStartPlan(chatA.ctx);
+    await execute(chatA, "plan-enter");
+    await execute(chatA, "plan-update", { markdown: "chat A plan" });
+    const statusA = await execute(chatA, "plan-status");
+    assert.equal(statusA.details.sessionId, "chat-a");
+    onSessionShutdownPlan(chatA.ctx);
+
+    const chatB = createHarness(root, false, false, false, false, "chat-b");
+    await onSessionStartPlan(chatB.ctx);
+    await execute(chatB, "plan-enter");
+    const emptyB = await execute(chatB, "plan-status");
+    assert.equal(emptyB.details.sessionId, "chat-b");
+    assert.equal(emptyB.details.status, "empty");
+    await execute(chatB, "plan-update", { markdown: "chat B plan" });
+    onSessionShutdownPlan(chatB.ctx);
+
+    const resumedA = createHarness(root, false, false, false, false, "chat-a");
+    await onSessionStartPlan(resumedA.ctx);
+    await execute(resumedA, "plan-enter");
+    assert.equal((await execute(resumedA, "plan-status")).details.status, "draft");
+    assert.equal((await execute(resumedA, "plan-status")).details.sessionId, "chat-a");
+    assert.equal(await readFile((await execute(resumedA, "plan-status")).details.path, "utf8"), "chat A plan");
+    onSessionShutdownPlan(resumedA.ctx);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

@@ -167,11 +167,13 @@ const QuestionSchema = Type.Object({
   ),
   options: Type.Optional(
     Type.Array(QuestionOptionSchema, {
-      description: "Multiple-choice options (2-4 recommended)",
+      minItems: 2,
+      maxItems: 4,
+      description: "Multiple-choice options (2-4)",
     }),
   ),
   multiSelect: Type.Optional(
-    Type.Boolean({ description: "Allow multiple selections (default: false)" }),
+    Type.Boolean({ description: "Allow multiple selections (default: false); every option question also accepts additional details" }),
   ),
 });
 

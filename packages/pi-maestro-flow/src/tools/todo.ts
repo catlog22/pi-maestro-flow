@@ -68,6 +68,13 @@ export interface TodoResultDetails {
   error?: string;
 }
 
+export interface TodoCompactionSnapshot {
+  stateVersion: number;
+  revision: number;
+  activeTaskId?: string;
+  tasks: TodoTask[];
+}
+
 export interface TodoContext {
   cwd: string;
   ui: {
@@ -88,6 +95,7 @@ const STATUS_KEY = "todo";
 let tasks: Map<string, TodoTask> = new Map();
 let extensionApi: ExtensionAPI | undefined;
 let skillLoader: TodoSkillLoader | undefined;
+let todoRevision = 0;
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -100,12 +108,14 @@ export function initTodo(pi: ExtensionAPI): void {
 export function onSessionStart(ctx: TodoContext): void {
   skillLoader = ctx.skillLoader ?? new TodoSkillLoader({ cwd: ctx.cwd });
   tasks = loadTasksFromSession(ctx);
+  markTodoChanged();
   updateStatusLine(ctx);
 }
 
 export function onSessionShutdown(ctx: TodoContext): void {
   tasks.clear();
   skillLoader = undefined;
+  markTodoChanged();
   ctx.ui.setStatus(STATUS_KEY, undefined);
 }
 
@@ -113,6 +123,20 @@ export function getVisibleTasks(): TodoTask[] {
   const visible = [...tasks.values()].filter((t) => t.status !== "deleted");
   visible.sort((a, b) => a.createdAt - b.createdAt);
   return visible;
+}
+
+/** Return a detached Todo snapshot suitable for compaction metadata and prompts. */
+export function getTodoCompactionSnapshot(): TodoCompactionSnapshot {
+  const visible = getVisibleTasks().map(cloneTodoTask);
+  const activeTask = visible
+    .filter((task) => task.status === "in_progress")
+    .sort((left, right) => right.updatedAt - left.updatedAt)[0];
+  return {
+    stateVersion: TODO_STATE_VERSION,
+    revision: todoRevision,
+    ...(activeTask ? { activeTaskId: activeTask.id } : {}),
+    tasks: visible,
+  };
 }
 
 export async function getInjectableContent(taskId: string): Promise<InjectableContent | null> {
@@ -198,6 +222,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext): AgentToolResul
   if (hasCycle(id, blockedBy)) return err("blockedBy would create a dependency cycle", "create");
 
   tasks.set(id, task);
+  markTodoChanged();
   persist();
   updateStatusLine(ctx);
 
@@ -248,11 +273,15 @@ function handleUpdate(params: TodoParams, ctx: ExtensionContext): AgentToolResul
     }
   }
 
-  task.updatedAt = Date.now();
+  const changed = taskChanged(before, task);
+  if (changed) {
+    task.updatedAt = Date.now();
+    markTodoChanged();
+  }
   persist();
   updateStatusLine(ctx);
 
-  if (taskChanged(before, task)) {
+  if (changed) {
     const statusNote = before.status !== task.status ? ` (${before.status} → ${task.status})` : "";
     return ok(`Updated #${task.id}: ${task.subject}${statusNote}`, "update");
   }
@@ -320,6 +349,7 @@ function handleDelete(params: TodoParams, ctx: ExtensionContext): AgentToolResul
 
   task.status = "deleted";
   task.updatedAt = Date.now();
+  markTodoChanged();
 
   for (const t of tasks.values()) {
     if (t.status !== "deleted" && t.blockedBy.includes(params.id)) {
@@ -339,6 +369,7 @@ function handleDelete(params: TodoParams, ctx: ExtensionContext): AgentToolResul
 function handleClear(ctx: ExtensionContext): AgentToolResult {
   const count = [...tasks.values()].filter((t) => t.status !== "deleted").length;
   tasks.clear();
+  markTodoChanged();
   persist();
   updateStatusLine(ctx);
   return ok(`Cleared ${count} task(s).`, "clear");
@@ -391,6 +422,7 @@ async function handleNext(ctx: ExtensionContext): Promise<AgentToolResult> {
   task.status = "in_progress";
   task.skillLoad = loadedSkill ? toSkillLoadRecord(loadedSkill) : undefined;
   task.updatedAt = Date.now();
+  markTodoChanged();
   persist();
   updateStatusLine(ctx);
 
@@ -410,6 +442,27 @@ function buildPrevContext(currentId: string): string | null {
     .slice(-PREV_CONTEXT_WINDOW)
     .map((t) => `[#${t.id}] ${t.subject}: ${t.summary}`)
     .join("\n");
+}
+
+function markTodoChanged(): void {
+  todoRevision++;
+}
+
+function cloneTodoTask(task: TodoTask): TodoTask {
+  return {
+    ...task,
+    blockedBy: [...task.blockedBy],
+    ...(task.skill ? { skill: { ...task.skill } } : {}),
+    ...(task.skillLoad
+      ? {
+          skillLoad: {
+            ...task.skillLoad,
+            requiredFiles: [...task.skillLoad.requiredFiles],
+            deferredFiles: [...task.skillLoad.deferredFiles],
+          },
+        }
+      : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------

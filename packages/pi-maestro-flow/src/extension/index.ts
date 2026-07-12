@@ -21,7 +21,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   MaestroParams,
   MaestroWaitParams,
@@ -50,7 +50,11 @@ import {
   onAgentEnd as goalAgentEnd,
   type GoalParams as GoalActionParams,
 } from "../tools/goal.ts";
-import { executeAsk, type AskParams } from "../tools/ask.ts";  // stateless formatter
+import {
+  executeAsk,
+  type AskParams,
+  type AskResultDetails,
+} from "../tools/ask.ts";
 import {
   initTodo,
   executeTodo,
@@ -77,6 +81,11 @@ import {
   onAgentEndPlan,
 } from "../tools/plan.ts";
 import { installStatusline } from "../statusline/statusline.ts";
+import { registerCodexHookAdapter } from "../hooks/pi-adapter.ts";
+import {
+  createMaestroCompaction,
+  persistMaestroCompactionKnowhow,
+} from "../compaction/maestro-compaction.ts";
 
 interface MaestroState {
   baseCwd: string;
@@ -92,6 +101,13 @@ interface MaestroState {
 
 const TODO_TOGGLE_KEY = "alt+t";
 const TODO_TOGGLE_LABEL = "Alt+T";
+
+function singleLine(text: string): Component {
+  return {
+    render: (width: number) => [truncateToWidth(text, Math.max(1, width), "…")],
+    invalidate() {},
+  };
+}
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const state: MaestroState = {
@@ -201,10 +217,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
         detail = "";
       }
 
-      return new Text(
+      return singleLine(
         `${theme.fg("toolTitle", theme.bold("maestro "))}${action}${detail}${asyncLabel}`,
-        0,
-        0,
       );
     },
   };
@@ -313,10 +327,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
         const sum = (args.summary as string) ?? "";
         detail = sum ? ` ${sum.slice(0, 40)}${sum.length > 40 ? "…" : ""}` : "";
       }
-      return new Text(
-        `${theme.fg("toolTitle", theme.bold("goal "))}${action}${detail}`,
-        0, 0,
-      );
+      return singleLine(`${theme.fg("toolTitle", theme.bold("goal "))}${action}${detail}`);
     },
   };
 
@@ -326,29 +337,48 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const askTool: ToolDefinition<typeof AskUserQuestionParams> = {
     name: "ask-user-question",
     label: "Ask User",
-    description: `Ask the user structured questions with optional multiple-choice options.
+    description: `Collect structured user answers through a keyboard-first TUI wizard.
 
 - Single question: { questions: [{ question: "Which approach?", options: [{label: "A"}, {label: "B"}] }] }
 - Multiple questions: up to 4 questions in one call
 - Multi-select: { questions: [{ question: "Which features?", multiSelect: true, options: [...] }] }
-- Open-ended: { questions: [{ question: "What should the name be?" }] }`,
+- Open-ended: { questions: [{ question: "What should the name be?" }] }
+
+The tool returns structured answers only. Plan mode owns proposed-plan Markdown; /plan approve is the explicit confirmation command.`,
 
     parameters: AskUserQuestionParams,
 
     async execute(
       _id: string,
       params: Record<string, unknown>,
+      _signal: AbortSignal,
+      _onUpdate: ((result: AgentToolResult) => void) | undefined,
+      ctx: ExtensionContext,
     ): Promise<AgentToolResult> {
-      return executeAsk(params as unknown as AskParams);
+      return executeAsk(params as unknown as AskParams, ctx);
     },
 
     renderCall(args, theme) {
       const qs = args.questions as unknown[] | undefined;
       const count = qs?.length ?? 0;
-      return new Text(
+      return singleLine(
         `${theme.fg("toolTitle", theme.bold("ask "))}${count} question${count !== 1 ? "s" : ""}`,
-        0,
-        0,
+      );
+    },
+
+    renderResult(result, _opts, theme) {
+      const details = result.details as AskResultDetails | undefined;
+      if (details?.cancelled) {
+        return singleLine(theme.fg("warning", "! Questionnaire cancelled"));
+      }
+      if ((result as { isError?: boolean }).isError || !details) {
+        const text = result.content[0];
+        const fallback = text && "text" in text ? text.text : "Questionnaire failed.";
+        return singleLine(theme.fg("error", `✗ ${fallback}`));
+      }
+      const count = details.answers.length;
+      return singleLine(
+        `${theme.fg("success", "✓")} Collected ${count} answer${count === 1 ? "" : "s"}`,
       );
     },
   };
@@ -370,7 +400,14 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 - get: { action: "get", id: "..." }
 - delete: { action: "delete", id: "..." }
 - clear: { action: "clear" }
-- next: { action: "next" } — get next pending task with injected context`,
+- next: { action: "next" } — activate the next pending task and return its resolved context`,
+
+    promptSnippet: "Track multi-step work and activate the next Todo task with resolved context and optional skill guidance.",
+    promptGuidelines: [
+      "Use todo for multi-step work that needs explicit progress tracking, dependencies, or resumable task context.",
+      "Call todo with action=next to activate the next pending task before executing it.",
+      "When an active Todo task is complete, call todo update with status=completed and a concise summary before activating another task.",
+    ],
 
     parameters: TodoToolParams,
 
@@ -394,11 +431,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
         const id = (args.id as string) ?? "";
         detail = id ? ` #${id}` : "";
       }
-      return new Text(
-        `${theme.fg("toolTitle", theme.bold("todo "))}${action}${detail}`,
-        0,
-        0,
-      );
+      return singleLine(`${theme.fg("toolTitle", theme.bold("todo "))}${action}${detail}`);
     },
 
     renderResult(result, _opts, theme) {
@@ -406,11 +439,11 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       if (!details?.tasks) {
         const text = result.content[0];
         const fallback = text && "text" in text ? text.text : "";
-        return new Text(details?.error ? theme.fg("error", fallback) : theme.fg("dim", fallback), 0, 0);
+        return singleLine(details?.error ? theme.fg("error", fallback) : theme.fg("dim", fallback));
       }
 
       if (details.error) {
-        return new Text(theme.fg("error", `Error: ${details.error}`), 0, 0);
+        return singleLine(theme.fg("error", `Error: ${details.error}`));
       }
 
       // Brief inline summary — full list shown in footer panel
@@ -433,7 +466,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
         : "";
 
       const prefix = actionText ? `${theme.fg("success", "✓")} ${actionText} — ` : "";
-      return new Text(`${prefix}${theme.fg("muted", summary)}`, 0, 0);
+      return singleLine(`${prefix}${theme.fg("muted", summary)}`);
     },
   };
 
@@ -507,11 +540,20 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     onSessionShutdownPlan(ctx);
   });
 
-  pi.on("session_before_compact", (_event, ctx) => {
+  pi.on("session_before_compact", async (event, ctx) => {
     goalBeforeCompact(ctx);
+    return createMaestroCompaction(event, ctx);
   });
 
   pi.on("session_compact", async (event, ctx) => {
+    try {
+      await persistMaestroCompactionKnowhow(event, ctx);
+    } catch (error) {
+      ctx.ui.notify(
+        `Compaction checkpoint was saved in the session but the knowhow copy failed: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
     await goalCompact(event, ctx);
     onCompactPlan(ctx);
   });
@@ -528,16 +570,10 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   });
 
   pi.on("before_agent_start", (event) => {
-    // Chain: plan system prompt injection, then goal
+    // Plan owns the stable mode prompt; Goal only acknowledges continuation markers.
     const planResult = onBeforeAgentStartPlan(event);
-    const effectiveEvent = planResult
-      ? { ...event, systemPrompt: planResult.systemPrompt }
-      : event;
-    const goalResult = goalBeforeAgentStart(effectiveEvent);
-    if (planResult && goalResult) {
-      return { systemPrompt: goalResult.systemPrompt };
-    }
-    return goalResult ?? planResult;
+    goalBeforeAgentStart(event);
+    return planResult;
   });
 
   pi.on("agent_end", async (event, ctx) => {
@@ -548,6 +584,11 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
   pi.on("tool_execution_end", (event) => {
     if (event.toolName === "todo") updateTodoWidget();
+  });
+
+  // Register last so existing Plan/Goal guards keep their current short-circuit priority.
+  registerCodexHookAdapter(pi, {
+    getPermissionMode: () => isPlanMode() ? "plan" : "default",
   });
 }
 
@@ -615,6 +656,8 @@ function renderTodoSummary(tasks: TodoTaskLike[], expanded: boolean, width: numb
       ? `${red("»")} ${red(`Blocked: ${next.subject}`)}`
       : `${green("»")} ${green(next.subject)}`
     : green("✓ All tasks completed");
+
+  if (width < 20) return truncateToWidth(nextText, width, "…");
 
   const candidates = [fullMeta, compactMeta, minimalMeta];
   let meta = minimalMeta;

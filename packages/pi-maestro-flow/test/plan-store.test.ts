@@ -8,6 +8,7 @@ import {
   PlanApprovalError,
   PlanRevisionConflictError,
   PlanStore,
+  planSessionStorageId,
   workspaceStorageId,
 } from "../src/tools/plan-store.ts";
 
@@ -17,6 +18,44 @@ test("workspace storage IDs are readable and collision resistant", () => {
   assert.match(first, /^demo-[a-f0-9]{8}$/);
   assert.match(second, /^demo-[a-f0-9]{8}$/);
   assert.notEqual(first, second);
+});
+
+test("session storage IDs are readable, stable and collision resistant", () => {
+  const first = planSessionStorageId("019f-chat-a");
+  const repeated = planSessionStorageId("019f-chat-a");
+  const second = planSessionStorageId("019f-chat-b");
+  assert.match(first, /^019f-chat-a-[a-f0-9]{8}$/);
+  assert.equal(first, repeated);
+  assert.notEqual(first, second);
+});
+
+test("PlanStore isolates chat sessions and assigns legacy workspace data once", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-session-store-"));
+  const cwd = join(root, "workspace");
+  const rootDir = join(root, "global");
+  try {
+    const legacy = new PlanStore(cwd, { rootDir });
+    await legacy.saveDraft("legacy workspace draft", 0);
+
+    const chatA = new PlanStore(cwd, { rootDir, session: { id: "chat-a", file: "chat-a.jsonl", name: "Chat A" } });
+    const loadedA = await chatA.load();
+    assert.equal(loadedA.markdown, "legacy workspace draft");
+    assert.equal(loadedA.manifest.sessionId, "chat-a");
+    assert.equal(loadedA.manifest.sessionFile, "chat-a.jsonl");
+    assert.equal(loadedA.manifest.sessionName, "Chat A");
+    assert.match(chatA.plansDir.replaceAll("\\", "/"), /\/sessions\/chat-a-[a-f0-9]{8}\/plans$/);
+
+    const chatB = new PlanStore(cwd, { rootDir, session: { id: "chat-b" } });
+    const loadedB = await chatB.load();
+    assert.equal(loadedB.markdown, "");
+    assert.equal(loadedB.manifest.sessionId, "chat-b");
+    await chatB.saveDraft("chat B draft", 0);
+
+    assert.equal((await new PlanStore(cwd, { rootDir, session: { id: "chat-a" } }).load()).markdown, "legacy workspace draft");
+    assert.equal((await new PlanStore(cwd, { rootDir, session: { id: "chat-b" } }).load()).markdown, "chat B draft");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("PlanStore persists drafts, revisions and restart state", async () => {

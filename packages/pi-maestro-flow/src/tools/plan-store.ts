@@ -15,6 +15,9 @@ export interface PlanManifest {
   version: 1;
   workspaceId: string;
   workspacePath: string;
+  sessionId?: string;
+  sessionFile?: string;
+  sessionName?: string;
   revision: number;
   status: "draft" | "approved";
   draftChecksum: string;
@@ -35,6 +38,7 @@ export interface LoadedPlan {
 
 export interface PlanStoreOptions {
   rootDir?: string;
+  session?: PlanSessionIdentity;
   now?: () => Date;
   approvalCommitHook?: () => Promise<void>;
   approvalCleanupHook?: () => Promise<void>;
@@ -44,6 +48,12 @@ export interface PlanStoreOptions {
   lockHeartbeatMs?: number;
   lockNow?: () => number;
   isProcessAlive?: (pid: number) => boolean;
+}
+
+export interface PlanSessionIdentity {
+  id: string;
+  file?: string;
+  name?: string;
 }
 
 interface LockOwner {
@@ -86,6 +96,9 @@ export class PlanApprovalError extends Error {
 export class PlanStore {
   readonly workspacePath: string;
   readonly workspaceId: string;
+  readonly workspaceDir: string;
+  readonly sessionId: string | undefined;
+  readonly sessionStorageId: string | undefined;
   readonly plansDir: string;
   readonly approvalsDir: string;
   readonly recoveryDir: string;
@@ -94,6 +107,10 @@ export class PlanStore {
   readonly pendingPath: string;
   readonly lockPath: string;
   readonly lockOwnerPath: string;
+
+  private readonly legacyPlansDir: string;
+  private readonly sessionFile: string | undefined;
+  private readonly sessionName: string | undefined;
 
   private readonly now: () => Date;
   private readonly approvalCommitHook?: () => Promise<void>;
@@ -109,7 +126,15 @@ export class PlanStore {
     this.workspacePath = normalizeWorkspacePath(cwd);
     this.workspaceId = workspaceStorageId(cwd);
     const rootDir = options.rootDir ?? join(homedir(), ".pi", "workspaces");
-    this.plansDir = join(rootDir, this.workspaceId, "plans");
+    this.workspaceDir = join(rootDir, this.workspaceId);
+    this.legacyPlansDir = join(this.workspaceDir, "plans");
+    this.sessionId = options.session?.id.trim() || undefined;
+    this.sessionStorageId = this.sessionId ? planSessionStorageId(this.sessionId) : undefined;
+    this.sessionFile = options.session?.file;
+    this.sessionName = options.session?.name;
+    this.plansDir = this.sessionStorageId
+      ? join(this.workspaceDir, "sessions", this.sessionStorageId, "plans")
+      : this.legacyPlansDir;
     this.approvalsDir = join(this.plansDir, "approvals");
     this.recoveryDir = join(this.plansDir, "recovery");
     this.currentPath = join(this.plansDir, "current.md");
@@ -238,9 +263,7 @@ export class PlanStore {
     assertRevision(expectedRevision, current.manifest.revision);
     const updatedAt = this.now().toISOString();
     const manifest: PlanManifest = {
-      version: 1,
-      workspaceId: this.workspaceId,
-      workspacePath: this.workspacePath,
+      ...this.manifestIdentity(),
       revision: current.manifest.revision + 1,
       status: "draft",
       draftChecksum: checksumText(markdown),
@@ -265,7 +288,7 @@ export class PlanStore {
   private async readManifest(): Promise<PlanManifest | null> {
     try {
       const raw: unknown = JSON.parse(await readFile(this.manifestPath, "utf8"));
-      return validateManifest(raw, this.workspaceId, this.workspacePath);
+      return validateManifest(raw, this.workspaceId, this.workspacePath, this.sessionId);
     } catch (error) {
       if (isMissingFile(error) || error instanceof SyntaxError || errorMessage(error) === "Invalid Plan manifest") return null;
       throw error;
@@ -283,9 +306,7 @@ export class PlanStore {
     const approved = Boolean(lastApproval && checksumText(lastArchive) === checksum);
     const updatedAt = this.now().toISOString();
     return {
-      version: 1,
-      workspaceId: this.workspaceId,
-      workspacePath: this.workspacePath,
+      ...this.manifestIdentity(),
       revision: lastRevision > 0
         ? lastRevision + (approved ? 0 : 1)
         : markdown ? 1 : 0,
@@ -324,6 +345,7 @@ export class PlanStore {
   }
 
   private async withWorkspaceLock<T>(operation: (ownerToken: string) => Promise<T>): Promise<T> {
+    await this.prepareSessionStorage();
     await mkdir(this.plansDir, { recursive: true });
     const maxAttempts = Math.max(1, Math.ceil(this.lockTimeoutMs / Math.max(1, this.lockRetryMs)));
     const owner: LockOwner = {
@@ -363,6 +385,28 @@ export class PlanStore {
       clearInterval(heartbeatTimer);
       await heartbeat;
       await this.releaseLock(owner.token);
+    }
+  }
+
+  private manifestIdentity(): Pick<PlanManifest, "version" | "workspaceId" | "workspacePath" | "sessionId" | "sessionFile" | "sessionName"> {
+    return {
+      version: 1,
+      workspaceId: this.workspaceId,
+      workspacePath: this.workspacePath,
+      ...(this.sessionId ? { sessionId: this.sessionId } : {}),
+      ...(this.sessionFile ? { sessionFile: this.sessionFile } : {}),
+      ...(this.sessionName ? { sessionName: this.sessionName } : {}),
+    };
+  }
+
+  private async prepareSessionStorage(): Promise<void> {
+    if (!this.sessionStorageId || await pathExists(this.plansDir)) return;
+    await mkdir(dirname(this.plansDir), { recursive: true });
+    if (await pathExists(join(this.legacyPlansDir, ".transaction-lock"))) return;
+    try {
+      await rename(this.legacyPlansDir, this.plansDir);
+    } catch (error) {
+      if (!isMissingFile(error) && !isAlreadyExists(error)) throw error;
     }
   }
 
@@ -561,6 +605,16 @@ export function workspaceStorageId(cwd: string): string {
   return `${slug}-${createHash("sha256").update(normalized).digest("hex").slice(0, 8)}`;
 }
 
+export function planSessionStorageId(sessionId: string): string {
+  const normalized = sessionId.trim();
+  const slug = normalized
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 48) || "session";
+  return `${slug}-${createHash("sha256").update(normalized).digest("hex").slice(0, 8)}`;
+}
+
 export function normalizeWorkspacePath(cwd: string): string {
   const normalized = resolve(cwd).replaceAll("\\", "/").replace(/\/$/, "");
   return process.platform === "win32" ? normalized.toLowerCase() : normalized;
@@ -624,11 +678,19 @@ function assertRevision(expected: number | undefined, actual: number): void {
   }
 }
 
-function validateManifest(raw: unknown, workspaceId: string, workspacePath: string): PlanManifest {
+function validateManifest(
+  raw: unknown,
+  workspaceId: string,
+  workspacePath: string,
+  sessionId: string | undefined,
+): PlanManifest {
   if (!isRecord(raw)
     || raw.version !== 1
     || raw.workspaceId !== workspaceId
     || raw.workspacePath !== workspacePath
+    || (sessionId ? raw.sessionId !== sessionId : raw.sessionId !== undefined)
+    || (raw.sessionFile !== undefined && typeof raw.sessionFile !== "string")
+    || (raw.sessionName !== undefined && typeof raw.sessionName !== "string")
     || !Number.isInteger(raw.revision)
     || (raw.revision as number) < 0
     || (raw.status !== "draft" && raw.status !== "approved")
@@ -665,6 +727,9 @@ function validateManifest(raw: unknown, workspaceId: string, workspacePath: stri
     version: 1,
     workspaceId,
     workspacePath,
+    ...(sessionId ? { sessionId } : {}),
+    ...(typeof raw.sessionFile === "string" ? { sessionFile: raw.sessionFile } : {}),
+    ...(typeof raw.sessionName === "string" ? { sessionName: raw.sessionName } : {}),
     revision: raw.revision as number,
     status: raw.status,
     draftChecksum: raw.draftChecksum as string,
@@ -678,6 +743,16 @@ function validateManifest(raw: unknown, workspaceId: string, workspacePath: stri
       : {}),
     approvals,
   };
+}
+
+async function pathExists(path: string): Promise<boolean> {
+  try {
+    await stat(path);
+    return true;
+  } catch (error) {
+    if (isMissingFile(error)) return false;
+    throw error;
+  }
 }
 
 function invalidManifest(): never {

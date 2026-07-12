@@ -4,7 +4,11 @@
   "description": "Pi extension for Maestro workflow orchestration — explore, delegate, MOA tools",
   "type": "module",
   "scripts": {
-    "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/todo.test.ts"
+    "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/todo.test.ts",
+    "test:compaction": "node --experimental-transform-types --test test/compaction.test.ts",
+    "test:hooks": "node --experimental-transform-types --test test/hooks.test.ts",
+    "test:goal": "node --experimental-transform-types --test test/goal.test.ts",
+    "test:plan": "node --experimental-transform-types --test test/plan-store.test.ts test/plan-editor.test.ts test/plan-lifecycle.test.ts test/statusline.test.ts"
   },
   "keywords": [
     "pi-package",
@@ -21,6 +25,7 @@
   ],
   "files": [
     "src/**/*.ts",
+    "schemas/",
     "workflows/",
     "templates/",
     "README.md"

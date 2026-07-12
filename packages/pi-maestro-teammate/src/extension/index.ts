@@ -69,6 +69,58 @@ import {
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_MESSAGE_EVENT,
 } from "../shared/types.ts";
+import { formatAgentCatalog } from "../agents/agents.ts";
+
+export const TEAMMATE_PROMPT_SNIPPET =
+  "Dispatch bounded work to discovered teammate roles for parallel, sequential, or specialist execution.";
+
+export const TEAMMATE_PROMPT_GUIDELINES = [
+  "Use teammate when work can be split into bounded independent tasks, or when a discovered specialist role materially improves correctness.",
+  "Do not use teammate for trivial, tightly coupled, single-step work that is faster to complete directly.",
+  "Use teammate tasks for parallel or DAG work; {name} and {name.field} references create dependencies between named tasks.",
+  "Give teammate tasks a name when they may need teammate-send follow-up or downstream variable references.",
+  'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default.',
+  "Use teammate-list or teammate-watch only when status or live output is needed, and teammate-send for steering or follow-up.",
+];
+
+export function buildTeammateToolDescription(cwd: string): string {
+  return `Dispatch tasks to teammate agents. Teammates run as Pi subprocesses with their own tools and context.
+
+Call forms:
+  - Single: { agent: "delegate", task: "..." }
+  - Fork: { agent: "delegate", task: "...", context: "fork" }
+  - Parallel: { tasks: [{ agent: "explorer", task: "..." }, { agent: "reviewer", task: "..." }] }
+  - DAG: name tasks and reference {name} or {name.field} from dependent tasks
+
+Use discovered roles when possible. Unknown names currently fall back to a generic teammate configuration.
+
+Available teammate roles for ${cwd}:
+${formatAgentCatalog(cwd)}`;
+}
+
+const TEAMMATE_SEND_DESCRIPTION = `Send a message to a named, running teammate agent.
+
+Modes:
+  - "steer" — interrupt the current turn and inject immediately
+  - "follow_up" — queue after the current turn completes
+  - "abort" — terminate the agent`;
+const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or abort a named running teammate agent.";
+const TEAMMATE_SEND_GUIDELINES = [
+  "Use teammate-send only for a named running or sleeping agent; use follow_up by default, steer for urgent correction, and abort only to terminate work.",
+];
+
+const TEAMMATE_LIST_DESCRIPTION = "List active teammate agents with status, timing, and addressable names.";
+const TEAMMATE_LIST_SNIPPET = "List active or named teammate agents and inspect their current status.";
+const TEAMMATE_LIST_GUIDELINES = [
+  "Use teammate-list when the current status or addressable name of background teammate work is needed.",
+];
+
+const TEAMMATE_WATCH_DESCRIPTION =
+  "View a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result.";
+const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activity and output.";
+const TEAMMATE_WATCH_GUIDELINES = [
+  "Use teammate-watch for targeted live inspection after selecting an agent name or correlation ID from teammate-list.",
+];
 
 interface AgentWidgetTheme {
   fg(name: string, text: string): string;
@@ -84,6 +136,7 @@ export async function switchConversationSession(
 }
 
 interface AgentWidgetRow {
+  correlationId: string;
   label: string;
   agent: string;
   status: AgentProgressSnapshot["status"] | "sleeping";
@@ -108,13 +161,18 @@ function toolAction(name: string): string {
 }
 
 function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
-  const rows: AgentWidgetRow[] = [];
+  const rows = new Map<string, AgentWidgetRow>();
+  const directAgents = new Map(agents.map((agent) => [agent.correlationId, agent]));
   for (const active of agents) {
     const snapshots = active.progress ?? [];
     const effective = snapshots.length > 1 ? snapshots : [snapshots[0]];
     for (const progress of effective) {
+      const correlationId = progress?.correlationId ?? active.correlationId;
+      const direct = directAgents.get(correlationId);
       const runningTool = progress?.recentTools?.find((tool) => tool.status === "running");
-      const status = active.status === "sleeping" ? "sleeping" : progress?.status ?? "running";
+      const status = direct?.status === "sleeping" || (!direct && active.status === "sleeping")
+        ? "sleeping"
+        : progress?.status ?? direct?.status ?? active.status;
       const action = runningTool
         ? toolAction(runningTool.name)
         : status === "sleeping"
@@ -128,9 +186,21 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
                 : progress?.lastMessage
                   ? "streaming"
                   : "waiting for model";
-      rows.push({
-        label: progress?.name ?? active.name ?? active.correlationId.slice(0, 8),
-        agent: progress?.agent ?? active.agent,
+      const existing = rows.get(correlationId);
+      if (!progress && existing) {
+        rows.set(correlationId, {
+          ...existing,
+          label: direct?.name ?? existing.label,
+          agent: direct?.agent ?? existing.agent,
+          status,
+          action: status === "sleeping" ? "sleeping" : existing.action,
+        });
+        continue;
+      }
+      rows.set(correlationId, {
+        correlationId,
+        label: progress?.name ?? direct?.name ?? active.name ?? correlationId.slice(0, 8),
+        agent: progress?.agent ?? direct?.agent ?? active.agent,
         status,
         action,
         direction: runningTool ? "↓" : "↑",
@@ -139,7 +209,7 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
       });
     }
   }
-  return rows;
+  return [...rows.values()];
 }
 
 export function renderAgentStatusWidget(
@@ -288,7 +358,11 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       });
     };
 
-    pi.on("session_start", (_event, ctx) => publishSessionIdentity(ctx));
+    pi.on("session_start", (_event, ctx) => {
+      publishSessionIdentity(ctx);
+      proxyTeammateTool.description = buildTeammateToolDescription(ctx.cwd);
+      pi.registerTool(proxyTeammateTool);
+    });
     pi.on("session_compact", (_event, ctx) => publishSessionIdentity(ctx));
     pi.on("message_end", (_event, ctx) => publishSessionIdentity(ctx));
     pi.on("agent_end", (_event, ctx) => {
@@ -399,20 +473,25 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       return result as AgentToolResult<T>;
     }
 
-    pi.registerTool({
+    const proxyTeammateTool: ToolDefinition<typeof TeammateParams, Details> = {
       name: "teammate",
       label: "Teammate",
-      description: "Dispatch tasks to teammate agents (proxy to root orchestrator).",
+      description: buildTeammateToolDescription(process.cwd()),
+      promptSnippet: TEAMMATE_PROMPT_SNIPPET,
+      promptGuidelines: TEAMMATE_PROMPT_GUIDELINES,
       parameters: TeammateParams,
       async execute(_id: string, params: RunTeammateParams) {
         return proxyCall<Details>("teammate", params);
       },
-    });
+    };
+    pi.registerTool(proxyTeammateTool);
 
     pi.registerTool({
       name: "teammate-send",
       label: "Teammate Send",
-      description: "Send a message to a named teammate agent (proxy to root).",
+      description: TEAMMATE_SEND_DESCRIPTION,
+      promptSnippet: TEAMMATE_SEND_SNIPPET,
+      promptGuidelines: TEAMMATE_SEND_GUIDELINES,
       parameters: TeammateSendParams,
       async execute(_id: string, params: { to: string; message: string; mode?: RpcMessageMode }) {
         return proxyCall<{ delivered: boolean }>("teammate-send", params);
@@ -422,7 +501,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     pi.registerTool({
       name: "teammate-list",
       label: "Teammate List",
-      description: "List active teammate agents (proxy to root).",
+      description: TEAMMATE_LIST_DESCRIPTION,
+      promptSnippet: TEAMMATE_LIST_SNIPPET,
+      promptGuidelines: TEAMMATE_LIST_GUIDELINES,
       parameters: TeammateListParams,
       async execute(_id: string, params: { view?: "active" | "named" | "all" }) {
         return proxyCall<{ agents: unknown[] }>("teammate-list", params);
@@ -432,7 +513,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     pi.registerTool({
       name: "teammate-watch",
       label: "Teammate Watch",
-      description: "View a running agent's output (proxy to root).",
+      description: TEAMMATE_WATCH_DESCRIPTION,
+      promptSnippet: TEAMMATE_WATCH_SNIPPET,
+      promptGuidelines: TEAMMATE_WATCH_GUIDELINES,
       parameters: TeammateWatchParams,
       async execute(_id: string, params: { name: string; lines?: number }) {
         return proxyCall<{ output: string[] }>("teammate-watch", params);
@@ -511,51 +594,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   const tool: ToolDefinition<typeof TeammateParams, Details> = {
     name: "teammate",
     label: "Teammate",
-    description: `Dispatch tasks to teammate agents. Teammates run as pi subprocesses with their own tools and context.
-
-Single agent:
-  { agent: "delegate", task: "..." }
-
-Fork current session (child inherits full conversation history):
-  { agent: "delegate", task: "...", context: "fork" }
-
-Multiple tasks (no references = parallel):
-  { tasks: [
-      { agent: "scout", task: "Find API endpoints" },
-      { agent: "scout", task: "Map database schema" }
-    ] }
-
-Multiple tasks ({name} references = DAG — dependencies auto-resolved):
-  { tasks: [
-      { agent: "scout", name: "api", task: "List all API routes",
-        outputSchema: { type: "object", properties: { routes: { type: "array" } } } },
-      { agent: "scout", name: "db", task: "Map the database schema" },
-      { agent: "reviewer", task: "Routes: {api.routes}\\nDB: {db}\\n\\nCheck consistency" }
-    ] }
-
-Variable references:
-  - {name} — full output of the named task (text or JSON if outputSchema set)
-  - {name.field} — specific field from structured output
-
-Context modes:
-  - "fresh" (default): blank conversation, no prior context
-  - "fork": inherits current session's full conversation history — the child sees everything before the fork and continues independently
-
-Routing:
-  - name: addressable name for variable referencing and teammate-send
-  - reply_to: "caller" (direct return) or "main" (broadcast to parent)
-
-Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task unless overridden per-task.`,
-
-    promptSnippet: "Use teammate to dispatch background agents for parallel or sequential work.",
-    promptGuidelines: [
-      "Prefer background mode (default) for long-running tasks — foreground (background: false) only for short tasks where you need the result immediately",
-      "Use the name field to make agents addressable via teammate-send and referenceable via {name} in other tasks",
-      "Use {name} and {name.field} variable references in tasks array to create DAG dependencies — referenced tasks are awaited, unreferenced run in parallel",
-      "Set outputSchema for structured output when downstream tasks need specific fields",
-      "Use teammate-list to check running agents, teammate-send to send follow-up messages or steer/abort",
-      'Use context: "fork" to spawn a child that inherits the current conversation history — useful when the child needs full context of what has been discussed',
-    ],
+    description: buildTeammateToolDescription(process.cwd()),
+    promptSnippet: TEAMMATE_PROMPT_SNIPPET,
+    promptGuidelines: TEAMMATE_PROMPT_GUIDELINES,
 
     parameters: TeammateParams,
 
@@ -1088,14 +1129,9 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
   const sendTool: ToolDefinition<typeof TeammateSendParams, { delivered: boolean }> = {
     name: "teammate-send",
     label: "Teammate Send",
-    description: `Send a message to a named, running teammate agent.
-
-Modes:
-  - "steer" — interrupt current turn, inject message immediately
-  - "follow_up" (default) — queue after current turn completes
-  - "abort" — cancel current execution (message field ignored)`,
-
-    promptSnippet: "Use teammate-send to communicate with running teammate agents by name.",
+    description: TEAMMATE_SEND_DESCRIPTION,
+    promptSnippet: TEAMMATE_SEND_SNIPPET,
+    promptGuidelines: TEAMMATE_SEND_GUIDELINES,
 
     parameters: TeammateSendParams,
 
@@ -1187,9 +1223,9 @@ Modes:
   const listTool: ToolDefinition<typeof TeammateListParams, { agents: unknown[] }> = {
     name: "teammate-list",
     label: "Teammate List",
-    description: `List active teammate agents with status and timing.`,
-
-    promptSnippet: "Use teammate-list to check on running background agents before dispatching new work.",
+    description: TEAMMATE_LIST_DESCRIPTION,
+    promptSnippet: TEAMMATE_LIST_SNIPPET,
+    promptGuidelines: TEAMMATE_LIST_GUIDELINES,
 
     parameters: TeammateListParams,
 
@@ -1215,9 +1251,9 @@ Modes:
   const watchTool: ToolDefinition<typeof TeammateWatchParams, { output: string[] }> = {
     name: "teammate-watch",
     label: "Teammate Watch",
-    description: `View a running agent's recent output log — tool calls, streaming text, and inbox messages.`,
-
-    promptSnippet: "Use teammate-watch to inspect a specific agent's live activity log.",
+    description: TEAMMATE_WATCH_DESCRIPTION,
+    promptSnippet: TEAMMATE_WATCH_SNIPPET,
+    promptGuidelines: TEAMMATE_WATCH_GUIDELINES,
 
     parameters: TeammateWatchParams,
 
@@ -1825,6 +1861,8 @@ Modes:
   pi.on("session_start", (_event, ctx) => {
     widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
+    tool.description = buildTeammateToolDescription(ctx.cwd);
+    pi.registerTool(tool);
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
     const sessionFile = ctx.sessionManager?.getSessionFile?.();
     const isAgentSession = Array.from(state.activeRuns.values()).some((agent) => agent.sessionFile === sessionFile);

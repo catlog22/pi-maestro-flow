@@ -1,27 +1,29 @@
 /**
  * TUI rendering for the teammate tool.
  *
- * renderCall: compact tree with dependency topology for chain/graph
+ * renderCall: compact one-line launch summary for single/chain/graph
  * renderResult: real-time streaming for foreground, compact status for completed
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  Text, Box, type BoxBorder, type Component,
+  Box, type Component,
   truncateToWidth,
+  wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { Details, SingleResult } from "../shared/types.ts";
+import type { AgentProgressSnapshot, Details, SingleResult } from "../shared/types.ts";
 import { extractDependencies } from "../runs/execution.ts";
+import {
+  buildProgressTree,
+  focusTaskIndex,
+  progressIcon,
+  progressLabel,
+  selectProgressWindow,
+  type ProgressPalette,
+} from "./progress-tree.ts";
 
 type Theme = ExtensionContext["ui"]["theme"];
-
-function resultBorder(exitCode: number, theme: Theme): BoxBorder {
-  return {
-    chars: { topLeft: "╭", topRight: "╮", bottomLeft: "╰", bottomRight: "╯", horizontal: "─", vertical: "│" },
-    color: exitCode === 0 ? (s: string) => theme.fg("dim", s) : (s: string) => theme.fg("error", s),
-  };
-}
 
 function statusMeta(parts: string[], theme: Theme): string {
   const filtered = parts.filter(Boolean);
@@ -30,6 +32,24 @@ function statusMeta(parts: string[], theme: Theme): string {
 
 function dynamicComponent(build: (width: number) => string[]): Component {
   return { render: (w: number) => build(w), invalidate() {} };
+}
+
+function appendWrappedMessage(
+  lines: string[],
+  content: string,
+  width: number,
+  theme: Theme,
+): void {
+  for (const rawLine of content.split("\n")) {
+    const wrapped = wrapTextWithAnsi(rawLine, Math.max(1, width));
+    if (wrapped.length === 0) {
+      lines.push(theme.fg("dim", "│"));
+      continue;
+    }
+    for (const line of wrapped) {
+      lines.push(theme.fg("dim", `│ ${line}`));
+    }
+  }
 }
 
 function formatDuration(ms: number): string {
@@ -60,13 +80,14 @@ interface TaskArg {
 export function renderTeammateCall(
   args: Record<string, unknown>,
   theme: Theme,
+  context?: { expanded?: boolean },
 ): Component {
   const tasks = args.tasks as TaskArg[] | undefined;
   const isBg = args.background !== false;
 
   // Multi-task: tree with dependency topology
   if (tasks?.length) {
-    return renderMultiTaskCall(tasks, isBg, args, theme);
+    return renderMultiTaskCall(tasks, isBg, args, theme, context?.expanded ?? false);
   }
 
   // Single agent
@@ -80,11 +101,8 @@ export function renderTeammateCall(
     ? theme.fg("dim", " [bg]")
     : theme.fg("dim", " (Alt+B to detach)");
 
-  return new Text(
-    `${theme.fg("success", "■")} ${nameLabel}${agentLabel}${modeHint}`,
-    0,
-    0,
-  );
+  const header = `${theme.fg("success", "■")} ${nameLabel}${agentLabel}${modeHint}`;
+  return dynamicComponent((w) => [truncateToWidth(header, Math.max(1, w), "…")]);
 }
 
 function renderMultiTaskCall(
@@ -92,6 +110,7 @@ function renderMultiTaskCall(
   isBg: boolean,
   args: Record<string, unknown>,
   theme: Theme,
+  expanded: boolean,
 ): Component {
   const taskNames = new Set(tasks.filter((t) => t.name).map((t) => t.name!));
   const hasDeps = tasks.some((t) => extractDependencies(t.task, taskNames).length > 0);
@@ -109,22 +128,34 @@ function renderMultiTaskCall(
   }
 
   const header = `${theme.fg("success", "■")} ${theme.bold(`${tasks.length}${topoLabel} ${modeWord} agents launched`)}${hint}`;
-  const lines = [header];
-
-  if (hasDeps) {
-    // Show dependency topology
-    renderTopologyTree(tasks, taskNames, lines, theme);
-  } else {
-    // Parallel — flat list
-    for (let i = 0; i < tasks.length; i++) {
-      const t = tasks[i];
-      const connector = i === tasks.length - 1 ? "└" : "├";
-      const label = t.name ? `@${t.name}` : `#${i}`;
-      lines.push(`  ${theme.fg("dim", connector)} ${theme.fg("accent", label)} ${theme.fg("dim", `(${t.agent})`)}`);
-    }
+  if (expanded) {
+    const indexByName = new Map<string, number>();
+    tasks.forEach((task, index) => {
+      if (task.name) indexByName.set(task.name, index);
+    });
+    const progress: AgentProgressSnapshot[] = tasks.map((task, index) => ({
+      agent: task.agent,
+      ...(task.name ? { name: task.name } : {}),
+      correlationId: `preview-${index + 1}`,
+      taskIndex: index,
+      dependencies: extractDependencies(task.task, taskNames)
+        .map((name) => indexByName.get(name))
+        .filter((dependency): dependency is number => dependency !== undefined),
+      status: "pending",
+    }));
+    const palette: ProgressPalette = {
+      dim: (text) => theme.fg("dim", text),
+      accent: (text) => theme.fg("accent", text),
+      running: (text) => theme.fg("warning", text),
+      success: (text) => theme.fg("success", text),
+      error: (text) => theme.fg("error", text),
+      bold: (text) => theme.bold(text),
+    };
+    const tree = buildProgressTree(progress, palette);
+    return dynamicComponent((w) => [header, ...tree.map((row) => row.text)]
+      .map((line) => truncateToWidth(line, Math.max(1, w), "…")));
   }
-
-  return new Text(lines.join("\n"), 0, 0);
+  return dynamicComponent((w) => [truncateToWidth(header, Math.max(1, w), "…")]);
 }
 
 function isLinearChain(tasks: TaskArg[], taskNames: Set<string>): boolean {
@@ -134,71 +165,6 @@ function isLinearChain(tasks: TaskArg[], taskNames: Set<string>): boolean {
     if (deps.length === 1 && i > 0 && deps[0] !== tasks[i - 1].name) return false;
   }
   return true;
-}
-
-function renderTopologyTree(
-  tasks: TaskArg[],
-  taskNames: Set<string>,
-  lines: string[],
-  theme: Theme,
-): void {
-  // Build dep map: taskIndex -> depIndices
-  const indexByName = new Map<string, number>();
-  for (let i = 0; i < tasks.length; i++) {
-    if (tasks[i].name) indexByName.set(tasks[i].name!, i);
-  }
-
-  const depMap = tasks.map((t) =>
-    extractDependencies(t.task, taskNames).map((n) => indexByName.get(n)!),
-  );
-
-  // Find roots (no dependents pointing to them... actually, roots = no deps)
-  const roots = tasks.map((_, i) => i).filter((i) => depMap[i].length === 0);
-  const childrenOf = new Map<number, number[]>();
-
-  // For chain/graph, build parent→children from deps
-  for (let i = 0; i < tasks.length; i++) {
-    for (const dep of depMap[i]) {
-      const children = childrenOf.get(dep) ?? [];
-      children.push(i);
-      childrenOf.set(dep, children);
-    }
-  }
-
-  // Render tree via DFS
-  const rendered = new Set<number>();
-
-  function renderNode(idx: number, prefix: string, isLast: boolean): void {
-    if (rendered.has(idx)) return;
-    rendered.add(idx);
-
-    const t = tasks[idx];
-    const connector = isLast ? "└" : "├";
-    const label = t.name ? `@${t.name}` : `#${idx}`;
-    const deps = depMap[idx];
-    const depHint = deps.length > 0
-      ? theme.fg("dim", ` ← ${deps.map((d) => tasks[d].name ?? `#${d}`).join(", ")}`)
-      : "";
-    lines.push(`${prefix}${theme.fg("dim", connector)} ${theme.fg("accent", label)} ${theme.fg("dim", `(${t.agent})`)}${depHint}`);
-
-    const children = childrenOf.get(idx) ?? [];
-    const childPrefix = prefix + (isLast ? "  " : "│ ");
-    for (let ci = 0; ci < children.length; ci++) {
-      renderNode(children[ci], childPrefix, ci === children.length - 1);
-    }
-  }
-
-  // Start from roots
-  for (let ri = 0; ri < roots.length; ri++) {
-    renderNode(roots[ri], "  ", ri === roots.length - 1);
-  }
-
-  // Render any remaining (shouldn't happen with DAG, but safety)
-  for (let i = 0; i < tasks.length; i++) {
-    if (!rendered.has(i)) {
-      renderNode(i, "  ", true);
-    }
-  }
 }
 
 // ---------------------------------------------------------------------------
@@ -214,7 +180,7 @@ export function renderTeammateResult(
 
   // No results yet — streaming progress or background ack
   if (!details || details.results.length === 0) {
-    return renderProgress(result, details, theme);
+    return renderProgress(result, details, options, theme);
   }
 
   // Single result
@@ -230,19 +196,10 @@ export function renderTeammateResult(
 // Streaming progress (foreground real-time display)
 // ---------------------------------------------------------------------------
 
-interface ProgressEntry {
-  agent: string;
-  status: string;
-  startedAt?: string;
-  toolCount?: number;
-  tokens?: number;
-  lastMessage?: string;
-  recentTools?: Array<{ name: string; status: string }>;
-}
-
 function renderProgress(
   result: AgentToolResult<Details>,
   details: Details | undefined,
+  options: { expanded: boolean },
   theme: Theme,
 ): Component {
   const progress = details?.progress;
@@ -251,40 +208,78 @@ function renderProgress(
     const content = typeof result.content === "string"
       ? result.content
       : result.content
-        .filter((c: { type: string }) => c.type === "text")
-        .map((c: { type: string; text: string }) => c.text)
+        .map((content) => content.type === "text" ? content.text : "")
+        .filter(Boolean)
         .join("\n");
     return dynamicComponent((w) => {
-      const preview = truncateToWidth(content.split("\n")[0] ?? "", w - 4, "…");
-      const icon = result.isError ? theme.fg("error", "✗") : theme.fg("dim", "↑");
-      return [`${icon} ${theme.fg("dim", preview)}`];
+      const preview = truncateToWidth(content.split("\n")[0] ?? "", Math.max(1, w - 4), "…");
+      const icon = (result as { isError?: boolean }).isError ? theme.fg("error", "✗") : theme.fg("success", "■");
+      return [truncateToWidth(`${icon} ${theme.fg("dim", preview)}`, Math.max(1, w), "…")];
     });
   }
 
   return dynamicComponent((w) => {
-    const cw = Math.max(20, w - 6);
-    const lines: string[] = [];
+    const entries = progress as AgentProgressSnapshot[];
+    if (w < 20) {
+      const running = entries.filter((entry) => entry.status === "running").length;
+      const failed = entries.filter((entry) => entry.status === "failed").length;
+      const icon = running > 0 ? theme.fg("warning", "■") : theme.fg("success", "✓");
+      const label = entries.length === 1
+        ? progressLabel(entries[0])
+        : failed > 0
+          ? `${failed}/${entries.length} failed`
+          : `${running}/${entries.length} running`;
+      return [truncateToWidth(`${icon} ${label}`, Math.max(1, w), "…")];
+    }
 
-    for (const p of progress as ProgressEntry[]) {
-      const isRunning = p.status === "running";
-      const icon = isRunning ? theme.fg("warning", "■") : theme.fg("success", "✓");
-      const dur = p.startedAt ? formatDuration(Date.now() - new Date(p.startedAt).getTime()) : "";
-      const meta = statusMeta([dur, p.toolCount ? `${p.toolCount} tools` : "", p.tokens ? formatTokens(p.tokens) : ""], theme);
-      lines.push(`${icon} ${theme.bold(p.agent)}  ${meta}`);
+    const palette: ProgressPalette = {
+      dim: (text) => theme.fg("dim", text),
+      accent: (text) => theme.fg("accent", text),
+      running: (text) => theme.fg("warning", text),
+      success: (text) => theme.fg("success", text),
+      error: (text) => theme.fg("error", text),
+      bold: (text) => theme.bold(text),
+    };
+    const running = entries.filter((entry) => entry.status === "running").length;
+    const pending = entries.filter((entry) => entry.status === "pending").length;
+    const completed = entries.filter((entry) => entry.status === "completed").length;
+    const failed = entries.filter((entry) => entry.status === "failed").length;
+    const focus = focusTaskIndex(entries);
+    const focused = entries.find((entry) => entry.taskIndex === focus) ?? entries[0];
+    const treeRows = buildProgressTree(entries, palette);
+    const maxTreeRows = options.expanded ? 8 : 5;
+    const treeWindow = selectProgressWindow(treeRows, maxTreeRows, focus);
+    const range = treeWindow.total > treeWindow.rows.length
+      ? `${treeWindow.start + 1}-${treeWindow.start + treeWindow.rows.length}/${treeWindow.total}`
+      : `${treeWindow.total}`;
+    const mode = details?.mode ?? "single";
+    const stateText = failed > 0
+      ? `${failed} failed`
+      : running > 0
+        ? `${running} running`
+        : `${completed}/${entries.length} completed`;
+    const headerIcon = failed > 0 ? theme.fg("error", "!") : running > 0 ? theme.fg("warning", "■") : theme.fg("success", "✓");
+    const lines: string[] = [
+      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, pending ? `${pending} pending` : "", `agents ${range}`], theme)}`,
+      ...treeWindow.rows.map((row) => row.text),
+    ];
 
-      if (isRunning) {
-        const activeTools = p.recentTools?.filter((t) => t.status === "running") ?? [];
-        const doneTools = p.recentTools?.filter((t) => t.status !== "running") ?? [];
-        for (const t of doneTools.slice(-3)) lines.push(`  ${theme.fg("dim", `└ ${t.name}`)}`);
-        for (const t of activeTools) lines.push(`  ${theme.fg("warning", `■ ${t.name}`)}`);
-
-        if (p.lastMessage) {
-          const tail = p.lastMessage.split("\n").filter((l: string) => l.trim()).slice(-4);
-          for (const line of tail) lines.push(`  ${theme.fg("dim", `│ `)}${theme.fg("dim", truncateToWidth(line, cw, "…"))}`);
-        }
+    if (focused) {
+      const recentTools = focused.recentTools ?? [];
+      const activeTool = recentTools.find((tool) => tool.status === "running")
+        ?? recentTools[recentTools.length - 1];
+      if (activeTool) {
+        const toolIcon = activeTool.status === "running" ? theme.fg("warning", "■") : theme.fg("dim", "✓");
+        lines.push(`${theme.fg("dim", "»")} ${theme.fg("accent", String(focused.taskIndex + 1))} ${toolIcon} ${activeTool.name}`);
+      }
+      const maxStreamRows = options.expanded ? 4 : 2;
+      const tail = focused.lastMessage?.split("\n").filter((line) => line.trim()).slice(-maxStreamRows) ?? [];
+      for (const line of tail) {
+        lines.push(`${theme.fg("dim", "│")} ${theme.fg("dim", line)}`);
       }
     }
-    return lines;
+    if (entries.length > 1) lines.push(theme.fg("dim", `Alt+R details · 1-${Math.min(9, entries.length)} view · 0 overview`));
+    return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
   });
 }
 
@@ -307,34 +302,32 @@ function renderSingleResult(
   const header = `${icon} ${theme.bold(r.agent)}  ${meta}`;
 
   if (!options.expanded) {
-    return new Text(header, 0, 0);
+    return dynamicComponent((w) => [truncateToWidth(header, Math.max(1, w), "…")]);
   }
 
   const proxy = { lines: [] as string[], invalidate() {}, render() { return this.lines; } };
-  const border = resultBorder(r.exitCode, theme);
-  const box = new Box(1, 0, undefined, border);
+  const box = new Box(1, 0);
   box.addChild(proxy);
 
   return dynamicComponent((w) => {
-    const cw = Math.max(20, w - 6);
-    const lines: string[] = [header];
+    const contentWidth = Math.max(1, w - 2);
+    const messageWidth = Math.max(1, contentWidth - 2);
+    const lines: string[] = [truncateToWidth(header, contentWidth, "…")];
 
     const usageParts: string[] = [];
     if (r.usage.inputTokens > 0) usageParts.push(`${formatTokens(r.usage.inputTokens)}in`);
     if (r.usage.outputTokens > 0) usageParts.push(`${formatTokens(r.usage.outputTokens)}out`);
     if (r.usage.turns > 0) usageParts.push(`${r.usage.turns} turns`);
-    if (usageParts.length > 0) lines.push(theme.fg("dim", usageParts.join(" · ")));
+    if (usageParts.length > 0) {
+      lines.push(truncateToWidth(theme.fg("dim", usageParts.join(" · ")), contentWidth, "…"));
+    }
 
     const lastMsg = r.messages[r.messages.length - 1]?.content;
     if (lastMsg) {
-      const contentLines = lastMsg.split("\n");
-      const maxLines = 20;
-      for (const line of contentLines.slice(0, maxLines))
-        lines.push(theme.fg("dim", `│ ${truncateToWidth(line, cw, "…")}`));
-      if (contentLines.length > maxLines)
-        lines.push(theme.fg("dim", `… ${contentLines.length - maxLines} more lines`));
+      appendWrappedMessage(lines, lastMsg, messageWidth, theme);
     }
 
+    if (w < 32) return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
     proxy.lines = lines;
     return [...box.render(w)];
   });
@@ -354,43 +347,55 @@ function renderMultiResult(
   const header = `${icon} ${theme.bold(`${okCount}/${total} completed`)}  ${meta}`;
 
   if (!options.expanded) {
-    const lines = [header];
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      const connector = i === results.length - 1 ? "└" : "├";
-      const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
-      lines.push(`  ${theme.fg("dim", connector)} ${rIcon} ${r.agent} ${theme.fg("dim", formatDuration(r.durationMs))}`);
-    }
-    return new Text(lines.join("\n"), 0, 0);
+    return dynamicComponent((w) => [truncateToWidth(header, Math.max(1, w), "…")]);
   }
 
-  const hasError = results.some((r) => r.exitCode !== 0);
   const proxy = { lines: [] as string[], invalidate() {}, render() { return this.lines; } };
-  const border = resultBorder(hasError ? 1 : 0, theme);
-  const box = new Box(1, 0, undefined, border);
+  const box = new Box(1, 0);
   box.addChild(proxy);
 
   return dynamicComponent((w) => {
-    const cw = Math.max(20, w - 8);
-    const lines = [header];
+    const contentWidth = Math.max(1, w - 2);
+    const previewWidth = Math.max(1, contentWidth - 3);
+    const messageWidth = Math.max(1, previewWidth - 2);
+    const lines = [truncateToWidth(header, contentWidth, "…")];
 
-    for (let i = 0; i < results.length; i++) {
-      const r = results[i];
-      const connector = i === results.length - 1 ? "└" : "├";
-      const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
-      const rMeta = statusMeta([formatDuration(r.durationMs), formatTokens(r.usage.inputTokens + r.usage.outputTokens)], theme);
-      lines.push(`${theme.fg("dim", connector)} ${rIcon} ${r.agent}  ${rMeta}`);
-
-      if (r.messages.length > 0) {
-        const lastMsg = r.messages[r.messages.length - 1]?.content ?? "";
-        const preview = truncateToWidth(lastMsg.split("\n")[0] ?? "", cw, "…");
-        if (preview) {
-          const pad = i === results.length - 1 ? " " : "│";
-          lines.push(`${theme.fg("dim", pad)}  ${theme.fg("dim", preview)}`);
+    if (details.progress?.length === results.length) {
+      const palette: ProgressPalette = {
+        dim: (text) => theme.fg("dim", text),
+        accent: (text) => theme.fg("accent", text),
+        running: (text) => theme.fg("warning", text),
+        success: (text) => theme.fg("success", text),
+        error: (text) => theme.fg("error", text),
+        bold: (text) => theme.bold(text),
+      };
+      for (const row of buildProgressTree(details.progress, palette)) {
+        lines.push(truncateToWidth(row.text, contentWidth, "…"));
+        const result = results[row.taskIndex];
+        const message = result?.messages[result.messages.length - 1]?.content ?? "";
+        if (message) {
+          appendWrappedMessage(lines, message, messageWidth, theme);
+        }
+      }
+    } else {
+      for (let i = 0; i < results.length; i++) {
+        const r = results[i];
+        const connector = i === results.length - 1 ? "└" : "├";
+        const rIcon = r.exitCode === 0 ? theme.fg("success", "✓") : theme.fg("error", "✗");
+        const rMeta = statusMeta([formatDuration(r.durationMs), formatTokens(r.usage.inputTokens + r.usage.outputTokens)], theme);
+        lines.push(truncateToWidth(
+          `${theme.fg("dim", connector)} ${rIcon} ${r.agent}  ${rMeta}`,
+          contentWidth,
+          "…",
+        ));
+        const message = r.messages[r.messages.length - 1]?.content ?? "";
+        if (message) {
+          appendWrappedMessage(lines, message, messageWidth, theme);
         }
       }
     }
 
+    if (w < 32) return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
     proxy.lines = lines;
     return [...box.render(w)];
   });

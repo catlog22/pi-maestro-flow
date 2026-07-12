@@ -3,7 +3,7 @@
  *
  * Act mode exposes plan-enter. Plan mode dynamically activates a safe read-only
  * tool surface plus plan-update/review/confirm/exit/status. Markdown drafts are
- * persisted by workspace and approval must commit before Act tools are restored.
+ * persisted by workspace and chat session; approval must commit before Act tools are restored.
  */
 
 import type {
@@ -15,23 +15,24 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { openPlanEditor } from "./plan-editor.ts";
-import { PlanStore, type LoadedPlan } from "./plan-store.ts";
+import { PlanStore, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
 
 type Mode = "act" | "plan";
-export type PlanContext = Pick<ExtensionContext, "cwd" | "hasUI" | "ui" | "isIdle">;
+export type PlanContext = Pick<ExtensionContext, "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager">;
 
 export interface PlanToolDetails {
   action: "enter" | "update" | "review" | "confirm" | "exit" | "status";
   mode: Mode;
   revision: number;
   path: string;
+  sessionId: string;
   status: "empty" | "draft" | "approved";
   approved?: boolean;
   error?: string;
 }
 
 interface PlanRuntimeOptions {
-  storeFactory?: (cwd: string) => PlanStore;
+  storeFactory?: (cwd: string, session: PlanSessionIdentity) => PlanStore;
 }
 
 const STATUS_KEY = "mode";
@@ -89,20 +90,24 @@ const EmptyPlanParams = Type.Object({});
 
 let mode: Mode = "act";
 let extensionApi: ExtensionAPI | undefined;
-let storeFactory: (cwd: string) => PlanStore = (cwd) => new PlanStore(cwd);
+let storeFactory: (cwd: string, session: PlanSessionIdentity) => PlanStore = (cwd, session) => new PlanStore(cwd, { session });
 let currentStore: PlanStore | undefined;
-let currentWorkspace = "";
+let currentStoreKey = "";
 let latestPlan: string | undefined;
 let latestRevision = 0;
 let latestStatus: PlanToolDetails["status"] = "empty";
 let awaitingAction = false;
 let activeToolsSnapshot: string[] | undefined;
 
+function syncModeStatus(ctx: PlanContext): void {
+  ctx.ui.setStatus(STATUS_KEY, mode === "act" ? "ACT" : hasPlan() ? "READY" : "PLAN");
+}
+
 export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): void {
   if (extensionApi && activeToolsSnapshot) extensionApi.setActiveTools(activeToolsSnapshot);
   resetRuntimeState();
   extensionApi = pi;
-  storeFactory = options.storeFactory ?? ((cwd) => new PlanStore(cwd));
+  storeFactory = options.storeFactory ?? ((cwd, session) => new PlanStore(cwd, { session }));
 }
 
 export function isPlanMode(): boolean {
@@ -129,11 +134,23 @@ export function clearPlan(): void {
 }
 
 async function ensureStore(ctx: PlanContext): Promise<PlanStore> {
-  if (!currentStore || currentWorkspace !== ctx.cwd) {
-    currentStore = storeFactory(ctx.cwd);
-    currentWorkspace = ctx.cwd;
+  const session = currentPlanSession(ctx);
+  const storeKey = `${ctx.cwd}\0${session.id}`;
+  if (!currentStore || currentStoreKey !== storeKey) {
+    currentStore = storeFactory(ctx.cwd, session);
+    currentStoreKey = storeKey;
   }
   return currentStore;
+}
+
+function currentPlanSession(ctx: PlanContext): PlanSessionIdentity {
+  const file = ctx.sessionManager.getSessionFile();
+  const name = ctx.sessionManager.getSessionName();
+  return {
+    id: ctx.sessionManager.getSessionId(),
+    ...(file ? { file } : {}),
+    ...(name ? { name } : {}),
+  };
 }
 
 function applyLoadedPlan(loaded: LoadedPlan): void {
@@ -175,14 +192,14 @@ async function enterPlanMode(ctx: PlanContext): Promise<void> {
   applyLoadedPlan(await store.load());
   mode = "plan";
   activatePlanToolSurface();
-  ctx.ui.setStatus(STATUS_KEY, hasPlan() ? "plan ready" : "PLAN");
+  syncModeStatus(ctx);
   ctx.ui.notify(`Plan mode · ${store.currentPath}`, "info");
 }
 
 function exitPlanMode(ctx: PlanContext): void {
   mode = "act";
   restoreActToolSurface();
-  ctx.ui.setStatus(STATUS_KEY, undefined);
+  syncModeStatus(ctx);
 }
 
 export async function toggleMode(ctx: PlanContext): Promise<Mode> {
@@ -204,13 +221,13 @@ export async function onSessionStartPlan(ctx: PlanContext): Promise<void> {
   restoreActToolSurface();
   resetRuntimeState();
   ensureActToolSurface();
-  ctx.ui.setStatus(STATUS_KEY, undefined);
+  syncModeStatus(ctx);
   try {
     const store = await ensureStore(ctx);
     applyLoadedPlan(await store.load());
   } catch (error) {
     currentStore = undefined;
-    currentWorkspace = "";
+    currentStoreKey = "";
     clearPlan();
     ctx.ui.notify(`Plan draft unavailable: ${errorMessage(error)}`, "warning");
   }
@@ -225,7 +242,7 @@ export function onSessionShutdownPlan(ctx: PlanContext): void {
 function resetRuntimeState(): void {
   mode = "act";
   currentStore = undefined;
-  currentWorkspace = "";
+  currentStoreKey = "";
   latestPlan = undefined;
   latestRevision = 0;
   latestStatus = "empty";
@@ -234,7 +251,7 @@ function resetRuntimeState(): void {
 }
 
 export function onCompactPlan(ctx: PlanContext): void {
-  if (mode === "plan") ctx.ui.setStatus(STATUS_KEY, hasPlan() ? "plan ready" : "PLAN");
+  syncModeStatus(ctx);
 }
 
 export function onBeforeAgentStartPlan(event: { systemPrompt: string }): { systemPrompt: string } | undefined {
@@ -273,7 +290,7 @@ export async function onAgentEndPlan(event: { messages: unknown[] }, ctx: PlanCo
     const store = await ensureStore(ctx);
     const saved = await store.saveDraft(proposedPlan, latestRevision);
     applyLoadedPlan(saved);
-    ctx.ui.setStatus(STATUS_KEY, "plan ready");
+    syncModeStatus(ctx);
     ctx.ui.notify("Compatibility plan captured to current.md. Use plan-review or plan-confirm.", "info");
   } catch (error) {
     ctx.ui.notify(`Plan compatibility capture failed: ${errorMessage(error)}`, "warning");
@@ -284,7 +301,7 @@ async function savePlan(ctx: PlanContext, markdown: string, expectedRevision = l
   const store = await ensureStore(ctx);
   const saved = await store.saveDraft(markdown, expectedRevision);
   applyLoadedPlan(saved);
-  ctx.ui.setStatus(STATUS_KEY, hasPlan() ? "plan ready" : "PLAN");
+  syncModeStatus(ctx);
   return saved;
 }
 
@@ -341,6 +358,7 @@ function currentDetails(action: PlanToolDetails["action"]): PlanToolDetails {
     mode,
     revision: latestRevision,
     path: currentStore?.currentPath ?? "",
+    sessionId: currentStore?.sessionId ?? "",
     status: latestStatus,
   };
 }
@@ -369,7 +387,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const enterTool: ToolDefinition<typeof PlanEnterParams, PlanToolDetails> = {
     name: PLAN_ENTER_TOOL,
     label: "Plan Enter",
-    description: "Enter durable Plan mode, load the workspace current.md draft, and activate Plan-only tools.",
+    description: "Enter durable Plan mode, load this chat session's current.md draft, and activate Plan-only tools.",
     promptSnippet: "Use plan-enter before producing or editing an implementation Plan.",
     parameters: PlanEnterParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -386,7 +404,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const updateTool: ToolDefinition<typeof PlanUpdateParams, PlanToolDetails> = {
     name: "plan-update",
     label: "Plan Update",
-    description: "Replace the workspace current.md draft with complete Markdown using optional revision checking.",
+    description: "Replace this chat session's current.md draft with complete Markdown using optional revision checking.",
     promptSnippet: "Use plan-update to persist the decision-complete Markdown Plan before review.",
     parameters: PlanUpdateParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -454,7 +472,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       const blocked = requirePlanMode("status");
       if (blocked) return blocked;
       const details = currentDetails("status");
-      return result(`${details.mode} · ${details.status} · r${details.revision} · ${details.path}`, details);
+      return result(`${details.mode} · ${details.status} · r${details.revision} · ${details.sessionId} · ${details.path}`, details);
     },
   };
 

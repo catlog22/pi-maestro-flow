@@ -14,7 +14,7 @@ import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "./frontmatter.ts";
 
 type SystemPromptMode = "append" | "replace";
-type AgentSource = "builtin" | "user" | "project";
+export type AgentSource = "builtin" | "user" | "project";
 
 export interface AgentConfig {
   name: string;
@@ -30,6 +30,12 @@ export interface AgentConfig {
   systemPrompt: string;
   source: AgentSource;
   filePath: string;
+}
+
+export interface AgentSummary {
+  name: string;
+  description: string;
+  source: AgentSource;
 }
 
 const BUILTIN_AGENTS_DIR = path.resolve(
@@ -183,4 +189,36 @@ export function resolveAgent(
 ): AgentConfig | undefined {
   const agents = discoverAgents(cwd);
   return agents.find((a) => a.name === agentName);
+}
+
+/** Return resolved role metadata without exposing the role prompt body. */
+export function listAgentSummaries(cwd: string): AgentSummary[] {
+  return discoverAgents(cwd)
+    .map(({ name, description, source }) => ({ name, description, source }))
+    .sort((left, right) => left.name.localeCompare(right.name));
+}
+
+/** Format a compact, deterministic role catalog for teammate tool metadata. */
+export function formatAgentCatalog(
+  cwd: string,
+  maxRoles = 32,
+  maxDescriptionLength = 120,
+): string {
+  const summaries = listAgentSummaries(cwd);
+  if (summaries.length === 0) return "(no discovered teammate roles)";
+
+  const visible = summaries.slice(0, maxRoles);
+  const lines = visible.map((agent) => {
+    const normalized = agent.description.replace(/\s+/g, " ").trim();
+    const description = normalized.length > maxDescriptionLength
+      ? `${normalized.slice(0, Math.max(1, maxDescriptionLength - 1)).trimEnd()}…`
+      : normalized;
+    return `- ${agent.name} [${agent.source}]: ${description}`;
+  });
+
+  if (summaries.length > visible.length) {
+    lines.push(`- … ${summaries.length - visible.length} more role(s) discovered`);
+  }
+
+  return lines.join("\n");
 }

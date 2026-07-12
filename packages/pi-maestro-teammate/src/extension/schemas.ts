@@ -213,7 +213,7 @@ export const TeammateListParams = Type.Object({
 
 export const TeammateWatchParams = Type.Object({
   name: Type.String({
-    description: "Name of the agent to watch",
+    description: "Agent name or correlation ID/prefix from teammate-list",
   }),
   lines: Type.Optional(
     Type.Integer({

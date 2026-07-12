@@ -10,6 +10,9 @@
     "teammate",
     "agents"
   ],
+  "scripts": {
+    "test": "node --experimental-transform-types --test \"test/*.test.ts\""
+  },
   "files": [
     "src/**/*.ts",
     "agents/",

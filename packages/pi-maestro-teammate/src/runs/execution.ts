@@ -427,7 +427,20 @@ export function buildPiArgs(
     args.push("--extension", structuredOutputExtension);
   }
 
-  args.push("--append-system-prompt", systemPromptFile);
+  args.push(
+    agentConfig.systemPromptMode === "replace"
+      ? "--system-prompt"
+      : "--append-system-prompt",
+    systemPromptFile,
+  );
+
+  if (!agentConfig.inheritProjectContext) {
+    args.push("--no-context-files");
+  }
+
+  if (!agentConfig.inheritSkills) {
+    args.push("--no-skills");
+  }
 
   if (sessionDir) {
     args.push("--session-dir", sessionDir);

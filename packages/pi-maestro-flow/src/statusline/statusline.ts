@@ -1,13 +1,14 @@
 /**
  * Maestro Flow statusline — Pi Extension footer API implementation.
  *
- * Line 1: Model | Runs | Dir+Git | Tokens | Context
+ * Line 1: Mode | Model | Context | Runs | Dir+Git | Tokens
  * Line 2: Milestone ◆Phase progress (when workflow active)
  *
  * Adapted from maestro2/src/hooks/statusline.ts for the Pi Extension ecosystem.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 import { readFileSync, existsSync } from "node:fs";
 import { join, basename } from "node:path";
 import {
@@ -58,6 +59,8 @@ interface RuntimeState {
 	workflow: WorkflowInfo | null;
 }
 
+type PlanModeStatus = "ACT" | "PLAN" | "READY";
+
 // ---------------------------------------------------------------------------
 // Formatters
 // ---------------------------------------------------------------------------
@@ -68,12 +71,13 @@ function formatTokens(n: number): string {
 	return Math.round(n / 1000) + "k";
 }
 
-function buildContextBar(usedPct: number): string {
+function buildContextBar(usedPct: number, compact = false): string {
 	const filled = Math.floor(usedPct / 10);
 	const bar = "█".repeat(filled) + "░".repeat(10 - filled);
 	const level = getCtxLevel(usedPct);
 	const color = getCtxColor(level);
-	return `${ansiFg(color)}${ICONS.ctx} ${bar} ${usedPct}%${ANSI_RESET}`;
+	const value = compact ? `${ICONS.ctx} ${usedPct}%` : `${ICONS.ctx} ${bar} ${usedPct}%`;
+	return `${ansiFg(color)}${value}${ANSI_RESET}`;
 }
 
 function formatGit(git: GitInfo): string {
@@ -89,7 +93,24 @@ function colored(key: keyof typeof COLORS, text: string): string {
 	return `${ansiFg(COLORS[key])}${text}${ANSI_RESET}`;
 }
 
-const SEP = `${ansiFg(COLORS.separator)} | ${ANSI_RESET}`;
+function normalizePlanModeStatus(value: string | undefined): PlanModeStatus {
+	const normalized = value?.trim().toUpperCase();
+	if (normalized === "PLAN") return "PLAN";
+	if (normalized === "READY" || normalized === "PLAN READY") return "READY";
+	return "ACT";
+}
+
+function renderPlanModeStatus(value: string | undefined, width: number): string {
+	const mode = normalizePlanModeStatus(value);
+	const text = width >= 80
+		? mode === "ACT" ? "[A] ACT" : mode === "PLAN" ? "[P] PLAN" : "[P] READY"
+		: width >= 48
+			? mode
+			: mode === "ACT" ? "A" : mode === "PLAN" ? "P" : "R";
+	return colored("phase", text);
+}
+
+const SEP = `${ansiFg(COLORS.separator)} · ${ANSI_RESET}`;
 
 // ---------------------------------------------------------------------------
 // Workflow state reader
@@ -212,38 +233,43 @@ function shortenModel(id: string): string {
 		.replace(/-\d{8}$/, "");
 }
 
-function renderLine1(rs: RuntimeState, activeRuns: number, dir: string): string {
-	const parts: string[] = [];
-
-	// Model
-	parts.push(colored("model", `${ICONS.model} ${shortenModel(rs.model)}`));
-
-	// Active maestro runs
-	if (activeRuns > 0) {
-		parts.push(colored("runs", `${ICONS.runs} ${activeRuns} run${activeRuns > 1 ? "s" : ""}`));
-	}
-
-	// Dir + Git
+function renderLine1(
+	rs: RuntimeState,
+	activeRuns: number,
+	dir: string,
+	width: number,
+	modeStatus: string | undefined,
+): string {
+	const safeWidth = Math.max(1, width);
+	const modeText = renderPlanModeStatus(modeStatus, safeWidth);
+	const modelText = colored("model", `${ICONS.model} ${shortenModel(rs.model)}`);
+	const runText = activeRuns > 0
+		? colored("runs", `${ICONS.runs} ${activeRuns} run${activeRuns > 1 ? "s" : ""}`)
+		: "";
 	let dirText = colored("dir", `${ICONS.dir} ${basename(dir)}`);
 	if (rs.git) dirText += `  ${formatGit(rs.git)}`;
-	parts.push(dirText);
-
-	// Tokens
+	let tokenText = "";
 	if (rs.tokens.input > 0 || rs.tokens.output > 0) {
-		const tokenText = `↑${formatTokens(rs.tokens.input)} ↓${formatTokens(rs.tokens.output)} ${ICONS.tokens}${formatTokens(rs.tokens.input + rs.tokens.output)}`;
-		parts.push(colored("tokens", tokenText));
+		const value = `↑${formatTokens(rs.tokens.input)} ↓${formatTokens(rs.tokens.output)} ${ICONS.tokens}${formatTokens(rs.tokens.input + rs.tokens.output)}`;
+		tokenText = colored("tokens", value);
 	}
-
-	// Context bar (contextPercent is already "used" percentage from Pi SDK)
+	let contextFull = "";
+	let contextCompact = "";
 	if (rs.contextPercent != null) {
 		const usedPct = Math.max(0, Math.min(100, Math.round(rs.contextPercent)));
-		parts.push(buildContextBar(usedPct));
+		contextFull = buildContextBar(usedPct);
+		contextCompact = buildContextBar(usedPct, true);
 	}
 
-	return parts.join(SEP);
+	const parts = safeWidth >= 80
+		? [modeText, modelText, contextFull, runText, dirText, tokenText]
+		: safeWidth >= 48
+			? [modeText, modelText, contextCompact, dirText]
+			: [modeText, contextCompact, modelText];
+	return truncateToWidth(parts.filter(Boolean).join(SEP), safeWidth, "…");
 }
 
-function renderLine2(wf: WorkflowInfo): string {
+function renderLine2(wf: WorkflowInfo, width: number): string {
 	const parts: string[] = [];
 
 	let header = colored("milestone", `${ICONS.milestone} ${wf.milestone}`);
@@ -255,7 +281,7 @@ function renderLine2(wf: WorkflowInfo): string {
 	}
 	parts.push(header);
 
-	return parts.join(SEP);
+	return truncateToWidth(parts.join(SEP), Math.max(1, width), "…");
 }
 
 // ---------------------------------------------------------------------------
@@ -308,7 +334,7 @@ export function installStatusline(
 
 	// --- Footer registration ---
 	function installFooter(ctx: ExtensionContext): void {
-		if (ctx.mode !== "tui") return;
+		if (!ctx.hasUI) return;
 		ctx.ui.setFooter((tui, _theme, footerData) => {
 			// Connect invalidate → requestRender
 			invalidateFn = () => tui.requestRender();
@@ -332,16 +358,17 @@ export function installStatusline(
 					// Called by Pi when render cache is cleared
 				},
 
-				render(_width: number): string[] {
+				render(width: number): string[] {
 					const state = getMaestroState();
 					const activeRuns = state.activeRuns.size;
 					const lines: string[] = [];
 
-					lines.push(renderLine1(rs, activeRuns, cwd));
+					const modeStatus = footerData.getExtensionStatuses().get("mode");
+					lines.push(renderLine1(rs, activeRuns, cwd, width, modeStatus));
 
 					// Line 2: workflow (if active)
-					if (rs.workflow?.milestone) {
-						lines.push(renderLine2(rs.workflow));
+					if (width >= 48 && rs.workflow?.milestone) {
+						lines.push(renderLine2(rs.workflow, width));
 					}
 
 					return lines;
@@ -475,4 +502,3 @@ export function installStatusline(
 		invalidate();
 	});
 }
-

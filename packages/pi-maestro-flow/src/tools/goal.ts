@@ -264,10 +264,8 @@ export function onToolCall() {
   return { block: true, reason: "Blocked stale goal tool call after the goal was paused or interrupted." };
 }
 
-export function onBeforeAgentStart(event: { prompt: string; systemPrompt: string }) {
+export function onBeforeAgentStart(event: { prompt: string }) {
   markDelivered(event.prompt);
-  if (!activeGoal || activeGoal.status !== "active") return;
-  return { systemPrompt: `${event.systemPrompt}\n\n${buildGoalSystemPrompt(activeGoal)}` };
 }
 
 export async function onAgentEnd(event: { messages: unknown[] }, ctx: GoalContext) {
@@ -698,24 +696,6 @@ function isGoal(v: unknown): v is ActiveGoal {
 // ---------------------------------------------------------------------------
 // Prompt construction
 // ---------------------------------------------------------------------------
-
-function buildGoalSystemPrompt(goal: ActiveGoal): string {
-  const budgetLine = goal.tokenBudget === undefined ? "" : `\n- Respect the goal token budget (${fmtBudget(goal)} used).`;
-  return [
-    `Active goal:\n${goalBlock(goal)}`,
-    "",
-    "Goal-mode rules:",
-    "- Keep going until the active goal is completely resolved end-to-end.",
-    "- Treat the current worktree, command output, tests, and external state as authoritative.",
-    "- Do not redefine the goal into a smaller task; audit every requirement before completion.",
-    "- Do not stop at analysis, a plan, TODO list, partial fixes, or suggested next steps.",
-    "- Autonomously perform implementation and verification with the available tools.",
-    "- Persevere through recoverable tool failures by trying reasonable alternatives.",
-    "- If the goal is not complete at the end of a turn, expect an automatic continuation.",
-    '- Call goal with action "done" only after the goal is fully complete — an independent verifier agent will check your work.',
-    budgetLine,
-  ].filter(Boolean).join("\n");
-}
 
 function buildGoalPrompt(goal: ActiveGoal): string {
   const budgetLine = goal.tokenBudget === undefined ? "" : `\nToken budget: ${fmtTokens(goal.tokenBudget)}.`;

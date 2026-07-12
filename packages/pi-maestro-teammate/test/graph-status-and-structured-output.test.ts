@@ -560,6 +560,50 @@ test("persistent agent widget renders a bounded below-editor style status list",
   }
 });
 
+test("persistent agent widget deduplicates graph progress and direct child rows", () => {
+  const now = Date.now();
+  const childId = "11111111-child";
+  const shared = {
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    sleepMs: 0,
+  };
+  const parent = {
+    ...shared,
+    agent: "graph(1)",
+    correlationId: "aaaaaaaa-parent",
+    status: "sleeping" as const,
+    progress: [{
+      agent: "delegate",
+      name: "pkg-info",
+      correlationId: childId,
+      taskIndex: 0,
+      dependencies: [],
+      status: "completed" as const,
+      toolCount: 1,
+      tokens: 0,
+    }],
+  };
+  const child = {
+    ...shared,
+    agent: "delegate",
+    name: "pkg-info",
+    correlationId: childId,
+    spawnedBy: parent.correlationId,
+    status: "sleeping" as const,
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+
+  const output = renderAgentStatusWidget([parent, child], 100, theme).join("\n");
+
+  assert.match(output, /Agents  1 sleeping/);
+  assert.equal(output.match(/@pkg-info/g)?.length, 1);
+  assert.match(output, /@pkg-info.*sleeping.*1 tools/);
+});
+
 function makeResult(agent: string, content: string): SingleResult {
   return {
     agent,

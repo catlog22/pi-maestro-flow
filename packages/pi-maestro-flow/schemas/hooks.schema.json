@@ -1,0 +1,90 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-maestro-flow.local/schemas/hooks.schema.json",
+  "title": "Pi Codex-compatible Hooks",
+  "description": "Schema for .pi/hooks.json, based on the OpenAI Codex lifecycle hook configuration shape.",
+  "type": "object",
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "hooks": {
+      "$ref": "#/$defs/hooks"
+    }
+  },
+  "required": [
+    "hooks"
+  ],
+  "additionalProperties": false,
+  "$defs": {
+    "hooks": {
+      "type": "object",
+      "properties": {
+        "SessionStart": { "$ref": "#/$defs/matcherGroups" },
+        "SubagentStart": { "$ref": "#/$defs/matcherGroups" },
+        "PreToolUse": { "$ref": "#/$defs/matcherGroups" },
+        "PermissionRequest": { "$ref": "#/$defs/matcherGroups" },
+        "PostToolUse": { "$ref": "#/$defs/matcherGroups" },
+        "PreCompact": { "$ref": "#/$defs/matcherGroups" },
+        "PostCompact": { "$ref": "#/$defs/matcherGroups" },
+        "UserPromptSubmit": { "$ref": "#/$defs/matcherGroups" },
+        "SubagentStop": { "$ref": "#/$defs/matcherGroups" },
+        "Stop": { "$ref": "#/$defs/matcherGroups" }
+      },
+      "additionalProperties": false
+    },
+    "matcherGroups": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/matcherGroup"
+      }
+    },
+    "matcherGroup": {
+      "type": "object",
+      "properties": {
+        "matcher": {
+          "type": "string"
+        },
+        "hooks": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/handler"
+          },
+          "default": []
+        }
+      },
+      "additionalProperties": false
+    },
+    "handler": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "command" },
+            "command": { "type": "string", "minLength": 1 },
+            "commandWindows": { "type": "string" },
+            "timeout": { "type": "integer", "minimum": 0, "default": 600 },
+            "statusMessage": { "type": "string" },
+            "async": { "type": "boolean", "default": false }
+          },
+          "required": ["type", "command"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "prompt" }
+          },
+          "required": ["type"]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "type": { "const": "agent" }
+          },
+          "required": ["type"]
+        }
+      ]
+    }
+  }
+}
