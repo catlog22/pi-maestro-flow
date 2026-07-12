@@ -396,6 +396,13 @@ export function buildPiArgs(
   // RPC mode: stdin stays open for bidirectional messaging (steer/follow_up/abort)
   const args: string[] = ["--mode", "rpc"];
 
+  // Child mode owns session identity publication, lease fencing, and proxy tools.
+  // Load it explicitly because the child cwd may not discover this package.
+  const teammateExtension = fileURLToPath(
+    new URL("../extension/index.ts", import.meta.url),
+  );
+  args.push("--extension", teammateExtension);
+
   if (forkSessionFile) {
     args.push("--fork", forkSessionFile);
   }

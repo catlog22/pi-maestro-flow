@@ -126,8 +126,20 @@ test("outputSchema enables the child extension and structured_output tool", () =
   );
   const tools = args[args.indexOf("--tools") + 1];
   assert.match(tools, /structured_output/);
-  const extensionPath = args[args.indexOf("--extension") + 1];
-  assert.match(extensionPath.replaceAll("\\", "/"), /extension\/structured-output\.ts$/);
+  const extensionPaths = args.flatMap((arg, index) => arg === "--extension" ? [args[index + 1].replaceAll("\\", "/")] : []);
+  assert.ok(extensionPaths.some((extensionPath) => /extension\/index\.ts$/.test(extensionPath)));
+  assert.ok(extensionPaths.some((extensionPath) => /extension\/structured-output\.ts$/.test(extensionPath)));
+});
+
+test("every teammate child explicitly loads the handoff bridge extension", () => {
+  const args = buildPiArgs(
+    { tools: ["read"] } as never,
+    { agent: "scout" },
+    "prompt.md",
+  );
+  const extensionPaths = args.flatMap((arg, index) => arg === "--extension" ? [args[index + 1].replaceAll("\\", "/")] : []);
+  assert.equal(extensionPaths.length, 1);
+  assert.match(extensionPaths[0], /extension\/index\.ts$/);
 });
 
 test("session ownership handoff fences stale writers and requires reload before child resumes", () => {
