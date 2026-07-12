@@ -442,6 +442,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     description: `Toggle Plan/Act mode (${PLAN_TOGGLE_LABEL})`,
     async handler(ctx: ExtensionContext) {
       await planToggleMode(ctx);
+      syncApprovalModeStatus(ctx, approvalMode);
     },
   });
 
@@ -456,7 +457,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
       if (next !== "plan" && isPlanMode()) await planToggleMode(ctx);
 
       approvalMode = next;
-      ctx.ui.setStatus("approval-mode", `APPROVAL ${next}`);
+      syncApprovalModeStatus(ctx, approvalMode);
       ctx.ui.notify(`Approval mode: ${next}`, "info");
     },
   });
@@ -504,7 +505,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     goalSessionStart(ctx);
     todoSessionStart(ctx);
     await onSessionStartPlan(ctx);
-    ctx.ui.setStatus("approval-mode", `APPROVAL ${isPlanMode() ? "plan" : approvalMode}`);
+    syncApprovalModeStatus(ctx, approvalMode);
     updateTodoWidget();
   });
 
@@ -582,6 +583,25 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
   registerCodexHookAdapter(pi, {
     getPermissionMode: () => isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
   });
+}
+
+/**
+ * Plan owns the mode indicator while it is active. Keeping a second
+ * `APPROVAL plan` indicator wastes narrow terminal space and can become stale
+ * when Plan is toggled through a different shortcut.
+ */
+export function approvalModeStatusValue(
+  planMode: boolean,
+  approvalMode: PermissionMode,
+): string | undefined {
+  return planMode ? undefined : `APPROVAL ${approvalMode}`;
+}
+
+function syncApprovalModeStatus(
+  ctx: Pick<ExtensionContext, "ui">,
+  approvalMode: PermissionMode,
+): void {
+  ctx.ui.setStatus("approval-mode", approvalModeStatusValue(isPlanMode(), approvalMode));
 }
 
 // ---------------------------------------------------------------------------

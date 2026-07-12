@@ -5,6 +5,7 @@ import {
   type MarkdownTheme,
   matchesKey,
   truncateToWidth,
+  visibleWidth,
 } from "@earendil-works/pi-tui";
 
 export type PlanConfirmationAction =
@@ -80,33 +81,30 @@ export async function openPlanConfirmation(
             ];
           }
 
+          const innerWidth = Math.max(1, safeWidth - 2);
           const terminalRows = process.stdout?.rows ?? 30;
-          const previewHeight = Math.max(3, terminalRows - items.length - 7);
-          const renderedPlan = markdown.render(Math.max(1, safeWidth - 2));
+          const previewHeight = Math.max(4, Math.min(16, terminalRows - 10));
+          const renderedPlan = markdown.render(Math.max(1, innerWidth - 2));
           const maxOffset = Math.max(0, renderedPlan.length - previewHeight);
           previewOffset = Math.min(previewOffset, maxOffset);
           const preview = renderedPlan.slice(previewOffset, previewOffset + previewHeight);
-          const header = ` Plan confirmation · ${options.pathLabel ?? "current.md"}`;
-          const output = [truncateToWidth(theme.bold(header), safeWidth, "…")];
-          output.push(...preview.map((line) => truncateToWidth(` ${line}`, safeWidth, "…")));
-          if (renderedPlan.length > previewHeight) {
-            output.push(truncateToWidth(theme.fg("dim", ` Plan ${previewOffset + 1}-${Math.min(renderedPlan.length, previewOffset + previewHeight)}/${renderedPlan.length} · PgUp/PgDn scroll`), safeWidth, "…"));
-          }
-
-          output.push("");
-          for (let index = 0; index < items.length; index++) {
-            const item = items[index];
-            const marker = index === selected ? ">" : " ";
-            const label = item.enabled ? item.label : `${item.label} (unavailable)`;
-            const line = safeWidth >= 70 ? `${marker} ${label} — ${item.description}` : `${marker} ${label}`;
-            const styled = index === selected
-              ? theme.fg(item.enabled ? "accent" : "warning", theme.bold(line))
-              : theme.fg(item.enabled ? "text" : "dim", line);
-            output.push(truncateToWidth(styled, safeWidth, "…"));
-          }
-          const footer = status || "↑↓ select · Enter choose · Ctrl+Enter execute · PgUp/PgDn plan · Esc exit";
-          output.push(truncateToWidth(theme.fg(status ? "warning" : "dim", footer), safeWidth, "…"));
-          return output;
+          const range = renderedPlan.length > previewHeight
+            ? `${previewOffset + 1}-${Math.min(renderedPlan.length, previewOffset + previewHeight)}/${renderedPlan.length}`
+            : `${renderedPlan.length}`;
+          const label = selectedItem.enabled ? selectedItem.label : `${selectedItem.label} (unavailable)`;
+          const action = `${selected + 1}/${items.length}  ${label}  ${theme.fg("dim", `— ${selectedItem.description}`)}`;
+          const footer = status || "↑↓ action · Enter choose · Ctrl+Enter execute · PgUp/PgDn plan · Esc close";
+          const rows = [
+            `${theme.bold("Plan confirmation")}  ${theme.fg("dim", options.pathLabel ?? "current.md")}`,
+            theme.fg("dim", "─".repeat(innerWidth)),
+            ...preview.map((line) => ` ${line}`),
+          ];
+          while (rows.length < previewHeight + 2) rows.push("");
+          rows.push(theme.fg("dim", `Plan ${range}`));
+          rows.push(theme.fg("dim", "─".repeat(innerWidth)));
+          rows.push(theme.fg(selectedItem.enabled ? "accent" : "warning", theme.bold(`› ${action}`)));
+          rows.push(theme.fg(status ? "warning" : "dim", footer));
+          return renderFrame(rows, safeWidth, theme);
         },
 
         handleInput(data: string): void {
@@ -143,15 +141,31 @@ export async function openPlanConfirmation(
     {
       overlay: true,
       overlayOptions: {
-        width: "100%",
-        maxHeight: "100%",
-        anchor: "top-left" as const,
-        margin: 0,
+        width: 100,
+        maxHeight: 28,
+        anchor: "center" as const,
       },
     },
   );
 
   return result ?? "cancel";
+}
+
+function renderFrame(
+  rows: string[],
+  width: number,
+  theme: { fg(name: string, text: string): string },
+): string[] {
+  const inner = Math.max(0, width - 2);
+  const border = (text: string) => theme.fg("dim", text);
+  return [
+    border(`╭${"─".repeat(inner)}╮`),
+    ...rows.map((row) => {
+      const content = truncateToWidth(row, inner, "…");
+      return `${border("│")}${content}${" ".repeat(Math.max(0, inner - visibleWidth(content)))}${border("│")}`;
+    }),
+    border(`╰${"─".repeat(inner)}╯`),
+  ];
 }
 
 function markdownTheme(theme: {

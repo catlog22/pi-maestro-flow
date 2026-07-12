@@ -1,50 +1,46 @@
-# Release v0.4.3 — 2026-07-12
+# Release v0.4.4 — 2026-07-12
 
 ## 概述
 
-v0.4.3 是 `pi-maestro-flow` 的 patch 版本，聚焦交互消息的单次交付语义：Plan 批准后不再把当前会话执行 handoff 额外排队为 follow-up，同时 Codex-compatible command hook 的输出会以可见、限长且不触发新 turn 的消息展示。
-
-## 修复
-
-### Plan 批准 handoff 去重
-
-- 当前会话中的 `plan-confirm` 通过 tool result 交付执行约束，不再额外调用 `sendUserMessage(..., { deliverAs: "followUp" })`。
-- 避免 agent 已开始创建 Goal/Todo 后，又收到同一 approved Plan handoff 的重复注入。
-- Compact 和新会话执行仍保持一次必要的消息投递。
-- 增加非 idle、compact、新会话三条生命周期回归断言。
+v0.4.4 是 `pi-maestro-flow` 的 UI patch 版本，统一 Plan、Approval 与 Todo 的终端展示层级，并将 Plan 确认页收敛为类似 Agent viewer 的居中 overlay。
 
 ## 改进
 
-### Codex Hook 输出可见性
+### Plan 确认 overlay
 
-- 每个已执行 command hook 都生成可见的 `codex-hook-output` 消息。
-- 输出消息使用 `triggerTurn: false`，不会意外启动新的 agent turn。
-- 命令和输出均设置长度上限，超长内容会明确标记为 truncated。
-- 支持 plain text、JSON、stdout、stderr、error 和 exit code 的统一展示。
+- 从占满终端的 `100% × 100%` 页面调整为居中的 `100 × 28` overlay。
+- 使用与 Agent viewer 一致的细边框、主体内容区和底部快捷键带。
+- 操作列表改为 progressive disclosure：默认只显示当前选项及说明，保留 `↑↓` 切换全部 5 个动作。
+- Plan Markdown 保持独立滚动，并继续支持 `PgUp/PgDn`、`Ctrl+Enter` 和窄终端 compact 降级。
+
+### 多模式状态仲裁
+
+- Plan 模式成为 `ACT / PLAN / READY` 的唯一状态所有者。
+- Plan 激活时隐藏重复的 `APPROVAL plan`，退出后恢复实际 Approval 状态。
+- 修复通过不同快捷键切换 Plan 时 Approval 状态可能残留或互相矛盾的问题。
+- Todo 继续作为独立任务进度面板，可与 Plan 模式并存而不重复表达模式语义。
 
 ## 验证
 
-- Plan 生命周期：40/40 通过。
-- Goal：1/1 通过。
-- Hooks：9/9 通过。
-- Compaction：15/15 通过。
+- Plan、PlanStore、Plan editor 与 Statusline：40/40 通过。
 - Todo 与 skill loader：20/20 通过。
-- 合计：85/85 通过。
+- Approval mode focused tests：2/2 通过。
+- 本次相关验证合计：62/62 通过。
 
 ## 版本
 
 | 包 | 旧版本 | 新版本 |
 |---|---:|---:|
-| `pi-maestro-flow` | 0.4.2 | 0.4.3 |
+| `pi-maestro-flow` | 0.4.3 | 0.4.4 |
 
-`pi-maestro-teammate` 本次没有代码变更，继续保持 0.4.2。
+`pi-maestro-teammate` 本次没有代码变更，继续保持现有版本。
 
 ## 安装
 
 ```bash
-npm install pi-maestro-flow@0.4.3
+npm install pi-maestro-flow@0.4.4
 ```
 
 ## 升级说明
 
-这是向后兼容的 patch 更新，无需迁移配置或持久化状态。使用 Plan Mode 的用户升级后，批准当前上下文执行时将只收到一次 handoff。
+这是向后兼容的 patch 更新，无需迁移配置或持久化状态。Plan 的批准、修改、退出和不同执行上下文选项均保持原有语义，仅调整终端展示与模式状态仲裁。

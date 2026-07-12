@@ -93,6 +93,13 @@ test("Plan confirmation renders Markdown and selects compact execution", async (
   for (const width of [20, 40, 80, 120]) {
     const lines = harness.component.render(width);
     assert.match(lines.join("\n"), /Plan confirm|Plan confirmation/);
+    if (width >= 40) {
+      assert.match(lines[0], /╭/);
+      assert.match(lines.at(-1) ?? "", /╰/);
+      assert.match(lines.join("\n"), /1\/5\s+Execute/);
+      assert.doesNotMatch(lines.join("\n"), /Modify Plan/);
+      assert.ok(lines.length <= 28);
+    }
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
   }
   harness.component.handleInput("\x1b[B");

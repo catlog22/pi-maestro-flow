@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { APPROVAL_MODES, nextApprovalMode } from "../src/extension/index.ts";
+import {
+  APPROVAL_MODES,
+  approvalModeStatusValue,
+  nextApprovalMode,
+} from "../src/extension/index.ts";
 
 test("approval modes cycle through plan and wrap to default", () => {
   assert.deepEqual(APPROVAL_MODES, ["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"]);
@@ -9,4 +13,11 @@ test("approval modes cycle through plan and wrap to default", () => {
   assert.equal(nextApprovalMode("plan"), "dontAsk");
   assert.equal(nextApprovalMode("dontAsk"), "bypassPermissions");
   assert.equal(nextApprovalMode("bypassPermissions"), "default");
+});
+
+test("plan mode owns the mode indicator without a duplicate approval status", () => {
+  assert.equal(approvalModeStatusValue(true, "default"), undefined);
+  assert.equal(approvalModeStatusValue(true, "plan"), undefined);
+  assert.equal(approvalModeStatusValue(false, "default"), "APPROVAL default");
+  assert.equal(approvalModeStatusValue(false, "acceptEdits"), "APPROVAL acceptEdits");
 });
