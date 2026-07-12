@@ -278,6 +278,36 @@ test("parallel graph rows keep independent IDs in the split tree", () => {
   assert.match(rows[1].text, /└─/);
 });
 
+test("agent list prefers attachable physical chain children over duplicate progress rows", () => {
+  const now = Date.now();
+  const parentId = "parent-chain";
+  const childId = "child-scout";
+  const childStdin = new PassThrough();
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    namedAgents: new Map([["scan", childId]]),
+    activeRuns: new Map([
+      [parentId, {
+        agent: "graph(1)", correlationId: parentId, startedAt: now,
+        abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
+        status: "running", sleepMs: 0,
+        progress: [{ agent: "scout", name: "scan", correlationId: childId, taskIndex: 0, dependencies: [], status: "running" }],
+      }],
+      [childId, {
+        agent: "scout", name: "scan", correlationId: childId, startedAt: now,
+        abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
+        spawnedBy: parentId, status: "running", sleepMs: 0, stdin: childStdin,
+      }],
+    ]),
+  };
+
+  const listed = buildAgentList(state, "all").entries.filter((entry) => entry.correlationId === childId);
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].hasStdin, true);
+  assert.equal(listed[0].depth, 1);
+});
+
 test("teammate-list expands graph tasks and watch keeps sleeping messages visible", () => {
   const parentId = "aaaaaaaa-parent";
   const taskId = "11111111-child";

@@ -49,11 +49,12 @@ export interface RunTeammateOptions {
   onChildRequest?: (event: Record<string, unknown>, reply: (msg: unknown) => void) => void;
   onChildEvent?: (event: Record<string, unknown>) => void;
   parentSessionFile?: string;
-  initialLeaseToken?: LeaseToken;
+  initialLeaseToken?: LeaseToken | ((correlationId: string) => LeaseToken | undefined);
   onChildSpawned?: (
     stdin: import("node:stream").Writable,
     sendControl: (message: Record<string, unknown>) => boolean,
     sessionDir?: string,
+    correlationId?: string,
   ) => void;
   onTurnComplete?: (result: SingleResult) => void;
 }
@@ -674,7 +675,10 @@ async function runSingleAttempt(
     // RPC mode: stdin stays open for bidirectional messaging.
     // Send initial prompt via RPC command.
     if (child.stdin && params.task) {
-      sendRpcMessage(child.stdin, params.task, "prompt", options.initialLeaseToken);
+      const initialLeaseToken = typeof options.initialLeaseToken === "function"
+        ? options.initialLeaseToken(correlationId)
+        : options.initialLeaseToken;
+      sendRpcMessage(child.stdin, params.task, "prompt", initialLeaseToken);
     }
 
     // Expose stdin for teammate-send message injection
@@ -687,7 +691,7 @@ async function runSingleAttempt(
         } catch {
           return false;
         }
-      }, sessionDir);
+      }, sessionDir, correlationId);
     }
 
     // IPC message listener — proxy requests from child extensions

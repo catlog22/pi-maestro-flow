@@ -674,6 +674,29 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
       };
       state.activeRuns.set(correlationId, activeAgent);
 
+      if (isMultiTask) {
+        normalizedTasks.forEach((task, index) => {
+          const childId = taskCorrelationIds[index];
+          const childAgent: ActiveAgent = {
+            agent: task.agent,
+            name: task.name,
+            correlationId: childId,
+            startedAt: Date.now(),
+            abortController,
+            inbox: [],
+            outputLog: [],
+            lastActivityAt: Date.now(),
+            spawnedBy: correlationId,
+            status: "running",
+            sleepMs: 0,
+            lease: createChildLease(),
+            promptSeq: task.task ? 1 : 0,
+          };
+          state.activeRuns.set(childId, childAgent);
+          if (task.name) state.namedAgents.set(task.name, childId);
+        });
+      }
+
       if (params.name) {
         state.namedAgents.set(params.name, correlationId);
       }
@@ -696,18 +719,30 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
         ...(isMultiTask ? { taskCorrelationIds } : {}),
         signal: abortController.signal,
         parentSessionFile,
-        initialLeaseToken: activeAgent.lease ? leaseToken(activeAgent.lease) : undefined,
+        initialLeaseToken: (childId: string) => {
+          const target = state.activeRuns.get(childId) ?? activeAgent;
+          return target.lease ? leaseToken(target.lease) : undefined;
+        },
         onChildSpawned: (
           stdin: import("node:stream").Writable,
           sendControl: (message: Record<string, unknown>) => boolean,
           sessionDir?: string,
+          childId?: string,
         ) => {
-          activeAgent.stdin = stdin;
-          activeAgent.sendControl = sendControl;
-          activeAgent.sessionDir = sessionDir;
-          if (activeAgent.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(activeAgent.lease) });
+          const target = childId ? state.activeRuns.get(childId) ?? activeAgent : activeAgent;
+          target.stdin = stdin;
+          target.sendControl = sendControl;
+          target.sessionDir = sessionDir;
+          if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
         },
-        onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent({ ...event, correlationId }),
+        onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent({
+          ...event,
+          correlationId: event.correlationId ?? correlationId,
+        }),
+        onTurnComplete: (result: SingleResult) => {
+          const lastMessage = result.messages[result.messages.length - 1]?.content;
+          retireAgent(state, result.correlationId, lastMessage);
+        },
         onProgress: (() => {
           let lastUpdateTime = 0;
           const UPDATE_INTERVAL = 300; // ms — throttle TUI updates
@@ -741,6 +776,12 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
             progressState.set(progressKey, entry);
             const currentProgress = progressSnapshot();
             activeAgent.progress = currentProgress;
+            const childAgent = state.activeRuns.get(entry.correlationId);
+            if (childAgent && childAgent !== activeAgent) {
+              childAgent.lastActivityAt = Date.now();
+              childAgent.status = entry.status === "completed" ? "sleeping" : entry.status;
+              childAgent.outputLog = [...activeAgent.outputLog];
+            }
 
             const shortId = entry.correlationId.slice(0, 8);
             const logKey = entry.correlationId;
@@ -1910,6 +1951,7 @@ export function buildAgentList(
         return Boolean(child && physicalVisible(child));
       });
     const graphChildren = (entry.progress ?? [])
+      .filter((progress) => !state.activeRuns.has(progress.correlationId))
       .filter((progress) => view !== "named" || Boolean(progress.name))
       .sort((a, b) => a.taskIndex - b.taskIndex);
     const childCount = physicalChildren.length + graphChildren.length;
