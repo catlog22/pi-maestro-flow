@@ -1,0 +1,28 @@
+{
+  "overall_pass": true,
+  "verification_method": "local convergence audit",
+  "external_verifier": {
+    "status": "unavailable",
+    "reason": "Configured maestro explore endpoints were circuit-breaker tripped on 2026-07-12."
+  },
+  "tasks": [
+    { "id": "TASK-001", "criteria_met": true, "gaps": [] },
+    { "id": "TASK-002", "criteria_met": true, "gaps": [] },
+    { "id": "TASK-003", "criteria_met": true, "gaps": [] },
+    { "id": "TASK-004", "criteria_met": true, "gaps": [] },
+    { "id": "TASK-005", "criteria_met": true, "gaps": [] },
+    { "id": "TASK-006", "criteria_met": true, "gaps": [] }
+  ],
+  "evidence": {
+    "todo": "20/20 passed",
+    "hooks": "8/8 passed",
+    "compaction": "4/4 passed",
+    "goal": "1/1 passed",
+    "plan": "33/33 passed",
+    "extension_import": "passed",
+    "diff_check": "passed"
+  },
+  "concerns": [
+    "External-model cross-validation was unavailable; verification is based on deterministic tests and direct criteria inspection."
+  ]
+}

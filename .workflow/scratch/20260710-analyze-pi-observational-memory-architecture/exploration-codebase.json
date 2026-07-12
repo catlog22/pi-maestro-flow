@@ -1,0 +1,60 @@
+{
+  "session_id": "ANL-pi-observational-memory-architecture-2026-07-10",
+  "target": "G:/github_lib/pi-observational-memory",
+  "version": "3.0.3",
+  "exploration_mode": "3-layer (module discovery + structure tracing + code anchors) via 3 parallel Explore agents; CLI delegate skipped per user",
+  "relevant_files": [
+    { "path": "src/index.ts", "responsibility": "Extension entry; instantiates one Runtime; registers 3 hooks (consolidation/compaction-trigger/compaction-hook) + 2 commands (om:status/om:view) + 1 tool (recall)" },
+    { "path": "src/runtime.ts", "responsibility": "Shared mutable state: config cache (lazy ensureConfig), 3 in-flight flags, consolidation phase tracker, last-error fields, resolveModel() override" },
+    { "path": "src/config.ts", "responsibility": "Config interface + DEFAULTS + resolveCompactAfterTokens (calibrated vs ratio scaling by model contextWindow)" },
+    { "path": "src/hooks/consolidation-trigger.ts", "responsibility": "turn_end/agent_start → token-clock gate (anyStageDue) → runConsolidationPipeline: observer→reflector→dropper, each appends ledger entries" },
+    { "path": "src/hooks/compaction-trigger.ts", "responsibility": "agent_end → idle check + retryable-error filter + double-check race guard → ctx.compact()" },
+    { "path": "src/hooks/compaction-hook.ts", "responsibility": "session_before_compact → buildCompactionProjection + renderSummary; NO model call (fast render path)" },
+    { "path": "src/session-ledger/types.ts", "responsibility": "Observation/Reflection/entry-data types, validators, MEMORY_ID_PATTERN /^[a-f0-9]{12}$/, builders" },
+    { "path": "src/session-ledger/fold.ts", "responsibility": "foldLedger() reducer: walks append-only entries, first-valid-record-wins by id, separates activeObservations from dropped tombstones" },
+    { "path": "src/session-ledger/projection.ts", "responsibility": "buildCompactionProjection (full-fold escalation when pool≥maxTokens), foldProjection (boundary-gated), fullProjection, visibleProjection" },
+    { "path": "src/session-ledger/recall.ts", "responsibility": "recallMemorySources: indexLedger (keeps ALL occurrences for collision detection) → id match → resolve sourceEntryIds; returns active/dropped status + diagnostics" },
+    { "path": "src/session-ledger/render-summary.ts", "responsibility": "renderSummary: deterministic markdown (CONTEXT_USAGE_INSTRUCTIONS + reflections + observations sections); no model" },
+    { "path": "src/session-ledger/progress.ts", "responsibility": "Token-since-coverage accounting: latestCoverageIndex, rawTokensSinceObservationCoverage/ReflectionCoverage/LastCompaction; source entries only" },
+    { "path": "src/agents/observer/agent.ts", "responsibility": "runObserver: record_observations tool, normalizeSourceEntryIds validation, hashId dedup, tokenCount estimate" },
+    { "path": "src/agents/observer/prompts.ts", "responsibility": "Observer extraction contract: NEW observations only, cite valid sourceEntryIds, zero is valid, group similar calls" },
+    { "path": "src/agents/reflector/agent.ts", "responsibility": "runReflector: record_reflections tool, pre+post coverage computation, injects [coverage: none|partial|strong] into prompt" },
+    { "path": "src/agents/reflector/prompts.ts", "responsibility": "Reflector stewardship: support-id provenance set (not checklist), false ids cause unsafe pruning, durable-value bar" },
+    { "path": "src/agents/dropper/agent.ts", "responsibility": "runDropper + selectDropCandidates: model proposes ids, deterministic re-sort by coverage→relevance→age→order, capped at maxDrops" },
+    { "path": "src/agents/dropper/prompts.ts", "responsibility": "Dropper: preservation floor, age-gradient, coverage/relevance guidance, safety-first defaults" },
+    { "path": "src/agents/dropper/coverage.ts", "responsibility": "Deterministic coverage engine: reflectionSupportCounts, tierForCount (0→none/1→partial/≥2→strong), reflectionCoverageMap" },
+    { "path": "src/agents/dropper/pool.ts", "responsibility": "Pool accounting: observationTokenSum, observationPoolFullness, maxDropCountForPool (ceil(tokensOverTarget/avgObsTokens))" },
+    { "path": "src/ids.ts", "responsibility": "hashId(content)=sha256(content).slice(0,12) — deterministic identity backbone for dedup" },
+    { "path": "src/serialize.ts", "responsibility": "serializeSourceAddressedBranchEntries ([Source entry id:] labels), renderRecallSourceEntries, truncateRecordContent, nowTimestamp" },
+    { "path": "src/tokens.ts", "responsibility": "estimateStringTokens=ceil(length/4), estimateEntryTokens (message via SDK, custom/branch via length/4)" },
+    { "path": "src/model-budget.ts", "responsibility": "AGENT_LOOP_MAX_TOKENS=32000, boundedMaxTokens=min(model.maxTokens,32K)" },
+    { "path": "src/tools/recall-observation.ts", "responsibility": "recall tool: exact-id reverse lookup (not search), returns source entries behind compacted memory" },
+    { "path": "src/commands/status.ts", "responsibility": "/om:status: counts, drift suffixes, progress clocks, pool pressure, in-flight, errors" },
+    { "path": "src/commands/view.ts", "responsibility": "/om:view [+full]: visible/full memory + clipboard copy" }
+  ],
+  "call_chains": [
+    { "name": "write-path (model-backed consolidation)", "steps": "turn_end→maybeLaunchConsolidation→anyStageDue(token clocks OR)→runConsolidationPipeline→runObserver(record_observations, normalizeSourceEntryIds, hashId)→appendEntry(om.observations.recorded)→runReflector(record_reflections, coverage injection, normalizeSupportingObservationIds)→appendEntry(om.reflections.recorded)→runDropper(drop_observations, selectDropCandidates)→appendEntry(om.observations.dropped)" },
+    { "name": "compaction-path (no model, fast render)", "steps": "agent_end→compaction-trigger(idle+race guard)→ctx.compact()→session_before_compact→buildCompactionProjection(fold + full-fold escalation)→renderSummary(deterministic markdown)→return {compaction:{summary,details:om.folded}}" },
+    { "name": "recall-path (reverse lookup)", "steps": "recall(id)→validate ^[a-f0-9]{12}$→recallMemorySources→indexLedger(keeps all occurrences)→id match→resolve sourceEntryIds→renderRecallSourceEntries" },
+    { "name": "fold-reducer", "steps": "foldLedger(entries)→iterate→observationsById.set(first-valid-wins)→reflectionsById.set→droppedObservationIds.add(tombstones)→activeObservations=observations.filter(!dropped)" },
+    { "name": "coverage-computation", "steps": "reflectionSupportCounts(count support-id citations per observation)→reflectionCoverageTierForCount(0/1/≥2)→reflectionCoverageMap(obsId→none|partial|strong)" },
+    { "name": "dropper-priority-sort", "steps": "selectDropCandidates→sort(coverageDelta strong=0/partial=1/none=2 || relevanceDelta low=0...critical=3 || ageDelta older=0 || index)→slice(0,maxDrops)" }
+  ],
+  "data_flows": [
+    "Raw conversation chunk → serializeSourceAddressedBranchEntries ([Source entry id:] labels) → observer model → Observation{sourceEntryIds} → hashId dedup → om.observations.recorded ledger entry",
+    "Folded active observations → reflectionCoverageMap (none/partial/strong) → reflector model → Reflection{supportingObservationIds} → om.reflections.recorded",
+    "Active pool tokens > observationsPoolTargetTokens → maxDropCountForPool → dropper model proposes ids → selectDropCandidates deterministic sort → om.observations.dropped tombstones",
+    "Ledger entries → foldLedger/buildCompactionProjection → renderSummary → compaction summary string (what agent sees) — NO model at compaction time",
+    "12-char id → recall → indexLedger → source entry resolution → original conversation context recovered"
+  ],
+  "code_anchors": [
+    { "file": "src/session-ledger/types.ts", "lines": "9-49", "note": "MEMORY_ID_PATTERN + Observation/Reflection/MemoryDetails — entire type foundation; sourceEntryIds (obs→raw) and supportingObservationIds (refl→obs) are the provenance links" },
+    { "file": "src/session-ledger/fold.ts", "lines": "50-100", "note": "foldLedger reducer — first-valid-record-wins by id; drops are tombstones excluded from activeObservations but retained for recall" },
+    { "file": "src/session-ledger/projection.ts", "lines": "173-208", "note": "buildCompactionProjection — normal (observations to cut, refl/drops to last full-fold) vs fullFold (pool≥maxTokens escalates); this is visible-vs-full divergence" },
+    { "file": "src/agents/dropper/coverage.ts", "lines": "18-42", "note": "reflectionCoverageTierForCount: 0→none/1→partial/≥2→strong — the single deterministic function reflector+dropper both depend on" },
+    { "file": "src/agents/dropper/agent.ts", "lines": "99-129", "note": "selectDropCandidates lexicographic sort: coverage→relevance→age→order; model proposes, code decides — separation of semantic judgment from deterministic safety" },
+    { "file": "src/hooks/compaction-hook.ts", "lines": "16-50", "note": "FAST render path proof — only buildCompactionProjection+renderSummary touched; no resolveModel/agentLoop/apiKey anywhere" },
+    { "file": "src/ids.ts", "lines": "1-5", "note": "hashId=sha256(content).slice(0,12) — 4-line identity backbone; same content=same id enables cross-batch dedup" },
+    { "file": "src/config.ts", "lines": "33-58,72-77", "note": "DEFAULTS (observe 10K/reflect 20K/compact 81K/poolMax 20K/poolTarget 10K) + resolveCompactAfterTokens ratio scaling" }
+  ]
+}

@@ -1,0 +1,139 @@
+{
+  "exploration_id": "ANL-pi-ultra-compact-compression-2026-07-10",
+  "target_codebase": "G:\\github_lib\\pi-ultra-compact",
+  "exploration_date": "2026-07-10",
+  "layers": {
+    "layer1_module_discovery": {
+      "relevant_files": [
+        { "path": "extensions/engine.ts", "lines": 1479, "role": "Core compression engine: UltraCompactEngine class with all compaction logic — token estimation, importance scoring, tier detection, graduated eviction, summary generation, circuit breaker support" },
+        { "path": "extensions/index.ts", "lines": 373, "role": "Pi extension entry point: factory function piUltraCompact(), /ultracompact command handler, session_before_compact hook, model_select/session_start listeners, circuit breaker state, snapshot-rollback, lossy truncation fallback" },
+        { "path": "extensions/types/index.ts", "lines": 189, "role": "Type definitions: EvictionLevel enum (4 levels), CompactionTier enum (3 tiers), UltraCompactConfig, CompactionResult, Message, EvictionStats, MicroCompactStats, CircuitBreakerState, Pi API types" },
+        { "path": "extensions/utils.ts", "lines": 126, "role": "Shared utilities (DEAD CODE — not imported by engine.ts): messageContent(), KEYWORD_PATTERNS, extractByPattern(), containsErrorIndicators(), emptyCompactionResult()" },
+        { "path": "skills/ultra-compact/SKILL.md", "lines": 152, "role": "Skill documentation: usage guide, supported models, compression rules, output format template" },
+        { "path": "tests/engine-coverage.test.ts", "lines": 1276, "role": "Most comprehensive test file: all 4 eviction levels, tier boundaries, LLM path, history, maxLevel capping" },
+        { "path": "tests/edge-cases.test.ts", "lines": 519, "role": "Edge case tests: empty messages, null/undefined content, huge inputs (10K messages, 1MB content), boundary values (NaN, Infinity, negative)" },
+        { "path": "tests/index.test.ts", "lines": 721, "role": "Extension integration tests: factory, command handler, circuit breaker, preemptive trigger, cache-aware, lossy truncation" },
+        { "path": "tests/fuzz.test.ts", "lines": 201, "role": "Fuzz tests: 100 iterations of random message patterns across all engine methods" }
+      ]
+    },
+    "layer2_structure_tracing": {
+      "call_chains": [
+        {
+          "name": "Chain A: Automatic Compaction Flow",
+          "flow": "handleBeforeCompact() [index.ts:112] → circuit breaker check → captureModel() → reconfigureEngineForCurrentModel() → preemptive projection (currentTokens + outputHeadroom) → shouldCompact() → snapshot (JSON deep clone) → cache-aware prefix extraction → tier dispatch (MICRO: microCompact() | FULL: generateSummary()) → validate non-empty → success: reset breaker / failure: increment failures, check threshold, lossy truncation"
+        },
+        {
+          "name": "Chain B: Full Compaction (generateSummary)",
+          "flow": "generateSummary() [engine.ts:452] → preprocessMessages (dedup, pruneToolOutputs, filter empty) → classifyMessages (protect system + importance>0.7 + shouldProtectContent + recentByTokenBudget) → evictGradually (4 levels) → generateSummaryFromRemaining (LLM or heuristic) → generateStructuredSummary (extract goals/decisions/errors/files/next/chat) → metrics + compressionHistory"
+        },
+        {
+          "name": "Chain C: 3-Tier System",
+          "flow": "determineTier() [engine.ts:359] → ratio = tokens/contextWindow → >=0.9: FULL | >=0.6: MICRO | else: NONE → compact() dispatches: MICRO→microCompact(levels 1-2 only, no LLM) | FULL→generateSummary()"
+        },
+        {
+          "name": "Chain D: 4-Level Graduated Eviction",
+          "flow": "evictGradually() [engine.ts:841] → check budget (early exit if satisfied) → L1: stripReasoningBlocks (thinking type) → check budget → L2: stripBulkToolOutputs (>100 lines, >5K chars → truncate to 3000) → check budget → L3: stripArtifactToolOutputs (non-error tool results → 1-line summary) → check budget → L4: removeOldCompressibleMessages (protect user/system/importance>0.7, add back newest-first)"
+        },
+        {
+          "name": "Chain E: Circuit Breaker",
+          "flow": "Module state: compactionFailures, breakerTrippedAtTurn, currentTurn → Entry: currentTurn++ → Check breaker: if tripped and cooldown not expired → return undefined (Pi default) | if expired → reset → On failure: failures++, if >= maxFailures → trip breaker, lossy truncation (system + last 10 msgs, 500 chars each) → Cooldown: 5 turns"
+        },
+        {
+          "name": "Chain F: Snapshot-Rollback",
+          "flow": "snapshot = JSON.parse(JSON.stringify(messagesToCompact)) [index.ts:169] → all compaction operations use snapshot → on success: return result → on failure: original untouched, snapshot used for lossy truncation"
+        }
+      ],
+      "data_flows": [
+        { "name": "Message Array → Compaction Result", "steps": "Input: Message[] → Snapshot (deep clone) → Preprocess (dedup/prune/filter) → Classify (protect/compress) → Evict (4-level graduated) → Summarize (LLM or heuristic structured) → Output: {summary, tokensBefore, tokensAfter, compressionRatio, readFiles, modifiedFiles}" },
+        { "name": "Token Estimation Pipeline", "steps": "messageContent(msg) → detect code blocks (``` pairs) → detect whitespace ratio → detect dense text → select ratio (3.5/4.5/6.0) → ceil(length/ratio) → sum" },
+        { "name": "Importance Scoring", "steps": "messageContent(msg) → 9 keyword patterns (maxWeight) → content multipliers (codeBlock×1.3, filePath×1.2, toolCall×1.15, errorLog×1.25, multiLine×0.9) → floor boost (tool/code → 0.5) → clamp [0,1]" }
+      ]
+    },
+    "layer3_code_anchors": [
+      {
+        "id": "CA1",
+        "title": "Main Compaction Entry Point + Tier Selection",
+        "file": "extensions/engine.ts",
+        "lines": "359-429",
+        "snippet": "determineTier(): ratio >= 0.9 → FULL, >= 0.6 → MICRO, else NONE. microCompact(): evictGradually with STRIP_BULK_OUTPUT (levels 1-2), target 50% contextWindow. compact(): dispatches MICRO vs FULL."
+      },
+      {
+        "id": "CA2",
+        "title": "Token Estimation Algorithm (Content-Aware)",
+        "file": "extensions/engine.ts",
+        "lines": "1427-1459",
+        "snippet": "4 ratios: code blocks 3.5, whitespace-heavy 6.0, dense text 3.5, standard prose 4.5. NO LRU CACHE present despite CHANGELOG claims."
+      },
+      {
+        "id": "CA3",
+        "title": "Importance Scoring Algorithm",
+        "file": "extensions/engine.ts",
+        "lines": "1191-1230",
+        "snippet": "9 keyword patterns (GOAL 1.0 → TODO 0.6), multiplicative content multipliers. MISSING: recency (0.30) and position (0.20) signals from RESEARCH.md. maxWeight starts at 0, multipliers multiply 0 if no keyword match."
+      },
+      {
+        "id": "CA4",
+        "title": "Summary Generation (Structured, Single-Pass)",
+        "file": "extensions/engine.ts",
+        "lines": "1094-1186",
+        "snippet": "LLM path: useLLM + llmSummarize callback, silent catch fallback. Heuristic: generateStructuredSummary with sections Previous Context, Goals, Decisions, Errors, Files, Next, Chat. NO multi-pass, NO quality scoring."
+      },
+      {
+        "id": "CA5",
+        "title": "Eviction Level 4 Bug — Budget Not Enforced",
+        "file": "extensions/engine.ts",
+        "lines": "1050-1088",
+        "snippet": "removeOldCompressibleMessages: initialTokens computed once, never updated as candidates added back. Comment on line 1081 admits missing logic. Budget can be exceeded."
+      },
+      {
+        "id": "CA6",
+        "title": "Circuit Breaker Implementation",
+        "file": "extensions/index.ts",
+        "lines": "14-19, 112-134, 244-300",
+        "snippet": "Module-level state, 3-failure threshold, 5-turn cooldown. Lossy truncation: system + last 10 non-system msgs, 500 chars each. __resetModuleState() for test isolation."
+      },
+      {
+        "id": "CA7",
+        "title": "Snapshot-Rollback + Cache-Aware Mode",
+        "file": "extensions/index.ts",
+        "lines": "168-243",
+        "snippet": "JSON.parse(JSON.stringify()) deep clone. Cache-aware: previous summary kept immutable as prefix, new content appended. MICRO path uses messagesToCompact directly (not snapshot) — inconsistency."
+      },
+      {
+        "id": "CA8",
+        "title": "Boundary Condition Handling",
+        "file": "extensions/engine.ts",
+        "lines": "456-466, 25-35, 1428, 436-450, 846-855",
+        "snippet": "Empty messages → emptyCompactionResult. Null/undefined content → String(c ?? ''). Non-array → return 0. NaN → false (comparisons). Zero contextWindow → ratio 0 → NONE tier."
+      },
+      {
+        "id": "CA9",
+        "title": "shouldCompact — Hardcoded Threshold Bug",
+        "file": "extensions/engine.ts",
+        "lines": "436-450",
+        "snippet": "Gate 1: contextWindow * 0.6 (hardcoded). Gate 2: contextWindow * hardWatermark (default 0.5). hardWatermark 0.5 < 0.6 → Gate 2 fires first, Gate 1 dead. thresholdTokens and preemptiveWatermark NOT consulted."
+      },
+      {
+        "id": "CA10",
+        "title": "compressMessage — Code Block Destruction",
+        "file": "extensions/engine.ts",
+        "lines": "1403-1416",
+        "snippet": "Replaces entire code blocks with 50-char stub of first line. Directly contradicts code protection in importance scoring and shouldProtectContent. Self-defeating for coding agent use case."
+      },
+      {
+        "id": "CA11",
+        "title": "Summary Bloat — Previous Summary Prepended Verbatim",
+        "file": "extensions/engine.ts",
+        "lines": "1131-1134",
+        "snippet": "generateStructuredSummary prepends full previous summary verbatim, re-extracts from combined set. No merge/condense. Summaries monotonically grow across cycles."
+      },
+      {
+        "id": "CA12",
+        "title": "Encapsulation Breach — index.ts Accesses Private Config",
+        "file": "extensions/index.ts",
+        "lines": "122, 158, 177, 249, 254",
+        "snippet": "engine['config']?.circuitBreakerCooldown, outputHeadroom, cacheAware, circuitBreakerMaxFailures — bracket notation bypasses TypeScript private modifier."
+      }
+    ]
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "id": "PLN-SKILL-RUNTIME-V1",
+  "title": "Todo multi-skill runtime and cache",
+  "scope": "standalone",
+  "summary": "Add canonical multi-skill tasks, cache-backed compilation, deterministic composition, durable runtime state, and Pi hook injection.",
+  "task_ids": ["TASK-001", "TASK-002", "TASK-003", "TASK-004", "TASK-005", "TASK-006"],
+  "waves": [
+    { "wave": 1, "tasks": ["TASK-001", "TASK-002"] },
+    { "wave": 2, "tasks": ["TASK-003"] },
+    { "wave": 3, "tasks": ["TASK-004"] },
+    { "wave": 4, "tasks": ["TASK-005"] },
+    { "wave": 5, "tasks": ["TASK-006"] }
+  ],
+  "confidence": { "level": "high", "basis": "Pi 0.74 and 0.80 APIs verified locally" }
+}

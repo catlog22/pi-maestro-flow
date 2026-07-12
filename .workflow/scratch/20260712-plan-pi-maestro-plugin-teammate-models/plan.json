@@ -1,0 +1,37 @@
+{
+  "id": "PLN-002",
+  "scope": "standalone",
+  "summary": "Associate maestro-flow resources with the Pi package, add Pi-native AGENTS guidance, and inject available teammate models into the system prompt.",
+  "approach": [
+    "Declare the published maestro-flow version as a runtime dependency and discover its packaged .agents skills through Pi's resources_discover hook.",
+    "Create a Pi AGENTS.md based on the Maestro Claude instructions, replacing delegate CLI guidance with direct teammate calls.",
+    "Snapshot authenticated models on session_start and append a deterministic model catalog through before_agent_start, refreshing when the registry changes.",
+    "Prove top-level and per-task model propagation plus package/resource behavior with focused tests."
+  ],
+  "task_ids": ["TASK-1", "TASK-2", "TASK-3", "TASK-4"],
+  "waves": [
+    { "wave": 1, "phase": "package-and-guidance", "tasks": ["TASK-1", "TASK-2"] },
+    { "wave": 2, "phase": "runtime-model-catalog", "tasks": ["TASK-3"] },
+    { "wave": 3, "phase": "verification", "tasks": ["TASK-4"] }
+  ],
+  "confidence": {
+    "overall": "medium",
+    "requirements": 0.95,
+    "architecture": 0.86,
+    "implementation": 0.84,
+    "verification": 0.9,
+    "collision_risk": 0.75,
+    "degradation_event": "Wave 1 instruction/model explorer and Wave 2 planner timed out; local Pi source evidence and two completed exploration results were used.",
+    "boundary_warning": "packages/pi-maestro-flow/package.json and README.md already contain user changes; edits must be additive."
+  },
+  "boundary_grill": {
+    "status": "passed_with_warning",
+    "conflicts": [],
+    "warnings": [
+      "Do not publish an absolute D:\\maestro2 dependency path.",
+      "Do not overwrite existing approval-mode, skill-runtime, or README worktree changes."
+    ]
+  },
+  "readiness": "ready"
+}
+

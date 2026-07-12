@@ -1,0 +1,221 @@
+{
+  "artifact_id": "ANL-pi-ultra-compact-compression-2026-07-10",
+  "session_path": ".workflow/scratch/20260710-analyze-pi-ultra-compact-compression",
+  "target": "G:\\github_lib\\pi-ultra-compact",
+  "version": "1.2.1",
+  "scope": "standalone",
+  "mode": "macro",
+  "date": "2026-07-10",
+  "confidence": "high",
+  "confidence_score": 0.88,
+  "rounds": 2,
+  "recommendation": "CONDITIONAL_GO",
+  "overall_score": 3.2,
+  "max_score": 5,
+  "dimension_scores": {
+    "feasibility": { "score": 3, "confidence": 0.88 },
+    "impact": { "score": 3, "confidence": 0.87 },
+    "risk": { "score": 2, "confidence": 0.93 },
+    "complexity": { "score": 3, "confidence": 0.86 },
+    "dependencies": { "score": 4, "confidence": 0.84 },
+    "alternatives": { "score": 4, "confidence": 0.90 }
+  },
+  "key_conclusions": [
+    {
+      "id": "KC1",
+      "conclusion": "Architecture is directionally excellent with 7 unique capabilities unmatched by any alternative",
+      "confidence": "high",
+      "evidence": [
+        "engine.ts has zero Pi imports — independently testable",
+        "4-level graduated eviction is unique across 7 compared systems",
+        "Circuit breaker + lossy truncation provides genuine fault tolerance",
+        "337 tests with comprehensive coverage"
+      ],
+      "priority": "high"
+    },
+    {
+      "id": "KC2",
+      "conclusion": "3 Critical bugs undermine the design intent: trigger config is dead code, Level 4 budget not enforced, code blocks destroyed",
+      "confidence": "high",
+      "evidence": [
+        "shouldCompact() uses hardcoded 0.6 (engine.ts:438), ignoring preemptiveWatermark",
+        "hardWatermark default 0.5 (engine.ts:154) vs README 0.95 — 3-tier collapses to 50%",
+        "Level 4 initialTokens frozen (engine.ts:1074), comment on line 1081 acknowledges bug",
+        "compressMessage replaces code blocks with 50-char stubs (engine.ts:1403-1416)"
+      ],
+      "priority": "critical"
+    },
+    {
+      "id": "KC3",
+      "conclusion": "Severe documentation/implementation drift — 4 advertised features do not exist in codebase",
+      "confidence": "high",
+      "evidence": [
+        "Multi-pass summarization: not implemented (single-pass heuristic only, engine.ts:1124-1186)",
+        "Quality scoring: not implemented (no quality validation exists)",
+        "LRU token estimation cache: not implemented (estimateTokens is O(n) with no cache, engine.ts:1427-1459)",
+        "Entropy-based information extraction: not implemented (regex-only extraction)"
+      ],
+      "priority": "high"
+    },
+    {
+      "id": "KC4",
+      "conclusion": "Code block protection has a triple design contradiction and structured content blind spot",
+      "confidence": "high",
+      "evidence": [
+        "Importance scoring says code is precious (×1.3 multiplier, engine.ts:83)",
+        "But 0.5 floor < 0.7 protection gate → pure code never protected by importance",
+        "compressMessage says code should be destroyed (50-char stub, engine.ts:1404-1407)",
+        "messageContent() (engine.ts:25-35) only keeps type=text blocks — structured code blocks invisible to protection"
+      ],
+      "priority": "critical"
+    },
+    {
+      "id": "KC5",
+      "conclusion": "Cross-bug interactions create degradation feedback loops in long sessions",
+      "confidence": "high",
+      "evidence": [
+        "Bug 2+5: entire trigger config is dead code — shouldCompact effectively = contextWindow * 0.5",
+        "Bug 1+4: budget not enforced → context bloated → summary bloated → faster re-trigger",
+        "Bug 4+5: premature trigger (50%) → more frequent compaction → faster summary bloat",
+        "Bug 3+6: code AND reasoning lost simultaneously after single FULL compaction"
+      ],
+      "priority": "high"
+    }
+  ],
+  "recommendations": [
+    {
+      "id": "REC1",
+      "title": "Fix shouldCompact to use preemptiveWatermark instead of hardcoded 0.6",
+      "rationale": "The 70% preemptive watermark is advertised but is dead code in production. Users cannot configure trigger behavior.",
+      "priority": "critical",
+      "action": "Replace hardcoded 0.6 in shouldCompact() (engine.ts:438) with this.config.preemptiveWatermark",
+      "evidence": ["engine.ts:436-450", "engine.ts:153", "README.md:93"],
+      "review_status": "proposed"
+    },
+    {
+      "id": "REC2",
+      "title": "Fix hardWatermark default from 0.5 to 0.95",
+      "rationale": "Default 0.5 causes Gate 2 to fire before Gate 1, inverting the trigger hierarchy. README documents 0.95.",
+      "priority": "critical",
+      "action": "Change engine.ts:154 from ?? 0.5 to ?? 0.95, update types/index.ts:53 comment",
+      "evidence": ["engine.ts:154", "README.md:94"],
+      "review_status": "proposed"
+    },
+    {
+      "id": "REC3",
+      "title": "Fix Level 4 budget enforcement — update running token counter",
+      "rationale": "Level 4 is the only eviction level meant to guarantee budget compliance. Currently can exceed budget by 300%.",
+      "priority": "critical",
+      "action": "Update initialTokens as candidates are added in the add-back loop (engine.ts:1077-1083)",
+      "evidence": ["engine.ts:1050-1088"],
+      "review_status": "proposed"
+    },
+    {
+      "id": "REC4",
+      "title": "Fix compressMessage to preserve code block structure",
+      "rationale": "Code block destruction (>99% info loss) directly contradicts code protection logic. Highest-impact domain anti-pattern for coding agent.",
+      "priority": "critical",
+      "action": "Redesign compressMessage (engine.ts:1403-1416) to retain first+last N lines or use hash-based reference instead of 50-char stub",
+      "evidence": ["engine.ts:1403-1416", "engine.ts:83", "engine.ts:783"],
+      "review_status": "proposed"
+    },
+    {
+      "id": "REC5",
+      "title": "Implement summary merge/condense to prevent bloat",
+      "rationale": "Previous summary prepended verbatim causes monotonic growth. RESEARCH.md shows iterative rewrite, not stacking.",
+      "priority": "high",
+      "action": "Add merge step in generateStructuredSummary (engine.ts:1131-1134) that condenses prior summary + new extraction",
+      "evidence": ["engine.ts:1131-1134"],
+      "review_status": "proposed"
+    },
+    {
+      "id": "REC6",
+      "title": "Add recency and position signals to importance scoring",
+      "rationale": "RESEARCH.md recommends recency (0.30) and position (0.20) as the two highest-weighted signals. Currently absent from calculateMessageImportance.",
+      "priority": "medium",
+      "action": "Add recency and position parameters to calculateMessageImportance (engine.ts:1191-1230) and incorporate into weighted scoring",
+      "evidence": ["engine.ts:1191-1230", "RESEARCH.md:38-46"],
+      "review_status": "proposed"
+    },
+    {
+      "id": "REC7",
+      "title": "Reconcile documentation with implementation",
+      "rationale": "4 advertised features do not exist. This misleads users and undermines trust.",
+      "priority": "high",
+      "action": "Remove claims for multi-pass summarization, quality scoring, LRU cache, entropy extraction from README and CHANGELOG; or implement them",
+      "evidence": ["README.md:19,24", "CHANGELOG.md:241-242,385"],
+      "review_status": "proposed"
+    },
+    {
+      "id": "REC8",
+      "title": "Complete utils.ts refactoring or delete it",
+      "rationale": "utils.ts (126 lines) is dead code — engine.ts has duplicated copies of messageContent(), keyword patterns, error detection. Divergent copies will drift.",
+      "priority": "medium",
+      "action": "Either make engine.ts import from utils.ts, or delete utils.ts entirely",
+      "evidence": ["engine.ts:25-35", "utils.ts:13-23", "engine.ts:42-79", "utils.ts:29-67"],
+      "review_status": "proposed"
+    }
+  ],
+  "implementation_scope": [
+    {
+      "objective": "Fix trigger configuration to use preemptiveWatermark instead of hardcoded 0.6",
+      "rationale": "Restores advertised 70% preemptive watermark and makes thresholdTokens effective",
+      "priority": "critical",
+      "target_files": ["extensions/engine.ts"],
+      "acceptance_criteria": ["shouldCompact() uses this.config.preemptiveWatermark", "hardWatermark default changed to 0.95", "thresholdTokens consulted in shouldCompact"],
+      "change_summary": "engine.ts:438 replace 0.6 with this.config.preemptiveWatermark; engine.ts:154 change default from 0.5 to 0.95"
+    },
+    {
+      "objective": "Fix Level 4 budget enforcement in removeOldCompressibleMessages",
+      "rationale": "Restores the safety guarantee that compaction reduces context to target budget",
+      "priority": "critical",
+      "target_files": ["extensions/engine.ts"],
+      "acceptance_criteria": ["Running token counter updates as candidates added", "Post-eviction token count <= tokenBudget"],
+      "change_summary": "engine.ts:1074-1083 update initialTokens in add-back loop"
+    },
+    {
+      "objective": "Fix compressMessage to preserve code block structure",
+      "rationale": "Prevents >99% code information loss in coding sessions",
+      "priority": "critical",
+      "target_files": ["extensions/engine.ts"],
+      "acceptance_criteria": ["Code blocks retain structural information (function signatures, class definitions)", "No regex-based wholesale code block replacement"],
+      "change_summary": "engine.ts:1403-1416 redesign code block compression"
+    }
+  ],
+  "decision_trail": [
+    {
+      "round": 1,
+      "decision": "Selected all 4 dimensions and all 4 perspectives for comprehensive analysis",
+      "reason": "User wants deep understanding of the entire compression mechanism"
+    },
+    {
+      "round": 1,
+      "decision": "6 key defects identified across all 4 perspectives",
+      "reason": "Multi-perspective exploration converged on same findings"
+    },
+    {
+      "round": 2,
+      "decision": "Deepened 3 directions: alternatives comparison, bug impact, code block lifecycle",
+      "reason": "Alternatives was weakest dimension (71%), bugs needed production simulation, code destruction needed full flow trace"
+    },
+    {
+      "round": 2,
+      "decision": "Confidence increased from 77% to 88%, proceeding to synthesis",
+      "reason": "All dimensions ≥84%, Alternatives improved to 90%, pressure pass completed"
+    }
+  ],
+  "open_questions": [
+    {
+      "area": "Performance",
+      "question": "What is the actual runtime performance of estimateTokens on large message arrays?",
+      "options": ["Run benchmarks on 10K+ messages", "Profile in production Pi session"]
+    },
+    {
+      "area": "Code Protection",
+      "question": "Should the extension use tree-sitter or similar AST parsing for code block understanding?",
+      "options": ["Add tree-sitter dependency", "Improve regex-based extraction", "Use LLM for semantic code understanding"]
+    }
+  ],
+  "scope_verdict": "medium",
+  "scope_verdict_rationale": "1-2 subsystems affected (engine.ts compaction logic + index.ts integration layer), parallelizable fixes, no hard serial dependency barriers"
+}

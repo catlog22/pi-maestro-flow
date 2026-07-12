@@ -38,7 +38,10 @@ Thumbs.db
 .workflow/state.json
 .workflow/wiki-index.json
 
-# Scratch session artifacts (keep understanding.md)
+# Scratch session artifacts
+.workflow/scratch/*/.history/
+.workflow/scratch/*/.summaries/
+.workflow/scratch/*/.task/
 .workflow/scratch/*/evidence.ndjson
 .workflow/scratch/*/session.json
 .workflow/scratch/*/tasks.csv

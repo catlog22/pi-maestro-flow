@@ -1,0 +1,273 @@
+{
+  "$schema": "context-package/1.0",
+  "auto_mode": false,
+  "source": {
+    "type": "grill",
+    "artifact_id": "GRL-001",
+    "session_path": "scratch/20260710-grill-todo-generalized-context",
+    "generated_at": "2026-07-10T17:02:58.5653391+08:00"
+  },
+  "requirements": [
+    {
+      "id": "R-001",
+      "title": "纯文本任务上下文",
+      "description": "todo 使用可选纯文本 context，不再解析 text/file/skill 混合引用。",
+      "priority": "must",
+      "ref": "grill-report.md#scope-revision-r1-context-改为纯文本skill-改为独立可空配置"
+    },
+    {
+      "id": "R-002",
+      "title": "独立可空 skill 配置",
+      "description": "todo 使用 skill?: { name: string, args?: string }，并支持 update 时以 null 清除。",
+      "priority": "must",
+      "ref": "grill-report.md#q24-可空-skill-的公开数据结构"
+    },
+    {
+      "id": "R-003",
+      "title": "Pi 原生 skill loader",
+      "description": "实现独立 loader 模块，复用 Pi resource discovery，不依赖 Maestro/Ralph runtime。",
+      "priority": "must",
+      "ref": "grill-report.md#scope-revision-r2-当前不集成-ralph未来以-todo-替代-pi-ralph-控制"
+    },
+    {
+      "id": "R-004",
+      "title": "Pi skill-config 双作用域",
+      "description": "全局与项目 skill-config 按 skill/param 合并，项目覆盖全局，task args 最后覆盖。",
+      "priority": "must",
+      "ref": "grill-report.md#q43-pi-skill-config-的作用域与覆盖顺序"
+    },
+    {
+      "id": "R-005",
+      "title": "安全的 next 状态转换",
+      "description": "skill 加载和 prompt 预算检查成功后才允许任务进入 in_progress。",
+      "priority": "must",
+      "ref": "grill-report.md#q32-source-解析失败时的状态转换"
+    }
+  ],
+  "constraints": [
+    {
+      "id": "C-001",
+      "area": "api",
+      "constraint": "todo public contract MUST expose context as optional plain text and MUST remove public injection, load, refs, and inject inputs.",
+      "rationale": "The current schema and runtime have multiple conflicting entry points.",
+      "status": "locked",
+      "ref": "grill-report.md#decision-summary"
+    },
+    {
+      "id": "C-002",
+      "area": "api",
+      "constraint": "todo MUST expose one optional skill object with name and optional args, and MUST NOT expose a separate skillArgs field.",
+      "rationale": "One nested field keeps the top-level tool schema small while retaining per-task parameters.",
+      "status": "locked",
+      "ref": "grill-report.md#q24-可空-skill-的公开数据结构"
+    },
+    {
+      "id": "C-003",
+      "area": "state",
+      "constraint": "On update, omitted context or skill MUST preserve the stored value; empty context MUST clear context; null skill MUST clear skill.",
+      "rationale": "Explicit empty values must be distinguishable from omitted fields.",
+      "status": "locked",
+      "ref": "grill-report.md#q25-context-与-skill-的-update-清空语义"
+    },
+    {
+      "id": "C-004",
+      "area": "scope",
+      "constraint": "Goal lifecycle MUST remain independent, and todo next SHOULD inject the active goal automatically.",
+      "rationale": "Goal is durable execution intent, not an optional content source.",
+      "status": "locked",
+      "ref": "grill-report.md#q13-goal-是否属于通用-context-source"
+    },
+    {
+      "id": "C-005",
+      "area": "scope",
+      "constraint": "todo MUST NOT provide generic file injection; skill files MUST be loaded through required reading and other files remain agent-managed.",
+      "rationale": "A third content path would undo the field simplification.",
+      "status": "locked",
+      "ref": "grill-report.md#q15-是否保留通用-file-注入能力"
+    },
+    {
+      "id": "C-006",
+      "area": "architecture",
+      "constraint": "The skill loader MUST be an independent Pi-native module and MUST NOT import or call D:/maestro2 Ralph modules.",
+      "rationale": "Ralph is a design reference only; Pi todo is the future control primitive.",
+      "status": "locked",
+      "ref": "grill-report.md#scope-revision-r2-当前不集成-ralph未来以-todo-替代-pi-ralph-控制"
+    },
+    {
+      "id": "C-007",
+      "area": "integration",
+      "constraint": "Skill discovery MUST reuse Pi DefaultResourceLoader results instead of maintaining custom directory scanning.",
+      "rationale": "The host already handles project, global, ancestor, and package skill sources.",
+      "status": "locked",
+      "ref": "grill-report.md#q44-skill-的发现机制"
+    },
+    {
+      "id": "C-008",
+      "area": "configuration",
+      "constraint": "The loader MUST merge ~/.pi/agent/skill-config.json and {cwd}/.pi/skill-config.json by skill and parameter, with project values taking precedence.",
+      "rationale": "This provides Pi-native global defaults with project overrides.",
+      "status": "locked",
+      "ref": "grill-report.md#q43-pi-skill-config-的作用域与覆盖顺序"
+    },
+    {
+      "id": "C-009",
+      "area": "execution",
+      "constraint": "Skill discovery and full content loading MUST be deferred to next; create and update MUST validate only the input shape.",
+      "rationale": "The user explicitly selected late binding and rejected Ralph-specific stored command paths.",
+      "status": "locked",
+      "ref": "grill-report.md#q33-skill-发现与校验时机"
+    },
+    {
+      "id": "C-010",
+      "area": "execution",
+      "constraint": "next MUST finish skill loading and budget validation before changing task state; failure MUST keep the task pending.",
+      "rationale": "The current implementation advances state before loader errors are known.",
+      "status": "locked",
+      "ref": "grill-report.md#q32-source-解析失败时的状态转换"
+    },
+    {
+      "id": "C-011",
+      "area": "performance",
+      "constraint": "Skill discovery MUST be cached per session; a miss or explicit refresh MAY trigger one reload and MUST NOT retry indefinitely.",
+      "rationale": "Reloading every next would rescan all Pi resources for long task chains.",
+      "status": "locked",
+      "ref": "grill-report.md#q51-skill-discovery-的缓存与刷新"
+    },
+    {
+      "id": "C-012",
+      "area": "performance",
+      "constraint": "Context, skill body, and required reading MUST have configurable file and total budgets; overflow MUST fail without silent truncation.",
+      "rationale": "Truncating instructions can remove safety or completion constraints.",
+      "status": "locked",
+      "ref": "grill-report.md#q52-context-与-skill-注入的-prompt-预算"
+    }
+  ],
+  "domain": {
+    "problem_statement": "Simplify the Pi todo tool into a small task-control contract with plain text context and an optional native skill execution configuration, while making todo the future primitive for Pi Ralph-style orchestration.",
+    "terminology": [
+      {
+        "term": "context",
+        "definition": "Optional plain text execution context stored on a todo task.",
+        "code_ref": "packages/pi-maestro-flow/src/extension/schemas.ts:261",
+        "status": "locked"
+      },
+      {
+        "term": "skill",
+        "definition": "Optional todo configuration object containing a skill name and optional task arguments.",
+        "code_ref": "packages/pi-maestro-flow/src/tools/todo.ts:479",
+        "status": "locked"
+      },
+      {
+        "term": "skill loader",
+        "definition": "Independent Pi-native module that discovers and loads skill instructions for todo next.",
+        "code_ref": "node_modules/@earendil-works/pi-coding-agent/docs/sdk.md:837",
+        "status": "locked"
+      },
+      {
+        "term": "skill-config",
+        "definition": "Pi-native global and project per-skill default parameter configuration.",
+        "code_ref": "node_modules/@earendil-works/pi-coding-agent/docs/sdk.md:340",
+        "status": "locked"
+      },
+      {
+        "term": "required reading",
+        "definition": "Files declared by a skill that must be loaded before execution.",
+        "code_ref": "D:/maestro2/src/ralph/skill-resolver.ts:152",
+        "status": "locked"
+      },
+      {
+        "term": "Goal Context",
+        "definition": "The active goal text injected independently by todo next.",
+        "code_ref": "packages/pi-maestro-flow/src/tools/todo.ts:348",
+        "status": "locked"
+      }
+    ],
+    "audience": "Pi extension maintainers and workflow authors",
+    "industry": "developer tooling and agent orchestration"
+  },
+  "non_goals": [
+    {
+      "title": "Current Ralph integration",
+      "rationale": "D:/maestro2 is a design reference only; no runtime coupling is allowed.",
+      "ref": "grill-report.md#scope-revision-r2-当前不集成-ralph未来以-todo-替代-pi-ralph-控制"
+    },
+    {
+      "title": "Generic file injection",
+      "rationale": "Files are handled by skill required reading or by the executing agent.",
+      "ref": "grill-report.md#q15-是否保留通用-file-注入能力"
+    },
+    {
+      "title": "Future Pi Ralph migration",
+      "rationale": "Todo must enable the migration, but the migration itself is deferred.",
+      "ref": "grill-report.md#scope-revision-r2-当前不集成-ralph未来以-todo-替代-pi-ralph-控制"
+    }
+  ],
+  "insights": [
+    {
+      "area": "contract",
+      "summary": "The public TypeBox schema still exposes old fields that the runtime no longer consumes.",
+      "evidence": "packages/pi-maestro-flow/src/extension/schemas.ts:261 and packages/pi-maestro-flow/src/tools/todo.ts:36",
+      "ref": "grill-report.md#codebase-surface"
+    },
+    {
+      "area": "ui",
+      "summary": "The footer widget still reads the legacy owner, decision, and injection shape.",
+      "evidence": "packages/pi-maestro-flow/src/extension/index.ts:535 and packages/pi-maestro-flow/src/extension/index.ts:598",
+      "ref": "grill-report.md#risk-register"
+    },
+    {
+      "area": "integration",
+      "summary": "Pi already provides DefaultResourceLoader for native skill discovery, so custom path scanning is unnecessary.",
+      "evidence": "node_modules/@earendil-works/pi-coding-agent/docs/sdk.md:345-359",
+      "ref": "grill-report.md#q44-skill-的发现机制"
+    },
+    {
+      "area": "state",
+      "summary": "The current next implementation advances task state before content loading can fail.",
+      "evidence": "packages/pi-maestro-flow/src/tools/todo.ts:329-354",
+      "ref": "grill-report.md#q32-source-解析失败时的状态转换"
+    }
+  ],
+  "open_questions": [
+    {
+      "area": "performance",
+      "question": "What are the default per-file and total prompt budgets, and where are they configured?",
+      "options": ["fixed package defaults", "skill-config defaults", "extension settings"],
+      "ref": "grill-report.md#open-questions"
+    },
+    {
+      "area": "configuration",
+      "question": "How are skill.args parsed and merged precisely with skill-config.params?",
+      "options": ["CLI string parser", "structured record", "ordered token list"],
+      "ref": "grill-report.md#open-questions"
+    },
+    {
+      "area": "migration",
+      "question": "How are legacy persisted todo fields migrated to context and skill?",
+      "options": ["versioned migration", "read compatibility only", "session reset"],
+      "ref": "grill-report.md#open-questions"
+    }
+  ],
+  "references": [
+    {
+      "type": "grill-report",
+      "path": "grill-report.md"
+    },
+    {
+      "type": "terminology",
+      "path": "terminology.md"
+    },
+    {
+      "type": "code",
+      "path": "packages/pi-maestro-flow/src/tools/todo.ts"
+    },
+    {
+      "type": "code",
+      "path": "packages/pi-maestro-flow/src/extension/schemas.ts"
+    },
+    {
+      "type": "reference-code",
+      "path": "D:/maestro2/src/ralph/skill-resolver.ts"
+    }
+  ]
+}

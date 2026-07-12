@@ -1,0 +1,173 @@
+{
+  "$schema": "context-package/1.0",
+  "source": {
+    "type": "analyze",
+    "artifact_id": "ANL-pi-ultra-compact-compression-2026-07-10",
+    "session_path": ".workflow/scratch/20260710-analyze-pi-ultra-compact-compression",
+    "generated_at": "2026-07-10T00:00:00Z"
+  },
+  "requirements": [
+    {
+      "id": "REQ1",
+      "title": "Fix trigger configuration to use preemptiveWatermark instead of hardcoded 0.6",
+      "acceptance": [
+        "shouldCompact() uses this.config.preemptiveWatermark",
+        "hardWatermark default changed to 0.95",
+        "thresholdTokens consulted in shouldCompact"
+      ],
+      "ref": "conclusions.json#implementation_scope[0]"
+    },
+    {
+      "id": "REQ2",
+      "title": "Fix Level 4 budget enforcement in removeOldCompressibleMessages",
+      "acceptance": [
+        "Running token counter updates as candidates added",
+        "Post-eviction token count <= tokenBudget"
+      ],
+      "ref": "conclusions.json#implementation_scope[1]"
+    },
+    {
+      "id": "REQ3",
+      "title": "Fix compressMessage to preserve code block structure",
+      "acceptance": [
+        "Code blocks retain structural information",
+        "No regex-based wholesale code block replacement"
+      ],
+      "ref": "conclusions.json#implementation_scope[2]"
+    }
+  ],
+  "constraints": [
+    {
+      "title": "Architecture pipeline (classify→protect→evict→summarize)",
+      "status": "locked",
+      "ref": "context.md#Locked"
+    },
+    {
+      "title": "4-level graduated eviction design",
+      "status": "locked",
+      "ref": "context.md#Locked"
+    },
+    {
+      "title": "Circuit breaker + lossy truncation safety net",
+      "status": "locked",
+      "ref": "context.md#Locked"
+    },
+    {
+      "title": "engine.ts zero Pi coupling",
+      "status": "locked",
+      "ref": "context.md#Locked"
+    },
+    {
+      "title": "Cross-provider compatibility",
+      "status": "locked",
+      "ref": "context.md#Locked"
+    },
+    {
+      "title": "Code block compression strategy",
+      "status": "open",
+      "ref": "context.md#Free"
+    },
+    {
+      "title": "Summary merge strategy",
+      "status": "open",
+      "ref": "context.md#Free"
+    },
+    {
+      "title": "Recency/position weight values",
+      "status": "open",
+      "ref": "context.md#Free"
+    },
+    {
+      "title": "utils.ts handling (refactor or delete)",
+      "status": "open",
+      "ref": "context.md#Free"
+    },
+    {
+      "title": "Cache-aware default value",
+      "status": "open",
+      "ref": "context.md#Free"
+    }
+  ],
+  "domain": {
+    "terminology": [
+      { "term": "Graduated Eviction", "definition": "4-level progressive content stripping: reasoning → bulk output → artifacts → full message removal" },
+      { "term": "CompactionTier", "definition": "3-tier dispatch: NONE (<60%), MICRO (60-90%, no LLM), FULL (90%+, structured summarization)" },
+      { "term": "Circuit Breaker", "definition": "3-failure threshold → lossy truncation (system + last 10 msgs) → 5-turn cooldown" },
+      { "term": "Cache-Aware Mode", "definition": "Previous summary kept immutable as prefix, new content appended — preserves prompt cache" },
+      { "term": "Preemptive Trigger", "definition": "Projects next turn token usage (currentTokens + outputHeadroom) and triggers before user's next turn" }
+    ]
+  },
+  "non_goals": [
+    {
+      "title": "Semantic importance scoring (LLM/embeddings)",
+      "rationale": "Requires additional dependencies and latency; regex-only is an acknowledged tradeoff",
+      "ref": "context.md#Deferred"
+    },
+    {
+      "title": "Tree-sitter AST parsing for code blocks",
+      "rationale": "Requires dependency and complexity increase; deferred to future version",
+      "ref": "context.md#Deferred"
+    },
+    {
+      "title": "Dynamic file inclusion (Cursor-style semantic search)",
+      "rationale": "Out of scope for a compaction extension; different problem domain",
+      "ref": "context.md#Deferred"
+    },
+    {
+      "title": "Query-conditioned compression",
+      "rationale": "Requires prediction model; deferred to future version",
+      "ref": "context.md#Deferred"
+    },
+    {
+      "title": "LRU Token estimation cache",
+      "rationale": "Need to verify performance bottleneck first; deferred to optimization phase",
+      "ref": "context.md#Deferred"
+    }
+  ],
+  "insights": [
+    {
+      "role": "analyzer",
+      "area": "architecture",
+      "summary": "7 unique capabilities unmatched by any alternative: 4-level graduated eviction, circuit breaker, preemptive trigger, structured summary, no-LLM default, content-aware estimation, cross-provider awareness"
+    },
+    {
+      "role": "analyzer",
+      "area": "implementation",
+      "summary": "3 Critical bugs: trigger config dead (shouldCompact 0.6 + hardWatermark 0.5), Level 4 budget not enforced (initialTokens frozen), code block destruction (compressMessage 50-char stub)"
+    },
+    {
+      "role": "analyzer",
+      "area": "documentation",
+      "summary": "4 advertised features do not exist: multi-pass summarization, quality scoring, LRU cache, entropy extraction — severe documentation/implementation drift"
+    },
+    {
+      "role": "analyzer",
+      "area": "risk",
+      "summary": "Cross-bug interactions create degradation feedback loops: Bug 2+5 (trigger dead), Bug 1+4 (bloat loop), Bug 3+6 (code+reasoning lost), Bug 4+5 (accelerating degradation)"
+    },
+    {
+      "role": "analyzer",
+      "area": "code_protection",
+      "summary": "Triple design contradiction: code is precious (×1.3) but not precious enough (0.5 floor < 0.7 gate) but should be destroyed (50-char stub). Structured content blind spot: type=code blocks invisible to protection."
+    }
+  ],
+  "open_questions": [
+    {
+      "area": "performance",
+      "question": "What is the actual runtime performance of estimateTokens on large message arrays?",
+      "options": ["Run benchmarks on 10K+ messages", "Profile in production Pi session"]
+    },
+    {
+      "area": "code_protection",
+      "question": "Should the extension use tree-sitter or similar AST parsing for code block understanding?",
+      "options": ["Add tree-sitter dependency", "Improve regex-based extraction", "Use LLM for semantic code understanding"]
+    }
+  ],
+  "references": [
+    { "type": "analysis", "path": "context.md" },
+    { "type": "conclusions", "path": "conclusions.json" },
+    { "type": "discussion", "path": "discussion.md" },
+    { "type": "exploration", "path": "exploration-codebase.json" },
+    { "type": "perspectives", "path": "perspectives.json" }
+  ]
+}

@@ -1,0 +1,65 @@
+{
+  "$schema": "context-package/1.0",
+  "source": {
+    "type": "analyze",
+    "artifact_id": "ANL-002",
+    "session_path": ".workflow/scratch/20260710-analyze-pi-observational-memory-architecture",
+    "generated_at": "2026-07-10T00:00:00Z"
+  },
+  "requirements": [],
+  "constraints": [
+    { "title": "ledger-as-truth + fold-on-read", "status": "locked", "rationale": "记忆状态靠 fold 重建永不 mutate；drop 是墓碑不删历史", "ref": "context.md#Locked" },
+    { "title": "model-free compaction render", "status": "locked", "rationale": "compaction 时只 fold+render 不调模型；semantic work 前置 turn_end", "ref": "context.md#Locked" },
+    { "title": "model proposes / code disposes (tool-schema-only + provenance rejection + content-hash dedup)", "status": "locked", "rationale": "correct-by-construction even if model hallucinates", "ref": "context.md#Locked" },
+    { "title": "coverage-tier pruning safety signal (none/partial/strong, lexicographic drop priority)", "status": "locked", "rationale": "确定性可审计，coverage-first 保证语义安全", "ref": "context.md#Locked" },
+    { "title": "watermark vs provenance separation (coversUpToId vs sourceEntryIds/supportingObservationIds)", "status": "locked", "rationale": "事件溯源正解，避免进度耦合因果", "ref": "context.md#Locked" },
+    { "title": "exact-id recall not search", "status": "locked", "rationale": "防止 recall 滥用，保持工具廉价", "ref": "context.md#Locked" },
+    { "title": "token-clock thresholds (observe/reflect/compact values)", "status": "open", "rationale": "按目标会话密度调整", "ref": "context.md#Free" },
+    { "title": "pool budget values (max/target tokens)", "status": "open", "rationale": "双轨分离设计保留，具体值可调", "ref": "context.md#Free" },
+    { "title": "compaction threshold mode (calibrated vs ratio)", "status": "open", "rationale": "按目标模型窗口选择", "ref": "context.md#Free" },
+    { "title": "three-agent split granularity", "status": "open", "rationale": "observer/reflector/dropper 分离 vs 合并视复杂度", "ref": "context.md#Free" },
+    { "title": "coverage-tier thresholds (0/1/≥2 boundaries)", "status": "open", "rationale": "可重定义支持数边界", "ref": "context.md#Free" },
+    { "title": "relevance tier semantics", "status": "open", "rationale": "low/medium/high/critical 可适配领域", "ref": "context.md#Free" }
+  ],
+  "domain": {
+    "terminology": [
+      { "term": "Observation", "definition": "timestamped session event with provenance (sourceEntryIds) + relevance tier" },
+      { "term": "Reflection", "definition": "durable conclusion distilled from observations with supportingObservationIds (coverage evidence)" },
+      { "term": "Drop", "definition": "tombstone removing an observation id from active memory (not from ledger history)" },
+      { "term": "Ledger", "definition": "branch-local append-only custom entries (om.observations.recorded / om.reflections.recorded / om.observations.dropped); source of truth" },
+      { "term": "coversUpToId", "definition": "progress/projection watermark — NOT provenance; drives token-clock accounting + projection boundaries" },
+      { "term": "coverage tier", "definition": "none/partial/strong = 0/1/≥2 reflections citing an observation; deterministic pruning safety signal" },
+      { "term": "fold", "definition": "reducer reconstructing memory state from append-only entries (first-valid-record-wins + drop tombstones)" },
+      { "term": "projection", "definition": "boundary-gated fold: visible (latest om.folded), full (branch tip), compaction (cut-boundary), diff (visible-vs-full)" },
+      { "term": "full fold", "definition": "compaction mode folding observations+reflections+drops through boundary; triggered when pool≥observationsPoolMaxTokens" },
+      { "term": "recall", "definition": "exact-id (12-hex) reverse lookup recovering source entries behind compacted memory; not semantic search" }
+    ]
+  },
+  "non_goals": [
+    { "title": "V2→V3 migration logic", "rationale": "本项目不向后兼容；pi-maestro-flow 无遗留格式则不需", "ref": "context.md#Deferred" },
+    { "title": "Pi SDK-specific hook registration", "rationale": "绑定 Pi 事件系统，移植需适配目标 runtime 钩子", "ref": "context.md#Deferred" },
+    { "title": "dropper historical coverage repair", "rationale": "本项目未实现（concepts.md:81）；需更强保证可后续加周期性审计", "ref": "context.md#Deferred" },
+    { "title": "reflection quality scoring (LLM/embeddings)", "rationale": "本项目用 prompt 约束+id 校验；显式质量分可后续加（ANL-001 也 deferred semantic importance scoring）", "ref": "context.md#Deferred" },
+    { "title": "incremental fold/caching optimization", "rationale": "foldLedger 全量 O(entries)；超长会话可后续优化（仅 visibleProjection 免重折叠）", "ref": "context.md#Deferred" }
+  ],
+  "insights": [
+    { "role": "analyzer", "area": "architecture", "summary": "ledger-as-truth + fold-on-read + model-free compaction render 是核心可借鉴模式——把昂贵 semantic work 前置，crisis 时刻只 render" },
+    { "role": "analyzer", "area": "implementation", "summary": "model 提案/code 裁决边界（tool-schema-only + provenance 拒收 + content-hash 去重）使系统 correct-by-construction" },
+    { "role": "analyzer", "area": "concept", "summary": "coverage-tier (none/partial/strong) 作为 pruning safety 结构信号是本项目最创新贡献；词典序优先级优于加权评分" },
+    { "role": "analyzer", "area": "comparison", "summary": "与 ANL-001 pi-ultra-compact 互补（会话语义 vs 素材体积），可叠加；与标准 compaction 相比直击双痛点" },
+    { "role": "analyzer", "area": "security", "summary": "model 信任边界严密（provenance 伪造抵抗）；残留=语义保真度不可机器验证（coverage 是结构代理非语义保证）" },
+    { "role": "analyzer", "area": "performance", "summary": "投影不对称+visibleProjection amortize 折叠成本；token 估算偏粗但自校正；长程 coverage 漂移是已知限制" }
+  ],
+  "open_questions": [
+    { "area": "pruning safety", "question": "是否需要比 upstream 更强的语义保真度保证？", "options": ["沿用 prompt+id 校验（接受残留风险）", "加 reflection 质量评分", "加周期性 coverage 审计/修复"] },
+    { "area": "memory layering", "question": "observations ledger 与 .workflow/ 工件级记忆如何分层集成？", "options": ["observations=会话内自动捕获 / .workflow/=跨会话显式", "合并为单一记忆层", "observations 仅作 compaction 渲染素材不持久化"] }
+  ],
+  "references": [
+    { "type": "analysis", "path": "analysis.md" },
+    { "type": "conclusions", "path": "conclusions.json" },
+    { "type": "discussion", "path": "discussion.md" },
+    { "type": "exploration", "path": "exploration-codebase.json" },
+    { "type": "perspectives", "path": "perspectives.json" },
+    { "type": "context", "path": "context.md" }
+  ]
+}

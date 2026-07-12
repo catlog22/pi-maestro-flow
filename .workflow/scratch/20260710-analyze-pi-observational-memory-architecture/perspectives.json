@@ -1,0 +1,65 @@
+{
+  "session_id": "ANL-pi-observational-memory-architecture-2026-07-10",
+  "perspectives_mode": "multi-perspective synthesis (Architecture, Technical, Domain) — derived from 3 Explore agents; maestro delegate CLI skipped per user (W001 adaptation)",
+  "perspectives": [
+    {
+      "perspective": "Architectural",
+      "lens": "system design, scalability, component interactions, layering",
+      "key_findings": [
+        "Ledger-centered inversion: the branch-local append-only ledger (om.observations.recorded / om.reflections.recorded / om.observations.dropped custom entries) is the single source of truth; memory state is RECONSTRUCTED by folding, never mutated. This is event-sourcing for agent memory.",
+        "Clean separation of 'write path' (model-backed consolidation at turn_end) vs 'compaction path' (model-free render at session_before_compact). The expensive summarization is moved BEFORE compaction, so compaction becomes a projection+render — O(entries) deterministic work.",
+        "Three-agent pipeline (observer→reflector→dropper) with strict gating: observer has priority (reflect/drop skipped when observer due); dropper runs ONLY after same-run non-empty reflection. Each agent is a thin model-call wrapper over a single tool-schema; no free-text parsing.",
+        "Projection asymmetry is the key scalability lever: normal (maintenance) compaction holds reflections/drops stable from the last full-fold boundary while only re-folding observations to the cut. Full fold only when observation pool ≥ observationsPoolMaxTokens (20K). This amortizes reflection/drop work across many maintenance compactions.",
+        "coversUpToId watermark vs provenance separation is architecturally deliberate: watermark drives token-clock accounting + projection boundaries; provenance (sourceEntryIds/supportingObservationIds) drives recall + coverage. Conflating them would couple progress to causality — a classic event-sourcing anti-pattern avoided here."
+      ],
+      "convergent_themes": ["event-sourcing ledger", "write-path/compaction-path split", "deterministic projection rendering"],
+      "architecture_verdict": "Excellent layered design. The ledger-as-truth + fold-on-read + model-free-compaction triad is the standout pattern. Compaction-latency reduction is an architectural consequence, not an optimization."
+    },
+    {
+      "perspective": "Technical",
+      "lens": "implementation feasibility, code patterns, determinism, error handling",
+      "key_findings": [
+        "Model/code responsibility split is rigorous: the model decides WHAT is worth keeping (propose observations/reflections/drop-ids); deterministic code enforces structural invariants (id validation via normalizeSourceEntryIds/normalizeSupportingObservationIds, content-hash dedup via hashId, coverage computation, priority sort, token caps). The model cannot lie about provenance — invalid ids are rejected.",
+        "Coverage stewardship is the safety core: reflectionCoverageTierForCount (0/1/≥2 → none/partial/strong) is deterministic and shared. The reflector is told coverage tiers (review context, not quota); the dropper sorts strong-coverage-first. False support ids are explicitly warned as 'unsafe downstream pruning' — the prompt enforces the semantic contract that deterministic code relies on.",
+        "selectDropCandidates lexicographic priority (coverage→relevance→age→order) is superior to weighted scoring: no tuning weights, no opaque tradeoffs, deterministic and auditable. The model proposes a candidate SET; code decides which survive within maxDropsAllowed.",
+        "Race/invariant handling is thorough: in-flight flags prevent duplicate runs; observer priority prevents reflect/drop advancing on unobserved source; no-output workers append nothing (no empty progress entries); invalid ids filtered/rejected; compaction does NOT wait for workers (folds whatever ledger state exists); historical/invalid coverage markers tolerated not thrown.",
+        "maxDropCountForPool = ceil(tokensOverTarget / avgObsTokens) — simple, robust, self-correcting (average recomputed each run). boundedMaxTokens caps all agents at 32K; agentMaxTurns caps loop length. Both are cheap-worker guarantees."
+      ],
+      "technical_solutions": [
+        { "solution": "content-hash deterministic ids (sha256/12)", "problem": "cross-batch dedup + short human-typeable ids", "rationale": "same content = same id, natural dedup, 12 hex chars fit in summary lines + recall tool", "status": "validated" },
+        { "solution": "tool-schema-only model output (no text parsing)", "problem": "reliable structured extraction", "rationale": "execute closure accumulates into Map; model can't smuggle malformed text", "status": "validated" },
+        { "solution": "lexicographic drop priority sort", "problem": "safe pruning priority", "rationale": "auditable, no weight tuning, coverage-first guarantees semantic safety", "status": "validated" }
+      ],
+      "implementation_verdict": "Production-grade determinism. The model/code boundary is the strongest part — the system is correct-by-construction even if the model hallucinates, because invalid provenance is rejected."
+    },
+    {
+      "perspective": "Domain Expert",
+      "lens": "memory/compaction domain patterns, best practices, standards",
+      "key_findings": [
+        "Two-tier memory (episodic observations + semantic reflections) mirrors cognitive-science dual-memory models (hippocampal episode log + neocortical consolidation). The 'distill durable facts from events' pattern is well-established in memory-augmented agent research (Mastra's Observational Memory is the credited inspiration).",
+        "Background consolidation during work (not at compaction crisis) is the domain-correct move: it front-loads the expensive semantic work when the session is still rich, rather than summarizing a degraded compressed-of-compressed chain at compaction time. This directly addresses the README's 'compressed version of a compressed version' failure mode.",
+        "Tombstone-based drops (not deletion) is the domain-standard for append-only ledgers: dropped observations remain recallable. This preserves auditability + reversibility while controlling active-memory footprint.",
+        "Exact-id recall (not semantic search) is a deliberate domain constraint: prevents the agent from recall-abuse as a fuzzy retrieval crutch, keeps the tool cheap (O(ledger scan)), and forces the memory layer to be the abstraction (not the search layer). This is the 'render at compaction, recall on demand' two-tier design.",
+        "Token-clock triggers (not turn-count or time-based) are domain-appropriate: they fire proportional to actual context growth, adapting to session density. The calibrated/ratio dual-mode for compaction threshold correctly handles the 'context window ≠ attention' reality (large windows degrade at range).",
+        "Coverage tiers (none/partial/strong by reflection support count) as the pruning safety signal is a novel-but-sound heuristic: it ties drop-safety to verifiable semantic coverage rather than to recency alone."
+      ],
+      "domain_verdict": "Domain-aligned and in places innovative. The coverage-tier-as-pruning-safety-signal is the most novel contribution; the two-tier + background-consolidation pattern is well-grounded in prior memory-agent research."
+    }
+  ],
+  "synthesis": {
+    "convergent_themes": [
+      "Ledger-as-source-of-truth + fold-on-read (event sourcing for agent memory)",
+      "Move semantic work BEFORE compaction; compaction = deterministic render (the headline insight)",
+      "Model proposes / code disposes (semantic judgment vs structural invariants)",
+      "Two-tier observations+reflections with bidirectional provenance links",
+      "Coverage-tier deterministic pruning safety signal",
+      "Tombstone drops (append-only, recallable) — never delete history"
+    ],
+    "conflicting_views": [],
+    "unique_contributions": {
+      "architectural": "write-path/compaction-path split + projection asymmetry (maintenance vs full-fold)",
+      "technical": "lexicographic drop-priority sort + tool-schema-only model output + provenance rejection",
+      "domain": "coverage-tier (none/partial/strong by support count) as pruning safety signal"
+    }
+  }
+}

@@ -1,0 +1,149 @@
+{
+  "exploration_id": "ANL-pi-ultra-compact-compression-2026-07-10",
+  "perspectives": {
+    "technical": {
+      "focus": "Implementation, code patterns, algorithm correctness, boundary conditions",
+      "key_findings": [
+        "3-tier system with hardcoded thresholds at 60%/90% — no hysteresis risk at boundary",
+        "4-level graduated eviction well-structured with early-exit after each level if budget satisfied",
+        "Circuit breaker with turn-based cooldown provides graceful degradation: ultra-compact → Pi default → lossy truncation",
+        "Snapshot-rollback via JSON deep clone isolates mutations from original message array",
+        "Content-aware token estimation (4 ratios) is more accurate than naive char/4",
+        "BUG: Level 4 add-back uses fixed initialTokens that never updates — budget can be exceeded",
+        "BUG: utils.ts is dead code — engine.ts has duplicated messageContent(), keyword patterns, error detection",
+        "BUG: No LRU cache despite CHANGELOG claims — estimateTokens is O(n) per call, called multiple times per compaction",
+        "BUG: Silent LLM failure catch — errors swallowed without logging",
+        "BUG: No quality scoring of generated summary",
+        "BUG: Dedup key only first 100 chars — false positives for messages with same prefix"
+      ],
+      "confidence": "high"
+    },
+    "architectural": {
+      "focus": "System design, scalability, module interactions, design patterns",
+      "key_findings": [
+        "Clean inverted tree dependency graph: types ← (utils, engine) ← index — no circular dependencies",
+        "10 design patterns: Strategy (tiered), Circuit Breaker, Snapshot/Rollback, Graduated Eviction, Template Method, Factory, Observer, Ring Buffer, Dual-Gate Threshold, Adapter",
+        "engine.ts has ZERO Pi imports — pure compaction engine, independently testable and reusable",
+        "Type system well-designed (enums, interfaces) but UNDERUTILIZED — handlers use 'any' throughout despite typed interfaces existing",
+        "ENCAPSULATION BREACH: index.ts accesses engine['config'] via bracket notation for private fields",
+        "CODE DUPLICATION: messageContent(), keyword patterns, error detection duplicated between engine.ts and utils.ts",
+        "Module-level mutable state in index.ts (currentModel, compactionFailures, breakerTrippedAtTurn, currentTurn) — not encapsulated in a class",
+        "Pi API types defined but never used in implementation — documentation-only types",
+        "PiUI.notify level type mismatch: types say 'warn', implementation says 'warning'"
+      ],
+      "confidence": "high"
+    },
+    "domain_expert": {
+      "focus": "Compression domain best practices, context management standards, research alignment",
+      "key_findings": [
+        "Hybrid sliding-window + summarization IS implemented and is the correct paradigm — aligns with LangChain ConversationSummaryBufferMemory",
+        "Token budget protection IS implemented (protectRecentByTokenBudget, 20K tokens) — matches RESEARCH.md recommendation",
+        "Tool output pruning saves 30-50% before LLM — aligns with research claim",
+        "CRITICAL: Importance scoring MISSING recency (0.30) and position (0.20) — the two HIGHEST weighted signals from RESEARCH.md",
+        "CRITICAL: Multi-pass summarization, quality scoring, LRU cache, entropy extraction — ALL ADVERTISED BUT NOT IMPLEMENTED",
+        "CRITICAL: compressMessage destroys code blocks (50-char stub) — directly contradicts code protection logic. Highest-impact domain anti-pattern for coding agent",
+        "BUG: Summary bloat — previous summary prepended verbatim, never compressed. Summaries grow across cycles, opposite of iterative-rewrite pattern",
+        "BUG: Budget enforcement in Level 4 eviction broken (initialTokens never updated)",
+        "BUG: shouldCompact uses hardcoded 0.6, not preemptiveWatermark (0.7) — 70% watermark is dead code in production",
+        "BUG: hardWatermark default 0.5 (code) vs 0.95 (README) — inverted, Gate 2 fires before Gate 1",
+        "NO semantic salience — regex-only despite RESEARCH.md flagging this as insufficient",
+        "NO hysteresis on tier boundary — MICRO/FULL thrash near 0.9",
+        "Extraction regex-anchored on explicit keywords (GOAL:, DECIDED:) — brittle to natural language",
+        "File path regex inconsistent: shouldProtectContent misses .py/.rs/.go that importance scorer recognizes"
+      ],
+      "confidence": "high"
+    },
+    "business_performance": {
+      "focus": "Token savings, performance optimization, user value, DX, Pi ecosystem",
+      "key_findings": [
+        "Micro-compaction is genuinely zero-LLM and synchronous — claim verified",
+        "'Runs in microseconds' — UNVERIFIED (tests assert 10s/60s limits, not microseconds)",
+        "LRU cache claimed in CHANGELOG v0.6.0 but NOT in code — '3x faster' claim unsupported",
+        "hardWatermark: README says 0.95, code says 0.5 — INVERTED documentation error",
+        "shouldCompact() ignores thresholdTokens — user-configured thresholds stored but not consulted",
+        "preemptiveWatermark (0.7) is dead code in production — only used by shouldCompactDefaultThreshold() which is never called",
+        "Compression ratio baseline: 0.784 (21.6% savings) — far from claimed 70% in RESEARCH.md",
+        "Compact templates save 10-15% — unverified, no A/B test exists",
+        "337 tests with good coverage including edge cases and fuzz testing",
+        "Circuit breaker + lossy truncation provides genuine fault tolerance — tested",
+        "Model switching preserves userThresholdOverride — but it's not actually used by shouldCompact",
+        "Default heuristic mode has no API cost — favorable cost-benefit ratio",
+        "Cache-aware mode is sound but default-off — most users get no benefit",
+        "Lossy truncation tailKeep=10 is hardcoded and aggressive — not configurable"
+      ],
+      "confidence": "high"
+    }
+  },
+  "synthesis": {
+    "convergent_themes": [
+      "All 4 perspectives confirm: core compaction pipeline (classify→protect→evict→summarize) is well-designed and aligns with mainstream context management",
+      "All 4 perspectives confirm: graduated eviction with early-exit is the strongest design quality",
+      "All 4 perspectives confirm: circuit breaker + snapshot-rollback provides genuine fault tolerance",
+      "All 4 perspectives confirm: documentation/implementation drift is severe — multiple advertised features do not exist in code",
+      "All 4 perspectives identify: Level 4 eviction budget enforcement bug (engine.ts:1050-1088)",
+      "All 4 perspectives identify: utils.ts is dead code from incomplete refactoring",
+      "All 4 perspectives identify: shouldCompact() uses hardcoded 0.6, ignoring configurable thresholds"
+    ],
+    "conflicting_views": [
+      "Technical agent: 'comprehensive boundary condition coverage' (positive) vs Domain expert: 'extraction brittle to natural language' (negative) — different scopes of boundary handling"
+    ],
+    "unique_contributions": {
+      "technical": "Identified Level 4 add-back bug and silent LLM failure catch",
+      "architectural": "Identified 10 design patterns and encapsulation breach via bracket notation",
+      "domain_expert": "Identified code block destruction in compressMessage and summary bloat anti-pattern",
+      "business": "Identified LRU cache absence, hardWatermark inversion, and preemptiveWatermark dead code"
+    },
+    "technical_solutions": [
+      {
+        "round": 1,
+        "solution": "Fix Level 4 budget enforcement — update running token count as candidates are added back",
+        "problem": "removeOldCompressibleMessages uses fixed initialTokens, never updates as candidates added",
+        "rationale": "Level 4 is the only eviction level meant to guarantee budget compliance",
+        "alternatives": "Could also add a post-pass token check that removes excess messages",
+        "status": "proposed",
+        "evidence_refs": ["engine.ts:1050-1088"],
+        "next_action": "Implement running token counter in add-back loop"
+      },
+      {
+        "round": 1,
+        "solution": "Fix shouldCompact to use preemptiveWatermark instead of hardcoded 0.6",
+        "problem": "shouldCompact uses hardcoded 0.6 multiplier, ignoring preemptiveWatermark config",
+        "rationale": "70% preemptive watermark is advertised but dead code in production",
+        "alternatives": "Could also fix hardWatermark default from 0.5 to 0.95 to match README",
+        "status": "proposed",
+        "evidence_refs": ["engine.ts:436-450", "README.md:93-94"],
+        "next_action": "Replace hardcoded 0.6 with this.config.preemptiveWatermark"
+      },
+      {
+        "round": 1,
+        "solution": "Fix compressMessage to preserve code block structure instead of 50-char stub",
+        "problem": "compressMessage replaces entire code blocks with 50 chars, destroying protected content",
+        "rationale": "For a coding agent use case, code is the most valuable content to preserve",
+        "alternatives": "Keep first+last N lines, or use a hash-based reference",
+        "status": "proposed",
+        "evidence_refs": ["engine.ts:1403-1416"],
+        "next_action": "Redesign code block compression to retain structural information"
+      },
+      {
+        "round": 1,
+        "solution": "Implement summary merge/condense to prevent bloat across cycles",
+        "problem": "Previous summary prepended verbatim, re-extracted, causing monotonic growth",
+        "rationale": "RESEARCH.md:66-71 shows iterative rewrite, not stacking",
+        "alternatives": "Could cap summary size, or use LLM to merge old+new summaries",
+        "status": "proposed",
+        "evidence_refs": ["engine.ts:1131-1134"],
+        "next_action": "Add merge step that condenses prior summary + new extraction"
+      },
+      {
+        "round": 1,
+        "solution": "Complete utils.ts refactoring — make engine.ts import from utils.ts",
+        "problem": "Code duplication: messageContent(), keyword patterns, error detection exist in both files",
+        "rationale": "Divergent copies will drift, creating maintenance burden",
+        "alternatives": "Could also delete utils.ts if the refactoring is abandoned",
+        "status": "proposed",
+        "evidence_refs": ["engine.ts:25-35", "utils.ts:13-23", "engine.ts:42-79", "utils.ts:29-67"],
+        "next_action": "Replace engine.ts duplicates with imports from utils.ts"
+      }
+    ]
+  }
+}
