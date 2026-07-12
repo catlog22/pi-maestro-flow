@@ -42,7 +42,7 @@ function createHarness() {
   };
 }
 
-test("single select uses an above-editor panel without checkboxes and keeps additional details", async () => {
+test("single select uses color-block selection, numeric shortcuts, default none, and skips submit", async () => {
   const harness = createHarness();
   const pending = executeAsk({
     questions: [{
@@ -61,21 +61,18 @@ test("single select uses an above-editor panel without checkboxes and keeps addi
   for (const width of [12, 19, 20, 40, 80]) {
     const lines = harness.component.render(width);
     assert.ok(lines.length <= 10);
-    assert.doesNotMatch(lines.join("\n"), /\[[ x]\]/);
-    if (width >= 20) assert.match(lines.join("\n"), /Add details/);
+    assert.doesNotMatch(lines.join("\n"), /\[[ x]\]|✓/);
+    if (width >= 40) assert.match(lines.join("\n"), /None of the above/);
     for (const line of lines) assert.ok(visibleWidth(line) <= width);
   }
 
-  assert.equal(harness.handler("\r")?.consume, true); // Select Preset.
-  harness.handler("\x1b[B");
-  harness.handler("\x1b[B");
-  harness.handler("\x1b[B");
-  harness.handler("\r"); // Open Add details.
+  assert.equal(harness.handler("1")?.consume, true); // Select Preset directly.
+  assert.match(harness.component.render(80).join("\n"), /Preset  selected/);
+  assert.match(harness.component.render(80).join("\n"), /Add details \(press d to add\)/);
+  harness.handler("d");
   harness.handler("Prefer the nearest region");
   harness.handler("\r"); // Save details without replacing the option.
-  harness.handler("\x1b[A");
-  harness.handler("\r"); // Next.
-  harness.handler("\r"); // Submit.
+  harness.handler("\r"); // Finish without a separate Next row.
 
   const result = await pending;
   assert.deepEqual(result.details.answers[0].selected, ["Preset"]);
@@ -94,8 +91,52 @@ test("multi-select keeps checkbox affordances", async () => {
     }],
   }, harness.ctx);
 
-  assert.match(harness.component?.render(60).join("\n") ?? "", /\[ \]/);
-  harness.handler?.("\x1b");
+  const rendered = harness.component?.render(80).join("\n") ?? "";
+  assert.match(rendered, /\[ \]/);
+  assert.match(rendered, /None of the above/);
+  harness.handler?.("3");
+  harness.handler?.("1");
+  harness.handler?.("\r");
   const result = await pending;
-  assert.equal(result.details.cancelled, true);
+  assert.deepEqual(result.details.answers[0].selected, ["Tests"]);
+});
+
+test("multi-select none option remains exclusive", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [{
+      question: "Choose checks",
+      multiSelect: true,
+      options: [{ label: "Tests" }, { label: "Lint" }],
+    }],
+  }, harness.ctx);
+
+  harness.handler?.("1");
+  harness.handler?.("3");
+  harness.handler?.("\r");
+  const result = await pending;
+  assert.deepEqual(result.details.answers[0].selected, ["None of the above"]);
+});
+
+test("multi-question review includes each full question and final option", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [
+      { question: "First full question?", header: "First", options: [{ label: "A" }, { label: "B" }] },
+      { question: "Second full question?", header: "Second", options: [{ label: "C" }, { label: "D" }] },
+    ],
+  }, harness.ctx);
+
+  harness.handler?.("1");
+  harness.handler?.("\r"); // Next.
+  harness.handler?.("2");
+  harness.handler?.("\r"); // Next.
+  const preview = harness.component?.render(100).join("\n") ?? "";
+  assert.match(preview, /First full question\?.*A/);
+  assert.match(preview, /Second full question\?.*D/);
+  harness.handler?.("\x1bOM");
+
+  const result = await pending;
+  assert.deepEqual(result.details.answers.map((answer) => answer.selected), [["A"], ["D"]]);
+  assert.match(result.content[0].type === "text" ? result.content[0].text : "", /First full question\?/);
 });

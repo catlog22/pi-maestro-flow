@@ -7,6 +7,8 @@ interface QuestionOption {
   description?: string;
 }
 
+const NONE_OPTION_LABEL = "None of the above";
+
 interface QuestionSpec {
   question: string;
   header?: string;
@@ -56,7 +58,14 @@ export async function executeAsk(
   return {
     content: [{
       type: "text",
-      text: `Collected ${answers.length} answer${answers.length === 1 ? "" : "s"}.\n${JSON.stringify({ answers }, null, 2)}`,
+      text: [
+        `Collected ${answers.length} answer${answers.length === 1 ? "" : "s"}.`,
+        ...answers.flatMap((answer, index) => {
+          const finalChoice = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(" — ");
+          return [`${index + 1}. ${answer.question}`, `   ${finalChoice}`];
+        }),
+        JSON.stringify({ answers }, null, 2),
+      ].join("\n"),
     }],
     details: { answers },
   };
@@ -104,6 +113,18 @@ async function showAskWizard(
       let input = "";
       let feedback = "";
 
+      function questionOptions(q: QuestionSpec): QuestionOption[] {
+        const options = q.options ?? [];
+        if (options.length === 0 || options.some((option) => option.label === NONE_OPTION_LABEL)) {
+          return options;
+        }
+        return [...options, { label: NONE_OPTION_LABEL }];
+      }
+
+      function noneOptionIndex(q: QuestionSpec): number {
+        return questionOptions(q).findIndex((option) => option.label === NONE_OPTION_LABEL);
+      }
+
       function questionLabel(index: number): string {
         return questions[index].header?.trim() || `Question ${index + 1}`;
       }
@@ -121,7 +142,7 @@ async function showAskWizard(
         feedback = "";
         if (step < questions.length) {
           const q = currentQuestion();
-          typing = (q.options?.length ?? 0) === 0;
+          typing = questionOptions(q).length === 0;
           input = textValues[step];
         } else {
           typing = false;
@@ -136,6 +157,10 @@ async function showAskWizard(
           tui.requestRender();
           return;
         }
+        if (questions.length === 1) {
+          done(collectAnswers());
+          return;
+        }
         enterStep(step + 1);
       }
 
@@ -143,7 +168,7 @@ async function showAskWizard(
         return questions.map((q, index) => {
           const values = [...selected[index]]
             .sort((a, b) => a - b)
-            .map((optionIndex) => q.options?.[optionIndex]?.label)
+            .map((optionIndex) => questionOptions(q)[optionIndex]?.label)
             .filter((label): label is string => Boolean(label));
           const text = textValues[index].trim();
           return {
@@ -178,13 +203,13 @@ async function showAskWizard(
 
       function renderQuestion(width: number): string[] {
         const q = currentQuestion();
-        const options = q.options ?? [];
+        const options = questionOptions(q);
         const questionLines = wrapTextWithAnsi(theme.bold(q.question), width).slice(0, 2);
         const lines: string[] = [breadcrumb(width), ...questionLines];
         const modeLabel = q.multiSelect
           ? "Multi-select · Space toggles"
-          : options.length > 0
-            ? "Single-select · choose one, then continue"
+            : options.length > 0
+            ? "Single-select · number chooses · details optional"
             : "Free response";
         lines.push(truncateToWidth(theme.fg("dim", modeLabel), width, "…"));
 
@@ -198,44 +223,44 @@ async function showAskWizard(
             const active = cursor === i;
             const checked = selected[step].has(i);
             const marker = active ? theme.fg("success", "›") : " ";
-            const label = checked || active ? theme.fg("success", options[i].label) : options[i].label;
+            const labelText = `${options[i].label}${checked ? "  selected" : ""}`;
+            const coloredLabel = checked || active ? theme.fg("success", labelText) : labelText;
+            const label = checked
+              ? theme.bg("selectedBg", theme.bold(` ${coloredLabel} `))
+              : coloredLabel;
             const selection = q.multiSelect
               ? checked ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]")
-              : checked ? theme.fg("success", "✓") : " ";
+              : "";
             const description = options[i].description
               ? theme.fg("muted", ` · ${options[i].description}`)
               : "";
             choiceRows.push(truncateToWidth(
-              `${marker} ${i + 1}. ${selection} ${label}${description}`,
+              `${marker} ${i + 1}. ${selection}${selection ? " " : ""}${label}${description}`,
               width,
               "…",
             ));
+            if (checked) {
+              const custom = textValues[step]
+                ? `: ${textValues[step]}`
+                : " (press d to add)";
+              choiceRows.push(truncateToWidth(
+                `     ${theme.fg("muted", `Add details${custom}`)}`,
+                width,
+                "…",
+              ));
+            }
           }
 
           let specialIndex = options.length;
           if (q.multiSelect && options.length > 1) {
-            const allSelected = selected[step].size === options.length;
+            const noneIndex = noneOptionIndex(q);
+            const selectableCount = options.length - (noneIndex >= 0 ? 1 : 0);
+            const allSelected = selected[step].size === selectableCount && !selected[step].has(noneIndex);
             const marker = cursor === specialIndex ? theme.fg("success", "›") : " ";
             const check = allSelected ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]");
             choiceRows.push(truncateToWidth(`${marker} ${specialIndex + 1}. ${check} Select all`, width, "…"));
             specialIndex++;
           }
-
-          const nextMarker = cursor === specialIndex ? theme.fg("success", "›") : " ";
-          choiceRows.push(truncateToWidth(
-            `${nextMarker} ${specialIndex + 1}. ${theme.bold("Next ›")}`,
-            width,
-            "…",
-          ));
-          specialIndex++;
-
-          const marker = cursor === specialIndex ? theme.fg("success", "›") : " ";
-          const custom = textValues[step] ? `: ${textValues[step]}` : "";
-          choiceRows.push(truncateToWidth(
-            `${marker} ${specialIndex + 1}. ${theme.bold("Add details")}${theme.fg("muted", custom)}`,
-            width,
-            "…",
-          ));
 
           const reservedRows = lines.length + (feedback ? 2 : 1);
           const choiceBudget = Math.max(1, 10 - reservedRows);
@@ -249,8 +274,8 @@ async function showAskWizard(
           theme.fg("dim", typing
             ? "Enter save · Esc back"
             : q.multiSelect
-              ? "↑↓ move · Space toggle · Enter activate · Esc back"
-              : "↑↓ move · Enter choose/action · Esc back"),
+              ? "↑↓ move · Space toggle · d details · Enter next"
+              : "↑↓/keypad move · 1-9 choose · d details · Enter next"),
           width,
           "…",
         ));
@@ -264,9 +289,9 @@ async function showAskWizard(
         ];
         for (let i = 0; i < questions.length; i++) {
           const answer = collectAnswers()[i];
-          const values = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(", ");
+          const values = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(" — ");
           lines.push(truncateToWidth(
-            `${theme.fg("success", "✓")} ${theme.bold(questionLabel(i))}  ${theme.fg("muted", values)}`,
+            `${theme.bold(`${i + 1}. ${answer.question}`)}  ${theme.fg("muted", values)}`,
             width,
             "…",
           ));
@@ -277,9 +302,9 @@ async function showAskWizard(
       }
 
       function maxCursor(q: QuestionSpec): number {
-        const optionCount = q.options?.length ?? 0;
+        const optionCount = questionOptions(q).length;
         const selectAllRows = q.multiSelect && optionCount > 1 ? 1 : 0;
-        return optionCount + selectAllRows + 1;
+        return optionCount + selectAllRows - 1;
       }
 
       function removeLastCodePoint(value: string): string {
@@ -288,7 +313,7 @@ async function showAskWizard(
 
       function handleTyping(data: string): void {
         const q = currentQuestion();
-        const hasOptions = (q.options?.length ?? 0) > 0;
+        const hasOptions = questionOptions(q).length > 0;
         if (data === "\r" || data === "\n") {
           const value = input.trim();
           if (!value) {
@@ -331,19 +356,18 @@ async function showAskWizard(
 
       function handleChoice(data: string): void {
         const q = currentQuestion();
-        const options = q.options ?? [];
+        const options = questionOptions(q);
+        const noneIndex = noneOptionIndex(q);
         const cursor = cursors[step];
         const allIndex = q.multiSelect && options.length > 1 ? options.length : -1;
-        const nextIndex = options.length + (allIndex >= 0 ? 1 : 0);
-        const textIndex = nextIndex + 1;
 
-        if (data === "\x1b[A" || data === "k") {
+        if (data === "\x1b[A" || data === "\x1bOA" || data === "k") {
           cursors[step] = Math.max(0, cursor - 1);
           feedback = "";
           tui.requestRender();
           return;
         }
-        if (data === "\x1b[B" || data === "j" || data === "\t") {
+        if (data === "\x1b[B" || data === "\x1bOB" || data === "j" || data === "\t") {
           cursors[step] = Math.min(maxCursor(q), cursor + 1);
           feedback = "";
           tui.requestRender();
@@ -354,44 +378,75 @@ async function showAskWizard(
           if (requested <= maxCursor(q)) {
             cursors[step] = requested;
             feedback = "";
+            if (requested < options.length) {
+              if (q.multiSelect) {
+                if (selected[step].has(requested)) {
+                  selected[step].delete(requested);
+                } else if (requested === noneIndex) {
+                  selected[step].clear();
+                  selected[step].add(requested);
+                } else {
+                  selected[step].delete(noneIndex);
+                  selected[step].add(requested);
+                }
+              } else {
+                selected[step].clear();
+                selected[step].add(requested);
+              }
+            }
             tui.requestRender();
           }
+          return;
+        }
+        if (data === "d" && selected[step].size > 0) {
+          typing = true;
+          input = textValues[step];
+          feedback = "";
+          tui.requestRender();
           return;
         }
         if (data !== " " && data !== "\r" && data !== "\n") return;
 
         if (cursor < options.length) {
           if (q.multiSelect) {
-            if (selected[step].has(cursor)) selected[step].delete(cursor);
-            else selected[step].add(cursor);
+            if ((data === "\r" || data === "\n") && selected[step].size > 0) {
+              advance();
+              return;
+            }
+            if (selected[step].has(cursor)) {
+              selected[step].delete(cursor);
+            } else if (cursor === noneIndex) {
+              selected[step].clear();
+              selected[step].add(cursor);
+            } else {
+              selected[step].delete(noneIndex);
+              selected[step].add(cursor);
+            }
             feedback = "";
             tui.requestRender();
           } else {
             selected[step].clear();
             selected[step].add(cursor);
             feedback = "";
-            tui.requestRender();
+            if (data === " ") tui.requestRender();
+            else advance();
           }
           return;
         }
 
         if (cursor === allIndex) {
-          const selectAll = selected[step].size !== options.length;
+          const selectableIndexes = options
+            .map((_, index) => index)
+            .filter((index) => index !== noneIndex);
+          const selectAll = selectableIndexes.some((index) => !selected[step].has(index));
           selected[step].clear();
-          if (selectAll) options.forEach((_, index) => selected[step].add(index));
+          if (selectAll) selectableIndexes.forEach((index) => selected[step].add(index));
           feedback = "";
           tui.requestRender();
           return;
         }
-        if (cursor === nextIndex) {
+        if ((data === "\r" || data === "\n") && selected[step].size > 0) {
           advance();
-          return;
-        }
-        if (cursor === textIndex) {
-          typing = true;
-          input = textValues[step];
-          feedback = "";
-          tui.requestRender();
         }
       }
 
@@ -406,20 +461,20 @@ async function showAskWizard(
 
         handleInput(data: string): void {
           if (step === questions.length) {
-            if (data === "\r" || data === "\n") done(collectAnswers());
-            else if (data === "\x1b" || data === "h" || data === "\x1b[D") enterStep(step - 1);
+            if (data === "\r" || data === "\n" || data === "\x1bOM") done(collectAnswers());
+            else if (data === "\x1b" || data === "h" || data === "\x1b[D" || data === "\x1bOD") enterStep(step - 1);
             return;
           }
           if (typing) {
             handleTyping(data);
             return;
           }
-          if (data === "\x1b" || data === "h" || data === "\x1b[D") {
+          if (data === "\x1b" || data === "h" || data === "\x1b[D" || data === "\x1bOD") {
             if (step > 0) enterStep(step - 1);
             else done(undefined);
             return;
           }
-          handleChoice(data);
+          handleChoice(data === "\x1bOM" ? "\r" : data);
         },
 
         invalidate() {},
