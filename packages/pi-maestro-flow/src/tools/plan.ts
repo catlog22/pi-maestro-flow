@@ -30,7 +30,10 @@ interface PlanReviewOutcome {
   approved: boolean;
   exited: boolean;
   executionMode?: PlanExecutionMode;
+  executionMessage?: string;
 }
+
+type PlanHandoffDelivery = "message" | "tool-result";
 
 export interface PlanToolDetails {
   action: "enter" | "update" | "review" | "confirm" | "exit" | "status";
@@ -317,7 +320,11 @@ async function savePlan(ctx: PlanContext, markdown: string, expectedRevision = l
   return saved;
 }
 
-async function reviewPlan(ctx: PlanContext, allowConfirm: boolean): Promise<PlanReviewOutcome> {
+async function reviewPlan(
+  ctx: PlanContext,
+  allowConfirm: boolean,
+  handoffDelivery: PlanHandoffDelivery = "message",
+): Promise<PlanReviewOutcome> {
   if (!ctx.hasUI) {
     ctx.ui.notify("Plan review requires an interactive UI.", "warning");
     return { approved: false, exited: false };
@@ -356,8 +363,14 @@ async function reviewPlan(ctx: PlanContext, allowConfirm: boolean): Promise<Plan
     }
 
     const executionMode = executionModeFor(action);
-    await startImplementation(ctx, markdown, store.currentPath, executionMode);
-    return { approved: true, exited: true, executionMode };
+    const executionMessage = await startImplementation(
+      ctx,
+      markdown,
+      store.currentPath,
+      executionMode,
+      handoffDelivery,
+    );
+    return { approved: true, exited: true, executionMode, executionMessage };
   }
 }
 
@@ -386,7 +399,8 @@ async function startImplementation(
   markdown: string,
   planPath: string,
   executionMode: PlanExecutionMode,
-): Promise<void> {
+  handoffDelivery: PlanHandoffDelivery,
+): Promise<string | undefined> {
   exitPlanMode(ctx);
   latestPlan = markdown;
   latestStatus = "approved";
@@ -448,6 +462,7 @@ async function startImplementation(
     return;
   }
 
+  if (handoffDelivery === "tool-result") return executionMessage;
   sendImplementationMessage(ctx, executionMessage);
 }
 
@@ -545,12 +560,15 @@ export function registerPlanTools(pi: ExtensionAPI): void {
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const blocked = requirePlanMode("confirm");
       if (blocked) return blocked;
-      const outcome = await reviewPlan(ctx, true);
-      const text = outcome.approved
+      const outcome = await reviewPlan(ctx, true, "tool-result");
+      const summary = outcome.approved
         ? `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context).`
         : outcome.exited
           ? "Plan confirmation cancelled; Act mode restored and draft preserved."
           : "Plan not approved; Plan mode remains active.";
+      const text = outcome.executionMessage
+        ? `${summary}\n\n${outcome.executionMessage}`
+        : summary;
       return result(text, {
         ...currentDetails("confirm"),
         approved: outcome.approved,

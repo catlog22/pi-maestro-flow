@@ -187,6 +187,7 @@ test("Plan lifecycle dynamically activates safe tools and restores the exact Act
 test("Plan confirmation archives the exact draft before restoring Act and injecting work", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-"));
   const harness = createHarness(root, true);
+  harness.ctx.isIdle = () => false;
   try {
     await onSessionStartPlan(harness.ctx);
     const actSnapshot = [...harness.active];
@@ -197,11 +198,13 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.equal(getMode(), "act");
     assert.equal(harness.statuses.at(-1), "ACT");
     assert.deepEqual(harness.active, actSnapshot);
-    assert.doesNotMatch(harness.messages.at(-1) ?? "", /# Approved/);
-    assert.match(harness.messages.at(-1) ?? "", /already in the current context/);
-    assert.match(harness.messages.at(-1) ?? "", /Todo dependency graph/);
-    assert.match(harness.messages.at(-1) ?? "", /one active Goal/);
-    assert.match(harness.messages.at(-1) ?? "", /locked boundaries and acceptance checks/);
+    assert.equal(harness.messages.length, 0);
+    const toolText = confirmed.content[0]?.text ?? "";
+    assert.doesNotMatch(toolText, /# Approved/);
+    assert.match(toolText, /already in the current context/);
+    assert.match(toolText, /Todo dependency graph/);
+    assert.match(toolText, /one active Goal/);
+    assert.match(toolText, /locked boundaries and acceptance checks/);
 
     const store = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
@@ -231,6 +234,7 @@ test("Plan confirmation compacts with an explicit approved-Plan link before exec
     assert.match(harness.compactions[0].customInstructions ?? "", /# Compact Plan/);
     assert.match(harness.compactions[0].customInstructions ?? "", /current\.md/);
     await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(harness.messages.length, 1);
     assert.doesNotMatch(harness.messages.at(-1) ?? "", /# Compact Plan/);
     assert.match(harness.messages.at(-1) ?? "", /already in the current context/);
   } finally {
@@ -249,6 +253,7 @@ test("Plan confirmation can execute in a new session from command-capable contex
     const confirmed = await execute(harness, "plan-confirm");
     assert.equal(confirmed.details.approved, true);
     assert.equal(harness.newSessions, 1);
+    assert.equal(harness.messages.length, 1);
     assert.match(harness.messages.at(-1) ?? "", /# Clean Context Plan/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
