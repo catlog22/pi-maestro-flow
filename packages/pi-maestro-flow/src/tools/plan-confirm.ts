@@ -91,8 +91,6 @@ export async function openPlanConfirmation(
           const range = renderedPlan.length > previewHeight
             ? `${previewOffset + 1}-${Math.min(renderedPlan.length, previewOffset + previewHeight)}/${renderedPlan.length}`
             : `${renderedPlan.length}`;
-          const label = selectedItem.enabled ? selectedItem.label : `${selectedItem.label} (unavailable)`;
-          const action = `${selected + 1}/${items.length}  ${label}  ${theme.fg("dim", `— ${selectedItem.description}`)}`;
           const footer = status || "↑↓ action · Enter choose · Ctrl+Enter execute · PgUp/PgDn plan · Esc close";
           const rows = [
             `${theme.bold("Plan confirmation")}  ${theme.fg("dim", options.pathLabel ?? "current.md")}`,
@@ -102,7 +100,16 @@ export async function openPlanConfirmation(
           while (rows.length < previewHeight + 2) rows.push("");
           rows.push(theme.fg("dim", `Plan ${range}`));
           rows.push(theme.fg("dim", "─".repeat(innerWidth)));
-          rows.push(theme.fg(selectedItem.enabled ? "accent" : "warning", theme.bold(`› ${action}`)));
+          for (let index = 0; index < items.length; index++) {
+            const item = items[index];
+            const marker = index === selected ? "›" : " ";
+            const label = item.enabled ? item.label : `${item.label} (unavailable)`;
+            const description = innerWidth >= 68 ? `  ${theme.fg("dim", `— ${item.description}`)}` : "";
+            const line = `${marker} ${index + 1}. ${label}${description}`;
+            rows.push(index === selected
+              ? theme.fg(item.enabled ? "accent" : "warning", theme.bold(line))
+              : theme.fg(item.enabled ? "text" : "dim", line));
+          }
           rows.push(theme.fg(status ? "warning" : "dim", footer));
           return renderFrame(rows, safeWidth, theme);
         },

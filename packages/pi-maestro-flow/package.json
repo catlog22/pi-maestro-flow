@@ -31,11 +31,16 @@
     "scripts/",
     "schemas/",
     "templates/",
+    ".pi/skills/",
+    "AGENTS.md",
     "README.md"
   ],
   "pi": {
     "extensions": [
       "./src/extension/index.ts"
+    ],
+    "skills": [
+      "./.pi/skills"
     ]
   },
   "dependencies": {

@@ -1,30 +1,43 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 
 const require = createRequire(import.meta.url);
 
-function resolveInstalledPackageJson(): string | undefined {
+function resolveOwnPackageJson(): string | undefined {
   try {
-    return require.resolve("maestro-flow/package.json");
+    return require.resolve("../../package.json");
   } catch {
     return undefined;
   }
 }
 
-export function resolveMaestroPackageSkillPath(
-  packageJsonPath = resolveInstalledPackageJson(),
+export function resolveBundledAgentsPath(
+  packageJsonPath = resolveOwnPackageJson(),
 ): string | undefined {
   if (!packageJsonPath) return undefined;
 
-  const skillPath = join(dirname(packageJsonPath), ".agents", "skills");
-  return existsSync(skillPath) ? skillPath : undefined;
+  const agentsPath = join(dirname(packageJsonPath), "AGENTS.md");
+  return existsSync(agentsPath) ? agentsPath : undefined;
+}
+
+export function loadBundledAgentsInstructions(
+  agentsPath = resolveBundledAgentsPath(),
+): string | undefined {
+  if (!agentsPath) return undefined;
+
+  const content = readFileSync(agentsPath, "utf8").trim();
+  return content || undefined;
 }
 
 export function registerMaestroPackageResources(pi: ExtensionAPI): void {
-  pi.on("resources_discover", () => {
-    const skillPath = resolveMaestroPackageSkillPath();
-    return skillPath ? { skillPaths: [skillPath] } : undefined;
-  });
+  const agentsPath = resolveBundledAgentsPath();
+  const agentsInstructions = loadBundledAgentsInstructions(agentsPath);
+
+  if (agentsPath && agentsInstructions) {
+    pi.on("before_agent_start", (event) => ({
+      systemPrompt: `${event.systemPrompt}\n\n<project_instructions path="${agentsPath}">\n${agentsInstructions}\n</project_instructions>`,
+    }));
+  }
 }

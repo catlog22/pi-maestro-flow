@@ -11,7 +11,7 @@ Follow this routing order:
 3. `teammate` — replace legacy delegate work for deep analysis, planning, implementation, review, and testing.
 4. Local `rg` / targeted reads — verify single-hit explorer results or act as fallback when teammate exploration is unavailable.
 
-Do not call `maestro delegate` or `maestro explore`. Do not use the `maestro` tool as a second agent-dispatch surface when `teammate` can express the task directly.
+Use `teammate` for all delegated work.
 
 ## Teammate
 

@@ -143,18 +143,25 @@ so the normal Todo loader can re-inject the canonical skill after compaction.
 
 ## Project skills and teammate agents
 
-The npm package does not declare a duplicate package-level routing skill. Project
-skills under `.pi/skills/` are the primary Pi skill source; in this repository the
-canonical set lives at `D:\pi-maestro-flow\.pi\skills`. Install the package through
-`pi install npm:pi-maestro-flow` (or register a local package path) for the extension,
-workflow documents, templates, and associated runtime resources.
+The npm package declares its canonical skill set through `pi.skills`, pointing to
+the bundled `.pi/skills/` directory. In this repository the source set lives under
+`packages/pi-maestro-flow/.pi/skills`, while the root `.pi/settings.json` references
+that same directory for local development. Install the package through
+`pi install npm:pi-maestro-flow` (or register a local package path) and Pi discovers
+the bundled skills through its standard package resource loader.
+
+The package also publishes its Pi-only `AGENTS.md`. The extension reads that bundled
+file from the installed package and appends it to Pi's system prompt through the
+`before_agent_start` event. This keeps the instructions available after npm installation
+without requiring a repository-root `AGENTS.md`, which other coding agents may discover.
 
 `pi-maestro-flow` also pins `maestro-flow@0.5.49` as an associated runtime package.
 During postinstall it calls Maestro's workflows-only installer, which writes the canonical
 workflow documents to `~/.maestro/workflows`. Pi project skills continue to reference that
 default path. Releases predating the dedicated command use the same package workflows as a
-compatibility fallback. On session startup, the extension also contributes the installed
-package's `.agents/skills` directory through Pi's `resources_discover` event.
+compatibility fallback. The extension does not register the installed `maestro-flow`
+package's `.agents/skills` directory, so compatibility mirrors cannot compete with the
+plugin's canonical `.pi/skills` resources.
 
 Agent definitions are not a native Pi package resource type and must not be declared
 as `pi.agents`. They are owned by `pi-maestro-teammate`, which discovers Markdown

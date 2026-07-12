@@ -96,8 +96,11 @@ test("Plan confirmation renders Markdown and selects compact execution", async (
     if (width >= 40) {
       assert.match(lines[0], /╭/);
       assert.match(lines.at(-1) ?? "", /╰/);
-      assert.match(lines.join("\n"), /1\/5\s+Execute/);
-      assert.doesNotMatch(lines.join("\n"), /Modify Plan/);
+      assert.match(lines.join("\n"), /1\. Execute/);
+      assert.match(lines.join("\n"), /2\. Execute in new session/);
+      assert.match(lines.join("\n"), /3\. Compact then execute/);
+      assert.match(lines.join("\n"), /4\. Modify Plan/);
+      assert.match(lines.join("\n"), /5\. Exit Plan mode/);
       assert.ok(lines.length <= 28);
     }
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
