@@ -429,6 +429,40 @@ test("agent conversation expands in overlay and sends composed messages", async 
   }
 });
 
+test("agent overlay renders compact horizontal tabs and switches with left/right", () => {
+  const now = Date.now();
+  const first = {
+    agent: "scout", name: "api", correlationId: "aaaaaaaa-api", startedAt: now,
+    abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
+    status: "running" as const, sleepMs: 0,
+  };
+  const second = {
+    agent: "builder", name: "ui", correlationId: "bbbbbbbb-ui", startedAt: now,
+    abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
+    status: "sleeping" as const, sleepMs: 0,
+  };
+  const activeRuns = new Map([[first.correlationId, first], [second.correlationId, second]]);
+  const overlay = new AttachOverlay(first, () => {}, () => activeRuns);
+  try {
+    const initial = overlay.render(100, 16).join("\n");
+    assert.match(initial, /Agents 1\/2/);
+    assert.match(initial, /@api/);
+    assert.match(initial, /@ui/);
+
+    overlay.handleInput("\x1b[C");
+    const next = overlay.render(100, 16).join("\n");
+    assert.match(next, /Agents 2\/2/);
+    assert.match(next, /builder/);
+    assert.match(next, /@ui/);
+    assert.match(next, /Sleeping/);
+
+    overlay.handleInput("\x1b[D");
+    assert.match(overlay.render(100, 16).join("\n"), /Agents 1\/2/);
+  } finally {
+    overlay.dispose();
+  }
+});
+
 test("persistent agent widget renders a bounded below-editor style status list", () => {
   const now = Date.now();
   const active = {
@@ -642,9 +676,9 @@ test("background completion renderer stays compact but expands to the full resul
   assert.equal(message.content, content);
 });
 
-test("Alt+R queues the session command safely while the main agent is streaming", async () => {
+test("Alt+R opens the native agent view without injecting a slash command", async () => {
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
-  let shortcut: ((ctx: unknown) => void) | undefined;
+  let shortcut: ((ctx: unknown) => Promise<void>) | undefined;
   const sentMessages: Array<{ message: string; options?: { deliverAs?: string } }> = [];
   const notifications: Array<{ message: string; level: string }> = [];
   const pi = new Proxy({
@@ -652,7 +686,7 @@ test("Alt+R queues the session command safely while the main agent is streaming"
     registerCommand(name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) {
       commands.set(name, command);
     },
-    registerShortcut(key: string, entry: { handler: (ctx: unknown) => void }) {
+    registerShortcut(key: string, entry: { handler: (ctx: unknown) => Promise<void> }) {
       if (key === "alt+r") shortcut = entry.handler;
     },
     sendUserMessage(message: string, options?: { deliverAs?: string }) {
@@ -668,17 +702,13 @@ test("Alt+R queues the session command safely while the main agent is streaming"
   registerTeammateExtension(pi as unknown as ExtensionAPI);
   assert.ok(commands.has("teammate-session"));
   assert.ok(shortcut);
-  shortcut({
-    isIdle: () => false,
+  await shortcut({
     ui: {
       notify(message: string, level: string) {
         notifications.push({ message, level });
       },
     },
   });
-  assert.deepEqual(sentMessages, [{ message: "/teammate-session", options: { deliverAs: "followUp" } }]);
-  assert.deepEqual(notifications, [{ message: "Session switch queued after the current loop.", level: "info" }]);
-
-  shortcut({ isIdle: () => true, ui: { notify() {} } });
-  assert.deepEqual(sentMessages[1], { message: "/teammate-session", options: undefined });
+  assert.deepEqual(sentMessages, []);
+  assert.deepEqual(notifications, [{ message: "No active agents.", level: "warning" }]);
 });
