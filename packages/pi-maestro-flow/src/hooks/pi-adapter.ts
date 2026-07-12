@@ -24,6 +24,8 @@ import {
 } from "./trust.ts";
 
 const STATUS_KEY = "maestro-hooks";
+const MAX_HOOK_COMMAND_LENGTH = 800;
+const MAX_HOOK_OUTPUT_LENGTH = 3000;
 const UNSUPPORTED_PI_EVENTS: CodexHookEvent[] = [
   "PermissionRequest",
   "SubagentStart",
@@ -106,6 +108,7 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
         ctx.ui.notify(`${eventName} Hook 输出不兼容：${protocolErrors[0]}`, "warning");
       }
       for (const output of outputs) notifySystemMessage(output, ctx);
+      for (const output of outputs) sendHookOutputMessage(pi, eventName, output);
       return outputs;
     } finally {
       if (status) ctx.ui.setStatus(STATUS_KEY, undefined);
@@ -377,6 +380,41 @@ function hookSpecific(output: ParsedHookOutput): Record<string, unknown> | undef
 function notifySystemMessage(output: ParsedHookOutput, ctx: ExtensionContext): void {
   const message = output.json && stringField(output.json, "systemMessage");
   if (message) ctx.ui.notify(message, "warning");
+}
+
+function sendHookOutputMessage(
+  pi: ExtensionAPI,
+  eventName: CodexHookEvent,
+  output: ParsedHookOutput,
+): void {
+  const command = process.platform === "win32" && output.handler.commandWindows
+    ? output.handler.commandWindows
+    : output.handler.command;
+  pi.sendMessage({
+    customType: "codex-hook-output",
+    content: [
+      `Codex Hook: ${eventName}`,
+      `Command: ${truncateHookText(command, MAX_HOOK_COMMAND_LENGTH)}`,
+      `Output:\n${truncateHookText(hookOutputText(output), MAX_HOOK_OUTPUT_LENGTH)}`,
+    ].join("\n"),
+    display: true,
+    details: { event: eventName, command },
+  }, { triggerTurn: false });
+}
+
+function hookOutputText(output: ParsedHookOutput): string {
+  if (output.plainText?.trim()) return output.plainText.trim();
+  if (output.json) return JSON.stringify(output.json, null, 2);
+  if (output.stdout.trim()) return output.stdout.trim();
+  if (output.stderr.trim()) return output.stderr.trim();
+  if (output.error) return output.error;
+  return `exit ${output.exitCode ?? "unknown"}`;
+}
+
+function truncateHookText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  const suffix = "\n… [truncated]";
+  return `${value.slice(0, maxLength - suffix.length)}${suffix}`;
 }
 
 function outputCompatibilityError(

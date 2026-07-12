@@ -183,9 +183,13 @@ test("Pi adapter maps PreToolUse deny output to tool_call blocking", async () =>
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
     registerCommand() {},
+    sendMessage(message: unknown, options: unknown) {
+      sentMessages.push({ message, options });
+    },
     sendUserMessage() {},
   } as unknown as ExtensionAPI;
   const notifications: string[] = [];
+  const sentMessages: Array<{ message: unknown; options: unknown }> = [];
   const ctx = {
     cwd: root,
     model: { id: "test-model" },
@@ -214,6 +218,14 @@ test("Pi adapter maps PreToolUse deny output to tool_call blocking", async () =>
     assert.equal(result.block, true);
     assert.equal(result.reason, "blocked by policy");
     assert.deepEqual(notifications, []);
+    assert.equal(sentMessages.length, 1);
+    assert.deepEqual(sentMessages[0].options, { triggerTurn: false });
+    assert.deepEqual(sentMessages[0].message, {
+      customType: "codex-hook-output",
+      content: `Codex Hook: PreToolUse\nCommand: ${command}\nOutput:\nblocked by policy`,
+      display: true,
+      details: { event: "PreToolUse", command },
+    });
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -250,6 +262,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({
       handlers.set(name, [...(handlers.get(name) ?? []), handler]);
     },
     registerCommand() {},
+    sendMessage() {},
     sendUserMessage() {},
   } as unknown as ExtensionAPI;
   const ctx = {
@@ -288,6 +301,83 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({
       display: false,
       details: { source: "hooks" },
     });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi adapter sends a visible bounded message for every executed command hook", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-visible-output-"));
+  const configDir = join(root, ".pi");
+  const trustPath = join(root, "user", "hook-trust.json");
+  const firstScript = join(root, "first.cjs");
+  const secondScript = join(root, "second.cjs");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(firstScript, "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write('first output:' + 'x'.repeat(5000)));");
+  await writeFile(secondScript, "process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify({result: 'second output'})));");
+  const firstCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(firstScript)}`;
+  const secondCommand = `${JSON.stringify(process.execPath)} ${JSON.stringify(secondScript)}`;
+  await writeFile(join(configDir, "hooks.json"), JSON.stringify({
+    hooks: {
+      UserPromptSubmit: [{ hooks: [
+        { type: "command", command: firstCommand, timeout: 5 },
+        { type: "command", command: secondCommand, timeout: 5 },
+      ] }],
+    },
+  }));
+  const loaded = await loadCodexHooks(root);
+  await trustHookConfig(trustPath, loaded.filePath, loaded.hash ?? "");
+
+  type Handler = (event: any, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  const handlers = new Map<string, Handler[]>();
+  const sentMessages: Array<{
+    message: { customType?: string; content?: string; display?: boolean; details?: unknown };
+    options?: { triggerTurn?: boolean };
+  }> = [];
+  const fakePi = {
+    on(name: string, handler: Handler) {
+      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+    },
+    registerCommand() {},
+    sendMessage(message: typeof sentMessages[number]["message"], options?: typeof sentMessages[number]["options"]) {
+      sentMessages.push({ message, options });
+    },
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd: root,
+    model: { id: "test-model" },
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getSessionFile: () => undefined,
+    },
+    ui: {
+      notify() {},
+      setStatus() {},
+    },
+  } as unknown as ExtensionContext;
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+
+  try {
+    for (const handler of handlers.get("session_start") ?? []) {
+      await handler({ type: "session_start", reason: "startup" }, ctx);
+    }
+    const [inputHandler] = handlers.get("input") ?? [];
+    await inputHandler({ source: "user", text: "continue" }, ctx);
+
+    assert.equal(sentMessages.length, 2);
+    for (const entry of sentMessages) {
+      assert.equal(entry.message.customType, "codex-hook-output");
+      assert.equal(entry.message.display, true);
+      assert.deepEqual(entry.options, { triggerTurn: false });
+      assert.match(entry.message.content ?? "", /^Codex Hook: UserPromptSubmit\nCommand: /);
+      assert.ok((entry.message.content ?? "").length <= 4000);
+    }
+    assert.match(sentMessages[0].message.content ?? "", new RegExp(firstCommand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(sentMessages[0].message.content ?? "", /first output:/);
+    assert.match(sentMessages[0].message.content ?? "", /\[truncated\]$/);
+    assert.match(sentMessages[1].message.content ?? "", new RegExp(secondCommand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+    assert.match(sentMessages[1].message.content ?? "", /"result": "second output"/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
