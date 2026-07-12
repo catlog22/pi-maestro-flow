@@ -612,21 +612,21 @@ test("background completion renderer stays compact but expands to the full resul
   assert.equal(message.content, content);
 });
 
-test("Alt+R directly uses its command context without injecting a user message", async () => {
+test("Alt+R queues the session command safely while the main agent is streaming", async () => {
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
-  let shortcut: ((ctx: unknown) => Promise<void>) | undefined;
-  const sentMessages: string[] = [];
+  let shortcut: ((ctx: unknown) => void) | undefined;
+  const sentMessages: Array<{ message: string; options?: { deliverAs?: string } }> = [];
   const notifications: Array<{ message: string; level: string }> = [];
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
     registerCommand(name: string, command: { handler: (args: string, ctx: unknown) => Promise<void> }) {
       commands.set(name, command);
     },
-    registerShortcut(key: string, entry: { handler: (ctx: unknown) => Promise<void> }) {
+    registerShortcut(key: string, entry: { handler: (ctx: unknown) => void }) {
       if (key === "alt+r") shortcut = entry.handler;
     },
-    sendUserMessage(message: string) {
-      sentMessages.push(message);
+    sendUserMessage(message: string, options?: { deliverAs?: string }) {
+      sentMessages.push({ message, options });
     },
   }, {
     get(target, property) {
@@ -638,14 +638,17 @@ test("Alt+R directly uses its command context without injecting a user message",
   registerTeammateExtension(pi as unknown as ExtensionAPI);
   assert.ok(commands.has("teammate-session"));
   assert.ok(shortcut);
-  await shortcut({
-    sessionManager: { getSessionFile: () => "main-session.jsonl" },
+  shortcut({
+    isIdle: () => false,
     ui: {
       notify(message: string, level: string) {
         notifications.push({ message, level });
       },
     },
   });
-  assert.deepEqual(sentMessages, []);
-  assert.deepEqual(notifications, [{ message: "No attachable teammate sessions.", level: "warning" }]);
+  assert.deepEqual(sentMessages, [{ message: "/teammate-session", options: { deliverAs: "followUp" } }]);
+  assert.deepEqual(notifications, [{ message: "Session switch queued after the current loop.", level: "info" }]);
+
+  shortcut({ isIdle: () => true, ui: { notify() {} } });
+  assert.deepEqual(sentMessages[1], { message: "/teammate-session", options: undefined });
 });

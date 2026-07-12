@@ -1705,8 +1705,13 @@ Modes:
 
   pi.registerShortcut("alt+r", {
     description: "Switch the main conversation to a teammate session",
-    async handler(ctx) {
-      await handleTeammateSession(ctx);
+    handler(ctx) {
+      if (ctx.isIdle()) {
+        pi.sendUserMessage("/teammate-session");
+      } else {
+        pi.sendUserMessage("/teammate-session", { deliverAs: "followUp" });
+        ctx.ui.notify("Session switch queued after the current loop.", "info");
+      }
     },
   });
 
