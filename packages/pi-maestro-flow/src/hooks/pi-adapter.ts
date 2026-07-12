@@ -30,7 +30,7 @@ const UNSUPPORTED_PI_EVENTS: CodexHookEvent[] = [
   "SubagentStop",
 ];
 
-type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
+export type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
 
 interface AdapterOptions {
   getPermissionMode?: () => PermissionMode;

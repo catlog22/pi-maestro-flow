@@ -734,6 +734,7 @@ test("background completion renderer stays compact but expands to the full resul
 test("Alt+R opens the native agent view without injecting a slash command", async () => {
   const commands = new Map<string, { handler: (args: string, ctx: unknown) => Promise<void> }>();
   let shortcut: ((ctx: unknown) => Promise<void>) | undefined;
+  let modelShortcut: ((ctx: unknown) => Promise<void>) | undefined;
   const sentMessages: Array<{ message: string; options?: { deliverAs?: string } }> = [];
   const notifications: Array<{ message: string; level: string }> = [];
   const pi = new Proxy({
@@ -743,6 +744,7 @@ test("Alt+R opens the native agent view without injecting a slash command", asyn
     },
     registerShortcut(key: string, entry: { handler: (ctx: unknown) => Promise<void> }) {
       if (key === "alt+r") shortcut = entry.handler;
+      if (key === "alt+m") modelShortcut = entry.handler;
     },
     sendUserMessage(message: string, options?: { deliverAs?: string }) {
       sentMessages.push({ message, options });
@@ -756,7 +758,9 @@ test("Alt+R opens the native agent view without injecting a slash command", asyn
 
   registerTeammateExtension(pi as unknown as ExtensionAPI);
   assert.ok(commands.has("teammate-session"));
+  assert.ok(commands.has("teammate-models"));
   assert.ok(shortcut);
+  assert.ok(modelShortcut);
   await shortcut({
     ui: {
       notify(message: string, level: string) {

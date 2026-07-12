@@ -1,9 +1,12 @@
 {
   "name": "pi-maestro-flow",
   "version": "0.4.1",
-  "description": "Pi extension for Maestro workflow orchestration — explore, delegate, MOA tools",
+  "description": "Pi extension for Maestro knowledge and workflow orchestration with teammate dispatch",
   "type": "module",
   "scripts": {
+    "postinstall": "node scripts/configure-keybindings.mjs && node scripts/install-workflows.mjs",
+    "test:install": "node --test test/configure-keybindings.test.mjs test/install-workflows.test.mjs",
+    "test:package": "node --experimental-transform-types --test test/package-resources.test.mjs test/package-resources-runtime.test.ts",
     "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/todo.test.ts",
     "test:compaction": "node --experimental-transform-types --test test/compaction.test.ts",
     "test:hooks": "node --experimental-transform-types --test test/hooks.test.ts",
@@ -25,8 +28,8 @@
   ],
   "files": [
     "src/**/*.ts",
+    "scripts/",
     "schemas/",
-    "workflows/",
     "templates/",
     "README.md"
   ],
@@ -37,6 +40,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-tui": "0.74.0",
+    "maestro-flow": "0.5.49",
     "typebox": "1.1.24"
   },
   "peerDependencies": {
@@ -69,9 +73,7 @@
     "minVersion": "1.0.0",
     "features": [
       "search",
-      "load",
-      "delegate",
-      "explore"
+      "load"
     ],
     "installUrl": "https://github.com/catlog22/maestro2"
   }

@@ -2,7 +2,7 @@
  * TypeBox schemas for all maestro tools.
  *
  * Main tool: maestro (action: explore | delegate | moa)
- * Auxiliary tools: maestro-wait, maestro-status, goal, ask-user-question, todo
+ * Auxiliary tools: goal, ask-user-question, todo
  */
 
 import { Type } from "typebox";
@@ -87,46 +87,11 @@ export const MaestroParams = Type.Object({
       description: "Working directory for the operation",
     }),
   ),
-  async: Type.Optional(
-    Type.Boolean({
-      description: "Run in background (default: false)",
-    }),
-  ),
   timeoutMs: Type.Optional(
     Type.Integer({
       minimum: 1,
       description: "Timeout in milliseconds",
     }),
-  ),
-});
-
-export const MaestroWaitParams = Type.Object({
-  id: Type.Optional(
-    Type.String({
-      description: "Specific run ID to wait for (omit to wait for any)",
-    }),
-  ),
-  all: Type.Optional(
-    Type.Boolean({
-      description: "Wait for all active runs (default: wait for first)",
-    }),
-  ),
-  timeoutMs: Type.Optional(
-    Type.Integer({
-      minimum: 1,
-      description: "Timeout in milliseconds (default: 1800000 / 30 min)",
-    }),
-  ),
-});
-
-export const MaestroStatusParams = Type.Object({
-  id: Type.Optional(
-    Type.String({
-      description: "Specific run ID to inspect",
-    }),
-  ),
-  view: Type.Optional(
-    StringEnum(["fleet", "transcript"]),
   ),
 });
 
@@ -187,11 +152,12 @@ export const AskUserQuestionParams = Type.Object({
 
 // === Todo Tool Schema ===
 
-const TodoSkillSchema = Type.Object({
+const TodoSkillBindingSchema = Type.Object({
   name: Type.String({
     minLength: 1,
     description: "Pi skill name resolved by the native skill loader during next",
   }),
+  role: StringEnum(["primary", "guard", "support"]),
   args: Type.Optional(
     Type.String({ description: "Task-level skill arguments; override matching skill-config defaults" }),
   ),
@@ -229,9 +195,9 @@ export const TodoToolParams = Type.Object({
   context: Type.Optional(
     Type.String({ description: "Plain-text execution context. On update, an empty string clears the stored context" }),
   ),
-  skill: Type.Optional(
-    Type.Union([TodoSkillSchema, Type.Null()], {
-      description: "Optional Pi skill configuration. On update, null clears the stored skill",
+  skills: Type.Optional(
+    Type.Union([Type.Array(TodoSkillBindingSchema), Type.Null()], {
+      description: "Ordered Pi skill bindings. On update, an empty array or null clears the stored skills",
     }),
   ),
   summary: Type.Optional(

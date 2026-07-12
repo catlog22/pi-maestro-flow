@@ -8,17 +8,29 @@
 
 import type {
   ExtensionAPI,
+  ExtensionCommandContext,
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
 import { PlanStore, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
 
 type Mode = "act" | "plan";
-export type PlanContext = Pick<ExtensionContext, "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager">;
+type PlanExecutionMode = "current" | "clear" | "compact";
+export type PlanContext = Pick<
+  ExtensionContext,
+  "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager" | "compact"
+> & Partial<Pick<ExtensionCommandContext, "newSession">>;
+
+interface PlanReviewOutcome {
+  approved: boolean;
+  exited: boolean;
+  executionMode?: PlanExecutionMode;
+}
 
 export interface PlanToolDetails {
   action: "enter" | "update" | "review" | "confirm" | "exit" | "status";
@@ -55,7 +67,7 @@ const BLOCKED_BUILTIN_TOOLS = new Set([
 ]);
 
 const PLAN_ALLOWED_TOOLS = new Set([
-  "maestro", "maestro-wait", "maestro-status", "ask-user-question", "todo",
+  "maestro", "ask-user-question", "todo",
   "teammate-list", "teammate-watch", "goal", "Read", "Grep", "Glob",
   "read", "grep", "glob", "bash", "Bash", "powershell", "PowerShell",
   "LSP", "WebSearch", "WebFetch", ...PLAN_MODE_TOOL_NAMES,
@@ -208,8 +220,8 @@ export async function toggleMode(ctx: PlanContext): Promise<Mode> {
     return mode;
   }
   if (hasPlan() && ctx.hasUI !== false) {
-    const approved = await reviewPlan(ctx, true);
-    if (!approved) ctx.ui.notify("Staying in Plan mode", "info");
+    const outcome = await reviewPlan(ctx, true);
+    if (!outcome.approved && !outcome.exited) ctx.ui.notify("Staying in Plan mode", "info");
     return mode;
   }
   exitPlanMode(ctx);
@@ -305,51 +317,143 @@ async function savePlan(ctx: PlanContext, markdown: string, expectedRevision = l
   return saved;
 }
 
-async function reviewPlan(ctx: PlanContext, allowConfirm: boolean): Promise<boolean> {
+async function reviewPlan(ctx: PlanContext, allowConfirm: boolean): Promise<PlanReviewOutcome> {
   if (!ctx.hasUI) {
     ctx.ui.notify("Plan review requires an interactive UI.", "warning");
-    return false;
+    return { approved: false, exited: false };
   }
   const store = await ensureStore(ctx);
   if (mode !== "plan") await enterPlanMode(ctx);
-  const result = await openPlanEditor(ctx, {
+  if (!allowConfirm) {
+    await editPlan(ctx, store.currentPath);
+    return { approved: false, exited: false };
+  }
+
+  while (true) {
+    const action = await openPlanConfirmation(ctx, {
+      markdown: latestPlan ?? "",
+      pathLabel: store.currentPath,
+      canClearContext: typeof ctx.newSession === "function",
+    });
+    if (action === "modify") {
+      await editPlan(ctx, store.currentPath);
+      continue;
+    }
+    if (action === "cancel") {
+      exitPlanMode(ctx);
+      ctx.ui.notify("Act mode · Plan draft preserved without approval", "info");
+      return { approved: false, exited: true };
+    }
+
+    const markdown = latestPlan ?? "";
+    try {
+      const approved = await store.approve(markdown, latestRevision);
+      applyLoadedPlan(approved);
+    } catch (error) {
+      applyLoadedPlan(await store.load());
+      ctx.ui.notify(`Plan approval failed: ${errorMessage(error)}`, "warning");
+      return { approved: false, exited: false };
+    }
+
+    const executionMode = executionModeFor(action);
+    await startImplementation(ctx, markdown, store.currentPath, executionMode);
+    return { approved: true, exited: true, executionMode };
+  }
+}
+
+async function editPlan(ctx: PlanContext, pathLabel: string): Promise<void> {
+  await openPlanEditor(ctx, {
     markdown: latestPlan ?? "",
     revision: latestRevision,
-    allowConfirm,
-    pathLabel: store.currentPath,
+    allowConfirm: false,
+    pathLabel,
     async onSave(markdown, expectedRevision) {
       const saved = await savePlan(ctx, markdown, expectedRevision);
       return saved.manifest.revision;
     },
-    async onConfirm(markdown, expectedRevision) {
-      try {
-        const approved = await store.approve(markdown, expectedRevision);
-        applyLoadedPlan(approved);
-      } catch (error) {
-        applyLoadedPlan(await store.load());
-        throw error;
-      }
-    },
+    async onConfirm() {},
   });
-  if (result.action !== "approved") return false;
-  startImplementation(ctx, result.markdown);
-  return true;
 }
 
-function startImplementation(ctx: PlanContext, markdown: string): void {
+function executionModeFor(action: PlanConfirmationAction): PlanExecutionMode {
+  if (action === "execute-clear") return "clear";
+  if (action === "execute-compact") return "compact";
+  return "current";
+}
+
+async function startImplementation(
+  ctx: PlanContext,
+  markdown: string,
+  planPath: string,
+  executionMode: PlanExecutionMode,
+): Promise<void> {
   exitPlanMode(ctx);
   latestPlan = markdown;
   latestStatus = "approved";
   awaitingAction = false;
   ctx.ui.notify("Plan approved · Act tools restored", "info");
-  const opts = ctx.isIdle?.() ? undefined : { deliverAs: "followUp" as const };
-  extensionApi?.sendUserMessage([
-    "Plan mode is disabled and the approved Plan is committed. Implement it now:",
+  const executionMessage = [
+    "The approved Plan is already in the current context and Act tools are restored.",
+    `Plan source: ${planPath}`,
+    "Before modifying the project:",
+    "1. Reconcile the Plan with every user requirement; do not shrink or reinterpret the approved scope.",
+    "2. Convert the approved Plan into one active Goal with a concise objective that preserves its locked boundaries and acceptance checks.",
+    "3. Decompose that Goal into an ordered Todo dependency graph before implementation.",
+    "4. Execute the Todo sequence under the active Goal, verifying each outcome before proceeding.",
+  ].join("\n");
+  const portableMessage = [
+    "Execute this approved Plan in the new session:",
+    `Plan source: ${planPath}`,
     "",
     markdown,
     "",
-    "Execute each step and verify it before proceeding.",
-  ].join("\n"), opts);
+    executionMessage,
+  ].join("\n");
+
+  if (executionMode === "clear" && ctx.newSession) {
+    try {
+      const replacement = await ctx.newSession({
+        async withSession(newCtx) {
+          await newCtx.sendUserMessage(portableMessage);
+        },
+      });
+      if (!replacement.cancelled) return;
+      ctx.ui.notify("New session was cancelled; executing in the current context.", "warning");
+    } catch (error) {
+      ctx.ui.notify(`New session failed; executing in the current context: ${errorMessage(error)}`, "warning");
+    }
+  }
+
+  if (executionMode === "compact") {
+    let delivered = false;
+    const deliver = () => {
+      if (delivered) return;
+      delivered = true;
+      sendImplementationMessage(ctx, executionMessage);
+    };
+    ctx.ui.notify("Compacting context with the approved Plan preserved…", "info");
+    ctx.compact({
+      customInstructions: [
+        "Treat the following approved Plan as the authoritative execution contract.",
+        `Preserve its source path, locked boundaries, risks, acceptance checks, and current execution position: ${planPath}`,
+        "",
+        markdown,
+      ].join("\n"),
+      onComplete: deliver,
+      onError(error) {
+        ctx.ui.notify(`Compaction failed; executing with the current context: ${error.message}`, "warning");
+        deliver();
+      },
+    });
+    return;
+  }
+
+  sendImplementationMessage(ctx, executionMessage);
+}
+
+function sendImplementationMessage(ctx: PlanContext, message: string): void {
+  const opts = ctx.isIdle?.() ? undefined : { deliverAs: "followUp" as const };
+  extensionApi?.sendUserMessage(message, opts);
 }
 
 function currentDetails(action: PlanToolDetails["action"]): PlanToolDetails {
@@ -435,16 +539,21 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-confirm",
     label: "Plan Confirm",
-    description: "Open the full-screen editor for human confirmation. Approval commits the Markdown archive before restoring Act mode.",
+    description: "Render the Markdown Plan and choose how to execute, modify, or exit. Approval commits the archive before Act mode.",
     promptSnippet: "Use plan-confirm only after plan-update has produced a decision-complete draft.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const blocked = requirePlanMode("confirm");
       if (blocked) return blocked;
-      const approved = await reviewPlan(ctx, true);
-      return result(approved ? "Plan approved; Act mode restored." : "Plan not approved; Plan mode remains active.", {
+      const outcome = await reviewPlan(ctx, true);
+      const text = outcome.approved
+        ? `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context).`
+        : outcome.exited
+          ? "Plan confirmation cancelled; Act mode restored and draft preserved."
+          : "Plan not approved; Plan mode remains active.";
+      return result(text, {
         ...currentDetails("confirm"),
-        approved,
+        approved: outcome.approved,
       });
     },
   };
@@ -541,13 +650,17 @@ function buildPlanModePrompt(): string {
   return `[PLAN MODE ACTIVE]
 # Plan Mode
 
-You are in durable Plan Mode. Explore and reason without modifying the project.
+You are in durable Plan Mode. Read and reason only. Produce concise, decision-complete Markdown.
 
-- Use read-only tools and ask-user-question to resolve intent.
-- Use plan-update with complete Markdown to persist the current draft.
-- Use plan-review when the user needs to edit without approval.
-- Use plan-confirm when the draft is decision-complete and ready for human approval.
-- Use plan-exit to leave Plan mode while preserving current.md.
+- Ground decisions in the current codebase and use its terminology.
+- Run a Socratic pressure review before confirmation: challenge assumptions, contradictions, boundaries, failure cases, and integration effects with concrete code evidence.
+- Use ask-user-question for every user question. Ask 2-4 related questions per call, grouped by one review branch; do not ask questions as plain assistant text.
+- Keep reviewing until scope, boundaries, non-goals, requirements, and acceptance checks are explicitly locked; unresolved risks must remain visible.
+- Align every user requirement with a planned outcome and a verifiable acceptance check.
+- Keep the final Markdown to locked scope, boundaries, decisions, ordered outcomes, risks, and acceptance checks; omit interview logs and boilerplate.
+- Confirm only after the pressure review is complete and no material decision remains open.
+- Approval converts the locked Plan into one active Goal, then decomposes that Goal into Todo before implementation.
+- Use plan-update to persist the complete draft, plan-review to edit, plan-confirm to approve, or plan-exit to leave while preserving current.md.
 - Do not use write tools, mutating shell commands, or write-mode delegation.
 - The legacy <proposed_plan> block is accepted only as a compatibility path; prefer plan-update.
 

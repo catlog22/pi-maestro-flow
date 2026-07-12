@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { Skill } from "@earendil-works/pi-coding-agent";
+import { SkillCache } from "../src/skills/skill-cache.ts";
 import {
   loadSkillConfig,
   renderSkillConfigDefaults,
@@ -12,6 +13,43 @@ import {
   TodoSkillLoadError,
   TodoSkillLoader,
 } from "../src/skills/skill-loader.ts";
+
+test("SkillCache applies LRU eviction and shares in-flight work", async () => {
+  const cache = new SkillCache<number>(2);
+  let releases = 0;
+  let release: (() => void) | undefined;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const first = cache.getOrCreate("shared", async () => {
+    releases += 1;
+    await gate;
+    return 1;
+  });
+  const second = cache.getOrCreate("shared", async () => 2);
+  release?.();
+  assert.deepEqual(await Promise.all([first, second]), [1, 1]);
+  assert.equal(releases, 1);
+  assert.equal(cache.stats().singleFlightHits, 1);
+
+  cache.set("second", 2);
+  assert.equal(cache.get("shared"), 1);
+  cache.set("third", 3);
+  assert.equal(cache.get("second"), undefined);
+  assert.equal(cache.stats().evictions, 1);
+});
+
+test("SkillCache also evicts by configured weight", () => {
+  const cache = new SkillCache<string>(10, { maxWeight: 5, measure: (value) => value.length });
+  cache.set("a", "123");
+  cache.set("b", "456");
+  assert.equal(cache.get("a"), undefined);
+  assert.equal(cache.get("b"), "456");
+  assert.equal(cache.stats().weight, 3);
+
+  cache.set("oversized", "123456");
+  assert.equal(cache.get("oversized"), undefined);
+  assert.equal(cache.get("b"), "456");
+  assert.equal(cache.stats().weight, 3);
+});
 
 test("skill-config merges global, project, and explicit task args", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-config-"));
@@ -89,12 +127,64 @@ description: demo skill
   try {
     const first = await loader.load({ name: "demo", args: "--depth deep" }, "inline context");
     const second = await loader.load({ name: "demo" });
+    const repeated = await loader.load({ name: "demo" });
+    const differentContext = await loader.load({ name: "demo" }, "different context");
     assert.equal(reloads, 1);
     assert.match(first.prompt, /REQUIRED CONTENT/);
     assert.doesNotMatch(first.prompt, /depth: standard/);
     assert.match(second.prompt, /depth: standard/);
+    assert.equal(second.cacheHit, false);
+    assert.equal(repeated.cacheHit, true);
+    assert.equal(repeated.cacheStatus, "hit");
+    assert.equal(repeated.compiledKey, second.compiledKey);
+    assert.equal(differentContext.compiledKey, second.compiledKey);
+    assert.equal(differentContext.cacheHit, true);
+    assert.ok(differentContext.totalBytes > repeated.totalBytes);
+    assert.ok(loader.getCacheStats().compiled.hits >= 2);
+    assert.ok(loader.getCacheStats().raw.hits >= 2);
+    assert.equal(Object.isFrozen(repeated), true);
+    assert.equal(Object.isFrozen(repeated.requiredFiles), true);
     assert.deepEqual(first.requiredFiles, [join(skillDir, "required.md")]);
     assert.deepEqual(first.deferredFiles, [join(skillDir, "later.md")]);
+
+    await writeFile(join(skillDir, "required.md"), "UPDATED REQUIRED CONTENT");
+    const requiredChanged = await loader.load({ name: "demo" });
+    assert.notEqual(requiredChanged.requiredReadingHash, repeated.requiredReadingHash);
+    assert.notEqual(requiredChanged.compiledKey, repeated.compiledKey);
+    assert.match(requiredChanged.prompt, /UPDATED REQUIRED CONTENT/);
+
+    await writeFile(skillPath, `---
+name: demo
+description: demo skill
+---
+# Demo changed
+<required_reading>
+@required.md
+</required_reading>
+`);
+    const contentChanged = await loader.load({ name: "demo" });
+    assert.notEqual(contentChanged.contentHash, requiredChanged.contentHash);
+    assert.notEqual(contentChanged.compiledKey, requiredChanged.compiledKey);
+    assert.match(contentChanged.prompt, /# Demo changed/);
+
+    await writeFile(join(projectDir, ".pi", "skill-config.json"), JSON.stringify({
+      version: "1.0.0",
+      skills: { demo: { params: { depth: "thorough" } } },
+    }));
+    const configChanged = await loader.load({ name: "demo" });
+    assert.notEqual(configChanged.configHash, contentChanged.configHash);
+    assert.notEqual(configChanged.compiledKey, contentChanged.compiledKey);
+    assert.match(configChanged.prompt, /depth: thorough/);
+
+    await writeFile(join(projectDir, ".pi", "skill-config.json"), JSON.stringify({
+      version: "1.0.0",
+      skills: {},
+      limits: { maxFileBytes: 8, maxTotalBytes: 8192 },
+    }));
+    await assert.rejects(
+      loader.load({ name: "demo" }),
+      (error: unknown) => error instanceof TodoSkillLoadError && error.code === "E_SKILL_BUDGET_EXCEEDED",
+    );
   } finally {
     await rm(root, { recursive: true, force: true });
   }

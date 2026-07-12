@@ -4,6 +4,34 @@
 
 Pi extension implementing teammate dispatch with **unified TaskSpec model**. Single agent, parallel fan-out, sequential chains, and arbitrary DAGs all use the same schema — execution order is determined by `{name}` variable references between tasks.
 
+## Automatic Model Routing
+
+Teammate maps task phases to models authenticated in the current Pi session. Supported task types are `explore`, `analysis`, `debug`, `planning`, `development`, `review`, and `testing`.
+
+Open the mapping overlay with `Alt+M` or `/teammate-models`. Project mappings are saved to `.pi/teammate-models.json`; global defaults can be stored in `~/.pi/agent/teammate-models.json`, with project values taking precedence.
+
+```json
+{
+  "version": 1,
+  "mappings": {
+    "explore": "google/gemini-2.5-pro",
+    "analysis": "openai/gpt-5",
+    "debug": "anthropic/claude-opus-4"
+  }
+}
+```
+
+Precedence is task-level `model` → top-level `model` → explicit `taskType` mapping → inferred task type → agent default. Omit `model` to use routing:
+
+```json
+{
+  "agent": "explorer",
+  "taskType": "explore",
+  "task": "FIND: auth middleware\nSCOPE: src/auth/",
+  "background": false
+}
+```
+
 ## Quick Start
 
 ### Single Agent
@@ -301,3 +329,33 @@ pi install ./pi-teammate
 ## License
 
 MIT
+# Agent discovery
+
+Agent Markdown files are loaded with project-over-user-over-builtin precedence:
+
+1. nearest project `.pi/agents/*.md`
+2. `~/.pi/agent/extensions/teammate/agents/*.md`
+3. this npm package's bundled `agents/*.md`
+
+Pi has no native `pi.agents` package manifest field. Builtin teammate agents are
+resolved relative to the installed extension module, so npm, git, global and local
+Pi package installs all use the same package-local `agents/` directory.
+
+## Fixed prompt templates
+
+`teammate` can load Pi-compatible Markdown prompt templates with `prompt` and
+`promptArgs`. Discovery priority is project `.pi/prompts/*.md`, user
+`~/.pi/agent/prompts/*.md`, then this package's `prompts/*.md`. Template syntax uses
+Pi's `$1`, `$2`, `$@`, `$ARGUMENTS`, `${1:-default}`, and `${@:N:L}` forms. The task
+value is `$1`; `promptArgs` start at `$2`.
+
+```json
+{
+  "agent": "delegate",
+  "prompt": "analysis",
+  "task": "Analyze the authentication flow",
+  "promptArgs": ["@src/auth/**/*.ts", "file:line evidence"],
+  "model": "provider/model",
+  "background": true
+}
+```

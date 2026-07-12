@@ -3,8 +3,6 @@
  *
  * Registers tools:
  *   - maestro: Main tool with action-based dispatch (explore, delegate, moa)
- *   - maestro-wait: Block until background maestro runs finish
- *   - maestro-status: Inspect active/completed runs
  *   - goal: Autonomous goal management (set/done/pause/clear) with independent verifier
  *   - ask-user-question: Structured questionnaire for user input
  *   - todo: Task management with plain context, optional skills, and step tracking
@@ -12,6 +10,7 @@
  * Also registers:
  *   - /goal command
  *   - /plan command + Alt+P shortcut (Plan/Act mode toggle)
+ *   - Shift+Tab approval-mode cycle (after remapping Pi effort cycling to Shift+E)
  *   - Dynamic LLM providers
  */
 
@@ -24,8 +23,6 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   MaestroParams,
-  MaestroWaitParams,
-  MaestroStatusParams,
   GoalToolParams,
   AskUserQuestionParams,
   TodoToolParams,
@@ -33,8 +30,6 @@ import {
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
 import { executeMoa, type MoaParams } from "../tools/moa.ts";
-import { executeMaestroWait } from "../tools/wait.ts";
-import { executeMaestroStatus } from "../tools/status.ts";
 import { registerMaestroProviders } from "../providers/provider-registry.ts";
 import {
   initGoal,
@@ -59,6 +54,9 @@ import {
   initTodo,
   executeTodo,
   getVisibleTasks,
+  onAgentEndTodo,
+  onBeforeAgentStartTodo,
+  onContextTodo,
   onSessionStart as todoSessionStart,
   onSessionShutdown as todoSessionShutdown,
   type TodoParams,
@@ -81,11 +79,13 @@ import {
   onAgentEndPlan,
 } from "../tools/plan.ts";
 import { installStatusline } from "../statusline/statusline.ts";
-import { registerCodexHookAdapter } from "../hooks/pi-adapter.ts";
+import { registerCodexHookAdapter, type PermissionMode } from "../hooks/pi-adapter.ts";
 import {
   createMaestroCompaction,
   persistMaestroCompactionKnowhow,
 } from "../compaction/maestro-compaction.ts";
+import { createMidTurnAutoCompaction } from "../compaction/auto-compaction.ts";
+import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
 
 interface MaestroState {
   baseCwd: string;
@@ -99,6 +99,20 @@ interface MaestroState {
   >;
 }
 
+export const APPROVAL_MODE_CYCLE_KEY = "shift+tab";
+export const APPROVAL_MODES: readonly PermissionMode[] = [
+  "default",
+  "acceptEdits",
+  "plan",
+  "dontAsk",
+  "bypassPermissions",
+];
+
+export function nextApprovalMode(current: PermissionMode): PermissionMode {
+  const index = APPROVAL_MODES.indexOf(current);
+  return APPROVAL_MODES[(index + 1) % APPROVAL_MODES.length] ?? "default";
+}
+
 const TODO_TOGGLE_KEY = "alt+t";
 const TODO_TOGGLE_LABEL = "Alt+T";
 
@@ -110,6 +124,7 @@ function singleLine(text: string): Component {
 }
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
+  const midTurnAutoCompaction = createMidTurnAutoCompaction(pi);
   const state: MaestroState = {
     baseCwd: "",
     activeRuns: new Map(),
@@ -124,6 +139,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       `[maestro] Provider registration warning: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
+
+  registerMaestroPackageResources(pi);
 
   // === Main Tool: maestro ===
   const maestroTool: ToolDefinition<typeof MaestroParams> = {
@@ -201,9 +218,6 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
     renderCall(args, theme) {
       const action = (args.action as string) ?? "?";
-      const asyncLabel =
-        args.async === true ? theme.fg("warning", " [async]") : "";
-
       let detail = "";
       if (action === "explore") {
         const prompts = args.prompts as string[] | undefined;
@@ -218,65 +232,12 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       }
 
       return singleLine(
-        `${theme.fg("toolTitle", theme.bold("maestro "))}${action}${detail}${asyncLabel}`,
+        `${theme.fg("toolTitle", theme.bold("maestro "))}${action}${detail}`,
       );
     },
   };
 
   pi.registerTool(maestroTool);
-
-  // === Auxiliary Tool: maestro-wait ===
-  const waitTool: ToolDefinition<typeof MaestroWaitParams> = {
-    name: "maestro-wait",
-    label: "Maestro Wait",
-    description: `Block until background (async) maestro runs finish.
-
-- { } — wait for first active run to finish (default)
-- { all: true } — wait for all active runs to finish
-- { id: "..." } — wait for a specific run
-- { timeoutMs: 600000 } — timeout after N ms (runs continue regardless)`,
-
-    parameters: MaestroWaitParams,
-
-    async execute(
-      _id: string,
-      params: Record<string, unknown>,
-      signal: AbortSignal,
-    ): Promise<AgentToolResult> {
-      return executeMaestroWait(
-        params as { id?: string; all?: boolean; timeoutMs?: number },
-        signal,
-        state,
-      );
-    },
-  };
-
-  pi.registerTool(waitTool);
-
-  // === Auxiliary Tool: maestro-status ===
-  const statusTool: ToolDefinition<typeof MaestroStatusParams> = {
-    name: "maestro-status",
-    label: "Maestro Status",
-    description: `Inspect maestro run status.
-
-- { } — fleet overview of all active runs
-- { id: "..." } — details for a specific run
-- { view: "transcript" } — tail the latest run transcript`,
-
-    parameters: MaestroStatusParams,
-
-    async execute(
-      _id: string,
-      params: Record<string, unknown>,
-    ): Promise<AgentToolResult> {
-      return executeMaestroStatus(
-        params as { id?: string; view?: "fleet" | "transcript" },
-        state,
-      );
-    },
-  };
-
-  pi.registerTool(statusTool);
 
   // === Goal Tool ===
   initGoal(pi);
@@ -393,9 +354,9 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     label: "Todo",
     description: `Task management with plain-text context and optional Pi skill execution — 7 actions.
 
-- create: { action: "create", subject: "...", context: "...", skill: { name: "maestro-execute", args: "..." } }
+- create: { action: "create", subject: "...", context: "...", skills: [{ name: "maestro-execute", role: "primary", args: "..." }] }
 - update: { action: "update", id: "...", status: "completed", summary: "..." }
-- clear context/skill: { action: "update", id: "...", context: "", skill: null }
+- clear context/skills: { action: "update", id: "...", context: "", skills: [] }
 - list: { action: "list", filter: { status: "pending" } }
 - get: { action: "get", id: "..." }
 - delete: { action: "delete", id: "..." }
@@ -484,6 +445,22 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     },
   });
 
+  let approvalMode: PermissionMode = "default";
+  pi.registerShortcut(APPROVAL_MODE_CYCLE_KEY, {
+    description: "Cycle approval mode",
+    async handler(ctx: ExtensionContext) {
+      const current: PermissionMode = isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode;
+      const next = nextApprovalMode(current);
+
+      if (next === "plan" && !isPlanMode()) await planToggleMode(ctx);
+      if (next !== "plan" && isPlanMode()) await planToggleMode(ctx);
+
+      approvalMode = next;
+      ctx.ui.setStatus("approval-mode", `APPROVAL ${next}`);
+      ctx.ui.notify(`Approval mode: ${next}`, "info");
+    },
+  });
+
   // === Statusline ===
   installStatusline(pi, () => state);
 
@@ -527,10 +504,12 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     goalSessionStart(ctx);
     todoSessionStart(ctx);
     await onSessionStartPlan(ctx);
+    ctx.ui.setStatus("approval-mode", `APPROVAL ${isPlanMode() ? "plan" : approvalMode}`);
     updateTodoWidget();
   });
 
   pi.on("session_shutdown", (_event, ctx) => {
+    midTurnAutoCompaction.reset(ctx);
     state.activeRuns.clear();
     widgetCtx?.ui.setWidget("todo-panel", undefined);
     widgetCtx = undefined;
@@ -538,6 +517,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     goalSessionShutdown(ctx);
     todoSessionShutdown(ctx);
     onSessionShutdownPlan(ctx);
+    ctx.ui.setStatus("approval-mode", undefined);
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
@@ -569,16 +549,28 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     return goalToolCall();
   });
 
-  pi.on("before_agent_start", (event) => {
+  pi.on("before_agent_start", async (event) => {
     // Plan owns the stable mode prompt; Goal only acknowledges continuation markers.
     const planResult = onBeforeAgentStartPlan(event);
     goalBeforeAgentStart(event);
-    return planResult;
+    const todoResult = await onBeforeAgentStartTodo({
+      systemPrompt: planResult?.systemPrompt ?? event.systemPrompt,
+    });
+    return todoResult ?? planResult;
+  });
+
+  pi.on("context", async (event, ctx) => {
+    const todoResult = await onContextTodo(event.messages);
+    const messages = todoResult?.messages ?? event.messages;
+    const pressureMessages = await midTurnAutoCompaction.evaluate(messages, ctx);
+    return pressureMessages ? { messages: pressureMessages } : todoResult;
   });
 
   pi.on("agent_end", async (event, ctx) => {
     await onAgentEndPlan(event, ctx);
     await goalAgentEnd(event, ctx);
+    onAgentEndTodo();
+    midTurnAutoCompaction.onAgentEnd(ctx);
     updateTodoWidget();
   });
 
@@ -588,7 +580,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
 
   // Register last so existing Plan/Goal guards keep their current short-circuit priority.
   registerCodexHookAdapter(pi, {
-    getPermissionMode: () => isPlanMode() ? "plan" : "default",
+    getPermissionMode: () => isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
   });
 }
 
@@ -607,7 +599,7 @@ interface TodoTaskLike {
   subject: string;
   status: string;
   blockedBy: string[];
-  skill?: { name: string };
+  skills?: Array<{ name: string; role?: string }>;
 }
 
 const WICON: Record<string, string> = {
@@ -683,7 +675,10 @@ function widgetTaskLine(task: TodoTaskLike, allTasks: TodoTaskLike[]): string {
   const icon = colorFn(WICON[task.status] ?? "?");
   const subject = task.status === "completed" ? dim(task.subject) : task.subject;
   let line = `  ${icon} ${subject}`;
-  if (task.skill) line += dim(`  /${task.skill.name}`);
+  if (task.skills && task.skills.length > 0) {
+    const primary = task.skills.find((skill) => skill.role === "primary") ?? task.skills[0];
+    line += dim(`  /${primary.name}${task.skills.length > 1 ? ` +${task.skills.length - 1}` : ""}`);
+  }
 
   // blocked: always show dependency arrows
   if (task.status === "blocked" && task.blockedBy.length > 0) {

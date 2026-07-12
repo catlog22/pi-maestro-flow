@@ -1,0 +1,177 @@
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  Key,
+  Markdown,
+  type MarkdownTheme,
+  matchesKey,
+  truncateToWidth,
+} from "@earendil-works/pi-tui";
+
+export type PlanConfirmationAction =
+  | "execute"
+  | "execute-clear"
+  | "execute-compact"
+  | "modify"
+  | "cancel";
+
+export interface PlanConfirmationOptions {
+  markdown: string;
+  pathLabel?: string;
+  canClearContext: boolean;
+}
+
+interface ConfirmationItem {
+  action: PlanConfirmationAction;
+  label: string;
+  description: string;
+  enabled: boolean;
+}
+
+const CTRL_ENTER_SEQUENCES = new Set([
+  "\x1b[13;5u",
+  "\x1b[13;5~",
+  "\x1b[27;5;13~",
+]);
+
+export async function openPlanConfirmation(
+  ctx: Pick<ExtensionContext, "hasUI" | "ui">,
+  options: PlanConfirmationOptions,
+): Promise<PlanConfirmationAction> {
+  if (!ctx.hasUI) return "cancel";
+
+  const result = await ctx.ui.custom<PlanConfirmationAction>(
+    (tui, theme, _keybindings, done) => {
+      const items: ConfirmationItem[] = [
+        { action: "execute", label: "Execute", description: "Keep the current context", enabled: true },
+        {
+          action: "execute-clear",
+          label: "Execute in new session",
+          description: options.canClearContext ? "Start with a clean context" : "Available from /plan approve",
+          enabled: options.canClearContext,
+        },
+        { action: "execute-compact", label: "Compact then execute", description: "Preserve this Plan in the checkpoint", enabled: true },
+        { action: "modify", label: "Modify Plan", description: "Open the full-screen Markdown editor", enabled: true },
+        { action: "cancel", label: "Exit Plan mode", description: "Keep the draft without approval", enabled: true },
+      ];
+      const markdown = new Markdown(options.markdown, 0, 0, markdownTheme(theme));
+      let selected = 0;
+      let previewOffset = 0;
+      let status = "";
+
+      function choose(action = items[selected]?.action): void {
+        const item = items.find((candidate) => candidate.action === action);
+        if (!item) return;
+        if (!item.enabled) {
+          status = "Use /plan approve to start execution in a new session.";
+          tui.requestRender();
+          return;
+        }
+        done(item.action);
+      }
+
+      return {
+        render(width: number): string[] {
+          const safeWidth = Math.max(1, width);
+          const selectedItem = items[selected] ?? items[0];
+          if (safeWidth < 24) {
+            return [
+              truncateToWidth(`Plan confirm · ${selected + 1}/${items.length} ${selectedItem.label}`, safeWidth, "…"),
+              truncateToWidth("↑↓ select · Enter choose · Esc exit", safeWidth, "…"),
+            ];
+          }
+
+          const terminalRows = process.stdout?.rows ?? 30;
+          const previewHeight = Math.max(3, terminalRows - items.length - 7);
+          const renderedPlan = markdown.render(Math.max(1, safeWidth - 2));
+          const maxOffset = Math.max(0, renderedPlan.length - previewHeight);
+          previewOffset = Math.min(previewOffset, maxOffset);
+          const preview = renderedPlan.slice(previewOffset, previewOffset + previewHeight);
+          const header = ` Plan confirmation · ${options.pathLabel ?? "current.md"}`;
+          const output = [truncateToWidth(theme.bold(header), safeWidth, "…")];
+          output.push(...preview.map((line) => truncateToWidth(` ${line}`, safeWidth, "…")));
+          if (renderedPlan.length > previewHeight) {
+            output.push(truncateToWidth(theme.fg("dim", ` Plan ${previewOffset + 1}-${Math.min(renderedPlan.length, previewOffset + previewHeight)}/${renderedPlan.length} · PgUp/PgDn scroll`), safeWidth, "…"));
+          }
+
+          output.push("");
+          for (let index = 0; index < items.length; index++) {
+            const item = items[index];
+            const marker = index === selected ? ">" : " ";
+            const label = item.enabled ? item.label : `${item.label} (unavailable)`;
+            const line = safeWidth >= 70 ? `${marker} ${label} — ${item.description}` : `${marker} ${label}`;
+            const styled = index === selected
+              ? theme.fg(item.enabled ? "accent" : "warning", theme.bold(line))
+              : theme.fg(item.enabled ? "text" : "dim", line);
+            output.push(truncateToWidth(styled, safeWidth, "…"));
+          }
+          const footer = status || "↑↓ select · Enter choose · Ctrl+Enter execute · PgUp/PgDn plan · Esc exit";
+          output.push(truncateToWidth(theme.fg(status ? "warning" : "dim", footer), safeWidth, "…"));
+          return output;
+        },
+
+        handleInput(data: string): void {
+          if (matchesKey(data, Key.up)) {
+            selected = (selected - 1 + items.length) % items.length;
+            status = "";
+          } else if (matchesKey(data, Key.down)) {
+            selected = (selected + 1) % items.length;
+            status = "";
+          } else if (matchesKey(data, Key.pageUp)) {
+            previewOffset = Math.max(0, previewOffset - 5);
+          } else if (matchesKey(data, Key.pageDown)) {
+            previewOffset += 5;
+          } else if (matchesKey(data, Key.enter)) {
+            choose();
+            return;
+          } else if (matchesKey(data, Key.ctrl("enter")) || CTRL_ENTER_SEQUENCES.has(data)) {
+            choose("execute");
+            return;
+          } else if (matchesKey(data, Key.escape)) {
+            choose("cancel");
+            return;
+          }
+          tui.requestRender();
+        },
+
+        invalidate(): void {
+          markdown.invalidate();
+        },
+
+        dispose(): void {},
+      };
+    },
+    {
+      overlay: true,
+      overlayOptions: {
+        width: "100%",
+        maxHeight: "100%",
+        anchor: "top-left" as const,
+        margin: 0,
+      },
+    },
+  );
+
+  return result ?? "cancel";
+}
+
+function markdownTheme(theme: {
+  fg(name: string, text: string): string;
+  bold(text: string): string;
+}): MarkdownTheme {
+  return {
+    heading: (text) => theme.fg("accent", theme.bold(text)),
+    link: (text) => theme.fg("accent", text),
+    linkUrl: (text) => theme.fg("dim", text),
+    code: (text) => theme.fg("warning", text),
+    codeBlock: (text) => text,
+    codeBlockBorder: (text) => theme.fg("dim", text),
+    quote: (text) => text,
+    quoteBorder: (text) => theme.fg("dim", text),
+    hr: (text) => theme.fg("dim", text),
+    listBullet: (text) => theme.fg("accent", text),
+    bold: (text) => theme.bold(text),
+    italic: (text) => text,
+    strikethrough: (text) => theme.fg("dim", text),
+    underline: (text) => text,
+  };
+}

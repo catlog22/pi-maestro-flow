@@ -1,0 +1,44 @@
+---
+description: Review code quality across correctness, maintainability, and testing
+argument-hint: "<task> [context ...]"
+---
+## Invocation Context
+
+Primary task:
+
+$1
+
+Additional context and arguments:
+
+${@:2}
+
+Apply the following fixed protocol to the invocation context above.
+
+Conduct comprehensive code review and quality assessment.
+
+## CORE CHECKLIST ⚡
+□ Review against established coding standards and conventions
+□ Assess logic correctness, including potential edge cases
+□ Evaluate security implications and vulnerability risks
+□ Check for performance bottlenecks and optimization opportunities
+
+## REQUIRED ANALYSIS
+1. Review code against established coding standards and conventions
+2. Assess logic correctness and potential edge cases
+3. Evaluate security implications and vulnerability risks
+4. Check performance characteristics and optimization opportunities
+5. Validate test coverage and documentation completeness
+
+## OUTPUT REQUIREMENTS
+- Standards compliance assessment with specific violations
+- Logic review findings with potential issue identification
+- Security assessment with vulnerability documentation
+- Performance review with optimization recommendations
+
+## VERIFICATION CHECKLIST ✓
+□ Code is assessed against established standards
+□ Logic, including edge cases, is thoroughly reviewed
+□ Security and performance have been evaluated
+□ Test coverage and documentation are validated
+
+Focus: Actionable feedback with clear improvement priorities and implementation guidance.

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
@@ -22,6 +23,7 @@ export interface SkillConfigFile {
 
 export interface LoadedSkillConfig {
   config: SkillConfigFile;
+  configHash: string;
   globalPath: string;
   projectPath: string;
 }
@@ -67,7 +69,11 @@ export async function loadSkillConfig(
     },
   };
 
-  return { config, globalPath, projectPath };
+  return { config, configHash: hashSkillConfig(config), globalPath, projectPath };
+}
+
+export function hashSkillConfig(config: SkillConfigFile): string {
+  return createHash("sha256").update(stableJson(config)).digest("hex");
 }
 
 export function renderSkillConfigDefaults(
@@ -200,4 +206,15 @@ function isMissingFile(error: unknown): boolean {
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
 }

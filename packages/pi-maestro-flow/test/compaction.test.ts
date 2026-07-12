@@ -11,6 +11,13 @@ import {
   type MaestroCompactionDetails,
 } from "../src/compaction/maestro-compaction.ts";
 import {
+  applyContextPressurePolicy,
+  createMidTurnAutoCompaction,
+  endsWithCompleteToolResultBatch,
+  estimateContextTokens,
+  shouldCompactMidTurn,
+} from "../src/compaction/auto-compaction.ts";
+import {
   initTodo,
   onSessionShutdown,
   onSessionStart,
@@ -90,6 +97,280 @@ test("reference merge preserves inherited lineage and upgrades modified files", 
   assert.equal(plan?.role, "modified");
   assert.equal(plan?.firstSeenCompaction, "checkpoint-1");
   assert.equal(plan?.lastConfirmedCompaction, "checkpoint-3");
+});
+
+test("mid-turn compaction only evaluates complete assistant tool-result batches", () => {
+  const assistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "large.txt" } }],
+    usage: { input: 70, output: 5, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const result = {
+    role: "toolResult",
+    toolCallId: "call-1",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(80) }],
+    isError: false,
+  } as never;
+  assert.equal(endsWithCompleteToolResultBatch([assistant]), false);
+  assert.equal(endsWithCompleteToolResultBatch([assistant, result]), true);
+  assert.equal(endsWithCompleteToolResultBatch([assistant, result, { role: "custom", content: "skill" } as never]), true);
+  assert.equal(endsWithCompleteToolResultBatch([assistant, { ...result, toolCallId: "other" }]), false);
+});
+
+test("mid-turn token estimate adds tool results after the last assistant usage", () => {
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-1", name: "read", arguments: {} }],
+    usage: { input: 70, output: 5, cacheRead: 3, cacheWrite: 2, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "call-1",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(400) }],
+    isError: false,
+  }] as never;
+  const estimate = estimateContextTokens(messages);
+  assert.equal(estimate.usageTokens, 80);
+  assert.ok(estimate.trailingTokens > 100);
+  assert.equal(estimate.tokens, estimate.usageTokens + estimate.trailingTokens);
+  assert.equal(shouldCompactMidTurn({
+    messages,
+    contextWindow: 200,
+    settings: { enabled: true, reserveTokens: 20, keepRecentTokens: 10 },
+  }), true);
+});
+
+test("pressure policy prunes stale large tool results but preserves the recent frontier", () => {
+  const oldAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }],
+    usage: { input: 700, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const oldResult = {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "read",
+    content: [{ type: "text", text: "o".repeat(8_000) }],
+    isError: false,
+  } as never;
+  const recentAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "recent", name: "read", arguments: {} }],
+  } as never;
+  const recentResult = {
+    role: "toolResult",
+    toolCallId: "recent",
+    toolName: "read",
+    content: [{ type: "text", text: "r".repeat(8_000) }],
+    isError: false,
+  } as never;
+  const pressure = applyContextPressurePolicy(
+    [oldAssistant, oldResult, recentAssistant, recentResult],
+    4_000,
+    { enabled: true, reserveTokens: 400, keepRecentTokens: 2_000 },
+  );
+  assert.equal(pressure.prunedToolResults, 1);
+  assert.equal(pressure.band, "auto-prune");
+  assert.match(JSON.stringify(pressure.messages[1]), /stale large output/);
+  assert.equal(pressure.messages[3], recentResult);
+  assert.ok(pressure.savedTokens > 1_000);
+});
+
+test("pressure policy never prunes error results or incomplete current tool batches", () => {
+  const assistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call", name: "bash", arguments: {} }],
+    usage: { input: 900, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const errorResult = {
+    role: "toolResult",
+    toolCallId: "call",
+    toolName: "bash",
+    content: [{ type: "text", text: "e".repeat(8_000) }],
+    isError: true,
+  } as never;
+  const pressure = applyContextPressurePolicy(
+    [assistant, errorResult],
+    2_000,
+    { enabled: true, reserveTokens: 200, keepRecentTokens: 100 },
+  );
+  assert.equal(pressure.prunedToolResults, 0);
+  assert.equal(pressure.messages[1], errorResult);
+  assert.equal(pressure.band, "critical");
+});
+
+test("pressure policy protects non-replayable control tool outputs", () => {
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "todo-call", name: "todo", arguments: {} }],
+    usage: { input: 900, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "todo-call",
+    toolName: "todo",
+    content: [{ type: "text", text: "state".repeat(2_000) }],
+    isError: false,
+  }] as never;
+  const pressure = applyContextPressurePolicy(
+    messages,
+    2_000,
+    { enabled: true, reserveTokens: 200, keepRecentTokens: 100 },
+  );
+  assert.equal(pressure.prunedToolResults, 0);
+  assert.equal(pressure.messages[1], messages[1]);
+});
+
+test("mid-turn guard does not abort when Pi reports no compactable history", async () => {
+  let aborted = 0;
+  let compacted = 0;
+  const notifications: string[] = [];
+  const statuses = new Map<string, string | undefined>();
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => undefined }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const messages = pressureToolBatch();
+  const result = await guard.evaluate(messages, {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { aborted++; },
+    compact() { compacted++; },
+    sessionManager: { getBranch: () => [] },
+    ui: {
+      setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
+      notify(message: string) { notifications.push(message); },
+    },
+  } as never);
+  await guard.evaluate(messages, {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { aborted++; },
+    compact() { compacted++; },
+    sessionManager: { getBranch: () => [] },
+    ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
+  } as never);
+  assert.ok(result);
+  assert.equal(aborted, 0);
+  assert.equal(compacted, 0);
+  assert.equal(notifications.length, 1);
+  assert.match(statuses.get("maestro-auto-compact") ?? "", /CRITICAL/);
+});
+
+test("mid-turn guard clears its trigger key after compaction failure", async () => {
+  let compactCalls = 0;
+  let abortCalls = 0;
+  let onError: ((error: Error) => void) | undefined;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { abortCalls++; },
+    compact(options: { onError(error: Error): void }) { compactCalls++; onError = options.onError; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const messages = pressureToolBatch();
+  await guard.evaluate(messages, ctx);
+  onError?.(new Error("failed"));
+  await guard.evaluate(messages, ctx);
+  assert.equal(compactCalls, 2);
+  assert.equal(abortCalls, 2);
+});
+
+test("mid-turn guard settles state when compact throws synchronously", async () => {
+  let attempts = 0;
+  const notifications: string[] = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    compact() { attempts++; throw new Error("sync failure"); },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
+  } as never;
+  await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.evaluate(pressureToolBatch(), ctx);
+  assert.equal(attempts, 2);
+  assert.match(notifications[0] ?? "", /sync failure/);
+});
+
+test("mid-turn guard clears idle pressure on agent end but preserves active compaction status", async () => {
+  const statuses: Array<string | undefined> = [];
+  let complete: (() => void) | undefined;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    compact(options: { onComplete(): void }) { complete = options.onComplete; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus(_key: string, value: string | undefined) { statuses.push(value); }, notify() {} },
+  } as never;
+  await guard.evaluate(pressureToolBatch(), ctx);
+  guard.onAgentEnd(ctx);
+  assert.match(statuses.at(-1) ?? "", /COMPACT/);
+  complete?.();
+  guard.onAgentEnd(ctx);
+  assert.equal(statuses.at(-1), undefined);
+});
+
+test("pressure policy honors large reserve thresholds below the auto-prune ratio", () => {
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call", name: "read", arguments: {} }],
+    usage: { input: 710, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "call",
+    toolName: "read",
+    content: [{ type: "text", text: "small" }],
+    isError: false,
+  }] as never;
+  const pressure = applyContextPressurePolicy(
+    messages,
+    1_000,
+    { enabled: true, reserveTokens: 300, keepRecentTokens: 100 },
+  );
+  assert.equal(pressure.thresholdTokens, 700);
+  assert.equal(pressure.band, "critical");
+});
+
+test("long tool-loop replay progressively prunes old outputs before compacting", () => {
+  const messages: unknown[] = [];
+  for (let index = 0; index < 5; index++) {
+    messages.push({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `call-${index}`, name: "read", arguments: { path: `${index}.txt` } }],
+      ...(index === 0 ? { usage: { input: 500, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } } } : {}),
+    });
+    messages.push({
+      role: "toolResult",
+      toolCallId: `call-${index}`,
+      toolName: "read",
+      content: [{ type: "text", text: String(index).repeat(8_000) }],
+      isError: false,
+    });
+  }
+  const pressure = applyContextPressurePolicy(
+    messages as never,
+    8_000,
+    { enabled: true, reserveTokens: 2_000, keepRecentTokens: 2_500 },
+  );
+  assert.ok(pressure.prunedToolResults >= 2);
+  assert.equal(pressure.messages.at(-1), messages.at(-1));
+  assert.ok(pressure.estimatedTokens <= 6_000);
+  assert.notEqual(pressure.band, "critical");
 });
 
 test("custom compaction captures the persisted active Todo skill", async () => {
@@ -172,7 +453,10 @@ test("custom compaction captures the persisted active Todo skill", async () => {
     const captured = result?.compaction?.details as MaestroCompactionDetails;
     assert.equal(captured.todo.activeTaskId, "active");
     assert.equal(captured.activeSkills[0]?.name, "maestro-execute");
+    assert.equal(captured.activeSkills[0]?.role, "primary");
     assert.equal(captured.activeSkills[0]?.deferredFiles[0], "D:\\repo\\plan.md");
+    assert.equal(captured.activeSkills[0]?.activationId, "legacy-active");
+    assert.equal(captured.activeSkills[0]?.state, "stale");
     assert.equal(captured.previousCheckpointId, "checkpoint-2");
     const previousKnowhow = captured.references.find((reference) => reference.path.endsWith("KNW-previous.md"));
     assert.equal(previousKnowhow?.firstSeenCompaction, "checkpoint-active");
@@ -219,3 +503,17 @@ test("successful Maestro compaction is copied to a unique knowhow document", asy
     await rm(root, { recursive: true, force: true });
   }
 });
+
+function pressureToolBatch() {
+  return [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call", name: "read", arguments: {} }],
+    usage: { input: 950, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "call",
+    toolName: "read",
+    content: [{ type: "text", text: "small" }],
+    isError: false,
+  }] as never;
+}

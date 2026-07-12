@@ -13,6 +13,16 @@
 
 import { Type } from "typebox";
 
+const TaskType = StringEnum([
+  "explore",
+  "analysis",
+  "debug",
+  "planning",
+  "development",
+  "review",
+  "testing",
+]);
+
 function StringEnum<T extends string[]>(values: [...T]) {
   return Type.Unsafe<T[number]>({
     type: "string",
@@ -34,6 +44,22 @@ export const TaskSpec = Type.Object({
         "Task description. Use {name} to reference another task's output, {name.field} for structured output fields.",
     }),
   ),
+  prompt: Type.Optional(
+    Type.String({
+      description: "Fixed prompt template name from project, user, or bundled teammate prompts",
+    }),
+  ),
+  promptArgs: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Additional positional prompt arguments. task is $1; promptArgs begin at $2",
+    }),
+  ),
+  taskType: Type.Optional(
+    Type.Unsafe({
+      ...TaskType,
+      description: "Optional task phase used for automatic model mapping",
+    }),
+  ),
   name: Type.Optional(
     Type.String({
       description:
@@ -41,7 +67,9 @@ export const TaskSpec = Type.Object({
     }),
   ),
   model: Type.Optional(
-    Type.String({ description: "Override model for this task" }),
+    Type.String({
+      description: "Exact provider/model override for this task; overrides the top-level model default",
+    }),
   ),
   cwd: Type.Optional(
     Type.String({ description: "Working directory for this task" }),
@@ -80,6 +108,22 @@ export const TeammateParams = Type.Object({
     Type.String({
       description:
         "Task description. Supports {name} variable references in multi-task mode.",
+    }),
+  ),
+  prompt: Type.Optional(
+    Type.String({
+      description: "Default fixed prompt template name. Per-task prompt takes precedence",
+    }),
+  ),
+  promptArgs: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Default additional positional prompt arguments. Per-task promptArgs take precedence",
+    }),
+  ),
+  taskType: Type.Optional(
+    Type.Unsafe({
+      ...TaskType,
+      description: "Default task phase for automatic model mapping. Per-task taskType takes precedence",
     }),
   ),
 
@@ -121,6 +165,9 @@ export const TeammateParams = Type.Object({
           }),
         ),
         model: Type.Optional(Type.String()),
+        taskType: Type.Optional(TaskType),
+        prompt: Type.Optional(Type.String()),
+        promptArgs: Type.Optional(Type.Array(Type.String())),
       }),
       {
         description:
@@ -169,7 +216,7 @@ export const TeammateParams = Type.Object({
   model: Type.Optional(
     Type.String({
       description:
-        "Default model override. Per-task model takes precedence.",
+        "Exact provider/model default from the injected available model catalog. Per-task model takes precedence.",
     }),
   ),
 

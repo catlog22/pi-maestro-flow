@@ -16,6 +16,7 @@
   "files": [
     "src/**/*.ts",
     "agents/",
+    "prompts/",
     "README.md"
   ],
   "pi": {

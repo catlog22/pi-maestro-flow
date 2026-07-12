@@ -100,14 +100,53 @@ function normalizePlanModeStatus(value: string | undefined): PlanModeStatus {
 	return "ACT";
 }
 
-function renderPlanModeStatus(value: string | undefined, width: number): string {
+function normalizeApprovalMode(value: string | undefined, planMode: PlanModeStatus): string {
+	if (planMode === "PLAN" || planMode === "READY") return "plan";
+	const normalized = value?.replace(/^APPROVAL\s+/i, "").trim();
+	return normalized && normalized !== "plan" ? normalized : "default";
+}
+
+function approvalInitial(mode: string): string {
+	return mode === "acceptEdits" ? "E"
+		: mode === "dontAsk" ? "N"
+			: mode === "bypassPermissions" ? "B"
+				: mode === "plan" ? "P" : "D";
+}
+
+function renderPlanModeStatus(
+	value: string | undefined,
+	approvalValue: string | undefined,
+	width: number,
+): string {
 	const mode = normalizePlanModeStatus(value);
+	const approval = normalizeApprovalMode(approvalValue, mode);
 	const text = width >= 80
-		? mode === "ACT" ? "[A] ACT" : mode === "PLAN" ? "[P] PLAN" : "[P] READY"
+		? `${mode === "ACT" ? "[A] ACT" : mode === "PLAN" ? "[P] PLAN" : "[P] READY"} · APPROVAL ${approval}`
 		: width >= 48
-			? mode
-			: mode === "ACT" ? "A" : mode === "PLAN" ? "P" : "R";
+			? `${mode}/${approval}`
+			: `${mode === "ACT" ? "A" : mode === "PLAN" ? "P" : "R"}/${approvalInitial(approval)}`;
 	return colored("phase", text);
+}
+
+function renderContextPressure(value: string | undefined, width: number): string {
+	if (!value) return "";
+	const normalized = value.replace(/^CTX\s+/i, "").trim();
+	const match = /^(NUDGE|AUTO-PRUNE|CRITICAL|COMPACT)\s+(\d+)\/(\d+)(?:\s+-(\d+))?$/i.exec(normalized);
+	if (!match) return "";
+	const band = match[1].toUpperCase();
+	const pruned = match[4] ? ` -${match[4]}` : "";
+	const text = width >= 80
+		? `CTX ${band} ${match[2]}/${match[3]}${pruned}`
+		: width >= 48
+			? `${band === "AUTO-PRUNE" ? "PRUNE" : band}${pruned}`
+			: band === "COMPACT" ? "C*" : band === "CRITICAL" ? "C!" : band === "AUTO-PRUNE" ? "P!" : "N!";
+	const color = band === "CRITICAL" || band === "COMPACT" ? COLORS.ctxCrit : band === "AUTO-PRUNE" ? COLORS.ctxAlert : COLORS.ctxWarn;
+	return `${ansiFg(color)}${text}${ANSI_RESET}`;
+}
+
+function renderPressureLine(value: string | undefined, width: number): string {
+	if (width < 48) return "";
+	return truncateToWidth(renderContextPressure(value, width), Math.max(1, width), "…");
 }
 
 const SEP = `${ansiFg(COLORS.separator)} · ${ANSI_RESET}`;
@@ -239,9 +278,12 @@ function renderLine1(
 	dir: string,
 	width: number,
 	modeStatus: string | undefined,
+	approvalStatus: string | undefined,
+	pressureStatus: string | undefined,
 ): string {
 	const safeWidth = Math.max(1, width);
-	const modeText = renderPlanModeStatus(modeStatus, safeWidth);
+	const modeText = renderPlanModeStatus(modeStatus, approvalStatus, safeWidth);
+	const pressureText = safeWidth < 48 ? renderContextPressure(pressureStatus, safeWidth) : "";
 	const modelText = colored("model", `${ICONS.model} ${shortenModel(rs.model)}`);
 	const runText = activeRuns > 0
 		? colored("runs", `${ICONS.runs} ${activeRuns} run${activeRuns > 1 ? "s" : ""}`)
@@ -262,10 +304,10 @@ function renderLine1(
 	}
 
 	const parts = safeWidth >= 80
-		? [modeText, modelText, contextFull, runText, dirText, tokenText]
+		? [modeText, modelText, contextFull, pressureText, runText, dirText, tokenText]
 		: safeWidth >= 48
 			? [modeText, modelText, contextCompact, dirText]
-			: [modeText, contextCompact, modelText];
+			: [modeText, contextCompact, pressureText, modelText];
 	return truncateToWidth(parts.filter(Boolean).join(SEP), safeWidth, "…");
 }
 
@@ -364,9 +406,14 @@ export function installStatusline(
 					const lines: string[] = [];
 
 					const modeStatus = footerData.getExtensionStatuses().get("mode");
-					lines.push(renderLine1(rs, activeRuns, cwd, width, modeStatus));
+					const approvalStatus = footerData.getExtensionStatuses().get("approval-mode");
+					const pressureStatus = footerData.getExtensionStatuses().get("maestro-auto-compact");
+					lines.push(renderLine1(rs, activeRuns, cwd, width, modeStatus, approvalStatus, pressureStatus));
 
-					// Line 2: workflow (if active)
+					const pressureLine = renderPressureLine(pressureStatus, width);
+					if (pressureLine) lines.push(pressureLine);
+
+					// Following line: workflow (if active)
 					if (width >= 48 && rs.workflow?.milestone) {
 						lines.push(renderLine2(rs.workflow, width));
 					}

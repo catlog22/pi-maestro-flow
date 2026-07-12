@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { openPlanConfirmation } from "../src/tools/plan-confirm.ts";
 import { openPlanEditor } from "../src/tools/plan-editor.ts";
 
 function createHarness() {
@@ -75,10 +76,55 @@ test("Plan editor saves without closing and confirms the exact edited buffer", a
   assert.equal(harness.doneValue, undefined);
   assert.deepEqual(saves, [{ markdown: "draft updated", revision: 4 }]);
 
-  harness.component.handleInput("\x1b[13;5u");
+  harness.component.handleInput("\x1b[27;5;13~");
   const result = await pending;
   assert.equal(result.action, "approved");
   assert.deepEqual(confirmations, [{ markdown: "draft updated", revision: 5 }]);
+});
+
+test("Plan confirmation renders Markdown and selects compact execution", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Approved Plan\n\n- Preserve boundaries",
+    pathLabel: "current.md",
+    canClearContext: true,
+  });
+  assert.ok(harness.component);
+  for (const width of [20, 40, 80, 120]) {
+    const lines = harness.component.render(width);
+    assert.match(lines.join("\n"), /Plan confirm|Plan confirmation/);
+    for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+  }
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\r");
+  assert.equal(await pending, "execute-compact");
+});
+
+test("Plan confirmation keeps clear-context execution unavailable outside command context", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan",
+    canClearContext: false,
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\r");
+  assert.equal(harness.doneValue, undefined);
+  assert.match(harness.component.render(100).join("\n"), /Use \/plan approve/);
+  harness.component.handleInput("\x1b");
+  assert.equal(await pending, "cancel");
+});
+
+test("Plan confirmation accepts Ctrl+Enter across modifyOtherKeys encoding", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan",
+    canClearContext: true,
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("\x1b[27;5;13~");
+  assert.equal(await pending, "execute");
 });
 
 test("Plan editor keeps the buffer open when approval fails", async () => {

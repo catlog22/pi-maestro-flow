@@ -8,6 +8,7 @@ import {
   getMode,
   initPlan,
   onAgentEndPlan,
+  onBeforeAgentStartPlan,
   onSessionShutdownPlan,
   onSessionStartPlan,
   onToolCallPlan,
@@ -26,12 +27,16 @@ function createHarness(
   failingSave = false,
   failFirstLoad = false,
   sessionId = "session-main",
+  confirmationInputs?: string[],
+  supportsNewSession = false,
 ) {
   let active = ["Read", "Write", "todo", "custom-tool"];
   const tools = new Map<string, ToolLike>();
   const messages: string[] = [];
   const notifications: string[] = [];
   const statuses: Array<string | undefined> = [];
+  const compactions: Array<{ customInstructions?: string; onComplete?: (result: unknown) => void }> = [];
+  let newSessions = 0;
   const tui = { requestRender() {} };
   const theme = {
     fg: (_name: string, text: string) => text,
@@ -44,7 +49,11 @@ function createHarness(
     async custom(factory: Function) {
       return new Promise((resolve) => {
         const component = factory(tui, theme, {}, resolve);
-        if (autoConfirm) {
+        if (confirmationInputs) {
+          setImmediate(() => {
+            for (const input of confirmationInputs) component.handleInput(input);
+          });
+        } else if (autoConfirm) {
           setImmediate(() => {
             component.handleInput("\x1b[13;5u");
             if (failingApproval) setTimeout(() => component.handleInput("\x1b"), 100);
@@ -65,12 +74,25 @@ function createHarness(
     cwd: join(root, "workspace"),
     hasUI: true,
     isIdle: () => true,
+    compact(options: { customInstructions?: string; onComplete?: (result: unknown) => void }) {
+      compactions.push(options);
+      setImmediate(() => options.onComplete?.({}));
+    },
     sessionManager: {
       getSessionId: () => sessionId,
       getSessionFile: () => join(root, `${sessionId}.jsonl`),
       getSessionName: () => sessionId,
     },
     ui,
+    ...(supportsNewSession
+      ? {
+          async newSession(options?: { withSession?: (ctx: { sendUserMessage(message: string): Promise<void> }) => Promise<void> }) {
+            newSessions++;
+            await options?.withSession?.({ async sendUserMessage(message: string) { messages.push(message); } });
+            return { cancelled: false };
+          },
+        }
+      : {}),
   } as unknown as ExtensionContext;
 
   class FailingSaveStore extends PlanStore {
@@ -111,6 +133,8 @@ function createHarness(
     messages,
     notifications,
     statuses,
+    compactions,
+    get newSessions() { return newSessions; },
     get active() { return active; },
   };
 }
@@ -173,7 +197,11 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.equal(getMode(), "act");
     assert.equal(harness.statuses.at(-1), "ACT");
     assert.deepEqual(harness.active, actSnapshot);
-    assert.match(harness.messages.at(-1) ?? "", /# Approved/);
+    assert.doesNotMatch(harness.messages.at(-1) ?? "", /# Approved/);
+    assert.match(harness.messages.at(-1) ?? "", /already in the current context/);
+    assert.match(harness.messages.at(-1) ?? "", /Todo dependency graph/);
+    assert.match(harness.messages.at(-1) ?? "", /one active Goal/);
+    assert.match(harness.messages.at(-1) ?? "", /locked boundaries and acceptance checks/);
 
     const store = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
@@ -183,6 +211,68 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.equal(loaded.manifest.status, "approved");
     assert.ok(loaded.manifest.approvedPath);
     assert.equal(await readFile(join(store.plansDir, loaded.manifest.approvedPath!), "utf8"), "# Approved\n\nImplement safely");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Plan confirmation compacts with an explicit approved-Plan link before execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-compact-"));
+  const harness = createHarness(root, false, false, false, false, "compact-chat", ["\x1b[B", "\x1b[B", "\r"]);
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Compact Plan\n\nKeep boundary A" });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(harness.compactions.length, 1);
+    assert.match(harness.compactions[0].customInstructions ?? "", /authoritative execution contract/);
+    assert.match(harness.compactions[0].customInstructions ?? "", /# Compact Plan/);
+    assert.match(harness.compactions[0].customInstructions ?? "", /current\.md/);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.doesNotMatch(harness.messages.at(-1) ?? "", /# Compact Plan/);
+    assert.match(harness.messages.at(-1) ?? "", /already in the current context/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Plan confirmation can execute in a new session from command-capable context", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-clear-"));
+  const harness = createHarness(root, false, false, false, false, "clear-chat", ["\x1b[B", "\r"], true);
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Clean Context Plan" });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(harness.newSessions, 1);
+    assert.match(harness.messages.at(-1) ?? "", /# Clean Context Plan/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Cancelling Plan confirmation exits Plan mode and preserves the draft", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-cancel-"));
+  const harness = createHarness(root, false, false, false, false, "cancel-chat", ["\x1b"]);
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Preserved Draft" });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, false);
+    assert.equal(getMode(), "act");
+    const store = new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: harness.ctx.sessionManager.getSessionId() },
+    });
+    const loaded = await store.load();
+    assert.equal(loaded.manifest.status, "draft");
+    assert.equal(loaded.markdown, "# Preserved Draft");
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -220,6 +310,14 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
+    const planPrompt = onBeforeAgentStartPlan({ systemPrompt: "base" })?.systemPrompt ?? "";
+    assert.match(planPrompt, /Align every user requirement/);
+    assert.match(planPrompt, /verifiable acceptance check/);
+    assert.match(planPrompt, /Socratic pressure review/);
+    assert.match(planPrompt, /Use ask-user-question for every user question/);
+    assert.match(planPrompt, /Ask 2-4 related questions per call/);
+    assert.match(planPrompt, /scope, boundaries, non-goals/);
+    assert.match(planPrompt, /one active Goal/);
     assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /blocks/);
     assert.match(onToolCallPlan({ toolName: "custom-tool", input: {} })?.reason ?? "", /does not allow/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git status" } })?.reason ?? "allowed", /allowed/);

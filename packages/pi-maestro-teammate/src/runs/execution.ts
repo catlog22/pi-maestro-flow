@@ -15,9 +15,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { resolveAgent, type AgentConfig } from "../agents/agents.ts";
+import { resolvePromptTask } from "../prompts/prompts.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
 import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
+import type { TeammateTaskType } from "../models/model-routing.ts";
 
 // ---------------------------------------------------------------------------
 // Public param / option interfaces
@@ -26,6 +28,9 @@ import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 export interface RunTeammateParams {
   agent: string;
   task?: string;
+  prompt?: string;
+  promptArgs?: string[];
+  taskType?: TeammateTaskType;
   name?: string;
   reply_to?: "caller" | "main";
   protocol_version?: number;
@@ -35,8 +40,8 @@ export interface RunTeammateParams {
   cwd?: string;
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
-  tasks?: Array<{ agent: string; task?: string; name?: string; model?: string; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }>;
-  chain?: Array<{ agent: string; task?: string; model?: string }>;
+  tasks?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; name?: string; model?: string; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }>;
+  chain?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; model?: string }>;
   concurrency?: number;
 }
 
@@ -66,6 +71,9 @@ export interface RunTeammateOptions {
 export interface NormalizedTask {
   agent: string;
   task: string;
+  prompt?: string;
+  promptArgs?: string[];
+  taskType?: TeammateTaskType;
   name?: string;
   model?: string;
   cwd?: string;
@@ -257,7 +265,7 @@ export function inferGraphMode(
 // ---------------------------------------------------------------------------
 
 export function normalizeChainToTasks(
-  chain: Array<{ agent: string; task?: string; model?: string }>,
+  chain: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; model?: string }>,
   initialTask: string,
 ): NormalizedTask[] {
   return chain.map((step, i) => {
@@ -270,7 +278,15 @@ export function normalizeChainToTasks(
       const template = step.task ?? `{${prevName}}`;
       task = template.replace(/\{previous\}/g, `{${prevName}}`);
     }
-    return { agent: step.agent, task, name, model: step.model };
+    return {
+      agent: step.agent,
+      task,
+      name,
+      model: step.model,
+      taskType: step.taskType,
+      prompt: step.prompt,
+      promptArgs: step.promptArgs,
+    };
   });
 }
 
@@ -505,6 +521,21 @@ export async function runTeammate(
   const startTime = Date.now();
   const correlationId = options.correlationId ?? randomUUID();
   const cwd = params.cwd ?? options.baseCwd;
+
+  const promptResolution = resolvePromptTask(cwd, params.prompt, params.task, params.promptArgs);
+  if (promptResolution.error) {
+    return {
+      agent: params.agent,
+      task: params.task ?? "",
+      exitCode: 1,
+      messages: [{ role: "system", content: promptResolution.error }],
+      usage: emptyUsage(),
+      model: params.model ?? "unknown",
+      correlationId,
+      durationMs: Date.now() - startTime,
+    };
+  }
+  if (params.prompt) params = { ...params, task: promptResolution.task };
 
   // AC4: Depth guard
   const depthCheck = checkDepthGuard();
@@ -1212,6 +1243,8 @@ export async function runGraph(
         {
           agent: task.agent,
           task: resolvedTask,
+          prompt: task.prompt,
+          promptArgs: task.promptArgs,
           model: task.model,
           cwd: task.cwd,
           outputSchema: task.outputSchema,

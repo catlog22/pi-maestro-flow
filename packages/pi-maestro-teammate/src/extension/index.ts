@@ -55,6 +55,7 @@ import {
   renderTeammateResult,
 } from "../tui/render.ts";
 import { AttachOverlay } from "../tui/attach-overlay.ts";
+import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
 import type {
   Details,
   TeammateState,
@@ -70,6 +71,16 @@ import {
   TEAMMATE_MESSAGE_EVENT,
 } from "../shared/types.ts";
 import { formatAgentCatalog } from "../agents/agents.ts";
+import { formatPromptCatalog } from "../prompts/prompts.ts";
+import {
+  appendModelCatalog,
+  createModelCatalogSnapshot,
+  type ModelCatalogSnapshot,
+} from "../models/model-catalog.ts";
+import {
+  applyModelRouting,
+  formatModelRoutingConfig,
+} from "../models/model-routing.ts";
 
 export const TEAMMATE_PROMPT_SNIPPET =
   "Dispatch bounded work to discovered teammate roles for parallel, sequential, or specialist execution.";
@@ -81,21 +92,30 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "Give teammate tasks a name when they may need teammate-send follow-up or downstream variable references.",
   'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default.',
   "Use teammate-list or teammate-watch only when status or live output is needed, and teammate-send for steering or follow-up.",
+  "Omit model to use teammate task-type model routing; an exact task-level provider/model overrides the top-level model, and the top-level model overrides automatic routing.",
 ];
 
 export function buildTeammateToolDescription(cwd: string): string {
   return `Dispatch tasks to teammate agents. Teammates run as Pi subprocesses with their own tools and context.
 
 Call forms:
-  - Single: { agent: "delegate", task: "..." }
+  - Single: { agent: "delegate", taskType: "analysis", task: "...", model: "provider/model" }
+  - Explore: { agent: "explorer", taskType: "explore", task: "FIND: ...\\nSCOPE: ..." }
   - Fork: { agent: "delegate", task: "...", context: "fork" }
-  - Parallel: { tasks: [{ agent: "explorer", task: "..." }, { agent: "reviewer", task: "..." }] }
+  - Parallel: { model: "provider/default", tasks: [{ agent: "explorer", task: "..." }, { agent: "reviewer", task: "...", model: "provider/override" }] }
   - DAG: name tasks and reference {name} or {name.field} from dependent tasks
+  - Fixed prompt: { agent: "delegate", prompt: "analysis", task: "Inspect auth", promptArgs: ["@src/auth", "file:line findings"] }
 
 Use discovered roles when possible. Unknown names currently fall back to a generic teammate configuration.
 
 Available teammate roles for ${cwd}:
-${formatAgentCatalog(cwd)}`;
+${formatAgentCatalog(cwd)}
+
+Available teammate prompts for ${cwd}:
+${formatPromptCatalog(cwd)}
+
+Configured task-type model routing for ${cwd}:
+${formatModelRoutingConfig(cwd)}`;
 }
 
 const TEAMMATE_SEND_DESCRIPTION = `Send a message to a named, running teammate agent.
@@ -309,6 +329,20 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   );
 
   const isChild = process.env.PI_TEAMMATE_CHILD === "1";
+  let modelCatalog: ModelCatalogSnapshot = createModelCatalogSnapshot([]);
+
+  const refreshModelCatalog = (ctx: ExtensionContext): ModelCatalogSnapshot => {
+    const next = createModelCatalogSnapshot(ctx.modelRegistry?.getAvailable?.() ?? []);
+    if (next.signature !== modelCatalog.signature) modelCatalog = next;
+    return modelCatalog;
+  };
+
+  const injectModelCatalog = (
+    event: { systemPrompt: string },
+    ctx: ExtensionContext,
+  ): { systemPrompt: string } => ({
+    systemPrompt: appendModelCatalog(event.systemPrompt, refreshModelCatalog(ctx)),
+  });
 
   // =========================================================================
   // Child mode: register proxy tools that forward to root via stdout/IPC
@@ -360,9 +394,11 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
 
     pi.on("session_start", (_event, ctx) => {
       publishSessionIdentity(ctx);
+      refreshModelCatalog(ctx);
       proxyTeammateTool.description = buildTeammateToolDescription(ctx.cwd);
       pi.registerTool(proxyTeammateTool);
     });
+    pi.on("before_agent_start", injectModelCatalog);
     pi.on("session_compact", (_event, ctx) => publishSessionIdentity(ctx));
     pi.on("message_end", (_event, ctx) => publishSessionIdentity(ctx));
     pi.on("agent_end", (_event, ctx) => {
@@ -481,7 +517,13 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       promptGuidelines: TEAMMATE_PROMPT_GUIDELINES,
       parameters: TeammateParams,
       async execute(_id: string, params: RunTeammateParams) {
-        return proxyCall<Details>("teammate", params);
+        const ctx = bridge.ctx;
+        const routed = applyModelRouting(
+          params,
+          ctx?.cwd ?? process.cwd(),
+          ctx ? refreshModelCatalog(ctx).modelIds : modelCatalog.modelIds,
+        );
+        return proxyCall<Details>("teammate", routed);
       },
     };
     pi.registerTool(proxyTeammateTool);
@@ -609,6 +651,12 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         | undefined,
       ctx: ExtensionContext,
     ): Promise<AgentToolResult<Details>> {
+      params = applyModelRouting(
+        params,
+        (params.cwd ?? state.baseCwd) || ctx.cwd,
+        refreshModelCatalog(ctx).modelIds,
+      );
+
       // --- Normalize to task list ---
       let normalizedTasks: NormalizedTask[];
       let isMultiTask = false;
@@ -617,9 +665,12 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         normalizedTasks = normalizeChainToTasks(params.chain, params.task ?? "");
         isMultiTask = true;
       } else if (params.tasks?.length) {
-        normalizedTasks = params.tasks.map((t: { agent: string; task?: string; name?: string; model?: string; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }) => ({
+        normalizedTasks = params.tasks.map((t) => ({
           agent: t.agent,
           task: t.task ?? "",
+          prompt: t.prompt ?? params.prompt,
+          promptArgs: t.promptArgs ?? params.promptArgs,
+          taskType: t.taskType ?? params.taskType,
           name: t.name,
           model: t.model ?? params.model,
           cwd: t.cwd ?? params.cwd,
@@ -641,6 +692,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       if (params.chain?.length) {
         for (const t of normalizedTasks) {
           t.model ??= params.model;
+          t.prompt ??= params.prompt;
+          t.promptArgs ??= params.promptArgs;
+          t.taskType ??= params.taskType;
           t.cwd ??= params.cwd;
           t.outputSchema ??= params.outputSchema as Record<string, unknown> | undefined;
           t.timeoutMs ??= params.timeoutMs;
@@ -1003,8 +1057,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               },
               { triggerTurn: true },
             );
-          }).catch(() => {
+          }).catch((error) => {
             retireAgent(state, correlationId);
+            notifyBackgroundFailure(pi, id, graphMode, correlationId, error);
           });
 
           return {
@@ -1066,8 +1121,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               },
               { triggerTurn: true },
             );
-          }).catch(() => {
+          }).catch((error) => {
             retireAgent(state, correlationId);
+            notifyBackgroundFailure(pi, id, params.agent, correlationId, error);
           });
           return {
             content: [{ type: "text", text: `■ @${params.name ?? params.agent} detached · completion notification enabled` }],
@@ -1093,8 +1149,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             },
             { triggerTurn: true },
           );
-        }).catch(() => {
+        }).catch((error) => {
           retireAgent(state, correlationId);
+          notifyBackgroundFailure(pi, id, params.agent, correlationId, error);
         });
 
         return {
@@ -1776,6 +1833,15 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     },
   });
 
+  pi.registerCommand("teammate-models", {
+    description: "Configure task-type to model routing for teammate agents",
+    async handler(_args, ctx) {
+      await showModelMappingOverlay(ctx, refreshModelCatalog(ctx).modelIds);
+      tool.description = buildTeammateToolDescription(ctx.cwd);
+      pi.registerTool(tool);
+    },
+  });
+
   // =========================================================================
   // TUI — only in parent mode (child processes have no terminal)
   // =========================================================================
@@ -1784,6 +1850,15 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     description: "Open the teammate agent view",
     async handler(ctx) {
       await showAgentSelector(ctx);
+    },
+  });
+
+  pi.registerShortcut("alt+m", {
+    description: "Configure teammate task-type model routing",
+    async handler(ctx) {
+      await showModelMappingOverlay(ctx, refreshModelCatalog(ctx).modelIds);
+      tool.description = buildTeammateToolDescription(ctx.cwd);
+      pi.registerTool(tool);
     },
   });
 
@@ -1861,6 +1936,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   pi.on("session_start", (_event, ctx) => {
     widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
+    refreshModelCatalog(ctx);
     tool.description = buildTeammateToolDescription(ctx.cwd);
     pi.registerTool(tool);
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
@@ -1868,6 +1944,8 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     const isAgentSession = Array.from(state.activeRuns.values()).some((agent) => agent.sessionFile === sessionFile);
     if (sessionFile && !isAgentSession) state.mainSessionFile = sessionFile;
   });
+
+  pi.on("before_agent_start", injectModelCatalog);
 
   pi.on("session_compact", (_event, ctx) => {
     widgetCtx = ctx;
@@ -2178,6 +2256,25 @@ function emitComplete(
   });
 }
 
+export function notifyBackgroundFailure(
+  pi: ExtensionAPI,
+  id: string,
+  agent: string,
+  correlationId: string,
+  error: unknown,
+): void {
+  const message = `Background teammate ${agent} failed: ${error instanceof Error ? error.message : String(error)}`;
+  emitComplete(pi, id, agent, correlationId, 1, 0);
+  pi.sendMessage(
+    {
+      customType: "teammate-complete",
+      content: message,
+      display: true,
+    },
+    { triggerTurn: true },
+  );
+}
+
 function retireAgent(
   state: TeammateState,
   correlationId: string,
@@ -2285,6 +2382,9 @@ async function handleProxyRequest(
         normalizedTasks = normalizeChainToTasks(p.chain, p.task ?? "");
         for (const t of normalizedTasks) {
           t.model ??= p.model;
+          t.taskType ??= p.taskType;
+          t.prompt ??= p.prompt;
+          t.promptArgs ??= p.promptArgs;
           t.cwd ??= p.cwd;
           t.outputSchema ??= p.outputSchema as Record<string, unknown> | undefined;
           t.timeoutMs ??= p.timeoutMs;
@@ -2293,6 +2393,9 @@ async function handleProxyRequest(
         normalizedTasks = p.tasks.map((t) => ({
           agent: t.agent,
           task: t.task ?? "",
+          prompt: t.prompt ?? p.prompt,
+          promptArgs: t.promptArgs ?? p.promptArgs,
+          taskType: t.taskType ?? p.taskType,
           name: t.name,
           model: t.model ?? p.model,
           cwd: t.cwd ?? p.cwd,

@@ -1,7 +1,9 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   Editor,
+  Key,
   type EditorTheme,
+  matchesKey,
   truncateToWidth,
   visibleWidth,
 } from "@earendil-works/pi-tui";
@@ -24,7 +26,7 @@ export interface PlanEditorResult {
 }
 
 const CTRL_S = "\x13";
-const CTRL_ENTER_SEQUENCES = new Set(["\x1b[13;5u", "\x1b[13;5~"]);
+const CTRL_ENTER_SEQUENCES = new Set(["\x1b[13;5u", "\x1b[13;5~", "\x1b[27;5;13~"]);
 
 export async function openPlanEditor(
   ctx: PlanEditorContext,
@@ -165,7 +167,7 @@ export async function openPlanEditor(
             void save();
             return;
           }
-          if (CTRL_ENTER_SEQUENCES.has(data)) {
+          if (matchesKey(data, Key.ctrl("enter")) || CTRL_ENTER_SEQUENCES.has(data)) {
             void confirm();
             return;
           }

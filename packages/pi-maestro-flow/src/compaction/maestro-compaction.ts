@@ -21,11 +21,14 @@ const DETAILS_VERSION = 1;
 export interface MaestroActiveSkill {
   name: string;
   args?: string;
+  role: "primary" | "guard" | "support";
   filePath?: string;
   requiredFiles: string[];
   deferredFiles: string[];
-  loadedAt?: string;
   todoId: string;
+  activationId?: string;
+  stackRevision?: string;
+  state?: "active" | "stale";
 }
 
 export interface MaestroCompactionReference {
@@ -296,17 +299,27 @@ export async function persistMaestroCompactionKnowhow(
 }
 
 function collectActiveSkills(tasks: TodoTask[]): MaestroActiveSkill[] {
-  return tasks
-    .filter((task) => task.status === "in_progress" && task.skill)
-    .map((task) => ({
-      name: task.skill!.name,
-      ...(task.skill!.args ? { args: task.skill!.args } : {}),
-      ...(task.skillLoad?.filePath ? { filePath: task.skillLoad.filePath } : {}),
-      requiredFiles: [...(task.skillLoad?.requiredFiles ?? [])],
-      deferredFiles: [...(task.skillLoad?.deferredFiles ?? [])],
-      ...(task.skillLoad?.loadedAt ? { loadedAt: task.skillLoad.loadedAt } : {}),
-      todoId: task.id,
-    }));
+  return tasks.flatMap((task) => {
+    if (task.status !== "in_progress") return [];
+    const metadataByName = new Map(
+      (task.skillActivation?.bindings ?? []).map((binding) => [binding.name, binding]),
+    );
+    return task.skills.map((skill) => {
+      const metadata = metadataByName.get(skill.name);
+      return {
+        name: skill.name,
+        role: skill.role,
+        ...(skill.args ? { args: skill.args } : {}),
+        ...(metadata?.filePath ? { filePath: metadata.filePath } : {}),
+        requiredFiles: [...(metadata?.requiredFiles ?? [])],
+        deferredFiles: [...(metadata?.deferredFiles ?? [])],
+        todoId: task.id,
+        ...(task.skillActivation?.activationId ? { activationId: task.skillActivation.activationId } : {}),
+        ...(task.skillActivation?.stackRevision ? { stackRevision: task.skillActivation.stackRevision } : {}),
+        ...(task.skillActivation?.state ? { state: task.skillActivation.state } : {}),
+      };
+    });
+  });
 }
 
 function collectCurrentReferencePaths(
