@@ -9,7 +9,14 @@ import {
   inferTaskType,
   loadModelRoutingConfig,
   saveProjectModelMapping,
+  TEAMMATE_TASK_TYPE_META,
 } from "../src/models/model-routing.ts";
+
+test("task types expose role metadata for the configuration UI", () => {
+  assert.equal(TEAMMATE_TASK_TYPE_META.explore.roles, "explorer");
+  assert.match(TEAMMATE_TASK_TYPE_META.development.description, /Implementation/);
+  assert.equal(Object.keys(TEAMMATE_TASK_TYPE_META).length, 7);
+});
 
 test("task type inference prioritizes explicit phases and specialized prompts", () => {
   assert.equal(inferTaskType({ taskType: "testing", agent: "explorer" }), "testing");

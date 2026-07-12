@@ -31,6 +31,7 @@ import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
 import { executeMoa, type MoaParams } from "../tools/moa.ts";
 import { registerMaestroProviders } from "../providers/provider-registry.ts";
+import { registerLoginProviderConfigs } from "../providers/login-provider-config.ts";
 import {
   initGoal,
   registerGoalCommand,
@@ -132,6 +133,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
   // Register dynamic providers from cli-tools.json
   try {
+    registerLoginProviderConfigs(pi);
     registerMaestroProviders(pi);
   } catch (error) {
     // Provider registration failures should not block extension load

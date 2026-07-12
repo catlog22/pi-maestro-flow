@@ -3,6 +3,7 @@ import { DynamicBorder } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import {
   TEAMMATE_TASK_TYPES,
+  TEAMMATE_TASK_TYPE_META,
   getProjectModelRoutingPath,
   loadModelRoutingConfig,
   saveProjectModelMapping,
@@ -55,11 +56,11 @@ export async function showModelMappingOverlay(
     const config = loadModelRoutingConfig(ctx.cwd);
     const taskType = await selectOverlay(
       ctx,
-      "Teammate Model Routing",
+      "Teammate Role & Model Routing",
       TEAMMATE_TASK_TYPES.map((type) => ({
         value: type,
-        label: type,
-        description: config.mappings[type] ?? "auto / agent default",
+        label: `${TEAMMATE_TASK_TYPE_META[type].label} · ${config.mappings[type] ?? "auto"}`,
+        description: `${TEAMMATE_TASK_TYPE_META[type].roles} — ${TEAMMATE_TASK_TYPE_META[type].description}`,
       })),
     ) as TeammateTaskType | null;
     if (!taskType) return;
@@ -85,7 +86,11 @@ export async function showModelMappingOverlay(
       });
     }
 
-    const model = await selectOverlay(ctx, `Map ${taskType} to model`, modelItems);
+    const model = await selectOverlay(
+      ctx,
+      `Map ${TEAMMATE_TASK_TYPE_META[taskType].label} (${TEAMMATE_TASK_TYPE_META[taskType].roles})`,
+      modelItems,
+    );
     if (model === null) return;
     saveProjectModelMapping(ctx.cwd, taskType, model === "__auto__" ? null : model);
     ctx.ui.notify(

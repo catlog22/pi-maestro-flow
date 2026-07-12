@@ -15,6 +15,19 @@ export const TEAMMATE_TASK_TYPES = [
 
 export type TeammateTaskType = (typeof TEAMMATE_TASK_TYPES)[number];
 
+export const TEAMMATE_TASK_TYPE_META: Record<
+  TeammateTaskType,
+  { label: string; roles: string; description: string }
+> = {
+  explore: { label: "Explore", roles: "explorer", description: "File discovery, definitions, and call sites" },
+  analysis: { label: "Analysis", roles: "delegate / analyst", description: "Read-only tracing and technical investigation" },
+  debug: { label: "Debug", roles: "debugger", description: "Root-cause diagnosis and runtime debugging" },
+  planning: { label: "Planning", roles: "planner / architect", description: "Architecture and execution planning" },
+  development: { label: "Development", roles: "developer / worker", description: "Implementation and refactoring" },
+  review: { label: "Review", roles: "reviewer", description: "Correctness, quality, and security review" },
+  testing: { label: "Testing", roles: "tester / qa", description: "Tests, coverage, and regression validation" },
+};
+
 export interface ModelRoutingConfig {
   version: 1;
   mappings: Partial<Record<TeammateTaskType, string | null>>;

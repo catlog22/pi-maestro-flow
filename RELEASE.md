@@ -1,57 +1,61 @@
-# Release v0.4.5 — 2026-07-13
+# Release v0.4.6 — 2026-07-13
 
 ## 概述
 
-v0.4.5 统一了 `pi-maestro-flow` 的安装包资源边界：Pi workflow skills 现在作为插件自身的标准 package resources 发布，不再扫描 `maestro-flow` 依赖包中的兼容镜像；Pi 专用 `AGENTS.md` 也随插件发布并由扩展稳定注入。同时改进 Plan 确认浮层，使全部执行选项保持可见。
+v0.4.6 为 Pi 增加通用的 OpenAI-compatible 与 Anthropic-compatible provider 登录配置，并把 teammate 的角色、任务类型和模型映射关系完整呈现在配置界面中。用户现在可以直接通过 `/login` 配置自定义 endpoint，再通过 `/teammate-models` 或 `Alt+M` 将已认证模型分配给不同工作角色。
 
-## 改进
+## 详细变更
 
-### 标准 Pi skill package resources
+### 通用 Provider 登录配置
 
-- 将 113 个 canonical skills 迁移到 `packages/pi-maestro-flow/.pi/skills/`。
-- 在 package manifest 中通过 `pi.skills` 声明 `./.pi/skills`，用户执行 `pi install npm:pi-maestro-flow` 后由 Pi 标准 package loader 自动发现。
-- 删除对 `node_modules/maestro-flow/.agents/skills` 的 `resources_discover` 注册，避免依赖包兼容副本进入候选列表并显示 `(skipped)`。
-- 根目录 `.pi/settings.json` 指向 package 内的同一 skill source，开发环境和发布包不再维护两套副本。
+- 新增 `maestro-openai` provider，使用 `openai-completions` API 格式。
+- 新增 `maestro-anthropic` provider，使用 `anthropic-messages` API 格式。
+- 登录流程支持输入 `Base URL`、`model ID` 和 `API key`。
+- 复用 Pi 原生 OAuth credential hook 保存多字段配置，并在认证后动态修改模型 ID 与 endpoint。
+- URL 仅允许 `http` 或 `https`，自动清除末尾 `/`。
+- 新增 provider 配置、凭证序列化、URL 校验和动态模型修改测试。
 
-### Pi 专用项目说明
+### Teammate 角色与模型映射
 
-- 将根目录 `AGENTS.md` 移入 `packages/pi-maestro-flow/AGENTS.md`，避免其他 coding agent 按根目录约定自动注入 Pi 专用规则。
-- npm package 明确包含 `AGENTS.md`。
-- 插件通过 `before_agent_start` 读取安装包内文档，并以 `<project_instructions>` 形式追加到 Pi system prompt。
+- 配置界面标题更新为 `Teammate Role & Model Routing`。
+- 为 `explore`、`analysis`、`debug`、`planning`、`development`、`review` 和 `testing` 增加角色提示及用途描述。
+- 第一层列表同时显示角色类别和当前生效模型或 `auto` 状态。
+- 第二层模型选择界面显示对应角色提示，继续保留 `active`、`unavailable` 与 `auto / agent default` 状态。
+- 项目级 `.pi/teammate-models.json` 与全局配置覆盖规则保持兼容。
 
-### Plan 确认浮层
+### 文档与知识沉淀
 
-- Plan confirmation 底部由单一当前动作改为完整动作列表。
-- 保留当前选中项、不可用状态和宽终端说明文本，使执行选择更直观。
-- 补充对应渲染与交互测试。
-
-## 验证
-
-- Package resource tests：3/3 通过。
-- Plan、PlanStore、Plan editor 与 Statusline：40/40 通过。
-- `npm pack --dry-run` 已确认包含 `AGENTS.md`、`.pi/skills/workflow-skill-designer/SKILL.md` 等 package resources。
-- 模拟 Pi `before_agent_start` 已确认 bundled `AGENTS.md` 正确进入 system prompt。
+- 新增 knowhow：`AST-20260713-pi-provider-login-teammate-model-routing.md`。
+- 记录 provider credential 契约、teammate 映射优先级、操作步骤、限制和验证结果。
 
 ## 版本
 
 | 包 | 旧版本 | 新版本 |
 |---|---:|---:|
-| `pi-maestro-flow` | 0.4.4 | 0.4.5 |
+| `pi-maestro-flow` | 0.4.5 | 0.4.6 |
+| `pi-maestro-teammate` | 0.4.2 | 0.4.3 |
 
-`pi-maestro-teammate` 本次没有代码变更，继续保持 `0.4.2`。
+## 验证
+
+- Provider focused tests：3/3 通过。
+- Teammate package tests：41/41 通过。
+- Package resource runtime tests：3/3 通过。
+- `git diff --check` 通过。
+- npm package dry-run 在正式发布前执行。
 
 ## 安装
 
 ```bash
-pi install npm:pi-maestro-flow@0.4.5
+pi install npm:pi-maestro-flow@0.4.6
+pi install npm:pi-maestro-teammate@0.4.3
 ```
 
-也可以通过 npm 安装：
+也可以使用 npm：
 
 ```bash
-npm install pi-maestro-flow@0.4.5
+npm install pi-maestro-flow@0.4.6 pi-maestro-teammate@0.4.3
 ```
 
 ## 升级说明
 
-这是向后兼容的 patch 更新。升级后建议在 Pi 中执行 `/reload` 或重启会话，使新的 package skills 和 bundled instructions 生效。项目无需再从 `maestro-flow/.agents/skills` 获取 workflow skills。
+这是向后兼容的 patch 更新。升级后执行 `/reload` 或重启 Pi。随后通过 `/login` 添加通用 provider，并使用 `/teammate-models` 或 `Alt+M` 配置角色模型映射。
