@@ -302,7 +302,8 @@ export class AttachOverlay implements Component, Focusable {
     const w = Math.max(1, Math.min(width, 120));
     const log = this.agents.get(this.activeId);
     if (w < 20) return [this.renderCompact(log, w)];
-    const targetHeight = Math.max(6, Math.min(height ?? process.stdout?.rows ?? 30, 30));
+    const terminalHeight = Math.max(6, (process.stdout?.rows ?? 30) - 2);
+    const targetHeight = Math.max(6, Math.min(height ?? terminalHeight, terminalHeight));
     if (targetHeight <= 12) return this.renderDocked(log, w, targetHeight);
     const inner = w - 2;
     const rows: string[] = [this.renderTabs(inner), frameRule(inner)];

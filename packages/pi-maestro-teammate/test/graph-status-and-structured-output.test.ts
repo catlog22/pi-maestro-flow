@@ -418,6 +418,17 @@ test("agent conversation expands in overlay and sends composed messages", async 
     assert.match(expanded.join("\n"), /detail line 20/);
     assert.match(expanded.join("\n"), /Enter.*message/);
 
+    const previousRows = process.stdout.rows;
+    Object.defineProperty(process.stdout, "rows", { configurable: true, value: 60 });
+    try {
+      const fullscreen = overlay.render(140, 48);
+      assert.ok(fullscreen.length > 30);
+      assert.ok(fullscreen.length <= 48);
+      assert.match(fullscreen.join("\n"), /detail line 20/);
+    } finally {
+      Object.defineProperty(process.stdout, "rows", { configurable: true, value: previousRows });
+    }
+
     overlay.handleInput("\r");
     for (const character of "please inspect the failing test") overlay.handleInput(character);
     assert.match(overlay.render(100, 26).join("\n"), /please inspect the failing test/);

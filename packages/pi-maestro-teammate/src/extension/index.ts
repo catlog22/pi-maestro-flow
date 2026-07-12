@@ -1456,8 +1456,8 @@ Modes:
         {
           overlay: true,
           overlayOptions: {
-            width: "88%",
-            maxHeight: "86%",
+            width: "96%",
+            maxHeight: "96%",
             anchor: "center",
           },
         },
