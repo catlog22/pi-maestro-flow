@@ -1,46 +1,57 @@
-# Release v0.4.4 — 2026-07-12
+# Release v0.4.5 — 2026-07-13
 
 ## 概述
 
-v0.4.4 是 `pi-maestro-flow` 的 UI patch 版本，统一 Plan、Approval 与 Todo 的终端展示层级，并将 Plan 确认页收敛为类似 Agent viewer 的居中 overlay。
+v0.4.5 统一了 `pi-maestro-flow` 的安装包资源边界：Pi workflow skills 现在作为插件自身的标准 package resources 发布，不再扫描 `maestro-flow` 依赖包中的兼容镜像；Pi 专用 `AGENTS.md` 也随插件发布并由扩展稳定注入。同时改进 Plan 确认浮层，使全部执行选项保持可见。
 
 ## 改进
 
-### Plan 确认 overlay
+### 标准 Pi skill package resources
 
-- 从占满终端的 `100% × 100%` 页面调整为居中的 `100 × 28` overlay。
-- 使用与 Agent viewer 一致的细边框、主体内容区和底部快捷键带。
-- 操作列表改为 progressive disclosure：默认只显示当前选项及说明，保留 `↑↓` 切换全部 5 个动作。
-- Plan Markdown 保持独立滚动，并继续支持 `PgUp/PgDn`、`Ctrl+Enter` 和窄终端 compact 降级。
+- 将 113 个 canonical skills 迁移到 `packages/pi-maestro-flow/.pi/skills/`。
+- 在 package manifest 中通过 `pi.skills` 声明 `./.pi/skills`，用户执行 `pi install npm:pi-maestro-flow` 后由 Pi 标准 package loader 自动发现。
+- 删除对 `node_modules/maestro-flow/.agents/skills` 的 `resources_discover` 注册，避免依赖包兼容副本进入候选列表并显示 `(skipped)`。
+- 根目录 `.pi/settings.json` 指向 package 内的同一 skill source，开发环境和发布包不再维护两套副本。
 
-### 多模式状态仲裁
+### Pi 专用项目说明
 
-- Plan 模式成为 `ACT / PLAN / READY` 的唯一状态所有者。
-- Plan 激活时隐藏重复的 `APPROVAL plan`，退出后恢复实际 Approval 状态。
-- 修复通过不同快捷键切换 Plan 时 Approval 状态可能残留或互相矛盾的问题。
-- Todo 继续作为独立任务进度面板，可与 Plan 模式并存而不重复表达模式语义。
+- 将根目录 `AGENTS.md` 移入 `packages/pi-maestro-flow/AGENTS.md`，避免其他 coding agent 按根目录约定自动注入 Pi 专用规则。
+- npm package 明确包含 `AGENTS.md`。
+- 插件通过 `before_agent_start` 读取安装包内文档，并以 `<project_instructions>` 形式追加到 Pi system prompt。
+
+### Plan 确认浮层
+
+- Plan confirmation 底部由单一当前动作改为完整动作列表。
+- 保留当前选中项、不可用状态和宽终端说明文本，使执行选择更直观。
+- 补充对应渲染与交互测试。
 
 ## 验证
 
+- Package resource tests：3/3 通过。
 - Plan、PlanStore、Plan editor 与 Statusline：40/40 通过。
-- Todo 与 skill loader：20/20 通过。
-- Approval mode focused tests：2/2 通过。
-- 本次相关验证合计：62/62 通过。
+- `npm pack --dry-run` 已确认包含 `AGENTS.md`、`.pi/skills/workflow-skill-designer/SKILL.md` 等 package resources。
+- 模拟 Pi `before_agent_start` 已确认 bundled `AGENTS.md` 正确进入 system prompt。
 
 ## 版本
 
 | 包 | 旧版本 | 新版本 |
 |---|---:|---:|
-| `pi-maestro-flow` | 0.4.3 | 0.4.4 |
+| `pi-maestro-flow` | 0.4.4 | 0.4.5 |
 
-`pi-maestro-teammate` 本次没有代码变更，继续保持现有版本。
+`pi-maestro-teammate` 本次没有代码变更，继续保持 `0.4.2`。
 
 ## 安装
 
 ```bash
-npm install pi-maestro-flow@0.4.4
+pi install npm:pi-maestro-flow@0.4.5
+```
+
+也可以通过 npm 安装：
+
+```bash
+npm install pi-maestro-flow@0.4.5
 ```
 
 ## 升级说明
 
-这是向后兼容的 patch 更新，无需迁移配置或持久化状态。Plan 的批准、修改、退出和不同执行上下文选项均保持原有语义，仅调整终端展示与模式状态仲裁。
+这是向后兼容的 patch 更新。升级后建议在 Pi 中执行 `/reload` 或重启会话，使新的 package skills 和 bundled instructions 生效。项目无需再从 `maestro-flow/.agents/skills` 获取 workflow skills。
