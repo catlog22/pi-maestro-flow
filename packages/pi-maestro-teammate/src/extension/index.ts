@@ -696,6 +696,7 @@ Top-level defaults (model, cwd, outputSchema, timeoutMs) flow down to each task 
         ...(isMultiTask ? { taskCorrelationIds } : {}),
         signal: abortController.signal,
         parentSessionFile,
+        initialLeaseToken: activeAgent.lease ? leaseToken(activeAgent.lease) : undefined,
         onChildSpawned: (
           stdin: import("node:stream").Writable,
           sendControl: (message: Record<string, unknown>) => boolean,
@@ -2263,6 +2264,7 @@ async function handleProxyRequest(
         baseCwd: state.baseCwd,
         signal: abortCtrl.signal,
         parentSessionFile: spawnerAgent?.sessionFile ?? state.mainSessionFile,
+        initialLeaseToken: activeAgent.lease ? leaseToken(activeAgent.lease) : undefined,
         onChildSpawned: (stdin, sendControl, sessionDir) => {
           activeAgent.stdin = stdin;
           activeAgent.sendControl = sendControl;

@@ -49,6 +49,7 @@ export interface RunTeammateOptions {
   onChildRequest?: (event: Record<string, unknown>, reply: (msg: unknown) => void) => void;
   onChildEvent?: (event: Record<string, unknown>) => void;
   parentSessionFile?: string;
+  initialLeaseToken?: LeaseToken;
   onChildSpawned?: (
     stdin: import("node:stream").Writable,
     sendControl: (message: Record<string, unknown>) => boolean,
@@ -666,8 +667,7 @@ async function runSingleAttempt(
     // RPC mode: stdin stays open for bidirectional messaging.
     // Send initial prompt via RPC command.
     if (child.stdin && params.task) {
-      const rpcCmd = JSON.stringify({ type: "prompt", message: params.task });
-      child.stdin.write(rpcCmd + "\n");
+      sendRpcMessage(child.stdin, params.task, "prompt", options.initialLeaseToken);
     }
 
     // Expose stdin for teammate-send message injection

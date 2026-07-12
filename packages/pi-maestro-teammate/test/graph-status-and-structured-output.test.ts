@@ -214,6 +214,23 @@ test("idle teammate wake-up uses the RPC prompt command", async () => {
   assert.deepEqual(JSON.parse(written.trim()), { type: "prompt", message: "continue the task" });
 });
 
+test("initial teammate prompt carries the child lease token", async () => {
+  const stdin = new PassThrough();
+  let written = "";
+  stdin.on("data", (chunk) => { written += chunk.toString(); });
+  const token = leaseToken(createChildLease());
+
+  assert.equal(sendRpcMessage(stdin, "inspect the project", "prompt", token), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const command = JSON.parse(written.trim());
+  assert.equal(command.type, "prompt");
+  assert.deepEqual(unwrapLeasedMessage(command.message), {
+    message: "inspect the project",
+    token,
+  });
+});
+
 test("parallel graph rows keep independent IDs in the split tree", () => {
   const plain = (text: string) => text;
   const rows = buildProgressTree([
