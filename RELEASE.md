@@ -1,61 +1,61 @@
-# Release v0.4.6 — 2026-07-13
+# Release v0.4.7 — 2026-07-13
 
 ## 概述
 
-v0.4.6 为 Pi 增加通用的 OpenAI-compatible 与 Anthropic-compatible provider 登录配置，并把 teammate 的角色、任务类型和模型映射关系完整呈现在配置界面中。用户现在可以直接通过 `/login` 配置自定义 endpoint，再通过 `/teammate-models` 或 `Alt+M` 将已认证模型分配给不同工作角色。
+v0.4.7 调整 Plan Mode 的工具访问边界：进入 Plan Mode 后保留宿主已经启用的所有非编辑工具，不再依赖固定 allowlist；Shell guard 则聚焦阻止文件系统、包管理器、Git 和 Maestro 安装状态的写操作。与此同时，`pi-maestro-teammate` 改为明确的 runtime dependency，确保安装 `pi-maestro-flow` 后 teammate 能力可直接加载。
 
 ## 详细变更
 
-### 通用 Provider 登录配置
+### Plan Mode 工具可用性
 
-- 新增 `maestro-openai` provider，使用 `openai-completions` API 格式。
-- 新增 `maestro-anthropic` provider，使用 `anthropic-messages` API 格式。
-- 登录流程支持输入 `Base URL`、`model ID` 和 `API key`。
-- 复用 Pi 原生 OAuth credential hook 保存多字段配置，并在认证后动态修改模型 ID 与 endpoint。
-- URL 仅允许 `http` 或 `https`，自动清除末尾 `/`。
-- 新增 provider 配置、凭证序列化、URL 校验和动态模型修改测试。
+- Plan Mode 从固定工具 allowlist 改为保留 Act snapshot 中的所有非编辑工具。
+- 继续阻止 `Edit`、`Write`、`NotebookEdit` 及其小写别名，并隐藏 `plan-enter`。
+- 自定义只读工具、测试命令、分析脚本和组合式只读 Shell 命令现在可以在 Plan Mode 中继续使用。
+- `maestro delegate` 仍强制使用 `mode='analysis'`，避免通过委派进入写模式。
 
-### Teammate 角色与模型映射
+### Shell 写操作防护
 
-- 配置界面标题更新为 `Teammate Role & Model Routing`。
-- 为 `explore`、`analysis`、`debug`、`planning`、`development`、`review` 和 `testing` 增加角色提示及用途描述。
-- 第一层列表同时显示角色类别和当前生效模型或 `auto` 状态。
-- 第二层模型选择界面显示对应角色提示，继续保留 `active`、`unavailable` 与 `auto / agent default` 状态。
-- 项目级 `.pi/teammate-models.json` 与全局配置覆盖规则保持兼容。
+- 新增面向 Bash 和 PowerShell 的命令边界检测，阻止文件创建、覆盖、复制、移动、删除和权限修改。
+- 阻止 `npm`、`yarn`、`pnpm`、`bun`、`pip` 的安装、更新、发布和版本修改命令。
+- 阻止 Git commit、push、merge、rebase、reset、restore、tag 等仓库状态变更。
+- 阻止 `maestro install`、`maestro uninstall`、`maestro update` 以及 `sed -i`、`perl -i`、`find -exec` 等间接写入形式。
+- 引号中的说明文字不会被误判为真实写命令，允许 `echo 'rm cp mv are write commands'` 等只读输出。
 
-### 文档与知识沉淀
+### 安装依赖
 
-- 新增 knowhow：`AST-20260713-pi-provider-login-teammate-model-routing.md`。
-- 记录 provider credential 契约、teammate 映射优先级、操作步骤、限制和验证结果。
+- 将 `pi-maestro-teammate` 从 optional peer dependency 调整为 `^0.4.3` runtime dependency。
+- 同步更新 workspace lockfile 和 package resource contract 测试。
+- npm tarball 排除 Python `__pycache__` 和 `*.pyc` 缓存文件。
 
 ## 版本
 
 | 包 | 旧版本 | 新版本 |
 |---|---:|---:|
-| `pi-maestro-flow` | 0.4.5 | 0.4.6 |
-| `pi-maestro-teammate` | 0.4.2 | 0.4.3 |
+| `pi-maestro-flow` | 0.4.6 | 0.4.7 |
+| `pi-maestro-teammate` | 0.4.3 | 0.4.3 |
 
-## 验证
+## 变更统计
 
-- Provider focused tests：3/3 通过。
-- Teammate package tests：41/41 通过。
-- Package resource runtime tests：3/3 通过。
+- 6 个发布相关文件发生变化。
+- Plan lifecycle suite：40/40 通过。
+- Package resource suite：3/3 通过。
 - `git diff --check` 通过。
 - npm package dry-run 在正式发布前执行。
 
 ## 安装
 
 ```bash
-pi install npm:pi-maestro-flow@0.4.6
-pi install npm:pi-maestro-teammate@0.4.3
+pi install npm:pi-maestro-flow@0.4.7
 ```
 
 也可以使用 npm：
 
 ```bash
-npm install pi-maestro-flow@0.4.6 pi-maestro-teammate@0.4.3
+npm install pi-maestro-flow@0.4.7
 ```
+
+`pi-maestro-teammate@^0.4.3` 会作为 runtime dependency 自动安装。
 
 ## 升级说明
 
-这是向后兼容的 patch 更新。升级后执行 `/reload` 或重启 Pi。随后通过 `/login` 添加通用 provider，并使用 `/teammate-models` 或 `Alt+M` 配置角色模型映射。
+这是向后兼容的 patch 更新。升级后执行 `/reload` 或重启 Pi。Plan Mode 将继续阻止文件和仓库写操作，但不再隐藏第三方只读工具或常规分析命令。

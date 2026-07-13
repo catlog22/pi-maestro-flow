@@ -1,8 +1,8 @@
 /**
  * Durable Plan mode lifecycle.
  *
- * Act mode exposes plan-enter. Plan mode dynamically activates a safe read-only
- * tool surface plus plan-update/review/confirm/exit/status. Markdown drafts are
+ * Act mode exposes plan-enter. Plan mode keeps the existing non-editing tool
+ * surface plus plan-update/review/confirm/exit/status. Markdown drafts are
  * persisted by workspace and chat session; approval must commit before Act tools are restored.
  */
 
@@ -69,30 +69,45 @@ const BLOCKED_BUILTIN_TOOLS = new Set([
   "Edit", "Write", "NotebookEdit", "edit", "write", "notebook_edit",
 ]);
 
-const PLAN_ALLOWED_TOOLS = new Set([
-  "maestro", "ask-user-question", "todo",
-  "teammate-list", "teammate-watch", "goal", "Read", "Grep", "Glob",
-  "read", "grep", "glob", "bash", "Bash", "powershell", "PowerShell",
-  "LSP", "WebSearch", "WebFetch", ...PLAN_MODE_TOOL_NAMES,
-]);
-
+const SHELL_COMMAND_BOUNDARY = String.raw`(?:^|[\r\n;|&{(]|\$\(|<\()\s*`;
+const FILE_MUTATING_COMMAND = new RegExp(
+  String.raw`${SHELL_COMMAND_BOUNDARY}(?:sudo\s+)?(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|ln|tee|truncate|dd)\b`,
+  "i",
+);
+const POWERSHELL_MUTATING_COMMAND = new RegExp(
+  String.raw`${SHELL_COMMAND_BOUNDARY}(?:Set-Content|Add-Content|Clear-Content|Out-File|Remove-Item|Move-Item|Copy-Item|New-Item|Rename-Item)\b`,
+  "i",
+);
+const PACKAGE_MUTATING_COMMAND = new RegExp(
+  String.raw`${SHELL_COMMAND_BOUNDARY}(?:npm\s+(?:install|uninstall|update|ci|link|publish|version)|yarn\s+(?:add|remove|install|publish|upgrade)|pnpm\s+(?:add|remove|install|publish|update)|bun\s+(?:add|remove|install|update|publish)|pip\s+(?:install|uninstall))\b`,
+  "i",
+);
+const GIT_MUTATING_COMMAND = new RegExp(
+  String.raw`${SHELL_COMMAND_BOUNDARY}git\s+(?:add|apply|clean|commit|push|pull|merge|rebase|reset|restore|checkout|switch|stash|cherry-pick|revert|tag|init|clone)\b`,
+  "i",
+);
+const MAESTRO_MUTATING_COMMAND = new RegExp(
+  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+(?:install|uninstall|update)\b`,
+  "i",
+);
+const IN_PLACE_EDIT_COMMAND = new RegExp(
+  String.raw`${SHELL_COMMAND_BOUNDARY}(?:sed|perl)\b[^\r\n;|&]*\s-[a-z]*i(?:[a-z]*|\.[^\s]+)?(?:\s|$)`,
+  "i",
+);
+const NESTED_MUTATING_COMMAND = /(?:^|\s)-(?:exec|execdir|x|X)\s+(?:sudo\s+)?(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|ln|tee|truncate|dd)\b/i;
 const MUTATING_BASH_PATTERNS = [
-  /\brm\b/i, /\brmdir\b/i, /\bmv\b/i, /\bcp\b/i, /\bmkdir\b/i,
-  /\btouch\b/i, /\bchmod\b/i, /\bchown\b/i, /\bln\b/i, /\btee\b/i,
-  /\btruncate\b/i, /\bdd\b/i, /(^|[^<])>(?!>)/, />>/,
-  /\bnpm\s+(install|uninstall|update|ci|link|publish|version)\b/i,
-  /\byarn\s+(add|remove|install|publish|upgrade)\b/i,
-  /\bpnpm\s+(add|remove|install|publish|update)\b/i,
-  /\bbun\s+(add|remove|install|update|publish)\b/i,
-  /\bpip\s+(install|uninstall)\b/i,
-  /\bgit\s+(add|commit|push|pull|merge|rebase|reset|checkout|switch|stash|cherry-pick|revert|tag|init|clone)\b/i,
-  /\bsudo\b/i, /\bkill\b/i, /\bpkill\b/i,
+  FILE_MUTATING_COMMAND,
+  POWERSHELL_MUTATING_COMMAND,
+  PACKAGE_MUTATING_COMMAND,
+  GIT_MUTATING_COMMAND,
+  MAESTRO_MUTATING_COMMAND,
+  IN_PLACE_EDIT_COMMAND,
+  NESTED_MUTATING_COMMAND,
+  /(^|[^<])>(?!>)/,
+  />>/,
 ];
 
-const SHELL_CHAIN_PATTERN = /(?:\r|\n|;|&&|\|\||\||`|\$\(|<\()/;
-const SHELL_SIDE_EFFECT_ARGUMENTS = /(?:^|\s)(?:--output(?:=|\s)|--outfile(?:=|\s)|-OutFile(?:\s|$)|-o(?:\s|$)|--in-place(?:=|\s|$)|-i(?:\s|$)|--exec(?:=|\s|$)|--exec-batch(?:=|\s|$)|-x(?:\s|$)|-X(?:\s|$)|--ext-diff(?:\s|$)|--textconv(?:\s|$)|--open-files-in-pager(?:=|\s|$)|--pager(?:=|\s|$)|--paging(?:=|\s|$)|--pre(?:=|\s|$)|--fix(?:\s|$))/i;
-const SIMPLE_READ_COMMAND = /^\s*(?:cat|head|tail|grep|ls|pwd|echo|printf|wc|diff|file|stat|du|df|tree|which|type|uname|whoami|id|ps|jq|rg)(?:\s|$)/i;
-const POWERSHELL_READ_COMMAND = /^\s*(?:Get-Content|Get-ChildItem|Get-Item|Get-Location|Resolve-Path|Test-Path|Select-String|Measure-Object)(?:\s|$)/i;
+const SHELL_SIDE_EFFECT_ARGUMENTS = /(?:^|\s)(?:--output(?:=|\s)|--outfile(?:=|\s)|-OutFile(?:\s|$)|--in-place(?:=|\s|$)|--exec(?:=|\s|$)|--exec-batch(?:=|\s|$)|--ext-diff(?:\s|$)|--textconv(?:\s|$)|--open-files-in-pager(?:=|\s|$)|--pre(?:=|\s|$)|--fix(?:\s|$))/i;
 
 const PlanEnterParams = Type.Object({
   prompt: Type.Optional(Type.String({ description: "Optional planning request to queue after entering Plan mode" })),
@@ -188,8 +203,8 @@ function ensureActToolSurface(): void {
 function activatePlanToolSurface(): void {
   if (!extensionApi) return;
   if (!activeToolsSnapshot) activeToolsSnapshot = [...extensionApi.getActiveTools()];
-  const safe = activeToolsSnapshot.filter((name) => PLAN_ALLOWED_TOOLS.has(name));
-  extensionApi.setActiveTools([...new Set([...safe, ...PLAN_MODE_TOOL_NAMES])]);
+  const nonEditing = activeToolsSnapshot.filter((name) => !BLOCKED_BUILTIN_TOOLS.has(name) && name !== PLAN_ENTER_TOOL);
+  extensionApi.setActiveTools([...new Set([...nonEditing, ...PLAN_MODE_TOOL_NAMES])]);
 }
 
 function restoreActToolSurface(): void {
@@ -283,16 +298,13 @@ export function onToolCallPlan(event: {
   if (BLOCKED_BUILTIN_TOOLS.has(name)) {
     return { block: true, reason: `Plan mode blocks "${name}". Confirm or exit the plan first.` };
   }
-  if (!PLAN_ALLOWED_TOOLS.has(name)) {
-    return { block: true, reason: `Plan mode tool surface does not allow "${name}".` };
-  }
   if (name === "maestro" && event.input?.action === "delegate" && event.input?.mode !== "analysis") {
     return { block: true, reason: "Plan mode requires delegate mode='analysis'; missing or write modes are blocked." };
   }
   if (["bash", "Bash", "powershell", "PowerShell"].includes(name)) {
     const command = readCommand(event.input);
     if (!command || !isSafeCommand(command)) {
-      return { block: true, reason: `Plan mode blocks mutating commands.\nCommand: ${command.slice(0, 120)}` };
+      return { block: true, reason: `Plan mode blocks commands that may modify files or repository state.\nCommand: ${command.slice(0, 120)}` };
     }
   }
 }
@@ -616,27 +628,31 @@ function readCommand(input: unknown): string {
   return "";
 }
 
+function maskQuotedShellText(command: string): string {
+  return command.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, (quoted) => " ".repeat(quoted.length));
+}
+
 function isSafeCommand(command: string): boolean {
   const trimmed = command.trim();
-  if (!trimmed || SHELL_CHAIN_PATTERN.test(trimmed)) return false;
-  if (MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(trimmed))) return false;
-  if (SHELL_SIDE_EFFECT_ARGUMENTS.test(trimmed)) return false;
+  if (!trimmed) return false;
+  const shellSyntax = maskQuotedShellText(trimmed);
+  if (MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(shellSyntax))) return false;
+  if (SHELL_SIDE_EFFECT_ARGUMENTS.test(shellSyntax)) return false;
   if (/^\s*find(?:\s|$)/i.test(trimmed)) {
-    return !/(?:^|\s)-(?:delete|exec|execdir|ok|okdir|fprint|fprintf|fls)(?:\s|$)/i.test(trimmed);
+    return !/(?:^|\s)-(?:delete|fprint|fprintf|fls)(?:\s|$)/i.test(trimmed);
   }
-  if (/^\s*fd(?:\s|$)/i.test(trimmed)) return true;
   if (/^\s*git\s+/i.test(trimmed)) {
-    return /^\s*git\s+(?:status|log|diff|show|ls-files|grep)(?:\s|$)/i.test(trimmed)
-      || /^\s*git\s+branch(?:\s+(?:--show-current|--list(?:\s+\S+)?|-a|-r|-v{1,2}))?\s*$/i.test(trimmed)
-      || /^\s*git\s+remote(?:\s+-v|\s+show\s+\S+|\s+get-url\s+\S+)?\s*$/i.test(trimmed)
-      || /^\s*git\s+config\s+--get(?:\s|$)/i.test(trimmed);
+    if (/^\s*git\s+branch(?:\s|$)/i.test(trimmed)) {
+      return /^\s*git\s+branch(?:\s+(?:--show-current|--list(?:\s+\S+)?|-a|-r|-v{1,2}))?\s*$/i.test(trimmed);
+    }
+    if (/^\s*git\s+remote(?:\s|$)/i.test(trimmed)) {
+      return /^\s*git\s+remote(?:\s+-v|\s+show\s+\S+|\s+get-url\s+\S+)?\s*$/i.test(trimmed);
+    }
+    if (/^\s*git\s+config(?:\s|$)/i.test(trimmed)) {
+      return /^\s*git\s+config\s+(?:--get|--get-all|--list|--show-origin|--show-scope)(?:\s|$)/i.test(trimmed);
+    }
   }
-  if (/^\s*npm\s+/i.test(trimmed)) {
-    return /^\s*npm\s+(?:list|ls|view|info|search|outdated|audit)(?:\s|$)/i.test(trimmed);
-  }
-  if (/^\s*(?:node|python|python3|npm|tsc|biome)\s+--version\s*$/i.test(trimmed)) return true;
-  if (/^\s*date(?:\s+\+\S+)?\s*$/i.test(trimmed)) return true;
-  return SIMPLE_READ_COMMAND.test(trimmed) || POWERSHELL_READ_COMMAND.test(trimmed);
+  return true;
 }
 
 function extractProposedPlan(text: string): string | undefined {
