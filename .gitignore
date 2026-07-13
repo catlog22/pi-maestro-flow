@@ -19,9 +19,11 @@ Thumbs.db
 
 # Pi / Maestro runtime artifacts (see .workflow/specs/ for tracked config)
 .history/
+.workflow/.backups/
 .workflow/.csv-wave/
 .workflow/.maestro/
 .workflow/.scratchpad/
+.workflow/sessions/
 .workflow/embedding-index.bin
 .workflow/embedding.zvec/
 .workflow/explore/
@@ -58,6 +60,10 @@ Thumbs.db
 packages/*/dist/
 packages/*/node_modules/
 packages/*/.workflow/
+
+# Python cache artifacts
+__pycache__/
+*.py[cod]
 
 # Misc
 nul
