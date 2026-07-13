@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.4.7",
+  "version": "0.4.8",
   "description": "Pi extension for Maestro knowledge and workflow orchestration with teammate dispatch",
   "type": "module",
   "scripts": {
