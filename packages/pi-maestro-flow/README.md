@@ -9,6 +9,7 @@ Pi extension providing Maestro's workflow tools. Built on [pi-maestro-teammate](
 | Resource | Count | Description |
 |----------|-------|-------------|
 | **Maestro tool** | 1 | `maestro` |
+| **Intelligence tools** | 3 | `lsp`, `browser`, `search_tool_bm25` |
 | **Workflow docs** | 82 | Installed from `maestro-flow` to `~/.maestro/workflows` |
 | **Templates** | 23 | Bundled template files |
 
@@ -33,6 +34,7 @@ pi install ./packages/pi-maestro-flow
 
 After installation:
 - Maestro dispatch is available through the single `maestro` tool
+- LSP navigation/refactoring, named-tab browser control, and BM25 tool discovery are available through `lsp`, `browser`, and `search_tool_bm25`
 - Maestro workflow docs installed at `~/.maestro/workflows/`
 
 ## Skills Categories
@@ -65,6 +67,52 @@ After installation:
 ```
 { action: "moa", prompts: ["Best approach for caching layer?"] }
 ```
+
+## Intelligence Tools
+
+### LSP
+
+`lsp` provides diagnostics, definition, references, hover, symbols, rename,
+file rename, code actions, type definition, implementation, status, reload,
+capabilities, and raw requests. Language servers are reused per project root and
+shut down with the Pi session.
+
+Configuration is merged in this order; later files override earlier entries:
+
+```text
+~/.omp/lsp.json
+~/.pi/agent/lsp.json
+<workspace>/.omp/lsp.json
+<workspace>/.pi/lsp.json
+```
+
+Each file may define `disabled` server names and `servers` entries containing
+`name`, `command`, `args`, `fileTypes`, `rootMarkers`, `initializationOptions`,
+`settings`, and `env`.
+
+### Browser
+
+`browser` uses named tabs with `open`, `run`, and `close`. `open` can launch a
+local headless Chromium (`app.path`, optional `app.args`) or connect to an
+existing Chrome DevTools Protocol endpoint (`app.cdp_url`, optional
+`app.target`). `run` exposes navigation, observation, selector/element input,
+evaluation, waits, screenshots, and extraction helpers.
+
+`browser.run` intentionally executes trusted host code with the same
+`AsyncFunction` semantics as oh-my-pi. Treat it like shell execution: do not run
+untrusted code. Supported asynchronous browser operations obey timeout and
+`AbortSignal`; abort or timeout closes the named tab. Session shutdown closes all
+tabs and removes automatically created screenshots.
+
+### BM25 tool discovery
+
+`search_tool_bm25` ranks the current Pi tool catalog by name, label, summary,
+description, and schema keys, then activates matching inactive tools. Results
+use stable ordering and support a caller-supplied `limit`.
+
+In durable Plan mode, BM25 and read-only LSP actions remain available. All
+browser actions and LSP mutations (`rename`, `rename_file`, applied code actions,
+`reload`, and raw `request`) are blocked until Plan mode is confirmed or exited.
 
 ## Durable Plan Mode
 
@@ -222,6 +270,7 @@ Repository commands require review before first execution. Run `/hooks` to inspe
 │                                          │
 │  Extension tools:                        │
 │    maestro                               │
+│    lsp · browser · search_tool_bm25      │
 │                                          │
 │  Runtime assets:                         │
 │    Maestro workflows + Templates (23)    │

@@ -6,6 +6,9 @@
  *   - goal: Autonomous goal management (set/done/pause/clear) with independent verifier
  *   - ask-user-question: Structured questionnaire for user input
  *   - todo: Task management with plain context, optional skills, and step tracking
+ *   - lsp: Language-server diagnostics, navigation, refactors, and raw requests
+ *   - browser: Named-tab Chromium control and screenshots
+ *   - search_tool_bm25: Natural-language discovery across registered tools
  *
  * Also registers:
  *   - /goal command
@@ -87,6 +90,7 @@ import {
 } from "../compaction/maestro-compaction.ts";
 import { createMidTurnAutoCompaction } from "../compaction/auto-compaction.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
+import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
 
 interface MaestroState {
   baseCwd: string;
@@ -440,6 +444,9 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
   registerPlanTools(pi);
   registerPlanCommand(pi);
 
+  // === Language intelligence, browser control, and tool discovery ===
+  registerIntelligenceTools(pi);
+
   pi.registerShortcut(PLAN_TOGGLE_KEY, {
     description: `Toggle Plan/Act mode (${PLAN_TOGGLE_LABEL})`,
     async handler(ctx: ExtensionContext) {
@@ -511,7 +518,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     updateTodoWidget();
   });
 
-  pi.on("session_shutdown", (_event, ctx) => {
+  pi.on("session_shutdown", async (_event, ctx) => {
     midTurnAutoCompaction.reset(ctx);
     state.activeRuns.clear();
     widgetCtx?.ui.setWidget("todo-panel", undefined);
@@ -521,6 +528,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     todoSessionShutdown(ctx);
     onSessionShutdownPlan(ctx);
     ctx.ui.setStatus("approval-mode", undefined);
+    await shutdownIntelligenceTools();
   });
 
   pi.on("session_before_compact", async (event, ctx) => {

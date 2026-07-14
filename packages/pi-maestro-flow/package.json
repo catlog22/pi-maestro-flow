@@ -3,6 +3,9 @@
   "version": "0.4.8",
   "description": "Pi extension for Maestro knowledge and workflow orchestration with teammate dispatch",
   "type": "module",
+  "engines": {
+    "node": ">=20.6.0"
+  },
   "scripts": {
     "postinstall": "node scripts/configure-keybindings.mjs && node scripts/install-workflows.mjs",
     "test:install": "node --test test/configure-keybindings.test.mjs test/install-workflows.test.mjs",
@@ -12,7 +15,9 @@
     "test:hooks": "node --experimental-transform-types --test test/hooks.test.ts",
     "test:providers": "node --experimental-transform-types --test test/login-provider-config.test.ts",
     "test:goal": "node --experimental-transform-types --test test/goal.test.ts",
-    "test:plan": "node --experimental-transform-types --test test/plan-store.test.ts test/plan-editor.test.ts test/plan-lifecycle.test.ts test/statusline.test.ts"
+    "test:plan": "node --experimental-transform-types --test test/plan-store.test.ts test/plan-editor.test.ts test/plan-lifecycle.test.ts test/statusline.test.ts",
+    "test:intelligence": "node --experimental-transform-types --test test/search-tool-bm25.test.ts test/lsp-client.test.ts test/lsp-manager.test.ts test/lsp-tool.test.ts test/workspace-edit.test.ts test/browser-tool.test.ts test/extension-tools.test.ts",
+    "check:types": "tsc -p tsconfig.intelligence.json"
   },
   "keywords": [
     "pi-package",
@@ -32,6 +37,7 @@
     "scripts/",
     "schemas/",
     "templates/",
+    "tsconfig.intelligence.json",
     ".pi/skills/",
     "!.pi/skills/**/__pycache__/**",
     "!.pi/skills/**/*.pyc",
@@ -48,8 +54,10 @@
   },
   "dependencies": {
     "@earendil-works/pi-tui": "0.74.0",
+    "cross-spawn": "7.0.6",
     "maestro-flow": "0.5.49",
     "pi-maestro-teammate": "^0.4.3",
+    "puppeteer-core": "24.31.0",
     "typebox": "1.1.24"
   },
   "peerDependencies": {
@@ -71,7 +79,9 @@
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.74.0",
     "@earendil-works/pi-ai": "0.74.0",
-    "@earendil-works/pi-coding-agent": "0.74.0"
+    "@earendil-works/pi-coding-agent": "0.74.0",
+    "@types/cross-spawn": "6.0.6",
+    "typescript": "5.7.3"
   },
   "maestro": {
     "required": true,

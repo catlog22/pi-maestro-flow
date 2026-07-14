@@ -325,6 +325,12 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.match(planPrompt, /one active Goal/);
     assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /blocks/);
     assert.equal(onToolCallPlan({ toolName: "custom-tool", input: {} }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "search_tool_bm25", input: { query: "browser" } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "lsp", input: { action: "diagnostics", file: "src/app.ts" } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "lsp", input: { action: "code_actions", file: "src/app.ts", apply: false } }), undefined);
+    assert.match(onToolCallPlan({ toolName: "lsp", input: { action: "rename", file: "src/app.ts", new_name: "next" } })?.reason ?? "", /may modify files/);
+    assert.match(onToolCallPlan({ toolName: "lsp", input: { action: "code_actions", file: "src/app.ts", apply: true } })?.reason ?? "", /may modify files/);
+    assert.match(onToolCallPlan({ toolName: "browser", input: { action: "open", url: "https:\/\/example.com" } })?.reason ?? "", /blocks browser control/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git status" } })?.reason ?? "allowed", /allowed/);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro load --type project --list" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro search \"Plan Mode\" --code" } }), undefined);

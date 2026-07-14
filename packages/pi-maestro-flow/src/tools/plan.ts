@@ -18,6 +18,7 @@ import { Type } from "typebox";
 import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
 import { PlanStore, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
+import { blockIntelligenceToolCallInPlan } from "./intelligence-safety.ts";
 
 type Mode = "act" | "plan";
 type PlanExecutionMode = "current" | "clear" | "compact";
@@ -301,6 +302,8 @@ export function onToolCallPlan(event: {
   if (name === "maestro" && event.input?.action === "delegate" && event.input?.mode !== "analysis") {
     return { block: true, reason: "Plan mode requires delegate mode='analysis'; missing or write modes are blocked." };
   }
+  const intelligenceBlock = blockIntelligenceToolCallInPlan(event);
+  if (intelligenceBlock) return intelligenceBlock;
   if (["bash", "Bash", "powershell", "PowerShell"].includes(name)) {
     const command = readCommand(event.input);
     if (!command || !isSafeCommand(command)) {
