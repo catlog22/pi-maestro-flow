@@ -57,3 +57,11 @@ Todo public schema 与 runtime model MUST 共享单一 canonical contract。持�
 Durable Plan approval uses four ordered boundaries: save the exact draft under revision CAS; write an approval.pending.json marker; atomically write the immutable archive; commit manifest.json last. Before manifest commit, failure may remove the pending archive. After manifest commit, cleanup is best-effort and must never roll back committed history. Recovery strictly validates the complete manifest and archive checksum/path invariant, quarantines interrupted or invalid pending transactions, and rebuilds history by revision rather than timestamp. Cross-process workspace mutation uses owner token, PID/liveness, heartbeat, token-specific stale takeover, ownership checks before mutation and owner-only release.
 
 </spec-entry>
+
+<spec-entry category="coding" keywords="tui input paste visiblewidth width-matrix" date="2026-07-14" sid="S-20260714-t5qv" title="TUI Paste 输入与可见宽度矩阵" description="终端输入和宽度测试的可复用实现规则" source="master@4d76db9">
+
+### TUI Paste 输入与可见宽度矩阵
+
+自由文本 TUI 输入 MUST 接受 printable multi-character 与 paste，不得仅处理 data.length===1。宽度验证 MUST 使用 visibleWidth 而非字符串 length，并覆盖 1..120 列的 runtime matrix。
+
+</spec-entry>
