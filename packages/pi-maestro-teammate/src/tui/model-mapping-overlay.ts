@@ -175,7 +175,7 @@ export class TeammateControlCenter implements Component, Focusable {
 
   render(width: number): readonly string[] {
     const w = Math.max(1, Math.min(width, 112));
-    if (w < 24) return [this.renderCompact(w)];
+    if (w < 24 || (this.modelTaskType && w < 40)) return [this.renderCompact(w)];
     return this.modelTaskType ? this.renderModels(w) : this.renderMain(w);
   }
 
@@ -536,10 +536,10 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   private footerLine(width: number): string {
-    const action = this.tab === "routing" ? "Enter configure" : this.tab === "active" ? "Enter open" : "Enter details";
+    const action = this.tab === "routing" ? "Enter configure" : this.tab === "active" ? "Enter open" : "";
     const segments = ["Tab/←→ view", "↑↓ select", "type filter", action, "Esc close"];
     let footer = "";
-    for (const segment of segments) {
+    for (const segment of segments.filter(Boolean)) {
       const next = footer ? `${footer} · ${segment}` : segment;
       if (visibleWidth(next) > width) break;
       footer = next;

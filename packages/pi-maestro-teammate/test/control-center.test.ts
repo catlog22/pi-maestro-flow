@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 import {
   TeammateControlCenter,
@@ -78,6 +79,9 @@ test("model routing is reversible and saves inline", async () => {
   const { center, closed, saved } = makeCenter();
   center.handleInput("\r");
   assert.match(center.render(90).join("\n"), /Explore/);
+  const narrowEditor = center.render(32);
+  assert.ok(narrowEditor.every((line) => visibleWidth(line) <= 32));
+  assert.match(narrowEditor.join("\n"), /Explore/);
   center.handleInput("\x1b");
   assert.equal(closed.length, 0);
   assert.match(center.render(90).join("\n"), /Routing 7/);
