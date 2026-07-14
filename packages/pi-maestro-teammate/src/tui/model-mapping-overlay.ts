@@ -384,7 +384,7 @@ export class TeammateControlCenter implements Component, Focusable {
       unavailable: false,
     }, ...TEAMMATE_THINKING_LEVELS.map((thinking) => ({
       value: thinking,
-      label: thinking,
+      label: thinking === "xhigh" ? "xhigh / max" : thinking,
       detail: thinking === configured ? `Current ${taskType} thinking depth` : "Supported by Pi --thinking",
       active: thinking === configured,
       unavailable: false,

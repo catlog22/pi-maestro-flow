@@ -12,7 +12,7 @@
  */
 
 import { Type } from "typebox";
-import { TEAMMATE_THINKING_LEVELS } from "../shared/thinking.ts";
+import { TEAMMATE_THINKING_INPUTS } from "../shared/thinking.ts";
 
 const TaskType = StringEnum([
   "explore",
@@ -24,7 +24,7 @@ const TaskType = StringEnum([
   "testing",
 ]);
 
-const ThinkingLevel = StringEnum([...TEAMMATE_THINKING_LEVELS]);
+const ThinkingLevel = StringEnum([...TEAMMATE_THINKING_INPUTS]);
 
 function StringEnum<T extends string[]>(values: [...T]) {
   return Type.Unsafe<T[number]>({
@@ -77,7 +77,7 @@ export const TaskSpec = Type.Object({
   thinking: Type.Optional(
     Type.Unsafe({
       ...ThinkingLevel,
-      description: "Pi thinking depth override for this task; overrides the top-level thinking default",
+      description: "Pi thinking depth override for this task; max is accepted as an alias for xhigh",
     }),
   ),
   cwd: Type.Optional(
@@ -232,7 +232,7 @@ export const TeammateParams = Type.Object({
   thinking: Type.Optional(
     Type.Unsafe({
       ...ThinkingLevel,
-      description: "Default Pi thinking depth. Per-task thinking takes precedence.",
+      description: "Default Pi thinking depth. Per-task thinking takes precedence; max aliases xhigh.",
     }),
   ),
 

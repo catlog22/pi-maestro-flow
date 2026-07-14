@@ -167,7 +167,7 @@ export function applyModelRouting(
 ): RunTeammateParams {
   const config = loadModelRoutingConfig(cwd);
   const topLevelModel = params.model;
-  const topLevelThinking = params.thinking;
+  const topLevelThinking = parseTeammateThinkingLevel(params.thinking);
 
   const tasks = params.tasks?.map((task) => ({
     ...task,
@@ -178,7 +178,7 @@ export function applyModelRouting(
       agent: task.agent,
       task: task.task,
     }, availableModels),
-    thinking: task.thinking ?? topLevelThinking ?? mappedThinking(config, {
+    thinking: parseTeammateThinkingLevel(task.thinking) ?? topLevelThinking ?? mappedThinking(config, {
       taskType: task.taskType ?? params.taskType,
       prompt: task.prompt ?? params.prompt,
       agent: task.agent,
@@ -195,7 +195,7 @@ export function applyModelRouting(
       agent: step.agent,
       task: step.task,
     }, availableModels),
-    thinking: step.thinking ?? topLevelThinking ?? mappedThinking(config, {
+    thinking: parseTeammateThinkingLevel(step.thinking) ?? topLevelThinking ?? mappedThinking(config, {
       taskType: step.taskType ?? params.taskType,
       prompt: step.prompt ?? params.prompt,
       agent: step.agent,
@@ -211,9 +211,9 @@ export function applyModelRouting(
     ...(isSingle && !params.model
       ? { model: mappedModel(config, params, availableModels) }
       : {}),
-    ...(isSingle && !params.thinking
+    ...(isSingle && !topLevelThinking
       ? { thinking: mappedThinking(config, params) }
-      : {}),
+      : { thinking: topLevelThinking }),
   };
 }
 

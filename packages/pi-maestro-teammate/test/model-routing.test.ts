@@ -108,6 +108,30 @@ test("thinking routing follows per-task, top-level, task type, then agent fallba
   }
 });
 
+test("max aliases canonicalize before routing and persisted max values migrate to xhigh", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-routing-"));
+  try {
+    fs.mkdirSync(path.dirname(getProjectModelRoutingPath(cwd)), { recursive: true });
+    fs.writeFileSync(getProjectModelRoutingPath(cwd), JSON.stringify({
+      version: 2,
+      mappings: {},
+      thinkingLevels: { analysis: "max" },
+    }));
+    assert.equal(loadModelRoutingConfig(cwd).thinkingLevels.analysis, "xhigh");
+
+    const topLevel = applyModelRouting({ agent: "delegate", thinking: "max" }, cwd);
+    assert.equal(topLevel.thinking, "xhigh");
+    const tasks = applyModelRouting({
+      agent: "delegate",
+      thinking: "low",
+      tasks: [{ agent: "delegate", thinking: "max" }],
+    }, cwd);
+    assert.equal(tasks.tasks?.[0].thinking, "xhigh");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("multi-task routing applies per phase while explicit defaults win", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-routing-"));
   try {

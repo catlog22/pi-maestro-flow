@@ -20,7 +20,11 @@ import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
 import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import type { TeammateTaskType } from "../models/model-routing.ts";
-import type { TeammateThinkingLevel } from "../shared/thinking.ts";
+import {
+  parseTeammateThinkingLevel,
+  type TeammateThinkingInput,
+  type TeammateThinkingLevel,
+} from "../shared/thinking.ts";
 
 // ---------------------------------------------------------------------------
 // Public param / option interfaces
@@ -38,12 +42,12 @@ export interface RunTeammateParams {
   background?: boolean;
   context?: "fresh" | "fork";
   model?: string;
-  thinking?: TeammateThinkingLevel;
+  thinking?: TeammateThinkingInput;
   cwd?: string;
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
-  tasks?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; name?: string; model?: string; thinking?: TeammateThinkingLevel; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }>;
-  chain?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; model?: string; thinking?: TeammateThinkingLevel }>;
+  tasks?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; name?: string; model?: string; thinking?: TeammateThinkingInput; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }>;
+  chain?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; model?: string; thinking?: TeammateThinkingInput }>;
   concurrency?: number;
 }
 
@@ -268,7 +272,7 @@ export function inferGraphMode(
 // ---------------------------------------------------------------------------
 
 export function normalizeChainToTasks(
-  chain: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; model?: string; thinking?: TeammateThinkingLevel }>,
+  chain: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; model?: string; thinking?: TeammateThinkingInput }>,
   initialTask: string,
 ): NormalizedTask[] {
   return chain.map((step, i) => {
@@ -286,7 +290,7 @@ export function normalizeChainToTasks(
       task,
       name,
       model: step.model,
-      thinking: step.thinking,
+      thinking: parseTeammateThinkingLevel(step.thinking),
       taskType: step.taskType,
       prompt: step.prompt,
       promptArgs: step.promptArgs,
@@ -433,7 +437,7 @@ export function buildPiArgs(
     args.push("--model", model);
   }
 
-  const thinking = params.thinking ?? agentConfig.thinking;
+  const thinking = parseTeammateThinkingLevel(params.thinking) ?? agentConfig.thinking;
   if (thinking) {
     args.push("--thinking", thinking);
   }

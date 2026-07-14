@@ -81,7 +81,7 @@ test("thinking routing supports inherit, all Pi levels, save errors, and narrow 
   const { center, savedThinking } = makeCenter();
   center.handleInput("\x1b[1;5C");
   const picker = center.render(90).join("\n");
-  for (const level of ["off", "minimal", "low", "medium", "high", "xhigh"]) assert.match(picker, new RegExp(level));
+  for (const level of ["off", "minimal", "low", "medium", "high", "xhigh / max"]) assert.match(picker, new RegExp(level));
   assert.match(picker, /inherit \/ Pi default/);
   for (let width = 1; width <= 120; width++) {
     assert.ok(center.render(width).every((line) => visibleWidth(line) <= width));

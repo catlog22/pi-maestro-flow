@@ -163,8 +163,16 @@ thinking: ultra
 ---
 Invalid prompt.
 `);
+  fs.writeFileSync(path.join(agentsDir, "max.md"), `---
+name: max
+description: Max thinking alias
+thinking: max
+---
+Max prompt.
+`);
   try {
     assert.equal(resolveAgent(project, "valid")?.thinking, "high");
+    assert.equal(resolveAgent(project, "max")?.thinking, "xhigh");
     assert.equal(resolveAgent(project, "invalid")?.thinking, undefined);
   } finally {
     fs.rmSync(project, { recursive: true, force: true });

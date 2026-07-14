@@ -115,4 +115,8 @@ test("thinking overrides reach child Pi once and legacy chains preserve them", (
 
   const tasks = normalizeChainToTasks([{ agent: "delegate", thinking: "high" }], "task");
   assert.equal(tasks[0].thinking, "high");
+
+  const maxAlias = buildPiArgs(baseAgent, { agent: "delegate", thinking: "max" }, "prompt.md");
+  assert.equal(maxAlias[maxAlias.indexOf("--thinking") + 1], "xhigh");
+  assert.equal(normalizeChainToTasks([{ agent: "delegate", thinking: "max" }], "task")[0].thinking, "xhigh");
 });
