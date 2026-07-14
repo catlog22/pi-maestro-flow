@@ -73,3 +73,19 @@ Durable Plan approval uses four ordered boundaries: save the exact draft under r
 Teammate 的多层运行参数必须复用单一 canonical enum，并在 tool schema、task normalization、taskType routing、agent frontmatter 与 child CLI boundary 保持同一类型。thinking 优先级固定为 per-task > top-level > taskType mapping > agent frontmatter > Pi default；CLI 仅在解析到值时从单一位置追加一次 --thinking。持久化 routing shape 升级时使用新 version 并将 thinkingLevels 与 model mappings 独立保存，读取边界兼容旧 string/null mappings，测试必须覆盖无损迁移、inherit null、保存失败重试、root/proxy 与 tasks/chain 传播。
 
 </spec-entry>
+
+<spec-entry category="coding" keywords="generation owner-identity single-flight lifecycle late-cleanup" date="2026-07-14" sid="S-20260714-hkwb" title="Generation-owned async resource cache" description="异步资源缓存使用 generation 与 owner identity 防止 shutdown/restart 后旧回调污染新代状态" source="planex:20260714-001-odyssey-planex">
+
+### Generation-owned async resource cache
+
+缓存 Promise 或可复用进程、浏览器资源时，创建方必须携带 generation 或 owner identity。then、catch、close callback 写共享 map 前必须确认仍持有当前 key；shutdown 顺序固定为 fencing 旧 lifecycle、清理可见 registry、取消并等待 in-flight work、回收 late resource。相同 key 的并发创建使用 single-flight reservation，旧代完成不得删除或覆盖新代资源。
+
+</spec-entry>
+
+<spec-entry category="coding" keywords="workspace-edit transaction multi-provider rollback rename" date="2026-07-14" sid="S-20260714-jboa" title="Collect-validate-commit workspace transaction" description="多 provider WorkspaceEdit 先收集校验，再与文件操作一次原子提交" source="planex:20260714-001-odyssey-planex">
+
+### Collect-validate-commit workspace transaction
+
+当多个 Language Server 或 provider 为一次文件操作返回 WorkspaceEdit 时，必须先收集全部响应，拒绝除明确 MethodNotFound 之外的错误，统一校验 URI、range、workspace 边界和操作顺序，再把引用编辑与最终 file rename 作为一次可回滚事务提交。禁止逐 provider 边请求边写入，以免后续失败留下部分修改。
+
+</spec-entry>
