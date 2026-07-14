@@ -1,7 +1,16 @@
 ---
 name: scholar-experiment
-description: "Systematic experimental results analysis workflow for ML/AI research papers. Connects experimental data to publication-ready Results sections with statistical validation, visualizations, and quality checks. Triggers on \"analyze experimental results\", \"generate results section\", \"statistical analysis of experiments\", \"compare model performance\", \"create results visualization\"."
-allowed-tools: Read Write Edit Bash Glob Grep maestro
+description: Systematic experimental results analysis workflow for ML/AI research papers. Connects experimental data to publication-ready Results sections with statistical validation, visualizations, and quality checks. Triggers on "analyze experimental results", "generate results section", "statistical analysis of experiments", "compare model performance", "create results visualization".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - Write
+  - todo
+session-mode: none
 ---
 
 # Scholar Experiment: Results Analysis Workflow
@@ -111,7 +120,7 @@ library(multcomp)   # Multiple comparisons
 Before dispatching to phases, collect analysis preferences:
 
 ```javascript
-const prefResponse = ask user ({
+const prefResponse = AskUserQuestion({
   question: "How would you like to configure the analysis?",
   options: [
     {
@@ -160,7 +169,7 @@ When user provides explicit analysis type (e.g., `/scholar-experiment comparison
 
 ## Execution Flow
 
-> **COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
+> **COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
 > The phase currently marked `in_progress` is the active execution phase -- preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
@@ -198,15 +207,15 @@ Validate analysis completeness, check reproducibility, verify statistical report
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-data-loading.md](phases/01-data-loading.md) | Load and validate data | TodoWrite driven |
-| 2 | [phases/02-statistical-analysis.md](phases/02-statistical-analysis.md) | Statistical testing | TodoWrite driven + sentinel |
-| 3 | [phases/03-visualization.md](phases/03-visualization.md) | Figure/table specs | TodoWrite driven |
-| 4 | [phases/04-results-writing.md](phases/04-results-writing.md) | Draft Results section | TodoWrite driven + sentinel |
-| 5 | [phases/05-quality-check.md](phases/05-quality-check.md) | Validate and verify | TodoWrite driven |
+| 1 | [phases/01-data-loading.md](phases/01-data-loading.md) | Load and validate data | todo({ action: "update" }) driven |
+| 2 | [phases/02-statistical-analysis.md](phases/02-statistical-analysis.md) | Statistical testing | todo({ action: "update" }) driven + sentinel |
+| 3 | [phases/03-visualization.md](phases/03-visualization.md) | Figure/table specs | todo({ action: "update" }) driven |
+| 4 | [phases/04-results-writing.md](phases/04-results-writing.md) | Draft Results section | todo({ action: "update" }) driven + sentinel |
+| 5 | [phases/05-quality-check.md](phases/05-quality-check.md) | Validate and verify | todo({ action: "update" }) driven |
 
 **Compact Rules**:
-1. **TodoWrite `in_progress`** -> preserve full content, do not compress
-2. **TodoWrite `completed`** -> may compress to summary
+1. **todo({ action: "update" }) `in_progress`** -> preserve full content, do not compress
+2. **todo({ action: "update" }) `completed`** -> may compress to summary
 3. **sentinel fallback** -> phases marked with sentinel contain compact sentinel; if after compact only sentinel remains without full Step protocol, MUST immediately `Read("phases/0N-xxx.md")` to recover before continuing
 
 ## Core Rules
@@ -261,11 +270,11 @@ Phase 5 output:
   visualization-specs.md  (figure specifications)
 ```
 
-## TodoWrite Pattern
+## todo({ action: "update" }) Pattern
 
 ```
 Phase starts:
-  -> Sub-tasks ATTACHED to TodoWrite (in_progress + pending)
+  -> Sub-tasks ATTACHED to todo({ action: "update" }) (in_progress + pending)
   -> Execute sub-tasks sequentially
 
 Phase ends:
@@ -302,12 +311,12 @@ Example:
 
 **Before each phase**:
 - [ ] Previous phase output available
-- [ ] TodoWrite updated (current phase in_progress)
+- [ ] todo({ action: "update" }) updated (current phase in_progress)
 - [ ] Phase document read via `Read("phases/0N-xxx.md")`
 
 **After each phase**:
 - [ ] Output files generated
-- [ ] TodoWrite updated (current phase completed, next phase in_progress)
+- [ ] todo({ action: "update" }) updated (current phase completed, next phase in_progress)
 - [ ] Data flow variables passed to next phase
 
 **After all phases**:

@@ -1,7 +1,7 @@
 ---
 name: workflow-research-synthesizer
-description: "Merges multiple researcher outputs into a unified research summary"
-tools:
+description: Merges multiple researcher outputs into a unified research summary
+allowed-tools:
   - Read
   - Write
 ---

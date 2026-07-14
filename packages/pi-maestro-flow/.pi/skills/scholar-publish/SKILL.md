@@ -1,7 +1,16 @@
 ---
 name: scholar-publish
-description: "Post-acceptance conference preparation workflow covering presentation slides, academic posters, and promotion content. Triggers on \"scholar publish\", \"conference preparation\", \"prepare presentation\", \"create poster\", \"write promotion\", \"post-acceptance\"."
-allowed-tools: Read Write Edit Bash Glob Grep maestro
+description: Post-acceptance conference preparation workflow covering presentation slides, academic posters, and promotion content. Triggers on "scholar publish", "conference preparation", "prepare presentation", "create poster", "write promotion", "post-acceptance".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - Write
+  - todo
+session-mode: none
 ---
 
 # Scholar Publish
@@ -53,7 +62,7 @@ Each phase runs independently based on user selection.
 
 ## Interactive Preference Collection
 
-Collect workflow preferences via user prompt before dispatching to phases:
+Collect workflow preferences via AskUserQuestion before dispatching to phases:
 
 ```
 Step 1: Identify paper context
@@ -64,7 +73,7 @@ Step 1: Identify paper context
         - Co-authors (for tagging in promotion)"
 
 Step 2: Select outputs to generate
-  user prompt:
+  AskUserQuestion:
     question: "Which outputs would you like to generate?"
     options:
       - "Presentation slides outline" → enablePresentation = true
@@ -90,7 +99,7 @@ Step 3: Conditional preferences (based on selection)
 
 ## Execution Flow
 
-> **COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
+> **COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
 > The phase currently marked `in_progress` is the active execution phase - preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
@@ -140,13 +149,13 @@ Generate platform-specific promotion content: Twitter/X thread, LinkedIn post, a
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-presentation.md](phases/01-presentation.md) | Slide outline creation | TodoWrite driven |
-| 2 | [phases/02-poster.md](phases/02-poster.md) | Poster layout design | TodoWrite driven |
-| 3 | [phases/03-promotion.md](phases/03-promotion.md) | Multi-platform promotion | TodoWrite driven |
+| 1 | [phases/01-presentation.md](phases/01-presentation.md) | Slide outline creation | todo({ action: "update" }) driven |
+| 2 | [phases/02-poster.md](phases/02-poster.md) | Poster layout design | todo({ action: "update" }) driven |
+| 3 | [phases/03-promotion.md](phases/03-promotion.md) | Multi-platform promotion | todo({ action: "update" }) driven |
 
 **Compact Rules**:
-1. **TodoWrite `in_progress`** -> preserve full content, do not compress
-2. **TodoWrite `completed`** -> can compress to summary
+1. **todo({ action: "update" }) `in_progress`** -> preserve full content, do not compress
+2. **todo({ action: "update" }) `completed`** -> can compress to summary
 3. Phases are independent - only load the phase being executed
 
 ## Core Rules
@@ -173,11 +182,11 @@ paperContext (from user input)
         └─ Twitter thread, LinkedIn post, blog draft
 ```
 
-## TodoWrite Pattern
+## todo({ action: "update" }) Pattern
 
 ```
 Phase starts:
-  → Sub-tasks ATTACHED to TodoWrite (in_progress + pending)
+  → Sub-tasks ATTACHED to todo({ action: "update" }) (in_progress + pending)
   → Execute sub-tasks sequentially within the phase
 
 Phase ends:
@@ -185,7 +194,7 @@ Phase ends:
   → Next selected phase begins (or workflow completes)
 ```
 
-Example TodoWrite lifecycle:
+Example todo({ action: "update" }) lifecycle:
 ```
 [in_progress] Generate presentation outline
   [in_progress] Extract key messages from paper
@@ -212,7 +221,7 @@ Example TodoWrite lifecycle:
 
 **After each phase**:
 - [ ] Output file written and verified
-- [ ] TodoWrite updated (phase marked completed)
+- [ ] todo({ action: "update" }) updated (phase marked completed)
 - [ ] Next phase dispatched (if selected)
 
 **After all phases**:

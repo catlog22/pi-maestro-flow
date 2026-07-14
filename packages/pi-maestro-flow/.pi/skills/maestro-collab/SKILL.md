@@ -1,7 +1,17 @@
 ---
 name: maestro-collab
-description: "Use when a question needs cross-verification from multiple CLI tools or diverse analytical perspectives Arguments: <requirement> [--tools agy,qwen,claude] [--mode analysis|write] [--rule <template>] [-y]"
-allowed-tools: Read Write Bash Glob Grep teammate maestro
+description: Use when a question needs cross-verification from multiple CLI tools or diverse analytical perspectives
+argument-hint: <requirement> [--tools agy,qwen,claude] [--mode analysis|write] [--rule <template>] [-y]
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Glob
+  - Grep
+  - Read
+  - Write
+  - teammate
+session-mode: run
+contract: 
 ---
 
 <purpose>
@@ -19,7 +29,7 @@ $ARGUMENTS — requirement text and optional flags.
 
 **Pre-load** (optional): `maestro load --type spec --category arch` + `maestro search --category arch` → include in delegate prompts.
 
-**Output**: `.workflow/scratch/{YYYYMMDD}-collab-{slug}/`
+**Output**: `{run_dir}/outputs/`
 - `collab-report.md` — merged findings with consensus/conflict/unique tags
 - `context.md` — Locked/Free/Deferred decisions (plan compatible)
 - `conclusions.json` — structured: session_id, tools[], consensus_level, recommendation, confidence, dimensions[], decisions[]
@@ -45,7 +55,7 @@ S_REPORT          — 显示摘要 + next-step routing               PERSIST: �
 
 S_PARSE:
   → S_DISCOVER    WHEN: requirement non-empty              DO: extract requirement, tools, mode, rule, autoYes
-  → S_PARSE       WHEN: requirement empty                  DO: user prompt for requirement
+  → S_PARSE       WHEN: requirement empty                  DO: AskUserQuestion for requirement
 
 S_DISCOVER:
   → S_CONFIRM     WHEN: eligible tools >= 2                DO: A_DISCOVER_TOOLS
@@ -79,7 +89,7 @@ S_SYNTHESIZE:
 S_REGISTER:
   → S_REPORT        WHEN: user confirms or -y    DO: append CLB artifact to state.json (type: collab, scope: adhoc)
   → S_REPORT        WHEN: user declines           DO: skip artifact registration, proceed to report
-  GUARD: user prompt "Register collab artifact to state.json?" (skipped if -y)
+  GUARD: AskUserQuestion "Register collab artifact to state.json?" (skipped if -y)
 
 S_REPORT:
   → END             DO: display summary (requirement, tools, consensus_level, per-tool status, artifact id, output dir)
@@ -99,7 +109,7 @@ Auto-select (no --tools): first 3 eligible in config order.
 
 ### A_SETUP_SESSION
 
-Create: `.workflow/scratch/{YYYYMMDD}-collab-{slug}/` + `per-tool/`.
+Create: `{run_dir}/outputs/` + `per-tool/`.
 
 ### A_PARALLEL_DELEGATE
 
@@ -175,7 +185,7 @@ Write 3 files:
 </success_criteria>
 
 <next_step_routing>
-- Deep feasibility → `/maestro-analyze "{topic}"`
-- Plan from conclusions → `/maestro-plan --dir {dir}`
-- Expand → `/maestro-brainstorm "{topic}"`
+- Deep feasibility → step `analyze` (`maestro run prepare analyze` + `maestro run create analyze "{topic}"`)
+- Plan from conclusions → step `plan` (`maestro run prepare plan` + `maestro run create plan --dir {dir}`)
+- Expand → step `brainstorm` (`maestro run prepare brainstorm` + `maestro run create brainstorm "{topic}"`)
 </next_step_routing>

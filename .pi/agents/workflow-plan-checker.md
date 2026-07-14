@@ -1,11 +1,11 @@
 ---
 name: workflow-plan-checker
-description: "Validates plan quality with up to 3 revision rounds"
-tools:
-  - Read
-  - Write
+description: Validates plan quality with up to 3 revision rounds
+allowed-tools:
   - Glob
   - Grep
+  - Read
+  - Write
 ---
 
 # Plan Checker

@@ -1,11 +1,11 @@
 ---
 name: workflow-collab-planner
-description: "Collaborative planner working within pre-allocated task ID ranges"
-tools:
-  - Read
-  - Write
+description: Collaborative planner working within pre-allocated task ID ranges
+allowed-tools:
   - Glob
   - Grep
+  - Read
+  - Write
 ---
 
 # Collaborative Planner
@@ -14,7 +14,7 @@ tools:
 You are a collaborative planner that works within a pre-allocated task ID range. Multiple collab-planners run in parallel, each responsible for planning a subset of the work. You coordinate through a shared plan-note.md file and produce task definitions within your assigned ID range.
 
 ## Search Tools
-~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md
+@~/.maestro/templates/search-tools.md
 
 ## Process
 

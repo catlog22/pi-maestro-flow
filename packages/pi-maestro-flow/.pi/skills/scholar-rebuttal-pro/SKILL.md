@@ -1,8 +1,26 @@
 ---
 name: scholar-rebuttal-pro
-description: "Enhanced academic paper review response workflow with Agy/CLI collaborative analysis and multi-perspective discussion. Produces structured rebuttal documents with evidence-based strategies. Triggers on \"rebuttal\", \"respond to reviewers\", \"review response\", \"审稿回复\"."
-allowed-tools: Task Read Write Edit Bash Glob Grep mcp__ace-tool__search_context mcp__ccw-tools__read_file mcp__ccw-tools__edit_file maestro
+description: Enhanced academic paper review response workflow with Agy/CLI collaborative analysis and multi-perspective discussion. Produces structured rebuttal documents with evidence-based strategies. Triggers on "rebuttal", "respond to reviewers", "review response", "审稿回复".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - Skill
+  - Task
+  - Write
+  - mcp__ace-tool__search_context
+  - mcp__ccw-tools__edit_file
+  - mcp__ccw-tools__read_file
+  - todo
+session-mode: run
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 # Scholar Rebuttal Pro
 
@@ -43,10 +61,10 @@ Enhanced academic paper review response workflow combining Agy/CLI collaborative
 
 ## Interactive Preference Collection
 
-Collect workflow preferences via user prompt before dispatching to phases:
+Collect workflow preferences via AskUserQuestion before dispatching to phases:
 
 ```javascript
-const prefResponse = ask user ({
+const prefResponse = AskUserQuestion({
   questions: [
     {
       question: "是否跳过所有确认步骤（自动模式）？",
@@ -102,7 +120,7 @@ When `workflowPreferences.autoYes === true`:
 
 ## Execution Flow
 
-> **⚠️ COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
+> **⚠️ COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
 > The phase currently marked `in_progress` is the active execution phase — preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
@@ -149,24 +167,24 @@ Return:
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-review-parsing.md](phases/01-review-parsing.md) | Parse reviewer comments, classify by type (Major/Minor/Typo/Misunderstanding), extract key concerns using Agy CLI semantic analysis | TodoWrite 驱动 |
-| 2 | [phases/02-multi-perspective-discussion.md](phases/02-multi-perspective-discussion.md) | Simulate discussion from author, reviewer, and domain expert perspectives to develop consensus strategies | TodoWrite 驱动 + 🔄 sentinel |
-| 3 | [phases/03-strategy-formulation.md](phases/03-strategy-formulation.md) | Select response strategies (Accept/Defend/Clarify/Experiment) based on discussion, analyze paper content for supporting evidence using CLI | TodoWrite 驱动 + 🔄 sentinel |
-| 4 | [phases/04-rebuttal-writing.md](phases/04-rebuttal-writing.md) | Generate structured rebuttal document using rebuttal-writer agent, apply conference-specific templates, optimize tone | TodoWrite 驱动 + 🔄 sentinel |
-| 5 | [phases/05-quality-validation.md](phases/05-quality-validation.md) | Validate rebuttal quality using Agy CLI: completeness, professionalism, persuasiveness, generate improvement suggestions | TodoWrite 驱动 |
+| 1 | [phases/01-review-parsing.md](phases/01-review-parsing.md) | Parse reviewer comments, classify by type (Major/Minor/Typo/Misunderstanding), extract key concerns using Agy CLI semantic analysis | todo({ action: "update" }) 驱动 |
+| 2 | [phases/02-multi-perspective-discussion.md](phases/02-multi-perspective-discussion.md) | Simulate discussion from author, reviewer, and domain expert perspectives to develop consensus strategies | todo({ action: "update" }) 驱动 + 🔄 sentinel |
+| 3 | [phases/03-strategy-formulation.md](phases/03-strategy-formulation.md) | Select response strategies (Accept/Defend/Clarify/Experiment) based on discussion, analyze paper content for supporting evidence using CLI | todo({ action: "update" }) 驱动 + 🔄 sentinel |
+| 4 | [phases/04-rebuttal-writing.md](phases/04-rebuttal-writing.md) | Generate structured rebuttal document using rebuttal-writer agent, apply conference-specific templates, optimize tone | todo({ action: "update" }) 驱动 + 🔄 sentinel |
+| 5 | [phases/05-quality-validation.md](phases/05-quality-validation.md) | Validate rebuttal quality using Agy CLI: completeness, professionalism, persuasiveness, generate improvement suggestions | todo({ action: "update" }) 驱动 |
 
 **Compact Rules**:
-1. **TodoWrite `in_progress`** → 保留完整内容，禁止压缩
-2. **TodoWrite `completed`** → 可压缩为摘要
+1. **todo({ action: "update" }) `in_progress`** → 保留完整内容，禁止压缩
+2. **todo({ action: "update" }) `completed`** → 可压缩为摘要
 3. **🔄 sentinel fallback** → 带此标记的 phase 包含 compact sentinel；若 compact 后仅存 sentinel 而无完整 Step 协议，必须立即 `Read()` 恢复
 
 ## Core Rules
 
-1. **Start Immediately**: First action is TodoWrite initialization, second action is Phase 1 execution
+1. **Start Immediately**: First action is todo({ action: "update" }) initialization, second action is Phase 1 execution
 2. **No Preliminary Analysis**: Do not read files or gather context before Phase 1
 3. **Parse Every Output**: Extract required data from each phase for next phase
 4. **Auto-Continue**: Check TodoList status to execute next pending phase automatically
-5. **Track Progress**: Update TodoWrite dynamically with task attachment/collapse pattern
+5. **Track Progress**: Update todo({ action: "update" }) dynamically with task attachment/collapse pattern
 6. **Progressive Phase Loading**: Read phase docs ONLY when that phase is about to execute
 7. **DO NOT STOP**: Continuous multi-phase workflow until all phases complete
 8. **CLI Integration**: Use `ccw cli --tool agy --mode analysis` for semantic analysis tasks
@@ -272,14 +290,14 @@ Step 6: Session Finalization (only when --session provided)
 Return summary to user
 ```
 
-## TodoWrite Pattern
+## todo({ action: "update" }) Pattern
 
 **Core Concept**: Dynamic task attachment and collapse for real-time visibility.
 
 ### Key Principles
 
 1. **Task Attachment** (when phase executed):
-   - Sub-tasks are **attached** to orchestrator's TodoWrite
+   - Sub-tasks are **attached** to orchestrator's todo({ action: "update" })
    - **Phase 1, 2, 3, 4, 5**: Multiple sub-tasks attached
 
 2. **Task Collapse** (after sub-tasks complete):
@@ -337,7 +355,7 @@ After each phase completes:
 ## Coordinator Checklist
 
 **Before Phase 1**:
-- [ ] TodoWrite initialized with all 5 phases
+- [ ] todo({ action: "update" }) initialized with all 5 phases
 - [ ] User preferences collected (autoMode, paperSource, conferenceType)
 - [ ] Review comments path validated
 - [ ] Paper path validated (if provided)

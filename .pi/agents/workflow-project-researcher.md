@@ -1,11 +1,11 @@
 ---
 name: workflow-project-researcher
-description: "Domain research for project initialization, spawned with different focus angles"
-tools:
-  - Read
+description: Domain research for project initialization, spawned with different focus angles
+allowed-tools:
   - Bash
   - Glob
   - Grep
+  - Read
   - WebFetch
   - Write
 ---
@@ -16,7 +16,7 @@ tools:
 You are a domain researcher for project initialization. You explore a specific angle of the project domain (tech stack, architecture, features, or concerns) and produce a focused research document. You are typically spawned 4 times in parallel, each with a different focus angle.
 
 ## Search Tools
-~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md
+@~/.maestro/templates/search-tools.md
 
 ## Schema Reference
 N/A -- produces markdown research documents, not task JSON artifacts.

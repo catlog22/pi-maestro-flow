@@ -1,7 +1,19 @@
 ---
 name: team-executor
-description: "Lightweight session execution skill. Resumes existing team-coordinate sessions for pure execution via team-worker agents. No analysis, no role generation -- only loads and executes. Session path required. Triggers on \"Team Executor\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+description: Lightweight session execution skill. Resumes existing team-coordinate sessions for pure execution via team-worker agents. No analysis, no role generation -- only loads and executes. Session path required. Triggers on "Team Executor".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - SendMessage
+  - Write
+  - mcp__maestro__team_msg
+  - teammate
+  - todo
+session-mode: none
 ---
 
 # Team Executor
@@ -107,29 +119,7 @@ Validate session
 When executor spawns workers, use `team-worker` agent with role-spec path:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker",
-  team_name: <team-name>,
-  name: "<role>",
-  run_in_background: true,
-  prompt: `## Role Assignment
-role: <role>
-role_spec: <session-folder>/role-specs/<role>.md
-session: <session-folder>
-session_id: <session-id>
-team_name: <team-name>
-requirement: <task-description>
-inner_loop: <true|false>
-
-## Progress Milestones
-session_id: <session-id>
-Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
-Report blockers immediately via team_msg type="blocker".
-Report completion via team_msg type="task_complete" after final SendMessage.
-
-Read role_spec file to load Phase 2-4 domain instructions.`
-})
+teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker", context: "fresh" })
 ```
 
 ---
@@ -139,7 +129,7 @@ Read role_spec file to load Phase 2-4 domain instructions.`
 When pipeline completes (all tasks done), executor presents an interactive choice:
 
 ```
-ask user ({
+AskUserQuestion({
   questions: [{
     question: "Team pipeline complete. What would you like to do?",
     header: "Completion",

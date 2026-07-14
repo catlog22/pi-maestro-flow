@@ -1,17 +1,23 @@
 ---
 name: security-audit
-description: "OWASP Top 10 and STRIDE security auditing with supply chain analysis Arguments: [quick|standard|deep] [--scope <path>]"
-allowed-tools: Read Write Bash Glob Grep teammate maestro
+description: OWASP Top 10 and STRIDE security auditing with supply chain analysis
+argument-hint: [quick|standard|deep] [--scope <path>]
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Glob
+  - Grep
+  - Read
+  - Write
+  - teammate
+session-mode: run
+contract: 
 ---
 
 <purpose>
 Systematic security audit covering OWASP Top 10, dependency supply chain, secrets detection,
 CI/CD pipeline review, and optional STRIDE threat modeling. Three tiers control depth vs speed.
 </purpose>
-
-<required_reading>
-~/.maestro/workflows/review.md
-</required_reading>
 
 <context>
 $ARGUMENTS — Parse tier and scope:
@@ -26,7 +32,7 @@ $ARGUMENTS — Parse tier and scope:
 | standard | ✓ | ✓ | ✓ | ✓ | — | — |
 | deep | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-**Output boundary**: ALL file writes MUST target `.workflow/scratch/{YYYYMMDD}-security-audit-{tier}-{slug}/` or `.workflow/state.json` only. NEVER modify source code, configuration files, or dependencies. Audit is read-only analysis.
+**Output boundary**: ALL file writes MUST target `{run_dir}/outputs/` or `.workflow/state.json` only. NEVER modify source code, configuration files, or dependencies. Audit is read-only analysis.
 </context>
 
 <invariants>
@@ -166,31 +172,7 @@ Summary: {total} findings ({critical} critical, {high} high, {medium} medium, {l
 
 **Register artifact on completion:**
 
-Confirm before writing:
-```
-AskUserQuestion("Register security-audit artifact RVW-{NNN} in state.json? (yes/no)")
-→ yes: proceed with write
-→ no: skip registration, continue to completion
-```
-
-```
-Append to state.json.artifacts[]:
-{
-  id: nextArtifactId(artifacts, "review"),  // RVW-NNN (security-audit reuses review type)
-  type: "review",
-  subtype: "security-audit",
-  milestone: current_milestone || null,
-  phase: target_phase || null,
-  scope: target_phase ? "phase" : "standalone",
-  path: "scratch/{YYYYMMDD}-security-audit-{tier}-{slug}",
-  status: critical_count == 0 ? "completed" : "completed_with_concerns",
-  tier: tier,                              // quick|standard|deep
-  harvested: false,
-  created_at: start_time,
-  completed_at: now()
-}
-```
-Write findings report to the same `path` (severity matrix, file:line refs, remediation).
+Write the declared security findings under `{run_dir}/outputs/` and the human summary to `{run_dir}/report.md`. `maestro run complete` performs registration automatically; the model never edits an artifact registry.
 </execution>
 
 <completion>
@@ -218,8 +200,8 @@ maestro ralph complete <idx> --status {STATUS} [--evidence {path}]
 
 | Condition | Suggestion |
 |-----------|-----------|
-| No critical findings | `/quality-review {phase}` |
-| Critical findings need fix | `/maestro-plan {phase} --gaps` |
+| No critical findings | `maestro run create review -- {phase}` |
+| Critical findings need fix | `maestro run create plan -- {phase} --gaps` |
 | Need deeper analysis | `/security-audit deep --scope {path}` |
 | Want dependency remediation | Fix vulnerabilities, then re-run `/security-audit` |
 </completion>

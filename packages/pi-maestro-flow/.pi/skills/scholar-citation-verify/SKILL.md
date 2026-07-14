@@ -1,7 +1,18 @@
 ---
 name: scholar-citation-verify
-description: "Four-layer citation verification for academic papers. Scans LaTeX/BibTeX files, verifies every citation via WebSearch and Google Scholar, generates verification report with fix suggestions. Triggers on \"verify citations\", \"check references\", \"citation verification\", \"prevent fake citations\", \"引用验证\"."
-allowed-tools: Read Write Edit Bash Glob Grep WebSearch WebFetch maestro
+description: Four-layer citation verification for academic papers. Scans LaTeX/BibTeX files, verifies every citation via WebSearch and Google Scholar, generates verification report with fix suggestions. Triggers on "verify citations", "check references", "citation verification", "prevent fake citations", "引用验证".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - WebFetch
+  - WebSearch
+  - Write
+  - todo
+session-mode: none
 ---
 
 # Scholar Citation Verify
@@ -83,11 +94,11 @@ When `workflowPreferences.autoYes === true`:
 
 ## Execution Flow
 
-> **COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
+> **COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
 > The phase currently marked `in_progress` is the active execution phase — preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
-### TodoWrite Setup
+### todo({ action: "update" }) Setup
 
 ```
 Citation Verification:
@@ -119,13 +130,13 @@ Phase 3: Report & Fix
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-scan-extract.md](phases/01-scan-extract.md) | Scan files, extract citations | TodoWrite driven |
-| 2 | [phases/02-verify.md](phases/02-verify.md) | 4-layer verification | TodoWrite driven + sentinel |
-| 3 | [phases/03-report-fix.md](phases/03-report-fix.md) | Generate report, apply fixes | TodoWrite driven |
+| 1 | [phases/01-scan-extract.md](phases/01-scan-extract.md) | Scan files, extract citations | todo({ action: "update" }) driven |
+| 2 | [phases/02-verify.md](phases/02-verify.md) | 4-layer verification | todo({ action: "update" }) driven + sentinel |
+| 3 | [phases/03-report-fix.md](phases/03-report-fix.md) | Generate report, apply fixes | todo({ action: "update" }) driven |
 
 **Compact Rules**:
-1. **TodoWrite `in_progress`** → preserve full content, do not compress
-2. **TodoWrite `completed`** → may compress to summary
+1. **todo({ action: "update" }) `in_progress`** → preserve full content, do not compress
+2. **todo({ action: "update" }) `completed`** → may compress to summary
 3. **sentinel fallback** → phases marked with sentinel contain compact sentinel; if only sentinel remains, **must immediately `Read()` to recover**
 
 ## Core Rules

@@ -1,3 +1,5 @@
+
+
 # Scholar Rebuttal Pro - 使用指南
 
 ## 概述
@@ -113,7 +115,7 @@ Skill 启动时会询问三个配置：
 - `quality-report.md` - 质量评估报告
 - `improvement-suggestions.json` - 改进建议
 
-所有输出文件位于: `.workflow/.scratchpad/`
+所有输出文件位于: `{run_dir}/outputs/`
 
 ## 架构设计
 
@@ -136,7 +138,7 @@ scholar-rebuttal-pro/
 - **Phase 文件**: 按需加载，包含完整执行细节
 - **Compact Recovery**: Phase 2/3/4 包含 sentinel 机制
 
-### TodoWrite 模式
+### todo({ action: "update" }) 模式
 
 ```json
 // Phase 执行中（任务展开）
@@ -296,7 +298,7 @@ Phase 2/3/4 包含 compact sentinel，防止长上下文压缩导致协议丢失
 
 ```markdown
 > **⚠️ CHECKPOINT**: Before proceeding, verify:
-> 1. This phase is TodoWrite `in_progress` (active phase protection)
+> 1. This phase is todo({ action: "update" }) `in_progress` (active phase protection)
 > 2. Full protocol (Step N.X — N.M) is in active memory, not just sentinel
 > If only sentinel remains → `Read("phases/0N-xxx.md")` now.
 ```

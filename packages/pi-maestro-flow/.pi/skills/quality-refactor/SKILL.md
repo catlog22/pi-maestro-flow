@@ -1,16 +1,23 @@
 ---
 name: quality-refactor
-description: "Use when accumulated tech debt needs systematic identification and safe reduction Arguments: [<scope>]"
-allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
+description: Use when accumulated tech debt needs systematic identification and safe reduction
+argument-hint: [<scope>]
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - Write
+  - teammate
+session-mode: run
+contract: 
 ---
 
 <purpose>
 Targeted refactoring with safety guarantees: plan → confirm → execute with test verification per change → reflection-log.md.
 </purpose>
-
-<required_reading>
-~/.maestro/workflows/refactor.md
-</required_reading>
 
 <context>
 Scope: $ARGUMENTS (required)
@@ -29,7 +36,7 @@ If not provided, prompt user for scope.
    - Identify task-relevant entries, then load: `maestro load --type knowhow --id <id1> [id2...]`
 4. All are optional — proceed without if unavailable.
 
-**Output boundary**: Refactoring modifies source files within the declared scope only. Ancillary outputs (reflection-log.md) MUST target `.workflow/scratch/{YYYYMMDD}-refactor-{slug}/`. NEVER modify files outside the confirmed scope without re-confirmation.
+**Output boundary**: Refactoring modifies source files within the declared scope only. Ancillary outputs (reflection-log.md) MUST target `{run_dir}/outputs/`. NEVER modify files outside the confirmed scope without re-confirmation.
 </context>
 
 <invariants>
@@ -62,7 +69,7 @@ Follow '~/.maestro/workflows/refactor.md' completely.
 - BLOCKED if tests fail: fix regressions before completing.
 
 **Knowledge inquiry on completion:**
-After successful refactoring, ask user once: "Record refactoring pattern as coding convention?" If yes → `Skill("spec-add", "coding \"<title>\" \"<pattern>\" --keywords <kw1>,<kw2> --description \"<summary>\"")`.
+After successful refactoring, ask user once: "Record refactoring pattern as coding convention?" If yes → `Skill("spec", "add coding \"<title>\" \"<pattern>\" --keywords <kw1>,<kw2> --description \"<summary>\"")`.
 </execution>
 
 <completion>
@@ -86,9 +93,9 @@ maestro ralph complete <idx> --status {STATUS} [--evidence {path}]
 
 | Condition | Suggestion |
 |-----------|-----------|
-| All tests pass | `/quality-sync` (update codebase docs) |
-| Test failures after refactor | `/quality-debug "test failures after refactor in {scope}"` |
-| No test suite available | `/quality-auto-test {phase}` |
+| All tests pass | `/manage sync codebase` (update codebase docs) |
+| Test failures after refactor | `maestro run create debug -- "test failures after refactor in {scope}"` |
+| No test suite available | `maestro run create auto-test -- {phase}` |
 </completion>
 
 <error_codes>

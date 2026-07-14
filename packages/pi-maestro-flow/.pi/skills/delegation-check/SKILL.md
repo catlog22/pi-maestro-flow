@@ -1,11 +1,18 @@
 ---
 name: delegation-check
-description: "Check workflow delegation prompts against agent role definitions for content separation violations. Detects conflicts, duplication, boundary leaks, and missing contracts. Triggers on \"check delegation\", \"delegation conflict\", \"prompt vs role check\"."
-allowed-tools: Read Glob Grep Bash maestro
+description: Check workflow delegation prompts against agent role definitions for content separation violations. Detects conflicts, duplication, boundary leaks, and missing contracts. Triggers on "check delegation", "delegation conflict", "prompt vs role check".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Glob
+  - Grep
+  - Read
+  - teammate
+session-mode: none
 ---
 
 <purpose>
-Validate that command delegation prompts (Agent() calls) and agent role definitions respect GSD content separation boundaries. Detects 7 conflict dimensions: role re-definition, domain expertise leaking into prompts, quality gate duplication, output format conflicts, process override, scope authority conflicts, and missing contracts.
+Validate that command delegation prompts (teammate() calls) and agent role definitions respect GSD content separation boundaries. Detects 7 conflict dimensions: role re-definition, domain expertise leaking into prompts, quality gate duplication, output format conflicts, process override, scope authority conflicts, and missing contracts.
 
 Invoked when user requests "check delegation", "delegation conflict", "prompt vs role check", or when reviewing workflow skill quality.
 </purpose>
@@ -52,15 +59,15 @@ AskUserQuestion(
 
 For each command file in scope:
 
-**2a. Extract Agent() calls from commands:**
+**2a. Extract teammate() calls from commands:**
 
 ```bash
-# Search both Agent() (current) and Task() (legacy GSD) patterns
-grep -n "Agent(\|Task(" "$COMMAND_FILE"
+# Search both teammate() (current) and Task() (legacy GSD) patterns
+grep -n "teammate(\|Task(" "$COMMAND_FILE"
 grep -n "subagent_type" "$COMMAND_FILE"
 ```
 
-For each `Agent()` call, extract:
+For each `teammate()` call, extract:
 - `subagent_type` → agent name
 - Full prompt content between the prompt markers (the string passed as `prompt=`)
 - Line range of the delegation prompt
@@ -89,7 +96,7 @@ If an agent file cannot be found, record as `MISSING_AGENT` — this is itself a
 
 ## 3. Parse Delegation Prompts
 
-For each Agent() call, extract structured blocks from the prompt content:
+For each teammate() call, extract structured blocks from the prompt content:
 
 | Block | What It Contains |
 |-------|-----------------|
@@ -226,7 +233,7 @@ For each command-agent pair, aggregate findings:
 
 ```
 {command_path} → {agent_name}
-  Agent() at line {N}:
+  teammate() at line {N}:
     D1 (Role Re-def):      {PASS|WARN|ERROR} — {detail}
     D2 (Domain Leak):       {PASS|WARN|ERROR} — {detail}
     D3 (Quality Gate):      {PASS|WARN|ERROR} — {detail}
@@ -287,7 +294,7 @@ Verdict: {CLEAN | REVIEW | CONFLICT}
 
 <success_criteria>
 - [ ] Scan scope determined and all files discovered
-- [ ] All Agent() calls extracted from commands with full prompt content
+- [ ] All teammate() calls extracted from commands with full prompt content
 - [ ] All corresponding agent definitions located and parsed
 - [ ] 7 conflict dimensions checked for each command-agent pair
 - [ ] No false positives on legitimate patterns (mode references, user decision passthrough, `<deep_work_rules>`)

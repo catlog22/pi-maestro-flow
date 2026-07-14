@@ -1,22 +1,26 @@
 ---
 name: maestro-init
-description: "Initialize project with auto state detection Arguments: [-y] [--from <source>] [--from-brainstorm SESSION-ID]"
-allowed-tools: Read Write Bash Glob Grep teammate maestro
+description: Initialize project with auto state detection
+argument-hint: [-y] [--from <source>] [--from-brainstorm SESSION-ID]
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Glob
+  - Grep
+  - Read
+  - Write
+  - teammate
+session-mode: bootstrap
 ---
-
 <purpose>
 Initialize project: detect state, create `.workflow/` with project.md, state.json, config.json.
-Entry point; downstream: maestro-roadmap or maestro-brainstorm.
+Entry point; downstream: step `roadmap` or step `brainstorm`.
 </purpose>
 
-<required_reading>
-~/.maestro/workflows/init.md
-</required_reading>
-
 <deferred_reading>
-- [project.md](~/.pi/agent/packages/pi-maestro-flow/templates/project.md) — read when generating project description
-- [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when creating initial state
-- [config.json](~/.pi/agent/packages/pi-maestro-flow/templates/config.json) — read when creating workflow configuration
+- [project.md](~/.maestro/templates/project.md) — read when generating project description
+- [state.json](~/.maestro/templates/state.json) — read when creating initial state
+- [config.json](~/.maestro/templates/config.json) — read when creating workflow configuration
 </deferred_reading>
 
 <context>
@@ -39,12 +43,12 @@ Check for `.workflow/state.json` -- loads context if project already initialized
 1. **Idempotent init** — re-running init on an already-initialized project MUST detect existing `.workflow/` and warn (E002); NEVER silently overwrite existing state
 2. **Scope guard** — init MUST only make initialization decisions; NEVER prejudge roadmap structure, plan scope, or implementation details
 3. **All artifacts required** — init MUST NOT report completion until project.md, state.json, and config.json all exist; missing artifacts MUST be created before exit
-4. **Template-driven** — deferred templates (project.md, state.json, config.json) MUST be read from `~/.pi/agent/packages/pi-maestro-flow/templates/` and customized; NEVER generate from scratch without template
+4. **Template-driven** — deferred templates (project.md, state.json, config.json) MUST be read from `~/.maestro/templates/` and customized; NEVER generate from scratch without template
 5. **Interview writes back** — all interactive decisions MUST be written to project.md/config.json before proceeding to research or completion; NEVER leave decisions unrecorded
 </invariants>
 
 <interview_protocol>
-Follows ~/.maestro/workflows/interview-mechanics.md standard.
+Follows @~/.maestro/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (strict order): project type (greenfield / existing codebase onboarding) → tech stack detection and confirmation → directory structure preferences → initial configuration (specs categories, wiki bootstrap)
@@ -116,7 +120,7 @@ maestro ralph complete <idx> --status {STATUS} [--evidence {path}]
 
 Status verdicts:
 - **DONE** — Normal completion
-- **DONE_WITH_CONCERNS** — Completed with caveats; pass `--concerns`
+- **DONE_WITH_CONCERNS** — Completed with concerns; pass `--concerns`
 - **NEEDS_RETRY** — Tooling error / transient issue; ralph will retry
 - **BLOCKED** — External hard blocker; pass `--reason`
 
@@ -124,11 +128,11 @@ Status verdicts:
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Roadmap needed (default light) | `/maestro-roadmap <requirement>` |
-| Full spec package | `/maestro-blueprint <idea>` |
-| Explore ideas first | `/maestro-brainstorm <topic>` |
-| View project dashboard | `/manage-status` |
-| Quick ad-hoc task | `/maestro-quick <task>` |
+| Roadmap needed (default light) | step `roadmap` (`maestro run prepare roadmap` + `maestro run create roadmap`) |
+| Full spec package | step `blueprint` (`maestro run prepare blueprint` + `maestro run create blueprint`) |
+| Explore ideas first | step `brainstorm` (`maestro run prepare brainstorm` + `maestro run create brainstorm`) |
+| View project dashboard | `/manage status` |
+| Quick ad-hoc task | step `quick` (`maestro run prepare quick` + `maestro run create quick`) |
 </completion>
 
 <error_codes>

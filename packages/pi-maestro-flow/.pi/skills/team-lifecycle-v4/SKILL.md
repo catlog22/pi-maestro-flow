@@ -1,8 +1,24 @@
 ---
 name: team-lifecycle-v4
-description: "Full lifecycle team skill — plan, develop, test, review in one coordinated session. Role-based architecture with coordinator-driven beat model. Triggers on \"team lifecycle v4\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+description: Full lifecycle team skill — plan, develop, test, review in one coordinated session. Role-based architecture with coordinator-driven beat model. Triggers on "team lifecycle v4".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - SendMessage
+  - Write
+  - mcp__maestro__team_msg
+  - teammate
+  - todo
+session-mode: run
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 # Team Lifecycle v4
 
@@ -63,30 +79,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker",
-  team_name: <team-name>,
-  name: "<role>",
-  run_in_background: true,
-  prompt: `## Role Assignment
-role: <role>
-role_spec: <skill_root>/roles/<role>/role.md
-session: <session-folder>
-session_id: <session-id>
-team_name: <team-name>
-requirement: <task-description>
-inner_loop: <true|false>
-
-## Progress Milestones
-session_id: <session-id>
-Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
-Report blockers immediately via team_msg type="blocker".
-Report completion via team_msg type="task_complete" after final SendMessage.
-
-Read role_spec file (@<skill_root>/roles/<role>/role.md) to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
-})
+teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker", context: "fresh" })
 ```
 
 ## Supervisor Spawn Template
@@ -96,30 +89,7 @@ Supervisor is a **resident agent** (independent from team-worker). Spawned once 
 ### Spawn (Phase 2 — once per session)
 
 ```
-teammate({
-  subagent_type: "team-supervisor",
-  description: "Spawn resident supervisor",
-  team_name: <team-name>,
-  name: "supervisor",
-  run_in_background: true,
-  prompt: `## Role Assignment
-role: supervisor
-role_spec: <skill_root>/roles/supervisor/role.md
-session: <session-folder>
-session_id: <session-id>
-team_name: <team-name>
-requirement: <task-description>
-
-## Progress Milestones
-session_id: <session-id>
-Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
-Report blockers immediately via team_msg type="blocker".
-Report completion via team_msg type="task_complete" after final SendMessage.
-
-Read role_spec file (@<skill_root>/roles/supervisor/role.md) to load checkpoint definitions.
-Init: load baseline context, report ready, go idle.
-Wake cycle: coordinator sends checkpoint requests via SendMessage.`
-})
+teammate({ agent: "team-supervisor", name: "supervisor", description: "Spawn resident supervisor", context: "fresh" })
 ```
 
 ### Wake (handleSpawnNext — per CHECKPOINT task)
@@ -162,7 +132,7 @@ SendMessage({
 When pipeline completes, coordinator presents:
 
 ```
-ask user ({
+AskUserQuestion({
   questions: [{
     question: "Pipeline complete. What would you like to do?",
     header: "Completion",

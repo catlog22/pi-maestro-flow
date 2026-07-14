@@ -1,8 +1,24 @@
 ---
 name: team-coordinate
-description: "Universal team coordination skill with dynamic role generation. Uses team-worker agent architecture with role-spec files. Only coordinator is built-in -- all worker roles are generated at runtime as role-specs and spawned via team-worker agent. Beat/cadence model for orchestration. Triggers on \"Team Coordinate \"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+description: Universal team coordination skill with dynamic role generation. Uses team-worker agent architecture with role-spec files. Only coordinator is built-in -- all worker roles are generated at runtime as role-specs and spawned via team-worker agent. Beat/cadence model for orchestration. Triggers on "Team Coordinate ".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - SendMessage
+  - Write
+  - mcp__maestro__team_msg
+  - teammate
+  - todo
+session-mode: run
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 # Team Coordinate 
 
@@ -110,30 +126,7 @@ User provides task description
 When coordinator spawns workers, use `team-worker` agent with role-spec path:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker",
-  team_name: <team-name>,
-  name: "<role>",
-  run_in_background: true,
-  prompt: `## Role Assignment
-role: <role>
-role_spec: <session-folder>/role-specs/<role>.md
-session: <session-folder>
-session_id: <session-id>
-team_name: <team-name>
-requirement: <task-description>
-inner_loop: <true|false>
-
-## Progress Milestones
-session_id: <session-id>
-Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
-Report blockers immediately via team_msg type="blocker".
-Report completion via team_msg type="task_complete" after final SendMessage.
-
-Read role_spec file to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery) -> role-spec Phase 2-4 -> built-in Phase 5 (report).`
-})
+teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker", context: "fresh" })
 ```
 
 **Inner Loop roles** (role has 2+ serial same-prefix tasks): Set `inner_loop: true`. The team-worker agent handles the loop internally.
@@ -147,7 +140,7 @@ Execute built-in Phase 1 (task discovery) -> role-spec Phase 2-4 -> built-in Pha
 When pipeline completes (all tasks done), coordinator presents an interactive choice:
 
 ```
-ask user ({
+AskUserQuestion({
   questions: [{
     question: "Team pipeline complete. What would you like to do?",
     header: "Completion",
@@ -243,11 +236,11 @@ ask user ({
 Coordinator supports `resume` / `continue` for interrupted sessions:
 
 1. Scan `.workflow/.team/TC-*/team-session.json` for active/paused sessions
-2. Multiple matches -> user prompt for selection
-3. Audit TaskList -> reconcile session state <-> task status
+2. Multiple matches -> AskUserQuestion for selection
+3. Audit todo({ action: "list" }) -> reconcile session state <-> task status
 4. Reset in_progress -> pending (interrupted tasks)
 5. Rebuild team and spawn needed workers only
-6. Create missing tasks, set dependencies via TaskUpdate({ addBlockedBy })
+6. Create missing tasks, set dependencies via todo({ action: "update" })({ addBlockedBy })
 7. Kick first executable task -> Phase 4 coordination loop
 
 ---

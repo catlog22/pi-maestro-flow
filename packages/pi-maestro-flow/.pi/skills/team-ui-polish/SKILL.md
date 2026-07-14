@@ -1,8 +1,31 @@
 ---
 name: team-ui-polish
-description: "Unified team skill for UI polish. Auto-discover and fix UI design issues using Impeccable design standards. Anti-AI-slop detection, color/typography/spacing quality, motion, interaction states, visual hierarchy. Uses team-worker agent architecture. Triggers on \"team ui polish\", \"ui polish\", \"design polish\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__chrome-devtools__evaluate_script mcp__chrome-devtools__take_screenshot mcp__chrome-devtools__navigate_page mcp__chrome-devtools__resize_page maestro
+description: Unified team skill for UI polish. Auto-discover and fix UI design issues using Impeccable design standards. Anti-AI-slop detection, color/typography/spacing quality, motion, interaction states, visual hierarchy. Uses team-worker agent architecture. Triggers on "team ui polish", "ui polish", "design polish".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - SendMessage
+  - Write
+  - mcp__chrome-devtools__evaluate_script
+  - mcp__chrome-devtools__navigate_page
+  - mcp__chrome-devtools__resize_page
+  - mcp__chrome-devtools__take_screenshot
+  - mcp__maestro__edit_file
+  - mcp__maestro__read_file
+  - mcp__maestro__team_msg
+  - mcp__maestro__write_file
+  - teammate
+  - todo
+session-mode: run
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 # Team UI Polish
 
@@ -67,30 +90,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker for <task-id>",
-  team_name: "ui-polish",
-  name: "<role>",
-  run_in_background: true,
-  prompt: `## Role Assignment
-role: <role>
-role_spec: <skill_root>/roles/<role>/role.md
-session: <session-folder>
-session_id: <session-id>
-team_name: ui-polish
-requirement: <task-description>
-inner_loop: <true|false>
-
-## Progress Milestones
-session_id: <session-id>
-Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
-Report blockers immediately via team_msg type="blocker".
-Report completion via team_msg type="task_complete" after final SendMessage.
-
-Read role_spec file (@<skill_root>/roles/<role>/role.md) to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
-})
+teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
 ```
 
 ## User Commands

@@ -1,10 +1,10 @@
 ---
 name: workflow-roadmapper
-description: "Creates project roadmap with phased milestones from research and requirements"
-tools:
+description: Creates project roadmap with phased milestones from research and requirements
+allowed-tools:
+  - Bash
   - Read
   - Write
-  - Bash
 ---
 
 # Roadmapper

@@ -1,14 +1,14 @@
 ---
 name: ui-design-agent
-description: "UI design token management and prototype generation — W3C Design Tokens Format, state-based components, WCAG AA validation, responsive layout templates."
-tools:
-  - Read
-  - Write
+description: UI design token management and prototype generation — W3C Design Tokens Format, state-based components, WCAG AA validation, responsive layout templates.
+allowed-tools:
+  - Bash
   - Glob
   - Grep
-  - Bash
-  - mcp__exa__web_search_exa
+  - Read
+  - Write
   - mcp__exa__get_code_context_exa
+  - mcp__exa__web_search_exa
 ---
 
 You are a specialized **UI Design Agent** that executes design generation tasks autonomously to produce production-ready design systems and prototypes.

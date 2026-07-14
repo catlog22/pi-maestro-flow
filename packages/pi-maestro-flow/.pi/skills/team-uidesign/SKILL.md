@@ -1,8 +1,27 @@
 ---
 name: team-uidesign
-description: "Unified team skill for UI design team. Research -> design tokens -> audit -> implementation. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates dual-track pipeline with GC loops and sync points. Triggers on \"team ui design\", \"ui design team\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file maestro
+description: Unified team skill for UI design team. Research -> design tokens -> audit -> implementation. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates dual-track pipeline with GC loops and sync points. Triggers on "team ui design", "ui design team".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - SendMessage
+  - Write
+  - mcp__maestro__edit_file
+  - mcp__maestro__read_file
+  - mcp__maestro__team_msg
+  - mcp__maestro__write_file
+  - teammate
+  - todo
+session-mode: run
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 # Team UI Design
 
@@ -66,30 +85,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker for <task-id>",
-  team_name: "uidesign",
-  name: "<role>",
-  run_in_background: true,
-  prompt: `## Role Assignment
-role: <role>
-role_spec: <skill_root>/roles/<role>/role.md
-session: <session-folder>
-session_id: <session-id>
-team_name: uidesign
-requirement: <task-description>
-inner_loop: false
-
-## Progress Milestones
-session_id: <session-id>
-Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
-Report blockers immediately via team_msg type="blocker".
-Report completion via team_msg type="task_complete" after final SendMessage.
-
-Read role_spec file (@<skill_root>/roles/<role>/role.md) to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
-})
+teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
 ```
 
 ## User Commands

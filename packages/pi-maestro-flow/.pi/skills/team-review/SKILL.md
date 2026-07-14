@@ -1,8 +1,24 @@
 ---
 name: team-review
-description: "Unified team skill for code review. 3-role pipeline: scanner, reviewer, fixer. Triggers on team-review."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+description: Unified team skill for code review. 3-role pipeline: scanner, reviewer, fixer. Triggers on team-review.
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - SendMessage
+  - Write
+  - mcp__maestro__team_msg
+  - teammate
+  - todo
+session-mode: run
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 # Team Review
 
@@ -58,30 +74,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker",
-  team_name: "review",
-  name: "<role>",
-  run_in_background: true,
-  prompt: `## Role Assignment
-role: <role>
-role_spec: <skill_root>/roles/<role>/role.md
-session: <session-folder>
-session_id: <session-id>
-team_name: review
-requirement: <task-description>
-inner_loop: <true|false>
-
-## Progress Milestones
-session_id: <session-id>
-Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
-Report blockers immediately via team_msg type="blocker".
-Report completion via team_msg type="task_complete" after final SendMessage.
-
-Read role_spec file (@<skill_root>/roles/<role>/role.md) to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
-})
+teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker", context: "fresh" })
 ```
 
 ## User Commands
@@ -101,7 +94,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 When pipeline completes, coordinator presents:
 
 ```
-ask user ({
+AskUserQuestion({
   questions: [{
     question: "Review pipeline complete. What would you like to do?",
     header: "Completion",

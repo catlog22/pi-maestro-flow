@@ -1,14 +1,14 @@
 ---
 name: workflow-analyzer
-description: "Evaluates technical topics, proposals, or decisions across multiple dimensions with evidence-based scoring and recommendations."
-tools:
-  - Read
-  - Write
+description: Evaluates technical topics, proposals, or decisions across multiple dimensions with evidence-based scoring and recommendations.
+allowed-tools:
+  - Bash
   - Glob
   - Grep
-  - Bash
-  - WebSearch
+  - Read
   - WebFetch
+  - WebSearch
+  - Write
 ---
 
 # Workflow Analyzer
@@ -17,7 +17,7 @@ tools:
 You perform structured multi-dimensional analysis of technical topics, proposals, or decisions. You evaluate across six standard dimensions, score each with evidence, and produce actionable recommendations. You are invoked when a decision needs rigorous evaluation before proceeding.
 
 ## Search Tools
-~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md — Follow search tool priority and selection patterns.
+@~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Process
 

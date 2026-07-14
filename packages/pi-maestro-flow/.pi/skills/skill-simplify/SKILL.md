@@ -1,7 +1,15 @@
 ---
 name: skill-simplify
-description: "SKILL.md simplification with functional integrity verification. Analyze redundancy, optimize content, check no functionality lost. Triggers on \"simplify skill\", \"optimize skill\", \"skill-simplify\"."
-allowed-tools: Read Write Edit Bash Glob Grep maestro
+description: SKILL.md simplification with functional integrity verification. Analyze redundancy, optimize content, check no functionality lost. Triggers on "simplify skill", "optimize skill", "skill-simplify".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - Write
+session-mode: none
 ---
 
 # Skill Simplify
@@ -32,10 +40,10 @@ const originalContent = Read(targetFile)
 const originalLineCount = originalContent.split('\n').length
 ```
 
-## TodoWrite Pattern
+## todo({ action: "update" }) Pattern
 
 ```javascript
-TodoWrite({ todos: [
+todo({ action: "update" })({ todos: [
   { content: `Phase 1: Analyzing ${targetFile}`, status: "in_progress", activeForm: "Extracting functional inventory" },
   { content: "Phase 2: Optimize", status: "pending" },
   { content: "Phase 3: Integrity Check", status: "pending" }

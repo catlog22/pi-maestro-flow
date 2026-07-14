@@ -1,11 +1,11 @@
 ---
 name: workflow-integration-checker
-description: "Cross-phase integration validation for milestone audits"
-tools:
-  - Read
+description: Cross-phase integration validation for milestone audits
+allowed-tools:
+  - Bash
   - Glob
   - Grep
-  - Bash
+  - Read
 ---
 
 # Integration Checker
@@ -14,7 +14,7 @@ tools:
 You validate cross-phase integration at milestone boundaries. You check that shared interfaces match across phases, data contracts are honored, and no cross-phase dependencies are broken. You are invoked during milestone audits to ensure phases compose correctly.
 
 ## Search Tools
-~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md — Follow search tool priority and selection patterns.
+@~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Schema Reference
 N/A -- reads code artifacts, not task JSON.

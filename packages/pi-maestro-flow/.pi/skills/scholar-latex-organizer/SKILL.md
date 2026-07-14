@@ -1,7 +1,18 @@
 ---
 name: scholar-latex-organizer
-description: "Organize messy conference LaTeX template .zip files into clean Overleaf-ready structure. Extracts, analyzes, cleans up, and generates README with submission requirements. Triggers on \"organize LaTeX template\", \"clean up template\", \"prepare Overleaf template\", \"整理LaTeX模板\"."
-allowed-tools: Read Write Edit Bash Glob Grep WebSearch WebFetch maestro
+description: Organize messy conference LaTeX template .zip files into clean Overleaf-ready structure. Extracts, analyzes, cleans up, and generates README with submission requirements. Triggers on "organize LaTeX template", "clean up template", "prepare Overleaf template", "整理LaTeX模板".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - WebFetch
+  - WebSearch
+  - Write
+  - todo
+session-mode: none
 ---
 
 # Scholar LaTeX Organizer
@@ -84,11 +95,11 @@ When `workflowPreferences.autoYes === true`:
 
 ## Execution Flow
 
-> **COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
+> **COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
 > The phase currently marked `in_progress` is the active execution phase — preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
-### TodoWrite Setup
+### todo({ action: "update" }) Setup
 
 ```
 LaTeX Template Organization:
@@ -120,13 +131,13 @@ Phase 3: README & Finalize
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-extract-analyze.md](phases/01-extract-analyze.md) | Extract and analyze template | TodoWrite driven |
-| 2 | [phases/02-cleanup-organize.md](phases/02-cleanup-organize.md) | Clean up and restructure | TodoWrite driven + sentinel |
-| 3 | [phases/03-readme-finalize.md](phases/03-readme-finalize.md) | Generate README, finalize | TodoWrite driven |
+| 1 | [phases/01-extract-analyze.md](phases/01-extract-analyze.md) | Extract and analyze template | todo({ action: "update" }) driven |
+| 2 | [phases/02-cleanup-organize.md](phases/02-cleanup-organize.md) | Clean up and restructure | todo({ action: "update" }) driven + sentinel |
+| 3 | [phases/03-readme-finalize.md](phases/03-readme-finalize.md) | Generate README, finalize | todo({ action: "update" }) driven |
 
 **Compact Rules**:
-1. **TodoWrite `in_progress`** → preserve full content, do not compress
-2. **TodoWrite `completed`** → may compress to summary
+1. **todo({ action: "update" }) `in_progress`** → preserve full content, do not compress
+2. **todo({ action: "update" }) `completed`** → may compress to summary
 3. **sentinel fallback** → phases marked with sentinel contain compact sentinel; if only sentinel remains, **must immediately `Read()` to recover**
 
 ## Core Rules

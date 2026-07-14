@@ -1,7 +1,16 @@
 ---
 name: scholar-anti-ai-writing
-description: "Remove AI writing patterns from academic prose. Detects and fixes inflated symbolism, promotional language, superficial analyses, vague attributions, AI vocabulary, and formulaic structures. Supports English and Chinese. Triggers on \"remove AI patterns\", \"humanize text\", \"anti-AI polish\", \"去除AI写作痕迹\", \"人性化处理\"."
-allowed-tools: Read Write Edit Bash Glob Grep maestro
+description: Remove AI writing patterns from academic prose. Detects and fixes inflated symbolism, promotional language, superficial analyses, vague attributions, AI vocabulary, and formulaic structures. Supports English and Chinese. Triggers on "remove AI patterns", "humanize text", "anti-AI polish", "去除AI写作痕迹", "人性化处理".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - Write
+  - todo
+session-mode: none
 ---
 
 # Scholar Anti-AI Writing
@@ -86,11 +95,11 @@ When `workflowPreferences.autoYes === true`:
 
 ## Execution Flow
 
-> **COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
+> **COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
 > The phase currently marked `in_progress` is the active execution phase — preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
-### TodoWrite Setup
+### todo({ action: "update" }) Setup
 
 ```
 Anti-AI Writing:
@@ -122,13 +131,13 @@ Phase 3: Validate & Score
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-detect-score.md](phases/01-detect-score.md) | Scan patterns, score text | TodoWrite driven |
-| 2 | [phases/02-rewrite-polish.md](phases/02-rewrite-polish.md) | Rewrite and humanize | TodoWrite driven + sentinel |
-| 3 | [phases/03-validate-score.md](phases/03-validate-score.md) | Re-score, generate report | TodoWrite driven |
+| 1 | [phases/01-detect-score.md](phases/01-detect-score.md) | Scan patterns, score text | todo({ action: "update" }) driven |
+| 2 | [phases/02-rewrite-polish.md](phases/02-rewrite-polish.md) | Rewrite and humanize | todo({ action: "update" }) driven + sentinel |
+| 3 | [phases/03-validate-score.md](phases/03-validate-score.md) | Re-score, generate report | todo({ action: "update" }) driven |
 
 **Compact Rules**:
-1. **TodoWrite `in_progress`** → preserve full content, do not compress
-2. **TodoWrite `completed`** → may compress to summary
+1. **todo({ action: "update" }) `in_progress`** → preserve full content, do not compress
+2. **todo({ action: "update" }) `completed`** → may compress to summary
 3. **sentinel fallback** → phases marked with sentinel contain compact sentinel; if only sentinel remains, **must immediately `Read()` to recover**
 
 ## Core Rules

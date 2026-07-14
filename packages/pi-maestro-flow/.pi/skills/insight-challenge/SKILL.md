@@ -1,7 +1,13 @@
 ---
 name: insight-challenge
-description: "Adversarial review of code quality findings. Challenges insights with counter-evidence, verifies claims against source code, and produces structured verdicts. Triggers on 'insight-challenge', 'challenge finding', '审查发现'."
-allowed-tools: Read Glob Grep Bash Write maestro
+description: Adversarial review of code quality findings. Challenges insights with counter-evidence, verifies claims against source code, and produces structured verdicts. Triggers on 'insight-challenge', 'challenge finding', '审查发现'.
+allowed-tools:
+  - Bash
+  - Glob
+  - Grep
+  - Read
+  - Write
+session-mode: none
 ---
 
 # Insight Challenge

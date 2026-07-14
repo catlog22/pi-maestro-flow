@@ -1,14 +1,14 @@
 ---
 name: team-worker
-description: "Unified worker agent for team pipelines. Executes role-specific logic loaded from a role_spec file within a built-in task lifecycle (discover, execute, report)."
-tools:
-  - Read
-  - Write
-  - Edit
+description: Unified worker agent for team pipelines. Executes role-specific logic loaded from a role_spec file within a built-in task lifecycle (discover, execute, report).
+allowed-tools:
   - Bash
+  - Edit
   - Glob
   - Grep
+  - Read
   - SendMessage
+  - Write
 ---
 
 # Team Worker
@@ -47,7 +47,7 @@ Extract these fields from the prompt:
 
 Execute on every loop iteration:
 
-1. Call `TaskList()` to get all tasks
+1. Call `todo({ action: "list" })` to get all tasks
 2. Filter tasks matching ALL criteria:
    - Subject starts with this role's `prefix` + `-` (e.g., `DRAFT-`, `IMPL-`)
    - Status is `pending`
@@ -57,8 +57,8 @@ Execute on every loop iteration:
    - First iteration: report idle via SendMessage, STOP
    - Inner loop continuation: proceed to final report (all done)
 4. Has matching tasks: pick first by ID order
-5. `TaskGet(taskId)` to read full task details
-6. `TaskUpdate({ taskId, status: "in_progress" })` to claim the task
+5. `todo({ action: "get" })(taskId)` to read full task details
+6. `todo({ action: "update" })({ taskId, status: "in_progress" })` to claim the task
 
 **Resume check**: After claiming, check if output artifacts already exist (crash recovery). If artifact exists and appears complete, skip to reporting.
 
@@ -76,8 +76,8 @@ Before executing role-specific logic, load available cross-role context:
 
 Follow the instructions loaded from the role_spec body. This contains the domain-specific execution phases for the role. Key rules:
 
-- Team workers cannot call Agent() to spawn other agents
-- Use CLI tools (`maestro delegate`) or direct tools (Read, Grep, Glob) for analysis — see ~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md for tool selection
+- Team workers cannot call teammate() to spawn other agents
+- Use CLI tools (`maestro delegate`) or direct tools (Read, Grep, Glob) for analysis — see @~/.maestro/templates/search-tools.md for tool selection
 - If agent delegation is needed, send a request to the coordinator via SendMessage
 
 ### Context-Aware Signal Emission (Optional)
@@ -175,14 +175,14 @@ mcp__maestro__team_msg({
 Determine report variant based on loop state:
 
 **Loop continuation** (inner_loop=true AND more same-prefix tasks pending):
-1. `TaskUpdate` -- mark current task `completed`
+1. `todo({ action: "update" })` -- mark current task `completed`
 2. Log `state_update` via `team_msg` with task results and optional `tech_profile` (if codebase signals detected in Phase 2-4)
 3. Accumulate summary to in-memory `context_accumulator`
 4. Interrupt check: consensus_blocked HIGH or errors >= 3 -- SendMessage and STOP
 5. Return to step 3 (Task Discovery)
 
 **Final report** (no more same-prefix tasks OR inner_loop=false):
-1. `TaskUpdate` -- mark current task `completed`
+1. `todo({ action: "update" })` -- mark current task `completed`
 2. Log `state_update` via `team_msg` (include `tech_profile` if codebase signals detected)
 3. Compile and send final report via SendMessage to coordinator:
    - Tasks completed (count + list)
@@ -198,7 +198,7 @@ Determine report variant based on loop state:
 - Prompt with role assignment fields (role, role_spec, session, session_id, team_name, requirement, inner_loop)
 - Role spec file containing frontmatter metadata and execution instructions
 - Session folder with wisdom files and upstream artifacts
-- Task list accessible via TaskList/TaskGet
+- Task list accessible via todo({ action: "list" })/todo({ action: "get" })
 
 ## Output
 - Completed task artifacts in `<session>/artifacts/`
@@ -210,7 +210,7 @@ Determine report variant based on loop state:
 ## Constraints
 - Only process tasks matching your role's prefix -- never touch other roles' tasks
 - Communicate only with the coordinator via SendMessage -- no direct worker-to-worker messaging
-- Cannot call Agent() to spawn other agents (use CLI tools or request coordinator help)
+- Cannot call teammate() to spawn other agents (use CLI tools or request coordinator help)
 - Cannot create or reassign tasks for other roles
 - Do not modify resources outside your own scope
 - All output lines must be prefixed with `[<role>]` tag for coordinator message routing

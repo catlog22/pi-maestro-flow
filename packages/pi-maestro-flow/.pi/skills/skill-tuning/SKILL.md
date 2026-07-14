@@ -1,8 +1,20 @@
 ---
 name: skill-tuning
-description: "Universal skill diagnosis and optimization tool. Detect and fix skill execution issues including context explosion, long-tail forgetting, data flow disruption, and agent coordination failures. Supports Agy CLI for deep analysis. Triggers on \"skill tuning\", \"tune skill\", \"skill diagnosis\", \"optimize skill\", \"skill debug\"."
-allowed-tools: teammate Read Write Bash Glob Grep maestro
+description: Universal skill diagnosis and optimization tool. Detect and fix skill execution issues including context explosion, long-tail forgetting, data flow disruption, and agent coordination failures. Supports Agy CLI for deep analysis. Triggers on "skill tuning", "tune skill", "skill diagnosis", "optimize skill", "skill debug".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Glob
+  - Grep
+  - Read
+  - Write
+  - teammate
+session-mode: run
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 # Skill Tuning
 
@@ -99,7 +111,7 @@ Full action details: [phases/actions/](phases/actions/)
 
 ## State Management
 
-**Single source of truth**: `.workflow/.scratchpad/skill-tuning-{ts}/state.json`
+**Single source of truth**: `{run_dir}/outputs/skill-tuning-{ts}/state.json`
 
 ```json
 {
@@ -157,7 +169,7 @@ See [phases/orchestrator.md](phases/orchestrator.md) for:
 ## Output
 
 After completion, review:
-- `.workflow/.scratchpad/skill-tuning-{ts}/state.json` - Full state with final_report
+- `{run_dir}/outputs/skill-tuning-{ts}/state.json` - Full state with final_report
 - `state.final_report` - Markdown summary (in state.json)
 - `state.applied_fixes` - List of applied fixes with verification results
 

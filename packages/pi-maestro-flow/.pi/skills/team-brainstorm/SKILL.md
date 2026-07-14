@@ -1,8 +1,24 @@
 ---
 name: team-brainstorm
-description: "Unified team skill for brainstorming team. Uses team-worker agent architecture with role directories for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team brainstorm\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+description: Unified team skill for brainstorming team. Uses team-worker agent architecture with role directories for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on "team brainstorm".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - SendMessage
+  - Write
+  - mcp__maestro__team_msg
+  - teammate
+  - todo
+session-mode: run
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 # Team Brainstorm
 
@@ -64,30 +80,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker",
-  team_name: "brainstorm",
-  name: "<role>",
-  run_in_background: true,
-  prompt: `## Role Assignment
-role: <role>
-role_spec: <skill_root>/roles/<role>/role.md
-session: <session-folder>
-session_id: <session-id>
-team_name: brainstorm
-requirement: <topic-description>
-inner_loop: false
-
-## Progress Milestones
-session_id: <session-id>
-Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
-Report blockers immediately via team_msg type="blocker".
-Report completion via team_msg type="task_complete" after final SendMessage.
-
-Read role_spec file (@<skill_root>/roles/<role>/role.md) to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
-})
+teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker", context: "fresh" })
 ```
 
 **Parallel ideator spawn** (Full pipeline with N angles):
@@ -95,30 +88,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 When Full pipeline has N parallel IDEA tasks, spawn N distinct team-worker agents named `ideator-1`, `ideator-2`, etc.
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  name: "ideator-<N>",
-  team_name: "brainstorm",
-  run_in_background: true,
-  prompt: `## Role Assignment
-role: ideator
-role_spec: <skill_root>/roles/ideator/role.md
-session: <session-folder>
-session_id: <session-id>
-team_name: brainstorm
-requirement: <topic-description>
-agent_name: ideator-<N>
-inner_loop: false
-
-## Progress Milestones
-session_id: <session-id>
-Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
-Report blockers immediately via team_msg type="blocker".
-Report completion via team_msg type="task_complete" after final SendMessage.
-
-Read role_spec file (@<skill_root>/roles/ideator/role.md) to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery, owner=ideator-<N>) -> role Phase 2-4 -> built-in Phase 5 (report).`
-})
+teammate({ agent: "team-worker", name: "ideator-<N>", context: "fresh" })
 ```
 
 ## User Commands

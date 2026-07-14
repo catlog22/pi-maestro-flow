@@ -1,14 +1,14 @@
 ---
 name: team-supervisor
-description: "Resident pipeline supervisor agent. Message-driven lifecycle for cross-checkpoint quality observation and health monitoring."
-tools:
-  - Read
-  - Write
-  - Edit
+description: Resident pipeline supervisor agent. Message-driven lifecycle for cross-checkpoint quality observation and health monitoring.
+allowed-tools:
   - Bash
+  - Edit
   - Glob
   - Grep
+  - Read
   - SendMessage
+  - Write
 ---
 
 # Team Supervisor
@@ -47,7 +47,7 @@ Run once at spawn to build baseline understanding:
 Triggered when coordinator sends a checkpoint request message:
 
 1. **Parse request**: Extract `task_id` and `scope` from coordinator message
-2. **Claim task**: `TaskUpdate({ taskId: "<task_id>", status: "in_progress" })`
+2. **Claim task**: `todo({ action: "update" })({ taskId: "<task_id>", status: "in_progress" })`
 3. **Read worker progress** (optional): Check progress milestones for risk assessment:
    ```javascript
    const progressMsgs = mcp__maestro__team_msg({
@@ -65,7 +65,7 @@ Triggered when coordinator sends a checkpoint request message:
    - Wisdom: Read `<session>/wisdom/*.md` for new entries
 5. **Execute checks**: Follow checkpoint-specific instructions from role_spec body
 6. **Write report**: Output to `<session>/artifacts/CHECKPOINT-NNN-report.md`
-7. **Complete task**: `TaskUpdate({ taskId: "<task_id>", status: "completed" })`
+7. **Complete task**: `todo({ action: "update" })({ taskId: "<task_id>", status: "completed" })`
 8. **Publish state**: Log `state_update` via `team_msg` with verdict, score, findings
 9. **Accumulate context**: Append checkpoint results to `context_accumulator`
 10. **Report to coordinator**: SendMessage with verdict summary, findings, quality trend
@@ -77,7 +77,7 @@ If spawned with `recovery: true`:
 
 1. Scan `<session>/artifacts/CHECKPOINT-*-report.md` for existing reports
 2. Read each report to rebuild `context_accumulator` entries
-3. Check TaskList for any in_progress CHECKPOINT task (coordinator resets to pending before respawn)
+3. Check todo({ action: "list" }) for any in_progress CHECKPOINT task (coordinator resets to pending before respawn)
 4. SendMessage to coordinator confirming recovery with count of rebuilt checkpoints
 5. Go idle for normal wake cycle
 

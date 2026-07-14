@@ -1,8 +1,27 @@
 ---
 name: team-ux-improve
-description: "Unified team skill for UX improvement. Systematically discovers and fixes UI/UX interaction issues including unresponsive buttons, missing feedback, and state refresh problems. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team ux improve\"."
-allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file maestro
+description: Unified team skill for UX improvement. Systematically discovers and fixes UI/UX interaction issues including unresponsive buttons, missing feedback, and state refresh problems. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on "team ux improve".
+allowed-tools:
+  - AskUserQuestion
+  - Bash
+  - Edit
+  - Glob
+  - Grep
+  - Read
+  - SendMessage
+  - Write
+  - mcp__maestro__edit_file
+  - mcp__maestro__read_file
+  - mcp__maestro__team_msg
+  - mcp__maestro__write_file
+  - teammate
+  - todo
+session-mode: run
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 # Team UX Improve
 
@@ -43,7 +62,7 @@ Skill(skill="team-ux-improve", args="<project-path> [--framework react|vue]")
 
 ## Utility Member Registry
 
-**Coordinator-only**: Utility members can only be spawned by Coordinator. Workers CANNOT call Agent() to spawn utility members.
+**Coordinator-only**: Utility members can only be spawned by Coordinator. Workers CANNOT call teammate() to spawn utility members.
 
 | Utility Member | Path | Callable By | Purpose |
 |----------------|------|-------------|---------|
@@ -75,30 +94,7 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({
-  subagent_type: "team-worker",
-  description: "Spawn <role> worker for <task-id>",
-  team_name: "ux-improve",
-  name: "<role>",
-  run_in_background: true,
-  prompt: `## Role Assignment
-role: <role>
-role_spec: <skill_root>/roles/<role>/role.md
-session: <session-folder>
-session_id: <session-id>
-team_name: ux-improve
-requirement: <task-description>
-inner_loop: <true|false>
-
-## Progress Milestones
-session_id: <session-id>
-Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
-Report blockers immediately via team_msg type="blocker".
-Report completion via team_msg type="task_complete" after final SendMessage.
-
-Read role_spec file (@<skill_root>/roles/<role>/role.md) to load Phase 2-4 domain instructions.
-Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
-})
+teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
 ```
 
 ## User Commands
@@ -144,7 +140,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 | Unknown command | Error with available command list |
 | Role not found | Error with role registry |
 | Project path invalid | Re-prompt user for valid path |
-| Framework detection fails | user prompt for framework selection |
+| Framework detection fails | AskUserQuestion for framework selection |
 | Session corruption | Attempt recovery, fallback to manual |
 | Fast-advance conflict | Coordinator reconciles on next callback |
 | No UI issues found | Complete with empty fix list, generate clean bill report |
