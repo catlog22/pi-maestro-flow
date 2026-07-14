@@ -1564,7 +1564,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   async function showAgentSelector(ctx: ExtensionContext): Promise<void> {
     const entries = Array.from(state.activeRuns.entries()).filter(([, a]) => a.status !== "completed");
     if (entries.length === 0) {
-      ctx.ui.notify("No active agents.", "warning");
+      ctx.ui.notify("No active teammates. Start one with the teammate tool.", "warning");
       return;
     }
     if (entries.length === 1) {
@@ -1623,7 +1623,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               const current = matches[cursor];
               const compact = current
                 ? `${current[1].status === "sleeping" ? yellow("◉") : green("■")} ${current[1].agent}/${current[1].name ?? current[0].slice(0, 6)} ${dim(current[1].status)}`
-                : `${dim("□")} no matches`;
+                : `${dim("□")} no matches · Backspace clears filter`;
               const queryPrefix = query ? `${query} ${dim("»")} ` : "";
               return [trunc(`${queryPrefix}${compact}`, w, "…")];
             }
@@ -1652,16 +1652,19 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               const icon = a.status === "sleeping" ? yellow("◉") : green("■");
               const name = a.name ?? cid.slice(0, 8);
               const up = Math.round((Date.now() - a.startedAt) / 1000);
-              const status = a.status === "sleeping" ? yellow("sleeping") : green("running");
+              const status = a.status === "sleeping" ? yellow("Sleeping") : green("Running");
               const prefix = absoluteIndex === cursor ? green("▸") : " ";
               out.push(frameLine(`${prefix} ${icon} ${bold(`${a.agent}/${name}`)} ${status} ${dim(`${up}s`)}`));
             }
             if (matches.length === 0) {
-              out.push(frameLine(dim("□ no matches")));
+              out.push(frameLine(dim("□ no matches · Backspace clears the filter")));
             }
 
             out.push(dim("╰" + "─".repeat(inner) + "╯"));
-            out.push(trunc(dim(" type to filter · ↑↓ select · Enter attach · Esc cancel"), w, "…"));
+            const footer = w < 46
+              ? " Esc cancel · Enter attach · ↑↓ select"
+              : " Esc cancel · Enter attach · ↑↓ select · type to filter";
+            out.push(trunc(dim(footer), w, "…"));
             return out;
           },
 
@@ -1679,10 +1682,13 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               requestRender();
             } else if (data === "\x7f" || data === "\b") {
               if (query.length > 0) { query = query.slice(0, -1); cursor = 0; requestRender(); }
-            } else if (data.length === 1 && data >= " ") {
-              query += data;
-              cursor = 0;
-              requestRender();
+            } else {
+              const input = data.replace(/[\x00-\x1f\x7f]/g, "");
+              if (input) {
+                query += input;
+                cursor = 0;
+                requestRender();
+              }
             }
           },
 

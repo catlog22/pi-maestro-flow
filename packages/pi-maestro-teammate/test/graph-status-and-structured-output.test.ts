@@ -769,5 +769,8 @@ test("Alt+R opens the native agent view without injecting a slash command", asyn
     },
   });
   assert.deepEqual(sentMessages, []);
-  assert.deepEqual(notifications, [{ message: "No active agents.", level: "warning" }]);
+  assert.deepEqual(notifications, [{
+    message: "No active teammates. Start one with the teammate tool.",
+    level: "warning",
+  }]);
 });
