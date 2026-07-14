@@ -57,6 +57,20 @@ const progressPalette: ProgressPalette = {
   bold,
 };
 
+function printableInput(data: string): string {
+  return data.replace(/[\x00-\x1f\x7f]/g, "");
+}
+
+function fitFooter(width: number, segments: string[]): string {
+  let footer = "";
+  for (const segment of segments.filter(Boolean)) {
+    const next = footer ? `${footer}  ${segment}` : segment;
+    if (visibleWidth(next) > width) break;
+    footer = next;
+  }
+  return footer || segments.find(Boolean) || "";
+}
+
 function activeMs(agent: ActiveAgent): number {
   return Date.now() - agent.startedAt - agent.sleepMs
     - (agent.sleptAt ? Date.now() - agent.sleptAt : 0);
@@ -212,13 +226,20 @@ export class AttachOverlay implements Component, Focusable {
         this.sendStatus = "Message cancelled";
       } else if (data === "\r" || data === "\n") {
         const message = this.draft.trim();
-        if (!message || !this.onSend) return;
+        if (!message || !this.onSend) {
+          this.sendStatus = message ? "Message cannot be sent" : "Message is empty";
+          this.requestRender?.();
+          return;
+        }
         this.composing = false;
         this.draft = "";
         this.cursor = 0;
         this.sendStatus = "Sending…";
-        void this.onSend(this.activeId, message).then((result) => {
+        void Promise.resolve(this.onSend(this.activeId, message)).then((result) => {
           this.sendStatus = result.message;
+          this.requestRender?.();
+        }).catch((error: unknown) => {
+          this.sendStatus = `Send failed · ${error instanceof Error ? error.message : String(error)}`;
           this.requestRender?.();
         });
       } else if (data === "\x7f" || data === "\b") {
@@ -230,9 +251,12 @@ export class AttachOverlay implements Component, Focusable {
         this.cursor = Math.max(0, this.cursor - 1);
       } else if (data === "\x1b[C") {
         this.cursor = Math.min(this.draft.length, this.cursor + 1);
-      } else if (data.length === 1 && data.charCodeAt(0) >= 32) {
-        this.draft = this.draft.slice(0, this.cursor) + data + this.draft.slice(this.cursor);
-        this.cursor++;
+      } else {
+        const input = printableInput(data);
+        if (input) {
+          this.draft = this.draft.slice(0, this.cursor) + input + this.draft.slice(this.cursor);
+          this.cursor += input.length;
+        }
       }
       this.requestRender?.();
       return;
@@ -339,7 +363,11 @@ export class AttachOverlay implements Component, Focusable {
 
     if (log.progress.length > 1) {
       rows.push(frameRule(inner));
-      rows.push(...this.renderProgressTree(log, inner));
+      rows.push(...this.renderProgressTree(
+        log,
+        inner,
+        Math.max(1, Math.min(GRAPH_LIST_MAX_ROWS, targetHeight - rows.length - 5)),
+      ));
     }
 
     rows.push(frameRule(inner));
@@ -381,11 +409,13 @@ export class AttachOverlay implements Component, Focusable {
     const agentHint = log.progress.length > 1
       ? `  ${dim("0")} overview  ${dim(`1-${Math.min(9, log.progress.length)}`)} view`
       : "";
-    out.push(truncateToWidth(
-      ` ${dim("Esc")} back  ${dim("Enter")} message  ${dim("←→")} switch(${this.order.length})${agentHint}  ${dim("↑↓")} scroll${dim(range)}`,
-      w,
-      "…",
-    ));
+    out.push(dim(fitFooter(w, [
+      "Esc back",
+      this.onSend ? "Enter message" : "",
+      `←→ switch(${this.order.length})`,
+      agentHint.trim(),
+      `↑↓ scroll${range}`,
+    ])));
     return out;
   }
 
@@ -460,9 +490,13 @@ export class AttachOverlay implements Component, Focusable {
         ];
     if (streamLines.length === 0) streamLines.push(dim("Waiting for output…"));
 
-    const footer = log.progress.length > 1
-      ? dim(`Esc back · ←→ switch · 0 overview · 1-${Math.min(9, log.progress.length)} view · ↑↓ scroll`)
-      : dim("Esc back · ←→ switch · ↑↓ scroll");
+    const footer = dim(fitFooter(width, [
+      "Esc back",
+      this.onSend ? "Enter message" : "",
+      "←→ switch",
+      log.progress.length > 1 ? `0 overview · 1-${Math.min(9, log.progress.length)} view` : "",
+      "↑↓ scroll",
+    ]));
     const contentHeight = Math.max(1, height - lines.length - 1);
     const maxOffset = Math.max(0, streamLines.length - contentHeight);
     log.scrollOffset = Number.isFinite(log.scrollOffset)
@@ -474,10 +508,10 @@ export class AttachOverlay implements Component, Focusable {
     return lines.slice(0, height).map((line) => truncateToWidth(line, width, "…"));
   }
 
-  private renderProgressTree(log: AgentLog, width: number): string[] {
+  private renderProgressTree(log: AgentLog, width: number, maxRows = GRAPH_LIST_MAX_ROWS): string[] {
     const tree = buildProgressTree(log.progress, progressPalette);
     const focus = log.selectedTaskIndex ?? focusTaskIndex(log.progress);
-    const window = selectProgressWindow(tree, GRAPH_LIST_MAX_ROWS, focus);
+    const window = selectProgressWindow(tree, maxRows, focus);
     const running = log.progress.filter((entry) => entry.status === "running").length;
     const pending = log.progress.filter((entry) => entry.status === "pending").length;
     const failed = log.progress.filter((entry) => entry.status === "failed").length;
@@ -554,9 +588,18 @@ export class AttachOverlay implements Component, Focusable {
       const name = agent.name ?? cid.slice(0, 6);
       const icon = agent.status === "sleeping" ? "◉" : agent.status === "completed" ? "✓" : "■";
       const label = `${icon} @${name}`;
-      return cid === this.activeId ? bold(green(label)) : dim(label);
+      return cid === this.activeId ? `${green("▸")} ${bold(green(label))}` : dim(label);
     });
-    return truncateToWidth(`${dim(`Agents ${activeIndex + 1}/${this.order.length} ·`)} ${labels.join(dim(" · "))}`, width, "…");
+    const prefix = `${dim(`Agents ${activeIndex + 1}/${this.order.length} ·`)} `;
+    const full = `${prefix}${labels.join(dim(" · "))}`;
+    if (visibleWidth(full) <= width) return full;
+    const hiddenLeft = activeIndex > 0 ? dim(`‹${activeIndex}`) : "";
+    const hiddenRight = activeIndex < this.order.length - 1 ? dim(`${this.order.length - activeIndex - 1}›`) : "";
+    return truncateToWidth(
+      `${prefix}${labels[activeIndex]}${hiddenLeft ? ` ${hiddenLeft}` : ""}${hiddenRight ? ` ${hiddenRight}` : ""}`,
+      width,
+      "…",
+    );
   }
 
   private renderTools(log: AgentLog, width: number): string[] {

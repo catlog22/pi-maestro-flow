@@ -70,7 +70,7 @@ import {
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_MESSAGE_EVENT,
 } from "../shared/types.ts";
-import { formatAgentCatalog } from "../agents/agents.ts";
+import { discoverAgents, formatAgentCatalog } from "../agents/agents.ts";
 import { formatPromptCatalog } from "../prompts/prompts.ts";
 import {
   appendModelCatalog,
@@ -1826,6 +1826,25 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       }
   }
 
+  async function showTeammateControlCenter(ctx: ExtensionContext): Promise<void> {
+    const activeAgents = Array.from(state.activeRuns.values())
+      .filter((agent) => agent.status !== "completed")
+      .map((agent) => ({
+        correlationId: agent.correlationId,
+        agent: agent.agent,
+        name: agent.name,
+        status: agent.status,
+        startedAt: agent.startedAt,
+        inboxCount: agent.inbox.length,
+        taskCount: agent.progress?.length ?? 0,
+      }));
+    await showModelMappingOverlay(ctx, refreshModelCatalog(ctx).modelIds, {
+      agents: discoverAgents(ctx.cwd),
+      activeAgents,
+      onOpenAgent: async (correlationId) => showAttachOverlay(correlationId, ctx),
+    });
+  }
+
   pi.registerCommand("teammate-session", {
     description: "Switch the main Pi conversation to a teammate session or return to main",
     async handler(_args, ctx) {
@@ -1834,9 +1853,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerCommand("teammate-models", {
-    description: "Configure task-type to model routing for teammate agents",
+    description: "Open teammate roles, collaboration status, and model routing",
     async handler(_args, ctx) {
-      await showModelMappingOverlay(ctx, refreshModelCatalog(ctx).modelIds);
+      await showTeammateControlCenter(ctx);
       tool.description = buildTeammateToolDescription(ctx.cwd);
       pi.registerTool(tool);
     },
@@ -1854,9 +1873,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   });
 
   pi.registerShortcut("alt+m", {
-    description: "Configure teammate task-type model routing",
+    description: "Open the teammate control center",
     async handler(ctx) {
-      await showModelMappingOverlay(ctx, refreshModelCatalog(ctx).modelIds);
+      await showTeammateControlCenter(ctx);
       tool.description = buildTeammateToolDescription(ctx.cwd);
       pi.registerTool(tool);
     },
