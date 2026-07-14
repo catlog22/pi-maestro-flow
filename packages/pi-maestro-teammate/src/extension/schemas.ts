@@ -12,6 +12,7 @@
  */
 
 import { Type } from "typebox";
+import { TEAMMATE_THINKING_LEVELS } from "../shared/thinking.ts";
 
 const TaskType = StringEnum([
   "explore",
@@ -22,6 +23,8 @@ const TaskType = StringEnum([
   "review",
   "testing",
 ]);
+
+const ThinkingLevel = StringEnum([...TEAMMATE_THINKING_LEVELS]);
 
 function StringEnum<T extends string[]>(values: [...T]) {
   return Type.Unsafe<T[number]>({
@@ -69,6 +72,12 @@ export const TaskSpec = Type.Object({
   model: Type.Optional(
     Type.String({
       description: "Exact provider/model override for this task; overrides the top-level model default",
+    }),
+  ),
+  thinking: Type.Optional(
+    Type.Unsafe({
+      ...ThinkingLevel,
+      description: "Pi thinking depth override for this task; overrides the top-level thinking default",
     }),
   ),
   cwd: Type.Optional(
@@ -165,6 +174,7 @@ export const TeammateParams = Type.Object({
           }),
         ),
         model: Type.Optional(Type.String()),
+        thinking: Type.Optional(ThinkingLevel),
         taskType: Type.Optional(TaskType),
         prompt: Type.Optional(Type.String()),
         promptArgs: Type.Optional(Type.Array(Type.String())),
@@ -217,6 +227,12 @@ export const TeammateParams = Type.Object({
     Type.String({
       description:
         "Exact provider/model default from the injected available model catalog. Per-task model takes precedence.",
+    }),
+  ),
+  thinking: Type.Optional(
+    Type.Unsafe({
+      ...ThinkingLevel,
+      description: "Default Pi thinking depth. Per-task thinking takes precedence.",
     }),
   ),
 

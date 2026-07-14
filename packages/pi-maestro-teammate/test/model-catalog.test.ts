@@ -99,3 +99,20 @@ test("top-level, task, and legacy chain model overrides reach child Pi", () => {
   assert.equal(tasks[0].model, "anthropic/claude-opus");
   assert.equal(tasks[1].model, "google/gemini-pro");
 });
+
+test("thinking overrides reach child Pi once and legacy chains preserve them", () => {
+  const explicit = buildPiArgs(
+    { ...baseAgent, thinking: "medium" },
+    { agent: "delegate", thinking: "xhigh" },
+    "prompt.md",
+  );
+  assert.equal(explicit[explicit.indexOf("--thinking") + 1], "xhigh");
+  assert.equal(explicit.filter((arg) => arg === "--thinking").length, 1);
+
+  const fallback = buildPiArgs({ ...baseAgent, thinking: "minimal" }, { agent: "delegate" }, "prompt.md");
+  assert.equal(fallback[fallback.indexOf("--thinking") + 1], "minimal");
+  assert.equal(buildPiArgs(baseAgent, { agent: "delegate" }, "prompt.md").includes("--thinking"), false);
+
+  const tasks = normalizeChainToTasks([{ agent: "delegate", thinking: "high" }], "task");
+  assert.equal(tasks[0].thinking, "high");
+});

@@ -305,6 +305,57 @@ export function renderAgentStatusWidget(
   return lines;
 }
 
+export function handleChildLifecycleEvent(
+  state: TeammateState,
+  event: Record<string, unknown>,
+): void {
+  const correlationId = event.correlationId as string | undefined;
+  if (!correlationId) return;
+  const agent = state.activeRuns.get(correlationId);
+  if (!agent) return;
+  const eventSessionFile = event.sessionFile as string | undefined;
+  if (eventSessionFile && !isSessionPathContained(agent.sessionDir, eventSessionFile)) return;
+
+  if (event.type === "teammate_session_ready") {
+    agent.sessionId = event.sessionId as string | undefined;
+    agent.sessionFile = eventSessionFile;
+    return;
+  }
+  const pendingHandoff = agent.pendingHandoff;
+  if (event.type === "teammate_handoff_ready" && pendingHandoff && event.nonce === pendingHandoff.nonce) {
+    agent.sessionId = event.sessionId as string | undefined;
+    agent.sessionFile = eventSessionFile;
+    if (agent.lease) agent.lease = confirmParked(agent.lease);
+    agent.lastParkNonce = pendingHandoff.nonce;
+    clearTimeout(pendingHandoff.timer);
+    pendingHandoff.resolve(true);
+    agent.pendingHandoff = undefined;
+    return;
+  }
+  if (event.type === "teammate_handoff_returned") {
+    const pending = agent.pendingHandback;
+    if (!pending
+      || event.nonce !== pending.nonce
+      || event.sessionId !== pending.sessionId
+      || event.sessionFile !== pending.sessionFile
+    ) return;
+    if (agent.lease) agent.lease = confirmChildReloaded(agent.lease);
+    if (agent.lease) agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
+    agent.pendingHandback = undefined;
+    agent.status = "running";
+    return;
+  }
+  if (event.type === "teammate_handoff_cancelled"
+    && agent.lease?.state === "fenced"
+    && agent.pendingCancel?.nonce === event.nonce
+    && agent.pendingCancel.fencedEpoch === agent.lease.epoch
+  ) {
+    agent.lease = recoverChild(agent.lease);
+    agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
+    agent.pendingCancel = undefined;
+  }
+}
+
 export default function registerTeammateExtension(pi: ExtensionAPI): void {
   pi.registerMessageRenderer<Details | { result?: SingleResult }>(
     "teammate-complete",
@@ -581,54 +632,6 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   };
   rootGlobals[registryKey] = state;
 
-  function handleChildLifecycleEvent(event: Record<string, unknown>): void {
-    const correlationId = event.correlationId as string | undefined;
-    if (!correlationId) return;
-    const agent = state.activeRuns.get(correlationId);
-    if (!agent) return;
-    const eventSessionFile = event.sessionFile as string | undefined;
-    if (eventSessionFile && !isSessionPathContained(agent.sessionDir, eventSessionFile)) return;
-
-    if (event.type === "teammate_session_ready") {
-      agent.sessionId = event.sessionId as string | undefined;
-      agent.sessionFile = eventSessionFile;
-      return;
-    }
-    const pendingHandoff = agent.pendingHandoff;
-    if (event.type === "teammate_handoff_ready" && pendingHandoff && event.nonce === pendingHandoff.nonce) {
-      agent.sessionId = event.sessionId as string | undefined;
-      agent.sessionFile = eventSessionFile;
-      if (agent.lease) agent.lease = confirmParked(agent.lease);
-      agent.lastParkNonce = pendingHandoff.nonce;
-      clearTimeout(pendingHandoff.timer);
-      pendingHandoff.resolve(true);
-      agent.pendingHandoff = undefined;
-      return;
-    }
-    if (event.type === "teammate_handoff_returned") {
-      const pending = agent.pendingHandback;
-      if (!pending
-        || event.nonce !== pending.nonce
-        || event.sessionId !== pending.sessionId
-        || event.sessionFile !== pending.sessionFile
-      ) return;
-      if (agent.lease) agent.lease = confirmChildReloaded(agent.lease);
-      if (agent.lease) agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
-      agent.pendingHandback = undefined;
-      agent.status = "running";
-      return;
-    }
-    if (event.type === "teammate_handoff_cancelled"
-      && agent.lease?.state === "fenced"
-      && agent.pendingCancel?.nonce === event.nonce
-      && agent.pendingCancel.fencedEpoch === agent.lease.epoch
-    ) {
-      agent.lease = recoverChild(agent.lease);
-      agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
-      agent.pendingCancel = undefined;
-    }
-  }
-
   // =========================================================================
   // Tool 1: teammate — dispatch
   // =========================================================================
@@ -673,6 +676,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           taskType: t.taskType ?? params.taskType,
           name: t.name,
           model: t.model ?? params.model,
+          thinking: t.thinking ?? params.thinking,
           cwd: t.cwd ?? params.cwd,
           outputSchema: (t.outputSchema ?? params.outputSchema) as Record<string, unknown> | undefined,
           timeoutMs: t.timeoutMs ?? params.timeoutMs,
@@ -692,6 +696,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       if (params.chain?.length) {
         for (const t of normalizedTasks) {
           t.model ??= params.model;
+          t.thinking ??= params.thinking;
           t.prompt ??= params.prompt;
           t.promptArgs ??= params.promptArgs;
           t.taskType ??= params.taskType;
@@ -830,7 +835,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           target.sessionDir = sessionDir;
           if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
         },
-        onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent({
+        onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent(state, {
           ...event,
           correlationId: event.correlationId ?? correlationId,
         }),
@@ -2407,6 +2412,7 @@ async function handleProxyRequest(
         normalizedTasks = normalizeChainToTasks(p.chain, p.task ?? "");
         for (const t of normalizedTasks) {
           t.model ??= p.model;
+          t.thinking ??= p.thinking;
           t.taskType ??= p.taskType;
           t.prompt ??= p.prompt;
           t.promptArgs ??= p.promptArgs;
@@ -2423,6 +2429,7 @@ async function handleProxyRequest(
           taskType: t.taskType ?? p.taskType,
           name: t.name,
           model: t.model ?? p.model,
+          thinking: t.thinking ?? p.thinking,
           cwd: t.cwd ?? p.cwd,
           outputSchema: (t.outputSchema ?? p.outputSchema) as Record<string, unknown> | undefined,
           timeoutMs: t.timeoutMs ?? p.timeoutMs,
@@ -2479,7 +2486,7 @@ async function handleProxyRequest(
           activeAgent.sessionDir = sessionDir;
           if (activeAgent.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(activeAgent.lease) });
         },
-        onChildEvent: (event) => handleChildLifecycleEvent({ ...event, correlationId: cid }),
+        onChildEvent: (event) => handleChildLifecycleEvent(state, { ...event, correlationId: cid }),
         onChildRequest: (evt, rep) => handleProxyRequest(pi, state, evt, rep, cid),
       };
 

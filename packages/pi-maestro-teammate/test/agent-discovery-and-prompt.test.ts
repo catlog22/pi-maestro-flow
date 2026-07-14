@@ -145,6 +145,32 @@ Worker prompt.
   }
 });
 
+test("agent frontmatter accepts supported thinking and ignores invalid values", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-thinking-"));
+  const agentsDir = path.join(project, ".pi", "agents");
+  fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(agentsDir, "valid.md"), `---
+name: valid
+description: Valid thinking
+thinking: high
+---
+Valid prompt.
+`);
+  fs.writeFileSync(path.join(agentsDir, "invalid.md"), `---
+name: invalid
+description: Invalid thinking
+thinking: ultra
+---
+Invalid prompt.
+`);
+  try {
+    assert.equal(resolveAgent(project, "valid")?.thinking, "high");
+    assert.equal(resolveAgent(project, "invalid")?.thinking, undefined);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test("child proxy tools receive the same dynamic teammate guidance", () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-proxy-"));
   const agentsDir = path.join(project, ".pi", "agents");

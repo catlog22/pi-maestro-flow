@@ -65,3 +65,11 @@ Durable Plan approval uses four ordered boundaries: save the exact draft under r
 自由文本 TUI 输入 MUST 接受 printable multi-character 与 paste，不得仅处理 data.length===1。宽度验证 MUST 使用 visibleWidth 而非字符串 length，并覆盖 1..120 列的 runtime matrix。
 
 </spec-entry>
+
+<spec-entry category="coding" keywords="thinking-depth routing-migration cli-boundary task-normalization teammate" date="2026-07-14" sid="S-20260714-1g63" title="Teammate thinking depth 全链路参数模式" description="Teammate thinking 参数跨 schema、routing、frontmatter、normalization 和 CLI 的统一优先级与迁移规则" source="odyssey-planex:20260714-002-odyssey-planex">
+
+### Teammate thinking depth 全链路参数模式
+
+Teammate 的多层运行参数必须复用单一 canonical enum，并在 tool schema、task normalization、taskType routing、agent frontmatter 与 child CLI boundary 保持同一类型。thinking 优先级固定为 per-task > top-level > taskType mapping > agent frontmatter > Pi default；CLI 仅在解析到值时从单一位置追加一次 --thinking。持久化 routing shape 升级时使用新 version 并将 thinkingLevels 与 model mappings 独立保存，读取边界兼容旧 string/null mappings，测试必须覆盖无损迁移、inherit null、保存失败重试、root/proxy 与 tasks/chain 传播。
+
+</spec-entry>

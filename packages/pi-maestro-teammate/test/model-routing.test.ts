@@ -9,6 +9,7 @@ import {
   inferTaskType,
   loadModelRoutingConfig,
   saveProjectModelMapping,
+  saveProjectThinkingLevel,
   TEAMMATE_TASK_TYPE_META,
 } from "../src/models/model-routing.ts";
 
@@ -50,6 +51,58 @@ test("project model mappings persist and route single tasks", () => {
       model: "anthropic/claude-opus",
     }, cwd, ["openai/gpt-5", "anthropic/claude-opus"]);
     assert.equal(explicit.model, "anthropic/claude-opus");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("v1 routing configs migrate without losing models and thinking saves independently", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-routing-"));
+  try {
+    fs.mkdirSync(path.dirname(getProjectModelRoutingPath(cwd)), { recursive: true });
+    fs.writeFileSync(getProjectModelRoutingPath(cwd), JSON.stringify({
+      version: 1,
+      mappings: { analysis: "openai/gpt-5", review: "anthropic/sonnet", testing: null },
+    }));
+    const migrated = loadModelRoutingConfig(cwd);
+    assert.equal(migrated.version, 2);
+    assert.equal(migrated.mappings.analysis, "openai/gpt-5");
+    assert.equal(migrated.mappings.review, "anthropic/sonnet");
+    assert.equal(migrated.mappings.testing, null);
+
+    saveProjectThinkingLevel(cwd, "analysis", "high");
+    const persisted = JSON.parse(fs.readFileSync(getProjectModelRoutingPath(cwd), "utf8"));
+    assert.equal(persisted.version, 2);
+    assert.deepEqual(persisted.mappings, {
+      analysis: "openai/gpt-5",
+      review: "anthropic/sonnet",
+      testing: null,
+    });
+    assert.deepEqual(persisted.thinkingLevels, { analysis: "high" });
+    saveProjectModelMapping(cwd, "analysis", "anthropic/sonnet");
+    assert.equal(loadModelRoutingConfig(cwd).thinkingLevels.analysis, "high");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("thinking routing follows per-task, top-level, task type, then agent fallback precedence", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-routing-"));
+  try {
+    saveProjectThinkingLevel(cwd, "analysis", "medium");
+    const routed = applyModelRouting({
+      agent: "delegate",
+      thinking: "low",
+      tasks: [
+        { agent: "delegate", taskType: "analysis", thinking: "xhigh" },
+        { agent: "delegate", taskType: "analysis" },
+      ],
+    }, cwd);
+    assert.equal(routed.tasks?.[0].thinking, "xhigh");
+    assert.equal(routed.tasks?.[1].thinking, "low");
+
+    const mapped = applyModelRouting({ agent: "delegate", taskType: "analysis" }, cwd);
+    assert.equal(mapped.thinking, "medium");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

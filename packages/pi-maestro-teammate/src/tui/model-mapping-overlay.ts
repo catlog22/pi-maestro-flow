@@ -15,9 +15,11 @@ import {
   getProjectModelRoutingPath,
   loadModelRoutingConfig,
   saveProjectModelMapping,
+  saveProjectThinkingLevel,
   type ModelRoutingConfig,
   type TeammateTaskType,
 } from "../models/model-routing.ts";
+import { TEAMMATE_THINKING_LEVELS, type TeammateThinkingLevel } from "../shared/thinking.ts";
 
 type ControlCenterTab = "routing" | "roles" | "active";
 
@@ -59,6 +61,7 @@ interface TeammateControlCenterParams {
   requestRender: () => void;
   close: (action: ControlCenterAction | null) => void;
   saveMapping?: (taskType: TeammateTaskType, model: string | null) => void;
+  saveThinking?: (taskType: TeammateTaskType, thinking: TeammateThinkingLevel | null) => void;
 }
 
 const SOURCE_ORDER: Record<AgentSource, number> = { project: 0, user: 1, builtin: 2 };
@@ -95,6 +98,7 @@ export class TeammateControlCenter implements Component, Focusable {
   focused = false;
   private tab: ControlCenterTab;
   private modelTaskType: TeammateTaskType | null = null;
+  private editorKind: "model" | "thinking" = "model";
   private readonly queries: Record<ControlCenterTab, string> = { routing: "", roles: "", active: "" };
   private modelQuery = "";
   private readonly selected: Record<ControlCenterTab, number> = { routing: 0, roles: 0, active: 0 };
@@ -112,6 +116,7 @@ export class TeammateControlCenter implements Component, Focusable {
     this.config = {
       version: params.config.version,
       mappings: { ...params.config.mappings },
+      thinkingLevels: { ...params.config.thinkingLevels },
     };
     this.models = [...new Set(params.availableModels)].sort((left, right) => left.localeCompare(right));
     this.agents = [...params.agents].sort((left, right) =>
@@ -164,6 +169,10 @@ export class TeammateControlCenter implements Component, Focusable {
       this.activateSelection();
       return;
     }
+    if (data === "\x1b[1;5C" && this.tab === "routing") {
+      this.activateThinkingSelection();
+      return;
+    }
     const input = printableInput(data);
     if (input) {
       this.queries[this.tab] += input;
@@ -197,6 +206,7 @@ export class TeammateControlCenter implements Component, Focusable {
       const item = this.filteredTaskTypes()[this.selected.routing];
       if (!item) return;
       this.modelTaskType = item;
+      this.editorKind = "model";
       this.modelQuery = "";
       this.modelSelected = this.modelItems(item).findIndex((entry) => entry.active);
       if (this.modelSelected < 0) this.modelSelected = 0;
@@ -211,6 +221,18 @@ export class TeammateControlCenter implements Component, Focusable {
     }
   }
 
+  private activateThinkingSelection(): void {
+    const item = this.filteredTaskTypes()[this.selected.routing];
+    if (!item) return;
+    this.modelTaskType = item;
+    this.editorKind = "thinking";
+    this.modelQuery = "";
+    this.modelSelected = this.thinkingItems(item).findIndex((entry) => entry.active);
+    if (this.modelSelected < 0) this.modelSelected = 0;
+    this.statusText = "";
+    this.params.requestRender();
+  }
+
   private handleModelInput(data: string): void {
     if (this.saving) return;
     if (data === "\x1b" || data === "\x1b[D") {
@@ -220,7 +242,7 @@ export class TeammateControlCenter implements Component, Focusable {
       this.params.requestRender();
       return;
     }
-    const items = this.filteredModelItems();
+    const items = this.filteredEditorItems();
     if (data === "\x1b[A" || (data === "k" && !this.modelQuery)) {
       this.modelSelected = clampIndex(this.modelSelected - 1, items.length);
       this.params.requestRender();
@@ -248,13 +270,20 @@ export class TeammateControlCenter implements Component, Focusable {
       this.statusText = `Saving ${TEAMMATE_TASK_TYPE_META[taskType].label}…`;
       this.params.requestRender();
       void Promise.resolve().then(() => {
-        const model = item.value === "__auto__" ? null : item.value;
-        if (this.params.saveMapping) this.params.saveMapping(taskType, model);
-        else saveProjectModelMapping(this.params.cwd, taskType, model);
-        this.config.mappings[taskType] = model;
+        const value = item.value === "__auto__" ? null : item.value;
+        if (this.editorKind === "thinking") {
+          const thinking = value as TeammateThinkingLevel | null;
+          if (this.params.saveThinking) this.params.saveThinking(taskType, thinking);
+          else saveProjectThinkingLevel(this.params.cwd, taskType, thinking);
+          this.config.thinkingLevels[taskType] = thinking;
+        } else {
+          if (this.params.saveMapping) this.params.saveMapping(taskType, value);
+          else saveProjectModelMapping(this.params.cwd, taskType, value);
+          this.config.mappings[taskType] = value;
+        }
         this.saving = false;
         this.statusTone = "success";
-        this.statusText = `Saved · ${taskType} → ${model ?? "auto / agent default"}`;
+        this.statusText = `Saved · ${taskType} ${this.editorKind} → ${value ?? (this.editorKind === "thinking" ? "inherit / Pi default" : "auto / agent default")}`;
         this.modelTaskType = null;
         this.modelQuery = "";
         this.params.requestRender();
@@ -280,7 +309,8 @@ export class TeammateControlCenter implements Component, Focusable {
     return TEAMMATE_TASK_TYPES.filter((taskType) => {
       const meta = TEAMMATE_TASK_TYPE_META[taskType];
       const mapping = this.config.mappings[taskType] ?? "auto";
-      return `${taskType} ${meta.label} ${meta.roles} ${meta.description} ${mapping}`.toLowerCase().includes(query);
+      const thinking = this.config.thinkingLevels[taskType] ?? "inherit";
+      return `${taskType} ${meta.label} ${meta.roles} ${meta.description} ${mapping} ${thinking}`.toLowerCase().includes(query);
     });
   }
 
@@ -344,13 +374,30 @@ export class TeammateControlCenter implements Component, Focusable {
     return items;
   }
 
-  private filteredModelItems() {
+  private thinkingItems(taskType: TeammateTaskType) {
+    const configured = this.config.thinkingLevels[taskType];
+    return [{
+      value: "__auto__",
+      label: "inherit / Pi default",
+      detail: "Use explicit task, top-level, agent frontmatter, or Pi default thinking",
+      active: !configured,
+      unavailable: false,
+    }, ...TEAMMATE_THINKING_LEVELS.map((thinking) => ({
+      value: thinking,
+      label: thinking,
+      detail: thinking === configured ? `Current ${taskType} thinking depth` : "Supported by Pi --thinking",
+      active: thinking === configured,
+      unavailable: false,
+    }))];
+  }
+
+  private filteredEditorItems() {
     if (!this.modelTaskType) return [];
-    const items = this.modelItems(this.modelTaskType);
+    const items = this.editorKind === "thinking"
+      ? this.thinkingItems(this.modelTaskType)
+      : this.modelItems(this.modelTaskType);
     const query = this.modelQuery.toLowerCase();
-    return query
-      ? items.filter((item) => `${item.label} ${item.detail}`.toLowerCase().includes(query))
-      : items;
+    return query ? items.filter((item) => `${item.label} ${item.detail}`.toLowerCase().includes(query)) : items;
   }
 
   private renderMain(width: number): string[] {
@@ -392,12 +439,12 @@ export class TeammateControlCenter implements Component, Focusable {
     const taskType = this.modelTaskType;
     if (!taskType) return this.renderMain(width);
     const inner = width - 2;
-    const items = this.filteredModelItems();
+    const items = this.filteredEditorItems();
     this.modelSelected = clampIndex(this.modelSelected, items.length);
     const meta = TEAMMATE_TASK_TYPE_META[taskType];
     const rows: string[] = [
       truncateToWidth(
-        `${this.params.theme.fg("accent", this.params.theme.bold("Teammate Control Center"))} ${this.params.theme.fg("dim", "›")} ${this.params.theme.bold(meta.label)} ${this.params.theme.fg("dim", `(${meta.roles})`)}`,
+        `${this.params.theme.fg("accent", this.params.theme.bold("Teammate Control Center"))} ${this.params.theme.fg("dim", "›")} ${this.params.theme.bold(meta.label)} ${this.params.theme.fg("dim", `› ${this.editorKind === "thinking" ? "Thinking" : "Model"} (${meta.roles})`)}`,
         inner,
         "…",
       ),
@@ -423,7 +470,7 @@ export class TeammateControlCenter implements Component, Focusable {
       }
     }
     if (items.length === 0) {
-      rows.push(this.params.theme.fg("warning", "□ No matching models · Backspace clears the filter"));
+      rows.push(this.params.theme.fg("warning", "□ No matching options · Backspace clears the filter"));
     }
     if (this.statusText) rows.push(this.statusLine(inner));
     rows.push(truncateToWidth(
@@ -448,7 +495,8 @@ export class TeammateControlCenter implements Component, Focusable {
       const taskType = item as TeammateTaskType;
       const meta = TEAMMATE_TASK_TYPE_META[taskType];
       const mapping = this.config.mappings[taskType] ?? "auto";
-      return truncateToWidth(`${prefix} ${this.params.theme.bold(meta.label)} ${this.params.theme.fg("dim", `· ${mapping}`)}`, width, "…");
+      const thinking = this.config.thinkingLevels[taskType] ?? "inherit";
+      return truncateToWidth(`${prefix} ${this.params.theme.bold(meta.label)} ${this.params.theme.fg("dim", `· ${mapping} · think ${thinking}`)}`, width, "…");
     }
     if (this.tab === "roles") {
       const agent = item as AgentConfig;
@@ -475,6 +523,7 @@ export class TeammateControlCenter implements Component, Focusable {
       lines.push(this.params.theme.fg("muted", `Roles · ${meta.roles}`));
       lines.push(...wrapTextWithAnsi(meta.description, Math.max(1, width)).slice(0, 3));
       lines.push(this.params.theme.fg("dim", `Model · ${mapping}`));
+      lines.push(this.params.theme.fg("dim", `Thinking · ${this.config.thinkingLevels[taskType] ?? "inherit / Pi default"}`));
       lines.push(this.params.theme.fg("dim", `Config · ${path.basename(getProjectModelRoutingPath(this.params.cwd))}`));
     } else if (this.tab === "roles") {
       const agent = this.filteredRoles()[this.selected.roles];
@@ -536,7 +585,7 @@ export class TeammateControlCenter implements Component, Focusable {
   }
 
   private footerLine(width: number): string {
-    const action = this.tab === "routing" ? "Enter configure" : this.tab === "active" ? "Enter open" : "";
+    const action = this.tab === "routing" ? "Enter model · Ctrl+→ thinking" : this.tab === "active" ? "Enter open" : "";
     const segments = ["Tab/←→ view", "↑↓ select", "type filter", action, "Esc close"];
     let footer = "";
     for (const segment of segments.filter(Boolean)) {
@@ -559,7 +608,7 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private renderCompact(width: number): string {
     if (this.modelTaskType) {
-      return truncateToWidth(`Routing › ${TEAMMATE_TASK_TYPE_META[this.modelTaskType].label} · Esc back`, width, "…");
+      return truncateToWidth(`Routing › ${TEAMMATE_TASK_TYPE_META[this.modelTaskType].label} › ${this.editorKind} · Esc back`, width, "…");
     }
     const count = this.currentItems().length;
     return truncateToWidth(`Teammates · ${TAB_LABELS[this.tab]} ${count} · Tab view`, width, "…");

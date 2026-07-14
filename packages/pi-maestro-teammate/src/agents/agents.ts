@@ -12,6 +12,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "./frontmatter.ts";
+import { parseTeammateThinkingLevel, type TeammateThinkingLevel } from "../shared/thinking.ts";
 
 type SystemPromptMode = "append" | "replace";
 export type AgentSource = "builtin" | "user" | "project";
@@ -22,7 +23,7 @@ export interface AgentConfig {
   tools?: string[];
   model?: string;
   fallbackModels?: string[];
-  thinking?: string;
+  thinking?: TeammateThinkingLevel;
   systemPromptMode: SystemPromptMode;
   inheritProjectContext: boolean;
   inheritSkills: boolean;
@@ -123,7 +124,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
       tools: rawTools && rawTools.length > 0 ? rawTools : undefined,
       model: frontmatter.model,
       fallbackModels: rawFallbackModels && rawFallbackModels.length > 0 ? rawFallbackModels : undefined,
-      thinking: frontmatter.thinking,
+      thinking: parseTeammateThinkingLevel(frontmatter.thinking),
       systemPromptMode,
       inheritProjectContext,
       inheritSkills,

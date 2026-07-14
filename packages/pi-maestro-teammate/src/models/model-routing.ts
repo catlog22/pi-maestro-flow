@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RunTeammateParams } from "../runs/execution.ts";
+import { parseTeammateThinkingLevel, type TeammateThinkingLevel } from "../shared/thinking.ts";
 
 export const TEAMMATE_TASK_TYPES = [
   "explore",
@@ -29,8 +30,9 @@ export const TEAMMATE_TASK_TYPE_META: Record<
 };
 
 export interface ModelRoutingConfig {
-  version: 1;
+  version: 2;
   mappings: Partial<Record<TeammateTaskType, string | null>>;
+  thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>>;
 }
 
 export interface TaskTypeInput {
@@ -54,14 +56,21 @@ function readConfig(filePath: string): ModelRoutingConfig {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<ModelRoutingConfig>;
     const mappings: Partial<Record<TeammateTaskType, string | null>> = {};
+    const thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>> = {};
     for (const taskType of TEAMMATE_TASK_TYPES) {
       const value = parsed.mappings?.[taskType];
       if (typeof value === "string" && value.trim()) mappings[taskType] = value.trim();
       else if (value === null) mappings[taskType] = null;
+      const thinking = parsed.thinkingLevels?.[taskType];
+      if (thinking === null) thinkingLevels[taskType] = null;
+      else {
+        const parsedThinking = parseTeammateThinkingLevel(thinking);
+        if (parsedThinking) thinkingLevels[taskType] = parsedThinking;
+      }
     }
-    return { version: 1, mappings };
+    return { version: 2, mappings, thinkingLevels };
   } catch {
-    return { version: 1, mappings: {} };
+    return { version: 2, mappings: {}, thinkingLevels: {} };
   }
 }
 
@@ -69,9 +78,23 @@ export function loadModelRoutingConfig(cwd: string): ModelRoutingConfig {
   const globalConfig = readConfig(getGlobalModelRoutingPath());
   const projectConfig = readConfig(getProjectModelRoutingPath(cwd));
   return {
-    version: 1,
+    version: 2,
     mappings: { ...globalConfig.mappings, ...projectConfig.mappings },
+    thinkingLevels: { ...globalConfig.thinkingLevels, ...projectConfig.thinkingLevels },
   };
+}
+
+export function saveProjectThinkingLevel(
+  cwd: string,
+  taskType: TeammateTaskType,
+  thinking: TeammateThinkingLevel | null,
+): ModelRoutingConfig {
+  const filePath = getProjectModelRoutingPath(cwd);
+  const config = readConfig(filePath);
+  config.thinkingLevels[taskType] = thinking;
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  return loadModelRoutingConfig(cwd);
 }
 
 export function saveProjectModelMapping(
@@ -131,6 +154,12 @@ function mappedModel(
   return configured;
 }
 
+function mappedThinking(config: ModelRoutingConfig, input: TaskTypeInput): TeammateThinkingLevel | undefined {
+  const taskType = inferTaskType(input);
+  if (!taskType) return undefined;
+  return config.thinkingLevels[taskType] ?? undefined;
+}
+
 export function applyModelRouting(
   params: RunTeammateParams,
   cwd: string,
@@ -138,6 +167,7 @@ export function applyModelRouting(
 ): RunTeammateParams {
   const config = loadModelRoutingConfig(cwd);
   const topLevelModel = params.model;
+  const topLevelThinking = params.thinking;
 
   const tasks = params.tasks?.map((task) => ({
     ...task,
@@ -148,6 +178,12 @@ export function applyModelRouting(
       agent: task.agent,
       task: task.task,
     }, availableModels),
+    thinking: task.thinking ?? topLevelThinking ?? mappedThinking(config, {
+      taskType: task.taskType ?? params.taskType,
+      prompt: task.prompt ?? params.prompt,
+      agent: task.agent,
+      task: task.task,
+    }),
   }));
 
   const chain = params.chain?.map((step) => ({
@@ -159,6 +195,12 @@ export function applyModelRouting(
       agent: step.agent,
       task: step.task,
     }, availableModels),
+    thinking: step.thinking ?? topLevelThinking ?? mappedThinking(config, {
+      taskType: step.taskType ?? params.taskType,
+      prompt: step.prompt ?? params.prompt,
+      agent: step.agent,
+      task: step.task,
+    }),
   }));
 
   const isSingle = !tasks?.length && !chain?.length;
@@ -169,12 +211,15 @@ export function applyModelRouting(
     ...(isSingle && !params.model
       ? { model: mappedModel(config, params, availableModels) }
       : {}),
+    ...(isSingle && !params.thinking
+      ? { thinking: mappedThinking(config, params) }
+      : {}),
   };
 }
 
 export function formatModelRoutingConfig(cwd: string): string {
   const config = loadModelRoutingConfig(cwd);
   return TEAMMATE_TASK_TYPES
-    .map((taskType) => `- ${taskType}: ${config.mappings[taskType] ?? "auto/default"}`)
+    .map((taskType) => `- ${taskType}: model=${config.mappings[taskType] ?? "auto/default"}, thinking=${config.thinkingLevels[taskType] ?? "inherit/default"}`)
     .join("\n");
 }

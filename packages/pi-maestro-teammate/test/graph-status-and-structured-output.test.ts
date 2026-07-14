@@ -10,6 +10,7 @@ import registerStructuredOutput from "../src/extension/structured-output.ts";
 import registerTeammateExtension, {
   buildAgentList,
   buildWatchOutput,
+  handleChildLifecycleEvent,
   renderAgentStatusWidget,
   resolveWatchTarget,
   switchConversationSession,
@@ -59,6 +60,87 @@ test("root and proxy teammate initialization use their own request params", () =
   assert.match(proxyInitialization, /promptSeq:\s*p\.task \? 1 : 0/);
   assert.doesNotMatch(proxyInitialization, /promptSeq:\s*params\.task/);
   assert.equal(proxyInitialization.match(/lease:\s*createChildLease\(\)/g)?.length, 1);
+});
+
+test("root and proxy graph normalization preserve thinking before execution", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  assert.match(source, /thinking:\s*t\.thinking \?\? params\.thinking/);
+  assert.match(source, /t\.thinking \?\?= params\.thinking/);
+  assert.match(source, /t\.thinking \?\?= p\.thinking/);
+  assert.match(source, /thinking:\s*t\.thinking \?\? p\.thinking/);
+  assert.equal(source.match(/applyModelRouting\(/g)?.length, 2);
+});
+
+test("child lifecycle handler is module-scoped and updates explicit teammate state", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const handlerStart = source.indexOf("export function handleChildLifecycleEvent(");
+  const registrationStart = source.indexOf("export default function registerTeammateExtension(");
+  assert.ok(handlerStart >= 0 && handlerStart < registrationStart);
+  assert.equal(source.match(/function handleChildLifecycleEvent\(/g)?.length, 1);
+  assert.match(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.event,\s*correlationId: event\.correlationId \?\? correlationId,/s);
+  assert.match(source, /handleChildLifecycleEvent\(state, \{ \.\.\.event, correlationId: cid \}\)/);
+
+  const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lifecycle-state-"));
+  const sessionFile = path.join(sessionDir, "session.jsonl");
+  fs.writeFileSync(sessionFile, "{}\n");
+  let lease = createChildLease();
+  lease = requestPark(lease);
+  lease = confirmParked(lease);
+  lease = transferToMain(lease);
+  lease = requestHandback(lease);
+  const correlationId = "lifecycle-agent";
+  const controlMessages: Record<string, unknown>[] = [];
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    namedAgents: new Map(),
+    activeRuns: new Map([[correlationId, {
+      agent: "delegate",
+      correlationId,
+      startedAt: Date.now(),
+      abortController: new AbortController(),
+      sessionDir,
+      sessionId: "child-session",
+      sessionFile,
+      lease,
+      pendingHandback: {
+        nonce: "return-nonce",
+        epoch: lease.epoch,
+        sessionId: "child-session",
+        sessionFile,
+      },
+      sendControl(message) {
+        controlMessages.push(message);
+        return true;
+      },
+      inbox: [],
+      outputLog: [],
+      lastActivityAt: Date.now(),
+      status: "sleeping",
+      sleepMs: 0,
+    }]]),
+  };
+
+  try {
+    handleChildLifecycleEvent(state, {
+      type: "teammate_handoff_returned",
+      correlationId,
+      nonce: "return-nonce",
+      sessionId: "child-session",
+      sessionFile,
+    });
+
+    const agent = state.activeRuns.get(correlationId);
+    assert.ok(agent);
+    assert.equal(agent.status, "running");
+    assert.equal(agent.pendingHandback, undefined);
+    assert.equal(agent.lease?.owner, "child");
+    assert.equal(agent.lease?.state, "active");
+    assert.equal(controlMessages.length, 1);
+    assert.equal(controlMessages[0].type, "teammate_lease_update");
+  } finally {
+    fs.rmSync(sessionDir, { recursive: true, force: true });
+  }
 });
 
 test("structured_output writes the validated tool payload for field references", async () => {
