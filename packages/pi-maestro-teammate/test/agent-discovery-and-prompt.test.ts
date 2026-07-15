@@ -5,18 +5,22 @@ import * as path from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
+  appendAgentCatalog,
+  BUILTIN_AGENT_NAMES,
+  discoverAgents,
   formatAgentCatalog,
   listAgentSummaries,
   resolveAgent,
   type AgentConfig,
 } from "../src/agents/agents.ts";
 import {
+  buildRoleList,
   buildTeammateToolDescription,
   default as registerTeammateExtension,
   TEAMMATE_PROMPT_GUIDELINES,
   TEAMMATE_PROMPT_SNIPPET,
 } from "../src/extension/index.ts";
-import { buildPiArgs } from "../src/runs/execution.ts";
+import { buildPiArgs, runTeammate } from "../src/runs/execution.ts";
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
@@ -33,7 +37,7 @@ function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   };
 }
 
-test("project teammate roles are discovered and injected into tool metadata", () => {
+test("project teammate roles are discovered and injected into the active system prompt", () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-catalog-"));
   const agentsDir = path.join(project, ".pi", "agents");
   fs.mkdirSync(agentsDir, { recursive: true });
@@ -58,10 +62,187 @@ Act as the project specialist.
     assert.match(catalog, /specialist \[project\]: Project-specific specialist/);
 
     const description = buildTeammateToolDescription(project);
-    assert.match(description, /Available teammate roles/);
-    assert.match(description, /specialist \[project\]/);
+    assert.match(description, /Available Teammate Agents section/);
+    assert.match(description, /specialist \[project\]: Project-specific specialist/);
+
+    const systemPrompt = appendAgentCatalog("Base prompt", project);
+    assert.match(systemPrompt, /# Available Teammate Agents/);
+    assert.match(systemPrompt, /Built-in roles:\n- delegate:/);
+    assert.match(systemPrompt, /- explorer:/);
+    assert.match(systemPrompt, /- workflow:/);
+    assert.match(systemPrompt, /Discovered project and user roles:\n- specialist: Project-specific specialist/);
     assert.doesNotMatch(description, /Act as the project specialist/);
+    assert.doesNotMatch(systemPrompt, /Act as the project specialist/);
+
+    const roles = buildRoleList(project);
+    assert.ok(roles.entries.some((agent) => agent.name === "specialist" && agent.source === "project"));
+    assert.match(roles.text, /specialist \[project\]: Project-specific specialist/);
+    assert.doesNotMatch(roles.text, /Act as the project specialist/);
   } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test(".agents and ~/.agents roles are discovered with canonical precedence", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-compatible-dirs-"));
+  const project = path.join(root, "project");
+  const nested = path.join(project, "src", "feature");
+  const home = path.join(root, "home");
+  const legacyUserDir = path.join(home, ".pi", "agent", "extensions", "teammate", "agents");
+  const userDir = path.join(home, ".agents");
+  const projectCompatDir = path.join(project, ".agents");
+  const projectPiDir = path.join(project, ".pi", "agents");
+  for (const dir of [nested, legacyUserDir, userDir, projectCompatDir, projectPiDir]) {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+
+  const writeAgent = (dir: string, name: string, description: string) => {
+    fs.writeFileSync(path.join(dir, `${name}.md`), `---
+name: ${name}
+description: ${description}
+---
+${description} prompt.
+`);
+  };
+  writeAgent(legacyUserDir, "shared-role", "Legacy user role");
+  writeAgent(userDir, "shared-role", "Standard user role");
+  writeAgent(userDir, "user-only", "User home role");
+  writeAgent(projectCompatDir, "shared-role", "Project compatible role");
+  writeAgent(projectCompatDir, "compat-only", "Project dot agents role");
+  writeAgent(projectPiDir, "shared-role", "Canonical project role");
+
+  try {
+    const agents = discoverAgents(nested, home);
+    assert.equal(agents.find((agent) => agent.name === "shared-role")?.description, "Canonical project role");
+    assert.equal(agents.find((agent) => agent.name === "compat-only")?.source, "project");
+    assert.equal(agents.find((agent) => agent.name === "user-only")?.source, "user");
+    assert.equal(resolveAgent(nested, "compat-only")?.description, "Project dot agents role");
+    assert.match(appendAgentCatalog("Base prompt", nested), /- compat-only: Project dot agents role/);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("builtin role names are reserved and coordinator remains a workflow alias", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-reserved-"));
+  const agentsDir = path.join(project, ".pi", "agents");
+  fs.mkdirSync(agentsDir, { recursive: true });
+  for (const name of BUILTIN_AGENT_NAMES) {
+    fs.writeFileSync(path.join(agentsDir, `${name}.md`), `---
+name: ${name}
+description: Project override that must be ignored
+---
+
+Unsafe project override.
+`);
+  }
+  fs.writeFileSync(path.join(agentsDir, "coordinator.md"), `---
+name: coordinator
+description: Legacy alias override that must be ignored
+---
+Legacy alias override.
+`);
+
+  try {
+    const agents = discoverAgents(project);
+    for (const name of BUILTIN_AGENT_NAMES) {
+      const agent = agents.find((candidate) => candidate.name === name);
+      assert.equal(agent?.source, "builtin");
+      assert.doesNotMatch(agent?.systemPrompt ?? "", /Unsafe project override/);
+    }
+    assert.equal(resolveAgent(project, "coordinator")?.name, "workflow");
+    assert.equal(agents.some((agent) => agent.name === "coordinator"), false);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("agent catalog replacement refreshes discovered roles without duplication", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-refresh-"));
+  const agentsDir = path.join(project, ".pi", "agents");
+  fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(agentsDir, "first.md"), `---
+name: first
+description: First role
+---
+First prompt.
+`);
+
+  try {
+    const first = appendAgentCatalog("Base prompt", project);
+    fs.writeFileSync(path.join(agentsDir, "second.md"), `---
+name: second
+description: Second role
+---
+Second prompt.
+`);
+    const refreshed = appendAgentCatalog(first, project);
+    assert.match(refreshed, /- first: First role/);
+    assert.match(refreshed, /- second: Second role/);
+    assert.equal(refreshed.match(/# Available Teammate Agents/g)?.length, 1);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("teammate-list roles view exposes project custom agents", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-list-"));
+  const agentsDir = path.join(project, ".pi", "agents");
+  fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(agentsDir, "custom-reviewer.md"), `---
+name: custom-reviewer
+description: Project custom review specialist
+---
+Custom reviewer prompt.
+`);
+
+  const tools = new Map<string, Record<string, unknown>>();
+  const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => void> = [];
+  const pi = new Proxy({
+    events: { on: () => () => {}, emit() {} },
+    registerTool(tool: Record<string, unknown>) {
+      tools.set(tool.name as string, tool);
+    },
+    on(event: string, handler: (event: unknown, ctx: unknown) => void) {
+      if (event === "session_start") sessionStartHandlers.push(handler);
+    },
+  }, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      return () => {};
+    },
+  });
+
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  delete process.env.PI_TEAMMATE_CHILD;
+  try {
+    registerTeammateExtension(pi as unknown as ExtensionAPI);
+    const context = {
+      cwd: project,
+      modelRegistry: { getAvailable: () => [] },
+      sessionManager: {
+        getSessionId: () => "role-list-session",
+        getSessionFile: () => path.join(project, "session.jsonl"),
+      },
+    };
+    sessionStartHandlers[0]({}, context);
+    const listTool = tools.get("teammate-list") as {
+      execute: (...args: unknown[]) => Promise<{ content: Array<{ type: string; text: string }>; details: { agents: unknown[] } }>;
+    };
+    const result = await listTool.execute(
+      "list-roles",
+      { view: "roles" },
+      new AbortController().signal,
+      undefined,
+      context,
+    );
+    assert.match(result.content[0]?.text ?? "", /custom-reviewer \[project\]: Project custom review specialist/);
+    assert.ok(result.details.agents.some((agent) =>
+      (agent as { name?: string }).name === "custom-reviewer"
+    ));
+  } finally {
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
     fs.rmSync(project, { recursive: true, force: true });
   }
 });
@@ -106,16 +287,18 @@ test("child Pi arguments honor prompt mode and resource inheritance", () => {
   assert.equal(appendArgs.includes("--no-skills"), false);
 });
 
-test("frontmatter defaults flow through discovery into child Pi arguments", () => {
+test("frontmatter prompt modes flow through discovery into child Pi arguments", () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-frontmatter-"));
   const agentsDir = path.join(project, ".pi", "agents");
   fs.mkdirSync(agentsDir, { recursive: true });
-  fs.writeFileSync(path.join(agentsDir, "delegate.md"), `---
-name: delegate
-description: Delegate defaults
+  fs.writeFileSync(path.join(agentsDir, "project-append.md"), `---
+name: project-append
+description: Project append role
+systemPromptMode: append
+inheritProjectContext: true
 ---
 
-Delegate prompt.
+Project append prompt.
 `);
   fs.writeFileSync(path.join(agentsDir, "worker.md"), `---
 name: worker
@@ -127,12 +310,12 @@ Worker prompt.
 `);
 
   try {
-    const delegate = resolveAgent(project, "delegate");
-    assert.ok(delegate);
-    const delegateArgs = buildPiArgs(delegate, { agent: "delegate" }, "delegate.md");
-    assert.equal(delegateArgs.includes("--append-system-prompt"), true);
-    assert.equal(delegateArgs.includes("--no-context-files"), false);
-    assert.equal(delegateArgs.includes("--no-skills"), true);
+    const appendRole = resolveAgent(project, "project-append");
+    assert.ok(appendRole);
+    const appendArgs = buildPiArgs(appendRole, { agent: "project-append" }, "project-append.md");
+    assert.equal(appendArgs.includes("--append-system-prompt"), true);
+    assert.equal(appendArgs.includes("--no-context-files"), false);
+    assert.equal(appendArgs.includes("--no-skills"), true);
 
     const worker = resolveAgent(project, "worker");
     assert.ok(worker);
@@ -140,6 +323,24 @@ Worker prompt.
     assert.equal(workerArgs.includes("--system-prompt"), true);
     assert.equal(workerArgs.includes("--no-context-files"), true);
     assert.equal(workerArgs.includes("--no-skills"), false);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("unknown agent names fail with the available catalog instead of generic fallback", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-unknown-"));
+  try {
+    const result = await runTeammate(
+      { agent: "missing-role", task: "Do work" },
+      { baseCwd: project },
+    );
+    assert.equal(result.exitCode, 1);
+    const message = result.messages[0]?.content ?? "";
+    assert.match(message, /Unknown teammate agent "missing-role"/);
+    assert.match(message, /\bdelegate\b/);
+    assert.match(message, /\bexplorer\b/);
+    assert.match(message, /\bworkflow\b/);
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
   }
@@ -193,6 +394,7 @@ Proxy specialist prompt.
 
   const tools = new Map<string, Record<string, unknown>>();
   const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => void> = [];
+  const beforeAgentStartHandlers: Array<(event: { systemPrompt: string }, ctx: unknown) => { systemPrompt: string }> = [];
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
     registerTool(tool: Record<string, unknown>) {
@@ -200,6 +402,9 @@ Proxy specialist prompt.
     },
     on(event: string, handler: (event: unknown, ctx: unknown) => void) {
       if (event === "session_start") sessionStartHandlers.push(handler);
+      if (event === "before_agent_start") {
+        beforeAgentStartHandlers.push(handler as typeof beforeAgentStartHandlers[number]);
+      }
     },
   }, {
     get(target, property) {
@@ -217,17 +422,23 @@ Proxy specialist prompt.
     assert.deepEqual(teammate.promptGuidelines, TEAMMATE_PROMPT_GUIDELINES);
 
     assert.equal(sessionStartHandlers.length, 1);
-    sessionStartHandlers[0]({}, {
+    const context = {
       cwd: project,
+      modelRegistry: { getAvailable: () => [] },
       sessionManager: {
         getSessionId: () => "child-session",
         getSessionFile: () => path.join(project, "session.jsonl"),
       },
-    });
+    };
+    sessionStartHandlers[0]({}, context);
 
     const refreshed = tools.get("teammate");
     assert.match(String(refreshed?.description), /proxy-specialist \[project\]/);
     assert.equal(refreshed?.promptSnippet, TEAMMATE_PROMPT_SNIPPET);
+    assert.equal(beforeAgentStartHandlers.length, 1);
+    const injected = beforeAgentStartHandlers[0]({ systemPrompt: "Base child prompt" }, context);
+    assert.match(injected.systemPrompt, /- proxy-specialist: Specialist visible to child proxy tools/);
+    assert.doesNotMatch(injected.systemPrompt, /Proxy specialist prompt/);
   } finally {
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;
@@ -252,6 +463,7 @@ ${name} prompt.
 
   const tools = new Map<string, Record<string, unknown>>();
   const sessionStartHandlers: Array<(event: unknown, ctx: unknown) => void> = [];
+  const beforeAgentStartHandlers: Array<(event: { systemPrompt: string }, ctx: unknown) => { systemPrompt: string }> = [];
   const pi = new Proxy({
     events: { on: () => () => {}, emit() {} },
     registerTool(tool: Record<string, unknown>) {
@@ -259,6 +471,9 @@ ${name} prompt.
     },
     on(event: string, handler: (event: unknown, ctx: unknown) => void) {
       if (event === "session_start") sessionStartHandlers.push(handler);
+      if (event === "before_agent_start") {
+        beforeAgentStartHandlers.push(handler as typeof beforeAgentStartHandlers[number]);
+      }
     },
   }, {
     get(target, property) {
@@ -275,6 +490,7 @@ ${name} prompt.
 
     const context = (cwd: string) => ({
       cwd,
+      modelRegistry: { getAvailable: () => [] },
       sessionManager: {
         getSessionId: () => `session-${path.basename(cwd)}`,
         getSessionFile: () => path.join(cwd, "session.jsonl"),
@@ -285,13 +501,17 @@ ${name} prompt.
     assert.match(String(first?.description), /root-alpha \[project\]/);
     assert.deepEqual(first?.promptGuidelines, TEAMMATE_PROMPT_GUIDELINES);
     assert.equal(typeof first?.execute, "function");
+    const firstPrompt = beforeAgentStartHandlers[0]({ systemPrompt: "Base root prompt" }, context(firstProject));
+    assert.match(firstPrompt.systemPrompt, /- root-alpha: root-alpha role/);
 
     sessionStartHandlers[0]({}, context(secondProject));
     const second = tools.get("teammate");
     assert.match(String(second?.description), /root-beta \[project\]/);
-    assert.doesNotMatch(String(second?.description), /root-alpha \[project\]/);
     assert.equal(second?.promptSnippet, TEAMMATE_PROMPT_SNIPPET);
     assert.equal(typeof second?.execute, "function");
+    const secondPrompt = beforeAgentStartHandlers[0](firstPrompt, context(secondProject));
+    assert.match(secondPrompt.systemPrompt, /- root-beta: root-beta role/);
+    assert.doesNotMatch(secondPrompt.systemPrompt, /root-alpha role/);
   } finally {
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;

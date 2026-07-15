@@ -46,7 +46,10 @@ function makeCenter(overrides: Partial<ConstructorParameters<typeof TeammateCont
   const savedThinking: Array<{ taskType: string; thinking: string | null }> = [];
   const center = new TeammateControlCenter({
     cwd: "C:\\tmp\\project",
-    availableModels: ["openai/gpt-5", "anthropic/sonnet"],
+    availableModels: [
+      { id: "openai/gpt-5", reasoning: true, thinkingLevels: ["minimal", "low", "medium", "high"] },
+      { id: "anthropic/sonnet", reasoning: true, thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"] },
+    ],
     agents: [agent("planner"), agent("reviewer", "builtin")],
     activeAgents: [active("worker-1"), active("worker-2", "sleeping")],
     config: { version: 2, mappings: {}, thinkingLevels: {} },
@@ -136,6 +139,41 @@ test("routing filter still accepts t-prefixed text and every view fits widths 1 
   }
 });
 
+test("thinking picker follows the routed model capability surface", () => {
+  const openai = makeCenter({
+    config: { version: 2, mappings: { explore: "openai/gpt-5" }, thinkingLevels: {} },
+  }).center;
+  openai.handleInput("\x1b[1;5C");
+  const openaiPicker = openai.render(90).join("\n");
+  assert.match(openaiPicker, /minimal/);
+  assert.match(openaiPicker, /high/);
+  assert.doesNotMatch(openaiPicker, /xhigh \/ max/);
+
+  const anthropic = makeCenter({
+    config: { version: 2, mappings: { explore: "anthropic/sonnet" }, thinkingLevels: {} },
+  }).center;
+  anthropic.handleInput("\x1b[1;5C");
+  const anthropicPicker = anthropic.render(90).join("\n");
+  assert.match(anthropicPicker, /off/);
+  assert.match(anthropicPicker, /xhigh \/ max/);
+});
+
+test("unsupported persisted thinking remains visible but cannot be saved", async () => {
+  const { center, savedThinking } = makeCenter({
+    config: {
+      version: 2,
+      mappings: { explore: "openai/gpt-5" },
+      thinkingLevels: { explore: "xhigh" },
+    },
+  });
+  center.handleInput("\x1b[1;5C");
+  assert.match(center.render(90).join("\n"), /does not support this level/);
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(savedThinking, []);
+  assert.match(center.render(90).join("\n"), /Unsupported/);
+});
+
 test("model routing is reversible and saves inline", async () => {
   const { center, closed, saved } = makeCenter();
   center.handleInput("\r");
@@ -144,6 +182,7 @@ test("model routing is reversible and saves inline", async () => {
   assert.ok(narrowEditor.every((line) => visibleWidth(line) <= 32));
   assert.match(narrowEditor.join("\n"), /Explore/);
   center.handleInput("\x1b");
+  await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(closed.length, 0);
   assert.match(center.render(90).join("\n"), /Routing 7/);
 
@@ -164,6 +203,7 @@ test("model routing keeps the editor open when persistence fails", async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.match(center.render(90).join("\n"), /Save failed.*read-only project/);
   center.handleInput("\x1b");
+  await new Promise((resolve) => setTimeout(resolve, 20));
   assert.match(center.render(90).join("\n"), /Routing 7/);
 });
 

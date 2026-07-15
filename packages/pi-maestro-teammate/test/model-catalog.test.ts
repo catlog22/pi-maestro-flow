@@ -6,8 +6,10 @@ import registerTeammateExtension from "../src/extension/index.ts";
 import {
   appendModelCatalog,
   createModelCatalogSnapshot,
+  supportedThinkingLevels,
+  type AvailableModelEntry,
 } from "../src/models/model-catalog.ts";
-import { buildPiArgs, normalizeChainToTasks } from "../src/runs/execution.ts";
+import { buildPiArgs, clampThinkingForModel, normalizeChainToTasks } from "../src/runs/execution.ts";
 
 const baseAgent: AgentConfig = {
   name: "delegate",
@@ -23,7 +25,7 @@ const baseAgent: AgentConfig = {
 
 test("model catalog is deterministic, deduplicated, and replaceable", () => {
   const first = createModelCatalogSnapshot([
-    { provider: "openai", id: "gpt-5", reasoning: true },
+    { provider: "openai", id: "gpt-5", reasoning: true, thinkingLevelMap: { off: null } },
     { provider: "anthropic", id: "claude-opus" },
     { provider: "openai", id: "gpt-5", reasoning: true },
   ]);
@@ -31,13 +33,40 @@ test("model catalog is deterministic, deduplicated, and replaceable", () => {
 
   const injected = appendModelCatalog("base", first);
   assert.match(injected, /anthropic\/claude-opus/);
-  assert.match(injected, /openai\/gpt-5 \[reasoning\]/);
+  assert.match(injected, /openai\/gpt-5 \[thinking:minimal,low,medium,high\]/);
 
   const second = createModelCatalogSnapshot([{ provider: "google", id: "gemini-pro" }]);
   const refreshed = appendModelCatalog(injected, second);
   assert.match(refreshed, /google\/gemini-pro/);
   assert.doesNotMatch(refreshed, /openai\/gpt-5/);
   assert.equal((refreshed.match(/<available_teammate_models>/g) ?? []).length, 1);
+});
+
+test("model catalog exposes legacy and modern thinking capabilities", () => {
+  assert.deepEqual(supportedThinkingLevels({
+    provider: "maestro-openai",
+    id: "gpt-5",
+    reasoning: true,
+    thinkingLevelMap: { off: null },
+  }), ["minimal", "low", "medium", "high"]);
+  assert.deepEqual(supportedThinkingLevels({
+    provider: "maestro-anthropic",
+    id: "claude-sonnet-4-5",
+    reasoning: true,
+    thinkingLevelMap: { xhigh: "high" },
+  }), ["off", "minimal", "low", "medium", "high", "xhigh"]);
+  assert.equal(supportedThinkingLevels({ provider: "custom", id: "unknown" }), undefined);
+});
+
+test("model catalog signature changes when the same model capability changes", () => {
+  const basic = createModelCatalogSnapshot([{ provider: "openai", id: "gpt-5" }]);
+  const reasoning = createModelCatalogSnapshot([{
+    provider: "openai",
+    id: "gpt-5",
+    reasoning: true,
+    thinkingLevelMap: { off: null },
+  }]);
+  assert.notEqual(reasoning.signature, basic.signature);
 });
 
 test("session start snapshots models and before_agent_start refreshes changed registries", async () => {
@@ -59,7 +88,7 @@ test("session start snapshots models and before_agent_start refreshes changed re
 
   const previousChild = process.env.PI_TEAMMATE_CHILD;
   delete process.env.PI_TEAMMATE_CHILD;
-  let models = [{ provider: "openai", id: "gpt-5" }];
+  let models: AvailableModelEntry[] = [{ provider: "openai", id: "gpt-5" }];
   const ctx = {
     cwd: process.cwd(),
     modelRegistry: { getAvailable: () => models },
@@ -77,6 +106,10 @@ test("session start snapshots models and before_agent_start refreshes changed re
     await handlers.get("session_start")![0]({}, ctx);
     const first = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
     assert.match(first.systemPrompt, /openai\/gpt-5/);
+
+    models = [{ provider: "openai", id: "gpt-5", reasoning: true, thinkingLevelMap: { off: null } }];
+    const capabilityRefresh = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
+    assert.match(capabilityRefresh.systemPrompt, /openai\/gpt-5 \[thinking:minimal,low,medium,high\]/);
 
     models = [{ provider: "anthropic", id: "claude-opus" }];
     const second = await handlers.get("before_agent_start")![0]({ systemPrompt: "base" }, ctx);
@@ -119,4 +152,41 @@ test("thinking overrides reach child Pi once and legacy chains preserve them", (
   const maxAlias = buildPiArgs(baseAgent, { agent: "delegate", thinking: "max" }, "prompt.md");
   assert.equal(maxAlias[maxAlias.indexOf("--thinking") + 1], "xhigh");
   assert.equal(normalizeChainToTasks([{ agent: "delegate", thinking: "max" }], "task")[0].thinking, "xhigh");
+});
+
+test("thinking clamps to the final model capability before child Pi", () => {
+  const capabilities = [
+    { id: "maestro-openai/gpt-5", reasoning: true, thinkingLevels: ["minimal", "low", "medium", "high"] },
+    { id: "maestro-anthropic/claude-sonnet-4-5", reasoning: true, thinkingLevels: ["off", "minimal", "low", "medium", "high", "xhigh"] },
+    { id: "custom/plain", reasoning: false, thinkingLevels: ["off"] },
+  ] as const;
+
+  assert.equal(clampThinkingForModel("xhigh", "maestro-openai/gpt-5", capabilities), "high");
+  assert.equal(clampThinkingForModel("off", "maestro-openai/gpt-5", capabilities), "minimal");
+  assert.equal(clampThinkingForModel("xhigh", "custom/plain", capabilities), "off");
+  assert.equal(clampThinkingForModel("xhigh", "unknown/model", capabilities), "xhigh");
+
+  const fallbackAttempt = buildPiArgs(
+    baseAgent,
+    { agent: "delegate", thinking: "max" },
+    "prompt.md",
+    "maestro-openai/gpt-5",
+    undefined,
+    undefined,
+    undefined,
+    capabilities,
+  );
+  assert.equal(fallbackAttempt[fallbackAttempt.indexOf("--thinking") + 1], "high");
+
+  const anthropic = buildPiArgs(
+    baseAgent,
+    { agent: "delegate", model: "maestro-anthropic/claude-sonnet-4-5", thinking: "max" },
+    "prompt.md",
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    capabilities,
+  );
+  assert.equal(anthropic[anthropic.indexOf("--thinking") + 1], "xhigh");
 });

@@ -10,12 +10,19 @@ import registerStructuredOutput from "../src/extension/structured-output.ts";
 import registerTeammateExtension, {
   buildAgentList,
   buildWatchOutput,
+  correlationIdPrefix,
   handleChildLifecycleEvent,
   renderAgentStatusWidget,
   resolveWatchTarget,
   switchConversationSession,
 } from "../src/extension/index.ts";
-import { buildPiArgs, resolveVariables, sendRpcMessage } from "../src/runs/execution.ts";
+import {
+  buildPiArgs,
+  normalizeGraphConcurrency,
+  resolveVariables,
+  sendRpcMessage,
+} from "../src/runs/execution.ts";
+import { registerTeammateChildExtension } from "../src/runs/child-extensions.ts";
 import {
   confirmChildReloaded,
   confirmParked,
@@ -62,13 +69,20 @@ test("root and proxy teammate initialization use their own request params", () =
   assert.equal(proxyInitialization.match(/lease:\s*createChildLease\(\)/g)?.length, 1);
 });
 
-test("root and proxy graph normalization preserve thinking before execution", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
-  assert.match(source, /thinking:\s*t\.thinking \?\? params\.thinking/);
-  assert.match(source, /t\.thinking \?\?= params\.thinking/);
-  assert.match(source, /t\.thinking \?\?= p\.thinking/);
-  assert.match(source, /thinking:\s*t\.thinking \?\? p\.thinking/);
-  assert.equal(source.match(/applyModelRouting\(/g)?.length, 2);
+test("root and proxy graph normalization share one implementation that preserves thinking", () => {
+  const indexSource = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const executionSource = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8");
+
+  // The shared normalizer parses thinking for both tasks and chain branches.
+  assert.match(executionSource, /thinking:\s*parseTeammateThinkingLevel\(t\.thinking \?\? params\.thinking\)/);
+  assert.match(executionSource, /thinking:\s*t\.thinking \?\? parseTeammateThinkingLevel\(params\.thinking\)/);
+
+  // Both the root execute and the child proxy paths call it — no local re-implementation.
+  assert.match(indexSource, /const normalization = normalizeTeammateParams\(params\)/);
+  assert.match(indexSource, /const normalization = normalizeTeammateParams\(p\)/);
+  assert.doesNotMatch(indexSource, /thinking:\s*parseTeammateThinkingLevel\(/);
+
+  assert.equal(indexSource.match(/applyModelRouting\(/g)?.length, 2);
 });
 
 test("child lifecycle handler is module-scoped and updates explicit teammate state", () => {
@@ -78,7 +92,7 @@ test("child lifecycle handler is module-scoped and updates explicit teammate sta
   assert.ok(handlerStart >= 0 && handlerStart < registrationStart);
   assert.equal(source.match(/function handleChildLifecycleEvent\(/g)?.length, 1);
   assert.match(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.event,\s*correlationId: event\.correlationId \?\? correlationId,/s);
-  assert.match(source, /handleChildLifecycleEvent\(state, \{ \.\.\.event, correlationId: cid \}\)/);
+  assert.match(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.childEvent,\s*correlationId: childEvent\.correlationId \?\? cid,/s);
 
   const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lifecycle-state-"));
   const sessionFile = path.join(sessionDir, "session.jsonl");
@@ -224,6 +238,25 @@ test("every teammate child explicitly loads the handoff bridge extension", () =>
   assert.match(extensionPaths[0], /extension\/index\.ts$/);
 });
 
+test("registered parent extensions and their interaction tools reach every teammate child", () => {
+  const dispose = registerTeammateChildExtension("D:\\packages\\pi-maestro-flow\\src\\extension\\index.ts", {
+    tools: ["ask-user-question"],
+  });
+  try {
+    const args = buildPiArgs(
+      { tools: ["read"] } as never,
+      { agent: "delegate" },
+      "prompt.md",
+    );
+    const extensionPaths = args.flatMap((arg, index) => arg === "--extension" ? [args[index + 1].replaceAll("\\", "/")] : []);
+    assert.equal(extensionPaths.length, 2);
+    assert.ok(extensionPaths.some((extensionPath) => extensionPath === "D:/packages/pi-maestro-flow/src/extension/index.ts"));
+    assert.match(args[args.indexOf("--tools") + 1], /(?:^|,)ask-user-question(?:,|$)/);
+  } finally {
+    dispose();
+  }
+});
+
 test("session ownership handoff fences stale writers and requires reload before child resumes", () => {
   let lease = createChildLease();
   const staleChild = leaseToken(lease);
@@ -360,6 +393,15 @@ test("parallel graph rows keep independent IDs in the split tree", () => {
   assert.match(rows[1].text, /└─/);
 });
 
+test("graph concurrency is finite, positive, and bounded by task count", () => {
+  assert.equal(normalizeGraphConcurrency(2, 5), 2);
+  assert.equal(normalizeGraphConcurrency(99, 3), 3);
+  assert.equal(normalizeGraphConcurrency(2.9, 5), 2);
+  assert.equal(normalizeGraphConcurrency(0, 5), 1);
+  assert.equal(normalizeGraphConcurrency(Number.POSITIVE_INFINITY, 5), 1);
+  assert.equal(normalizeGraphConcurrency(4, 0), 1);
+});
+
 test("agent list prefers attachable physical chain children over duplicate progress rows", () => {
   const now = Date.now();
   const parentId = "parent-chain";
@@ -388,6 +430,7 @@ test("agent list prefers attachable physical chain children over duplicate progr
   assert.equal(listed.length, 1);
   assert.equal(listed[0].hasStdin, true);
   assert.equal(listed[0].depth, 1);
+  assert.equal(resolveWatchTarget(state, "child").match?.kind, "agent");
 });
 
 test("teammate-list expands graph tasks and watch keeps sleeping messages visible", () => {
@@ -434,6 +477,78 @@ test("teammate-list expands graph tasks and watch keeps sleeping messages visibl
   const watched = buildWatchOutput(resolved.match, 20).join("\n");
   assert.match(watched, /found \/health/);
   assert.match(watched, /graph is sleeping/);
+});
+
+test("teammate-list expands colliding short IDs until watch targets are unambiguous", () => {
+  const now = Date.now();
+  const firstId = "aaaaaaaa-1111";
+  const secondId = "aaaaaaaa-2222";
+  const makeAgent = (correlationId: string) => ({
+    agent: "explorer",
+    correlationId,
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    status: "running" as const,
+    sleepMs: 0,
+  });
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    namedAgents: new Map(),
+    activeRuns: new Map([
+      [firstId, makeAgent(firstId)],
+      [secondId, makeAgent(secondId)],
+    ]),
+  };
+
+  assert.equal(correlationIdPrefix(firstId, [firstId, secondId]), "aaaaaaaa-1");
+  assert.equal(correlationIdPrefix(secondId, [firstId, secondId]), "aaaaaaaa-2");
+  const listed = buildAgentList(state, "all");
+  assert.match(listed.text, /id=aaaaaaaa-1/);
+  assert.match(listed.text, /id=aaaaaaaa-2/);
+
+  const ambiguous = resolveWatchTarget(state, "aaaaaaaa");
+  assert.match(ambiguous.error ?? "", /ambiguous/);
+  assert.deepEqual(ambiguous.available.sort(), ["aaaaaaaa-1", "aaaaaaaa-2"]);
+  assert.equal(resolveWatchTarget(state, "aaaaaaaa-1").match?.kind, "agent");
+});
+
+test("teammate-watch explains provider queueing before first activity", () => {
+  const now = Date.now();
+  const correlationId = "waiting-model-agent";
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    namedAgents: new Map(),
+    activeRuns: new Map([[correlationId, {
+      agent: "explorer",
+      correlationId,
+      startedAt: now,
+      abortController: new AbortController(),
+      inbox: [],
+      outputLog: [],
+      lastActivityAt: now,
+      status: "running",
+      sleepMs: 0,
+    }]]),
+  };
+
+  const resolved = resolveWatchTarget(state, correlationId);
+  assert.ok(resolved.match);
+  assert.match(buildWatchOutput(resolved.match, 20).join("\n"), /Waiting for model capacity or first activity/);
+});
+
+test("nested proxy preserves parentage, graph children, and explicit background semantics", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  assert.match(source, /const parentCid = \(event\.parentCid as string \| undefined\) \?\? spawnedBy/);
+  assert.match(source, /spawnedBy: cid,[\s\S]*if \(task\.name\) state\.namedAgents\.set\(task\.name, childId\)/);
+  assert.match(source, /normalizedTasks \? \{ taskCorrelationIds \} : \{ correlationId: cid \}/);
+  assert.match(source, /if \(p\.background === false\) \{[\s\S]*await executeNested\(\)/);
+  assert.match(source, /running in background\. correlationId=\$\{cid\}/);
+  assert.doesNotMatch(source, /spawned @\$\{p\.name \?\? p\.agent\}/);
 });
 
 test("agent conversation expands in overlay and sends composed messages", async () => {
