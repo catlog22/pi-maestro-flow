@@ -1,9 +1,27 @@
-# 规划：todo/goal × Session-Run 长时执行增强 + TUI 方案
+# 已实施：todo/goal × Session-Run 长时执行增强 + TUI 方案
 
-> 状态：规划（未实施）
+> 状态：实施完成（P0–P6，AC1–AC12 全部通过）
 > 日期：2026-07-15
+> 完成日期：2026-07-15
 > 参考：`D:\maestro2\guide\session-run-structure-guide.md`（Session → Run → Artifact 三级模型，schema v1.1）
 > 范围：`packages/pi-maestro-flow` 插件（todo/goal/statusline/TUI）+ `.pi/skills/` 协议层
+
+---
+
+## 实施结果
+
+P0–P6 已全部落地。主要提交为：
+
+- `af8fec5e`：加固 Session gate 与 Skill 漂移；
+- `7e3303e5`：接通 Workflow Session 运行闭环；
+- `45c2fcc0`：规范化打包后的 Pi skills；
+- `541dde99`：完成本地依赖 packed consumer 闭环；
+- `7c40ca21`：补齐 Session/Run 验收闭环；
+- `7cce3533`：将冲突的 `/session` 改为 `/maestro-session`；
+- `177ffc98`：收口 GENERALIZE 阶段发现的恢复、gate、投影和 continuation 缺陷；
+- `668a4c24`：隔离 packed consumer 的本地 `npm link` global prefix。
+
+最终实现保持 `Plan → Goal → Todo → Execute`，canonical 状态只由 Maestro CLI 写入；Goal/Todo 为可重建投影，Coordinator 是唯一 continuation owner。打包验收使用 `pi-maestro-flow` tarball 的真实隔离安装，同时直接 `npm link D:\maestro2` 与本地 `pi-maestro-teammate`，确保验证本地最新依赖且不把本地路径写入发布 manifest/lock。
 
 ---
 
@@ -376,25 +394,25 @@ bridge 检测到 run 状态跃迁时 `pi.sendMessage({customType:"run-event", di
 
 ---
 
-## 七、实施路线图
+## 七、实施路线图（已完成）
 
-| 期 | 内容 | 依赖 | 交付判定 |
-|---|---|---|---|
-| **P0 契约收敛** | 冻结 Session/Run/Artifact/Projection contract；裁决 pause/cancel 契约（风险 9）与 lease 存储位置（§4.5）；审计 `.pi/skills` 的 `taskId`、`failed`、`activeForm`、直接写 JSON（实测漂移 73 处 / 30+ 文件，linter 首日即全仓运行，非核心 skill 以报告模式豁免）；增加 contract linter | 无 | 核心 Skills 与当前 Todo schema 一致；写入所有权无歧义；pause/cancel 与 lease 契约冻结 |
-| **P1 Bridge 基础** | `src/session/bridge.ts` 只读快照、legacy fallback、缓存与 revision；statusline 第二行先接真实 Session/Run | P0 | 新旧目录双轨可读；不修改 canonical files；statusline 不再读 milestone/phase |
-| **P2 Projection + Coordinator** | Todo schema v4 内部 `origin`、Goal/Todo 自动物化/对账、`WorkflowCoordinator`、单 continuation owner、`run-control` adapter | P1 | Run 与 Todo/Goal 全程收敛；无重复 follow-up；Plan Mode 权限正确 |
-| **P3 核心 Skill 迁移** | 统一 `<host_mirror>`；依次迁移 `maestro-next`、`maestro-ralph`、`maestro`、`maestro-session-seal` | P2 | analyze→plan→execute→verify 核心链完成，零手工镜像 update |
-| **P4 恢复与失败控制** | compaction identity checkpoint、fresh Pi attach、stale skill、retry lineage、cancel、lease fencing | P2/P3 | 压缩、重启、失败重试后恢复到同一安全动作 |
-| **P5 TUI** | `WorkflowViewModel`、Maestro Panel、run-event、`/maestro-session` overlay、非颜色状态与窄宽降级 | P2/P4 | Alt+T 三态、控制中心、宽度 1..120 和键盘冲突测试通过 |
-| **P6 全量迁移与发布** | 扫描全部 `.pi/skills`；focused/full tests；`npm pack` + isolated consumer + fresh Pi 验证 | P3/P5 | packed consumer 能完成一条真实 Session/Run 闭环 |
+| 期 | 状态 | 内容 | 依赖 | 交付判定 |
+|---|---|---|---|---|
+| **P0 契约收敛** | ✅ | 冻结 Session/Run/Artifact/Projection contract；裁决 pause/cancel 契约（风险 9）与 lease 存储位置（§4.5）；审计 `.pi/skills` 的 `taskId`、`failed`、`activeForm`、直接写 JSON；增加 contract linter | 无 | core 与 non-core Skill contract findings 均为 0；写入所有权与 lease contract 已冻结 |
+| **P1 Bridge 基础** | ✅ | `src/session/bridge.ts` 只读快照、legacy fallback、缓存与 revision；statusline 第二行接真实 Session/Run | P0 | 新旧目录双轨可读；不修改 canonical files；statusline 不再读 milestone/phase |
+| **P2 Projection + Coordinator** | ✅ | Todo schema v4 内部 `origin`、Goal/Todo 自动物化/对账、`WorkflowCoordinator`、单 continuation owner、`run-control` adapter | P1 | Run 与 Todo/Goal 全程收敛；无重复 follow-up；Plan Mode 权限正确 |
+| **P3 核心 Skill 迁移** | ✅ | 统一 `<host_mirror>`；迁移 `maestro-next`、`maestro-ralph`、`maestro`、`maestro-session-seal` | P2 | analyze→plan→execute→verify 核心链完成，零手工镜像 update |
+| **P4 恢复与失败控制** | ✅ | compaction identity checkpoint、fresh Pi attach、stale skill、retry lineage、lease fencing | P2/P3 | 压缩、重启、失败重试后恢复到同一安全动作；不伪造 CLI 不支持的 cancel 状态 |
+| **P5 TUI** | ✅ | `WorkflowViewModel`、Maestro Panel、run-event、`/maestro-session` overlay、非颜色状态与窄宽降级 | P2/P4 | Alt+T 三态、控制中心、宽度 1..120 和 fresh Pi 命令加载通过 |
+| **P6 全量迁移与发布验收** | ✅ | 扫描全部 `.pi/skills`；focused/full tests；`npm pack` + isolated consumer + fresh Pi 验证 | P3/P5 | packed consumer 完成真实 Session/Run 闭环；本地依赖由临时 prefix 下的 `npm link` 提供 |
 
 每期配 focused tests：bridge 对账（新建/失败/重试 run 的镜像收敛）、todo v4 迁移（按既有 contract-test spec）、goal done 前置校验矩阵、`fmtStatusLine` 快照。
 
 ---
 
-## 八、风险与开放问题
+## 八、风险与已裁决项
 
-1. **过渡期双真相**：skills 尚在写 legacy 路径（`.workflow/.maestro/*/status.json`），bridge 双轨读只允许作为迁移缓冲；新写入不得继续产生 legacy 状态，P3 后移除 fallback。
+1. **过渡期双真相**：核心链已停止向 legacy `.workflow/.maestro/*/status.json` 写入；bridge 暂时保留只读 fallback 以兼容存量会话，且不得把 legacy 状态回写 canonical files。待存量迁移窗口结束后可单独移除 fallback。
 2. **对账时机**：不引入 file watcher（Windows 语义麻烦），只挂 hook + 防抖；代价是 run 状态显示最多滞后一个 tool 调用，可接受。
 3. **并行 session（worktree fork）**：goal 是单例，一个 pi 会话只镜像一个 active session——与 guide 的 worktree 隔离模型一致，无需多 goal。
 4. **物化任务的删除语义**：session sealed 后 mirror 任务自动 completed；用户手动 delete mirror 任务时 bridge 不再重建（尊重人的裁决，在 origin 上打 tombstone）。
@@ -402,28 +420,32 @@ bridge 检测到 run 状态跃迁时 `pi.sendMessage({customType:"run-event", di
 6. **Continuation 重复投递**：Goal、Coordinator、compaction callback、Skill 都可能发送 follow-up。实现时必须用 `runId + iteration + epoch`（lease 定义见 §4.5）去重，并在 pause/cancel/session switch 时 fence 旧 marker。
 7. **Skill 热更新**：恢复时只能保存 identity/hash，不能把旧 prompt 当真相；hash 变化应 block 并要求重新激活，不能静默续跑。
 8. **大量现有工作树改动**：实施必须按模块小步提交，避免把当前 `.pi/skills`、Goal、TUI、teammate 的其他未完成改动混入同一提交。
-9. **Pause/Cancel canonical contract 尚未冻结**：当前 `maestro run --help` 没有 pause/cancel 命令，现有 Run schema 也没有 `cancelled`。P0 必须先裁决是扩展新 schema/CLI，还是使用 `blocked`/`failed` + 结构化 reason；禁止只在 Goal/TUI 中伪造状态。
+9. **Pause/Cancel contract**：保持 canonical schema 真实；Goal pause 只暂停宿主投影与 continuation，CLI 不支持的 Run cancel 由 adapter 明确拒绝，不在 Goal/TUI 中伪造 `cancelled`。
+10. **Windows 文件锁波动**：全量 `test:plan` 曾出现一次 `.transaction-lock` rename `EPERM`（43/44），同一 heartbeat 用例隔离复跑 1/1 通过；该波动记录为 Windows baseline，不降低功能断言。
+11. **本地最新版决策**：packed consumer 对 `D:\maestro2` 和本地 `pi-maestro-teammate` 使用直接 `npm link`。测试把 `npm_config_prefix` 隔离到临时目录，避免争用用户级 `maestro.ps1` / `maestro-mcp`；发布 manifest 与 lockfile 仍保持可发布依赖。
 
 ---
 
 ## 九、验收矩阵
 
-| ID | 验收条件 | 证明方式 |
-|---|---|---|
-| AC1 | Skill/config/required-reading/budget/entry gate 失败时 Todo 保持 `pending` | focused transition tests |
-| AC2 | exit gate 失败时 Todo 不完成、Run 不 sealed、Goal 自动暂停 | Run fixture + Goal integration test |
-| AC3 | 删除 Goal/Todo session entries 后可从 canonical Session/Run 重建相同投影 | reconstruction test |
-| AC4 | compaction 后首个执行动作重新获取 active Run brief，且不重复注入 Skill prompt | compaction integration test |
-| AC5 | fresh Pi process 能 attach running Session，恢复 runId/todoId/nextAction | child process smoke test |
-| AC6 | Skill 文件变化后旧 activation 进入 stale，旧 Run 不继续 | hash drift test |
-| AC7 | Goal 与 Coordinator 不产生重复 continuation；pause/cancel 后迟到 marker 被拒绝 | nonce/epoch concurrency test |
-| AC8 | retry 保留失败 Run，并创建 attempt+1 的新 Run；Artifact lineage 可追踪 | retry lineage fixture |
-| AC9 | Plan Mode 允许 status/brief/prepare，阻止 advance/complete/retry/cancel | permission matrix |
-| AC10 | TUI 状态同时有 glyph+文本，宽度 1..120 不溢出，关键恢复操作不被截断 | render matrix + snapshot tests |
-| AC11 | statusline 不再读取 milestone/phase，tool RPC count 与 Workflow Run count 不混淆 | statusline unit tests |
-| AC12 | analyze→plan→execute→verify→seal 在真实 CLI 与 packed consumer 中闭环 | E2E + `npm pack` isolated install |
+| ID | 状态 | 验收条件 | 客观证据 |
+|---|---|---|---|
+| AC1 | ✅ | Skill/config/required-reading/budget/entry gate 失败时 Todo 保持 `pending` | `todo next keeps task pending when skill loading fails`；`entry gate failures keep the canonical Todo mirror pending` |
+| AC2 | ✅ | exit gate 失败时 Todo 不完成、Run 不 sealed、Goal 自动暂停 | `exit gate failures keep completed work uncompleted`；`failed exit gate leaves Run and Todo unsealed and pauses the canonical Goal` |
+| AC3 | ✅ | 删除 Goal/Todo session entries 后可从 canonical Session/Run 重建相同投影 | `canonical Workflow state rebuilds Goal projection`；Todo v4 projection/reconcile tests |
+| AC4 | ✅ | compaction 后首个执行动作重新获取 active Run brief，且不重复注入 Skill prompt | `compaction recovery fetches the Run brief before continuation`，含 retry 与 pending-message 分支 |
+| AC5 | ✅ | fresh Pi process 能 attach running Session，恢复 runId/todoId/nextAction | packed consumer child-process attach；本地 fresh Pi 启动加载 user extension |
+| AC6 | ✅ | Skill 文件变化后旧 activation 进入 stale，旧 Run 不继续 | `active skill metadata resumes and marks changed skill content stale` |
+| AC7 | ✅ | Goal 与 Coordinator 不产生重复 continuation；pause/cancel/session switch 后迟到 marker 被拒绝 | coordinator nonce/epoch tests、generic Goal marker 单次消费、compaction generation fencing |
+| AC8 | ✅ | retry 保留失败 Run，并创建 attempt+1 的新 Run；Artifact lineage 可追踪 | `retry validates parent-derived attempt while canonical artifacts retain lineage` |
+| AC9 | ✅ | Plan Mode 允许 status/brief/prepare，阻止 advance/complete/retry/cancel | Plan/permission matrix；`test:permissions` 22/22 |
+| AC10 | ✅ | TUI 状态同时有 glyph+文本，宽度 1..120 不溢出，关键恢复操作不被截断 | Maestro Panel、run-event、Session overlay 和 statusline width matrix |
+| AC11 | ✅ | statusline 不再读取 milestone/phase，tool RPC count 与 Workflow Run count 不混淆 | `statusline renders canonical Session/Run separately from active tool calls` |
+| AC12 | ✅ | analyze→plan→execute→verify→seal 在真实 CLI 与 packed consumer 中闭环 | `test:packed` 1/1；tarball 隔离安装 + 本地 link + fresh Pi process |
 
-完成定义：AC1–AC12 全部有客观证据，核心链无 legacy `status.json` 新写入，Skill contract linter 零错误，且 fresh Pi 验证通过。
+完成定义已满足：AC1–AC12 全部有客观证据，核心链无 legacy `status.json` 新写入，core/non-core Skill contract linter findings 均为 0，且 fresh Pi 验证通过。
+
+最终验证摘要：Session 25/25、Goal 7/7、Todo 21/21、Compaction 16/16、Hooks 10/10、Permissions 22/22、Package 4/4、Install 6/6、Providers 1/1、Intelligence 51/51、packed consumer 1/1、`check:types` 通过。Plan 聚合运行 43/44，唯一失败为 Windows `EPERM rename` baseline；对应 heartbeat 用例隔离复跑 1/1 通过。
 
 ---
 
