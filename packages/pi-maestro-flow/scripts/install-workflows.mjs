@@ -32,13 +32,14 @@ export function installMaestroWorkflows({
   stdio = "inherit",
 } = {}) {
   const binary = join(packageRoot, "bin", "maestro.js");
-  const result = existsSync(binary)
+  const runtimeEntry = join(packageRoot, "dist", "src", "cli.js");
+  const result = existsSync(binary) && existsSync(runtimeEntry)
     ? runner(process.execPath, [binary, "install", "workflows"], {
         stdio,
         windowsHide: true,
         env: { ...process.env, MAESTRO_HOME: maestroHome },
       })
-    : { status: 1, error: new Error(`Maestro binary not found: ${binary}`) };
+    : { status: 1, error: new Error(`Runnable Maestro CLI not found under: ${packageRoot}`) };
 
   if (!result.error && result.status === 0) {
     return { mode: "maestro-cli", targetDir: join(maestroHome, "workflows") };

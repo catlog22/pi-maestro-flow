@@ -9,7 +9,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import test from "node:test";
@@ -82,7 +82,10 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
 
     const installed = join(consumer, "node_modules", "pi-maestro-flow");
     const installedPackage = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
-    assert.equal(installedPackage.dependencies["maestro-flow"], localMaestroPackage.version);
+    assert.equal(
+      installedPackage.dependencies["maestro-flow"],
+      "https://codeload.github.com/catlog22/maestro-flow/tar.gz/84ae24f8ed9a12cac3b5c69ea3428840a0a58e1b",
+    );
     const installedMaestro = join(consumer, "node_modules", "maestro-flow");
     const installedTeammate = join(consumer, "node_modules", "pi-maestro-teammate");
     assert.equal(lstatSync(installedMaestro).isSymbolicLink(), true);
@@ -104,7 +107,7 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
     const cliEnv = { ...process.env, MAESTRO_HOME: maestroHome };
     assert.match(run(maestroCommand, ["run", "create", "--help"], workflowRoot, cliEnv).stdout, /--workflow-root/);
     let sessionId = "";
-    for (const stage of ["analyze", "plan", "execute", "verify"]) {
+    const createStage = (stage) => {
       const args = ["run", "create", stage, "--workflow-root", workflowRoot];
       if (sessionId) args.push("--session", sessionId);
       else args.push("--intent", "packed consumer lifecycle");
@@ -113,6 +116,9 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
       const runDir = resolve(workflowRoot, created.run_dir);
       mkdirSync(join(runDir, "outputs"), { recursive: true });
       writeFileSync(join(runDir, "outputs", `${stage}.json`), `${JSON.stringify({ stage, status: "passed" })}\n`);
+      return created;
+    };
+    const completeStage = (stage, created) => {
       const completed = JSON.parse(run(
         maestroCommand,
         ["run", "complete", created.run_id, "--session", sessionId, "--workflow-root", workflowRoot],
@@ -121,8 +127,41 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
       ).stdout);
       assert.equal(completed.status, "sealed", stage);
       assert.equal(completed.sealed, true, stage);
+    };
+    for (const stage of ["analyze", "plan"]) {
+      completeStage(stage, createStage(stage));
     }
 
+    const executeRun = createStage("execute");
+    const extensionPath = join(installed, "src", "extension", "index.ts");
+    const runtimeEnv = {
+      ...installEnv,
+      PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
+    };
+    const rpc = run(
+      piCommand,
+      [
+        "--offline", "--mode", "rpc", "--no-session", "--no-extensions", "--no-skills",
+        "--no-context-files", "--extension", extensionPath,
+      ],
+      workflowRoot,
+      runtimeEnv,
+      45_000,
+      `${JSON.stringify({ id: "state", type: "get_state" })}\n${JSON.stringify({ id: "messages", type: "get_messages" })}\n`,
+    );
+    const messages = rpc.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    assert.ok(messages.some((message) => message.id === "state" && message.type === "response"), rpc.stdout);
+    const messageResponse = messages.find((message) => message.id === "messages" && message.type === "response");
+    assert.ok(messageResponse, rpc.stdout);
+    const attachEvidence = JSON.stringify(messageResponse);
+    assert.match(attachEvidence, /workflow-attach/);
+    assert.match(attachEvidence, new RegExp(sessionId));
+    assert.match(attachEvidence, new RegExp(executeRun.run_id));
+    assert.match(attachEvidence, /"todoId":"[^"]+"/);
+    assert.match(attachEvidence, /"nextAction":"[^"]+"/);
+
+    completeStage("execute", executeRun);
+    completeStage("verify", createStage("verify"));
     const sealed = JSON.parse(run(
       maestroCommand,
       ["run", "seal-session", sessionId, "--summary", "packed E2E", "--workflow-root", workflowRoot],
@@ -133,21 +172,6 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
     const session = JSON.parse(readFileSync(join(workflowRoot, ".workflow", "sessions", sessionId, "session.json"), "utf8"));
     assert.equal(session.status, "sealed");
     assert.equal(session.latest_completed_run_id.endsWith("verify"), true);
-
-    const extensionPath = join(installed, "src", "extension", "index.ts");
-    const rpc = run(
-      piCommand,
-      [
-        "--offline", "--mode", "rpc", "--no-session", "--no-extensions", "--no-skills",
-        "--no-context-files", "--extension", extensionPath,
-      ],
-      workflowRoot,
-      { ...process.env, MAESTRO_HOME: maestroHome },
-      45_000,
-      `${JSON.stringify({ id: "state", type: "get_state" })}\n`,
-    );
-    const messages = rpc.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
-    assert.ok(messages.some((message) => message.id === "state" && message.type === "response"), rpc.stdout);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

@@ -15,6 +15,7 @@ import {
   onSessionStart,
   type GoalContext,
 } from "../src/tools/goal.ts";
+import { buildTodoMirrorSpecs } from "../src/session/bridge.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 
 function createContext(overrides: Partial<GoalContext> = {}): GoalContext {
@@ -96,6 +97,34 @@ test("canonical Workflow state rebuilds Goal projection and blocks premature com
     const evidence = buildCanonicalEvidence(snapshot);
     assert.match(evidence, /Session session-1: running/);
     assert.match(evidence, /Run run-1 \(execute\): running/);
+  } finally {
+    await executeGoal({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("failed exit gate leaves Run and Todo unsealed and pauses the canonical Goal", async () => {
+  const ctx = createContext({ sessionManager: { getEntries: () => [] } });
+  initGoal({ appendEntry() {} } as never);
+  onSessionStart(ctx);
+  const snapshot = workflowSnapshot();
+  const session = snapshot.session!;
+  const run = session.runs[0]!;
+  session.chain[0]!.status = "completed";
+  run.status = "completed";
+  run.endedAt = "2026-07-15T00:01:00.000Z";
+  run.gates = [{ id: "gate-exit", phase: "exit", blocking: true, status: "failed" }];
+
+  try {
+    const specs = buildTodoMirrorSpecs(snapshot);
+    const goal = reconcileWorkflowGoal(snapshot, ctx);
+
+    assert.equal(run.status, "completed");
+    assert.notEqual(run.status, "sealed");
+    assert.equal(specs[0]?.status, "blocked");
+    assert.notEqual(specs[0]?.status, "completed");
+    assert.equal(goal?.status, "paused");
+    assert.equal(goal?.pauseReason, "gate");
   } finally {
     await executeGoal({ action: "clear" }, ctx);
     onSessionShutdown(ctx);

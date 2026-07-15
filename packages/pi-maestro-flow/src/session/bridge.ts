@@ -7,7 +7,6 @@ import type {
   WorkflowChainStep,
   WorkflowGate,
   WorkflowRun,
-  WorkflowRunStatus,
   WorkflowSession,
   WorkflowSessionStatus,
   WorkflowSnapshot,
@@ -92,10 +91,22 @@ export class WorkflowBridge {
 export function buildTodoMirrorSpecs(snapshot: WorkflowSnapshot): TodoMirrorTaskSpec[] {
   const session = snapshot.session;
   if (!session) return [];
-  return session.chain.map((step, index) => {
+  const chain = [...session.chain];
+  const activeRun = session.activeRunId
+    ? session.runs.find((run) => run.runId === session.activeRunId)
+    : undefined;
+  if (activeRun && !chain.some((step) => step.runId === activeRun.runId)) {
+    chain.push({
+      step: `active:${activeRun.runId}`,
+      command: activeRun.command,
+      status: activeRun.status,
+      runId: activeRun.runId,
+    });
+  }
+  return chain.map((step, index) => {
     const run = step.runId ? session.runs.find((candidate) => candidate.runId === step.runId) : undefined;
-    const previous = index > 0 ? session.chain[index - 1] : undefined;
-    const status = todoStatus(run?.status, step.status, index, previous);
+    const previous = index > 0 ? chain[index - 1] : undefined;
+    const status = todoStatus(run, session.gates, step.status, index, previous);
     const summary = stringValue(run?.handoff?.summary);
     const skill = step.skill?.trim();
     return {
@@ -370,11 +381,18 @@ function mergeGates(left: WorkflowGate[], right: WorkflowGate[]): WorkflowGate[]
 }
 
 function todoStatus(
-  runStatusValue: WorkflowRunStatus | undefined,
+  run: WorkflowRun | undefined,
+  sessionGates: WorkflowGate[],
   chainStatus: string,
   index: number,
   previous?: WorkflowChainStep,
 ): TodoMirrorTaskSpec["status"] {
+  const blockingFailures = [...sessionGates, ...(run?.gates ?? [])].filter((gate) =>
+    gate.blocking && ["failed", "blocked"].includes(gate.status)
+  );
+  if (blockingFailures.some((gate) => gate.phase !== "entry")) return "blocked";
+  if (blockingFailures.some((gate) => gate.phase === "entry")) return "pending";
+  const runStatusValue = run?.status;
   if (runStatusValue === "completed" || runStatusValue === "sealed" || chainStatus === "completed") return "completed";
   if (runStatusValue === "running") return "in_progress";
   if (runStatusValue === "blocked" || runStatusValue === "failed" || ["blocked", "failed"].includes(chainStatus)) return "blocked";

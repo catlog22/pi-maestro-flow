@@ -613,9 +613,13 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     if (!snapshot || !session) return undefined;
     const run = activeWorkflowRun(snapshot);
     if (!run) return undefined;
-    const task = getVisibleTasks().find((candidate) => candidate.status === "in_progress" && candidate.origin);
+    const task = getVisibleTasks().find((candidate) => candidate.origin?.runId === run.runId)
+      ?? getVisibleTasks().find((candidate) => candidate.status === "in_progress" && candidate.origin);
     const gates = [...session.gates, ...(run?.gates ?? [])];
     const next = Array.isArray(run?.handoff?.next) ? run?.handoff?.next[0] : undefined;
+    const handoffAction = next && typeof next === "object" && typeof (next as { command?: unknown }).command === "string"
+      ? (next as { command: string }).command
+      : undefined;
     return {
       sessionId: session.sessionId,
       runId: run.runId,
@@ -627,9 +631,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
         failed: gates.filter((gate) => ["failed", "blocked"].includes(gate.status)).length,
       },
       artifactRefs: session.artifacts.map((artifact) => artifact.artifactId),
-      nextAction: next && typeof next === "object" && typeof (next as { command?: unknown }).command === "string"
-        ? (next as { command: string }).command
-        : undefined,
+      nextAction: handoffAction ?? snapshot.recovery?.message ?? `maestro run brief ${run.runId}`,
     };
   }
 
@@ -685,9 +687,14 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
         requestRender: () => tui.requestRender(),
         close: () => done(undefined),
         onAction: async (action: SessionOverlayAction, runId?: string) => {
+          if (action !== "decision") {
+            const planBlock = onToolCallPlan({ toolName: "run-control", input: { action } });
+            if (planBlock) throw new Error(planBlock.reason);
+          }
           if (action === "pause" || action === "resume") {
             const goal = getActiveGoal();
             if ((action === "pause" && goal?.status === "active") || (action === "resume" && goal?.status === "paused")) {
+              if (action === "pause") await workflowCoordinator!.fenceContinuation();
               const result = await executeGoal({ action: "pause" }, ctx);
               if (result.isError) throw new Error(result.text);
             }
@@ -778,6 +785,15 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
       try {
         await workflowCoordinator.attach(hostSessionId, snapshot.session.sessionId);
         await refreshWorkflow(ctx);
+        const recovery = workflowRecoveryIdentity();
+        if (recovery) {
+          pi.sendMessage({
+            customType: "workflow-attach",
+            content: `Attached canonical Workflow Session ${recovery.sessionId} at Run ${recovery.runId}.`,
+            display: false,
+            details: recovery,
+          });
+        }
       } catch (error) {
         ctx.ui.notify(`Workflow Session attach is read-only because continuation ownership was unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
       }

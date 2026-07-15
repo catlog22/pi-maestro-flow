@@ -266,13 +266,15 @@ file from the installed package and appends it to Pi's system prompt through the
 `before_agent_start` event. This keeps the instructions available after npm installation
 without requiring a repository-root `AGENTS.md`, which other coding agents may discover.
 
-`pi-maestro-flow` also pins `maestro-flow@0.5.49` as an associated runtime package.
-During postinstall it calls Maestro's workflows-only installer, which writes the canonical
-workflow documents to `~/.maestro/workflows`. Pi project skills continue to reference that
-default path. Releases predating the dedicated command use the same package workflows as a
-compatibility fallback. The extension does not register the installed `maestro-flow`
-package's `.agents/skills` directory, so compatibility mirrors cannot compete with the
-plugin's canonical `.pi/skills` resources.
+`pi-maestro-flow` pins the Maestro source tarball at commit
+`84ae24f8ed9a12cac3b5c69ea3428840a0a58e1b` as an associated workflow resource package.
+During postinstall it calls Maestro's workflows-only installer when the tarball includes a
+runnable build; source-only tarballs copy the same canonical workflow documents directly.
+Both paths write to `~/.maestro/workflows`. The active Maestro CLI remains an environment
+runtime, and local development may link the latest `maestro-flow` checkout explicitly.
+The extension does not register the installed `maestro-flow` package's `.agents/skills`
+directory, so compatibility mirrors cannot compete with the plugin's canonical `.pi/skills`
+resources.
 
 Agent definitions are not a native Pi package resource type and must not be declared
 as `pi.agents`. They are owned by `pi-maestro-teammate`, which discovers Markdown

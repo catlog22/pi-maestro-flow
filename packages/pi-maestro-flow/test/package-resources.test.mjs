@@ -22,7 +22,10 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.match(pkg.scripts.postinstall, /install-workflows\.mjs/);
   assert.ok(pkg.files.includes("!.pi/skills/**/__pycache__/**"));
   assert.ok(pkg.files.includes("!.pi/skills/**/*.pyc"));
-  assert.equal(pkg.dependencies["maestro-flow"], "0.5.50");
+  assert.equal(
+    pkg.dependencies["maestro-flow"],
+    "https://codeload.github.com/catlog22/maestro-flow/tar.gz/84ae24f8ed9a12cac3b5c69ea3428840a0a58e1b",
+  );
   assert.equal(pkg.dependencies["pi-maestro-teammate"], "^0.4.3");
   assert.equal(
     pkg.dependencies["@konbakuyomu/smart-search"],
@@ -35,7 +38,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.equal(pkg.files.includes("tsconfig.intelligence.json"), true);
   assert.equal(pkg.peerDependencies?.["pi-maestro-teammate"], undefined);
   assert.equal(pkg.peerDependenciesMeta?.["pi-maestro-teammate"], undefined);
-  assert.doesNotMatch(JSON.stringify(pkg), /file:D:|D:\\\\maestro2/i);
+  assert.doesNotMatch(JSON.stringify(pkg), /file:D:|D:\\\\maestro2|link:/i);
 });
 
 test("package contains the canonical workflow skill set", () => {

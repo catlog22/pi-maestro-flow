@@ -1,7 +1,4 @@
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
-
-const execFileAsync = promisify(execFile);
+import crossSpawn from "cross-spawn";
 
 export interface RunCliResult {
   argv: string[];
@@ -119,22 +116,31 @@ export class RunCliAdapter {
 
 async function defaultRunner(args: readonly string[], cwd: string): Promise<RunCliResult> {
   const executable = process.platform === "win32" ? "maestro.cmd" : "maestro";
-  try {
-    const result = await execFileAsync(executable, [...args], {
+  return new Promise((resolve) => {
+    const child = crossSpawn(executable, [...args], {
       cwd,
       windowsHide: true,
-      maxBuffer: 4 * 1024 * 1024,
+      stdio: ["ignore", "pipe", "pipe"],
     });
-    return { argv: [...args], stdout: result.stdout, stderr: result.stderr, exitCode: 0 };
-  } catch (error) {
-    const value = error as NodeJS.ErrnoException & { stdout?: string; stderr?: string; code?: string | number };
-    return {
+    let stdout = "";
+    let stderr = "";
+    child.stdout?.setEncoding("utf8");
+    child.stderr?.setEncoding("utf8");
+    child.stdout?.on("data", (chunk: string) => { stdout += chunk; });
+    child.stderr?.on("data", (chunk: string) => { stderr += chunk; });
+    child.once("error", (error) => resolve({
       argv: [...args],
-      stdout: value.stdout ?? "",
-      stderr: value.stderr ?? errorMessage(error),
-      exitCode: typeof value.code === "number" ? value.code : 1,
-    };
-  }
+      stdout,
+      stderr: stderr || errorMessage(error),
+      exitCode: 1,
+    }));
+    child.once("close", (code) => resolve({
+      argv: [...args],
+      stdout,
+      stderr,
+      exitCode: code ?? 1,
+    }));
+  });
 }
 
 function required(value: string, label: string): string {

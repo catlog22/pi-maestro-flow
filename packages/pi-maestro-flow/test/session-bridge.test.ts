@@ -227,6 +227,107 @@ test("bridge normalizes live Maestro 0.5.50 session/1.0 records", async () => {
   }
 });
 
+test("entry gate failures keep the canonical Todo mirror pending", async () => {
+  for (const gateStatus of ["failed", "blocked"] as const) {
+    const snapshot = mirrorSnapshot({
+      runStatus: "blocked",
+      chainStatus: "blocked",
+      gatePhase: "entry",
+      gateStatus,
+    });
+
+    assert.equal(buildTodoMirrorSpecs(snapshot)[0]?.status, "pending", gateStatus);
+  }
+
+  const sessionGate = mirrorSnapshot({
+    runStatus: "blocked",
+    chainStatus: "blocked",
+    gatePhase: "entry",
+    gateStatus: "failed",
+  });
+  sessionGate.session!.gates = sessionGate.session!.runs[0]!.gates.splice(0);
+  assert.equal(buildTodoMirrorSpecs(sessionGate)[0]?.status, "pending", "session entry gate");
+});
+
+test("exit gate failures keep completed work uncompleted in the Todo mirror", async () => {
+  const snapshot = mirrorSnapshot({
+    runStatus: "completed",
+    chainStatus: "completed",
+    gatePhase: "exit",
+    gateStatus: "failed",
+  });
+
+  assert.equal(snapshot.session?.runs[0]?.status, "completed");
+  assert.notEqual(snapshot.session?.runs[0]?.status, "sealed");
+  assert.equal(buildTodoMirrorSpecs(snapshot)[0]?.status, "blocked");
+});
+
+test("an active canonical Run without an orchestration chain still gets a recoverable Todo mirror", () => {
+  const snapshot = mirrorSnapshot({
+    runStatus: "blocked",
+    chainStatus: "blocked",
+    gatePhase: "entry",
+    gateStatus: "blocked",
+  });
+  snapshot.session!.chain = [];
+  snapshot.session!.runs[0]!.status = "running";
+  snapshot.session!.runs[0]!.gates = [];
+
+  const [mirror] = buildTodoMirrorSpecs(snapshot);
+  assert.equal(mirror?.origin.runId, "run-gate");
+  assert.equal(mirror?.status, "in_progress");
+});
+
+function mirrorSnapshot(options: {
+  runStatus: "blocked" | "completed";
+  chainStatus: string;
+  gatePhase: "entry" | "exit";
+  gateStatus: "failed" | "blocked";
+}) {
+  return {
+    source: "canonical" as const,
+    projectRoot: "D:/workspace",
+    loadedAt: "2026-07-15T00:00:00.000Z",
+    revision: { sessionRevision: 1, fingerprint: "mirror-gate" },
+    diagnostics: [],
+    session: {
+      sessionId: "session-gate",
+      intent: "Verify gate projection",
+      status: "running" as const,
+      revision: 1,
+      activeRunId: "run-gate",
+      definitionOfDone: "All gates pass",
+      gates: [],
+      chain: [{
+        step: "execute",
+        command: "execute",
+        status: options.chainStatus,
+        runId: "run-gate",
+      }],
+      runs: [{
+        runId: "run-gate",
+        parentRunId: null,
+        command: "execute",
+        status: options.runStatus,
+        goal: "Execute",
+        args: [],
+        gates: [{
+          id: "gate-run",
+          phase: options.gatePhase,
+          blocking: true,
+          status: options.gateStatus,
+        }],
+        primaryArtifactId: null,
+        handoff: null,
+        startedAt: "2026-07-15T00:00:00.000Z",
+        endedAt: options.runStatus === "completed" ? "2026-07-15T00:01:00.000Z" : null,
+      }],
+      artifacts: [],
+      aliases: {},
+    },
+  };
+}
+
 async function writeJson(path: string, value: unknown): Promise<void> {
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, "utf8");
 }

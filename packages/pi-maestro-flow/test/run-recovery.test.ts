@@ -11,6 +11,26 @@ import {
 } from "../src/compaction/maestro-compaction.ts";
 import { TodoSkillLoadError, TodoSkillLoader } from "../src/skills/skill-loader.ts";
 import { SkillRuntime } from "../src/skills/skill-runtime.ts";
+import {
+  executeGoal,
+  initGoal,
+  onCompact as onGoalCompact,
+  onSessionShutdown as onGoalSessionShutdown,
+  onSessionStart as onGoalSessionStart,
+  setWorkflowCoordinator,
+  type GoalContext,
+} from "../src/tools/goal.ts";
+import {
+  executeTodo,
+  getVisibleTasks,
+  initTodo,
+  onBeforeAgentStartTodo,
+  onContextTodo,
+  onSessionShutdown as onTodoSessionShutdown,
+  onSessionStart as onTodoSessionStart,
+  type TodoContext,
+} from "../src/tools/todo.ts";
+import type { WorkflowSnapshot } from "../src/session/types.ts";
 
 test("session-mode flows from skill frontmatter into compiled and activation metadata", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-skill-session-mode-"));
@@ -100,6 +120,117 @@ test("checkpoint v2 preserves Workflow recovery identity across compactions", as
   assert.deepEqual(secondDetails.workflow, workflow);
   assert.equal(secondDetails.previousCheckpointId, "checkpoint-v2");
 });
+
+test("compaction recovery fetches the Run brief before continuation without duplicating the same Skill stack", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-run-recovery-order-"));
+  const skillDir = join(root, ".pi", "skills", "demo");
+  const skillPath = join(skillDir, "SKILL.md");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(skillPath, skillSource("run"));
+  const skill = {
+    name: "demo",
+    description: "session mode test",
+    filePath: skillPath,
+    baseDir: skillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  } satisfies Skill;
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [skill], diagnostics: [] }) },
+  });
+  initTodo({ appendEntry() {} } as never);
+  const todoContext: TodoContext = {
+    cwd: root,
+    ui: { setStatus() {} },
+    skillLoader: loader,
+    sessionManager: { getEntries: () => [] },
+  };
+  onTodoSessionStart(todoContext);
+  const toolContext = { cwd: root, ui: { setStatus() {} } } as never;
+  await executeTodo({ action: "create", subject: "Recover", skills: [{ name: "demo", role: "primary" }] }, toolContext);
+  await executeTodo({ action: "next" }, toolContext);
+  const stackRevision = getVisibleTasks()[0]?.skillActivation?.stackRevision;
+
+  const events: string[] = [];
+  initGoal({
+    appendEntry() {},
+    async sendUserMessage(message: string) {
+      assert.match(message, /^Continue the active goal:/);
+      events.push("continuation");
+    },
+  } as never);
+  const goalContext: GoalContext = {
+    cwd: root,
+    ui: { notify() {}, setStatus() {} },
+    sessionManager: { getEntries: () => [] },
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+  };
+  onGoalSessionStart(goalContext);
+  await executeGoal({ action: "set", objective: "Recover the active Run" }, goalContext);
+  const snapshot = recoverySnapshot();
+  setWorkflowCoordinator({
+    status: () => snapshot,
+    async brief() {
+      events.push("brief");
+      return {};
+    },
+    continuationMarker: () => "workflow-session-1:run-003:1:1",
+  } as never);
+
+  try {
+    await onGoalCompact({}, goalContext);
+    assert.deepEqual(events, ["brief", "continuation"]);
+
+    const injected = await onBeforeAgentStartTodo({ systemPrompt: "base" });
+    assert.equal(injected?.systemPrompt.match(/<active_skill_stack>/g)?.length, 1);
+    assert.equal(getVisibleTasks()[0]?.skillActivation?.stackRevision, stackRevision);
+    assert.equal(await onContextTodo([]), undefined);
+  } finally {
+    setWorkflowCoordinator(undefined);
+    await executeGoal({ action: "clear" }, goalContext);
+    onGoalSessionShutdown(goalContext);
+    onTodoSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+function recoverySnapshot(): WorkflowSnapshot {
+  return {
+    source: "canonical",
+    projectRoot: "D:/workspace",
+    loadedAt: "2026-07-15T00:00:00.000Z",
+    revision: { sessionRevision: 1, fingerprint: "recovery" },
+    diagnostics: [],
+    session: {
+      sessionId: "workflow-session-1",
+      intent: "Recover the active Run",
+      status: "running",
+      revision: 1,
+      activeRunId: "run-003",
+      definitionOfDone: "Run is sealed",
+      gates: [],
+      chain: [{ step: "execute", command: "execute", status: "running", runId: "run-003" }],
+      runs: [{
+        runId: "run-003",
+        parentRunId: null,
+        command: "execute",
+        status: "running",
+        goal: "Execute",
+        args: [],
+        gates: [],
+        primaryArtifactId: null,
+        handoff: null,
+        startedAt: "2026-07-15T00:00:00.000Z",
+        endedAt: null,
+      }],
+      artifacts: [],
+      aliases: {},
+    },
+  };
+}
 
 function skillSource(sessionMode: string): string {
   return `---\nname: demo\ndescription: session mode test\nsession-mode: ${sessionMode}\n---\n# Demo`;
