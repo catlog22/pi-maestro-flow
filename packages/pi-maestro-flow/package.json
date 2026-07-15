@@ -8,8 +8,10 @@
   },
   "scripts": {
     "postinstall": "node scripts/configure-keybindings.mjs && node scripts/install-workflows.mjs",
+    "prepack": "node scripts/prepare-package-skills.mjs",
+    "postpack": "node scripts/prepare-package-skills.mjs --clean",
     "test:install": "node --test test/configure-keybindings.test.mjs test/install-workflows.test.mjs",
-    "test:package": "node --experimental-transform-types --test test/package-resources.test.mjs test/package-resources-runtime.test.ts",
+    "test:package": "node --experimental-transform-types --test test/prepare-package-skills.test.mjs test/package-resources.test.mjs test/package-resources-runtime.test.ts",
     "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/todo.test.ts",
     "test:compaction": "node --experimental-transform-types --test test/compaction.test.ts",
     "test:hooks": "node --experimental-transform-types --test test/hooks.test.ts",

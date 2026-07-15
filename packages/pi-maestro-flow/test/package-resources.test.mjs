@@ -2,9 +2,16 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import test from "node:test";
+import test, { after, before } from "node:test";
+import {
+  cleanPackagedSkills,
+  preparePackagedSkills,
+} from "../scripts/prepare-package-skills.mjs";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+before(() => preparePackagedSkills());
+after(() => cleanPackagedSkills());
 
 test("package manifest publishes the extension and canonical Pi skills", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
