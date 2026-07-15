@@ -721,7 +721,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     });
   }
 
-  pi.registerCommand("session", {
+  pi.registerCommand("maestro-session", {
     description: "Open the canonical Workflow Session control center",
     async handler(_args, ctx) { await openSessionOverlay(ctx); },
   });

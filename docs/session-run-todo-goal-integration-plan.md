@@ -96,7 +96,7 @@ guide §7.1a 已裁定方向：**host_tools（todo/goal）是投影镜像，CLI 
 - `todo({action:"next"})` —— 步进（激活下一步 + 注入上下文）
 - `goal done` —— 宣告完成（触发前置校验 + verifier）
 
-Run 的 `prepare/create/check/complete/brief/seal-session` 转移统一由 CLI 完成。Pi 插件可以提供 `run-control` tool 或 `/session` TUI 动作，但它们只是 CLI adapter，不得形成第二套写入逻辑。状态对账全部由插件确定性完成，不给 LLM 留第二条声明路径（同 guide §7.5 原则）。
+Run 的 `prepare/create/check/complete/brief/seal-session` 转移统一由 CLI 完成。Pi 插件可以提供 `run-control` tool 或 `/maestro-session` TUI 动作，但它们只是 CLI adapter，不得形成第二套写入逻辑。状态对账全部由插件确定性完成，不给 LLM 留第二条声明路径（同 guide §7.5 原则）。
 
 ---
 
@@ -245,7 +245,7 @@ interface WorkflowCoordinator {
 }
 ```
 
-`run-control` tool 或 `/session` 命令暴露以下稳定动作：
+`run-control` tool 或 `/maestro-session` 命令暴露以下稳定动作：
 
 | 动作 | 是否写入 | 实现 |
 |---|---:|---|
@@ -261,7 +261,7 @@ interface WorkflowCoordinator {
 **双入口分工（唯一裁决）**：Run 转移有两个发起者，但同一写入者（CLI）——
 
 - **LLM 路径**：skill 纪律下直接 Bash 调 `maestro run create/complete`（现状即如此，maestro-next 为范本）；
-- **用户/TUI 路径**：`run-control` / `/session` 经 Coordinator 调 CLI adapter。
+- **用户/TUI 路径**：`run-control` / `/maestro-session` 经 Coordinator 调 CLI adapter。
 
 `advance()` 执行前必须检查 `active_run_id`：已有 running Run 时幂等短路为"恢复该 Run"，不重复 create；反向地，LLM 在 TUI 已触发 advance 后再 create，由 CLI 的单 active run 约束拒绝。P3 迁移时 skills 只教 LLM 路径，不提 run-control。
 
@@ -326,7 +326,7 @@ bridge 检测到 run 状态跃迁时 `pi.sendMessage({customType:"run-event", di
 
 ### 5.4 L3 — Session 控制中心 overlay（按需深查）
 
-`/session` 命令唤起 `ctx.ui.custom()` 全屏 overlay，照抄 SmartSearchConfigOverlay 骨架（列表/详情双态、BracketedPasteDecoder、宽度矩阵）：
+`/maestro-session` 命令唤起 `ctx.ui.custom()` 全屏 overlay，照抄 SmartSearchConfigOverlay 骨架（列表/详情双态、BracketedPasteDecoder、宽度矩阵）：
 
 - 左列 run 列表（状态/gate/verdict）；右侧 `Markdown` 组件预览 `report.md`、gates 表、handoff decisions
 - 动作键：`p` 暂停 goal、`r` 恢复（自动发 brief 指令）、`d` 处理 decision point、`Enter` 看详情
@@ -365,7 +365,7 @@ bridge 检测到 run 状态跃迁时 `pi.sendMessage({customType:"run-event", di
 |---|---|---|
 | 跨 turn 持续 | WorkflowCoordinator 校验 Run/gate/Goal/lease 后复用 goal continuation 投递 | 自动 |
 | 压缩恢复 | identity-only checkpoint + continuation 附 `run brief` 锚点（§4.2-3） | 自动 |
-| 冷启动恢复 | session_start：bridge 发现 running session 而 goal 缺失 → notify + `/session resume` 一键重建镜像并发 resume prompt | 半自动 |
+| 冷启动恢复 | session_start：bridge 发现 running session 而 goal 缺失 → notify + `/maestro-session resume` 一键重建镜像并发 resume prompt | 半自动 |
 | 门禁失败 | bridge 产出 blocked diff 事件 → Coordinator 执行 goal pause(reason:gate) + statusline ⚠ + notify | 自动中断 |
 | 决策点 | `orchestration.decision_points` pending → widget 高亮 + statusline ◆；交互裁决仍走 skill 的 AskUserQuestion（**不做双控制路径**），overlay 提供手动兜底 | 混合 |
 | 预算闸门 | goal tokenBudget 由配置策略映射；触顶暂停 → `ui.confirm` 追加预算 | 半自动 |
@@ -385,7 +385,7 @@ bridge 检测到 run 状态跃迁时 `pi.sendMessage({customType:"run-event", di
 | **P2 Projection + Coordinator** | Todo schema v4 内部 `origin`、Goal/Todo 自动物化/对账、`WorkflowCoordinator`、单 continuation owner、`run-control` adapter | P1 | Run 与 Todo/Goal 全程收敛；无重复 follow-up；Plan Mode 权限正确 |
 | **P3 核心 Skill 迁移** | 统一 `<host_mirror>`；依次迁移 `maestro-next`、`maestro-ralph`、`maestro`、`maestro-session-seal` | P2 | analyze→plan→execute→verify 核心链完成，零手工镜像 update |
 | **P4 恢复与失败控制** | compaction identity checkpoint、fresh Pi attach、stale skill、retry lineage、cancel、lease fencing | P2/P3 | 压缩、重启、失败重试后恢复到同一安全动作 |
-| **P5 TUI** | `WorkflowViewModel`、Maestro Panel、run-event、`/session` overlay、非颜色状态与窄宽降级 | P2/P4 | Alt+T 三态、控制中心、宽度 1..120 和键盘冲突测试通过 |
+| **P5 TUI** | `WorkflowViewModel`、Maestro Panel、run-event、`/maestro-session` overlay、非颜色状态与窄宽降级 | P2/P4 | Alt+T 三态、控制中心、宽度 1..120 和键盘冲突测试通过 |
 | **P6 全量迁移与发布** | 扫描全部 `.pi/skills`；focused/full tests；`npm pack` + isolated consumer + fresh Pi 验证 | P3/P5 | packed consumer 能完成一条真实 Session/Run 闭环 |
 
 每期配 focused tests：bridge 对账（新建/失败/重试 run 的镜像收敛）、todo v4 迁移（按既有 contract-test spec）、goal done 前置校验矩阵、`fmtStatusLine` 快照。

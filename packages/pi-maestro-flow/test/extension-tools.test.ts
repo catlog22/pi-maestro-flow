@@ -38,7 +38,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(names.filter((name) => name === "browser").length, 1);
   assert.equal(names.filter((name) => name === "search_tool_bm25").length, 1);
   assert.ok(names.includes("run-control"));
-  assert.ok(commands.includes("session"));
+  assert.ok(commands.includes("maestro-session"));
   assert.ok(renderers.includes("run-event"));
 
   const runControl = tools.find((tool) => tool.name === "run-control");
