@@ -41,3 +41,11 @@ Pi todo MUST 将 skill 作为可空任务配置并通过独立的 Pi 原生 load
 Teammate session handoff MUST maintain exactly one writer. Handoff MUST wait for accepted prompt sequence, corresponding agent_end completion, and stable idle before transfer. Every RPC user message MUST carry epoch/nonce lease metadata and child input MUST reject stale tokens. Timeout recovery MUST send the old transaction cancel before publishing the new fenced lease. switchSession invalidates old extension context; handback MUST reload the child session and validate nonce, sessionId, and canonical sessionFile before restoring child ownership.
 
 </spec-entry>
+
+<spec-entry category="arch" keywords="依赖漂移,源码锁定,tarball,packed-consumer,runtime" date="2026-07-15" sid="S-20260715-j486" title="同版本依赖内容漂移的源码锁定" description="registry 与源码同版本异内容时的可复现集成和真实运行验收规则" source="odyssey:20260715-004-odyssey">
+
+### 同版本依赖内容漂移的源码锁定
+
+当 npm registry 包与目标源码具有相同 version 但命令或行为合同不一致时，禁止继续按 semver 或该 registry version 集成。必须锁定到可复现的 HTTPS source tarball + commit SHA，通过 package-local wrapper 调用，并在 packed consumer 中启用 install scripts 后实际执行至少一个代表性命令；仅 require.resolve、npm ls 或 --ignore-scripts 安装不足以证明 runtime 可用。
+
+</spec-entry>
