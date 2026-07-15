@@ -25,8 +25,7 @@
 Every task description uses structured format:
 
 ```
-todo({ action: "create" })({
-  subject: "<TASK-ID>",
+todo({ action: "create", subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -39,9 +38,8 @@ CONTEXT:
   - Upstream artifacts: <artifact-1>, <artifact-2>
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <deliverable path> + <quality criteria>
-CONSTRAINTS: <scope limits, focus areas>"
-})
-todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
+CONSTRAINTS: <scope limits, focus areas>" })
+todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
 ### Mode Router
@@ -58,8 +56,7 @@ todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-lis
 
 **SCAN-001** (scanner):
 ```
-todo({ action: "create" })({
-  subject: "SCAN-001",
+todo({ action: "create", subject: "SCAN-001",
   description: "PURPOSE: Scan UI against Impeccable's 8 audit dimensions to discover all design problems | Success: Complete scan report with per-dimension scores and issue inventory
 TASK:
   - Load target files or take screenshots via Chrome DevTools
@@ -72,15 +69,13 @@ CONTEXT:
   - Dimension filters: all
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/scan/scan-report.md | 8-dimension scored report with issue inventory
-CONSTRAINTS: Read-only analysis | Reference specs/anti-patterns.md and specs/design-standards.md"
-})
-todo({ action: "update" })({ taskId: "SCAN-001", owner: "scanner" })
+CONSTRAINTS: Read-only analysis | Reference specs/anti-patterns.md and specs/design-standards.md" })
+todo({ action: "update", taskId: "SCAN-001", owner: "scanner" })
 ```
 
 **DIAG-001** (diagnostician):
 ```
-todo({ action: "create" })({
-  subject: "DIAG-001",
+todo({ action: "create", subject: "DIAG-001",
   description: "PURPOSE: Deep-dive root cause analysis of scan findings, classify severity, group systemic vs one-off | Success: Prioritized diagnosis with fix dependency graph
 TASK:
   - Read scan report and classify each issue as systemic or one-off
@@ -92,9 +87,8 @@ CONTEXT:
   - Upstream artifacts: scan/scan-report.md
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/diagnosis/diagnosis-report.md | Root cause groups with fix strategies and dependency graph
-CONSTRAINTS: Read-only analysis | Reference specs/fix-strategies.md"
-})
-todo({ action: "update" })({ taskId: "DIAG-001", addBlockedBy: ["SCAN-001"], owner: "diagnostician" })
+CONSTRAINTS: Read-only analysis | Reference specs/fix-strategies.md" })
+todo({ action: "update", taskId: "DIAG-001", addBlockedBy: ["SCAN-001"], owner: "diagnostician" })
 ```
 
 ---
@@ -110,8 +104,7 @@ Same as scan-only SCAN-001 and DIAG-001, plus:
 
 **OPT-001** (optimizer):
 ```
-todo({ action: "create" })({
-  subject: "OPT-001",
+todo({ action: "create", subject: "OPT-001",
   description: "PURPOSE: Apply targeted fixes for specified dimensions following Impeccable design standards | Success: All P0/P1 issues in targeted dimensions resolved
 TASK:
   - Read diagnosis report for prioritized fix plan
@@ -124,15 +117,13 @@ CONTEXT:
   - Upstream artifacts: scan/scan-report.md, diagnosis/diagnosis-report.md
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: Modified source files + <session>/optimization/fix-log.md | Each fix documented with before/after
-CONSTRAINTS: Only fix targeted dimensions | Reference specs/fix-strategies.md and specs/design-standards.md"
-})
-todo({ action: "update" })({ taskId: "OPT-001", addBlockedBy: ["DIAG-001"], owner: "optimizer" })
+CONSTRAINTS: Only fix targeted dimensions | Reference specs/fix-strategies.md and specs/design-standards.md" })
+todo({ action: "update", taskId: "OPT-001", addBlockedBy: ["DIAG-001"], owner: "optimizer" })
 ```
 
 **VERIFY-001** (verifier):
 ```
-todo({ action: "create" })({
-  subject: "VERIFY-001",
+todo({ action: "create", subject: "VERIFY-001",
   description: "PURPOSE: Verify fixes improved scores without introducing regressions | Success: Score improved or maintained in all dimensions, zero regressions
 TASK:
   - Re-scan fixed code against same 8 dimensions
@@ -144,9 +135,8 @@ CONTEXT:
   - Upstream artifacts: scan/scan-report.md, optimization/fix-log.md
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/verification/verify-report.md | Before/after comparison with regression check
-CONSTRAINTS: Read-only verification | Signal fix_required if regressions found"
-})
-todo({ action: "update" })({ taskId: "VERIFY-001", addBlockedBy: ["OPT-001"], owner: "verifier" })
+CONSTRAINTS: Read-only verification | Signal fix_required if regressions found" })
+todo({ action: "update", taskId: "VERIFY-001", addBlockedBy: ["OPT-001"], owner: "verifier" })
 ```
 
 ---
@@ -162,8 +152,7 @@ Same as targeted pipeline. The difference is in GC loop behavior:
 ### GC Fix Task Template (created by monitor.md when verify fails)
 
 ```
-todo({ action: "create" })({
-  subject: "OPT-fix-<round>",
+todo({ action: "create", subject: "OPT-fix-<round>",
   description: "PURPOSE: Address verification regressions from round <round> | Success: All regressions resolved, no new issues
 TASK:
   - Parse verification feedback for specific regressions
@@ -174,9 +163,8 @@ CONTEXT:
   - Upstream artifacts: verification/verify-report.md, optimization/fix-log.md
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: Updated source files + appended <session>/optimization/fix-log.md
-CONSTRAINTS: Fix regressions only, do not expand scope"
-})
-todo({ action: "update" })({ taskId: "OPT-fix-<round>", owner: "optimizer" })
+CONSTRAINTS: Fix regressions only, do not expand scope" })
+todo({ action: "update", taskId: "OPT-fix-<round>", owner: "optimizer" })
 ```
 
 Then create new VERIFY task blocked by OPT-fix.

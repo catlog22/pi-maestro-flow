@@ -2,7 +2,7 @@
 role: implementer
 prefix: BUILD
 inner_loop: false
-message_types: [impl_complete, impl_failed, error]
+message_types: "[impl_complete, impl_failed, error]"
 ---
 
 <required_reading>

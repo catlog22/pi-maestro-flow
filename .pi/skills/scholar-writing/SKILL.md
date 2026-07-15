@@ -1,6 +1,6 @@
 ---
 name: scholar-writing
-description: End-to-end academic paper writing workflow. Takes a research repository and produces a publication-ready LaTeX manuscript for top ML/AI conferences (NeurIPS, ICML, ICLR, ACL, AAAI, COLM). Covers repo understanding, structure planning, section drafting, citation management, anti-AI polishing, and conference formatting. Triggers on "write paper", "draft paper", "scholar writing", "paper writing workflow".
+description: "End-to-end academic paper writing workflow. Takes a research repository and produces a publication-ready LaTeX manuscript for top ML/AI conferences (NeurIPS, ICML, ICLR, ACL, AAAI, COLM). Covers repo understanding, structure planning, section drafting, citation management, anti-AI polishing, and conference formatting. Triggers on \"write paper\", \"draft paper\", \"scholar writing\", \"paper writing workflow\"."
 allowed-tools:
   - AskUserQuestion
   - Bash

@@ -1,7 +1,7 @@
 ---
 name: maestro-init
 description: Initialize project with auto state detection
-argument-hint: [-y] [--from <source>] [--from-brainstorm SESSION-ID]
+argument-hint: "[-y] [--from <source>] [--from-brainstorm SESSION-ID]"
 allowed-tools:
   - AskUserQuestion
   - Bash

@@ -1,6 +1,6 @@
 ---
 name: scholar-citation-verify
-description: Four-layer citation verification for academic papers. Scans LaTeX/BibTeX files, verifies every citation via WebSearch and Google Scholar, generates verification report with fix suggestions. Triggers on "verify citations", "check references", "citation verification", "prevent fake citations", "引用验证".
+description: "Four-layer citation verification for academic papers. Scans LaTeX/BibTeX files, verifies every citation via WebSearch and Google Scholar, generates verification report with fix suggestions. Triggers on \"verify citations\", \"check references\", \"citation verification\", \"prevent fake citations\", \"引用验证\"."
 allowed-tools:
   - AskUserQuestion
   - Bash

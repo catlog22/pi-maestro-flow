@@ -34,7 +34,7 @@ Triggered when a worker sends completion message.
 2. Mark task as completed:
 
 ```
-todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })
+todo({ action: "update", taskId: "<task-id>", status: "completed" })
 ```
 
 3. Record completion in session state

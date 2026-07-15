@@ -71,8 +71,7 @@ Overlapping files -> log warning to `wisdom/issues.md`, continue.
 ### 3d. Create EXEC-* Task
 
 ```
-todo({ action: "create" })({
-  subject: "EXEC-00N: Implement <issue-title>",
+todo({ action: "create", subject: "EXEC-00N: Implement <issue-title>",
   description: `Implement solution for issue <issueId>.
 
 Issue ID: <issueId>
@@ -81,8 +80,7 @@ Session: <session>
 Execution method: <method>
 
 InnerLoop: true`,
-  activeForm: "Implementing <issue-title>"
-})
+  activeForm: "Implementing <issue-title>" })
 ```
 
 ### 3e. Signal issue_ready

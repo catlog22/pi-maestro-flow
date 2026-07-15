@@ -24,8 +24,7 @@
 Every task description uses structured format:
 
 ```
-todo({ action: "create" })({
-  subject: "<TASK-ID>",
+todo({ action: "create", subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -38,9 +37,8 @@ CONTEXT:
   - Upstream artifacts: <artifact-1>, <artifact-2>
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <deliverable path> + <quality criteria>
-CONSTRAINTS: <scope limits, focus areas>"
-})
-todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
+CONSTRAINTS: <scope limits, focus areas>" })
+todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
 ### Mode Router
@@ -56,8 +54,7 @@ todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-lis
 
 **COLOR-001** (color-auditor):
 ```
-todo({ action: "create" })({
-  subject: "COLOR-001",
+todo({ action: "create", subject: "COLOR-001",
   description: "PURPOSE: OKLCH color contrast audit for all color combinations | Success: Complete color audit with WCAG 2.1 + APCA contrast ratios and color blindness assessment
 TASK:
   - Extract all color values (OKLCH, HSL, RGB, hex) from stylesheets
@@ -72,15 +69,13 @@ CONTEXT:
   - WCAG Level: <level>
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <session>/audits/color/color-audit-001.md | Pass/fail per color combination
-CONSTRAINTS: Read-only analysis | Use Chrome DevTools for computed styles when available"
-})
-todo({ action: "update" })({ taskId: "COLOR-001", owner: "color-auditor" })
+CONSTRAINTS: Read-only analysis | Use Chrome DevTools for computed styles when available" })
+todo({ action: "update", taskId: "COLOR-001", owner: "color-auditor" })
 ```
 
 **TYPO-001** (typo-auditor):
 ```
-todo({ action: "create" })({
-  subject: "TYPO-001",
+todo({ action: "create", subject: "TYPO-001",
   description: "PURPOSE: Typography readability audit across all viewports | Success: Complete typography audit with size, line-height, reading width at each breakpoint
 TASK:
   - Audit font sizes at each breakpoint (320px, 768px, 1024px, 1400px)
@@ -95,15 +90,13 @@ CONTEXT:
   - WCAG Level: <level>
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <session>/audits/typography/typo-audit-001.md | Breakpoint-by-breakpoint report
-CONSTRAINTS: Read-only analysis | Screenshot at multiple viewports if Chrome DevTools available"
-})
-todo({ action: "update" })({ taskId: "TYPO-001", owner: "typo-auditor" })
+CONSTRAINTS: Read-only analysis | Screenshot at multiple viewports if Chrome DevTools available" })
+todo({ action: "update", taskId: "TYPO-001", owner: "typo-auditor" })
 ```
 
 **FOCUS-001** (focus-auditor):
 ```
-todo({ action: "create" })({
-  subject: "FOCUS-001",
+todo({ action: "create", subject: "FOCUS-001",
   description: "PURPOSE: Focus management and keyboard accessibility audit | Success: Complete focus audit with tab order, indicator visibility, ARIA coverage
 TASK:
   - Audit tab order for logical sequence and no tab traps
@@ -120,17 +113,15 @@ CONTEXT:
   - WCAG Level: <level>
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <session>/audits/focus/focus-audit-001.md | Element-by-element focus report
-CONSTRAINTS: Read-only analysis | Tab through elements if Chrome DevTools available"
-})
-todo({ action: "update" })({ taskId: "FOCUS-001", owner: "focus-auditor" })
+CONSTRAINTS: Read-only analysis | Tab through elements if Chrome DevTools available" })
+todo({ action: "update", taskId: "FOCUS-001", owner: "focus-auditor" })
 ```
 
 **CRITICAL**: COLOR-001, TYPO-001, FOCUS-001 have NO blockedBy -- they run in PARALLEL.
 
 **REMED-001** (remediation-planner):
 ```
-todo({ action: "create" })({
-  subject: "REMED-001",
+todo({ action: "create", subject: "REMED-001",
   description: "PURPOSE: Synthesize all 3 audit findings into prioritized remediation plan | Success: Complete remediation plan with severity ranking, code-level fix guidance, WCAG criterion mapping
 TASK:
   - Read color, typography, and focus audit reports
@@ -147,9 +138,8 @@ CONTEXT:
   - Upstream artifacts: audits/color/color-audit-001.md, audits/typography/typo-audit-001.md, audits/focus/focus-audit-001.md
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <session>/remediation/remediation-plan.md | All critical/high issues addressed
-CONSTRAINTS: Read-only synthesis | No code modifications"
-})
-todo({ action: "update" })({ taskId: "REMED-001", addBlockedBy: ["COLOR-001", "TYPO-001", "FOCUS-001"], owner: "remediation-planner" })
+CONSTRAINTS: Read-only synthesis | No code modifications" })
+todo({ action: "update", taskId: "REMED-001", addBlockedBy: ["COLOR-001", "TYPO-001", "FOCUS-001"], owner: "remediation-planner" })
 ```
 
 ---
@@ -160,8 +150,7 @@ Same as audit-only (COLOR-001, TYPO-001, FOCUS-001, REMED-001), plus:
 
 **FIX-001** (fix-implementer):
 ```
-todo({ action: "create" })({
-  subject: "FIX-001",
+todo({ action: "create", subject: "FIX-001",
   description: "PURPOSE: Implement accessibility fixes from remediation plan | Success: All critical and high severity issues fixed with passing contrast ratios and ARIA validation
 TASK:
   - Read remediation plan for prioritized fix list
@@ -179,15 +168,13 @@ CONTEXT:
   - Upstream artifacts: remediation/remediation-plan.md
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: Modified source files + <session>/fixes/fix-summary-001.md | All critical/high fixes applied
-CONSTRAINTS: Modify only files identified in remediation plan | Preserve existing functionality"
-})
-todo({ action: "update" })({ taskId: "FIX-001", addBlockedBy: ["REMED-001"], owner: "fix-implementer" })
+CONSTRAINTS: Modify only files identified in remediation plan | Preserve existing functionality" })
+todo({ action: "update", taskId: "FIX-001", addBlockedBy: ["REMED-001"], owner: "fix-implementer" })
 ```
 
 **COLOR-002** (color-auditor):
 ```
-todo({ action: "create" })({
-  subject: "COLOR-002",
+todo({ action: "create", subject: "COLOR-002",
   description: "PURPOSE: Re-audit color contrast after fixes applied | Success: All color combinations pass WCAG target level
 TASK:
   - Re-extract all color values from modified stylesheets
@@ -202,15 +189,13 @@ CONTEXT:
   - Upstream artifacts: fixes/fix-summary-001.md, audits/color/color-audit-001.md
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <session>/re-audit/color-audit-002.md | Before/after comparison with pass/fail
-CONSTRAINTS: Read-only verification | Focus on fixed items + regression check"
-})
-todo({ action: "update" })({ taskId: "COLOR-002", addBlockedBy: ["FIX-001"], owner: "color-auditor" })
+CONSTRAINTS: Read-only verification | Focus on fixed items + regression check" })
+todo({ action: "update", taskId: "COLOR-002", addBlockedBy: ["FIX-001"], owner: "color-auditor" })
 ```
 
 **FOCUS-002** (focus-auditor):
 ```
-todo({ action: "create" })({
-  subject: "FOCUS-002",
+todo({ action: "create", subject: "FOCUS-002",
   description: "PURPOSE: Re-audit focus management after fixes applied | Success: All focus indicators visible with correct ARIA attributes
 TASK:
   - Re-audit tab order after DOM changes
@@ -226,9 +211,8 @@ CONTEXT:
   - Upstream artifacts: fixes/fix-summary-001.md, audits/focus/focus-audit-001.md
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <session>/re-audit/focus-audit-002.md | Before/after comparison with pass/fail
-CONSTRAINTS: Read-only verification | Focus on fixed items + regression check"
-})
-todo({ action: "update" })({ taskId: "FOCUS-002", addBlockedBy: ["FIX-001"], owner: "focus-auditor" })
+CONSTRAINTS: Read-only verification | Focus on fixed items + regression check" })
+todo({ action: "update", taskId: "FOCUS-002", addBlockedBy: ["FIX-001"], owner: "focus-auditor" })
 ```
 
 **CRITICAL**: COLOR-002 and FOCUS-002 both blocked only by FIX-001 -- they run in PARALLEL after fixes.

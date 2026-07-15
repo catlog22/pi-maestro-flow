@@ -2,7 +2,7 @@
 role: focus-auditor
 prefix: FOCUS
 inner_loop: false
-message_types: [state_update]
+message_types: "[state_update]"
 ---
 
 <required_reading>

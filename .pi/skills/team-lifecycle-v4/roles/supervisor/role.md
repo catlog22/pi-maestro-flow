@@ -2,7 +2,7 @@
 role: supervisor
 prefix: CHECKPOINT
 inner_loop: false
-discuss_rounds: []
+discuss_rounds: "[]"
 message_types: 
 ---
 

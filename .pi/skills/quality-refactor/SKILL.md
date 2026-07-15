@@ -1,7 +1,7 @@
 ---
 name: quality-refactor
 description: Use when accumulated tech debt needs systematic identification and safe reduction
-argument-hint: [<scope>]
+argument-hint: "[<scope>]"
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -14,6 +14,10 @@ allowed-tools:
 session-mode: run
 contract: 
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 <purpose>
 Targeted refactoring with safety guarantees: plan → confirm → execute with test verification per change → reflection-log.md.

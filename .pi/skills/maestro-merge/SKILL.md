@@ -1,7 +1,7 @@
 ---
 name: maestro-merge
 description: Merge session worktree branch back to main
-argument-hint: --session <session_id> [--force] [--dry-run] [--no-cleanup] [--continue]
+argument-hint: "--session <session_id> [--force] [--dry-run] [--no-cleanup] [--continue]"
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -14,6 +14,10 @@ allowed-tools:
 session-mode: run
 contract: 
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 <purpose>
 Merge a session worktree branch back into main, sync Run artifacts, and reconcile the artifact registry.

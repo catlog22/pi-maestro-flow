@@ -2,7 +2,7 @@
 role: optimizer
 prefix: OPT
 inner_loop: true
-message_types: [opt_complete, opt_progress, error]
+message_types: "[opt_complete, opt_progress, error]"
 ---
 
 <required_reading>

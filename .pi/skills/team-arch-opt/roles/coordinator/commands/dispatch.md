@@ -27,8 +27,7 @@
 Every task description uses structured format for clarity:
 
 ```
-todo({ action: "create" })({
-  subject: "<TASK-ID>",
+todo({ action: "create", subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -44,9 +43,8 @@ EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits, focus areas>
 ---
 InnerLoop: <true|false>
-BranchId: <B01|A|none>"
-})
-todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
+BranchId: <B01|A|none>" })
+todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
 ### Mode Router
@@ -66,8 +64,7 @@ Create tasks in dependency order (backward compatible, unchanged):
 
 **ANALYZE-001** (analyzer, Stage 1):
 ```
-todo({ action: "create" })({
-  subject: "ANALYZE-001",
+todo({ action: "create", subject: "ANALYZE-001",
   description: "PURPOSE: Analyze codebase architecture to identify structural issues | Success: Baseline metrics captured, top 3-7 issues ranked by severity
 TASK:
   - Detect project type and available analysis tools
@@ -81,15 +78,13 @@ CONTEXT:
 EXPECTED: <session>/artifacts/architecture-baseline.json + <session>/artifacts/architecture-report.md | Quantified metrics with evidence
 CONSTRAINTS: Focus on <refactoring-scope> | Analyze before any changes
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "ANALYZE-001", owner: "analyzer" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "ANALYZE-001", owner: "analyzer" })
 ```
 
 **DESIGN-001** (designer, Stage 2):
 ```
-todo({ action: "create" })({
-  subject: "DESIGN-001",
+todo({ action: "create", subject: "DESIGN-001",
   description: "PURPOSE: Design prioritized refactoring plan from architecture analysis | Success: Actionable plan with measurable success criteria per refactoring
 TASK:
   - Analyze architecture report and baseline metrics
@@ -105,15 +100,13 @@ CONTEXT:
 EXPECTED: <session>/artifacts/refactoring-plan.md | Priority-ordered with structural improvement targets, discrete REFACTOR-IDs
 CONSTRAINTS: Focus on highest-impact refactorings | Risk assessment required | Non-overlapping file targets per REFACTOR-ID
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "DESIGN-001", addBlockedBy: ["ANALYZE-001"], owner: "designer" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "DESIGN-001", addBlockedBy: ["ANALYZE-001"], owner: "designer" })
 ```
 
 **REFACTOR-001** (refactorer, Stage 3):
 ```
-todo({ action: "create" })({
-  subject: "REFACTOR-001",
+todo({ action: "create", subject: "REFACTOR-001",
   description: "PURPOSE: Implement refactoring changes per design plan | Success: All planned refactorings applied, code compiles, existing tests pass
 TASK:
   - Load refactoring plan and identify target files
@@ -129,15 +122,13 @@ CONTEXT:
 EXPECTED: Modified source files + validation passing | Refactorings applied without regressions
 CONSTRAINTS: Preserve existing behavior | Update all references | Follow code conventions
 ---
-InnerLoop: true"
-})
-todo({ action: "update" })({ taskId: "REFACTOR-001", addBlockedBy: ["DESIGN-001"], owner: "refactorer" })
+InnerLoop: true" })
+todo({ action: "update", taskId: "REFACTOR-001", addBlockedBy: ["DESIGN-001"], owner: "refactorer" })
 ```
 
 **VALIDATE-001** (validator, Stage 4 - parallel):
 ```
-todo({ action: "create" })({
-  subject: "VALIDATE-001",
+todo({ action: "create", subject: "VALIDATE-001",
   description: "PURPOSE: Validate refactoring results against baseline | Success: Build passes, tests pass, no metric regressions, API compatible
 TASK:
   - Load architecture baseline and plan success criteria
@@ -154,15 +145,13 @@ CONTEXT:
 EXPECTED: <session>/artifacts/validation-results.json | Per-dimension validation with verdicts
 CONSTRAINTS: Must compare against baseline | Flag any regressions or broken imports
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "VALIDATE-001", addBlockedBy: ["REFACTOR-001"], owner: "validator" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "VALIDATE-001", addBlockedBy: ["REFACTOR-001"], owner: "validator" })
 ```
 
 **REVIEW-001** (reviewer, Stage 4 - parallel):
 ```
-todo({ action: "create" })({
-  subject: "REVIEW-001",
+todo({ action: "create", subject: "REVIEW-001",
   description: "PURPOSE: Review refactoring code for correctness, pattern consistency, and migration safety | Success: All dimensions reviewed, verdict issued
 TASK:
   - Load modified files and refactoring plan
@@ -177,9 +166,8 @@ CONTEXT:
 EXPECTED: <session>/artifacts/review-report.md | Per-dimension findings with severity
 CONSTRAINTS: Focus on refactoring changes only | Provide specific file:line references
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "REVIEW-001", addBlockedBy: ["REFACTOR-001"], owner: "reviewer" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "REVIEW-001", addBlockedBy: ["REFACTOR-001"], owner: "reviewer" })
 ```
 
 ---
@@ -206,15 +194,15 @@ For each target index `i` (0-based), with prefix char `P = pipeline_prefix_chars
 // Create session subdirectory for this pipeline
 Bash("mkdir -p <session>/artifacts/pipelines/<P>")
 
-todo({ action: "create" })({ subject: "ANALYZE-<P>01", ... })
-todo({ action: "create" })({ subject: "DESIGN-<P>01", ... })
-todo({ action: "update" })({ taskId: "DESIGN-<P>01", addBlockedBy: ["ANALYZE-<P>01"] })
-todo({ action: "create" })({ subject: "REFACTOR-<P>01", ... })
-todo({ action: "update" })({ taskId: "REFACTOR-<P>01", addBlockedBy: ["DESIGN-<P>01"] })
-todo({ action: "create" })({ subject: "VALIDATE-<P>01", ... })
-todo({ action: "update" })({ taskId: "VALIDATE-<P>01", addBlockedBy: ["REFACTOR-<P>01"] })
-todo({ action: "create" })({ subject: "REVIEW-<P>01", ... })
-todo({ action: "update" })({ taskId: "REVIEW-<P>01", addBlockedBy: ["REFACTOR-<P>01"] })
+todo({ action: "create", subject: "ANALYZE-<P>01", ... })
+todo({ action: "create", subject: "DESIGN-<P>01", ... })
+todo({ action: "update", taskId: "DESIGN-<P>01", addBlockedBy: ["ANALYZE-<P>01"] })
+todo({ action: "create", subject: "REFACTOR-<P>01", ... })
+todo({ action: "update", taskId: "REFACTOR-<P>01", addBlockedBy: ["DESIGN-<P>01"] })
+todo({ action: "create", subject: "VALIDATE-<P>01", ... })
+todo({ action: "update", taskId: "VALIDATE-<P>01", addBlockedBy: ["REFACTOR-<P>01"] })
+todo({ action: "create", subject: "REVIEW-<P>01", ... })
+todo({ action: "update", taskId: "REVIEW-<P>01", addBlockedBy: ["REFACTOR-<P>01"] })
 ```
 
 Task descriptions follow same template as single mode, with additions:
@@ -225,8 +213,7 @@ Task descriptions follow same template as single mode, with additions:
 
 Example for pipeline A with target "refactor auth module":
 ```
-todo({ action: "create" })({
-  subject: "ANALYZE-A01",
+todo({ action: "create", subject: "ANALYZE-A01",
   description: "PURPOSE: Analyze auth module architecture | Success: Auth module structural issues identified
 TASK:
   - Detect project type and available analysis tools
@@ -241,9 +228,8 @@ EXPECTED: <session>/artifacts/pipelines/A/architecture-baseline.json + architect
 CONSTRAINTS: Focus on auth module scope
 ---
 InnerLoop: false
-PipelineId: A"
-})
-todo({ action: "update" })({ taskId: "ANALYZE-A01", owner: "analyzer" })
+PipelineId: A" })
+todo({ action: "update", taskId: "ANALYZE-A01", owner: "analyzer" })
 ```
 
 ---

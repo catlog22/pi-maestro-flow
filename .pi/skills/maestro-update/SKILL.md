@@ -1,7 +1,7 @@
 ---
 name: maestro-update
-description: Detect version, preview changes, apply workflow upgrades
-argument-hint: [--dry-run] [--force] [--setup-only]
+description: "Detect version, preview changes, apply workflow upgrades"
+argument-hint: "[--dry-run] [--force] [--setup-only]"
 allowed-tools:
   - AskUserQuestion
   - Bash

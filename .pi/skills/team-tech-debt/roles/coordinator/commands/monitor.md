@@ -32,7 +32,7 @@ Worker completed. Process and advance.
 3. Progress update -> update session state, STOP
 4. Completion -> mark task done:
    ```
-   todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })
+   todo({ action: "update", taskId: "<task-id>", status: "completed" })
    ```
 5. Remove from active_workers, record completion in session
 
@@ -71,9 +71,9 @@ Worker completed. Process and advance.
 
      Fix-Verify Task Creation:
      ```
-     todo({ action: "create" })({ subject: "TDFIX-fix-<round>", description: "PURPOSE: Fix regressions | Session: <session>" })
-     todo({ action: "create" })({ subject: "TDVAL-recheck-<round>", description: "..." })
-     todo({ action: "update" })({ taskId: "TDVAL-recheck-<round>", addBlockedBy: ["TDFIX-fix-<round>"] })
+     todo({ action: "create", subject: "TDFIX-fix-<round>", description: "PURPOSE: Fix regressions | Session: <session>" })
+     todo({ action: "create", subject: "TDVAL-recheck-<round>", description: "..." })
+     todo({ action: "update", taskId: "TDVAL-recheck-<round>", addBlockedBy: ["TDFIX-fix-<round>"] })
      ```
 
 7. -> handleSpawnNext

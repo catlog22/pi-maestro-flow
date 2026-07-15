@@ -1,6 +1,6 @@
 ---
 name: team-designer
-description: Meta-skill for generating team skills following the v4 architecture pattern. Produces complete skill packages with SKILL.md router, coordinator, worker roles, specs, and templates. Triggers on "team-designer", "design team".
+description: "Meta-skill for generating team skills following the v4 architecture pattern. Produces complete skill packages with SKILL.md router, coordinator, worker roles, specs, and templates. Triggers on \"team-designer\", \"design team\"."
 allowed-tools:
   - AskUserQuestion
   - Bash

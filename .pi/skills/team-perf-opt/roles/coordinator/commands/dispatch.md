@@ -27,8 +27,7 @@
 Every task description uses structured format for clarity:
 
 ```
-todo({ action: "create" })({
-  subject: "<TASK-ID>",
+todo({ action: "create", subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -45,9 +44,8 @@ CONSTRAINTS: <scope limits, focus areas>
 ---
 InnerLoop: <true|false>
 BranchId: <B01|A|none>",
-  status: "pending"
-})
-todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
+  status: "pending" })
+todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
 ### Mode Router
@@ -67,8 +65,7 @@ Create tasks in dependency order (backward compatible, unchanged):
 
 **PROFILE-001** (profiler, Stage 1):
 ```
-todo({ action: "create" })({
-  subject: "PROFILE-001",
+todo({ action: "create", subject: "PROFILE-001",
   description: "PURPOSE: Profile application performance to identify bottlenecks | Success: Baseline metrics captured, top 3-5 bottlenecks ranked by severity
 TASK:
   - Detect project type and available profiling tools
@@ -83,14 +80,12 @@ EXPECTED: <session>/artifacts/baseline-metrics.json + <session>/artifacts/bottle
 CONSTRAINTS: Focus on <optimization-scope> | Profile before any changes
 ---
 InnerLoop: false",
-  status: "pending"
-})
+  status: "pending" })
 ```
 
 **STRATEGY-001** (strategist, Stage 2):
 ```
-todo({ action: "create" })({
-  subject: "STRATEGY-001",
+todo({ action: "create", subject: "STRATEGY-001",
   description: "PURPOSE: Design prioritized optimization plan from bottleneck analysis | Success: Actionable plan with measurable success criteria per optimization
 TASK:
   - Analyze bottleneck report and baseline metrics
@@ -107,15 +102,13 @@ EXPECTED: <session>/artifacts/optimization-plan.md | Priority-ordered with impro
 CONSTRAINTS: Focus on highest-impact optimizations | Risk assessment required | Non-overlapping file targets per OPT-ID
 ---
 InnerLoop: false",
-  status: "pending"
-})
-todo({ action: "update" })({ taskId: "STRATEGY-001", addBlockedBy: ["PROFILE-001"] })
+  status: "pending" })
+todo({ action: "update", taskId: "STRATEGY-001", addBlockedBy: ["PROFILE-001"] })
 ```
 
 **IMPL-001** (optimizer, Stage 3):
 ```
-todo({ action: "create" })({
-  subject: "IMPL-001",
+todo({ action: "create", subject: "IMPL-001",
   description: "PURPOSE: Implement optimization changes per strategy plan | Success: All planned optimizations applied, code compiles, existing tests pass
 TASK:
   - Load optimization plan and identify target files
@@ -131,15 +124,13 @@ EXPECTED: Modified source files + validation passing | Optimizations applied wit
 CONSTRAINTS: Preserve existing behavior | Minimal changes per optimization | Follow code conventions
 ---
 InnerLoop: true",
-  status: "pending"
-})
-todo({ action: "update" })({ taskId: "IMPL-001", addBlockedBy: ["STRATEGY-001"] })
+  status: "pending" })
+todo({ action: "update", taskId: "IMPL-001", addBlockedBy: ["STRATEGY-001"] })
 ```
 
 **BENCH-001** (benchmarker, Stage 4 - parallel):
 ```
-todo({ action: "create" })({
-  subject: "BENCH-001",
+todo({ action: "create", subject: "BENCH-001",
   description: "PURPOSE: Benchmark optimization results against baseline | Success: All plan success criteria met, no regressions detected
 TASK:
   - Load baseline metrics and plan success criteria
@@ -155,15 +146,13 @@ EXPECTED: <session>/artifacts/benchmark-results.json | Per-metric comparison wit
 CONSTRAINTS: Must compare against baseline | Flag any regressions
 ---
 InnerLoop: false",
-  status: "pending"
-})
-todo({ action: "update" })({ taskId: "BENCH-001", addBlockedBy: ["IMPL-001"] })
+  status: "pending" })
+todo({ action: "update", taskId: "BENCH-001", addBlockedBy: ["IMPL-001"] })
 ```
 
 **REVIEW-001** (reviewer, Stage 4 - parallel):
 ```
-todo({ action: "create" })({
-  subject: "REVIEW-001",
+todo({ action: "create", subject: "REVIEW-001",
   description: "PURPOSE: Review optimization code for correctness, side effects, and regression risks | Success: All dimensions reviewed, verdict issued
 TASK:
   - Load modified files and optimization plan
@@ -179,9 +168,8 @@ EXPECTED: <session>/artifacts/review-report.md | Per-dimension findings with sev
 CONSTRAINTS: Focus on optimization changes only | Provide specific file:line references
 ---
 InnerLoop: false",
-  status: "pending"
-})
-todo({ action: "update" })({ taskId: "REVIEW-001", addBlockedBy: ["IMPL-001"] })
+  status: "pending" })
+todo({ action: "update", taskId: "REVIEW-001", addBlockedBy: ["IMPL-001"] })
 ```
 
 ---
@@ -208,16 +196,16 @@ For each target index `i` (0-based), with prefix char `P = pipeline_prefix_chars
 // Create session subdirectory for this pipeline
 Bash("mkdir -p <session>/artifacts/pipelines/<P>")
 
-todo({ action: "create" })({ subject: "PROFILE-<P>01", ... })
-todo({ action: "create" })({ subject: "STRATEGY-<P>01", ... })
-todo({ action: "create" })({ subject: "IMPL-<P>01", ... })
-todo({ action: "create" })({ subject: "BENCH-<P>01", ... })
-todo({ action: "create" })({ subject: "REVIEW-<P>01", ... })
+todo({ action: "create", subject: "PROFILE-<P>01", ... })
+todo({ action: "create", subject: "STRATEGY-<P>01", ... })
+todo({ action: "create", subject: "IMPL-<P>01", ... })
+todo({ action: "create", subject: "BENCH-<P>01", ... })
+todo({ action: "create", subject: "REVIEW-<P>01", ... })
 // Then set dependencies via todo({ action: "update" }):
-todo({ action: "update" })({ taskId: "STRATEGY-<P>01", addBlockedBy: ["PROFILE-<P>01"] })
-todo({ action: "update" })({ taskId: "IMPL-<P>01", addBlockedBy: ["STRATEGY-<P>01"] })
-todo({ action: "update" })({ taskId: "BENCH-<P>01", addBlockedBy: ["IMPL-<P>01"] })
-todo({ action: "update" })({ taskId: "REVIEW-<P>01", addBlockedBy: ["IMPL-<P>01"] })
+todo({ action: "update", taskId: "STRATEGY-<P>01", addBlockedBy: ["PROFILE-<P>01"] })
+todo({ action: "update", taskId: "IMPL-<P>01", addBlockedBy: ["STRATEGY-<P>01"] })
+todo({ action: "update", taskId: "BENCH-<P>01", addBlockedBy: ["IMPL-<P>01"] })
+todo({ action: "update", taskId: "REVIEW-<P>01", addBlockedBy: ["IMPL-<P>01"] })
 ```
 
 Task descriptions follow same template as single mode, with additions:
@@ -228,8 +216,7 @@ Task descriptions follow same template as single mode, with additions:
 
 Example for pipeline A with target "optimize rendering":
 ```
-todo({ action: "create" })({
-  subject: "PROFILE-A01",
+todo({ action: "create", subject: "PROFILE-A01",
   description: "PURPOSE: Profile rendering performance | Success: Rendering bottlenecks identified
 TASK:
   - Detect project type and available profiling tools
@@ -245,8 +232,7 @@ CONSTRAINTS: Focus on rendering scope
 ---
 InnerLoop: false
 PipelineId: A",
-  status: "pending"
-})
+  status: "pending" })
 ```
 
 ---

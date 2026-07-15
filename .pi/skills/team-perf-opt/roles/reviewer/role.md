@@ -2,8 +2,8 @@
 role: reviewer
 prefix: REVIEW
 inner_loop: false
-additional_prefixes: [QUALITY]
-discuss_rounds: [DISCUSS-REVIEW]
+additional_prefixes: "[QUALITY]"
+discuss_rounds: "[DISCUSS-REVIEW]"
 message_types: 
 ---
 

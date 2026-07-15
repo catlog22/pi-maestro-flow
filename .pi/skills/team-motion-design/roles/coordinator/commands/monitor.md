@@ -36,7 +36,7 @@ Worker completed. Process and advance.
 | `[animator]` or `ANIM-*` | animator |
 | `[motion-tester]` or `MTEST-*` | motion-tester |
 
-2. Mark task completed: `todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })`
+2. Mark task completed: `todo({ action: "update", taskId: "<task-id>", status: "completed" })`
 3. Record completion in session state
 
 4. Check checkpoint for completed task:
@@ -61,7 +61,7 @@ Worker completed. Process and advance.
 
    **GC Fix Task Creation**:
    ```
-   todo({ action: "create" })({ subject: "ANIM-fix-<round>",
+   todo({ action: "create", subject: "ANIM-fix-<round>",
      description: "PURPOSE: Address performance issues from motion-tester report | Success: All critical perf issues resolved
    TASK:
      - Parse performance report for specific issues (layout thrashing, unsafe properties, excessive will-change)
@@ -71,7 +71,7 @@ Worker completed. Process and advance.
    CONTEXT:
      - Session: <session-folder>
      - Upstream artifacts: testing/reports/perf-report-<NNN>.md" })
-   todo({ action: "update" })({ taskId: "ANIM-fix-<round>", owner: "animator" })
+   todo({ action: "update", taskId: "ANIM-fix-<round>", owner: "animator" })
    ```
    Then create new MTEST task blocked by fix. Increment gc_state.round.
 

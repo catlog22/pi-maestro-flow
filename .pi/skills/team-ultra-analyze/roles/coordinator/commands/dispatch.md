@@ -24,8 +24,7 @@
 Every task description uses structured format:
 
 ```
-todo({ action: "create" })({
-  subject: "<TASK-ID>",
+todo({ action: "create", subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -40,9 +39,8 @@ CONTEXT:
 EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits, focus areas>
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
 ### Mode Router
@@ -59,8 +57,7 @@ todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-lis
 
 **EXPLORE-001** (explorer):
 ```
-todo({ action: "create" })({
-  subject: "EXPLORE-001",
+todo({ action: "create", subject: "EXPLORE-001",
   description: "PURPOSE: Explore codebase structure for analysis topic | Success: Key files, patterns, and findings collected
 TASK:
   - Detect project structure and relevant modules
@@ -75,15 +72,13 @@ CONTEXT:
 EXPECTED: <session>/explorations/exploration-001.json | Structured exploration with files and findings
 CONSTRAINTS: Focus on <topic> scope
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "EXPLORE-001", owner: "explorer" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "EXPLORE-001", owner: "explorer" })
 ```
 
 **ANALYZE-001** (analyst):
 ```
-todo({ action: "create" })({
-  subject: "ANALYZE-001",
+todo({ action: "create", subject: "ANALYZE-001",
   description: "PURPOSE: Deep analysis of topic from technical perspective | Success: Actionable insights with confidence levels
 TASK:
   - Load exploration results and build analysis context
@@ -99,15 +94,13 @@ CONTEXT:
 EXPECTED: <session>/analyses/analysis-001.json | Structured analysis with evidence
 CONSTRAINTS: Focus on technical perspective | <dimensions>
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "ANALYZE-001", addBlockedBy: ["EXPLORE-001"], owner: "analyst" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "ANALYZE-001", addBlockedBy: ["EXPLORE-001"], owner: "analyst" })
 ```
 
 **SYNTH-001** (synthesizer):
 ```
-todo({ action: "create" })({
-  subject: "SYNTH-001",
+todo({ action: "create", subject: "SYNTH-001",
   description: "PURPOSE: Integrate analysis into final conclusions | Success: Executive summary with recommendations
 TASK:
   - Load all exploration, analysis, and discussion artifacts
@@ -121,9 +114,8 @@ CONTEXT:
 EXPECTED: <session>/conclusions.json + discussion.md update | Final conclusions with confidence levels
 CONSTRAINTS: Pure integration, no new exploration
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "SYNTH-001", addBlockedBy: ["ANALYZE-001"], owner: "synthesizer" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "SYNTH-001", addBlockedBy: ["ANALYZE-001"], owner: "synthesizer" })
 ```
 
 ---
@@ -136,8 +128,7 @@ Create tasks in dependency order with parallel exploration and analysis windows:
 
 ```
 // For each perspective[i]:
-todo({ action: "create" })({
-  subject: "EXPLORE-<NNN>",
+todo({ action: "create", subject: "EXPLORE-<NNN>",
   description: "PURPOSE: Explore codebase from <perspective> angle | Success: Perspective-specific files and patterns collected
 TASK:
   - Search codebase from <perspective> perspective
@@ -152,16 +143,14 @@ CONTEXT:
 EXPECTED: <session>/explorations/exploration-<NNN>.json
 CONSTRAINTS: Focus on <perspective> angle
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "EXPLORE-<NNN>", owner: "explorer-<i+1>" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "EXPLORE-<NNN>", owner: "explorer-<i+1>" })
 ```
 
 **ANALYZE-001..N** (analyst, parallel): One per perspective. Each blocked by its corresponding EXPLORE-N.
 
 ```
-todo({ action: "create" })({
-  subject: "ANALYZE-<NNN>",
+todo({ action: "create", subject: "ANALYZE-<NNN>",
   description: "PURPOSE: Deep analysis from <perspective> perspective | Success: Insights with confidence and evidence
 TASK:
   - Load exploration-<NNN> results
@@ -177,16 +166,14 @@ CONTEXT:
 EXPECTED: <session>/analyses/analysis-<NNN>.json
 CONSTRAINTS: <perspective> perspective | <dimensions>
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "ANALYZE-<NNN>", addBlockedBy: ["EXPLORE-<NNN>"], owner: "analyst-<i+1>" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "ANALYZE-<NNN>", addBlockedBy: ["EXPLORE-<NNN>"], owner: "analyst-<i+1>" })
 ```
 
 **DISCUSS-001** (discussant): Blocked by all ANALYZE tasks.
 
 ```
-todo({ action: "create" })({
-  subject: "DISCUSS-001",
+todo({ action: "create", subject: "DISCUSS-001",
   description: "PURPOSE: Process analysis results into discussion summary | Success: Convergent themes and discussion points identified
 TASK:
   - Aggregate all analysis results across perspectives
@@ -202,20 +189,17 @@ CONTEXT:
 EXPECTED: <session>/discussions/discussion-round-001.json + discussion.md update
 CONSTRAINTS: Aggregate only, no new exploration
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "DISCUSS-001", addBlockedBy: ["ANALYZE-001", ..., "ANALYZE-<N>"], owner: "discussant" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "DISCUSS-001", addBlockedBy: ["ANALYZE-001", ..., "ANALYZE-<N>"], owner: "discussant" })
 ```
 
 **SYNTH-001** (synthesizer): Blocked by DISCUSS-001.
 
 ```
-todo({ action: "create" })({
-  subject: "SYNTH-001",
+todo({ action: "create", subject: "SYNTH-001",
   description: "PURPOSE: Cross-perspective integration into final conclusions | Success: Executive summary with prioritized recommendations
-...same as Quick mode SYNTH-001 but blocked by DISCUSS-001..."
-})
-todo({ action: "update" })({ taskId: "SYNTH-001", addBlockedBy: ["DISCUSS-001"], owner: "synthesizer" })
+...same as Quick mode SYNTH-001 but blocked by DISCUSS-001..." })
+todo({ action: "update", taskId: "SYNTH-001", addBlockedBy: ["DISCUSS-001"], owner: "synthesizer" })
 ```
 
 ---
@@ -232,8 +216,7 @@ Dynamic tasks created during discussion loop:
 
 **DISCUSS-N** (subsequent rounds):
 ```
-todo({ action: "create" })({
-  subject: "DISCUSS-<NNN>",
+todo({ action: "create", subject: "DISCUSS-<NNN>",
   description: "PURPOSE: Process discussion round <N> | Success: Updated understanding with user feedback integrated
 TASK:
   - Process user feedback: <feedback>
@@ -248,15 +231,13 @@ CONTEXT:
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/discussions/discussion-round-<NNN>.json
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "DISCUSS-<NNN>", owner: "discussant" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "DISCUSS-<NNN>", owner: "discussant" })
 ```
 
 **ANALYZE-fix-N** (direction adjustment):
 ```
-todo({ action: "create" })({
-  subject: "ANALYZE-fix-<N>",
+todo({ action: "create", subject: "ANALYZE-fix-<N>",
   description: "PURPOSE: Supplementary analysis with adjusted focus | Success: New insights from adjusted direction
 TASK:
   - Re-analyze from adjusted perspective: <adjusted_focus>
@@ -270,9 +251,8 @@ CONTEXT:
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/analyses/analysis-fix-<N>.json
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "ANALYZE-fix-<N>", owner: "analyst" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "ANALYZE-fix-<N>", owner: "analyst" })
 ```
 
 ## Phase 4: Validation

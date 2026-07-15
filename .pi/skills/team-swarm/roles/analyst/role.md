@@ -2,7 +2,7 @@
 role: analyst
 prefix: ANALYST
 inner_loop: false
-output_tag: [analyst]
+output_tag: "[analyst]"
 message_types: 
 ---
 

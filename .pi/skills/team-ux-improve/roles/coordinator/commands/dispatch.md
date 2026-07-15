@@ -32,8 +32,7 @@ Create task chains based on execution mode. Generate structured task description
 Every task description uses structured format for clarity:
 
 ```
-todo({ action: "create" })({
-  subject: "<TASK-ID>",
+todo({ action: "create", subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -49,17 +48,15 @@ EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits, focus areas>
 ---
 InnerLoop: <true|false>
-<additional-metadata-fields>"
-})
-todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
+<additional-metadata-fields>" })
+todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
 ### Standard Pipeline Tasks
 
 **SCAN-001: UI Component Scanning**
 ```
-todo({ action: "create" })({
-  subject: "SCAN-001",
+todo({ action: "create", subject: "SCAN-001",
   description: "PURPOSE: Scan UI components to identify interaction issues (unresponsive buttons, missing feedback, state not refreshing) | Success: Complete issue report with file:line references and severity classification
 TASK:
   - Detect framework (React/Vue) from project structure
@@ -75,15 +72,13 @@ CONTEXT:
 EXPECTED: artifacts/scan-report.md with structured issue list (severity: High/Medium/Low, file:line, description, category)
 CONSTRAINTS: Focus on interaction issues only, exclude styling/layout problems
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "SCAN-001", owner: "scanner" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "SCAN-001", owner: "scanner" })
 ```
 
 **DIAG-001: Root Cause Diagnosis**
 ```
-todo({ action: "create" })({
-  subject: "DIAG-001",
+todo({ action: "create", subject: "DIAG-001",
   description: "PURPOSE: Diagnose root causes of identified UI issues | Success: Complete diagnosis report with fix recommendations for each issue
 TASK:
   - Load scan report from artifacts/scan-report.md
@@ -100,15 +95,13 @@ CONTEXT:
 EXPECTED: artifacts/diagnosis.md with root cause analysis (issue ID, root cause, pattern type, fix recommendation)
 CONSTRAINTS: Focus on actionable root causes, provide specific fix strategies
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "DIAG-001", addBlockedBy: ["SCAN-001"], owner: "diagnoser" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "DIAG-001", addBlockedBy: ["SCAN-001"], owner: "diagnoser" })
 ```
 
 **DESIGN-001: Solution Design**
 ```
-todo({ action: "create" })({
-  subject: "DESIGN-001",
+todo({ action: "create", subject: "DESIGN-001",
   description: "PURPOSE: Design feedback mechanisms and state management solutions for identified issues | Success: Complete implementation guide with code patterns and examples
 TASK:
   - Load diagnosis report from artifacts/diagnosis.md
@@ -126,15 +119,13 @@ CONTEXT:
 EXPECTED: artifacts/design-guide.md with implementation guide (issue ID, solution design, code patterns, state management examples, UI binding templates)
 CONSTRAINTS: Solutions must be framework-appropriate, provide complete working examples
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "DESIGN-001", addBlockedBy: ["DIAG-001"], owner: "designer" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "DESIGN-001", addBlockedBy: ["DIAG-001"], owner: "designer" })
 ```
 
 **IMPL-001: Code Implementation**
 ```
-todo({ action: "create" })({
-  subject: "IMPL-001",
+todo({ action: "create", subject: "IMPL-001",
   description: "PURPOSE: Generate fix code with proper state management, event handling, and UI feedback bindings | Success: All fixes implemented and validated
 TASK:
   - Load design guide from artifacts/design-guide.md
@@ -154,15 +145,13 @@ CONTEXT:
 EXPECTED: artifacts/fixes/ directory with all fix files, implementation summary in artifacts/fixes/README.md
 CONSTRAINTS: Maintain existing code style, ensure backward compatibility, validate all changes
 ---
-InnerLoop: true"
-})
-todo({ action: "update" })({ taskId: "IMPL-001", addBlockedBy: ["DESIGN-001"], owner: "implementer" })
+InnerLoop: true" })
+todo({ action: "update", taskId: "IMPL-001", addBlockedBy: ["DESIGN-001"], owner: "implementer" })
 ```
 
 **TEST-001: Test Validation**
 ```
-todo({ action: "create" })({
-  subject: "TEST-001",
+todo({ action: "create", subject: "TEST-001",
   description: "PURPOSE: Generate and run tests to verify fixes (loading states, error handling, state updates) | Success: Pass rate >= 95%, all critical fixes validated
 TASK:
   - Detect test framework (Jest/Vitest) from project
@@ -181,9 +170,8 @@ CONTEXT:
 EXPECTED: artifacts/test-report.md with test results (pass/fail counts, coverage metrics, fix iterations, remaining issues)
 CONSTRAINTS: Pass rate threshold: 95%, max fix iterations: 5
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "TEST-001", addBlockedBy: ["IMPL-001"], owner: "tester" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "TEST-001", addBlockedBy: ["IMPL-001"], owner: "tester" })
 ```
 
 ---

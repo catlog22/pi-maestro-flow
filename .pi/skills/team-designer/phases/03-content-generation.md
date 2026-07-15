@@ -79,7 +79,7 @@ If `.workflow/.team/${teamConfig.sessionPrefix}-*/team-session.json` exists:
 ## Phase 3: Dispatch
 
 - Execute `commands/dispatch.md`
-- Creates todo({ action: "create" }) calls, then sets dependencies via todo({ action: "update" })({ addBlockedBy })
+- Creates todo({ action: "create" }) calls, then sets dependencies via todo({ action: "update", addBlockedBy })
 
 ## Phase 4: Spawn & Monitor
 
@@ -146,7 +146,7 @@ Write `task-analysis.json` to session directory:
 
 Template — includes:
 - Topological sort from dependency graph
-- todo({ action: "create" }) + todo({ action: "update" })({ addBlockedBy }) for dependencies
+- todo({ action: "create" }) + todo({ action: "update", addBlockedBy }) for dependencies
 - Task description template (PURPOSE/TASK/CONTEXT/EXPECTED/CONSTRAINTS)
 
 ### coordinator/commands/monitor.md

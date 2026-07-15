@@ -86,11 +86,9 @@ for (const stage of pipeline) {
     .map(dep => taskIds[dep])
     .filter(Boolean)
 
-  todo({ action: "update" })({
-    taskId: newTask.id,
+  todo({ action: "update", taskId: newTask.id,
     owner: stage.owner,
-    addBlockedBy: blockedByIds
-  })
+    addBlockedBy: blockedByIds })
 }
 ```
 

@@ -2,7 +2,7 @@
 role: explorer
 prefix: EXPLORE
 inner_loop: false
-message_types: [context_ready, error]
+message_types: "[context_ready, error]"
 ---
 
 <required_reading>

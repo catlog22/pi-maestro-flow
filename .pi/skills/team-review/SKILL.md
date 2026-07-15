@@ -1,6 +1,6 @@
 ---
 name: team-review
-description: Unified team skill for code review. 3-role pipeline: scanner, reviewer, fixer. Triggers on team-review.
+description: "Unified team skill for code review. 3-role pipeline: scanner, reviewer, fixer. Triggers on team-review."
 allowed-tools:
   - AskUserQuestion
   - Bash

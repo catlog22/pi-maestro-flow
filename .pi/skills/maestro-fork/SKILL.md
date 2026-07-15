@@ -1,7 +1,7 @@
 ---
 name: maestro-fork
 description: Create or sync session worktree for parallel dev
-argument-hint: --session <session_id> [--base <branch>] [--sync]
+argument-hint: "--session <session_id> [--base <branch>] [--sync]"
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -14,6 +14,10 @@ allowed-tools:
 session-mode: run
 contract: 
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 <purpose>
 Create or sync a session-level git worktree for parallel development.

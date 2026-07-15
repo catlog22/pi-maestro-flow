@@ -1,7 +1,7 @@
 ---
 name: learn
-description: Understand code through guided reading, investigation, pattern extraction, or second opinions
-argument-hint: <subcommand> [args...] where subcommand = follow|investigate|decompose|consult
+description: "Understand code through guided reading, investigation, pattern extraction, or second opinions"
+argument-hint: "follow|investigate|decompose|consult [args...]"
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -10,8 +10,7 @@ allowed-tools:
   - Read
   - Write
   - teammate
-session-mode: none
-contract: 
+session-mode: run
 ---
 <purpose>
 Learning toolkit for building understanding of code, decisions, and plans. Four subcommands:

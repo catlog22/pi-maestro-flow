@@ -2,7 +2,7 @@
 role: diagnostician
 prefix: DIAG
 inner_loop: false
-message_types: [diag_complete, diag_progress, error]
+message_types: "[diag_complete, diag_progress, error]"
 ---
 
 <required_reading>

@@ -25,8 +25,7 @@
 Every task description uses structured format:
 
 ```
-todo({ action: "create" })({
-  subject: "<TASK-ID>",
+todo({ action: "create", subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -39,9 +38,8 @@ CONTEXT:
   - Upstream artifacts: <artifact-1>, <artifact-2>
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <deliverable path> + <quality criteria>
-CONSTRAINTS: <scope limits, focus areas>"
-})
-todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
+CONSTRAINTS: <scope limits, focus areas>" })
+todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
 ### Mode Router
@@ -58,8 +56,7 @@ todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-lis
 
 **ANALYZE-001** (analyst):
 ```
-todo({ action: "create" })({
-  subject: "ANALYZE-001",
+todo({ action: "create", subject: "ANALYZE-001",
   description: "PURPOSE: Analyze frontend requirements and retrieve design intelligence | Success: design-intelligence.json produced with industry-specific recommendations
 TASK:
   - Detect tech stack and existing design system
@@ -72,15 +69,13 @@ CONTEXT:
   - Scope: <scope>
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <session>/analysis/design-intelligence.json + requirements.md | Structured design data
-CONSTRAINTS: Read-only analysis | No code modifications"
-})
-todo({ action: "update" })({ taskId: "ANALYZE-001", owner: "analyst" })
+CONSTRAINTS: Read-only analysis | No code modifications" })
+todo({ action: "update", taskId: "ANALYZE-001", owner: "analyst" })
 ```
 
 **ARCH-001** (architect):
 ```
-todo({ action: "create" })({
-  subject: "ARCH-001",
+todo({ action: "create", subject: "ARCH-001",
   description: "PURPOSE: Define design token system and component architecture | Success: design-tokens.json + component specs produced
 TASK:
   - Load design intelligence from analyst output
@@ -94,15 +89,13 @@ CONTEXT:
   - Upstream artifacts: design-intelligence.json, requirements.md
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <session>/architecture/design-tokens.json + component-specs/ + project-structure.md
-CONSTRAINTS: Use ui-ux-pro-max recommendations for token values | Support light/dark mode"
-})
-todo({ action: "update" })({ taskId: "ARCH-001", addBlockedBy: ["ANALYZE-001"], owner: "architect" })
+CONSTRAINTS: Use ui-ux-pro-max recommendations for token values | Support light/dark mode" })
+todo({ action: "update", taskId: "ARCH-001", addBlockedBy: ["ANALYZE-001"], owner: "architect" })
 ```
 
 **DEV-001** (developer):
 ```
-todo({ action: "create" })({
-  subject: "DEV-001",
+todo({ action: "create", subject: "DEV-001",
   description: "PURPOSE: Implement frontend page/components from architecture artifacts | Success: All planned files implemented with design token usage
 TASK:
   - Load design tokens, component specs, project structure
@@ -116,15 +109,13 @@ CONTEXT:
   - Upstream artifacts: design-tokens.json, component-specs/, project-structure.md
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: src/styles/tokens.css + component files | Design-token compliant code
-CONSTRAINTS: Use CSS variables from tokens | Mobile-first responsive | WCAG AA"
-})
-todo({ action: "update" })({ taskId: "DEV-001", addBlockedBy: ["ARCH-001"], owner: "developer" })
+CONSTRAINTS: Use CSS variables from tokens | Mobile-first responsive | WCAG AA" })
+todo({ action: "update", taskId: "DEV-001", addBlockedBy: ["ARCH-001"], owner: "developer" })
 ```
 
 **QA-001** (qa):
 ```
-todo({ action: "create" })({
-  subject: "QA-001",
+todo({ action: "create", subject: "QA-001",
   description: "PURPOSE: Execute 5-dimension quality audit on implementation | Success: Score >= 8 with 0 critical issues
 TASK:
   - Load design intelligence and tokens for compliance checks
@@ -138,9 +129,8 @@ CONTEXT:
   - Upstream artifacts: design-intelligence.json, design-tokens.json, src/**
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <session>/qa/audit-001.md | Weighted score + verdict + categorized issues
-CONSTRAINTS: Read-only review | No code modifications"
-})
-todo({ action: "update" })({ taskId: "QA-001", addBlockedBy: ["DEV-001"], owner: "qa" })
+CONSTRAINTS: Read-only review | No code modifications" })
+todo({ action: "update", taskId: "QA-001", addBlockedBy: ["DEV-001"], owner: "qa" })
 ```
 
 ---

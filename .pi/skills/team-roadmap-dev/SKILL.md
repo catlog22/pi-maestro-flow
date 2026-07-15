@@ -1,6 +1,6 @@
 ---
 name: team-roadmap-dev
-description: Unified team skill for roadmap-driven development workflow. Coordinator discusses roadmap with user, then dispatches phased execution pipeline (plan -> execute -> verify). All roles invoke this skill with --role arg. Triggers on "team roadmap-dev".
+description: "Unified team skill for roadmap-driven development workflow. Coordinator discusses roadmap with user, then dispatches phased execution pipeline (plan -> execute -> verify). All roles invoke this skill with --role arg. Triggers on \"team roadmap-dev\"."
 allowed-tools:
   - AskUserQuestion
   - Bash

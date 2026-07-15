@@ -1,6 +1,6 @@
 ---
 name: skill-iter-tune
-description: Iterative skill tuning via execute-evaluate-improve feedback loop. Uses maestro delegate Claude to execute skill, Agy to evaluate quality, and Agent to apply improvements. Iterates until quality threshold or max iterations. Triggers on "skill iter tune", "iterative skill tuning", "tune skill".
+description: "Iterative skill tuning via execute-evaluate-improve feedback loop. Uses maestro delegate Claude to execute skill, Agy to evaluate quality, and Agent to apply improvements. Iterates until quality threshold or max iterations. Triggers on \"skill iter tune\", \"iterative skill tuning\", \"tune skill\"."
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -292,9 +292,9 @@ Phase 1: Setup
 
 ```javascript
 // Initial state
-todo({ action: "create" })({ subject: "Phase 1: Setup workspace", activeForm: "Setting up workspace" })
-todo({ action: "create" })({ subject: "Iteration Loop", activeForm: "Running iterations" })
-todo({ action: "create" })({ subject: "Phase 5: Final Report", activeForm: "Generating report" })
+todo({ action: "create", subject: "Phase 1: Setup workspace", activeForm: "Setting up workspace" })
+todo({ action: "create", subject: "Iteration Loop", activeForm: "Running iterations" })
+todo({ action: "create", subject: "Phase 5: Final Report", activeForm: "Generating report" })
 
 // Chain mode: create per-skill tracking tasks
 if (state.execution_mode === 'chain') {

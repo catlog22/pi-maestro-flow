@@ -2,7 +2,7 @@
 role: analyst
 prefix: ANALYZE
 inner_loop: false
-additional_prefixes: [ANALYZE-fix]
+additional_prefixes: "[ANALYZE-fix]"
 message_types: 
 ---
 

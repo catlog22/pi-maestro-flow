@@ -2,7 +2,7 @@
 role: scorer
 prefix: SCORE
 inner_loop: false
-output_tag: [scorer]
+output_tag: "[scorer]"
 message_types: 
 ---
 

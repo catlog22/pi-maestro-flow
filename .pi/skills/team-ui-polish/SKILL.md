@@ -1,6 +1,6 @@
 ---
 name: team-ui-polish
-description: Unified team skill for UI polish. Auto-discover and fix UI design issues using Impeccable design standards. Anti-AI-slop detection, color/typography/spacing quality, motion, interaction states, visual hierarchy. Uses team-worker agent architecture. Triggers on "team ui polish", "ui polish", "design polish".
+description: "Unified team skill for UI polish. Auto-discover and fix UI design issues using Impeccable design standards. Anti-AI-slop detection, color/typography/spacing quality, motion, interaction states, visual hierarchy. Uses team-worker agent architecture. Triggers on \"team ui polish\", \"ui polish\", \"design polish\"."
 allowed-tools:
   - AskUserQuestion
   - Bash

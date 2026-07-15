@@ -2,7 +2,7 @@
 role: scanner
 prefix: SCAN
 inner_loop: false
-message_types: [scan_complete, scan_progress, error]
+message_types: "[scan_complete, scan_progress, error]"
 ---
 
 <required_reading>

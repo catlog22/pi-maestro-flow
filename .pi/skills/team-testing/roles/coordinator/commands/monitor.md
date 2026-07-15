@@ -55,8 +55,7 @@ Worker completed. Process and advance.
 
 **GC Fix Task Creation** (when coverage below target):
 ```
-todo({ action: "create" })({
-  subject: "TESTGEN-<layer>-fix-<round>: Revise <layer> tests (GC #<round>)",
+todo({ action: "create", subject: "TESTGEN-<layer>-fix-<round>: Revise <layer> tests (GC #<round>)",
   description: "PURPOSE: Revise tests to fix failures and improve coverage | Success: pass_rate >= 0.95 AND coverage >= target
 TASK:
   - Read previous test results and failure details
@@ -70,10 +69,8 @@ EXPECTED: Revised test files in <session>/tests/<layer>/
 CONSTRAINTS: Only modify test files
 ---
 InnerLoop: true
-RoleSpec: ~  or <project>/.claude/skills/team-testing/roles/generator/role.md"
-})
-todo({ action: "create" })({
-  subject: "TESTRUN-<layer>-fix-<round>: Re-execute <layer> (GC #<round>)",
+RoleSpec: ~  or <project>/.claude/skills/team-testing/roles/generator/role.md" })
+todo({ action: "create", subject: "TESTRUN-<layer>-fix-<round>: Re-execute <layer> (GC #<round>)",
   description: "PURPOSE: Re-execute tests after revision | Success: pass_rate >= 0.95
 CONTEXT:
   - Session: <session-folder>
@@ -83,8 +80,7 @@ EXPECTED: <session>/results/run-<N>-gc.json
 ---
 InnerLoop: true
 RoleSpec: ~  or <project>/.claude/skills/team-testing/roles/executor/role.md",
-  blockedBy: ["TESTGEN-<layer>-fix-<round>"]
-})
+  blockedBy: ["TESTGEN-<layer>-fix-<round>"] })
 ```
 Update session.gc_rounds[layer]++
 

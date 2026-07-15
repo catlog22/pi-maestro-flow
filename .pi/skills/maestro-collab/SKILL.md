@@ -1,7 +1,7 @@
 ---
 name: maestro-collab
 description: Use when a question needs cross-verification from multiple CLI tools or diverse analytical perspectives
-argument-hint: <requirement> [--tools agy,qwen,claude] [--mode analysis|write] [--rule <template>] [-y]
+argument-hint: "<requirement> [--tools agy,qwen,claude] [--mode analysis|write] [--rule <template>] [-y]"
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -13,6 +13,10 @@ allowed-tools:
 session-mode: run
 contract: 
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 <purpose>
 Fan-out requirement to multiple CLI tools in parallel → cross-verify for consensus/conflicts → synthesize into unified report with downstream artifacts (context.md + conclusions.json).

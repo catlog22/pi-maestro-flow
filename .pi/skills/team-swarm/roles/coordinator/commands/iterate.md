@@ -52,11 +52,9 @@ On error -> log to issues.md, AskUserQuestion (retry / abort).
 For each assignment:
 
 ```
-todo({ action: "create" })({
-  subject: "ANT-<k>-<i>: explore from <start_node>",
-  description: "Session: <session_path>\nAssignment: <assignment JSON>\nObjective: <config.ant_prompt.objective>"
-})
-todo({ action: "update" })({ taskId: <new>, owner: "ant" })
+todo({ action: "create", subject: "ANT-<k>-<i>: explore from <start_node>",
+  description: "Session: <session_path>\nAssignment: <assignment JSON>\nObjective: <config.ant_prompt.objective>" })
+todo({ action: "update", taskId: <new>, owner: "ant" })
 ```
 
 Set the task ID to match `ANT-<k>-<i>` (or record mapping in `.msg/meta.json` if framework auto-assigns IDs).

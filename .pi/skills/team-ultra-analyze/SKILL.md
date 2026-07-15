@@ -1,6 +1,6 @@
 ---
 name: team-ultra-analyze
-description: Deep collaborative analysis team skill. Multi-role investigation with coordinator-driven synthesis. Triggers on "team ultra-analyze", "team analyze".
+description: "Deep collaborative analysis team skill. Multi-role investigation with coordinator-driven synthesis. Triggers on \"team ultra-analyze\", \"team analyze\"."
 allowed-tools:
   - AskUserQuestion
   - Bash

@@ -1,6 +1,6 @@
 ---
 name: team-frontend-debug
-description: Frontend debugging team using Chrome DevTools MCP. Dual-mode — feature-list testing or bug-report debugging. Triggers on "team-frontend-debug", "frontend debug".
+description: "Frontend debugging team using Chrome DevTools MCP. Dual-mode — feature-list testing or bug-report debugging. Triggers on \"team-frontend-debug\", \"frontend debug\"."
 allowed-tools:
   - AskUserQuestion
   - Bash

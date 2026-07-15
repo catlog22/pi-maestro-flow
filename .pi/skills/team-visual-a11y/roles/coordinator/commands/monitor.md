@@ -37,7 +37,7 @@ Worker completed. Process and advance.
 | `[remediation-planner]` or `REMED-*` | remediation-planner |
 | `[fix-implementer]` or `FIX-*` | fix-implementer |
 
-2. Mark task completed: `todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })`
+2. Mark task completed: `todo({ action: "update", taskId: "<task-id>", status: "completed" })`
 3. Record completion in session state
 
 4. Check checkpoint for completed task:
@@ -79,7 +79,7 @@ Worker completed. Process and advance.
 
    **GC Fix Task Creation** (when re-audit finds issues):
    ```
-   todo({ action: "create" })({ subject: "FIX-002",
+   todo({ action: "create", subject: "FIX-002",
      description: "PURPOSE: Address remaining issues from re-audit | Success: All critical/high issues resolved
    TASK:
      - Parse re-audit reports for remaining issues
@@ -87,7 +87,7 @@ Worker completed. Process and advance.
    CONTEXT:
      - Session: <session-folder>
      - Upstream artifacts: re-audit/color-audit-002.md, re-audit/focus-audit-002.md" })
-   todo({ action: "update" })({ taskId: "FIX-002", addBlockedBy: ["COLOR-002", "FOCUS-002"], owner: "fix-implementer" })
+   todo({ action: "update", taskId: "FIX-002", addBlockedBy: ["COLOR-002", "FOCUS-002"], owner: "fix-implementer" })
    ```
    Then create new re-audit tasks blocked by FIX-002. Increment gc_state.round.
 

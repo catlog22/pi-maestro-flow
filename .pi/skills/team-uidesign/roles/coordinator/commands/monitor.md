@@ -36,7 +36,7 @@ Worker completed. Process and advance.
 | `[reviewer]` or `AUDIT-*` | reviewer |
 | `[implementer]` or `BUILD-*` | implementer |
 
-2. Mark task completed: `todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })`
+2. Mark task completed: `todo({ action: "update", taskId: "<task-id>", status: "completed" })`
 3. Record completion in session state
 
 4. Check checkpoint for completed task:
@@ -61,7 +61,7 @@ Worker completed. Process and advance.
 
    **GC Fix Task Creation**:
    ```
-   todo({ action: "create" })({ subject: "DESIGN-fix-<round>",
+   todo({ action: "create", subject: "DESIGN-fix-<round>",
      description: "PURPOSE: Address audit feedback | Success: All critical/high issues resolved
    TASK:
      - Parse audit feedback for specific issues
@@ -69,7 +69,7 @@ Worker completed. Process and advance.
    CONTEXT:
      - Session: <session-folder>
      - Upstream artifacts: audit/audit-<NNN>.md" })
-   todo({ action: "update" })({ taskId: "DESIGN-fix-<round>", owner: "designer" })
+   todo({ action: "update", taskId: "DESIGN-fix-<round>", owner: "designer" })
    ```
    Then create new AUDIT task blocked by fix. Increment gc_state.round.
 

@@ -2,7 +2,7 @@
 role: ant
 prefix: ANT
 inner_loop: false
-output_tag: [ant]
+output_tag: "[ant]"
 message_types: 
 ---
 

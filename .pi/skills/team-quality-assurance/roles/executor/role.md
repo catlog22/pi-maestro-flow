@@ -2,7 +2,7 @@
 role: executor
 prefix: QARUN
 inner_loop: true
-additional_prefixes: [QARUN-gc]
+additional_prefixes: "[QARUN-gc]"
 message_types: 
 ---
 

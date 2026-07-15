@@ -37,7 +37,7 @@ Worker completed. Process and advance.
 | `[analyzer-A]` or task ID `ANALYZE-A01` | Pipeline `A` (independent) |
 | `[analyzer]` or task ID `ANALYZE-001` | No branch (single) |
 
-2. Mark task as completed: `todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })`
+2. Mark task as completed: `todo({ action: "update", taskId: "<task-id>", status: "completed" })`
 3. Record completion in session state
 4. **CP-2.5 check** (auto/fan-out mode only):
    - If completed task is DESIGN-001 AND parallel_mode is `auto` or `fan-out`:

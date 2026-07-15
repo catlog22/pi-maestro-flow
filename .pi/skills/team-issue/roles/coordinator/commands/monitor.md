@@ -38,7 +38,7 @@ Worker completed. Process and advance.
 | `[integrator]` or task ID `MARSHAL-*` | integrator |
 | `[implementer]` or task ID `BUILD-*` | implementer |
 
-2. Mark task as completed: `todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })`
+2. Mark task as completed: `todo({ action: "update", taskId: "<task-id>", status: "completed" })`
 3. Record completion in session state
 
 4. **Review gate check** (when reviewer completes):

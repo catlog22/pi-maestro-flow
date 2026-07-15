@@ -240,7 +240,7 @@ Coordinator supports `resume` / `continue` for interrupted sessions:
 3. Audit todo({ action: "list" }) -> reconcile session state <-> task status
 4. Reset in_progress -> pending (interrupted tasks)
 5. Rebuild team and spawn needed workers only
-6. Create missing tasks, set dependencies via todo({ action: "update" })({ addBlockedBy })
+6. Create missing tasks, set dependencies via todo({ action: "update", addBlockedBy })
 7. Kick first executable task -> Phase 4 coordination loop
 
 ---

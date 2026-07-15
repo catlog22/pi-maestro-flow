@@ -36,7 +36,7 @@ Worker completed. Process and advance.
 | `[optimizer]` or `OPT-*` | optimizer |
 | `[verifier]` or `VERIFY-*` | verifier |
 
-2. Mark task completed: `todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })`
+2. Mark task completed: `todo({ action: "update", taskId: "<task-id>", status: "completed" })`
 3. Record completion in session state
 
 4. Check checkpoint for completed task:
@@ -60,7 +60,7 @@ Worker completed. Process and advance.
 
    **GC Fix Task Creation**:
    ```
-   todo({ action: "create" })({ subject: "OPT-fix-<round>",
+   todo({ action: "create", subject: "OPT-fix-<round>",
      description: "PURPOSE: Address verification regressions | Success: All regressions resolved
    TASK:
      - Parse verification feedback for specific regressions
@@ -68,7 +68,7 @@ Worker completed. Process and advance.
    CONTEXT:
      - Session: <session-folder>
      - Upstream artifacts: verification/verify-report.md" })
-   todo({ action: "update" })({ taskId: "OPT-fix-<round>", owner: "optimizer" })
+   todo({ action: "update", taskId: "OPT-fix-<round>", owner: "optimizer" })
    ```
    Then create new VERIFY task blocked by OPT-fix. Increment gc_state.round.
 

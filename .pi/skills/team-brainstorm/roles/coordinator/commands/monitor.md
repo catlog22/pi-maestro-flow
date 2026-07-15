@@ -37,7 +37,7 @@ Worker completed. Process and advance.
 | `[synthesizer]` or task ID `SYNTH-*` | synthesizer |
 | `[evaluator]` or task ID `EVAL-*` | evaluator |
 
-2. Mark task as completed: `todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })`
+2. Mark task as completed: `todo({ action: "update", taskId: "<task-id>", status: "completed" })`
 3. Record completion in session state
 4. **Generator-Critic check** (when challenger completes):
    - If completed task is CHALLENGE-* AND pipeline is deep or full:

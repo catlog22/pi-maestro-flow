@@ -2,7 +2,7 @@
 role: optimizer
 prefix: IMPL
 inner_loop: dynamic
-additional_prefixes: [FIX]
+additional_prefixes: "[FIX]"
 message_types: 
 ---
 

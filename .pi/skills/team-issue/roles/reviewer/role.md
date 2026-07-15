@@ -2,7 +2,7 @@
 role: reviewer
 prefix: AUDIT
 inner_loop: false
-message_types: [approved, concerns, rejected, error]
+message_types: "[approved, concerns, rejected, error]"
 ---
 
 <required_reading>

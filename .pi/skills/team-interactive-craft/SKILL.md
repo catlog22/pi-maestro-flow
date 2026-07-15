@@ -1,6 +1,6 @@
 ---
 name: team-interactive-craft
-description: Unified team skill for interactive component crafting. Vanilla JS + CSS interactive components with zero dependencies. Research -> interaction design -> build -> a11y test. Uses team-worker agent architecture. Triggers on "team interactive craft", "interactive component".
+description: "Unified team skill for interactive component crafting. Vanilla JS + CSS interactive components with zero dependencies. Research -> interaction design -> build -> a11y test. Uses team-worker agent architecture. Triggers on \"team interactive craft\", \"interactive component\"."
 allowed-tools:
   - AskUserQuestion
   - Bash

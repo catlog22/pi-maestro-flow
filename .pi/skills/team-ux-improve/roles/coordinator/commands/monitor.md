@@ -41,7 +41,7 @@ Worker completed. Process and advance.
 3. Progress update -> update session state, STOP
 4. Completion -> mark task done:
    ```
-   todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })
+   todo({ action: "update", taskId: "<task-id>", status: "completed" })
    ```
 5. Remove from active_workers, record completion in session
 

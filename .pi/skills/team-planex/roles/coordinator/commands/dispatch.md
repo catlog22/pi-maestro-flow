@@ -24,8 +24,7 @@ Create the initial task chain for team-planex pipeline. Creates PLAN-001 for pla
 Create a single PLAN-001 task for the planner:
 
 ```
-todo({ action: "create" })({
-  subject: "PLAN-001: Requirement decomposition and solution design",
+todo({ action: "create", subject: "PLAN-001: Requirement decomposition and solution design",
   description: `Decompose requirements into issues and generate solutions.
 
 Input type: <issues|text|plan>
@@ -40,8 +39,7 @@ Execution method: <agent|codex|agy>
 4. After all issues: send all_planned signal
 
 InnerLoop: true`,
-  activeForm: "Planning requirements"
-})
+  activeForm: "Planning requirements" })
 ```
 
 ### EXEC-* Task Template (for planner reference)
@@ -49,8 +47,7 @@ InnerLoop: true`,
 Planner creates EXEC-* tasks at runtime using this template:
 
 ```
-todo({ action: "create" })({
-  subject: "EXEC-00N: Implement <issue-title>",
+todo({ action: "create", subject: "EXEC-00N: Implement <issue-title>",
   description: `Implement solution for issue <issueId>.
 
 Issue ID: <issueId>
@@ -59,8 +56,7 @@ Session: <session-folder>
 Execution method: <agent|codex|agy>
 
 InnerLoop: true`,
-  activeForm: "Implementing <issue-title>"
-})
+  activeForm: "Implementing <issue-title>" })
 ```
 
 ### Add Command Task Template
@@ -68,8 +64,7 @@ InnerLoop: true`,
 When coordinator handles `add` command, create additional PLAN tasks:
 
 ```
-todo({ action: "create" })({
-  subject: "PLAN-00N: Additional requirement decomposition",
+todo({ action: "create", subject: "PLAN-00N: Additional requirement decomposition",
   description: `Additional requirements to decompose.
 
 Input type: <issues|text|plan>
@@ -78,8 +73,7 @@ Session: <session-folder>
 Execution method: <execution-method>
 
 InnerLoop: true`,
-  activeForm: "Planning additional requirements"
-})
+  activeForm: "Planning additional requirements" })
 ```
 
 ## Phase 4: Validation

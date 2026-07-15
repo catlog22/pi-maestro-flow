@@ -2,7 +2,7 @@
 role: interaction-designer
 prefix: INTERACT
 inner_loop: false
-message_types: [state_update]
+message_types: "[state_update]"
 ---
 
 <required_reading>

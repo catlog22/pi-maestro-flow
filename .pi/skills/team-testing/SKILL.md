@@ -1,6 +1,6 @@
 ---
 name: team-testing
-description: Unified team skill for testing team. Progressive test coverage through Generator-Critic loops, shared memory, and dynamic layer selection. Triggers on "team testing".
+description: "Unified team skill for testing team. Progressive test coverage through Generator-Critic loops, shared memory, and dynamic layer selection. Triggers on \"team testing\"."
 allowed-tools:
   - AskUserQuestion
   - Bash

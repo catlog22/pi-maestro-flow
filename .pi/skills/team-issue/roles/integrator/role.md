@@ -2,7 +2,7 @@
 role: integrator
 prefix: MARSHAL
 inner_loop: false
-message_types: [queue_ready, conflict_found, error]
+message_types: "[queue_ready, conflict_found, error]"
 ---
 
 <required_reading>

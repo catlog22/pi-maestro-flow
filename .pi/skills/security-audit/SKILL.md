@@ -1,7 +1,7 @@
 ---
 name: security-audit
 description: OWASP Top 10 and STRIDE security auditing with supply chain analysis
-argument-hint: [quick|standard|deep] [--scope <path>]
+argument-hint: "[quick|standard|deep] [--scope <path>]"
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -13,6 +13,10 @@ allowed-tools:
 session-mode: run
 contract: 
 ---
+
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 <purpose>
 Systematic security audit covering OWASP Top 10, dependency supply chain, secrets detection,

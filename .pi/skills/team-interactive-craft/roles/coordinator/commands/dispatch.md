@@ -24,8 +24,7 @@
 Every task description uses structured format:
 
 ```
-todo({ action: "create" })({
-  subject: "<TASK-ID>",
+todo({ action: "create", subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -38,9 +37,8 @@ CONTEXT:
   - Upstream artifacts: <artifact-1>, <artifact-2>
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <deliverable path> + <quality criteria>
-CONSTRAINTS: <scope limits, focus areas>"
-})
-todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
+CONSTRAINTS: <scope limits, focus areas>" })
+todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
 ### Mode Router
@@ -57,8 +55,7 @@ todo({ action: "update" })({ taskId: "<TASK-ID>", addBlockedBy: [<dependency-lis
 
 **RESEARCH-001** (researcher):
 ```
-todo({ action: "create" })({
-  subject: "RESEARCH-001",
+todo({ action: "create", subject: "RESEARCH-001",
   description: "PURPOSE: Analyze interaction patterns, browser API availability, and reference implementations | Success: 3 research artifacts with valid data
 TASK:
   - Catalog existing interactive components in project
@@ -70,15 +67,13 @@ CONTEXT:
   - Components: <component-list>
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/research/*.json | All 3 research files with valid JSON
-CONSTRAINTS: Read-only analysis | Focus on <interaction-scope>"
-})
-todo({ action: "update" })({ taskId: "RESEARCH-001", owner: "researcher" })
+CONSTRAINTS: Read-only analysis | Focus on <interaction-scope>" })
+todo({ action: "update", taskId: "RESEARCH-001", owner: "researcher" })
 ```
 
 **INTERACT-001** (interaction-designer):
 ```
-todo({ action: "create" })({
-  subject: "INTERACT-001",
+todo({ action: "create", subject: "INTERACT-001",
   description: "PURPOSE: Design complete interaction blueprint with state machine and event flows | Success: Blueprint with all states, events, and keyboard mappings defined
 TASK:
   - Define state machine (idle -> hover -> active -> animating -> complete)
@@ -92,15 +87,13 @@ CONTEXT:
   - Upstream artifacts: research/*.json
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/interaction/blueprints/<component-name>.md | Complete state machine + event map + keyboard coverage
-CONSTRAINTS: Vanilla JS only | GPU-only animations | Progressive enhancement"
-})
-todo({ action: "update" })({ taskId: "INTERACT-001", addBlockedBy: ["RESEARCH-001"], owner: "interaction-designer" })
+CONSTRAINTS: Vanilla JS only | GPU-only animations | Progressive enhancement" })
+todo({ action: "update", taskId: "INTERACT-001", addBlockedBy: ["RESEARCH-001"], owner: "interaction-designer" })
 ```
 
 **BUILD-001** (builder):
 ```
-todo({ action: "create" })({
-  subject: "BUILD-001",
+todo({ action: "create", subject: "BUILD-001",
   description: "PURPOSE: Implement interactive component as vanilla JS + CSS | Success: Working ES module + CSS with all states, touch-aware, keyboard accessible
 TASK:
   - Implement ES module component class from interaction blueprint
@@ -116,15 +109,13 @@ CONTEXT:
   - Upstream artifacts: interaction/blueprints/*.md, research/*.json
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/build/components/<name>.js + <name>.css | Zero dependencies, all states implemented
-CONSTRAINTS: No npm packages | ES modules only | No inline styles | < 5ms per frame"
-})
-todo({ action: "update" })({ taskId: "BUILD-001", addBlockedBy: ["INTERACT-001"], owner: "builder" })
+CONSTRAINTS: No npm packages | ES modules only | No inline styles | < 5ms per frame" })
+todo({ action: "update", taskId: "BUILD-001", addBlockedBy: ["INTERACT-001"], owner: "builder" })
 ```
 
 **A11Y-001** (a11y-tester):
 ```
-todo({ action: "create" })({
-  subject: "A11Y-001",
+todo({ action: "create", subject: "A11Y-001",
   description: "PURPOSE: Audit accessibility of built component | Success: Audit report with pass/fail per check, 0 critical issues
 TASK:
   - Test keyboard navigation (tab order, arrow keys, escape, enter/space)
@@ -138,9 +129,8 @@ CONTEXT:
   - Upstream artifacts: build/components/*.js, build/components/*.css, interaction/blueprints/*.md
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/a11y/a11y-audit-001.md | Per-check pass/fail with remediation suggestions
-CONSTRAINTS: Read-only analysis | GC convergence: 0 critical issues"
-})
-todo({ action: "update" })({ taskId: "A11Y-001", addBlockedBy: ["BUILD-001"], owner: "a11y-tester" })
+CONSTRAINTS: Read-only analysis | GC convergence: 0 critical issues" })
+todo({ action: "update", taskId: "A11Y-001", addBlockedBy: ["BUILD-001"], owner: "a11y-tester" })
 ```
 
 ---

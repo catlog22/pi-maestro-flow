@@ -53,7 +53,7 @@ Triggered when a worker sends completion message.
 2. Mark task as completed:
 
 ```
-todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })
+todo({ action: "update", taskId: "<task-id>", status: "completed" })
 ```
 
 3. Record completion in session state
@@ -77,8 +77,7 @@ todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })
 
 **GC Fix Task Creation**:
 ```
-todo({ action: "create" })({
-  subject: "DEV-fix-<round>",
+todo({ action: "create", subject: "DEV-fix-<round>",
   description: "PURPOSE: Fix issues identified in QA audit | Success: All critical/high issues resolved
 TASK:
   - Load QA audit report with findings
@@ -89,12 +88,10 @@ CONTEXT:
   - Upstream artifacts: <session>/qa/audit-<NNN>.md
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: Fixed source files | QA issues resolved
-CONSTRAINTS: Targeted fixes only | Do not introduce regressions"
-})
-todo({ action: "update" })({ taskId: "DEV-fix-<round>", owner: "developer" })
+CONSTRAINTS: Targeted fixes only | Do not introduce regressions" })
+todo({ action: "update", taskId: "DEV-fix-<round>", owner: "developer" })
 
-todo({ action: "create" })({
-  subject: "QA-recheck-<round>",
+todo({ action: "create", subject: "QA-recheck-<round>",
   description: "PURPOSE: Re-audit after developer fixes | Success: Score >= 8, critical == 0
 TASK:
   - Execute 5-dimension audit on fixed code
@@ -105,9 +102,8 @@ CONTEXT:
   - Review type: code-review
   - Shared memory: <session>/.msg/meta.json
 EXPECTED: <session>/qa/audit-<NNN>.md | Improved score
-CONSTRAINTS: Read-only review"
-})
-todo({ action: "update" })({ taskId: "QA-recheck-<round>", addBlockedBy: ["DEV-fix-<round>"], owner: "qa" })
+CONSTRAINTS: Read-only review" })
+todo({ action: "update", taskId: "QA-recheck-<round>", addBlockedBy: ["DEV-fix-<round>"], owner: "qa" })
 ```
 
 6. Proceed to handleSpawnNext

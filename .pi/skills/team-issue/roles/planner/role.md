@@ -2,8 +2,8 @@
 role: planner
 prefix: SOLVE
 inner_loop: false
-additional_prefixes: [SOLVE-fix]
-message_types: [solution_ready, multi_solution, error]
+additional_prefixes: "[SOLVE-fix]"
+message_types: "[solution_ready, multi_solution, error]"
 ---
 
 <required_reading>

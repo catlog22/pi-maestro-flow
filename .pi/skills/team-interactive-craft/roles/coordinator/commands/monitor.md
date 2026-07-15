@@ -36,7 +36,7 @@ Worker completed. Process and advance.
 | `[builder]` or `BUILD-*` | builder |
 | `[a11y-tester]` or `A11Y-*` | a11y-tester |
 
-2. Mark task completed: `todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })`
+2. Mark task completed: `todo({ action: "update", taskId: "<task-id>", status: "completed" })`
 3. Record completion in session state
 
 4. Check checkpoint for completed task:
@@ -63,7 +63,7 @@ Worker completed. Process and advance.
 
    **GC Fix Task Creation**:
    ```
-   todo({ action: "create" })({ subject: "BUILD-fix-<round>",
+   todo({ action: "create", subject: "BUILD-fix-<round>",
      description: "PURPOSE: Address a11y audit feedback | Success: All critical/high issues resolved
    TASK:
      - Parse a11y audit feedback for specific issues
@@ -71,7 +71,7 @@ Worker completed. Process and advance.
    CONTEXT:
      - Session: <session-folder>
      - Upstream artifacts: a11y/a11y-audit-<NNN>.md" })
-   todo({ action: "update" })({ taskId: "BUILD-fix-<round>", owner: "builder" })
+   todo({ action: "update", taskId: "BUILD-fix-<round>", owner: "builder" })
    ```
    Then create new A11Y task blocked by fix. Increment gc_state.round.
 

@@ -1,6 +1,6 @@
 ---
 name: team-perf-opt
-description: Unified team skill for performance optimization. Coordinator orchestrates pipeline, workers are team-worker agents. Supports single/fan-out/independent parallel modes. Triggers on "team perf-opt".
+description: "Unified team skill for performance optimization. Coordinator orchestrates pipeline, workers are team-worker agents. Supports single/fan-out/independent parallel modes. Triggers on \"team perf-opt\"."
 allowed-tools:
   - AskUserQuestion
   - Bash

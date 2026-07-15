@@ -41,8 +41,7 @@ Create task chains from dynamic dependency graphs. Builds pipelines from the tas
 4. **For each task** (in topological order):
 
 ```
-todo({ action: "create" })({
-  subject: "<PREFIX>-<NNN>",
+todo({ action: "create", subject: "<PREFIX>-<NNN>",
   description: "PURPOSE: <goal> | Success: <success_criteria>
 TASK:
   - <step 1>
@@ -57,9 +56,8 @@ EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits>
 ---
 InnerLoop: <true|false>
-RoleSpec: <session-folder>/role-specs/<role-name>.md"
-})
-todo({ action: "update" })({ taskId: "<PREFIX>-<NNN>", addBlockedBy: [<dependency-list from graph>], owner: "<role-name>" })
+RoleSpec: <session-folder>/role-specs/<role-name>.md" })
+todo({ action: "update", taskId: "<PREFIX>-<NNN>", addBlockedBy: [<dependency-list from graph>], owner: "<role-name>" })
 ```
 
 5. **Update team-session.json** with pipeline and tasks_total

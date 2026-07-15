@@ -97,7 +97,7 @@ ${phaseGoal}
 })
 
 // Set dependency: EXEC blocked by PLAN
-todo({ action: "update" })({ taskId: execTaskId, addBlockedBy: [planTaskId] })
+todo({ action: "update", taskId: execTaskId, addBlockedBy: [planTaskId] })
 ```
 
 ### Step 5: Create VERIFY Task (Assigned to Verifier, Blocked by EXEC)
@@ -133,7 +133,7 @@ ${phaseSuccessCriteria.map(c => `- ${c}`).join('\n')}
 })
 
 // Set dependency: VERIFY blocked by EXEC
-todo({ action: "update" })({ taskId: verifyTaskId, addBlockedBy: [execTaskId] })
+todo({ action: "update", taskId: verifyTaskId, addBlockedBy: [execTaskId] })
 ```
 
 ### Step 6: Update state.md

@@ -64,7 +64,7 @@ Triggered when a worker sends completion message (via SendMessage callback).
 ```
 todo({ action: "get" })({ taskId: "<task-id>" })
 // If still "in_progress" (worker failed to mark) → fallback:
-todo({ action: "update" })({ taskId: "<task-id>", status: "completed" })
+todo({ action: "update", taskId: "<task-id>", status: "completed" })
 ```
 
 3. Record completion in session state via team_msg
@@ -130,8 +130,7 @@ ELSE:
 
 DISCUSS-N (subsequent round):
 ```
-todo({ action: "create" })({
-  subject: "DISCUSS-<NNN>",
+todo({ action: "create", subject: "DISCUSS-<NNN>",
   description: "PURPOSE: Process discussion round <N> | Success: Updated understanding
 TASK:
   - Process previous round results
@@ -145,15 +144,13 @@ CONTEXT:
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/discussions/discussion-round-<NNN>.json
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "DISCUSS-<NNN>", owner: "discussant" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "DISCUSS-<NNN>", owner: "discussant" })
 ```
 
 ANALYZE-fix-N (direction adjustment):
 ```
-todo({ action: "create" })({
-  subject: "ANALYZE-fix-<N>",
+todo({ action: "create", subject: "ANALYZE-fix-<N>",
   description: "PURPOSE: Supplementary analysis with adjusted focus | Success: New insights from adjusted direction
 TASK:
   - Re-analyze from adjusted perspective: <adjusted_focus>
@@ -167,9 +164,8 @@ CONTEXT:
   - Shared memory: <session>/wisdom/.msg/meta.json
 EXPECTED: <session>/analyses/analysis-fix-<N>.json
 ---
-InnerLoop: false"
-})
-todo({ action: "update" })({ taskId: "ANALYZE-fix-<N>", owner: "analyst" })
+InnerLoop: false" })
+todo({ action: "update", taskId: "ANALYZE-fix-<N>", owner: "analyst" })
 ```
 
 SYNTH-001 (created dynamically — check existence first):
@@ -177,8 +173,7 @@ SYNTH-001 (created dynamically — check existence first):
 // Guard: only create if SYNTH-001 doesn't exist yet (dispatch may have pre-created it)
 const existingSynth = todo({ action: "list" }).find(t => t.subject === 'SYNTH-001')
 if (!existingSynth) {
-todo({ action: "create" })({
-  subject: "SYNTH-001",
+todo({ action: "create", subject: "SYNTH-001",
   description: "PURPOSE: Integrate all analysis into final conclusions | Success: Executive summary with recommendations
 TASK:
   - Load all exploration, analysis, and discussion artifacts
@@ -192,11 +187,10 @@ CONTEXT:
 EXPECTED: <session>/conclusions.json + discussion.md update
 CONSTRAINTS: Pure integration, no new exploration
 ---
-InnerLoop: false"
-})
+InnerLoop: false" })
 }
 // Always update blockedBy to reference the last DISCUSS task (whether pre-existing or newly created)
-todo({ action: "update" })({ taskId: "SYNTH-001", addBlockedBy: ["<last-DISCUSS-task-id>"], owner: "synthesizer" })
+todo({ action: "update", taskId: "SYNTH-001", addBlockedBy: ["<last-DISCUSS-task-id>"], owner: "synthesizer" })
 ```
 
 7. Record user feedback to decision_trail via team_msg:

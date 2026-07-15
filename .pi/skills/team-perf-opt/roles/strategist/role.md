@@ -2,7 +2,7 @@
 role: strategist
 prefix: STRATEGY
 inner_loop: false
-discuss_rounds: [DISCUSS-OPT]
+discuss_rounds: "[DISCUSS-OPT]"
 message_types: 
 ---
 

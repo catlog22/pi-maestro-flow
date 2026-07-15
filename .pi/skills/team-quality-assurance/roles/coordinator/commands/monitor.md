@@ -47,8 +47,7 @@ Worker completed. Process and advance.
 
 **GC Fix Task Creation** (when coverage below target):
 ```
-todo({ action: "create" })({
-  subject: "QAGEN-fix-<round>: Fix tests for <layer> (GC #<round>)",
+todo({ action: "create", subject: "QAGEN-fix-<round>: Fix tests for <layer> (GC #<round>)",
   description: "PURPOSE: Fix failing tests and improve coverage | Success: Coverage meets target
 TASK:
   - Load execution results and failing test details
@@ -61,10 +60,8 @@ EXPECTED: Fixed test files | Improved coverage
 CONSTRAINTS: Only modify test files | No source changes
 ---
 InnerLoop: false
-RoleSpec: ~  or <project>/.claude/skills/team-quality-assurance/roles/generator/role.md"
-})
-todo({ action: "create" })({
-  subject: "QARUN-gc-<round>: Re-execute <layer> (GC #<round>)",
+RoleSpec: ~  or <project>/.claude/skills/team-quality-assurance/roles/generator/role.md" })
+todo({ action: "create", subject: "QARUN-gc-<round>: Re-execute <layer> (GC #<round>)",
   description: "PURPOSE: Re-execute tests after fixes | Success: Coverage >= target
 TASK: Execute test suite, measure coverage, report results
 CONTEXT:
@@ -74,9 +71,8 @@ EXPECTED: <session>/results/run-<layer>-gc-<round>.json
 CONSTRAINTS: Read-only execution
 ---
 InnerLoop: false
-RoleSpec: ~  or <project>/.claude/skills/team-quality-assurance/roles/executor/role.md"
-})
-todo({ action: "update" })({ taskId: "QARUN-gc-<round>", addBlockedBy: ["QAGEN-fix-<round>"] })
+RoleSpec: ~  or <project>/.claude/skills/team-quality-assurance/roles/executor/role.md" })
+todo({ action: "update", taskId: "QARUN-gc-<round>", addBlockedBy: ["QAGEN-fix-<round>"] })
 ```
 
 6. -> handleSpawnNext
