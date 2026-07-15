@@ -16,7 +16,7 @@
     "test:providers": "node --experimental-transform-types --test test/login-provider-config.test.ts",
     "test:goal": "node --experimental-transform-types --test test/goal.test.ts",
     "test:plan": "node --experimental-transform-types --test test/plan-store.test.ts test/plan-editor.test.ts test/plan-lifecycle.test.ts test/statusline.test.ts",
-    "test:intelligence": "node --experimental-transform-types --test test/search-tool-bm25.test.ts test/lsp-client.test.ts test/lsp-manager.test.ts test/lsp-tool.test.ts test/workspace-edit.test.ts test/browser-tool.test.ts test/extension-tools.test.ts",
+    "test:intelligence": "node --experimental-transform-types --test test/search-tool-bm25.test.ts test/smart-search.test.ts test/smart-search-config.test.ts test/lsp-client.test.ts test/lsp-manager.test.ts test/lsp-tool.test.ts test/workspace-edit.test.ts test/browser-tool.test.ts test/extension-tools.test.ts",
     "check:types": "tsc -p tsconfig.intelligence.json"
   },
   "keywords": [
@@ -54,6 +54,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-tui": "0.74.0",
+    "@konbakuyomu/smart-search": "https://codeload.github.com/konbakuyomu/smartsearch/tar.gz/667c465d0f6ea16a423f03c434f94e21505d3595",
     "cross-spawn": "7.0.6",
     "maestro-flow": "0.5.49",
     "pi-maestro-teammate": "^0.4.3",

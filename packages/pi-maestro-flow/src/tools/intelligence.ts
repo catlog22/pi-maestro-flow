@@ -5,11 +5,13 @@ import { createLspTool } from "./lsp-tool.ts";
 import { lspManager } from "./lsp/manager.ts";
 import type { LspManagerLike } from "./lsp/types.ts";
 import { registerSearchToolBm25 } from "./search-tool-bm25.ts";
+import { registerSmartSearch } from "./smart-search.ts";
 
 export function registerIntelligenceTools(pi: ExtensionAPI): void {
   pi.registerTool(createLspTool());
   pi.registerTool(createBrowserTool());
   registerSearchToolBm25(pi);
+  registerSmartSearch(pi);
 }
 
 export async function shutdownIntelligenceTools(

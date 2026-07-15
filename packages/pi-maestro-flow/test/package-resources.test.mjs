@@ -17,6 +17,10 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.ok(pkg.files.includes("!.pi/skills/**/*.pyc"));
   assert.equal(pkg.dependencies["maestro-flow"], "0.5.49");
   assert.equal(pkg.dependencies["pi-maestro-teammate"], "^0.4.3");
+  assert.equal(
+    pkg.dependencies["@konbakuyomu/smart-search"],
+    "https://codeload.github.com/konbakuyomu/smartsearch/tar.gz/667c465d0f6ea16a423f03c434f94e21505d3595",
+  );
   assert.equal(pkg.dependencies["puppeteer-core"], "24.31.0");
   assert.equal(pkg.dependencies["cross-spawn"], "7.0.6");
   assert.equal(pkg.devDependencies.typescript, "5.7.3");
