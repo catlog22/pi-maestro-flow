@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-maestro-flow.local/schemas/permissions.schema.json",
+  "title": "Pi Maestro permission settings",
+  "type": "object",
+  "properties": {
+    "$schema": { "type": "string" },
+    "permissions": {
+      "type": "object",
+      "properties": {
+        "allow": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "ask": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "deny": { "type": "array", "items": { "type": "string" }, "uniqueItems": true },
+        "defaultMode": {
+          "enum": ["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"]
+        },
+        "disableBypassPermissionsMode": { "const": "disable" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "required": ["permissions"],
+  "additionalProperties": true
+}
