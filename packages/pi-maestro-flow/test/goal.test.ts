@@ -9,6 +9,7 @@ import {
   initGoal,
   onAgentEnd,
   onBeforeAgentStart,
+  onInput,
   parseVerifierOutput,
   reconcileWorkflowGoal,
   onSessionShutdown,
@@ -158,6 +159,12 @@ test("goal set inside an active tool turn does not queue a stale follow-up", asy
     assert.equal(sent.length, 1);
     assert.match(sent[0]?.message ?? "", /^Continue the active goal:/);
     assert.equal(sent[0]?.options?.deliverAs, "followUp");
+
+    const continuation = sent[0]?.message ?? "";
+    assert.equal(onInput({ source: "extension", text: continuation }), undefined);
+    onBeforeAgentStart({ prompt: continuation });
+    assert.deepEqual(onInput({ source: "extension", text: continuation }), { action: "handled" });
+    assert.deepEqual(onInput({ source: "extension", text: continuation }), { action: "handled" });
   } finally {
     await executeGoal({ action: "clear" }, ctx);
     onSessionShutdown(ctx);

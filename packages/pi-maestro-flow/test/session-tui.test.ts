@@ -104,6 +104,24 @@ test("WorkflowViewModel derives one status projection for Session, Run, Goal and
   assert.equal(view.goal?.glyph, "⏸");
 });
 
+test("WorkflowViewModel hides terminal-success gates and displays unresolved blocking gates", () => {
+  const terminal = structuredClone(snapshot);
+  const active = terminal.session!.runs.find((candidate) => candidate.runId === "003")!;
+  active.gates = [
+    { id: "GATE-PASSED", blocking: true, status: "passed" },
+    { id: "GATE-WAIVED", blocking: true, status: "waived" },
+    { id: "GATE-SKIPPED", blocking: true, status: "skipped" },
+  ];
+  const terminalView = deriveWorkflowViewModel(terminal);
+  assert.ok(terminalView);
+  assert.equal(terminalView.activeRun?.gate, undefined);
+  assert.doesNotMatch(renderMaestroPanel(terminalView, "panorama", 120).join("\n"), /GATE-(?:PASSED|WAIVED|SKIPPED)/);
+
+  active.gates.push({ id: "GATE-BLOCKED", blocking: true, status: "blocked" });
+  const blockedView = deriveWorkflowViewModel(terminal);
+  assert.equal(blockedView?.activeRun?.gate, "GATE-BLOCKED");
+});
+
 test("Maestro Panel cycles collapsed, todo and panorama with a 1..120 width matrix", () => {
   const view = deriveWorkflowViewModel(snapshot);
   assert.ok(view);

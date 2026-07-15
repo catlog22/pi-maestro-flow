@@ -247,6 +247,15 @@ test("entry gate failures keep the canonical Todo mirror pending", async () => {
   });
   sessionGate.session!.gates = sessionGate.session!.runs[0]!.gates.splice(0);
   assert.equal(buildTodoMirrorSpecs(sessionGate)[0]?.status, "pending", "session entry gate");
+
+  const unphasedLegacyGate = mirrorSnapshot({
+    runStatus: "blocked",
+    chainStatus: "blocked",
+    gatePhase: "entry",
+    gateStatus: "failed",
+  });
+  delete unphasedLegacyGate.session!.runs[0]!.gates[0]!.phase;
+  assert.equal(buildTodoMirrorSpecs(unphasedLegacyGate)[0]?.status, "blocked", "unknown gate phase fails closed");
 });
 
 test("exit gate failures keep completed work uncompleted in the Todo mirror", async () => {
@@ -276,6 +285,33 @@ test("an active canonical Run without an orchestration chain still gets a recove
   const [mirror] = buildTodoMirrorSpecs(snapshot);
   assert.equal(mirror?.origin.runId, "run-gate");
   assert.equal(mirror?.status, "in_progress");
+
+  snapshot.session!.chain = [{
+    step: "execute",
+    command: "execute",
+    status: "running",
+    runId: "run-gate",
+    skill: "maestro",
+  }];
+  const [chainMirror] = buildTodoMirrorSpecs(snapshot);
+  assert.deepEqual(chainMirror?.origin, mirror?.origin, "the same Run keeps one mirror identity when the chain catches up");
+});
+
+test("session gate failure leaves historical completed Todo mirrors completed", () => {
+  const snapshot = mirrorSnapshot({
+    runStatus: "completed",
+    chainStatus: "completed",
+    gatePhase: "exit",
+    gateStatus: "failed",
+  });
+  const session = snapshot.session!;
+  const active = session.runs[0]!;
+  active.gates = [];
+  session.gates = [{ id: "gate-session-exit", phase: "exit", blocking: true, status: "failed" }];
+  session.runs.unshift({ ...active, runId: "run-history", status: "sealed", gates: [] });
+  session.chain.unshift({ step: "analyze", command: "analyze", status: "completed", runId: "run-history" });
+
+  assert.deepEqual(buildTodoMirrorSpecs(snapshot).map((spec) => spec.status), ["completed", "blocked"]);
 });
 
 function mirrorSnapshot(options: {

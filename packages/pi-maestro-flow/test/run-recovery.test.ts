@@ -119,6 +119,28 @@ test("checkpoint v2 preserves Workflow recovery identity across compactions", as
   const secondDetails = second?.compaction?.details as MaestroCompactionDetails;
   assert.deepEqual(secondDetails.workflow, workflow);
   assert.equal(secondDetails.previousCheckpointId, "checkpoint-v2");
+
+  const cleared = await createMaestroCompaction(
+    compactEvent([{
+      type: "compaction",
+      id: "checkpoint-entry-v2",
+      parentId: null,
+      timestamp: "2026-07-15T00:00:03.000Z",
+      summary: "previous checkpoint",
+      firstKeptEntryId: "kept-1",
+      tokensBefore: 100,
+      details: firstDetails,
+    }]),
+    compactContext(),
+    {
+      checkpointId: () => "checkpoint-v2-cleared",
+      now: () => new Date("2026-07-15T00:00:04.000Z"),
+      getWorkflowIdentity: () => undefined,
+      completeSummary: checkpointSummary,
+    },
+  );
+  const clearedDetails = cleared?.compaction?.details as MaestroCompactionDetails;
+  assert.equal(clearedDetails.workflow, undefined);
 });
 
 test("compaction recovery fetches the Run brief before continuation without duplicating the same Skill stack", async () => {
@@ -154,6 +176,7 @@ test("compaction recovery fetches the Run brief before continuation without dupl
   const stackRevision = getVisibleTasks()[0]?.skillActivation?.stackRevision;
 
   const events: string[] = [];
+  let hasPendingMessages = false;
   initGoal({
     appendEntry() {},
     async sendUserMessage(message: string) {
@@ -166,7 +189,7 @@ test("compaction recovery fetches the Run brief before continuation without dupl
     ui: { notify() {}, setStatus() {} },
     sessionManager: { getEntries: () => [] },
     isIdle: () => false,
-    hasPendingMessages: () => false,
+    hasPendingMessages: () => hasPendingMessages,
   };
   onGoalSessionStart(goalContext);
   await executeGoal({ action: "set", objective: "Recover the active Run" }, goalContext);
@@ -183,6 +206,16 @@ test("compaction recovery fetches the Run brief before continuation without dupl
   try {
     await onGoalCompact({}, goalContext);
     assert.deepEqual(events, ["brief", "continuation"]);
+
+    events.length = 0;
+    await onGoalCompact({ willRetry: true }, goalContext);
+    assert.deepEqual(events, ["brief"], "Pi retry must reacquire the active Run brief before retrying");
+
+    events.length = 0;
+    hasPendingMessages = true;
+    await onGoalCompact({}, goalContext);
+    assert.deepEqual(events, ["brief"], "queued continuation must still be fenced by a fresh Run brief");
+    hasPendingMessages = false;
 
     const injected = await onBeforeAgentStartTodo({ systemPrompt: "base" });
     assert.equal(injected?.systemPrompt.match(/<active_skill_stack>/g)?.length, 1);

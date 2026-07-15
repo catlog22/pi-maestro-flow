@@ -97,7 +97,7 @@ export function buildTodoMirrorSpecs(snapshot: WorkflowSnapshot): TodoMirrorTask
     : undefined;
   if (activeRun && !chain.some((step) => step.runId === activeRun.runId)) {
     chain.push({
-      step: `active:${activeRun.runId}`,
+      step: activeRun.runId,
       command: activeRun.command,
       status: activeRun.status,
       runId: activeRun.runId,
@@ -106,13 +106,20 @@ export function buildTodoMirrorSpecs(snapshot: WorkflowSnapshot): TodoMirrorTask
   return chain.map((step, index) => {
     const run = step.runId ? session.runs.find((candidate) => candidate.runId === step.runId) : undefined;
     const previous = index > 0 ? chain[index - 1] : undefined;
-    const status = todoStatus(run, session.gates, step.status, index, previous);
+    const status = todoStatus(
+      run,
+      session.gates,
+      step.status,
+      index,
+      previous,
+      run?.runId === session.activeRunId,
+    );
     const summary = stringValue(run?.handoff?.summary);
     const skill = step.skill?.trim();
     return {
       origin: {
         sessionId: session.sessionId,
-        step: step.step,
+        step: stableOriginStep(step, run),
         ...(run ? { runId: run.runId, runSeq: runSequence(run.runId) } : {}),
       },
       subject: `Step ${index + 1}: ${step.command}`,
@@ -386,14 +393,20 @@ function todoStatus(
   chainStatus: string,
   index: number,
   previous?: WorkflowChainStep,
+  isActiveRun = false,
 ): TodoMirrorTaskSpec["status"] {
-  const blockingFailures = [...sessionGates, ...(run?.gates ?? [])].filter((gate) =>
+  const runFailures = (run?.gates ?? []).filter((gate) =>
     gate.blocking && ["failed", "blocked"].includes(gate.status)
   );
+  const completed = run?.status === "completed" || run?.status === "sealed" || chainStatus === "completed";
+  const sessionFailures = completed && !isActiveRun
+    ? []
+    : sessionGates.filter((gate) => gate.blocking && ["failed", "blocked"].includes(gate.status));
+  const blockingFailures = [...sessionFailures, ...runFailures];
   if (blockingFailures.some((gate) => gate.phase !== "entry")) return "blocked";
   if (blockingFailures.some((gate) => gate.phase === "entry")) return "pending";
   const runStatusValue = run?.status;
-  if (runStatusValue === "completed" || runStatusValue === "sealed" || chainStatus === "completed") return "completed";
+  if (completed) return "completed";
   if (runStatusValue === "running") return "in_progress";
   if (runStatusValue === "blocked" || runStatusValue === "failed" || ["blocked", "failed"].includes(chainStatus)) return "blocked";
   if (index > 0 && previous && previous.status !== "completed") return "blocked";
@@ -402,7 +415,11 @@ function todoStatus(
 
 function originKeyForChainStep(sessionId: string, step: WorkflowChainStep, runs: WorkflowRun[]): string {
   const run = step.runId ? runs.find((candidate) => candidate.runId === step.runId) : undefined;
-  return [sessionId, step.step, run?.runId ?? "", run ? runSequence(run.runId) : ""].join("\u0000");
+  return [sessionId, stableOriginStep(step, run), run?.runId ?? "", run ? runSequence(run.runId) : ""].join("\u0000");
+}
+
+function stableOriginStep(step: WorkflowChainStep, run: WorkflowRun | undefined): string {
+  return run ? `run:${run.runId}` : step.step;
 }
 
 function runSequence(runId: string): string | undefined {

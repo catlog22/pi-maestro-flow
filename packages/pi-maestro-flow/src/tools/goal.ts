@@ -109,7 +109,6 @@ const STATUS_KEY = "goal";
 const GOAL_STATE_ENTRY_TYPE = "goal-state";
 const MAX_OBJECTIVE_LENGTH = 4_000;
 const CONTINUATION_MARKER_PREFIX = "maestro-goal-continuation:";
-const MAX_CANCELLED_MARKERS = 20;
 const VERIFIER_TIMEOUT_MS = 90_000;
 const MAX_VERIFIER_EVIDENCE_ITEMS = 12;
 const MAX_VERIFIER_EVIDENCE_ITEM_CHARS = 1_200;
@@ -140,7 +139,7 @@ let completionTimer: ReturnType<typeof setTimeout> | undefined;
 let verificationInFlight: { goalId: string; updatedAt: number; epoch: number } | undefined;
 let goalLifecycleEpoch = 0;
 let workflowCoordinator: WorkflowCoordinator | undefined;
-const cancelledMarkers = new Set<string>();
+const issuedGoalMarkers = new Set<string>();
 
 // ---------------------------------------------------------------------------
 // Public: tool parameter types (4 actions)
@@ -292,7 +291,6 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
 
   const wasPiRetry = isPiRetry(event, activeGoal.id);
   clearRecoveryFor(activeGoal.id);
-  if (wasPiRetry || hasPending(ctx)) return;
   if (workflowCoordinator?.status()?.session?.activeRunId) {
     try {
       await workflowCoordinator.brief();
@@ -305,12 +303,13 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
       return;
     }
   }
+  if (wasPiRetry || hasPending(ctx)) return;
   await sendContinuation(ctx, activeGoal);
 }
 
 export function onInput(event: { source?: string; text?: string }) {
   if (event.source === "extension") {
-    if (consumeCancelledMarker(event.text ?? "")) return { action: "handled" as const };
+    if (rejectContinuationReplay(event.text ?? "")) return { action: "handled" as const };
     return;
   }
   clearRecovery();
@@ -1028,9 +1027,11 @@ async function sendContinuation(ctx: GoalContext, goal: ActiveGoal) {
   if (continuationPending?.goalId === goal.id) return false;
   if (hasPending(ctx)) return false;
   let marker = `${goal.id}:${goal.iteration}:${randomUUID()}`;
+  let genericMarker = true;
   if (workflowCoordinator?.status()?.session) {
     try {
       marker = workflowCoordinator.continuationMarker(goal.iteration);
+      genericMarker = false;
     } catch (error) {
       activeGoal = pauseGoal(goal, "gate");
       persistGoal(activeGoal);
@@ -1040,9 +1041,13 @@ async function sendContinuation(ctx: GoalContext, goal: ActiveGoal) {
       return false;
     }
   }
+  if (genericMarker) issuedGoalMarkers.add(marker);
   continuationPending = { goalId: goal.id, iteration: goal.iteration, marker };
   const sent = await sendPrompt(ctx, buildContinuePrompt(goal, marker));
-  if (!sent && continuationPending?.marker === marker) continuationPending = undefined;
+  if (!sent) {
+    issuedGoalMarkers.delete(marker);
+    if (continuationPending?.marker === marker) continuationPending = undefined;
+  }
   return sent;
 }
 
@@ -1064,30 +1069,40 @@ async function sendPrompt(ctx: GoalContext, prompt: string): Promise<boolean> {
 
 function cancelContinuation() {
   if (continuationPending) {
-    cancelledMarkers.add(continuationPending.marker);
-    if (cancelledMarkers.size > MAX_CANCELLED_MARKERS) {
-      const oldest = cancelledMarkers.values().next().value;
-      if (oldest) cancelledMarkers.delete(oldest);
+    const marker = continuationPending.marker;
+    if (!isWorkflowContinuationMarker(marker)) {
+      issuedGoalMarkers.delete(marker);
     }
   }
   continuationPending = undefined;
 }
 
-function clearContinuation() { continuationPending = undefined; cancelledMarkers.clear(); }
+function clearContinuation() {
+  continuationPending = undefined;
+  issuedGoalMarkers.clear();
+}
 
 const MARKER_RE = new RegExp(
   `<!--\\s*${CONTINUATION_MARKER_PREFIX.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}([^\\s>]+)\\s*-->`,
 );
 
-function consumeCancelledMarker(text: string): boolean {
+function rejectContinuationReplay(text: string): boolean {
   const marker = MARKER_RE.exec(text)?.[1];
   if (!marker) return false;
-  if (marker.includes("maestro-workflow-continuation:") && workflowCoordinator && !workflowCoordinator.acceptsContinuation(marker)) {
-    return true;
+  if (isWorkflowContinuationMarker(marker)) {
+    return !workflowCoordinator || !workflowCoordinator.acceptsContinuation(marker);
   }
-  return cancelledMarkers.delete(marker);
+  return !issuedGoalMarkers.delete(marker);
 }
-function markDelivered(prompt: string) { const m = MARKER_RE.exec(prompt)?.[1]; if (m && continuationPending?.marker === m) continuationPending = undefined; }
+function markDelivered(prompt: string) {
+  const marker = MARKER_RE.exec(prompt)?.[1];
+  if (!marker) return;
+  if (!isWorkflowContinuationMarker(marker)) issuedGoalMarkers.delete(marker);
+  if (continuationPending?.marker === marker) continuationPending = undefined;
+}
+function isWorkflowContinuationMarker(marker: string): boolean {
+  return marker.includes("maestro-workflow-continuation:");
+}
 function markerComment(marker: string): string { return `<!-- ${CONTINUATION_MARKER_PREFIX}${marker} -->`; }
 
 // ---------------------------------------------------------------------------

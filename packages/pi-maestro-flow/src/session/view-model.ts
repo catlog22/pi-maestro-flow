@@ -238,7 +238,9 @@ function toRunView(
 ): WorkflowRunView {
   const status = normalizeWorkflowStatus(run.status);
   const handoff = run.handoff ?? {};
-  const gate = run.gates.find((item) => item.blocking && item.status !== "passed")?.id;
+  const gate = run.gates.find((item) =>
+    item.blocking && !["passed", "waived", "skipped"].includes(item.status)
+  )?.id;
   return {
     id: run.runId,
     sequence,

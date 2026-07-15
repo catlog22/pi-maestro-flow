@@ -325,6 +325,42 @@ test("mid-turn guard clears idle pressure on agent end but preserves active comp
   assert.equal(statuses.at(-1), undefined);
 });
 
+test("mid-turn reset fences stale compaction callbacks from the next lifecycle", async () => {
+  const callbacks: Array<{ onComplete(): void; onError(error: Error): void }> = [];
+  const sent: string[] = [];
+  const statuses: Array<string | undefined> = [];
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    compact(options: { onComplete(): void; onError(error: Error): void }) { callbacks.push(options); },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus(_key: string, value: string | undefined) { statuses.push(value); }, notify() {} },
+  } as never;
+
+  await guard.evaluate(pressureToolBatch(), ctx);
+  guard.reset(ctx);
+  await guard.evaluate(pressureToolBatch(), ctx);
+  assert.equal(callbacks.length, 2);
+
+  callbacks[0]!.onComplete();
+  callbacks[0]!.onError(new Error("late failure"));
+  assert.deepEqual(sent, [], "stale lifecycle must not send a continuation");
+  guard.onAgentEnd(ctx);
+  assert.match(statuses.at(-1) ?? "", /COMPACT/, "stale callback must not settle the new owner");
+
+  callbacks[1]!.onComplete();
+  assert.equal(sent.length, 1);
+  guard.onAgentEnd(ctx);
+  assert.equal(statuses.at(-1), undefined);
+});
+
 test("pressure policy honors large reserve thresholds below the auto-prune ratio", () => {
   const messages = [{
     role: "assistant",

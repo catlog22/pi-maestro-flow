@@ -38,6 +38,9 @@ export interface ContextPressureResult {
 
 interface AutoCompactionState {
   running: boolean;
+  generation: number;
+  nextOwner: number;
+  activeOwner?: number;
   lastTriggerKey?: string;
   internalsWarningShown: boolean;
   lastNoCompactableKey?: string;
@@ -63,11 +66,17 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   onAgentEnd(ctx: ExtensionContext): void;
   reset(ctx?: ExtensionContext): void;
 } {
-  const state: AutoCompactionState = { running: false, internalsWarningShown: false };
+  const state: AutoCompactionState = {
+    running: false,
+    generation: 0,
+    nextOwner: 0,
+    internalsWarningShown: false,
+  };
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
   return {
     async evaluate(messages, ctx) {
+      const generation = state.generation;
       if (state.running) return undefined;
       if (!ctx.model || !endsWithCompleteToolResultBatch(messages)) {
         clearPressureStatus(ctx);
@@ -90,6 +99,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       try {
         internals = await loadInternals();
       } catch (error) {
+        if (state.generation !== generation) return undefined;
         clearPressureStatus(ctx);
         if (!state.internalsWarningShown) {
           state.internalsWarningShown = true;
@@ -97,6 +107,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         }
         return pressure.messages;
       }
+      if (state.generation !== generation || state.running) return undefined;
       const branch = ctx.sessionManager.getBranch();
       let preparation: unknown;
       try {
@@ -121,10 +132,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.lastNoCompactableKey = undefined;
       state.lastTriggerKey = triggerKey;
       state.running = true;
+      const owner = ++state.nextOwner;
+      state.activeOwner = owner;
       ctx.abort();
       ctx.ui.setStatus("maestro-auto-compact", `COMPACT ${estimate.tokens}/${thresholdTokens}`);
       const failCompaction = (error: unknown) => {
+        if (state.generation !== generation || state.activeOwner !== owner) return;
         state.running = false;
+        state.activeOwner = undefined;
         state.lastTriggerKey = undefined;
         clearPressureStatus(ctx);
         ctx.ui.notify(`Mid-turn compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -133,7 +148,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ctx.compact({
           customInstructions: buildMidTurnInstructions(estimate, ctx.model.contextWindow, settings.reserveTokens),
           onComplete: () => {
+            if (state.generation !== generation || state.activeOwner !== owner) return;
             state.running = false;
+            state.activeOwner = undefined;
             state.lastTriggerKey = undefined;
             clearPressureStatus(ctx);
             try {
@@ -153,7 +170,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (!state.running) clearPressureStatus(ctx);
     },
     reset(ctx) {
+      state.generation += 1;
       state.running = false;
+      state.activeOwner = undefined;
       state.lastTriggerKey = undefined;
       state.internalsWarningShown = false;
       state.lastNoCompactableKey = undefined;

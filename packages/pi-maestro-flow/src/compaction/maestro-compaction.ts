@@ -191,7 +191,9 @@ export async function createMaestroCompaction(
   const now = dependencies.now?.() ?? new Date();
   const checkpointId = dependencies.checkpointId?.() ?? randomUUID();
   const previousDetails = findPreviousDetails(event);
-  const workflow = await dependencies.getWorkflowIdentity?.() ?? previousDetails?.workflow;
+  const workflow = dependencies.getWorkflowIdentity
+    ? await dependencies.getWorkflowIdentity()
+    : previousDetails?.workflow;
   const todo = getTodoCompactionSnapshot();
   const activeSkills = collectActiveSkills(todo.tasks);
   const knowhowPath = buildKnowhowPath(ctx.cwd, now.toISOString(), ctx.sessionManager.getSessionId(), checkpointId);

@@ -29,7 +29,7 @@ test("core Session/Run skills satisfy the host mirror contract", () => {
   assert.deepEqual(findings, []);
 });
 
-test("non-core skill contract drift is report-only", (t) => {
+test("non-core skill contract drift is absent", (t) => {
   const findings = listSkillFiles(skillsRoot)
     .filter((file) => !coreSkills.has(relative(skillsRoot, dirname(file)).split(/[\\/]/)[0] ?? ""))
     .flatMap((file) => auditSkill(file, false));
@@ -38,7 +38,7 @@ test("non-core skill contract drift is report-only", (t) => {
   for (const finding of findings.slice(0, 20)) {
     t.diagnostic(`${finding.file}: ${finding.rule} — ${finding.detail}`);
   }
-  assert.ok(Array.isArray(findings));
+  assert.deepEqual(findings, []);
 });
 
 function auditSkill(file: string, core: boolean): ContractFinding[] {
