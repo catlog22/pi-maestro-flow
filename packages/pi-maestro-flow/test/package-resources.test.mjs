@@ -22,7 +22,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.match(pkg.scripts.postinstall, /install-workflows\.mjs/);
   assert.ok(pkg.files.includes("!.pi/skills/**/__pycache__/**"));
   assert.ok(pkg.files.includes("!.pi/skills/**/*.pyc"));
-  assert.equal(pkg.dependencies["maestro-flow"], "0.5.49");
+  assert.equal(pkg.dependencies["maestro-flow"], "0.5.50");
   assert.equal(pkg.dependencies["pi-maestro-teammate"], "^0.4.3");
   assert.equal(
     pkg.dependencies["@konbakuyomu/smart-search"],
