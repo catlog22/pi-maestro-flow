@@ -6,6 +6,7 @@ export type WorkflowGateStatus = "pending" | "passed" | "failed" | "waived" | "s
 
 export interface WorkflowGate {
   id: string;
+  runId?: string;
   phase?: "entry" | "exit" | "session";
   blocking: boolean;
   status: WorkflowGateStatus;
@@ -21,6 +22,7 @@ export interface WorkflowChainStep {
 }
 
 export interface WorkflowRun {
+  schemaVersion?: string;
   runId: string;
   parentRunId: string | null;
   command: string;
@@ -46,10 +48,13 @@ export interface WorkflowArtifact {
 }
 
 export interface WorkflowSession {
+  schemaVersion?: string;
   sessionId: string;
   intent: string;
   status: WorkflowSessionStatus;
   revision: number;
+  identityRevision?: number;
+  activityRevision?: number;
   activeRunId: string | null;
   definitionOfDone: string;
   gates: WorkflowGate[];

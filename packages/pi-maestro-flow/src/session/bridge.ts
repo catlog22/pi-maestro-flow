@@ -42,12 +42,22 @@ export async function loadCanonicalSnapshot(
     if (sessionResult.raw) fingerprintParts.push(sessionResult.raw);
     if (sessionResult.error) diagnostics.push(sessionResult.error);
     if (sessionResult.value) {
+      const gateResult = await readJson(join(sessionDir, "gates.json"), true);
+      if (gateResult.raw) fingerprintParts.push(gateResult.raw);
+      if (gateResult.error) diagnostics.push(gateResult.error);
+      const gateRecords = gateRegistry(gateResult.value);
       const artifactResult = await readJson(join(sessionDir, "artifacts.json"), true);
       if (artifactResult.raw) fingerprintParts.push(artifactResult.raw);
       if (artifactResult.error) diagnostics.push(artifactResult.error);
-      const runResults = await readRuns(join(sessionDir, "runs"), diagnostics);
+      const runResults = await readRuns(join(sessionDir, "runs"), diagnostics, gateRecords);
       fingerprintParts.push(...runResults.raw);
-      const session = normalizeSession(activeSessionId, sessionResult.value, runResults.runs, artifactResult.value);
+      const session = normalizeSession(
+        activeSessionId,
+        sessionResult.value,
+        runResults.runs,
+        artifactResult.value,
+        gateRecords,
+      );
       return snapshot("canonical", projectRoot, session, fingerprintParts, diagnostics, options.now);
     }
   } else if (activeSessionId) {
@@ -143,7 +153,11 @@ async function readJson(path: string, optional = false): Promise<ReadJsonResult>
   }
 }
 
-async function readRuns(runsDir: string, diagnostics: string[]): Promise<{ runs: WorkflowRun[]; raw: string[] }> {
+async function readRuns(
+  runsDir: string,
+  diagnostics: string[],
+  gateRecords: WorkflowGate[] = [],
+): Promise<{ runs: WorkflowRun[]; raw: string[] }> {
   let directories: string[];
   try {
     directories = (await readdir(runsDir, { withFileTypes: true }))
@@ -161,7 +175,7 @@ async function readRuns(runsDir: string, diagnostics: string[]): Promise<{ runs:
     const result = await readJson(join(runsDir, directory, "run.json"));
     if (result.raw) raw.push(result.raw);
     if (result.error) diagnostics.push(result.error);
-    if (result.value) runs.push(normalizeRun(directory, result.value));
+    if (result.value) runs.push(normalizeRun(directory, result.value, gateRecords));
   }
   return { runs, raw };
 }
@@ -171,19 +185,32 @@ function normalizeSession(
   raw: Record<string, unknown>,
   runs: WorkflowRun[],
   artifactRegistry?: Record<string, unknown>,
+  gateRecords: WorkflowGate[] = [],
 ): WorkflowSession {
   const orchestration = recordValue(raw.orchestration);
   const boundary = recordValue(raw.boundary_contract);
-  const artifactsRecord = recordValue(artifactRegistry?.artifacts) ?? {};
+  const artifactsRecord = recordValue(artifactRegistry?.artifacts)
+    ?? recordValue(artifactRegistry?.records)
+    ?? {};
   const aliasesRecord = recordValue(artifactRegistry?.aliases) ?? {};
+  const identityRevision = optionalNumber(raw.identity_revision);
+  const activityRevision = optionalNumber(raw.activity_revision);
+  const revision = Math.max(numberValue(raw.revision), identityRevision ?? 0, activityRevision ?? 0);
+  const sessionGateIds = stringArray(raw.gate_ids);
+  const externalSessionGates = gateRecords.filter((gate) =>
+    sessionGateIds.includes(gate.id) || !gate.runId
+  );
   return {
+    ...(stringValue(raw.schema_version) ? { schemaVersion: stringValue(raw.schema_version) } : {}),
     sessionId: stringValue(raw.session_id) ?? activeSessionId,
     intent: stringValue(raw.intent) ?? "",
     status: sessionStatus(raw.status),
-    revision: numberValue(raw.revision),
+    revision,
+    ...(identityRevision !== undefined ? { identityRevision } : {}),
+    ...(activityRevision !== undefined ? { activityRevision } : {}),
     activeRunId: nullableString(raw.active_run_id),
     definitionOfDone: stringValue(boundary?.definition_of_done) ?? "",
-    gates: gateArray(raw.gates, "session"),
+    gates: mergeGates(gateArray(raw.gates, "session"), externalSessionGates),
     chain: chainArray(orchestration?.chain),
     runs,
     artifacts: Object.entries(artifactsRecord).map(([artifactId, value]) => normalizeArtifact(artifactId, value)),
@@ -191,20 +218,34 @@ function normalizeSession(
   };
 }
 
-function normalizeRun(fallbackId: string, raw: Record<string, unknown>): WorkflowRun {
+function normalizeRun(
+  fallbackId: string,
+  raw: Record<string, unknown>,
+  gateRecords: WorkflowGate[] = [],
+): WorkflowRun {
   const input = recordValue(raw.input);
+  const command = recordValue(raw.command);
+  const output = recordValue(raw.output);
+  const runId = stringValue(raw.run_id) ?? fallbackId;
+  const gateIds = stringArray(raw.gate_ids);
+  const externalGates = gateRecords.filter((gate) =>
+    gate.runId === runId || gateIds.includes(gate.id)
+  );
   return {
-    runId: stringValue(raw.run_id) ?? fallbackId,
+    ...(stringValue(raw.schema_version) ? { schemaVersion: stringValue(raw.schema_version) } : {}),
+    runId,
     parentRunId: nullableString(raw.parent_run_id),
-    command: stringValue(raw.command) ?? "unknown",
+    command: stringValue(raw.command) ?? stringValue(command?.name) ?? "unknown",
     status: runStatus(raw.status),
     goal: nullableString(raw.goal),
-    args: stringArray(input?.args),
-    gates: gateArray(raw.gates),
-    primaryArtifactId: nullableString(raw.primary),
+    args: stringArray(input?.args).length > 0 ? stringArray(input?.args) : stringArray(command?.args),
+    gates: mergeGates(gateArray(raw.gates), externalGates),
+    primaryArtifactId: nullableString(raw.primary) ?? nullableString(output?.primary_artifact_id),
     handoff: recordValue(raw.handoff) ?? null,
     startedAt: stringValue(raw.started_at) ?? "",
-    endedAt: nullableString(raw.ended_at),
+    endedAt: nullableString(raw.ended_at)
+      ?? nullableString(raw.sealed_at)
+      ?? nullableString(raw.completed_at),
   };
 }
 
@@ -214,9 +255,9 @@ function normalizeArtifact(artifactId: string, value: unknown): WorkflowArtifact
     artifactId,
     kind: stringValue(raw.kind) ?? "unknown",
     role: stringValue(raw.role) ?? "attachment",
-    runId: stringValue(raw.run_id) ?? "",
-    path: stringValue(raw.path) ?? "",
-    hash: stringValue(raw.hash) ?? "",
+    runId: stringValue(raw.run_id) ?? stringValue(raw.producer_run_id) ?? "",
+    path: stringValue(raw.path) ?? stringValue(raw.relative_path) ?? "",
+    hash: stringValue(raw.hash) ?? stringValue(raw.content_hash) ?? "",
     status: stringValue(raw.status) ?? "draft",
     replaces: nullableString(raw.replaces),
   };
@@ -293,16 +334,39 @@ function normalizeLegacyStep(value: unknown, index: number): WorkflowChainStep {
 
 function gateArray(value: unknown, defaultPhase?: WorkflowGate["phase"]): WorkflowGate[] {
   if (!Array.isArray(value)) return [];
-  return value.map((entry, index) => {
-    const raw = recordValue(entry) ?? {};
-    return {
-      id: stringValue(raw.id) ?? `gate-${index + 1}`,
-      ...(phaseValue(raw.phase) ?? defaultPhase ? { phase: phaseValue(raw.phase) ?? defaultPhase } : {}),
-      blocking: raw.blocking !== false,
-      status: gateStatus(raw.status),
-      ...(sourceValue(raw.source) ? { source: sourceValue(raw.source) } : {}),
-    };
-  });
+  return value.map((entry, index) => normalizeGate(`gate-${index + 1}`, entry, defaultPhase));
+}
+
+function gateRegistry(value: Record<string, unknown> | undefined): WorkflowGate[] {
+  if (!value) return [];
+  const records = recordValue(value.records) ?? recordValue(value.gates) ?? value;
+  return Object.entries(records)
+    .filter(([key, entry]) => !["schema_version", "revision"].includes(key) && recordValue(entry))
+    .map(([key, entry]) => normalizeGate(key, entry));
+}
+
+function normalizeGate(
+  fallbackId: string,
+  value: unknown,
+  defaultPhase?: WorkflowGate["phase"],
+): WorkflowGate {
+  const raw = recordValue(value) ?? {};
+  const runId = stringValue(raw.run_id);
+  const phase = phaseValue(raw.phase) ?? defaultPhase;
+  return {
+    id: stringValue(raw.id) ?? fallbackId,
+    ...(runId ? { runId } : {}),
+    ...(phase ? { phase } : {}),
+    blocking: raw.blocking !== false,
+    status: gateStatus(raw.status),
+    ...(sourceValue(raw.source) ? { source: sourceValue(raw.source) } : {}),
+  };
+}
+
+function mergeGates(left: WorkflowGate[], right: WorkflowGate[]): WorkflowGate[] {
+  const merged = new Map<string, WorkflowGate>();
+  for (const gate of [...left, ...right]) merged.set(gate.id, gate);
+  return [...merged.values()];
 }
 
 function todoStatus(
@@ -375,6 +439,10 @@ function nullableString(value: unknown): string | null {
 
 function numberValue(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
 function stringArray(value: unknown): string[] {
