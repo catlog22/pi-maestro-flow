@@ -27,11 +27,14 @@ test("coordinator attaches brief-first and fences old continuation markers on re
 
     const marker = coordinator.continuationMarker(3);
     assert.equal(coordinator.acceptsContinuation(marker), true);
+    await coordinator.fenceContinuation();
+    assert.equal(coordinator.acceptsContinuation(marker), false);
+    const retryMarker = coordinator.continuationMarker(4);
 
     snapshot.session!.runs[0]!.status = "failed";
     const retried = await coordinator.retry("run-1");
     assert.equal(retried.command.stdout, "created execute");
-    assert.equal(coordinator.acceptsContinuation(marker), false);
+    assert.equal(coordinator.acceptsContinuation(retryMarker), false);
     assert.deepEqual(calls.at(-1), ["create", "execute", "session-1", "run-1", "--scope", "core"]);
 
     const cancel = coordinator.cancel("run-1");

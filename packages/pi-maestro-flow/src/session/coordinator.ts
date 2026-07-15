@@ -346,6 +346,10 @@ export class WorkflowCoordinator {
     );
   }
 
+  async fenceContinuation(): Promise<void> {
+    await this.leases.fence();
+  }
+
   async release(): Promise<void> {
     await this.leases.release();
   }
