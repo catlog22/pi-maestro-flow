@@ -335,6 +335,21 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro load --type project --list" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro search \"Plan Mode\" --code" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro explore \"FIND: plan hooks\\nSCOPE: packages/pi-maestro-flow/src/tools/plan.ts\"" } }), undefined);
+    for (const action of ["status", "brief", "prepare"]) {
+      assert.equal(onToolCallPlan({ toolName: "run-control", input: { action } }), undefined, action);
+    }
+    for (const action of ["advance", "complete", "retry", "cancel"]) {
+      assert.match(onToolCallPlan({ toolName: "run-control", input: { action } })?.reason ?? "", /blocks/, action);
+    }
+    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run prepare analyze" } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run brief run-1" } }), undefined);
+    for (const subcommand of ["create execute", "check run-1", "complete run-1", "seal-session session-1", "retry run-1", "cancel run-1"]) {
+      assert.match(
+        onToolCallPlan({ toolName: "bash", input: { command: `maestro run ${subcommand}` } })?.reason ?? "",
+        /modify files/,
+        subcommand,
+      );
+    }
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "maestro install" } })?.reason ?? "", /modify files/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git commit -am x" } })?.reason ?? "", /modify files/);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "git status; node --version" } }), undefined);

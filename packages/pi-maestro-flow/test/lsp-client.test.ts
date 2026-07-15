@@ -38,6 +38,9 @@ process.stdin.on('data', chunk => {
       send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: { uri: message.params.textDocument.uri, diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } }, severity: 2, message: 'fake warning' }] } });
       send({ jsonrpc: '2.0', id: 999, method: 'workspace/applyEdit', params: { edit: { changes: {} } } });
     }
+    else if (message.method === 'textDocument/didChange') {
+      send({ jsonrpc: '2.0', method: 'textDocument/publishDiagnostics', params: { uri: message.params.textDocument.uri, diagnostics: [{ range: { start: { line: 0, character: 0 }, end: { line: 0, character: 5 } }, severity: 1, message: 'updated error' }] } });
+    }
     else if (message.id === 999 && !message.method) applyResponse = message.result;
     else if (message.method === 'textDocument/hover') {
       const respond = () => applyResponse
@@ -65,6 +68,10 @@ process.stdin.on('data', chunk => {
     assert.equal(uri, pathToFileURL(source).href);
     const diagnostics = await client.getDiagnostics(uri, 1_000);
     assert.equal(diagnostics[0]?.message, "fake warning");
+    await fs.writeFile(source, "const value: string = 1;\n", "utf8");
+    await client.ensureFileOpen(source);
+    const updatedDiagnostics = await client.getDiagnostics(uri, 1_000);
+    assert.equal(updatedDiagnostics[0]?.message, "updated error");
     const hover = await client.request("textDocument/hover", { textDocument: { uri }, position: { line: 0, character: 6 } });
     assert.deepEqual(hover, {
       contents: "hovered",

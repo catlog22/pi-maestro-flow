@@ -91,6 +91,27 @@ test("LSP tool routes navigation, diagnostics, symbols, capabilities, status, re
   assert.equal(manager.reloaded, true);
 });
 
+test("LSP raw request output is bounded and payload details are summarized", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-lsp-output-"));
+  const manager = new FakeManager(root);
+  const tool = createLspTool(manager);
+  const payload = JSON.stringify({ content: "界".repeat(20_000) });
+  try {
+    const response = await tool.execute("request-bounded", {
+      action: "request",
+      query: "custom/method",
+      payload,
+    }, undefined, undefined, { cwd: root } as never);
+    const text = (response.content[0] as { text: string }).text;
+    assert.ok(Buffer.byteLength(text, "utf8") <= 16 * 1024);
+    assert.match(text, /Output truncated/);
+    assert.equal(response.details?.request.payload, `<${Buffer.byteLength(payload, "utf8")} byte JSON payload>`);
+    assert.equal(response.details?.output?.truncated, true);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("LSP rename, code action, and rename_file support preview and apply behavior", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-lsp-write-"));
   const sample = path.join(root, "sample.ts");

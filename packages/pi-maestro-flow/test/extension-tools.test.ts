@@ -34,11 +34,61 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(names.filter((name) => name === "browser").length, 1);
   assert.equal(names.filter((name) => name === "search_tool_bm25").length, 1);
 
+  const maestro = tools.find((tool) => tool.name === "maestro");
+  const maestroProperties = (maestro?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties;
+  assert.ok(maestroProperties?.name, "maestro delegate schema should expose a stable task name");
+  assert.ok(maestroProperties?.concurrency, "maestro explore schema should expose a concurrency bound");
+
+  const askTool = tools.find((tool) => tool.name === "ask-user-question");
+  assert.ok(askTool?.renderResult);
+  const renderAskResult = askTool.renderResult as unknown as (
+    result: unknown,
+    options: { expanded: boolean; isPartial: boolean },
+    theme: { fg(name: string, text: string): string },
+  ) => { render(width: number): string[] };
+  const askResult = {
+    content: [{ type: "text", text: "ok" }],
+    details: {
+      answers: [
+        { question: "First question?", selected: ["Alpha"] },
+        { question: "Second question?", selected: ["Beta"], text: "with detail" },
+      ],
+    },
+  };
+  const theme = { fg: (_name: string, text: string) => text };
+  const collapsed = renderAskResult(askResult, { expanded: false, isPartial: false }, theme).render(120);
+  const expanded = renderAskResult(askResult, { expanded: true, isPartial: false }, theme).render(120);
+  assert.equal(collapsed.length, 1);
+  assert.match(collapsed[0], /First question\?.*Alpha/);
+  assert.doesNotMatch(collapsed[0], /Second question/);
+  assert.deepEqual(expanded.slice(1), [
+    "1. First question? → Alpha",
+    "2. Second question? → Beta — with detail",
+  ]);
+
+  let permissionPrompts = 0;
   const ctx = {
     cwd: "D:/workspace",
-    ui: { setWidget() {}, setStatus() {}, notify() {} },
+    hasUI: true,
+    ui: {
+      setWidget() {},
+      setStatus() {},
+      notify() {},
+      async select() {
+        permissionPrompts++;
+        return "Deny";
+      },
+    },
     sessionManager: { getSessionId: () => "test", getSessionFile: () => undefined, getSessionName: () => undefined },
   } as unknown as ExtensionContext;
+  let toolResult: unknown;
+  const toolEvent = { type: "tool_call", toolName: "bash", toolCallId: "permission-1", input: { command: "npm test" } };
+  for (const handler of handlers.get("tool_call") ?? []) {
+    toolResult = await handler(toolEvent, ctx);
+    if ((toolResult as { block?: boolean } | undefined)?.block) break;
+  }
+  assert.equal(permissionPrompts, 1);
+  assert.match((toolResult as { reason?: string }).reason ?? "", /denied by user/i);
   for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx);
 });
 

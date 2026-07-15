@@ -336,8 +336,25 @@ test("todo widget shows the primary skill and additional binding count", () => {
   assert.match(lines.join("\n"), /\/maestro-execute \+2/);
 });
 
-test("todo state version is 3", () => {
-  assert.equal(getTodoCompactionSnapshot().stateVersion, 3);
+test("todo widget bounds expanded rows and keeps actionable work first", () => {
+  const tasks = Array.from({ length: 100 }, (_, index) => ({
+    id: String(index + 1),
+    subject: index === 0 ? "Current work" : index === 1 ? "Blocked work" : `Task ${index + 1}`,
+    status: index === 0 ? "in_progress" as const : index === 1 ? "blocked" as const : "completed" as const,
+    blockedBy: index === 1 ? ["external"] : [],
+    skills: [],
+  }));
+
+  const lines = renderTodoWidget(tasks, true, 120);
+
+  assert.equal(lines.length, 10);
+  assert.match(lines[1], /Current work/);
+  assert.match(lines[2], /Blocked work/);
+  assert.match(lines.at(-1) ?? "", /92 more/);
+});
+
+test("todo state version is 4", () => {
+  assert.equal(getTodoCompactionSnapshot().stateVersion, 4);
 });
 
 test("todo next refuses to activate a second task", async () => {

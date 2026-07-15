@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import type { WorkflowSnapshotLike } from "../src/session/view-model.ts";
 import { installStatusline } from "../src/statusline/statusline.ts";
+import { ansiFg, ANSI_BOLD, COLORS } from "../src/statusline/constants.ts";
 
 type EventHandler = (event: unknown, ctx: ExtensionContext) => unknown;
 
@@ -10,7 +12,10 @@ function stripAnsi(value: string): string {
   return value.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
-function createHarness() {
+function createHarness(options: {
+  activeToolCalls?: number;
+  workflowSnapshot?: WorkflowSnapshotLike;
+} = {}) {
   const handlers = new Map<string, EventHandler[]>();
   const statuses = new Map<string, string>();
   let component: { render(width: number): string[]; dispose?(): void } | undefined;
@@ -40,7 +45,15 @@ function createHarness() {
     },
   } as unknown as ExtensionContext;
 
-  installStatusline(pi, () => ({ activeRuns: new Map() }));
+  const activeToolCalls = new Map(Array.from(
+    { length: options.activeToolCalls ?? 0 },
+    (_, index) => [String(index), { action: "tool", startedAt: 0, correlationId: String(index) }],
+  ));
+  installStatusline(
+    pi,
+    () => ({ activeToolCalls }),
+    () => options.workflowSnapshot,
+  );
   for (const handler of handlers.get("session_start") ?? []) handler({}, ctx);
 
   return {
@@ -62,6 +75,8 @@ test("statusline links approval mode with ACT, PLAN and READY using width-aware 
     for (const [status, approval, full, compact, narrow] of [
       ["ACT", "APPROVAL default", "[A] ACT · APPROVAL default", "ACT/default", "A/D"],
       ["ACT", "APPROVAL acceptEdits", "[A] ACT · APPROVAL acceptEdits", "ACT/acceptEdits", "A/E"],
+	  ["ACT", "APPROVAL dontAsk", "[A] ACT · APPROVAL dontAsk", "ACT/dontAsk", "A/N"],
+	  ["ACT", "APPROVAL YOLO", "[A] ACT · APPROVAL YOLO", "ACT/YOLO", "A/Y"],
       ["PLAN", "APPROVAL default", "[P] PLAN · APPROVAL plan", "PLAN/plan", "P/P"],
       ["READY", "APPROVAL bypassPermissions", "[P] READY · APPROVAL plan", "READY/plan", "R/P"],
     ] as const) {
@@ -71,6 +86,11 @@ test("statusline links approval mode with ACT, PLAN and READY using width-aware 
       assert.ok(stripAnsi(harness.render(60)[0]).startsWith(compact));
       assert.ok(stripAnsi(harness.render(30)[0]).startsWith(narrow));
     }
+
+    harness.statuses.set("mode", "ACT");
+    harness.statuses.set("approval-mode", "APPROVAL YOLO");
+    const yolo = harness.render(100)[0];
+    assert.ok(yolo.includes(`${ansiFg(COLORS.danger)}${ANSI_BOLD}APPROVAL YOLO`));
 
     for (let width = 1; width <= 120; width++) {
       for (const line of harness.render(width)) {
@@ -105,6 +125,70 @@ test("statusline renders context pressure across full compact and narrow widths"
     harness.statuses.delete("maestro-auto-compact");
     assert.equal(harness.render(120).length, 1);
     assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /AUTO-PRUNE|CRITICAL|P!|C!/);
+
+    for (let width = 1; width <= 120; width++) {
+      for (const line of harness.render(width)) {
+        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+      }
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("statusline renders canonical Session/Run separately from active tool calls", () => {
+  const harness = createHarness({
+    activeToolCalls: 2,
+    workflowSnapshot: {
+      source: "canonical",
+      projectRoot: "D:\\pi-maestro-flow",
+      loadedAt: "2026-07-15T00:00:00.000Z",
+      revision: { sessionRevision: 1, fingerprint: "statusline" },
+      diagnostics: [],
+      session: {
+        sessionId: "20260715-auth-m1",
+        label: "auth-m1",
+        intent: "Auth",
+        status: "paused",
+        revision: 1,
+        activeRunId: "003",
+        definitionOfDone: "Auth verified",
+        gates: [
+          { id: "GATE-001", blocking: true, status: "passed" },
+          { id: "GATE-002", blocking: true, status: "passed" },
+          { id: "GATE-003", blocking: true, status: "pending" },
+        ],
+        chain: [{ step: "plan", command: "plan", status: "blocked", runId: "003" }],
+        runs: [{
+          runId: "003",
+          parentRunId: null,
+          command: "plan",
+          status: "blocked",
+          goal: null,
+          args: [],
+          gates: [{ id: "GATE-003", blocking: true, status: "pending" }],
+          primaryArtifactId: null,
+          handoff: null,
+          startedAt: "2026-07-15T00:00:00.000Z",
+          endedAt: null,
+        }],
+        artifacts: [],
+        aliases: {},
+      },
+      recoveryAction: "Resume from gate",
+      goal: { objective: "Auth", status: "paused", tokensUsed: 45_000, tokenBudget: 300_000 },
+    },
+  });
+  try {
+    const full = harness.render(120).map(stripAnsi);
+    assert.equal(full.length, 2);
+    assert.match(full[0], /2 calls/);
+    assert.doesNotMatch(full[0], /2 runs/);
+    assert.match(full[1], /⚑ auth-m1/);
+    assert.match(full[1], /! blocked/);
+    assert.match(full[1], /003\/plan/);
+    assert.doesNotMatch(full.join("\n"), /milestone|phase/i);
+    assert.match(stripAnsi(harness.render(40)[1]), /^» Resume from gate/);
 
     for (let width = 1; width <= 120; width++) {
       for (const line of harness.render(width)) {

@@ -137,6 +137,50 @@ test("Plan confirmation accepts Ctrl+Enter across modifyOtherKeys encoding", asy
   assert.equal(await pending, "execute");
 });
 
+test("Plan confirmation number keys match the numbered actions", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan",
+    canClearContext: true,
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("4");
+  assert.equal(await pending, "modify");
+});
+
+test("Plan confirmation blocks invisible actions below 20 columns", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan",
+    canClearContext: true,
+  });
+  assert.ok(harness.component);
+  harness.component.render(12);
+  harness.component.handleInput("1");
+  harness.component.handleInput("\r");
+  harness.component.handleInput("\x1b[27;5;13~");
+  assert.equal(harness.doneValue, undefined);
+  harness.component.handleInput("\x1b");
+  assert.equal(await pending, "cancel");
+});
+
+test("Plan editor blocks invisible editing below the minimum width", async () => {
+  const harness = createHarness();
+  const pending = openPlanEditor(harness.ctx, {
+    markdown: "safe draft",
+    revision: 1,
+    allowConfirm: true,
+    async onSave() { return 2; },
+    async onConfirm() {},
+  });
+  assert.ok(harness.component);
+  assert.match(harness.component.render(12).join("\n"), /Esc/);
+  harness.component.handleInput(" hidden mutation");
+  harness.component.handleInput("\x1b");
+  const result = await pending;
+  assert.equal(result.markdown, "safe draft");
+});
+
 test("Plan editor keeps the buffer open when approval fails", async () => {
   const harness = createHarness();
   const pending = openPlanEditor(harness.ctx, {

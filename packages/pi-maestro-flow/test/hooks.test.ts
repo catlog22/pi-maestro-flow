@@ -231,6 +231,151 @@ test("Pi adapter maps PreToolUse deny output to tool_call blocking", async () =>
   }
 });
 
+test("Pi adapter maps PreToolUse ask and PermissionRequest decisions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-permission-request-"));
+  const configDir = join(root, ".pi");
+  const trustPath = join(root, "user", "hook-trust.json");
+  const scriptPath = join(root, "permission.cjs");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(scriptPath, `
+const fs = require("node:fs");
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+const hookSpecificOutput = input.hook_event_name === "PreToolUse"
+  ? {
+      hookEventName: "PreToolUse",
+      permissionDecision: "ask",
+      permissionDecisionReason: "review command",
+      updatedInput: { command: "npm test" }
+    }
+  : {
+      hookEventName: "PermissionRequest",
+      decision: {
+        behavior: "allow",
+        updatedPermissions: [{
+          type: "addRules",
+          behavior: "allow",
+          destination: "session",
+          rules: [{ toolName: "Bash", ruleContent: "npm test" }]
+        }]
+      }
+    };
+process.stdout.write(JSON.stringify({ hookSpecificOutput }));
+`);
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
+  await writeFile(join(configDir, "hooks.json"), JSON.stringify({
+    hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command, timeout: 5 }] }],
+      PermissionRequest: [{ matcher: "Bash", hooks: [{ type: "command", command, timeout: 5 }] }],
+    },
+  }));
+  const loaded = await loadCodexHooks(root);
+  await trustHookConfig(trustPath, loaded.filePath, loaded.hash ?? "");
+
+  type Handler = (event: any, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  const handlers = new Map<string, Handler[]>();
+  const fakePi = {
+    on(name: string, handler: Handler) {
+      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+    },
+    registerCommand() {},
+    sendMessage() {},
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  let prompts = 0;
+  const ctx = {
+    cwd: root,
+    hasUI: true,
+    model: { id: "test-model" },
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getSessionFile: () => undefined,
+    },
+    ui: {
+      notify() {},
+      setStatus() {},
+      async select() {
+        prompts++;
+        return "Allow once";
+      },
+    },
+  } as unknown as ExtensionContext;
+  const adapter = registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+
+  try {
+    for (const handler of handlers.get("session_start") ?? []) {
+      await handler({ type: "session_start", reason: "startup" }, ctx);
+    }
+    const input = { command: "npm run unsafe" };
+    const [toolHandler] = handlers.get("tool_call") ?? [];
+    assert.equal(await toolHandler({
+      type: "tool_call",
+      toolName: "bash",
+      toolCallId: "tool-ask",
+      input,
+    }, ctx), undefined);
+    assert.equal(prompts, 1);
+    assert.deepEqual(input, { command: "npm test" });
+
+    const decision = await adapter.requestPermission(
+      { toolName: "bash", input: { command: "npm test" } },
+      ctx,
+      "Bash(npm test)",
+      false,
+    );
+    assert.equal(decision?.behavior, "allow");
+    assert.deepEqual(decision?.updatedPermissions, [{
+      type: "addRules",
+      behavior: "allow",
+      destination: "session",
+      rules: [{ toolName: "Bash", ruleContent: "npm test" }],
+    }]);
+
+    const brokerInput = { command: "npm run nested" };
+    assert.equal(await adapter.beforeToolCall({
+      toolName: "bash",
+      toolCallId: "nested-tool-ask",
+      input: brokerInput,
+    }, ctx), undefined);
+    assert.equal(prompts, 2);
+    assert.deepEqual(brokerInput, { command: "npm test" });
+    assert.deepEqual(await adapter.requestPermission(
+      { toolName: "bash", input: brokerInput },
+      ctx,
+      "Bash(npm test)",
+      false,
+    ), { behavior: "allow" });
+
+    const childHandlers = new Map<string, Handler[]>();
+    const childPi = {
+      on(name: string, handler: Handler) {
+        childHandlers.set(name, [...(childHandlers.get(name) ?? []), handler]);
+      },
+      registerCommand() {},
+      sendMessage() {},
+      sendUserMessage() {},
+    } as unknown as ExtensionAPI;
+    registerCodexHookAdapter(childPi, {
+      trustFilePath: trustPath,
+      isTeammateChild: () => true,
+    });
+    for (const handler of childHandlers.get("session_start") ?? []) {
+      await handler({ type: "session_start", reason: "startup" }, ctx);
+    }
+    const childInput = { command: "npm run unsafe" };
+    const [childToolHandler] = childHandlers.get("tool_call") ?? [];
+    assert.equal(await childToolHandler({
+      type: "tool_call",
+      toolName: "bash",
+      toolCallId: "child-tool-ask",
+      input: childInput,
+    }, ctx), undefined);
+    assert.deepEqual(childInput, { command: "npm run unsafe" });
+    assert.equal(prompts, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Pi adapter injects UserPromptSubmit context as a message, not the system prompt", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-hooks-context-"));
   const configDir = join(root, ".pi");
