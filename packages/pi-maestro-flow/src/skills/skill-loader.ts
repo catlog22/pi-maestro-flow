@@ -25,10 +25,18 @@ export interface TodoSkillConfig {
   args?: string;
 }
 
+export const SKILL_SESSION_MODES = ["none", "brief", "run", "bootstrap"] as const;
+export type SkillSessionMode = typeof SKILL_SESSION_MODES[number];
+
+interface TodoSkillFrontmatter extends Record<string, unknown> {
+  "session-mode"?: unknown;
+}
+
 export interface LoadedTodoSkill {
   readonly name: string;
   readonly filePath: string;
   readonly prompt: string;
+  readonly sessionMode: SkillSessionMode;
   readonly requiredFiles: string[];
   readonly deferredFiles: string[];
   readonly totalBytes: number;
@@ -83,6 +91,7 @@ export class TodoSkillLoadError extends Error {
       | "E_SKILL_NOT_FOUND"
       | "E_SKILL_READ_FAILED"
       | "E_SKILL_REQUIRED_MISSING"
+      | "E_SKILL_FRONTMATTER_INVALID"
       | "E_SKILL_BUDGET_EXCEEDED",
     message: string,
   ) {
@@ -133,7 +142,8 @@ export class TodoSkillLoader {
     const { config, configHash } = await loadSkillConfig(this.cwd, this.agentDir);
     const budgets = config.limits;
     const main = await this.readRawFile(skill.filePath, budgets, "skill");
-    const { body } = parseFrontmatter(main.content);
+    const { body, frontmatter } = parseFrontmatter<TodoSkillFrontmatter>(main.content);
+    const sessionMode = parseSkillSessionMode(frontmatter["session-mode"], skill.filePath);
     const requiredRaw = extractBlockPaths(body, "required_reading");
     const deferredRaw = extractBlockPaths(body, "deferred_reading");
     const requiredFiles = requiredRaw.map((path) => expandSkillPath(path, skill.baseDir, this.cwd));
@@ -161,6 +171,7 @@ export class TodoSkillLoader {
     const compiledKey = hashValue({
       name,
       filePath: skill.filePath,
+      sessionMode,
       contentHash: main.contentHash,
       configHash,
       requiredReadingHash,
@@ -179,6 +190,7 @@ export class TodoSkillLoader {
         name,
         filePath: skill.filePath,
         prompt,
+        sessionMode,
         requiredFiles,
         deferredFiles,
         promptBytes,
@@ -264,6 +276,17 @@ export class TodoSkillLoader {
     }
     return snapshot;
   }
+}
+
+function parseSkillSessionMode(value: unknown, filePath: string): SkillSessionMode {
+  if (value === undefined || value === null || value === "") return "none";
+  if (typeof value === "string" && (SKILL_SESSION_MODES as readonly string[]).includes(value)) {
+    return value as SkillSessionMode;
+  }
+  throw new TodoSkillLoadError(
+    "E_SKILL_FRONTMATTER_INVALID",
+    `${filePath} has invalid session-mode ${JSON.stringify(value)}; expected ${SKILL_SESSION_MODES.join("|")}`,
+  );
 }
 
 function extractBlockPaths(body: string, tag: "required_reading" | "deferred_reading"): string[] {

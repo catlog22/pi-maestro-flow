@@ -113,6 +113,7 @@ export class LspClient implements LspClientLike {
     } else if (existing.content !== content) {
       const version = existing.version + 1;
       this.#documents.set(uri, { version, content });
+      this.#diagnostics.delete(uri);
       this.notify("textDocument/didChange", {
         textDocument: { uri, version },
         contentChanges: [{ text: content }],

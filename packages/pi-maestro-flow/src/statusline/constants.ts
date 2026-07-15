@@ -67,6 +67,7 @@ interface ThemeColors {
 	ctxCrit: RGB;
 	milestone: RGB;
 	phase: RGB;
+	danger: RGB;
 	tokens: RGB;
 	separator: RGB;
 }
@@ -83,6 +84,7 @@ export const THEMES: Record<string, ThemeColors> = {
 		ctxCrit: [243, 139, 168],
 		milestone: [224, 175, 104],
 		phase: [166, 209, 137],
+		danger: [243, 139, 168],
 		tokens: [205, 214, 244],
 		separator: [88, 91, 112],
 	},
@@ -97,6 +99,7 @@ export const THEMES: Record<string, ThemeColors> = {
 		ctxCrit: [255, 50, 50],
 		milestone: [255, 85, 85],
 		phase: [255, 204, 0],
+		danger: [255, 50, 50],
 		tokens: [220, 220, 220],
 		separator: [60, 60, 80],
 	},
@@ -111,6 +114,7 @@ export const THEMES: Record<string, ThemeColors> = {
 		ctxCrit: [191, 97, 106],
 		milestone: [208, 135, 112],
 		phase: [163, 190, 140],
+		danger: [191, 97, 106],
 		tokens: [216, 222, 233],
 		separator: [76, 86, 106],
 	},

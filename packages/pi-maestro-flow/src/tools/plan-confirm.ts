@@ -58,6 +58,16 @@ export async function openPlanConfirmation(
       let selected = 0;
       let previewOffset = 0;
       let status = "";
+      let lastWidth = 80;
+
+      function actionFooter(width: number, segments: string[]): string {
+        let value = "";
+        for (const segment of segments) {
+          const next = value ? `${value} · ${segment}` : segment;
+          if (visibleWidth(next) <= width) value = next;
+        }
+        return value || segments[0] || "";
+      }
 
       function choose(action = items[selected]?.action): void {
         const item = items.find((candidate) => candidate.action === action);
@@ -73,11 +83,12 @@ export async function openPlanConfirmation(
       return {
         render(width: number): string[] {
           const safeWidth = Math.max(1, width);
+          lastWidth = safeWidth;
           const selectedItem = items[selected] ?? items[0];
           if (safeWidth < 24) {
             return [
               truncateToWidth(`Plan confirm · ${selected + 1}/${items.length} ${selectedItem.label}`, safeWidth, "…"),
-              truncateToWidth("↑↓ select · Enter choose · Esc exit", safeWidth, "…"),
+              truncateToWidth(actionFooter(safeWidth, ["Esc exit", "Enter choose", "↑↓ select"]), safeWidth, "…"),
             ];
           }
 
@@ -91,7 +102,14 @@ export async function openPlanConfirmation(
           const range = renderedPlan.length > previewHeight
             ? `${previewOffset + 1}-${Math.min(renderedPlan.length, previewOffset + previewHeight)}/${renderedPlan.length}`
             : `${renderedPlan.length}`;
-          const footer = status || "↑↓ action · Enter choose · Ctrl+Enter execute · PgUp/PgDn plan · Esc close";
+          const footer = status || actionFooter(innerWidth, [
+            "Esc close",
+            "Enter choose",
+            "1-5 choose",
+            "↑↓ action",
+            "Ctrl+Enter execute",
+            "PgUp/PgDn plan",
+          ]);
           const rows = [
             `${theme.bold("Plan confirmation")}  ${theme.fg("dim", options.pathLabel ?? "current.md")}`,
             theme.fg("dim", "─".repeat(innerWidth)),
@@ -115,6 +133,10 @@ export async function openPlanConfirmation(
         },
 
         handleInput(data: string): void {
+          if (lastWidth < 20) {
+            if (matchesKey(data, Key.escape)) choose("cancel");
+            return;
+          }
           if (matchesKey(data, Key.up)) {
             selected = (selected - 1 + items.length) % items.length;
             status = "";
@@ -125,6 +147,10 @@ export async function openPlanConfirmation(
             previewOffset = Math.max(0, previewOffset - 5);
           } else if (matchesKey(data, Key.pageDown)) {
             previewOffset += 5;
+          } else if (/^[1-5]$/.test(data)) {
+            selected = Number(data) - 1;
+            choose();
+            return;
           } else if (matchesKey(data, Key.enter)) {
             choose();
             return;
@@ -148,7 +174,8 @@ export async function openPlanConfirmation(
     {
       overlay: true,
       overlayOptions: {
-        width: 100,
+        width: "92%",
+        minWidth: 24,
         maxHeight: 28,
         anchor: "center" as const,
       },

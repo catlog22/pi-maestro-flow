@@ -22,21 +22,28 @@ import {
   revokeHookConfigTrust,
   trustHookConfig,
 } from "./trust.ts";
+import type {
+  PermissionMode,
+  PermissionRequestHookDecision,
+  PermissionToolCall,
+  PermissionUpdate,
+} from "../permissions/types.ts";
+import { isTeammateChild } from "../permissions/teammate-relay.ts";
+
+export type { PermissionMode } from "../permissions/types.ts";
 
 const STATUS_KEY = "maestro-hooks";
 const MAX_HOOK_COMMAND_LENGTH = 800;
 const MAX_HOOK_OUTPUT_LENGTH = 3000;
 const UNSUPPORTED_PI_EVENTS: CodexHookEvent[] = [
-  "PermissionRequest",
   "SubagentStart",
   "SubagentStop",
 ];
 
-export type PermissionMode = "default" | "acceptEdits" | "plan" | "dontAsk" | "bypassPermissions";
-
 interface AdapterOptions {
   getPermissionMode?: () => PermissionMode;
   trustFilePath?: string;
+  isTeammateChild?: () => boolean;
 }
 
 interface HookState {
@@ -48,7 +55,20 @@ interface HookState {
   stopHookActive: boolean;
 }
 
-export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptions = {}): void {
+export interface CodexHookAdapter {
+  beforeToolCall(
+    call: PermissionToolCall & { toolCallId?: string },
+    ctx: ExtensionContext,
+  ): Promise<{ block: true; reason: string } | undefined>;
+  requestPermission(
+    call: PermissionToolCall,
+    ctx: ExtensionContext,
+    suggestion: string,
+    forced: boolean,
+  ): Promise<PermissionRequestHookDecision | undefined>;
+}
+
+export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptions = {}): CodexHookAdapter {
   const trustFilePath = options.trustFilePath ?? join(getAgentDir(), "hook-trust.json");
   const getPermissionMode = options.getPermissionMode ?? (() => "default");
   const state: HookState = {
@@ -57,6 +77,7 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
     toolContext: new Map(),
     stopHookActive: false,
   };
+  const preApprovedInputs = new WeakSet<Record<string, unknown>>();
 
   const reload = async (ctx: ExtensionContext, announce: boolean): Promise<void> => {
     try {
@@ -113,6 +134,64 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
     } finally {
       if (status) ctx.ui.setStatus(STATUS_KEY, undefined);
     }
+  };
+
+  const requestPermission = async (
+    call: PermissionToolCall,
+    ctx: ExtensionContext,
+    suggestion: string,
+    forced: boolean,
+  ): Promise<PermissionRequestHookDecision | undefined> => {
+    const preApproved = preApprovedInputs.delete(call.input);
+    if (preApproved && !forced) return { behavior: "allow" };
+    const names = toolMatchValues(call.toolName);
+    const outputs = await execute("PermissionRequest", names, {
+      ...turnInput("PermissionRequest", ctx, state, getPermissionMode()),
+      tool_name: names[0],
+      pi_tool_name: call.toolName,
+      tool_input: call.input,
+      permission_suggestions: [{
+        type: "addRules",
+        rules: [{ toolName: names[0], ruleContent: suggestionRuleContent(suggestion) }],
+        behavior: "allow",
+        destination: "localSettings",
+      }],
+    }, ctx);
+    return permissionRequestDecision(outputs);
+  };
+
+  const beforeToolCall = async (
+    event: PermissionToolCall & { toolCallId?: string },
+    ctx: ExtensionContext,
+  ): Promise<{ block: true; reason: string } | undefined> => {
+    if (!state.active) return;
+    const names = toolMatchValues(event.toolName);
+    const outputs = await execute("PreToolUse", names, {
+      ...turnInput("PreToolUse", ctx, state, getPermissionMode()),
+      tool_name: names[0],
+      pi_tool_name: event.toolName,
+      tool_use_id: event.toolCallId,
+      tool_input: event.input,
+    }, ctx);
+    const reason = preToolDenyReason(outputs);
+    if (reason) return { block: true, reason };
+
+    const askReason = preToolAskReason(outputs);
+    if (askReason) {
+      if (!ctx.hasUI) return { block: true, reason: `${askReason} Interactive approval is unavailable.` };
+      const choice = await ctx.ui.select(
+        `Hook permission request: ${event.toolName}\n\n${askReason}`,
+        ["Allow once", "Deny"],
+      );
+      if (choice !== "Allow once") return { block: true, reason: "Permission denied by user." };
+      preApprovedInputs.add(event.input);
+    }
+
+    if (preToolAllows(outputs)) preApprovedInputs.add(event.input);
+    const updatedInput = lastUpdatedInput(outputs);
+    if (updatedInput) replaceRecord(event.input, updatedInput);
+    const context = collectAdditionalContext(outputs, false);
+    if (context.length > 0 && event.toolCallId) state.toolContext.set(event.toolCallId, context);
   };
 
   pi.registerCommand("hooks", {
@@ -203,22 +282,10 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
   });
 
   pi.on("tool_call", async (event, ctx) => {
-    if (!state.active) return;
-    const names = toolMatchValues(event.toolName);
-    const outputs = await execute("PreToolUse", names, {
-      ...turnInput("PreToolUse", ctx, state, getPermissionMode()),
-      tool_name: names[0],
-      pi_tool_name: event.toolName,
-      tool_use_id: event.toolCallId,
-      tool_input: event.input,
-    }, ctx);
-    const reason = preToolDenyReason(outputs);
-    if (reason) return { block: true, reason };
-
-    const updatedInput = lastUpdatedInput(outputs);
-    if (updatedInput) replaceRecord(event.input, updatedInput);
-    const context = collectAdditionalContext(outputs, false);
-    if (context.length > 0) state.toolContext.set(event.toolCallId, context);
+    // The parent permission broker runs the live parent's hooks exactly once.
+    // Running PreToolUse in the RPC child can otherwise block before relay.
+    if ((options.isTeammateChild ?? isTeammateChild)()) return;
+    return beforeToolCall(event, ctx);
   });
 
   pi.on("tool_result", async (event, ctx) => {
@@ -280,6 +347,8 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
     state.stopHookActive = true;
     pi.sendUserMessage(reason, { deliverAs: "followUp" });
   });
+
+  return { beforeToolCall, requestPermission };
 }
 
 function commonInput(
@@ -334,6 +403,23 @@ function preToolDenyReason(outputs: ParsedHookOutput[]): string | undefined {
   return undefined;
 }
 
+function preToolAskReason(outputs: ParsedHookOutput[]): string | undefined {
+  for (const output of outputs) {
+    const specific = hookSpecific(output);
+    if (specific?.permissionDecision === "ask") {
+      return typeof specific.permissionDecisionReason === "string"
+        ? specific.permissionDecisionReason
+        : "Hook requires user approval.";
+    }
+  }
+  return undefined;
+}
+
+function preToolAllows(outputs: ParsedHookOutput[]): boolean {
+  return outputs.some((output) => hookSpecific(output)?.permissionDecision === "allow"
+    || output.json?.decision === "approve");
+}
+
 function blockingReason(outputs: ParsedHookOutput[]): string | undefined {
   for (const output of outputs) {
     if (output.exitCode === 2) return output.stderr.trim() || "Blocked by hook.";
@@ -356,7 +442,10 @@ function lastUpdatedInput(outputs: ParsedHookOutput[]): Record<string, unknown> 
   let updated: Record<string, unknown> | undefined;
   for (const output of outputs) {
     const specific = hookSpecific(output);
-    if (specific?.permissionDecision === "allow" && isRecord(specific.updatedInput)) {
+    if (
+      (specific?.permissionDecision === "allow" || specific?.permissionDecision === "ask")
+      && isRecord(specific.updatedInput)
+    ) {
       updated = specific.updatedInput;
     }
   }
@@ -431,11 +520,10 @@ function outputCompatibilityError(
     if (json.continue === false || "stopReason" in json || "suppressOutput" in json) {
       return "PreToolUse 不支持 continue、stopReason 或 suppressOutput";
     }
-    if (json.decision === "approve" || specific?.permissionDecision === "ask") {
-      return "PreToolUse 当前不支持 approve 或 ask 决策";
-    }
     if (isRecord(specific?.updatedInput) && specific?.permissionDecision !== "allow") {
-      return "updatedInput 只能与 permissionDecision: allow 一起返回";
+      if (specific?.permissionDecision !== "ask") {
+        return "updatedInput 只能与 permissionDecision: allow 或 ask 一起返回";
+      }
     }
   }
   if (eventName === "PostToolUse" && ("updatedMCPToolOutput" in json || "suppressOutput" in json)) {
@@ -447,6 +535,34 @@ function outputCompatibilityError(
 function replaceRecord(target: Record<string, unknown>, replacement: Record<string, unknown>): void {
   for (const key of Object.keys(target)) delete target[key];
   Object.assign(target, replacement);
+}
+
+function permissionRequestDecision(outputs: ParsedHookOutput[]): PermissionRequestHookDecision | undefined {
+  let allowed: PermissionRequestHookDecision | undefined;
+  for (const output of outputs) {
+    if (output.exitCode === 2) {
+      return { behavior: "deny", message: output.stderr.trim() || "Permission denied by hook." };
+    }
+    const specific = hookSpecific(output);
+    const decision = isRecord(specific?.decision) ? specific.decision : undefined;
+    if (decision?.behavior !== "allow" && decision?.behavior !== "deny") continue;
+    const parsed: PermissionRequestHookDecision = {
+      behavior: decision.behavior,
+      ...(typeof decision.message === "string" ? { message: decision.message } : {}),
+      ...(isRecord(decision.updatedInput) ? { updatedInput: decision.updatedInput } : {}),
+      ...(Array.isArray(decision.updatedPermissions)
+        ? { updatedPermissions: decision.updatedPermissions.filter(isRecord) as unknown as PermissionUpdate[] }
+        : {}),
+    };
+    if (parsed.behavior === "deny") return parsed;
+    allowed = parsed;
+  }
+  return allowed;
+}
+
+function suggestionRuleContent(suggestion: string): string | undefined {
+  const match = /^[^()]+\((.*)\)$/.exec(suggestion);
+  return match?.[1];
 }
 
 function findLastAssistantText(messages: unknown[]): string | null {

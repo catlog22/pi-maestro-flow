@@ -6,7 +6,6 @@ import { pathToFileURL } from "node:url";
 import { Type, type Static } from "typebox";
 import { lspManager } from "./lsp/manager.ts";
 import type {
-  Diagnostic,
   Location,
   LocationLink,
   LspClientLike,
@@ -15,7 +14,17 @@ import type {
   Range,
   WorkspaceEdit,
 } from "./lsp/types.ts";
-import { applyWorkspaceEdit, previewWorkspaceEdit, uriToFile } from "./lsp/workspace-edit.ts";
+import {
+  boundText,
+  formatDiagnostics,
+  formatItems,
+  formatJson,
+  formatLocations,
+  formatSymbols,
+  formatWorkspaceDiagnostics,
+  type LspFormattedOutput,
+} from "./lsp/output.ts";
+import { applyWorkspaceEdit, previewWorkspaceEdit } from "./lsp/workspace-edit.ts";
 
 export const LSP_ACTIONS = [
   "diagnostics", "definition", "references", "hover", "symbols", "rename", "rename_file",
@@ -37,6 +46,8 @@ export const LspParams = Type.Object({
   new_name: Type.Optional(Type.String({ description: "New symbol name or destination path" })),
   apply: Type.Optional(Type.Boolean({ description: "Apply returned edits instead of previewing/listing" })),
   timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 120, description: "Timeout in seconds; clamped to 5..60" })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 200, description: "Maximum result items to return; defaults to 50" })),
+  offset: Type.Optional(Type.Integer({ minimum: 0, description: "Result offset for continuing a truncated list" })),
   payload: Type.Optional(Type.String({ description: "JSON payload for action=request" })),
 });
 
@@ -45,6 +56,7 @@ export interface LspToolDetails {
   success: boolean;
   serverName?: string;
   request: Record<string, unknown>;
+  output?: { totalItems?: number; shownItems?: number; truncated: boolean };
 }
 
 export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinition<typeof LspParams, LspToolDetails> {
@@ -56,6 +68,7 @@ export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinit
     promptGuidelines: [
       "Use 1-indexed line numbers and provide symbol when a line contains multiple relevant identifiers.",
       "Use apply=false to preview rename or code-action edits before applying them.",
+      "Use limit and offset to page through large diagnostics, symbol, reference, or code-action results.",
     ],
     parameters: LspParams,
     executionMode: "sequential",
@@ -94,27 +107,31 @@ async function executeLspAction(
     const clients = params.file && params.file !== "*"
       ? [await manager.clientForFile(resolveFile(cwd, params.file), cwd, undefined, signal, timeoutMs)]
       : await manager.clientsForWorkspace(cwd, signal, timeoutMs);
-    return result(params, clients.map((client) => `${client.config.name}:\n${pretty(client.capabilities)}`).join("\n\n"), true, clients.map((client) => client.config.name).join(", "));
+    return result(params, boundText(clients.map((client) => `${client.config.name}:\n${JSON.stringify(client.capabilities, null, 2)}`).join("\n\n")), true, clients.map((client) => client.config.name).join(", "));
   }
   if (action === "request") {
     if (!params.query?.trim()) return result(params, "Error: action=request requires query with the LSP method name.", false);
     const client = await resolveClient(manager, params.file, cwd, signal, timeoutMs);
     const payload = params.payload ? parsePayload(params.payload) : await automaticRequestPayload(client, params, cwd);
     const response = await client.request(params.query.trim(), payload, signal, timeoutMs);
-    return result(params, pretty(response), true, client.config.name);
+    return result(params, formatJson(response), true, client.config.name);
   }
   if (action === "symbols" && (!params.file || params.file === "*")) {
     if (!params.query?.trim()) return result(params, "Error: workspace symbols require query.", false);
     const clients = await manager.clientsForWorkspace(cwd, signal, timeoutMs);
     const settled = await Promise.allSettled(clients.map((client) => client.request("workspace/symbol", { query: params.query }, signal, timeoutMs)));
     const symbols = settled.flatMap((item) => item.status === "fulfilled" && Array.isArray(item.value) ? item.value : []);
-    return result(params, symbols.length > 0 ? pretty(symbols) : `No symbols matching "${params.query}"`, true, clients.map((client) => client.config.name).join(", "));
+    return result(params, symbols.length > 0
+      ? formatSymbols(symbols, listOptions(cwd, params))
+      : `No symbols matching "${params.query}"`, true, clients.map((client) => client.config.name).join(", "));
   }
   if (action === "diagnostics" && params.file === "*") {
     const clients = await manager.clientsForWorkspace(cwd, signal, timeoutMs);
     const settled = await Promise.allSettled(clients.map((client) => client.request("workspace/diagnostic", { previousResultIds: [] }, signal, timeoutMs)));
     const reports = settled.flatMap((item) => item.status === "fulfilled" ? [item.value] : []);
-    return result(params, reports.length > 0 ? pretty(reports) : "No workspace diagnostics reported.", true, clients.map((client) => client.config.name).join(", "));
+    return result(params, reports.length > 0
+      ? formatWorkspaceDiagnostics(reports, listOptions(cwd, params))
+      : "No workspace diagnostics reported.", true, clients.map((client) => client.config.name).join(", "));
   }
   if (action === "rename_file") return executeRenameFile(manager, params, cwd, signal, timeoutMs);
 
@@ -125,11 +142,13 @@ async function executeLspAction(
 
   if (action === "diagnostics") {
     const diagnostics = await client.getDiagnostics(uri, Math.min(timeoutMs, 2_000), signal);
-    return result(params, formatDiagnostics(file, diagnostics), true, client.config.name);
+    return result(params, formatDiagnostics(file, diagnostics, listOptions(cwd, params)), true, client.config.name);
   }
   if (action === "symbols") {
     const symbols = await client.request("textDocument/documentSymbol", { textDocument: { uri } }, signal, timeoutMs);
-    return result(params, symbols && Array.isArray(symbols) && symbols.length > 0 ? pretty(symbols) : `No symbols found in ${file}`, true, client.config.name);
+    return result(params, symbols && Array.isArray(symbols) && symbols.length > 0
+      ? formatSymbols(symbols, listOptions(cwd, params))
+      : `No symbols found in ${file}`, true, client.config.name);
   }
 
   const position = await resolvePosition(file, params.line ?? 1, params.symbol);
@@ -137,15 +156,15 @@ async function executeLspAction(
   if (action === "definition" || action === "type_definition" || action === "implementation") {
     const method = action === "definition" ? "textDocument/definition" : action === "type_definition" ? "textDocument/typeDefinition" : "textDocument/implementation";
     const locations = normalizeLocations(await client.request(method, textDocumentPosition, signal, timeoutMs));
-    return result(params, locations.length > 0 ? formatLocations(locations) : `No ${action.replace("_", " ")} found`, true, client.config.name);
+    return result(params, locations.length > 0 ? formatLocations(locations, listOptions(cwd, params)) : `No ${action.replace("_", " ")} found`, true, client.config.name);
   }
   if (action === "references") {
     const locations = normalizeLocations(await client.request("textDocument/references", { ...textDocumentPosition, context: { includeDeclaration: true } }, signal, timeoutMs));
-    return result(params, locations.length > 0 ? formatLocations(locations) : "No references found", true, client.config.name);
+    return result(params, locations.length > 0 ? formatLocations(locations, listOptions(cwd, params)) : "No references found", true, client.config.name);
   }
   if (action === "hover") {
     const hover = await client.request("textDocument/hover", textDocumentPosition, signal, timeoutMs);
-    return result(params, flattenHover(hover) || "No hover information", true, client.config.name);
+    return result(params, boundText(flattenHover(hover) || "No hover information"), true, client.config.name);
   }
   if (action === "rename") {
     if (!params.new_name?.trim()) return result(params, "Error: action=rename requires new_name.", false, client.config.name);
@@ -160,7 +179,9 @@ async function executeLspAction(
     const pointRange: Range = { start: position, end: position };
     const raw = await client.request("textDocument/codeAction", { textDocument: { uri }, range: pointRange, context: { diagnostics } }, signal, timeoutMs);
     const actions = Array.isArray(raw) ? raw as CodeAction[] : [];
-    if (params.apply !== true) return result(params, actions.length > 0 ? actions.map((item, index) => `${index + 1}. ${item.title}`).join("\n") : "No code actions found", true, client.config.name);
+    if (params.apply !== true) return result(params, actions.length > 0
+      ? formatItems(actions.map((item, index) => `${index + 1}. ${item.title}`), listOptions(cwd, params), "No code actions found")
+      : "No code actions found", true, client.config.name);
     if (!params.query?.trim()) return result(params, "Error: query is required when apply=true for code_actions.", false, client.config.name);
     let selected = actions.find((item) => item.title.toLowerCase().includes(params.query!.toLowerCase()));
     if (!selected) return result(params, `No code action matching "${params.query}"`, false, client.config.name);
@@ -280,19 +301,6 @@ function normalizeLocations(value: unknown): Location[] {
   });
 }
 
-function formatLocations(locations: Location[]): string {
-  return locations.map((location) => `${uriToFile(location.uri)}:${location.range.start.line + 1}:${location.range.start.character + 1}`).join("\n");
-}
-
-function formatDiagnostics(file: string, diagnostics: Diagnostic[]): string {
-  if (diagnostics.length === 0) return "OK";
-  const severity = ["", "error", "warning", "info", "hint"];
-  return diagnostics
-    .sort((left, right) => (left.severity ?? 4) - (right.severity ?? 4))
-    .map((item) => `${file}:${item.range.start.line + 1}:${item.range.start.character + 1} ${severity[item.severity ?? 4]}${item.code !== undefined ? ` [${item.code}]` : ""}: ${item.message}`)
-    .join("\n");
-}
-
 function flattenHover(value: unknown): string {
   const contents = (value as { contents?: unknown } | null)?.contents;
   if (typeof contents === "string") return contents;
@@ -308,10 +316,26 @@ function flattenMarkedString(value: unknown): string {
   return record.language ? `\`\`\`${record.language}\n${record.value}\n\`\`\`` : record.value;
 }
 
-function result(params: Static<typeof LspParams>, text: string, success: boolean, serverName?: string): AgentToolResult<LspToolDetails> {
+function result(
+  params: Static<typeof LspParams>,
+  output: string | LspFormattedOutput,
+  success: boolean,
+  serverName?: string,
+): AgentToolResult<LspToolDetails> {
+  const formatted = typeof output === "string" ? boundText(output) : output;
   return {
-    content: [{ type: "text", text }],
-    details: { action: params.action, success, request: params as Record<string, unknown>, ...(serverName ? { serverName } : {}) },
+    content: [{ type: "text", text: formatted.text }],
+    details: {
+      action: params.action,
+      success,
+      request: requestDetails(params),
+      ...(serverName ? { serverName } : {}),
+      output: {
+        ...(formatted.totalItems === undefined ? {} : { totalItems: formatted.totalItems }),
+        ...(formatted.shownItems === undefined ? {} : { shownItems: formatted.shownItems }),
+        truncated: formatted.truncated,
+      },
+    },
   } as AgentToolResult<LspToolDetails>;
 }
 
@@ -338,10 +362,18 @@ function parsePayload(payload: string): unknown {
   }
 }
 
-function pretty(value: unknown): string {
-  const serialized = JSON.stringify(value, null, 2);
-  if (serialized === undefined) return String(value);
-  return serialized.length > 60_000 ? `${serialized.slice(0, 60_000)}\n…output truncated…` : serialized;
+function listOptions(cwd: string, params: Static<typeof LspParams>): { cwd: string; limit?: number; offset?: number } {
+  return {
+    cwd,
+    ...(params.limit === undefined ? {} : { limit: params.limit }),
+    ...(params.offset === undefined ? {} : { offset: params.offset }),
+  };
+}
+
+function requestDetails(params: Static<typeof LspParams>): Record<string, unknown> {
+  if (params.payload === undefined) return params as Record<string, unknown>;
+  const { payload, ...rest } = params;
+  return { ...rest, payload: `<${Buffer.byteLength(payload, "utf8")} byte JSON payload>` };
 }
 
 function withTimeout(parent: AbortSignal | undefined, timeoutMs: number): { signal: AbortSignal; dispose(): void } {

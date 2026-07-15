@@ -77,6 +77,30 @@ file rename, code actions, type definition, implementation, status, reload,
 capabilities, and raw requests. Language servers are reused per project root and
 shut down with the Pi session.
 
+#### Default servers and dependencies
+
+| Server | Command | npm package | File types |
+|--------|---------|-------------|------------|
+| typescript | `typescript-language-server` | `typescript-language-server typescript` | `.ts` `.tsx` `.js` `.jsx` `.mjs` `.cjs` |
+| python | `pyright-langserver` | `pyright` | `.py` `.pyi` |
+| rust | `rust-analyzer` | system install | `.rs` |
+| go | `gopls` | `go install golang.org/x/tools/gopls@latest` | `.go` |
+| clangd | `clangd` | system install | `.c` `.h` `.cc` `.cpp` `.cxx` `.hpp` |
+| json | `vscode-json-language-server` | `vscode-langservers-extracted` | `.json` `.jsonc` |
+| yaml | `yaml-language-server` | `yaml-language-server` | `.yaml` `.yml` |
+
+Install all npm-based servers:
+
+```bash
+npm install -g typescript-language-server typescript pyright vscode-langservers-extracted yaml-language-server
+```
+
+Servers whose binary is not found on `$PATH` will show ENOENT/EPIPE in
+`lsp status`. Disable unwanted servers via a config file (see below) rather
+than leaving them in error state.
+
+#### Configuration
+
 Configuration is merged in this order; later files override earlier entries:
 
 ```text
@@ -162,15 +186,54 @@ reserved host binding. During `npm install`, Maestro Flow creates or merges
 
 The installer preserves all other shortcuts. If the existing file is invalid JSON, it
 is left unchanged and npm prints a warning. Run `/reload` after installation when Pi is
-already open. Pi then releases `Shift+Tab`, allowing the
-extension shortcut to handle approval-mode cycling. `plan` activates Maestro's
-durable Plan mode; the other values are forwarded as `permission_mode` to Codex-style
-hooks and do not create an operating-system sandbox or additional Pi tool isolation.
+already open. Pi then releases `Shift+Tab`, allowing the extension shortcut to handle
+approval-mode cycling. `plan` activates Maestro's durable Plan mode. The other values
+control the permission engine and are also forwarded as `permission_mode` to
+Codex-style hooks. Permissions are application-level gates, not an operating-system
+sandbox.
 
 The statusline follows the effective approval mode. Wide terminals show labels such as
 `ACT · APPROVAL acceptEdits`; medium and narrow terminals progressively compact this to
 `ACT/acceptEdits` and `A/E`. Active or ready Plan mode always renders approval as `plan`,
 regardless of whether it was entered through `Shift+Tab`, `Alt+P`, or `/plan`.
+
+### Permission rules
+
+Permission rules use `Tool` or `Tool(specifier)` syntax and resolve in fixed order:
+`deny`, then `ask`, then `allow`. Settings merge from user, project and local files:
+
+1. `~/.pi/agent/settings.json`
+2. `.pi/settings.json`
+3. `.pi/settings.local.json`
+
+Later files override scalar values such as `defaultMode`; rule arrays are merged and
+deduplicated. Because a repository must not grant itself new privileges, project
+`allow` rules are ignored until the user persists approval locally, and a project
+cannot select `acceptEdits` or `bypassPermissions` as its default mode. An
+editor schema is bundled at `schemas/permissions.schema.json`.
+
+```json
+{
+  "$schema": "../node_modules/pi-maestro-flow/schemas/permissions.schema.json",
+  "permissions": {
+    "defaultMode": "default",
+    "allow": ["Bash(npm test)", "Read"],
+    "ask": ["Bash(git push *)"],
+    "deny": ["Read(./.env)", "Bash(rm *)"],
+    "disableBypassPermissionsMode": "disable"
+  }
+}
+```
+
+In `default` mode, internal/read-only tools run directly and other tools ask first.
+The permission dialog offers `Allow once`, `Always allow`, and `Deny`; `Always allow`
+writes an exact rule to `.pi/settings.local.json`; keep this file gitignored.
+`acceptEdits` auto-allows built-in
+edit tools, `dontAsk` denies tools without an allow rule, and `bypassPermissions`
+is the explicit YOLO mode that bypasses allow/ask/deny permission rules. Use
+`/permissions yolo` to enable it for the current session, `/permissions` to inspect
+active rules, and `/permissions reload` after editing a settings file. Plan mode and
+Codex-compatible hooks remain independent enforcement layers.
 
 ### Statusline fonts
 
@@ -258,7 +321,7 @@ Project hooks use `.pi/hooks.json` as their only configuration source. The shape
 }
 ```
 
-Command hooks receive Codex-compatible JSON on `stdin` and return JSON on `stdout`. Pi maps `SessionStart`, `PreToolUse`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, and `Stop`. `PermissionRequest`, `SubagentStart`, and `SubagentStop` are accepted by the schema but reported as unmapped because Pi does not currently expose equivalent lifecycle events here.
+Command hooks receive Codex-compatible JSON on `stdin` and return JSON on `stdout`. Pi maps `SessionStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, and `Stop`. `PreToolUse` supports `allow`, `ask`, and `deny`; `PermissionRequest` can allow or deny the pending prompt and may return `updatedInput` or `updatedPermissions`. `SubagentStart` and `SubagentStop` are accepted by the schema but reported as unmapped because Pi does not currently expose equivalent lifecycle events here.
 
 Repository commands require review before first execution. Run `/hooks` to inspect and trust the exact config hash; run `/hooks revoke` to disable it. Any change to `.pi/hooks.json` invalidates the previous trust entry.
 

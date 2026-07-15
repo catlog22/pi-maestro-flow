@@ -74,7 +74,8 @@ export async function executeMoa(
       try {
         const result = await runTeammate(
           {
-            agent: "reference",
+            agent: "delegate",
+            taskType: "analysis",
             task: primaryPrompt,
             model,
             cwd: params.cwd,
@@ -142,7 +143,8 @@ export async function executeMoa(
   try {
     const aggregatorResult = await runTeammate(
       {
-        agent: "aggregator",
+        agent: "delegate",
+        taskType: "analysis",
         task: aggregationPrompt,
         model: params.model,
         cwd: params.cwd,

@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type {
   ExtensionAPI,
@@ -21,6 +21,11 @@ import {
   type SkillActivationBindingMetadata,
   type SkillActivationMetadata,
 } from "../skills/skill-runtime.ts";
+import {
+  todoOriginKey,
+  type TodoMirrorTaskSpec,
+  type TodoTaskOrigin,
+} from "../session/types.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,6 +45,7 @@ export interface TodoTask {
   skills: TodoSkillBinding[];
   skillActivation?: SkillActivationMetadata;
   summary?: string;
+  origin?: TodoTaskOrigin;
   createdAt: number;
   updatedAt: number;
 }
@@ -85,6 +91,13 @@ export interface TodoCompactionSnapshot {
   tasks: TodoTask[];
 }
 
+export interface TodoMirrorReconcileResult {
+  created: string[];
+  updated: string[];
+  tombstoned: string[];
+  unchanged: string[];
+}
+
 export interface TodoContext {
   cwd: string;
   ui: {
@@ -99,7 +112,7 @@ export interface TodoContext {
 // ---------------------------------------------------------------------------
 
 const TODO_STATE_ENTRY_TYPE = "todo-state";
-const TODO_STATE_VERSION = 3;
+const TODO_STATE_VERSION = 4;
 const STATUS_KEY = "todo";
 
 let tasks: Map<string, TodoTask> = new Map();
@@ -142,6 +155,96 @@ export function getVisibleTasks(): TodoTask[] {
   const visible = [...tasks.values()].filter((t) => t.status !== "deleted");
   visible.sort((a, b) => a.createdAt - b.createdAt);
   return visible;
+}
+
+/**
+ * Internal projection boundary. Canonical Session/Run state is authoritative;
+ * this function never writes canonical files and is intentionally not exposed
+ * as a public Todo tool action.
+ */
+export function reconcileMirrorTasks(
+  specs: readonly TodoMirrorTaskSpec[],
+  ctx: ExtensionContext,
+): TodoMirrorReconcileResult {
+  const activeSpecs = specs.filter((spec) => spec.status === "in_progress");
+  if (activeSpecs.length > 1) {
+    throw new Error(`Canonical projection has ${activeSpecs.length} active Todo tasks; expected at most one`);
+  }
+
+  const result: TodoMirrorReconcileResult = { created: [], updated: [], tombstoned: [], unchanged: [] };
+  const existingByOrigin = new Map<string, TodoTask>();
+  for (const task of tasks.values()) {
+    if (task.origin) existingByOrigin.set(todoOriginKey(task.origin), task);
+  }
+
+  const idsByOrigin = new Map<string, string>();
+  for (const spec of specs) {
+    const key = todoOriginKey(spec.origin);
+    idsByOrigin.set(key, existingByOrigin.get(key)?.id ?? mirrorTaskId(key));
+  }
+  const desiredKeys = new Set(idsByOrigin.keys());
+  const incomingSessions = new Set(specs.map((spec) => spec.origin.sessionId));
+
+  for (const spec of specs) {
+    const key = todoOriginKey(spec.origin);
+    const existing = existingByOrigin.get(key);
+    if (existing?.status === "deleted") {
+      result.unchanged.push(existing.id);
+      continue;
+    }
+    const id = uniqueMirrorId(idsByOrigin.get(key)!, key);
+    idsByOrigin.set(key, id);
+    const blockedBy = spec.blockedByOriginKeys
+      .map((originKey) => idsByOrigin.get(originKey))
+      .filter((value): value is string => Boolean(value));
+    const now = Date.now();
+    const next: TodoTask = {
+      id,
+      subject: spec.subject,
+      ...(spec.description ? { description: spec.description } : {}),
+      status: blockedBy.length > 0 && spec.status === "pending" ? "blocked" : spec.status,
+      blockedBy,
+      ...(spec.context ? { context: spec.context } : {}),
+      skills: spec.skills.map((skill) => ({ ...skill })),
+      ...(spec.summary ? { summary: spec.summary } : {}),
+      origin: { ...spec.origin },
+      createdAt: existing?.createdAt ?? now,
+      updatedAt: existing?.updatedAt ?? now,
+    };
+    if (existing?.skillActivation && mirrorActivationStillValid(existing, next)) {
+      next.skillActivation = existing.skillActivation;
+    }
+    if (!existing) {
+      tasks.set(id, next);
+      result.created.push(id);
+      continue;
+    }
+    if (taskChanged(existing, next)) {
+      next.updatedAt = now;
+      tasks.set(existing.id, { ...next, id: existing.id });
+      clearSkillSnapshot(existing.id);
+      result.updated.push(existing.id);
+    } else {
+      result.unchanged.push(existing.id);
+    }
+  }
+
+  for (const task of tasks.values()) {
+    if (!task.origin || !incomingSessions.has(task.origin.sessionId)) continue;
+    const key = todoOriginKey(task.origin);
+    if (desiredKeys.has(key) || task.status === "deleted") continue;
+    task.status = "deleted";
+    task.updatedAt = Date.now();
+    clearSkillSnapshot(task.id);
+    result.tombstoned.push(task.id);
+  }
+
+  if (result.created.length || result.updated.length || result.tombstoned.length) {
+    markTodoChanged();
+    persist();
+    updateStatusLine(ctx);
+  }
+  return result;
 }
 
 /** Return a detached Todo snapshot suitable for compaction metadata and prompts. */
@@ -538,6 +641,7 @@ function cloneTodoTask(task: TodoTask): TodoTask {
     ...task,
     blockedBy: [...task.blockedBy],
     skills: task.skills.map((skill) => ({ ...skill })),
+    ...(task.origin ? { origin: { ...task.origin } } : {}),
     ...(task.skillActivation
       ? {
           skillActivation: {
@@ -664,8 +768,26 @@ function taskChanged(before: TodoTask, after: TodoTask): boolean {
     before.summary !== after.summary ||
     JSON.stringify(before.blockedBy) !== JSON.stringify(after.blockedBy) ||
     before.context !== after.context ||
-    JSON.stringify(before.skills) !== JSON.stringify(after.skills)
+    JSON.stringify(before.skills) !== JSON.stringify(after.skills) ||
+    JSON.stringify(before.origin) !== JSON.stringify(after.origin)
   );
+}
+
+function mirrorTaskId(originKey: string): string {
+  return `wf-${createHash("sha256").update(originKey).digest("hex").slice(0, 8)}`;
+}
+
+function uniqueMirrorId(candidate: string, originKey: string): string {
+  const occupied = tasks.get(candidate);
+  if (!occupied || (occupied.origin && todoOriginKey(occupied.origin) === originKey)) return candidate;
+  return `wf-${createHash("sha256").update(`${originKey}\u0000collision`).digest("hex").slice(0, 12)}`;
+}
+
+function mirrorActivationStillValid(before: TodoTask, after: TodoTask): boolean {
+  return before.status === "in_progress"
+    && after.status === "in_progress"
+    && before.context === after.context
+    && JSON.stringify(before.skills) === JSON.stringify(after.skills);
 }
 
 function requireSkillRuntime(): SkillRuntime {
@@ -826,6 +948,7 @@ function normalizeLoadedTask(id: string, raw: unknown): TodoTask {
   const now = Date.now();
   const skillActivation = readSkillActivation(task.skillActivation);
   const legacySkillActivation = skillActivation ?? readLegacySkillActivation(id, task.skillLoad, skills);
+  const origin = readTodoOrigin(task.origin);
 
   return {
     id: typeof task.id === "string" ? task.id : id,
@@ -837,8 +960,20 @@ function normalizeLoadedTask(id: string, raw: unknown): TodoTask {
     ...(contextParts.length > 0 ? { context: contextParts.join("\n\n") } : {}),
     ...(legacySkillActivation ? { skillActivation: legacySkillActivation } : {}),
     ...(summary ? { summary } : {}),
+    ...(origin ? { origin } : {}),
     createdAt: typeof task.createdAt === "number" ? task.createdAt : now,
     updatedAt: typeof task.updatedAt === "number" ? task.updatedAt : now,
+  };
+}
+
+function readTodoOrigin(value: unknown): TodoTaskOrigin | undefined {
+  const origin = asRecord(value);
+  if (!origin || typeof origin.sessionId !== "string" || typeof origin.step !== "string") return undefined;
+  return {
+    sessionId: origin.sessionId,
+    step: origin.step,
+    ...(typeof origin.runId === "string" ? { runId: origin.runId } : {}),
+    ...(typeof origin.runSeq === "string" ? { runSeq: origin.runSeq } : {}),
   };
 }
 

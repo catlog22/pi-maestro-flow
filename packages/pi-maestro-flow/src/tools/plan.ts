@@ -19,6 +19,7 @@ import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confir
 import { openPlanEditor } from "./plan-editor.ts";
 import { PlanStore, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
 import { blockIntelligenceToolCallInPlan } from "./intelligence-safety.ts";
+import { RUN_CONTROL_READ_ACTIONS } from "./run-control.ts";
 
 type Mode = "act" | "plan";
 type PlanExecutionMode = "current" | "clear" | "compact";
@@ -91,6 +92,10 @@ const MAESTRO_MUTATING_COMMAND = new RegExp(
   String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+(?:install|uninstall|update)\b`,
   "i",
 );
+const MAESTRO_RUN_MUTATING_COMMAND = new RegExp(
+  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+run\s+(?:create|check|complete|seal-session|advance|pause|resume|retry|cancel)\b`,
+  "i",
+);
 const IN_PLACE_EDIT_COMMAND = new RegExp(
   String.raw`${SHELL_COMMAND_BOUNDARY}(?:sed|perl)\b[^\r\n;|&]*\s-[a-z]*i(?:[a-z]*|\.[^\s]+)?(?:\s|$)`,
   "i",
@@ -102,6 +107,7 @@ const MUTATING_BASH_PATTERNS = [
   PACKAGE_MUTATING_COMMAND,
   GIT_MUTATING_COMMAND,
   MAESTRO_MUTATING_COMMAND,
+  MAESTRO_RUN_MUTATING_COMMAND,
   IN_PLACE_EDIT_COMMAND,
   NESTED_MUTATING_COMMAND,
   /(^|[^<])>(?!>)/,
@@ -301,6 +307,12 @@ export function onToolCallPlan(event: {
   }
   if (name === "maestro" && event.input?.action === "delegate" && event.input?.mode !== "analysis") {
     return { block: true, reason: "Plan mode requires delegate mode='analysis'; missing or write modes are blocked." };
+  }
+  if (name === "run-control" || name === "run_control") {
+    const action = typeof event.input?.action === "string" ? event.input.action : "";
+    if (!(RUN_CONTROL_READ_ACTIONS as ReadonlySet<string>).has(action)) {
+      return { block: true, reason: `Plan mode blocks run-control action "${action || "unknown"}" because it may change canonical Run state.` };
+    }
   }
   const intelligenceBlock = blockIntelligenceToolCallInPlan(event);
   if (intelligenceBlock) return intelligenceBlock;

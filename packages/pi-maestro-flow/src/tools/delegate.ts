@@ -14,9 +14,11 @@ export interface DelegateParams {
   prompt?: string;
   tool?: string;
   mode?: "analysis" | "write";
+  name?: string;
   model?: string;
   rule?: string;
   cwd?: string;
+  timeoutMs?: number;
 }
 
 /**
@@ -53,8 +55,11 @@ export async function executeDelegate(
       {
         agent: "delegate",
         task,
+        name: params.name,
         model,
         cwd: params.cwd,
+        timeoutMs: params.timeoutMs,
+        background: false,
         reply_to: "caller",
         lifecycle: "ephemeral",
       },

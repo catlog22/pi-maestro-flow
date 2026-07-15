@@ -63,6 +63,11 @@ export const MaestroParams = Type.Object({
   mode: Type.Optional(
     StringEnum(["analysis", "write"]),
   ),
+  name: Type.Optional(
+    Type.String({
+      description: "Stable delegate task name for nested tracing and follow-up",
+    }),
+  ),
   model: Type.Optional(
     Type.String({
       description: "Model override for delegate or explore",

@@ -2,6 +2,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { createBrowserTool } from "./browser-tool.ts";
 import { browserManager, type BrowserManagerLike } from "./browser/manager.ts";
 import { createLspTool } from "./lsp-tool.ts";
+import { registerLspAutoDiagnostics } from "./lsp/auto-diagnostics.ts";
 import { lspManager } from "./lsp/manager.ts";
 import type { LspManagerLike } from "./lsp/types.ts";
 import { registerSearchToolBm25 } from "./search-tool-bm25.ts";
@@ -9,6 +10,7 @@ import { registerSmartSearch } from "./smart-search.ts";
 
 export function registerIntelligenceTools(pi: ExtensionAPI): void {
   pi.registerTool(createLspTool());
+  registerLspAutoDiagnostics(pi);
   pi.registerTool(createBrowserTool());
   registerSearchToolBm25(pi);
   registerSmartSearch(pi);

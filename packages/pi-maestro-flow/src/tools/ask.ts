@@ -1,6 +1,13 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { isTeammateChild, requestTeammateInteraction } from "../permissions/teammate-relay.ts";
+import {
+  BracketedPasteDecoder,
+  removeLastGrapheme,
+  sanitizeSingleLineInput,
+  type DecodedInputToken,
+} from "../tui/input-text.ts";
 
 interface QuestionOption {
   label: string;
@@ -43,18 +50,127 @@ export async function executeAsk(
     return askError("At least one question is required.");
   }
 
-  if (!ctx.hasUI || !ctx.ui.setWidget || !ctx.ui.onTerminalInput) {
-    return askError("Interactive questions require Pi TUI mode. Ask the user directly instead.");
+  if (isTeammateChild()) {
+    const relayed = await requestTeammateInteraction<{
+      action: "answer" | "cancel";
+      answers?: AskAnswer[];
+    }>("question", { questions });
+    if (relayed?.action === "answer" && Array.isArray(relayed.answers)) {
+      return askSuccess(relayed.answers);
+    }
+    if (relayed?.action === "cancel") return cancelledAsk();
+    return askError("The parent session did not answer the teammate questionnaire.");
+  }
+
+  if (!ctx.hasUI) {
+    return askError("Interactive questions require a dialog-capable Pi mode.");
+  }
+
+  const mode = (ctx as ExtensionContext & { mode?: string }).mode;
+  const terminalUi = mode === "tui"
+    || (mode === undefined && Boolean(ctx.ui.setWidget) && Boolean(ctx.ui.onTerminalInput));
+  if (!terminalUi) {
+    const answers = await showAskDialogs(questions, ctx);
+    return answers ? askSuccess(answers) : cancelledAsk();
   }
 
   const answers = await showAskWizard(questions, ctx);
   if (!answers) {
-    return {
-      content: [{ type: "text", text: "Questionnaire cancelled by the user." }],
-      details: { answers: [], cancelled: true },
-    };
+    return cancelledAsk();
   }
 
+  return askSuccess(answers);
+}
+
+function cancelledAsk(): AskToolResult {
+  return {
+    content: [{ type: "text", text: "Questionnaire cancelled by the user." }],
+    details: { answers: [], cancelled: true },
+  };
+}
+
+/** RPC/JSON-safe dialog path; Pi maps these calls to extension_ui_request. */
+async function showAskDialogs(
+  questions: QuestionSpec[],
+  ctx: ExtensionContext,
+): Promise<AskAnswer[] | undefined> {
+  const answers: AskAnswer[] = [];
+  for (let index = 0; index < questions.length; index++) {
+    const question = questions[index];
+    const title = `${question.header ?? `Question ${index + 1}`}\n${question.question}`;
+    const baseOptions = question.options ?? [];
+    if (baseOptions.length === 0) {
+      const text = await ctx.ui.input(title, "Enter response");
+      if (text === undefined) return undefined;
+      answers.push({
+        question: question.question,
+        ...(question.header ? { header: question.header } : {}),
+        selected: [],
+        ...(text.trim() ? { text: text.trim() } : {}),
+      });
+      continue;
+    }
+
+    const options = baseOptions.some((option) => option.label === NONE_OPTION_LABEL)
+      ? baseOptions
+      : [...baseOptions, { label: NONE_OPTION_LABEL }];
+    const selected = question.multiSelect
+      ? await selectMultipleDialog(ctx, title, options)
+      : await selectOneDialog(ctx, title, options);
+    if (!selected) return undefined;
+    answers.push({
+      question: question.question,
+      ...(question.header ? { header: question.header } : {}),
+      selected,
+    });
+  }
+  return answers;
+}
+
+async function selectOneDialog(
+  ctx: ExtensionContext,
+  title: string,
+  options: QuestionOption[],
+): Promise<string[] | undefined> {
+  const labels = options.map((option, index) =>
+    `${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`
+  );
+  const choice = await ctx.ui.select(title, labels);
+  const index = choice ? labels.indexOf(choice) : -1;
+  return index >= 0 ? [options[index].label] : undefined;
+}
+
+async function selectMultipleDialog(
+  ctx: ExtensionContext,
+  title: string,
+  options: QuestionOption[],
+): Promise<string[] | undefined> {
+  const selected = new Set<number>();
+  while (true) {
+    const labels = options.map((option, index) =>
+      `${selected.has(index) ? "[x]" : "[ ]"} ${index + 1}. ${option.label}`
+    );
+    const done = `Done (${selected.size})`;
+    const choice = await ctx.ui.select(title, [...labels, done]);
+    if (choice === undefined) return undefined;
+    if (choice === done) {
+      return [...selected].sort((a, b) => a - b).map((index) => options[index].label);
+    }
+    const index = labels.indexOf(choice);
+    if (index < 0) continue;
+    if (options[index].label === NONE_OPTION_LABEL) {
+      selected.clear();
+      selected.add(index);
+      continue;
+    }
+    const noneIndex = options.findIndex((option) => option.label === NONE_OPTION_LABEL);
+    if (noneIndex >= 0) selected.delete(noneIndex);
+    if (selected.has(index)) selected.delete(index);
+    else selected.add(index);
+  }
+}
+
+function askSuccess(answers: AskAnswer[]): AskToolResult {
   return {
     content: [{
       type: "text",
@@ -112,6 +228,9 @@ async function showAskWizard(
       let typing = (questions[0].options?.length ?? 0) === 0;
       let input = "";
       let feedback = "";
+      let lastWidth = 80;
+      const pasteDecoder = new BracketedPasteDecoder();
+      let pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
       function questionOptions(q: QuestionSpec): QuestionOption[] {
         const options = q.options ?? [];
@@ -195,10 +314,34 @@ async function showAskWizard(
         );
       }
 
-      function visibleWindow(rows: string[], cursor: number, maxRows: number): string[] {
-        if (rows.length <= maxRows) return rows;
-        const start = Math.max(0, Math.min(rows.length - maxRows, cursor - Math.floor(maxRows / 2)));
-        return rows.slice(start, start + maxRows);
+      function visibleChoiceWindow(
+        groups: Array<{ cursorIndex: number; lines: string[] }>,
+        cursor: number,
+        maxRows: number,
+      ): string[] {
+        if (groups.length === 0) return [];
+        const active = Math.max(0, groups.findIndex((group) => group.cursorIndex === cursor));
+        let start = active;
+        let end = active + 1;
+        let used = groups[active].lines.length;
+        while (used < maxRows && (start > 0 || end < groups.length)) {
+          const after = end < groups.length && (start === 0 || end - active <= active - start);
+          const candidate = after ? groups[end] : groups[start - 1];
+          if (!candidate || used + candidate.lines.length > maxRows) break;
+          used += candidate.lines.length;
+          if (after) end++;
+          else start--;
+        }
+        return groups.slice(start, end).flatMap((group) => group.lines).slice(0, maxRows);
+      }
+
+      function actionFooter(width: number, segments: string[]): string {
+        let value = "";
+        for (const segment of segments.filter(Boolean)) {
+          const next = value ? `${value} · ${segment}` : segment;
+          if (truncateToWidth(next, width, "") === next) value = next;
+        }
+        return truncateToWidth(value || segments.find(Boolean) || "", width, "…");
       }
 
       function renderQuestion(width: number): string[] {
@@ -218,7 +361,7 @@ async function showAskWizard(
           lines.push(truncateToWidth(`${theme.fg("success", "›")} ${value}`, width, "…"));
         } else {
           const cursor = cursors[step];
-          const choiceRows: string[] = [];
+          const choiceGroups: Array<{ cursorIndex: number; lines: string[] }> = [];
           for (let i = 0; i < options.length; i++) {
             const active = cursor === i;
             const checked = selected[step].has(i);
@@ -234,21 +377,22 @@ async function showAskWizard(
             const description = options[i].description
               ? theme.fg("muted", ` · ${options[i].description}`)
               : "";
-            choiceRows.push(truncateToWidth(
+            const optionLines = [truncateToWidth(
               `${marker} ${i + 1}. ${selection}${selection ? " " : ""}${label}${description}`,
               width,
               "…",
-            ));
+            )];
             if (checked) {
               const custom = textValues[step]
                 ? `: ${textValues[step]}`
                 : " (press d to add)";
-              choiceRows.push(truncateToWidth(
+              optionLines.push(truncateToWidth(
                 `     ${theme.fg("muted", `Add details${custom}`)}`,
                 width,
                 "…",
               ));
             }
+            choiceGroups.push({ cursorIndex: i, lines: optionLines });
           }
 
           let specialIndex = options.length;
@@ -258,27 +402,26 @@ async function showAskWizard(
             const allSelected = selected[step].size === selectableCount && !selected[step].has(noneIndex);
             const marker = cursor === specialIndex ? theme.fg("success", "›") : " ";
             const check = allSelected ? theme.fg("success", "[x]") : theme.fg("dim", "[ ]");
-            choiceRows.push(truncateToWidth(`${marker} ${specialIndex + 1}. ${check} Select all`, width, "…"));
+            choiceGroups.push({
+              cursorIndex: specialIndex,
+              lines: [truncateToWidth(`${marker} ${specialIndex + 1}. ${check} Select all`, width, "…")],
+            });
             specialIndex++;
           }
 
           const reservedRows = lines.length + (feedback ? 2 : 1);
           const choiceBudget = Math.max(1, 10 - reservedRows);
-          lines.push(...visibleWindow(choiceRows, cursor, choiceBudget));
+          lines.push(...visibleChoiceWindow(choiceGroups, cursor, choiceBudget));
         }
 
         if (feedback) {
           lines.push(truncateToWidth(theme.fg("warning", `! ${feedback}`), width, "…"));
         }
-        lines.push(truncateToWidth(
-          theme.fg("dim", typing
-            ? "Enter save · Esc back"
-            : q.multiSelect
-              ? "↑↓ move · Space toggle · d details · Enter next"
-              : "↑↓/keypad move · 1-9 choose · d details · Enter next"),
-          width,
-          "…",
-        ));
+        lines.push(theme.fg("dim", actionFooter(width, typing
+          ? ["Esc back", "Enter save"]
+          : q.multiSelect
+            ? ["Esc cancel", "Enter next", "↑↓ move", "Space toggle", "d details"]
+            : ["Esc cancel", "Enter next", "↑↓ move", "1-9 choose", "d details"])));
         return lines.slice(0, 10);
       }
 
@@ -297,7 +440,7 @@ async function showAskWizard(
           ));
         }
         lines.push(truncateToWidth(`${theme.fg("success", "›")} ${theme.bold("Submit")}`, width, "…"));
-        lines.push(truncateToWidth(theme.fg("dim", "Enter submit · Esc back"), width, "…"));
+        lines.push(theme.fg("dim", actionFooter(width, ["Esc back", "Enter submit"])));
         return lines.slice(0, 10);
       }
 
@@ -305,10 +448,6 @@ async function showAskWizard(
         const optionCount = questionOptions(q).length;
         const selectAllRows = q.multiSelect && optionCount > 1 ? 1 : 0;
         return optionCount + selectAllRows - 1;
-      }
-
-      function removeLastCodePoint(value: string): string {
-        return [...value].slice(0, -1).join("");
       }
 
       function handleTyping(data: string): void {
@@ -342,13 +481,14 @@ async function showAskWizard(
           return;
         }
         if (data === "\x7f" || data === "\b") {
-          input = removeLastCodePoint(input);
+          input = removeLastGrapheme(input);
           feedback = "";
           tui.requestRender();
           return;
         }
-        if (data && !data.startsWith("\x1b") && [...data].every((char) => char >= " ")) {
-          input += data;
+        const printable = sanitizeSingleLineInput(data);
+        if (printable && !data.startsWith("\x1b")) {
+          input += printable;
           feedback = "";
           tui.requestRender();
         }
@@ -450,9 +590,48 @@ async function showAskWizard(
         }
       }
 
+      function dispatchDecodedToken(token: DecodedInputToken): void {
+        if (token.kind === "paste") {
+          if (step < questions.length && !typing) {
+            typing = true;
+            input = textValues[step];
+          }
+          if (step < questions.length) handleTyping(token.text);
+          return;
+        }
+        const value = token.text;
+        if (step === questions.length) {
+          if (value === "\r" || value === "\n" || value === "\x1bOM") done(collectAnswers());
+          else if (value === "\x1b" || value === "h" || value === "\x1b[D" || value === "\x1bOD") enterStep(step - 1);
+          return;
+        }
+        if (typing) {
+          handleTyping(value);
+          return;
+        }
+        if (value === "\x1b" || value === "h" || value === "\x1b[D" || value === "\x1bOD") {
+          if (step > 0) enterStep(step - 1);
+          else done(undefined);
+          return;
+        }
+        handleChoice(value === "\x1bOM" ? "\r" : value);
+      }
+
+      function decodeInput(data: string): void {
+        if (pasteFlushTimer) clearTimeout(pasteFlushTimer);
+        for (const token of pasteDecoder.feed(data)) dispatchDecodedToken(token);
+        if (pasteDecoder.hasPending()) {
+          pasteFlushTimer = setTimeout(() => {
+            pasteFlushTimer = undefined;
+            for (const token of pasteDecoder.flushPending()) dispatchDecodedToken(token);
+          }, 16);
+        }
+      }
+
       const createdPanel = {
         render(width: number): string[] {
           const safeWidth = Math.max(1, Math.min(width, 110));
+          lastWidth = safeWidth;
           const lines = step === questions.length
             ? renderSubmit(safeWidth)
             : renderQuestion(safeWidth);
@@ -460,25 +639,18 @@ async function showAskWizard(
         },
 
         handleInput(data: string): void {
-          if (step === questions.length) {
-            if (data === "\r" || data === "\n" || data === "\x1bOM") done(collectAnswers());
-            else if (data === "\x1b" || data === "h" || data === "\x1b[D" || data === "\x1bOD") enterStep(step - 1);
+          if (lastWidth < 20) {
+            if (data === "\x1b") done(undefined);
             return;
           }
-          if (typing) {
-            handleTyping(data);
-            return;
-          }
-          if (data === "\x1b" || data === "h" || data === "\x1b[D" || data === "\x1bOD") {
-            if (step > 0) enterStep(step - 1);
-            else done(undefined);
-            return;
-          }
-          handleChoice(data === "\x1bOM" ? "\r" : data);
+          decodeInput(data);
         },
 
         invalidate() {},
-        dispose() {},
+        dispose() {
+          if (pasteFlushTimer) clearTimeout(pasteFlushTimer);
+          done(undefined);
+        },
       };
       panel = createdPanel;
       return createdPanel;

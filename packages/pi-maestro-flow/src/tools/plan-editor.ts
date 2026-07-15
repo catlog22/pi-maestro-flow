@@ -58,6 +58,7 @@ export async function openPlanEditor(
       let horizontalOffset = 0;
       let busy = false;
       let status = "";
+      let lastWidth = 80;
 
       editor.onChange = () => {
         status = "";
@@ -110,9 +111,9 @@ export async function openPlanEditor(
       return {
         render(width: number): string[] {
           const safeWidth = Math.max(1, width);
+          lastWidth = safeWidth;
           if (safeWidth < 20) {
-            const action = options.allowConfirm ? "Ctrl+Enter approve" : "Ctrl+S save";
-            return [truncateToWidth(`Plan · ${action} · Esc close`, safeWidth, "…")];
+            return [truncateToWidth("Esc close · resize to edit", safeWidth, "…")];
           }
 
           const lines = editor.getLines();
@@ -154,15 +155,18 @@ export async function openPlanEditor(
 
           const location = `Ln ${cursor.line + 1}, Col ${cursor.col + 1} · ${lines.length} lines`;
           const actions = options.allowConfirm
-            ? "Ctrl+S save · Ctrl+Enter confirm · Esc cancel"
-            : "Ctrl+S save · Esc close";
-          const footer = status ? `${location} · ${status} · ${actions}` : `${location} · ${actions}`;
-          output.push(truncateToWidth(theme.fg(status.includes("failed") ? "error" : "dim", footer), safeWidth, "…"));
+            ? "Esc cancel · Ctrl+S save · Ctrl+Enter confirm"
+            : "Esc close · Ctrl+S save";
+          if (status) {
+            output.push(truncateToWidth(theme.fg(status.includes("failed") ? "error" : "dim", status), safeWidth, "…"));
+          }
+          output.push(truncateToWidth(theme.fg("dim", `${actions} · ${location}`), safeWidth, "…"));
           return output;
         },
 
         handleInput(data: string): void {
           if (busy) return;
+          if (lastWidth < 20 && !matchesKey(data, Key.escape)) return;
           if (data === CTRL_S) {
             void save();
             return;
@@ -171,7 +175,7 @@ export async function openPlanEditor(
             void confirm();
             return;
           }
-          if (data === "\x1b") {
+          if (matchesKey(data, Key.escape)) {
             done({ action: "cancelled", markdown: editor.getText(), revision });
             return;
           }

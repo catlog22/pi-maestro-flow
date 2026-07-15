@@ -5,13 +5,14 @@ import {
   type LoadedTodoSkillBinding,
   type TodoSkillBinding,
 } from "./skill-composer.ts";
-import { TodoSkillLoader } from "./skill-loader.ts";
+import { TodoSkillLoader, type SkillSessionMode } from "./skill-loader.ts";
 
 export type SkillActivationState = "active" | "stale";
 
 export interface SkillActivationBindingMetadata {
   role: TodoSkillBinding["role"];
   name: string;
+  sessionMode?: SkillSessionMode;
   args?: string;
   filePath: string;
   contentHash: string;
@@ -65,6 +66,7 @@ export class SkillRuntime {
     const metadataBindings = loaded.map(({ role, skill }, index) => ({
       role,
       name: skill.name,
+      sessionMode: skill.sessionMode,
       ...(ordered[index]?.args ? { args: ordered[index].args } : {}),
       filePath: skill.filePath,
       contentHash: skill.contentHash,

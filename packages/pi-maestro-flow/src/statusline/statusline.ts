@@ -1,18 +1,24 @@
 /**
  * Maestro Flow statusline — Pi Extension footer API implementation.
  *
- * Line 1: Mode | Model | Context | Runs | Dir+Git | Tokens
- * Line 2: Milestone ◆Phase progress (when workflow active)
+ * Line 1: Mode | Model | Context | Tool calls | Dir+Git | Tokens
+ * Line 2: Session and active Workflow Run (when a canonical snapshot is active)
  *
  * Adapted from maestro2/src/hooks/statusline.ts for the Pi Extension ecosystem.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { readFileSync, existsSync } from "node:fs";
-import { join, basename } from "node:path";
+import { basename } from "node:path";
+import {
+	deriveWorkflowViewModel,
+	type WorkflowSnapshotLike,
+	type WorkflowViewModel,
+	workflowStatusLabel,
+} from "../session/view-model.ts";
 import {
 	ansiFg,
+	ANSI_BOLD,
 	ANSI_RESET,
 	ICONS,
 	GIT_ICONS,
@@ -26,7 +32,9 @@ import {
 // ---------------------------------------------------------------------------
 
 interface MaestroState {
-	activeRuns: Map<string, { action: string; startedAt: number; correlationId: string }>;
+	activeToolCalls?: Map<string, { action: string; startedAt: number; correlationId: string }>;
+	/** @deprecated Kept until the extension state owner switches to activeToolCalls. */
+	activeRuns?: Map<string, { action: string; startedAt: number; correlationId: string }>;
 }
 
 interface GitInfo {
@@ -34,14 +42,6 @@ interface GitInfo {
 	dirty: boolean;
 	ahead: number;
 	behind: number;
-}
-
-interface WorkflowInfo {
-	milestone: string;
-	currentPhase: number;
-	completed: number;
-	total: number;
-	status: string;
 }
 
 interface TokenTotals {
@@ -56,7 +56,6 @@ interface RuntimeState {
 	tokens: TokenTotals;
 	turnCount: number;
 	isAgentRunning: boolean;
-	workflow: WorkflowInfo | null;
 }
 
 type PlanModeStatus = "ACT" | "PLAN" | "READY";
@@ -103,14 +102,26 @@ function normalizePlanModeStatus(value: string | undefined): PlanModeStatus {
 function normalizeApprovalMode(value: string | undefined, planMode: PlanModeStatus): string {
 	if (planMode === "PLAN" || planMode === "READY") return "plan";
 	const normalized = value?.replace(/^APPROVAL\s+/i, "").trim();
+	if (/^(?:YOLO|bypassPermissions)$/i.test(normalized ?? "")) return "YOLO";
 	return normalized && normalized !== "plan" ? normalized : "default";
 }
 
 function approvalInitial(mode: string): string {
 	return mode === "acceptEdits" ? "E"
 		: mode === "dontAsk" ? "N"
-			: mode === "bypassPermissions" ? "B"
+			: mode === "YOLO" || mode === "bypassPermissions" ? "Y"
 				: mode === "plan" ? "P" : "D";
+}
+
+function approvalColor(mode: string): keyof typeof COLORS {
+	return mode === "YOLO" ? "danger"
+		: mode === "dontAsk" ? "ctxWarn"
+			: mode === "acceptEdits" ? "ctxOk" : "phase";
+}
+
+function renderApprovalMode(mode: string, text: string): string {
+	const emphasis = mode === "YOLO" ? ANSI_BOLD : "";
+	return `${ansiFg(COLORS[approvalColor(mode)])}${emphasis}${text}${ANSI_RESET}`;
 }
 
 function renderPlanModeStatus(
@@ -120,12 +131,14 @@ function renderPlanModeStatus(
 ): string {
 	const mode = normalizePlanModeStatus(value);
 	const approval = normalizeApprovalMode(approvalValue, mode);
-	const text = width >= 80
-		? `${mode === "ACT" ? "[A] ACT" : mode === "PLAN" ? "[P] PLAN" : "[P] READY"} · APPROVAL ${approval}`
-		: width >= 48
-			? `${mode}/${approval}`
-			: `${mode === "ACT" ? "A" : mode === "PLAN" ? "P" : "R"}/${approvalInitial(approval)}`;
-	return colored("phase", text);
+	const modeLabel = width >= 80
+		? mode === "ACT" ? "[A] ACT" : mode === "PLAN" ? "[P] PLAN" : "[P] READY"
+		: width >= 48 ? mode : mode === "ACT" ? "A" : mode === "PLAN" ? "P" : "R";
+	const approvalLabel = width >= 80 ? `APPROVAL ${approval}` : width >= 48 ? approval : approvalInitial(approval);
+	const separator = width >= 80
+		? `${ansiFg(COLORS.separator)} · ${ANSI_RESET}`
+		: `${ansiFg(COLORS.separator)}/${ANSI_RESET}`;
+	return `${colored("phase", modeLabel)}${separator}${renderApprovalMode(approval, approvalLabel)}`;
 }
 
 function renderContextPressure(value: string | undefined, width: number): string {
@@ -150,73 +163,6 @@ function renderPressureLine(value: string | undefined, width: number): string {
 }
 
 const SEP = `${ansiFg(COLORS.separator)} · ${ANSI_RESET}`;
-
-// ---------------------------------------------------------------------------
-// Workflow state reader
-// ---------------------------------------------------------------------------
-
-function readWorkflow(cwd: string): WorkflowInfo | null {
-	const statePath = join(cwd, ".workflow", "state.json");
-	if (!existsSync(statePath)) return null;
-	try {
-		const state = JSON.parse(readFileSync(statePath, "utf8"));
-		if (!state.current_milestone) return null;
-
-		const result: WorkflowInfo = {
-			milestone: state.current_milestone,
-			currentPhase: 0,
-			completed: 0,
-			total: 0,
-			status: state.status ?? "",
-		};
-
-		const milestone = Array.isArray(state.milestones)
-			? state.milestones.find(
-					(m: { name?: string; id?: string }) =>
-						m.name === state.current_milestone || m.id === state.current_milestone,
-				)
-			: null;
-
-		const phases: unknown[] = Array.isArray(milestone?.phases) ? milestone.phases : [];
-		const phaseEntries: Array<{ id: number; status?: string }> = [];
-
-		for (const p of phases) {
-			if (typeof p === "number") phaseEntries.push({ id: p });
-			else if (p && typeof p === "object" && typeof (p as { id?: unknown }).id === "number") {
-				const obj = p as { id: number; status?: string };
-				phaseEntries.push({ id: obj.id, status: obj.status });
-			}
-		}
-
-		if (phaseEntries.length > 0) {
-			result.total = phaseEntries.length;
-			let completed = 0;
-			for (const pe of phaseEntries) {
-				if (pe.status === "completed") completed++;
-			}
-			result.completed = completed;
-
-			// Find current phase: first in-progress, then first non-completed
-			const cur =
-				phaseEntries.find(
-					(p) =>
-						p.status === "in-progress" ||
-						p.status === "in_progress" ||
-						p.status === "active",
-				) ?? phaseEntries.find((p) => p.status !== "completed");
-			if (cur) result.currentPhase = cur.id;
-		} else if (state.phases_summary) {
-			const s = state.phases_summary;
-			if (typeof s.total === "number") result.total = s.total;
-			if (typeof s.completed === "number") result.completed = s.completed;
-			if (state.current_phase) result.currentPhase = state.current_phase;
-		}
-
-		return result;
-	} catch {
-		return null;
-	}
-}
 
 // ---------------------------------------------------------------------------
 // Git reader (async — cached)
@@ -274,7 +220,7 @@ function shortenModel(id: string): string {
 
 function renderLine1(
 	rs: RuntimeState,
-	activeRuns: number,
+	activeToolCalls: number,
 	dir: string,
 	width: number,
 	modeStatus: string | undefined,
@@ -285,8 +231,8 @@ function renderLine1(
 	const modeText = renderPlanModeStatus(modeStatus, approvalStatus, safeWidth);
 	const pressureText = safeWidth < 48 ? renderContextPressure(pressureStatus, safeWidth) : "";
 	const modelText = colored("model", `${ICONS.model} ${shortenModel(rs.model)}`);
-	const runText = activeRuns > 0
-		? colored("runs", `${ICONS.runs} ${activeRuns} run${activeRuns > 1 ? "s" : ""}`)
+	const toolCallText = activeToolCalls > 0
+		? colored("runs", `${ICONS.runs} ${activeToolCalls} call${activeToolCalls > 1 ? "s" : ""}`)
 		: "";
 	let dirText = colored("dir", `${ICONS.dir} ${basename(dir)}`);
 	if (rs.git) dirText += `  ${formatGit(rs.git)}`;
@@ -304,26 +250,42 @@ function renderLine1(
 	}
 
 	const parts = safeWidth >= 80
-		? [modeText, modelText, contextFull, pressureText, runText, dirText, tokenText]
+		? [modeText, modelText, contextFull, pressureText, toolCallText, dirText, tokenText]
 		: safeWidth >= 48
 			? [modeText, modelText, contextCompact, dirText]
 			: [modeText, contextCompact, pressureText, modelText];
 	return truncateToWidth(parts.filter(Boolean).join(SEP), safeWidth, "…");
 }
 
-function renderLine2(wf: WorkflowInfo, width: number): string {
-	const parts: string[] = [];
-
-	let header = colored("milestone", `${ICONS.milestone} ${wf.milestone}`);
-	if (wf.total > 0) {
-		header += colored("milestone", ` ${wf.completed}/${wf.total}`);
+export function renderWorkflowStatusline(view: WorkflowViewModel, width: number): string {
+	const safeWidth = Math.max(1, width);
+	const action = view.recoveryAction ?? view.nextAction;
+	if (safeWidth < 20) {
+		return truncateToWidth(action ? `» ${action}` : workflowStatusLabel(view.status), safeWidth, "…");
 	}
-	if (wf.currentPhase) {
-		header += ` ${colored("phase", `${ICONS.phase} P${wf.currentPhase}`)}`;
-	}
-	parts.push(header);
 
-	return truncateToWidth(parts.join(SEP), Math.max(1, width), "…");
+	const run = view.activeRun;
+	const runText = run
+		? `${run.sequence != null ? String(run.sequence).padStart(3, "0") : run.id}/${run.command}`
+		: "no active run";
+	const status = run ? workflowStatusLabel(run.status, run.attempt) : workflowStatusLabel(view.status);
+	const chain = `✓${view.chain.completed} ▶${view.chain.running} ○${view.chain.pending}`;
+	const session = `⚑ ${view.sessionLabel}`;
+	const recovery = action ? `» ${action}` : "";
+
+	let parts: string[];
+	if (safeWidth < 48) {
+		parts = [recovery, status, runText, chain];
+	} else if (safeWidth < 80) {
+		parts = [recovery, session, status, runText, chain];
+	} else {
+		const gates = view.gates ? `gate ${view.gates.passed}/${view.gates.total}` : "";
+		const budget = view.goal?.tokensUsed != null && view.goal.tokenBudget != null
+			? `goal ${formatTokens(view.goal.tokensUsed)}/${formatTokens(view.goal.tokenBudget)}`
+			: "";
+		parts = [recovery, session, status, runText, chain, gates, budget];
+	}
+	return truncateToWidth(parts.filter(Boolean).join(SEP), safeWidth, "…");
 }
 
 // ---------------------------------------------------------------------------
@@ -332,11 +294,10 @@ function renderLine2(wf: WorkflowInfo, width: number): string {
 
 const GIT_REFRESH_INTERVAL = 30_000;
 const GIT_DEBOUNCE_MS = 500;
-const WORKFLOW_REFRESH_INTERVAL = 15_000;
-
 export function installStatusline(
 	pi: ExtensionAPI,
 	getMaestroState: () => MaestroState,
+	getWorkflowSnapshot: () => WorkflowSnapshotLike | null | undefined = () => null,
 ): void {
 	const rs: RuntimeState = {
 		model: "Claude",
@@ -345,14 +306,12 @@ export function installStatusline(
 		tokens: { input: 0, output: 0 },
 		turnCount: 0,
 		isAgentRunning: false,
-		workflow: null,
 	};
 
 	let cwd = "";
 	let invalidateFn: (() => void) | null = null;
 	let gitTimer: ReturnType<typeof setInterval> | null = null;
 	let gitDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-	let workflowTimer: ReturnType<typeof setInterval> | null = null;
 	let disposed = false;
 
 	function invalidate(): void {
@@ -366,12 +325,6 @@ export function installStatusline(
 			rs.git = await refreshGit(pi, cwd);
 			invalidate();
 		}, GIT_DEBOUNCE_MS);
-	}
-
-	function refreshWorkflow(): void {
-		if (!cwd) return;
-		rs.workflow = readWorkflow(cwd);
-		invalidate();
 	}
 
 	// --- Footer registration ---
@@ -393,7 +346,6 @@ export function installStatusline(
 					unsubBranch();
 					if (gitTimer) clearInterval(gitTimer);
 					if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
-					if (workflowTimer) clearInterval(workflowTimer);
 				},
 
 				invalidate() {
@@ -402,21 +354,19 @@ export function installStatusline(
 
 				render(width: number): string[] {
 					const state = getMaestroState();
-					const activeRuns = state.activeRuns.size;
+					const activeToolCalls = (state.activeToolCalls ?? state.activeRuns)?.size ?? 0;
 					const lines: string[] = [];
 
 					const modeStatus = footerData.getExtensionStatuses().get("mode");
 					const approvalStatus = footerData.getExtensionStatuses().get("approval-mode");
 					const pressureStatus = footerData.getExtensionStatuses().get("maestro-auto-compact");
-					lines.push(renderLine1(rs, activeRuns, cwd, width, modeStatus, approvalStatus, pressureStatus));
+					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, pressureStatus));
 
 					const pressureLine = renderPressureLine(pressureStatus, width);
 					if (pressureLine) lines.push(pressureLine);
 
-					// Following line: workflow (if active)
-					if (width >= 48 && rs.workflow?.milestone) {
-						lines.push(renderLine2(rs.workflow, width));
-					}
+					const workflow = deriveWorkflowViewModel(getWorkflowSnapshot());
+					if (workflow) lines.push(renderWorkflowStatusline(workflow, width));
 
 					return lines;
 				},
@@ -430,7 +380,6 @@ export function installStatusline(
 		// Clear any leaked timers from prior session
 		if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }
 		if (gitDebounceTimer) { clearTimeout(gitDebounceTimer); gitDebounceTimer = null; }
-		if (workflowTimer) { clearInterval(workflowTimer); workflowTimer = null; }
 
 		cwd = ctx.cwd;
 		disposed = false;
@@ -441,7 +390,6 @@ export function installStatusline(
 		if (usage?.percent != null) rs.contextPercent = usage.percent;
 
 		rs.tokens = { input: 0, output: 0 };
-		rs.workflow = readWorkflow(cwd);
 
 		// Footer must install synchronously — before any await
 		installFooter(ctx);
@@ -461,11 +409,6 @@ export function installStatusline(
 			});
 		}, GIT_REFRESH_INTERVAL);
 
-		// Periodic workflow refresh
-		workflowTimer = setInterval(() => {
-			if (disposed) return;
-			refreshWorkflow();
-		}, WORKFLOW_REFRESH_INTERVAL);
 	});
 
 	pi.on("session_shutdown", () => {
@@ -473,7 +416,6 @@ export function installStatusline(
 		invalidateFn = null;
 		if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }
 		if (gitDebounceTimer) { clearTimeout(gitDebounceTimer); gitDebounceTimer = null; }
-		if (workflowTimer) { clearInterval(workflowTimer); workflowTimer = null; }
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
@@ -496,7 +438,6 @@ export function installStatusline(
 	pi.on("agent_end", () => {
 		rs.isAgentRunning = false;
 		scheduleGitRefresh();
-		refreshWorkflow();
 		invalidate();
 	});
 

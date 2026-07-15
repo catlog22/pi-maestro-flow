@@ -1,4 +1,7 @@
+import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+
+type ThinkingLevelMap = Partial<Record<ModelThinkingLevel, string | null>>;
 
 interface GenericProviderDefinition {
   id: string;
@@ -10,7 +13,7 @@ interface GenericProviderDefinition {
     id: string;
     name: string;
     reasoning: boolean;
-    thinkingLevelMap?: { off: null };
+    thinkingLevelMap?: ThinkingLevelMap;
     input: ("text" | "image")[];
     cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
     contextWindow: number;
@@ -45,7 +48,9 @@ const PROVIDERS: readonly GenericProviderDefinition[] = [
     model: {
       id: "claude-sonnet-4-5",
       name: "Claude Sonnet 4.5",
-      reasoning: false,
+      reasoning: true,
+      // Sonnet 4.5 uses token budgets; expose the xhigh/max selector as the high budget tier.
+      thinkingLevelMap: { xhigh: "high" },
       input: ["text", "image"],
       cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
       contextWindow: 128_000,

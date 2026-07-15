@@ -16,7 +16,22 @@ import {
 } from "../tools/todo.ts";
 
 const DETAILS_KIND = "maestro-session-checkpoint";
-const DETAILS_VERSION = 1;
+const DETAILS_VERSION = 2;
+const LEGACY_DETAILS_VERSION = 1;
+
+export interface WorkflowRecoveryIdentity {
+  sessionId: string;
+  runId: string;
+  todoId?: string;
+  stackRevision?: string;
+  gates: {
+    passed: number;
+    total: number;
+    failed: number;
+  };
+  artifactRefs: string[];
+  nextAction?: string;
+}
 
 export interface MaestroActiveSkill {
   name: string;
@@ -42,12 +57,13 @@ export interface MaestroCompactionReference {
 
 export interface MaestroCompactionDetails {
   kind: typeof DETAILS_KIND;
-  schemaVersion: typeof DETAILS_VERSION;
+  schemaVersion: typeof DETAILS_VERSION | typeof LEGACY_DETAILS_VERSION;
   checkpointId: string;
   previousCheckpointId?: string;
   sessionId: string;
   projectRoot: string;
   createdAt: string;
+  workflow?: WorkflowRecoveryIdentity;
   todo: TodoCompactionSnapshot;
   activeSkills: MaestroActiveSkill[];
   references: MaestroCompactionReference[];
@@ -74,6 +90,7 @@ interface CreateCompactionDependencies {
   checkpointId?: () => string;
   now?: () => Date;
   completeSummary?: (prompt: string, event: SessionBeforeCompactEvent, ctx: ExtensionContext) => Promise<SummaryResponse>;
+  getWorkflowIdentity?: () => WorkflowRecoveryIdentity | undefined | Promise<WorkflowRecoveryIdentity | undefined>;
 }
 
 interface PersistCompactionDependencies {
@@ -174,6 +191,7 @@ export async function createMaestroCompaction(
   const now = dependencies.now?.() ?? new Date();
   const checkpointId = dependencies.checkpointId?.() ?? randomUUID();
   const previousDetails = findPreviousDetails(event);
+  const workflow = await dependencies.getWorkflowIdentity?.() ?? previousDetails?.workflow;
   const todo = getTodoCompactionSnapshot();
   const activeSkills = collectActiveSkills(todo.tasks);
   const knowhowPath = buildKnowhowPath(ctx.cwd, now.toISOString(), ctx.sessionManager.getSessionId(), checkpointId);
@@ -194,6 +212,7 @@ export async function createMaestroCompaction(
     sessionId: ctx.sessionManager.getSessionId(),
     projectRoot: ctx.cwd,
     createdAt: now.toISOString(),
+    ...(workflow ? { workflow: cloneWorkflowIdentity(workflow) } : {}),
     todo,
     activeSkills,
     references,
@@ -350,9 +369,18 @@ function findPreviousDetails(event: SessionBeforeCompactEvent): MaestroCompactio
 function asMaestroDetails(value: unknown): MaestroCompactionDetails | undefined {
   if (!value || typeof value !== "object") return undefined;
   const candidate = value as Partial<MaestroCompactionDetails>;
-  if (candidate.kind !== DETAILS_KIND || candidate.schemaVersion !== DETAILS_VERSION) return undefined;
+  if (candidate.kind !== DETAILS_KIND
+    || (candidate.schemaVersion !== DETAILS_VERSION && candidate.schemaVersion !== LEGACY_DETAILS_VERSION)) return undefined;
   if (typeof candidate.checkpointId !== "string" || !Array.isArray(candidate.references)) return undefined;
   return candidate as MaestroCompactionDetails;
+}
+
+function cloneWorkflowIdentity(identity: WorkflowRecoveryIdentity): WorkflowRecoveryIdentity {
+  return {
+    ...identity,
+    gates: { ...identity.gates },
+    artifactRefs: [...identity.artifactRefs],
+  };
 }
 
 async function completeWithCurrentModel(

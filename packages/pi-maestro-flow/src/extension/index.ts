@@ -17,6 +17,8 @@
  *   - Dynamic LLM providers
  */
 
+import { fileURLToPath } from "node:url";
+
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -83,7 +85,9 @@ import {
   onAgentEndPlan,
 } from "../tools/plan.ts";
 import { installStatusline } from "../statusline/statusline.ts";
-import { registerCodexHookAdapter, type PermissionMode } from "../hooks/pi-adapter.ts";
+import { registerCodexHookAdapter } from "../hooks/pi-adapter.ts";
+import { createPermissionController } from "../permissions/controller.ts";
+import { PERMISSION_MODES, type PermissionMode } from "../permissions/types.ts";
 import {
   createMaestroCompaction,
   persistMaestroCompactionKnowhow,
@@ -91,6 +95,10 @@ import {
 import { createMidTurnAutoCompaction } from "../compaction/auto-compaction.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
+import {
+  registerTeammateChildExtension,
+  registerTeammatePermissionBroker,
+} from "pi-maestro-teammate/src/runs/child-extensions.ts";
 
 interface MaestroState {
   baseCwd: string;
@@ -105,17 +113,19 @@ interface MaestroState {
 }
 
 export const APPROVAL_MODE_CYCLE_KEY = "shift+tab";
-export const APPROVAL_MODES: readonly PermissionMode[] = [
-  "default",
-  "acceptEdits",
-  "plan",
-  "dontAsk",
-  "bypassPermissions",
-];
+export const APPROVAL_MODES: readonly PermissionMode[] = PERMISSION_MODES;
 
-export function nextApprovalMode(current: PermissionMode): PermissionMode {
-  const index = APPROVAL_MODES.indexOf(current);
-  return APPROVAL_MODES[(index + 1) % APPROVAL_MODES.length] ?? "default";
+export function nextApprovalMode(
+  current: PermissionMode,
+  disabled: ReadonlySet<PermissionMode> = new Set(),
+): PermissionMode {
+  let index = APPROVAL_MODES.indexOf(current);
+  for (let offset = 0; offset < APPROVAL_MODES.length; offset++) {
+    index = (index + 1) % APPROVAL_MODES.length;
+    const candidate = APPROVAL_MODES[index] ?? "default";
+    if (!disabled.has(candidate)) return candidate;
+  }
+  return "default";
 }
 
 const TODO_TOGGLE_KEY = "alt+t";
@@ -129,6 +139,12 @@ function singleLine(text: string): Component {
 }
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
+  // Teammates run in separate Pi processes. Explicitly inherit this extension
+  // so permission hooks and ask-user-question remain available in child mode.
+  registerTeammateChildExtension(fileURLToPath(import.meta.url), {
+    tools: ["ask-user-question"],
+  });
+
   const midTurnAutoCompaction = createMidTurnAutoCompaction(pi);
   const state: MaestroState = {
     baseCwd: "",
@@ -333,7 +349,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
       );
     },
 
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const details = result.details as AskResultDetails | undefined;
       if (details?.cancelled) {
         return singleLine(theme.fg("warning", "! Questionnaire cancelled"));
@@ -344,9 +360,21 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
         return singleLine(theme.fg("error", `✗ ${fallback}`));
       }
       const count = details.answers.length;
-      return singleLine(
-        `${theme.fg("success", "✓")} Collected ${count} answer${count === 1 ? "" : "s"}`,
-      );
+      const header = `${theme.fg("success", "✓")} Collected ${count} answer${count === 1 ? "" : "s"}`;
+      const answerLines = details.answers.map((answer, index) => {
+        const value = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(" — ") || "No answer";
+        return `${index + 1}. ${answer.question} → ${value}`;
+      });
+      return {
+        render(width: number): string[] {
+          const safeWidth = Math.max(1, width);
+          const lines = opts.expanded
+            ? [header, ...answerLines]
+            : [answerLines[0] ? `${header} · ${answerLines[0]}` : header];
+          return lines.map((line) => truncateToWidth(line, safeWidth, "…"));
+        },
+        invalidate() {},
+      };
     },
   };
 
@@ -456,11 +484,47 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
   });
 
   let approvalMode: PermissionMode = "default";
+  const permissionController = createPermissionController({
+    async setMode(mode, ctx) {
+      if (mode === "plan" && !isPlanMode()) await planToggleMode(ctx);
+      approvalMode = mode;
+      syncApprovalModeStatus(ctx, approvalMode);
+    },
+  });
+  pi.registerCommand("permissions", {
+    description: "查看、重新加载权限规则，或用 /permissions yolo 启用全权限模式",
+    async handler(args, ctx) {
+      const action = args.trim().toLowerCase();
+      if (action === "yolo" || action === "bypasspermissions") {
+        if (permissionController.bypassDisabled()) {
+          ctx.ui.notify("YOLO mode is disabled by permissions.disableBypassPermissionsMode.", "warning");
+          return;
+        }
+        if (isPlanMode()) await planToggleMode(ctx);
+        approvalMode = "bypassPermissions";
+        syncApprovalModeStatus(ctx, approvalMode);
+        ctx.ui.notify("Approval mode: YOLO (all permission checks bypassed)", "warning");
+        return;
+      }
+      if (action === "reload") {
+        const configuredMode = await permissionController.reload(ctx);
+        if (configuredMode === "plan" && !isPlanMode()) await planToggleMode(ctx);
+        if (configuredMode) approvalMode = configuredMode;
+        syncApprovalModeStatus(ctx, approvalMode);
+        ctx.ui.notify("权限配置已重新加载。", "info");
+        return;
+      }
+      ctx.ui.notify(permissionController.summary(isPlanMode() ? "plan" : approvalMode), "info");
+    },
+  });
   pi.registerShortcut(APPROVAL_MODE_CYCLE_KEY, {
     description: "Cycle approval mode",
     async handler(ctx: ExtensionContext) {
       const current: PermissionMode = isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode;
-      const next = nextApprovalMode(current);
+      const disabled = permissionController.bypassDisabled()
+        ? new Set<PermissionMode>(["bypassPermissions"])
+        : new Set<PermissionMode>();
+      const next = nextApprovalMode(current, disabled);
 
       if (next === "plan" && !isPlanMode()) await planToggleMode(ctx);
       if (next !== "plan" && isPlanMode()) await planToggleMode(ctx);
@@ -514,6 +578,9 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     goalSessionStart(ctx);
     todoSessionStart(ctx);
     await onSessionStartPlan(ctx);
+    const configuredMode = await permissionController.reload(ctx);
+    if (configuredMode === "plan" && !isPlanMode()) await planToggleMode(ctx);
+    if (configuredMode) approvalMode = configuredMode;
     syncApprovalModeStatus(ctx, approvalMode);
     updateTodoWidget();
   });
@@ -553,12 +620,8 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     return goalInput(event);
   });
 
-  pi.on("tool_call", (event) => {
-    // Plan mode tool blocking takes priority
-    const planBlock = onToolCallPlan(event);
-    if (planBlock) return planBlock;
-    return goalToolCall();
-  });
+  // Plan mode is a hard boundary and must run before hook or configurable permissions.
+  pi.on("tool_call", (event) => onToolCallPlan(event));
 
   pi.on("before_agent_start", async (event) => {
     // Plan owns the stable mode prompt; Goal only acknowledges continuation markers.
@@ -589,10 +652,31 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     if (event.toolName === "todo") updateTodoWidget();
   });
 
-  // Register last so existing Plan/Goal guards keep their current short-circuit priority.
-  registerCodexHookAdapter(pi, {
+  // Hook denial runs after Plan's hard boundary and before the interactive permission prompt.
+  const hookAdapter = registerCodexHookAdapter(pi, {
     getPermissionMode: () => isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
   });
+  registerTeammatePermissionBroker(async (call, ctx) => {
+    const planBlock = onToolCallPlan(call);
+    if (planBlock) return { action: "deny", reason: planBlock.reason };
+    const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
+    if (hookBlock) return { action: "deny", reason: hookBlock.reason };
+    const block = await permissionController.authorize(
+      call,
+      ctx,
+      isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
+      hookAdapter,
+    );
+    if (block) return { action: "deny", reason: block.reason };
+    return { action: "allow_once", updatedInput: call.input };
+  });
+  pi.on("tool_call", async (event, ctx) => permissionController.authorize(
+    event,
+    ctx,
+    isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
+    hookAdapter,
+  ));
+  pi.on("tool_call", () => goalToolCall());
 }
 
 /**
@@ -604,7 +688,7 @@ export function approvalModeStatusValue(
   planMode: boolean,
   approvalMode: PermissionMode,
 ): string | undefined {
-  return planMode ? undefined : `APPROVAL ${approvalMode}`;
+  return planMode ? undefined : `APPROVAL ${approvalMode === "bypassPermissions" ? "YOLO" : approvalMode}`;
 }
 
 function syncApprovalModeStatus(
@@ -655,12 +739,16 @@ export function renderTodoWidget(
   const lines = [renderTodoSummary(tasks, expanded, safeWidth)];
   if (!expanded) return lines;
 
-  const active = tasks.filter((t) => t.status !== "completed");
-  const completed = tasks.filter((t) => t.status === "completed");
-
-  for (const task of [...active, ...completed]) {
+  const priority: Record<string, number> = { in_progress: 0, blocked: 1, pending: 2, completed: 3 };
+  const ordered = [...tasks].sort((left, right) =>
+    (priority[left.status] ?? 2) - (priority[right.status] ?? 2)
+  );
+  const visible = ordered.slice(0, 8);
+  for (const task of visible) {
     lines.push(truncateToWidth(widgetTaskLine(task, tasks), safeWidth, "…"));
   }
+  const hidden = ordered.length - visible.length;
+  if (hidden > 0) lines.push(truncateToWidth(dim(`  … ${hidden} more · ${TODO_TOGGLE_LABEL} collapse`), safeWidth, "…"));
 
   return lines;
 }

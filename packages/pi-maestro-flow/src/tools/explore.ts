@@ -9,7 +9,6 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { runTeammate } from "pi-maestro-teammate/src/runs/execution.ts";
-import type { SingleResult } from "pi-maestro-teammate/src/shared/types.ts";
 
 export interface ExploreParams {
   prompts?: string[];
@@ -19,10 +18,12 @@ export interface ExploreParams {
   concurrency?: number;
   model?: string;
   cwd?: string;
+  timeoutMs?: number;
 }
 
 export interface ExploreResult {
   prompt: string;
+  name: string;
   agent: string;
   model: string;
   content: string;
@@ -47,24 +48,24 @@ export async function executeExplore(
     };
   }
 
-  const concurrency = params.concurrency ?? 4;
-  const results: ExploreResult[] = [];
-  const errors: string[] = [];
+  const concurrency = Math.max(1, Math.floor(params.concurrency ?? 4));
+  const results: Array<ExploreResult | undefined> = new Array(prompts.length);
+  const errors: Array<string | undefined> = new Array(prompts.length);
 
-  // Process prompts with concurrency limit
-  const queue = [...prompts];
-  const running: Promise<void>[] = [];
-
-  const processPrompt = async (prompt: string): Promise<void> => {
+  const processPrompt = async (prompt: string, index: number): Promise<void> => {
     if (signal.aborted) return;
+    const name = `explore-${String(index + 1).padStart(2, "0")}`;
 
     try {
       const result = await runTeammate(
         {
           agent: "explorer",
           task: prompt,
+          name,
           model: params.model ?? params.endpoint,
           cwd: params.cwd,
+          timeoutMs: params.timeoutMs,
+          background: false,
           reply_to: "caller",
           lifecycle: "ephemeral",
         },
@@ -77,58 +78,52 @@ export async function executeExplore(
       const lastMessage =
         result.messages[result.messages.length - 1]?.content ?? "(no output)";
 
-      results.push({
+      results[index] = {
         prompt,
+        name,
         agent: result.agent,
         model: result.model,
         content: lastMessage,
         exitCode: result.exitCode,
         durationMs: result.durationMs,
-      });
+      };
     } catch (error) {
-      errors.push(
-        `Prompt "${prompt.slice(0, 50)}": ${error instanceof Error ? error.message : String(error)}`,
-      );
+      errors[index] =
+        `Prompt "${prompt.slice(0, 50)}": ${error instanceof Error ? error.message : String(error)}`;
     }
   };
 
-  // Dispatch with concurrency control
-  for (const prompt of queue) {
-    if (signal.aborted) break;
-
-    const task = processPrompt(prompt);
-    running.push(task);
-
-    if (running.length >= concurrency) {
-      await Promise.race(running);
-      // Remove completed tasks
-      for (let i = running.length - 1; i >= 0; i--) {
-        const settled = await Promise.race([
-          running[i].then(() => true),
-          Promise.resolve(false),
-        ]);
-        if (settled) running.splice(i, 1);
-      }
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (!signal.aborted) {
+      const index = nextIndex++;
+      if (index >= prompts.length) return;
+      await processPrompt(prompts[index], index);
     }
-  }
+  };
 
-  // Wait for remaining
-  await Promise.allSettled(running);
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, prompts.length) }, () => worker()),
+  );
 
   // Build output
   const outputParts: string[] = [];
   for (const result of results) {
+    if (!result) continue;
     outputParts.push(
-      `## Prompt: ${result.prompt.slice(0, 80)}\n**Model**: ${result.model} | **Duration**: ${result.durationMs}ms\n\n${result.content}\n`,
+      `## Prompt: ${result.prompt.slice(0, 80)}\n**Task**: @${result.name} | **Model**: ${result.model} | **Duration**: ${result.durationMs}ms\n\n${result.content}\n`,
     );
   }
 
-  if (errors.length > 0) {
-    outputParts.push(`## Errors\n${errors.map((e) => `- ${e}`).join("\n")}`);
+  const reportedErrors = errors.filter((error): error is string => Boolean(error));
+  if (reportedErrors.length > 0) {
+    outputParts.push(`## Errors\n${reportedErrors.map((e) => `- ${e}`).join("\n")}`);
   }
+
+  const completedResults = results.filter((result): result is ExploreResult => Boolean(result));
 
   return {
     content: [{ type: "text", text: outputParts.join("\n---\n\n") }],
-    isError: results.length === 0 && errors.length > 0,
+    isError: completedResults.length === 0 && reportedErrors.length > 0,
   };
 }
