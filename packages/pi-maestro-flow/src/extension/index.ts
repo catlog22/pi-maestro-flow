@@ -49,6 +49,9 @@ import {
   onToolCall as goalToolCall,
   onBeforeAgentStart as goalBeforeAgentStart,
   onAgentEnd as goalAgentEnd,
+  getActiveGoal,
+  reconcileWorkflowGoal,
+  setWorkflowCoordinator,
   type GoalParams as GoalActionParams,
 } from "../tools/goal.ts";
 import {
@@ -65,10 +68,20 @@ import {
   onContextTodo,
   onSessionStart as todoSessionStart,
   onSessionShutdown as todoSessionShutdown,
+  reconcileMirrorTasks,
   type TodoParams,
   type TodoResultDetails,
   type TodoTask,
 } from "../tools/todo.ts";
+import { WorkflowBridge, buildTodoMirrorSpecs } from "../session/bridge.ts";
+import { RunCliAdapter } from "../session/cli-adapter.ts";
+import { WorkflowCoordinator } from "../session/coordinator.ts";
+import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
+import { deriveWorkflowViewModel, type WorkflowSnapshotLike } from "../session/view-model.ts";
+import { createRunEventComponent, type RunEventDetails } from "../session/run-event.ts";
+import { executeRunControl, RunControlParams, type RunControlInput } from "../tools/run-control.ts";
+import { nextMaestroPanelMode, renderMaestroPanel, type MaestroPanelMode } from "../tui/maestro-panel.ts";
+import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
 import {
   initPlan,
   PLAN_TOGGLE_KEY,
@@ -91,6 +104,7 @@ import { PERMISSION_MODES, type PermissionMode } from "../permissions/types.ts";
 import {
   createMaestroCompaction,
   persistMaestroCompactionKnowhow,
+  type WorkflowRecoveryIdentity,
 } from "../compaction/maestro-compaction.ts";
 import { createMidTurnAutoCompaction } from "../compaction/auto-compaction.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
@@ -102,7 +116,7 @@ import {
 
 interface MaestroState {
   baseCwd: string;
-  activeRuns: Map<
+  activeToolCalls: Map<
     string,
     {
       action: string;
@@ -148,8 +162,11 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const midTurnAutoCompaction = createMidTurnAutoCompaction(pi);
   const state: MaestroState = {
     baseCwd: "",
-    activeRuns: new Map(),
+    activeToolCalls: new Map(),
   };
+  let workflowBridge: WorkflowBridge | undefined;
+  let workflowCoordinator: WorkflowCoordinator | undefined;
+  let lastRunStates = new Map<string, string>();
 
   // Register dynamic providers from cli-tools.json
   try {
@@ -193,7 +210,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       const action = params.action as string;
 
       // Track run
-      state.activeRuns.set(id, {
+      state.activeToolCalls.set(id, {
         action,
         startedAt: Date.now(),
         correlationId: id,
@@ -234,7 +251,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
             };
         }
       } finally {
-        state.activeRuns.delete(id);
+        state.activeToolCalls.delete(id);
       }
     },
 
@@ -467,6 +484,39 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
 
   pi.registerTool(todoTool);
 
+  // === Canonical Workflow Run Control ===
+  const runControlTool: ToolDefinition<typeof RunControlParams> = {
+    name: "run-control",
+    label: "Run Control",
+    description: "Read or control the active canonical Maestro Workflow Session through its CLI writer.",
+    parameters: RunControlParams,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (!workflowCoordinator) {
+        return {
+          content: [{ type: "text", text: "Workflow Coordinator is not attached." }],
+          isError: true,
+          details: { ok: false, action: params.action, message: "Workflow Coordinator is not attached." },
+        };
+      }
+      const result = await executeRunControl(params as RunControlInput, workflowCoordinator);
+      if (result.ok) await refreshWorkflow(ctx, true);
+      return {
+        content: [{ type: "text", text: result.message }],
+        isError: !result.ok,
+        details: result,
+      };
+    },
+    renderCall(args, theme) {
+      return singleLine(`${theme.fg("toolTitle", theme.bold("run-control "))}${String(args.action ?? "?")}`);
+    },
+  };
+  pi.registerTool(runControlTool);
+
+  pi.registerMessageRenderer<RunEventDetails>("run-event", (message, options) => {
+    const details = message.details;
+    return details ? createRunEventComponent(details, options.expanded) : undefined;
+  });
+
   // === Plan Mode ===
   initPlan(pi);
   registerPlanTools(pi);
@@ -535,36 +585,173 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     },
   });
 
-  // === Statusline ===
-  installStatusline(pi, () => state);
+  function workflowSnapshotForUi(): WorkflowSnapshotLike | undefined {
+    const snapshot = workflowBridge?.getSnapshot();
+    if (!snapshot) return undefined;
+    const goal = getActiveGoal();
+    return {
+      ...snapshot,
+      goal: goal ? {
+        objective: goal.text,
+        status: goal.status,
+        tokensUsed: goal.tokensUsed,
+        tokenBudget: goal.tokenBudget,
+      } : null,
+      todos: getVisibleTasks().map((task) => ({
+        id: task.id,
+        subject: task.subject,
+        status: task.status,
+        origin: task.origin ? "mirror" : "local",
+        blockedBy: task.blockedBy,
+      })),
+    };
+  }
 
-  // === Todo Widget (above editor) ===
+  function workflowRecoveryIdentity(): WorkflowRecoveryIdentity | undefined {
+    const snapshot = workflowBridge?.getSnapshot();
+    const session = snapshot?.session;
+    if (!snapshot || !session) return undefined;
+    const run = activeWorkflowRun(snapshot);
+    if (!run) return undefined;
+    const task = getVisibleTasks().find((candidate) => candidate.status === "in_progress" && candidate.origin);
+    const gates = [...session.gates, ...(run?.gates ?? [])];
+    const next = Array.isArray(run?.handoff?.next) ? run?.handoff?.next[0] : undefined;
+    return {
+      sessionId: session.sessionId,
+      runId: run.runId,
+      todoId: task?.id,
+      stackRevision: task?.skillActivation?.stackRevision,
+      gates: {
+        passed: gates.filter((gate) => ["passed", "waived", "skipped"].includes(gate.status)).length,
+        total: gates.length,
+        failed: gates.filter((gate) => ["failed", "blocked"].includes(gate.status)).length,
+      },
+      artifactRefs: session.artifacts.map((artifact) => artifact.artifactId),
+      nextAction: next && typeof next === "object" && typeof (next as { command?: unknown }).command === "string"
+        ? (next as { command: string }).command
+        : undefined,
+    };
+  }
+
+  async function refreshWorkflow(ctx: ExtensionContext, emitEvents = false): Promise<WorkflowSnapshot | undefined> {
+    if (!workflowBridge) return undefined;
+    const next = await workflowBridge.refresh();
+    if (next.session) {
+      reconcileMirrorTasks(buildTodoMirrorSpecs(next), ctx);
+      reconcileWorkflowGoal(next, ctx);
+    }
+    if (emitEvents) emitRunTransitions(next);
+    else lastRunStates = new Map(next.session?.runs.map((run) => [run.runId, run.status]) ?? []);
+    updateTodoWidget();
+    return next;
+  }
+
+  function emitRunTransitions(snapshot: WorkflowSnapshot): void {
+    const nextStates = new Map(snapshot.session?.runs.map((run) => [run.runId, run.status]) ?? []);
+    for (const run of snapshot.session?.runs ?? []) {
+      const previous = lastRunStates.get(run.runId);
+      if (!previous || previous === run.status) continue;
+      const handoff = run.handoff ?? {};
+      const next = Array.isArray(handoff.next) ? handoff.next[0] : undefined;
+      pi.sendMessage({
+        customType: "run-event",
+        content: `Run ${run.runId} changed from ${previous} to ${run.status}`,
+        display: true,
+        details: {
+          runId: run.runId,
+          command: run.command,
+          status: run.status,
+          verdict: typeof handoff.verdict === "string" ? handoff.verdict : undefined,
+          artifactsCount: snapshot.session?.artifacts.filter((artifact) => artifact.runId === run.runId).length ?? 0,
+          nextAction: next && typeof next === "object" && typeof (next as { command?: unknown }).command === "string"
+            ? (next as { command: string }).command
+            : undefined,
+        } satisfies RunEventDetails,
+      });
+    }
+    lastRunStates = nextStates;
+  }
+
+  async function openSessionOverlay(ctx: ExtensionContext): Promise<void> {
+    const view = deriveWorkflowViewModel(workflowSnapshotForUi());
+    if (!view || !workflowCoordinator) {
+      ctx.ui.notify("No active canonical Workflow Session.", "info");
+      return;
+    }
+    await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
+      let overlay: SessionOverlay;
+      overlay = new SessionOverlay({
+        view,
+        requestRender: () => tui.requestRender(),
+        close: () => done(undefined),
+        onAction: async (action: SessionOverlayAction, runId?: string) => {
+          if (action === "pause" || action === "resume") {
+            const goal = getActiveGoal();
+            if ((action === "pause" && goal?.status === "active") || (action === "resume" && goal?.status === "paused")) {
+              const result = await executeGoal({ action: "pause" }, ctx);
+              if (result.isError) throw new Error(result.text);
+            }
+          } else if (action === "brief") {
+            await workflowCoordinator!.brief(runId);
+          } else if (action === "retry") {
+            if (!runId) throw new Error("No Run selected");
+            await workflowCoordinator!.retry(runId);
+          } else if (action === "cancel") {
+            if (!runId) throw new Error("No Run selected");
+            await workflowCoordinator!.cancel(runId);
+          } else {
+            ctx.ui.notify("Resolve the decision through AskUserQuestion; the overlay is a recovery fallback only.", "info");
+          }
+          await refreshWorkflow(ctx, true);
+          const updated = deriveWorkflowViewModel(workflowSnapshotForUi());
+          if (updated) overlay.update(updated);
+        },
+      });
+      return overlay;
+    }, {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
+    });
+  }
+
+  pi.registerCommand("session", {
+    description: "Open the canonical Workflow Session control center",
+    async handler(_args, ctx) { await openSessionOverlay(ctx); },
+  });
+
+  // === Statusline ===
+  installStatusline(pi, () => state, () => workflowSnapshotForUi());
+
+  // === Maestro Panel (above editor) ===
   let widgetCtx: ExtensionContext | undefined;
-  let todoExpanded = false;
+  let panelMode: MaestroPanelMode = "collapsed";
 
   function updateTodoWidget(): void {
     if (!widgetCtx) return;
     const tasks = getVisibleTasks();
-    if (tasks.length === 0) {
+    const view = deriveWorkflowViewModel(workflowSnapshotForUi());
+    if (!view && tasks.length === 0) {
       widgetCtx.ui.setWidget("todo-panel", undefined);
       return;
     }
     widgetCtx.ui.setWidget("todo-panel", () => ({
       render(width: number): string[] {
-        return renderTodoWidget(tasks, todoExpanded, width);
+        return view
+          ? renderMaestroPanel(view, panelMode, width)
+          : renderTodoWidget(tasks, panelMode !== "collapsed", width);
       },
       invalidate() {},
     }));
   }
 
   pi.registerShortcut(TODO_TOGGLE_KEY, {
-    description: "Toggle Todo details",
+    description: "Cycle Maestro Panel: collapsed, Todo, panorama",
     handler(ctx: ExtensionContext) {
-      if (getVisibleTasks().length === 0) {
-        ctx.ui.notify("No Todo tasks to display.", "info");
+      if (!deriveWorkflowViewModel(workflowSnapshotForUi()) && getVisibleTasks().length === 0) {
+        ctx.ui.notify("No Workflow Session or Todo tasks to display.", "info");
         return;
       }
-      todoExpanded = !todoExpanded;
+      panelMode = nextMaestroPanelMode(panelMode);
       widgetCtx = ctx;
       updateTodoWidget();
     },
@@ -574,9 +761,27 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
   pi.on("session_start", async (_event, ctx) => {
     state.baseCwd = ctx.cwd;
     widgetCtx = ctx;
-    todoExpanded = false;
+    panelMode = "collapsed";
     goalSessionStart(ctx);
     todoSessionStart(ctx);
+    workflowBridge = new WorkflowBridge(ctx.cwd);
+    workflowCoordinator = WorkflowCoordinator.create(
+      workflowBridge,
+      new RunCliAdapter(ctx.cwd),
+      ctx.cwd,
+    );
+    setWorkflowCoordinator(workflowCoordinator);
+    const snapshot = await refreshWorkflow(ctx);
+    if (snapshot?.source === "canonical" && snapshot.session?.status === "running") {
+      const hostSessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.()
+        ?? `pi-${process.pid}`;
+      try {
+        await workflowCoordinator.attach(hostSessionId, snapshot.session.sessionId);
+        await refreshWorkflow(ctx);
+      } catch (error) {
+        ctx.ui.notify(`Workflow Session attach is read-only because continuation ownership was unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      }
+    }
     await onSessionStartPlan(ctx);
     const configuredMode = await permissionController.reload(ctx);
     if (configuredMode === "plan" && !isPlanMode()) await planToggleMode(ctx);
@@ -587,12 +792,17 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
 
   pi.on("session_shutdown", async (_event, ctx) => {
     midTurnAutoCompaction.reset(ctx);
-    state.activeRuns.clear();
+    state.activeToolCalls.clear();
     widgetCtx?.ui.setWidget("todo-panel", undefined);
     widgetCtx = undefined;
-    todoExpanded = false;
+    panelMode = "collapsed";
     goalSessionShutdown(ctx);
     todoSessionShutdown(ctx);
+    await workflowCoordinator?.release();
+    workflowCoordinator = undefined;
+    workflowBridge = undefined;
+    lastRunStates.clear();
+    setWorkflowCoordinator(undefined);
     onSessionShutdownPlan(ctx);
     ctx.ui.setStatus("approval-mode", undefined);
     await shutdownIntelligenceTools();
@@ -600,7 +810,9 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
 
   pi.on("session_before_compact", async (event, ctx) => {
     goalBeforeCompact(ctx);
-    return createMaestroCompaction(event, ctx);
+    return createMaestroCompaction(event, ctx, {
+      getWorkflowIdentity: () => workflowRecoveryIdentity(),
+    });
   });
 
   pi.on("session_compact", async (event, ctx) => {
@@ -645,11 +857,18 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     await goalAgentEnd(event, ctx);
     onAgentEndTodo();
     midTurnAutoCompaction.onAgentEnd(ctx);
+    await refreshWorkflow(ctx, true);
     updateTodoWidget();
   });
 
-  pi.on("tool_execution_end", (event) => {
+  pi.on("tool_execution_end", async (event, ctx) => {
     if (event.toolName === "todo") updateTodoWidget();
+    const command = event.toolName === "bash"
+      ? String((event as { input?: { command?: unknown } }).input?.command ?? "")
+      : "";
+    if (event.toolName === "run-control" || /\bmaestro\s+(?:run|ralph)\b/.test(command)) {
+      await refreshWorkflow(ctx, true);
+    }
   });
 
   // Hook denial runs after Plan's hard boundary and before the interactive permission prompt.

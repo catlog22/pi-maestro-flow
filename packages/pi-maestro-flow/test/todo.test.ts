@@ -534,8 +534,10 @@ test("active skill metadata resumes and marks changed skill content stale", asyn
     onSessionShutdown(context());
     await writeFile(skillPath, `---\nname: demo\ndescription: demo\n---\n# Changed content with a different size`);
     onSessionStart(context(entries));
-    const stale = await onBeforeAgentStartTodo({ systemPrompt: "base" });
-    assert.match(stale?.systemPrompt ?? "", /active_skill_stack_stale/);
+    await assert.rejects(
+      onBeforeAgentStartTodo({ systemPrompt: "base" }),
+      /skill activation is stale/,
+    );
     assert.equal(getVisibleTasks()[0].skillActivation?.state, "stale");
   } finally {
     onSessionShutdown(context());

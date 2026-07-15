@@ -7,10 +7,14 @@ import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
 test("extension registers LSP, browser, and BM25 discovery", async () => {
   const tools: ToolDefinition[] = [];
   const active: string[] = [];
+  const commands: string[] = [];
+  const renderers: string[] = [];
   const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
   const api = new Proxy({} as ExtensionAPI, {
     get(_target, property) {
       if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); active.push(tool.name); };
+      if (property === "registerCommand") return (name: string) => { commands.push(name); };
+      if (property === "registerMessageRenderer") return (name: string) => { renderers.push(name); };
       if (property === "getAllTools") return () => tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters, sourceInfo: { path: "test", type: "extension" } }));
       if (property === "getActiveTools") return () => [...active];
       if (property === "setActiveTools") return (names: string[]) => { active.splice(0, active.length, ...names); };
@@ -33,6 +37,16 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(names.filter((name) => name === "lsp").length, 1);
   assert.equal(names.filter((name) => name === "browser").length, 1);
   assert.equal(names.filter((name) => name === "search_tool_bm25").length, 1);
+  assert.ok(names.includes("run-control"));
+  assert.ok(commands.includes("session"));
+  assert.ok(renderers.includes("run-event"));
+
+  const runControl = tools.find((tool) => tool.name === "run-control");
+  const actionSchema = (runControl?.parameters as { properties?: { action?: { anyOf?: Array<{ const?: string }> } } })
+    ?.properties?.action;
+  assert.deepEqual(actionSchema?.anyOf?.map((item) => item.const), [
+    "status", "brief", "prepare", "advance", "complete", "retry", "cancel",
+  ]);
 
   const maestro = tools.find((tool) => tool.name === "maestro");
   const maestroProperties = (maestro?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties;

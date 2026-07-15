@@ -572,6 +572,46 @@ export function collectVerifierEvidence(ctx: GoalContext, since: number): string
   return included.join("\n\n");
 }
 
+export function canonicalCompletionBlockers(snapshot: WorkflowSnapshot | undefined): string[] {
+  const session = snapshot?.session;
+  if (!session) return [];
+  const blockers: string[] = [];
+  if (["paused", "failed"].includes(session.status)) blockers.push(`Session is ${session.status}`);
+  for (const step of session.chain) {
+    if (!["completed", "sealed"].includes(step.status)) {
+      blockers.push(`Step ${step.step} (${step.command}) is ${step.status}`);
+    }
+  }
+  const activeRun = activeWorkflowRun(snapshot);
+  if (activeRun && !["completed", "sealed"].includes(activeRun.status)) {
+    blockers.push(`Active Run ${activeRun.runId} is ${activeRun.status}`);
+  }
+  for (const gate of [...session.gates, ...session.runs.flatMap((run) => run.gates)]) {
+    if (gate.blocking && !["passed", "waived", "skipped"].includes(gate.status)) {
+      blockers.push(`Gate ${gate.id} is ${gate.status}`);
+    }
+  }
+  return [...new Set(blockers)];
+}
+
+export function buildCanonicalEvidence(snapshot: WorkflowSnapshot | undefined): string {
+  const session = snapshot?.session;
+  if (!session) return "";
+  const lines = [
+    `Session ${session.sessionId}: ${session.status} (revision ${session.revision})`,
+    `Intent: ${session.intent}`,
+    `Chain: ${session.chain.length === 0 ? "(empty)" : session.chain.map((step) => `${step.step}:${step.status}`).join(", ")}`,
+    `Gates: ${[...session.gates, ...session.runs.flatMap((run) => run.gates)].map((gate) => `${gate.id}:${gate.status}`).join(", ") || "(none)"}`,
+    `Artifacts: ${session.artifacts.map((artifact) => `${artifact.artifactId}:${artifact.status}:${artifact.path}`).join(", ") || "(none)"}`,
+  ];
+  for (const run of session.runs) {
+    const verdict = typeof run.handoff?.verdict === "string" ? run.handoff.verdict : "none";
+    const summary = typeof run.handoff?.summary === "string" ? ` — ${run.handoff.summary.slice(0, 300)}` : "";
+    lines.push(`Run ${run.runId} (${run.command}): ${run.status}; verdict=${verdict}${summary}`);
+  }
+  return lines.join("\n").slice(0, MAX_VERIFIER_EVIDENCE_CHARS);
+}
+
 function isSince(timestamp: unknown, since: number): boolean {
   if (typeof timestamp !== "string" && typeof timestamp !== "number") return true;
   const millis = typeof timestamp === "number" ? timestamp : Date.parse(timestamp);
@@ -752,7 +792,7 @@ async function handlePause(ctx: GoalContext): Promise<{ text: string; isError: b
 
   // active → paused
   cancelContinuation();
-  await workflowCoordinator?.fenceContinuation();
+  await fenceWorkflowContinuation();
   blockStale();
   abortTurn(ctx);
   activeGoal = pauseGoal(activeGoal, "user");
@@ -763,7 +803,7 @@ async function handlePause(ctx: GoalContext): Promise<{ text: string; isError: b
 }
 
 async function handleClear(ctx: GoalContext): Promise<{ text: string; isError: boolean }> {
-  await workflowCoordinator?.fenceContinuation();
+  await fenceWorkflowContinuation();
   if (!activeGoal) {
     cancelContinuation();
     clearRecovery();
@@ -952,7 +992,8 @@ function buildResumePrompt(goal: ActiveGoal): string {
 }
 
 function buildContinuePrompt(goal: ActiveGoal, marker: string): string {
-  const activeRun = workflowCoordinator?.status() ? activeWorkflowRun(workflowCoordinator.status()!) : undefined;
+  const workflowSnapshot = workflowCoordinator?.status();
+  const activeRun = workflowSnapshot ? activeWorkflowRun(workflowSnapshot) : undefined;
   const runAnchor = activeRun
     ? `\n\n<active_run id="${escapeXml(activeRun.runId)}">Run \`maestro run brief ${activeRun.runId}\` before the next execution action.</active_run>`
     : "";
@@ -1086,6 +1127,10 @@ function blockStale() { staleToolCallsBlocked = true; }
 function clearStaleBlock() { staleToolCallsBlocked = false; }
 function clearRecovery() { goalRecovery = undefined; }
 function clearRecoveryFor(id: string) { if (goalRecovery?.goalId === id) goalRecovery = undefined; }
+async function fenceWorkflowContinuation(): Promise<void> {
+  if (!workflowCoordinator?.status()?.session) return;
+  try { await workflowCoordinator.fenceContinuation(); } catch { /* no owned lease means no live marker can be accepted */ }
+}
 function abortTurn(ctx: GoalContext) { try { ctx.abort?.(); } catch { /* best effort */ } }
 function hasPending(ctx: GoalContext) { return ctx.hasPendingMessages?.() ?? false; }
 function isContradictory(s: string): boolean { return CONTRADICTORY_RE.some((re) => re.test(s)); }

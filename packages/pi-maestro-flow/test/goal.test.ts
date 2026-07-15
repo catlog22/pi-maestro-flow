@@ -1,16 +1,21 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+  buildCanonicalEvidence,
+  canonicalCompletionBlockers,
   collectVerifierEvidence,
   executeGoal,
+  getActiveGoal,
   initGoal,
   onAgentEnd,
   onBeforeAgentStart,
   parseVerifierOutput,
+  reconcileWorkflowGoal,
   onSessionShutdown,
   onSessionStart,
   type GoalContext,
 } from "../src/tools/goal.ts";
+import type { WorkflowSnapshot } from "../src/session/types.ts";
 
 function createContext(overrides: Partial<GoalContext> = {}): GoalContext {
   return {
@@ -72,6 +77,29 @@ test("verifier receives bounded raw tool evidence produced after the goal starte
   assert.doesNotMatch(evidence, /stale output/);
   assert.match(evidence, /\[OK\] bash\n3 tests passed/);
   assert.match(evidence, /\[ERROR\] goal\nverifier feedback/);
+});
+
+test("canonical Workflow state rebuilds Goal projection and blocks premature completion", async () => {
+  const ctx = createContext({ sessionManager: { getEntries: () => [] } });
+  initGoal({ appendEntry() {} } as never);
+  onSessionStart(ctx);
+  const snapshot = workflowSnapshot();
+  try {
+    const goal = reconcileWorkflowGoal(snapshot, ctx);
+    assert.equal(goal?.workflowSessionId, "session-1");
+    assert.match(getActiveGoal()?.text ?? "", /Definition of done: all gates pass/);
+    assert.deepEqual(canonicalCompletionBlockers(snapshot), [
+      "Step execute (execute) is running",
+      "Active Run run-1 is running",
+      "Gate gate-1 is pending",
+    ]);
+    const evidence = buildCanonicalEvidence(snapshot);
+    assert.match(evidence, /Session session-1: running/);
+    assert.match(evidence, /Run run-1 \(execute\): running/);
+  } finally {
+    await executeGoal({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
 });
 
 test("goal set inside an active tool turn does not queue a stale follow-up", async () => {
@@ -165,3 +193,38 @@ test("active Goal does not rewrite the per-turn system prompt", () => {
     onSessionShutdown(ctx);
   }
 });
+
+function workflowSnapshot(): WorkflowSnapshot {
+  return {
+    source: "canonical",
+    projectRoot: "D:/workspace",
+    loadedAt: "2026-07-15T00:00:00.000Z",
+    revision: { sessionRevision: 1, fingerprint: "goal-workflow" },
+    diagnostics: [],
+    session: {
+      sessionId: "session-1",
+      intent: "Execute integration",
+      status: "running",
+      revision: 1,
+      activeRunId: "run-1",
+      definitionOfDone: "all gates pass",
+      gates: [],
+      chain: [{ step: "execute", command: "execute", status: "running", runId: "run-1" }],
+      runs: [{
+        runId: "run-1",
+        parentRunId: null,
+        command: "execute",
+        status: "running",
+        goal: "Execute",
+        args: [],
+        gates: [{ id: "gate-1", blocking: true, status: "pending" }],
+        primaryArtifactId: null,
+        handoff: null,
+        startedAt: "2026-07-15T00:00:00.000Z",
+        endedAt: null,
+      }],
+      artifacts: [],
+      aliases: {},
+    },
+  };
+}
