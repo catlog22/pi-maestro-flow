@@ -76,7 +76,14 @@ export interface MessageEnvelope {
   timestamp: number;
 }
 
-export type AgentStatus = "running" | "sleeping" | "completed";
+export type AgentStatus = "pending" | "running" | "sleeping" | "completed" | "failed";
+
+export interface TeammateInteractionRecord {
+  requestId: string;
+  interaction: "permission" | "question";
+  createdAt: number;
+  payload: Record<string, unknown>;
+}
 
 export interface ActiveAgent {
   agent: string;
@@ -104,6 +111,7 @@ export interface ActiveAgent {
     sessionFile?: string;
   };
   pendingCancel?: { nonce: string; fencedEpoch: number };
+  pendingInteractions?: Map<string, TeammateInteractionRecord>;
   inbox: MessageEnvelope[];
   outputLog: string[];
   pendingResolve?: (result: SingleResult) => void;

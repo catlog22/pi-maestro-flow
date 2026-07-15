@@ -5,8 +5,10 @@
 
 import {
   CURSOR_MARKER,
+  Key,
   type Component,
   type Focusable,
+  matchesKey,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -20,6 +22,13 @@ import {
   selectProgressWindow,
   type ProgressPalette,
 } from "./progress-tree.ts";
+import {
+  BracketedPasteDecoder,
+  nextGraphemeBoundary,
+  previousGraphemeBoundary,
+  sanitizeSingleLineInput,
+  type DecodedInputToken,
+} from "./input-text.ts";
 
 const MAX_LOG_LINES = 500;
 const STREAMING_MAX_LINES = 8;
@@ -56,10 +65,6 @@ const progressPalette: ProgressPalette = {
   error: red,
   bold,
 };
-
-function printableInput(data: string): string {
-  return data.replace(/[\x00-\x1f\x7f]/g, "");
-}
 
 function fitFooter(width: number, segments: string[]): string {
   let footer = "";
@@ -114,6 +119,10 @@ export class AttachOverlay implements Component, Focusable {
   private draft = "";
   private cursor = 0;
   private sendStatus = "";
+  private sending = false;
+  private readonly pasteDecoder = new BracketedPasteDecoder();
+  private pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastWidth = 80;
   private readonly onSend?: (correlationId: string, message: string) => Promise<{ ok: boolean; message: string }>;
 
   constructor(
@@ -220,70 +229,105 @@ export class AttachOverlay implements Component, Focusable {
   }
 
   handleInput(data: string): void {
+    if (this.lastWidth < 20) {
+      if (matchesKey(data, Key.escape) || data === "q") this.onDone();
+      else if (matchesKey(data, Key.left) || matchesKey(data, Key.shift("tab"))) this.switchAgent(-1);
+      else if (matchesKey(data, Key.right) || matchesKey(data, Key.tab)) this.switchAgent(1);
+      return;
+    }
+    if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
+    for (const token of this.pasteDecoder.feed(data)) this.dispatchDecodedToken(token);
+    if (this.pasteDecoder.hasPending()) {
+      this.pasteFlushTimer = setTimeout(() => {
+        this.pasteFlushTimer = undefined;
+        for (const token of this.pasteDecoder.flushPending()) this.dispatchDecodedToken(token);
+        this.requestRender?.();
+      }, 16);
+    }
+    this.requestRender?.();
+  }
+
+  private dispatchDecodedToken(token: DecodedInputToken): void {
+    if (token.kind === "paste") {
+      if (!this.composing && this.onSend) this.composing = true;
+      this.insertDraft(token.text);
+      return;
+    }
+    this.handleDecodedInput(token.text);
+  }
+
+  private handleDecodedInput(data: string): void {
     if (this.composing) {
-      if (data === "\x1b") {
+      if (this.sending) return;
+      if (matchesKey(data, Key.escape)) {
         this.composing = false;
         this.sendStatus = "Message cancelled";
-      } else if (data === "\r" || data === "\n") {
+      } else if (matchesKey(data, Key.enter)) {
         const message = this.draft.trim();
         if (!message || !this.onSend) {
           this.sendStatus = message ? "Message cannot be sent" : "Message is empty";
           this.requestRender?.();
           return;
         }
-        this.composing = false;
-        this.draft = "";
-        this.cursor = 0;
+        this.sending = true;
         this.sendStatus = "Sending…";
         void Promise.resolve(this.onSend(this.activeId, message)).then((result) => {
-          this.sendStatus = result.message;
+          this.sending = false;
+          if (result.ok) {
+            this.composing = false;
+            this.draft = "";
+            this.cursor = 0;
+            this.sendStatus = result.message;
+          } else {
+            this.composing = true;
+            this.sendStatus = `${result.message} · Enter retry · Esc cancel`;
+          }
           this.requestRender?.();
         }).catch((error: unknown) => {
-          this.sendStatus = `Send failed · ${error instanceof Error ? error.message : String(error)}`;
+          this.sending = false;
+          this.composing = true;
+          this.sendStatus = `Send failed · ${error instanceof Error ? error.message : String(error)} · Enter retry · Esc cancel`;
           this.requestRender?.();
         });
-      } else if (data === "\x7f" || data === "\b") {
+      } else if (matchesKey(data, Key.backspace)) {
         if (this.cursor > 0) {
-          this.draft = this.draft.slice(0, this.cursor - 1) + this.draft.slice(this.cursor);
-          this.cursor--;
+          const previous = previousGraphemeBoundary(this.draft, this.cursor);
+          this.draft = this.draft.slice(0, previous) + this.draft.slice(this.cursor);
+          this.cursor = previous;
         }
-      } else if (data === "\x1b[D") {
-        this.cursor = Math.max(0, this.cursor - 1);
-      } else if (data === "\x1b[C") {
-        this.cursor = Math.min(this.draft.length, this.cursor + 1);
+      } else if (matchesKey(data, Key.left)) {
+        this.cursor = previousGraphemeBoundary(this.draft, this.cursor);
+      } else if (matchesKey(data, Key.right)) {
+        this.cursor = nextGraphemeBoundary(this.draft, this.cursor);
       } else {
-        const input = printableInput(data);
-        if (input) {
-          this.draft = this.draft.slice(0, this.cursor) + input + this.draft.slice(this.cursor);
-          this.cursor += input.length;
-        }
+        this.insertDraft(sanitizeSingleLineInput(data));
       }
       this.requestRender?.();
       return;
     }
-    if (data === "\x1b" || data === "q") {
+    if (matchesKey(data, Key.escape) || data === "q") {
       this.onDone();
       return;
     }
-    if ((data === "\r" || data === "\n") && this.onSend) {
+    if (matchesKey(data, Key.enter) && this.onSend) {
       this.composing = true;
       this.sendStatus = "";
       this.requestRender?.();
       return;
     }
-    if (data === "\t") {
+    if (matchesKey(data, Key.tab)) {
       this.switchAgent(1);
       return;
     }
-    if (data === "\x1b[Z") {
+    if (matchesKey(data, Key.shift("tab"))) {
       this.switchAgent(-1);
       return;
     }
-    if (data === "\x1b[D") {
+    if (matchesKey(data, Key.left)) {
       this.switchAgent(-1);
       return;
     }
-    if (data === "\x1b[C") {
+    if (matchesKey(data, Key.right)) {
       this.switchAgent(1);
       return;
     }
@@ -305,9 +349,9 @@ export class AttachOverlay implements Component, Focusable {
       }
       return;
     }
-    if (data === "\x1b[A" || data === "k") {
+    if (matchesKey(data, Key.up) || data === "k") {
       log.scrollOffset = Math.max(0, log.scrollOffset - 1);
-    } else if (data === "\x1b[B" || data === "j") {
+    } else if (matchesKey(data, Key.down) || data === "j") {
       log.scrollOffset = Number.isFinite(log.scrollOffset) ? log.scrollOffset + 1 : log.scrollOffset;
     } else if (data === "\x1b[5~") {
       log.scrollOffset = Math.max(0, log.scrollOffset - 10);
@@ -319,11 +363,18 @@ export class AttachOverlay implements Component, Focusable {
     this.requestRender?.();
   }
 
+  private insertDraft(input: string): void {
+    if (!input) return;
+    this.draft = this.draft.slice(0, this.cursor) + input + this.draft.slice(this.cursor);
+    this.cursor += input.length;
+  }
+
   invalidate(): void {}
 
   render(width: number, height?: number): string[] {
     this.syncAgents();
     const w = Math.max(1, Math.min(width, 120));
+    this.lastWidth = w;
     const log = this.agents.get(this.activeId);
     if (w < 20) return [this.renderCompact(log, w)];
     const terminalHeight = Math.max(6, (process.stdout?.rows ?? 30) - 2);
@@ -399,6 +450,9 @@ export class AttachOverlay implements Component, Focusable {
 
     if (this.onSend) {
       rows.push(frameRule(inner));
+      if (this.composing && this.sendStatus) {
+        rows.push(truncateToWidth(`${red("!")} ${this.sendStatus}`, inner, "…"));
+      }
       rows.push(this.renderComposer(inner));
     }
 
@@ -428,8 +482,9 @@ export class AttachOverlay implements Component, Focusable {
       );
     }
     const before = this.draft.slice(0, this.cursor);
-    const cursorChar = this.cursor < this.draft.length ? this.draft[this.cursor] : " ";
-    const after = this.draft.slice(this.cursor + 1);
+    const next = nextGraphemeBoundary(this.draft, this.cursor);
+    const cursorChar = this.cursor < this.draft.length ? this.draft.slice(this.cursor, next) : " ";
+    const after = this.draft.slice(next);
     const marker = this.focused ? CURSOR_MARKER : "";
     return truncateToWidth(
       `${green("›")} ${before}${marker}\x1b[7m${cursorChar}\x1b[27m${after}`,
@@ -552,6 +607,10 @@ export class AttachOverlay implements Component, Focusable {
   }
 
   private renderCompact(log: AgentLog | undefined, width: number): string {
+    if (this.composing) {
+      const content = this.sendStatus || this.draft || "Type message";
+      return truncateToWidth(`Esc cancel · ${content}`, width, "…");
+    }
     if (!log) return truncateToWidth(`${dim("□")} Agents`, width, "…");
     const selected = log.selectedTaskIndex === undefined
       ? undefined
@@ -566,7 +625,7 @@ export class AttachOverlay implements Component, Focusable {
     const agent = log.agent;
     const icon = agent.status === "sleeping" ? yellow("◉") : agent.status === "completed" ? dim("✓") : green("■");
     const name = agent.name ?? agent.correlationId.slice(0, 6);
-    return truncateToWidth(`${icon} ${agent.agent}/${name}`, width, "…");
+    return truncateToWidth(`${icon} ${agent.agent}/${name} · Enter msg · Esc`, width, "…");
   }
 
   private renderFrame(rows: string[], width: number): string[] {
@@ -653,6 +712,7 @@ export class AttachOverlay implements Component, Focusable {
   }
 
   dispose(): void {
+    if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
     if (this.timer) {
       clearInterval(this.timer);
       this.timer = null;

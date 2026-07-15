@@ -14,12 +14,14 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
-import { resolveAgent, type AgentConfig } from "../agents/agents.ts";
+import { listAgentSummaries, resolveAgent, type AgentConfig } from "../agents/agents.ts";
 import { resolvePromptTask } from "../prompts/prompts.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
 import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import type { TeammateTaskType } from "../models/model-routing.ts";
+import type { TeammateModelCapability } from "../models/model-catalog.ts";
+import { getTeammateChildExtensions } from "./child-extensions.ts";
 import {
   parseTeammateThinkingLevel,
   type TeammateThinkingInput,
@@ -46,13 +48,14 @@ export interface RunTeammateParams {
   cwd?: string;
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
-  tasks?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; name?: string; model?: string; thinking?: TeammateThinkingInput; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }>;
+  tasks?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; name?: string; dependsOn?: string[]; context?: "fresh" | "fork"; model?: string; thinking?: TeammateThinkingInput; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }>;
   chain?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; model?: string; thinking?: TeammateThinkingInput }>;
   concurrency?: number;
 }
 
 export interface RunTeammateOptions {
   baseCwd: string;
+  modelCapabilities?: readonly TeammateModelCapability[];
   correlationId?: string;
   taskCorrelationIds?: string[];
   signal?: AbortSignal;
@@ -81,6 +84,8 @@ export interface NormalizedTask {
   promptArgs?: string[];
   taskType?: TeammateTaskType;
   name?: string;
+  dependsOn?: string[];
+  context?: "fresh" | "fork";
   model?: string;
   thinking?: TeammateThinkingLevel;
   cwd?: string;
@@ -171,6 +176,110 @@ export function extractDependencies(
   return deps;
 }
 
+/**
+ * Collect `{name}` references in a template that do NOT match any task name.
+ * These are passed through as literal text at resolution time — surfacing
+ * them lets callers distinguish intentional literals from misspelled refs.
+ */
+export function collectUnknownRefs(
+  template: string | undefined,
+  taskNames: Set<string>,
+): string[] {
+  if (!template) return [];
+  const unknown: string[] = [];
+  const pattern = new RegExp(VAR_PATTERN_SOURCE, "g");
+  let m;
+  while ((m = pattern.exec(template)) !== null) {
+    const name = m[1];
+    if (!taskNames.has(name) && !unknown.includes(name)) {
+      unknown.push(name);
+    }
+  }
+  return unknown;
+}
+
+function editDistance(a: string, b: string): number {
+  const rows = a.length + 1;
+  const cols = b.length + 1;
+  const dist: number[] = new Array(cols).fill(0).map((_, j) => j);
+  for (let i = 1; i < rows; i++) {
+    let prevDiag = dist[0];
+    dist[0] = i;
+    for (let j = 1; j < cols; j++) {
+      const tmp = dist[j];
+      dist[j] = Math.min(
+        dist[j] + 1,
+        dist[j - 1] + 1,
+        prevDiag + (a[i - 1] === b[j - 1] ? 0 : 1),
+      );
+      prevDiag = tmp;
+    }
+  }
+  return dist[cols - 1];
+}
+
+/**
+ * Union of a task's implicit `{name}` references and explicit dependsOn names.
+ * Single source of truth for graph edges — used by inferGraphMode, runGraph,
+ * and progress snapshots so all three agree on the dependency set.
+ */
+export function taskDependencyNames(
+  task: Pick<NormalizedTask, "task" | "dependsOn">,
+  taskNames: Set<string>,
+): string[] {
+  const deps = extractDependencies(task.task, taskNames);
+  for (const name of task.dependsOn ?? []) {
+    if (taskNames.has(name) && !deps.includes(name)) deps.push(name);
+  }
+  return deps;
+}
+
+/**
+ * Validate task references before dispatch.
+ *
+ * - dependsOn entries must match an existing task name — strict error
+ *   (no literal-text ambiguity exists for an explicit dependency list).
+ * - Unknown `{name}` refs close to an existing task name (edit distance)
+ *   are treated as misspellings — error, because silently running the task
+ *   without the intended dependency is worse than rejecting.
+ * - Other unknown `{name}` refs are legitimate literals — warning only.
+ *   Skipped entirely when no task has a name (reference intent impossible).
+ */
+export function validateTaskReferences(
+  tasks: NormalizedTask[],
+): { errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  const taskNames = new Set(tasks.filter((t) => t.name).map((t) => t.name!));
+
+  tasks.forEach((t, i) => {
+    const label = t.name ? `tasks[${i}] "${t.name}"` : `tasks[${i}]`;
+    for (const name of t.dependsOn ?? []) {
+      if (!taskNames.has(name)) {
+        errors.push(`${label}: dependsOn references unknown task name "${name}"`);
+      }
+    }
+    if (taskNames.size === 0) return;
+    for (const name of collectUnknownRefs(t.task, taskNames)) {
+      const threshold = name.length <= 3 ? 1 : 2;
+      const close = [...taskNames].find(
+        (candidate) => candidate !== t.name && editDistance(name, candidate) <= threshold,
+      );
+      if (close) {
+        errors.push(
+          `${label}: "{${name}}" looks like a misspelled reference to task "${close}" — fix the reference or rename the task`,
+        );
+      } else {
+        warnings.push(
+          `${label}: "{${name}}" does not match any task name and will be passed through as literal text`,
+        );
+      }
+    }
+  });
+
+  return { errors, warnings };
+}
+
 function resolvePath(obj: unknown, pathStr: string): unknown {
   const parts = pathStr.split(/\.|\[|\]/).filter(Boolean);
   let current = obj;
@@ -254,7 +363,7 @@ export function inferGraphMode(
   let allLinear = true;
 
   for (let i = 0; i < tasks.length; i++) {
-    const deps = extractDependencies(tasks[i].task, taskNames);
+    const deps = taskDependencyNames(tasks[i], taskNames);
     if (deps.length > 0) hasDeps = true;
     if (deps.length > 1) allLinear = false;
     if (deps.length === 1 && i > 0 && deps[0] !== tasks[i - 1].name) {
@@ -296,6 +405,131 @@ export function normalizeChainToTasks(
       promptArgs: step.promptArgs,
     };
   });
+}
+
+// ---------------------------------------------------------------------------
+// Unified param normalization (shared by tool execute and child proxy paths)
+// ---------------------------------------------------------------------------
+
+export interface NormalizeTeammateResult {
+  /** Normalized task list; null when running in single-agent mode. */
+  tasks: NormalizedTask[] | null;
+  isMultiTask: boolean;
+  /** Non-fatal issues surfaced to the caller alongside the result. */
+  warnings: string[];
+  /** Fatal validation error — nothing was dispatched. */
+  error?: string;
+}
+
+/**
+ * Normalize teammate tool params into a task list.
+ *
+ * Precedence: tasks > chain (deprecated) > single-agent sugar.
+ * Top-level prompt/promptArgs/taskType/context/model/thinking/cwd/
+ * outputSchema/timeoutMs act as defaults; per-task values win.
+ */
+export function normalizeTeammateParams(
+  params: RunTeammateParams,
+): NormalizeTeammateResult {
+  const warnings: string[] = [];
+  const hasTasks = !!params.tasks?.length;
+  const hasChain = !!params.chain?.length;
+
+  let normalized: NormalizedTask[];
+
+  if (hasTasks) {
+    if (hasChain) {
+      warnings.push(
+        '"chain" is deprecated and was ignored because "tasks" is also provided — migrate chain steps to tasks with {name} references',
+      );
+    }
+    if (params.agent || params.task) {
+      warnings.push(
+        'top-level "agent"/"task" are ignored in multi-task mode — set them per task',
+      );
+    }
+    normalized = params.tasks!.map((t) => ({
+      agent: t.agent,
+      task: t.task ?? "",
+      prompt: t.prompt ?? params.prompt,
+      promptArgs: t.promptArgs ?? params.promptArgs,
+      taskType: t.taskType ?? params.taskType,
+      name: t.name,
+      dependsOn: t.dependsOn,
+      context: t.context ?? params.context,
+      model: t.model ?? params.model,
+      thinking: parseTeammateThinkingLevel(t.thinking ?? params.thinking),
+      cwd: t.cwd ?? params.cwd,
+      outputSchema: (t.outputSchema ?? params.outputSchema) as Record<string, unknown> | undefined,
+      timeoutMs: t.timeoutMs ?? params.timeoutMs,
+    }));
+  } else if (hasChain) {
+    warnings.push(
+      '"chain" is deprecated — use "tasks" with {name} references instead',
+    );
+    if (params.agent) {
+      warnings.push('top-level "agent" is ignored in chain mode — set it per step');
+    }
+    normalized = normalizeChainToTasks(params.chain!, params.task ?? "").map((t) => ({
+      ...t,
+      prompt: t.prompt ?? params.prompt,
+      promptArgs: t.promptArgs ?? params.promptArgs,
+      taskType: t.taskType ?? params.taskType,
+      context: params.context,
+      model: t.model ?? params.model,
+      thinking: t.thinking ?? parseTeammateThinkingLevel(params.thinking),
+      cwd: t.cwd ?? params.cwd,
+      outputSchema: (t.outputSchema ?? params.outputSchema) as Record<string, unknown> | undefined,
+      timeoutMs: t.timeoutMs ?? params.timeoutMs,
+    }));
+  } else if (params.agent) {
+    if (!params.task && !params.prompt) {
+      return {
+        tasks: null,
+        isMultiTask: false,
+        warnings,
+        error: 'Single mode requires "task" or "prompt" — refusing to dispatch an empty task.',
+      };
+    }
+    if (params.promptArgs?.length && !params.prompt) {
+      warnings.push('"promptArgs" has no effect without "prompt"');
+    }
+    return { tasks: null, isMultiTask: false, warnings };
+  } else {
+    return {
+      tasks: null,
+      isMultiTask: false,
+      warnings,
+      error: 'Requires "agent" (with "task" or "prompt") for single mode, or "tasks" for multi-task mode.',
+    };
+  }
+
+  for (const [i, t] of normalized.entries()) {
+    if (!t.task && !t.prompt) {
+      return {
+        tasks: normalized,
+        isMultiTask: true,
+        warnings,
+        error: `tasks[${i}]${t.name ? ` "${t.name}"` : ""} requires "task" or "prompt" — refusing to dispatch an empty task.`,
+      };
+    }
+    if (t.promptArgs?.length && !t.prompt) {
+      warnings.push(`tasks[${i}]: "promptArgs" has no effect without "prompt"`);
+    }
+  }
+
+  const refCheck = validateTaskReferences(normalized);
+  warnings.push(...refCheck.warnings);
+  if (refCheck.errors.length > 0) {
+    return {
+      tasks: normalized,
+      isMultiTask: true,
+      warnings,
+      error: refCheck.errors.join("\n"),
+    };
+  }
+
+  return { tasks: normalized, isMultiTask: true, warnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -409,6 +643,35 @@ function isRetryableModelError(messages: Array<{ role: string; content: string }
 // Build pi CLI arguments
 // ---------------------------------------------------------------------------
 
+const ORDERED_THINKING_LEVELS: readonly TeammateThinkingLevel[] = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+];
+
+export function clampThinkingForModel(
+  thinking: TeammateThinkingLevel,
+  model: string | undefined,
+  modelCapabilities: readonly TeammateModelCapability[] = [],
+): TeammateThinkingLevel {
+  const supported = modelCapabilities.find((candidate) => candidate.id === model)?.thinkingLevels;
+  if (!supported?.length || supported.includes(thinking)) return thinking;
+
+  const requestedIndex = ORDERED_THINKING_LEVELS.indexOf(thinking);
+  for (let index = requestedIndex; index < ORDERED_THINKING_LEVELS.length; index += 1) {
+    const candidate = ORDERED_THINKING_LEVELS[index];
+    if (supported.includes(candidate)) return candidate;
+  }
+  for (let index = requestedIndex - 1; index >= 0; index -= 1) {
+    const candidate = ORDERED_THINKING_LEVELS[index];
+    if (supported.includes(candidate)) return candidate;
+  }
+  return thinking;
+}
+
 export function buildPiArgs(
   agentConfig: AgentConfig,
   params: RunTeammateParams,
@@ -417,6 +680,7 @@ export function buildPiArgs(
   sessionDir?: string,
   forkSessionFile?: string,
   schemaFile?: string,
+  modelCapabilities: readonly TeammateModelCapability[] = [],
 ): string[] {
   // RPC mode: stdin stays open for bidirectional messaging (steer/follow_up/abort)
   const args: string[] = ["--mode", "rpc"];
@@ -428,6 +692,19 @@ export function buildPiArgs(
   );
   args.push("--extension", teammateExtension);
 
+  const inheritedExtensions = getTeammateChildExtensions();
+  const loadedExtensionPaths = new Set([
+    process.platform === "win32" ? teammateExtension.toLowerCase() : teammateExtension,
+  ]);
+  for (const registration of inheritedExtensions) {
+    const key = process.platform === "win32"
+      ? registration.path.toLowerCase()
+      : registration.path;
+    if (loadedExtensionPaths.has(key)) continue;
+    loadedExtensionPaths.add(key);
+    args.push("--extension", registration.path);
+  }
+
   if (forkSessionFile) {
     args.push("--fork", forkSessionFile);
   }
@@ -437,14 +714,15 @@ export function buildPiArgs(
     args.push("--model", model);
   }
 
-  const thinking = parseTeammateThinkingLevel(params.thinking) ?? agentConfig.thinking;
-  if (thinking) {
-    args.push("--thinking", thinking);
+  const requestedThinking = parseTeammateThinkingLevel(params.thinking) ?? agentConfig.thinking;
+  if (requestedThinking) {
+    args.push("--thinking", clampThinkingForModel(requestedThinking, model, modelCapabilities));
   }
 
   if (agentConfig.tools && agentConfig.tools.length > 0) {
     const proxyTools = ["teammate", "teammate-send", "teammate-list", "teammate-watch"];
-    const toolSet = new Set([...agentConfig.tools, ...proxyTools]);
+    const inheritedTools = inheritedExtensions.flatMap((registration) => registration.tools);
+    const toolSet = new Set([...agentConfig.tools, ...proxyTools, ...inheritedTools]);
     if (schemaFile) toolSet.add("structured_output");
     args.push("--tools", [...toolSet].join(","));
   }
@@ -568,18 +846,25 @@ export async function runTeammate(
     };
   }
 
-  // Resolve agent — fall back to generic config if no definition file exists
-  const agentConfig: AgentConfig = resolveAgent(cwd, params.agent) ?? {
-    name: params.agent,
-    description: `Generic teammate agent "${params.agent}"`,
-    tools: ["read", "grep", "find", "ls", "bash", "edit", "write"],
-    systemPromptMode: "append" as const,
-    inheritProjectContext: true,
-    inheritSkills: false,
-    systemPrompt: `You are a teammate agent named "${params.agent}". Execute the assigned task using the provided tools. Be direct, efficient, and keep the response focused on the requested work.`,
-    source: "builtin" as const,
-    filePath: "",
-  };
+  // Resolve an exact discovered role. Silent generic fallback made misspelled
+  // or out-of-project role names look successful while ignoring their prompt.
+  const agentConfig: AgentConfig | undefined = resolveAgent(cwd, params.agent);
+  if (!agentConfig) {
+    const available = listAgentSummaries(cwd).map((agent) => agent.name).join(", ");
+    return {
+      agent: params.agent,
+      task: params.task ?? "",
+      exitCode: 1,
+      messages: [{
+        role: "system",
+        content: `Unknown teammate agent "${params.agent}". Available agents: ${available || "(none)"}.`,
+      }],
+      usage: emptyUsage(),
+      model: params.model ?? "unknown",
+      correlationId,
+      durationMs: Date.now() - startTime,
+    };
+  }
 
   // Resolve routing
   const replyTo: ReplyTarget = resolveReplyTo({
@@ -662,6 +947,7 @@ async function runSingleAttempt(
     sessionDir,
     forkSessionFile,
     schemaFile,
+    options.modelCapabilities,
   );
 
   const usage = emptyUsage();
@@ -755,14 +1041,19 @@ async function runSingleAttempt(
     if (useIpc) {
       child.on("message", (msg: unknown) => {
         const m = msg as Record<string, unknown>;
-        if (m?.type === "teammate_proxy_request" && options.onChildRequest) {
-          const replyFn = (reply: unknown) => {
-            try { child.send(reply); } catch { /* child disconnected */ }
-          };
-          options.onChildRequest(m, replyFn);
-        } else {
-          options.onChildEvent?.(m);
-        }
+        dispatchChildIpcMessage(
+          m,
+          options.onChildRequest,
+          options.onChildEvent
+            ? (event) => options.onChildEvent?.({
+                ...event,
+                correlationId: event.correlationId ?? correlationId,
+              })
+            : undefined,
+          (reply) => {
+            try { child.send(reply as never); } catch { /* child disconnected */ }
+          },
+        );
       });
     }
 
@@ -817,6 +1108,22 @@ async function runSingleAttempt(
       progress.durationMs = Date.now() - startTime;
 
       switch (event.type) {
+        case "extension_ui_request": {
+          const request = {
+            ...event,
+            type: "teammate_rpc_ui_request",
+            correlationId,
+          };
+          const respond = (response: unknown) => {
+            if (!child.stdin?.writable) return;
+            child.stdin.write(`${JSON.stringify(response)}\n`);
+          };
+          if (options.onChildRequest) options.onChildRequest(request, respond);
+          else if (typeof event.id === "string") {
+            respond({ type: "extension_ui_response", id: event.id, cancelled: true });
+          }
+          break;
+        }
         case "message_end":
         case "assistant": {
           const text = extractTextContent(event) || streamingText || undefined;
@@ -1061,11 +1368,19 @@ async function runSingleAttempt(
 // Graph execution (unified: parallel, chain, and DAG)
 // ---------------------------------------------------------------------------
 
+export function normalizeGraphConcurrency(concurrency: number, taskCount: number): number {
+  return Math.max(
+    1,
+    Math.min(taskCount || 1, Number.isFinite(concurrency) ? Math.floor(concurrency) : 1),
+  );
+}
+
 export async function runGraph(
   tasks: NormalizedTask[],
   concurrency: number,
   options: RunTeammateOptions,
 ): Promise<SingleResult[]> {
+  const maxConcurrency = normalizeGraphConcurrency(concurrency, tasks.length);
   const taskCorrelationIds = tasks.map(
     (_, index) => options.taskCorrelationIds?.[index] ?? randomUUID(),
   );
@@ -1075,14 +1390,27 @@ export async function runGraph(
     if (tasks[i].name) indexByName.set(tasks[i].name!, i);
   }
 
-  // Build dependency adjacency list
-  const deps: number[][] = tasks.map((t) => {
-    return extractDependencies(t.task, taskNames).map((name) => {
-      const idx = indexByName.get(name);
-      if (idx === undefined) throw new Error(`Task references unknown name "${name}"`);
-      return idx;
-    });
-  });
+  // Defensive validation for direct runGraph callers — the teammate tool
+  // path already rejects these in normalizeTeammateParams.
+  const refCheck = validateTaskReferences(tasks);
+  if (refCheck.errors.length > 0) {
+    return tasks.map((t, index) => ({
+      agent: t.agent,
+      task: t.task,
+      exitCode: 1,
+      messages: [{ role: "system", content: refCheck.errors.join("\n") }],
+      usage: emptyUsage(),
+      model: t.model ?? "unknown",
+      correlationId: taskCorrelationIds[index],
+      durationMs: 0,
+    }));
+  }
+
+  // Build dependency adjacency list — implicit {name} refs ∪ explicit dependsOn.
+  // Names are pre-filtered against taskNames, so lookups cannot miss.
+  const deps: number[][] = tasks.map((t) =>
+    taskDependencyNames(t, taskNames).map((name) => indexByName.get(name)!),
+  );
 
   if (hasCycle(deps)) {
     return tasks.map((t, index) => ({
@@ -1127,7 +1455,7 @@ export async function runGraph(
   const waiters: Array<() => void> = [];
 
   function acquire(): Promise<void> {
-    if (running < concurrency) {
+    if (running < maxConcurrency) {
       running++;
       return Promise.resolve();
     }
@@ -1258,6 +1586,7 @@ export async function runGraph(
           task: resolvedTask,
           prompt: task.prompt,
           promptArgs: task.promptArgs,
+          context: task.context,
           model: task.model,
           thinking: task.thinking,
           cwd: task.cwd,
@@ -1343,5 +1672,22 @@ export function sendRpcMessage(
   }
   stdin.write(JSON.stringify({ type: mode, message: leasedMessage }) + "\n");
   return true;
+}
+
+export function dispatchChildIpcMessage(
+  message: Record<string, unknown>,
+  onRequest: RunTeammateOptions["onChildRequest"],
+  onEvent: RunTeammateOptions["onChildEvent"],
+  reply: (message: unknown) => void,
+): "request" | "event" {
+  if (
+    (message.type === "teammate_proxy_request" || message.type === "teammate_interaction_request")
+    && onRequest
+  ) {
+    onRequest(message, reply);
+    return "request";
+  }
+  onEvent?.(message);
+  return "event";
 }
 

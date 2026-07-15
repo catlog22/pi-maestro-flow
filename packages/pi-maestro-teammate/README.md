@@ -44,11 +44,12 @@ Precedence is task-level `model` → top-level `model` → explicit `taskType` m
 
 ```
 { tasks: [
-    { agent: "scout", task: "Find all API endpoints" },
-    { agent: "scout", task: "Map database schemas" },
-    { agent: "scout", task: "List external dependencies" }
+    { agent: "explorer", name: "api", task: "Find all API endpoints" },
+    { agent: "explorer", name: "db", task: "Map database schemas" },
+    { agent: "explorer", name: "deps", task: "List external dependencies" }
   ],
-  concurrency: 3
+  concurrency: 3,
+  background: false
 }
 ```
 
@@ -56,9 +57,11 @@ Precedence is task-level `model` → top-level `model` → explicit `taskType` m
 
 ```
 { tasks: [
-    { agent: "scout", name: "recon", task: "Find the auth module structure" },
-    { agent: "delegate", task: "Based on this context: {recon}\n\nRefactor the auth module" }
-  ]
+    { agent: "explorer", name: "recon", task: "Find the auth module structure" },
+    { agent: "delegate", name: "implement", task: "Based on this context: {recon}\n\nRefactor the auth module" }
+  ],
+  concurrency: 1,
+  background: false
 }
 ```
 
@@ -66,24 +69,31 @@ Precedence is task-level `model` → top-level `model` → explicit `taskType` m
 
 ```
 { tasks: [
-    { agent: "scout", name: "api", task: "List all API routes",
+    { agent: "explorer", name: "api", task: "List all API routes",
       outputSchema: {
         type: "object",
         properties: { routes: { type: "array", items: { type: "string" } } },
         required: ["routes"]
       } },
-    { agent: "scout", name: "db", task: "Map the database schema" },
-    { agent: "reviewer", task: "Routes: {api.routes}\nDB: {db}\n\nCheck consistency" }
-  ]
+    { agent: "explorer", name: "db", task: "Map the database schema" },
+    { agent: "delegate", name: "verify", task: "Routes: {api.routes}\nDB: {db}\n\nCheck consistency" }
+  ],
+  concurrency: 2,
+  background: false
 }
 ```
 
-`api` and `db` run in parallel. `reviewer` waits for both, with `{api.routes}` resolved from structured output and `{db}` from text output.
+`api` and `db` run in parallel. `delegate` waits for both, with `{api.routes}` resolved from structured output and `{db}` from text output.
+
+For production nested dispatch, give every task a unique `name`, set an explicit
+provider-safe `concurrency`, and use `background: false` whenever the parent must
+consume all child results before it continues. Background runs return immediately
+and report completion to the root session.
 
 ### Structured Output
 
 ```
-{ agent: "scout", task: "List all API routes",
+{ agent: "explorer", task: "List all API routes",
   outputSchema: {
     type: "object",
     properties: { routes: { type: "array", items: { type: "string" } } },
@@ -164,12 +174,12 @@ dispatch → running → turn complete → sleeping → teammate-send → runnin
 
 Time spent sleeping is excluded from the displayed duration. `sleepMs` accumulates total sleep time; displayed uptime = wall clock − sleep time.
 
-### Agent Fallback
+### Agent Resolution
 
-Any agent name works — if no `.md` definition file exists, a generic config is used:
-- `tools`: read, grep, find, ls, bash, edit, write (+ teammate proxy tools)
-- `systemPromptMode`: append (inherits pi default system prompt)
-- `inheritProjectContext`: true
+Agent names must resolve to one of the three reserved builtin roles (`delegate`,
+`explorer`, `workflow`) or to a discovered project/user role. Unknown names return
+an error with the available role catalog instead of silently using a generic
+configuration. The legacy name `coordinator` resolves to `workflow`.
 
 ## TaskSpec Schema
 
@@ -221,14 +231,14 @@ The `chain` field is preserved for backward compatibility. It normalizes interna
 ```
 // This chain:
 { chain: [
-    { agent: "scout", task: "Find auth code" },
+    { agent: "explorer", task: "Find auth code" },
     { agent: "delegate", task: "Fix: {previous}" }
   ]
 }
 
 // Is equivalent to:
 { tasks: [
-    { agent: "scout", name: "_step0", task: "Find auth code" },
+    { agent: "explorer", name: "_step0", task: "Find auth code" },
     { agent: "delegate", name: "_step1", task: "Fix: {_step0}" }
   ]
 }
@@ -241,18 +251,19 @@ All agents are managed by the root process in a single flat `activeRuns` pool, r
 ### How It Works
 
 ```
-coordinator calls teammate({ agent: "scout", name: "recon" })
+workflow calls teammate({ agent: "explorer", name: "recon" })
   │  IPC: teammate_proxy_request (process.send)
   ▼
-Root spawns scout → registers in root's activeRuns/namedAgents
+Root spawns explorer → registers in root's activeRuns/namedAgents
   │  IPC: teammate_proxy_result (child.send)
   ▼
-coordinator receives result
+workflow receives result
 ```
 
 All agents are flat peers:
 - `teammate-send({ to: "name" })` = one lookup in `namedAgents` → stdin. Direct delivery.
-- `teammate-list` = iterate `activeRuns`. Flat, simple.
+- `teammate-list({ view: "active" | "named" | "all" })` = iterate running instances.
+- `teammate-list({ view: "roles" })` = list all available builtin, project, and user-defined roles with descriptions.
 - `teammate-watch` = read agent's `outputLog`. Direct.
 
 ### Child Proxy Tools
@@ -263,12 +274,26 @@ Every child process automatically gets proxy versions of all 4 teammate tools (i
 
 The root's IPC message listener (`child.on("message")`) intercepts these requests and executes them locally.
 
+### Main-Session Interaction Relay
+
+Parent extensions can register themselves for inheritance by teammate children. `pi-maestro-flow` uses this bridge automatically, so every child loads its permission hooks and receives the `ask-user-question` tool even when the role has an explicit `tools` whitelist.
+
+When a child needs user input, it sends a reply-capable `teammate_interaction_request` to the root session:
+
+- Permission requests are displayed in the main UI with `Allow once`, `Always allow`, and `Deny`. The selected action is returned to the blocked child tool call.
+- `ask-user-question` requests are displayed in the main UI and return structured option/free-text answers to the child.
+- Pending requests are tracked by `requestId` on the active agent and serialized through the root interaction queue, preventing overlapping prompts.
+- Headless root sessions still run the parent permission broker: silent allow/deny decisions work, while permissions that require a dialog fail closed and questionnaires are cancelled.
+
+The response uses `teammate_interaction_response` with the original `requestId`, so late or duplicate responses cannot resolve a different child request.
+
 ## Reliability
 
 - **Model fallback chain** — primary model → `fallbackModels[]` from agent config → automatic retry
 - **Flat agent pool** — all agents managed by root process; child proxy tools forward spawn requests to root; depth guard (`PI_TEAMMATE_DEPTH`) prevents runaway recursion
 - **Resident lifecycle** — agents sleep after turn completion; process stays alive for follow-up; only killed on explicit abort or session shutdown
 - **IPC disconnect guard** — child proxy resolves all pending requests with error on disconnect (root crash / agent abort)
+- **Interaction fail-closed** — missing main UI, timeout, or relay failure never grants a child permission request
 - **Windows-safe pi resolution** — `getPiSpawnCommand()` resolves the pi binary via env override, Windows script detection, or PATH
 - **Abort signal** — SIGTERM → 5s grace → SIGKILL
 
@@ -331,11 +356,23 @@ pi install ./pi-teammate
 MIT
 # Agent discovery
 
-Agent Markdown files are loaded with project-over-user-over-builtin precedence:
+The package always provides exactly three reserved builtin roles:
+
+- `delegate`: general-purpose execution, including fixed prompt templates
+- `explorer`: read-only code discovery and call-chain tracing
+- `workflow`: dependency-aware DAG decomposition and teammate delegation
+
+Other Agent Markdown files are discovered with the following precedence:
 
 1. nearest project `.pi/agents/*.md`
-2. `~/.pi/agent/extensions/teammate/agents/*.md`
-3. this npm package's bundled `agents/*.md`
+2. nearest project `.agents/*.md`
+3. `~/.agents/*.md`
+4. legacy `~/.pi/agent/extensions/teammate/agents/*.md`
+
+Project and user files cannot override the three reserved builtin names. Their
+`name` and `description` fields are refreshed into the active system prompt on
+every `before_agent_start`; the Markdown body is loaded only after the role is
+selected. Files without both fields are ignored. Unknown role names are rejected.
 
 Pi has no native `pi.agents` package manifest field. Builtin teammate agents are
 resolved relative to the installed extension module, so npm, git, global and local

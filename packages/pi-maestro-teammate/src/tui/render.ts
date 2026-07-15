@@ -19,6 +19,7 @@ import {
   focusTaskIndex,
   progressIcon,
   progressLabel,
+  selectPriorityProgressRows,
   selectProgressWindow,
   type ProgressPalette,
 } from "./progress-tree.ts";
@@ -248,10 +249,15 @@ function renderProgress(
     const focused = entries.find((entry) => entry.taskIndex === focus) ?? entries[0];
     const treeRows = buildProgressTree(entries, palette);
     const maxTreeRows = options.expanded ? 8 : 5;
-    const treeWindow = selectProgressWindow(treeRows, maxTreeRows, focus);
-    const range = treeWindow.total > treeWindow.rows.length
-      ? `${treeWindow.start + 1}-${treeWindow.start + treeWindow.rows.length}/${treeWindow.total}`
-      : `${treeWindow.total}`;
+    const failedIndexes = entries.filter((entry) => entry.status === "failed").map((entry) => entry.taskIndex);
+    const treeWindow = failedIndexes.length > 0
+      ? selectPriorityProgressRows(treeRows, maxTreeRows, focus, failedIndexes)
+      : selectProgressWindow(treeRows, maxTreeRows, focus);
+    const range = "hidden" in treeWindow && treeWindow.hidden > 0
+      ? `${treeWindow.rows.length}/${treeWindow.total} shown`
+      : treeWindow.total > treeWindow.rows.length
+        ? `${treeWindow.start + 1}-${treeWindow.start + treeWindow.rows.length}/${treeWindow.total}`
+        : `${treeWindow.total}`;
     const mode = details?.mode ?? "single";
     const stateText = failed > 0
       ? `${failed} failed`
@@ -302,7 +308,7 @@ function renderSingleResult(
   const header = `${icon} ${theme.bold(r.agent)}  ${meta}`;
 
   if (!options.expanded) {
-    return dynamicComponent((w) => [truncateToWidth(header, Math.max(1, w), "…")]);
+    return dynamicComponent((w) => [truncateToWidth(`${header}  ${theme.fg("dim", "Alt+R details")}`, Math.max(1, w), "…")]);
   }
 
   const proxy = { lines: [] as string[], invalidate() {}, render() { return this.lines; } };
@@ -347,7 +353,7 @@ function renderMultiResult(
   const header = `${icon} ${theme.bold(`${okCount}/${total} completed`)}  ${meta}`;
 
   if (!options.expanded) {
-    return dynamicComponent((w) => [truncateToWidth(header, Math.max(1, w), "…")]);
+    return dynamicComponent((w) => [truncateToWidth(`${header}  ${theme.fg("dim", "Alt+R details")}`, Math.max(1, w), "…")]);
   }
 
   const proxy = { lines: [] as string[], invalidate() {}, render() { return this.lines; } };

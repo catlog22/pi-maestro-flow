@@ -19,9 +19,9 @@ import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchPa
 import {
   runTeammate,
   runGraph,
-  normalizeChainToTasks,
+  normalizeTeammateParams,
   inferGraphMode,
-  extractDependencies,
+  taskDependencyNames,
   sendRpcMessage,
 } from "../runs/execution.ts";
 import {
@@ -55,6 +55,12 @@ import {
   renderTeammateResult,
 } from "../tui/render.ts";
 import { AttachOverlay } from "../tui/attach-overlay.ts";
+import {
+  BracketedPasteDecoder,
+  removeLastGrapheme,
+  sanitizeSingleLineInput,
+  type DecodedInputToken,
+} from "../tui/input-text.ts";
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
 import type {
   Details,
@@ -64,23 +70,32 @@ import type {
   ActiveAgent,
   MessageEnvelope,
   SingleResult,
+  TeammateInteractionRecord,
 } from "../shared/types.ts";
 import {
   TEAMMATE_COMPLETE_EVENT,
   TEAMMATE_STARTED_EVENT,
   TEAMMATE_MESSAGE_EVENT,
 } from "../shared/types.ts";
-import { discoverAgents, formatAgentCatalog } from "../agents/agents.ts";
+import {
+  appendAgentCatalog,
+  discoverAgents,
+  formatAgentCatalog,
+  listAgentSummaries,
+  type AgentSummary,
+} from "../agents/agents.ts";
 import { formatPromptCatalog } from "../prompts/prompts.ts";
 import {
   appendModelCatalog,
   createModelCatalogSnapshot,
   type ModelCatalogSnapshot,
+  type TeammateModelCapability,
 } from "../models/model-catalog.ts";
 import {
   applyModelRouting,
   formatModelRoutingConfig,
 } from "../models/model-routing.ts";
+import { getTeammatePermissionBroker } from "../runs/child-extensions.ts";
 
 export const TEAMMATE_PROMPT_SNIPPET =
   "Dispatch bounded work to discovered teammate roles for parallel, sequential, or specialist execution.";
@@ -88,9 +103,10 @@ export const TEAMMATE_PROMPT_SNIPPET =
 export const TEAMMATE_PROMPT_GUIDELINES = [
   "Use teammate when work can be split into bounded independent tasks, or when a discovered specialist role materially improves correctness.",
   "Do not use teammate for trivial, tightly coupled, single-step work that is faster to complete directly.",
-  "Use teammate tasks for parallel or DAG work; {name} and {name.field} references create dependencies between named tasks.",
-  "Give teammate tasks a name when they may need teammate-send follow-up or downstream variable references.",
-  'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default.',
+  "Use teammate tasks for parallel or DAG work; {name} and {name.field} references create dependencies between named tasks, and dependsOn declares ordering without injecting output.",
+  "Give every multi-task teammate item a stable unique name so nested work remains traceable and addressable; a {ref} that matches no task name is passed through as literal text.",
+  "Set teammate concurrency explicitly for provider-safe fan-out; use background: false whenever the caller needs child results before continuing.",
+  'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default, and in multi-task mode prefer per-task fork over a top-level default.',
   "Use teammate-list or teammate-watch only when status or live output is needed, and teammate-send for steering or follow-up.",
   "Omit model to use teammate task-type model routing; an exact task-level provider/model overrides the top-level model, and the top-level model overrides automatic routing.",
 ];
@@ -102,14 +118,14 @@ Call forms:
   - Single: { agent: "delegate", taskType: "analysis", task: "...", model: "provider/model" }
   - Explore: { agent: "explorer", taskType: "explore", task: "FIND: ...\\nSCOPE: ..." }
   - Fork: { agent: "delegate", task: "...", context: "fork" }
-  - Parallel: { model: "provider/default", tasks: [{ agent: "explorer", task: "..." }, { agent: "reviewer", task: "...", model: "provider/override" }] }
-  - DAG: name tasks and reference {name} or {name.field} from dependent tasks
+  - Parallel: { tasks: [{ agent: "explorer", name: "scan", task: "..." }, { agent: "delegate", name: "review", task: "..." }], concurrency: 2, background: false }
+  - DAG: name tasks and reference {name} or {name.field} from dependent tasks, or declare dependsOn: ["name"] for ordering without output injection
   - Fixed prompt: { agent: "delegate", prompt: "analysis", task: "Inspect auth", promptArgs: ["@src/auth", "file:line findings"] }
 
-Use discovered roles when possible. Unknown names currently fall back to a generic teammate configuration.
+Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
-Available teammate roles for ${cwd}:
-${formatAgentCatalog(cwd)}
+Available teammate agents for ${cwd}:
+${formatAgentCatalog(cwd, Number.MAX_SAFE_INTEGER, 160)}
 
 Available teammate prompts for ${cwd}:
 ${formatPromptCatalog(cwd)}
@@ -118,21 +134,22 @@ Configured task-type model routing for ${cwd}:
 ${formatModelRoutingConfig(cwd)}`;
 }
 
-const TEAMMATE_SEND_DESCRIPTION = `Send a message to a named, running teammate agent.
+const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running teammate agent, addressed by name, correlation ID, or unique ID prefix.
 
-Modes:
+Modes (default: follow_up):
   - "steer" — interrupt the current turn and inject immediately
   - "follow_up" — queue after the current turn completes
-  - "abort" — terminate the agent`;
+  - "abort" — terminate the agent (message optional)`;
 const TEAMMATE_SEND_SNIPPET = "Steer, follow up with, or abort a named running teammate agent.";
 const TEAMMATE_SEND_GUIDELINES = [
   "Use teammate-send only for a named running or sleeping agent; use follow_up by default, steer for urgent correction, and abort only to terminate work.",
 ];
 
-const TEAMMATE_LIST_DESCRIPTION = "List active teammate agents with status, timing, and addressable names.";
-const TEAMMATE_LIST_SNIPPET = "List active or named teammate agents and inspect their current status.";
+const TEAMMATE_LIST_DESCRIPTION =
+  'List available roles or active teammate agents. Use view="roles" for builtin, project, and user-defined agent names and descriptions.';
+const TEAMMATE_LIST_SNIPPET = "List available teammate roles or inspect active and named agent status.";
 const TEAMMATE_LIST_GUIDELINES = [
-  "Use teammate-list when the current status or addressable name of background teammate work is needed.",
+  'Use teammate-list with view="roles" when an available builtin or custom agent name is needed; use active/named/all for running work.',
 ];
 
 const TEAMMATE_WATCH_DESCRIPTION =
@@ -241,16 +258,25 @@ export function renderAgentStatusWidget(
   const rows = agentWidgetRows(agents);
   if (rows.length === 0) return [];
   const statusRank = (status: AgentWidgetRow["status"]): number => {
-    if (status === "running") return 0;
-    if (status === "sleeping") return 1;
-    if (status === "pending") return 2;
-    if (status === "failed") return 3;
+    if (status === "failed") return 0;
+    if (status === "running") return 1;
+    if (status === "sleeping") return 2;
+    if (status === "pending") return 3;
     return 4;
   };
   rows.sort((a, b) => statusRank(a.status) - statusRank(b.status));
 
   const maxVisible = safeWidth < 20 ? 3 : safeWidth < 40 ? 4 : 6;
-  const visible = rows.slice(0, maxVisible);
+  const required = new Set<AgentWidgetRow>();
+  const failedAnchor = rows.find((row) => row.status === "failed");
+  const running = rows.find((row) => row.status === "running");
+  if (failedAnchor) required.add(failedAnchor);
+  if (running) required.add(running);
+  for (const row of rows) {
+    if (required.size >= maxVisible) break;
+    required.add(row);
+  }
+  const visible = [...required].sort((a, b) => statusRank(a.status) - statusRank(b.status));
   const hidden = rows.length - visible.length;
   const icon = (row: AgentWidgetRow): string => {
     if (row.status === "running") return theme.fg("success", "■");
@@ -270,15 +296,15 @@ export function renderAgentStatusWidget(
     return compact;
   }
 
-  const running = rows.filter((row) => row.status === "running").length;
+  const runningCount = rows.filter((row) => row.status === "running").length;
   const sleeping = rows.filter((row) => row.status === "sleeping").length;
   const pending = rows.filter((row) => row.status === "pending").length;
-  const failed = rows.filter((row) => row.status === "failed").length;
+  const failedCount = rows.filter((row) => row.status === "failed").length;
   const summary = [
-    running ? `${running} running` : "",
+    runningCount ? `${runningCount} running` : "",
     sleeping ? `${sleeping} sleeping` : "",
     pending ? `${pending} pending` : "",
-    failed ? `${failed} failed` : "",
+    failedCount ? `${failedCount} failed` : "",
   ].filter(Boolean).join(" · ");
   const lines = [truncateToWidth(
     `${theme.bold("Agents")}  ${theme.fg("dim", `${summary} · Alt+R`)}`,
@@ -388,12 +414,13 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     return modelCatalog;
   };
 
-  const injectModelCatalog = (
+  const injectTeammateContext = (
     event: { systemPrompt: string },
     ctx: ExtensionContext,
-  ): { systemPrompt: string } => ({
-    systemPrompt: appendModelCatalog(event.systemPrompt, refreshModelCatalog(ctx)),
-  });
+  ): { systemPrompt: string } => {
+    const withModels = appendModelCatalog(event.systemPrompt, refreshModelCatalog(ctx));
+    return { systemPrompt: appendAgentCatalog(withModels, ctx.cwd) };
+  };
 
   // =========================================================================
   // Child mode: register proxy tools that forward to root via stdout/IPC
@@ -449,7 +476,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       proxyTeammateTool.description = buildTeammateToolDescription(ctx.cwd);
       pi.registerTool(proxyTeammateTool);
     });
-    pi.on("before_agent_start", injectModelCatalog);
+    pi.on("before_agent_start", injectTeammateContext);
     pi.on("session_compact", (_event, ctx) => publishSessionIdentity(ctx));
     pi.on("message_end", (_event, ctx) => publishSessionIdentity(ctx));
     pi.on("agent_end", (_event, ctx) => {
@@ -586,7 +613,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       promptSnippet: TEAMMATE_SEND_SNIPPET,
       promptGuidelines: TEAMMATE_SEND_GUIDELINES,
       parameters: TeammateSendParams,
-      async execute(_id: string, params: { to: string; message: string; mode?: RpcMessageMode }) {
+      async execute(_id: string, params: { to: string; message?: string; mode?: RpcMessageMode }) {
         return proxyCall<{ delivered: boolean }>("teammate-send", params);
       },
     });
@@ -598,7 +625,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       promptSnippet: TEAMMATE_LIST_SNIPPET,
       promptGuidelines: TEAMMATE_LIST_GUIDELINES,
       parameters: TeammateListParams,
-      async execute(_id: string, params: { view?: "active" | "named" | "all" }) {
+      async execute(_id: string, params: { view?: TeammateListView }) {
         return proxyCall<{ agents: unknown[] }>("teammate-list", params);
       },
     });
@@ -631,6 +658,38 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     namedAgents: new Map(),
   };
   rootGlobals[registryKey] = state;
+  let interactionQueue: Promise<void> = Promise.resolve();
+
+  const enqueueChildInteraction = (
+    event: Record<string, unknown>,
+    reply: (msg: unknown) => void,
+    ctx: ExtensionContext | null | undefined,
+    fallbackCorrelationId?: string,
+  ): void => {
+    interactionQueue = interactionQueue
+      .then(() => event.type === "teammate_rpc_ui_request"
+        ? handleChildRpcUiRequest(event, reply, ctx)
+        : handleChildInteractionRequest(
+            pi,
+            state,
+            event,
+            reply,
+            ctx,
+            fallbackCorrelationId,
+          ))
+      .catch((error) => {
+        const requestId = typeof event.requestId === "string" ? event.requestId : "unknown";
+        if (event.type === "teammate_rpc_ui_request" && typeof event.id === "string") {
+          reply({ type: "extension_ui_response", id: event.id, cancelled: true });
+        } else {
+          reply({
+            type: "teammate_interaction_response",
+            requestId,
+            result: { action: "cancel", error: error instanceof Error ? error.message : String(error) },
+          });
+        }
+      });
+  };
 
   // =========================================================================
   // Tool 1: teammate — dispatch
@@ -660,51 +719,20 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         refreshModelCatalog(ctx).modelIds,
       );
 
-      // --- Normalize to task list ---
-      let normalizedTasks: NormalizedTask[];
-      let isMultiTask = false;
-
-      if (params.chain?.length) {
-        normalizedTasks = normalizeChainToTasks(params.chain, params.task ?? "");
-        isMultiTask = true;
-      } else if (params.tasks?.length) {
-        normalizedTasks = params.tasks.map((t) => ({
-          agent: t.agent,
-          task: t.task ?? "",
-          prompt: t.prompt ?? params.prompt,
-          promptArgs: t.promptArgs ?? params.promptArgs,
-          taskType: t.taskType ?? params.taskType,
-          name: t.name,
-          model: t.model ?? params.model,
-          thinking: t.thinking ?? params.thinking,
-          cwd: t.cwd ?? params.cwd,
-          outputSchema: (t.outputSchema ?? params.outputSchema) as Record<string, unknown> | undefined,
-          timeoutMs: t.timeoutMs ?? params.timeoutMs,
-        }));
-        isMultiTask = true;
-      } else if (params.agent) {
-        normalizedTasks = [];
-      } else {
+      // --- Normalize to task list (shared with the child proxy path) ---
+      const normalization = normalizeTeammateParams(params);
+      if (normalization.error) {
         return {
-          content: [{ type: "text", text: 'Requires "agent" field for single mode, or "tasks" for multi-task mode.' }],
+          content: [{ type: "text", text: normalization.error }],
           isError: true,
           details: { mode: "single", results: [] },
         };
       }
-
-      // Apply top-level defaults to chain tasks
-      if (params.chain?.length) {
-        for (const t of normalizedTasks) {
-          t.model ??= params.model;
-          t.thinking ??= params.thinking;
-          t.prompt ??= params.prompt;
-          t.promptArgs ??= params.promptArgs;
-          t.taskType ??= params.taskType;
-          t.cwd ??= params.cwd;
-          t.outputSchema ??= params.outputSchema as Record<string, unknown> | undefined;
-          t.timeoutMs ??= params.timeoutMs;
-        }
-      }
+      const { isMultiTask } = normalization;
+      const normalizedTasks: NormalizedTask[] = normalization.tasks ?? [];
+      const warningPrefix = normalization.warnings.length
+        ? normalization.warnings.map((w) => `[warn] ${w}`).join("\n") + "\n\n"
+        : "";
 
       const isSingle = !isMultiTask;
       const graphMode = isMultiTask ? inferGraphMode(normalizedTasks) : null;
@@ -725,7 +753,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             ...(task.name ? { name: task.name } : {}),
             correlationId: taskCorrelationIds[index],
             taskIndex: index,
-            dependencies: extractDependencies(task.task, taskNames)
+            dependencies: taskDependencyNames(task, taskNames)
               .map((name) => taskIndexByName.get(name))
               .filter((dependency): dependency is number => dependency !== undefined),
             status: "pending",
@@ -739,20 +767,6 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       const correlationId = randomUUID();
 
       const abortController = new AbortController();
-      // P2-1: Deadlock detection — check if reply_to creates a cycle
-      if (params.name && params.reply_to !== "main" && params.reply_to !== "caller") {
-        const wouldCycle = detectReplyCycle(state, params.name, params.reply_to);
-        if (wouldCycle) {
-          return {
-            content: [{
-              type: "text",
-              text: `[deadlock] reply_to="${params.reply_to}" would create a cycle with agent "${params.name}". Falling back to reply_to="caller".`,
-            }],
-            isError: false,
-            details: { mode: "single", results: [] },
-          };
-        }
-      }
 
       const agentLabel = isMultiTask ? `graph(${normalizedTasks.length})` : params.agent!;
 
@@ -787,7 +801,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             outputLog: [],
             lastActivityAt: Date.now(),
             spawnedBy: correlationId,
-            status: "running",
+            status: "pending",
             sleepMs: 0,
             lease: createChildLease(),
             promptSeq: task.task ? 1 : 0,
@@ -815,6 +829,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
 
       const makeOptions = () => ({
         baseCwd: state.baseCwd || ctx.cwd,
+        modelCapabilities: refreshModelCatalog(ctx).models,
         ...(isSingle ? { correlationId } : {}),
         ...(isMultiTask ? { taskCorrelationIds } : {}),
         signal: abortController.signal,
@@ -833,6 +848,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           target.stdin = stdin;
           target.sendControl = sendControl;
           target.sessionDir = sessionDir;
+          target.status = "running";
           if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
         },
         onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent(state, {
@@ -968,7 +984,19 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           };
         })(),
         onChildRequest: (event: Record<string, unknown>, reply: (msg: unknown) => void) => {
-          handleProxyRequest(pi, state, event, reply, correlationId);
+          if (event.type === "teammate_interaction_request" || event.type === "teammate_rpc_ui_request") {
+            enqueueChildInteraction(event, reply, ctx, correlationId);
+            return;
+          }
+          handleProxyRequest(
+            pi,
+            state,
+            event,
+            reply,
+            correlationId,
+            refreshModelCatalog(ctx).models,
+            (request, respond, childId) => enqueueChildInteraction(request, respond, ctx, childId),
+          );
         },
       });
 
@@ -1034,9 +1062,10 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             const { results, hasError, totalDur, summaries, structuredOutput, progress } = await executeGraph();
 
             emitComplete(pi, id, graphMode, correlationId, hasError ? 1 : 0, totalDur);
+            settleAgent(state, correlationId, hasError ? 1 : 0, summaries);
 
             return {
-              content: [{ type: "text", text: summaries }],
+              content: [{ type: "text", text: warningPrefix + summaries }],
               isError: hasError,
               details: {
                 mode: graphMode as Details["mode"],
@@ -1051,7 +1080,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           const bgPromise = executeGraph();
 
           bgPromise.then(({ results, summaries, progress }) => {
-            retireAgent(state, correlationId, summaries);
+            settleAgent(state, correlationId, results.some((result) => result.exitCode !== 0) ? 1 : 0, summaries);
 
             pi.sendMessage(
               {
@@ -1063,14 +1092,14 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               { triggerTurn: true },
             );
           }).catch((error) => {
-            retireAgent(state, correlationId);
+            killAgent(state, correlationId);
             notifyBackgroundFailure(pi, id, graphMode, correlationId, error);
           });
 
           return {
             content: [{
               type: "text",
-              text: `${normalizedTasks.length} tasks (${graphMode}) running in background. correlationId=${correlationId}. Use teammate-list to check status.`,
+              text: `${warningPrefix}${normalizedTasks.length} tasks (${graphMode}) running in background. correlationId=${correlationId}. Use teammate-list to check status.`,
             }],
             isError: false,
             details: { mode: graphMode as Details["mode"], results: [], progress: progressSnapshot() },
@@ -1100,8 +1129,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             const result = race.result!;
             emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
             const lastMessage = result.messages[result.messages.length - 1]?.content ?? "(no output)";
+            settleAgent(state, correlationId, result.exitCode, lastMessage);
             const toolResult: AgentToolResult<Details> = {
-              content: [{ type: "text", text: lastMessage }],
+              content: [{ type: "text", text: warningPrefix + lastMessage }],
               isError: result.exitCode !== 0,
               details: { mode: "single", results: [result] },
             };
@@ -1116,7 +1146,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           runPromise.then((result) => {
             emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
             const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-            retireAgent(state, correlationId, lastMsg);
+            settleAgent(state, correlationId, result.exitCode, lastMsg);
             pi.sendMessage(
               {
                 customType: "teammate-complete",
@@ -1127,7 +1157,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               { triggerTurn: true },
             );
           }).catch((error) => {
-            retireAgent(state, correlationId);
+            killAgent(state, correlationId);
             notifyBackgroundFailure(pi, id, params.agent, correlationId, error);
           });
           return {
@@ -1143,7 +1173,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         bgPromise.then((result) => {
           emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
           const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-          retireAgent(state, correlationId, lastMsg);
+          settleAgent(state, correlationId, result.exitCode, lastMsg);
 
           pi.sendMessage(
             {
@@ -1155,21 +1185,22 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             { triggerTurn: true },
           );
         }).catch((error) => {
-          retireAgent(state, correlationId);
+          killAgent(state, correlationId);
           notifyBackgroundFailure(pi, id, params.agent, correlationId, error);
         });
 
         return {
           content: [{
             type: "text",
-            text: `■ @${params.name ?? params.agent} running in background · teammate-list status · teammate-send message`,
+            text: `${warningPrefix}■ @${params.name ?? params.agent} running in background · teammate-list status · teammate-send message`,
           }],
           isError: false,
           details: { mode: "single", results: [] },
         };
       } finally {
         if (params.background === false && !detached) {
-          retireAgent(state, correlationId);
+          const agent = state.activeRuns.get(correlationId);
+          if (agent?.status === "running") killAgent(state, correlationId);
         }
         signal.removeEventListener("abort", abortForward);
       }
@@ -1199,11 +1230,19 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
 
     async execute(
       _id: string,
-      params: { to: string; message: string; mode?: RpcMessageMode },
+      params: { to: string; message?: string; mode?: RpcMessageMode },
     ): Promise<AgentToolResult<{ delivered: boolean }>> {
       const requestedMode = params.mode ?? "follow_up";
+      const message = params.message ?? "";
+      if (!message && requestedMode !== "abort") {
+        return {
+          content: [{ type: "text", text: `"message" is required for mode "${requestedMode}".` }],
+          isError: true,
+          details: { delivered: false },
+        };
+      }
 
-      const cid = state.namedAgents.get(params.to);
+      const cid = resolveAgentCorrelationId(state, params.to);
       if (!cid) {
         const available = Array.from(state.namedAgents.keys());
         return {
@@ -1234,7 +1273,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       const mode: RpcMessageMode = agent.status === "sleeping" && requestedMode !== "abort"
         ? "prompt"
         : requestedMode;
-      const sent = sendRpcMessage(agent.stdin, params.message, mode, agent.lease ? leaseToken(agent.lease) : undefined);
+      const sent = sendRpcMessage(agent.stdin, message, mode, agent.lease ? leaseToken(agent.lease) : undefined);
       if (!sent) {
         return {
           content: [{ type: "text", text: `Failed to send message to "${params.to}".` }],
@@ -1254,11 +1293,11 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       }
 
       const now = Date.now();
-      agent.inbox.push({ id: randomUUID(), from: "caller", to: params.to, kind: mode === "abort" ? "notification" : "task", payload: params.message, timestamp: now });
-      agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${params.message.slice(0, 100)}`);
+      agent.inbox.push({ id: randomUUID(), from: "caller", to: params.to, kind: mode === "abort" ? "notification" : "task", payload: message, timestamp: now });
+      agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);
       agent.lastActivityAt = now;
 
-      pi.events.emit(TEAMMATE_MESSAGE_EVENT, { correlationId: cid, from: "caller", to: params.to, mode, message: params.message, isSend: true });
+      pi.events.emit(TEAMMATE_MESSAGE_EVENT, { correlationId: cid, from: "caller", to: params.to, mode, message, isSend: true });
 
       if (mode === "abort") {
         killAgent(state, cid, params.to);
@@ -1293,9 +1332,20 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
 
     async execute(
       _id: string,
-      params: { view?: "active" | "named" | "all" },
+      params: { view?: TeammateListView },
+      _signal: AbortSignal,
+      _onUpdate: unknown,
+      ctx: ExtensionContext,
     ): Promise<AgentToolResult<{ agents: unknown[] }>> {
       const view = params.view ?? "active";
+      if (view === "roles") {
+        const { entries, text } = buildRoleList(ctx.cwd);
+        return {
+          content: [{ type: "text", text }],
+          isError: false,
+          details: { agents: entries },
+        };
+      }
       const { entries, text } = buildAgentList(state, view);
 
       return {
@@ -1375,6 +1425,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     ctx: ExtensionContext,
     key: string,
     create: (requestRender: () => void, done: (value: T) => void) => ComposerPanel,
+    cancelValue: T,
   ): Promise<T> {
     interactivePanelActive = true;
     updateAgentWidget();
@@ -1383,6 +1434,13 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       let panel: ComposerPanel | undefined;
       let unsubscribe = () => {};
       let settled = false;
+      let panelDisposed = false;
+
+      const disposePanel = (): void => {
+        if (panelDisposed) return;
+        panelDisposed = true;
+        panel?.dispose?.();
+      };
 
       const cleanup = (): void => {
         unsubscribe();
@@ -1400,7 +1458,15 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       try {
         ctx.ui.setWidget(key, (tui) => {
           panel = create(() => tui.requestRender(), done);
-          return panel;
+          return {
+            render: (width: number) => panel?.render(width) ?? [],
+            handleInput: (data: string) => panel?.handleInput(data),
+            invalidate: () => panel?.invalidate(),
+            dispose: () => {
+              disposePanel();
+              done(cancelValue);
+            },
+          };
         }, { placement: "aboveEditor" });
         unsubscribe = ctx.ui.onTerminalInput((data) => {
           panel?.handleInput(data === "\x03" ? "\x1b" : data);
@@ -1606,6 +1672,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       (requestRender, done) => {
         let query = "";
         let cursor = 0;
+        let lastWidth = 80;
+        const pasteDecoder = new BracketedPasteDecoder();
+        let pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
         function filtered(): AgentEntry[] {
           if (!query) return entries;
@@ -1616,6 +1685,39 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             .map((item) => item.entry);
         }
 
+        function handleDecodedInput(data: string): void {
+          const matches = filtered();
+          if (data === "\r" || data === "\n") {
+            done(matches[cursor]?.[0] ?? null);
+          } else if (data === "\x1b") {
+            done(null);
+          } else if (data === "\x1b[A" || (data === "k" && !query)) {
+            cursor = Math.max(0, cursor - 1);
+            requestRender();
+          } else if (data === "\x1b[B" || (data === "j" && !query)) {
+            cursor = Math.min(Math.max(0, matches.length - 1), cursor + 1);
+            requestRender();
+          } else if (data === "\x7f" || data === "\b") {
+            if (query.length > 0) { query = removeLastGrapheme(query); cursor = 0; requestRender(); }
+          } else {
+            const input = sanitizeSingleLineInput(data);
+            if (input) {
+              query += input;
+              cursor = 0;
+              requestRender();
+            }
+          }
+        }
+
+        function dispatchDecodedToken(token: DecodedInputToken): void {
+          if (token.kind === "paste") {
+            query += token.text;
+            cursor = 0;
+          } else {
+            handleDecodedInput(token.text);
+          }
+        }
+
         return {
           render(width: number) {
             const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
@@ -1623,6 +1725,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
             const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
             const w = Math.max(1, Math.min(width, 60));
+            lastWidth = w;
             const matches = filtered();
             if (w < 20) {
               const current = matches[cursor];
@@ -1630,7 +1733,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
                 ? `${current[1].status === "sleeping" ? yellow("◉") : green("■")} ${current[1].agent}/${current[1].name ?? current[0].slice(0, 6)} ${dim(current[1].status)}`
                 : `${dim("□")} no matches · Backspace clears filter`;
               const queryPrefix = query ? `${query} ${dim("»")} ` : "";
-              return [trunc(`${queryPrefix}${compact}`, w, "…")];
+              return [trunc(`Esc · ${queryPrefix}${compact}`, w, "…")];
             }
 
             const inner = w - 2;
@@ -1674,33 +1777,27 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           },
 
           handleInput(data: string) {
-            const matches = filtered();
-            if (data === "\r" || data === "\n") {
-              done(matches[cursor]?.[0] ?? null);
-            } else if (data === "\x1b") {
-              done(null);
-            } else if (data === "\x1b[A" || (data === "k" && !query)) {
-              cursor = Math.max(0, cursor - 1);
-              requestRender();
-            } else if (data === "\x1b[B" || (data === "j" && !query)) {
-              cursor = Math.min(Math.max(0, matches.length - 1), cursor + 1);
-              requestRender();
-            } else if (data === "\x7f" || data === "\b") {
-              if (query.length > 0) { query = query.slice(0, -1); cursor = 0; requestRender(); }
-            } else {
-              const input = data.replace(/[\x00-\x1f\x7f]/g, "");
-              if (input) {
-                query += input;
-                cursor = 0;
-                requestRender();
-              }
+            if (lastWidth < 20) {
+              if (data === "\x1b") done(null);
+              return;
             }
+            if (pasteFlushTimer) clearTimeout(pasteFlushTimer);
+            for (const token of pasteDecoder.feed(data)) dispatchDecodedToken(token);
+            if (pasteDecoder.hasPending()) {
+              pasteFlushTimer = setTimeout(() => {
+                pasteFlushTimer = undefined;
+                for (const token of pasteDecoder.flushPending()) dispatchDecodedToken(token);
+                requestRender();
+              }, 16);
+            }
+            requestRender();
           },
 
           invalidate() {},
-          dispose() {},
+          dispose() { if (pasteFlushTimer) clearTimeout(pasteFlushTimer); },
         };
       },
+      null,
     );
 
     if (selected) {
@@ -1849,7 +1946,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         inboxCount: agent.inbox.length,
         taskCount: agent.progress?.length ?? 0,
       }));
-    await showModelMappingOverlay(ctx, refreshModelCatalog(ctx).modelIds, {
+    await showModelMappingOverlay(ctx, refreshModelCatalog(ctx).models, {
       agents: discoverAgents(ctx.cwd),
       activeAgents,
       onOpenAgent: async (correlationId) => showAttachOverlay(correlationId, ctx),
@@ -1975,7 +2072,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     if (sessionFile && !isAgentSession) state.mainSessionFile = sessionFile;
   });
 
-  pi.on("before_agent_start", injectModelCatalog);
+  pi.on("before_agent_start", injectTeammateContext);
 
   pi.on("session_compact", (_event, ctx) => {
     widgetCtx = ctx;
@@ -2005,6 +2102,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
 // ===========================================================================
 
 type AgentListView = "active" | "named" | "all";
+type TeammateListView = AgentListView | "roles";
 type ListedAgentStatus = ActiveAgent["status"] | AgentProgressSnapshot["status"];
 
 interface ListedAgent {
@@ -2027,6 +2125,14 @@ interface ListedAgent {
   tokens?: number;
 }
 
+export function buildRoleList(cwd: string): { entries: AgentSummary[]; text: string } {
+  const entries = listAgentSummaries(cwd);
+  const text = entries.length > 0
+    ? `Available teammate roles for ${cwd}:\n${formatAgentCatalog(cwd, Number.MAX_SAFE_INTEGER, 160)}`
+    : `No teammate roles discovered for ${cwd}.`;
+  return { entries, text };
+}
+
 function progressDurationMs(progress: AgentProgressSnapshot, parent: ActiveAgent): number {
   const startedAt = progress.startedAt
     ? new Date(progress.startedAt).getTime()
@@ -2035,6 +2141,23 @@ function progressDurationMs(progress: AgentProgressSnapshot, parent: ActiveAgent
     ? new Date(progress.completedAt).getTime()
     : Date.now();
   return Math.max(0, completedAt - startedAt);
+}
+
+export function correlationIdPrefix(
+  correlationId: string,
+  correlationIds: Iterable<string>,
+  minimumLength = 8,
+): string {
+  const ids = [...new Set(correlationIds)];
+  const maximumLength = Math.max(correlationId.length, ...ids.map((id) => id.length));
+  let length = Math.min(minimumLength, correlationId.length);
+  while (
+    length < maximumLength
+    && ids.some((id) => id !== correlationId && id.startsWith(correlationId.slice(0, length)))
+  ) {
+    length += 1;
+  }
+  return correlationId.slice(0, length);
 }
 
 export function buildAgentList(
@@ -2135,6 +2258,7 @@ export function buildAgentList(
   }
 
   roots.forEach((cid) => visitPhysical(cid, "", "", 0));
+  const listedCorrelationIds = entries.map((entry) => entry.correlationId);
 
   const iconFor = (status: ListedAgentStatus): string => {
     if (status === "pending") return "○";
@@ -2149,7 +2273,7 @@ export function buildAgentList(
           ? `[${entry.agent}] name="${entry.name}"`
           : `[${entry.agent}]`;
         const metadata = [
-          `id=${entry.correlationId.slice(0, 8)}`,
+          `id=${correlationIdPrefix(entry.correlationId, listedCorrelationIds)}`,
           entry.taskIndex !== undefined ? `task=${entry.taskIndex + 1}` : "",
           entry.dependencies?.length
             ? `deps=${entry.dependencies.map((dependency) => dependency + 1).join(",")}`
@@ -2175,10 +2299,15 @@ export function resolveWatchTarget(
   target: string,
 ): { match?: WatchTarget; error?: string; available: string[] } {
   const available = new Set<string>();
+  const correlationIds = new Set<string>();
   for (const [cid, agent] of state.activeRuns) {
-    available.add(agent.name ?? cid.slice(0, 8));
+    correlationIds.add(cid);
+    for (const progress of agent.progress ?? []) correlationIds.add(progress.correlationId);
+  }
+  for (const [cid, agent] of state.activeRuns) {
+    available.add(agent.name ?? correlationIdPrefix(cid, correlationIds));
     for (const progress of agent.progress ?? []) {
-      available.add(progress.name ?? progress.correlationId.slice(0, 8));
+      available.add(progress.name ?? correlationIdPrefix(progress.correlationId, correlationIds));
     }
   }
 
@@ -2194,6 +2323,7 @@ export function resolveWatchTarget(
   const exactTaskMatches: Array<{ agent: ActiveAgent; progress: AgentProgressSnapshot }> = [];
   for (const agent of state.activeRuns.values()) {
     for (const progress of agent.progress ?? []) {
+      if (state.activeRuns.has(progress.correlationId)) continue;
       if (progress.correlationId === target || progress.name === target) {
         exactTaskMatches.push({ agent, progress });
       }
@@ -2210,6 +2340,7 @@ export function resolveWatchTarget(
   for (const [cid, agent] of state.activeRuns) {
     if (cid.startsWith(target)) prefixMatches.push({ kind: "agent", agent });
     for (const progress of agent.progress ?? []) {
+      if (state.activeRuns.has(progress.correlationId)) continue;
       if (progress.correlationId.startsWith(target)) {
         prefixMatches.push({ kind: "graph-task", agent, progress });
       }
@@ -2237,6 +2368,8 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
     const lastResult = agent.lastResult?.trim();
     if (lastResult) {
       output.push("--- last result ---", ...lastResult.split("\n").slice(-lineCount));
+    } else if (agent.status === "running" && log.length === 0) {
+      output.push("Waiting for model capacity or first activity…");
     }
     if (agent.status === "sleeping") {
       output.push("", "[sleeping — messages remain visible; use teammate-send to wake]");
@@ -2265,7 +2398,13 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
   if (lastMessage) {
     output.push("--- last message ---", ...lastMessage.split("\n").slice(-lineCount));
   } else if (log.length === 0) {
-    output.push(progress.status === "pending" ? "Waiting for dependencies…" : "No message captured yet.");
+    output.push(
+      progress.status === "pending"
+        ? "Waiting for dependencies…"
+        : progress.status === "running"
+          ? "Waiting for model capacity or first activity…"
+          : "No message captured yet.",
+    );
   }
   if (agent.status === "sleeping") {
     output.push("", "[graph is sleeping — this task's captured messages remain available]");
@@ -2318,6 +2457,27 @@ function retireAgent(
   agent.lastActivityAt = Date.now();
 }
 
+export function settleAgent(
+  state: TeammateState,
+  correlationId: string,
+  exitCode: number,
+  lastResult?: string,
+): void {
+  if (exitCode === 0) retireAgent(state, correlationId, lastResult);
+  else killAgent(state, correlationId);
+}
+
+export function resolveAgentCorrelationId(
+  state: TeammateState,
+  target: string,
+): string | undefined {
+  const named = state.namedAgents.get(target);
+  if (named) return named;
+  if (state.activeRuns.has(target)) return target;
+  const matches = [...state.activeRuns.keys()].filter((correlationId) => correlationId.startsWith(target));
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 function killAgent(
   state: TeammateState,
   correlationId: string,
@@ -2330,41 +2490,15 @@ function killAgent(
   agent.abortController.abort();
   state.activeRuns.delete(correlationId);
   if (name) state.namedAgents.delete(name);
+  for (const [agentName, id] of state.namedAgents) {
+    if (id === correlationId) state.namedAgents.delete(agentName);
+  }
 }
 
 function agentActiveMs(a: ActiveAgent): number {
   const total = Date.now() - a.startedAt;
   const sleeping = a.sleptAt ? Date.now() - a.sleptAt : 0;
   return total - a.sleepMs - sleeping;
-}
-
-// ===========================================================================
-// P2-1: Reply-cycle deadlock detection
-// ===========================================================================
-
-function detectReplyCycle(
-  state: TeammateState,
-  fromName: string | undefined,
-  replyToName: string | undefined,
-): boolean {
-  if (!fromName || !replyToName) return false;
-  if (fromName === replyToName) return true;
-
-  const visited = new Set<string>([fromName]);
-  let current = replyToName;
-
-  while (current) {
-    if (visited.has(current)) return true;
-    visited.add(current);
-
-    const cid = state.namedAgents.get(current);
-    if (!cid) break;
-    const agent = state.activeRuns.get(cid);
-    if (!agent?.replyTo) break;
-    current = agent.replyTo;
-  }
-
-  return false;
 }
 
 function ts(): string {
@@ -2382,7 +2516,323 @@ function releaseAgentMemory(agent: ActiveAgent): void {
     try { agent.stdin.end(); } catch { /* already closed */ }
     agent.stdin = undefined;
   }
+  agent.pendingInteractions?.clear();
   agent.sendControl = undefined;
+}
+
+interface RelayedQuestionOption {
+  label: string;
+  description?: string;
+}
+
+interface RelayedQuestion {
+  question: string;
+  header?: string;
+  options?: RelayedQuestionOption[];
+  multiSelect?: boolean;
+}
+
+export async function handleChildInteractionRequest(
+  pi: ExtensionAPI,
+  state: TeammateState,
+  event: Record<string, unknown>,
+  reply: (msg: unknown) => void,
+  ctx: ExtensionContext | null | undefined,
+  fallbackCorrelationId?: string,
+): Promise<void> {
+  const requestId = typeof event.requestId === "string" ? event.requestId : randomUUID();
+  const interaction = event.interaction === "permission" ? "permission"
+    : event.interaction === "question" ? "question"
+      : undefined;
+  const payload = isRecord(event.payload) ? event.payload : {};
+  const correlationId = typeof event.correlationId === "string"
+    ? event.correlationId
+    : fallbackCorrelationId;
+  const agent = correlationId ? state.activeRuns.get(correlationId) : undefined;
+  const agentLabel = agent?.name ?? agent?.agent ?? correlationId?.slice(0, 8) ?? "teammate";
+
+  if (!interaction) {
+    replyInteraction(reply, requestId, { action: "cancel", error: "Unknown interaction type" });
+    return;
+  }
+
+  const record: TeammateInteractionRecord = {
+    requestId,
+    interaction,
+    createdAt: Date.now(),
+    payload,
+  };
+  if (agent) {
+    agent.pendingInteractions ??= new Map();
+    agent.pendingInteractions.set(requestId, record);
+    agent.lastActivityAt = Date.now();
+    agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ? ${interaction} request`);
+  }
+
+  const requestSummary = interaction === "permission"
+    ? `${payload.toolName ?? "tool"}: ${interactionDetail(payload.input)}`
+    : questionSummary(payload.questions);
+  const parentAuthorization = interaction === "permission" && payload.authorization === "parent";
+  if (!parentAuthorization) {
+    pi.sendMessage({
+      customType: "teammate-interaction-request",
+      content: `? @${agentLabel} ${interaction}\n${requestSummary}`,
+      display: true,
+      details: { requestId, interaction, correlationId, payload },
+    }, { triggerTurn: false });
+  }
+
+  let result: Record<string, unknown>;
+  try {
+    if (interaction === "permission" && payload.authorization === "parent") {
+      const broker = getTeammatePermissionBroker();
+      const toolName = typeof payload.toolName === "string" ? payload.toolName : undefined;
+      const input = isRecord(payload.input) ? payload.input : undefined;
+      result = broker && toolName && input && ctx
+        ? { ...await broker({ toolName, input }, ctx) }
+        : { action: "deny", reason: "No parent permission broker is available." };
+    } else if (!ctx?.hasUI) {
+      result = interaction === "permission" ? { action: "deny" } : { action: "cancel" };
+    } else if (interaction === "permission") {
+      result = await showRelayedPermission(ctx, agentLabel, payload);
+    } else {
+      result = await showRelayedQuestions(ctx, agentLabel, payload);
+    }
+  } catch (error) {
+    result = {
+      action: interaction === "permission" ? "deny" : "cancel",
+      error: error instanceof Error ? error.message : String(error),
+    };
+  } finally {
+    agent?.pendingInteractions?.delete(requestId);
+  }
+
+  if (agent) {
+    const action = typeof result.action === "string" ? result.action : "cancel";
+    agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ◀ ${interaction} ${action}`);
+    agent.lastActivityAt = Date.now();
+  }
+  pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+    correlationId,
+    agent: agentLabel,
+    interaction,
+    requestId,
+    action: result.action,
+    isInteraction: true,
+  });
+  replyInteraction(reply, requestId, result);
+}
+
+export async function handleChildRpcUiRequest(
+  event: Record<string, unknown>,
+  reply: (msg: unknown) => void,
+  ctx: ExtensionContext | null | undefined,
+): Promise<void> {
+  const id = typeof event.id === "string" ? event.id : randomUUID();
+  if (!ctx?.hasUI) {
+    reply({ type: "extension_ui_response", id, cancelled: true });
+    return;
+  }
+  const method = typeof event.method === "string" ? event.method : "";
+  if (method === "select") {
+    const options = Array.isArray(event.options)
+      ? event.options.filter((value): value is string => typeof value === "string")
+      : [];
+    const value = await ctx.ui.select(String(event.title ?? "Select"), options);
+    reply(value === undefined
+      ? { type: "extension_ui_response", id, cancelled: true }
+      : { type: "extension_ui_response", id, value });
+    return;
+  }
+  if (method === "confirm") {
+    const confirmed = await ctx.ui.confirm(String(event.title ?? "Confirm"), String(event.message ?? ""));
+    reply({ type: "extension_ui_response", id, confirmed });
+    return;
+  }
+  if (method === "input" || method === "editor") {
+    const value = method === "editor"
+      ? await ctx.ui.editor(String(event.title ?? "Edit"), typeof event.prefill === "string" ? event.prefill : undefined)
+      : await ctx.ui.input(String(event.title ?? "Input"), typeof event.placeholder === "string" ? event.placeholder : undefined);
+    reply(value === undefined
+      ? { type: "extension_ui_response", id, cancelled: true }
+      : { type: "extension_ui_response", id, value });
+    return;
+  }
+  if (method === "notify") {
+    const notifyType = event.notifyType === "warning" || event.notifyType === "error" ? event.notifyType : "info";
+    ctx.ui.notify(String(event.message ?? ""), notifyType);
+  } else if (method === "setStatus") {
+    ctx.ui.setStatus(String(event.statusKey ?? "teammate"), typeof event.statusText === "string" ? event.statusText : undefined);
+  } else if (method === "setWidget") {
+    const lines = Array.isArray(event.widgetLines)
+      ? event.widgetLines.filter((value): value is string => typeof value === "string")
+      : undefined;
+    ctx.ui.setWidget(String(event.widgetKey ?? "teammate"), lines, {
+      placement: event.widgetPlacement === "belowEditor" ? "belowEditor" : "aboveEditor",
+    });
+  } else if (method === "setTitle") {
+    ctx.ui.setTitle(String(event.title ?? ""));
+  } else if (method === "set_editor_text") {
+    ctx.ui.setEditorText(String(event.text ?? ""));
+  }
+  reply({ type: "extension_ui_response", id, cancelled: true });
+}
+
+async function showRelayedPermission(
+  ctx: ExtensionContext,
+  agentLabel: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const toolName = typeof payload.toolName === "string" ? payload.toolName : "unknown tool";
+  const reason = typeof payload.reason === "string" ? payload.reason : "User approval required.";
+  const detail = interactionDetail(payload.input);
+  const choice = await ctx.ui.select(
+    `@${agentLabel} requests ${toolName}\n\n${detail}\n\n${reason}`,
+    ["Allow once", "Always allow", "Deny"],
+  );
+  if (choice === "Allow once") return { action: "allow_once" };
+  if (choice === "Always allow") return { action: "always_allow" };
+  return { action: "deny" };
+}
+
+async function showRelayedQuestions(
+  ctx: ExtensionContext,
+  agentLabel: string,
+  payload: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
+  const questions = Array.isArray(payload.questions)
+    ? payload.questions.filter(isRecord).map(normalizeRelayedQuestion).filter((q): q is RelayedQuestion => Boolean(q))
+    : [];
+  if (questions.length === 0) return { action: "cancel", error: "No valid questions" };
+
+  const answers: Array<{
+    question: string;
+    header?: string;
+    selected: string[];
+    text?: string;
+  }> = [];
+  for (let index = 0; index < questions.length; index++) {
+    const question = questions[index];
+    const title = `@${agentLabel} · ${question.header ?? `Question ${index + 1}`}\n${question.question}`;
+    const options = question.options ?? [];
+    if (options.length === 0) {
+      const text = await ctx.ui.input(title, "Enter response");
+      if (text === undefined) return { action: "cancel" };
+      answers.push({
+        question: question.question,
+        ...(question.header ? { header: question.header } : {}),
+        selected: [],
+        ...(text.trim() ? { text: text.trim() } : {}),
+      });
+      continue;
+    }
+
+    const normalizedOptions = options.some((option) => option.label === "None of the above")
+      ? options
+      : [...options, { label: "None of the above" }];
+    const selected = question.multiSelect
+      ? await selectMultiple(ctx, title, normalizedOptions)
+      : await selectOne(ctx, title, normalizedOptions);
+    if (!selected) return { action: "cancel" };
+    answers.push({
+      question: question.question,
+      ...(question.header ? { header: question.header } : {}),
+      selected,
+    });
+  }
+  return { action: "answer", answers };
+}
+
+async function selectOne(
+  ctx: ExtensionContext,
+  title: string,
+  options: RelayedQuestionOption[],
+): Promise<string[] | undefined> {
+  const labels = options.map((option, index) => `${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`);
+  const choice = await ctx.ui.select(title, labels);
+  const index = choice ? labels.indexOf(choice) : -1;
+  return index >= 0 ? [options[index].label] : undefined;
+}
+
+async function selectMultiple(
+  ctx: ExtensionContext,
+  title: string,
+  options: RelayedQuestionOption[],
+): Promise<string[] | undefined> {
+  const selected = new Set<number>();
+  while (true) {
+    const labels = options.map((option, index) =>
+      `${selected.has(index) ? "[x]" : "[ ]"} ${index + 1}. ${option.label}`
+    );
+    const done = `Done (${selected.size})`;
+    const choice = await ctx.ui.select(title, [...labels, done]);
+    if (choice === undefined) return undefined;
+    if (choice === done) {
+      return [...selected].sort((a, b) => a - b).map((index) => options[index].label);
+    }
+    const index = labels.indexOf(choice);
+    if (index < 0) continue;
+    if (options[index].label === "None of the above") {
+      selected.clear();
+      selected.add(index);
+    } else {
+      const noneIndex = options.findIndex((option) => option.label === "None of the above");
+      if (noneIndex >= 0) selected.delete(noneIndex);
+      if (selected.has(index)) selected.delete(index);
+      else selected.add(index);
+    }
+  }
+}
+
+function normalizeRelayedQuestion(value: Record<string, unknown>): RelayedQuestion | undefined {
+  if (typeof value.question !== "string" || !value.question.trim()) return undefined;
+  const options = Array.isArray(value.options)
+    ? value.options.filter(isRecord).flatMap((option) =>
+      typeof option.label === "string"
+        ? [{
+            label: option.label,
+            ...(typeof option.description === "string" ? { description: option.description } : {}),
+          }]
+        : []
+    )
+    : undefined;
+  return {
+    question: value.question,
+    ...(typeof value.header === "string" ? { header: value.header } : {}),
+    ...(options ? { options } : {}),
+    ...(value.multiSelect === true ? { multiSelect: true } : {}),
+  };
+}
+
+function replyInteraction(
+  reply: (msg: unknown) => void,
+  requestId: string,
+  result: Record<string, unknown>,
+): void {
+  reply({ type: "teammate_interaction_response", requestId, result });
+}
+
+function interactionDetail(value: unknown): string {
+  if (!isRecord(value)) return "{}";
+  const raw = typeof value.command === "string"
+    ? value.command
+    : typeof value.path === "string"
+      ? value.path
+      : typeof value.file_path === "string"
+        ? value.file_path
+        : JSON.stringify(value);
+  return raw.length > 500 ? `${raw.slice(0, 497)}...` : raw;
+}
+
+function questionSummary(value: unknown): string {
+  if (!Array.isArray(value)) return "No questions";
+  return value.filter(isRecord).map((question, index) =>
+    `${index + 1}. ${typeof question.question === "string" ? question.question : "Invalid question"}`
+  ).join("\n");
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 // ===========================================================================
@@ -2395,54 +2845,58 @@ async function handleProxyRequest(
   event: Record<string, unknown>,
   reply: (msg: unknown) => void,
   spawnedBy?: string,
+  modelCapabilities: readonly TeammateModelCapability[] = [],
+  onInteraction?: (
+    event: Record<string, unknown>,
+    reply: (message: unknown) => void,
+    correlationId: string,
+  ) => void,
 ): Promise<void> {
   const tool = event.tool as string;
   const requestId = event.requestId as string;
   const params = event.params as Record<string, unknown>;
-  const parentCid = event.parentCid as string | undefined;
+  const parentCid = (event.parentCid as string | undefined) ?? spawnedBy;
 
   switch (tool) {
     case "teammate": {
       const p = params as RunTeammateParams;
       const cid = randomUUID();
 
-      // Normalize
-      let normalizedTasks: NormalizedTask[] | null = null;
-      if (p.chain?.length) {
-        normalizedTasks = normalizeChainToTasks(p.chain, p.task ?? "");
-        for (const t of normalizedTasks) {
-          t.model ??= p.model;
-          t.thinking ??= p.thinking;
-          t.taskType ??= p.taskType;
-          t.prompt ??= p.prompt;
-          t.promptArgs ??= p.promptArgs;
-          t.cwd ??= p.cwd;
-          t.outputSchema ??= p.outputSchema as Record<string, unknown> | undefined;
-          t.timeoutMs ??= p.timeoutMs;
-        }
-      } else if (p.tasks?.length) {
-        normalizedTasks = p.tasks.map((t) => ({
-          agent: t.agent,
-          task: t.task ?? "",
-          prompt: t.prompt ?? p.prompt,
-          promptArgs: t.promptArgs ?? p.promptArgs,
-          taskType: t.taskType ?? p.taskType,
-          name: t.name,
-          model: t.model ?? p.model,
-          thinking: t.thinking ?? p.thinking,
-          cwd: t.cwd ?? p.cwd,
-          outputSchema: (t.outputSchema ?? p.outputSchema) as Record<string, unknown> | undefined,
-          timeoutMs: t.timeoutMs ?? p.timeoutMs,
-        }));
-      }
-
-      if (!normalizedTasks && !p.agent) {
+      // Normalize (shared with the root tool execute path)
+      const normalization = normalizeTeammateParams(p);
+      if (normalization.error) {
         reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: 'Requires "agent" or "tasks".' }],
+          content: [{ type: "text", text: normalization.error }],
           isError: true, details: { mode: "single", results: [] },
         }});
         return;
       }
+      const normalizedTasks: NormalizedTask[] | null = normalization.tasks;
+      const warningPrefix = normalization.warnings.length
+        ? normalization.warnings.map((w) => `[warn] ${w}`).join("\n") + "\n\n"
+        : "";
+
+      const taskNames = new Set(normalizedTasks?.filter((task) => task.name).map((task) => task.name!) ?? []);
+      const taskIndexByName = new Map<string, number>();
+      normalizedTasks?.forEach((task, index) => {
+        if (task.name) taskIndexByName.set(task.name, index);
+      });
+      const taskCorrelationIds: string[] = normalizedTasks?.map(() => randomUUID()) ?? [];
+      const progressState = new Map<number, AgentProgressSnapshot>();
+      normalizedTasks?.forEach((task, index) => {
+        progressState.set(index, {
+          agent: task.agent,
+          ...(task.name ? { name: task.name } : {}),
+          correlationId: taskCorrelationIds[index],
+          taskIndex: index,
+          dependencies: taskDependencyNames(task, taskNames)
+            .map((name) => taskIndexByName.get(name))
+            .filter((dependency): dependency is number => dependency !== undefined),
+          status: "pending",
+        });
+      });
+      const progressSnapshot = (): AgentProgressSnapshot[] =>
+        [...progressState.values()].sort((left, right) => left.taskIndex - right.taskIndex);
 
       const abortCtrl = new AbortController();
       const activeAgent: ActiveAgent = {
@@ -2459,39 +2913,130 @@ async function handleProxyRequest(
         sleepMs: 0,
         lease: createChildLease(),
         promptSeq: p.task ? 1 : 0,
+        ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(cid, activeAgent);
       if (p.name) state.namedAgents.set(p.name, cid);
+      normalizedTasks?.forEach((task, index) => {
+        const childId = taskCorrelationIds[index];
+        state.activeRuns.set(childId, {
+          agent: task.agent,
+          name: task.name,
+          correlationId: childId,
+          startedAt: Date.now(),
+          abortController: abortCtrl,
+          inbox: [],
+          outputLog: [],
+          lastActivityAt: Date.now(),
+          spawnedBy: cid,
+          status: "pending",
+          sleepMs: 0,
+          lease: createChildLease(),
+          promptSeq: task.task ? 1 : 0,
+        });
+        if (task.name) state.namedAgents.set(task.name, childId);
+      });
 
-      const spawnerAgent = spawnedBy ? state.activeRuns.get(spawnedBy) : undefined;
+      const spawnerAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
       const spawnerLabel = spawnerAgent?.name ?? spawnerAgent?.agent ?? "proxy";
       pi.sendMessage(
         {
           customType: "teammate-started",
-          content: `● @${spawnerLabel} spawned @${p.name ?? p.agent}`,
+          content: `● @${spawnerLabel} spawned @${p.name ?? p.agent ?? activeAgent.agent}`,
           display: true,
         },
         { triggerTurn: true },
       );
-      pi.events.emit(TEAMMATE_STARTED_EVENT, { correlationId: cid, agent: p.agent, name: p.name, spawnedBy });
+      pi.events.emit(TEAMMATE_STARTED_EVENT, {
+        correlationId: cid,
+        agent: activeAgent.agent,
+        name: p.name,
+        spawnedBy: parentCid,
+      });
 
       const runOpts: RunTeammateOptions = {
         baseCwd: state.baseCwd,
+        modelCapabilities,
+        ...(normalizedTasks ? { taskCorrelationIds } : { correlationId: cid }),
         signal: abortCtrl.signal,
         parentSessionFile: spawnerAgent?.sessionFile ?? state.mainSessionFile,
-        initialLeaseToken: activeAgent.lease ? leaseToken(activeAgent.lease) : undefined,
-        onChildSpawned: (stdin, sendControl, sessionDir) => {
-          activeAgent.stdin = stdin;
-          activeAgent.sendControl = sendControl;
-          activeAgent.sessionDir = sessionDir;
-          if (activeAgent.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(activeAgent.lease) });
+        initialLeaseToken: (childId: string) => {
+          const target = state.activeRuns.get(childId) ?? activeAgent;
+          return target.lease ? leaseToken(target.lease) : undefined;
         },
-        onChildEvent: (event) => handleChildLifecycleEvent(state, { ...event, correlationId: cid }),
-        onChildRequest: (evt, rep) => handleProxyRequest(pi, state, evt, rep, cid),
+        onChildSpawned: (stdin, sendControl, sessionDir, childId) => {
+          const target = childId ? state.activeRuns.get(childId) ?? activeAgent : activeAgent;
+          target.stdin = stdin;
+          target.sendControl = sendControl;
+          target.sessionDir = sessionDir;
+          target.status = "running";
+          if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
+        },
+        onChildEvent: (childEvent) => handleChildLifecycleEvent(state, {
+          ...childEvent,
+          correlationId: childEvent.correlationId ?? cid,
+        }),
+        onTurnComplete: (result) => {
+          if (result.correlationId !== cid) {
+            const lastMessage = result.messages[result.messages.length - 1]?.content;
+            settleAgent(state, result.correlationId, result.exitCode, lastMessage);
+          }
+        },
+        onProgress: normalizedTasks
+          ? (data) => {
+              const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
+              if (taskIndex < 0) return;
+              const existing = progressState.get(taskIndex);
+              const correlationId = data.correlationId ?? existing?.correlationId ?? taskCorrelationIds[taskIndex];
+              const progressName = data.name ?? existing?.name;
+              const entry: AgentProgressSnapshot = {
+                agent: data.agent,
+                ...(progressName ? { name: progressName } : {}),
+                correlationId,
+                taskIndex,
+                dependencies: data.dependencies ?? existing?.dependencies ?? [],
+                status: data.status,
+                startedAt: new Date(data.startedAt).toISOString(),
+                recentTools: data.recentTools,
+                toolCount: data.toolCount,
+                tokens: data.tokens,
+                ...(data.lastMessage ? { lastMessage: data.lastMessage } : {}),
+                ...(data.status === "completed" || data.status === "failed"
+                  ? { completedAt: new Date().toISOString() }
+                  : {}),
+              };
+              progressState.set(taskIndex, entry);
+              activeAgent.progress = progressSnapshot();
+              activeAgent.lastActivityAt = Date.now();
+
+              const childAgent = state.activeRuns.get(correlationId);
+              if (childAgent && childAgent !== activeAgent) {
+                childAgent.lastActivityAt = Date.now();
+                childAgent.status = data.status === "completed" ? "sleeping" : data.status;
+                if (data.lastMessage) {
+                  const lastLine = data.lastMessage.split("\n").pop()?.trim();
+                  if (lastLine) {
+                    const shortId = correlationId.slice(0, 8);
+                    const marker = data.name ? `@${data.name}#${shortId}` : `${data.agent}#${shortId}`;
+                    const line = `${marker} │ ${lastLine}`;
+                    childAgent.outputLog = [line];
+                    activeAgent.outputLog.push(line);
+                    if (activeAgent.outputLog.length > 200) activeAgent.outputLog.shift();
+                  }
+                }
+              }
+            }
+          : undefined,
+        onChildRequest: (evt, rep) => {
+          if (evt.type === "teammate_interaction_request" || evt.type === "teammate_rpc_ui_request") {
+            onInteraction?.(evt, rep, cid);
+            return;
+          }
+          handleProxyRequest(pi, state, evt, rep, cid, modelCapabilities, onInteraction);
+        },
       };
 
-      try {
-        let resultPayload: unknown;
+      const executeNested = async () => {
         if (normalizedTasks) {
           const mode = inferGraphMode(normalizedTasks);
           const results = await runGraph(normalizedTasks, p.concurrency ?? 4, runOpts);
@@ -2499,29 +3044,125 @@ async function handleProxyRequest(
           const summaries = results
             .map((r, i) => `[${r.agent}${normalizedTasks![i]?.name ? "/" + normalizedTasks![i].name : ""}] ${r.exitCode === 0 ? "OK" : "FAIL"}: ${r.messages[r.messages.length - 1]?.content ?? "(no output)"}`)
             .join("\n\n");
-          resultPayload = { content: [{ type: "text", text: summaries }], isError: hasError, details: { mode, results } };
-        } else {
-          const result = await runTeammate(p, runOpts);
-          const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-          resultPayload = {
-            content: [{ type: "text", text: lastMsg }],
-            isError: result.exitCode !== 0,
-            details: { mode: "single", results: [result] },
+          results.forEach((result, index) => {
+            const current = progressState.get(index);
+            progressState.set(index, {
+              agent: result.agent,
+              ...(normalizedTasks![index]?.name ? { name: normalizedTasks![index].name } : {}),
+              correlationId: result.correlationId,
+              taskIndex: index,
+              dependencies: current?.dependencies ?? [],
+              status: result.exitCode === 0 ? "completed" : "failed",
+              ...(current?.startedAt ? { startedAt: current.startedAt } : {}),
+              completedAt: new Date().toISOString(),
+              recentTools: current?.recentTools ?? [],
+              toolCount: current?.toolCount ?? 0,
+              tokens: result.usage.inputTokens + result.usage.outputTokens,
+              lastMessage: result.messages[result.messages.length - 1]?.content ?? "",
+            });
+          });
+          const progress = progressSnapshot();
+          activeAgent.progress = progress;
+          return {
+            resultPayload: {
+              content: [{ type: "text", text: warningPrefix + summaries }],
+              isError: hasError,
+              details: { mode, results, progress },
+            },
+            summary: summaries,
+            exitCode: hasError ? 1 : 0,
+            mode,
+            results,
+            progress,
           };
         }
-        reply({ type: "teammate_proxy_result", requestId, result: resultPayload });
-      } finally {
-        retireAgent(state, cid);
+
+        const result = await runTeammate(p, runOpts);
+        const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
+        return {
+          resultPayload: {
+            content: [{ type: "text", text: warningPrefix + lastMsg }],
+            isError: result.exitCode !== 0,
+            details: { mode: "single", results: [result] },
+          },
+          summary: lastMsg,
+          exitCode: result.exitCode,
+          mode: "single" as const,
+          results: [result],
+          progress: undefined,
+        };
+      };
+
+      if (p.background === false) {
+        try {
+          const completed = await executeNested();
+          settleAgent(state, cid, completed.exitCode, completed.summary);
+          reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
+        } catch (error) {
+          killAgent(state, cid);
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{
+              type: "text",
+              text: `Nested teammate failed: ${error instanceof Error ? error.message : String(error)}`,
+            }],
+            isError: true,
+            details: { mode: normalizedTasks ? inferGraphMode(normalizedTasks) : "single", results: [] },
+          }});
+        }
+        return;
       }
+
+      void executeNested().then((completed) => {
+        settleAgent(state, cid, completed.exitCode, completed.summary);
+        pi.sendMessage(
+          {
+            customType: "teammate-complete",
+            content: completed.summary,
+            display: true,
+            details: {
+              mode: completed.mode,
+              results: completed.results,
+              ...(completed.progress ? { progress: completed.progress } : {}),
+            },
+          },
+          { triggerTurn: true },
+        );
+      }).catch((error) => {
+        killAgent(state, cid);
+        notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error);
+      });
+
+      const mode = normalizedTasks ? inferGraphMode(normalizedTasks) : "single";
+      const runningLabel = p.name ?? p.agent ?? activeAgent.agent;
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{
+          type: "text",
+          text: `${warningPrefix}@${runningLabel} running in background. correlationId=${cid}. Use teammate-list to check status.`,
+        }],
+        isError: false,
+        details: {
+          mode,
+          results: [],
+          ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
+        },
+      }});
       return;
     }
 
     case "teammate-send": {
       const to = params.to as string;
-      const message = params.message as string;
+      const message = (params.message as string | undefined) ?? "";
       const requestedMode = (params.mode as RpcMessageMode) ?? "follow_up";
 
-      const cid = state.namedAgents.get(to);
+      if (!message && requestedMode !== "abort") {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `"message" is required for mode "${requestedMode}".` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+
+      const cid = resolveAgentCorrelationId(state, to);
       if (!cid) {
         const available = Array.from(state.namedAgents.keys());
         reply({ type: "teammate_proxy_result", requestId, result: {
@@ -2591,7 +3232,14 @@ async function handleProxyRequest(
     }
 
     case "teammate-list": {
-      const view = ((params.view as AgentListView | undefined) ?? "active");
+      const view = ((params.view as TeammateListView | undefined) ?? "active");
+      if (view === "roles") {
+        const { entries, text } = buildRoleList(state.baseCwd || process.cwd());
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text }], isError: false, details: { agents: entries },
+        }});
+        return;
+      }
       const { entries, text } = buildAgentList(state, view);
       reply({ type: "teammate_proxy_result", requestId, result: {
         content: [{ type: "text", text }], isError: false, details: { agents: entries },

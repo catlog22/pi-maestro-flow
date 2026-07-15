@@ -60,13 +60,28 @@ export const TaskSpec = Type.Object({
   taskType: Type.Optional(
     Type.Unsafe({
       ...TaskType,
-      description: "Optional task phase used for automatic model mapping",
+      description:
+        "Task phase used only for automatic model routing (task model > top-level model > taskType routing). Does not change the agent's behavior — that is defined by the agent role.",
     }),
   ),
   name: Type.Optional(
     Type.String({
       description:
         "Task identifier — enables referencing via {name} in other tasks and addressing via teammate-send",
+    }),
+  ),
+  dependsOn: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Explicit dependency task names. Merged with implicit {name} references. Use when ordering is needed without injecting the referenced task's output. Unknown names are rejected.",
+    }),
+  ),
+  context: Type.Optional(
+    Type.Unsafe<"fresh" | "fork">({
+      type: "string",
+      enum: ["fresh", "fork"],
+      description:
+        'Session context override for this task; overrides the top-level context default. "fork" copies the parent conversation per task — prefer per-task fork over a top-level default when only some tasks need history.',
     }),
   ),
   model: Type.Optional(
@@ -132,7 +147,8 @@ export const TeammateParams = Type.Object({
   taskType: Type.Optional(
     Type.Unsafe({
       ...TaskType,
-      description: "Default task phase for automatic model mapping. Per-task taskType takes precedence",
+      description:
+        "Default task phase for automatic model routing; per-task taskType takes precedence. Routing only — does not change agent behavior.",
     }),
   ),
 
@@ -145,13 +161,12 @@ export const TeammateParams = Type.Object({
     }),
   ),
 
-  reply_to: Type.Optional(StringEnum(["caller", "main"])),
-
-  protocol_version: Type.Optional(
-    Type.Integer({
-      default: 2,
+  reply_to: Type.Optional(
+    Type.Unsafe<"caller" | "main">({
+      type: "string",
+      enum: ["caller", "main"],
       description:
-        "Protocol version for backward compatibility (v2 defaults reply_to=caller)",
+        'Result routing (default: "caller"). "caller" returns the result to the dispatching context; "main" routes it to the main session.',
     }),
   ),
 
@@ -160,7 +175,7 @@ export const TeammateParams = Type.Object({
   tasks: Type.Optional(
     Type.Array(TaskSpec, {
       description:
-        "Multiple tasks to execute. Use {name} references in task descriptions to define dependencies — referenced tasks are awaited; unreferenced tasks run in parallel.",
+        "Multiple tasks to execute. Dependencies come from {name}/{name.field} references in task descriptions plus explicit dependsOn lists — dependent tasks are awaited; independent tasks run in parallel. A {ref} that matches no task name is passed through as literal text (misspellings close to an existing name are rejected).",
     }),
   ),
 
@@ -219,7 +234,7 @@ export const TeammateParams = Type.Object({
       type: "string",
       enum: ["fresh", "fork"],
       description:
-        'Session context mode. "fresh" (default) starts a blank conversation. "fork" inherits the current session\'s full conversation history — the child sees everything that happened before the fork and continues independently.',
+        'Session context mode. "fresh" (default) starts a blank conversation. "fork" inherits the current session\'s full conversation history — the child sees everything that happened before the fork and continues independently. In multi-task mode this is the default for every task (per-task context wins); forking N tasks copies the parent conversation N times.',
     }),
   ),
 
@@ -258,19 +273,28 @@ export const TeammateParams = Type.Object({
 
 export const TeammateSendParams = Type.Object({
   to: Type.String({
-    description: "Target agent name (must be a named, running agent)",
+    description:
+      "Target agent — a name, a correlation ID, or a unique correlation ID prefix (from teammate-list)",
   }),
-  message: Type.String({
-    description: "Message content to send to the agent",
-  }),
+  message: Type.Optional(
+    Type.String({
+      description:
+        'Message content. Required for "steer" and "follow_up"; optional for "abort".',
+    }),
+  ),
   mode: Type.Optional(
-    StringEnum(["steer", "follow_up", "abort"]),
+    Type.Unsafe<"steer" | "follow_up" | "abort">({
+      type: "string",
+      enum: ["steer", "follow_up", "abort"],
+      description:
+        'Delivery mode (default: "follow_up"). "steer" interrupts the current turn, "follow_up" queues after it, "abort" terminates the agent.',
+    }),
   ),
 });
 
 export const TeammateListParams = Type.Object({
   view: Type.Optional(
-    StringEnum(["active", "named", "all"]),
+    StringEnum(["active", "named", "all", "roles"]),
   ),
 });
 

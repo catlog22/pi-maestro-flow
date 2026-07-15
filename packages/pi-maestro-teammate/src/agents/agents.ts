@@ -1,10 +1,8 @@
 /**
  * Agent discovery and configuration.
  *
- * Discovers agent definitions from three locations (in priority order):
- *   1. Project agents: .pi/agents/ in the nearest project root
- *   2. User agents: ~/.pi/agent/extensions/teammate/agents/
- *   3. Builtin agents: bundled agents/ directory in this package
+ * Discovers agent definitions from compatible project and user locations.
+ * Precedence: project .pi/agents > project .agents > ~/.agents > legacy user > builtin.
  */
 
 import * as fs from "node:fs";
@@ -16,6 +14,16 @@ import { parseTeammateThinkingLevel, type TeammateThinkingLevel } from "../share
 
 type SystemPromptMode = "append" | "replace";
 export type AgentSource = "builtin" | "user" | "project";
+
+export const BUILTIN_AGENT_NAMES = ["delegate", "explorer", "workflow"] as const;
+export type BuiltinAgentName = (typeof BUILTIN_AGENT_NAMES)[number];
+
+const LEGACY_AGENT_ALIASES: Readonly<Record<string, BuiltinAgentName>> = {
+  coordinator: "workflow",
+};
+
+const AGENT_CATALOG_START_MARKER = "<!-- teammate-agent-catalog:start -->";
+const AGENT_CATALOG_END_MARKER = "<!-- teammate-agent-catalog:end -->";
 
 export interface AgentConfig {
   name: string;
@@ -37,6 +45,11 @@ export interface AgentSummary {
   name: string;
   description: string;
   source: AgentSource;
+}
+
+export interface AgentCatalogSnapshot {
+  signature: string;
+  systemPrompt: string;
 }
 
 const BUILTIN_AGENTS_DIR = path.resolve(
@@ -138,27 +151,43 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
   return agents;
 }
 
+export function isBuiltinAgentName(name: string): name is BuiltinAgentName {
+  return (BUILTIN_AGENT_NAMES as readonly string[]).includes(name);
+}
+
+function isReservedAgentName(name: string): boolean {
+  return isBuiltinAgentName(name) || Object.hasOwn(LEGACY_AGENT_ALIASES, name);
+}
+
+function canonicalAgentName(name: string): string {
+  return LEGACY_AGENT_ALIASES[name] ?? name;
+}
+
 /**
  * Discover all agent definitions, merged by priority:
  * project > user > builtin (name collisions: higher priority wins).
  */
-export function discoverAgents(cwd: string): AgentConfig[] {
-  const userAgentsDir = path.join(
-    os.homedir(),
+export function discoverAgents(cwd: string, homeDir = os.homedir()): AgentConfig[] {
+  const legacyUserAgentsDir = path.join(
+    homeDir,
     ".pi",
     "agent",
     "extensions",
     "teammate",
     "agents",
   );
+  const userAgentsDir = path.join(homeDir, ".agents");
 
-  // Find project root (first ancestor with .pi/ directory)
-  let projectAgentsDir: string | null = null;
+  // Find the nearest ancestor containing either supported project directory.
+  let projectPiAgentsDir: string | null = null;
+  let projectCompatAgentsDir: string | null = null;
   let currentDir = cwd;
   while (true) {
-    const piDir = path.join(currentDir, ".pi", "agents");
-    if (fs.existsSync(piDir)) {
-      projectAgentsDir = piDir;
+    const piAgentsDir = path.join(currentDir, ".pi", "agents");
+    const compatAgentsDir = path.join(currentDir, ".agents");
+    if (fs.existsSync(piAgentsDir) || fs.existsSync(compatAgentsDir)) {
+      projectPiAgentsDir = fs.existsSync(piAgentsDir) ? piAgentsDir : null;
+      projectCompatAgentsDir = fs.existsSync(compatAgentsDir) ? compatAgentsDir : null;
       break;
     }
     const parentDir = path.dirname(currentDir);
@@ -166,17 +195,36 @@ export function discoverAgents(cwd: string): AgentConfig[] {
     currentDir = parentDir;
   }
 
-  const builtinAgents = loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin");
-  const userAgents = loadAgentsFromDir(userAgentsDir, "user");
-  const projectAgents = projectAgentsDir
-    ? loadAgentsFromDir(projectAgentsDir, "project")
+  const builtinByName = new Map(
+    loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin")
+      .filter((agent) => isBuiltinAgentName(agent.name))
+      .map((agent) => [agent.name, agent]),
+  );
+  const builtinAgents = BUILTIN_AGENT_NAMES
+    .map((name) => builtinByName.get(name))
+    .filter((agent): agent is AgentConfig => agent !== undefined);
+  const loadCustomAgents = (dir: string, source: AgentSource): AgentConfig[] =>
+    loadAgentsFromDir(dir, source)
+    .filter((agent) => !isReservedAgentName(agent.name));
+
+  // Builtin names are reserved so project/user definitions cannot silently
+  // replace the stable general, exploration, and DAG orchestration roles.
+  const legacyUserAgents = loadCustomAgents(legacyUserAgentsDir, "user");
+  const userAgents = loadCustomAgents(userAgentsDir, "user");
+  const projectCompatAgents = projectCompatAgentsDir
+    ? loadCustomAgents(projectCompatAgentsDir, "project")
+    : [];
+  const projectPiAgents = projectPiAgentsDir
+    ? loadCustomAgents(projectPiAgentsDir, "project")
     : [];
 
-  // Merge: project > user > builtin
+  // Merge from lowest to highest priority.
   const agentMap = new Map<string, AgentConfig>();
   for (const agent of builtinAgents) agentMap.set(agent.name, agent);
+  for (const agent of legacyUserAgents) agentMap.set(agent.name, agent);
   for (const agent of userAgents) agentMap.set(agent.name, agent);
-  for (const agent of projectAgents) agentMap.set(agent.name, agent);
+  for (const agent of projectCompatAgents) agentMap.set(agent.name, agent);
+  for (const agent of projectPiAgents) agentMap.set(agent.name, agent);
 
   return Array.from(agentMap.values());
 }
@@ -189,7 +237,8 @@ export function resolveAgent(
   agentName: string,
 ): AgentConfig | undefined {
   const agents = discoverAgents(cwd);
-  return agents.find((a) => a.name === agentName);
+  const canonicalName = canonicalAgentName(agentName);
+  return agents.find((a) => a.name === canonicalName);
 }
 
 /** Return resolved role metadata without exposing the role prompt body. */
@@ -222,4 +271,61 @@ export function formatAgentCatalog(
   }
 
   return lines.join("\n");
+}
+
+/** Build the compact role directory appended to the active parent prompt. */
+export function createAgentCatalogSnapshot(
+  cwd: string,
+  maxDescriptionLength = 160,
+): AgentCatalogSnapshot {
+  const summaries = listAgentSummaries(cwd);
+  const byName = new Map(summaries.map((agent) => [agent.name, agent]));
+  const builtins = BUILTIN_AGENT_NAMES
+    .map((name) => byName.get(name))
+    .filter((agent): agent is AgentSummary => agent !== undefined);
+  const discovered = summaries
+    .filter((agent) => !isBuiltinAgentName(agent.name));
+
+  const formatLine = (agent: AgentSummary): string => {
+    const normalized = agent.description.replace(/\s+/g, " ").trim();
+    const description = normalized.length > maxDescriptionLength
+      ? `${normalized.slice(0, Math.max(1, maxDescriptionLength - 1)).trimEnd()}…`
+      : normalized;
+    return `- ${agent.name}: ${description}`;
+  };
+
+  const lines = [
+    AGENT_CATALOG_START_MARKER,
+    "# Available Teammate Agents",
+    "",
+    "Built-in roles:",
+    ...builtins.map(formatLine),
+    "",
+    "Discovered project and user roles:",
+    ...(discovered.length > 0 ? discovered.map(formatLine) : ["(none)"]),
+  ];
+
+  lines.push(
+    "",
+    "Use the exact agent name. Unknown names are invalid. Agent prompt bodies are loaded only after a role is selected.",
+    AGENT_CATALOG_END_MARKER,
+  );
+
+  return {
+    signature: summaries
+      .map((agent) => `${agent.name}:${agent.source}:${agent.description}`)
+      .join("\n"),
+    systemPrompt: lines.join("\n"),
+  };
+}
+
+/** Replace an existing role directory or append a fresh one to the prompt. */
+export function appendAgentCatalog(systemPrompt: string, cwd: string): string {
+  const snapshot = createAgentCatalogSnapshot(cwd);
+  const start = systemPrompt.indexOf(AGENT_CATALOG_START_MARKER);
+  const end = systemPrompt.indexOf(AGENT_CATALOG_END_MARKER);
+  if (start >= 0 && end >= start) {
+    return `${systemPrompt.slice(0, start)}${snapshot.systemPrompt}${systemPrompt.slice(end + AGENT_CATALOG_END_MARKER.length)}`;
+  }
+  return `${systemPrompt}\n\n${snapshot.systemPrompt}`;
 }

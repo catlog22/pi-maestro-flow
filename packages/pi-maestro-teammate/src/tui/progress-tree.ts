@@ -97,3 +97,28 @@ export function selectProgressWindow(
   const start = Math.max(0, Math.min(rows.length - maxRows, focusRow - Math.floor(maxRows / 2)));
   return { rows: rows.slice(start, start + maxRows), start, total: rows.length };
 }
+
+export function selectPriorityProgressRows(
+  rows: ProgressTreeRow[],
+  maxRows: number,
+  focusIndex: number | undefined,
+  pinnedIndexes: readonly number[],
+): { rows: ProgressTreeRow[]; total: number; hidden: number } {
+  if (rows.length <= maxRows) return { rows, total: rows.length, hidden: 0 };
+  const selected = new Set<number>();
+  const focusRow = rows.findIndex((row) => row.taskIndex === focusIndex);
+  if (focusRow >= 0) selected.add(focusRow);
+  for (const taskIndex of pinnedIndexes) {
+    const index = rows.findIndex((row) => row.taskIndex === taskIndex);
+    if (index >= 0 && selected.size < maxRows) selected.add(index);
+  }
+  for (let distance = 0; selected.size < maxRows && distance < rows.length; distance++) {
+    for (const index of [focusRow - distance, focusRow + distance]) {
+      if (index >= 0 && index < rows.length) selected.add(index);
+      if (selected.size >= maxRows) break;
+    }
+  }
+  for (let index = rows.length - 1; selected.size < maxRows && index >= 0; index--) selected.add(index);
+  const visible = [...selected].sort((a, b) => a - b).slice(0, maxRows).map((index) => rows[index]);
+  return { rows: visible, total: rows.length, hidden: rows.length - visible.length };
+}

@@ -9,6 +9,7 @@ import {
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import type { AgentConfig, AgentSource } from "../agents/agents.ts";
+import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import {
   TEAMMATE_TASK_TYPES,
   TEAMMATE_TASK_TYPE_META,
@@ -20,6 +21,12 @@ import {
   type TeammateTaskType,
 } from "../models/model-routing.ts";
 import { TEAMMATE_THINKING_LEVELS, type TeammateThinkingLevel } from "../shared/thinking.ts";
+import {
+  BracketedPasteDecoder,
+  removeLastGrapheme,
+  sanitizeSingleLineInput,
+  type DecodedInputToken,
+} from "./input-text.ts";
 
 type ControlCenterTab = "routing" | "roles" | "active";
 
@@ -27,7 +34,7 @@ export interface ControlCenterActiveAgent {
   correlationId: string;
   agent: string;
   name?: string;
-  status: "running" | "sleeping" | "completed";
+  status: "pending" | "running" | "sleeping" | "completed" | "failed";
   startedAt: number;
   inboxCount: number;
   taskCount: number;
@@ -52,7 +59,7 @@ export interface TeammateControlCenterOptions {
 
 interface TeammateControlCenterParams {
   cwd: string;
-  availableModels: readonly string[];
+  availableModels: readonly TeammateModelCapability[];
   agents: readonly AgentConfig[];
   activeAgents: readonly ControlCenterActiveAgent[];
   config: ModelRoutingConfig;
@@ -73,7 +80,7 @@ const TAB_LABELS: Record<ControlCenterTab, string> = {
 };
 
 function printableInput(data: string): string {
-  return data.replace(/[\x00-\x1f\x7f]/g, "");
+  return sanitizeSingleLineInput(data);
 }
 
 function normalizedText(value: string): string {
@@ -89,6 +96,8 @@ function clampIndex(index: number, length: number): number {
 }
 
 function activeStatus(status: ControlCenterActiveAgent["status"]): { icon: string; label: string; tone: string } {
+  if (status === "pending") return { icon: "○", label: "Pending", tone: "dim" };
+  if (status === "failed") return { icon: "✗", label: "Failed", tone: "error" };
   if (status === "sleeping") return { icon: "◉", label: "Sleeping", tone: "warning" };
   if (status === "completed") return { icon: "✓", label: "Done", tone: "dim" };
   return { icon: "■", label: "Running", tone: "success" };
@@ -106,8 +115,12 @@ export class TeammateControlCenter implements Component, Focusable {
   private saving = false;
   private statusText = "";
   private statusTone: "dim" | "success" | "error" = "dim";
+  private readonly pasteDecoder = new BracketedPasteDecoder();
+  private pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  private lastWidth = 80;
   private config: ModelRoutingConfig;
   private readonly models: string[];
+  private readonly modelCapabilities: Map<string, TeammateModelCapability>;
   private readonly agents: AgentConfig[];
   private readonly activeAgents: ControlCenterActiveAgent[];
 
@@ -118,7 +131,8 @@ export class TeammateControlCenter implements Component, Focusable {
       mappings: { ...params.config.mappings },
       thinkingLevels: { ...params.config.thinkingLevels },
     };
-    this.models = [...new Set(params.availableModels)].sort((left, right) => left.localeCompare(right));
+    this.modelCapabilities = new Map(params.availableModels.map((model) => [model.id, model]));
+    this.models = [...this.modelCapabilities.keys()].sort((left, right) => left.localeCompare(right));
     this.agents = [...params.agents].sort((left, right) =>
       SOURCE_ORDER[left.source] - SOURCE_ORDER[right.source] || left.name.localeCompare(right.name)
     );
@@ -129,7 +143,38 @@ export class TeammateControlCenter implements Component, Focusable {
 
   invalidate(): void {}
 
+  dispose(): void {
+    if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
+  }
+
   handleInput(data: string): void {
+    if (this.lastWidth < 20) {
+      if (data === "\x1b") this.params.close(null);
+      return;
+    }
+    if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
+    for (const token of this.pasteDecoder.feed(data)) this.dispatchDecodedToken(token);
+    if (this.pasteDecoder.hasPending()) {
+      this.pasteFlushTimer = setTimeout(() => {
+        this.pasteFlushTimer = undefined;
+        for (const token of this.pasteDecoder.flushPending()) this.dispatchDecodedToken(token);
+        this.params.requestRender();
+      }, 16);
+    }
+    this.params.requestRender();
+  }
+
+  private dispatchDecodedToken(token: DecodedInputToken): void {
+    if (token.kind === "paste") {
+      if (this.modelTaskType) this.modelQuery += token.text;
+      else this.queries[this.tab] += token.text;
+      this.statusText = "";
+      return;
+    }
+    this.handleDecodedInput(token.text);
+  }
+
+  private handleDecodedInput(data: string): void {
     if (this.modelTaskType) {
       this.handleModelInput(data);
       return;
@@ -158,7 +203,7 @@ export class TeammateControlCenter implements Component, Focusable {
     if (data === "\x7f" || data === "\b") {
       const query = this.queries[this.tab];
       if (query) {
-        this.queries[this.tab] = query.slice(0, -1);
+        this.queries[this.tab] = removeLastGrapheme(query);
         this.selected[this.tab] = 0;
         this.statusText = "";
         this.params.requestRender();
@@ -182,8 +227,9 @@ export class TeammateControlCenter implements Component, Focusable {
     }
   }
 
-  render(width: number): readonly string[] {
+  render(width: number): string[] {
     const w = Math.max(1, Math.min(width, 112));
+    this.lastWidth = w;
     if (w < 24 || (this.modelTaskType && w < 40)) return [this.renderCompact(w)];
     return this.modelTaskType ? this.renderModels(w) : this.renderMain(w);
   }
@@ -255,7 +301,7 @@ export class TeammateControlCenter implements Component, Focusable {
     }
     if (data === "\x7f" || data === "\b") {
       if (this.modelQuery) {
-        this.modelQuery = this.modelQuery.slice(0, -1);
+        this.modelQuery = removeLastGrapheme(this.modelQuery);
         this.modelSelected = 0;
         this.params.requestRender();
       }
@@ -265,6 +311,12 @@ export class TeammateControlCenter implements Component, Focusable {
       const taskType = this.modelTaskType;
       const item = items[this.modelSelected];
       if (!taskType || !item) return;
+      if (this.editorKind === "thinking" && item.unavailable) {
+        this.statusTone = "error";
+        this.statusText = `Unsupported · ${item.detail}`;
+        this.params.requestRender();
+        return;
+      }
       this.saving = true;
       this.statusTone = "dim";
       this.statusText = `Saving ${TEAMMATE_TASK_TYPE_META[taskType].label}…`;
@@ -376,19 +428,31 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private thinkingItems(taskType: TeammateTaskType) {
     const configured = this.config.thinkingLevels[taskType];
-    return [{
+    const routedModel = this.config.mappings[taskType];
+    const capability = routedModel ? this.modelCapabilities.get(routedModel) : undefined;
+    const supported = capability?.thinkingLevels;
+    const items = [{
       value: "__auto__",
       label: "inherit / Pi default",
       detail: "Use explicit task, top-level, agent frontmatter, or Pi default thinking",
       active: !configured,
       unavailable: false,
-    }, ...TEAMMATE_THINKING_LEVELS.map((thinking) => ({
-      value: thinking,
-      label: thinking === "xhigh" ? "xhigh / max" : thinking,
-      detail: thinking === configured ? `Current ${taskType} thinking depth` : "Supported by Pi --thinking",
-      active: thinking === configured,
-      unavailable: false,
-    }))];
+    }, ...TEAMMATE_THINKING_LEVELS
+      .filter((thinking) => !supported || supported.includes(thinking) || thinking === configured)
+      .map((thinking) => ({
+        value: thinking,
+        label: thinking === "xhigh" ? "xhigh / max" : thinking,
+        detail: supported && !supported.includes(thinking)
+          ? `${routedModel} does not support this level`
+          : thinking === configured
+            ? `Current ${taskType} thinking depth`
+            : routedModel
+              ? `Supported by ${routedModel}`
+              : "Model-dependent; select a routed model for exact capabilities",
+        active: thinking === configured,
+        unavailable: !!supported && !supported.includes(thinking),
+      }))];
+    return items;
   }
 
   private filteredEditorItems() {
@@ -473,8 +537,8 @@ export class TeammateControlCenter implements Component, Focusable {
       rows.push(this.params.theme.fg("warning", "□ No matching options · Backspace clears the filter"));
     }
     if (this.statusText) rows.push(this.statusLine(inner));
-    rows.push(truncateToWidth(
-      `${this.params.theme.fg("dim", "↑↓")} select ${this.params.theme.fg("dim", "· type")} filter ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· Esc/←")} back`,
+      rows.push(truncateToWidth(
+      `${this.params.theme.fg("dim", "Esc/←")} back ${this.params.theme.fg("dim", "· Enter")} save ${this.params.theme.fg("dim", "· ↑↓")} select ${this.params.theme.fg("dim", "· type")} filter`,
       inner,
       "…",
     ));
@@ -576,7 +640,7 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private filterLine(width: number, query: string, count: number): string {
     const marker = this.focused ? CURSOR_MARKER : "";
-    const queryText = query ? `${query}${marker}` : this.params.theme.fg("dim", "type to filter");
+    const queryText = query ? `${query}${marker}` : `${marker}${this.params.theme.fg("dim", "type to filter")}`;
     return truncateToWidth(`${this.params.theme.fg("accent", "›")} ${queryText} ${this.params.theme.fg("dim", `· ${count} shown`)}`, width, "…");
   }
 
@@ -586,7 +650,7 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private footerLine(width: number): string {
     const action = this.tab === "routing" ? "Enter model · Ctrl+→ thinking" : this.tab === "active" ? "Enter open" : "";
-    const segments = ["Tab/←→ view", "↑↓ select", "type filter", action, "Esc close"];
+    const segments = ["Esc close", action, "↑↓ select", "Tab/←→ view", "type filter"];
     let footer = "";
     for (const segment of segments.filter(Boolean)) {
       const next = footer ? `${footer} · ${segment}` : segment;
@@ -608,16 +672,22 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private renderCompact(width: number): string {
     if (this.modelTaskType) {
-      return truncateToWidth(`Routing › ${TEAMMATE_TASK_TYPE_META[this.modelTaskType].label} › ${this.editorKind} · Esc back`, width, "…");
+      const item = this.filteredEditorItems()[this.modelSelected];
+      return truncateToWidth(
+        `Esc back · ${TEAMMATE_TASK_TYPE_META[this.modelTaskType].label} · ${item?.label ?? this.editorKind}`,
+        width,
+        "…",
+      );
     }
-    const count = this.currentItems().length;
-    return truncateToWidth(`Teammates · ${TAB_LABELS[this.tab]} ${count} · Tab view`, width, "…");
+    const item = this.currentItems()[this.selected[this.tab]];
+    const label = item ? this.itemLine(item, true, Math.max(1, width)) : `${TAB_LABELS[this.tab]} empty`;
+    return truncateToWidth(`Esc close · ${label}`, width, "…");
   }
 }
 
 export async function showModelMappingOverlay(
   ctx: ExtensionContext,
-  availableModels: readonly string[],
+  availableModels: readonly TeammateModelCapability[],
   options: TeammateControlCenterOptions = {},
 ): Promise<void> {
   let initialTab: ControlCenterTab = "routing";
@@ -634,7 +704,15 @@ export async function showModelMappingOverlay(
         requestRender: () => tui.requestRender(),
         close: done,
       });
-      return controlCenter;
+      return {
+        render: (width: number) => controlCenter.render(width),
+        handleInput: (data: string) => controlCenter.handleInput(data),
+        invalidate: () => controlCenter.invalidate(),
+        dispose: () => {
+          controlCenter.dispose();
+          done(null);
+        },
+      };
     }, {
       overlay: true,
       overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },

@@ -1,14 +1,39 @@
+import {
+  TEAMMATE_THINKING_LEVELS,
+  parseTeammateThinkingLevel,
+  type TeammateThinkingLevel,
+} from "../shared/thinking.ts";
+
 export interface AvailableModelEntry {
   provider: string;
   id: string;
   name?: string;
   reasoning?: boolean;
+  thinkingLevelMap?: Partial<Record<TeammateThinkingLevel, string | null>>;
+}
+
+export interface TeammateModelCapability {
+  id: string;
+  reasoning?: boolean;
+  thinkingLevels?: readonly TeammateThinkingLevel[];
 }
 
 export interface ModelCatalogSnapshot {
   signature: string;
   systemPrompt: string;
   modelIds: string[];
+  models: TeammateModelCapability[];
+}
+
+export function supportedThinkingLevels(model: AvailableModelEntry): TeammateThinkingLevel[] | undefined {
+  if (model.reasoning === false) return ["off"];
+  if (model.reasoning !== true) return undefined;
+
+  return TEAMMATE_THINKING_LEVELS.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    return level !== "xhigh" || mapped !== undefined;
+  });
 }
 
 const START_MARKER = "<available_teammate_models>";
@@ -31,15 +56,28 @@ function normalizedEntries(models: AvailableModelEntry[]): AvailableModelEntry[]
 export function createModelCatalogSnapshot(models: AvailableModelEntry[]): ModelCatalogSnapshot {
   const entries = normalizedEntries(models);
   const modelIds = entries.map((model) => `${model.provider}/${model.id}`);
-  const lines = entries.length > 0
-    ? entries.map((model) => `- ${model.provider}/${model.id}${model.reasoning ? " [reasoning]" : ""}`)
+  const capabilities = entries.map((model) => {
+    const thinkingLevels = supportedThinkingLevels(model);
+    return {
+      id: `${model.provider}/${model.id}`,
+      reasoning: model.reasoning,
+      thinkingLevels,
+    };
+  });
+  const lines = capabilities.length > 0
+    ? capabilities.map((model) => {
+      const levels = model.thinkingLevels;
+      const thinking = levels ? ` [thinking:${levels.join(",")}]` : model.reasoning ? " [reasoning]" : "";
+      return `- ${model.id}${thinking}`;
+    })
     : ["- (none; configure provider authentication before selecting a teammate model)"];
 
   return {
-    signature: entries
-      .map((model) => `${model.provider}/${model.id}:${model.reasoning ? "reasoning" : "standard"}`)
+    signature: capabilities
+      .map((model) => `${model.id}:${model.reasoning ?? "unknown"}:${model.thinkingLevels?.join(",") ?? "unknown"}`)
       .join("\n"),
     modelIds,
+    models: capabilities,
     systemPrompt: `${START_MARKER}\nAvailable authenticated models for the teammate tool:\n${lines.join("\n")}\n\nUse an exact provider/model identifier in the top-level model field or a task-level model field. Task-level model overrides the top-level default.\n${END_MARKER}`,
   };
 }
