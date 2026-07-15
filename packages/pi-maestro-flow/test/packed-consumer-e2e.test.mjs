@@ -33,17 +33,19 @@ const piCli = resolve(
 );
 const piCommand = [process.execPath, piCli];
 
-test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi process", { timeout: 360_000 }, () => {
+test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi process", { timeout: 900_000 }, () => {
   const shortTempRoot = process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
   const root = join(shortTempRoot, `pme-${process.pid}-${Date.now()}`);
   const consumer = join(root, "consumer");
   const workflowRoot = join(root, "workflow");
   const maestroHome = join(root, "maestro-home");
   const installHome = join(root, "install-home");
+  const npmPrefix = join(root, "npm-prefix");
   mkdirSync(consumer, { recursive: true });
   mkdirSync(workflowRoot, { recursive: true });
   mkdirSync(maestroHome, { recursive: true });
   mkdirSync(installHome, { recursive: true });
+  mkdirSync(npmPrefix, { recursive: true });
 
   try {
     const localMaestroPackage = JSON.parse(readFileSync(join(localMaestroRoot, "package.json"), "utf8"));
@@ -64,6 +66,7 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
       HOME: installHome,
       USERPROFILE: installHome,
       MAESTRO_HOME: maestroHome,
+      npm_config_prefix: npmPrefix,
     };
     run(
       npmCommand,
@@ -77,7 +80,7 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
       ["install", tarball, "--no-audit", "--no-fund"],
       consumer,
       installEnv,
-      240_000,
+      600_000,
     );
 
     const installed = join(consumer, "node_modules", "pi-maestro-flow");
