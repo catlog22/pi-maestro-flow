@@ -292,6 +292,7 @@ export async function onBeforeAgentStartTodo(
     return undefined;
   }
   const activation = await ensureSkillActivation(active);
+  assertActiveSkillStack(active, activation);
   runInjectedStackRevision = activation.stackRevision;
   return {
     systemPrompt: `${event.systemPrompt}\n\n${renderActivationPrompt(active, activation)}`,
@@ -304,6 +305,7 @@ export async function onContextTodo(
   const active = findActiveTask();
   if (!active || active.skills.length === 0) return undefined;
   const activation = await ensureSkillActivation(active);
+  assertActiveSkillStack(active, activation);
   if (runInjectedStackRevision === activation.stackRevision) return undefined;
   return {
     messages: [
@@ -837,6 +839,13 @@ function renderActivationPrompt(task: TodoTask, activation: SkillActivation): st
     "Do not continue the previous skill workflow until the task is moved back to pending and activated again.",
     "</active_skill_stack_stale>",
   ].join("\n");
+}
+
+function assertActiveSkillStack(task: TodoTask, activation: SkillActivation): void {
+  if (activation.state === "active") return;
+  throw new Error(
+    `Todo task #${task.id} skill activation is stale. Move the task back to pending and reactivate it before continuing the Run.`,
+  );
 }
 
 function cloneActivationBinding(binding: SkillActivationBindingMetadata): SkillActivationBindingMetadata {

@@ -2,12 +2,12 @@ import type { TodoSkillBinding } from "../skills/skill-composer.ts";
 
 export type WorkflowSessionStatus = "planned" | "running" | "paused" | "sealed" | "archived" | "failed";
 export type WorkflowRunStatus = "created" | "running" | "blocked" | "failed" | "completed" | "sealed";
-export type WorkflowGateStatus = "pending" | "passed" | "failed" | "waived" | "skipped";
+export type WorkflowGateStatus = "pending" | "running" | "passed" | "failed" | "blocked" | "waived" | "skipped";
 
 export interface WorkflowGate {
   id: string;
   runId?: string;
-  phase?: "entry" | "exit" | "session";
+  phase?: "entry" | "phase" | "exit" | "transition" | "knowledge" | "session";
   blocking: boolean;
   status: WorkflowGateStatus;
   source?: "contract" | "prepared" | "handoff";

@@ -404,13 +404,15 @@ function runStatus(value: unknown): WorkflowRunStatus {
 }
 
 function gateStatus(value: unknown): WorkflowGate["status"] {
-  return ["pending", "passed", "failed", "waived", "skipped"].includes(String(value))
+  return ["pending", "running", "passed", "failed", "blocked", "waived", "skipped"].includes(String(value))
     ? value as WorkflowGate["status"]
     : "pending";
 }
 
 function phaseValue(value: unknown): WorkflowGate["phase"] | undefined {
-  return ["entry", "exit", "session"].includes(String(value)) ? value as WorkflowGate["phase"] : undefined;
+  return ["entry", "phase", "exit", "transition", "knowledge", "session"].includes(String(value))
+    ? value as WorkflowGate["phase"]
+    : undefined;
 }
 
 function sourceValue(value: unknown): WorkflowGate["source"] | undefined {
