@@ -89,3 +89,11 @@ Teammate 的多层运行参数必须复用单一 canonical enum，并在 tool sc
 当多个 Language Server 或 provider 为一次文件操作返回 WorkspaceEdit 时，必须先收集全部响应，拒绝除明确 MethodNotFound 之外的错误，统一校验 URI、range、workspace 边界和操作顺序，再把引用编辑与最终 file rename 作为一次可回滚事务提交。禁止逐 provider 边请求边写入，以免后续失败留下部分修改。
 
 </spec-entry>
+
+<spec-entry category="coding" keywords="teammate,normalize,normalizeteammateparams,drift" date="2026-07-15" sid="S-20260715-o48y" title="teammate 参数归一化单一实现约束" description="teammate 归一化逻辑必须走共享 normalizeTeammateParams，禁止双路径内联重写" source="master@19a9519">
+
+### teammate 参数归一化单一实现约束
+
+teammate 工具的参数归一化（单/多任务/chain 判定、顶层默认值下沉、空任务校验、{name}/dependsOn 引用校验）必须且只能通过 packages/pi-maestro-teammate/src/runs/execution.ts 的 normalizeTeammateParams() 完成。禁止在 extension/index.ts 的 root execute 或 handleProxyRequest 内联重写归一化逻辑——历史上两份内联实现产生过漂移（含错误消息不一致、chain 默认值合并差异）。守护测试：test/graph-status-and-structured-output.test.ts 以源码正则断言两条路径均调用 normalizeTeammateParams 且不含内联 thinking 解析；行为测试见 test/normalize.test.ts。新增归一化规则时改共享函数并补 normalize.test.ts 用例。
+
+</spec-entry>

@@ -158,7 +158,11 @@ test("statusline renders canonical Session/Run separately from active tool calls
           { id: "GATE-002", blocking: true, status: "passed" },
           { id: "GATE-003", blocking: true, status: "pending" },
         ],
-        chain: [{ step: "plan", command: "plan", status: "blocked", runId: "003" }],
+        chain: [
+          { step: "analyze", command: "analyze", status: "completed", runId: null },
+          { step: "grill", command: "grill", status: "completed", runId: null },
+          { step: "plan", command: "plan", status: "blocked", runId: "003" },
+        ],
         runs: [{
           runId: "003",
           parentRunId: null,
