@@ -194,6 +194,37 @@ test("session_tree keeps the replacement footer live and fences the replaced foo
   }
 });
 
+test("agent and tool completion refresh Git under the active footer generation", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const calls: Array<{
+    resolve(result: { code: number; stdout: string; stderr: string }): void;
+  }> = [];
+  const harness = createHarness({
+    exec: () => new Promise((resolve) => calls.push({ resolve })),
+  });
+  try {
+    calls[0]!.resolve({ code: 0, stdout: "## initial-branch\n", stderr: "" });
+    await settleAsyncWork();
+
+    harness.emit("agent_end", { type: "agent_end" });
+    t.mock.timers.tick(500);
+    assert.equal(calls.length, 2);
+    calls[1]!.resolve({ code: 0, stdout: "## agent-branch\n", stderr: "" });
+    await settleAsyncWork();
+    assert.match(stripAnsi(harness.render(120)[0]), /agent-branch/);
+
+    harness.emit("tool_execution_end", { type: "tool_execution_end" });
+    t.mock.timers.tick(500);
+    assert.equal(calls.length, 3);
+    calls[2]!.resolve({ code: 0, stdout: "## tool-branch\n", stderr: "" });
+    await settleAsyncWork();
+    assert.match(stripAnsi(harness.render(120)[0]), /tool-branch/);
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
+
 test("statusline accumulates message usage incrementally and rebuilds only at branch lifecycle boundaries", () => {
   const initialBranch = Array.from({ length: 1_000 }, () => ({
     type: "message",

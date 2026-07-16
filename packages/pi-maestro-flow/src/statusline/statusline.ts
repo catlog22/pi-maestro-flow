@@ -485,7 +485,7 @@ export function installStatusline(
 
 	pi.on("agent_end", () => {
 		rs.isAgentRunning = false;
-		scheduleGitRefresh();
+		scheduleGitRefresh(footerGeneration);
 		invalidate();
 	});
 
@@ -508,7 +508,7 @@ export function installStatusline(
 			rs.contextPercent = usage.percent;
 		}
 		// Debounced git refresh after tool completes (may have edited files)
-		scheduleGitRefresh();
+		scheduleGitRefresh(footerGeneration);
 		invalidate();
 	});
 
