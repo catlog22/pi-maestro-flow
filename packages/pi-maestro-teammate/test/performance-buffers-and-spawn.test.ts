@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import * as fs from "node:fs";
 import test from "node:test";
 import type { AgentConfig } from "../src/agents/agents.ts";
 import {
@@ -58,6 +59,42 @@ test("progress bursts coalesce before expensive flush and terminal state flushes
     assert.equal(expensiveFlushes, 1, "running burst must not trigger graph sort/broadcast/render work");
     gate.mark(true);
     assert.equal(expensiveFlushes, 2, "terminal progress must synchronously flush the coalesced state");
+  } finally {
+    gate.dispose();
+  }
+});
+
+test("proxy graph progress batches burst snapshots and synchronously publishes terminal state", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const proxyStart = source.indexOf("const pendingProgressByTask = new Map<number, AgentProgress>();");
+  const proxyEnd = source.indexOf("onChildRequest:", proxyStart);
+  assert.ok(proxyStart >= 0 && proxyEnd > proxyStart);
+  const proxyProgress = source.slice(proxyStart, proxyEnd);
+  assert.match(proxyProgress, /createProgressFlushGate\(/);
+  assert.match(proxyProgress, /pendingProgressByTask\.set\(taskIndex, data\)/);
+  assert.match(proxyProgress, /\.mark\(data\.status === "completed" \|\| data\.status === "failed"\)/);
+  const callbackStart = proxyProgress.indexOf("onProgress: normalizedTasks");
+  assert.ok(callbackStart >= 0);
+  assert.doesNotMatch(proxyProgress.slice(callbackStart), /progressSnapshot\(\)/);
+
+  const pending = new Map<number, number>();
+  const snapshots: number[][] = [];
+  const gate = createProgressFlushGate(() => {
+    snapshots.push([...pending.values()].sort((left, right) => left - right));
+    pending.clear();
+  }, 60_000);
+  try {
+    pending.set(0, 0);
+    gate.mark();
+    for (let index = 1; index <= 5_000; index += 1) {
+      pending.set(index % 8, index);
+      gate.mark();
+    }
+    assert.equal(snapshots.length, 1, "non-terminal burst must not sort a full snapshot per event");
+    pending.set(7, 5_001);
+    gate.mark(true);
+    assert.equal(snapshots.length, 2, "terminal progress must publish synchronously");
+    assert.ok(snapshots[1].includes(5_001));
   } finally {
     gate.dispose();
   }

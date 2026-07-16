@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { TodoMirrorTaskSpec } from "../src/session/types.ts";
+import { todoOriginKey, type TodoMirrorTaskSpec } from "../src/session/types.ts";
 import {
   executeTodo,
   getTodoCompactionSnapshot,
@@ -111,6 +111,51 @@ test("Todo projection generation authoritatively clears mirrors across Session i
   } finally {
     onSessionShutdown(todoContext);
   }
+});
+
+test("Todo projection replaces same-Session mirrors and activation when identity generation changes", async () => {
+  initTodo({ appendEntry() {} } as never);
+  const todoContext = context([]);
+  const extensionContext = { cwd: "D:/workspace", ui: { setStatus() {} } } as unknown as ExtensionContext;
+  onSessionStart(todoContext);
+  try {
+    const specs = mirrorSpecs().slice(1);
+    const generation1 = "canonical:valid:session-1:1";
+    const generation2 = "canonical:valid:session-1:2";
+    const first = reconcileMirrorTasks(specs, extensionContext, generation1);
+    const firstId = first.created[0]!;
+
+    await executeTodo({ action: "update", id: firstId, status: "pending" }, extensionContext);
+    await executeTodo({ action: "next" }, extensionContext);
+    const activated = getVisibleTasks().find((task) => task.id === firstId)!;
+    assert.equal(activated.origin?.sessionGeneration, generation1);
+    assert.ok(activated.skillActivation);
+
+    const stable = reconcileMirrorTasks(specs, extensionContext, generation1);
+    assert.deepEqual(stable.unchanged, [firstId]);
+    assert.ok(getVisibleTasks().find((task) => task.id === firstId)?.skillActivation);
+
+    const replaced = reconcileMirrorTasks(specs, extensionContext, generation2);
+    assert.deepEqual(replaced.tombstoned, [firstId]);
+    assert.equal(replaced.created.length, 1);
+    assert.notEqual(replaced.created[0], firstId);
+    const replacement = getVisibleTasks().find((task) => task.id === replaced.created[0])!;
+    assert.equal(replacement.origin?.sessionId, "session-1");
+    assert.equal(replacement.origin?.sessionGeneration, generation2);
+    assert.equal(replacement.skillActivation, undefined);
+  } finally {
+    onSessionShutdown(todoContext);
+  }
+});
+
+test("Todo origin keys preserve the persisted legacy shape when generation is absent", () => {
+  const legacyOrigin = { sessionId: "session-1", step: "plan", runId: "run-2", runSeq: "002" };
+  const legacyKey = "session-1\u0000plan\u0000run-2\u0000002";
+  assert.equal(todoOriginKey(legacyOrigin), legacyKey);
+  assert.equal(
+    todoOriginKey({ ...legacyOrigin, sessionGeneration: "canonical:valid:session-1:2" }),
+    `${legacyKey}\u0000canonical:valid:session-1:2`,
+  );
 });
 
 test("Todo projection publishes no mirror or generation cleanup when persistence fails", async () => {

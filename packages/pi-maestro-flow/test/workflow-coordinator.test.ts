@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 import test from "node:test";
-import { RunCliAdapter, type RunCliResult } from "../src/session/cli-adapter.ts";
+import { defaultRunner, RunCliAdapter, type RunCliResult } from "../src/session/cli-adapter.ts";
 import {
   WorkflowCoordinator,
   WorkflowLeaseBusyError,
@@ -378,6 +380,75 @@ test("CLI adapter detects parent-run retry and rejects unsupported cancel", asyn
     "--arg", "--scope", "--arg", "core", "--workflow-root", "D:/workspace",
   ]);
   await assert.rejects(adapter.cancel("run-1"), /does not support run capability: cancel/);
+});
+
+test("default CLI runner times out and terminates a hung process", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-cli-runner-timeout-"));
+  try {
+    const execution = await defaultRunner(
+      ["-e", "setInterval(() => undefined, 1000)"],
+      root,
+      { executable: process.execPath, timeoutMs: 50, maxOutputBytes: 1024 },
+    );
+    assert.equal(execution.exitCode, 1);
+    assert.match(execution.stderr, /timed out after 50ms/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("default CLI runner bounds UTF-8 output by bytes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-cli-runner-output-"));
+  try {
+    const execution = await defaultRunner(
+      ["-e", "process.stdout.write('界'.repeat(4096)); setInterval(() => undefined, 1000)"],
+      root,
+      { executable: process.execPath, timeoutMs: 5_000, maxOutputBytes: 128 },
+    );
+    assert.equal(execution.exitCode, 1);
+    assert.match(execution.stderr, /output exceeded 128 bytes/);
+    assert.ok(Buffer.byteLength(execution.stdout, "utf8") <= 128);
+    assert.ok(Buffer.byteLength(execution.stderr, "utf8") <= 128);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("default CLI runner settles once and removes listeners when error races close", async () => {
+  const child = new EventEmitter() as EventEmitter & {
+    stdout: PassThrough;
+    stderr: PassThrough;
+    pid?: number;
+    exitCode: number | null;
+    signalCode: NodeJS.Signals | null;
+    kill(): boolean;
+  };
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.exitCode = null;
+  child.signalCode = null;
+  child.kill = () => true;
+  const spawnProcess = () => {
+    queueMicrotask(() => {
+      child.emit("error", new Error("spawn failed"));
+      child.emit("close", 1);
+    });
+    return child;
+  };
+  let settlements = 0;
+  const execution = await defaultRunner([], process.cwd(), { spawnProcess: spawnProcess as never }).then((result) => {
+    settlements++;
+    return result;
+  });
+  await delay(10);
+
+  assert.equal(execution.exitCode, 1);
+  assert.match(execution.stderr, /spawn failed/);
+  assert.equal(settlements, 1);
+  assert.equal(child.listenerCount("error"), 0);
+  assert.equal(child.listenerCount("close"), 0);
+  assert.equal(child.stdout.listenerCount("data"), 0);
+  assert.equal(child.stderr.listenerCount("data"), 0);
 });
 
 function fakeBridge(snapshot: WorkflowSnapshot): WorkflowSnapshotProvider {

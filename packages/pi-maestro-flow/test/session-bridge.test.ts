@@ -4,6 +4,33 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { buildTodoMirrorSpecs, loadCanonicalSnapshot, WorkflowBridge } from "../src/session/bridge.ts";
+import type { WorkflowSnapshot } from "../src/session/types.ts";
+
+test("bridge ignores an older refresh that completes after a newer snapshot", async () => {
+  const older = deferred<WorkflowSnapshot>();
+  const newer = deferred<WorkflowSnapshot>();
+  const snapshots = [older.promise, newer.promise];
+  class InterleavedWorkflowBridge extends WorkflowBridge {
+    protected override loadSnapshot(): Promise<WorkflowSnapshot> {
+      const snapshot = snapshots.shift();
+      assert.ok(snapshot, "each refresh must consume one controlled snapshot");
+      return snapshot;
+    }
+  }
+  const bridge = new InterleavedWorkflowBridge("D:/workspace");
+  const olderRefresh = bridge.refresh();
+  const newerRefresh = bridge.refresh();
+  const newerSnapshot = bridgeSnapshot("newer");
+  const olderSnapshot = bridgeSnapshot("older");
+
+  newer.resolve(newerSnapshot);
+  assert.equal(await newerRefresh, newerSnapshot);
+  assert.equal(bridge.getSnapshot(), newerSnapshot);
+
+  older.resolve(olderSnapshot);
+  assert.equal(await olderRefresh, newerSnapshot);
+  assert.equal(bridge.getSnapshot(), newerSnapshot, "the stale completion must not replace the latest snapshot");
+});
 
 test("bridge reads canonical Session/Run/Artifact state and changes revision by content", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-session-bridge-"));
@@ -438,6 +465,27 @@ function mirrorSnapshot(options: {
       aliases: {},
     },
   };
+}
+
+function bridgeSnapshot(fingerprint: string): WorkflowSnapshot {
+  return {
+    source: "none",
+    projectRoot: "D:/workspace",
+    loadedAt: `2026-07-16T00:00:0${fingerprint === "older" ? "1" : "2"}.000Z`,
+    revision: { fingerprint },
+    diagnostics: [],
+  };
+}
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+} {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((fulfill) => {
+    resolve = fulfill;
+  });
+  return { promise, resolve };
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {

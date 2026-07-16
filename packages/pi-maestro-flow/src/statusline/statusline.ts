@@ -316,6 +316,7 @@ export function installStatusline(
 	let gitTimer: ReturnType<typeof setInterval> | null = null;
 	let gitDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let disposed = false;
+	let sessionGeneration = 0;
 
 	function invalidate(): void {
 		invalidateFn?.();
@@ -345,9 +346,13 @@ export function installStatusline(
 
 	function scheduleGitRefresh(): void {
 		if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
+		const generation = sessionGeneration;
+		const refreshCwd = cwd;
 		gitDebounceTimer = setTimeout(async () => {
 			if (disposed) return;
-			rs.git = await refreshGit(pi, cwd);
+			const git = await refreshGit(pi, refreshCwd);
+			if (disposed || generation !== sessionGeneration || refreshCwd !== cwd) return;
+			rs.git = git;
 			invalidate();
 		}, GIT_DEBOUNCE_MS);
 	}
@@ -406,7 +411,9 @@ export function installStatusline(
 		if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }
 		if (gitDebounceTimer) { clearTimeout(gitDebounceTimer); gitDebounceTimer = null; }
 
-		cwd = ctx.cwd;
+		const generation = ++sessionGeneration;
+		const sessionCwd = ctx.cwd;
+		cwd = sessionCwd;
 		disposed = false;
 
 		if (ctx.model?.id) rs.model = ctx.model.id;
@@ -421,7 +428,8 @@ export function installStatusline(
 		installFooter(ctx);
 
 		// Fire-and-forget async git refresh
-		refreshGit(pi, cwd).then((git) => {
+		refreshGit(pi, sessionCwd).then((git) => {
+			if (disposed || generation !== sessionGeneration || sessionCwd !== cwd) return;
 			rs.git = git;
 			invalidate();
 		});
@@ -429,7 +437,8 @@ export function installStatusline(
 		// Periodic git refresh
 		gitTimer = setInterval(() => {
 			if (disposed) return;
-			refreshGit(pi, cwd).then((git) => {
+			refreshGit(pi, sessionCwd).then((git) => {
+				if (disposed || generation !== sessionGeneration || sessionCwd !== cwd) return;
 				rs.git = git;
 				invalidate();
 			});
@@ -438,6 +447,7 @@ export function installStatusline(
 	});
 
 	pi.on("session_shutdown", () => {
+		sessionGeneration += 1;
 		disposed = true;
 		invalidateFn = null;
 		if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }

@@ -1,5 +1,6 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
+import { dirname, join, resolve } from "node:path";
 import { PERMISSION_MODES, type PermissionBehavior, type PermissionMode, type PermissionRuleSettings } from "./types.ts";
 
 export interface LoadedPermissionSettings {
@@ -11,6 +12,7 @@ export interface LoadedPermissionSettings {
 }
 
 const EMPTY_PERMISSIONS: PermissionRuleSettings = { allow: [], ask: [], deny: [] };
+const mutationQueues = new Map<string, Promise<void>>();
 
 export async function loadPermissionSettings(
   cwd: string,
@@ -56,27 +58,31 @@ export async function updatePermissionRules(
   operation: "add" | "replace" | "remove",
   rules: string[],
 ): Promise<void> {
-  const root = await readSettingsRoot(filePath);
-  const rawPermissions = isRecord(root.permissions) ? root.permissions : {};
-  const existing = Array.isArray(rawPermissions[behavior])
-    ? rawPermissions[behavior].filter((entry): entry is string => typeof entry === "string")
-    : [];
-  if (operation === "replace") rawPermissions[behavior] = [...new Set(rules)];
-  if (operation === "add") rawPermissions[behavior] = [...new Set([...existing, ...rules])];
-  if (operation === "remove") {
-    const removals = new Set(rules);
-    rawPermissions[behavior] = existing.filter((rule) => !removals.has(rule));
-  }
-  root.permissions = rawPermissions;
-  await atomicWriteJson(filePath, root);
+  await serializeMutation(filePath, async () => {
+    const root = await readSettingsRoot(filePath);
+    const rawPermissions = isRecord(root.permissions) ? root.permissions : {};
+    const existing = Array.isArray(rawPermissions[behavior])
+      ? rawPermissions[behavior].filter((entry): entry is string => typeof entry === "string")
+      : [];
+    if (operation === "replace") rawPermissions[behavior] = [...new Set(rules)];
+    if (operation === "add") rawPermissions[behavior] = [...new Set([...existing, ...rules])];
+    if (operation === "remove") {
+      const removals = new Set(rules);
+      rawPermissions[behavior] = existing.filter((rule) => !removals.has(rule));
+    }
+    root.permissions = rawPermissions;
+    await atomicWriteJson(filePath, root);
+  });
 }
 
 export async function setPermissionDefaultMode(filePath: string, mode: PermissionMode): Promise<void> {
-  const root = await readSettingsRoot(filePath);
-  const rawPermissions = isRecord(root.permissions) ? root.permissions : {};
-  rawPermissions.defaultMode = mode;
-  root.permissions = rawPermissions;
-  await atomicWriteJson(filePath, root);
+  await serializeMutation(filePath, async () => {
+    const root = await readSettingsRoot(filePath);
+    const rawPermissions = isRecord(root.permissions) ? root.permissions : {};
+    rawPermissions.defaultMode = mode;
+    root.permissions = rawPermissions;
+    await atomicWriteJson(filePath, root);
+  });
 }
 
 async function readSettingsRoot(filePath: string): Promise<Record<string, unknown>> {
@@ -176,9 +182,49 @@ function restrictUntrustedProjectPermissions(
 
 async function atomicWriteJson(filePath: string, value: Record<string, unknown>): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
-  const tempPath = `${filePath}.${process.pid}.tmp`;
-  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, "utf8");
-  await rename(tempPath, filePath);
+  const tempPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  let tempHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let tempCreated = false;
+  try {
+    tempHandle = await open(tempPath, "wx", 0o600);
+    tempCreated = true;
+    await tempHandle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await tempHandle.close();
+    tempHandle = undefined;
+    await rename(tempPath, filePath);
+  } finally {
+    try {
+      await tempHandle?.close();
+    } finally {
+      if (tempCreated) await removeTemporaryFile(tempPath);
+    }
+  }
+}
+
+async function serializeMutation(filePath: string, mutate: () => Promise<void>): Promise<void> {
+  const key = canonicalFilePath(filePath);
+  const previous = mutationQueues.get(key) ?? Promise.resolve();
+  const mutation = previous.catch(() => undefined).then(mutate);
+  const settled = mutation.then(() => undefined, () => undefined);
+  mutationQueues.set(key, settled);
+  try {
+    await mutation;
+  } finally {
+    if (mutationQueues.get(key) === settled) mutationQueues.delete(key);
+  }
+}
+
+function canonicalFilePath(filePath: string): string {
+  const canonical = resolve(filePath);
+  return process.platform === "win32" ? canonical.toLowerCase() : canonical;
+}
+
+async function removeTemporaryFile(filePath: string): Promise<void> {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) throw error;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

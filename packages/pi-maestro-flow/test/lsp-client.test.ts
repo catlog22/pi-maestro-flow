@@ -4,7 +4,12 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
-import { LspClient, type LspClientCacheLimits } from "../src/tools/lsp/client.ts";
+import {
+  DEFAULT_LSP_CLIENT_CACHE_LIMITS,
+  LspClient,
+  type LspClientCacheLimits,
+  type LspTransportLimits,
+} from "../src/tools/lsp/client.ts";
 
 test("LSP client frames JSON-RPC, opens documents, receives diagnostics, and shuts down", async () => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-lsp-client-"));
@@ -182,6 +187,7 @@ process.stdin.on('data', chunk => {
     else if (message.method === 'exit') process.exit(0);
   }
 });
+
 `, "utf8");
   await fs.writeFile(shim, `@echo off\r\n"${process.execPath}" "${server}" %*\r\n`, "utf8");
 
@@ -257,5 +263,111 @@ process.stdin.on('data', chunk => {
   } finally {
     if (!client.closed) await client.shutdown();
     await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LSP client accepts JSON-RPC headers and bodies split across stdout chunks", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-lsp-chunked-"));
+  const server = path.join(root, "chunked-lsp.mjs");
+  await fs.writeFile(server, `
+let buffer = Buffer.alloc(0);
+function sendChunked(message) {
+  const body = Buffer.from(JSON.stringify(message));
+  const frame = Buffer.concat([Buffer.from('Content-Length: ' + body.length + '\\r\\n\\r\\n'), body]);
+  process.stdout.write(frame.subarray(0, 7));
+  setTimeout(() => {
+    process.stdout.write(frame.subarray(7, 24));
+    setTimeout(() => process.stdout.write(frame.subarray(24)), 2);
+  }, 2);
+}
+process.stdin.on('data', chunk => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const headerEnd = buffer.indexOf('\\r\\n\\r\\n');
+    if (headerEnd < 0) return;
+    const match = /Content-Length:\\s*(\\d+)/i.exec(buffer.subarray(0, headerEnd).toString('ascii'));
+    if (!match) return;
+    const length = Number(match[1]);
+    const start = headerEnd + 4;
+    if (buffer.length < start + length) return;
+    const message = JSON.parse(buffer.subarray(start, start + length).toString('utf8'));
+    buffer = buffer.subarray(start + length);
+    if (message.method === 'initialize') sendChunked({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } });
+    else if (message.method === 'test/chunked') sendChunked({ jsonrpc: '2.0', id: message.id, result: { ok: true } });
+    else if (message.method === 'shutdown') sendChunked({ jsonrpc: '2.0', id: message.id, result: null });
+    else if (message.method === 'exit') process.exit(0);
+  }
+});
+`, "utf8");
+
+  const client = await LspClient.start({
+    name: "chunked",
+    command: process.execPath,
+    args: [server],
+    fileTypes: [".ts"],
+    rootMarkers: [],
+  }, root);
+  try {
+    assert.deepEqual(await client.request("test/chunked", null), { ok: true });
+  } finally {
+    await client.shutdown();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("LSP client fails closed on unterminated headers and oversized Content-Length", async () => {
+  const transportLimits: LspTransportLimits = {
+    maxHeaderBytes: 64,
+    maxContentLengthBytes: 2_048,
+  };
+  for (const scenario of ["unterminated", "oversized"] as const) {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), `maestro-lsp-${scenario}-`));
+    const server = path.join(root, "invalid-lsp.mjs");
+    await fs.writeFile(server, `
+let buffer = Buffer.alloc(0);
+function send(message) {
+  const body = Buffer.from(JSON.stringify(message));
+  process.stdout.write('Content-Length: ' + body.length + '\\r\\n\\r\\n');
+  process.stdout.write(body);
+}
+process.stdin.on('data', chunk => {
+  buffer = Buffer.concat([buffer, chunk]);
+  while (true) {
+    const headerEnd = buffer.indexOf('\\r\\n\\r\\n');
+    if (headerEnd < 0) return;
+    const match = /Content-Length:\\s*(\\d+)/i.exec(buffer.subarray(0, headerEnd).toString('ascii'));
+    if (!match) return;
+    const length = Number(match[1]);
+    const start = headerEnd + 4;
+    if (buffer.length < start + length) return;
+    const message = JSON.parse(buffer.subarray(start, start + length).toString('utf8'));
+    buffer = buffer.subarray(start + length);
+    if (message.method === 'initialize') send({ jsonrpc: '2.0', id: message.id, result: { capabilities: {} } });
+    else if (message.method === 'test/invalid') {
+      if (${JSON.stringify(scenario)} === 'unterminated') process.stdout.write('X'.repeat(${transportLimits.maxHeaderBytes + 4}));
+      else process.stdout.write('Content-Length: ${transportLimits.maxContentLengthBytes + 1}\\r\\n\\r\\n');
+    }
+  }
+});
+`, "utf8");
+
+    const client = await LspClient.start({
+      name: scenario,
+      command: process.execPath,
+      args: [server],
+      fileTypes: [".ts"],
+      rootMarkers: [],
+    }, root, undefined, 20_000, undefined, DEFAULT_LSP_CLIENT_CACHE_LIMITS, transportLimits);
+    try {
+      await assert.rejects(
+        client.request("test/invalid", null, undefined, 5_000),
+        scenario === "unterminated" ? /header exceeded 64 bytes without a terminator/ : /Content-Length 2049 exceeds the 2048-byte frame limit/,
+      );
+      assert.equal(client.closed, true);
+      await assert.rejects(client.request("test/after-invalid", null), /is closed/);
+    } finally {
+      await client.shutdown();
+      await fs.rm(root, { recursive: true, force: true });
+    }
   }
 });

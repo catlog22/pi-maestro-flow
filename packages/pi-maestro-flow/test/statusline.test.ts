@@ -12,10 +12,16 @@ function stripAnsi(value: string): string {
   return value.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+async function settleAsyncWork(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
+}
+
 function createHarness(options: {
   activeToolCalls?: number;
   workflowSnapshot?: WorkflowSnapshotLike;
   branchEntries?: unknown[];
+  cwd?: string;
+  exec?: (cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
 } = {}) {
   const handlers = new Map<string, EventHandler[]>();
   const statuses = new Map<string, string>();
@@ -32,13 +38,15 @@ function createHarness(options: {
       registered.push(handler);
       handlers.set(name, registered);
     },
-    async exec() { return { code: 1, stdout: "", stderr: "" }; },
+    async exec(_command: string, _args: string[], execOptions: { cwd?: string }) {
+      return options.exec?.(execOptions.cwd ?? "") ?? { code: 1, stdout: "", stderr: "" };
+    },
   } as unknown as ExtensionAPI;
   let branchEntries = options.branchEntries ?? [];
   let branchReads = 0;
   let branchEntryVisits = 0;
-  const ctx = {
-    cwd: "D:\\pi-maestro-flow",
+  let ctx = {
+    cwd: options.cwd ?? "D:\\pi-maestro-flow",
     hasUI: true,
     model: { id: "claude-test" },
     getContextUsage: () => ({ percent: 42 }),
@@ -78,6 +86,10 @@ function createHarness(options: {
     emit(name: string, event: unknown = {}) {
       for (const handler of handlers.get(name) ?? []) handler(event, ctx);
     },
+    startSession(nextCwd: string) {
+      ctx = { ...ctx, cwd: nextCwd } as ExtensionContext;
+      for (const handler of handlers.get("session_start") ?? []) handler({}, ctx);
+    },
     setBranch(entries: unknown[]) {
       branchEntries = entries;
     },
@@ -94,6 +106,48 @@ function createHarness(options: {
     },
   };
 }
+
+test("statusline rejects initial and periodic Git results from an older Session", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const calls: Array<{
+    cwd: string;
+    resolve(result: { code: number; stdout: string; stderr: string }): void;
+  }> = [];
+  const harness = createHarness({
+    cwd: "D:\\old-session",
+    exec: (cwd) => new Promise((resolve) => calls.push({ cwd, resolve })),
+  });
+  try {
+    assert.deepEqual(calls.map((call) => call.cwd), ["D:\\old-session"]);
+
+    t.mock.timers.tick(30_000);
+    assert.deepEqual(
+      calls.map((call) => call.cwd),
+      ["D:\\old-session", "D:\\old-session"],
+      "the old Session periodic refresh must be in flight before switching",
+    );
+
+    harness.startSession("D:\\new-session");
+    assert.deepEqual(
+      calls.map((call) => call.cwd),
+      ["D:\\old-session", "D:\\old-session", "D:\\new-session"],
+    );
+
+    calls[2]!.resolve({ code: 0, stdout: "## new-branch\n", stderr: "" });
+    await settleAsyncWork();
+    assert.match(stripAnsi(harness.render(120)[0]), /new-branch/);
+
+    calls[0]!.resolve({ code: 0, stdout: "## stale-initial\n", stderr: "" });
+    calls[1]!.resolve({ code: 0, stdout: "## stale-periodic\n", stderr: "" });
+    await settleAsyncWork();
+    const rendered = stripAnsi(harness.render(120)[0]);
+    assert.match(rendered, /new-branch/);
+    assert.doesNotMatch(rendered, /stale-initial|stale-periodic/);
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
 
 test("statusline accumulates message usage incrementally and rebuilds only at branch lifecycle boundaries", () => {
   const initialBranch = Array.from({ length: 1_000 }, () => ({

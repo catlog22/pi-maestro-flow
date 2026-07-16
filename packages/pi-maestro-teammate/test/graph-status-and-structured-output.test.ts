@@ -37,12 +37,15 @@ import {
   fenceLease,
   handoffBarrierReached,
   isSessionPathContained,
+  leaseSelection,
   leaseToken,
   ownsLease,
   requestHandback,
   requestPark,
   restoreMainOwnership,
+  sameLeaseSelection,
   sameLeaseToken,
+  transitionLeaseIfCurrent,
   transferToMain,
   unwrapLeasedMessage,
   wrapLeasedMessage,
@@ -369,6 +372,45 @@ test("session ownership handoff fences stale writers and requires reload before 
     buildFenceRecoveryMessages(fenced, "old-handback-nonce").map((message) => message.type),
     ["teammate_handoff_cancel", "teammate_lease_update"],
   );
+});
+
+test("awaited handoff transitions reject stale selections and transition no-ops", async () => {
+  let lease = createChildLease();
+  const selected = leaseSelection(lease);
+  let release!: () => void;
+  const boundary = new Promise<void>((resolve) => { release = resolve; });
+
+  const attemptedPark = (async () => {
+    await boundary;
+    const next = transitionLeaseIfCurrent(lease, selected, requestPark);
+    if (next) lease = next;
+    return next;
+  })();
+
+  lease = fenceLease(lease);
+  release();
+  assert.equal(await attemptedPark, undefined);
+  assert.equal(lease.state, "fenced");
+  assert.equal(sameLeaseSelection(lease, selected), false);
+
+  const active = createChildLease();
+  const activeSelection = leaseSelection(active);
+  assert.equal(transitionLeaseIfCurrent(active, activeSelection, transferToMain), undefined);
+  assert.equal(transitionLeaseIfCurrent(active, activeSelection, requestHandback), undefined);
+});
+
+test("teammate-session revalidates the complete lease after each awaited selection boundary", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const start = source.indexOf("async function handleTeammateSession(");
+  const end = source.indexOf("async function showTeammateControlCenter(", start);
+  assert.ok(start >= 0 && end > start);
+  const handler = source.slice(start, end);
+
+  assert.match(handler, /await ctx\.waitForIdle\(\);\s*const reloadingLease = transitionLeaseIfCurrent\(attached\.lease, selectedLease, requestHandback\)/);
+  assert.match(handler, /await ctx\.ui\.select[\s\S]*if \(!sameLeaseSelection\(agent\.lease, selectedLease\)\)/);
+  assert.match(handler, /const parkedLease = await prepareAgentHandoff\(agent, selectedLease\)[\s\S]*transitionLeaseIfCurrent\(agent\.lease, parkedLease, transferToMain\)/);
+  assert.doesNotMatch(handler, /agent\.lease = transferToMain\(agent\.lease\)/);
+  assert.doesNotMatch(handler, /attached\.lease = requestHandback\(attached\.lease\)/);
 });
 
 test("session identity is accepted only inside the canonical child session directory", () => {

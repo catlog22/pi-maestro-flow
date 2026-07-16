@@ -146,6 +146,59 @@ test("automatic diagnostic additions stay within the 4 KiB budget", async () => 
   assert.match(addition?.type === "text" ? addition.text : "", /Showing/);
 });
 
+test("automatic diagnostic failure suppression resets per session and remains bounded", async () => {
+  const manager = new FakeManager();
+  manager.error = new Error("Unable to start typescript: command missing");
+  const handler = createLspAutoDiagnosticsHandler(manager, {
+    debounceMs: 0,
+    maxReportedFailures: 1,
+  });
+  const notifications: Notification[] = [];
+  const ctx = context(path.resolve("workspace"), notifications);
+
+  assert.ok(await handler(event("edit", "src/a.ts"), ctx));
+  assert.equal(await handler(event("edit", "src/a.ts"), ctx), undefined);
+  assert.ok(await handler(event("edit", "src/b.ts"), ctx));
+  assert.ok(await handler(event("edit", "src/a.ts"), ctx));
+  assert.equal(notifications.length, 3);
+
+  handler.reset();
+  assert.ok(await handler(event("edit", "src/a.ts"), ctx));
+  assert.equal(notifications.length, 4);
+});
+
+test("automatic diagnostic notification suppression uses a bounded file LRU", async () => {
+  const manager = new FakeManager();
+  manager.client.diagnostics = [diagnostic(1, 1, "warning", 2)];
+  const handler = createLspAutoDiagnosticsHandler(manager, {
+    debounceMs: 0,
+    maxNotificationFiles: 1,
+  });
+  const notifications: Notification[] = [];
+  const ctx = context(path.resolve("workspace"), notifications);
+
+  await handler(event("edit", "src/a.ts"), ctx);
+  await handler(event("edit", "src/a.ts"), ctx);
+  await handler(event("edit", "src/b.ts"), ctx);
+  await handler(event("edit", "src/a.ts"), ctx);
+
+  assert.deepEqual(notifications.map((item) => item.message), [
+    "LSP src/a.ts: 1 warning(s)",
+    "LSP src/b.ts: 1 warning(s)",
+    "LSP src/a.ts: 1 warning(s)",
+  ]);
+});
+
+test("automatic diagnostic reset fences in-flight work from the prior session", async () => {
+  const manager = new FakeManager();
+  const handler = createLspAutoDiagnosticsHandler(manager, { debounceMs: 20 });
+  const pending = handler(event("edit", "src/app.ts"), context(path.resolve("workspace")));
+  handler.reset();
+
+  assert.equal(await pending, undefined);
+  assert.equal(manager.calls, 0);
+});
+
 function event(toolName: string, file: string, details?: unknown, isError = false): ToolResultEvent {
   return {
     type: "tool_result",

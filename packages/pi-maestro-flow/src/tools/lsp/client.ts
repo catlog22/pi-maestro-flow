@@ -1,4 +1,5 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { constants as bufferConstants } from "node:buffer";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
@@ -47,12 +48,22 @@ export interface LspClientCacheStats {
   diagnosticWaiters: number;
 }
 
+export interface LspTransportLimits {
+  maxHeaderBytes: number;
+  maxContentLengthBytes: number;
+}
+
 export const DEFAULT_LSP_CLIENT_CACHE_LIMITS: Readonly<LspClientCacheLimits> = Object.freeze({
   maxDocumentEntries: 64,
   maxDocumentBytes: 16 * 1024 * 1024,
   maxDiagnosticEntries: 128,
   maxDiagnosticBytes: 4 * 1024 * 1024,
   maxDiagnosticWaiters: 256,
+});
+
+export const DEFAULT_LSP_TRANSPORT_LIMITS: Readonly<LspTransportLimits> = Object.freeze({
+  maxHeaderBytes: 8 * 1024,
+  maxContentLengthBytes: 16 * 1024 * 1024,
 });
 
 export class LspClient implements LspClientLike {
@@ -80,6 +91,7 @@ export class LspClient implements LspClientLike {
     child: ChildProcessWithoutNullStreams,
     readonly onClose?: (error?: Error) => void,
     readonly cacheLimits: Readonly<LspClientCacheLimits> = DEFAULT_LSP_CLIENT_CACHE_LIMITS,
+    readonly transportLimits: Readonly<LspTransportLimits> = DEFAULT_LSP_TRANSPORT_LIMITS,
   ) {
     this.#child = child;
     child.stdout.on("data", (chunk: Buffer) => this.#read(chunk));
@@ -116,15 +128,24 @@ export class LspClient implements LspClientLike {
     timeoutMs = 20_000,
     onClose?: (error?: Error) => void,
     cacheLimits: Readonly<LspClientCacheLimits> = DEFAULT_LSP_CLIENT_CACHE_LIMITS,
+    transportLimits: Readonly<LspTransportLimits> = DEFAULT_LSP_TRANSPORT_LIMITS,
   ): Promise<LspClient> {
     validateCacheLimits(cacheLimits);
+    validateTransportLimits(transportLimits);
     const child = crossSpawn(config.command, config.args, {
       cwd: root,
       env: { ...process.env, ...config.env },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     }) as ChildProcessWithoutNullStreams;
-    const client = new LspClient(config, root, child, onClose, Object.freeze({ ...cacheLimits }));
+    const client = new LspClient(
+      config,
+      root,
+      child,
+      onClose,
+      Object.freeze({ ...cacheLimits }),
+      Object.freeze({ ...transportLimits }),
+    );
     try {
       await waitForSpawn(child, config.name, signal, timeoutMs);
       const initialize = await client.request("initialize", {
@@ -251,6 +272,10 @@ export class LspClient implements LspClientLike {
   async shutdown(): Promise<void> {
     if (this.#closed) {
       this.#clearCaches(false);
+      if (!await waitForExit(this.#child, 1_000)) {
+        try { this.#child.kill("SIGKILL"); } catch {}
+        await waitForExit(this.#child, 1_000);
+      }
       return;
     }
     this.#closing = true;
@@ -367,6 +392,11 @@ export class LspClient implements LspClientLike {
       throw new Error(`Language server ${this.config.name} input is closed.`);
     }
     const body = Buffer.from(JSON.stringify(message), "utf8");
+    if (body.length > this.transportLimits.maxContentLengthBytes) {
+      throw new RangeError(
+        `LSP message is ${body.length} bytes, exceeding the ${this.transportLimits.maxContentLengthBytes}-byte frame limit.`,
+      );
+    }
     const frame = Buffer.concat([Buffer.from(`Content-Length: ${body.length}\r\n\r\n`, "ascii"), body]);
     this.#child.stdin.write(frame, (error) => {
       if (error) this.#closeWithError(error);
@@ -374,25 +404,72 @@ export class LspClient implements LspClientLike {
   }
 
   #read(chunk: Buffer): void {
-    this.#buffer = Buffer.concat([this.#buffer, chunk]);
+    if (this.#closed) return;
+    const maxBufferedBytes = this.transportLimits.maxHeaderBytes + 4 + this.transportLimits.maxContentLengthBytes;
+    let offset = 0;
+    while (offset < chunk.length && !this.#closed) {
+      const available = maxBufferedBytes - this.#buffer.length;
+      if (available <= 0) {
+        this.#failProtocol(`buffer exceeded ${maxBufferedBytes} bytes`);
+        return;
+      }
+      const end = Math.min(chunk.length, offset + available);
+      this.#buffer = Buffer.concat([this.#buffer, chunk.subarray(offset, end)]);
+      offset = end;
+      this.#drainBuffer();
+    }
+  }
+
+  #drainBuffer(): void {
     while (true) {
       const headerEnd = this.#buffer.indexOf("\r\n\r\n");
-      if (headerEnd < 0) return;
-      const header = this.#buffer.subarray(0, headerEnd).toString("ascii");
-      const match = /(?:^|\r\n)Content-Length:\s*(\d+)/i.exec(header);
-      if (!match) {
-        this.#buffer = this.#buffer.subarray(headerEnd + 4);
-        continue;
+      if (headerEnd < 0) {
+        if (this.#buffer.length > this.transportLimits.maxHeaderBytes + 3) {
+          this.#failProtocol(`header exceeded ${this.transportLimits.maxHeaderBytes} bytes without a terminator`);
+        }
+        return;
       }
-      const length = Number(match[1]);
+      if (headerEnd > this.transportLimits.maxHeaderBytes) {
+        this.#failProtocol(`header exceeded ${this.transportLimits.maxHeaderBytes} bytes`);
+        return;
+      }
+      const header = this.#buffer.subarray(0, headerEnd).toString("ascii");
+      const contentLengthHeaders = header
+        .split("\r\n")
+        .filter((line) => /^Content-Length\s*:/i.test(line));
+      if (contentLengthHeaders.length !== 1) {
+        this.#failProtocol(contentLengthHeaders.length === 0 ? "missing Content-Length header" : "duplicate Content-Length headers");
+        return;
+      }
+      const match = /^Content-Length:\s*(\d+)\s*$/i.exec(contentLengthHeaders[0]!);
+      const length = match ? Number(match[1]) : Number.NaN;
+      if (!Number.isSafeInteger(length) || length < 0) {
+        this.#failProtocol("invalid Content-Length header");
+        return;
+      }
+      if (length > this.transportLimits.maxContentLengthBytes) {
+        this.#failProtocol(
+          `Content-Length ${length} exceeds the ${this.transportLimits.maxContentLengthBytes}-byte frame limit`,
+        );
+        return;
+      }
       const bodyStart = headerEnd + 4;
       if (this.#buffer.length < bodyStart + length) return;
       const body = this.#buffer.subarray(bodyStart, bodyStart + length).toString("utf8");
       this.#buffer = this.#buffer.subarray(bodyStart + length);
       try {
         void this.#handle(JSON.parse(body) as JsonRpcMessage);
-      } catch {}
+      } catch {
+        this.#failProtocol("body is not valid JSON");
+        return;
+      }
     }
+  }
+
+  #failProtocol(reason: string): void {
+    const error = new Error(`Invalid LSP frame from ${this.config.name}: ${reason}.`);
+    this.#closeWithError(error);
+    try { this.#child.kill(); } catch {}
   }
 
   async #handle(message: JsonRpcMessage): Promise<void> {
@@ -522,6 +599,17 @@ function validateCacheLimits(limits: Readonly<LspClientCacheLimits>): void {
     if (!Number.isSafeInteger(value) || value <= 0) {
       throw new RangeError(`LSP client cache limit ${name} must be a positive integer.`);
     }
+  }
+}
+
+function validateTransportLimits(limits: Readonly<LspTransportLimits>): void {
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new RangeError(`LSP transport limit ${name} must be a positive integer.`);
+    }
+  }
+  if (limits.maxHeaderBytes + 4 + limits.maxContentLengthBytes > bufferConstants.MAX_LENGTH) {
+    throw new RangeError("Combined LSP transport limits exceed the maximum Buffer length.");
   }
 }
 

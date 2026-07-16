@@ -90,6 +90,8 @@ export interface WorkflowSnapshot {
 
 export interface TodoTaskOrigin {
   sessionId: string;
+  /** Projection identity boundary; absent on persisted legacy Todo mirrors. */
+  sessionGeneration?: string;
   runId?: string;
   runSeq?: string;
   step: string;
@@ -107,7 +109,10 @@ export interface TodoMirrorTaskSpec {
 }
 
 export function todoOriginKey(origin: TodoTaskOrigin): string {
-  return [origin.sessionId, origin.step, origin.runId ?? "", origin.runSeq ?? ""].join("\u0000");
+  const legacyKey = [origin.sessionId, origin.step, origin.runId ?? "", origin.runSeq ?? ""].join("\u0000");
+  return origin.sessionGeneration === undefined
+    ? legacyKey
+    : `${legacyKey}\u0000${origin.sessionGeneration}`;
 }
 
 export function activeWorkflowRun(snapshot: WorkflowSnapshot): WorkflowRun | undefined {

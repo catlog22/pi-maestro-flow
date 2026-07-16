@@ -36,13 +36,17 @@ import {
   leaseToken,
   handoffBarrierReached,
   isSessionPathContained,
+  leaseSelection,
   requestHandback,
   requestPark,
   recoverChild,
   restoreMainOwnership,
+  sameLeaseSelection,
   sameLeaseToken,
+  transitionLeaseIfCurrent,
   transferToMain,
   unwrapLeasedMessage,
+  type LeaseSelection,
   type LeaseToken,
 } from "../runs/session-handoff.ts";
 import type {
@@ -2075,15 +2079,26 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     }
   }
 
-  async function prepareAgentHandoff(agent: ActiveAgent, timeoutMs = 15_000): Promise<boolean> {
-    if (!agent.lease || !agent.sendControl) return false;
-    agent.lease = requestPark(agent.lease);
+  async function prepareAgentHandoff(
+    agent: ActiveAgent,
+    selectedLease: LeaseSelection,
+    timeoutMs = 15_000,
+  ): Promise<LeaseSelection | undefined> {
+    if (!agent.sendControl) return undefined;
+    const parkingLease = transitionLeaseIfCurrent(agent.lease, selectedLease, requestPark);
+    if (!parkingLease) return undefined;
+    agent.lease = parkingLease;
+    const parkingSelection = leaseSelection(parkingLease);
     const nonce = agent.lease.nonce;
     const ready = new Promise<boolean>((resolve) => {
       const timer = setTimeout(() => {
         if (agent.pendingHandoff?.nonce !== nonce) return;
         agent.pendingHandoff = undefined;
-        agent.lease = agent.lease ? fenceLease(agent.lease) : undefined;
+        if (!sameLeaseSelection(agent.lease, parkingSelection)) {
+          resolve(false);
+          return;
+        }
+        agent.lease = fenceLease(agent.lease!);
         if (agent.lease) agent.pendingCancel = { nonce, fencedEpoch: agent.lease.epoch };
         agent.sendControl?.({ type: "teammate_handoff_cancel", nonce });
         resolve(false);
@@ -2097,26 +2112,42 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     })) {
       if (agent.pendingHandoff) clearTimeout(agent.pendingHandoff.timer);
       agent.pendingHandoff = undefined;
-      agent.lease = cancelPark(agent.lease);
-      return false;
+      const activeLease = transitionLeaseIfCurrent(agent.lease, parkingSelection, cancelPark);
+      if (activeLease) agent.lease = activeLease;
+      return undefined;
     }
-    return ready;
+    if (!await ready || !agent.lease) return undefined;
+    const parkedSelection = leaseSelection(agent.lease);
+    if (parkedSelection.owner !== "child"
+      || parkedSelection.state !== "parked"
+      || !sameLeaseToken(parkingSelection, parkedSelection)) {
+      return undefined;
+    }
+    return parkedSelection;
   }
 
   async function handleTeammateSession(ctx: ExtensionCommandContext): Promise<void> {
       const currentFile = ctx.sessionManager.getSessionFile();
       const attached = Array.from(state.activeRuns.values()).find((agent) =>
-        agent.sessionFile === currentFile && agent.lease?.owner === "main"
+        agent.sessionFile === currentFile
+          && agent.lease?.owner === "main"
+          && agent.lease.state === "main_active"
       );
       if (attached) {
         if (!state.mainSessionFile) {
           ctx.ui.notify("Main session path is unavailable.", "error");
           return;
         }
+        const selectedLease = leaseSelection(attached.lease!);
         await ctx.waitForIdle();
-        if (attached.lease) attached.lease = requestHandback(attached.lease);
-        if (attached.lease) {
-          const token = leaseToken(attached.lease);
+        const reloadingLease = transitionLeaseIfCurrent(attached.lease, selectedLease, requestHandback);
+        if (!reloadingLease) {
+          ctx.ui.notify("Session lease changed while waiting; retry handback.", "warning");
+          return;
+        }
+        attached.lease = reloadingLease;
+        {
+          const token = leaseToken(reloadingLease);
           attached.pendingHandback = {
             nonce: token.nonce,
             epoch: token.epoch,
@@ -2167,25 +2198,41 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         return;
       }
 
-      const candidates = Array.from(state.activeRuns.values()).filter((agent) =>
-        Boolean(agent.sessionDir && agent.sessionFile && agent.sendControl && agent.lease?.owner === "child")
-      );
+      const candidates = Array.from(state.activeRuns.values())
+        .filter((agent) => Boolean(
+          agent.sessionDir
+            && agent.sessionFile
+            && agent.sendControl
+            && agent.lease?.owner === "child"
+            && agent.lease.state === "active",
+        ))
+        .map((agent) => ({ agent, selectedLease: leaseSelection(agent.lease!) }));
       if (candidates.length === 0) {
         ctx.ui.notify("No attachable teammate sessions.", "warning");
         return;
       }
-      const labels = candidates.map((agent) => `${agent.name ?? agent.correlationId.slice(0, 8)} · ${agent.agent} · ${agent.status}`);
+      const labels = candidates.map(({ agent }) => `${agent.name ?? agent.correlationId.slice(0, 8)} · ${agent.agent} · ${agent.status}`);
       const selected = await ctx.ui.select("Switch to teammate session", labels);
       const index = selected ? labels.indexOf(selected) : -1;
       if (index < 0) return;
-      const agent = candidates[index];
+      const { agent, selectedLease } = candidates[index];
+      if (!sameLeaseSelection(agent.lease, selectedLease)) {
+        ctx.ui.notify("Session lease changed while selecting; retry handoff.", "warning");
+        return;
+      }
       ctx.ui.notify(`Waiting for ${agent.name ?? agent.agent} to finish its current loop…`, "info");
-      if (!await prepareAgentHandoff(agent)) {
+      const parkedLease = await prepareAgentHandoff(agent, selectedLease);
+      if (!parkedLease) {
         ctx.ui.notify("Session handoff timed out and was fenced.", "error");
         return;
       }
       if (!agent.sessionFile || !agent.lease) return;
-      agent.lease = transferToMain(agent.lease);
+      const mainLease = transitionLeaseIfCurrent(agent.lease, parkedLease, transferToMain);
+      if (!mainLease) {
+        ctx.ui.notify("Session lease changed before transfer; retry handoff.", "warning");
+        return;
+      }
+      agent.lease = mainLease;
       agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
       state.handoffSwitching = true;
       try {
@@ -2952,6 +2999,92 @@ export async function handleChildRpcUiRequest(
   reply({ type: "extension_ui_response", id, cancelled: true });
 }
 
+export interface TeammateDirectChildRequestHandlerOptions {
+  state?: TeammateState;
+  fallbackCorrelationId?: string;
+}
+
+/**
+ * Build the child-request bridge required by direct runTeammate/runGraph users.
+ *
+ * The root teammate tool installs the same interaction routing internally, but
+ * native orchestrators such as Swarm call the public execution API directly.
+ * Without this bridge a child permission request is delivered over IPC and
+ * then waits until its timeout because no parent handler replies.
+ */
+export function createTeammateDirectChildRequestHandler(
+  pi: ExtensionAPI,
+  ctx: ExtensionContext,
+  options: TeammateDirectChildRequestHandlerOptions = {},
+): NonNullable<RunTeammateOptions["onChildRequest"]> {
+  const state = options.state ?? {
+    baseCwd: ctx.cwd,
+    currentSessionId: null,
+    activeRuns: new Map(),
+    namedAgents: new Map(),
+  };
+  let interactionQueue: Promise<void> = Promise.resolve();
+
+  return (event, reply) => {
+    if (event.type === "teammate_rpc_ui_request" || event.type === "teammate_interaction_request") {
+      interactionQueue = interactionQueue
+        .then(() => event.type === "teammate_rpc_ui_request"
+          ? handleChildRpcUiRequest(event, reply, ctx)
+          : handleChildInteractionRequest(
+              pi,
+              state,
+              event,
+              reply,
+              ctx,
+              options.fallbackCorrelationId,
+            ))
+        .catch((error) => replyChildRequestFailure(event, reply, error));
+      return;
+    }
+
+    // Direct orchestrators do not own teammate's nested activeRuns lifecycle.
+    // Fail closed and reply immediately instead of leaving a proxy call hung.
+    if (event.type === "teammate_proxy_request") {
+      const requestId = typeof event.requestId === "string" ? event.requestId : randomUUID();
+      reply({
+        type: "teammate_proxy_result",
+        requestId,
+        result: {
+          content: [{
+            type: "text",
+            text: "Nested teammate calls are unavailable in this direct runtime; return control to the parent orchestrator.",
+          }],
+          isError: true,
+          details: { mode: "single", results: [] },
+        },
+      });
+    }
+  };
+}
+
+function replyChildRequestFailure(
+  event: Record<string, unknown>,
+  reply: (msg: unknown) => void,
+  error: unknown,
+): void {
+  if (event.type === "teammate_rpc_ui_request") {
+    reply({
+      type: "extension_ui_response",
+      id: typeof event.id === "string" ? event.id : randomUUID(),
+      cancelled: true,
+    });
+    return;
+  }
+  reply({
+    type: "teammate_interaction_response",
+    requestId: typeof event.requestId === "string" ? event.requestId : randomUUID(),
+    result: {
+      action: "cancel",
+      error: error instanceof Error ? error.message : String(error),
+    },
+  });
+}
+
 async function showRelayedPermission(
   ctx: ExtensionContext,
   agentLabel: string,
@@ -3171,6 +3304,7 @@ async function handleProxyRequest(
       });
       const progressSnapshot = (): AgentProgressSnapshot[] =>
         [...progressState.values()].sort((left, right) => left.taskIndex - right.taskIndex);
+      const pendingProgressByTask = new Map<number, AgentProgress>();
 
       const abortCtrl = new AbortController();
       const activeAgent: ActiveAgent = {
@@ -3228,6 +3362,63 @@ async function handleProxyRequest(
         spawnedBy: parentCid,
       });
 
+      const processProxyProgress = (data: AgentProgress) => {
+        const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
+        if (taskIndex < 0) return;
+        const existing = progressState.get(taskIndex);
+        const correlationId = data.correlationId ?? existing?.correlationId ?? taskCorrelationIds[taskIndex];
+        const progressName = data.name ?? existing?.name;
+        const entry: AgentProgressSnapshot = {
+          agent: data.agent,
+          ...(progressName ? { name: progressName } : {}),
+          correlationId,
+          taskIndex,
+          dependencies: data.dependencies ?? existing?.dependencies ?? [],
+          status: data.status,
+          startedAt: new Date(data.startedAt).toISOString(),
+          recentTools: data.recentTools,
+          toolCount: data.toolCount,
+          tokens: data.tokens,
+          ...(data.lastMessage
+            ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
+            : {}),
+          ...(data.status === "completed" || data.status === "failed"
+            ? { completedAt: new Date().toISOString() }
+            : {}),
+        };
+        progressState.set(taskIndex, entry);
+        activeAgent.lastActivityAt = Date.now();
+
+        const childAgent = state.activeRuns.get(correlationId);
+        if (childAgent && childAgent !== activeAgent) {
+          childAgent.lastActivityAt = Date.now();
+          childAgent.status = data.status === "completed" ? "sleeping" : data.status;
+          if (data.lastMessage) {
+            const lastLine = data.lastMessage.split("\n").pop()?.trim();
+            if (lastLine) {
+              const shortId = correlationId.slice(0, 8);
+              const marker = data.name ? `@${data.name}#${shortId}` : `${data.agent}#${shortId}`;
+              const line = truncateUtf8Tail(
+                `${marker} │ ${lastLine}`,
+                AGENT_BUFFER_LIMITS.logLineBytes,
+              );
+              childAgent.outputLog = [line];
+              activeAgent.outputLog.push(line);
+              trimAgentBuffers(childAgent, childAgent.status === "sleeping");
+              trimAgentBuffers(activeAgent);
+            }
+          }
+        }
+      };
+      const proxyProgressFlushGate = normalizedTasks
+        ? createProgressFlushGate(() => {
+            const pending = [...pendingProgressByTask.values()];
+            pendingProgressByTask.clear();
+            for (const data of pending) processProxyProgress(data);
+            activeAgent.progress = progressSnapshot();
+          })
+        : undefined;
+
       const runOpts: RunTeammateOptions = {
         baseCwd: state.baseCwd,
         modelCapabilities,
@@ -3260,51 +3451,9 @@ async function handleProxyRequest(
           ? (data) => {
               const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
               if (taskIndex < 0) return;
-              const existing = progressState.get(taskIndex);
-              const correlationId = data.correlationId ?? existing?.correlationId ?? taskCorrelationIds[taskIndex];
-              const progressName = data.name ?? existing?.name;
-              const entry: AgentProgressSnapshot = {
-                agent: data.agent,
-                ...(progressName ? { name: progressName } : {}),
-                correlationId,
-                taskIndex,
-                dependencies: data.dependencies ?? existing?.dependencies ?? [],
-                status: data.status,
-                startedAt: new Date(data.startedAt).toISOString(),
-                recentTools: data.recentTools,
-                toolCount: data.toolCount,
-                tokens: data.tokens,
-                ...(data.lastMessage
-                  ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
-                  : {}),
-                ...(data.status === "completed" || data.status === "failed"
-                  ? { completedAt: new Date().toISOString() }
-                  : {}),
-              };
-              progressState.set(taskIndex, entry);
-              activeAgent.progress = progressSnapshot();
               activeAgent.lastActivityAt = Date.now();
-
-              const childAgent = state.activeRuns.get(correlationId);
-              if (childAgent && childAgent !== activeAgent) {
-                childAgent.lastActivityAt = Date.now();
-                childAgent.status = data.status === "completed" ? "sleeping" : data.status;
-                if (data.lastMessage) {
-                  const lastLine = data.lastMessage.split("\n").pop()?.trim();
-                  if (lastLine) {
-                    const shortId = correlationId.slice(0, 8);
-                    const marker = data.name ? `@${data.name}#${shortId}` : `${data.agent}#${shortId}`;
-                    const line = truncateUtf8Tail(
-                      `${marker} │ ${lastLine}`,
-                      AGENT_BUFFER_LIMITS.logLineBytes,
-                    );
-                    childAgent.outputLog = [line];
-                    activeAgent.outputLog.push(line);
-                    trimAgentBuffers(childAgent, childAgent.status === "sleeping");
-                    trimAgentBuffers(activeAgent);
-                  }
-                }
-              }
+              pendingProgressByTask.set(taskIndex, data);
+              proxyProgressFlushGate!.mark(data.status === "completed" || data.status === "failed");
             }
           : undefined,
         onChildRequest: (evt, rep) => {
@@ -3319,7 +3468,13 @@ async function handleProxyRequest(
       const executeNested = async () => {
         if (normalizedTasks) {
           const mode = inferGraphMode(normalizedTasks);
-          const results = await runGraph(normalizedTasks, p.concurrency ?? 4, runOpts);
+          let results: SingleResult[];
+          try {
+            results = await runGraph(normalizedTasks, p.concurrency ?? 4, runOpts);
+          } finally {
+            proxyProgressFlushGate?.flush();
+            proxyProgressFlushGate?.dispose();
+          }
           const hasError = results.some((r) => r.exitCode !== 0);
           const summaries = results
             .map((r, i) => `[${r.agent}${normalizedTasks![i]?.name ? "/" + normalizedTasks![i].name : ""}] ${r.exitCode === 0 ? "OK" : "FAIL"}: ${r.messages[r.messages.length - 1]?.content ?? "(no output)"}`)

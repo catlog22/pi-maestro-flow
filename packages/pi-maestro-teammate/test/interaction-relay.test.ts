@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+  createTeammateDirectChildRequestHandler,
   handleChildInteractionRequest,
   handleChildRpcUiRequest,
   resolveAgentCorrelationId,
@@ -173,6 +174,46 @@ test("headless parent still runs the authoritative broker for silent allows", as
     } as ExtensionContext);
     assert.equal(replies[0].result.action, "allow_once");
     assert.equal(messages.length, 0);
+  } finally {
+    unregister();
+  }
+});
+
+test("direct execution child bridge replies to permissions and rejects nested proxy calls without hanging", async () => {
+  const { pi } = createPi();
+  const ctx = { hasUI: false, cwd: "D:/workspace" } as ExtensionContext;
+  const unregister = registerTeammatePermissionBroker(async (request) => {
+    assert.equal(request.toolName, "read");
+    return { action: "allow_once" };
+  });
+  try {
+    const handler = createTeammateDirectChildRequestHandler(pi, ctx);
+    const permissionReply = await new Promise<any>((resolve) => handler({
+      type: "teammate_interaction_request",
+      requestId: "direct-permission",
+      interaction: "permission",
+      correlationId: "direct-child",
+      payload: {
+        authorization: "parent",
+        toolName: "read",
+        input: { path: "README.md" },
+      },
+    }, resolve));
+    assert.deepEqual(permissionReply, {
+      type: "teammate_interaction_response",
+      requestId: "direct-permission",
+      result: { action: "allow_once" },
+    });
+
+    const proxyReply = await new Promise<any>((resolve) => handler({
+      type: "teammate_proxy_request",
+      requestId: "direct-proxy",
+      tool: "teammate",
+      params: {},
+    }, resolve));
+    assert.equal(proxyReply.type, "teammate_proxy_result");
+    assert.equal(proxyReply.requestId, "direct-proxy");
+    assert.equal(proxyReply.result.isError, true);
   } finally {
     unregister();
   }

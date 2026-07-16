@@ -182,17 +182,27 @@ export function reconcileMirrorTasks(
     if (task.origin) existingByOrigin.set(todoOriginKey(task.origin), task);
   }
 
+  const projectedSpecs = specs.map((spec) => {
+    const origin = sessionGeneration === undefined
+      ? { ...spec.origin }
+      : { ...spec.origin, sessionGeneration };
+    return { spec, origin, sourceOriginKey: todoOriginKey(spec.origin) };
+  });
   const idsByOrigin = new Map<string, string>();
-  for (const spec of specs) {
-    const key = todoOriginKey(spec.origin);
-    idsByOrigin.set(key, existingByOrigin.get(key)?.id ?? mirrorTaskId(key));
+  const idsByOriginReference = new Map<string, string>();
+  for (const projected of projectedSpecs) {
+    const key = todoOriginKey(projected.origin);
+    const id = existingByOrigin.get(key)?.id ?? mirrorTaskId(key);
+    idsByOrigin.set(key, id);
+    idsByOriginReference.set(projected.sourceOriginKey, id);
+    idsByOriginReference.set(key, id);
   }
   const desiredKeys = new Set(idsByOrigin.keys());
-  const incomingSessions = new Set(specs.map((spec) => spec.origin.sessionId));
+  const incomingSessions = new Set(projectedSpecs.map(({ origin }) => origin.sessionId));
   const authoritativeProjection = sessionGeneration !== undefined;
 
-  for (const spec of specs) {
-    const key = todoOriginKey(spec.origin);
+  for (const { spec, origin, sourceOriginKey } of projectedSpecs) {
+    const key = todoOriginKey(origin);
     const existing = existingByOrigin.get(key);
     if (existing?.status === "deleted") {
       result.unchanged.push(existing.id);
@@ -200,8 +210,10 @@ export function reconcileMirrorTasks(
     }
     const id = uniqueMirrorId(idsByOrigin.get(key)!, key, nextTasks);
     idsByOrigin.set(key, id);
+    idsByOriginReference.set(sourceOriginKey, id);
+    idsByOriginReference.set(key, id);
     const blockedBy = spec.blockedByOriginKeys
-      .map((originKey) => idsByOrigin.get(originKey))
+      .map((originKey) => idsByOriginReference.get(originKey))
       .filter((value): value is string => Boolean(value));
     const now = Date.now();
     const next: TodoTask = {
@@ -213,7 +225,7 @@ export function reconcileMirrorTasks(
       ...(spec.context ? { context: spec.context } : {}),
       skills: spec.skills.map((skill) => ({ ...skill })),
       ...(spec.summary ? { summary: spec.summary } : {}),
-      origin: { ...spec.origin },
+      origin,
       createdAt: existing?.createdAt ?? now,
       updatedAt: existing?.updatedAt ?? now,
     };
@@ -1110,6 +1122,7 @@ function readTodoOrigin(value: unknown): TodoTaskOrigin | undefined {
   return {
     sessionId: origin.sessionId,
     step: origin.step,
+    ...(typeof origin.sessionGeneration === "string" ? { sessionGeneration: origin.sessionGeneration } : {}),
     ...(typeof origin.runId === "string" ? { runId: origin.runId } : {}),
     ...(typeof origin.runSeq === "string" ? { runSeq: origin.runSeq } : {}),
   };

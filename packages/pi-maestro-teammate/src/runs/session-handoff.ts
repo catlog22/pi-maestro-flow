@@ -26,6 +26,10 @@ export interface LeaseToken {
   nonce: string;
 }
 
+export interface LeaseSelection extends LeaseToken {
+  state: HandoffState;
+}
+
 const LEASE_PREFIX = "[pi-teammate-lease:";
 
 export function wrapLeasedMessage(message: string, token?: LeaseToken): string {
@@ -59,6 +63,29 @@ export function createChildLease(): SessionLease {
 
 export function leaseToken(lease: SessionLease): LeaseToken {
   return { owner: lease.owner, epoch: lease.epoch, nonce: lease.nonce };
+}
+
+export function leaseSelection(lease: SessionLease): LeaseSelection {
+  return { ...leaseToken(lease), state: lease.state };
+}
+
+export function sameLeaseSelection(
+  current: SessionLease | undefined,
+  expected: LeaseSelection | undefined,
+): boolean {
+  return Boolean(current && expected
+    && current.state === expected.state
+    && sameLeaseToken(leaseToken(current), expected));
+}
+
+export function transitionLeaseIfCurrent(
+  current: SessionLease | undefined,
+  expected: LeaseSelection | undefined,
+  transition: (lease: SessionLease) => SessionLease,
+): SessionLease | undefined {
+  if (!current || !sameLeaseSelection(current, expected)) return undefined;
+  const next = transition(current);
+  return next === current ? undefined : next;
 }
 
 export function ownsLease(lease: SessionLease, token: LeaseToken): boolean {

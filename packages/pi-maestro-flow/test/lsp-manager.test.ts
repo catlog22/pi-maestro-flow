@@ -109,3 +109,28 @@ test("LSP config merges project overrides and manager single-flights clients the
     await fs.rm(root, { recursive: true, force: true });
   }
 });
+
+test("LSP manager shutdown clears the process-wide cwd config cache", async () => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "maestro-lsp-config-lifecycle-"));
+  const configDirectory = path.join(root, ".pi");
+  const configPath = path.join(configDirectory, "lsp.json");
+  await fs.mkdir(configDirectory, { recursive: true });
+  clearLspConfigCache();
+  try {
+    await fs.writeFile(configPath, JSON.stringify({
+      servers: [{ name: "session-server", command: "first", fileTypes: [".session"], rootMarkers: [] }],
+    }), "utf8");
+    assert.equal((await loadLspConfig(root)).find((item) => item.name === "session-server")?.command, "first");
+
+    await fs.writeFile(configPath, JSON.stringify({
+      servers: [{ name: "session-server", command: "second", fileTypes: [".session"], rootMarkers: [] }],
+    }), "utf8");
+    assert.equal((await loadLspConfig(root)).find((item) => item.name === "session-server")?.command, "first");
+
+    await new LspManager().shutdown();
+    assert.equal((await loadLspConfig(root)).find((item) => item.name === "session-server")?.command, "second");
+  } finally {
+    clearLspConfigCache();
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});

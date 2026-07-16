@@ -107,12 +107,12 @@ export class LspManager implements LspManagerLike {
 
   async reload(): Promise<void> {
     await this.shutdown();
-    clearLspConfigCache();
   }
 
   async shutdown(): Promise<void> {
     this.#lifecycle.abort();
     this.#lifecycle = new AbortController();
+    clearLspConfigCache();
     const clients = [...this.#clients.values()];
     this.#clients.clear();
     this.#errors.clear();

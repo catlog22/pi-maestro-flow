@@ -113,6 +113,7 @@ export async function loadCanonicalSnapshot(
 
 export class WorkflowBridge {
   private current?: WorkflowSnapshot;
+  private refreshGeneration = 0;
 
   constructor(
     private readonly projectRoot: string,
@@ -120,10 +121,16 @@ export class WorkflowBridge {
   ) {}
 
   async refresh(): Promise<WorkflowSnapshot> {
-    const next = await loadCanonicalSnapshot(this.projectRoot, this.options);
+    const generation = ++this.refreshGeneration;
+    const next = await this.loadSnapshot();
+    if (generation !== this.refreshGeneration) return this.current ?? next;
     if (this.current?.revision.fingerprint === next.revision.fingerprint) return this.current;
     this.current = next;
     return next;
+  }
+
+  protected loadSnapshot(): Promise<WorkflowSnapshot> {
+    return loadCanonicalSnapshot(this.projectRoot, this.options);
   }
 
   getSnapshot(): WorkflowSnapshot | undefined {

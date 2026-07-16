@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 
 interface HookTrustFile {
@@ -7,6 +8,7 @@ interface HookTrustFile {
 }
 
 const EMPTY_TRUST: HookTrustFile = { version: 1, trusted: {} };
+const mutationQueues = new Map<string, Promise<void>>();
 
 export async function isHookConfigTrusted(
   trustFilePath: string,
@@ -22,18 +24,22 @@ export async function trustHookConfig(
   configPath: string,
   hash: string,
 ): Promise<void> {
-  const trust = await readTrustFile(trustFilePath);
-  trust.trusted[trustKey(configPath)] = hash;
-  await writeTrustFile(trustFilePath, trust);
+  await serializeMutation(trustFilePath, async () => {
+    const trust = await readTrustFile(trustFilePath);
+    trust.trusted[trustKey(configPath)] = hash;
+    await writeTrustFile(trustFilePath, trust);
+  });
 }
 
 export async function revokeHookConfigTrust(
   trustFilePath: string,
   configPath: string,
 ): Promise<void> {
-  const trust = await readTrustFile(trustFilePath);
-  delete trust.trusted[trustKey(configPath)];
-  await writeTrustFile(trustFilePath, trust);
+  await serializeMutation(trustFilePath, async () => {
+    const trust = await readTrustFile(trustFilePath);
+    delete trust.trusted[trustKey(configPath)];
+    await writeTrustFile(trustFilePath, trust);
+  });
 }
 
 async function readTrustFile(filePath: string): Promise<HookTrustFile> {
@@ -53,9 +59,44 @@ async function readTrustFile(filePath: string): Promise<HookTrustFile> {
 
 async function writeTrustFile(filePath: string, trust: HookTrustFile): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
-  const temporaryPath = `${filePath}.${process.pid}.tmp`;
-  await writeFile(temporaryPath, `${JSON.stringify(trust, null, 2)}\n`, "utf8");
-  await rename(temporaryPath, filePath);
+  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  let temporaryHandle: Awaited<ReturnType<typeof open>> | undefined;
+  let temporaryCreated = false;
+  try {
+    temporaryHandle = await open(temporaryPath, "wx", 0o600);
+    temporaryCreated = true;
+    await temporaryHandle.writeFile(`${JSON.stringify(trust, null, 2)}\n`, "utf8");
+    await temporaryHandle.close();
+    temporaryHandle = undefined;
+    await rename(temporaryPath, filePath);
+  } finally {
+    try {
+      await temporaryHandle?.close();
+    } finally {
+      if (temporaryCreated) await removeTemporaryFile(temporaryPath);
+    }
+  }
+}
+
+async function serializeMutation(filePath: string, mutate: () => Promise<void>): Promise<void> {
+  const key = trustKey(filePath);
+  const previous = mutationQueues.get(key) ?? Promise.resolve();
+  const mutation = previous.catch(() => undefined).then(mutate);
+  const settled = mutation.then(() => undefined, () => undefined);
+  mutationQueues.set(key, settled);
+  try {
+    await mutation;
+  } finally {
+    if (mutationQueues.get(key) === settled) mutationQueues.delete(key);
+  }
+}
+
+async function removeTemporaryFile(filePath: string): Promise<void> {
+  try {
+    await unlink(filePath);
+  } catch (error) {
+    if (!isErrno(error, "ENOENT")) throw error;
+  }
 }
 
 function trustKey(filePath: string): string {
@@ -65,4 +106,8 @@ function trustKey(filePath: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isErrno(value: unknown, code: string): value is NodeJS.ErrnoException {
+  return isRecord(value) && value.code === code;
 }

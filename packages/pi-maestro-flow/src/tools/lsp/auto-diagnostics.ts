@@ -11,6 +11,8 @@ const AUTO_DIAGNOSTIC_WAIT_MS = 1_000;
 const AUTO_DIAGNOSTIC_DEBOUNCE_MS = 75;
 const AUTO_DIAGNOSTIC_LIMIT = 20;
 const AUTO_DIAGNOSTIC_SEVERITIES = new Set([1, 2]);
+const AUTO_DIAGNOSTIC_MAX_REPORTED_FAILURES = 256;
+const AUTO_DIAGNOSTIC_MAX_NOTIFICATION_FILES = 512;
 
 type ToolResultContent = ToolResultEvent["content"];
 type AutoDiagnosticResult = { content: ToolResultContent } | undefined;
@@ -19,39 +21,60 @@ interface AutoDiagnosticOptions {
   timeoutMs?: number;
   waitMs?: number;
   debounceMs?: number;
+  maxReportedFailures?: number;
+  maxNotificationFiles?: number;
+}
+
+export interface LspAutoDiagnosticsHandler {
+  (event: ToolResultEvent, ctx: ExtensionContext): Promise<AutoDiagnosticResult>;
+  reset(): void;
 }
 
 export function registerLspAutoDiagnostics(pi: ExtensionAPI): void {
-  pi.on("tool_result", createLspAutoDiagnosticsHandler());
+  const handler = createLspAutoDiagnosticsHandler();
+  pi.on("tool_result", handler);
+  pi.on("session_shutdown", () => handler.reset());
 }
 
 export function createLspAutoDiagnosticsHandler(
   manager: LspManagerLike = lspManager,
   options: AutoDiagnosticOptions = {},
-): (event: ToolResultEvent, ctx: ExtensionContext) => Promise<AutoDiagnosticResult> {
+): LspAutoDiagnosticsHandler {
   const generations = new Map<string, number>();
   const reportedFailures = new Set<string>();
   const lastNotificationByFile = new Map<string, string>();
+  let lifecycleGeneration = 0;
   const timeoutMs = options.timeoutMs ?? AUTO_DIAGNOSTIC_TIMEOUT_MS;
   const waitMs = options.waitMs ?? AUTO_DIAGNOSTIC_WAIT_MS;
   const debounceMs = options.debounceMs ?? AUTO_DIAGNOSTIC_DEBOUNCE_MS;
+  const maxReportedFailures = positiveInteger(
+    options.maxReportedFailures,
+    AUTO_DIAGNOSTIC_MAX_REPORTED_FAILURES,
+    "maxReportedFailures",
+  );
+  const maxNotificationFiles = positiveInteger(
+    options.maxNotificationFiles,
+    AUTO_DIAGNOSTIC_MAX_NOTIFICATION_FILES,
+    "maxNotificationFiles",
+  );
 
-  return async (event, ctx) => {
+  const handler = async (event: ToolResultEvent, ctx: ExtensionContext): Promise<AutoDiagnosticResult> => {
     const editedFile = editedFileFromEvent(event, ctx.cwd);
     if (!editedFile) return undefined;
 
+    const lifecycle = lifecycleGeneration;
     const generation = (generations.get(editedFile) ?? 0) + 1;
     generations.set(editedFile, generation);
     const timeout = withTimeout(ctx.signal, timeoutMs);
     try {
       await delay(debounceMs, timeout.signal);
-      if (generations.get(editedFile) !== generation) return undefined;
+      if (lifecycle !== lifecycleGeneration || generations.get(editedFile) !== generation) return undefined;
 
       const client = await manager.clientForFile(editedFile, ctx.cwd, undefined, timeout.signal, timeoutMs);
       const uri = await client.ensureFileOpen(editedFile);
       client.notify("textDocument/didSave", { textDocument: { uri } });
       const diagnostics = await client.getDiagnostics(uri, Math.min(waitMs, timeoutMs), timeout.signal);
-      if (generations.get(editedFile) !== generation) return undefined;
+      if (lifecycle !== lifecycleGeneration || generations.get(editedFile) !== generation) return undefined;
 
       const formatted = formatDiagnostics(editedFile, diagnostics, {
         cwd: ctx.cwd,
@@ -59,23 +82,30 @@ export function createLspAutoDiagnosticsHandler(
         maxBytes: LSP_AUTO_MAX_OUTPUT_BYTES,
         severities: AUTO_DIAGNOSTIC_SEVERITIES,
       });
-      notifyDiagnosticResult(ctx, editedFile, formatted, lastNotificationByFile);
+      notifyDiagnosticResult(ctx, editedFile, formatted, lastNotificationByFile, maxNotificationFiles);
       return appendText(event.content, formatted.text);
     } catch (error) {
-      if (isAbortError(error) || timeout.signal.aborted) return undefined;
+      if (lifecycle !== lifecycleGeneration || isAbortError(error) || timeout.signal.aborted) return undefined;
       const message = error instanceof Error ? error.message : String(error);
       if (/No language server is configured/i.test(message)) return undefined;
       const failureKey = `${editedFile}\0${message}`;
-      if (reportedFailures.has(failureKey)) return undefined;
-      reportedFailures.add(failureKey);
+      if (rememberBounded(reportedFailures, failureKey, maxReportedFailures)) return undefined;
       const unavailable = `LSP check unavailable: ${truncateLine(message.replace(/\s+/g, " "), 240).text}`;
       ctx.ui.notify(unavailable, "warning");
       return appendText(event.content, unavailable);
     } finally {
-      if (generations.get(editedFile) === generation) generations.delete(editedFile);
+      if (lifecycle === lifecycleGeneration && generations.get(editedFile) === generation) generations.delete(editedFile);
       timeout.dispose();
     }
   };
+  return Object.assign(handler, {
+    reset() {
+      lifecycleGeneration += 1;
+      generations.clear();
+      reportedFailures.clear();
+      lastNotificationByFile.clear();
+    },
+  });
 }
 
 function notifyDiagnosticResult(
@@ -83,6 +113,7 @@ function notifyDiagnosticResult(
   file: string,
   formatted: LspFormattedOutput,
   lastNotificationByFile: Map<string, string>,
+  maxNotificationFiles: number,
 ): void {
   const counts = formatted.diagnosticCounts ?? { errors: 0, warnings: 0, infos: 0, hints: 0 };
   const display = displayPath(file, ctx.cwd);
@@ -93,9 +124,46 @@ function notifyDiagnosticResult(
   if (counts.hints > 0) parts.push(`${counts.hints} hint(s)`);
   const message = `LSP ${display}: ${parts.join(", ") || "OK"}`;
   const notificationKey = `${message}\0${formatted.text}`;
-  if (lastNotificationByFile.get(file) === notificationKey) return;
-  lastNotificationByFile.set(file, notificationKey);
+  if (lastNotificationByFile.get(file) === notificationKey) {
+    touchBounded(lastNotificationByFile, file, notificationKey, maxNotificationFiles);
+    return;
+  }
+  touchBounded(lastNotificationByFile, file, notificationKey, maxNotificationFiles);
   ctx.ui.notify(message, counts.errors > 0 ? "error" : counts.warnings > 0 ? "warning" : "info");
+}
+
+function rememberBounded(values: Set<string>, value: string, limit: number): boolean {
+  const known = values.delete(value);
+  values.add(value);
+  while (values.size > limit) {
+    const oldest = values.values().next().value as string | undefined;
+    if (oldest === undefined) break;
+    values.delete(oldest);
+  }
+  return known;
+}
+
+function touchBounded(
+  values: Map<string, string>,
+  key: string,
+  value: string,
+  limit: number,
+): void {
+  values.delete(key);
+  values.set(key, value);
+  while (values.size > limit) {
+    const oldest = values.keys().next().value as string | undefined;
+    if (oldest === undefined) break;
+    values.delete(oldest);
+  }
+}
+
+function positiveInteger(value: number | undefined, fallback: number, name: string): number {
+  const resolved = value ?? fallback;
+  if (!Number.isSafeInteger(resolved) || resolved <= 0) {
+    throw new RangeError(`LSP automatic diagnostics ${name} must be a positive integer.`);
+  }
+  return resolved;
 }
 
 function displayPath(file: string, cwd: string): string {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -15,6 +15,7 @@ import {
 } from "../src/hooks/runner.ts";
 import {
   isHookConfigTrusted,
+  revokeHookConfigTrust,
   trustHookConfig,
 } from "../src/hooks/trust.ts";
 import { registerCodexHookAdapter } from "../src/hooks/pi-adapter.ts";
@@ -155,6 +156,48 @@ test("trust is bound to the exact hooks.json hash", async () => {
     await trustHookConfig(trustPath, configPath, "hash-a");
     assert.equal(await isHookConfigTrusted(trustPath, configPath, "hash-a"), true);
     assert.equal(await isHookConfigTrusted(trustPath, configPath, "hash-b"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent hook trust and revoke mutations preserve unrelated entries and clean up private temp files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-concurrent-trust-"));
+  const trustDirectory = join(root, "user");
+  const trustPath = join(trustDirectory, "hook-trust.json");
+  const trustAliasDirectory = join(trustDirectory, "alias");
+  const trustAliasPath = `${trustAliasDirectory}${sep}..${sep}hook-trust.json`;
+  const configPaths = Array.from(
+    { length: 32 },
+    (_, index) => join(root, `project-${index}`, ".pi", "hooks.json"),
+  );
+  try {
+    await mkdir(trustAliasDirectory, { recursive: true });
+    await Promise.all(configPaths.map((configPath, index) => (
+      trustHookConfig(index % 2 === 0 ? trustPath : trustAliasPath, configPath, `hash-${index}`)
+    )));
+    await Promise.all(configPaths.map((configPath, index) => (
+      index % 2 === 0
+        ? revokeHookConfigTrust(trustPath, configPath)
+        : trustHookConfig(trustPath, configPath, `updated-hash-${index}`)
+    )));
+
+    const transientConfigPath = join(root, "transient", ".pi", "hooks.json");
+    const trustTransient = trustHookConfig(trustPath, transientConfigPath, "transient-hash");
+    const revokeTransient = revokeHookConfigTrust(trustPath, transientConfigPath);
+    await Promise.all([trustTransient, revokeTransient]);
+
+    for (const [index, configPath] of configPaths.entries()) {
+      assert.equal(
+        await isHookConfigTrusted(trustPath, configPath, `updated-hash-${index}`),
+        index % 2 === 1,
+      );
+    }
+    assert.equal(await isHookConfigTrusted(trustPath, transientConfigPath, "transient-hash"), false);
+    assert.deepEqual((await readdir(trustDirectory)).filter((entry) => entry.endsWith(".tmp")), []);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(trustPath)).mode & 0o777, 0o600);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }

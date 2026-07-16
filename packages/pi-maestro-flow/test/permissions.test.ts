@@ -1,12 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { join, relative, resolve, sep } from "node:path";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createPermissionController } from "../src/permissions/controller.ts";
 import { evaluatePermission, matchesPermissionRule, suggestedAllowRule } from "../src/permissions/policy.ts";
-import { loadPermissionSettings } from "../src/permissions/settings.ts";
+import {
+  addPermissionRule,
+  loadPermissionSettings,
+  setPermissionDefaultMode,
+} from "../src/permissions/settings.ts";
 
 const empty = { allow: [], ask: [], deny: [] };
 
@@ -294,6 +298,42 @@ test("settings merge user, project and local rules with local scalar precedence"
     assert.equal(loaded.permissions.defaultMode, "acceptEdits");
     assert.equal(loaded.sources.length, 3);
     assert.equal(loaded.warnings.length, 2);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent permission mutations preserve every update and clean up private temp files", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-permissions-concurrent-settings-"));
+  const settingsDirectory = join(root, ".pi");
+  const settingsPath = join(settingsDirectory, "settings.local.json");
+  const settingsAliasDirectory = join(settingsDirectory, "alias");
+  const settingsAliasPath = `${settingsAliasDirectory}${sep}..${sep}settings.local.json`;
+  await mkdir(settingsDirectory, { recursive: true });
+  await mkdir(settingsAliasDirectory);
+  await writeFile(settingsPath, JSON.stringify({ marker: "preserve", permissions: { allow: ["Read"] } }));
+  try {
+    const allowRules = Array.from({ length: 24 }, (_, index) => `Bash(command-${index})`);
+    const denyRules = Array.from({ length: 12 }, (_, index) => `Write(secret-${index})`);
+    await Promise.all([
+      ...allowRules.map((rule, index) => addPermissionRule(
+        index % 2 === 0 ? settingsPath : settingsAliasPath,
+        "allow",
+        rule,
+      )),
+      ...denyRules.map((rule) => addPermissionRule(settingsPath, "deny", rule)),
+      setPermissionDefaultMode(settingsPath, "dontAsk"),
+    ]);
+
+    const persisted = JSON.parse(await readFile(settingsPath, "utf8"));
+    assert.equal(persisted.marker, "preserve");
+    assert.deepEqual(persisted.permissions.allow, ["Read", ...allowRules]);
+    assert.deepEqual(persisted.permissions.deny, denyRules);
+    assert.equal(persisted.permissions.defaultMode, "dontAsk");
+    assert.deepEqual((await readdir(settingsDirectory)).filter((entry) => entry.endsWith(".tmp")), []);
+    if (process.platform !== "win32") {
+      assert.equal((await stat(settingsPath)).mode & 0o777, 0o600);
+    }
   } finally {
     await rm(root, { recursive: true, force: true });
   }
