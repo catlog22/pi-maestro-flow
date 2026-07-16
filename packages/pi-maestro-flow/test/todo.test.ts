@@ -81,6 +81,35 @@ test("todo create/update preserves, replaces, and clears context and skills", as
   }
 });
 
+test("Todo creation and reload preserve the approved Plan handoff binding", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-handoff-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const handoffKey = "b".repeat(64);
+  let todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  try {
+    await executeTodo({ action: "create", subject: "Bound task", planHandoffKey: handoffKey }, ctx);
+    const created = getVisibleTasks()[0];
+    assert.equal(created.planHandoffKey, handoffKey);
+    onSessionShutdown(todoContext);
+
+    const entry = {
+      type: "custom",
+      customType: "todo-state",
+      data: { version: 4, tasks: { [created.id]: created } },
+    };
+    todoContext = startTodo(root, loader, [entry]);
+    assert.equal(getVisibleTasks()[0].planHandoffKey, handoffKey);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("todo next loads context and skills before transitioning", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-next-"));
   const agentDir = join(root, "agent");
@@ -541,6 +570,328 @@ test("active skill metadata resumes and marks changed skill content stale", asyn
     assert.equal(getVisibleTasks()[0].skillActivation?.state, "stale");
   } finally {
     onSessionShutdown(context());
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo update activates skills and leaves task and activation snapshots unchanged on errors", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-update-atomic-"));
+  const skillDir = join(root, ".pi", "skills", "demo");
+  const skillPath = join(skillDir, "SKILL.md");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(skillPath, "---\nname: demo\ndescription: demo\n---\n# Atomic demo\n");
+  const skill: Skill = {
+    name: "demo",
+    description: "demo",
+    filePath: skillPath,
+    baseDir: skillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  };
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [skill], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    const created = await executeTodo({
+      action: "create",
+      subject: "Atomic update",
+      context: "original context",
+      skills: [{ name: "demo", role: "primary" }],
+    }, ctx);
+    const id = (created.details as { tasks: Array<{ id: string }> }).tasks[0].id;
+    const activated = await executeTodo({ action: "update", id, status: "in_progress" }, ctx);
+    assert.equal((activated as { isError?: boolean }).isError, undefined);
+    assert.equal(getVisibleTasks()[0].status, "in_progress");
+    assert.match(getVisibleTasks()[0].skillActivation?.activationId ?? "", /^[0-9a-f-]{36}$/);
+    assert.match((await onBeforeAgentStartTodo({ systemPrompt: "base" }))?.systemPrompt ?? "", /# Atomic demo/);
+
+    const beforeValidationError = getTodoCompactionSnapshot();
+    const validationError = await executeTodo({
+      action: "update",
+      id,
+      context: "must not leak",
+      blockedBy: ["missing"],
+    }, ctx);
+    assert.equal((validationError as { isError?: boolean }).isError, true);
+    assert.deepEqual(getTodoCompactionSnapshot(), beforeValidationError);
+
+    initTodo({ appendEntry() { throw new Error("persist failed"); } } as never);
+    const beforePersistError = getTodoCompactionSnapshot();
+    const persistError = await executeTodo({
+      action: "update",
+      id,
+      context: "must not commit",
+    }, ctx);
+    assert.equal((persistError as { isError?: boolean }).isError, true);
+    assert.match((persistError.content[0] as { text: string }).text, /persist failed/);
+    assert.deepEqual(getTodoCompactionSnapshot(), beforePersistError);
+    assert.match((await onBeforeAgentStartTodo({ systemPrompt: "base" }))?.systemPrompt ?? "", /# Atomic demo/);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo create, next, delete, and clear publish no live state when persistence fails", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-public-mutation-atomic-"));
+  const skillDir = join(root, ".pi", "skills", "atomic");
+  const skillPath = join(skillDir, "SKILL.md");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(skillPath, "---\nname: atomic\ndescription: atomic\n---\n# Atomic mutation skill\n");
+  const skill: Skill = {
+    name: "atomic",
+    description: "atomic",
+    filePath: skillPath,
+    baseDir: skillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  };
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [skill], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const useSuccessfulPersist = () => initTodo({ appendEntry() {} } as never);
+  const useFailingPersist = () => initTodo({
+    appendEntry() { throw new Error("persist failed"); },
+  } as never);
+  const assertLiveSnapshotUnchanged = (before: ReturnType<typeof getTodoCompactionSnapshot>) => {
+    const after = getTodoCompactionSnapshot();
+    assert.equal(after.revision, before.revision);
+    assert.equal(after.activeTaskId, before.activeTaskId);
+    assert.deepEqual(after.tasks, before.tasks);
+  };
+
+  try {
+    useFailingPersist();
+    const beforeCreate = getTodoCompactionSnapshot();
+    const createError = await executeTodo({ action: "create", subject: "Must not exist" }, ctx);
+    assert.equal((createError as { isError?: boolean }).isError, true);
+    assert.match((createError.content[0] as { text: string }).text, /persist failed/);
+    assertLiveSnapshotUnchanged(beforeCreate);
+
+    useSuccessfulPersist();
+    const created = await executeTodo({
+      action: "create",
+      subject: "Atomic task",
+      skills: [{ name: "atomic", role: "primary" }],
+    }, ctx);
+    const id = (created.details as { tasks: Array<{ id: string }> }).tasks[0].id;
+
+    useFailingPersist();
+    const beforeNext = getTodoCompactionSnapshot();
+    const nextError = await executeTodo({ action: "next" }, ctx);
+    assert.equal((nextError as { isError?: boolean }).isError, true);
+    assert.match((nextError.content[0] as { text: string }).text, /persist failed/);
+    assertLiveSnapshotUnchanged(beforeNext);
+    assert.equal(getVisibleTasks()[0].skillActivation, undefined);
+
+    useSuccessfulPersist();
+    await executeTodo({ action: "next" }, ctx);
+    assert.equal(getVisibleTasks()[0].status, "in_progress");
+    assert.ok(getVisibleTasks()[0].skillActivation);
+
+    useFailingPersist();
+    const beforeDelete = getTodoCompactionSnapshot();
+    const deleteError = await executeTodo({ action: "delete", id }, ctx);
+    assert.equal((deleteError as { isError?: boolean }).isError, true);
+    assert.match((deleteError.content[0] as { text: string }).text, /persist failed/);
+    assertLiveSnapshotUnchanged(beforeDelete);
+    assert.match(
+      (await onBeforeAgentStartTodo({ systemPrompt: "base" }))?.systemPrompt ?? "",
+      /# Atomic mutation skill/,
+    );
+
+    const beforeClear = getTodoCompactionSnapshot();
+    const clearError = await executeTodo({ action: "clear" }, ctx);
+    assert.equal((clearError as { isError?: boolean }).isError, true);
+    assert.match((clearError.content[0] as { text: string }).text, /persist failed/);
+    assertLiveSnapshotUnchanged(beforeClear);
+    assert.match(
+      (await onBeforeAgentStartTodo({ systemPrompt: "base" }))?.systemPrompt ?? "",
+      /# Atomic mutation skill/,
+    );
+  } finally {
+    useSuccessfulPersist();
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo dependencies reject deleted tasks, drop completed tasks, and derive blocked or pending", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-dependencies-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    const completedResult = await executeTodo({ action: "create", subject: "Completed dependency" }, ctx);
+    const activeResult = await executeTodo({ action: "create", subject: "Active dependency" }, ctx);
+    const completedId = (completedResult.details as { tasks: Array<{ id: string }> }).tasks[0].id;
+    const activeId = (activeResult.details as { tasks: Array<{ id: string }> }).tasks
+      .find((task) => task.id !== completedId)!.id;
+    await executeTodo({ action: "update", id: completedId, status: "completed" }, ctx);
+
+    const childResult = await executeTodo({
+      action: "create",
+      subject: "Child",
+      blockedBy: [completedId, activeId, completedId],
+    }, ctx);
+    const childId = (childResult.details as { tasks: Array<{ id: string }> }).tasks
+      .find((task) => task.id !== completedId && task.id !== activeId)!.id;
+    let child = getVisibleTasks().find((task) => task.id === childId)!;
+    assert.equal(child.status, "blocked");
+    assert.deepEqual(child.blockedBy, [activeId]);
+
+    const blockedActivation = await executeTodo({ action: "update", id: childId, status: "in_progress" }, ctx);
+    assert.equal((blockedActivation as { isError?: boolean }).isError, true);
+    assert.match((blockedActivation.content[0] as { text: string }).text, /blocked by/);
+    assert.equal(getVisibleTasks().find((task) => task.id === childId)?.status, "blocked");
+
+    await executeTodo({ action: "update", id: childId, blockedBy: [completedId] }, ctx);
+    child = getVisibleTasks().find((task) => task.id === childId)!;
+    assert.equal(child.status, "pending");
+    assert.deepEqual(child.blockedBy, []);
+
+    await executeTodo({ action: "update", id: childId, blockedBy: [activeId] }, ctx);
+    await executeTodo({ action: "update", id: activeId, status: "completed" }, ctx);
+    child = getVisibleTasks().find((task) => task.id === childId)!;
+    assert.equal(child.status, "pending");
+    assert.deepEqual(child.blockedBy, []);
+
+    await executeTodo({ action: "delete", id: activeId }, ctx);
+    const beforeDeletedError = getTodoCompactionSnapshot();
+    const deletedError = await executeTodo({ action: "update", id: childId, blockedBy: [activeId] }, ctx);
+    assert.equal((deletedError as { isError?: boolean }).isError, true);
+    assert.match((deletedError.content[0] as { text: string }).text, /deleted task/);
+    assert.deepEqual(getTodoCompactionSnapshot(), beforeDeletedError);
+
+    const createDeletedError = await executeTodo({
+      action: "create",
+      subject: "Invalid deleted dependency",
+      blockedBy: [activeId],
+    }, ctx);
+    assert.equal((createDeletedError as { isError?: boolean }).isError, true);
+    assert.match((createDeletedError.content[0] as { text: string }).text, /deleted task/);
+    assert.deepEqual(getTodoCompactionSnapshot(), beforeDeletedError);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo update keeps blocked work pending when skill activation fails after unblocking", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-update-skill-error-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    const blockerResult = await executeTodo({ action: "create", subject: "Blocker" }, ctx);
+    const blockerId = (blockerResult.details as { tasks: Array<{ id: string }> }).tasks[0].id;
+    const childResult = await executeTodo({
+      action: "create",
+      subject: "Missing skill child",
+      blockedBy: [blockerId],
+      skills: [{ name: "missing", role: "primary" }],
+    }, ctx);
+    const childId = (childResult.details as { tasks: Array<{ id: string }> }).tasks
+      .find((task) => task.id !== blockerId)!.id;
+    await executeTodo({ action: "update", id: blockerId, status: "completed" }, ctx);
+    const before = getTodoCompactionSnapshot();
+
+    const result = await executeTodo({ action: "update", id: childId, status: "in_progress" }, ctx);
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.match((result.content[0] as { text: string }).text, /E_SKILL_NOT_FOUND/);
+    assert.deepEqual(getTodoCompactionSnapshot(), before);
+    assert.equal(getVisibleTasks().find((task) => task.id === childId)?.status, "pending");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo next reports legacy dependency deadlocks and normalizes completed blockers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-deadlock-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const entries = [{
+    type: "custom",
+    customType: "todo-state",
+    data: {
+      version: 2,
+      tasks: {
+        completed: {
+          id: "completed",
+          subject: "Completed",
+          status: "completed",
+          blockedBy: [],
+          createdAt: 1,
+          updatedAt: 1,
+        },
+        released: {
+          id: "released",
+          subject: "Released",
+          status: "blocked",
+          blockedBy: ["completed"],
+          createdAt: 2,
+          updatedAt: 2,
+        },
+        cycleA: {
+          id: "cycleA",
+          subject: "Cycle A",
+          status: "blocked",
+          blockedBy: ["cycleB"],
+          createdAt: 3,
+          updatedAt: 3,
+        },
+        cycleB: {
+          id: "cycleB",
+          subject: "Cycle B",
+          status: "blocked",
+          blockedBy: ["cycleA"],
+          createdAt: 4,
+          updatedAt: 4,
+        },
+      },
+    },
+  }];
+  const todoContext = startTodo(root, loader, entries);
+  const ctx = makeExtensionContext();
+
+  try {
+    const released = getVisibleTasks().find((task) => task.id === "released")!;
+    assert.equal(released.status, "pending");
+    assert.deepEqual(released.blockedBy, []);
+    await executeTodo({ action: "update", id: "released", status: "completed" }, ctx);
+
+    const next = await executeTodo({ action: "next" }, ctx);
+    const text = (next.content[0] as { text: string }).text;
+    assert.equal((next as { isError?: boolean }).isError, true);
+    assert.match(text, /Dependency deadlock/);
+    assert.match(text, /#cycleA/);
+    assert.match(text, /#cycleB/);
+    assert.doesNotMatch(text, /All tasks completed/);
+  } finally {
+    onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });
   }
 });

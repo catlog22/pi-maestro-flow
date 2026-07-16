@@ -36,6 +36,28 @@ function createContext(overrides: Partial<GoalContext> = {}): GoalContext {
   };
 }
 
+test("Goal creation persists the approved Plan handoff binding", async () => {
+  const entries: Array<{ type: string; data: unknown }> = [];
+  initGoal({ appendEntry(type: string, data: unknown) { entries.push({ type, data }); } } as never);
+  const ctx = createContext();
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    const handoffKey = "a".repeat(64);
+    const result = await executeGoal({
+      action: "create",
+      objective: "Execute the approved Plan",
+      planHandoffKey: handoffKey,
+    }, ctx);
+    assert.equal(result.isError, false);
+    assert.equal(getActiveGoal()?.planHandoffKey, handoffKey);
+    const persisted = entries.at(-1)?.data as { goal?: { planHandoffKey?: string } } | undefined;
+    assert.equal(persisted?.goal?.planHandoffKey, handoffKey);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
 const goalWidgetTheme = {
   fg: (_color: "accent" | "success" | "warning" | "error" | "dim", text: string) => text,
   bold: (text: string) => text,
@@ -569,6 +591,113 @@ test("canonical Workflow state rebuilds Goal projection and blocks premature com
   }
 });
 
+test("an unrelated user Goal is never relabeled as the canonical Workflow owner", async () => {
+  const ctx = createContext({ sessionManager: { getEntries: () => [] } });
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  onSessionStart(ctx);
+  try {
+    await executeGoal({ action: "create", objective: "Independent user objective" }, ctx);
+    const userGoal = getActiveGoal();
+    const reconciled = reconcileWorkflowGoal(workflowSnapshot(), ctx);
+    assert.equal(reconciled?.id, userGoal?.id);
+    assert.equal(reconciled?.workflowSessionId, undefined);
+    assert.equal(reconciled?.workflowSessionGeneration, undefined);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("canonical Session identity changes fence the old workflow Goal and replace it", async () => {
+  const persisted: Array<{ goal?: { workflowSessionId?: string; status?: string } | null }> = [];
+  const ctx = createContext({ sessionManager: { getEntries: () => [] } });
+  initGoal({ appendEntry(_type: string, value: unknown) { persisted.push(value as typeof persisted[number]); } } as never);
+  onSessionStart(ctx);
+  try {
+    const first = workflowSnapshot();
+    const oldGoal = reconcileWorkflowGoal(first, ctx);
+    const next = workflowSnapshot();
+    next.session!.sessionId = "session-2";
+    next.session!.identityRevision = 1;
+    next.sessionGeneration = "canonical:valid:session-2:1";
+    next.canonicalClaim = { activeSessionId: "session-2", status: "valid" };
+    next.session!.intent = "Execute replacement integration";
+    next.session!.definitionOfDone = "replacement gates pass";
+
+    const replacement = reconcileWorkflowGoal(next, ctx);
+    assert.equal(replacement?.workflowSessionId, "session-2");
+    assert.notEqual(replacement?.id, oldGoal?.id);
+    assert.match(replacement?.text ?? "", /replacement gates pass/);
+    const oldPersisted = persisted.findLast((entry) =>
+      entry.goal?.workflowSessionId === "session-1" && entry.goal.status === "paused"
+    );
+    assert.ok(oldPersisted, "the old workflow-owned Goal must be paused before replacement");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("canonical identityRevision generation changes recreate a workflow Goal under the same Session id", async () => {
+  const persisted: Array<{ goal?: { workflowSessionGeneration?: string; status?: string } | null }> = [];
+  const ctx = createContext({ sessionManager: { getEntries: () => [] } });
+  initGoal({ appendEntry(_type: string, value: unknown) { persisted.push(value as typeof persisted[number]); } } as never);
+  onSessionStart(ctx);
+  try {
+    const first = workflowSnapshot();
+    const oldGoal = reconcileWorkflowGoal(first, ctx);
+    assert.equal(oldGoal?.workflowSessionGeneration, "canonical:valid:session-1:1");
+
+    const next = workflowSnapshot();
+    next.session!.identityRevision = 2;
+    next.sessionGeneration = "canonical:valid:session-1:2";
+    const replacement = reconcileWorkflowGoal(next, ctx);
+
+    assert.equal(replacement?.workflowSessionId, "session-1");
+    assert.equal(replacement?.workflowSessionGeneration, "canonical:valid:session-1:2");
+    assert.notEqual(replacement?.id, oldGoal?.id);
+    assert.ok(persisted.some((entry) =>
+      entry.goal?.workflowSessionGeneration === "canonical:valid:session-1:1" && entry.goal.status === "paused"
+    ));
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("an invalid canonical claim pauses its workflow Goal and blocks completion fail-closed", async () => {
+  const ctx = createContext({ sessionManager: { getEntries: () => [] } });
+  initGoal({ appendEntry() {} } as never);
+  onSessionStart(ctx);
+  try {
+    reconcileWorkflowGoal(workflowSnapshot(), ctx);
+    const invalid: WorkflowSnapshot = {
+      source: "canonical",
+      projectRoot: "D:/workspace",
+      loadedAt: "2026-07-16T00:00:00.000Z",
+      revision: { sessionRevision: 0, fingerprint: "invalid-canonical" },
+      sessionGeneration: "canonical:invalid:session-1:0",
+      canonicalClaim: {
+        activeSessionId: "session-1",
+        status: "invalid",
+        error: "session.json is malformed",
+      },
+      diagnostics: ["session.json is malformed"],
+    };
+
+    const goal = reconcileWorkflowGoal(invalid, ctx);
+    assert.equal(goal?.status, "paused");
+    assert.equal(goal?.pauseReason, "gate");
+    assert.deepEqual(canonicalCompletionBlockers(invalid), [
+      "Canonical Workflow Session session-1 is invalid: session.json is malformed",
+    ]);
+    assert.match(buildCanonicalEvidence(invalid), /invalid.*malformed/i);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
 test("failed exit gate leaves Run and Todo unsealed and pauses the canonical Goal", async () => {
   const ctx = createContext({ sessionManager: { getEntries: () => [] } });
   initGoal({ appendEntry() {} } as never);
@@ -736,12 +865,15 @@ function workflowSnapshot(): WorkflowSnapshot {
     projectRoot: "D:/workspace",
     loadedAt: "2026-07-15T00:00:00.000Z",
     revision: { sessionRevision: 1, fingerprint: "goal-workflow" },
+    sessionGeneration: "canonical:valid:session-1:1",
+    canonicalClaim: { activeSessionId: "session-1", status: "valid" },
     diagnostics: [],
     session: {
       sessionId: "session-1",
       intent: "Execute integration",
       status: "running",
       revision: 1,
+      identityRevision: 1,
       activeRunId: "run-1",
       definitionOfDone: "all gates pass",
       gates: [],

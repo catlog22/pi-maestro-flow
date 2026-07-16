@@ -20,9 +20,12 @@ import { openPlanEditor } from "./plan-editor.ts";
 import { PlanStore, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
 import { blockIntelligenceToolCallInPlan } from "./intelligence-safety.ts";
 import { RUN_CONTROL_READ_ACTIONS } from "./run-control.ts";
+import { getActiveGoal } from "./goal.ts";
+import { getVisibleTasks } from "./todo.ts";
 
 type Mode = "act" | "plan";
 type PlanExecutionMode = "current" | "clear" | "compact";
+export type PlanHandoffStatus = "none" | "goal-required" | "todo-required" | "ready";
 export type PlanContext = Pick<
   ExtensionContext,
   "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager" | "compact"
@@ -44,12 +47,16 @@ export interface PlanToolDetails {
   path: string;
   sessionId: string;
   status: "empty" | "draft" | "approved";
+  handoffStatus: PlanHandoffStatus;
+  handoffKey?: string;
   approved?: boolean;
   error?: string;
 }
 
 interface PlanRuntimeOptions {
   storeFactory?: (cwd: string, session: PlanSessionIdentity) => PlanStore;
+  activeGoalHandoffKey?: () => string | undefined;
+  hasExecutableTodo?: (handoffKey: string) => boolean;
 }
 
 const STATUS_KEY = "mode";
@@ -101,6 +108,18 @@ const IN_PLACE_EDIT_COMMAND = new RegExp(
   "i",
 );
 const NESTED_MUTATING_COMMAND = /(?:^|\s)-(?:exec|execdir|x|X)\s+(?:sudo\s+)?(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|ln|tee|truncate|dd)\b/i;
+const INTERPRETER_PATH_PREFIX = String.raw`(?:[^\s;|&()]+[\\/])*`;
+const INTERPRETER_WRAPPER_PREFIX = String.raw`(?:sudo\s+)?(?:(?:env|command)\s+)?${INTERPRETER_PATH_PREFIX}`;
+const SHELL_INTERPRETER = String.raw`(?:ba|z|da|k)?sh(?:\.exe)?`;
+const NESTED_INTERPRETER_COMMAND = new RegExp([
+  String.raw`${SHELL_COMMAND_BOUNDARY}${INTERPRETER_WRAPPER_PREFIX}${SHELL_INTERPRETER}\b[^\r\n;|&]*\s-(?:c|lc)\b`,
+  String.raw`${SHELL_COMMAND_BOUNDARY}${INTERPRETER_WRAPPER_PREFIX}(?:powershell|pwsh)(?:\.exe)?\b[^\r\n;|&]*\s-(?:c|command|encodedcommand)\b`,
+  String.raw`${SHELL_COMMAND_BOUNDARY}${INTERPRETER_WRAPPER_PREFIX}cmd(?:\.exe)?\b[^\r\n;|&]*\/(?:c|k)\b`,
+  String.raw`${SHELL_COMMAND_BOUNDARY}${INTERPRETER_WRAPPER_PREFIX}(?:node|deno|bun)(?:\.exe)?\b[^\r\n;|&]*\s(?:-e|--eval)\b`,
+  String.raw`${SHELL_COMMAND_BOUNDARY}${INTERPRETER_WRAPPER_PREFIX}(?:python\d*(?:\.\d+)?|perl|ruby)(?:\.exe)?\b[^\r\n;|&]*\s-(?:c|e)\b`,
+  String.raw`${SHELL_COMMAND_BOUNDARY}xargs\b[^\r\n;|&]*\s+${INTERPRETER_PATH_PREFIX}${SHELL_INTERPRETER}\b[^\r\n;|&]*\s-(?:c|lc)\b`,
+  String.raw`(?:^|\s)-(?:exec|execdir)\s+${INTERPRETER_PATH_PREFIX}${SHELL_INTERPRETER}\b[^\r\n;|&]*\s-(?:c|lc)\b`,
+].join("|"), "i");
 const MUTATING_BASH_PATTERNS = [
   FILE_MUTATING_COMMAND,
   POWERSHELL_MUTATING_COMMAND,
@@ -110,8 +129,7 @@ const MUTATING_BASH_PATTERNS = [
   MAESTRO_RUN_MUTATING_COMMAND,
   IN_PLACE_EDIT_COMMAND,
   NESTED_MUTATING_COMMAND,
-  /(^|[^<])>(?!>)/,
-  />>/,
+  NESTED_INTERPRETER_COMMAND,
 ];
 
 const SHELL_SIDE_EFFECT_ARGUMENTS = /(?:^|\s)(?:--output(?:=|\s)|--outfile(?:=|\s)|-OutFile(?:\s|$)|--in-place(?:=|\s|$)|--exec(?:=|\s|$)|--exec-batch(?:=|\s|$)|--ext-diff(?:\s|$)|--textconv(?:\s|$)|--open-files-in-pager(?:=|\s|$)|--pre(?:=|\s|$)|--fix(?:\s|$))/i;
@@ -133,8 +151,18 @@ let currentStoreKey = "";
 let latestPlan: string | undefined;
 let latestRevision = 0;
 let latestStatus: PlanToolDetails["status"] = "empty";
+let latestHandoffKey: string | undefined;
 let awaitingAction = false;
 let activeToolsSnapshot: string[] | undefined;
+let activeGoalHandoffKey = () => {
+  const goal = getActiveGoal();
+  return goal?.status === "active" ? goal.planHandoffKey : undefined;
+};
+let hasExecutableTodoForHandoff = (handoffKey: string) => getVisibleTasks().some((task) =>
+  task.planHandoffKey === handoffKey
+  && (task.status === "pending" || task.status === "in_progress")
+  && task.blockedBy.length === 0
+);
 
 function syncModeStatus(ctx: PlanContext): void {
   ctx.ui.setStatus(STATUS_KEY, mode === "act" ? "ACT" : hasPlan() ? "READY" : "PLAN");
@@ -145,6 +173,15 @@ export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): vo
   resetRuntimeState();
   extensionApi = pi;
   storeFactory = options.storeFactory ?? ((cwd, session) => new PlanStore(cwd, { session }));
+  activeGoalHandoffKey = options.activeGoalHandoffKey ?? (() => {
+    const goal = getActiveGoal();
+    return goal?.status === "active" ? goal.planHandoffKey : undefined;
+  });
+  hasExecutableTodoForHandoff = options.hasExecutableTodo ?? ((handoffKey) => getVisibleTasks().some((task) =>
+    task.planHandoffKey === handoffKey
+    && (task.status === "pending" || task.status === "in_progress")
+    && task.blockedBy.length === 0
+  ));
 }
 
 export function isPlanMode(): boolean {
@@ -167,6 +204,7 @@ export function clearPlan(): void {
   latestPlan = undefined;
   latestRevision = 0;
   latestStatus = "empty";
+  latestHandoffKey = undefined;
   awaitingAction = false;
 }
 
@@ -196,7 +234,8 @@ function applyLoadedPlan(loaded: LoadedPlan): void {
   latestStatus = loaded.markdown
     ? loaded.manifest.status
     : "empty";
-  awaitingAction = Boolean(loaded.markdown.trim());
+  latestHandoffKey = loaded.manifest.handoffKey;
+  awaitingAction = loaded.manifest.status === "approved" && Boolean(loaded.markdown.trim());
 }
 
 function ensureActToolSurface(): void {
@@ -283,6 +322,7 @@ function resetRuntimeState(): void {
   latestPlan = undefined;
   latestRevision = 0;
   latestStatus = "empty";
+  latestHandoffKey = undefined;
   awaitingAction = false;
   activeToolsSnapshot = undefined;
 }
@@ -300,26 +340,76 @@ export function onToolCallPlan(event: {
   toolName: string;
   input: Record<string, unknown>;
 }): { block: true; reason: string } | undefined {
-  if (mode !== "plan") return;
+  if (mode !== "plan") return blockApprovedHandoffWrite(event);
+  return blockMutatingToolCall(event, "Plan mode");
+}
+
+function blockApprovedHandoffWrite(event: {
+  toolName: string;
+  input: Record<string, unknown>;
+}): { block: true; reason: string } | undefined {
+  if (!awaitingAction) return;
+  const handoffStatus = getPlanHandoffStatus();
+  if (handoffStatus === "ready") {
+    awaitingAction = false;
+    return;
+  }
+  const action = typeof event.input?.action === "string" ? event.input.action : "";
+  if (event.toolName === "goal") {
+    if (action === "get") return;
+    if (action === "create" && handoffStatus === "goal-required" && latestHandoffKey) {
+      event.input.planHandoffKey = latestHandoffKey;
+      return;
+    }
+    return {
+      block: true,
+      reason: `Approved Plan handoff is ${handoffStatus}. Read the Goal or create the one active Goal before other Goal mutations.`,
+    };
+  }
+  if (event.toolName === "todo") {
+    if (action === "list" || action === "get") return;
+    if (action === "create" && handoffStatus === "todo-required" && latestHandoffKey) {
+      event.input.planHandoffKey = latestHandoffKey;
+      return;
+    }
+    return {
+      block: true,
+      reason: handoffStatus === "goal-required"
+        ? "Approved Plan handoff requires one active Goal before creating its Todo dependency graph."
+        : "Approved Plan handoff requires at least one executable Todo before other Todo mutations.",
+    };
+  }
+  return blockMutatingToolCall(event, "Approved Plan handoff");
+}
+
+function blockMutatingToolCall(event: {
+  toolName: string;
+  input: Record<string, unknown>;
+}, boundary: "Plan mode" | "Approved Plan handoff"): { block: true; reason: string } | undefined {
   const name = event.toolName;
   if (BLOCKED_BUILTIN_TOOLS.has(name)) {
-    return { block: true, reason: `Plan mode blocks "${name}". Confirm or exit the plan first.` };
+    return { block: true, reason: `${boundary} blocks "${name}" until its required state is complete.` };
   }
   if (name === "maestro" && event.input?.action === "delegate" && event.input?.mode !== "analysis") {
-    return { block: true, reason: "Plan mode requires delegate mode='analysis'; missing or write modes are blocked." };
+    return { block: true, reason: `${boundary} requires delegate mode='analysis'; missing or write modes are blocked.` };
   }
   if (name === "run-control" || name === "run_control") {
     const action = typeof event.input?.action === "string" ? event.input.action : "";
     if (!(RUN_CONTROL_READ_ACTIONS as ReadonlySet<string>).has(action)) {
-      return { block: true, reason: `Plan mode blocks run-control action "${action || "unknown"}" because it may change canonical Run state.` };
+      return { block: true, reason: `${boundary} blocks run-control action "${action || "unknown"}" because it may change canonical Run state.` };
     }
   }
   const intelligenceBlock = blockIntelligenceToolCallInPlan(event);
-  if (intelligenceBlock) return intelligenceBlock;
+  if (intelligenceBlock) {
+    return boundary === "Plan mode"
+      ? intelligenceBlock
+      : { block: true, reason: `${boundary} is incomplete. ${intelligenceBlock.reason}` };
+  }
   if (["bash", "Bash", "powershell", "PowerShell"].includes(name)) {
     const command = readCommand(event.input);
-    if (!command || !isSafeCommand(command)) {
-      return { block: true, reason: `Plan mode blocks commands that may modify files or repository state.\nCommand: ${command.slice(0, 120)}` };
+    const dialect = name.toLowerCase() === "powershell" ? "powershell" : "posix";
+    if (!command || !isSafeCommand(command, dialect)) {
+      return { block: true, reason: `${boundary} blocks commands that may modify files or repository state.\nCommand: ${command.slice(0, 120)}` };
     }
   }
 }
@@ -431,10 +521,10 @@ async function startImplementation(
   exitPlanMode(ctx);
   latestPlan = markdown;
   latestStatus = "approved";
-  awaitingAction = false;
-  ctx.ui.notify("Plan approved · Act tools restored", "info");
+  awaitingAction = true;
+  ctx.ui.notify("Plan approved · Goal/Todo handoff required before project writes", "info");
   const executionMessage = [
-    "The approved Plan is already in the current context and Act tools are restored.",
+    "The approved Plan is already in the current context. Read tools are available; project writes remain gated until the Goal/Todo handoff is ready.",
     `Plan source: ${planPath}`,
     "Before modifying the project:",
     "1. Reconcile the Plan with every user requirement; do not shrink or reinterpret the approved scope.",
@@ -452,15 +542,56 @@ async function startImplementation(
   ].join("\n");
 
   if (executionMode === "clear" && ctx.newSession) {
+    const sourceHandoffKey = latestHandoffKey;
+    let switchedToReplacement = false;
     try {
       const replacement = await ctx.newSession({
         async withSession(newCtx) {
-          await newCtx.sendUserMessage(portableMessage);
+          switchedToReplacement = true;
+          const replacementCtx = newCtx as PlanContext;
+          try {
+            if (!sourceHandoffKey) throw new Error("approved Plan is missing its handoff key");
+            const replacementStore = await ensureStore(replacementCtx);
+            applyLoadedPlan(await replacementStore.approve(markdown, undefined, sourceHandoffKey));
+          } catch (error) {
+            try {
+              await enterPlanMode(replacementCtx);
+            } catch {
+              mode = "plan";
+              latestPlan = markdown;
+              latestRevision = 0;
+              latestStatus = "draft";
+              latestHandoffKey = undefined;
+              awaitingAction = false;
+              activatePlanToolSurface();
+              syncModeStatus(replacementCtx);
+            }
+            replacementCtx.ui.notify(
+              `Replacement session Plan handoff failed closed in Plan mode: ${errorMessage(error)}`,
+              "error",
+            );
+            return;
+          }
+          try {
+            await newCtx.sendUserMessage(portableMessage);
+          } catch (error) {
+            replacementCtx.ui.notify(
+              `Replacement session is write-gated, but its execution prompt could not be delivered: ${errorMessage(error)}`,
+              "error",
+            );
+          }
         },
       });
-      if (!replacement.cancelled) return;
+      if (!replacement.cancelled || switchedToReplacement) return;
+      applyLoadedPlan(await (await ensureStore(ctx)).load());
       ctx.ui.notify("New session was cancelled; executing in the current context.", "warning");
     } catch (error) {
+      if (switchedToReplacement) return;
+      try {
+        applyLoadedPlan(await (await ensureStore(ctx)).load());
+      } catch {
+        // Preserve the original replacement failure; the still-persisted source approval reloads on restart.
+      }
       ctx.ui.notify(`New session failed; executing in the current context: ${errorMessage(error)}`, "warning");
     }
   }
@@ -506,7 +637,16 @@ function currentDetails(action: PlanToolDetails["action"]): PlanToolDetails {
     path: currentStore?.currentPath ?? "",
     sessionId: currentStore?.sessionId ?? "",
     status: latestStatus,
+    handoffStatus: getPlanHandoffStatus(),
+    ...(latestHandoffKey ? { handoffKey: latestHandoffKey } : {}),
   };
+}
+
+export function getPlanHandoffStatus(): PlanHandoffStatus {
+  if (!awaitingAction) return latestStatus === "approved" ? "ready" : "none";
+  if (!latestHandoffKey || activeGoalHandoffKey() !== latestHandoffKey) return "goal-required";
+  if (!hasExecutableTodoForHandoff(latestHandoffKey)) return "todo-required";
+  return "ready";
 }
 
 function result(
@@ -643,14 +783,188 @@ function readCommand(input: unknown): string {
   return "";
 }
 
-function maskQuotedShellText(command: string): string {
-  return command.replace(/'[^']*'|"(?:\\.|[^"\\])*"/g, (quoted) => " ".repeat(quoted.length));
+function executableShellSyntax(
+  command: string,
+  dialect: "posix" | "powershell",
+): { syntax: string; balanced: boolean } {
+  const syntax = command.split("");
+  let quote: "'" | '"' | undefined;
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index];
+    if (quote === "'") {
+      syntax[index] = " ";
+      if (char === "'") quote = undefined;
+      continue;
+    }
+    if (quote === '"') {
+      if (char === '"') {
+        syntax[index] = " ";
+        quote = undefined;
+        continue;
+      }
+      if (dialect === "posix" && char === "\\" && /[$`"\\\r\n]/.test(command[index + 1] ?? "")) {
+        syntax[index] = " ";
+        if (index + 1 < command.length) syntax[++index] = " ";
+        continue;
+      }
+      if (dialect === "powershell" && char === "`") {
+        syntax[index] = " ";
+        if (index + 1 < command.length) syntax[++index] = " ";
+        continue;
+      }
+      if (char === "$" && command[index + 1] === "(") {
+        syntax[index] = "$";
+        syntax[++index] = "(";
+        continue;
+      }
+      syntax[index] = dialect === "posix" && char === "`" ? "`" : " ";
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      syntax[index] = " ";
+      continue;
+    }
+    if (dialect === "posix" && char === "\\") {
+      syntax[index] = " ";
+      if (index + 1 < command.length) syntax[++index] = " ";
+      continue;
+    }
+    if (dialect === "powershell" && char === "`") {
+      syntax[index] = " ";
+      if (index + 1 < command.length) syntax[++index] = " ";
+    }
+  }
+  return { syntax: syntax.join(""), balanced: quote === undefined };
 }
 
-function isSafeCommand(command: string): boolean {
+function tokenizeShellCommands(command: string, dialect: "posix" | "powershell"): string[][] {
+  const segments: string[][] = [];
+  let tokens: string[] = [];
+  let token = "";
+  let quote: "'" | '"' | undefined;
+  const flushToken = () => {
+    if (token) tokens.push(token);
+    token = "";
+  };
+  const flushSegment = () => {
+    flushToken();
+    if (tokens.length > 0) segments.push(tokens);
+    tokens = [];
+  };
+  for (let index = 0; index < command.length; index++) {
+    const char = command[index];
+    if (quote) {
+      if (char === quote) {
+        quote = undefined;
+        continue;
+      }
+      const escape = dialect === "posix" ? "\\" : "`";
+      if (char === escape && quote === '"' && index + 1 < command.length) {
+        token += command[++index];
+        continue;
+      }
+      token += char;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      quote = char;
+      continue;
+    }
+    const escape = dialect === "posix" ? "\\" : "`";
+    if (char === escape && index + 1 < command.length) {
+      token += command[++index];
+      continue;
+    }
+    if (/\s/.test(char)) {
+      flushToken();
+      continue;
+    }
+    if (";|&(){}".includes(char)) {
+      flushSegment();
+      if (command[index + 1] === char) index++;
+      continue;
+    }
+    token += char;
+  }
+  flushSegment();
+  return segments;
+}
+
+const DIRECT_MUTATING_EXECUTABLES = new Set([
+  "rm", "rmdir", "mv", "cp", "mkdir", "touch", "chmod", "chown", "ln", "tee", "truncate", "dd",
+  "set-content", "add-content", "clear-content", "out-file", "remove-item", "move-item", "copy-item", "new-item", "rename-item",
+  "eval", "source", ".", "invoke-expression", "iex",
+]);
+
+function executableBasename(token: string): string {
+  return token.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase() ?? "";
+}
+
+function unwrapCommand(tokens: string[]): { executable: string; args: string[] } | undefined {
+  let index = 0;
+  for (let depth = 0; depth < 6 && index < tokens.length; depth++) {
+    const executable = executableBasename(tokens[index]);
+    if (executable === "env" || executable === "env.exe") {
+      index++;
+      while (index < tokens.length && (tokens[index].startsWith("-") || /^[A-Za-z_]\w*=/.test(tokens[index]))) index++;
+      continue;
+    }
+    if (executable === "command") {
+      index++;
+      if (["-v", "-V"].includes(tokens[index] ?? "")) return undefined;
+      while (["-p", "--"].includes(tokens[index] ?? "")) index++;
+      continue;
+    }
+    if (executable === "sudo" || executable === "sudo.exe") {
+      index++;
+      while (index < tokens.length && tokens[index].startsWith("-")) {
+        const option = tokens[index++].split("=", 1)[0].toLowerCase();
+        if (["-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-c", "--close-from"].includes(option)
+          && index < tokens.length && !tokens[index - 1].includes("=")) index++;
+      }
+      continue;
+    }
+    return { executable, args: tokens.slice(index + 1) };
+  }
+  return undefined;
+}
+
+function hasUnsafeCommandLaunch(command: string, dialect: "posix" | "powershell"): boolean {
+  for (const segment of tokenizeShellCommands(command, dialect)) {
+    const launch = unwrapCommand(segment);
+    if (!launch) continue;
+    const { executable, args } = launch;
+    if (DIRECT_MUTATING_EXECUTABLES.has(executable)) return true;
+    if (/^(?:(?:ba|z|da|k)?sh)(?:\.exe)?$/.test(executable)
+      && args.some((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg))) return true;
+    if (/^(?:powershell|pwsh)(?:\.exe)?$/.test(executable)
+      && args.some((arg) => /^-(?:c|command|encodedcommand)$/i.test(arg))) return true;
+    if (/^cmd(?:\.exe)?$/.test(executable)
+      && args.some((arg) => /^\/(?:c|k)$/i.test(arg))) return true;
+    if (/^(?:node|deno|bun)(?:\.exe)?$/.test(executable)
+      && args.some((arg) => /^(?:-e|--eval)(?:=|$)/i.test(arg))) return true;
+    if (/^(?:python\d*(?:\.\d+)?|perl|ruby)(?:\.exe)?$/.test(executable)
+      && args.some((arg) => /^-[A-Za-z]*[ce][A-Za-z]*$/.test(arg))) return true;
+    const subcommand = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+    if (["npm", "yarn", "pnpm", "bun", "pip"].includes(executable)
+      && subcommand && ["install", "uninstall", "update", "ci", "link", "publish", "version", "add", "remove", "upgrade"].includes(subcommand)) return true;
+    if (executable === "git" && subcommand
+      && ["add", "apply", "clean", "commit", "push", "pull", "merge", "rebase", "reset", "restore", "checkout", "switch", "stash", "cherry-pick", "revert", "tag", "init", "clone"].includes(subcommand)) return true;
+    if (executable === "maestro" && subcommand && ["install", "uninstall", "update"].includes(subcommand)) return true;
+  }
+  return false;
+}
+
+function isSafeCommand(command: string, dialect: "posix" | "powershell"): boolean {
   const trimmed = command.trim();
   if (!trimmed) return false;
-  const shellSyntax = maskQuotedShellText(trimmed);
+  const parsed = executableShellSyntax(trimmed, dialect);
+  if (!parsed.balanced) return false;
+  const shellSyntax = parsed.syntax;
+  if (/\$\(/.test(shellSyntax) || (dialect === "posix" && /`/.test(shellSyntax))) return false;
+  if (/[<>]/.test(shellSyntax)) return false;
+  if (hasUnsafeCommandLaunch(trimmed, dialect)) return false;
   if (MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(shellSyntax))) return false;
   if (SHELL_SIDE_EFFECT_ARGUMENTS.test(shellSyntax)) return false;
   if (/^\s*find(?:\s|$)/i.test(trimmed)) {

@@ -86,6 +86,73 @@ test("Todo projection rejects multiple canonical active root tasks", () => {
   }
 });
 
+test("Todo projection generation authoritatively clears mirrors across Session identity changes", () => {
+  initTodo({ appendEntry() {} } as never);
+  const todoContext = context([]);
+  const extensionContext = { cwd: "D:/workspace", ui: { setStatus() {} } } as unknown as ExtensionContext;
+  onSessionStart(todoContext);
+  try {
+    reconcileMirrorTasks(mirrorSpecs(), extensionContext, "canonical:valid:session-1:1");
+    assert.equal(getVisibleTasks().filter((task) => task.origin).length, 2);
+
+    const replacement = mirrorSpecs().slice(0, 1).map((spec) => ({
+      ...spec,
+      origin: { ...spec.origin, sessionId: "session-2" },
+    }));
+    const switched = reconcileMirrorTasks(replacement, extensionContext, "canonical:valid:session-2:1");
+    assert.equal(switched.tombstoned.length, 2);
+    assert.deepEqual(
+      getVisibleTasks().filter((task) => task.origin).map((task) => task.origin?.sessionId),
+      ["session-2"],
+    );
+
+    reconcileMirrorTasks([], extensionContext, "canonical:invalid:session-2:0");
+    assert.equal(getVisibleTasks().some((task) => task.origin), false);
+  } finally {
+    onSessionShutdown(todoContext);
+  }
+});
+
+test("Todo projection publishes no mirror or generation cleanup when persistence fails", async () => {
+  const useSuccessfulPersist = () => initTodo({ appendEntry() {} } as never);
+  const useFailingPersist = () => initTodo({
+    appendEntry() { throw new Error("persist failed"); },
+  } as never);
+  useSuccessfulPersist();
+  const todoContext = context([]);
+  const extensionContext = { cwd: "D:/workspace", ui: { setStatus() {} } } as unknown as ExtensionContext;
+  onSessionStart(todoContext);
+  try {
+    useFailingPersist();
+    const beforeCreate = getTodoCompactionSnapshot();
+    assert.throws(
+      () => reconcileMirrorTasks(mirrorSpecs(), extensionContext, "canonical:valid:session-1:1"),
+      /persist failed/,
+    );
+    assert.deepEqual(getTodoCompactionSnapshot(), beforeCreate);
+
+    useSuccessfulPersist();
+    reconcileMirrorTasks(mirrorSpecs(), extensionContext, "canonical:valid:session-1:1");
+    const activeMirror = getVisibleTasks().find((task) => task.status === "in_progress")!;
+    await executeTodo({ action: "update", id: activeMirror.id, status: "pending" }, extensionContext);
+    await executeTodo({ action: "next" }, extensionContext);
+    const beforeCleanup = getTodoCompactionSnapshot();
+    assert.equal(beforeCleanup.tasks.filter((task) => task.origin).length, 2);
+    assert.equal(beforeCleanup.activeTaskId, activeMirror.id);
+    assert.ok(beforeCleanup.tasks.find((task) => task.id === activeMirror.id)?.skillActivation);
+
+    useFailingPersist();
+    assert.throws(
+      () => reconcileMirrorTasks([], extensionContext, "canonical:invalid:session-1:0"),
+      /persist failed/,
+    );
+    assert.deepEqual(getTodoCompactionSnapshot(), beforeCleanup);
+  } finally {
+    useSuccessfulPersist();
+    onSessionShutdown(todoContext);
+  }
+});
+
 function mirrorSpecs(): TodoMirrorTaskSpec[] {
   const firstOrigin = { sessionId: "session-1", step: "analyze", runId: "run-1", runSeq: "001" };
   return [

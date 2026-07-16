@@ -25,6 +25,7 @@ export interface PlanManifest {
   approvedAt?: string;
   approvedPath?: string;
   approvedChecksum?: string;
+  handoffKey?: string;
   approvals: string[];
 }
 
@@ -161,7 +162,7 @@ export class PlanStore {
     return this.withWorkspaceLock((token) => this.saveDraftUnlocked(markdown, expectedRevision, token));
   }
 
-  async approve(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {
+  async approve(markdown: string, expectedRevision?: number, inheritedHandoffKey?: string): Promise<LoadedPlan> {
     return this.withWorkspaceLock(async (ownerToken) => {
       const draft = await this.saveDraftUnlocked(markdown, expectedRevision, ownerToken);
       let archivePath: string | undefined;
@@ -170,7 +171,9 @@ export class PlanStore {
       try {
         const approvedAt = this.now().toISOString();
         const checksum = checksumText(markdown);
-        const archiveName = `${archiveTimestamp(approvedAt)}-r${String(draft.manifest.revision).padStart(4, "0")}-${checksum.slice(0, 8)}.md`;
+        const handoffKey = inheritedHandoffKey
+          ?? approvalHandoffKey(this.workspaceId, this.sessionId, draft.manifest.revision, checksum);
+        const archiveName = `${archiveTimestamp(approvedAt)}-r${String(draft.manifest.revision).padStart(4, "0")}-${checksum.slice(0, 8)}-h${handoffKey}.md`;
         archivePath = join(this.approvalsDir, archiveName);
         pendingToken = ownerToken;
         const pending: PendingApproval = {
@@ -193,6 +196,7 @@ export class PlanStore {
           approvedAt,
           approvedPath,
           approvedChecksum: checksum,
+          handoffKey,
           approvals: [...draft.manifest.approvals, approvedPath],
           updatedAt: approvedAt,
         };
@@ -231,7 +235,31 @@ export class PlanStore {
       manifest = await this.rebuildManifest(markdown, checksum);
       await this.assertLockOwnership(ownerToken);
       await atomicWriteJson(this.manifestPath, manifest);
-    } else if (manifest.draftChecksum !== checksum) {
+    } else {
+      if (manifest.status === "approved" && !manifest.handoffKey) {
+        manifest = {
+          ...manifest,
+          handoffKey: approvalHandoffKey(
+            this.workspaceId,
+            this.sessionId,
+            manifest.revision,
+            manifest.approvedChecksum!,
+          ),
+        };
+        await this.assertLockOwnership(ownerToken);
+        await atomicWriteJson(this.manifestPath, manifest);
+      }
+      if (manifest.draftChecksum === checksum) {
+        await this.assertLockOwnership(ownerToken);
+        await this.removeOrphanApprovals(manifest);
+        return {
+          markdown,
+          manifest,
+          currentPath: this.currentPath,
+          manifestPath: this.manifestPath,
+          plansDir: this.plansDir,
+        };
+      }
       manifest = {
         ...manifest,
         revision: manifest.revision + 1,
@@ -242,6 +270,7 @@ export class PlanStore {
       delete manifest.approvedAt;
       delete manifest.approvedPath;
       delete manifest.approvedChecksum;
+      delete manifest.handoffKey;
       await this.assertLockOwnership(ownerToken);
       await atomicWriteJson(this.manifestPath, manifest);
     }
@@ -299,10 +328,8 @@ export class PlanStore {
     const approvals = await this.recoverableApprovalPaths();
     const lastApproval = approvals.at(-1);
     const lastArchive = lastApproval ? await readOptionalText(join(this.plansDir, lastApproval)) : "";
-    const lastRevision = approvals.reduce((highest, path) => {
-      const match = /-r(\d+)-[a-f0-9]{8}\.md$/i.exec(path);
-      return Math.max(highest, match ? Number(match[1]) : 0);
-    }, 0);
+    const lastRevision = approvals.reduce((highest, path) =>
+      Math.max(highest, parseArchivePath(path)?.revision ?? 0), 0);
     const approved = Boolean(lastApproval && checksumText(lastArchive) === checksum);
     const updatedAt = this.now().toISOString();
     return {
@@ -315,7 +342,13 @@ export class PlanStore {
       updatedAt,
       approvals,
       ...(approved && lastApproval
-        ? { approvedAt: updatedAt, approvedPath: lastApproval, approvedChecksum: checksum }
+        ? {
+            approvedAt: updatedAt,
+            approvedPath: lastApproval,
+            approvedChecksum: checksum,
+            handoffKey: parseArchivePath(lastApproval)?.handoffKey
+              ?? approvalHandoffKey(this.workspaceId, this.sessionId, lastRevision, checksum),
+          }
         : {}),
     };
   }
@@ -624,6 +657,17 @@ export function checksumText(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+function approvalHandoffKey(
+  workspaceId: string,
+  sessionId: string | undefined,
+  revision: number,
+  checksum: string,
+): string {
+  return createHash("sha256")
+    .update(`${workspaceId}\0${sessionId ?? "workspace"}\0${revision}\0${checksum}`)
+    .digest("hex");
+}
+
 async function atomicWriteText(filePath: string, content: string): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true });
   const temporaryPath = `${filePath}.${process.pid}-${randomUUID()}.tmp`;
@@ -714,12 +758,19 @@ function validateManifest(
     if (!isIsoDate(raw.approvedAt)
       || typeof raw.approvedPath !== "string"
       || !isChecksum(raw.approvedChecksum)
+      || (raw.handoffKey !== undefined && !isChecksum(raw.handoffKey))
       || approvals.at(-1) !== raw.approvedPath) invalidManifest();
     const approvedArchive = parseArchivePath(raw.approvedPath as string);
     if (!approvedArchive
       || approvedArchive.revision !== raw.revision
+      || (approvedArchive.handoffKey !== undefined && approvedArchive.handoffKey !== raw.handoffKey)
       || !(raw.approvedChecksum as string).startsWith(approvedArchive.checksumPrefix)) invalidManifest();
-  } else if (raw.approvedAt !== undefined || raw.approvedPath !== undefined || raw.approvedChecksum !== undefined) {
+  } else if (
+    raw.approvedAt !== undefined
+    || raw.approvedPath !== undefined
+    || raw.approvedChecksum !== undefined
+    || raw.handoffKey !== undefined
+  ) {
     invalidManifest();
   }
 
@@ -739,6 +790,7 @@ function validateManifest(
           approvedAt: raw.approvedAt as string,
           approvedPath: raw.approvedPath as string,
           approvedChecksum: raw.approvedChecksum as string,
+          ...(typeof raw.handoffKey === "string" ? { handoffKey: raw.handoffKey } : {}),
         }
       : {}),
     approvals,
@@ -759,18 +811,22 @@ function invalidManifest(): never {
   throw new Error("Invalid Plan manifest");
 }
 
-function parseArchivePath(value: string): { revision: number; checksumPrefix: string } | null {
+function parseArchivePath(value: string): { revision: number; checksumPrefix: string; handoffKey?: string } | null {
   const entry = basename(value);
   if (value !== join("approvals", entry)) return null;
   return parseArchiveName(entry);
 }
 
-function parseArchiveName(value: string): { revision: number; checksumPrefix: string } | null {
-  const match = /^\d{8}T\d{6,9}Z-r(\d+)-([a-f0-9]{8})\.md$/i.exec(value);
+function parseArchiveName(value: string): { revision: number; checksumPrefix: string; handoffKey?: string } | null {
+  const match = /^\d{8}T\d{6,9}Z-r(\d+)-([a-f0-9]{8})(?:-h([a-f0-9]{64}))?\.md$/i.exec(value);
   if (!match) return null;
   const revision = Number(match[1]);
   if (!Number.isSafeInteger(revision) || revision < 1) return null;
-  return { revision, checksumPrefix: match[2].toLowerCase() };
+  return {
+    revision,
+    checksumPrefix: match[2].toLowerCase(),
+    ...(match[3] ? { handoffKey: match[3].toLowerCase() } : {}),
+  };
 }
 
 function isChecksum(value: unknown): value is string {

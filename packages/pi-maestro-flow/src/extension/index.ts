@@ -80,7 +80,12 @@ import { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
 import { deriveWorkflowViewModel, type WorkflowSnapshotLike } from "../session/view-model.ts";
 import { createRunEventComponent, type RunEventDetails } from "../session/run-event.ts";
-import { executeRunControl, RunControlParams, type RunControlInput } from "../tools/run-control.ts";
+import {
+  executeRunControl,
+  isRunControlReadAction,
+  RunControlParams,
+  type RunControlInput,
+} from "../tools/run-control.ts";
 import {
   nextMaestroPanelMode,
   renderMaestroPanel,
@@ -170,9 +175,31 @@ function textBlock(text: string): Component {
 
 export function shouldRestoreWorkflowGoal(
   reason: "startup" | "reload" | "new" | "resume" | "fork" | undefined,
-  hasSessionGoal: boolean,
+  goal: { workflowSessionId?: string } | undefined,
+  snapshot: WorkflowSnapshot | undefined,
 ): boolean {
-  return reason !== "new" && reason !== "fork" && hasSessionGoal;
+  const canonicalSessionId = snapshot?.canonicalClaim?.status === "valid"
+    ? snapshot.session?.sessionId
+    : undefined;
+  return reason !== "new"
+    && reason !== "fork"
+    && Boolean(goal?.workflowSessionId && goal.workflowSessionId === canonicalSessionId);
+}
+
+export function shouldAttachWorkflowSession(
+  optedIn: boolean,
+  snapshot: WorkflowSnapshot | undefined,
+): boolean {
+  return optedIn
+    && snapshot?.source === "canonical"
+    && snapshot.canonicalClaim?.status !== "invalid"
+    && snapshot.session?.status === "running";
+}
+
+export function isWorkflowOptInCommand(command: string): boolean {
+  if (/\bmaestro\s+ralph\b/.test(command)) return true;
+  const runAction = /\bmaestro\s+run\s+([\w-]+)/.exec(command)?.[1];
+  return Boolean(runAction && !isRunControlReadAction(runAction));
 }
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
@@ -194,9 +221,9 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   };
   let workflowBridge: WorkflowBridge | undefined;
   let workflowCoordinator: WorkflowCoordinator | undefined;
+  let attachedWorkflowSessionId: string | undefined;
   let lastRunStates = new Map<string, string>();
   let workflowSessionOptedIn = true;
-  let workflowBaselineEstablished = false;
 
   // Register dynamic providers from cli-tools.json
   try {
@@ -480,7 +507,10 @@ When the agent loop ends naturally, the extension verifies completion automatica
         };
       }
       const result = await executeRunControl(params as RunControlInput, workflowCoordinator);
-      if (result.ok) await refreshWorkflow(ctx, true);
+      if (result.ok) {
+        const actionOptsIn = !isRunControlReadAction(params.action);
+        await refreshWorkflow(ctx, true, actionOptsIn);
+      }
       return {
         content: [{ type: "text", text: result.message }],
         isError: !result.ok,
@@ -611,26 +641,52 @@ When the agent loop ends naturally, the extension verifies completion automatica
     };
   }
 
-  async function refreshWorkflow(ctx: ExtensionContext, emitEvents = false): Promise<WorkflowSnapshot | undefined> {
+  async function refreshWorkflow(
+    ctx: ExtensionContext,
+    emitEvents = false,
+    allowOptIn = false,
+  ): Promise<WorkflowSnapshot | undefined> {
     if (!workflowBridge) return undefined;
-    const previous = workflowBridge.getSnapshot();
     const next = await workflowBridge.refresh();
-    if (workflowBaselineEstablished
-      && !workflowSessionOptedIn
-      && emitEvents
-      && next.session?.status === "running"
-      && (previous?.session?.sessionId !== next.session.sessionId || previous.session.status !== "running")) {
+    if (!workflowSessionOptedIn && allowOptIn && next.session?.status === "running") {
       workflowSessionOptedIn = true;
     }
-    workflowBaselineEstablished = true;
-    if (next.session) {
-      reconcileMirrorTasks(buildTodoMirrorSpecs(next), ctx);
-      if (workflowSessionOptedIn) reconcileWorkflowGoal(next, ctx);
+
+    const nextAttachSessionId = next.source === "canonical" && next.session?.status === "running"
+      ? next.session.sessionId
+      : undefined;
+    if (attachedWorkflowSessionId && attachedWorkflowSessionId !== nextAttachSessionId) {
+      try { await workflowCoordinator?.fenceContinuation(); } catch { /* a lost lease is already fail-closed */ }
+      await workflowCoordinator?.release();
+      attachedWorkflowSessionId = undefined;
     }
+    if (emitEvents && shouldAttachWorkflowSession(workflowSessionOptedIn, next)
+      && attachedWorkflowSessionId !== next.session!.sessionId) {
+      await attachWorkflowSession(ctx, next);
+    }
+    reconcileMirrorTasks(buildTodoMirrorSpecs(next), ctx, next.sessionGeneration);
+    if (workflowSessionOptedIn) reconcileWorkflowGoal(next, ctx);
     if (emitEvents) emitRunTransitions(next);
     else lastRunStates = new Map(next.session?.runs.map((run) => [run.runId, run.status]) ?? []);
     updateTodoWidget();
     return next;
+  }
+
+  async function attachWorkflowSession(ctx: ExtensionContext, snapshot: WorkflowSnapshot): Promise<boolean> {
+    if (!workflowCoordinator || !shouldAttachWorkflowSession(workflowSessionOptedIn, snapshot)) return false;
+    const sessionId = snapshot.session!.sessionId;
+    if (attachedWorkflowSessionId === sessionId) return true;
+    const hostSessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.()
+      ?? `pi-${process.pid}`;
+    try {
+      await workflowCoordinator.attach(hostSessionId, sessionId);
+      attachedWorkflowSessionId = sessionId;
+      return true;
+    } catch (error) {
+      attachedWorkflowSessionId = undefined;
+      ctx.ui.notify(`Workflow Session attach is read-only because continuation ownership was unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      return false;
+    }
   }
 
   function emitRunTransitions(snapshot: WorkflowSnapshot): void {
@@ -680,10 +736,7 @@ When the agent loop ends naturally, the extension verifies completion automatica
             if (action === "resume" && !workflowSessionOptedIn) {
               workflowSessionOptedIn = true;
               const snapshot = workflowBridge?.getSnapshot();
-              if (snapshot?.session?.status === "running") {
-                const hostSessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.()
-                  ?? `pi-${process.pid}`;
-                await workflowCoordinator!.attach(hostSessionId, snapshot.session.sessionId);
+              if (snapshot && await attachWorkflowSession(ctx, snapshot)) {
                 reconcileWorkflowGoal(snapshot, ctx);
               }
             }
@@ -770,8 +823,8 @@ When the agent loop ends naturally, the extension verifies completion automatica
     widgetCtx = ctx;
     panelMode = "collapsed";
     goalSessionStart(ctx, event);
-    workflowSessionOptedIn = shouldRestoreWorkflowGoal(event.reason, getActiveGoal() !== undefined);
-    workflowBaselineEstablished = false;
+    const restoredGoal = getActiveGoal();
+    workflowSessionOptedIn = false;
     todoSessionStart(ctx);
     workflowBridge = new WorkflowBridge(ctx.cwd);
     workflowCoordinator = WorkflowCoordinator.create(
@@ -781,11 +834,10 @@ When the agent loop ends naturally, the extension verifies completion automatica
     );
     setWorkflowCoordinator(workflowCoordinator);
     const snapshot = await refreshWorkflow(ctx);
-    if (snapshot?.source === "canonical" && snapshot.session?.status === "running") {
-      const hostSessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.()
-        ?? `pi-${process.pid}`;
-      try {
-        await workflowCoordinator.attach(hostSessionId, snapshot.session.sessionId);
+    workflowSessionOptedIn = shouldRestoreWorkflowGoal(event.reason, restoredGoal, snapshot);
+    if (workflowSessionOptedIn && snapshot) reconcileWorkflowGoal(snapshot, ctx);
+    if (snapshot && shouldAttachWorkflowSession(workflowSessionOptedIn, snapshot)) {
+      if (await attachWorkflowSession(ctx, snapshot)) {
         await refreshWorkflow(ctx);
         const recovery = workflowRecoveryIdentity();
         if (recovery) {
@@ -796,8 +848,6 @@ When the agent loop ends naturally, the extension verifies completion automatica
             details: recovery,
           });
         }
-      } catch (error) {
-        ctx.ui.notify(`Workflow Session attach is read-only because continuation ownership was unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
       }
     }
     await onSessionStartPlan(ctx);
@@ -817,10 +867,10 @@ When the agent loop ends naturally, the extension verifies completion automatica
     goalSessionShutdown(ctx);
     todoSessionShutdown(ctx);
     await workflowCoordinator?.release();
+    attachedWorkflowSessionId = undefined;
     workflowCoordinator = undefined;
     workflowBridge = undefined;
     workflowSessionOptedIn = true;
-    workflowBaselineEstablished = false;
     lastRunStates.clear();
     setWorkflowCoordinator(undefined);
     onSessionShutdownPlan(ctx);
@@ -888,7 +938,13 @@ When the agent loop ends naturally, the extension verifies completion automatica
       ? String((event as { input?: { command?: unknown } }).input?.command ?? "")
       : "";
     if (event.toolName === "run-control" || /\bmaestro\s+(?:run|ralph)\b/.test(command)) {
-      await refreshWorkflow(ctx, true);
+      const runControlAction = event.toolName === "run-control"
+        ? String((event as { input?: { action?: unknown } }).input?.action ?? "")
+        : "";
+      const allowOptIn = event.toolName === "run-control"
+        ? Boolean(runControlAction && !isRunControlReadAction(runControlAction))
+        : isWorkflowOptInCommand(command);
+      await refreshWorkflow(ctx, true, allowOptIn);
     }
   });
 

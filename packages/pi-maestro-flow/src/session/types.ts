@@ -69,11 +69,21 @@ export interface WorkflowSnapshotRevision {
   fingerprint: string;
 }
 
+export interface WorkflowCanonicalClaim {
+  activeSessionId?: string;
+  status: "valid" | "invalid";
+  error?: string;
+}
+
 export interface WorkflowSnapshot {
   source: "canonical" | "legacy" | "none";
   projectRoot: string;
   loadedAt: string;
   revision: WorkflowSnapshotRevision;
+  /** Stable identity boundary for consumers that own projected session state. */
+  sessionGeneration?: string;
+  /** Present whenever state.json authoritatively declares an active canonical Session. */
+  canonicalClaim?: WorkflowCanonicalClaim;
   session?: WorkflowSession;
   diagnostics: string[];
 }

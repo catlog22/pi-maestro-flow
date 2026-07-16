@@ -6,6 +6,7 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   getMode,
+  getPlanHandoffStatus,
   initPlan,
   onAgentEndPlan,
   onBeforeAgentStartPlan,
@@ -29,6 +30,8 @@ function createHarness(
   sessionId = "session-main",
   confirmationInputs?: string[],
   supportsNewSession = false,
+  handoff: { goalKey?: string; todoKeys: string[] } = { todoKeys: [] },
+  replacementFailure?: "approval" | "send",
 ) {
   let active = ["Read", "Write", "todo", "custom-tool"];
   const tools = new Map<string, ToolLike>();
@@ -86,9 +89,24 @@ function createHarness(
     ui,
     ...(supportsNewSession
       ? {
-          async newSession(options?: { withSession?: (ctx: { sendUserMessage(message: string): Promise<void> }) => Promise<void> }) {
+          async newSession(options?: { withSession?: (ctx: ExtensionContext & { sendUserMessage(message: string): Promise<void> }) => Promise<void> }) {
             newSessions++;
-            await options?.withSession?.({ async sendUserMessage(message: string) { messages.push(message); } });
+            const replacementSessionId = `${sessionId}-replacement`;
+            const replacementCtx = {
+              ...ctx,
+              sessionManager: {
+                getSessionId: () => replacementSessionId,
+                getSessionFile: () => join(root, `${replacementSessionId}.jsonl`),
+                getSessionName: () => replacementSessionId,
+              },
+              async sendUserMessage(message: string) {
+                if (replacementFailure === "send") throw new Error("replacement send failed");
+                messages.push(message);
+              },
+            } as ExtensionContext & { sendUserMessage(message: string): Promise<void> };
+            onSessionShutdownPlan(ctx);
+            await onSessionStartPlan(replacementCtx);
+            await options?.withSession?.(replacementCtx);
             return { cancelled: false };
           },
         }
@@ -113,6 +131,13 @@ function createHarness(
     storeFactory: (cwd, session) => {
       const call = storeCalls++;
       if (failFirstLoad && call === 0) return new FailingLoadStore(cwd, { rootDir: join(root, "global"), session });
+      if (replacementFailure === "approval" && session.id.endsWith("-replacement")) {
+        return new PlanStore(cwd, {
+          rootDir: join(root, "global"),
+          session,
+          approvalCommitHook: async () => { throw new Error("replacement approval failed"); },
+        });
+      }
       return failingSave ? new FailingSaveStore(cwd, {
         rootDir: join(root, "global"),
         session,
@@ -124,6 +149,8 @@ function createHarness(
         : {}),
       });
     },
+    activeGoalHandoffKey: () => handoff.goalKey,
+    hasExecutableTodo: (handoffKey) => handoff.todoKeys.includes(handoffKey),
   });
   registerPlanTools(pi);
   return {
@@ -136,6 +163,7 @@ function createHarness(
     compactions,
     get newSessions() { return newSessions; },
     get active() { return active; },
+    handoff,
   };
 }
 
@@ -195,6 +223,7 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     await execute(harness, "plan-update", { markdown: "# Approved\n\nImplement safely" });
     const confirmed = await execute(harness, "plan-confirm");
     assert.equal(confirmed.details.approved, true);
+    assert.equal(confirmed.details.handoffStatus, "goal-required");
     assert.equal(getMode(), "act");
     assert.equal(harness.statuses.at(-1), "ACT");
     assert.deepEqual(harness.active, actSnapshot);
@@ -212,8 +241,29 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     });
     const loaded = await store.load();
     assert.equal(loaded.manifest.status, "approved");
+    assert.ok(loaded.manifest.handoffKey);
     assert.ok(loaded.manifest.approvedPath);
     assert.equal(await readFile(join(store.plansDir, loaded.manifest.approvedPath!), "utf8"), "# Approved\n\nImplement safely");
+
+    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /Approved Plan handoff/);
+    assert.equal(onToolCallPlan({ toolName: "goal", input: { action: "get" } }), undefined);
+    const goalCreate = { action: "create", objective: "Execute approved plan" };
+    assert.equal(onToolCallPlan({ toolName: "goal", input: goalCreate }), undefined);
+    assert.equal(goalCreate.planHandoffKey, loaded.manifest.handoffKey);
+    assert.match(onToolCallPlan({ toolName: "todo", input: { action: "create", subject: "Implement" } })?.reason ?? "", /active Goal/);
+    harness.handoff.goalKey = "unrelated-goal";
+    harness.handoff.todoKeys.push("unrelated-goal");
+    assert.equal(getPlanHandoffStatus(), "goal-required");
+    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /Approved Plan handoff/);
+    harness.handoff.goalKey = loaded.manifest.handoffKey;
+    assert.equal(getPlanHandoffStatus(), "todo-required");
+    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /Approved Plan handoff/);
+    const todoCreate = { action: "create", subject: "Implement" };
+    assert.equal(onToolCallPlan({ toolName: "todo", input: todoCreate }), undefined);
+    assert.equal(todoCreate.planHandoffKey, loaded.manifest.handoffKey);
+    harness.handoff.todoKeys.push(loaded.manifest.handoffKey!);
+    assert.equal(getPlanHandoffStatus(), "ready");
+    assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -255,11 +305,62 @@ test("Plan confirmation can execute in a new session from command-capable contex
     assert.equal(harness.newSessions, 1);
     assert.equal(harness.messages.length, 1);
     assert.match(harness.messages.at(-1) ?? "", /# Clean Context Plan/);
+    assert.equal(getPlanHandoffStatus(), "goal-required");
+    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /Approved Plan handoff/);
+    const replacementStore = new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: "clear-chat-replacement" },
+    });
+    const replacement = await replacementStore.load();
+    assert.equal(replacement.manifest.status, "approved");
+    assert.ok(replacement.manifest.handoffKey);
+    const sourceStore = new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: "clear-chat" },
+    });
+    const sourceHandoffKey = (await sourceStore.load()).manifest.handoffKey;
+    assert.equal(replacement.manifest.handoffKey, sourceHandoffKey);
+    await rm(replacementStore.manifestPath, { force: true });
+    assert.equal((await replacementStore.load()).manifest.handoffKey, sourceHandoffKey);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
   }
 });
+
+for (const failure of ["approval", "send"] as const) {
+  test(`Plan execute-clear fails closed inside the replacement session when ${failure} fails`, async () => {
+    const root = await mkdtemp(join(tmpdir(), `pi-plan-confirm-clear-${failure}-`));
+    const harness = createHarness(
+      root,
+      false,
+      false,
+      false,
+      false,
+      `clear-${failure}-chat`,
+      ["\x1b[B", "\r"],
+      true,
+      { todoKeys: [] },
+      failure,
+    );
+    try {
+      await onSessionStartPlan(harness.ctx);
+      await execute(harness, "plan-enter");
+      await execute(harness, "plan-update", { markdown: `# Replacement ${failure} failure` });
+      const confirmed = await execute(harness, "plan-confirm");
+      assert.equal(confirmed.details.approved, true);
+      assert.equal(harness.newSessions, 1);
+      assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /blocks|handoff/i);
+      assert.match(
+        harness.notifications.join("\n"),
+        failure === "approval" ? /failed closed in Plan mode/ : /write-gated.*prompt could not be delivered/,
+      );
+    } finally {
+      onSessionShutdownPlan(harness.ctx);
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+}
 
 test("Cancelling Plan confirmation exits Plan mode and preserves the draft", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-cancel-"));
@@ -358,6 +459,9 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "kill 1234" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "rg '\\brm\\b|cp|mv' packages/pi-maestro-flow/src" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "echo 'rm cp mv are write commands'" } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "rg '\\$\\(|`|>|sh -c' packages/pi-maestro-flow/src" } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "rg \"\\$\\(\" packages/pi-maestro-flow/src" } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "PowerShell", input: { command: "Select-String -Pattern '\\$\\(|>|pwsh -Command' src/app.ts" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "PowerShell", input: { command: "Get-Content x | Select-String plan" } }), undefined);
     assert.match(onToolCallPlan({ toolName: "PowerShell", input: { command: "Get-Content x | Set-Content y" } })?.reason ?? "", /modify files/);
     assert.equal(onToolCallPlan({ toolName: "PowerShell", input: { command: "Get-Content x" } }), undefined);
@@ -375,6 +479,64 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git status && rm src/app.ts" } })?.reason ?? "", /modify files/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "sed -i 's/a/b/' src/app.ts" } })?.reason ?? "", /modify files/);
     assert.match(onToolCallPlan({ toolName: "PowerShell", input: { command: "Remove-Item src/app.ts" } })?.reason ?? "", /modify files/);
+    for (const command of [
+      "sh -c \"rm src/app.ts\"",
+      "bash -lc 'touch src/app.ts'",
+      "/bin/sh -c \"rm src/app.ts\"",
+      "/bin/rm src/app.ts",
+      "env bash -c \"rm src/app.ts\"",
+      "env -S bash -c \"rm src/app.ts\"",
+      "bash -O extglob -c \"rm src/app.ts\"",
+      "bash -xec 'rm src/app.ts'",
+      "command rm src/app.ts",
+      "xargs -0 sh -c \"rm src/app.ts\"",
+      "find . -exec /bin/sh -c \"rm src/app.ts\" ;",
+      "cmd /c \"del src\\app.ts\"",
+      "cmd /d /c \"del src\\app.ts\"",
+      "pwsh -NoProfile -Command \"Set-Content src/app.ts x\"",
+      "pwsh -ExecutionPolicy Bypass -Command \"Set-Content src/app.ts x\"",
+      "eval 'rm src/app.ts'",
+      "source 'scripts/write.sh'",
+      ". 'scripts/write.sh'",
+      "iex 'Set-Content src/app.ts x'",
+      "Invoke-Expression 'Set-Content src/app.ts x'",
+      "node --eval \"require('fs').writeFileSync('src/app.ts', 'x')\"",
+      "node --input-type=module -e \"require('fs').writeFileSync('src/app.ts', 'x')\"",
+      "python3 -c \"open('src/app.ts', 'w').write('x')\"",
+      "python3 -I -c \"open('src/app.ts', 'w').write('x')\"",
+      "echo $(printf safe)",
+      "echo \"$(rm src/app.ts)\"",
+      "echo `rm src/app.ts`",
+      "Get-Content source.txt > copy.txt",
+      "Get-Content < source.txt",
+    ]) {
+      assert.match(
+        onToolCallPlan({ toolName: "bash", input: { command } })?.reason ?? "",
+        /modify files/,
+        command,
+      );
+    }
+    assert.match(
+      onToolCallPlan({
+        toolName: "PowerShell",
+        input: { command: '& "$env:SystemRoot\\System32\\cmd.exe" /c del src\\app.ts' },
+      })?.reason ?? "",
+      /modify files/,
+    );
+    assert.equal(
+      onToolCallPlan({
+        toolName: "bash",
+        input: { command: "rg '/bin/rm|bash -xec|env -S bash -c|command rm|eval|source' packages/pi-maestro-flow/src" },
+      }),
+      undefined,
+    );
+    assert.equal(
+      onToolCallPlan({
+        toolName: "PowerShell",
+        input: { command: "Select-String -Pattern '& \\\"cmd.exe\\\" /c del|iex|Invoke-Expression' src/app.ts" },
+      }),
+      undefined,
+    );
 
     await onAgentEndPlan({
       messages: [{ role: "assistant", content: "<proposed_plan>\n# Legacy plan\n</proposed_plan>" }],
@@ -384,6 +546,36 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.equal(status.details.status, "draft");
   } finally {
     onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Approved Plan handoff gate is restored from the manifest after restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-handoff-restart-"));
+  const binding: { goalKey?: string; todoKeys: string[] } = { todoKeys: [] };
+  const first = createHarness(root, true, false, false, false, "handoff-chat", undefined, false, binding);
+  try {
+    await onSessionStartPlan(first.ctx);
+    await execute(first, "plan-enter");
+    await execute(first, "plan-update", { markdown: "# Restart handoff" });
+    const confirmed = await execute(first, "plan-confirm");
+    assert.equal(getPlanHandoffStatus(), "goal-required");
+    const handoffKey = confirmed.details.handoffKey as string;
+    onSessionShutdownPlan(first.ctx);
+
+    const second = createHarness(root, false, false, false, false, "handoff-chat", undefined, false, binding);
+    await onSessionStartPlan(second.ctx);
+    assert.equal(getMode(), "act");
+    assert.equal(getPlanHandoffStatus(), "goal-required");
+    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /Approved Plan handoff/);
+    binding.goalKey = handoffKey;
+    assert.equal(getPlanHandoffStatus(), "todo-required");
+    binding.todoKeys.push(handoffKey);
+    assert.equal(getPlanHandoffStatus(), "ready");
+    assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
+    onSessionShutdownPlan(second.ctx);
+  } finally {
+    onSessionShutdownPlan(first.ctx);
     await rm(root, { recursive: true, force: true });
   }
 });

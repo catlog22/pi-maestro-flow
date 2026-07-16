@@ -87,6 +87,161 @@ test("session lease is atomic under first-acquire concurrency and stale takeover
   }
 });
 
+test("stale takeover fences an already-validated old heartbeat and release", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-lease-fence-"));
+  let now = new Date("2026-07-15T00:00:00.000Z");
+  let publishReached!: () => void;
+  let resumePublish!: () => void;
+  const reachedPublish = new Promise<void>((resolve) => { publishReached = resolve; });
+  const publishResumed = new Promise<void>((resolve) => { resumePublish = resolve; });
+  let pauseHeartbeat = true;
+  const oldOwner = new WorkflowLeaseStore(root, 1_000, () => now, {
+    async beforeHeartbeatPublish() {
+      if (!pauseHeartbeat) return;
+      pauseHeartbeat = false;
+      publishReached();
+      await publishResumed;
+    },
+  });
+  const newOwner = new WorkflowLeaseStore(root, 1_000, () => now);
+  try {
+    await oldOwner.acquire("session-1", "host-old");
+    const oldHeartbeat = oldOwner.heartbeat();
+    await reachedPublish;
+
+    now = new Date("2026-07-15T00:00:02.000Z");
+    const replacement = await newOwner.acquire("session-1", "host-new");
+    await oldOwner.release();
+    resumePublish();
+
+    await assert.rejects(oldHeartbeat, WorkflowLeaseBusyError);
+    assert.equal(oldOwner.current(), undefined, "the fenced owner must not retain a held lease illusion");
+    assert.equal((await newOwner.heartbeat()).token, replacement.token);
+  } finally {
+    resumePublish();
+    await oldOwner.release();
+    await newOwner.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("heartbeat publication failure clears ownership and blocks continuation and mutation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-heartbeat-failure-"));
+  const snapshot = workflowSnapshot("running");
+  const calls: string[][] = [];
+  const store = new WorkflowLeaseStore(root, 1_000, () => new Date("2026-07-15T00:00:00.000Z"), {
+    async beforeHeartbeatPublish() {
+      throw new Error("injected heartbeat publication failure");
+    },
+  });
+  const coordinator = new WorkflowCoordinator(
+    fakeBridge(snapshot),
+    fakeAdapter(calls, { retryViaParentRun: true, cancel: true }),
+    store,
+  );
+  try {
+    await coordinator.attach("host-1");
+    const marker = coordinator.continuationMarker(1);
+
+    await assert.rejects(store.heartbeat(), /injected heartbeat publication failure/);
+    assert.equal(store.current(), undefined);
+    assert.equal(coordinator.acceptsContinuation(marker), false);
+    assert.throws(() => coordinator.continuationMarker(2), /lease is not held/);
+    await assert.rejects(coordinator.complete("run-1"), /lease is not held/);
+    assert.equal(calls.some(([operation]) => operation === "complete"), false);
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("every coordinator mutation rejects a canonical Session switch after attach before fencing or CLI", async () => {
+  const scenarios: Array<{
+    name: string;
+    status: "running" | "failed" | "completed";
+    mutate: (coordinator: WorkflowCoordinator) => Promise<unknown>;
+  }> = [
+    { name: "advance", status: "completed", mutate: (coordinator) => coordinator.advance("review") },
+    { name: "complete", status: "running", mutate: (coordinator) => coordinator.complete("run-1") },
+    { name: "retry", status: "failed", mutate: (coordinator) => coordinator.retry("run-1") },
+    { name: "cancel", status: "running", mutate: (coordinator) => coordinator.cancel("run-1") },
+    { name: "fenceContinuation", status: "running", mutate: (coordinator) => coordinator.fenceContinuation() },
+  ];
+
+  for (const scenario of scenarios) {
+    const root = await mkdtemp(join(tmpdir(), `pi-workflow-switch-${scenario.name}-`));
+    const snapshot = workflowSnapshot(scenario.status);
+    let refreshCount = 0;
+    const bridge: WorkflowSnapshotProvider = {
+      async refresh() {
+        refreshCount++;
+        if (refreshCount === 2) {
+          snapshot.session!.sessionId = "session-2";
+          snapshot.sessionGeneration = "canonical:valid:session-2:1";
+          snapshot.canonicalClaim = { activeSessionId: "session-2", status: "valid" };
+        }
+        return snapshot;
+      },
+      getSnapshot() { return snapshot; },
+    };
+    const calls: string[][] = [];
+    const store = new WorkflowLeaseStore(root);
+    const coordinator = new WorkflowCoordinator(
+      bridge,
+      fakeAdapter(calls, { retryViaParentRun: true, cancel: true }),
+      store,
+    );
+    try {
+      await coordinator.attach("host-1");
+      const leaseBefore = store.current();
+      await assert.rejects(
+        scenario.mutate(coordinator),
+        /lease belongs to session-1, but the active canonical Session is session-2/,
+        scenario.name,
+      );
+      assert.equal(store.current()?.token, leaseBefore?.token, `${scenario.name} must not fence the old lease`);
+      assert.equal(
+        calls.some(([operation]) => ["create", "complete", "cancel"].includes(operation ?? "")),
+        false,
+        `${scenario.name} must not reach a mutating CLI call`,
+      );
+    } finally {
+      await coordinator.release();
+      await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("coordinator mutation fails closed when the canonical Session disappears after attach", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-missing-session-"));
+  const attachedSnapshot = workflowSnapshot("running");
+  const missingSnapshot: WorkflowSnapshot = {
+    ...attachedSnapshot,
+    sessionGeneration: "none",
+    canonicalClaim: undefined,
+    session: undefined,
+  };
+  let refreshCount = 0;
+  const bridge: WorkflowSnapshotProvider = {
+    async refresh() { return ++refreshCount === 1 ? attachedSnapshot : missingSnapshot; },
+    getSnapshot() { return refreshCount <= 1 ? attachedSnapshot : missingSnapshot; },
+  };
+  const calls: string[][] = [];
+  const coordinator = new WorkflowCoordinator(
+    bridge,
+    fakeAdapter(calls, { retryViaParentRun: true, cancel: true }),
+    new WorkflowLeaseStore(root),
+  );
+  try {
+    await coordinator.attach("host-1");
+    await assert.rejects(coordinator.complete("run-1"), /No active canonical Workflow Session/);
+    assert.equal(calls.some(([operation]) => operation === "complete"), false);
+  } finally {
+    await coordinator.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("attach heartbeats its token and safely stops on Session switch and release", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-heartbeat-"));
   const snapshot = workflowSnapshot("running");
@@ -100,8 +255,7 @@ test("attach heartbeats its token and safely stops on Session switch and release
   const oldSessionObserver = new WorkflowLeaseStore(root, 1_000);
   try {
     const first = await coordinator.attach("host-1");
-    await delay(30);
-    assert.ok(Date.parse(store.current()!.heartbeatAt) > Date.parse(first.lease.heartbeatAt));
+    await waitUntil(() => Date.parse(store.current()!.heartbeatAt) > Date.parse(first.lease.heartbeatAt));
     const oldMarker = coordinator.continuationMarker(1);
 
     snapshot.session!.sessionId = "session-2";
@@ -283,7 +437,15 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function workflowSnapshot(status: "running" | "failed"): WorkflowSnapshot {
+async function waitUntil(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error(`Condition was not met within ${timeoutMs}ms`);
+    await delay(5);
+  }
+}
+
+function workflowSnapshot(status: "running" | "failed" | "completed"): WorkflowSnapshot {
   return {
     source: "canonical",
     projectRoot: "D:/workspace",

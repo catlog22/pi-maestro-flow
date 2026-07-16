@@ -868,6 +868,109 @@ function createProgress(agent: string, startTime: number): AgentProgress {
   };
 }
 
+const CHILD_TERMINATION_GRACE_MS = 5_000;
+
+export interface ChildTerminationController {
+  terminate(): void;
+  cleanup(): void;
+}
+
+export interface ChildTerminationOptions {
+  graceMs?: number;
+  platform?: NodeJS.Platform;
+  spawnProcess?: typeof spawn;
+}
+
+/** @internal Exported for lifecycle regression tests. */
+export function createChildTerminationController(
+  child: ChildProcess,
+  options: ChildTerminationOptions = {},
+): ChildTerminationController {
+  const graceMs = options.graceMs ?? CHILD_TERMINATION_GRACE_MS;
+  const platform = options.platform ?? process.platform;
+  const spawnProcess = options.spawnProcess ?? spawn;
+  let exitObserved = child.exitCode !== null || child.signalCode !== null;
+  let terminationStarted = false;
+  let windowsTreeCleanupConfirmed = false;
+  let forceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const clearForceTimer = (): void => {
+    if (!forceTimer) return;
+    clearTimeout(forceTimer);
+    forceTimer = undefined;
+  };
+  const onExit = (): void => {
+    exitObserved = true;
+    if (platform !== "win32") clearForceTimer();
+  };
+  const isAlive = (): boolean =>
+    !exitObserved && child.exitCode === null && child.signalCode === null;
+  const killDirect = (signal: NodeJS.Signals): void => {
+    if (!isAlive()) return;
+    try { child.kill(signal); } catch { /* process already exited */ }
+  };
+  const killWindowsTree = (force: boolean): void => {
+    if (windowsTreeCleanupConfirmed) return;
+    if (!child.pid) {
+      killDirect(force ? "SIGKILL" : "SIGTERM");
+      return;
+    }
+    try {
+      const killer = spawnProcess(
+        "taskkill",
+        ["/PID", String(child.pid), "/T", ...(force ? ["/F"] : [])],
+        { windowsHide: true, stdio: "ignore", shell: false },
+      );
+      killer.once("error", () => killDirect(force ? "SIGKILL" : "SIGTERM"));
+      killer.once("close", (code) => {
+        if (code !== 0) return;
+        windowsTreeCleanupConfirmed = true;
+        clearForceTimer();
+      });
+    } catch {
+      killDirect(force ? "SIGKILL" : "SIGTERM");
+    }
+  };
+
+  child.once("exit", onExit);
+  return {
+    terminate(): void {
+      if (terminationStarted || !isAlive()) return;
+      terminationStarted = true;
+      if (platform === "win32") killWindowsTree(false);
+      else killDirect("SIGTERM");
+      if (platform !== "win32" && !isAlive()) return;
+      forceTimer = setTimeout(() => {
+        forceTimer = undefined;
+        if (platform === "win32") {
+          if (!windowsTreeCleanupConfirmed) killWindowsTree(true);
+          return;
+        }
+        if (!isAlive()) return;
+        killDirect("SIGKILL");
+      }, graceMs);
+    },
+    cleanup(): void {
+      child.removeListener("exit", onExit);
+      if (platform !== "win32" || !terminationStarted || windowsTreeCleanupConfirmed) {
+        clearForceTimer();
+      }
+    },
+  };
+}
+
+/** @internal Exported for lifecycle regression tests. */
+export function bindChildTerminationSignal(
+  termination: ChildTerminationController,
+  signal?: AbortSignal,
+): () => void {
+  if (!signal) return () => undefined;
+  const abortHandler = () => termination.terminate();
+  signal.addEventListener("abort", abortHandler, { once: true });
+  if (signal.aborted) abortHandler();
+  return () => signal.removeEventListener("abort", abortHandler);
+}
+
 // ---------------------------------------------------------------------------
 // Core: run a single teammate agent
 // ---------------------------------------------------------------------------
@@ -1128,26 +1231,15 @@ async function runSingleAttempt(
     // Report initial progress
     options.onProgress?.(progress);
 
+    const termination = createChildTerminationController(child);
+
     // Handle abort signal
-    const abortHandler = () => {
-      child.kill("SIGTERM");
-      setTimeout(() => {
-        if (!child.killed) child.kill("SIGKILL");
-      }, 5000);
-    };
-    if (options.signal) {
-      options.signal.addEventListener("abort", abortHandler, { once: true });
-    }
+    const unbindTerminationSignal = bindChildTerminationSignal(termination, options.signal);
 
     // Timeout handling
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     if (params.timeoutMs) {
-      timeoutTimer = setTimeout(() => {
-        child.kill("SIGTERM");
-        setTimeout(() => {
-          if (!child.killed) child.kill("SIGKILL");
-        }, 5000);
-      }, params.timeoutMs);
+      timeoutTimer = setTimeout(() => termination.terminate(), params.timeoutMs);
     }
 
     // Parse JSON lines from stdout
@@ -1342,9 +1434,8 @@ async function runSingleAttempt(
 
     child.on("close", (code) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (options.signal) {
-        options.signal.removeEventListener("abort", abortHandler);
-      }
+      termination.cleanup();
+      unbindTerminationSignal();
 
       cleanupFile(systemPromptFile);
 
@@ -1397,9 +1488,7 @@ async function runSingleAttempt(
 
     child.on("error", (error) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (options.signal) {
-        options.signal.removeEventListener("abort", abortHandler);
-      }
+      unbindTerminationSignal();
 
       cleanupFile(systemPromptFile);
       if (schemaFile) cleanupFile(schemaFile);
@@ -1409,19 +1498,22 @@ async function runSingleAttempt(
       progress.durationMs = Date.now() - startTime;
       options.onProgress?.(progress);
 
-      resolve({
-        agent: params.agent,
-        task: params.task ?? "",
-        exitCode: 1,
-        messages: [{
-          role: "system",
-          content: `Process error: ${error.message}`,
-        }],
-        usage: emptyUsage(),
-        model: resolvedModel,
-        correlationId,
-        durationMs: Date.now() - startTime,
-      });
+      if (!resolved) {
+        resolved = true;
+        resolve({
+          agent: params.agent,
+          task: params.task ?? "",
+          exitCode: 1,
+          messages: [{
+            role: "system",
+            content: `Process error: ${error.message}`,
+          }],
+          usage: emptyUsage(),
+          model: resolvedModel,
+          correlationId,
+          durationMs: Date.now() - startTime,
+        });
+      }
     });
   });
 }

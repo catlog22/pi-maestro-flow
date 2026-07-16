@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { WorkflowCoordinator } from "../session/coordinator.ts";
-import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
+import { activeWorkflowRun, type WorkflowSession, type WorkflowSnapshot } from "../session/types.ts";
 import {
   renderGoalWidget,
   type GoalWidgetModel,
@@ -77,6 +77,8 @@ export interface ActiveGoal {
   timeUsedSeconds: number;
   baselineTokens: number;
   workflowSessionId?: string;
+  planHandoffKey?: string;
+  workflowSessionGeneration?: string;
 }
 
 interface AssistantMessageLike {
@@ -165,6 +167,7 @@ export interface GoalCreateParams {
   action: "create";
   objective: string;
   tokenBudget?: string;
+  planHandoffKey?: string;
 }
 
 export type GoalParams = GoalGetParams | GoalCreateParams;
@@ -191,7 +194,7 @@ export async function executeGoal(
       if (typeof params.objective !== "string" || params.objective.trim().length === 0) {
         return { text: "Goal create requires a non-empty objective.", isError: true };
       }
-      return handleCreate(params.objective, params.tokenBudget, ctx);
+      return handleCreate(params.objective, params.tokenBudget, ctx, params.planHandoffKey);
     }
     default:
       return { text: "Unknown action. Valid: get, create", isError: true };
@@ -260,17 +263,49 @@ export function setWorkflowCoordinator(coordinator: WorkflowCoordinator | undefi
 
 export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalContext): ActiveGoal | undefined {
   const session = snapshot.session;
-  if (!session || session.status === "sealed" || session.status === "archived") return activeGoal;
+  if (snapshot.canonicalClaim?.status === "invalid") {
+    if (activeGoal?.workflowSessionId && activeGoal.status === "active") {
+      fenceGoalLifecycle();
+      activeGoal = pauseGoal(activeGoal, "gate");
+      persistGoal(activeGoal);
+      updateStatusLine(ctx, activeGoal);
+    }
+    return activeGoal;
+  }
+  if (!session) {
+    if (activeGoal?.workflowSessionId && activeGoal.status === "active") {
+      fenceGoalLifecycle();
+      activeGoal = pauseGoal(activeGoal, "gate");
+      persistGoal(activeGoal);
+      updateStatusLine(ctx, activeGoal);
+    }
+    return activeGoal;
+  }
+
+  const workflowIdentityChanged = activeGoal?.workflowSessionId && (
+    activeGoal.workflowSessionId !== session.sessionId
+    || activeGoal.workflowSessionGeneration !== snapshot.sessionGeneration
+  );
+  if (workflowIdentityChanged) {
+    fenceGoalLifecycle();
+    activeGoal = pauseGoal(activeGoal, "gate");
+    persistGoal(activeGoal);
+    if (session.status === "sealed" || session.status === "archived") {
+      updateStatusLine(ctx, activeGoal);
+      return activeGoal;
+    }
+    activeGoal = createWorkflowGoal(session, ctx, snapshot.sessionGeneration);
+    clearStaleBlock();
+    persistGoal(activeGoal);
+    updateStatusLine(ctx, activeGoal);
+    return activeGoal;
+  }
+
+  if (session.status === "sealed" || session.status === "archived") return activeGoal;
   const failedGate = [...session.gates, ...session.runs.flatMap((run) => run.gates)]
     .some((gate) => gate.blocking && ["failed", "blocked"].includes(gate.status));
   if (!activeGoal) {
-    const definition = session.definitionOfDone.trim();
-    const objective = definition ? `${session.intent}\n\nDefinition of done: ${definition}` : session.intent;
-    activeGoal = {
-      ...createGoal(objective, undefined, currentTokenTotal(ctx)),
-      workflowSessionId: session.sessionId,
-      ...(failedGate || session.status === "paused" ? { status: "paused" as const, pauseReason: "gate" as const } : {}),
-    };
+    activeGoal = createWorkflowGoal(session, ctx, snapshot.sessionGeneration, failedGate);
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
     return activeGoal;
@@ -724,6 +759,12 @@ function safeEvidenceJson(value: unknown): string {
 }
 
 export function canonicalCompletionBlockers(snapshot: WorkflowSnapshot | undefined): string[] {
+  if (snapshot?.canonicalClaim?.status === "invalid") {
+    const claim = snapshot.canonicalClaim;
+    return [
+      `Canonical Workflow Session ${claim.activeSessionId ?? "claim"} is invalid: ${claim.error ?? "state could not be loaded"}`,
+    ];
+  }
   const session = snapshot?.session;
   if (!session) return [];
   const blockers: string[] = [];
@@ -746,6 +787,9 @@ export function canonicalCompletionBlockers(snapshot: WorkflowSnapshot | undefin
 }
 
 export function buildCanonicalEvidence(snapshot: WorkflowSnapshot | undefined): string {
+  if (snapshot?.canonicalClaim?.status === "invalid") {
+    return canonicalCompletionBlockers(snapshot)[0] ?? "";
+  }
   const session = snapshot?.session;
   if (!session) return "";
   const lines = [
@@ -790,6 +834,7 @@ async function handleCreate(
   objective: string,
   budget: string | undefined,
   ctx: GoalContext,
+  planHandoffKey?: string,
 ): Promise<{ text: string; isError: boolean }> {
   const err = validateObjective(objective);
   if (err) return { text: err, isError: true };
@@ -807,7 +852,7 @@ async function handleCreate(
   cancelContinuation();
   clearRecovery();
   clearStaleBlock();
-  activeGoal = createGoal(objective, tokenBudget, currentTokenTotal(ctx));
+  activeGoal = createGoal(objective, tokenBudget, currentTokenTotal(ctx), planHandoffKey);
   if (ctx.isIdle?.() !== true) armGoalLoop(activeGoal);
   persistGoal(activeGoal);
   updateStatusLine(ctx, activeGoal);
@@ -1043,17 +1088,50 @@ function tokenize(input: string): string[] {
 // Goal state transitions
 // ---------------------------------------------------------------------------
 
-function createGoal(text: string, tokenBudget: number | undefined, baseline: number): ActiveGoal {
+function createGoal(
+  text: string,
+  tokenBudget: number | undefined,
+  baseline: number,
+  planHandoffKey?: string,
+): ActiveGoal {
   const now = Date.now();
   return {
     id: randomUUID(), text, status: "active",
     startedAt: now, updatedAt: now, iteration: 0,
     tokenBudget, tokensUsed: 0, timeUsedSeconds: 0, baselineTokens: baseline,
+    ...(planHandoffKey ? { planHandoffKey } : {}),
   };
 }
 
 function pauseGoal(goal: ActiveGoal, reason: PauseReason): ActiveGoal {
   return { ...goal, status: "paused", pauseReason: reason, updatedAt: Date.now() };
+}
+
+function createWorkflowGoal(
+  session: WorkflowSession,
+  ctx: GoalContext,
+  sessionGeneration: string | undefined,
+  failedGate?: boolean,
+): ActiveGoal {
+  const blocked = failedGate ?? [...session.gates, ...session.runs.flatMap((run) => run.gates)]
+    .some((gate) => gate.blocking && ["failed", "blocked"].includes(gate.status));
+  const definition = session.definitionOfDone.trim();
+  const objective = definition ? `${session.intent}\n\nDefinition of done: ${definition}` : session.intent;
+  return {
+    ...createGoal(objective, undefined, currentTokenTotal(ctx)),
+    workflowSessionId: session.sessionId,
+    ...(sessionGeneration ? { workflowSessionGeneration: sessionGeneration } : {}),
+    ...(blocked || session.status === "paused" ? { status: "paused" as const, pauseReason: "gate" as const } : {}),
+  };
+}
+
+function fenceGoalLifecycle(): void {
+  goalLifecycleEpoch++;
+  verificationInFlight = undefined;
+  goalLoopOwner = undefined;
+  clearCompletionTimer();
+  cancelContinuation();
+  clearRecovery();
 }
 
 function increment(goal: ActiveGoal): ActiveGoal {
@@ -1116,7 +1194,10 @@ function isGoal(v: unknown): v is ActiveGoal {
     ["active", "paused", "done"].includes(String(g.status)) &&
     typeof g.startedAt === "number" && typeof g.updatedAt === "number" &&
     typeof g.iteration === "number" &&
-    typeof g.tokensUsed === "number" && typeof g.baselineTokens === "number"
+    typeof g.tokensUsed === "number" && typeof g.baselineTokens === "number" &&
+    (g.planHandoffKey === undefined || typeof g.planHandoffKey === "string") &&
+    (g.workflowSessionId === undefined || typeof g.workflowSessionId === "string") &&
+    (g.workflowSessionGeneration === undefined || typeof g.workflowSessionGeneration === "string")
   );
 }
 

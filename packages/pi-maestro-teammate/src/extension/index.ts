@@ -382,6 +382,136 @@ export function handleChildLifecycleEvent(
   }
 }
 
+export function restoreMainOwnershipIfHandbackPending(
+  agent: ActiveAgent,
+): LeaseToken | undefined {
+  const lease = agent.lease;
+  const pending = agent.pendingHandback;
+  if (!lease
+    || !pending
+    || lease.owner !== "none"
+    || lease.state !== "reloading"
+    || lease.epoch !== pending.epoch
+    || lease.nonce !== pending.nonce
+  ) return undefined;
+
+  agent.lease = restoreMainOwnership(lease);
+  agent.pendingHandback = undefined;
+  return leaseToken(agent.lease);
+}
+
+const CHILD_PROXY_TIMEOUT_MS = 30 * 60 * 1_000;
+
+export interface PendingChildProxyRequest {
+  resolve: (result: unknown) => void;
+  reject: (error: Error) => void;
+  timer: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  abortHandler?: () => void;
+}
+
+export type ChildProxyPendingRequests = Map<string, PendingChildProxyRequest>;
+
+function takeChildProxyRequest(
+  pendingRequests: ChildProxyPendingRequests,
+  requestId: string,
+): PendingChildProxyRequest | undefined {
+  const pending = pendingRequests.get(requestId);
+  if (!pending) return undefined;
+  pendingRequests.delete(requestId);
+  clearTimeout(pending.timer);
+  if (pending.signal && pending.abortHandler) {
+    pending.signal.removeEventListener("abort", pending.abortHandler);
+  }
+  return pending;
+}
+
+function childProxyAbortError(): Error {
+  const error = new Error("Teammate proxy request aborted.");
+  error.name = "AbortError";
+  return error;
+}
+
+/** @internal Exported for lifecycle regression tests. */
+export function resolveChildProxyRequest(
+  pendingRequests: ChildProxyPendingRequests,
+  requestId: string,
+  result: unknown,
+): boolean {
+  const pending = takeChildProxyRequest(pendingRequests, requestId);
+  if (!pending) return false;
+  pending.resolve(result);
+  return true;
+}
+
+/** @internal Exported for lifecycle regression tests. */
+export function rejectChildProxyRequest(
+  pendingRequests: ChildProxyPendingRequests,
+  requestId: string,
+  error: Error,
+): boolean {
+  const pending = takeChildProxyRequest(pendingRequests, requestId);
+  if (!pending) return false;
+  pending.reject(error);
+  return true;
+}
+
+/** @internal Exported for lifecycle regression tests. */
+export function rejectAllChildProxyRequests(
+  pendingRequests: ChildProxyPendingRequests,
+  error: Error,
+): void {
+  const pending = [...pendingRequests.values()];
+  pendingRequests.clear();
+  for (const request of pending) {
+    clearTimeout(request.timer);
+    if (request.signal && request.abortHandler) {
+      request.signal.removeEventListener("abort", request.abortHandler);
+    }
+    request.reject(error);
+  }
+}
+
+/** @internal Exported for lifecycle regression tests. */
+export function createChildProxyRequest(
+  pendingRequests: ChildProxyPendingRequests,
+  requestId: string,
+  message: Record<string, unknown>,
+  send: (message: Record<string, unknown>, callback: (error: Error | null) => void) => boolean,
+  timeoutMs = CHILD_PROXY_TIMEOUT_MS,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  if (signal?.aborted) return Promise.reject(childProxyAbortError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      rejectChildProxyRequest(
+        pendingRequests,
+        requestId,
+        new Error(`Teammate proxy request timed out after ${timeoutMs}ms.`),
+      );
+    }, timeoutMs);
+    const abortHandler = signal
+      ? () => rejectChildProxyRequest(pendingRequests, requestId, childProxyAbortError())
+      : undefined;
+    pendingRequests.set(requestId, { resolve, reject, timer, signal, abortHandler });
+    if (signal && abortHandler) signal.addEventListener("abort", abortHandler, { once: true });
+    if (signal?.aborted) abortHandler?.();
+    if (!pendingRequests.has(requestId)) return;
+
+    try {
+      send(message, (error) => {
+        if (error) rejectChildProxyRequest(pendingRequests, requestId, error);
+      });
+    } catch (error) {
+      rejectChildProxyRequest(
+        pendingRequests,
+        requestId,
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    }
+  });
+}
+
 export default function registerTeammateExtension(pi: ExtensionAPI): void {
   pi.registerMessageRenderer<Details | { result?: SingleResult }>(
     "teammate-complete",
@@ -434,8 +564,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       parking: boolean;
       nonce?: string;
       listenerInstalled: boolean;
+      lifecycleListenersInstalled: boolean;
       pollTimer?: ReturnType<typeof setInterval>;
-      pendingRequests: Map<string, (result: unknown) => void>;
+      pendingRequests: ChildProxyPendingRequests;
       expectedLease?: LeaseToken;
       acceptedPromptSeq: number;
       requiredPromptSeq: number;
@@ -447,6 +578,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       parked: false,
       parking: false,
       listenerInstalled: false,
+      lifecycleListenersInstalled: false,
       pendingRequests: new Map(),
       acceptedPromptSeq: 0,
       requiredPromptSeq: 0,
@@ -471,6 +603,12 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     };
 
     pi.on("session_start", (_event, ctx) => {
+      if (bridge.ctx) {
+        rejectAllChildProxyRequests(
+          pendingRequests,
+          new Error("Teammate child session restarted before the proxy request completed."),
+        );
+      }
       publishSessionIdentity(ctx);
       refreshModelCatalog(ctx);
       proxyTeammateTool.description = buildTeammateToolDescription(ctx.cwd);
@@ -483,6 +621,15 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       publishSessionIdentity(ctx);
       bridge.completedPromptSeq = bridge.acceptedPromptSeq;
       bridge.idleStableTicks = 0;
+    });
+    pi.on("session_shutdown", () => {
+      if (bridge.pollTimer) clearInterval(bridge.pollTimer);
+      bridge.pollTimer = undefined;
+      bridge.ctx = undefined;
+      rejectAllChildProxyRequests(
+        pendingRequests,
+        new Error("Teammate child session shut down before the proxy request completed."),
+      );
     });
     pi.on("input", (event) => {
       if (event.text.startsWith("/teammate-handoff-reload ")) {
@@ -528,11 +675,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       process.on("message", (msg: unknown) => {
         const m = msg as Record<string, unknown>;
         if (m?.type === "teammate_proxy_result") {
-          const resolve = pendingRequests.get(m.requestId as string);
-          if (resolve) {
-            pendingRequests.delete(m.requestId as string);
-            resolve(m.result);
-          }
+          resolveChildProxyRequest(pendingRequests, m.requestId as string, m.result);
         } else if (m?.type === "teammate_handoff_request") {
           bridge.parking = true;
           bridge.nonce = m.nonce as string;
@@ -571,19 +714,42 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         }
       });
     }
+    if (!bridge.lifecycleListenersInstalled) {
+      bridge.lifecycleListenersInstalled = true;
+      process.once("disconnect", () => {
+        rejectAllChildProxyRequests(
+          pendingRequests,
+          new Error("Teammate parent IPC disconnected before the proxy request completed."),
+        );
+      });
+      process.once("exit", () => {
+        rejectAllChildProxyRequests(
+          pendingRequests,
+          new Error("Teammate child exited before the proxy request completed."),
+        );
+      });
+    }
 
-    async function proxyCall<T>(tool: string, params: unknown): Promise<AgentToolResult<T>> {
-      if (typeof process.send !== "function") {
+    async function proxyCall<T>(
+      tool: string,
+      params: unknown,
+      signal?: AbortSignal,
+    ): Promise<AgentToolResult<T>> {
+      if (typeof process.send !== "function" || process.connected === false) {
         return {
           content: [{ type: "text", text: "IPC not available. Teammate proxy requires IPC channel." }],
           isError: true,
         } as AgentToolResult<T>;
       }
       const requestId = randomUUID();
-      const result = await new Promise<unknown>((resolve) => {
-        pendingRequests.set(requestId, resolve);
-        process.send?.({ type: "teammate_proxy_request", tool, requestId, params });
-      });
+      const result = await createChildProxyRequest(
+        pendingRequests,
+        requestId,
+        { type: "teammate_proxy_request", tool, requestId, params },
+        (message, callback) => process.send!(message, callback),
+        CHILD_PROXY_TIMEOUT_MS,
+        signal,
+      );
       return result as AgentToolResult<T>;
     }
 
@@ -594,14 +760,14 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       promptSnippet: TEAMMATE_PROMPT_SNIPPET,
       promptGuidelines: TEAMMATE_PROMPT_GUIDELINES,
       parameters: TeammateParams,
-      async execute(_id: string, params: RunTeammateParams) {
+      async execute(_id: string, params: RunTeammateParams, signal: AbortSignal) {
         const ctx = bridge.ctx;
         const routed = applyModelRouting(
           params,
           ctx?.cwd ?? process.cwd(),
           ctx ? refreshModelCatalog(ctx).modelIds : modelCatalog.modelIds,
         );
-        return proxyCall<Details>("teammate", routed);
+        return proxyCall<Details>("teammate", routed, signal);
       },
     };
     pi.registerTool(proxyTeammateTool);
@@ -613,8 +779,8 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       promptSnippet: TEAMMATE_SEND_SNIPPET,
       promptGuidelines: TEAMMATE_SEND_GUIDELINES,
       parameters: TeammateSendParams,
-      async execute(_id: string, params: { to: string; message?: string; mode?: RpcMessageMode }) {
-        return proxyCall<{ delivered: boolean }>("teammate-send", params);
+      async execute(_id: string, params: { to: string; message?: string; mode?: RpcMessageMode }, signal: AbortSignal) {
+        return proxyCall<{ delivered: boolean }>("teammate-send", params, signal);
       },
     });
 
@@ -625,8 +791,8 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       promptSnippet: TEAMMATE_LIST_SNIPPET,
       promptGuidelines: TEAMMATE_LIST_GUIDELINES,
       parameters: TeammateListParams,
-      async execute(_id: string, params: { view?: TeammateListView }) {
-        return proxyCall<{ agents: unknown[] }>("teammate-list", params);
+      async execute(_id: string, params: { view?: TeammateListView }, signal: AbortSignal) {
+        return proxyCall<{ agents: unknown[] }>("teammate-list", params, signal);
       },
     });
 
@@ -637,8 +803,8 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       promptSnippet: TEAMMATE_WATCH_SNIPPET,
       promptGuidelines: TEAMMATE_WATCH_GUIDELINES,
       parameters: TeammateWatchParams,
-      async execute(_id: string, params: { name: string; lines?: number }) {
-        return proxyCall<{ output: string[] }>("teammate-watch", params);
+      async execute(_id: string, params: { name: string; lines?: number }, signal: AbortSignal) {
+        return proxyCall<{ output: string[] }>("teammate-watch", params, signal);
       },
     });
 
@@ -1888,11 +2054,10 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           });
         } catch (error) {
           state.handoffSwitching = false;
-          if (attached.lease) {
-            attached.lease = restoreMainOwnership(attached.lease);
-            attached.sendControl?.({ type: "teammate_lease_update", token: leaseToken(attached.lease) });
+          const restoredToken = restoreMainOwnershipIfHandbackPending(attached);
+          if (restoredToken) {
+            attached.sendControl?.({ type: "teammate_lease_update", token: restoredToken });
           }
-          attached.pendingHandback = undefined;
           throw error;
         }
         return;

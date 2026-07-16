@@ -2,17 +2,49 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import registerMaestroExtension, { shouldRestoreWorkflowGoal } from "../src/extension/index.ts";
+import registerMaestroExtension, {
+  isWorkflowOptInCommand,
+  shouldAttachWorkflowSession,
+  shouldRestoreWorkflowGoal,
+} from "../src/extension/index.ts";
+import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
+import { isRunControlReadAction } from "../src/tools/run-control.ts";
 
-test("Workflow Goal restore requires a Goal entry owned by the current Pi session", () => {
-  assert.equal(shouldRestoreWorkflowGoal("startup", false), false);
-  assert.equal(shouldRestoreWorkflowGoal("startup", true), true);
-  assert.equal(shouldRestoreWorkflowGoal("reload", true), true);
-  assert.equal(shouldRestoreWorkflowGoal("resume", true), true);
-  assert.equal(shouldRestoreWorkflowGoal("resume", false), false);
-  assert.equal(shouldRestoreWorkflowGoal("new", true), false);
-  assert.equal(shouldRestoreWorkflowGoal("fork", true), false);
+test("Workflow Goal restore requires a workflow-owned Goal matching the canonical Session", () => {
+  const snapshot = workflowAttachSnapshot();
+  const owned = { workflowSessionId: "session-1" };
+  assert.equal(shouldRestoreWorkflowGoal("startup", undefined, snapshot), false);
+  const unrelatedOptIn = shouldRestoreWorkflowGoal("startup", {}, snapshot);
+  assert.equal(unrelatedOptIn, false, "an unrelated user Goal must stay read-only");
+  assert.equal(shouldAttachWorkflowSession(unrelatedOptIn, snapshot), false, "an unrelated Goal must not acquire a writer lease");
+  assert.equal(shouldRestoreWorkflowGoal("startup", owned, snapshot), true);
+  assert.equal(shouldRestoreWorkflowGoal("reload", owned, snapshot), true);
+  assert.equal(shouldRestoreWorkflowGoal("resume", owned, snapshot), true);
+  assert.equal(shouldRestoreWorkflowGoal("resume", { workflowSessionId: "session-other" }, snapshot), false);
+  assert.equal(shouldRestoreWorkflowGoal("new", owned, snapshot), false);
+  assert.equal(shouldRestoreWorkflowGoal("fork", owned, snapshot), false);
+});
+
+test("Workflow writer attachment requires explicit session opt-in and a valid canonical claim", () => {
+  const snapshot = workflowAttachSnapshot();
+  assert.equal(shouldAttachWorkflowSession(false, snapshot), false);
+  assert.equal(shouldAttachWorkflowSession(true, snapshot), true);
+  assert.equal(shouldAttachWorkflowSession(true, {
+    ...snapshot,
+    session: undefined,
+    canonicalClaim: { activeSessionId: "session-1", status: "invalid", error: "missing session.json" },
+  }), false);
+  assert.equal(isWorkflowOptInCommand("maestro run brief run-1"), false);
+  assert.equal(isWorkflowOptInCommand("maestro run status"), false);
+  assert.equal(isWorkflowOptInCommand("maestro run prepare analyze"), false);
+  assert.equal(isWorkflowOptInCommand("maestro run list"), false);
+  assert.equal(isWorkflowOptInCommand("maestro run show run-1"), false);
+  assert.equal(isWorkflowOptInCommand("maestro run create analyze"), true);
+  assert.equal(isWorkflowOptInCommand("maestro ralph next"), true);
+  for (const action of ["status", "brief", "prepare", "list", "show"]) {
+    assert.equal(isRunControlReadAction(action), true, action);
+  }
 });
 
 test("extension registers LSP, browser, and BM25 discovery", async () => {
@@ -213,3 +245,29 @@ test("intelligence shutdown awaits both managers and contains cleanup failures",
   }, 100);
   assert.deepEqual(calls.sort(), ["browser", "lsp"]);
 });
+
+function workflowAttachSnapshot(): WorkflowSnapshot {
+  return {
+    source: "canonical",
+    projectRoot: "D:/workspace",
+    loadedAt: "2026-07-16T00:00:00.000Z",
+    revision: { sessionRevision: 1, fingerprint: "attach" },
+    sessionGeneration: "canonical:valid:session-1:1",
+    canonicalClaim: { activeSessionId: "session-1", status: "valid" },
+    diagnostics: [],
+    session: {
+      sessionId: "session-1",
+      intent: "Attach only after opt-in",
+      status: "running",
+      revision: 1,
+      identityRevision: 1,
+      activeRunId: null,
+      definitionOfDone: "",
+      gates: [],
+      chain: [],
+      runs: [],
+      artifacts: [],
+      aliases: {},
+    },
+  };
+}

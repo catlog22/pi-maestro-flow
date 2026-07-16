@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative, resolve } from "node:path";
 import test from "node:test";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createPermissionController } from "../src/permissions/controller.ts";
@@ -65,6 +65,170 @@ test("permission modes enforce real default behavior", () => {
   );
 });
 
+test("file permission rules match cwd-relative, absolute, parent and Windows-style paths", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-permissions-paths-"));
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(join(root, "src", "app.ts"), "export {};\n");
+  try {
+    const absolute = resolve(root, "src", "app.ts");
+    assert.equal(evaluatePermission(
+      { toolName: "read", input: { path: absolute } },
+      "dontAsk",
+      { allow: [], ask: [], deny: ["Read(src/app.ts)"] },
+      root,
+    ).behavior, "deny");
+    assert.equal(evaluatePermission(
+      { toolName: "edit", input: { file_path: "src/../src/app.ts" } },
+      "default",
+      { allow: [`Edit(${absolute})`], ask: ["Edit(src/app.ts)"], deny: [] },
+      root,
+    ).behavior, "ask");
+    assert.equal(evaluatePermission(
+      { toolName: "write", input: { path: "./src/app.ts" } },
+      "default",
+      { allow: ["Write(src/app.ts)"], ask: [], deny: [] },
+      root,
+    ).behavior, "allow");
+    assert.equal(matchesPermissionRule(
+      "Write(src/app.ts)",
+      { toolName: "write", input: { path: "D:\\WORKSPACE\\SRC\\APP.TS" } },
+      "D:\\workspace",
+    ), true);
+    assert.equal(matchesPermissionRule(
+      "Write(src/app.ts)",
+      { toolName: "write", input: { path: "/workspace/SRC/APP.TS" } },
+      "/workspace",
+    ), false);
+    assert.equal(matchesPermissionRule(
+      "Write(src/app.ts)",
+      { toolName: "write", input: { path: "src\\app.ts" } },
+      "/workspace",
+    ), false);
+    assert.equal(
+      suggestedAllowRule({ toolName: "write", input: { path: absolute } }, root),
+      "Write(src/app.ts)",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("workspace-relative wildcard rules do not authorize paths outside cwd", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-permissions-workspace-"));
+  const outside = await mkdtemp(join(tmpdir(), "pi-permissions-outside-"));
+  const aliasDirectory = join(root, "src", "external-link");
+  await mkdir(join(root, "src"), { recursive: true });
+  await writeFile(join(outside, "generated.ts"), "export {};\n");
+  try {
+    await symlink(outside, aliasDirectory, process.platform === "win32" ? "junction" : "dir");
+    const settings = { allow: ["Write(src/*)"], ask: [], deny: [] };
+    assert.notEqual(evaluatePermission(
+      { toolName: "write", input: { path: relative(root, join(outside, "generated.ts")) } },
+      "default",
+      settings,
+      root,
+    ).behavior, "allow");
+    assert.notEqual(evaluatePermission(
+      { toolName: "write", input: { path: "src/external-link/generated.ts" } },
+      "default",
+      settings,
+      root,
+    ).behavior, "allow");
+    assert.equal(evaluatePermission(
+      { toolName: "write", input: { path: "src/external-link/generated.ts" } },
+      "default",
+      { allow: ["Write(src/external-link/generated.ts)"], ask: [], deny: [] },
+      root,
+    ).behavior, "allow");
+    assert.equal(evaluatePermission(
+      { toolName: "write", input: { path: "src/external-link/generated.ts" } },
+      "default",
+      {
+        allow: ["Write(src/external-link/generated.ts)"],
+        ask: [],
+        deny: ["Write(src/*)"],
+      },
+      root,
+    ).behavior, "deny");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("file permission rules resolve existing symlink aliases", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-permissions-symlink-"));
+  const realDirectory = join(root, "real");
+  const aliasDirectory = join(root, "alias");
+  await mkdir(realDirectory, { recursive: true });
+  await writeFile(join(realDirectory, "app.ts"), "export {};\n");
+  try {
+    await symlink(realDirectory, aliasDirectory, process.platform === "win32" ? "junction" : "dir");
+    assert.equal(evaluatePermission(
+      { toolName: "edit", input: { path: "alias/app.ts" } },
+      "default",
+      { allow: ["Edit(real/app.ts)"], ask: [], deny: [] },
+      root,
+    ).behavior, "allow");
+    assert.equal(evaluatePermission(
+      { toolName: "edit", input: { path: "real/app.ts" } },
+      "default",
+      { allow: ["Edit(alias/*.ts)"], ask: [], deny: [] },
+      root,
+    ).behavior, "allow");
+    assert.equal(evaluatePermission(
+      { toolName: "write", input: { path: "alias/generated.ts" } },
+      "default",
+      { allow: ["Write(real/generated.ts)"], ask: [], deny: [] },
+      root,
+    ).behavior, "allow");
+    assert.equal(evaluatePermission(
+      { toolName: "write", input: { path: "alias/new/../generated.ts" } },
+      "default",
+      { allow: ["Write(real/generated.ts)"], ask: [], deny: [] },
+      root,
+    ).behavior, "allow");
+    assert.equal(evaluatePermission(
+      { toolName: "read", input: { path: "alias/app.ts" } },
+      "default",
+      { allow: ["Read(alias/app.ts)"], ask: [], deny: ["Read(real/app.ts)"] },
+      root,
+    ).behavior, "deny");
+    assert.equal(matchesPermissionRule(
+      "Read(real/app.ts)",
+      { toolName: "read", input: { path: join(aliasDirectory, "app.ts") } },
+      root,
+    ), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("permission controller applies cwd path matching to non-existent Write targets", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-permissions-controller-path-"));
+  const userPath = join(root, "user-settings.json");
+  await writeFile(userPath, JSON.stringify({ permissions: { allow: ["Write(src/generated.ts)"] } }));
+  const ctx = {
+    cwd: root,
+    hasUI: false,
+    ui: { notify() {} },
+  } as unknown as ExtensionContext;
+  const controller = createPermissionController({ userSettingsPath: userPath });
+  try {
+    await controller.reload(ctx);
+    assert.equal(
+      await controller.authorize(
+        { toolName: "write", input: { path: resolve(root, "src", "generated.ts") } },
+        ctx,
+        "default",
+      ),
+      undefined,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("shell wildcard allows cannot hide substitution, backticks, or redirection", () => {
   const settings = { allow: ["Bash(echo *)"], ask: [], deny: ["Bash(rm *)"] };
   for (const command of [
@@ -80,6 +244,29 @@ test("shell wildcard allows cannot hide substitution, backticks, or redirection"
   }
   assert.equal(
     evaluatePermission({ toolName: "bash", input: { command: "echo safe" } }, "default", settings).behavior,
+    "allow",
+  );
+});
+
+test("PowerShell wildcard allows do not treat backslash as an escape", () => {
+  const settings = { allow: ["PowerShell(Write-Output *)"], ask: [], deny: [] };
+  for (const command of [
+    "Write-Output \\$(Remove-Item build -Recurse)",
+    "Write-Output safe \\> build/output.txt",
+    "Write-Output safe \\; Remove-Item build -Recurse",
+  ]) {
+    assert.notEqual(
+      evaluatePermission({ toolName: "powershell", input: { command } }, "default", settings).behavior,
+      "allow",
+      command,
+    );
+  }
+  assert.equal(
+    evaluatePermission(
+      { toolName: "powershell", input: { command: "Write-Output C:\\temp" } },
+      "default",
+      settings,
+    ).behavior,
     "allow",
   );
 });

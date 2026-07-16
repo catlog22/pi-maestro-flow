@@ -118,6 +118,82 @@ test("bridge falls back to legacy status without writing canonical files", async
   }
 });
 
+test("a present malformed canonical state is authoritative invalid and never falls back to legacy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-invalid-state-"));
+  try {
+    const workflowDir = join(root, ".workflow");
+    const legacyDir = join(workflowDir, ".maestro", "legacy");
+    await mkdir(legacyDir, { recursive: true });
+    await writeJson(join(legacyDir, "status.json"), {
+      intent: "Legacy state must not shadow malformed canonical state",
+      status: "running",
+    });
+
+    for (const invalidState of ["{ broken json", "[]"]) {
+      await writeFile(join(workflowDir, "state.json"), invalidState, "utf8");
+      const snapshot = await loadCanonicalSnapshot(root);
+      assert.equal(snapshot.source, "canonical");
+      assert.equal(snapshot.session, undefined);
+      assert.equal(snapshot.canonicalClaim?.status, "invalid");
+      assert.match(snapshot.canonicalClaim?.error ?? "", /JSON|must contain a JSON object/i);
+      assert.doesNotMatch(snapshot.diagnostics.join("\n"), /Using legacy workflow projection/i);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("an active canonical claim is authoritative when its Session is missing, malformed, or mismatched", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-session-invalid-claim-"));
+  const sessionId = "20260716-authoritative";
+  const sessionPath = join(root, ".workflow", "sessions", sessionId, "session.json");
+  try {
+    await mkdir(join(root, ".workflow", "sessions", sessionId), { recursive: true });
+    await mkdir(join(root, ".workflow", ".maestro", "legacy"), { recursive: true });
+    await writeJson(join(root, ".workflow", "state.json"), { active_session_id: sessionId });
+    await writeJson(join(root, ".workflow", ".maestro", "legacy", "status.json"), {
+      intent: "Must not shadow the canonical claim",
+      status: "running",
+    });
+
+    const missing = await loadCanonicalSnapshot(root);
+    assert.equal(missing.source, "canonical");
+    assert.equal(missing.session, undefined);
+    assert.equal(missing.canonicalClaim?.status, "invalid");
+    assert.equal(missing.canonicalClaim?.activeSessionId, sessionId);
+    assert.match(missing.sessionGeneration ?? "", /^canonical:invalid:/);
+
+    await writeFile(sessionPath, "{ broken json", "utf8");
+    const malformed = await loadCanonicalSnapshot(root);
+    assert.equal(malformed.source, "canonical");
+    assert.equal(malformed.canonicalClaim?.status, "invalid");
+    assert.match(malformed.canonicalClaim?.error ?? "", /JSON/i);
+
+    await writeJson(sessionPath, {
+      session_id: "different-session",
+      status: "running",
+      intent: "Mismatched identity",
+    });
+    const mismatched = await loadCanonicalSnapshot(root);
+    assert.equal(mismatched.source, "canonical");
+    assert.equal(mismatched.canonicalClaim?.status, "invalid");
+    assert.match(mismatched.canonicalClaim?.error ?? "", /identity mismatch/i);
+
+    await writeJson(sessionPath, {
+      session_id: sessionId,
+      status: "running",
+      intent: "Valid identity",
+      identity_revision: 3,
+    });
+    const valid = await loadCanonicalSnapshot(root);
+    assert.equal(valid.canonicalClaim?.status, "valid");
+    assert.equal(valid.session?.sessionId, sessionId);
+    assert.equal(valid.sessionGeneration, `canonical:valid:${sessionId}:3`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("bridge normalizes live Maestro 0.5.50 session/1.0 records", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-session-live-v1-"));
   const sessionId = "20260715-live-v1";

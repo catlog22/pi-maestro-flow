@@ -1,9 +1,20 @@
 import { Type } from "typebox";
 import type { WorkflowCoordinator } from "../session/coordinator.ts";
 
-export const RUN_CONTROL_READ_ACTIONS = new Set(["status", "brief", "prepare"] as const);
+/** Read-only across both the native run-control tool and Maestro CLI aliases. */
+export const RUN_CONTROL_READ_ACTIONS: ReadonlySet<string> = new Set([
+  "status",
+  "brief",
+  "prepare",
+  "list",
+  "show",
+]);
 export const RUN_CONTROL_WRITE_ACTIONS = new Set(["advance", "complete", "retry", "cancel"] as const);
 export type RunControlAction = "status" | "brief" | "prepare" | "advance" | "complete" | "retry" | "cancel";
+
+export function isRunControlReadAction(action: string): boolean {
+  return RUN_CONTROL_READ_ACTIONS.has(action);
+}
 
 export const RunControlParams = Type.Object({
   action: Type.Union([

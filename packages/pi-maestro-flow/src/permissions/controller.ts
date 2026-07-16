@@ -95,16 +95,16 @@ export function createPermissionController(options: {
 
       const settings = effectiveSettings(loaded?.permissions, sessionRules);
       if (loaded?.errors.length && mode !== "bypassPermissions") {
-        const toolDecision = evaluatePermission(call, "dontAsk", settings);
+        const toolDecision = evaluatePermission(call, "dontAsk", settings, ctx.cwd);
         if (toolDecision.behavior !== "allow") {
           return { block: true, reason: "Permission settings are invalid; non-read-only tools are blocked until the configuration is fixed." };
         }
       }
-      const decision = evaluatePermission(call, mode, settings);
+      const decision = evaluatePermission(call, mode, settings, ctx.cwd);
       if (decision.behavior === "allow") return;
       if (decision.behavior === "deny") return { block: true, reason: decision.reason };
 
-      const suggestion = suggestedAllowRule(call);
+      const suggestion = suggestedAllowRule(call, ctx.cwd);
       const hookDecision = await hooks?.requestPermission(call, ctx, suggestion, Boolean(decision.rule));
       const inputWasUpdated = Boolean(hookDecision?.updatedInput);
       let updatedMode: PermissionMode | undefined;
@@ -134,6 +134,7 @@ export function createPermissionController(options: {
           call,
           updatedMode ?? mode,
           effectiveSettings(loaded?.permissions, sessionRules),
+          ctx.cwd,
         );
         if (reevaluated.behavior === "deny") return { block: true, reason: reevaluated.reason };
         if (reevaluated.behavior === "allow") return;

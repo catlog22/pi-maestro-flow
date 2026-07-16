@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { link, mkdir, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { link, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RunCliAdapter, RunCliCapabilities, RunCliResult } from "./cli-adapter.ts";
 import type { WorkflowBridge } from "./bridge.ts";
@@ -49,6 +49,15 @@ export class WorkflowLeaseBusyError extends Error {
   }
 }
 
+export interface WorkflowLeaseStoreHooks {
+  beforeHeartbeatPublish?(lease: WorkflowLease): Promise<void>;
+}
+
+interface CurrentLease {
+  lease: WorkflowLease;
+  released: boolean;
+}
+
 export class WorkflowLeaseStore {
   private held?: WorkflowLease;
 
@@ -56,6 +65,7 @@ export class WorkflowLeaseStore {
     private readonly workflowRoot: string,
     private readonly staleAfterMs = 30_000,
     private readonly now: () => Date = () => new Date(),
+    private readonly hooks: WorkflowLeaseStoreHooks = {},
   ) {}
 
   async acquire(sessionId: string, hostSessionId: string): Promise<WorkflowLease> {
@@ -63,40 +73,38 @@ export class WorkflowLeaseStore {
       return this.heartbeat();
     }
     if (this.held) throw new Error("Release the current Workflow lease before acquiring another Session");
-    const directory = join(this.workflowRoot, ".workflow", "tmp", "hook");
+    const directory = this.directoryFor(sessionId);
     await mkdir(directory, { recursive: true });
-    const path = this.pathFor(sessionId);
-    let previousEpoch = 0;
     for (let attempt = 0; attempt < 5; attempt++) {
+      const current = await this.readCurrent(directory, sessionId);
+      if (current && !current.released && !this.isStale(current.lease)) {
+        throw new WorkflowLeaseBusyError(current.lease);
+      }
       const lease: WorkflowLease = {
         sessionId,
         hostSessionId,
-        epoch: Math.max(previousEpoch + 1, this.now().getTime()),
+        epoch: (current?.lease.epoch ?? 0) + 1,
         heartbeatAt: this.now().toISOString(),
         token: randomUUID(),
       };
-      const pendingPath = `${path}.${lease.token}.pending`;
+      const claimPath = this.claimPath(directory, lease.epoch);
+      const pendingPath = `${claimPath}.${lease.token}.pending`;
       try {
         await writeFile(pendingPath, `${JSON.stringify(lease)}\n`, { encoding: "utf8", flag: "wx" });
-        await link(pendingPath, path);
-        this.held = lease;
-        return { ...lease };
+        await link(pendingPath, claimPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        continue;
       } finally {
         await rm(pendingPath, { force: true }).catch(() => {});
       }
-      const owner = await this.read(path);
-      if (!owner) throw new Error(`Workflow Session ${sessionId} has an unreadable lease`);
-      previousEpoch = owner.epoch;
-      if (!this.isStale(owner)) throw new WorkflowLeaseBusyError(owner);
-      const quarantine = `${path}.stale-${owner.token}`;
-      try {
-        await rename(path, quarantine);
-        await rm(quarantine, { force: true });
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      const owner = await this.readCurrent(directory, sessionId);
+      if (!owner || owner.released || !sameLease(owner.lease, lease)) {
+        if (owner && !owner.released) throw new WorkflowLeaseBusyError(owner.lease);
+        continue;
       }
+      this.held = lease;
+      return { ...lease };
     }
     throw new Error(`Could not acquire workflow lease for ${sessionId}`);
   }
@@ -104,27 +112,48 @@ export class WorkflowLeaseStore {
   async heartbeat(expectedToken?: string): Promise<WorkflowLease> {
     const lease = this.requireHeld();
     if (expectedToken && lease.token !== expectedToken) throw new WorkflowLeaseBusyError(lease);
-    const path = this.pathFor(lease.sessionId);
-    await this.assertOwner(path, lease);
-    const next = { ...lease, heartbeatAt: this.now().toISOString() };
-    await this.replaceOwned(path, next);
-    this.held = next;
-    return { ...next };
+    try {
+      const directory = this.directoryFor(lease.sessionId);
+      await this.assertOwner(directory, lease);
+      const next = { ...lease, heartbeatAt: this.now().toISOString() };
+      await this.hooks.beforeHeartbeatPublish?.({ ...next });
+      await this.replaceState(directory, next);
+      await this.assertOwner(directory, next);
+      if (!this.held || !sameLease(this.held, lease)) throw this.busyError(lease);
+      this.held = next;
+      return { ...next };
+    } catch (error) {
+      this.lose(lease);
+      throw error;
+    }
   }
 
   async fence(): Promise<WorkflowLease> {
     const lease = this.requireHeld();
-    const path = this.pathFor(lease.sessionId);
-    await this.assertOwner(path, lease);
-    const next = {
-      ...lease,
-      epoch: lease.epoch + 1,
-      heartbeatAt: this.now().toISOString(),
-      token: randomUUID(),
-    };
-    await this.replaceOwned(path, next);
-    this.held = next;
-    return { ...next };
+    const directory = this.directoryFor(lease.sessionId);
+    try {
+      await this.assertOwner(directory, lease);
+      const next: WorkflowLease = {
+        ...lease,
+        epoch: lease.epoch + 1,
+        heartbeatAt: this.now().toISOString(),
+        token: randomUUID(),
+      };
+      const claimPath = this.claimPath(directory, next.epoch);
+      const pendingPath = `${claimPath}.${next.token}.pending`;
+      try {
+        await writeFile(pendingPath, `${JSON.stringify(next)}\n`, { encoding: "utf8", flag: "wx" });
+        await link(pendingPath, claimPath);
+      } finally {
+        await rm(pendingPath, { force: true }).catch(() => {});
+      }
+      await this.assertOwner(directory, next);
+      this.held = next;
+      return { ...next };
+    } catch (error) {
+      this.lose(lease);
+      throw error;
+    }
   }
 
   current(): WorkflowLease | undefined {
@@ -134,48 +163,126 @@ export class WorkflowLeaseStore {
   async release(): Promise<void> {
     const lease = this.held;
     if (!lease) return;
-    const path = this.pathFor(lease.sessionId);
-    const owner = await this.read(path);
-    if (owner?.token === lease.token) await rm(path, { force: true });
     this.held = undefined;
+    const directory = this.directoryFor(lease.sessionId);
+    const owner = await this.readCurrent(directory, lease.sessionId);
+    if (!owner || owner.released || !sameLease(owner.lease, lease)) return;
+    await writeFile(this.releasePath(directory, lease), "", { flag: "wx" }).catch((error) => {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    });
   }
 
-  private pathFor(sessionId: string): string {
-    return join(this.workflowRoot, ".workflow", "tmp", "hook", `${encodeURIComponent(sessionId)}.lease.json`);
+  private directoryFor(sessionId: string): string {
+    return join(this.workflowRoot, ".workflow", "tmp", "hook", `${encodeURIComponent(sessionId)}.lease`);
   }
 
-  private async assertOwner(path: string, expected: WorkflowLease): Promise<void> {
-    const owner = await this.read(path);
-    if (!owner || owner.token !== expected.token || owner.epoch !== expected.epoch) {
-      throw new WorkflowLeaseBusyError(owner ?? { ...expected, hostSessionId: "unknown", token: "unknown" });
+  private claimPath(directory: string, epoch: number): string {
+    return join(directory, `${epoch}.claim.json`);
+  }
+
+  private statePath(directory: string, lease: WorkflowLease): string {
+    return join(directory, `${lease.epoch}.${lease.token}.state.json`);
+  }
+
+  private releasePath(directory: string, lease: WorkflowLease): string {
+    return join(directory, `${lease.epoch}.${lease.token}.released`);
+  }
+
+  private async assertOwner(directory: string, expected: WorkflowLease): Promise<void> {
+    const owner = await this.readCurrent(directory, expected.sessionId);
+    if (!owner || owner.released || !sameLease(owner.lease, expected)) {
+      throw this.busyError(expected, owner?.lease);
     }
   }
 
-  private async replaceOwned(path: string, lease: WorkflowLease): Promise<void> {
-    const handle = await open(path, "r+");
+  private async replaceState(directory: string, lease: WorkflowLease): Promise<void> {
+    const path = this.statePath(directory, lease);
+    const pendingPath = `${path}.${randomUUID()}.pending`;
     try {
-      await handle.truncate(0);
-      await handle.writeFile(`${JSON.stringify(lease)}\n`, "utf8");
-      await handle.sync();
+      await writeFile(pendingPath, `${JSON.stringify(lease)}\n`, { encoding: "utf8", flag: "wx" });
+      await rename(pendingPath, path);
     } finally {
-      await handle.close();
+      await rm(pendingPath, { force: true }).catch(() => {});
     }
   }
 
-  private async read(path: string): Promise<WorkflowLease | undefined> {
+  private async readCurrent(directory: string, sessionId: string): Promise<CurrentLease | undefined> {
+    let entries: string[];
     try {
-      const value = JSON.parse(await readFile(path, "utf8")) as Partial<WorkflowLease>;
-      if (
-        typeof value.sessionId !== "string"
-        || typeof value.hostSessionId !== "string"
-        || typeof value.epoch !== "number"
-        || typeof value.heartbeatAt !== "string"
-        || typeof value.token !== "string"
-      ) return undefined;
-      return value as WorkflowLease;
+      entries = await readdir(directory);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    const claims = entries.flatMap((entry) => {
+      const match = /^(\d+)\.claim\.json$/.exec(entry);
+      if (!match) return [];
+      const epoch = Number(match[1]);
+      return Number.isSafeInteger(epoch) ? [{ entry, epoch }] : [];
+    }).sort((left, right) => right.epoch - left.epoch);
+    if (claims.length === 0) return this.readLegacy(sessionId);
+    const claim = await this.readLease(join(directory, claims[0]!.entry));
+    if (!claim) throw new Error(`Workflow Session ${sessionId} has an unreadable lease claim`);
+    const released = await this.exists(this.releasePath(directory, claim));
+    const state = await this.readLease(this.statePath(directory, claim));
+    if (state && !sameLease(state, claim)) {
+      throw new Error(`Workflow Session ${sessionId} has a mismatched lease state`);
+    }
+    return { lease: state ?? claim, released };
+  }
+
+  private async readLegacy(sessionId: string): Promise<CurrentLease | undefined> {
+    const path = join(
+      this.workflowRoot,
+      ".workflow",
+      "tmp",
+      "hook",
+      `${encodeURIComponent(sessionId)}.lease.json`,
+    );
+    const lease = await this.readLease(path);
+    return lease ? { lease, released: false } : undefined;
+  }
+
+  private async readLease(path: string): Promise<WorkflowLease | undefined> {
+    let raw: string;
+    try {
+      raw = await readFile(path, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+    let value: Partial<WorkflowLease>;
+    try {
+      value = JSON.parse(raw) as Partial<WorkflowLease>;
     } catch {
       return undefined;
     }
+    if (
+      typeof value.sessionId !== "string"
+      || typeof value.hostSessionId !== "string"
+      || !Number.isSafeInteger(value.epoch)
+      || typeof value.heartbeatAt !== "string"
+      || typeof value.token !== "string"
+    ) return undefined;
+    return value as WorkflowLease;
+  }
+
+  private async exists(path: string): Promise<boolean> {
+    try {
+      await readFile(path);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+      throw error;
+    }
+  }
+
+  private busyError(expected: WorkflowLease, owner?: WorkflowLease): WorkflowLeaseBusyError {
+    return new WorkflowLeaseBusyError(owner ?? { ...expected, hostSessionId: "unknown", token: "unknown" });
+  }
+
+  private lose(lease: WorkflowLease): void {
+    if (this.held && sameLease(this.held, lease)) this.held = undefined;
   }
 
   private isStale(lease: WorkflowLease): boolean {
@@ -265,6 +372,7 @@ export class WorkflowCoordinator {
     if (active && ["created", "running", "blocked"].includes(active.status)) {
       return { command: await this.adapter.brief(active.runId, session.sessionId), snapshot };
     }
+    await this.fenceLease(session.sessionId);
     const result = await this.adapter.create(command, args, { sessionId: session.sessionId });
     return { command: result, snapshot: await this.bridge.refresh() };
   }
@@ -273,6 +381,7 @@ export class WorkflowCoordinator {
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
     requireRun(session.runs, runId);
+    await this.fenceLease(session.sessionId);
     const result = await this.adapter.complete(runId, session.sessionId);
     return { command: result, snapshot: await this.bridge.refresh() };
   }
@@ -282,6 +391,7 @@ export class WorkflowCoordinator {
     const session = requireSession(snapshot);
     const failed = requireRun(session.runs, runId);
     if (failed.status !== "failed") throw new Error(`Run ${runId} is ${failed.status}; only failed Runs can be retried`);
+    this.requireMutationLease(session.sessionId);
     const capabilities = await this.adapter.capabilities();
     if (!capabilities.retryViaParentRun) throw new Error("Installed Maestro CLI cannot preserve retry parent_run_id");
     const retryBaseline = {
@@ -289,7 +399,7 @@ export class WorkflowCoordinator {
       runIds: new Set(session.runs.map((run) => run.runId)),
       failedAttempt: lineageAttempt(session.runs, failed),
     };
-    await this.fenceLease();
+    await this.fenceLease(session.sessionId);
     const result = await this.adapter.create(failed.command, failed.args, {
       sessionId: session.sessionId,
       parentRunId: failed.runId,
@@ -303,9 +413,10 @@ export class WorkflowCoordinator {
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
     requireRun(session.runs, runId);
+    this.requireMutationLease(session.sessionId);
     const capabilities = await this.adapter.capabilities();
     if (!capabilities.cancel) throw new Error("Installed Maestro CLI does not expose canonical run cancel");
-    await this.fenceLease();
+    await this.fenceLease(session.sessionId);
     const result = await this.adapter.cancel(runId, session.sessionId);
     return { command: result, snapshot: await this.bridge.refresh() };
   }
@@ -358,7 +469,9 @@ export class WorkflowCoordinator {
   }
 
   async fenceContinuation(): Promise<void> {
-    await this.fenceLease();
+    const snapshot = await this.bridge.refresh();
+    const session = requireSession(snapshot);
+    await this.fenceLease(session.sessionId);
   }
 
   async release(): Promise<void> {
@@ -367,11 +480,23 @@ export class WorkflowCoordinator {
     await this.leases.release();
   }
 
-  private async fenceLease(): Promise<void> {
+  private async fenceLease(sessionId: string): Promise<void> {
+    this.requireMutationLease(sessionId);
     this.pendingContinuation = undefined;
     await this.stopHeartbeat();
     const lease = await this.leases.fence();
     this.startHeartbeat(lease);
+  }
+
+  private requireMutationLease(sessionId: string): WorkflowLease {
+    const lease = this.leases.current();
+    if (!lease) throw new Error("Workflow mutation lease is not held");
+    if (lease.sessionId !== sessionId) {
+      throw new Error(
+        `Workflow mutation lease belongs to ${lease.sessionId}, but the active canonical Session is ${sessionId}`,
+      );
+    }
+    return lease;
   }
 
   private startHeartbeat(lease: WorkflowLease): void {
@@ -382,6 +507,7 @@ export class WorkflowCoordinator {
         await this.leases.heartbeat(lease.token);
       }).catch(() => {
         if (this.heartbeatGeneration === generation) {
+          this.pendingContinuation = undefined;
           clearInterval(timer);
           if (this.heartbeatTimer === timer) this.heartbeatTimer = undefined;
         }
@@ -424,6 +550,13 @@ function sameMarker(left: ContinuationMarker, right: ContinuationMarker): boolea
     && left.iteration === right.iteration
     && left.epoch === right.epoch
     && left.nonce === right.nonce;
+}
+
+function sameLease(left: WorkflowLease, right: WorkflowLease): boolean {
+  return left.sessionId === right.sessionId
+    && left.hostSessionId === right.hostSessionId
+    && left.epoch === right.epoch
+    && left.token === right.token;
 }
 
 function requireSession(snapshot: WorkflowSnapshot) {

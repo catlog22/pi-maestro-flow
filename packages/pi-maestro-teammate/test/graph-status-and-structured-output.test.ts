@@ -13,6 +13,7 @@ import registerTeammateExtension, {
   correlationIdPrefix,
   handleChildLifecycleEvent,
   renderAgentStatusWidget,
+  restoreMainOwnershipIfHandbackPending,
   resolveWatchTarget,
   switchConversationSession,
 } from "../src/extension/index.ts";
@@ -49,7 +50,7 @@ import {
 import { buildProgressTree } from "../src/tui/progress-tree.ts";
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 import { renderTeammateResult } from "../src/tui/render.ts";
-import type { SingleResult, TeammateState } from "../src/shared/types.ts";
+import type { ActiveAgent, SingleResult, TeammateState } from "../src/shared/types.ts";
 
 test("UTF-8 line decoding preserves characters split across stdout chunks", () => {
   const decoder = createUtf8LineDecoder();
@@ -135,7 +136,7 @@ test("root and proxy graph normalization share one implementation that preserves
   assert.equal(indexSource.match(/applyModelRouting\(/g)?.length, 2);
 });
 
-test("child lifecycle handler is module-scoped and updates explicit teammate state", () => {
+test("child lifecycle commit wins over a later handback failure recovery", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
   const handlerStart = source.indexOf("export function handleChildLifecycleEvent(");
   const registrationStart = source.indexOf("export default function registerTeammateExtension(");
@@ -202,6 +203,10 @@ test("child lifecycle handler is module-scoped and updates explicit teammate sta
     assert.equal(agent.lease?.state, "active");
     assert.equal(controlMessages.length, 1);
     assert.equal(controlMessages[0].type, "teammate_lease_update");
+    assert.equal(restoreMainOwnershipIfHandbackPending(agent), undefined);
+    assert.equal(agent.lease?.owner, "child");
+    assert.equal(agent.lease?.state, "active");
+    assert.equal(controlMessages.length, 1);
   } finally {
     fs.rmSync(sessionDir, { recursive: true, force: true });
   }
@@ -326,6 +331,21 @@ test("session ownership handoff fences stale writers and requires reload before 
   lease = requestHandback(lease);
   assert.equal(lease.state, "reloading");
   assert.equal(restoreMainOwnership(lease).owner, "main");
+  const pendingToken = leaseToken(lease);
+  const recoveringAgent = {
+    lease,
+    pendingHandback: {
+      nonce: pendingToken.nonce,
+      epoch: pendingToken.epoch,
+      sessionId: "child-session",
+      sessionFile: "C:/sessions/child.jsonl",
+    },
+  } as ActiveAgent;
+  const restoredToken = restoreMainOwnershipIfHandbackPending(recoveringAgent);
+  assert.equal(recoveringAgent.lease?.owner, "main");
+  assert.equal(recoveringAgent.lease?.state, "main_active");
+  assert.equal(recoveringAgent.pendingHandback, undefined);
+  assert.deepEqual(restoredToken, leaseToken(recoveringAgent.lease!));
   assert.equal(ownsLease(lease, mainToken), false);
   lease = confirmChildReloaded(lease);
   assert.equal(lease.owner, "child");

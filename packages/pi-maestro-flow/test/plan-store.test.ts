@@ -95,6 +95,7 @@ test("PlanStore approval archives the exact draft and commits manifest last", as
     const approved = await store.approve(markdown, 0);
     assert.equal(approved.manifest.status, "approved");
     assert.equal(approved.manifest.approvedChecksum, checksumText(markdown));
+    assert.match(approved.manifest.handoffKey ?? "", /^[a-f0-9]{64}$/);
     assert.ok(approved.manifest.approvedPath);
     const archive = join(store.plansDir, approved.manifest.approvedPath!);
     assert.equal(await readFile(archive, "utf8"), markdown);
@@ -102,6 +103,7 @@ test("PlanStore approval archives the exact draft and commits manifest last", as
     const persistedManifest = JSON.parse(await readFile(store.manifestPath, "utf8"));
     assert.equal(persistedManifest.status, "approved");
     assert.equal(persistedManifest.approvedPath, approved.manifest.approvedPath);
+    assert.equal(persistedManifest.handoffKey, approved.manifest.handoffKey);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

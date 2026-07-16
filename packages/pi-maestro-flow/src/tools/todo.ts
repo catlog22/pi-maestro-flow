@@ -46,6 +46,7 @@ export interface TodoTask {
   skillActivation?: SkillActivationMetadata;
   summary?: string;
   origin?: TodoTaskOrigin;
+  planHandoffKey?: string;
   createdAt: number;
   updatedAt: number;
 }
@@ -61,6 +62,7 @@ export interface TodoParams {
   summary?: string;
   id?: string;
   filter?: { status?: TaskStatus };
+  planHandoffKey?: string;
 }
 
 type TodoParamsInput = TodoParams & {
@@ -165,6 +167,7 @@ export function getVisibleTasks(): TodoTask[] {
 export function reconcileMirrorTasks(
   specs: readonly TodoMirrorTaskSpec[],
   ctx: ExtensionContext,
+  sessionGeneration?: string,
 ): TodoMirrorReconcileResult {
   const activeSpecs = specs.filter((spec) => spec.status === "in_progress");
   if (activeSpecs.length > 1) {
@@ -172,8 +175,10 @@ export function reconcileMirrorTasks(
   }
 
   const result: TodoMirrorReconcileResult = { created: [], updated: [], tombstoned: [], unchanged: [] };
+  const nextTasks = cloneTaskMap();
+  const skillSnapshotsToClear = new Set<string>();
   const existingByOrigin = new Map<string, TodoTask>();
-  for (const task of tasks.values()) {
+  for (const task of nextTasks.values()) {
     if (task.origin) existingByOrigin.set(todoOriginKey(task.origin), task);
   }
 
@@ -184,6 +189,7 @@ export function reconcileMirrorTasks(
   }
   const desiredKeys = new Set(idsByOrigin.keys());
   const incomingSessions = new Set(specs.map((spec) => spec.origin.sessionId));
+  const authoritativeProjection = sessionGeneration !== undefined;
 
   for (const spec of specs) {
     const key = todoOriginKey(spec.origin);
@@ -192,7 +198,7 @@ export function reconcileMirrorTasks(
       result.unchanged.push(existing.id);
       continue;
     }
-    const id = uniqueMirrorId(idsByOrigin.get(key)!, key);
+    const id = uniqueMirrorId(idsByOrigin.get(key)!, key, nextTasks);
     idsByOrigin.set(key, id);
     const blockedBy = spec.blockedByOriginKeys
       .map((originKey) => idsByOrigin.get(originKey))
@@ -212,37 +218,39 @@ export function reconcileMirrorTasks(
       updatedAt: existing?.updatedAt ?? now,
     };
     if (existing?.skillActivation && mirrorActivationStillValid(existing, next)) {
-      next.skillActivation = existing.skillActivation;
+      next.skillActivation = cloneSkillActivation(existing.skillActivation);
     }
     if (!existing) {
-      tasks.set(id, next);
+      nextTasks.set(id, next);
       result.created.push(id);
       continue;
     }
     if (taskChanged(existing, next)) {
       next.updatedAt = now;
-      tasks.set(existing.id, { ...next, id: existing.id });
-      clearSkillSnapshot(existing.id);
+      nextTasks.set(existing.id, { ...next, id: existing.id });
+      skillSnapshotsToClear.add(existing.id);
       result.updated.push(existing.id);
     } else {
       result.unchanged.push(existing.id);
     }
   }
 
-  for (const task of tasks.values()) {
-    if (!task.origin || !incomingSessions.has(task.origin.sessionId)) continue;
+  for (const task of nextTasks.values()) {
+    if (!task.origin) continue;
     const key = todoOriginKey(task.origin);
-    if (desiredKeys.has(key) || task.status === "deleted") continue;
+    const belongsToUpdatedProjection = authoritativeProjection
+      ? true
+      : incomingSessions.has(task.origin.sessionId);
+    if (!belongsToUpdatedProjection || desiredKeys.has(key) || task.status === "deleted") continue;
     task.status = "deleted";
     task.updatedAt = Date.now();
-    clearSkillSnapshot(task.id);
+    skillSnapshotsToClear.add(task.id);
     result.tombstoned.push(task.id);
   }
 
   if (result.created.length || result.updated.length || result.tombstoned.length) {
-    markTodoChanged();
-    persist();
-    updateStatusLine(ctx);
+    commitTodoState(nextTasks, ctx);
+    clearCommittedSkillSnapshots(skillSnapshotsToClear);
   }
   return result;
 }
@@ -341,7 +349,7 @@ export async function executeTodo(
       case "create":
         return handleCreate(params, ctx);
       case "update":
-        return handleUpdate(params, ctx);
+        return await handleUpdate(params, ctx);
       case "list":
         return handleList(params);
       case "get":
@@ -370,12 +378,9 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext): AgentToolResul
   const id = randomUUID().slice(0, 8);
   const now = Date.now();
 
-  const blockedBy = params.blockedBy ?? [];
-  for (const depId of blockedBy) {
-    if (!tasks.has(depId)) return err(`blockedBy references unknown task: ${depId}`, "create");
-    const dep = tasks.get(depId)!;
-    if (dep.status === "deleted") return err(`blockedBy references deleted task: ${depId}`, "create");
-  }
+  const blockerResolution = resolveBlockedBy(id, params.blockedBy ?? []);
+  if (blockerResolution.error) return err(blockerResolution.error, "create");
+  const blockedBy = blockerResolution.blockedBy;
 
   const task: TodoTask = {
     id,
@@ -385,89 +390,104 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext): AgentToolResul
     blockedBy,
     skills: params.skills ?? [],
     ...(params.context ? { context: params.context } : {}),
+    ...(params.planHandoffKey ? { planHandoffKey: params.planHandoffKey } : {}),
     createdAt: now,
     updatedAt: now,
   };
 
   if (hasCycle(id, blockedBy)) return err("blockedBy would create a dependency cycle", "create");
 
-  tasks.set(id, task);
-  markTodoChanged();
-  persist();
-  updateStatusLine(ctx);
+  const nextTasks = new Map(tasks);
+  nextTasks.set(id, task);
+  commitTodoState(nextTasks, ctx);
 
   return ok(`Created #${id}: ${task.subject} (${task.status})`, "create");
 }
 
-function handleUpdate(params: TodoParams, ctx: ExtensionContext): AgentToolResult {
+async function handleUpdate(params: TodoParams, ctx: ExtensionContext): Promise<AgentToolResult> {
   if (!params.id) return err("id is required for update", "update");
   const task = tasks.get(params.id);
   if (!task) return err(`Task not found: ${params.id}`, "update");
   if (task.status === "deleted") return err(`Cannot update deleted task: ${params.id}`, "update");
 
-  const before = structuredClone(task);
+  const before = cloneTodoTask(task);
+  const draft = cloneTodoTask(task);
 
-  if (params.status === "in_progress" && task.status !== "in_progress") {
-    const active = findActiveTask(task.id);
+  if (params.subject !== undefined) draft.subject = params.subject;
+  if (params.description !== undefined) draft.description = params.description;
+  if (params.summary !== undefined) draft.summary = params.summary;
+
+  if (params.context !== undefined) {
+    if (params.context === "") delete draft.context;
+    else draft.context = params.context;
+    draft.skillActivation = undefined;
+  }
+
+  if (params.skills !== undefined) {
+    draft.skills = params.skills ?? [];
+    draft.skillActivation = undefined;
+  }
+
+  if (params.blockedBy !== undefined) {
+    const blockerResolution = resolveBlockedBy(draft.id, params.blockedBy);
+    if (blockerResolution.error) return err(blockerResolution.error, "update");
+    draft.blockedBy = blockerResolution.blockedBy;
+  }
+
+  if (params.status !== undefined) draft.status = params.status;
+  if (
+    params.status === "pending"
+    || params.status === "blocked"
+    || (params.status === undefined && params.blockedBy !== undefined)
+  ) {
+    draft.status = deriveDependencyStatus(draft.blockedBy);
+  }
+
+  if (draft.status === "in_progress" && draft.blockedBy.length > 0) {
+    return err(`Task #${draft.id} is blocked by: ${draft.blockedBy.join(", ")}`, "update");
+  }
+  if (draft.status === "in_progress" && before.status !== "in_progress") {
+    const active = findActiveTask(draft.id);
     if (active) {
       return err(`Task #${active.id} is already in progress; complete or pause it before activating another task`, "update");
     }
   }
 
-  if (params.subject !== undefined) task.subject = params.subject;
-  if (params.description !== undefined) task.description = params.description;
-  if (params.summary !== undefined) task.summary = params.summary;
-
-  if (params.context !== undefined) {
-    if (params.context === "") delete task.context;
-    else task.context = params.context;
-    task.skillActivation = undefined;
-    clearSkillSnapshot(task.id);
+  if (draft.status !== before.status && !isValidTransition(before.status, draft.status)) {
+    return err(`Invalid status transition: ${before.status} → ${draft.status}`, "update");
   }
 
-  if (params.skills !== undefined) {
-    task.skills = params.skills ?? [];
-    task.skillActivation = undefined;
-    clearSkillSnapshot(task.id);
+  const activationInputsChanged = before.context !== draft.context
+    || JSON.stringify(before.skills) !== JSON.stringify(draft.skills);
+  const shouldActivate = draft.status === "in_progress"
+    && (before.status !== "in_progress" || activationInputsChanged || !draft.skillActivation);
+  const activation = shouldActivate ? await activateTask(draft) : undefined;
+  if (activation) draft.skillActivation = activationMetadata(activation);
+  if (draft.status === "pending") draft.skillActivation = undefined;
+
+  const changed = taskChanged(before, draft)
+    || JSON.stringify(before.skillActivation) !== JSON.stringify(draft.skillActivation);
+  if (!changed) return ok(`No change: #${draft.id}`, "update");
+
+  draft.updatedAt = Date.now();
+  const nextTasks = new Map(tasks);
+  nextTasks.set(draft.id, draft);
+  if (draft.status === "completed" && before.status !== "completed") {
+    autoUnblock(nextTasks, draft.id);
   }
 
-  if (params.blockedBy !== undefined) {
-    for (const depId of params.blockedBy) {
-      if (!tasks.has(depId)) return err(`blockedBy references unknown task: ${depId}`, "update");
-      if (depId === task.id) return err("Task cannot block itself", "update");
-    }
-    if (hasCycle(task.id, params.blockedBy)) return err("blockedBy would create a dependency cycle", "update");
-    task.blockedBy = params.blockedBy;
+  // Persist and update the UI against the detached candidate state. Only after
+  // every fallible operation succeeds do we publish the task and skill snapshot.
+  commitTodoState(nextTasks, ctx);
+  if (activation) {
+    activeSkillSnapshot = { taskId: draft.id, activation };
+    runInjectedStackRevision = undefined;
+  } else if (activationInputsChanged || draft.status !== "in_progress") {
+    clearSkillSnapshot(draft.id);
   }
 
-  if (params.status !== undefined && params.status !== task.status) {
-    if (!isValidTransition(task.status, params.status)) {
-      return err(`Invalid status transition: ${task.status} → ${params.status}`, "update");
-    }
-    task.status = params.status;
-    if (params.status !== "in_progress") {
-      clearSkillSnapshot(task.id);
-      if (params.status === "pending") task.skillActivation = undefined;
-    }
-
-    if (params.status === "completed") {
-      autoUnblock(task.id, ctx);
-    }
-  }
-
-  const changed = taskChanged(before, task);
-  if (changed) {
-    task.updatedAt = Date.now();
-    markTodoChanged();
-  }
-  persist();
-  updateStatusLine(ctx);
-
-  if (changed) {
-    const statusNote = before.status !== task.status ? ` (${before.status} → ${task.status})` : "";
-    return ok(`Updated #${task.id}: ${task.subject}${statusNote}`, "update");
-  }
-  return ok(`No change: #${task.id}`, "update");
+  const statusNote = before.status !== draft.status ? ` (${before.status} → ${draft.status})` : "";
+  return ok(`Updated #${draft.id}: ${draft.subject}${statusNote}`, "update");
 }
 
 function handleList(params: TodoParams): AgentToolResult {
@@ -527,31 +547,31 @@ function handleDelete(params: TodoParams, ctx: ExtensionContext): AgentToolResul
   const task = tasks.get(params.id);
   if (!task) return err(`Task not found: ${params.id}`, "delete");
 
-  task.status = "deleted";
-  task.updatedAt = Date.now();
-  markTodoChanged();
+  const nextTasks = cloneTaskMap();
+  const deleted = nextTasks.get(params.id)!;
+  deleted.status = "deleted";
+  deleted.updatedAt = Date.now();
 
-  for (const t of tasks.values()) {
+  for (const t of nextTasks.values()) {
     if (t.status !== "deleted" && t.blockedBy.includes(params.id)) {
       t.blockedBy = t.blockedBy.filter((d) => d !== params.id);
-      if (t.blockedBy.length === 0 && t.status === "blocked") {
-        t.status = "pending";
-        t.updatedAt = Date.now();
+      if (t.status === "blocked" || t.status === "pending") {
+        t.status = deriveDependencyStatus(t.blockedBy);
       }
+      t.updatedAt = Date.now();
     }
   }
 
-  persist();
-  updateStatusLine(ctx);
-  return ok(`Deleted #${task.id}: ${task.subject}`, "delete");
+  commitTodoState(nextTasks, ctx);
+  clearCommittedSkillSnapshots(new Set([deleted.id]));
+  return ok(`Deleted #${deleted.id}: ${deleted.subject}`, "delete");
 }
 
 function handleClear(ctx: ExtensionContext): AgentToolResult {
   const count = [...tasks.values()].filter((t) => t.status !== "deleted").length;
-  tasks.clear();
-  markTodoChanged();
-  persist();
-  updateStatusLine(ctx);
+  const nextTasks = new Map<string, TodoTask>();
+  commitTodoState(nextTasks, ctx);
+  clearSkillSnapshot();
   return ok(`Cleared ${count} task(s).`, "clear");
 }
 
@@ -570,10 +590,29 @@ async function handleNext(ctx: ExtensionContext): Promise<AgentToolResult> {
     if (inProgress.length > 0) {
       return ok(`No pending tasks. ${inProgress.length} task(s) in progress.`, "next");
     }
+    const blocked = getVisibleTasks().filter(
+      (task) => task.status === "blocked" || (task.status === "pending" && task.blockedBy.length > 0),
+    );
+    if (blocked.length > 0) {
+      const blockerDetails = blocked.map((task) => {
+        const dependencies = task.blockedBy.map((depId) => {
+          const dependency = tasks.get(depId);
+          return dependency
+            ? `#${depId} (${dependency.status}: ${dependency.subject})`
+            : `#${depId} (missing)`;
+        });
+        return `#${task.id} ${task.subject} blocked by ${dependencies.join(", ") || "an unresolved dependency"}`;
+      });
+      return err(
+        `Dependency deadlock: no runnable pending task. ${blockerDetails.join("; ")}`,
+        "next",
+      );
+    }
     return ok("All tasks completed or no tasks exist.", "next");
   }
 
   const task = pending[0];
+  const draft = cloneTodoTask(task);
   const allTasks = getVisibleTasks();
   const taskIndex = allTasks.findIndex((t) => t.id === task.id);
 
@@ -596,25 +635,19 @@ async function handleNext(ctx: ExtensionContext): Promise<AgentToolResult> {
     parts.push(`\n<context>\n${task.context}\n</context>`);
   }
 
-  const activation = await requireSkillRuntime().activate(task.skills, task.context ?? "");
+  const activation = await activateTask(draft);
   for (const binding of activation.skills) {
     parts.push(`\n<skill_prompt role="${binding.role}">\n${binding.skill.prompt}\n</skill_prompt>`);
   }
 
-  task.status = "in_progress";
-  task.skillActivation = {
-    activationId: activation.activationId,
-    stackRevision: activation.stackRevision,
-    activatedAt: activation.activatedAt,
-    validatedAt: activation.validatedAt,
-    state: activation.state,
-    bindings: activation.bindings.map(cloneActivationBinding),
-  };
-  activeSkillSnapshot = { taskId: task.id, activation };
-  task.updatedAt = Date.now();
-  markTodoChanged();
-  persist();
-  updateStatusLine(ctx);
+  draft.status = "in_progress";
+  draft.skillActivation = activationMetadata(activation);
+  draft.updatedAt = Date.now();
+  const nextTasks = new Map(tasks);
+  nextTasks.set(draft.id, draft);
+  commitTodoState(nextTasks, ctx);
+  activeSkillSnapshot = { taskId: draft.id, activation };
+  runInjectedStackRevision = undefined;
 
   return ok(parts.join("\n"), "next");
 }
@@ -644,14 +677,18 @@ function cloneTodoTask(task: TodoTask): TodoTask {
     blockedBy: [...task.blockedBy],
     skills: task.skills.map((skill) => ({ ...skill })),
     ...(task.origin ? { origin: { ...task.origin } } : {}),
-    ...(task.skillActivation
-      ? {
-          skillActivation: {
-            ...task.skillActivation,
-            bindings: task.skillActivation.bindings.map(cloneActivationBinding),
-          },
-        }
-      : {}),
+    ...(task.skillActivation ? { skillActivation: cloneSkillActivation(task.skillActivation) } : {}),
+  };
+}
+
+function cloneTaskMap(state: Map<string, TodoTask> = tasks): Map<string, TodoTask> {
+  return new Map([...state].map(([id, task]) => [id, cloneTodoTask(task)]));
+}
+
+function cloneSkillActivation(activation: SkillActivationMetadata): SkillActivationMetadata {
+  return {
+    ...activation,
+    bindings: activation.bindings.map(cloneActivationBinding),
   };
 }
 
@@ -675,6 +712,36 @@ function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
 // Dependency management
 // ---------------------------------------------------------------------------
 
+function resolveBlockedBy(
+  taskId: string,
+  proposedDeps: readonly string[],
+): { blockedBy: string[]; error?: string } {
+  const blockedBy: string[] = [];
+  const seen = new Set<string>();
+  for (const depId of proposedDeps) {
+    if (seen.has(depId)) continue;
+    seen.add(depId);
+    if (depId === taskId) return { blockedBy: [], error: "Task cannot block itself" };
+    const dependency = tasks.get(depId);
+    if (!dependency) {
+      return { blockedBy: [], error: `blockedBy references unknown task: ${depId}` };
+    }
+    if (dependency.status === "deleted") {
+      return { blockedBy: [], error: `blockedBy references deleted task: ${depId}` };
+    }
+    if (dependency.status === "completed") continue;
+    blockedBy.push(depId);
+  }
+  if (hasCycle(taskId, blockedBy)) {
+    return { blockedBy: [], error: "blockedBy would create a dependency cycle" };
+  }
+  return { blockedBy };
+}
+
+function deriveDependencyStatus(blockedBy: readonly string[]): "blocked" | "pending" {
+  return blockedBy.length > 0 ? "blocked" : "pending";
+}
+
 function hasCycle(taskId: string, proposedDeps: string[]): boolean {
   const visited = new Set<string>();
   const stack = [...proposedDeps];
@@ -689,28 +756,54 @@ function hasCycle(taskId: string, proposedDeps: string[]): boolean {
   return false;
 }
 
-function autoUnblock(completedId: string, ctx: ExtensionContext): void {
-  for (const t of tasks.values()) {
+function autoUnblock(state: Map<string, TodoTask>, completedId: string): void {
+  for (const [id, t] of state) {
     if (t.status === "deleted") continue;
     if (!t.blockedBy.includes(completedId)) continue;
-    t.blockedBy = t.blockedBy.filter((d) => d !== completedId);
-    if (t.blockedBy.length === 0 && t.status === "blocked") {
-      t.status = "pending";
-      t.updatedAt = Date.now();
+    const next = cloneTodoTask(t);
+    next.blockedBy = next.blockedBy.filter((d) => d !== completedId);
+    if (next.status === "blocked" || next.status === "pending") {
+      next.status = deriveDependencyStatus(next.blockedBy);
+    }
+    next.updatedAt = Date.now();
+    state.set(id, next);
+  }
+}
+
+function normalizeLoadedDependencies(state: Map<string, TodoTask>): void {
+  for (const task of state.values()) {
+    const seen = new Set<string>();
+    task.blockedBy = task.blockedBy.filter((depId) => {
+      if (seen.has(depId)) return false;
+      seen.add(depId);
+      const dependency = state.get(depId);
+      return dependency?.status !== "completed" && dependency?.status !== "deleted";
+    });
+    if (task.status === "pending" || task.status === "blocked") {
+      task.status = deriveDependencyStatus(task.blockedBy);
     }
   }
-  updateStatusLine(ctx);
 }
 
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
 
-function persist(): void {
+function persist(state: Map<string, TodoTask> = tasks): void {
   extensionApi?.appendEntry?.(TODO_STATE_ENTRY_TYPE, {
     version: TODO_STATE_VERSION,
-    tasks: Object.fromEntries(tasks),
+    tasks: Object.fromEntries(state),
   });
+}
+
+function commitTodoState(
+  nextTasks: Map<string, TodoTask>,
+  ctx: { ui: { setStatus: (key: string, value: string | undefined) => void } },
+): void {
+  persist(nextTasks);
+  updateStatusLine(ctx, nextTasks);
+  tasks = nextTasks;
+  markTodoChanged();
 }
 
 function loadTasksFromSession(ctx: TodoContext): Map<string, TodoTask> {
@@ -729,6 +822,7 @@ function loadTasksFromSession(ctx: TodoContext): Map<string, TodoTask> {
   for (const [id, rawTask] of Object.entries(rawTasks)) {
     loaded.set(id, normalizeLoadedTask(id, rawTask));
   }
+  normalizeLoadedDependencies(loaded);
   return loaded;
 }
 
@@ -736,8 +830,11 @@ function loadTasksFromSession(ctx: TodoContext): Map<string, TodoTask> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-function updateStatusLine(ctx: { ui: { setStatus: (key: string, value: string | undefined) => void } }): void {
-  const visible = [...tasks.values()].filter((t) => t.status !== "deleted");
+function updateStatusLine(
+  ctx: { ui: { setStatus: (key: string, value: string | undefined) => void } },
+  state: Map<string, TodoTask> = tasks,
+): void {
+  const visible = [...state.values()].filter((t) => t.status !== "deleted");
   if (visible.length === 0) {
     ctx.ui.setStatus(STATUS_KEY, undefined);
     return;
@@ -779,8 +876,12 @@ function mirrorTaskId(originKey: string): string {
   return `wf-${createHash("sha256").update(originKey).digest("hex").slice(0, 8)}`;
 }
 
-function uniqueMirrorId(candidate: string, originKey: string): string {
-  const occupied = tasks.get(candidate);
+function uniqueMirrorId(
+  candidate: string,
+  originKey: string,
+  state: Map<string, TodoTask> = tasks,
+): string {
+  const occupied = state.get(candidate);
   if (!occupied || (occupied.origin && todoOriginKey(occupied.origin) === originKey)) return candidate;
   return `wf-${createHash("sha256").update(`${originKey}\u0000collision`).digest("hex").slice(0, 12)}`;
 }
@@ -795,6 +896,21 @@ function mirrorActivationStillValid(before: TodoTask, after: TodoTask): boolean 
 function requireSkillRuntime(): SkillRuntime {
   if (!skillRuntime) throw new Error("todo skill runtime is not initialized");
   return skillRuntime;
+}
+
+function activateTask(task: TodoTask): Promise<SkillActivation> {
+  return requireSkillRuntime().activate(task.skills, task.context ?? "");
+}
+
+function activationMetadata(activation: SkillActivation): SkillActivationMetadata {
+  return {
+    activationId: activation.activationId,
+    stackRevision: activation.stackRevision,
+    activatedAt: activation.activatedAt,
+    validatedAt: activation.validatedAt,
+    state: activation.state,
+    bindings: activation.bindings.map(cloneActivationBinding),
+  };
 }
 
 async function ensureSkillActivation(task: TodoTask): Promise<SkillActivation> {
@@ -818,9 +934,13 @@ async function ensureSkillActivation(task: TodoTask): Promise<SkillActivation> {
     bindings: activation.bindings.map(cloneActivationBinding),
   };
   if (JSON.stringify(task.skillActivation) !== JSON.stringify(nextMetadata)) {
-    task.skillActivation = nextMetadata;
+    const draft = cloneTodoTask(task);
+    draft.skillActivation = nextMetadata;
+    const nextTasks = new Map(tasks);
+    nextTasks.set(draft.id, draft);
+    persist(nextTasks);
+    tasks = nextTasks;
     markTodoChanged();
-    persist();
   }
   activeSkillSnapshot = { taskId: task.id, activation };
   return activation;
@@ -828,6 +948,14 @@ async function ensureSkillActivation(task: TodoTask): Promise<SkillActivation> {
 
 function clearSkillSnapshot(taskId?: string): void {
   if (!taskId || activeSkillSnapshot?.taskId === taskId) activeSkillSnapshot = undefined;
+  runInjectedStackRevision = undefined;
+}
+
+function clearCommittedSkillSnapshots(taskIds: ReadonlySet<string>): void {
+  if (taskIds.size === 0) return;
+  if (activeSkillSnapshot && taskIds.has(activeSkillSnapshot.taskId)) {
+    activeSkillSnapshot = undefined;
+  }
   runInjectedStackRevision = undefined;
 }
 
@@ -970,6 +1098,7 @@ function normalizeLoadedTask(id: string, raw: unknown): TodoTask {
     ...(legacySkillActivation ? { skillActivation: legacySkillActivation } : {}),
     ...(summary ? { summary } : {}),
     ...(origin ? { origin } : {}),
+    ...(typeof task.planHandoffKey === "string" ? { planHandoffKey: task.planHandoffKey } : {}),
     createdAt: typeof task.createdAt === "number" ? task.createdAt : now,
     updatedAt: typeof task.updatedAt === "number" ? task.updatedAt : now,
   };

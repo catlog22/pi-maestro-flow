@@ -4,6 +4,7 @@ import { join, resolve } from "node:path";
 import type {
   TodoMirrorTaskSpec,
   WorkflowArtifact,
+  WorkflowCanonicalClaim,
   WorkflowChainStep,
   WorkflowGate,
   WorkflowRun,
@@ -18,6 +19,7 @@ export interface WorkflowBridgeOptions {
 }
 
 interface ReadJsonResult {
+  present: boolean;
   value?: Record<string, unknown>;
   raw?: string;
   error?: string;
@@ -33,34 +35,75 @@ export async function loadCanonicalSnapshot(
   const state = await readJson(join(workflowDir, "state.json"));
   if (state.raw) fingerprintParts.push(state.raw);
   if (state.error) diagnostics.push(state.error);
+  if (state.present && state.error) {
+    return snapshot("canonical", projectRoot, undefined, fingerprintParts, diagnostics, options.now, {
+      status: "invalid",
+      error: state.error,
+    });
+  }
 
-  const activeSessionId = stringValue(state.value?.active_session_id);
-  if (activeSessionId && safeId(activeSessionId)) {
+  const activeSessionValue = state.value?.active_session_id;
+  const hasCanonicalClaim = activeSessionValue !== undefined && activeSessionValue !== null;
+  const activeSessionId = stringValue(activeSessionValue);
+  if (hasCanonicalClaim && (!activeSessionId || !safeId(activeSessionId))) {
+    const error = activeSessionId
+      ? `Rejected unsafe active_session_id: ${activeSessionId}`
+      : "active_session_id must be a non-empty safe string";
+    diagnostics.push(error);
+    return snapshot("canonical", projectRoot, undefined, fingerprintParts, diagnostics, options.now, {
+      ...(activeSessionId ? { activeSessionId } : {}),
+      status: "invalid",
+      error,
+    });
+  }
+
+  if (activeSessionId) {
     const sessionDir = join(workflowDir, "sessions", activeSessionId);
     const sessionResult = await readJson(join(sessionDir, "session.json"));
     if (sessionResult.raw) fingerprintParts.push(sessionResult.raw);
     if (sessionResult.error) diagnostics.push(sessionResult.error);
-    if (sessionResult.value) {
-      const gateResult = await readJson(join(sessionDir, "gates.json"), true);
-      if (gateResult.raw) fingerprintParts.push(gateResult.raw);
-      if (gateResult.error) diagnostics.push(gateResult.error);
-      const gateRecords = gateRegistry(gateResult.value);
-      const artifactResult = await readJson(join(sessionDir, "artifacts.json"), true);
-      if (artifactResult.raw) fingerprintParts.push(artifactResult.raw);
-      if (artifactResult.error) diagnostics.push(artifactResult.error);
-      const runResults = await readRuns(join(sessionDir, "runs"), diagnostics, gateRecords);
-      fingerprintParts.push(...runResults.raw);
-      const session = normalizeSession(
+    if (!sessionResult.value) {
+      const error = sessionResult.error ?? `Canonical Workflow Session ${activeSessionId} is missing`;
+      return snapshot("canonical", projectRoot, undefined, fingerprintParts, diagnostics, options.now, {
         activeSessionId,
-        sessionResult.value,
-        runResults.runs,
-        artifactResult.value,
-        gateRecords,
-      );
-      return snapshot("canonical", projectRoot, session, fingerprintParts, diagnostics, options.now);
+        status: "invalid",
+        error,
+      });
     }
-  } else if (activeSessionId) {
-    diagnostics.push(`Rejected unsafe active_session_id: ${activeSessionId}`);
+
+    const declaredSessionId = stringValue(sessionResult.value.session_id);
+    if (declaredSessionId !== activeSessionId) {
+      const error = declaredSessionId
+        ? `Canonical session identity mismatch: state declares ${activeSessionId}, session.json declares ${declaredSessionId}`
+        : `Canonical Workflow Session ${activeSessionId} is missing session_id`;
+      diagnostics.push(error);
+      return snapshot("canonical", projectRoot, undefined, fingerprintParts, diagnostics, options.now, {
+        activeSessionId,
+        status: "invalid",
+        error,
+      });
+    }
+
+    const gateResult = await readJson(join(sessionDir, "gates.json"), true);
+    if (gateResult.raw) fingerprintParts.push(gateResult.raw);
+    if (gateResult.error) diagnostics.push(gateResult.error);
+    const gateRecords = gateRegistry(gateResult.value);
+    const artifactResult = await readJson(join(sessionDir, "artifacts.json"), true);
+    if (artifactResult.raw) fingerprintParts.push(artifactResult.raw);
+    if (artifactResult.error) diagnostics.push(artifactResult.error);
+    const runResults = await readRuns(join(sessionDir, "runs"), diagnostics, gateRecords);
+    fingerprintParts.push(...runResults.raw);
+    const session = normalizeSession(
+      activeSessionId,
+      sessionResult.value,
+      runResults.runs,
+      artifactResult.value,
+      gateRecords,
+    );
+    return snapshot("canonical", projectRoot, session, fingerprintParts, diagnostics, options.now, {
+      activeSessionId,
+      status: "valid",
+    });
   }
 
   const legacy = await loadLegacySnapshot(projectRoot, workflowDir, diagnostics, fingerprintParts, options.now);
@@ -144,7 +187,13 @@ function snapshot(
   fingerprintParts: string[],
   diagnostics: string[],
   now: WorkflowBridgeOptions["now"],
+  canonicalClaim?: WorkflowCanonicalClaim,
 ): WorkflowSnapshot {
+  const sessionGeneration = canonicalClaim
+    ? `canonical:${canonicalClaim.status}:${canonicalClaim.activeSessionId ?? "unknown"}:${session?.identityRevision ?? 0}`
+    : session
+      ? `${source}:${session.sessionId}:${session.identityRevision ?? 0}`
+      : source;
   return {
     source,
     projectRoot: resolve(projectRoot),
@@ -153,21 +202,28 @@ function snapshot(
       sessionRevision: session?.revision ?? 0,
       fingerprint: createHash("sha256").update(fingerprintParts.join("\u0000")).digest("hex"),
     },
+    sessionGeneration,
+    ...(canonicalClaim ? { canonicalClaim } : {}),
     ...(session ? { session } : {}),
     diagnostics,
   };
 }
 
 async function readJson(path: string, optional = false): Promise<ReadJsonResult> {
+  let raw: string;
   try {
-    const raw = await readFile(path, "utf8");
-    const parsed = JSON.parse(raw);
-    if (!isRecord(parsed)) return { raw, error: `${path} must contain a JSON object` };
-    return { raw, value: parsed };
+    raw = await readFile(path, "utf8");
   } catch (error) {
     const code = (error as NodeJS.ErrnoException).code;
-    if (optional && code === "ENOENT") return {};
-    return { error: `${path}: ${errorMessage(error)}` };
+    if (optional && code === "ENOENT") return { present: false };
+    return { present: code !== "ENOENT", error: `${path}: ${errorMessage(error)}` };
+  }
+  try {
+    const parsed = JSON.parse(raw);
+    if (!isRecord(parsed)) return { present: true, raw, error: `${path} must contain a JSON object` };
+    return { present: true, raw, value: parsed };
+  } catch (error) {
+    return { present: true, raw, error: `${path}: ${errorMessage(error)}` };
   }
 }
 

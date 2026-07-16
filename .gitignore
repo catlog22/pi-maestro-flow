@@ -19,6 +19,7 @@ Thumbs.db
 
 # Pi / Maestro runtime artifacts (see .workflow/specs/ for tracked config)
 .history/
+.pi/settings.local.json
 .workflow/.backups/
 .workflow/.csv-wave/
 .workflow/.maestro/
@@ -38,6 +39,7 @@ Thumbs.db
 .workflow/specs/test-conventions.md
 .workflow/specs/ui-conventions.md
 .workflow/state.json
+.workflow/tmp/
 .workflow/wiki-index.json
 
 # Scratch session artifacts
