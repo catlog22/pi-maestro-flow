@@ -23,6 +23,7 @@ import {
   inferGraphMode,
   taskDependencyNames,
   sendRpcMessage,
+  truncateUtf8Tail,
 } from "../runs/execution.ts";
 import {
   confirmChildReloaded,
@@ -158,6 +159,94 @@ const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activ
 const TEAMMATE_WATCH_GUIDELINES = [
   "Use teammate-watch for targeted live inspection after selecting an agent name or correlation ID from teammate-list.",
 ];
+
+export const AGENT_BUFFER_LIMITS = Object.freeze({
+  inboxItems: 64,
+  sleepingInboxItems: 5,
+  inboxBytes: 256 * 1024,
+  logLines: 200,
+  sleepingLogLines: 100,
+  logLineBytes: 16 * 1024,
+  logBytes: 512 * 1024,
+  lastResultBytes: 256 * 1024,
+});
+
+function trimAgentBuffers(agent: ActiveAgent, sleeping = false): void {
+  const inboxLimit = sleeping
+    ? AGENT_BUFFER_LIMITS.sleepingInboxItems
+    : AGENT_BUFFER_LIMITS.inboxItems;
+  let inboxBytes = 0;
+  const retainedInbox: MessageEnvelope[] = [];
+  for (let index = agent.inbox.length - 1; index >= 0 && retainedInbox.length < inboxLimit; index -= 1) {
+    const message = agent.inbox[index];
+    const payload = truncateUtf8Tail(message.payload, AGENT_BUFFER_LIMITS.inboxBytes);
+    const payloadBytes = Buffer.byteLength(payload, "utf8");
+    if (retainedInbox.length > 0 && inboxBytes + payloadBytes > AGENT_BUFFER_LIMITS.inboxBytes) break;
+    retainedInbox.push({ ...message, payload });
+    inboxBytes += payloadBytes;
+  }
+  agent.inbox = retainedInbox.reverse();
+
+  const lineLimit = sleeping
+    ? AGENT_BUFFER_LIMITS.sleepingLogLines
+    : AGENT_BUFFER_LIMITS.logLines;
+  let logBytes = 0;
+  const retainedLog: string[] = [];
+  for (let index = agent.outputLog.length - 1; index >= 0 && retainedLog.length < lineLimit; index -= 1) {
+    const line = truncateUtf8Tail(agent.outputLog[index], AGENT_BUFFER_LIMITS.logLineBytes);
+    const lineBytes = Buffer.byteLength(line, "utf8");
+    if (retainedLog.length > 0 && logBytes + lineBytes > AGENT_BUFFER_LIMITS.logBytes) break;
+    retainedLog.push(line);
+    logBytes += lineBytes;
+  }
+  agent.outputLog = retainedLog.reverse();
+  if (agent.lastResult !== undefined) {
+    agent.lastResult = truncateUtf8Tail(agent.lastResult, AGENT_BUFFER_LIMITS.lastResultBytes);
+  }
+}
+
+export function retainBoundedAgentHistory(agent: ActiveAgent, sleeping = false): void {
+  trimAgentBuffers(agent, sleeping);
+}
+
+export interface ProgressFlushGate {
+  mark(terminal?: boolean): void;
+  flush(): void;
+  dispose(): void;
+}
+
+export function createProgressFlushGate(
+  onFlush: () => void,
+  intervalMs = 300,
+): ProgressFlushGate {
+  let dirty = false;
+  let lastFlushAt = Number.NEGATIVE_INFINITY;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  const cancelTimer = () => {
+    if (timer) clearTimeout(timer);
+    timer = undefined;
+  };
+  const flush = () => {
+    cancelTimer();
+    if (!dirty) return;
+    dirty = false;
+    lastFlushAt = Date.now();
+    onFlush();
+  };
+  const mark = (terminal = false) => {
+    dirty = true;
+    if (terminal || Date.now() - lastFlushAt >= intervalMs) {
+      flush();
+      return;
+    }
+    if (!timer) {
+      timer = setTimeout(flush, Math.max(0, intervalMs - (Date.now() - lastFlushAt)));
+      timer.unref?.();
+    }
+  };
+  return { mark, flush, dispose: cancelTimer };
+}
 
 interface AgentWidgetTheme {
   fg(name: string, text: string): string;
@@ -1026,15 +1115,15 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           retireAgent(state, result.correlationId, lastMessage);
         },
         onProgress: (() => {
-          let lastUpdateTime = 0;
           const UPDATE_INTERVAL = 300; // ms — throttle TUI updates
           const logStates = new Map<string, {
             loggedToolCount: number;
             streamingLineIdx: number;
             loggedToolLines: Map<number, number>;
           }>();
+          const pendingByTask = new Map<number, AgentProgress>();
 
-          return (data: AgentProgress) => {
+          const processProgress = (data: AgentProgress) => {
             activeAgent.lastActivityAt = Date.now();
             const progressKey = data.taskIndex ?? 0;
             const existing = progressState.get(progressKey);
@@ -1050,7 +1139,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               recentTools: data.recentTools,
               toolCount: data.toolCount,
               tokens: data.tokens,
-              ...(data.lastMessage ? { lastMessage: data.lastMessage } : {}),
+              ...(data.lastMessage
+                ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
+                : {}),
               ...(data.status === "completed" || data.status === "failed"
                 ? { completedAt: new Date().toISOString() }
                 : {}),
@@ -1063,6 +1154,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               childAgent.lastActivityAt = Date.now();
               childAgent.status = entry.status === "completed" ? "sleeping" : entry.status;
               childAgent.outputLog = [...activeAgent.outputLog];
+              trimAgentBuffers(childAgent, childAgent.status === "sleeping");
             }
 
             const shortId = entry.correlationId.slice(0, 8);
@@ -1078,7 +1170,6 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               : `${data.agent}#${shortId}`;
 
             // Record a bounded aggregate history while keeping per-agent cursors independent.
-            const MAX_LOG = 200;
             if (data.recentTools?.length) {
               for (let ti = logState.loggedToolCount; ti < data.recentTools.length; ti++) {
                 const tool = data.recentTools[ti];
@@ -1109,10 +1200,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
                 }
               }
             }
-            if (activeAgent.outputLog.length > MAX_LOG) {
-              activeAgent.outputLog.splice(0, activeAgent.outputLog.length - MAX_LOG);
-              logStates.clear();
-            }
+            const logLengthBeforeTrim = activeAgent.outputLog.length;
+            trimAgentBuffers(activeAgent);
+            if (activeAgent.outputLog.length !== logLengthBeforeTrim) logStates.clear();
 
             // Broadcast the complete graph snapshot so overlays can switch views reliably.
             pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
@@ -1130,13 +1220,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               progress: currentProgress,
             });
 
-            if (!onUpdate) return;
-            // Throttle TUI updates — skip if too frequent (except completion).
-            const now = Date.now();
-            if (data.status === "running" && now - lastUpdateTime < UPDATE_INTERVAL) return;
-            lastUpdateTime = now;
-
-            onUpdate({
+            onUpdate?.({
               content: [{
                 type: "text",
                 text: `[${data.name ?? data.agent}] ${data.status} · tools ${data.toolCount} · tokens ${data.tokens}`,
@@ -1147,6 +1231,18 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
                 progress: currentProgress,
               },
             });
+          };
+
+          const flushGate = createProgressFlushGate(() => {
+            const pending = [...pendingByTask.values()];
+            pendingByTask.clear();
+            for (const data of pending) processProgress(data);
+          }, UPDATE_INTERVAL);
+
+          return (data: AgentProgress) => {
+            activeAgent.lastActivityAt = Date.now();
+            pendingByTask.set(data.taskIndex ?? 0, data);
+            flushGate.mark(data.status === "completed" || data.status === "failed");
           };
         })(),
         onChildRequest: (event: Record<string, unknown>, reply: (msg: unknown) => void) => {
@@ -1461,6 +1557,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       const now = Date.now();
       agent.inbox.push({ id: randomUUID(), from: "caller", to: params.to, kind: mode === "abort" ? "notification" : "task", payload: message, timestamp: now });
       agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);
+      trimAgentBuffers(agent);
       agent.lastActivityAt = now;
 
       pi.events.emit(TEAMMATE_MESSAGE_EVENT, { correlationId: cid, from: "caller", to: params.to, mode, message, isSend: true });
@@ -1685,6 +1782,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               timestamp: now,
             });
             target.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ follow_up: ${message.slice(0, 100)}`);
+            trimAgentBuffers(target);
             target.lastActivityAt = now;
             if (target.status === "sleeping") {
               target.status = "running";
@@ -1733,30 +1831,36 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           }
 
           const progress = evt.progress as AgentProgressSnapshot[] | undefined;
-          if (progress) overlay.setProgress(cid, progress);
-
           const tools = evt.recentTools as Array<{ name: string; status: string }> | undefined;
+          const lines: Array<{ text: string; kind: "tool" }> = [];
+          let toolEntries: Array<{
+            name: string;
+            status: "running" | "completed" | "failed";
+            startedAt: number;
+          }> | undefined;
           if (tools && tools.length > 0) {
-            const toolEntries = tools.map((t) => ({
+            toolEntries = tools.map((t) => ({
               name: t.name,
               status: t.status as "running" | "completed" | "failed",
               startedAt: Date.now(),
             }));
-            overlay.setActiveTools(cid, toolEntries);
 
             for (const t of tools) {
               const key = `${evt.taskIndex ?? "single"}:${t.name}:${t.status}`;
               if (t.status !== "running" && !completedToolLog.has(key)) {
                 completedToolLog.add(key);
-                overlay.appendLog(cid, `[${ts()}] ✓ ${t.name}`, "tool");
+                lines.push({ text: `[${ts()}] ✓ ${t.name}`, kind: "tool" });
               }
             }
           }
 
           const lastMsg = evt.lastMessage as string | undefined;
-          if (lastMsg) {
-            overlay.setStreamingText(cid, lastMsg);
-          }
+          overlay.applyProgressEvent(cid, {
+            ...(progress ? { progress } : {}),
+            ...(toolEntries ? { activeTools: toolEntries } : {}),
+            ...(lastMsg ? { streamingText: lastMsg } : {}),
+            ...(lines.length ? { lines } : {}),
+          });
         };
         const completeHandler = (data: unknown) => {
           const evt = data as Record<string, unknown>;
@@ -2617,9 +2721,12 @@ function retireAgent(
   const agent = state.activeRuns.get(correlationId);
   if (!agent) return;
   agent.status = "sleeping";
-  agent.lastResult = lastResult;
+  agent.lastResult = lastResult === undefined
+    ? undefined
+    : truncateUtf8Tail(lastResult, AGENT_BUFFER_LIMITS.lastResultBytes);
   agent.sleptAt = Date.now();
   agent.lastActivityAt = Date.now();
+  trimAgentBuffers(agent, true);
 }
 
 export function settleAgent(
@@ -2732,6 +2839,7 @@ export async function handleChildInteractionRequest(
     agent.pendingInteractions.set(requestId, record);
     agent.lastActivityAt = Date.now();
     agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ? ${interaction} request`);
+    trimAgentBuffers(agent);
   }
 
   const requestSummary = interaction === "permission"
@@ -2775,6 +2883,7 @@ export async function handleChildInteractionRequest(
   if (agent) {
     const action = typeof result.action === "string" ? result.action : "cancel";
     agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ◀ ${interaction} ${action}`);
+    trimAgentBuffers(agent);
     agent.lastActivityAt = Date.now();
   }
   pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
@@ -3165,7 +3274,9 @@ async function handleProxyRequest(
                 recentTools: data.recentTools,
                 toolCount: data.toolCount,
                 tokens: data.tokens,
-                ...(data.lastMessage ? { lastMessage: data.lastMessage } : {}),
+                ...(data.lastMessage
+                  ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
+                  : {}),
                 ...(data.status === "completed" || data.status === "failed"
                   ? { completedAt: new Date().toISOString() }
                   : {}),
@@ -3183,10 +3294,14 @@ async function handleProxyRequest(
                   if (lastLine) {
                     const shortId = correlationId.slice(0, 8);
                     const marker = data.name ? `@${data.name}#${shortId}` : `${data.agent}#${shortId}`;
-                    const line = `${marker} │ ${lastLine}`;
+                    const line = truncateUtf8Tail(
+                      `${marker} │ ${lastLine}`,
+                      AGENT_BUFFER_LIMITS.logLineBytes,
+                    );
                     childAgent.outputLog = [line];
                     activeAgent.outputLog.push(line);
-                    if (activeAgent.outputLog.length > 200) activeAgent.outputLog.shift();
+                    trimAgentBuffers(childAgent, childAgent.status === "sleeping");
+                    trimAgentBuffers(activeAgent);
                   }
                 }
               }
@@ -3374,6 +3489,7 @@ async function handleProxyRequest(
       const now = Date.now();
       agent.inbox.push({ id: randomUUID(), from: spawnedBy ?? "proxy", to, kind: mode === "abort" ? "notification" : "task", payload: message, timestamp: now });
       agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);
+      trimAgentBuffers(agent);
       agent.lastActivityAt = now;
 
       // Notify main session TUI

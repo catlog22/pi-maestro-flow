@@ -279,42 +279,64 @@ test("PlanStore heartbeat prevents a live long approval from being reclaimed as 
   const root = await mkdtemp(join(tmpdir(), "pi-plan-lock-heartbeat-"));
   let releaseCommit: (() => void) | undefined;
   let commitStarted: (() => void) | undefined;
+  let ownerClockReads = 0;
+  let approval: ReturnType<PlanStore["approve"]> | undefined;
   const started = new Promise<void>((resolve) => { commitStarted = resolve; });
   const release = new Promise<void>((resolve) => { releaseCommit = resolve; });
   try {
     const cwd = join(root, "workspace");
-    const lockOptions = {
-      rootDir: join(root, "global"),
-      lockStaleMs: 20,
-      lockHeartbeatMs: 5,
-      lockRetryMs: 2,
-      lockTimeoutMs: 1_000,
-      isProcessAlive: () => false,
-    };
+    const rootDir = join(root, "global");
     const owner = new PlanStore(cwd, {
-      ...lockOptions,
+      rootDir,
+      lockStaleMs: 20,
+      lockHeartbeatMs: 1,
+      lockNow: () => {
+        ownerClockReads += 1;
+        return ownerClockReads > 2 ? 100 : 0;
+      },
+      isProcessAlive: () => false,
+      getProcessIdentity: (pid: number) => `test-process:${pid}`,
       approvalCommitHook: async () => {
         commitStarted?.();
         await release;
       },
     });
-    const approval = owner.approve("long approval", 0);
+    approval = owner.approve("long approval", 0);
     await started;
-    await new Promise((resolve) => setTimeout(resolve, 60));
-
-    let recoveryFinished = false;
-    const recovery = new PlanStore(cwd, lockOptions).load().then((loaded) => {
-      recoveryFinished = true;
-      return loaded;
+    await waitForCondition(async () => {
+      try {
+        const lockOwner = JSON.parse(await readFile(owner.lockOwnerPath, "utf8"));
+        return lockOwner.heartbeatAt === 100;
+      } catch {
+        return false;
+      }
     });
-    await new Promise((resolve) => setTimeout(resolve, 30));
-    assert.equal(recoveryFinished, false);
+    assert.equal(
+      JSON.parse(await readFile(owner.lockOwnerPath, "utf8")).processIdentity,
+      `test-process:${process.pid}`,
+    );
+
+    const contender = new PlanStore(cwd, {
+      rootDir,
+      lockStaleMs: 20,
+      lockRetryMs: 1,
+      lockTimeoutMs: 1,
+      lockNow: () => 100,
+      isProcessAlive: () => false,
+      getProcessIdentity: (pid: number) => `test-process:${pid}`,
+    });
+    await assert.rejects(contender.load(), /Timed out waiting for Plan transaction lock/);
+    assert.equal(
+      JSON.parse(await readFile(owner.lockOwnerPath, "utf8")).processIdentity,
+      `test-process:${process.pid}`,
+    );
 
     releaseCommit?.();
-    const [approved, recovered] = await Promise.all([approval, recovery]);
-    assert.equal(recovered.manifest.approvedPath, approved.manifest.approvedPath);
+    const approved = await approval;
+    assert.equal(approved.manifest.status, "approved");
   } finally {
     releaseCommit?.();
+    await approval?.catch(() => {});
     await rm(root, { recursive: true, force: true });
   }
 });
@@ -328,11 +350,13 @@ test("PlanStore reclaims a dead stale owner and releases only its own token", as
       lockRetryMs: 2,
       lockTimeoutMs: 500,
       isProcessAlive: () => false,
+      getProcessIdentity: () => "test-process:current",
     });
     await mkdir(store.lockPath, { recursive: true });
     await writeFile(store.lockOwnerPath, `${JSON.stringify({
       token: "dead-owner",
       pid: 999_999,
+      processIdentity: "test-process:dead",
       createdAt: Date.now() - 1_000,
       heartbeatAt: Date.now() - 1_000,
     })}\n`, "utf8");
@@ -340,6 +364,99 @@ test("PlanStore reclaims a dead stale owner and releases only its own token", as
     const loaded = await store.load();
     assert.equal(loaded.manifest.revision, 0);
     assert.equal(await storePathExists(store.lockPath), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore does not reclaim a stale lock when the live PID birth identity matches", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-live-owner-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), {
+      rootDir: join(root, "global"),
+      lockStaleMs: 10,
+      lockRetryMs: 1,
+      lockTimeoutMs: 1,
+      lockNow: () => 1_000,
+      isProcessAlive: () => true,
+      getProcessIdentity: (pid) => pid === 42_424 ? "test-process:birth-a" : "test-process:contender",
+    });
+    await mkdir(store.lockPath, { recursive: true });
+    await writeFile(store.lockOwnerPath, `${JSON.stringify({
+      token: "live-owner",
+      pid: 42_424,
+      processIdentity: "test-process:birth-a",
+      createdAt: 0,
+      heartbeatAt: 0,
+    })}\n`, "utf8");
+
+    await assert.rejects(store.load(), /Timed out waiting for Plan transaction lock/);
+    assert.equal(JSON.parse(await readFile(store.lockOwnerPath, "utf8")).token, "live-owner");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore reclaims a stale lock when a live PID was reused", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-reused-pid-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), {
+      rootDir: join(root, "global"),
+      lockStaleMs: 10,
+      lockRetryMs: 1,
+      lockTimeoutMs: 100,
+      lockNow: () => 1_000,
+      isProcessAlive: () => true,
+      getProcessIdentity: (pid) => pid === 42_424 ? "test-process:birth-new" : "test-process:contender",
+    });
+    await mkdir(store.lockPath, { recursive: true });
+    await writeFile(store.lockOwnerPath, `${JSON.stringify({
+      token: "reused-pid-owner",
+      pid: 42_424,
+      processIdentity: "test-process:birth-old",
+      createdAt: 0,
+      heartbeatAt: 0,
+    })}\n`, "utf8");
+
+    const loaded = await store.load();
+    assert.equal(loaded.manifest.revision, 0);
+    assert.equal(await storePathExists(store.lockPath), false);
+    assert.deepEqual(
+      (await readdir(store.plansDir)).filter((entry) => entry.includes(".transaction-lock.stale-")),
+      [],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore keeps legacy stale locks fail-closed while their PID is live", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-legacy-live-owner-"));
+  let legacyIdentityReads = 0;
+  try {
+    const store = new PlanStore(join(root, "workspace"), {
+      rootDir: join(root, "global"),
+      lockStaleMs: 10,
+      lockRetryMs: 1,
+      lockTimeoutMs: 1,
+      lockNow: () => 1_000,
+      isProcessAlive: () => true,
+      getProcessIdentity: (pid) => {
+        if (pid === 42_424) legacyIdentityReads += 1;
+        return "test-process:contender";
+      },
+    });
+    await mkdir(store.lockPath, { recursive: true });
+    await writeFile(store.lockOwnerPath, `${JSON.stringify({
+      token: "legacy-live-owner",
+      pid: 42_424,
+      createdAt: 0,
+      heartbeatAt: 0,
+    })}\n`, "utf8");
+
+    await assert.rejects(store.load(), /Timed out waiting for Plan transaction lock/);
+    assert.equal(legacyIdentityReads, 0);
+    assert.equal(JSON.parse(await readFile(store.lockOwnerPath, "utf8")).token, "legacy-live-owner");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -502,4 +619,12 @@ async function storePathExists(path: string): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
     throw error;
   }
+}
+
+async function waitForCondition(predicate: () => Promise<boolean>): Promise<void> {
+  for (let attempt = 0; attempt < 1_000; attempt += 1) {
+    if (await predicate()) return;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  throw new Error("Timed out waiting for deterministic PlanStore test condition");
 }

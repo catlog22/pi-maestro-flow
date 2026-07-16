@@ -8,6 +8,26 @@ import * as fs from "node:fs";
 import { defineTool, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
+export const STRUCTURED_OUTPUT_FILE_MODE = 0o600;
+
+export function writeStructuredOutputFile(outputPath: string, content: string): void {
+  try {
+    const existing = fs.lstatSync(outputPath);
+    if (!existing.isFile() || existing.isSymbolicLink()) {
+      throw new Error(`Structured output path is not a regular file: ${outputPath}`);
+    }
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  const fd = fs.openSync(outputPath, "w", STRUCTURED_OUTPUT_FILE_MODE);
+  try {
+    if (process.platform !== "win32") fs.fchmodSync(fd, STRUCTURED_OUTPUT_FILE_MODE);
+    fs.writeFileSync(fd, content, { encoding: "utf8" });
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
 function readSchema(schemaPath: string): Record<string, unknown> {
   const parsed = JSON.parse(fs.readFileSync(schemaPath, "utf-8")) as unknown;
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
@@ -35,7 +55,7 @@ export default function registerStructuredOutput(pi: ExtensionAPI): void {
     parameters: Type.Unsafe(schema),
 
     async execute(_toolCallId, params) {
-      fs.writeFileSync(outputPath, JSON.stringify(params), "utf-8");
+      writeStructuredOutputFile(outputPath, JSON.stringify(params));
       return {
         content: [{ type: "text", text: "Structured output saved." }],
         details: params,

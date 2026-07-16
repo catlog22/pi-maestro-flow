@@ -36,10 +36,17 @@ const GRAPH_LIST_MAX_ROWS = 7;
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_MS = 120;
 
-interface ToolEntry {
+export interface ToolEntry {
   name: string;
   status: "running" | "completed" | "failed";
   startedAt: number;
+}
+
+export interface OverlayProgressUpdate {
+  progress?: AgentProgressSnapshot[];
+  activeTools?: ToolEntry[];
+  streamingText?: string;
+  lines?: Array<{ text: string; kind: "info" | "tool" | "output" | "system" }>;
 }
 
 interface AgentLog {
@@ -197,6 +204,40 @@ export class AttachOverlay implements Component, Focusable {
       log.followTail = true;
     }
     this.requestRender?.();
+  }
+
+  applyProgressEvent(cid: string, update: OverlayProgressUpdate): void {
+    const log = this.ensureLog(cid);
+    if (!log) return;
+    let changed = false;
+    if (update.progress) {
+      log.progress = [...update.progress].sort((a, b) => a.taskIndex - b.taskIndex);
+      if (
+        log.selectedTaskIndex !== undefined
+        && !log.progress.some((entry) => entry.taskIndex === log.selectedTaskIndex)
+      ) {
+        log.selectedTaskIndex = undefined;
+        log.followTail = true;
+      }
+      changed = true;
+    }
+    if (update.activeTools) {
+      log.activeTools = update.activeTools;
+      changed = true;
+    }
+    if (update.streamingText !== undefined) {
+      log.streamingText = update.streamingText;
+      changed = true;
+    }
+    for (const line of update.lines ?? []) {
+      log.lines.push(line);
+      if (log.lines.length > MAX_LOG_LINES) {
+        log.lines.shift();
+        if (!log.followTail) log.scrollOffset = Math.max(0, log.scrollOffset - 1);
+      }
+      changed = true;
+    }
+    if (changed) this.requestRender?.();
   }
 
   appendLog(

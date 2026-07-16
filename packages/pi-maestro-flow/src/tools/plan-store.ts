@@ -1,5 +1,7 @@
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
+import { performance } from "node:perf_hooks";
 import {
   mkdir,
   open,
@@ -49,6 +51,7 @@ export interface PlanStoreOptions {
   lockHeartbeatMs?: number;
   lockNow?: () => number;
   isProcessAlive?: (pid: number) => boolean;
+  getProcessIdentity?: (pid: number) => string | null | Promise<string | null>;
 }
 
 export interface PlanSessionIdentity {
@@ -60,6 +63,7 @@ export interface PlanSessionIdentity {
 interface LockOwner {
   token: string;
   pid: number;
+  processIdentity?: string;
   createdAt: number;
   heartbeatAt: number;
 }
@@ -122,6 +126,7 @@ export class PlanStore {
   private readonly lockHeartbeatMs: number;
   private readonly lockNow: () => number;
   private readonly isProcessAlive: (pid: number) => boolean;
+  private readonly getProcessIdentity: (pid: number) => string | null | Promise<string | null>;
 
   constructor(cwd: string, options: PlanStoreOptions = {}) {
     this.workspacePath = normalizeWorkspacePath(cwd);
@@ -152,6 +157,7 @@ export class PlanStore {
     this.lockHeartbeatMs = options.lockHeartbeatMs ?? Math.max(10, Math.min(30_000, Math.floor(this.lockStaleMs / 3)));
     this.lockNow = options.lockNow ?? (() => Date.now());
     this.isProcessAlive = options.isProcessAlive ?? processIsAlive;
+    this.getProcessIdentity = options.getProcessIdentity ?? processIdentity;
   }
 
   async load(): Promise<LoadedPlan> {
@@ -380,14 +386,16 @@ export class PlanStore {
   private async withWorkspaceLock<T>(operation: (ownerToken: string) => Promise<T>): Promise<T> {
     await this.prepareSessionStorage();
     await mkdir(this.plansDir, { recursive: true });
-    const maxAttempts = Math.max(1, Math.ceil(this.lockTimeoutMs / Math.max(1, this.lockRetryMs)));
+    const lockDeadline = performance.now() + this.lockTimeoutMs;
+    const ownerProcessIdentity = await this.resolveProcessIdentity(process.pid);
     const owner: LockOwner = {
       token: randomUUID(),
       pid: process.pid,
+      ...(ownerProcessIdentity ? { processIdentity: ownerProcessIdentity } : {}),
       createdAt: this.lockNow(),
       heartbeatAt: this.lockNow(),
     };
-    for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    for (let attempt = 0; attempt === 0 || performance.now() < lockDeadline; attempt += 1) {
       try {
         await mkdir(this.lockPath);
         try {
@@ -400,7 +408,9 @@ export class PlanStore {
       } catch (error) {
         if (!isAlreadyExists(error)) throw error;
         await this.reclaimStaleLock();
-        await delay(this.lockRetryMs);
+        const retryBudget = lockDeadline - performance.now();
+        if (retryBudget <= 0) break;
+        await delay(Math.min(this.lockRetryMs, retryBudget));
       }
     }
     if (!(await this.lockIsOwnedBy(owner.token))) {
@@ -592,9 +602,24 @@ export class PlanStore {
   }
 
   private async lockIdentityIsStale(identity: { owner: LockOwner | null; mtimeMs: number }): Promise<boolean> {
-    if (identity.owner && this.isProcessAlive(identity.owner.pid)) return false;
     const lastActiveAt = identity.owner?.heartbeatAt ?? identity.mtimeMs;
-    return this.lockNow() - lastActiveAt > this.lockStaleMs;
+    if (this.lockNow() - lastActiveAt <= this.lockStaleMs) return false;
+    if (identity.owner && this.isProcessAlive(identity.owner.pid)) {
+      // Legacy owners have no birth identity. Keep them fail-closed while their PID is live.
+      if (!identity.owner.processIdentity) return false;
+      const liveProcessIdentity = await this.resolveProcessIdentity(identity.owner.pid);
+      if (!liveProcessIdentity || liveProcessIdentity === identity.owner.processIdentity) return false;
+    }
+    return true;
+  }
+
+  private async resolveProcessIdentity(pid: number): Promise<string | null> {
+    try {
+      const identity = await this.getProcessIdentity(pid);
+      return typeof identity === "string" && identity.trim() ? identity.trim() : null;
+    } catch {
+      return null;
+    }
   }
 
   private async removeStaleTemps(): Promise<void> {
@@ -847,10 +872,13 @@ function validateLockOwner(raw: unknown): LockOwner | null {
     || typeof raw.createdAt !== "number"
     || !Number.isFinite(raw.createdAt)
     || typeof raw.heartbeatAt !== "number"
-    || !Number.isFinite(raw.heartbeatAt)) return null;
+    || !Number.isFinite(raw.heartbeatAt)
+    || (raw.processIdentity !== undefined
+      && (typeof raw.processIdentity !== "string" || !raw.processIdentity.trim()))) return null;
   return {
     token: raw.token,
     pid: raw.pid as number,
+    ...(typeof raw.processIdentity === "string" ? { processIdentity: raw.processIdentity } : {}),
     createdAt: raw.createdAt,
     heartbeatAt: raw.heartbeatAt,
   };
@@ -891,6 +919,55 @@ function processIsAlive(pid: number): boolean {
   } catch (error) {
     return isRecord(error) && error.code === "EPERM";
   }
+}
+
+let ownProcessIdentity: Promise<string | null> | undefined;
+
+function processIdentity(pid: number): Promise<string | null> {
+  if (pid !== process.pid) return readProcessIdentity(pid);
+  ownProcessIdentity ??= readProcessIdentity(pid).then((identity) => {
+    if (!identity) ownProcessIdentity = undefined;
+    return identity;
+  });
+  return ownProcessIdentity;
+}
+
+async function readProcessIdentity(pid: number): Promise<string | null> {
+  if (!Number.isInteger(pid) || pid < 0) return null;
+  if (process.platform === "linux") {
+    try {
+      const [rawStat, bootId] = await Promise.all([
+        readFile(`/proc/${pid}/stat`, "utf8"),
+        readFile("/proc/sys/kernel/random/boot_id", "utf8"),
+      ]);
+      const commandEnd = rawStat.lastIndexOf(")");
+      if (commandEnd < 0) return null;
+      const fieldsAfterCommand = rawStat.slice(commandEnd + 1).trim().split(/\s+/);
+      const startTicks = fieldsAfterCommand[19];
+      return startTicks ? `linux:${bootId.trim()}:${startTicks}` : null;
+    } catch {
+      return null;
+    }
+  }
+  if (process.platform === "win32") {
+    const windowsDir = process.env.SystemRoot ?? process.env.WINDIR;
+    const powershell = windowsDir
+      ? join(windowsDir, "System32", "WindowsPowerShell", "v1.0", "powershell.exe")
+      : "powershell.exe";
+    const script = `$processInfo = Get-CimInstance Win32_Process -Filter 'ProcessId = ${pid}'; if ($null -ne $processInfo) { $processInfo.CreationDate.ToUniversalTime().Ticks }`;
+    const output = await execFileText(powershell, ["-NoProfile", "-NonInteractive", "-Command", script]);
+    return output ? `win32:${output}` : null;
+  }
+  // Unsupported platforms stay fail-closed instead of comparing locale- or timezone-dependent ps output.
+  return null;
+}
+
+function execFileText(file: string, args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(file, args, { encoding: "utf8", timeout: 2_000, windowsHide: true }, (error, stdout) => {
+      resolve(error ? null : stdout.trim() || null);
+    });
+  });
 }
 
 function archiveTimestamp(iso: string): string {

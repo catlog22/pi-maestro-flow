@@ -50,6 +50,11 @@ interface TokenTotals {
 	output: number;
 }
 
+interface MessageWithUsage {
+	role?: string;
+	usage?: { input?: number; output?: number };
+}
+
 interface RuntimeState {
 	model: string;
 	git: GitInfo | null;
@@ -316,6 +321,28 @@ export function installStatusline(
 		invalidateFn?.();
 	}
 
+	function addTokenUsage(message: MessageWithUsage | undefined): void {
+		if (message?.role !== "assistant") return;
+		rs.tokens.input += message.usage?.input ?? 0;
+		rs.tokens.output += message.usage?.output ?? 0;
+	}
+
+	function rebuildTokenUsage(ctx: ExtensionContext): void {
+		const totals: TokenTotals = { input: 0, output: 0 };
+		try {
+			for (const entry of ctx.sessionManager?.getBranch?.() ?? []) {
+				if (entry.type !== "message") continue;
+				const message = entry.message as MessageWithUsage | undefined;
+				if (message?.role !== "assistant") continue;
+				totals.input += message.usage?.input ?? 0;
+				totals.output += message.usage?.output ?? 0;
+			}
+		} catch {
+			// Token tracking is best-effort.
+		}
+		rs.tokens = totals;
+	}
+
 	function scheduleGitRefresh(): void {
 		if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
 		gitDebounceTimer = setTimeout(async () => {
@@ -387,7 +414,8 @@ export function installStatusline(
 		const usage = ctx.getContextUsage?.();
 		if (usage?.percent != null) rs.contextPercent = usage.percent;
 
-		rs.tokens = { input: 0, output: 0 };
+		// Session resume/switch may start with an existing branch.
+		rebuildTokenUsage(ctx);
 
 		// Footer must install synchronously — before any await
 		installFooter(ctx);
@@ -417,6 +445,8 @@ export function installStatusline(
 	});
 
 	pi.on("session_tree", (_event, ctx) => {
+		// Tree rewind/branch switch invalidates the incremental token baseline.
+		rebuildTokenUsage(ctx);
 		// Reinstall footer on session tree change
 		installFooter(ctx);
 	});
@@ -462,24 +492,10 @@ export function installStatusline(
 		invalidate();
 	});
 
-	// Track token usage from session messages (same pattern as pi-statusline)
-	pi.on("message_end", (_event, ctx) => {
-		try {
-			const branch = ctx.sessionManager?.getBranch?.() ?? [];
-			let totalInput = 0;
-			let totalOutput = 0;
-			for (const entry of branch) {
-				if (entry.type !== "message" || entry.message?.role !== "assistant") continue;
-				const u = entry.message.usage as
-					| { input?: number; output?: number }
-					| undefined;
-				totalInput += u?.input ?? 0;
-				totalOutput += u?.output ?? 0;
-			}
-			rs.tokens = { input: totalInput, output: totalOutput };
-		} catch {
-			// Token tracking is best-effort
-		}
+	// Each finalized assistant message is counted once. Full branch scans are
+	// reserved for lifecycle boundaries above, avoiding quadratic session work.
+	pi.on("message_end", (event, ctx) => {
+		addTokenUsage(event.message as MessageWithUsage | undefined);
 
 		const usage = ctx.getContextUsage?.();
 		if (usage?.percent != null) {

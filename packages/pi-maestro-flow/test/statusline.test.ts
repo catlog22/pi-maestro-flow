@@ -15,6 +15,7 @@ function stripAnsi(value: string): string {
 function createHarness(options: {
   activeToolCalls?: number;
   workflowSnapshot?: WorkflowSnapshotLike;
+  branchEntries?: unknown[];
 } = {}) {
   const handlers = new Map<string, EventHandler[]>();
   const statuses = new Map<string, string>();
@@ -33,11 +34,27 @@ function createHarness(options: {
     },
     async exec() { return { code: 1, stdout: "", stderr: "" }; },
   } as unknown as ExtensionAPI;
+  let branchEntries = options.branchEntries ?? [];
+  let branchReads = 0;
+  let branchEntryVisits = 0;
   const ctx = {
     cwd: "D:\\pi-maestro-flow",
     hasUI: true,
     model: { id: "claude-test" },
     getContextUsage: () => ({ percent: 42 }),
+    sessionManager: {
+      getBranch: () => {
+        branchReads += 1;
+        return {
+          *[Symbol.iterator]() {
+            for (const entry of branchEntries) {
+              branchEntryVisits += 1;
+              yield entry;
+            }
+          },
+        };
+      },
+    },
     ui: {
       setFooter(factory: Function) {
         component = factory({ requestRender() {} }, {}, footerData);
@@ -58,6 +75,15 @@ function createHarness(options: {
 
   return {
     statuses,
+    emit(name: string, event: unknown = {}) {
+      for (const handler of handlers.get(name) ?? []) handler(event, ctx);
+    },
+    setBranch(entries: unknown[]) {
+      branchEntries = entries;
+    },
+    tokenScanCounts() {
+      return { branchReads, branchEntryVisits };
+    },
     render(width: number): string[] {
       assert.ok(component);
       return component.render(width);
@@ -68,6 +94,42 @@ function createHarness(options: {
     },
   };
 }
+
+test("statusline accumulates message usage incrementally and rebuilds only at branch lifecycle boundaries", () => {
+  const initialBranch = Array.from({ length: 1_000 }, () => ({
+    type: "message",
+    message: { role: "assistant", usage: { input: 1, output: 2 } },
+  }));
+  const harness = createHarness({ branchEntries: initialBranch });
+  try {
+    assert.deepEqual(harness.tokenScanCounts(), { branchReads: 1, branchEntryVisits: 1_000 });
+
+    for (let index = 0; index < 1_000; index++) {
+      harness.emit("message_end", {
+        type: "message_end",
+        message: { role: "assistant", usage: { input: 1, output: 3 } },
+      });
+    }
+    harness.emit("message_end", { type: "message_end", message: { role: "user" } });
+
+    assert.deepEqual(
+      harness.tokenScanCounts(),
+      { branchReads: 1, branchEntryVisits: 1_000 },
+      "message_end must remain O(1) instead of rescanning the growing branch",
+    );
+    assert.match(stripAnsi(harness.render(120)[0]), /↑2\.0k ↓5\.0k/);
+
+    harness.setBranch([{
+      type: "message",
+      message: { role: "assistant", usage: { input: 7, output: 11 } },
+    }]);
+    harness.emit("session_tree", { type: "session_tree", oldLeafId: "old", newLeafId: "new" });
+    assert.deepEqual(harness.tokenScanCounts(), { branchReads: 2, branchEntryVisits: 1_001 });
+    assert.match(stripAnsi(harness.render(120)[0]), /↑7 ↓11/);
+  } finally {
+    harness.dispose();
+  }
+});
 
 test("statusline links approval mode with ACT, PLAN and READY using width-aware labels", () => {
   const harness = createHarness();

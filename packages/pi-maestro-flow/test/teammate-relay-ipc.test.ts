@@ -3,10 +3,10 @@ import { fork } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { handleChildInteractionRequest } from "pi-maestro-teammate/src/extension/index.ts";
-import { dispatchChildIpcMessage } from "pi-maestro-teammate/src/runs/execution.ts";
-import { registerTeammatePermissionBroker } from "pi-maestro-teammate/src/runs/child-extensions.ts";
-import type { ActiveAgent, TeammateState } from "pi-maestro-teammate/src/shared/types.ts";
+import { handleChildInteractionRequest } from "pi-maestro-teammate/v1/extension";
+import { dispatchChildIpcMessage } from "pi-maestro-teammate/v1/execution";
+import { registerTeammatePermissionBroker } from "pi-maestro-teammate/v1/child-extensions";
+import type { ActiveAgent, TeammateState } from "pi-maestro-teammate/v1/types";
 
 test("real teammate child IPC resumes permission and AskUserQuestion calls", async () => {
   const child = fork(new URL("./fixtures/teammate-interaction-child.ts", import.meta.url), {

@@ -30,7 +30,7 @@ let _teammateResolved = false;
 async function getRunTeammate(): Promise<RunTeammateFn | undefined> {
   if (_teammateResolved) return _runTeammate;
   try {
-    const mod = await import("pi-maestro-teammate/src/runs/execution.ts");
+    const mod = await import("pi-maestro-teammate/v1/execution");
     _runTeammate = mod.runTeammate;
     _teammateResolved = true;
   } catch (err: unknown) {

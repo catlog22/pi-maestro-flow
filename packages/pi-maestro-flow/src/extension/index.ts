@@ -124,7 +124,7 @@ import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/i
 import {
   registerTeammateChildExtension,
   registerTeammatePermissionBroker,
-} from "pi-maestro-teammate/src/runs/child-extensions.ts";
+} from "pi-maestro-teammate/v1/child-extensions";
 
 interface MaestroState {
   baseCwd: string;

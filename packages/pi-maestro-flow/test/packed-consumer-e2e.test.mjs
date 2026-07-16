@@ -15,25 +15,11 @@ import { createRequire } from "node:module";
 import test from "node:test";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const localMaestroRoot = process.env.MAESTRO_SOURCE_DIR
-  ? resolve(process.env.MAESTRO_SOURCE_DIR)
-  : resolve(packageRoot, "..", "..", "..", "maestro2");
 const localTeammateRoot = resolve(packageRoot, "..", "pi-maestro-teammate");
 const require = createRequire(import.meta.url);
 const npmCommand = [process.execPath, process.env.npm_execpath ?? require.resolve("npm/bin/npm-cli.js")];
-const piCli = resolve(
-  packageRoot,
-  "..",
-  "..",
-  "node_modules",
-  "@earendil-works",
-  "pi-coding-agent",
-  "dist",
-  "cli.js",
-);
-const piCommand = [process.execPath, piCli];
 
-test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi process", { timeout: 900_000 }, () => {
+test("packed consumer installs real tarballs and loads in a fresh Pi process", { timeout: 900_000 }, () => {
   const shortTempRoot = process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
   const root = join(shortTempRoot, `pme-${process.pid}-${Date.now()}`);
   const consumer = join(root, "consumer");
@@ -48,17 +34,24 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
   mkdirSync(npmPrefix, { recursive: true });
 
   try {
-    const localMaestroPackage = JSON.parse(readFileSync(join(localMaestroRoot, "package.json"), "utf8"));
-    const localMaestroCli = join(localMaestroRoot, "bin", "maestro.js");
-    assert.match(run([process.execPath, localMaestroCli], ["run", "create", "--help"], workflowRoot).stdout, /--workflow-root/);
-
-    const packed = parseTrailingJson(run(
+    const teammatePacked = parseTrailingJson(run(
+      npmCommand,
+      ["pack", "--json", "--pack-destination", root],
+      localTeammateRoot,
+    ).stdout);
+    const flowPacked = parseTrailingJson(run(
       npmCommand,
       ["pack", "--json", "--pack-destination", root],
       packageRoot,
     ).stdout);
-    const tarball = join(root, packed[0].filename);
-    assert.equal(existsSync(tarball), true);
+    const teammateTarball = join(root, teammatePacked[0].filename);
+    const flowTarball = join(root, flowPacked[0].filename);
+    assert.equal(existsSync(teammateTarball), true);
+    assert.equal(existsSync(flowTarball), true);
+    assert.equal(teammatePacked[0].version, "0.4.5");
+    assert.equal(flowPacked[0].version, "0.4.10");
+    assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/index.ts"));
+    assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/public/v1/execution.ts"));
 
     writeFileSync(join(consumer, "package.json"), `${JSON.stringify({ private: true }, null, 2)}\n`);
     const installEnv = {
@@ -70,14 +63,14 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
     };
     run(
       npmCommand,
-      ["link", localMaestroRoot, localTeammateRoot, "--save", "--no-audit", "--no-fund"],
-      consumer,
-      installEnv,
-      120_000,
-    );
-    run(
-      npmCommand,
-      ["install", tarball, "--no-audit", "--no-fund"],
+      [
+        "install",
+        teammateTarball,
+        flowTarball,
+        "@earendil-works/pi-coding-agent@0.74.0",
+        "--no-audit",
+        "--no-fund",
+      ],
       consumer,
       installEnv,
       600_000,
@@ -85,20 +78,66 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
 
     const installed = join(consumer, "node_modules", "pi-maestro-flow");
     const installedPackage = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
+    assert.equal(installedPackage.version, "0.4.10");
     assert.equal(
       installedPackage.dependencies["maestro-flow"],
       "https://codeload.github.com/catlog22/maestro-flow/tar.gz/84ae24f8ed9a12cac3b5c69ea3428840a0a58e1b",
     );
+    assert.equal(installedPackage.dependencies["pi-maestro-teammate"], "0.4.5");
     const installedMaestro = join(consumer, "node_modules", "maestro-flow");
     const installedTeammate = join(consumer, "node_modules", "pi-maestro-teammate");
-    assert.equal(lstatSync(installedMaestro).isSymbolicLink(), true);
-    assert.equal(lstatSync(installedTeammate).isSymbolicLink(), true);
-    assert.equal(
-      JSON.parse(readFileSync(join(installedMaestro, "package.json"), "utf8")).version,
-      localMaestroPackage.version,
-    );
+    assert.equal(lstatSync(installed).isSymbolicLink(), false);
+    assert.equal(lstatSync(installedMaestro).isSymbolicLink(), false);
+    assert.equal(lstatSync(installedTeammate).isSymbolicLink(), false);
+    const installedTeammatePackage = JSON.parse(readFileSync(join(installedTeammate, "package.json"), "utf8"));
+    assert.equal(installedTeammatePackage.version, "0.4.5");
+    assert.equal(installedTeammatePackage.dependencies["cross-spawn"], "7.0.6");
     assert.equal(existsSync(join(installed, ".pi", "skills", "workflow-skill-designer", "SKILL.md")), true);
     assert.equal(existsSync(join(installed, "src", "extension", "index.ts")), true);
+    assert.match(
+      run(
+        [process.execPath],
+        [
+          "--input-type=module",
+          "--eval",
+          "console.log(import.meta.resolve('pi-maestro-teammate/v1/execution'))",
+        ],
+        consumer,
+        installEnv,
+      ).stdout,
+      /pi-maestro-teammate[\\/]src[\\/]public[\\/]v1[\\/]execution\.ts$/,
+    );
+
+    const extensionPath = join(installed, "src", "extension", "index.ts");
+    const piCommand = [
+      process.execPath,
+      join(consumer, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
+    ];
+    const runtimeEnv = {
+      ...installEnv,
+      PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
+    };
+    const smoke = run(
+      piCommand,
+      [
+        "--offline", "--mode", "rpc", "--no-session", "--no-extensions", "--no-skills",
+        "--no-context-files", "--extension", extensionPath,
+      ],
+      workflowRoot,
+      runtimeEnv,
+      45_000,
+      `${JSON.stringify({ id: "state", type: "get_state" })}\n${JSON.stringify({ id: "messages", type: "get_messages" })}\n`,
+    );
+    const smokeMessages = smoke.stdout.split(/\r?\n/).filter(Boolean).map((line) => JSON.parse(line));
+    assert.ok(smokeMessages.some((message) => message.id === "state" && message.type === "response"), smoke.stdout);
+    assert.ok(smokeMessages.some((message) => message.id === "messages" && message.type === "response"), smoke.stdout);
+
+    const maestroRuntimeEntry = join(installedMaestro, "dist", "src", "utils", "wasm-relaunch.js");
+    assert.equal(
+      existsSync(maestroRuntimeEntry),
+      true,
+      "the exact Maestro source dependency must include dist/src/utils/wasm-relaunch.js before consumer installation",
+    );
 
     const prepareDir = join(maestroHome, "prepare");
     mkdirSync(prepareDir, { recursive: true });
@@ -136,11 +175,6 @@ test("packed consumer completes Session/Run lifecycle and loads in a fresh Pi pr
     }
 
     const executeRun = createStage("execute");
-    const extensionPath = join(installed, "src", "extension", "index.ts");
-    const runtimeEnv = {
-      ...installEnv,
-      PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
-    };
     const rpc = run(
       piCommand,
       [

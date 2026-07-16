@@ -444,7 +444,7 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     }
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run prepare analyze" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run brief run-1" } }), undefined);
-    for (const subcommand of ["create execute", "check run-1", "complete run-1", "seal-session session-1", "retry run-1", "cancel run-1"]) {
+    for (const subcommand of ["next", "next --session s1", "create execute", "check run-1", "complete run-1", "seal-session session-1", "retry run-1", "cancel run-1"]) {
       assert.match(
         onToolCallPlan({ toolName: "bash", input: { command: `maestro run ${subcommand}` } })?.reason ?? "",
         /modify files/,

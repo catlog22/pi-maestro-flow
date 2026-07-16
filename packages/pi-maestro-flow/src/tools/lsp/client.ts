@@ -22,15 +22,54 @@ interface JsonRpcMessage {
   error?: { code?: number; message?: string; data?: unknown };
 }
 
+interface DocumentState {
+  version: number;
+  content: string;
+  bytes: number;
+}
+
+export interface LspClientCacheLimits {
+  maxDocumentEntries: number;
+  maxDocumentBytes: number;
+  maxDiagnosticEntries: number;
+  maxDiagnosticBytes: number;
+  maxDiagnosticWaiters: number;
+}
+
+export interface LspClientCacheStats {
+  documentEntries: number;
+  documentBytes: number;
+  documentEvictions: number;
+  diagnosticEntries: number;
+  diagnosticBytes: number;
+  diagnosticEvictions: number;
+  diagnosticWaiterUris: number;
+  diagnosticWaiters: number;
+}
+
+export const DEFAULT_LSP_CLIENT_CACHE_LIMITS: Readonly<LspClientCacheLimits> = Object.freeze({
+  maxDocumentEntries: 64,
+  maxDocumentBytes: 16 * 1024 * 1024,
+  maxDiagnosticEntries: 128,
+  maxDiagnosticBytes: 4 * 1024 * 1024,
+  maxDiagnosticWaiters: 256,
+});
+
 export class LspClient implements LspClientLike {
   readonly capabilities: Record<string, unknown> = {};
   #child: ChildProcessWithoutNullStreams;
   #buffer = Buffer.alloc(0);
   #nextId = 1;
   #pending = new Map<number, PendingRequest>();
-  #documents = new Map<string, { version: number; content: string }>();
+  #documents = new Map<string, DocumentState>();
   #diagnostics = new Map<string, Diagnostic[]>();
+  #diagnosticWeights = new Map<string, number>();
   #diagnosticWaiters = new Map<string, Set<() => void>>();
+  #documentBytes = 0;
+  #diagnosticBytes = 0;
+  #diagnosticWaiterCount = 0;
+  #documentEvictions = 0;
+  #diagnosticEvictions = 0;
   #closed = false;
   #closing = false;
   #closeReported = false;
@@ -40,6 +79,7 @@ export class LspClient implements LspClientLike {
     readonly root: string,
     child: ChildProcessWithoutNullStreams,
     readonly onClose?: (error?: Error) => void,
+    readonly cacheLimits: Readonly<LspClientCacheLimits> = DEFAULT_LSP_CLIENT_CACHE_LIMITS,
   ) {
     this.#child = child;
     child.stdout.on("data", (chunk: Buffer) => this.#read(chunk));
@@ -56,20 +96,35 @@ export class LspClient implements LspClientLike {
     return this.#closed;
   }
 
+  get cacheStats(): Readonly<LspClientCacheStats> {
+    return Object.freeze({
+      documentEntries: this.#documents.size,
+      documentBytes: this.#documentBytes,
+      documentEvictions: this.#documentEvictions,
+      diagnosticEntries: this.#diagnostics.size,
+      diagnosticBytes: this.#diagnosticBytes,
+      diagnosticEvictions: this.#diagnosticEvictions,
+      diagnosticWaiterUris: this.#diagnosticWaiters.size,
+      diagnosticWaiters: this.#diagnosticWaiterCount,
+    });
+  }
+
   static async start(
     config: LspServerConfig,
     root: string,
     signal?: AbortSignal,
     timeoutMs = 20_000,
     onClose?: (error?: Error) => void,
+    cacheLimits: Readonly<LspClientCacheLimits> = DEFAULT_LSP_CLIENT_CACHE_LIMITS,
   ): Promise<LspClient> {
+    validateCacheLimits(cacheLimits);
     const child = crossSpawn(config.command, config.args, {
       cwd: root,
       env: { ...process.env, ...config.env },
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
     }) as ChildProcessWithoutNullStreams;
-    const client = new LspClient(config, root, child, onClose);
+    const client = new LspClient(config, root, child, onClose, Object.freeze({ ...cacheLimits }));
     try {
       await waitForSpawn(child, config.name, signal, timeoutMs);
       const initialize = await client.request("initialize", {
@@ -104,20 +159,28 @@ export class LspClient implements LspClientLike {
     const absolute = path.resolve(file);
     const uri = pathToFileURL(absolute).href;
     const content = await fs.readFile(absolute, "utf8");
+    const bytes = Buffer.byteLength(content, "utf8");
+    if (bytes > this.cacheLimits.maxDocumentBytes) {
+      throw new RangeError(
+        `LSP document ${absolute} is ${bytes} bytes, exceeding the ${this.cacheLimits.maxDocumentBytes}-byte client limit.`,
+      );
+    }
     const existing = this.#documents.get(uri);
     if (!existing) {
-      this.#documents.set(uri, { version: 1, content });
+      this.#setDocument(uri, { version: 1, content, bytes });
       this.notify("textDocument/didOpen", {
         textDocument: { uri, languageId: languageId(absolute), version: 1, text: content },
       });
     } else if (existing.content !== content) {
       const version = existing.version + 1;
-      this.#documents.set(uri, { version, content });
-      this.#diagnostics.delete(uri);
+      this.#setDocument(uri, { version, content, bytes });
+      this.#deleteDiagnostics(uri);
       this.notify("textDocument/didChange", {
         textDocument: { uri, version },
         contentChanges: [{ text: content }],
       });
+    } else {
+      this.#touchDocument(uri);
     }
     return uri;
   }
@@ -167,26 +230,31 @@ export class LspClient implements LspClientLike {
   }
 
   async getDiagnostics(uri: string, waitMs = 600, signal?: AbortSignal): Promise<Diagnostic[]> {
+    if (this.#closed) throw new Error(`Language server ${this.config.name} is closed.`);
     const diagnosticProvider = this.capabilities.diagnosticProvider;
     if (diagnosticProvider) {
       try {
         const result = await this.request("textDocument/diagnostic", { textDocument: { uri } }, signal, Math.max(waitMs, 1_000)) as { items?: Diagnostic[] } | undefined;
         if (Array.isArray(result?.items)) {
-          this.#diagnostics.set(uri, result.items);
+          this.#setDiagnostics(uri, result.items);
           return result.items;
         }
       } catch (error) {
         if (isAbortError(error)) throw error;
       }
     }
-    if (this.#diagnostics.has(uri)) return this.#diagnostics.get(uri) ?? [];
+    if (this.#diagnostics.has(uri)) return this.#touchDiagnostics(uri);
     await this.#waitForDiagnostics(uri, waitMs, signal);
-    return this.#diagnostics.get(uri) ?? [];
+    return this.#diagnostics.has(uri) ? this.#touchDiagnostics(uri) : [];
   }
 
   async shutdown(): Promise<void> {
-    if (this.#closed) return;
+    if (this.#closed) {
+      this.#clearCaches(false);
+      return;
+    }
     this.#closing = true;
+    this.#clearCaches(true);
     try {
       await this.request("shutdown", null, undefined, 2_000);
     } catch {}
@@ -201,6 +269,97 @@ export class LspClient implements LspClientLike {
       await waitForExit(this.#child, 1_000);
     }
     this.#closeGracefully();
+  }
+
+  #setDocument(uri: string, document: DocumentState): void {
+    const previous = this.#documents.get(uri);
+    if (previous) this.#documentBytes -= previous.bytes;
+    this.#documents.delete(uri);
+    this.#documents.set(uri, document);
+    this.#documentBytes += document.bytes;
+    while (
+      this.#documents.size > this.cacheLimits.maxDocumentEntries
+      || this.#documentBytes > this.cacheLimits.maxDocumentBytes
+    ) {
+      const oldestUri = this.#documents.keys().next().value as string | undefined;
+      if (!oldestUri) break;
+      this.#evictDocument(oldestUri);
+    }
+  }
+
+  #touchDocument(uri: string): void {
+    const document = this.#documents.get(uri);
+    if (!document) return;
+    this.#documents.delete(uri);
+    this.#documents.set(uri, document);
+  }
+
+  #evictDocument(uri: string): void {
+    const document = this.#documents.get(uri);
+    if (!document) return;
+    this.#documents.delete(uri);
+    this.#documentBytes -= document.bytes;
+    this.#documentEvictions += 1;
+    this.#deleteDiagnostics(uri);
+    this.#wakeDiagnosticWaiters(uri);
+    try {
+      this.notify("textDocument/didClose", { textDocument: { uri } });
+    } catch {}
+  }
+
+  #setDiagnostics(uri: string, diagnostics: Diagnostic[]): void {
+    const bytes = Buffer.byteLength(JSON.stringify(diagnostics), "utf8");
+    this.#deleteDiagnostics(uri);
+    if (bytes > this.cacheLimits.maxDiagnosticBytes) return;
+    this.#diagnostics.set(uri, diagnostics);
+    this.#diagnosticWeights.set(uri, bytes);
+    this.#diagnosticBytes += bytes;
+    while (
+      this.#diagnostics.size > this.cacheLimits.maxDiagnosticEntries
+      || this.#diagnosticBytes > this.cacheLimits.maxDiagnosticBytes
+    ) {
+      const oldestUri = this.#diagnostics.keys().next().value as string | undefined;
+      if (!oldestUri) break;
+      this.#deleteDiagnostics(oldestUri);
+      this.#diagnosticEvictions += 1;
+    }
+  }
+
+  #touchDiagnostics(uri: string): Diagnostic[] {
+    const diagnostics = this.#diagnostics.get(uri) ?? [];
+    this.#diagnostics.delete(uri);
+    this.#diagnostics.set(uri, diagnostics);
+    return diagnostics;
+  }
+
+  #deleteDiagnostics(uri: string): void {
+    if (!this.#diagnostics.has(uri)) return;
+    this.#diagnosticBytes -= this.#diagnosticWeights.get(uri) ?? 0;
+    this.#diagnostics.delete(uri);
+    this.#diagnosticWeights.delete(uri);
+  }
+
+  #wakeDiagnosticWaiters(uri: string): void {
+    for (const wake of [...(this.#diagnosticWaiters.get(uri) ?? [])]) wake();
+  }
+
+  #clearCaches(notifyClose: boolean): void {
+    const documentUris = [...this.#documents.keys()];
+    this.#documents.clear();
+    this.#documentBytes = 0;
+    this.#diagnostics.clear();
+    this.#diagnosticWeights.clear();
+    this.#diagnosticBytes = 0;
+    for (const uri of [...this.#diagnosticWaiters.keys()]) this.#wakeDiagnosticWaiters(uri);
+    this.#diagnosticWaiters.clear();
+    this.#diagnosticWaiterCount = 0;
+    if (notifyClose) {
+      for (const uri of documentUris) {
+        try {
+          this.notify("textDocument/didClose", { textDocument: { uri } });
+        } catch {}
+      }
+    }
   }
 
   #write(message: JsonRpcMessage): void {
@@ -247,8 +406,8 @@ export class LspClient implements LspClientLike {
     if (message.method === "textDocument/publishDiagnostics") {
       const params = message.params as { uri?: string; diagnostics?: Diagnostic[] };
       if (params.uri && Array.isArray(params.diagnostics)) {
-        this.#diagnostics.set(params.uri, params.diagnostics);
-        for (const wake of this.#diagnosticWaiters.get(params.uri) ?? []) wake();
+        this.#setDiagnostics(params.uri, params.diagnostics);
+        this.#wakeDiagnosticWaiters(params.uri);
       }
       return;
     }
@@ -269,23 +428,40 @@ export class LspClient implements LspClientLike {
   }
 
   #waitForDiagnostics(uri: string, waitMs: number, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) return Promise.reject(abortError());
+    if (this.#diagnosticWaiterCount >= this.cacheLimits.maxDiagnosticWaiters) {
+      return Promise.reject(new Error(`Too many pending LSP diagnostic waiters (max ${this.cacheLimits.maxDiagnosticWaiters}).`));
+    }
     return new Promise((resolve, reject) => {
       const waiters = this.#diagnosticWaiters.get(uri) ?? new Set<() => void>();
       this.#diagnosticWaiters.set(uri, waiters);
+      let settled = false;
+      const remove = () => {
+        if (!waiters.delete(finish)) return;
+        this.#diagnosticWaiterCount -= 1;
+        if (waiters.size === 0) this.#diagnosticWaiters.delete(uri);
+      };
       const finish = () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
         signal?.removeEventListener("abort", abort);
-        waiters.delete(finish);
+        remove();
         resolve();
       };
       const abort = () => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        waiters.delete(finish);
+        signal?.removeEventListener("abort", abort);
+        remove();
         reject(abortError());
       };
       const timer = setTimeout(finish, waitMs);
-      signal?.addEventListener("abort", abort, { once: true });
       waiters.add(finish);
+      this.#diagnosticWaiterCount += 1;
+      if (signal?.aborted) abort();
+      else signal?.addEventListener("abort", abort, { once: true });
     });
   }
 
@@ -293,6 +469,8 @@ export class LspClient implements LspClientLike {
     this.#closed = true;
     for (const pending of this.#pending.values()) pending.reject(error);
     this.#pending.clear();
+    this.#buffer = Buffer.alloc(0);
+    this.#clearCaches(false);
   }
 
   #closeWithError(error: Error): void {
@@ -337,6 +515,14 @@ function waitForSpawn(child: ChildProcessWithoutNullStreams, name: string, signa
     child.once("error", onError);
     signal?.addEventListener("abort", onAbort, { once: true });
   });
+}
+
+function validateCacheLimits(limits: Readonly<LspClientCacheLimits>): void {
+  for (const [name, value] of Object.entries(limits)) {
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      throw new RangeError(`LSP client cache limit ${name} must be a positive integer.`);
+    }
+  }
 }
 
 function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {

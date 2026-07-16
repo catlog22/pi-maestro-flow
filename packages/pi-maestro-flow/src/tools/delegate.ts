@@ -8,7 +8,7 @@
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { runTeammate } from "pi-maestro-teammate/src/runs/execution.ts";
+import { runTeammate } from "pi-maestro-teammate/v1/execution";
 
 export interface DelegateParams {
   prompt?: string;

@@ -150,7 +150,7 @@ test("Maestro Panel cycles collapsed, todo and panorama with a 1..120 width matr
     }
   }
 
-  assert.match(renderMaestroPanel(view, "collapsed", 80)[0], /^» Resume from gate/);
+  assert.deepEqual(renderMaestroPanel(view, "collapsed", 80), []);
   const panorama = renderMaestroPanel(view, "panorama", 120).join("\n");
   assert.match(panorama, /! blocked/);
   assert.match(panorama, /\? waiting user/);
@@ -159,7 +159,7 @@ test("Maestro Panel cycles collapsed, todo and panorama with a 1..120 width matr
   assert.doesNotMatch(panorama, /Mirror active run/);
 });
 
-test("collapsed Maestro Panel stays hidden when the statusline already owns passive run status", () => {
+test("collapsed Maestro Panel stays hidden because the statusline owns Workflow and recovery status", () => {
   const view = deriveWorkflowViewModel(snapshot);
   assert.ok(view);
   const passive = {
@@ -173,7 +173,9 @@ test("collapsed Maestro Panel stays hidden when the statusline already owns pass
   assert.deepEqual(renderMaestroPanel(passive, "collapsed", 80), []);
   assert.equal(shouldShowMaestroPanel(passive, "todo"), true);
   assert.ok(renderMaestroPanel(passive, "todo", 80).length > 0);
-  assert.equal(shouldShowMaestroPanel(view, "collapsed"), true, "recovery actions remain visible");
+  assert.equal(shouldShowMaestroPanel(view, "collapsed"), false);
+  assert.deepEqual(renderMaestroPanel(view, "collapsed", 80), []);
+  assert.match(renderMaestroPanel(view, "todo", 120).join("\n"), /» Next: Resume from gate/);
 });
 
 test("run-event renderer keeps the recovery action first and fits every width", () => {

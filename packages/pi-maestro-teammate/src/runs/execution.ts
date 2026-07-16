@@ -9,13 +9,14 @@
  */
 
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { Check } from "typebox/value";
+import crossSpawn from "cross-spawn";
 import { listAgentSummaries, resolveAgent, type AgentConfig } from "../agents/agents.ts";
 import { resolvePromptTask } from "../prompts/prompts.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
@@ -113,6 +114,25 @@ interface JsonLineEvent {
 // Utilities
 // ---------------------------------------------------------------------------
 
+/**
+ * Correlation ids are protocol identities, not filesystem-safe names.
+ * Keep the original id for IPC while deriving a deterministic portable
+ * component for --session-dir (notably ':' is invalid on Windows).
+ */
+export function correlationSessionDirectoryName(correlationId: string): string {
+  const raw = correlationId.trim() || "teammate";
+  let safe = raw
+    .normalize("NFKC")
+    .replace(/[<>:"/\\|?*\u0000-\u001F]/g, "-")
+    .replace(/[. ]+$/g, "")
+    .replace(/-+/g, "-");
+  if (!safe || /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(safe)) safe = `_${safe || "teammate"}`;
+  const changed = safe !== raw || safe.length > 96;
+  if (!changed) return safe;
+  const hash = createHash("sha256").update(raw).digest("hex").slice(0, 8);
+  return `${safe.slice(0, 87).replace(/[. ]+$/g, "")}-${hash}`;
+}
+
 function extractTextContent(event: JsonLineEvent): string | undefined {
   if (typeof event.content === "string") return event.content;
   // AgentMessage format: { message: { content: [{type:"text", text:"..."}] } }
@@ -165,12 +185,57 @@ export interface Utf8LineDecoder {
   end(): string[];
 }
 
-export function createUtf8LineDecoder(): Utf8LineDecoder {
+export const EXECUTION_BUFFER_LIMITS = Object.freeze({
+  lineBytes: 256 * 1024,
+  streamBytes: 256 * 1024,
+  stderrBytes: 64 * 1024,
+  toolItems: 10,
+  toolNameBytes: 1024,
+  transcriptMessages: 128,
+  transcriptMessageBytes: 64 * 1024,
+  transcriptBytes: 1024 * 1024,
+});
+
+export function truncateUtf8Tail(value: string, maxBytes: number): string {
+  if (maxBytes <= 0) return "";
+  const encoded = Buffer.from(value, "utf8");
+  if (encoded.length <= maxBytes) return value;
+  let start = encoded.length - maxBytes;
+  while (start < encoded.length && (encoded[start] & 0xc0) === 0x80) start += 1;
+  return encoded.subarray(start).toString("utf8");
+}
+
+function appendUtf8Tail(current: string, addition: string, maxBytes: number): string {
+  return truncateUtf8Tail(current + addition, maxBytes);
+}
+
+export function appendBoundedTranscriptMessage(
+  messages: Array<{ role: string; content: string }>,
+  message: { role: string; content: string },
+): void {
+  messages.push({
+    ...message,
+    content: truncateUtf8Tail(message.content, EXECUTION_BUFFER_LIMITS.transcriptMessageBytes),
+  });
+  let totalBytes = messages.reduce((total, entry) => total + Buffer.byteLength(entry.content, "utf8"), 0);
+  while (
+    messages.length > EXECUTION_BUFFER_LIMITS.transcriptMessages
+    || totalBytes > EXECUTION_BUFFER_LIMITS.transcriptBytes
+  ) {
+    const removed = messages.shift();
+    if (!removed) break;
+    totalBytes -= Buffer.byteLength(removed.content, "utf8");
+  }
+}
+
+export function createUtf8LineDecoder(
+  maxBufferedBytes = EXECUTION_BUFFER_LIMITS.lineBytes,
+): Utf8LineDecoder {
   const decoder = new StringDecoder("utf8");
   let buffered = "";
   return {
     write(chunk: Buffer): string[] {
-      buffered += decoder.write(chunk);
+      buffered = appendUtf8Tail(buffered, decoder.write(chunk), maxBufferedBytes);
       const lines = buffered.split("\n");
       buffered = lines.pop() ?? "";
       return lines.map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
@@ -190,7 +255,7 @@ export function appendDistinctAssistantMessage(
 ): boolean {
   const previous = messages[messages.length - 1];
   if (previous?.role === "assistant" && previous.content === content) return false;
-  messages.push({ role: "assistant", content });
+  appendBoundedTranscriptMessage(messages, { role: "assistant", content });
   return true;
 }
 
@@ -213,6 +278,20 @@ function accumulateUsage(total: Usage, partial: Partial<Usage>): void {
   if (partial.cacheWriteTokens)
     total.cacheWriteTokens += partial.cacheWriteTokens;
   if (partial.cost) total.cost += partial.cost;
+}
+
+function resetUsage(usage: Usage): void {
+  Object.assign(usage, emptyUsage());
+}
+
+export function releasePublishedTurnHistory(
+  messages: Array<{ role: string; content: string }>,
+  progress: AgentProgress,
+  usage: Usage,
+): void {
+  messages.length = 0;
+  progress.recentTools = [];
+  resetUsage(usage);
 }
 
 // ---------------------------------------------------------------------------
@@ -641,20 +720,33 @@ function resolvePiEntryPoint(): string | null {
   return null;
 }
 
-function getPiSpawnCommand(args: string[]): { command: string; args: string[]; shell: boolean } {
-  const envBinary = process.env.PI_TEAMMATE_PI_BINARY;
+export interface PiSpawnCommandOptions {
+  envBinary?: string | null;
+  entryPoint?: string | null;
+  platform?: NodeJS.Platform;
+}
+
+export function getPiSpawnCommand(
+  args: string[],
+  options: PiSpawnCommandOptions = {},
+): { command: string; args: string[]; shell: false } {
+  const envBinary = options.envBinary === undefined
+    ? process.env.PI_TEAMMATE_PI_BINARY
+    : options.envBinary;
   if (envBinary) {
     return { command: envBinary, args, shell: false };
   }
 
-  const entryPoint = resolvePiEntryPoint();
+  const entryPoint = options.entryPoint === undefined
+    ? resolvePiEntryPoint()
+    : options.entryPoint;
   if (entryPoint) {
     return { command: process.execPath, args: [entryPoint, ...args], shell: false };
   }
 
-  if (process.platform === "win32") {
-    return { command: "pi.cmd", args, shell: true };
-  }
+  // cross-spawn resolves Windows .cmd shims without opting into shell mode
+  // and escapes each argv item before invoking cmd.exe internally.
+  void options.platform;
   return { command: "pi", args, shell: false };
 }
 
@@ -739,6 +831,19 @@ export function clampThinkingForModel(
   return thinking;
 }
 
+const MODEL_SPECIFIER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*(?:\/[A-Za-z0-9][A-Za-z0-9._:-]*)?$/;
+const MAX_MODEL_SPECIFIER_BYTES = 256;
+
+export function validateModelSpecifier(model: string): string {
+  if (
+    Buffer.byteLength(model, "utf8") > MAX_MODEL_SPECIFIER_BYTES
+    || !MODEL_SPECIFIER_PATTERN.test(model)
+  ) {
+    throw new TypeError(`Invalid teammate model specifier: ${JSON.stringify(model)}`);
+  }
+  return model;
+}
+
 export function buildPiArgs(
   agentConfig: AgentConfig,
   params: RunTeammateParams,
@@ -778,7 +883,7 @@ export function buildPiArgs(
 
   const model = modelOverride ?? params.model ?? agentConfig.model;
   if (model) {
-    args.push("--model", model);
+    args.push("--model", validateModelSpecifier(model));
   }
 
   const requestedThinking = parseTeammateThinkingLevel(params.thinking) ?? agentConfig.thinking;
@@ -827,23 +932,64 @@ export function buildPiArgs(
 // Write temporary files
 // ---------------------------------------------------------------------------
 
-function writeSystemPromptFile(
+export const PRIVATE_DIRECTORY_MODE = 0o700;
+export const PRIVATE_FILE_MODE = 0o600;
+
+function shouldEnforcePosixMode(): boolean {
+  return process.platform !== "win32";
+}
+
+export function ensurePrivateDirectory(directoryPath: string): void {
+  fs.mkdirSync(directoryPath, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  const stat = fs.lstatSync(directoryPath);
+  if (!stat.isDirectory()) {
+    throw new Error(`Private teammate path is not a directory: ${directoryPath}`);
+  }
+  // mkdir mode is creation-only. Tighten an existing directory explicitly.
+  if (shouldEnforcePosixMode()) fs.chmodSync(directoryPath, PRIVATE_DIRECTORY_MODE);
+}
+
+export function writePrivateTextFile(filePath: string, content: string): void {
+  try {
+    const existing = fs.lstatSync(filePath);
+    if (!existing.isFile() || existing.isSymbolicLink()) {
+      throw new Error(`Private teammate path is not a regular file: ${filePath}`);
+    }
+  } catch (error) {
+    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+  }
+  const fd = fs.openSync(filePath, "w", PRIVATE_FILE_MODE);
+  try {
+    // open mode is creation-only. fchmod secures an existing file before the
+    // new sensitive content is written. Windows relies on its ACL semantics.
+    if (shouldEnforcePosixMode()) fs.fchmodSync(fd, PRIVATE_FILE_MODE);
+    fs.writeFileSync(fd, content, { encoding: "utf8" });
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+export function writeSystemPromptFile(
   agentConfig: AgentConfig,
   correlationId: string,
 ): string {
   const tmpDir = path.join(os.tmpdir(), "pi-teammate");
-  fs.mkdirSync(tmpDir, { recursive: true });
-  const promptFile = path.join(tmpDir, `prompt-${correlationId}.md`);
-  fs.writeFileSync(promptFile, agentConfig.systemPrompt, "utf-8");
+  ensurePrivateDirectory(tmpDir);
+  const promptFile = path.join(tmpDir, `prompt-${correlationSessionDirectoryName(correlationId)}.md`);
+  writePrivateTextFile(promptFile, agentConfig.systemPrompt);
   return promptFile;
 }
 
-function writeSchemaFile(schema: Record<string, unknown>, correlationId: string): { schemaFile: string; outputFile: string } {
+export function writeSchemaFile(schema: Record<string, unknown>, correlationId: string): { schemaFile: string; outputFile: string } {
   const tmpDir = path.join(os.tmpdir(), "pi-teammate");
-  fs.mkdirSync(tmpDir, { recursive: true });
-  const schemaFile = path.join(tmpDir, `schema-${correlationId}.json`);
-  const outputFile = path.join(tmpDir, `output-${correlationId}.json`);
-  fs.writeFileSync(schemaFile, JSON.stringify(schema), "utf-8");
+  ensurePrivateDirectory(tmpDir);
+  const fileId = correlationSessionDirectoryName(correlationId);
+  const schemaFile = path.join(tmpDir, `schema-${fileId}.json`);
+  const outputFile = path.join(tmpDir, `output-${fileId}.json`);
+  writePrivateTextFile(schemaFile, JSON.stringify(schema));
+  // Reserve the result path with private permissions before the child starts,
+  // closing the predictable-name creation race in the shared temp directory.
+  writePrivateTextFile(outputFile, "");
   return { schemaFile, outputFile };
 }
 
@@ -1048,6 +1194,23 @@ export async function runTeammate(
     params.model ?? agentConfig.model,
     agentConfig.fallbackModels,
   );
+  try {
+    for (const candidate of candidates) validateModelSpecifier(candidate);
+  } catch (error) {
+    return {
+      agent: params.agent,
+      task: params.task ?? "",
+      exitCode: 1,
+      messages: [{
+        role: "system",
+        content: error instanceof Error ? error.message : String(error),
+      }],
+      usage: emptyUsage(),
+      model: params.model ?? agentConfig.model ?? "unknown",
+      correlationId,
+      durationMs: Date.now() - startTime,
+    };
+  }
   const attemptedModels: string[] = [];
 
   for (let mi = 0; mi <= candidates.length; mi++) {
@@ -1088,8 +1251,8 @@ async function runSingleAttempt(
   if (parentSession && fs.existsSync(parentSession)) {
     const sessionRoot = getTeammateSessionRoot(parentSession);
     if (sessionRoot) {
-      sessionDir = path.join(sessionRoot, correlationId);
-      fs.mkdirSync(sessionDir, { recursive: true });
+      sessionDir = path.join(sessionRoot, correlationSessionDirectoryName(correlationId));
+      ensurePrivateDirectory(sessionDir);
     }
   }
   if (effectiveContext === "fork") {
@@ -1123,7 +1286,7 @@ async function runSingleAttempt(
   const usage = emptyUsage();
   const messages: Array<{ role: string; content: string }> = [];
   if (forkWarning) {
-    messages.push({ role: "system", content: forkWarning });
+    appendBoundedTranscriptMessage(messages, { role: "system", content: forkWarning });
   }
   let resolvedModel = modelOverride ?? params.model ?? agentConfig.model ?? "unknown";
   let lastContent = "";
@@ -1158,13 +1321,13 @@ async function runSingleAttempt(
     try {
       const spawnSpec = getPiSpawnCommand(piArgs);
       useIpc = !spawnSpec.shell;
-      const spawnOpts: Parameters<typeof spawn>[2] = {
+      const spawnOpts: Parameters<typeof crossSpawn>[2] = {
         cwd,
         stdio: useIpc ? ["pipe", "pipe", "pipe", "ipc"] : ["pipe", "pipe", "pipe"],
         env: spawnEnv,
         shell: spawnSpec.shell,
       };
-      child = spawn(spawnSpec.command, spawnSpec.args, spawnOpts);
+      child = crossSpawn(spawnSpec.command, spawnSpec.args, spawnOpts);
     } catch (error) {
       cleanupFile(systemPromptFile);
       if (schemaFile) cleanupFile(schemaFile);
@@ -1251,7 +1414,11 @@ async function runSingleAttempt(
         const event = JSON.parse(trimmed) as JsonLineEvent;
         processEvent(event);
       } catch {
-        lastContent += trimmed + "\n";
+        lastContent = appendUtf8Tail(
+          lastContent,
+          trimmed + "\n",
+          EXECUTION_BUFFER_LIMITS.streamBytes,
+        );
       }
     };
     child.stdout?.on("data", (chunk: Buffer) => {
@@ -1267,6 +1434,15 @@ async function runSingleAttempt(
       progress.durationMs = Date.now() - startTime;
 
       switch (event.type) {
+        case "agent_start":
+        case "turn_start": {
+          progress.status = "running";
+          progress.recentTools = [];
+          progress.toolCount = 0;
+          progress.tokens = 0;
+          options.onProgress?.(progress);
+          break;
+        }
         case "extension_ui_request": {
           const request = {
             ...event,
@@ -1310,7 +1486,11 @@ async function runSingleAttempt(
           if (deltaType === "text_delta") {
             const delta = ame?.delta as string | undefined;
             if (delta) {
-              streamingText += delta;
+              streamingText = appendUtf8Tail(
+                streamingText,
+                delta,
+                EXECUTION_BUFFER_LIMITS.streamBytes,
+              );
               progress.lastMessage = streamingText;
               options.onProgress?.(progress);
             }
@@ -1333,9 +1513,17 @@ async function runSingleAttempt(
           break;
         }
         case "tool_execution_start": {
-          const toolName = (event.toolName as string) ?? (event.name as string) ?? "unknown";
+          const toolName = truncateUtf8Tail(
+            (event.toolName as string) ?? (event.name as string) ?? "unknown",
+            EXECUTION_BUFFER_LIMITS.toolNameBytes,
+          );
           progress.recentTools.push({ name: toolName, status: "running" });
-          if (progress.recentTools.length > 10) progress.recentTools.shift();
+          if (progress.recentTools.length > EXECUTION_BUFFER_LIMITS.toolItems) {
+            progress.recentTools.splice(
+              0,
+              progress.recentTools.length - EXECUTION_BUFFER_LIMITS.toolItems,
+            );
+          }
           options.onProgress?.(progress);
           break;
         }
@@ -1343,7 +1531,7 @@ async function runSingleAttempt(
         case "tool_result_end":
         case "tool_result": {
           if (event.content) {
-            messages.push({ role: "tool", content: event.content });
+            appendBoundedTranscriptMessage(messages, { role: "tool", content: event.content });
           }
           progress.toolCount += 1;
           const lastTool = progress.recentTools[progress.recentTools.length - 1];
@@ -1375,7 +1563,7 @@ async function runSingleAttempt(
           progress.status = "completed";
           progress.durationMs = Date.now() - startTime;
           if (messages.length === 0 && lastContent) {
-            messages.push({ role: "assistant", content: lastContent });
+            appendBoundedTranscriptMessage(messages, { role: "assistant", content: lastContent });
           }
           options.onProgress?.(progress);
 
@@ -1411,13 +1599,23 @@ async function runSingleAttempt(
             resolved = true;
             resolve(turnResult);
           }
-          options.onTurnComplete?.(turnResult);
+          try {
+            options.onTurnComplete?.(turnResult);
+          } finally {
+            // The child remains alive for prompt-mode follow-ups. Preserve only
+            // the published result/progress snapshot; release per-turn buffers.
+            releasePublishedTurnHistory(messages, progress, usage);
+            lastContent = "";
+            streamingText = "";
+            stderrBuffer = "";
+            capturedStructuredOutput = undefined;
+          }
           // Process stays alive. Idle agents must be resumed with an RPC prompt;
           // steer/follow_up only queue while an agent loop is already running.
           break;
         }
         case "error": {
-          messages.push({
+          appendBoundedTranscriptMessage(messages, {
             role: "system",
             content: event.error ?? "Unknown error",
           });
@@ -1429,7 +1627,11 @@ async function runSingleAttempt(
     let stderrBuffer = "";
     const stderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderrBuffer += stderrDecoder.write(chunk);
+      stderrBuffer = appendUtf8Tail(
+        stderrBuffer,
+        stderrDecoder.write(chunk),
+        EXECUTION_BUFFER_LIMITS.stderrBytes,
+      );
     });
 
     child.on("close", (code) => {
@@ -1440,12 +1642,21 @@ async function runSingleAttempt(
       cleanupFile(systemPromptFile);
 
       for (const line of stdoutLines.end()) processStdoutLine(line);
-      stderrBuffer += stderrDecoder.end();
+      stderrBuffer = appendUtf8Tail(
+        stderrBuffer,
+        stderrDecoder.end(),
+        EXECUTION_BUFFER_LIMITS.stderrBytes,
+      );
+
+      // agent_end already published the turn result and released its buffers.
+      // A later process close must not replace the sleeping agent's last result
+      // with a synthetic "(no output)" record.
+      if (resolved) return;
 
       if (messages.length === 0) {
         const content =
           lastContent.trim() || stderrBuffer.trim() || "(no output)";
-        messages.push({ role: "assistant", content });
+        appendBoundedTranscriptMessage(messages, { role: "assistant", content });
       }
 
       const status = code === 0 ? "completed" : "failed";

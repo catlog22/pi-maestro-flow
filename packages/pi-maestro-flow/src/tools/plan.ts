@@ -100,7 +100,7 @@ const MAESTRO_MUTATING_COMMAND = new RegExp(
   "i",
 );
 const MAESTRO_RUN_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+run\s+(?:create|check|complete|seal-session|advance|pause|resume|retry|cancel)\b`,
+  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+run\s+(?:next|create|check|complete|seal-session|advance|pause|resume|retry|cancel)\b`,
   "i",
 );
 const IN_PLACE_EDIT_COMMAND = new RegExp(
