@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -85,6 +85,68 @@ test("session lease is atomic under first-acquire concurrency and stale takeover
   } finally {
     await first.release();
     await second.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session lease storage is private and tightens existing POSIX permissions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-lease-mode-"));
+  const directory = join(root, ".workflow", "tmp", "hook", "session-private.lease");
+  const owner = new WorkflowLeaseStore(root);
+  const observer = new WorkflowLeaseStore(root);
+  try {
+    await owner.acquire("session-private", "host-owner");
+    await owner.heartbeat();
+    const entries = await readdir(directory);
+    const claimPath = join(directory, entries.find((entry) => entry.endsWith(".claim.json"))!);
+    const statePath = join(directory, entries.find((entry) => entry.endsWith(".state.json"))!);
+    assert.equal((await lstat(claimPath)).isFile(), true);
+    assert.equal((await lstat(statePath)).isFile(), true);
+
+    if (process.platform !== "win32") {
+      assert.equal((await stat(directory)).mode & 0o777, 0o700);
+      assert.equal((await stat(claimPath)).mode & 0o777, 0o600);
+      assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+      await Promise.all([chmod(directory, 0o777), chmod(claimPath, 0o666), chmod(statePath, 0o666)]);
+      await assert.rejects(observer.acquire("session-private", "host-observer"), WorkflowLeaseBusyError);
+      assert.equal((await stat(directory)).mode & 0o777, 0o700);
+      assert.equal((await stat(claimPath)).mode & 0o777, 0o600);
+      assert.equal((await stat(statePath)).mode & 0o777, 0o600);
+    }
+  } finally {
+    await owner.release();
+    await observer.release();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session lease rejects a non-regular claim target", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-lease-non-file-"));
+  const directory = join(root, ".workflow", "tmp", "hook", "session-invalid.lease");
+  try {
+    await mkdir(join(directory, "1.claim.json"), { recursive: true });
+    await assert.rejects(
+      new WorkflowLeaseStore(root).acquire("session-invalid", "host-owner"),
+      /Workflow lease path must be a regular file/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session lease rejects a symlink claim target on POSIX", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-workflow-lease-symlink-"));
+  const directory = join(root, ".workflow", "tmp", "hook", "session-symlink.lease");
+  try {
+    await mkdir(directory, { recursive: true });
+    const target = join(root, "outside.json");
+    await writeFile(target, "{}\n", "utf8");
+    await symlink(target, join(directory, "1.claim.json"));
+    await assert.rejects(
+      new WorkflowLeaseStore(root).acquire("session-symlink", "host-owner"),
+      /Workflow lease path must be a regular file/,
+    );
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

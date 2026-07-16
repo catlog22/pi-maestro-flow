@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -104,6 +104,93 @@ test("PlanStore approval archives the exact draft and commits manifest last", as
     assert.equal(persistedManifest.status, "approved");
     assert.equal(persistedManifest.approvedPath, approved.manifest.approvedPath);
     assert.equal(persistedManifest.handoffKey, approved.manifest.handoffKey);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore uses private files and directories and tightens existing POSIX permissions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-private-mode-"));
+  let commitStarted!: () => void;
+  let releaseCommit!: () => void;
+  const started = new Promise<void>((resolve) => { commitStarted = resolve; });
+  const release = new Promise<void>((resolve) => { releaseCommit = resolve; });
+  let approval: ReturnType<PlanStore["approve"]> | undefined;
+  try {
+    const store = new PlanStore(join(root, "workspace"), {
+      rootDir: join(root, "global"),
+      approvalCommitHook: async () => {
+        commitStarted();
+        await release;
+      },
+    });
+    await store.saveDraft("initial", 0);
+    if (process.platform !== "win32") {
+      await Promise.all([
+        chmod(store.plansDir, 0o777),
+        chmod(store.currentPath, 0o666),
+        chmod(store.manifestPath, 0o666),
+      ]);
+    }
+
+    approval = store.approve("private approval", 1);
+    await started;
+    const archiveName = (await readdir(store.approvalsDir)).find((entry) => entry.endsWith(".md"));
+    assert.ok(archiveName);
+    const privateDirectories = [store.plansDir, store.approvalsDir, store.recoveryDir, store.lockPath];
+    const privateFiles = [
+      store.currentPath,
+      store.manifestPath,
+      store.pendingPath,
+      store.lockOwnerPath,
+      join(store.approvalsDir, archiveName),
+    ];
+    for (const directory of privateDirectories) {
+      const details = await lstat(directory);
+      assert.equal(details.isSymbolicLink(), false);
+      assert.equal(details.isDirectory(), true);
+      if (process.platform !== "win32") assert.equal(details.mode & 0o777, 0o700);
+    }
+    for (const file of privateFiles) {
+      const details = await lstat(file);
+      assert.equal(details.isSymbolicLink(), false);
+      assert.equal(details.isFile(), true);
+      if (process.platform !== "win32") assert.equal(details.mode & 0o777, 0o600);
+    }
+
+    releaseCommit();
+    assert.equal((await approval).manifest.status, "approved");
+  } finally {
+    releaseCommit?.();
+    await approval?.catch(() => {});
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore rejects a non-regular persisted file target", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-non-file-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") });
+    await store.saveDraft("initial", 0);
+    await rm(store.currentPath);
+    await mkdir(store.currentPath);
+    await assert.rejects(store.load(), /Plan storage path must be a regular file/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("PlanStore rejects a symlink persisted file target on POSIX", { skip: process.platform === "win32" }, async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-symlink-"));
+  try {
+    const store = new PlanStore(join(root, "workspace"), { rootDir: join(root, "global") });
+    await store.saveDraft("initial", 0);
+    const outside = join(root, "outside.md");
+    await writeFile(outside, "outside", "utf8");
+    await rm(store.currentPath);
+    await symlink(outside, store.currentPath);
+    await assert.rejects(store.load(), /Plan storage path must be a regular file/);
+    assert.equal(await readFile(outside, "utf8"), "outside");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

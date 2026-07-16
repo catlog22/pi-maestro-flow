@@ -69,6 +69,12 @@ test("browser close supports one tab and all tabs, while run validates code and 
   await assert.rejects(() => tool.execute("abort", { action: "run", code: "await wait(1000)" }, undefined, undefined, ctx), { name: "AbortError" });
 });
 
+test("browser temporary screenshots use exclusive owner-only creation", async () => {
+  const source = await fs.readFile(new URL("../src/tools/browser/manager.ts", import.meta.url), "utf8");
+  assert.match(source, /flag:\s*options\?\.save\s*\?\s*"w"\s*:\s*"wx"/);
+  assert.match(source, /mode:\s*options\?\.save\s*\?\s*0o666\s*:\s*0o600/);
+});
+
 test("browser manager drives a real local Chromium tab when an executable is available", async (t) => {
   const manager = new BrowserManager();
   const openOptions = {
@@ -102,7 +108,9 @@ test("browser manager drives a real local Chromium tab when an executable is ava
     assert.equal(output.screenshots.length, 1);
     const screenshotPath = output.screenshots[0]?.path;
     assert.ok(screenshotPath);
-    assert.equal(await fs.stat(screenshotPath).then(() => true, () => false), true);
+    const screenshotStat = await fs.stat(screenshotPath);
+    assert.equal(screenshotStat.isFile(), true);
+    if (process.platform !== "win32") assert.equal(screenshotStat.mode & 0o777, 0o600);
     await manager.run("live", "await page.close(); return true;", process.cwd(), undefined, 15_000);
     for (let attempt = 0; attempt < 20 && manager.has("live"); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(manager.has("live"), false);

@@ -25,12 +25,16 @@ function createHarness(options: {
 } = {}) {
   const handlers = new Map<string, EventHandler[]>();
   const statuses = new Map<string, string>();
+  const branchChangeHandlers = new Set<() => void>();
   let component: { render(width: number): string[]; dispose?(): void } | undefined;
   const footerData = {
     getGitBranch: () => null,
     getExtensionStatuses: () => statuses,
     getAvailableProviderCount: () => 1,
-    onBranchChange: () => () => {},
+    onBranchChange(callback: () => void) {
+      branchChangeHandlers.add(callback);
+      return () => branchChangeHandlers.delete(callback);
+    },
   };
   const pi = {
     on(name: string, handler: EventHandler) {
@@ -65,6 +69,7 @@ function createHarness(options: {
     },
     ui: {
       setFooter(factory: Function) {
+        component?.dispose?.();
         component = factory({ requestRender() {} }, {}, footerData);
       },
     },
@@ -89,6 +94,9 @@ function createHarness(options: {
     startSession(nextCwd: string) {
       ctx = { ...ctx, cwd: nextCwd } as ExtensionContext;
       for (const handler of handlers.get("session_start") ?? []) handler({}, ctx);
+    },
+    emitBranchChange() {
+      for (const handler of branchChangeHandlers) handler();
     },
     setBranch(entries: unknown[]) {
       branchEntries = entries;
@@ -143,6 +151,43 @@ test("statusline rejects initial and periodic Git results from an older Session"
     const rendered = stripAnsi(harness.render(120)[0]);
     assert.match(rendered, /new-branch/);
     assert.doesNotMatch(rendered, /stale-initial|stale-periodic/);
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
+
+test("session_tree keeps the replacement footer live and fences the replaced footer Git request", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const calls: Array<{
+    cwd: string;
+    resolve(result: { code: number; stdout: string; stderr: string }): void;
+  }> = [];
+  const harness = createHarness({
+    exec: (cwd) => new Promise((resolve) => calls.push({ cwd, resolve })),
+  });
+  try {
+    calls[0]!.resolve({ code: 0, stdout: "## initial-branch\n", stderr: "" });
+    await settleAsyncWork();
+
+    harness.emitBranchChange();
+    t.mock.timers.tick(500);
+    assert.equal(calls.length, 2);
+
+    harness.emit("session_tree", { type: "session_tree", oldLeafId: "old", newLeafId: "new" });
+    harness.emitBranchChange();
+    t.mock.timers.tick(500);
+    assert.equal(calls.length, 3, "the replacement footer must keep its branch subscription live");
+
+    calls[2]!.resolve({ code: 0, stdout: "## replacement-branch\n", stderr: "" });
+    await settleAsyncWork();
+    assert.match(stripAnsi(harness.render(120)[0]), /replacement-branch/);
+
+    calls[1]!.resolve({ code: 0, stdout: "## replaced-footer-stale\n", stderr: "" });
+    await settleAsyncWork();
+    const rendered = stripAnsi(harness.render(120)[0]);
+    assert.match(rendered, /replacement-branch/);
+    assert.doesNotMatch(rendered, /replaced-footer-stale/);
   } finally {
     harness.dispose();
     t.mock.timers.reset();

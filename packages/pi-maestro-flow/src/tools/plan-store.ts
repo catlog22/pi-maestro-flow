@@ -3,6 +3,8 @@ import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 import {
+  chmod,
+  lstat,
   mkdir,
   open,
   readFile,
@@ -76,6 +78,9 @@ interface PendingApproval {
   checksum: string;
   createdAt: string;
 }
+
+const PRIVATE_DIRECTORY_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
 
 export class PlanRevisionConflictError extends Error {
   constructor(
@@ -315,13 +320,14 @@ export class PlanStore {
 
   private async ensureDirectories(): Promise<void> {
     await Promise.all([
-      mkdir(this.approvalsDir, { recursive: true }),
-      mkdir(this.recoveryDir, { recursive: true }),
+      ensurePrivateDirectory(this.approvalsDir),
+      ensurePrivateDirectory(this.recoveryDir),
     ]);
   }
 
   private async readManifest(): Promise<PlanManifest | null> {
     try {
+      await secureExistingPrivateFile(this.manifestPath);
       const raw: unknown = JSON.parse(await readFile(this.manifestPath, "utf8"));
       return validateManifest(raw, this.workspaceId, this.workspacePath, this.sessionId);
     } catch (error) {
@@ -385,7 +391,7 @@ export class PlanStore {
 
   private async withWorkspaceLock<T>(operation: (ownerToken: string) => Promise<T>): Promise<T> {
     await this.prepareSessionStorage();
-    await mkdir(this.plansDir, { recursive: true });
+    await ensurePrivateDirectory(this.plansDir);
     const lockDeadline = performance.now() + this.lockTimeoutMs;
     const ownerProcessIdentity = await this.resolveProcessIdentity(process.pid);
     const owner: LockOwner = {
@@ -397,7 +403,7 @@ export class PlanStore {
     };
     for (let attempt = 0; attempt === 0 || performance.now() < lockDeadline; attempt += 1) {
       try {
-        await mkdir(this.lockPath);
+        await mkdir(this.lockPath, { mode: PRIVATE_DIRECTORY_MODE });
         try {
           await atomicWriteJsonExistingDir(this.lockOwnerPath, owner);
         } catch (error) {
@@ -490,6 +496,7 @@ export class PlanStore {
 
   private async readPendingApproval(): Promise<PendingApproval | "invalid" | null> {
     try {
+      await secureExistingPrivateFile(this.pendingPath);
       const raw: unknown = JSON.parse(await readFile(this.pendingPath, "utf8"));
       const pending = validatePendingApproval(raw);
       if (pending) return pending;
@@ -520,7 +527,7 @@ export class PlanStore {
   }
 
   private async quarantineFile(source: string, name: string): Promise<void> {
-    await mkdir(this.recoveryDir, { recursive: true });
+    await ensurePrivateDirectory(this.recoveryDir);
     const destination = join(this.recoveryDir, `${name}.${randomUUID()}`);
     await rename(source, destination);
   }
@@ -552,7 +559,7 @@ export class PlanStore {
     if (!observed || !(await this.lockIdentityIsStale(observed))) return;
     const claimPath = `${this.lockPath}.reclaim-${safeLockToken(observed.token)}`;
     try {
-      await mkdir(claimPath);
+      await mkdir(claimPath, { mode: PRIVATE_DIRECTORY_MODE });
     } catch (error) {
       if (isAlreadyExists(error)) return;
       throw error;
@@ -587,6 +594,7 @@ export class PlanStore {
   private async readLockOwner(): Promise<LockOwner | null> {
     for (let attempt = 0; attempt < 5; attempt += 1) {
       try {
+        await secureExistingPrivateFile(this.lockOwnerPath);
         const raw: unknown = JSON.parse(await readFile(this.lockOwnerPath, "utf8"));
         return validateLockOwner(raw);
       } catch (error) {
@@ -694,16 +702,18 @@ function approvalHandoffKey(
 }
 
 async function atomicWriteText(filePath: string, content: string): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true });
+  await ensurePrivateDirectory(dirname(filePath));
+  await secureExistingPrivateFile(filePath);
   const temporaryPath = `${filePath}.${process.pid}-${randomUUID()}.tmp`;
   try {
-    const handle = await open(temporaryPath, "wx");
+    const handle = await open(temporaryPath, "wx", PRIVATE_FILE_MODE);
     try {
       await handle.writeFile(content, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
     }
+    await secureExistingPrivateFile(filePath);
     await rename(temporaryPath, filePath);
   } catch (error) {
     await rm(temporaryPath, { force: true }).catch(() => {});
@@ -716,15 +726,18 @@ async function atomicWriteJson(filePath: string, value: unknown): Promise<void> 
 }
 
 async function atomicWriteJsonExistingDir(filePath: string, value: unknown): Promise<void> {
+  await ensurePrivateDirectory(dirname(filePath));
+  await secureExistingPrivateFile(filePath);
   const temporaryPath = `${filePath}.${process.pid}-${randomUUID()}.tmp`;
   try {
-    const handle = await open(temporaryPath, "wx");
+    const handle = await open(temporaryPath, "wx", PRIVATE_FILE_MODE);
     try {
       await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
       await handle.sync();
     } finally {
       await handle.close();
     }
+    await secureExistingPrivateFile(filePath);
     await rename(temporaryPath, filePath);
   } catch (error) {
     await rm(temporaryPath, { force: true }).catch(() => {});
@@ -734,11 +747,35 @@ async function atomicWriteJsonExistingDir(filePath: string, value: unknown): Pro
 
 async function readOptionalText(filePath: string): Promise<string> {
   try {
+    await secureExistingPrivateFile(filePath);
     return await readFile(filePath, "utf8");
   } catch (error) {
     if (isMissingFile(error)) return "";
     throw error;
   }
+}
+
+async function ensurePrivateDirectory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  const details = await lstat(path);
+  if (details.isSymbolicLink() || !details.isDirectory()) {
+    throw new Error(`Plan storage path must be a real directory: ${path}`);
+  }
+  if (process.platform !== "win32") await chmod(path, PRIVATE_DIRECTORY_MODE);
+}
+
+async function secureExistingPrivateFile(path: string): Promise<void> {
+  let details: Awaited<ReturnType<typeof lstat>>;
+  try {
+    details = await lstat(path);
+  } catch (error) {
+    if (isMissingFile(error)) return;
+    throw error;
+  }
+  if (details.isSymbolicLink() || !details.isFile()) {
+    throw new Error(`Plan storage path must be a regular file: ${path}`);
+  }
+  if (process.platform !== "win32") await chmod(path, PRIVATE_FILE_MODE);
 }
 
 function assertRevision(expected: number | undefined, actual: number): void {

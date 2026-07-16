@@ -32,6 +32,36 @@ test("bridge ignores an older refresh that completes after a newer snapshot", as
   assert.equal(bridge.getSnapshot(), newerSnapshot, "the stale completion must not replace the latest snapshot");
 });
 
+test("a superseded bridge refresh waits for the winning generation when it completes first", async () => {
+  const older = deferred<WorkflowSnapshot>();
+  const newer = deferred<WorkflowSnapshot>();
+  const snapshots = [older.promise, newer.promise];
+  class InterleavedWorkflowBridge extends WorkflowBridge {
+    protected override loadSnapshot(): Promise<WorkflowSnapshot> {
+      const snapshot = snapshots.shift();
+      assert.ok(snapshot, "each refresh must consume one controlled snapshot");
+      return snapshot;
+    }
+  }
+  const bridge = new InterleavedWorkflowBridge("D:/workspace");
+  let olderSettled = false;
+  const olderRefresh = bridge.refresh().finally(() => {
+    olderSettled = true;
+  });
+  const newerRefresh = bridge.refresh();
+  const newerSnapshot = bridgeSnapshot("newer");
+
+  older.resolve(bridgeSnapshot("older"));
+  await settleAsyncWork();
+  assert.equal(olderSettled, false, "the superseded caller must wait while the winner is pending");
+  assert.equal(bridge.getSnapshot(), undefined, "the superseded result must never be published");
+
+  newer.resolve(newerSnapshot);
+  assert.equal(await newerRefresh, newerSnapshot);
+  assert.equal(await olderRefresh, newerSnapshot);
+  assert.equal(bridge.getSnapshot(), newerSnapshot);
+});
+
 test("bridge reads canonical Session/Run/Artifact state and changes revision by content", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-session-bridge-"));
   const sessionId = "20260715-integration";
@@ -486,6 +516,10 @@ function deferred<T>(): {
     resolve = fulfill;
   });
   return { promise, resolve };
+}
+
+async function settleAsyncWork(): Promise<void> {
+  await new Promise<void>((resolve) => setImmediate(resolve));
 }
 
 async function writeJson(path: string, value: unknown): Promise<void> {

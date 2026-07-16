@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { link, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { RunCliAdapter, RunCliCapabilities, RunCliResult } from "./cli-adapter.ts";
 import type { WorkflowBridge } from "./bridge.ts";
@@ -58,6 +58,9 @@ interface CurrentLease {
   released: boolean;
 }
 
+const PRIVATE_DIRECTORY_MODE = 0o700;
+const PRIVATE_FILE_MODE = 0o600;
+
 export class WorkflowLeaseStore {
   private held?: WorkflowLease;
 
@@ -74,7 +77,7 @@ export class WorkflowLeaseStore {
     }
     if (this.held) throw new Error("Release the current Workflow lease before acquiring another Session");
     const directory = this.directoryFor(sessionId);
-    await mkdir(directory, { recursive: true });
+    await ensurePrivateDirectory(directory);
     for (let attempt = 0; attempt < 5; attempt++) {
       const current = await this.readCurrent(directory, sessionId);
       if (current && !current.released && !this.isStale(current.lease)) {
@@ -90,7 +93,11 @@ export class WorkflowLeaseStore {
       const claimPath = this.claimPath(directory, lease.epoch);
       const pendingPath = `${claimPath}.${lease.token}.pending`;
       try {
-        await writeFile(pendingPath, `${JSON.stringify(lease)}\n`, { encoding: "utf8", flag: "wx" });
+        await writeFile(pendingPath, `${JSON.stringify(lease)}\n`, {
+          encoding: "utf8",
+          flag: "wx",
+          mode: PRIVATE_FILE_MODE,
+        });
         await link(pendingPath, claimPath);
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -142,7 +149,11 @@ export class WorkflowLeaseStore {
       const claimPath = this.claimPath(directory, next.epoch);
       const pendingPath = `${claimPath}.${next.token}.pending`;
       try {
-        await writeFile(pendingPath, `${JSON.stringify(next)}\n`, { encoding: "utf8", flag: "wx" });
+        await writeFile(pendingPath, `${JSON.stringify(next)}\n`, {
+          encoding: "utf8",
+          flag: "wx",
+          mode: PRIVATE_FILE_MODE,
+        });
         await link(pendingPath, claimPath);
       } finally {
         await rm(pendingPath, { force: true }).catch(() => {});
@@ -167,7 +178,7 @@ export class WorkflowLeaseStore {
     const directory = this.directoryFor(lease.sessionId);
     const owner = await this.readCurrent(directory, lease.sessionId);
     if (!owner || owner.released || !sameLease(owner.lease, lease)) return;
-    await writeFile(this.releasePath(directory, lease), "", { flag: "wx" }).catch((error) => {
+    await writeFile(this.releasePath(directory, lease), "", { flag: "wx", mode: PRIVATE_FILE_MODE }).catch((error) => {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
     });
   }
@@ -199,7 +210,11 @@ export class WorkflowLeaseStore {
     const path = this.statePath(directory, lease);
     const pendingPath = `${path}.${randomUUID()}.pending`;
     try {
-      await writeFile(pendingPath, `${JSON.stringify(lease)}\n`, { encoding: "utf8", flag: "wx" });
+      await writeFile(pendingPath, `${JSON.stringify(lease)}\n`, {
+        encoding: "utf8",
+        flag: "wx",
+        mode: PRIVATE_FILE_MODE,
+      });
       await rename(pendingPath, path);
     } finally {
       await rm(pendingPath, { force: true }).catch(() => {});
@@ -246,6 +261,7 @@ export class WorkflowLeaseStore {
   private async readLease(path: string): Promise<WorkflowLease | undefined> {
     let raw: string;
     try {
+      await secureExistingPrivateFile(path);
       raw = await readFile(path, "utf8");
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
@@ -269,6 +285,7 @@ export class WorkflowLeaseStore {
 
   private async exists(path: string): Promise<boolean> {
     try {
+      await secureExistingPrivateFile(path);
       await readFile(path);
       return true;
     } catch (error) {
@@ -294,6 +311,29 @@ export class WorkflowLeaseStore {
     if (!this.held) throw new Error("Workflow lease is not held");
     return this.held;
   }
+}
+
+async function ensurePrivateDirectory(path: string): Promise<void> {
+  await mkdir(path, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
+  const details = await lstat(path);
+  if (details.isSymbolicLink() || !details.isDirectory()) {
+    throw new Error(`Workflow lease directory must be a real directory: ${path}`);
+  }
+  if (process.platform !== "win32") await chmod(path, PRIVATE_DIRECTORY_MODE);
+}
+
+async function secureExistingPrivateFile(path: string): Promise<void> {
+  let details: Awaited<ReturnType<typeof lstat>>;
+  try {
+    details = await lstat(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  if (details.isSymbolicLink() || !details.isFile()) {
+    throw new Error(`Workflow lease path must be a regular file: ${path}`);
+  }
+  if (process.platform !== "win32") await chmod(path, PRIVATE_FILE_MODE);
 }
 
 const MARKER_PREFIX = "maestro-workflow-continuation:";

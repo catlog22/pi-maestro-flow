@@ -317,6 +317,7 @@ export function installStatusline(
 	let gitDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 	let disposed = false;
 	let sessionGeneration = 0;
+	let footerGeneration = 0;
 
 	function invalidate(): void {
 		invalidateFn?.();
@@ -344,14 +345,19 @@ export function installStatusline(
 		rs.tokens = totals;
 	}
 
-	function scheduleGitRefresh(): void {
+	function scheduleGitRefresh(generation: number): void {
 		if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
-		const generation = sessionGeneration;
+		const session = sessionGeneration;
 		const refreshCwd = cwd;
 		gitDebounceTimer = setTimeout(async () => {
 			if (disposed) return;
 			const git = await refreshGit(pi, refreshCwd);
-			if (disposed || generation !== sessionGeneration || refreshCwd !== cwd) return;
+			if (
+				disposed
+				|| generation !== footerGeneration
+				|| session !== sessionGeneration
+				|| refreshCwd !== cwd
+			) return;
 			rs.git = git;
 			invalidate();
 		}, GIT_DEBOUNCE_MS);
@@ -360,20 +366,23 @@ export function installStatusline(
 	// --- Footer registration ---
 	function installFooter(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
+		const generation = ++footerGeneration;
 		ctx.ui.setFooter((tui, _theme, footerData) => {
+			disposed = false;
 			// Connect invalidate → requestRender
 			invalidateFn = () => tui.requestRender();
 
 			// Subscribe to branch changes for git refresh
 			const unsubBranch = footerData.onBranchChange(() => {
-				scheduleGitRefresh();
+				scheduleGitRefresh(generation);
 			});
 
 			return {
 				dispose() {
+					unsubBranch();
+					if (generation !== footerGeneration) return;
 					disposed = true;
 					invalidateFn = null;
-					unsubBranch();
 					if (gitTimer) clearInterval(gitTimer);
 					if (gitDebounceTimer) clearTimeout(gitDebounceTimer);
 				},
@@ -448,6 +457,7 @@ export function installStatusline(
 
 	pi.on("session_shutdown", () => {
 		sessionGeneration += 1;
+		footerGeneration += 1;
 		disposed = true;
 		invalidateFn = null;
 		if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }

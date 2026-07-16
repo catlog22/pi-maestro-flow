@@ -114,19 +114,38 @@ export async function loadCanonicalSnapshot(
 export class WorkflowBridge {
   private current?: WorkflowSnapshot;
   private refreshGeneration = 0;
+  private latestRefresh?: Promise<WorkflowSnapshot>;
 
   constructor(
     private readonly projectRoot: string,
     private readonly options: WorkflowBridgeOptions = {},
   ) {}
 
-  async refresh(): Promise<WorkflowSnapshot> {
+  refresh(): Promise<WorkflowSnapshot> {
     const generation = ++this.refreshGeneration;
-    const next = await this.loadSnapshot();
-    if (generation !== this.refreshGeneration) return this.current ?? next;
-    if (this.current?.revision.fingerprint === next.revision.fingerprint) return this.current;
-    this.current = next;
-    return next;
+    const refresh = Promise.resolve()
+      .then(() => this.loadSnapshot())
+      .then(
+        (next) => {
+          if (generation !== this.refreshGeneration) return this.getWinningRefresh();
+          if (this.current?.revision.fingerprint === next.revision.fingerprint) return this.current;
+          this.current = next;
+          return next;
+        },
+        (error: unknown) => {
+          if (generation !== this.refreshGeneration) return this.getWinningRefresh();
+          throw error;
+        },
+      );
+    this.latestRefresh = refresh;
+    return refresh;
+  }
+
+  private getWinningRefresh(): Promise<WorkflowSnapshot> {
+    if (!this.latestRefresh) {
+      return Promise.reject(new Error("WorkflowBridge lost the winning refresh generation"));
+    }
+    return this.latestRefresh;
   }
 
   protected loadSnapshot(): Promise<WorkflowSnapshot> {

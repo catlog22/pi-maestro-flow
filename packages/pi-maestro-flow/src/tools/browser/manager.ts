@@ -338,7 +338,10 @@ function createTabApi(
         ? path.resolve(cwd, options.save)
         : path.join(os.tmpdir(), `pi-maestro-browser-${Date.now()}-${Math.random().toString(36).slice(2)}.png`);
       await fs.mkdir(path.dirname(destination), { recursive: true });
-      await fs.writeFile(destination, buffer);
+      await fs.writeFile(destination, buffer, {
+        flag: options?.save ? "w" : "wx",
+        mode: options?.save ? 0o666 : 0o600,
+      });
       if (!options?.save) entry.ownedTempFiles.add(destination);
       const metadata = { path: destination, mimeType: "image/png", bytes: buffer.length };
       screenshots.push(metadata);
