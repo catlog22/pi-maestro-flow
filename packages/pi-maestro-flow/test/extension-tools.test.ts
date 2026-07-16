@@ -1,8 +1,19 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import registerMaestroExtension from "../src/extension/index.ts";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import registerMaestroExtension, { shouldRestoreWorkflowGoal } from "../src/extension/index.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
+
+test("Workflow Goal restore requires a Goal entry owned by the current Pi session", () => {
+  assert.equal(shouldRestoreWorkflowGoal("startup", false), false);
+  assert.equal(shouldRestoreWorkflowGoal("startup", true), true);
+  assert.equal(shouldRestoreWorkflowGoal("reload", true), true);
+  assert.equal(shouldRestoreWorkflowGoal("resume", true), true);
+  assert.equal(shouldRestoreWorkflowGoal("resume", false), false);
+  assert.equal(shouldRestoreWorkflowGoal("new", true), false);
+  assert.equal(shouldRestoreWorkflowGoal("fork", true), false);
+});
 
 test("extension registers LSP, browser, and BM25 discovery", async () => {
   const tools: ToolDefinition[] = [];
@@ -80,6 +91,57 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     "2. Second question? → Beta — with detail",
   ]);
 
+  const goalTool = tools.find((tool) => tool.name === "goal");
+  assert.ok(goalTool?.renderCall);
+  assert.ok(goalTool?.renderResult);
+  const goalSchema = goalTool?.parameters as {
+    type?: string;
+    additionalProperties?: boolean;
+    required?: string[];
+    properties?: Record<string, { enum?: string[] }>;
+    anyOf?: unknown;
+  };
+  assert.equal(goalSchema.type, "object", "provider function schemas must have an object root");
+  assert.equal(goalSchema.anyOf, undefined, "provider function schemas must not use a root-level anyOf");
+  assert.equal(goalSchema.additionalProperties, false);
+  assert.deepEqual(goalSchema.required, ["action"]);
+  assert.deepEqual(goalSchema.properties?.action?.enum, ["get", "create"]);
+  assert.ok(goalSchema.properties?.objective);
+  assert.ok(goalSchema.properties?.tokenBudget);
+  assert.match(String(goalSchema.properties?.tokenBudget?.description), /omit for no budget/i);
+  assert.equal(goalSchema.properties?.summary, undefined);
+  const renderGoalCall = goalTool.renderCall as unknown as (
+    args: Record<string, unknown>,
+    theme: { fg(name: string, text: string): string; bold(text: string): string },
+  ) => { render(width: number): string[] };
+  const renderGoalResult = goalTool.renderResult as unknown as (
+    result: unknown,
+    options: { expanded: boolean; isPartial: boolean },
+    theme: { fg(name: string, text: string): string; bold(text: string): string },
+  ) => { render(width: number): string[] };
+  const goalTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const goalCallComponent = renderGoalCall({
+    action: "create",
+    objective: "完成 Git 仓库配置整理：这段长目标不应破坏 call 行宽度",
+  }, goalTheme);
+  const call = goalCallComponent.render(120);
+  assert.match(call[0] ?? "", /^goal create/);
+  const goalResult = {
+    content: [{ type: "text", text: "Goal started: 完成 Git 仓库配置整理" }],
+    isError: false,
+  };
+  const collapsedGoalComponent = renderGoalResult(goalResult, { expanded: false, isPartial: false }, goalTheme);
+  const expandedGoalComponent = renderGoalResult(goalResult, { expanded: true, isPartial: false }, goalTheme);
+  const collapsedGoal = collapsedGoalComponent.render(120);
+  const expandedGoal = expandedGoalComponent.render(120);
+  assert.deepEqual(collapsedGoal, ["✓ goal created"]);
+  assert.equal(expandedGoal.filter((line) => /完成 Git 仓库配置整理/.test(line)).length, 1);
+  for (let width = 1; width <= 120; width++) {
+    for (const component of [goalCallComponent, collapsedGoalComponent, expandedGoalComponent]) {
+      for (const line of component.render(width)) assert.ok(visibleWidth(line) <= width, `width ${width}: ${line}`);
+    }
+  }
+
   let permissionPrompts = 0;
   const ctx = {
     cwd: "D:/workspace",
@@ -104,6 +166,43 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(permissionPrompts, 1);
   assert.match((toolResult as { reason?: string }).reason ?? "", /denied by user/i);
   for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx);
+});
+
+test("teammate child registers only interaction and parent-permission surfaces", async () => {
+  const tools: ToolDefinition[] = [];
+  const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
+  const api = new Proxy({} as ExtensionAPI, {
+    get(_target, property) {
+      if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); };
+      if (property === "on") return (event: string, handler: (...args: unknown[]) => unknown) => {
+        const list = handlers.get(event) ?? [];
+        list.push(handler);
+        handlers.set(event, list);
+      };
+      return () => undefined;
+    },
+  });
+  const previous = process.env.PI_TEAMMATE_CHILD;
+
+  try {
+    process.env.PI_TEAMMATE_CHILD = "1";
+    registerMaestroExtension(api);
+  } finally {
+    if (previous === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previous;
+  }
+
+  assert.deepEqual(tools.map((tool) => tool.name), ["ask-user-question"]);
+  assert.deepEqual([...handlers.keys()], ["tool_call"]);
+  assert.equal(handlers.has("session_start"), false, "child must not compete for the Workflow continuation lease");
+  assert.equal(handlers.has("agent_end"), false, "child must not drive the parent Goal continuation loop");
+  const structuredOutputDecision = await handlers.get("tool_call")?.[0]?.({
+    type: "tool_call",
+    toolName: "structured_output",
+    toolCallId: "verdict-1",
+    input: { pass: false },
+  }, {} as ExtensionContext);
+  assert.equal(structuredOutputDecision, undefined, "child-local verdicts must not wait for parent permission RPC");
 });
 
 test("intelligence shutdown awaits both managers and contains cleanup failures", async () => {

@@ -32,8 +32,9 @@ export function buildProgressTree(
   progress: AgentProgressSnapshot[],
   palette: ProgressPalette,
 ): ProgressTreeRow[] {
-  const entries = [...progress].sort((a, b) => a.taskIndex - b.taskIndex);
-  const byIndex = new Map(entries.map((entry) => [entry.taskIndex, entry]));
+  const byIndex = new Map<number, AgentProgressSnapshot>();
+  for (const entry of progress) byIndex.set(entry.taskIndex, entry);
+  const entries = [...byIndex.values()].sort((a, b) => a.taskIndex - b.taskIndex);
   const depthCache = new Map<number, number>();
 
   function depthOf(taskIndex: number, visiting = new Set<number>()): number {

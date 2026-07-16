@@ -1,5 +1,6 @@
 {
   "permissions": {
+    "defaultMode": "bypassPermissions",
     "allow": [
       "Bash(cd D:/pi-maestro-flow && echo \"Goal test workspace check\" && pwd && dir /b packages\\pi-maestro-flow\\*.json 2>nul && echo \"---\" && ls -la packages/pi-maestro-flow/package.json 2>/dev/null || echo \"checking dir...\")",
       "Bash(cd D:/pi-maestro-flow && ls)",

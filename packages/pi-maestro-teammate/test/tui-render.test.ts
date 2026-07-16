@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { selectPriorityProgressRows } from "../src/tui/progress-tree.ts";
+import { buildProgressTree, selectPriorityProgressRows } from "../src/tui/progress-tree.ts";
 import { renderTeammateResult } from "../src/tui/render.ts";
 import type { SingleResult } from "../src/shared/types.ts";
 
@@ -45,4 +45,41 @@ test("priority progress rows reserve the live edge when failures exceed the budg
   assert.equal(visible.rows.length, 5);
   assert.ok(visible.rows.some((row) => row.taskIndex === 7));
   assert.ok(visible.rows.some((row) => row.taskIndex === 0));
+});
+
+test("progress tree renders one row per task index when snapshots repeat", () => {
+  const palette = {
+    dim: (text: string) => text,
+    accent: (text: string) => text,
+    running: (text: string) => text,
+    success: (text: string) => text,
+    error: (text: string) => text,
+    bold: (text: string) => text,
+  };
+  const rows = buildProgressTree([
+    {
+      agent: "delegate",
+      correlationId: "first-correlation",
+      taskIndex: 0,
+      dependencies: [],
+      status: "running",
+      startedAt: new Date().toISOString(),
+      toolCount: 0,
+      tokens: 0,
+    },
+    {
+      agent: "delegate",
+      correlationId: "second-correlation",
+      taskIndex: 0,
+      dependencies: [],
+      status: "completed",
+      startedAt: new Date().toISOString(),
+      toolCount: 1,
+      tokens: 10,
+    },
+  ], palette);
+
+  assert.equal(rows.length, 1);
+  assert.match(rows[0]?.text ?? "", /✓ delegate/);
+  assert.match(rows[0]?.text ?? "", /second-c/);
 });

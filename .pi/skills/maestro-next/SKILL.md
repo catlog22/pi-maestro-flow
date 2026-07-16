@@ -31,7 +31,7 @@ Does not create chains or orchestrate multi-step sequences — that is maestro/r
 **镜像协议**（状态对账由插件自动完成，LLM 只保留两个语义动作）：
 
 - 步进仅调用 `todo({ action: "next" })`，由 bridge 激活下一步并注入上游摘要与 skill。
-- 完成仅调用 `goal done`，由 canonical chain/gates 前置校验与 verifier 裁决。
+- 完成时让 agent loop 自然结束，由 canonical chain/gates 前置校验与 verifier 自动裁决；禁止调用 Goal 完成动作。
 - 禁止手工创建或更新 Goal/Todo 镜像，禁止直接写 `state.json`、`session.json`、`run.json`、`artifacts.json`。
 - 压缩恢复后先执行 `maestro run brief <run-id>`，再继续 active Run。
 

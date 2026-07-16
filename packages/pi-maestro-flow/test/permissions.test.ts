@@ -143,6 +143,31 @@ test("interactive permission can be persisted as an exact local allow rule", asy
   }
 });
 
+test("permission mode changes persist as the next session default", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-permissions-default-mode-"));
+  const applied: string[] = [];
+  const ctx = {
+    cwd: root,
+    hasUI: true,
+    ui: { notify() {} },
+  } as unknown as ExtensionContext;
+  const controller = createPermissionController({
+    userSettingsPath: join(root, "user-settings.json"),
+    setMode(mode) { applied.push(mode); },
+  });
+  try {
+    await controller.reload(ctx);
+    await controller.setDefaultMode(ctx, "bypassPermissions");
+
+    const persisted = JSON.parse(await readFile(join(root, ".pi", "settings.local.json"), "utf8"));
+    assert.equal(persisted.permissions.defaultMode, "bypassPermissions");
+    assert.deepEqual(applied, ["bypassPermissions"]);
+    assert.equal(await controller.reload(ctx), "bypassPermissions");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("non-interactive and invalid-config permission checks fail closed", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-permissions-closed-"));
   await mkdir(join(root, ".pi"), { recursive: true });

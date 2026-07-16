@@ -52,5 +52,11 @@
     "@earendil-works/pi-ai": "0.80.3",
     "@earendil-works/pi-coding-agent": "0.80.3",
     "@earendil-works/pi-tui": "0.80.3"
-  }
+  },
+  "main": "index.js",
+  "directories": {
+    "test": "test"
+  },
+  "author": "",
+  "license": "ISC"
 }

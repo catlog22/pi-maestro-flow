@@ -17,7 +17,10 @@ import registerTeammateExtension, {
   switchConversationSession,
 } from "../src/extension/index.ts";
 import {
+  appendDistinctAssistantMessage,
   buildPiArgs,
+  createUtf8LineDecoder,
+  extractValidatedStructuredOutput,
   normalizeGraphConcurrency,
   resolveVariables,
   sendRpcMessage,
@@ -47,6 +50,53 @@ import { buildProgressTree } from "../src/tui/progress-tree.ts";
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 import { renderTeammateResult } from "../src/tui/render.ts";
 import type { SingleResult, TeammateState } from "../src/shared/types.ts";
+
+test("UTF-8 line decoding preserves characters split across stdout chunks", () => {
+  const decoder = createUtf8LineDecoder();
+  const encoded = Buffer.from("压力测试完成\n下一行", "utf8");
+  const split = 2;
+
+  assert.deepEqual(decoder.write(encoded.subarray(0, split)), []);
+  assert.deepEqual(decoder.write(encoded.subarray(split)), ["压力测试完成"]);
+  assert.deepEqual(decoder.end(), ["下一行"]);
+});
+
+test("assistant event accumulation ignores duplicate terminal events", () => {
+  const messages: Array<{ role: string; content: string }> = [];
+  assert.equal(appendDistinctAssistantMessage(messages, "verdict ready"), true);
+  assert.equal(appendDistinctAssistantMessage(messages, "verdict ready"), false);
+  assert.equal(messages.length, 1);
+});
+
+test("assistant structured_output calls provide a schema-validated settlement fallback", () => {
+  const schema = {
+    type: "object",
+    properties: {
+      pass: { type: "boolean" },
+      reasoning: { type: "string" },
+      unmet: { type: "array", items: { type: "string" } },
+      evidence: { type: "array", items: { type: "string" } },
+    },
+    required: ["pass", "reasoning", "unmet", "evidence"],
+    additionalProperties: false,
+  };
+  const verdict = { pass: false, reasoning: "clear was not tested", unmet: ["clear"], evidence: ["no clear call"] };
+  const event = {
+    type: "agent_end",
+    message: {
+      content: [
+        { type: "text", text: "Checking each action." },
+        { type: "toolCall", name: "structured_output", arguments: verdict },
+      ],
+    },
+  };
+
+  assert.deepEqual(extractValidatedStructuredOutput(event, schema), verdict);
+  assert.equal(extractValidatedStructuredOutput({
+    ...event,
+    message: { content: [{ type: "toolCall", name: "structured_output", arguments: { ...verdict, pass: "no" } }] },
+  }, schema), undefined);
+});
 
 test("root and proxy teammate initialization use their own request params", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");

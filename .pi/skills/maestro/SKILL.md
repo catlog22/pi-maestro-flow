@@ -75,7 +75,7 @@ $ARGUMENTS — user intent text, or special keywords.
 | 动作 | 工具调用 | 说明 |
 |------|----------|------|
 | 步进 | `todo({ action: "next" })` | 激活下一步 + 注入上游摘要 + 绑定 skill |
-| 完成宣告 | `goal done` | 触发前置校验（chain 全 completed + gates 无 failed）+ verifier |
+| 完成验收 | agent loop 自然结束 | 自动触发前置校验（chain 全 completed + gates 无 failed）+ verifier |
 
 - 禁止手工 `todo({ action: "create" })` / `todo({ action: "update" })` 镜像任务——bridge 从 session.json 自动物化
 - goal 由 bridge 从 session intent + definition_of_done 自动派生
@@ -280,7 +280,7 @@ Execute a saved workflow template through the ralph chain runner. Flags: `--cont
    ```
    📋 任务分解完成。可随时复制下面一行设定目标（执行过程中输入即可）：
 
-   /goal 完成以下子目标：
+   /goal create 完成以下子目标：
    {for each G in task_decomposition:}
    - {G.id}: {G.goal} — 完成条件: {G.done_when}
    {end for}

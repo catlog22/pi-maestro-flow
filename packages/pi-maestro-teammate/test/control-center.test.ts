@@ -239,3 +239,79 @@ test("attach overlay accepts pasted messages and keeps a focused tab visible", a
     overlay.dispose();
   }
 });
+
+test("attach overlay keeps the composer and recovery footer visible across height budgets", () => {
+  const now = Date.now();
+  const progress = Array.from({ length: 8 }, (_, taskIndex) => ({
+    agent: "worker",
+    name: `agent-${taskIndex + 1}`,
+    correlationId: `agent-${taskIndex + 1}`,
+    taskIndex,
+    dependencies: [],
+    status: taskIndex < 3 ? "running" as const : "pending" as const,
+    recentTools: [{ name: "exec", status: "running" as const }],
+    lastMessage: `stream ${taskIndex + 1}`,
+  }));
+  const parent = {
+    agent: "graph", name: "parent", correlationId: "parent", startedAt: now,
+    abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
+    status: "running" as const, sleepMs: 0, progress,
+  };
+  const runs = new Map([[parent.correlationId, parent]]);
+  const overlay = new AttachOverlay(
+    parent,
+    () => {},
+    () => runs,
+    async () => ({ ok: true, message: "Queued" }),
+  );
+  try {
+    overlay.setProgress(parent.correlationId, progress);
+    overlay.setActiveTools(parent.correlationId, Array.from({ length: 6 }, (_, index) => ({
+      name: `tool-${index + 1}`,
+      status: "running" as const,
+      startedAt: now,
+    })));
+    overlay.setStreamingText(
+      parent.correlationId,
+      Array.from({ length: 12 }, (_, index) => `output line ${index + 1}`).join("\n"),
+    );
+    overlay.handleInput("\r");
+    overlay.handleInput("draft message");
+
+    for (const height of [6, 8, 12, 16, 20, 28, 38]) {
+      const lines = overlay.render(80, height);
+      assert.ok(lines.length <= height, `height ${height}: rendered ${lines.length} rows`);
+      assert.match(lines.join("\n"), /draft message/, `height ${height}: composer hidden`);
+      assert.match(lines.join("\n"), /Esc back/, `height ${height}: recovery footer hidden`);
+    }
+  } finally {
+    overlay.dispose();
+  }
+});
+
+test("attach overlay preserves manual scroll position while new logs arrive", () => {
+  const now = Date.now();
+  const parent = {
+    agent: "worker", name: "parent", correlationId: "parent", startedAt: now,
+    abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
+    status: "running" as const, sleepMs: 0,
+  };
+  const runs = new Map([[parent.correlationId, parent]]);
+  const overlay = new AttachOverlay(parent, () => {}, () => runs);
+  try {
+    for (let index = 1; index <= 20; index++) {
+      overlay.appendLog(parent.correlationId, `log line ${index}`, "output");
+    }
+    assert.match(overlay.render(80, 20).join("\n"), /log line 20/);
+
+    for (let index = 0; index < 3; index++) overlay.handleInput("\x1b[A");
+    assert.doesNotMatch(overlay.render(80, 20).join("\n"), /log line 20/);
+
+    overlay.appendLog(parent.correlationId, "log line 21", "output");
+    const afterRefresh = overlay.render(80, 20).join("\n");
+    assert.doesNotMatch(afterRefresh, /log line 21/);
+    assert.match(afterRefresh, /log line 17/);
+  } finally {
+    overlay.dispose();
+  }
+});

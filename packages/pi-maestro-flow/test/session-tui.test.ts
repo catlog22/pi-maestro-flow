@@ -9,6 +9,7 @@ import {
 import {
   nextMaestroPanelMode,
   renderMaestroPanel,
+  shouldShowMaestroPanel,
   type MaestroPanelMode,
 } from "../src/tui/maestro-panel.ts";
 import { SessionOverlay } from "../src/tui/session-overlay.ts";
@@ -104,6 +105,15 @@ test("WorkflowViewModel derives one status projection for Session, Run, Goal and
   assert.equal(view.goal?.glyph, "⏸");
 });
 
+test("WorkflowViewModel treats an explicit null Goal as session-scoped absence", () => {
+  const withoutGoal = structuredClone(snapshot);
+  withoutGoal.goal = null;
+  const view = deriveWorkflowViewModel(withoutGoal);
+  assert.ok(view);
+  assert.equal(view.goal, undefined);
+  assert.doesNotMatch(renderMaestroPanel(view, "panorama", 120).join("\n"), /─ Goal/);
+});
+
 test("WorkflowViewModel hides terminal-success gates and displays unresolved blocking gates", () => {
   const terminal = structuredClone(snapshot);
   const active = terminal.session!.runs.find((candidate) => candidate.runId === "003")!;
@@ -147,6 +157,23 @@ test("Maestro Panel cycles collapsed, todo and panorama with a 1..120 width matr
   assert.match(panorama, /↻ retry 2/);
   assert.match(panorama, /Update README/);
   assert.doesNotMatch(panorama, /Mirror active run/);
+});
+
+test("collapsed Maestro Panel stays hidden when the statusline already owns passive run status", () => {
+  const view = deriveWorkflowViewModel(snapshot);
+  assert.ok(view);
+  const passive = {
+    ...view,
+    status: "running" as const,
+    recoveryAction: undefined,
+    nextAction: undefined,
+  };
+
+  assert.equal(shouldShowMaestroPanel(passive, "collapsed"), false);
+  assert.deepEqual(renderMaestroPanel(passive, "collapsed", 80), []);
+  assert.equal(shouldShowMaestroPanel(passive, "todo"), true);
+  assert.ok(renderMaestroPanel(passive, "todo", 80).length > 0);
+  assert.equal(shouldShowMaestroPanel(view, "collapsed"), true, "recovery actions remain visible");
 });
 
 test("run-event renderer keeps the recovery action first and fits every width", () => {

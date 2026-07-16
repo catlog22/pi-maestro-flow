@@ -98,6 +98,26 @@ interface PersistCompactionDependencies {
   ensureDir?: typeof mkdir;
 }
 
+export const COMPACTION_STATUS_KEY = "maestro-auto-compact";
+
+export async function runWithCompactionStatus<T>(
+  event: Pick<SessionBeforeCompactEvent, "preparation">,
+  ctx: Pick<ExtensionContext, "model" | "ui">,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const contextWindow = ctx.model?.contextWindow ?? event.preparation.tokensBefore;
+  const thresholdTokens = Math.max(1, contextWindow - event.preparation.settings.reserveTokens);
+  ctx.ui.setStatus(
+    COMPACTION_STATUS_KEY,
+    `COMPACT ${event.preparation.tokensBefore}/${thresholdTokens}`,
+  );
+  try {
+    return await operation();
+  } finally {
+    ctx.ui.setStatus(COMPACTION_STATUS_KEY, undefined);
+  }
+}
+
 const CHECKPOINT_PROMPT = `You are the session checkpoint compiler for a coding workflow.
 
 Produce a canonical recovery checkpoint that another agent can use to resume the session without reconstructing state from the full conversation.

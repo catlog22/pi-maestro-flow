@@ -9,6 +9,7 @@ Pi extension providing Maestro's workflow tools. Built on [pi-maestro-teammate](
 | Resource | Count | Description |
 |----------|-------|-------------|
 | **Maestro tool** | 1 | `maestro` |
+| **Goal tool** | 1 | `goal` (`get` / `create`; user-owned lifecycle commands) |
 | **Intelligence tools** | 3 | `lsp`, `browser`, `search_tool_bm25` |
 | **Workflow docs** | 82 | Installed from `maestro-flow` to `~/.maestro/workflows` |
 | **Templates** | 23 | Bundled template files |
@@ -34,6 +35,7 @@ pi install ./packages/pi-maestro-flow
 
 After installation:
 - Maestro dispatch is available through the single `maestro` tool
+- Autonomous Goal state is available through `goal`; use `/goal stop`, `/goal resume`, and `/goal clear` for lifecycle control
 - LSP navigation/refactoring, named-tab browser control, and BM25 tool discovery are available through `lsp`, `browser`, and `search_tool_bm25`
 - Maestro workflow docs installed at `~/.maestro/workflows/`
 
@@ -67,6 +69,32 @@ After installation:
 ```
 { action: "moa", prompts: ["Best approach for caching layer?"] }
 ```
+
+### Goal
+
+The LLM tool has a deliberately small surface:
+
+```javascript
+goal({ action: "create", objective: "Implement JWT authentication" })
+goal({ action: "create", objective: "Implement JWT authentication", tokenBudget: "100k" }) // explicit budget
+goal({ action: "get" })
+```
+
+Token budget is absent by default and exists only when `tokenBudget` or `--tokens` is supplied explicitly. The `/goal` command offers native argument-completion hints for both the unbudgeted and explicitly budgeted forms.
+
+Users control lifecycle transitions with `/goal stop`, `/goal resume [--tokens 100k]`, and `/goal clear`. When the complete agent loop ends normally, `agent_end` automatically runs the independent verifier. `turn_end` does not verify, and `session_shutdown` only persists state. A passing verdict completes and clears the Goal; a failing verdict starts another loop; an inconclusive verdict holds the active Goal until `/goal resume`.
+
+An always-on, width-aware Goal panel is placed `aboveEditor` while a Goal exists. It updates immediately for active, waiting, verifying, verified, stopped, budget-limited, gate-blocked, and error states. Wide layouts include the objective, elapsed time, and round; Token usage and a budget progress bar appear only after a budget is explicitly configured. Narrow layouts collapse to one explicit status line.
+
+Goal persistence is scoped to `sessionManager.getSessionId()`. New and forked sessions start without a Goal even if their conversation history exposes an older Goal entry. Resuming the same session restores its Goal in `WAITING`; unrelated prompts do not acquire Goal ownership or invoke the verifier. Run `/goal resume` to explicitly start the next Goal-owned agent loop.
+
+For a running canonical Workflow, `/new` and `/fork` also suppress automatic lease attachment and Goal projection. Explicit Resume from `/maestro-session` opts the new Pi session back into that Workflow.
+
+Pi reports ordinary process launches as `session_start(reason: "startup")`. The extension therefore checks for a Goal entry owned by the current sessionId before restoring or attaching; `startup` alone never recreates a Goal from a running project Workflow.
+
+For OpenAI-compatible providers, the Goal function schema is a single root `type: "object"`. The execution layer still requires a non-empty `objective` for `create`.
+
+If a provider reports `Invalid schema for function 'goal' ... got 'type: null'`, the running Pi process still has a root-union schema loaded. Update the extension and restart Pi (or reload extensions) before retrying; then use `/goal resume` if the failed request paused an existing Goal.
 
 ## Intelligence Tools
 

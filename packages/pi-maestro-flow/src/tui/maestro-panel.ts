@@ -19,6 +19,7 @@ export function renderMaestroPanel(
   mode: MaestroPanelMode,
   width: number,
 ): string[] {
+  if (!shouldShowMaestroPanel(view, mode)) return [];
   const safeWidth = Math.max(1, width);
   if (safeWidth < 20) return [renderNarrow(view, safeWidth)];
   if (mode === "collapsed") return [renderSummary(view, safeWidth)];
@@ -46,6 +47,10 @@ export function renderMaestroPanel(
   return frame(rows, safeWidth);
 }
 
+export function shouldShowMaestroPanel(view: WorkflowViewModel, mode: MaestroPanelMode): boolean {
+  return mode !== "collapsed" || Boolean(view.recoveryAction ?? view.nextAction);
+}
+
 function renderNarrow(view: WorkflowViewModel, width: number): string {
   const action = view.recoveryAction ?? view.nextAction;
   const content = action ? `» ${action}` : workflowStatusLabel(view.status);
@@ -55,9 +60,7 @@ function renderNarrow(view: WorkflowViewModel, width: number): string {
 function renderSummary(view: WorkflowViewModel, width: number): string {
   const action = view.recoveryAction ?? view.nextAction;
   const run = view.activeRun ? ` · ${shortRunLabel(view.activeRun)}` : "";
-  const base = action
-    ? `» ${action} · ${workflowStatusLabel(view.status)}${run}`
-    : `${workflowStatusLabel(view.status)} · ${view.sessionLabel}${run}`;
+  const base = `» ${action} · ${workflowStatusLabel(view.status)}${run}`;
   return truncateToWidth(base, width, "…");
 }
 

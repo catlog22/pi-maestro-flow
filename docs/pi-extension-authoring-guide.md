@@ -497,18 +497,23 @@ async function mapWithConcurrencyLimit<T, R>(
 }
 ```
 
-### 13.4 状态机模式（pi-goal）
+### 13.4 状态机模式（pi-maestro-flow Goal）
 
 ```typescript
-type Status = "active" | "paused" | "complete" | "budget_limited";
+type GoalStatus = "active" | "paused" | "done";
+type PauseReason = "user" | "budget" | "gate" | "error";
 
 // 事件驱动的状态转换
 // session_start → 恢复持久状态
-// agent_end → 检查是否完成，发送续接
+// 正常 agent_end → 自动验证；pass 完成，fail 发送续接，inconclusive 保持 active
+// aborted/error agent_end → 暂停或进入恢复路径，不验证完成
 // session_before_compact → 保存状态
-// before_agent_start → 注入 system prompt
+// session_shutdown → 仅持久化与清理，不验证
+// turn_end → 不参与 Goal 验证（它只是单个 turn 的边界）
 // tool_call → 阻止无效调用
 ```
+
+Goal 的 LLM tool schema 必须以单一 `type: "object"` 为根；不要使用根级 `anyOf`，部分 OpenAI-compatible provider 会直接拒绝该函数 schema。action 专属必填项可在执行层校验。
 
 ### 13.5 AbortSignal 处理
 
@@ -683,10 +688,10 @@ export default function myExtension(pi: ExtensionAPI) {
 | 级别 | 代表 | 特征 | 文件数 |
 |------|------|------|--------|
 | **简单** | pi-caffeinate, pi-retry | 纯 hook，无 tool/command | 1 |
-| **标准** | pi-goal, pi-btw, pi-wait-what | 1-2 个 command/tool + hooks | 1 |
+| **标准** | pi-btw, pi-wait-what | 1-2 个 command/tool + hooks | 1 |
 | **中等** | pi-statusline, pi-google-genai | 多 tool + 外部 API + config | 1-2 |
 | **复杂** | pi-subagents, pi-chrome-devtools | 进程管理 + TUI + 并发 | 2-3 |
-| **大型** | pi-lsp, pi-sync | 协议实现 + 多模块 | 5-9 |
+| **大型** | pi-lsp, pi-sync, pi-maestro-flow | 协议实现 + 多模块 | 5-9+ |
 
 ## 附录 B：完整事件列表
 

@@ -29,6 +29,7 @@ export interface PermissionRequestHookRunner {
 
 export interface PermissionController {
   reload(ctx: ExtensionContext): Promise<PermissionMode | undefined>;
+  setDefaultMode(ctx: ExtensionContext, mode: PermissionMode): Promise<void>;
   authorize(
     call: PermissionToolCall,
     ctx: ExtensionContext,
@@ -58,6 +59,16 @@ export function createPermissionController(options: {
       const defaultMode = loaded.permissions.defaultMode;
       if (defaultMode === "bypassPermissions" && this.bypassDisabled()) return "default";
       return defaultMode;
+    },
+
+    async setDefaultMode(ctx, mode) {
+      if (!loaded) loaded = await loadPermissionSettings(ctx.cwd, userSettingsPath);
+      if (mode === "bypassPermissions" && loaded.permissions.disableBypassPermissionsMode === "disable") {
+        throw new Error("YOLO mode is disabled by permissions.disableBypassPermissionsMode.");
+      }
+      await setPermissionDefaultMode(loaded.localSettingsPath, mode);
+      loaded.permissions.defaultMode = mode;
+      await options.setMode?.(mode, ctx);
     },
 
     async authorize(call, ctx, mode, hooks) {

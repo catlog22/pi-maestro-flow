@@ -15,7 +15,7 @@ import { parseTeammateThinkingLevel, type TeammateThinkingLevel } from "../share
 type SystemPromptMode = "append" | "replace";
 export type AgentSource = "builtin" | "user" | "project";
 
-export const BUILTIN_AGENT_NAMES = ["delegate", "explorer", "workflow"] as const;
+export const BUILTIN_AGENT_NAMES = ["delegate", "explorer", "goal-verifier", "workflow"] as const;
 export type BuiltinAgentName = (typeof BUILTIN_AGENT_NAMES)[number];
 
 const LEGACY_AGENT_ALIASES: Readonly<Record<string, BuiltinAgentName>> = {

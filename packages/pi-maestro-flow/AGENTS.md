@@ -13,6 +13,17 @@ Follow this routing order:
 
 Use `teammate` for all delegated work.
 
+### Tool Selection
+
+| Need | Tool |
+|------|------|
+| Delegate work to a pi agent | `teammate` |
+| Delegate to external CLI (gemini/codex/etc.) | `maestro` |
+| Multi-step tracking with skill activation | `todo` |
+| Cross-turn execution with budget control | `goal` |
+| Web search / deep research / URL fetch | `smart_search` |
+| Read-only code discovery | `teammate` + `agent: "explorer"` |
+
 ## Teammate
 
 Use Pi's `teammate` tool directly for delegated work; the legacy delegate path is not part of Pi guidance.
@@ -249,6 +260,109 @@ Confidence rules:
 - Stop and wait for explorer output before issuing dependent reads or edits.
 
 If teammate exploration is unavailable or fails, switch to local `rg`, targeted reads, and focused runtime checks. Record the degradation instead of repeatedly retrying the same failure.
+
+## Todo
+
+DAG task tracker with dependency management, skill binding, and context injection.
+
+**Use when**: multi-step work needs step-by-step tracking, skill activation, or dependency ordering.
+**Skip when**: single-action work; active Workflow Session (bridge projects mirror tasks automatically).
+
+### Usage
+
+`subject` is the title; `description` is the detail — do not swap. Set `summary` on completion; downstream `next` consumes it.
+
+```text
+todo({ action: "create", subject: "Analyze auth flow", skills: [{ name: "analysis-trace-code-execution", role: "primary" }] })
+todo({ action: "create", subject: "Implement auth middleware", blockedBy: ["<prev id>"], skills: [{ name: "development-implement-feature", role: "primary" }, { name: "analysis-assess-security-risks", role: "guard" }] })
+```
+
+`next` is the primary step driver — replaces manual `update status: "in_progress"`:
+
+```text
+todo({ action: "next" })
+```
+
+It selects the next pending task, sets it to `in_progress`, injects prior 5 step summaries + goal context + skill prompts, and returns assembled context ready for execution.
+
+### Constraints
+
+- One `in_progress` task at a time in the root session.
+- Skill binding requires exactly one `primary`; `guard`/`support` are optional.
+- Skill file changes after activation mark the binding stale — re-activate required.
+- In `update`: omitted fields are preserved, `null` clears, empty array replaces.
+
+## Goal
+
+Cross-turn persistence engine — auto-continuation, token budget, compaction survival, independent verifier.
+
+**Use when**: multi-turn execution needs sustained momentum, budget control, or verified completion.
+**Skip when**: single-turn tasks; active Workflow Session already projects a Goal — do not create a competing one.
+
+### LLM Tool Surface
+
+```text
+goal({ action: "create", objective: "Implement JWT auth module" })
+goal({ action: "create", objective: "Implement JWT auth module", tokenBudget: "500k" })  # explicit budget
+goal({ action: "get" })
+```
+
+The LLM-facing tool exposes only `get` and `create`. `create` is exclusive: it fails while any Goal already exists. There is no default budget: omit `tokenBudget` unless the user explicitly requests one. Explicit budget format is `"100k"`, `"2m"`, or a plain number. The `/goal` command provides native argument-completion hints for `--tokens`.
+
+The function schema must remain a single root JSON object for provider compatibility. `objective` is optional in the flat JSON Schema but is required and validated at runtime for `create`.
+
+### User Lifecycle Commands
+
+| Command | Effect |
+|---------|--------|
+| `/goal status` | Show the current Goal |
+| `/goal create [--tokens 100k] <objective>` | Create a Goal and start its agent loop |
+| `/goal stop` | Persist paused state, fence continuation, and abort the current agent loop |
+| `/goal resume [--tokens 100k]` | Resume; optionally raise an exhausted budget |
+| `/goal clear` | Abandon and remove the Goal |
+
+Legacy `/goal set`, `/goal pause`, and `/goal done|complete` commands are rejected with migration guidance. Lifecycle control is user-owned; the model cannot stop, resume, clear, update, or mark a Goal done.
+
+### Automatic Verification
+
+Verification runs only after a normal `agent_end`, meaning the whole agent loop has stopped naturally. `turn_end` never verifies; `session_shutdown` only persists state. Outcomes are deterministic:
+
+- `pass`: mark done and clear the Goal automatically.
+- `fail`: keep the Goal active and start the next agent loop with unmet requirements.
+- `inconclusive` or verifier error: keep the Goal active without auto-continuation; the user may retry with `/goal resume`.
+- abort, provider error, budget exhaustion, or a blocking Workflow gate: pause or hold without completion verification.
+
+The `goal-panel` widget is lifecycle-owned and rendered above the input editor. Every state transition must update both footer status and the widget; clearing or shutting down a Goal must remove both. The renderer must remain width-safe from 1–120 columns and preserve explicit status text without depending on color.
+
+Goal state and loop ownership are separate. Persist Goal entries with the current Pi `sessionId`; `session_start` with `reason: new|fork` must not load an older Goal, while same-ID `resume|reload|startup` may restore it. A restored or inconclusive Goal is `WAITING` and must not claim ordinary user prompts. Only explicit create/resume or an internal continuation may arm Goal ownership for an agent loop; `onAgentEnd` must ignore unowned loops.
+
+`reason: new|fork` also disables automatic canonical Workflow attach and Goal projection for that Pi session. Only an explicit Resume action in `/maestro-session` may acquire the Workflow lease and re-enable projection.
+
+Do not interpret `reason: startup` as Goal ownership. Auto-restore/attach requires both an eligible reason (`startup|reload|resume`) and a persisted Goal entry belonging to the current sessionId. A running canonical Workflow discovered only by cwd is a read-only baseline until explicit Resume or until this Pi session creates/starts a new Workflow.
+
+After compaction, the first action should be `maestro run brief` to re-anchor Workflow Session context.
+
+## Smart Search
+
+External information retrieval — web search, deep research, URL extraction.
+
+**Use when**: web-sourced information is needed (API docs, technical comparisons, external resources).
+**Skip when**: codebase search — use `maestro search` / explorer / `rg`; do not web-search for answers already in project knowledge.
+
+| Scenario | Mode | Key params |
+|----------|------|------------|
+| Quick lookup | `search` | `platform`, `validation` |
+| Multi-source deep research | `research` | `budget`(`quick`/`standard`/`deep`), `validation`(`strict`) |
+| Extract known URL content | `fetch` | — |
+| Routing diagnostics | `route` | `router_mode` |
+
+```text
+smart_search({ mode: "search", query: "Express.js middleware error handling best practices" })
+smart_search({ mode: "research", query: "JWT vs session-based auth for microservices", budget: "deep", validation: "strict" })
+smart_search({ mode: "fetch", query: "https://docs.example.com/api/auth" })
+```
+
+Use `validation: "strict"` for security/compliance queries. Results are unverified — cross-check against project code or authoritative sources before acting. Config: `Alt+S` or `/smart-search-config`.
 
 ## Knowledge System
 

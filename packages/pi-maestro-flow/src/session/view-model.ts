@@ -183,11 +183,13 @@ export function deriveWorkflowViewModel(
   });
   const completed = runs.filter((run) => isCompletedStatus(run.status)).length;
   const running = runs.filter((run) => isActiveStatus(run.status)).length;
-  const goalInput = snapshot.goal ?? {
-    objective: session.intent,
-    status: session.status,
-  };
-  const goalStatus = normalizeWorkflowStatus(goalInput.status);
+  const goalInput = snapshot.goal === null
+    ? undefined
+    : snapshot.goal ?? {
+      objective: session.intent,
+      status: session.status,
+    };
+  const goalStatus = normalizeWorkflowStatus(goalInput?.status);
   const decisionPending = (snapshot.decisionPoints ?? []).some(
     (point) => normalizeWorkflowStatus(point.status) === "pending",
   );
@@ -211,13 +213,13 @@ export function deriveWorkflowViewModel(
     activeRun,
     runs,
     todos,
-    goal: {
+    goal: goalInput ? {
       objective: goalInput.objective ?? session.intent,
       status: goalStatus,
       glyph: GLYPHS[goalStatus],
       tokensUsed: goalInput.tokensUsed,
       tokenBudget: goalInput.tokenBudget,
-    },
+    } : undefined,
     chain: {
       completed,
       running,

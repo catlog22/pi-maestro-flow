@@ -46,6 +46,8 @@ interface AgentLog {
   agent: ActiveAgent;
   lines: Array<{ text: string; kind: "info" | "tool" | "output" | "system" }>;
   scrollOffset: number;
+  maxScrollOffset: number;
+  followTail: boolean;
   streamingText: string;
   activeTools: ToolEntry[];
   progress: AgentProgressSnapshot[];
@@ -156,6 +158,8 @@ export class AttachOverlay implements Component, Focusable {
       agent,
       lines: [],
       scrollOffset: 0,
+      maxScrollOffset: 0,
+      followTail: true,
       streamingText: "",
       activeTools: [],
       progress: agent.progress ?? [],
@@ -190,7 +194,7 @@ export class AttachOverlay implements Component, Focusable {
       && !log.progress.some((entry) => entry.taskIndex === log.selectedTaskIndex)
     ) {
       log.selectedTaskIndex = undefined;
-      log.scrollOffset = Number.POSITIVE_INFINITY;
+      log.followTail = true;
     }
     this.requestRender?.();
   }
@@ -203,8 +207,10 @@ export class AttachOverlay implements Component, Focusable {
     const log = this.ensureLog(cid);
     if (!log) return;
     log.lines.push({ text, kind });
-    if (log.lines.length > MAX_LOG_LINES) log.lines.shift();
-    if (cid === this.activeId) log.scrollOffset = Number.POSITIVE_INFINITY;
+    if (log.lines.length > MAX_LOG_LINES) {
+      log.lines.shift();
+      if (!log.followTail) log.scrollOffset = Math.max(0, log.scrollOffset - 1);
+    }
     this.requestRender?.();
   }
 
@@ -336,7 +342,7 @@ export class AttachOverlay implements Component, Focusable {
     if (!log) return;
     if (data === "0" && log.progress.length > 0) {
       log.selectedTaskIndex = undefined;
-      log.scrollOffset = Number.POSITIVE_INFINITY;
+      log.followTail = true;
       this.requestRender?.();
       return;
     }
@@ -344,19 +350,24 @@ export class AttachOverlay implements Component, Focusable {
       const taskIndex = Number(data) - 1;
       if (log.progress.some((entry) => entry.taskIndex === taskIndex)) {
         log.selectedTaskIndex = taskIndex;
-        log.scrollOffset = Number.POSITIVE_INFINITY;
+        log.followTail = true;
         this.requestRender?.();
       }
       return;
     }
+    const currentOffset = log.followTail ? log.maxScrollOffset : log.scrollOffset;
     if (matchesKey(data, Key.up) || data === "k") {
-      log.scrollOffset = Math.max(0, log.scrollOffset - 1);
+      log.scrollOffset = Math.max(0, currentOffset - 1);
+      log.followTail = false;
     } else if (matchesKey(data, Key.down) || data === "j") {
-      log.scrollOffset = Number.isFinite(log.scrollOffset) ? log.scrollOffset + 1 : log.scrollOffset;
+      log.scrollOffset = Math.min(log.maxScrollOffset, currentOffset + 1);
+      log.followTail = log.scrollOffset >= log.maxScrollOffset;
     } else if (data === "\x1b[5~") {
-      log.scrollOffset = Math.max(0, log.scrollOffset - 10);
+      log.scrollOffset = Math.max(0, currentOffset - 10);
+      log.followTail = false;
     } else if (data === "\x1b[6~") {
-      log.scrollOffset = Number.isFinite(log.scrollOffset) ? log.scrollOffset + 10 : log.scrollOffset;
+      log.scrollOffset = Math.min(log.maxScrollOffset, currentOffset + 10);
+      log.followTail = log.scrollOffset >= log.maxScrollOffset;
     } else {
       return;
     }
@@ -432,29 +443,30 @@ export class AttachOverlay implements Component, Focusable {
     const logLines = selected
       ? this.buildSelectedLog(selected, Math.max(1, inner - 2))
       : this.buildLog(log, Math.max(1, inner - 2));
-    const sleepingRows = agent.status === "sleeping" ? 2 : 0;
-    const composerRows = this.onSend ? 2 : 0;
-    const logHeight = Math.max(3, targetHeight - rows.length - sleepingRows - composerRows - 3);
+    const tailRows: string[] = [];
+    if (agent.status === "sleeping") {
+      tailRows.push(frameRule(inner));
+      tailRows.push(`${yellow("◉")} ${dim("Sleeping · teammate-send to wake")}`);
+    }
+    if (this.onSend) {
+      tailRows.push(frameRule(inner));
+      if (this.composing && this.sendStatus) {
+        tailRows.push(truncateToWidth(`${red("!")} ${this.sendStatus}`, inner, "…"));
+      }
+      tailRows.push(this.renderComposer(inner));
+    }
+
+    const logHeight = targetHeight - rows.length - tailRows.length - 3;
+    if (logHeight < 1) return this.renderDocked(log, w, targetHeight);
     const maxOffset = Math.max(0, logLines.length - logHeight);
-    log.scrollOffset = Number.isFinite(log.scrollOffset)
-      ? Math.max(0, Math.min(log.scrollOffset, maxOffset))
-      : maxOffset;
+    log.maxScrollOffset = maxOffset;
+    log.scrollOffset = log.followTail
+      ? maxOffset
+      : Math.max(0, Math.min(log.scrollOffset, maxOffset));
     const visibleLogs = logLines.slice(log.scrollOffset, log.scrollOffset + logHeight);
     rows.push(...visibleLogs);
     for (let i = visibleLogs.length; i < logHeight; i++) rows.push("");
-
-    if (agent.status === "sleeping") {
-      rows.push(frameRule(inner));
-      rows.push(`${yellow("◉")} ${dim("Sleeping · teammate-send to wake")}`);
-    }
-
-    if (this.onSend) {
-      rows.push(frameRule(inner));
-      if (this.composing && this.sendStatus) {
-        rows.push(truncateToWidth(`${red("!")} ${this.sendStatus}`, inner, "…"));
-      }
-      rows.push(this.renderComposer(inner));
-    }
+    rows.push(...tailRows);
 
     const out = this.renderFrame(rows, w);
     const range = logLines.length > logHeight
@@ -520,16 +532,32 @@ export class AttachOverlay implements Component, Focusable {
       truncateToWidth(`${title}  ${status}`, width, "…"),
     ];
 
+    const footer = dim(fitFooter(width, [
+      "Esc back",
+      this.onSend ? "Enter message" : "",
+      "←→ switch",
+      log.progress.length > 1 ? `0 overview · 1-${Math.min(9, log.progress.length)} view` : "",
+      "↑↓ scroll",
+    ]));
+    const tailRows: string[] = [];
+    if (this.onSend && this.composing && this.sendStatus) {
+      tailRows.push(truncateToWidth(`${red("!")} ${this.sendStatus}`, width, "…"));
+    }
+    if (this.onSend) tailRows.push(this.renderComposer(width));
+    tailRows.push(footer);
+
     if (log.progress.length > 1) {
       const tree = buildProgressTree(log.progress, progressPalette);
       const focus = log.selectedTaskIndex ?? focusTaskIndex(log.progress);
-      const maxTreeRows = Math.max(1, Math.min(3, height - 6));
-      const window = selectProgressWindow(tree, maxTreeRows, focus);
-      lines.push(...window.rows.map((row) => truncateToWidth(
-        `${row.taskIndex === log.selectedTaskIndex ? green("›") : " "} ${row.text}`,
-        width,
-        "…",
-      )));
+      const maxTreeRows = Math.max(0, Math.min(3, height - lines.length - tailRows.length - 2));
+      if (maxTreeRows > 0) {
+        const window = selectProgressWindow(tree, maxTreeRows, focus);
+        lines.push(...window.rows.map((row) => truncateToWidth(
+          `${row.taskIndex === log.selectedTaskIndex ? green("›") : " "} ${row.text}`,
+          width,
+          "…",
+        )));
+      }
     }
 
     const toolLine = selected
@@ -545,20 +573,16 @@ export class AttachOverlay implements Component, Focusable {
         ];
     if (streamLines.length === 0) streamLines.push(dim("Waiting for output…"));
 
-    const footer = dim(fitFooter(width, [
-      "Esc back",
-      this.onSend ? "Enter message" : "",
-      "←→ switch",
-      log.progress.length > 1 ? `0 overview · 1-${Math.min(9, log.progress.length)} view` : "",
-      "↑↓ scroll",
-    ]));
-    const contentHeight = Math.max(1, height - lines.length - 1);
+    const contentHeight = Math.max(0, height - lines.length - tailRows.length);
     const maxOffset = Math.max(0, streamLines.length - contentHeight);
-    log.scrollOffset = Number.isFinite(log.scrollOffset)
-      ? Math.max(0, Math.min(log.scrollOffset, maxOffset))
-      : maxOffset;
-    lines.push(...streamLines.slice(log.scrollOffset, log.scrollOffset + contentHeight));
-    lines.push(footer);
+    log.maxScrollOffset = maxOffset;
+    log.scrollOffset = log.followTail
+      ? maxOffset
+      : Math.max(0, Math.min(log.scrollOffset, maxOffset));
+    if (contentHeight > 0) {
+      lines.push(...streamLines.slice(log.scrollOffset, log.scrollOffset + contentHeight));
+    }
+    lines.push(...tailRows);
 
     return lines.slice(0, height).map((line) => truncateToWidth(line, width, "…"));
   }

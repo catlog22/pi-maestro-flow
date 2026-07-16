@@ -5,9 +5,11 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   buildMaestroCompactionPrompt,
+  COMPACTION_STATUS_KEY,
   createMaestroCompaction,
   mergeCompactionReferences,
   persistMaestroCompactionKnowhow,
+  runWithCompactionStatus,
   type MaestroCompactionDetails,
 } from "../src/compaction/maestro-compaction.ts";
 import {
@@ -22,6 +24,39 @@ import {
   onSessionShutdown,
   onSessionStart,
 } from "../src/tools/todo.ts";
+
+test("compaction lifecycle publishes status and always clears it", async () => {
+  const statuses: Array<{ key: string; value: string | undefined }> = [];
+  const event = {
+    preparation: {
+      tokensBefore: 91_000,
+      settings: { reserveTokens: 10_000 },
+    },
+  } as never;
+  const ctx = {
+    model: { contextWindow: 100_000 },
+    ui: {
+      setStatus(key: string, value: string | undefined) {
+        statuses.push({ key, value });
+      },
+    },
+  } as never;
+
+  await assert.rejects(
+    runWithCompactionStatus(event, ctx, async () => {
+      assert.deepEqual(statuses.at(-1), {
+        key: COMPACTION_STATUS_KEY,
+        value: "COMPACT 91000/90000",
+      });
+      throw new Error("summary failed");
+    }),
+    /summary failed/,
+  );
+  assert.deepEqual(statuses.at(-1), {
+    key: COMPACTION_STATUS_KEY,
+    value: undefined,
+  });
+});
 
 function details(): MaestroCompactionDetails {
   return {

@@ -2,7 +2,8 @@
  * Maestro Flow statusline — Pi Extension footer API implementation.
  *
  * Line 1: Mode | Model | Context | Tool calls | Dir+Git | Tokens
- * Line 2: Session and active Workflow Run (when a canonical snapshot is active)
+ * Line 2: Context pressure or active compaction (when present)
+ * Line 3: Session and active Workflow Run (when a canonical snapshot is active)
  *
  * Adapted from maestro2/src/hooks/statusline.ts for the Pi Extension ecosystem.
  */
@@ -151,14 +152,13 @@ function renderContextPressure(value: string | undefined, width: number): string
 	const text = width >= 80
 		? `CTX ${band} ${match[2]}/${match[3]}${pruned}`
 		: width >= 48
-			? `${band === "AUTO-PRUNE" ? "PRUNE" : band}${pruned}`
-			: band === "COMPACT" ? "C*" : band === "CRITICAL" ? "C!" : band === "AUTO-PRUNE" ? "P!" : "N!";
+			? `CTX ${band === "AUTO-PRUNE" ? "PRUNE" : band}${pruned}`
+			: band === "AUTO-PRUNE" ? `CTX PRUNE${pruned}` : `CTX ${band}${pruned}`;
 	const color = band === "CRITICAL" || band === "COMPACT" ? COLORS.ctxCrit : band === "AUTO-PRUNE" ? COLORS.ctxAlert : COLORS.ctxWarn;
 	return `${ansiFg(color)}${text}${ANSI_RESET}`;
 }
 
 function renderPressureLine(value: string | undefined, width: number): string {
-	if (width < 48) return "";
 	return truncateToWidth(renderContextPressure(value, width), Math.max(1, width), "…");
 }
 
@@ -225,11 +225,9 @@ function renderLine1(
 	width: number,
 	modeStatus: string | undefined,
 	approvalStatus: string | undefined,
-	pressureStatus: string | undefined,
 ): string {
 	const safeWidth = Math.max(1, width);
 	const modeText = renderPlanModeStatus(modeStatus, approvalStatus, safeWidth);
-	const pressureText = safeWidth < 48 ? renderContextPressure(pressureStatus, safeWidth) : "";
 	const modelText = colored("model", `${ICONS.model} ${shortenModel(rs.model)}`);
 	const toolCallText = activeToolCalls > 0
 		? colored("runs", `${ICONS.runs} ${activeToolCalls} call${activeToolCalls > 1 ? "s" : ""}`)
@@ -250,10 +248,10 @@ function renderLine1(
 	}
 
 	const parts = safeWidth >= 80
-		? [modeText, modelText, contextFull, pressureText, toolCallText, dirText, tokenText]
+		? [modeText, modelText, contextFull, toolCallText, dirText, tokenText]
 		: safeWidth >= 48
 			? [modeText, modelText, contextCompact, dirText]
-			: [modeText, contextCompact, pressureText, modelText];
+			: [modeText, contextCompact, modelText];
 	return truncateToWidth(parts.filter(Boolean).join(SEP), safeWidth, "…");
 }
 
@@ -360,7 +358,7 @@ export function installStatusline(
 					const modeStatus = footerData.getExtensionStatuses().get("mode");
 					const approvalStatus = footerData.getExtensionStatuses().get("approval-mode");
 					const pressureStatus = footerData.getExtensionStatuses().get("maestro-auto-compact");
-					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, pressureStatus));
+					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus));
 
 					const pressureLine = renderPressureLine(pressureStatus, width);
 					if (pressureLine) lines.push(pressureLine);

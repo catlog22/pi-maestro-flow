@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.4.8",
+  "version": "0.4.9",
   "description": "Pi extension for Maestro knowledge and workflow orchestration with teammate dispatch",
   "type": "module",
   "engines": {
@@ -62,7 +62,7 @@
     "@konbakuyomu/smart-search": "https://codeload.github.com/konbakuyomu/smartsearch/tar.gz/667c465d0f6ea16a423f03c434f94e21505d3595",
     "cross-spawn": "7.0.6",
     "maestro-flow": "https://codeload.github.com/catlog22/maestro-flow/tar.gz/84ae24f8ed9a12cac3b5c69ea3428840a0a58e1b",
-    "pi-maestro-teammate": "^0.4.3",
+    "pi-maestro-teammate": "^0.4.4",
     "puppeteer-core": "24.31.0",
     "typebox": "1.1.24"
   },

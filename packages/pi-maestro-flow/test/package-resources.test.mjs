@@ -26,7 +26,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
     pkg.dependencies["maestro-flow"],
     "https://codeload.github.com/catlog22/maestro-flow/tar.gz/84ae24f8ed9a12cac3b5c69ea3428840a0a58e1b",
   );
-  assert.equal(pkg.dependencies["pi-maestro-teammate"], "^0.4.3");
+  assert.equal(pkg.dependencies["pi-maestro-teammate"], "^0.4.4");
   assert.equal(
     pkg.dependencies["@konbakuyomu/smart-search"],
     "https://codeload.github.com/konbakuyomu/smartsearch/tar.gz/667c465d0f6ea16a423f03c434f94e21505d3595",

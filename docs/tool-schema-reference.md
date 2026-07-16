@@ -222,18 +222,30 @@ explore 提示词结构（explorer 类 agent 通用）：`FIND:`(目标+条件) 
 
 ---
 
-## 10. `goal` - 自治目标管理
+## 10. `goal` - 自治目标读取与创建
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|:---:|------|
-| `action` | enum | ✅ | `set`/`done`/`pause`/`clear` |
-| `objective` | string | | 目标描述(set 时) |
-| `tokenBudget` | string | | Token 预算，如 `100k` |
-| `summary` | string | | 完成摘要(done 时必需) |
+| `action` | enum | ✅ | `get`/`create` |
+| `objective` | string | create 时 ✅ | 目标描述 |
+| `tokenBudget` | string | | 可选的显式 Token 预算；默认省略即无预算。接受纯数字、`k`、`m`，仅用于 create |
+
+预算不是 Goal 的默认属性：只有调用方显式传入 `tokenBudget`，或用户在 `/goal create|resume` 中使用 `--tokens` 后才存在。`/goal` 使用 Pi 原生参数补全显示无预算创建和 `--tokens 100k` 两种 hint；function schema 不添加 provider 不兼容的非标准 `hint` 字段。
+
+Goal 生命周期由用户命令控制：`/goal stop`、`/goal resume`、`/goal clear`。正常 agent loop 结束后自动验证，无需完成动作。
+
+Session 隔离：Goal 持久化条目绑定当前 `sessionId`。`/new` 与 `/fork` 不继承旧 Goal；同 session 的 `/resume` 可恢复为 `WAITING`。普通输入不会取得 Goal loop ownership，只有 create、`/goal resume` 或内部 continuation 启动的 loop 才会在 `agent_end` 进入 Goal verifier。
+
+`session_start(reason:"startup")` 只表示 Pi 进程启动，不等于 Goal 恢复。只有当前 sessionId 存在自己的 Goal entry 时才恢复并 attach Workflow；仅在 cwd 中发现 running Workflow 时保持只读，不自动投影 Goal。
+
+兼容性约束：函数 schema 必须保持单一 `type: "object"` 根节点，不使用根级 `anyOf`。因此 `objective` 在 JSON Schema 中是 optional，但执行层会拒绝缺少或为空的 `create` 请求。
+
+排障：若 provider 返回 `Invalid schema for function 'goal' ... got 'type: null'`，说明当前进程仍加载了旧的根级 union schema。更新后需重启 Pi 或 reload extension；若原 Goal 因该 400 被暂停，再执行 `/goal resume`。
 
 ```js
-goal({ action: "set", objective: "实现认证模块", tokenBudget: "500k" })
-goal({ action: "done", summary: "认证模块完成：JWT + 测试全部通过" })
+goal({ action: "create", objective: "实现认证模块" })
+goal({ action: "create", objective: "实现认证模块", tokenBudget: "500k" }) // 显式预算
+goal({ action: "get" })
 ```
 
 ---

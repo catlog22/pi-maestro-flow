@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
+  SMART_SEARCH_CONFIG_GROUPS,
+  SMART_SEARCH_CONFIG_KEYS,
   SmartSearchConfigStore,
   displaySmartSearchConfigValue,
   resolveSmartSearchConfigPath,
@@ -19,6 +22,7 @@ const theme = {
   fg: (_role: string, text: string) => text,
   bold: (text: string) => text,
 };
+const require = createRequire(import.meta.url);
 
 test("Smart Search path honors override and Windows legacy fallback", () => {
   const overridden = resolveSmartSearchConfigPath({
@@ -55,6 +59,22 @@ test("Smart Search store atomically preserves unknown keys and masks secrets", a
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Smart Search provider groups cover every repository config key exactly once", async () => {
+  const grouped = SMART_SEARCH_CONFIG_GROUPS.flatMap((group) => [...group.keys]);
+  assert.equal(new Set(grouped).size, grouped.length);
+  assert.deepEqual(grouped, [...SMART_SEARCH_CONFIG_KEYS]);
+  const packageRoot = dirname(require.resolve("@konbakuyomu/smart-search/package.json"));
+  const configSource = await readFile(join(packageRoot, "src", "smart_search", "config.py"), "utf8");
+  const configBlock = /_CONFIG_KEYS\s*=\s*\{(?<body>[\s\S]*?)\n\s*\}/.exec(configSource)?.groups?.body;
+  assert.ok(configBlock, "Smart Search _CONFIG_KEYS block must be readable");
+  const repositoryKeys = [...configBlock.matchAll(/"([A-Z][A-Z0-9_]+)"/g)].map((match) => match[1]).sort();
+  assert.deepEqual([...grouped].sort(), repositoryKeys);
+  assert.deepEqual(
+    SMART_SEARCH_CONFIG_GROUPS.map((group) => group.id),
+    ["xai", "openai-compatible", "search-policy", "intent-router", "exa", "context7", "zhipu", "zhipu-mcp", "jina", "tavily", "firecrawl", "anysearch", "runtime"],
+  );
 });
 
 test("Smart Search TUI uses nested Esc semantics, saves edits, and stays width-safe", async () => {
@@ -140,6 +160,91 @@ test("Smart Search TUI decodes bracketed paste and Ctrl+U unsets secret keys", a
   assert.deepEqual(saved[1], { XAI_MODEL: "grok 4" });
 });
 
+test("Smart Search TUI filters provider keys and saves Context7 configuration", async () => {
+  const saved: Array<Record<string, unknown | undefined>> = [];
+  const store = createStore({}, async (patch) => {
+    saved.push(patch);
+    return { ...patch };
+  });
+  let closed = 0;
+  const overlay = new SmartSearchConfigOverlay({
+    config: {},
+    store,
+    theme,
+    requestRender() {},
+    close() { closed++; },
+  });
+
+  overlay.handleInput("context7");
+  const filtered = overlay.render(100).join("\n");
+  assert.match(filtered, /Filter: context7 · 3\/61/);
+  assert.match(filtered, /CONTEXT7_API_KEY/);
+  assert.match(filtered, /CONTEXT7_BASE_URL/);
+  assert.match(filtered, /CONTEXT7_TIMEOUT_SECONDS/);
+  assert.doesNotMatch(filtered, /XAI_API_KEY/);
+
+  overlay.handleInput("\r");
+  overlay.handleInput("ctx7-secret");
+  overlay.handleInput("\r");
+  await flushAsync();
+  assert.deepEqual(saved, [{ CONTEXT7_API_KEY: "ctx7-secret" }]);
+  assert.match(overlay.render(100).join("\n"), /Saved · CONTEXT7_API_KEY/);
+
+  overlay.handleInput("\x1b");
+  await flushInput();
+  assert.equal(closed, 0);
+  assert.match(overlay.render(100).join("\n"), /Filter: all keys · 61\/61/);
+  overlay.handleInput("\x1b");
+  await flushInput();
+  assert.equal(closed, 1);
+});
+
+test("Smart Search TUI supports paging and safe no-match filters", async () => {
+  const overlay = new SmartSearchConfigOverlay({
+    config: {},
+    store: createStore({}, async (patch) => patch),
+    theme,
+    requestRender() {},
+    close() {},
+  });
+
+  overlay.handleInput("\x1b[6~");
+  assert.doesNotMatch(overlay.render(100).join("\n"), /› XAI_API_URL/);
+  overlay.handleInput("\x1b[F");
+  assert.match(overlay.render(100).join("\n"), /› \[Runtime\] SSL_VERIFY/);
+
+  overlay.handleInput("definitely-missing-provider");
+  assert.match(overlay.render(100).join("\n"), /No matching configuration keys/);
+  overlay.handleInput("\r");
+  assert.match(overlay.render(100).join("\n"), /No matching configuration key/);
+});
+
+test("Smart Search TUI exposes and saves a representative key from every provider group", async () => {
+  const saved: Array<Record<string, unknown | undefined>> = [];
+  const store = createStore({}, async (patch) => {
+    saved.push(patch);
+    return { ...patch };
+  });
+
+  for (const group of SMART_SEARCH_CONFIG_GROUPS) {
+    const key = group.keys[0];
+    const overlay = new SmartSearchConfigOverlay({
+      config: {},
+      store,
+      theme,
+      initialKey: key,
+      requestRender() {},
+      close() {},
+    });
+    assert.match(overlay.render(120).join("\n"), new RegExp(`\\[${escapeRegex(group.label)}\\].*${key}`));
+    overlay.handleInput("\r");
+    overlay.handleInput(`value-${group.id}`);
+    overlay.handleInput("\r");
+    await flushAsync();
+    assert.deepEqual(saved.at(-1), { [key]: `value-${group.id}` });
+  }
+});
+
 test("Smart Search TUI keeps failed secret edit context without exposing the value", async () => {
   const attempts: string[] = [];
   const store = createStore({ XAI_API_KEY: "old-secret" }, async (patch) => {
@@ -181,4 +286,8 @@ async function flushAsync(): Promise<void> {
 
 async function flushInput(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 20));
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

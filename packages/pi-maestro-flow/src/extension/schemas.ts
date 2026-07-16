@@ -102,24 +102,18 @@ export const MaestroParams = Type.Object({
 
 // === Goal Tool Schema ===
 
+// Keep the function schema rooted at an object. Some OpenAI-compatible
+// providers reject a root-level anyOf even when every union variant is an
+// object. Action-specific requirements are enforced by executeGoal().
 export const GoalToolParams = Type.Object({
-  action: StringEnum(["set", "done", "pause", "clear"]),
+  action: StringEnum(["get", "create"]),
   objective: Type.Optional(
-    Type.String({
-      description: "Goal objective (for 'set'). Omit with 'set' to show status or resume a paused goal.",
-    }),
+    Type.String({ description: "Goal objective; required when action is 'create'" }),
   ),
   tokenBudget: Type.Optional(
-    Type.String({
-      description: "Token budget with k/m suffix, e.g. '100k' or '1.5m' (for 'set')",
-    }),
+    Type.String({ description: "Optional explicit Token budget; omit for no budget. Accepts plain, k, or m values, e.g. '100000', '100k', or '1.5m'; create only" }),
   ),
-  summary: Type.Optional(
-    Type.String({
-      description: "Completion summary (required for 'done') — an independent verifier agent will check this claim.",
-    }),
-  ),
-});
+}, { additionalProperties: false });
 
 // === Ask User Question Schema ===
 

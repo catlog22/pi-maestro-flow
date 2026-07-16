@@ -110,17 +110,23 @@ test("statusline renders context pressure across full compact and narrow widths"
     harness.statuses.set("maestro-auto-compact", "CTX AUTO-PRUNE 82000/90000 -3");
     assert.equal(harness.render(120).length, 2);
     assert.match(stripAnsi(harness.render(120)[1]), /CTX AUTO-PRUNE 82000\/90000 -3/);
-    assert.match(stripAnsi(harness.render(70)[1]), /PRUNE -3/);
-    assert.match(stripAnsi(harness.render(36)[0]), /P!/);
-    assert.equal(harness.render(36).length, 1);
+    assert.match(stripAnsi(harness.render(70)[1]), /CTX PRUNE -3/);
+    assert.match(stripAnsi(harness.render(36)[1]), /CTX PRUNE -3/);
+    assert.equal(harness.render(36).length, 2);
+    assert.doesNotMatch(stripAnsi(harness.render(36)[0]), /CTX PRUNE/);
 
     harness.statuses.set("maestro-auto-compact", "CTX CRITICAL 91000/90000");
     assert.match(stripAnsi(harness.render(120)[1]), /CTX CRITICAL 91000\/90000/);
-    assert.match(stripAnsi(harness.render(36)[0]), /C!/);
+    assert.match(stripAnsi(harness.render(36)[1]), /CTX CRITICAL/);
 
     harness.statuses.set("maestro-auto-compact", "COMPACT 91000/90000");
     assert.match(stripAnsi(harness.render(120)[1]), /CTX COMPACT 91000\/90000/);
-    assert.match(stripAnsi(harness.render(36)[0]), /C\*/);
+    assert.match(stripAnsi(harness.render(36)[1]), /CTX COMPACT/);
+    for (let width = 1; width <= 120; width++) {
+      for (const line of harness.render(width)) {
+        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+      }
+    }
 
     harness.statuses.delete("maestro-auto-compact");
     assert.equal(harness.render(120).length, 1);

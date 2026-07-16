@@ -157,6 +157,23 @@ Legacy alias override.
   }
 });
 
+test("goal verifier is a bundled read-only role with objective-scoped checks", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-goal-verifier-"));
+  try {
+    const verifier = resolveAgent(project, "goal-verifier");
+    assert.equal(verifier?.source, "builtin");
+    assert.deepEqual(verifier?.tools, ["read", "grep", "find", "ls", "bash"]);
+    assert.equal(verifier?.systemPromptMode, "replace");
+    assert.equal(verifier?.inheritProjectContext, false);
+    assert.equal(verifier?.inheritSkills, false);
+    assert.match(verifier?.systemPrompt ?? "", /broad unit-test suite/i);
+    assert.match(verifier?.systemPrompt ?? "", /structured_output.*mandatory/i);
+    assert.match(verifier?.systemPrompt ?? "", /missing evidence.*pass=false/i);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
 test("agent catalog replacement refreshes discovered roles without duplication", () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-refresh-"));
   const agentsDir = path.join(project, ".pi", "agents");

@@ -179,8 +179,9 @@ test("compaction recovery fetches the Run brief before continuation without dupl
   let hasPendingMessages = false;
   initGoal({
     appendEntry() {},
-    async sendUserMessage(message: string) {
-      assert.match(message, /^Continue the active goal:/);
+    sendMessage(message: { content: string; display: boolean }) {
+      assert.match(message.content, /^Continue the active goal:/);
+      assert.equal(message.display, false);
       events.push("continuation");
     },
   } as never);
@@ -192,7 +193,7 @@ test("compaction recovery fetches the Run brief before continuation without dupl
     hasPendingMessages: () => hasPendingMessages,
   };
   onGoalSessionStart(goalContext);
-  await executeGoal({ action: "set", objective: "Recover the active Run" }, goalContext);
+  await executeGoal({ action: "create", objective: "Recover the active Run" }, goalContext);
   const snapshot = recoverySnapshot();
   setWorkflowCoordinator({
     status: () => snapshot,
@@ -201,6 +202,7 @@ test("compaction recovery fetches the Run brief before continuation without dupl
       return {};
     },
     continuationMarker: () => "workflow-session-1:run-003:1:1",
+    acceptsContinuation: () => true,
   } as never);
 
   try {

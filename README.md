@@ -41,8 +41,8 @@
 │  │  (Extension Package)  │◄──►│  (Core Dispatch Engine)      │    │
 │  │                       │    │                              │    │
 │  │  • maestro tool       │    │  • teammate tool             │    │
-│  │  • maestro-wait       │    │  • DAG task graphs           │    │
-│  │  • maestro-status     │    │  • RPC subprocess messaging  │    │
+│  │  • goal lifecycle     │    │  • DAG task graphs           │    │
+│  │  • todo projection    │    │  • RPC subprocess messaging  │    │
 │  │  • explore/delegate/  │    │  • P0 three-axis control     │    │
 │  │    moa actions        │    │    (name × reply_to ×        │    │
 │  │                       │    │     lifecycle)               │    │
@@ -65,7 +65,7 @@
 | Package | npm | Role |
 |---------|-----|------|
 | **pi-maestro-teammate** | [`pi-maestro-teammate`](https://www.npmjs.com/package/pi-maestro-teammate) | Core dispatch engine — `teammate` tool, RPC subprocess model, DAG graphs, TUI widgets |
-| **pi-maestro-flow** | [`pi-maestro-flow`](https://www.npmjs.com/package/pi-maestro-flow) | Maestro tools (`explore` / `delegate` / `moa`), 104 skills, knowledge system bridge |
+| **pi-maestro-flow** | [`pi-maestro-flow`](https://www.npmjs.com/package/pi-maestro-flow) | Maestro tools (`explore` / `delegate` / `moa`), Goal/Todo lifecycle, 104 skills, knowledge system bridge |
 
 ---
 
@@ -236,6 +236,37 @@ maestro({
 })
 // Runs analysis across multiple models, then synthesizes into a unified report
 ```
+
+### `goal` — Long-Running Objective Lifecycle
+
+The model-facing tool intentionally exposes only two actions:
+
+```javascript
+goal({ action: "create", objective: "Implement JWT authentication" })
+goal({ action: "create", objective: "Implement JWT authentication", tokenBudget: "100k" }) // explicit budget
+goal({ action: "get" })
+```
+
+Users own lifecycle transitions:
+
+```text
+/goal stop
+/goal resume
+/goal resume --tokens 200k
+/goal clear
+```
+
+A normal `agent_end` means the complete agent loop has stopped and automatically triggers independent verification. `turn_end` does not verify, and `session_shutdown` only persists state. A `pass` verdict completes and clears the Goal; `fail` starts the next loop with unmet requirements; `inconclusive` holds the active Goal until the user runs `/goal resume`.
+
+The Goal function schema uses one root `type: "object"` for OpenAI-compatible provider support. `objective` is conditionally required by the execution layer for `create`. `tokenBudget` is absent by default and must be supplied explicitly; `/goal` argument completion exposes ready-to-edit `--tokens 100k` hints.
+
+While a Goal exists, a width-aware `goal-panel` is rendered directly above the input editor. It follows `ACTIVE`, `WAITING`, `VERIFYING`, `VERIFIED`, `STOPPED`, `BUDGET`, `BLOCKED`, and `ERROR` transitions, and shows the objective, elapsed time, loop count, and an explicitly configured Token budget when space permits. Unbudgeted Goals do not show Token budget metrics. Narrow terminals degrade to one explicit text line rather than relying on color alone.
+
+Goal ownership is session-scoped. `/new` and `/fork` never inherit the previous session's Goal; `/resume` restores only a Goal whose persisted `sessionId` matches. A restored or inconclusive Goal enters `WAITING`: ordinary user prompts do not become Goal loops and do not trigger its verifier. Only `goal create`, `/goal create`, `/goal resume`, or an internal Goal continuation acquires the next agent loop.
+
+New and forked Pi sessions also do not automatically acquire a running canonical Workflow lease or recreate its projected Goal. Use the `/maestro-session` control center and choose Resume when that handoff is intentional.
+
+`session_start(reason: "startup")` is not treated as proof of restoration. A Pi restart restores Goal/Workflow ownership only when the current sessionId has its own persisted Goal entry; a pre-existing running Workflow in the same directory is otherwise kept as a read-only baseline.
 
 ---
 

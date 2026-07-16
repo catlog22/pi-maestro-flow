@@ -38,69 +38,117 @@ export interface SmartSearchConfigStoreOptions extends SmartSearchConfigPathOpti
 
 const DEFAULT_IO: SmartSearchConfigStoreIO = { mkdir, readFile, writeFile, rename, unlink };
 
-export const SMART_SEARCH_CONFIG_KEYS = [
-  "XAI_API_URL",
-  "XAI_API_KEY",
-  "XAI_MODEL",
-  "XAI_TOOLS",
-  "OPENAI_COMPATIBLE_API_URL",
-  "OPENAI_COMPATIBLE_API_KEY",
-  "OPENAI_COMPATIBLE_MODEL",
-  "OPENAI_COMPATIBLE_FALLBACK_MODELS",
-  "OPENAI_COMPATIBLE_STREAM",
-  "SMART_SEARCH_VALIDATION_LEVEL",
-  "SMART_SEARCH_FALLBACK_MODE",
-  "SMART_SEARCH_MINIMUM_PROFILE",
-  "SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS",
-  "SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS",
-  "SMART_SEARCH_INTENT_ROUTER",
-  "INTENT_EMBEDDING_API_URL",
-  "INTENT_EMBEDDING_API_KEY",
-  "INTENT_EMBEDDING_MODEL",
-  "INTENT_EMBEDDING_THRESHOLD",
-  "INTENT_EMBEDDING_MARGIN",
-  "INTENT_CLASSIFIER_API_URL",
-  "INTENT_CLASSIFIER_API_KEY",
-  "INTENT_CLASSIFIER_MODEL",
-  "INTENT_ROUTER_TIMEOUT_SECONDS",
-  "EXA_API_KEY",
-  "EXA_BASE_URL",
-  "EXA_TIMEOUT_SECONDS",
-  "CONTEXT7_API_KEY",
-  "CONTEXT7_BASE_URL",
-  "CONTEXT7_TIMEOUT_SECONDS",
-  "ZHIPU_API_KEY",
-  "ZHIPU_API_URL",
-  "ZHIPU_SEARCH_ENGINE",
-  "ZHIPU_TIMEOUT_SECONDS",
-  "ZHIPU_MCP_API_KEY",
-  "ZHIPU_MCP_SEARCH_API_URL",
-  "ZHIPU_MCP_READER_API_URL",
-  "ZHIPU_MCP_ZREAD_API_URL",
-  "ZHIPU_MCP_TIMEOUT_SECONDS",
-  "JINA_API_KEY",
-  "JINA_READER_API_URL",
-  "JINA_RESPOND_WITH",
-  "JINA_TIMEOUT_SECONDS",
-  "TAVILY_API_KEY",
-  "TAVILY_API_URL",
-  "TAVILY_ENABLED",
-  "TAVILY_TIMEOUT_SECONDS",
-  "FIRECRAWL_API_KEY",
-  "FIRECRAWL_API_URL",
-  "ANYSEARCH_API_KEY",
-  "ANYSEARCH_API_URL",
-  "ANYSEARCH_TIMEOUT_SECONDS",
-  "SMART_SEARCH_DEBUG",
-  "SMART_SEARCH_LOG_LEVEL",
-  "SMART_SEARCH_LOG_DIR",
-  "SMART_SEARCH_RETRY_MAX_ATTEMPTS",
-  "SMART_SEARCH_RETRY_MULTIPLIER",
-  "SMART_SEARCH_RETRY_MAX_WAIT",
-  "SMART_SEARCH_OUTPUT_CLEANUP",
-  "SMART_SEARCH_LOG_TO_FILE",
-  "SSL_VERIFY",
-] as const;
+export interface SmartSearchConfigGroup {
+  id: string;
+  label: string;
+  capability: string;
+  aliases: readonly string[];
+  keys: readonly string[];
+}
+
+export const SMART_SEARCH_CONFIG_GROUPS = [
+  {
+    id: "xai",
+    label: "xAI Responses",
+    capability: "main_search",
+    aliases: ["grok", "primary search"],
+    keys: ["XAI_API_URL", "XAI_API_KEY", "XAI_MODEL", "XAI_TOOLS"],
+  },
+  {
+    id: "openai-compatible",
+    label: "OpenAI Compatible",
+    capability: "main_search",
+    aliases: ["openai", "relay", "primary search"],
+    keys: ["OPENAI_COMPATIBLE_API_URL", "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_MODEL", "OPENAI_COMPATIBLE_FALLBACK_MODELS", "OPENAI_COMPATIBLE_STREAM"],
+  },
+  {
+    id: "search-policy",
+    label: "Search Policy",
+    capability: "routing",
+    aliases: ["validation", "fallback", "research providers"],
+    keys: ["SMART_SEARCH_VALIDATION_LEVEL", "SMART_SEARCH_FALLBACK_MODE", "SMART_SEARCH_MINIMUM_PROFILE", "SMART_SEARCH_RESEARCH_PREFERRED_PROVIDERS", "SMART_SEARCH_RESEARCH_DISABLED_PROVIDERS"],
+  },
+  {
+    id: "intent-router",
+    label: "Intent Router",
+    capability: "routing",
+    aliases: ["embedding", "classifier", "semantic route"],
+    keys: ["SMART_SEARCH_INTENT_ROUTER", "INTENT_EMBEDDING_API_URL", "INTENT_EMBEDDING_API_KEY", "INTENT_EMBEDDING_MODEL", "INTENT_EMBEDDING_THRESHOLD", "INTENT_EMBEDDING_MARGIN", "INTENT_CLASSIFIER_API_URL", "INTENT_CLASSIFIER_API_KEY", "INTENT_CLASSIFIER_MODEL", "INTENT_ROUTER_TIMEOUT_SECONDS"],
+  },
+  {
+    id: "exa",
+    label: "Exa",
+    capability: "docs_search",
+    aliases: ["docs", "papers", "official sources"],
+    keys: ["EXA_API_KEY", "EXA_BASE_URL", "EXA_TIMEOUT_SECONDS"],
+  },
+  {
+    id: "context7",
+    label: "Context7",
+    capability: "docs_search",
+    aliases: ["docs", "library", "api docs"],
+    keys: ["CONTEXT7_API_KEY", "CONTEXT7_BASE_URL", "CONTEXT7_TIMEOUT_SECONDS"],
+  },
+  {
+    id: "zhipu",
+    label: "Zhipu Web Search",
+    capability: "web_search",
+    aliases: ["智谱", "中文搜索", "current search"],
+    keys: ["ZHIPU_API_KEY", "ZHIPU_API_URL", "ZHIPU_SEARCH_ENGINE", "ZHIPU_TIMEOUT_SECONDS"],
+  },
+  {
+    id: "zhipu-mcp",
+    label: "Zhipu Coding Plan MCP",
+    capability: "web_search web_fetch repo_docs",
+    aliases: ["智谱 MCP", "webReader", "zread"],
+    keys: ["ZHIPU_MCP_API_KEY", "ZHIPU_MCP_SEARCH_API_URL", "ZHIPU_MCP_READER_API_URL", "ZHIPU_MCP_ZREAD_API_URL", "ZHIPU_MCP_TIMEOUT_SECONDS"],
+  },
+  {
+    id: "jina",
+    label: "Jina Reader",
+    capability: "web_fetch",
+    aliases: ["reader", "page extraction"],
+    keys: ["JINA_API_KEY", "JINA_READER_API_URL", "JINA_RESPOND_WITH", "JINA_TIMEOUT_SECONDS"],
+  },
+  {
+    id: "tavily",
+    label: "Tavily",
+    capability: "web_fetch web_search",
+    aliases: ["fetch", "discovery"],
+    keys: ["TAVILY_API_KEY", "TAVILY_API_URL", "TAVILY_ENABLED", "TAVILY_TIMEOUT_SECONDS"],
+  },
+  {
+    id: "firecrawl",
+    label: "Firecrawl",
+    capability: "web_fetch web_search",
+    aliases: ["crawl", "fetch"],
+    keys: ["FIRECRAWL_API_KEY", "FIRECRAWL_API_URL"],
+  },
+  {
+    id: "anysearch",
+    label: "AnySearch",
+    capability: "vertical_search",
+    aliases: ["vertical", "experimental"],
+    keys: ["ANYSEARCH_API_KEY", "ANYSEARCH_API_URL", "ANYSEARCH_TIMEOUT_SECONDS"],
+  },
+  {
+    id: "runtime",
+    label: "Runtime",
+    capability: "runtime",
+    aliases: ["debug", "logging", "retry", "ssl"],
+    keys: ["SMART_SEARCH_DEBUG", "SMART_SEARCH_LOG_LEVEL", "SMART_SEARCH_LOG_DIR", "SMART_SEARCH_RETRY_MAX_ATTEMPTS", "SMART_SEARCH_RETRY_MULTIPLIER", "SMART_SEARCH_RETRY_MAX_WAIT", "SMART_SEARCH_OUTPUT_CLEANUP", "SMART_SEARCH_LOG_TO_FILE", "SSL_VERIFY"],
+  },
+] as const satisfies readonly SmartSearchConfigGroup[];
+
+export const SMART_SEARCH_CONFIG_KEYS: readonly string[] = SMART_SEARCH_CONFIG_GROUPS.flatMap((group) => group.keys);
+
+const SMART_SEARCH_CONFIG_GROUP_BY_KEY: ReadonlyMap<string, SmartSearchConfigGroup> = new Map<string, SmartSearchConfigGroup>(
+  SMART_SEARCH_CONFIG_GROUPS.flatMap((group) => group.keys.map((key) => [key, group] as const)),
+);
+
+export function smartSearchConfigGroupForKey(key: string): SmartSearchConfigGroup | undefined {
+  return SMART_SEARCH_CONFIG_GROUP_BY_KEY.get(key);
+}
 
 export function resolveSmartSearchConfigPath(options: SmartSearchConfigPathOptions = {}): SmartSearchConfigPath {
   const env = options.env ?? process.env;

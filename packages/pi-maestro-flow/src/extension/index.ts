@@ -3,7 +3,7 @@
  *
  * Registers tools:
  *   - maestro: Main tool with action-based dispatch (explore, delegate, moa)
- *   - goal: Autonomous goal management (set/done/pause/clear) with independent verifier
+ *   - goal: Autonomous Goal read/create surface with automatic loop-end verification
  *   - ask-user-question: Structured questionnaire for user input
  *   - todo: Task management with plain context, optional skills, and step tracking
  *   - lsp: Language-server diagnostics, navigation, refactors, and raw requests
@@ -41,6 +41,7 @@ import {
   initGoal,
   registerGoalCommand,
   executeGoal,
+  executeGoalCommand,
   onSessionStart as goalSessionStart,
   onSessionShutdown as goalSessionShutdown,
   onBeforeCompact as goalBeforeCompact,
@@ -80,7 +81,12 @@ import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
 import { deriveWorkflowViewModel, type WorkflowSnapshotLike } from "../session/view-model.ts";
 import { createRunEventComponent, type RunEventDetails } from "../session/run-event.ts";
 import { executeRunControl, RunControlParams, type RunControlInput } from "../tools/run-control.ts";
-import { nextMaestroPanelMode, renderMaestroPanel, type MaestroPanelMode } from "../tui/maestro-panel.ts";
+import {
+  nextMaestroPanelMode,
+  renderMaestroPanel,
+  shouldShowMaestroPanel,
+  type MaestroPanelMode,
+} from "../tui/maestro-panel.ts";
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
 import {
   initPlan,
@@ -104,6 +110,7 @@ import { PERMISSION_MODES, type PermissionMode } from "../permissions/types.ts";
 import {
   createMaestroCompaction,
   persistMaestroCompactionKnowhow,
+  runWithCompactionStatus,
   type WorkflowRecoveryIdentity,
 } from "../compaction/maestro-compaction.ts";
 import { createMidTurnAutoCompaction } from "../compaction/auto-compaction.ts";
@@ -152,7 +159,28 @@ function singleLine(text: string): Component {
   };
 }
 
+function textBlock(text: string): Component {
+  return {
+    render: (width: number) => text
+      .split("\n")
+      .map((line) => truncateToWidth(line, Math.max(1, width), "…")),
+    invalidate() {},
+  };
+}
+
+export function shouldRestoreWorkflowGoal(
+  reason: "startup" | "reload" | "new" | "resume" | "fork" | undefined,
+  hasSessionGoal: boolean,
+): boolean {
+  return reason !== "new" && reason !== "fork" && hasSessionGoal;
+}
+
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
+  if (process.env.PI_TEAMMATE_CHILD === "1") {
+    registerMaestroChildSurface(pi);
+    return;
+  }
+
   // Teammates run in separate Pi processes. Explicitly inherit this extension
   // so permission hooks and ask-user-question remain available in child mode.
   registerTeammateChildExtension(fileURLToPath(import.meta.url), {
@@ -167,6 +195,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let workflowBridge: WorkflowBridge | undefined;
   let workflowCoordinator: WorkflowCoordinator | undefined;
   let lastRunStates = new Map<string, string>();
+  let workflowSessionOptedIn = true;
+  let workflowBaselineEstablished = false;
 
   // Register dynamic providers from cli-tools.json
   try {
@@ -285,19 +315,20 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const goalTool: ToolDefinition<typeof GoalToolParams> = {
     name: "goal",
     label: "Goal",
-    description: `Autonomous goal management — 4 actions. Both users (/goal) and LLM can call this.
+    description: `Read or create an autonomous Goal. Lifecycle control belongs to the user through /goal commands.
 
-- set: Create/update/resume goal. { action: "set", objective: "...", tokenBudget: "100k" }
-  Omit objective to show status or resume a paused goal.
-- done: Mark complete — spawns independent verifier. { action: "done", summary: "..." }
-- pause: Toggle pause/resume. { action: "pause" }
-- clear: Abandon goal. { action: "clear" }`,
+- get: Read the current Goal state. { action: "get" }
+- create: Create a new Goal without a budget by default. { action: "create", objective: "..." }
+- optional budget: Include tokenBudget only when the user explicitly requests one. { action: "create", objective: "...", tokenBudget: "100k" }
 
-    promptSnippet: "Manage autonomous goals — set, done (with independent verification), pause, clear",
+When the agent loop ends naturally, the extension verifies completion automatically. The model cannot stop, resume, clear, update, or mark a Goal done.`,
+
+    promptSnippet: "Read the active Goal or create a new autonomous Goal; completion is verified automatically",
     promptGuidelines: [
       "When a goal is active, keep working until it is complete; do not stop with only a plan or partial progress.",
-      "Before calling goal with action 'done', audit the goal requirement by requirement against current files, command output, tests, or external state.",
-      "An independent verifier agent will check your completion claim — only mark done when all requirements are verifiably met.",
+      "Use goal get to inspect state. Use goal create only when no Goal exists.",
+      "Omit tokenBudget by default. Set it only when the user explicitly requests a Token budget.",
+      "Do not attempt to stop, resume, clear, update, or mark a Goal done; those transitions are user- or verifier-owned.",
     ],
 
     parameters: GoalToolParams,
@@ -313,89 +344,39 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
       return {
         content: [{ type: "text", text: result.text }],
         isError: result.isError,
-        ...(result.terminate ? { terminate: true } : {}),
       };
     },
 
     renderCall(args, theme) {
       const action = (args.action as string) ?? "?";
       let detail = "";
-      if (action === "set") {
+      if (action === "create") {
         const obj = (args.objective as string) ?? "";
         detail = obj ? ` ${obj.slice(0, 40)}${obj.length > 40 ? "…" : ""}` : "";
-      } else if (action === "done") {
-        const sum = (args.summary as string) ?? "";
-        detail = sum ? ` ${sum.slice(0, 40)}${sum.length > 40 ? "…" : ""}` : "";
       }
       return singleLine(`${theme.fg("toolTitle", theme.bold("goal "))}${action}${detail}`);
+    },
+
+    renderResult(result, options, theme) {
+      const block = result.content.find((item) => item.type === "text");
+      const text = block && "text" in block ? block.text : "Goal action completed.";
+      if (options.expanded) return textBlock(text);
+
+      const isError = (result as { isError?: boolean }).isError === true;
+      let label: string;
+      if (/^Goal started:/.test(text)) label = "goal created";
+      else if (/^A Goal already exists/.test(text)) label = "goal already exists";
+      else if (/^No goal set\./.test(text)) label = "no goal";
+      else label = "goal status updated";
+      const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
+      return singleLine(`${icon} ${label}${text.includes("\n") ? theme.fg("dim", " · Alt+R details") : ""}`);
     },
   };
 
   pi.registerTool(goalTool);
 
   // === Ask User Question Tool ===
-  const askTool: ToolDefinition<typeof AskUserQuestionParams> = {
-    name: "ask-user-question",
-    label: "Ask User",
-    description: `Collect structured user answers through a keyboard-first TUI wizard.
-
-- Single question: { questions: [{ question: "Which approach?", options: [{label: "A"}, {label: "B"}] }] }
-- Multiple questions: up to 4 questions in one call
-- Multi-select: { questions: [{ question: "Which features?", multiSelect: true, options: [...] }] }
-- Open-ended: { questions: [{ question: "What should the name be?" }] }
-
-The tool returns structured answers only. Plan mode owns proposed-plan Markdown; /plan approve is the explicit confirmation command.`,
-
-    parameters: AskUserQuestionParams,
-
-    async execute(
-      _id: string,
-      params: Record<string, unknown>,
-      _signal: AbortSignal,
-      _onUpdate: ((result: AgentToolResult) => void) | undefined,
-      ctx: ExtensionContext,
-    ): Promise<AgentToolResult> {
-      return executeAsk(params as unknown as AskParams, ctx);
-    },
-
-    renderCall(args, theme) {
-      const qs = args.questions as unknown[] | undefined;
-      const count = qs?.length ?? 0;
-      return singleLine(
-        `${theme.fg("toolTitle", theme.bold("ask "))}${count} question${count !== 1 ? "s" : ""}`,
-      );
-    },
-
-    renderResult(result, opts, theme) {
-      const details = result.details as AskResultDetails | undefined;
-      if (details?.cancelled) {
-        return singleLine(theme.fg("warning", "! Questionnaire cancelled"));
-      }
-      if ((result as { isError?: boolean }).isError || !details) {
-        const text = result.content[0];
-        const fallback = text && "text" in text ? text.text : "Questionnaire failed.";
-        return singleLine(theme.fg("error", `✗ ${fallback}`));
-      }
-      const count = details.answers.length;
-      const header = `${theme.fg("success", "✓")} Collected ${count} answer${count === 1 ? "" : "s"}`;
-      const answerLines = details.answers.map((answer, index) => {
-        const value = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(" — ") || "No answer";
-        return `${index + 1}. ${answer.question} → ${value}`;
-      });
-      return {
-        render(width: number): string[] {
-          const safeWidth = Math.max(1, width);
-          const lines = opts.expanded
-            ? [header, ...answerLines]
-            : [answerLines[0] ? `${header} · ${answerLines[0]}` : header];
-          return lines.map((line) => truncateToWidth(line, safeWidth, "…"));
-        },
-        invalidate() {},
-      };
-    },
-  };
-
-  pi.registerTool(askTool);
+  registerAskUserQuestionTool(pi);
 
   // === Todo Tool ===
   initTodo(pi);
@@ -537,6 +518,7 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
   const permissionController = createPermissionController({
     async setMode(mode, ctx) {
       if (mode === "plan" && !isPlanMode()) await planToggleMode(ctx);
+      if (mode !== "plan" && isPlanMode()) await planToggleMode(ctx);
       approvalMode = mode;
       syncApprovalModeStatus(ctx, approvalMode);
     },
@@ -550,10 +532,8 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
           ctx.ui.notify("YOLO mode is disabled by permissions.disableBypassPermissionsMode.", "warning");
           return;
         }
-        if (isPlanMode()) await planToggleMode(ctx);
-        approvalMode = "bypassPermissions";
-        syncApprovalModeStatus(ctx, approvalMode);
-        ctx.ui.notify("Approval mode: YOLO (all permission checks bypassed)", "warning");
+        await permissionController.setDefaultMode(ctx, "bypassPermissions");
+        ctx.ui.notify("Approval mode: YOLO (saved as the project default)", "warning");
         return;
       }
       if (action === "reload") {
@@ -576,12 +556,8 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
         : new Set<PermissionMode>();
       const next = nextApprovalMode(current, disabled);
 
-      if (next === "plan" && !isPlanMode()) await planToggleMode(ctx);
-      if (next !== "plan" && isPlanMode()) await planToggleMode(ctx);
-
-      approvalMode = next;
-      syncApprovalModeStatus(ctx, approvalMode);
-      ctx.ui.notify(`Approval mode: ${next}`, "info");
+      await permissionController.setDefaultMode(ctx, next);
+      ctx.ui.notify(`Approval mode: ${next} (saved as the project default)`, "info");
     },
   });
 
@@ -637,10 +613,19 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
 
   async function refreshWorkflow(ctx: ExtensionContext, emitEvents = false): Promise<WorkflowSnapshot | undefined> {
     if (!workflowBridge) return undefined;
+    const previous = workflowBridge.getSnapshot();
     const next = await workflowBridge.refresh();
+    if (workflowBaselineEstablished
+      && !workflowSessionOptedIn
+      && emitEvents
+      && next.session?.status === "running"
+      && (previous?.session?.sessionId !== next.session.sessionId || previous.session.status !== "running")) {
+      workflowSessionOptedIn = true;
+    }
+    workflowBaselineEstablished = true;
     if (next.session) {
       reconcileMirrorTasks(buildTodoMirrorSpecs(next), ctx);
-      reconcileWorkflowGoal(next, ctx);
+      if (workflowSessionOptedIn) reconcileWorkflowGoal(next, ctx);
     }
     if (emitEvents) emitRunTransitions(next);
     else lastRunStates = new Map(next.session?.runs.map((run) => [run.runId, run.status]) ?? []);
@@ -692,10 +677,21 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
             if (planBlock) throw new Error(planBlock.reason);
           }
           if (action === "pause" || action === "resume") {
+            if (action === "resume" && !workflowSessionOptedIn) {
+              workflowSessionOptedIn = true;
+              const snapshot = workflowBridge?.getSnapshot();
+              if (snapshot?.session?.status === "running") {
+                const hostSessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.()
+                  ?? `pi-${process.pid}`;
+                await workflowCoordinator!.attach(hostSessionId, snapshot.session.sessionId);
+                reconcileWorkflowGoal(snapshot, ctx);
+              }
+            }
             const goal = getActiveGoal();
-            if ((action === "pause" && goal?.status === "active") || (action === "resume" && goal?.status === "paused")) {
+            if ((action === "pause" && goal?.status === "active")
+              || (action === "resume" && (goal?.status === "paused" || goal?.status === "active"))) {
               if (action === "pause") await workflowCoordinator!.fenceContinuation();
-              const result = await executeGoal({ action: "pause" }, ctx);
+              const result = await executeGoalCommand({ action: action === "pause" ? "stop" : "resume" }, ctx);
               if (result.isError) throw new Error(result.text);
             }
           } else if (action === "brief") {
@@ -741,6 +737,10 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
       widgetCtx.ui.setWidget("todo-panel", undefined);
       return;
     }
+    if (view && !shouldShowMaestroPanel(view, panelMode)) {
+      widgetCtx.ui.setWidget("todo-panel", undefined);
+      return;
+    }
     widgetCtx.ui.setWidget("todo-panel", () => ({
       render(width: number): string[] {
         return view
@@ -765,11 +765,13 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
   });
 
   // === Session lifecycle ===
-  pi.on("session_start", async (_event, ctx) => {
+  pi.on("session_start", async (event, ctx) => {
     state.baseCwd = ctx.cwd;
     widgetCtx = ctx;
     panelMode = "collapsed";
-    goalSessionStart(ctx);
+    goalSessionStart(ctx, event);
+    workflowSessionOptedIn = shouldRestoreWorkflowGoal(event.reason, getActiveGoal() !== undefined);
+    workflowBaselineEstablished = false;
     todoSessionStart(ctx);
     workflowBridge = new WorkflowBridge(ctx.cwd);
     workflowCoordinator = WorkflowCoordinator.create(
@@ -817,6 +819,8 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     await workflowCoordinator?.release();
     workflowCoordinator = undefined;
     workflowBridge = undefined;
+    workflowSessionOptedIn = true;
+    workflowBaselineEstablished = false;
     lastRunStates.clear();
     setWorkflowCoordinator(undefined);
     onSessionShutdownPlan(ctx);
@@ -826,9 +830,10 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
 
   pi.on("session_before_compact", async (event, ctx) => {
     goalBeforeCompact(ctx);
-    return createMaestroCompaction(event, ctx, {
-      getWorkflowIdentity: () => workflowRecoveryIdentity(),
-    });
+    return runWithCompactionStatus(event, ctx, () =>
+      createMaestroCompaction(event, ctx, {
+        getWorkflowIdentity: () => workflowRecoveryIdentity(),
+      }));
   });
 
   pi.on("session_compact", async (event, ctx) => {
@@ -912,6 +917,87 @@ The tool returns structured answers only. Plan mode owns proposed-plan Markdown;
     hookAdapter,
   ));
   pi.on("tool_call", () => goalToolCall());
+}
+
+/**
+ * Teammate children inherit this extension for interaction and permission RPC.
+ * They must not register the root Workflow/Goal/Todo lifecycle because only the
+ * parent Pi session may own the canonical continuation lease.
+ */
+function registerMaestroChildSurface(pi: ExtensionAPI): void {
+  registerAskUserQuestionTool(pi);
+  const permissionController = createPermissionController();
+  pi.on("tool_call", (event, ctx) => {
+    // structured_output is a schema-validated, child-local termination tool.
+    // Relaying it deadlocks direct runners, which have no interaction handler.
+    if (event.toolName === "structured_output") return;
+    return permissionController.authorize(event, ctx, "default");
+  });
+}
+
+function registerAskUserQuestionTool(pi: ExtensionAPI): void {
+  const askTool: ToolDefinition<typeof AskUserQuestionParams> = {
+    name: "ask-user-question",
+    label: "Ask User",
+    description: `Collect structured user answers through a keyboard-first TUI wizard.
+
+- Single question: { questions: [{ question: "Which approach?", options: [{label: "A"}, {label: "B"}] }] }
+- Multiple questions: up to 4 questions in one call
+- Multi-select: { questions: [{ question: "Which features?", multiSelect: true, options: [...] }] }
+- Open-ended: { questions: [{ question: "What should the name be?" }] }
+
+The tool returns structured answers only. Plan mode owns proposed-plan Markdown; /plan approve is the explicit confirmation command.`,
+
+    parameters: AskUserQuestionParams,
+
+    async execute(
+      _id: string,
+      params: Record<string, unknown>,
+      _signal: AbortSignal,
+      _onUpdate: ((result: AgentToolResult) => void) | undefined,
+      ctx: ExtensionContext,
+    ): Promise<AgentToolResult> {
+      return executeAsk(params as unknown as AskParams, ctx);
+    },
+
+    renderCall(args, theme) {
+      const qs = args.questions as unknown[] | undefined;
+      const count = qs?.length ?? 0;
+      return singleLine(
+        `${theme.fg("toolTitle", theme.bold("ask "))}${count} question${count !== 1 ? "s" : ""}`,
+      );
+    },
+
+    renderResult(result, opts, theme) {
+      const details = result.details as AskResultDetails | undefined;
+      if (details?.cancelled) {
+        return singleLine(theme.fg("warning", "! Questionnaire cancelled"));
+      }
+      if ((result as { isError?: boolean }).isError || !details) {
+        const text = result.content[0];
+        const fallback = text && "text" in text ? text.text : "Questionnaire failed.";
+        return singleLine(theme.fg("error", `✗ ${fallback}`));
+      }
+      const count = details.answers.length;
+      const header = `${theme.fg("success", "✓")} Collected ${count} answer${count === 1 ? "" : "s"}`;
+      const answerLines = details.answers.map((answer, index) => {
+        const value = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(" — ") || "No answer";
+        return `${index + 1}. ${answer.question} → ${value}`;
+      });
+      return {
+        render(width: number): string[] {
+          const safeWidth = Math.max(1, width);
+          const lines = opts.expanded
+            ? [header, ...answerLines]
+            : [answerLines[0] ? `${header} · ${answerLines[0]}` : header];
+          return lines.map((line) => truncateToWidth(line, safeWidth, "…"));
+        },
+        invalidate() {},
+      };
+    },
+  };
+
+  pi.registerTool(askTool);
 }
 
 /**

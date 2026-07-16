@@ -13,6 +13,7 @@ import {
   displaySmartSearchConfigValue,
   isSmartSearchSecretKey,
   maskSmartSearchSecret,
+  smartSearchConfigGroupForKey,
   type SmartSearchConfig,
 } from "../tools/smart-search-config.ts";
 interface SmartSearchConfigTheme {
@@ -35,7 +36,7 @@ export interface SmartSearchConfigOverlayParams {
 }
 
 type OverlayMode = "list" | "edit";
-type StatusTone = "dim" | "success" | "error";
+type StatusTone = "dim" | "success" | "warning" | "error";
 
 const CTRL_U = "\x15";
 const MAX_VISIBLE_ITEMS = 10;
@@ -45,6 +46,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
   private config: SmartSearchConfig;
   private readonly keys: string[];
   private selected = 0;
+  private query = "";
   private mode: OverlayMode = "list";
   private draft = "";
   private unsetDraft = false;
@@ -80,7 +82,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
     }
 
     const inner = Math.max(1, safeWidth - 2);
-    const key = this.currentKey();
+    const key = this.currentKey() ?? "";
     const rows = [
       truncateToWidth(this.params.theme.bold("Smart Search configuration"), inner, "…"),
       this.params.theme.fg("dim", "─".repeat(inner)),
@@ -98,20 +100,34 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
         "…",
       ));
     } else {
-      const start = Math.max(0, Math.min(this.selected - Math.floor(MAX_VISIBLE_ITEMS / 2), this.keys.length - MAX_VISIBLE_ITEMS));
-      const visibleKeys = this.keys.slice(start, start + MAX_VISIBLE_ITEMS);
+      const filteredKeys = this.filteredKeys();
+      const start = Math.max(0, Math.min(this.selected - Math.floor(MAX_VISIBLE_ITEMS / 2), filteredKeys.length - MAX_VISIBLE_ITEMS));
+      const visibleKeys = filteredKeys.slice(start, start + MAX_VISIBLE_ITEMS);
+      rows.push(truncateToWidth(
+        this.params.theme.fg("dim", `Filter: ${this.query || "all keys"} · ${filteredKeys.length}/${this.keys.length}`),
+        inner,
+        "…",
+      ));
+      if (visibleKeys.length === 0) {
+        rows.push(truncateToWidth(this.params.theme.fg("warning", "No matching configuration keys"), inner, "…"));
+      }
       for (let offset = 0; offset < visibleKeys.length; offset++) {
         const itemKey = visibleKeys[offset];
         const marker = start + offset === this.selected ? "›" : " ";
         const value = displaySmartSearchConfigValue(itemKey, this.config[itemKey]);
-        const line = `${marker} ${itemKey} = ${value}`;
+        const group = smartSearchConfigGroupForKey(itemKey);
+        const line = `${marker} [${group?.label ?? "Custom"}] ${itemKey} = ${value}`;
         rows.push(truncateToWidth(
           start + offset === this.selected ? this.params.theme.fg("accent", line) : line,
           inner,
           "…",
         ));
       }
-      rows.push(truncateToWidth(this.params.theme.fg("dim", "Esc close · Enter edit · ↑↓ select"), inner, "…"));
+      rows.push(truncateToWidth(
+        this.params.theme.fg("dim", "Type provider/capability/key · PgUp/PgDn · Enter edit · Esc clear/close"),
+        inner,
+        "…",
+      ));
     }
     if (this.status) rows.push(truncateToWidth(this.params.theme.fg(this.statusTone, this.status), inner, "…"));
     return frame(rows, safeWidth, this.params.theme);
@@ -133,9 +149,14 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
 
   private dispatchDecodedToken(token: DecodedInputToken): void {
     if (token.kind === "paste") {
-      if (this.mode !== "edit" || this.lastWidth < 20) return;
-      this.draft += token.text;
-      this.unsetDraft = false;
+      if (this.lastWidth < 20) return;
+      if (this.mode === "edit") {
+        this.draft += token.text;
+        this.unsetDraft = false;
+      } else {
+        this.query += token.text;
+        this.selected = 0;
+      }
       this.status = "";
       return;
     }
@@ -152,13 +173,36 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
       return;
     }
     if (matchesKey(data, Key.escape)) {
+      if (this.query) {
+        this.query = "";
+        this.selected = 0;
+        this.status = "Filter cleared";
+        this.statusTone = "dim";
+        return;
+      }
       this.params.close();
       return;
     }
-    if (matchesKey(data, Key.up)) this.selected = wrapIndex(this.selected - 1, this.keys.length);
-    else if (matchesKey(data, Key.down)) this.selected = wrapIndex(this.selected + 1, this.keys.length);
+    const length = this.filteredKeys().length;
+    if (matchesKey(data, Key.up)) this.selected = wrapIndex(this.selected - 1, length);
+    else if (matchesKey(data, Key.down)) this.selected = wrapIndex(this.selected + 1, length);
+    else if (matchesKey(data, Key.pageUp)) this.selected = clampIndex(this.selected - MAX_VISIBLE_ITEMS, length);
+    else if (matchesKey(data, Key.pageDown)) this.selected = clampIndex(this.selected + MAX_VISIBLE_ITEMS, length);
+    else if (isHomeKey(data)) this.selected = 0;
+    else if (isEndKey(data)) this.selected = Math.max(0, length - 1);
     else if (matchesKey(data, Key.enter)) this.beginEdit();
-    else return;
+    else if (matchesKey(data, Key.backspace) || data === "\b") {
+      this.query = removeLastGrapheme(this.query);
+      this.selected = 0;
+    } else if (data === CTRL_U) {
+      this.query = "";
+      this.selected = 0;
+    } else {
+      const printable = sanitizeSingleLineInput(data);
+      if (!printable) return;
+      this.query += printable;
+      this.selected = 0;
+    }
     this.status = "";
   }
 
@@ -193,6 +237,11 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
 
   private beginEdit(): void {
     const key = this.currentKey();
+    if (!key) {
+      this.status = "No matching configuration key";
+      this.statusTone = "warning";
+      return;
+    }
     const current = this.config[key];
     this.mode = "edit";
     this.draft = isSmartSearchSecretKey(key) ? "" : current === undefined || current === null ? "" : String(current);
@@ -201,6 +250,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
 
   private async saveDraft(): Promise<void> {
     const key = this.currentKey();
+    if (!key) return;
     if (isSmartSearchSecretKey(key) && !this.draft && !this.unsetDraft) {
       this.mode = "list";
       this.status = "Secret unchanged";
@@ -228,8 +278,21 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
     this.params.requestRender();
   }
 
-  private currentKey(): string {
-    return this.keys[this.selected] ?? SMART_SEARCH_CONFIG_KEYS[0];
+  private filteredKeys(): string[] {
+    const terms = this.query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
+    if (terms.length === 0) return this.keys;
+    return this.keys.filter((key) => {
+      const group = smartSearchConfigGroupForKey(key);
+      const haystack = [key, group?.id, group?.label, group?.capability, ...(group?.aliases ?? [])]
+        .filter(Boolean)
+        .join(" ")
+        .toLocaleLowerCase();
+      return terms.every((term) => haystack.includes(term));
+    });
+  }
+
+  private currentKey(): string | undefined {
+    return this.filteredKeys()[this.selected];
   }
 
   private escape(): void {
@@ -269,6 +332,19 @@ export async function showSmartSearchConfigOverlay(
 function wrapIndex(index: number, length: number): number {
   if (length === 0) return 0;
   return (index + length) % length;
+}
+
+function clampIndex(index: number, length: number): number {
+  if (length === 0) return 0;
+  return Math.max(0, Math.min(index, length - 1));
+}
+
+function isHomeKey(data: string): boolean {
+  return data === "\x1b[H" || data === "\x1bOH" || data === "\x1b[1~";
+}
+
+function isEndKey(data: string): boolean {
+  return data === "\x1b[F" || data === "\x1bOF" || data === "\x1b[4~";
 }
 
 function frame(rows: string[], width: number, theme: SmartSearchConfigTheme): string[] {

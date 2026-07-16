@@ -1621,7 +1621,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           overlay: true,
           overlayOptions: {
             width: "96%",
-            maxHeight: "96%",
+            maxHeight: "100%",
             anchor: "center",
           },
         },

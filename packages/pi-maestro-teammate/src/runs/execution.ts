@@ -13,7 +13,9 @@ import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
+import { Check } from "typebox/value";
 import { listAgentSummaries, resolveAgent, type AgentConfig } from "../agents/agents.ts";
 import { resolvePromptTask } from "../prompts/prompts.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
@@ -125,6 +127,71 @@ function extractTextContent(event: JsonLineEvent): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Captures a schema-valid structured_output call from Pi's assistant event.
+ * This is a fallback for the small window before the child output file becomes
+ * observable to the parent runner.
+ */
+export function extractValidatedStructuredOutput(
+  event: Record<string, unknown>,
+  schema: Record<string, unknown>,
+): unknown | undefined {
+  const message = event.message as Record<string, unknown> | undefined;
+  const content = message?.content;
+  if (!Array.isArray(content)) return undefined;
+
+  for (const item of content) {
+    if (!item || typeof item !== "object") continue;
+    const block = item as Record<string, unknown>;
+    if ((block.name ?? block.toolName) !== "structured_output") continue;
+    const raw = block.arguments ?? block.input;
+    let value = raw;
+    if (typeof raw === "string") {
+      try { value = JSON.parse(raw); } catch { return undefined; }
+    }
+    try {
+      return Check(schema, value) ? value : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
+export interface Utf8LineDecoder {
+  write(chunk: Buffer): string[];
+  end(): string[];
+}
+
+export function createUtf8LineDecoder(): Utf8LineDecoder {
+  const decoder = new StringDecoder("utf8");
+  let buffered = "";
+  return {
+    write(chunk: Buffer): string[] {
+      buffered += decoder.write(chunk);
+      const lines = buffered.split("\n");
+      buffered = lines.pop() ?? "";
+      return lines.map((line) => line.endsWith("\r") ? line.slice(0, -1) : line);
+    },
+    end(): string[] {
+      buffered += decoder.end();
+      const tail = buffered;
+      buffered = "";
+      return tail ? [tail.endsWith("\r") ? tail.slice(0, -1) : tail] : [];
+    },
+  };
+}
+
+export function appendDistinctAssistantMessage(
+  messages: Array<{ role: string; content: string }>,
+  content: string,
+): boolean {
+  const previous = messages[messages.length - 1];
+  if (previous?.role === "assistant" && previous.content === content) return false;
+  messages.push({ role: "assistant", content });
+  return true;
 }
 
 function emptyUsage(): Usage {
@@ -958,6 +1025,7 @@ async function runSingleAttempt(
   let resolvedModel = modelOverride ?? params.model ?? agentConfig.model ?? "unknown";
   let lastContent = "";
   let streamingText = "";
+  let capturedStructuredOutput: unknown;
 
   // AC8: Rich progress tracking
   const progress = createProgress(params.agent, startTime);
@@ -1083,26 +1151,25 @@ async function runSingleAttempt(
     }
 
     // Parse JSON lines from stdout
-    let stdoutBuffer = "";
-    child.stdout?.on("data", (chunk: Buffer) => {
-      const text = chunk.toString();
-      stdoutBuffer += text;
-      const lines = stdoutBuffer.split("\n");
-      stdoutBuffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const event = JSON.parse(trimmed) as JsonLineEvent;
-          processEvent(event);
-        } catch {
-          lastContent += trimmed + "\n";
-        }
+    const stdoutLines = createUtf8LineDecoder();
+    const processStdoutLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      try {
+        const event = JSON.parse(trimmed) as JsonLineEvent;
+        processEvent(event);
+      } catch {
+        lastContent += trimmed + "\n";
       }
+    };
+    child.stdout?.on("data", (chunk: Buffer) => {
+      for (const line of stdoutLines.write(chunk)) processStdoutLine(line);
     });
 
     function processEvent(event: JsonLineEvent): void {
+      if (capturedStructuredOutput === undefined && params.outputSchema) {
+        capturedStructuredOutput = extractValidatedStructuredOutput(event, params.outputSchema);
+      }
       // AC8: Update lastActivityAt on every event
       progress.lastActivityAt = Date.now();
       progress.durationMs = Date.now() - startTime;
@@ -1130,7 +1197,7 @@ async function runSingleAttempt(
           if (text) {
             lastContent = text;
             streamingText = "";
-            messages.push({ role: "assistant", content: text });
+            appendDistinctAssistantMessage(messages, text);
             progress.lastMessage = text;
             options.onProgress?.(progress);
           }
@@ -1205,9 +1272,8 @@ async function runSingleAttempt(
           const msg = event.message as Record<string, unknown> | undefined;
           if (msg) {
             const text = extractTextContent({ message: msg } as JsonLineEvent);
-            if (text && !messages.some((m) => m.content === text)) {
+            if (text && appendDistinctAssistantMessage(messages, text)) {
               lastContent = text;
-              messages.push({ role: "assistant", content: text });
               progress.lastMessage = text;
             }
           }
@@ -1234,6 +1300,7 @@ async function runSingleAttempt(
             } catch { /* ignore */ }
             cleanupFile(outputFile);
           }
+          structuredOutput ??= capturedStructuredOutput;
 
           const turnResult: SingleResult = {
             agent: params.agent,
@@ -1268,8 +1335,9 @@ async function runSingleAttempt(
     }
 
     let stderrBuffer = "";
+    const stderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderrBuffer += chunk.toString();
+      stderrBuffer += stderrDecoder.write(chunk);
     });
 
     child.on("close", (code) => {
@@ -1280,15 +1348,8 @@ async function runSingleAttempt(
 
       cleanupFile(systemPromptFile);
 
-      // Process remaining buffer
-      if (stdoutBuffer.trim()) {
-        try {
-          const event = JSON.parse(stdoutBuffer.trim()) as JsonLineEvent;
-          processEvent(event);
-        } catch {
-          lastContent += stdoutBuffer.trim();
-        }
-      }
+      for (const line of stdoutLines.end()) processStdoutLine(line);
+      stderrBuffer += stderrDecoder.end();
 
       if (messages.length === 0) {
         const content =
@@ -1315,6 +1376,7 @@ async function runSingleAttempt(
         }
         cleanupFile(outputFile);
       }
+      structuredOutput ??= capturedStructuredOutput;
       if (schemaFile) cleanupFile(schemaFile);
 
       if (!resolved) {

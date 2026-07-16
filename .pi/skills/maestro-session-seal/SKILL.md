@@ -31,7 +31,7 @@ Replaces the deprecated `maestro-milestone-complete` with session-level semantic
 
 **镜像协议**（状态对账由插件自动完成，LLM 只保留两个语义动作）：
 
-- 步进仅调用 `todo({ action: "next" })`；完成宣告仅调用 `goal done`。
+- 步进仅调用 `todo({ action: "next" })`；完成时让 agent loop 自然结束，由 Goal verifier 自动裁决。
 - 禁止手工创建或更新 Goal/Todo 镜像，禁止直接写 `state.json`、`session.json`、`run.json`、`artifacts.json`。
 - Session seal 与 DAG 推进必须调用 Maestro CLI；宿主镜像由 bridge 在 CLI 成功后对账。
 - 压缩恢复后先执行 `maestro run brief <run-id>`，再继续 active Run。
