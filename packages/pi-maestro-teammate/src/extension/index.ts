@@ -252,6 +252,18 @@ export function createProgressFlushGate(
   return { mark, flush, dispose: cancelTimer };
 }
 
+export async function runWithProgressFlushCleanup<T>(
+  run: () => Promise<T>,
+  gate: ProgressFlushGate | undefined,
+): Promise<T> {
+  try {
+    return await run();
+  } finally {
+    gate?.flush();
+    gate?.dispose();
+  }
+}
+
 interface AgentWidgetTheme {
   fg(name: string, text: string): string;
   bold(text: string): string;
@@ -1085,6 +1097,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       signal.addEventListener("abort", abortForward, { once: true });
 
       const parentSessionFile = ctx.sessionManager?.getSessionFile?.() ?? undefined;
+      let progressFlushGate: ProgressFlushGate | undefined;
 
       const makeOptions = () => ({
         baseCwd: state.baseCwd || ctx.cwd,
@@ -1242,6 +1255,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             pendingByTask.clear();
             for (const data of pending) processProgress(data);
           }, UPDATE_INTERVAL);
+          progressFlushGate = flushGate;
 
           return (data: AgentProgress) => {
             activeAgent.lastActivityAt = Date.now();
@@ -1272,10 +1286,10 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         // --- MULTI-TASK MODE (parallel / chain / graph) ---
         if (isMultiTask) {
           const executeGraph = async () => {
-            const results = await runGraph(
-              normalizedTasks,
-              params.concurrency ?? 4,
-              makeOptions(),
+            const options = makeOptions();
+            const results = await runWithProgressFlushCleanup(
+              () => runGraph(normalizedTasks, params.concurrency ?? 4, options),
+              progressFlushGate,
             );
 
             const hasError = results.some((r) => r.exitCode !== 0);
@@ -1383,7 +1397,11 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               })
             : null;
 
-          const runPromise = runTeammate(params, makeOptions());
+          const options = makeOptions();
+          const runPromise = runWithProgressFlushCleanup(
+            () => runTeammate(params, options),
+            progressFlushGate,
+          );
           const race = await Promise.race([
             runPromise.then((r) => ({ done: true as const, result: r })),
             detachPromise.then(() => ({ done: false as const, result: null })),
@@ -1434,7 +1452,11 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         }
 
         // --- BACKGROUND (default) ---
-        const bgPromise = runTeammate(params, makeOptions());
+        const options = makeOptions();
+        const bgPromise = runWithProgressFlushCleanup(
+          () => runTeammate(params, options),
+          progressFlushGate,
+        );
 
         bgPromise.then((result) => {
           emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);

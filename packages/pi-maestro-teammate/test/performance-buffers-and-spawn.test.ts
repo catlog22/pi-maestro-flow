@@ -7,6 +7,7 @@ import {
   buildWatchOutput,
   createProgressFlushGate,
   retainBoundedAgentHistory,
+  runWithProgressFlushCleanup,
 } from "../src/extension/index.ts";
 import {
   EXECUTION_BUFFER_LIMITS,
@@ -62,6 +63,45 @@ test("progress bursts coalesce before expensive flush and terminal state flushes
   } finally {
     gate.dispose();
   }
+});
+
+test("root progress cleanup flushes then disposes on success, error, and termination", async () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const executeStart = source.indexOf("async execute(");
+  const executeEnd = source.indexOf("renderCall(args", executeStart);
+  assert.ok(executeStart >= 0 && executeEnd > executeStart);
+  const rootExecute = source.slice(executeStart, executeEnd);
+  assert.equal(rootExecute.match(/runWithProgressFlushCleanup\(/g)?.length, 3);
+  assert.doesNotMatch(rootExecute, /runTeammate\(params, makeOptions\(\)\)/);
+
+  for (const outcome of ["success", "error", "termination"] as const) {
+    const lifecycle: string[] = [];
+    const gate = {
+      mark() {},
+      flush() { lifecycle.push("flush"); },
+      dispose() { lifecycle.push("dispose"); },
+    };
+    const run = async () => {
+      if (outcome === "success") return outcome;
+      const error = new Error(outcome);
+      if (outcome === "termination") error.name = "AbortError";
+      throw error;
+    };
+
+    if (outcome === "success") {
+      assert.equal(await runWithProgressFlushCleanup(run, gate), outcome);
+    } else {
+      await assert.rejects(runWithProgressFlushCleanup(run, gate), { name: outcome === "termination" ? "AbortError" : "Error" });
+    }
+    assert.deepEqual(lifecycle, ["flush", "dispose"]);
+  }
+
+  let renders = 0;
+  const terminalGate = createProgressFlushGate(() => { renders += 1; }, 60_000);
+  terminalGate.mark(true);
+  assert.equal(renders, 1);
+  await runWithProgressFlushCleanup(async () => undefined, terminalGate);
+  assert.equal(renders, 1, "cleanup after a terminal flush must not render twice");
 });
 
 test("proxy graph progress batches burst snapshots and synchronously publishes terminal state", () => {

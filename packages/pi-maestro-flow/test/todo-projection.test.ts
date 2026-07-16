@@ -148,6 +148,65 @@ test("Todo projection replaces same-Session mirrors and activation when identity
   }
 });
 
+test("Todo projection remaps legacy dependency keys to blockers in the current generation", () => {
+  initTodo({ appendEntry() {} } as never);
+  const todoContext = context([]);
+  const extensionContext = { cwd: "D:/workspace", ui: { setStatus() {} } } as unknown as ExtensionContext;
+  onSessionStart(todoContext);
+  try {
+    const blockerOrigin = { sessionId: "session-1", step: "analyze", runId: "run-1", runSeq: "001" };
+    const dependentOrigin = { sessionId: "session-1", step: "plan", runId: "run-2", runSeq: "002" };
+    const specs: TodoMirrorTaskSpec[] = [
+      {
+        origin: blockerOrigin,
+        subject: "Step 1: analyze",
+        status: "pending",
+        blockedByOriginKeys: [],
+        skills: [],
+      },
+      {
+        origin: dependentOrigin,
+        subject: "Step 2: plan",
+        status: "pending",
+        blockedByOriginKeys: [todoOriginKey(blockerOrigin)],
+        skills: [],
+      },
+    ];
+    const generation1 = "canonical:valid:session-1:1";
+    const generation2 = "canonical:valid:session-1:2";
+
+    const first = reconcileMirrorTasks(specs, extensionContext, generation1);
+    const firstTasks = getVisibleTasks().filter((task) => task.origin);
+    const firstBlocker = firstTasks.find((task) => task.subject === "Step 1: analyze")!;
+    const firstDependent = firstTasks.find((task) => task.subject === "Step 2: plan")!;
+    assert.deepEqual(firstDependent.blockedBy, [firstBlocker.id]);
+    assert.equal(firstDependent.status, "blocked");
+
+    const stable = reconcileMirrorTasks(specs, extensionContext, generation1);
+    assert.deepEqual(new Set(stable.unchanged), new Set(first.created));
+    assert.deepEqual(
+      getVisibleTasks().find((task) => task.subject === "Step 2: plan")?.blockedBy,
+      [firstBlocker.id],
+    );
+
+    const replaced = reconcileMirrorTasks(specs, extensionContext, generation2);
+    assert.deepEqual(new Set(replaced.tombstoned), new Set(first.created));
+    assert.equal(replaced.created.length, 2);
+    const replacementTasks = getVisibleTasks().filter((task) => task.origin);
+    const replacementBlocker = replacementTasks.find((task) => task.subject === "Step 1: analyze")!;
+    const replacementDependent = replacementTasks.find((task) => task.subject === "Step 2: plan")!;
+    assert.equal(replacementBlocker.origin?.sessionGeneration, generation2);
+    assert.equal(replacementDependent.origin?.sessionGeneration, generation2);
+    assert.deepEqual(replacementDependent.blockedBy, [replacementBlocker.id]);
+    assert.equal(replacementDependent.status, "blocked");
+    assert.notEqual(replacementBlocker.id, firstBlocker.id);
+    assert.equal(replacementDependent.blockedBy.includes(firstBlocker.id), false);
+    assert.equal(getVisibleTasks().some((task) => first.created.includes(task.id)), false);
+  } finally {
+    onSessionShutdown(todoContext);
+  }
+});
+
 test("Todo origin keys preserve the persisted legacy shape when generation is absent", () => {
   const legacyOrigin = { sessionId: "session-1", step: "plan", runId: "run-2", runSeq: "002" };
   const legacyKey = "session-1\u0000plan\u0000run-2\u0000002";
