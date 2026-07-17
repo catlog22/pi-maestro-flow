@@ -263,8 +263,8 @@ function renderLine1(
 	const toolCallText = activeToolCalls > 0
 		? colored("runs", `${ICONS.runs} ${activeToolCalls} call${activeToolCalls > 1 ? "s" : ""}`)
 		: "";
-	let dirText = colored("dir", `${ICONS.dir} ${basename(dir)}`);
-	if (rs.git) dirText += `  ${formatGit(rs.git)}`;
+	const dirText = colored("dir", `${ICONS.dir} ${basename(dir)}`);
+	const dirGitText = rs.git ? `${dirText}  ${formatGit(rs.git)}` : dirText;
 	let tokenText = "";
 	if (rs.tokens.input > 0 || rs.tokens.output > 0) {
 		const value = `↑${formatTokens(rs.tokens.input)} ↓${formatTokens(rs.tokens.output)} ${ICONS.tokens}${formatTokens(rs.tokens.input + rs.tokens.output)}`;
@@ -280,14 +280,16 @@ function renderLine1(
 
 	const candidates = safeWidth >= 80
 		? [
-			[modeFull, modelText, contextFull, autoCompactionFull, toolCallText, dirText, tokenText],
-			[modeCompact, modelText, contextCompact, autoCompactionCompact, toolCallText, dirText, tokenText],
+			[modeFull, modelText, contextFull, autoCompactionFull, toolCallText, dirGitText, tokenText],
+			[modeCompact, modelText, contextCompact, autoCompactionCompact, toolCallText, dirGitText, tokenText],
+			[modeCompact, modelText, contextCompact, autoCompactionCompact, toolCallText, dirGitText],
 			[modeCompact, modelText, contextCompact, autoCompactionCompact, toolCallText, dirText],
 			[modeCompact, modelText, contextCompact, autoCompactionCompact, dirText],
 			[modeNarrow, autoCompactionNarrow, contextCompact, modelText],
 		]
 		: safeWidth >= 48
 			? [
+				[modeCompact, autoCompactionCompact, modelText, contextCompact, dirGitText],
 				[modeCompact, autoCompactionCompact, modelText, contextCompact, dirText],
 				[modeCompact, autoCompactionCompact, modelText, contextCompact],
 				[modeNarrow, autoCompactionNarrow, contextCompact, modelText],

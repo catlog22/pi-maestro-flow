@@ -382,6 +382,27 @@ test("statusline compacts labels before truncating the cwd and Git segment", asy
   }
 });
 
+test("statusline drops an extreme Git branch as a whole before dropping the cwd", async () => {
+  const longBranch = `feature/${"界面修复🚀".repeat(20)}`;
+  const harness = createHarness({
+    exec: async () => ({ code: 0, stdout: `## ${longBranch}\n`, stderr: "" }),
+  });
+  try {
+    harness.statuses.set("mode", "ACT");
+    harness.statuses.set("approval-mode", "APPROVAL YOLO");
+    harness.statuses.set("maestro-auto-compact-mode", "AUTO ON");
+    await settleAsyncWork();
+
+    const rendered = harness.render(94)[0];
+    const line = stripAnsi(rendered);
+    assert.match(line, /pi-maestro-flow/);
+    assert.doesNotMatch(line, /feature\/|界面修复|…/);
+    assert.ok(visibleWidth(rendered) <= 94);
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("statusline renders Swarm iteration and convergence on one optional compact line", () => {
   const harness = createHarness();
   try {
