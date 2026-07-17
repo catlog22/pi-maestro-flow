@@ -24,6 +24,7 @@ export interface ApiProviderSettings {
   modelId: string;
   reasoning: boolean;
   apiKey?: string;
+  maxThinking?: boolean;
 }
 
 interface ProviderDefaults {
@@ -47,7 +48,7 @@ export interface RegisterApiProviderOptions {
 }
 
 type ApiProviderAction = "configure" | "delete" | "list" | "logout" | "reset" | "show";
-type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
 
@@ -118,12 +119,14 @@ export async function loadApiProviderSettings(
   const config = isRecord(providers[provider]) ? providers[provider] : {};
   const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
   const model = models[0];
+  const thinkingLevelMap = isRecord(model?.thinkingLevelMap) ? model.thinkingLevelMap : {};
   return {
     provider,
     baseUrl: typeof config.baseUrl === "string" ? config.baseUrl : defaults.baseUrl,
     modelId: typeof model?.id === "string" ? model.id : defaults.modelId,
     reasoning: typeof model?.reasoning === "boolean" ? model.reasoning : true,
     apiKey: typeof config.apiKey === "string" ? config.apiKey : defaults.apiKey,
+    maxThinking: typeof thinkingLevelMap.max === "string",
   };
 }
 
@@ -139,6 +142,7 @@ export async function saveApiProviderSettings(
     apiKey: settings.apiKey === undefined
       ? providerDefaults(settings.provider).apiKey
       : required(settings.apiKey, "API key config"),
+    maxThinking: settings.maxThinking === true,
   };
   let result: SaveApiProviderResult | undefined;
   await serializeMutation(modelsPath, async () => {
@@ -221,13 +225,15 @@ async function configureProvider(
   modelsPath: string,
 ): Promise<void> {
   const current = await loadApiProviderSettings(provider.id, modelsPath);
+  const maxThinking = current.maxThinking === true || runtimeSupportsMaxThinking(ctx);
   const baseUrlInput = await ctx.ui.input(`${provider.name} Base URL`, current.baseUrl);
   if (baseUrlInput === undefined) return;
   const modelInput = await ctx.ui.input(`${provider.name} model ID`, current.modelId);
   if (modelInput === undefined) return;
+  const maxSuffix = maxThinking ? " / max" : "";
   const enabledLabel = provider.id === "maestro-openai"
-    ? "启用：minimal / low / medium / high / xhigh"
-    : "启用：off / minimal / low / medium / high / xhigh";
+    ? `启用：minimal / low / medium / high / xhigh${maxSuffix}`
+    : `启用：off / minimal / low / medium / high / xhigh${maxSuffix}`;
   const disabledLabel = "关闭：仅 off";
   const reasoningChoice = await ctx.ui.select(
     "推理强度支持",
@@ -239,6 +245,7 @@ async function configureProvider(
     provider,
     reasoningChoice === enabledLabel,
     currentDefaultThinkingLevel(ctx, modelsPath),
+    maxThinking,
   );
   if (!defaultThinkingLevel) return;
 
@@ -267,6 +274,7 @@ async function configureProvider(
     modelId: required(modelInput.trim() || current.modelId, "Model ID"),
     reasoning: reasoningChoice === enabledLabel,
     apiKey,
+    maxThinking,
   };
   const confirmed = await ctx.ui.confirm(
     `保存 ${provider.name} API 配置？`,
@@ -325,6 +333,7 @@ async function resetProvider(
     modelId: provider.modelId,
     reasoning: true,
     apiKey: provider.apiKey,
+    maxThinking: runtimeSupportsMaxThinking(ctx),
   }, modelsPath);
   await saveDefaultThinkingLevel(ctx, modelsPath, DEFAULT_THINKING_LEVEL);
   reloadProviderRegistration(pi, ctx, provider);
@@ -422,9 +431,11 @@ async function writeApiProviderSettings(
       : defaults.maxTokens,
   };
   if (settings.reasoning) {
-    nextModel.thinkingLevelMap = settings.provider === "maestro-openai"
+    const thinkingLevelMap: Record<string, string | null> = settings.provider === "maestro-openai"
       ? { off: null, xhigh: "xhigh" }
       : { xhigh: "high" };
+    if (settings.maxThinking) thinkingLevelMap.max = "max";
+    nextModel.thinkingLevelMap = thinkingLevelMap;
   } else {
     delete nextModel.thinkingLevelMap;
   }
@@ -589,12 +600,14 @@ async function chooseDefaultThinkingLevel(
   provider: ProviderDefaults,
   reasoning: boolean,
   current: ApiThinkingLevel,
+  maxThinking: boolean,
 ): Promise<ApiThinkingLevel | undefined> {
   const supported: ApiThinkingLevel[] = reasoning
     ? provider.id === "maestro-openai"
       ? ["minimal", "low", "medium", "high", "xhigh"]
       : ["off", "minimal", "low", "medium", "high", "xhigh"]
     : ["off"];
+  if (reasoning && maxThinking) supported.push("max");
   const fallback = supported.includes(DEFAULT_THINKING_LEVEL)
     ? DEFAULT_THINKING_LEVEL
     : supported[0];
@@ -608,7 +621,7 @@ function currentDefaultThinkingLevel(
   modelsPath: string,
 ): ApiThinkingLevel {
   const manager = SettingsManager.create(ctx.cwd, dirname(modelsPath));
-  return manager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
+  return (manager.getDefaultThinkingLevel() as ApiThinkingLevel | undefined) ?? DEFAULT_THINKING_LEVEL;
 }
 
 async function saveDefaultThinkingLevel(
@@ -617,7 +630,8 @@ async function saveDefaultThinkingLevel(
   level: ApiThinkingLevel,
 ): Promise<void> {
   const manager = SettingsManager.create(ctx.cwd, dirname(modelsPath));
-  manager.setDefaultThinkingLevel(level);
+  const setDefaultThinkingLevel = manager.setDefaultThinkingLevel.bind(manager) as (value: ApiThinkingLevel) => void;
+  setDefaultThinkingLevel(level);
   await manager.flush();
   const errors = manager.drainErrors();
   if (errors.length > 0) {
@@ -631,7 +645,15 @@ function applyThinkingLevelToActiveProvider(
   provider: ProviderDefaults,
   level: ApiThinkingLevel,
 ): void {
-  if (ctx.model?.provider === provider.id) pi.setThinkingLevel(level);
+  if (ctx.model?.provider !== provider.id) return;
+  const setThinkingLevel = pi.setThinkingLevel.bind(pi) as (value: ApiThinkingLevel) => void;
+  setThinkingLevel(level);
+}
+
+function runtimeSupportsMaxThinking(ctx: ExtensionCommandContext): boolean {
+  return ctx.modelRegistry.getAll().some((model) =>
+    isRecord(model.thinkingLevelMap) && typeof model.thinkingLevelMap.max === "string"
+  );
 }
 
 function reloadProviderRegistration(

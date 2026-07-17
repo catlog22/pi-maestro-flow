@@ -66,10 +66,18 @@ OpenAI Responses 与 Anthropic custom provider MUST 由 Maestro 的 /api-manager
 
 </spec-entry>
 
-<spec-entry category="arch" keywords="api-manager models.json settings.json defaultthinkinglevel thinkinglevelmap reasoning deepseek" date="2026-07-17" sid="S-20260717-en4p" title="API Manager 分层管理推理能力与默认思考强度" description="区分模型推理能力与 Pi 全局默认思考强度的持久化边界" source="user:2026-07-17" supersedes="S-20260717-wl3q">
+<spec-entry category="arch" keywords="api-manager models.json settings.json defaultthinkinglevel thinkinglevelmap reasoning deepseek" date="2026-07-17" sid="S-20260717-en4p" title="API Manager 分层管理推理能力与默认思考强度" description="区分模型推理能力与 Pi 全局默认思考强度的持久化边界" source="user:2026-07-17" supersedes="S-20260717-wl3q" status="deprecated" superseded-by="S-20260717-s3f9">
 
 ### API Manager 分层管理推理能力与默认思考强度
 
 OpenAI Responses 与 Anthropic custom provider MUST 由 /api-manager 管理。模型是否支持 reasoning 及 thinkingLevelMap MUST 写入 models.json；Pi 全局默认思考强度 MUST 通过公开 SettingsManager.setDefaultThinkingLevel() 写入 agent settings.json 的 defaultThinkingLevel，不得向 models.json 写入非官方 default 字段。set 流程 MUST 只展示目标模型支持的档位，list/show MUST 显示当前 Pi 全局默认值，reset MUST 恢复 medium；目标 provider 正在使用时 MAY 同步当前 session。Provider CRUD 写入仍须原子化并保留 DeepSeek 等其他 provider。
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="api-manager max xhigh thinkinglevelmap defaultthinkinglevel compatibility deepseek" date="2026-07-17" sid="S-20260717-s3f9" title="API Manager 支持 Pi max 思考强度" description="将 max 作为独立且 capability-gated 的 Pi 思考强度" source="user:2026-07-17" supersedes="S-20260717-en4p">
+
+### API Manager 支持 Pi max 思考强度
+
+在支持 Pi max thinking level 的运行时，/api-manager MUST 将 max 作为独立档位展示和持久化，不得归一化为 xhigh。models.json 的 thinkingLevelMap MUST 显式写入 max: max，因为 xhigh 与 max 都是 opt-in extended levels；settings.json.defaultThinkingLevel MUST 允许 max。为兼容不识别 max 的旧 Pi，UI 与 models.json 写入 MUST 由当前 ModelRegistry 中的 max capability 门控。OpenAI Responses 与 Anthropic 的 max provider 映射均为 max；其他 CRUD、原子写入及 DeepSeek 隔离约束保持不变。
 
 </spec-entry>
