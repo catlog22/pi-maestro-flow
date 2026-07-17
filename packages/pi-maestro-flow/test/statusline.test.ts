@@ -21,12 +21,18 @@ function createHarness(options: {
   workflowSnapshot?: WorkflowSnapshotLike;
   branchEntries?: unknown[];
   cwd?: string;
+  terminalWidth?: number;
   exec?: (cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
 } = {}) {
   const handlers = new Map<string, EventHandler[]>();
   const statuses = new Map<string, string>();
   const branchChangeHandlers = new Set<() => void>();
   let component: { render(width: number): string[]; dispose?(): void } | undefined;
+  let terminalWidth = options.terminalWidth ?? 120;
+  let invalidations = 0;
+  let renderRequests = 0;
+  let forcedRenderRequests = 0;
+  let lastRequestedRender: string[] | undefined;
   const footerData = {
     getGitBranch: () => null,
     getExtensionStatuses: () => statuses,
@@ -70,7 +76,15 @@ function createHarness(options: {
     ui: {
       setFooter(factory: Function) {
         component?.dispose?.();
-        component = factory({ requestRender() {} }, {}, footerData);
+        component = factory({
+          terminal: { get columns() { return terminalWidth; } },
+          invalidate() { invalidations++; },
+          requestRender(force = false) {
+            renderRequests++;
+            if (force) forcedRenderRequests++;
+            lastRequestedRender = component?.render(terminalWidth);
+          },
+        }, {}, footerData);
       },
     },
   } as unknown as ExtensionContext;
@@ -108,12 +122,64 @@ function createHarness(options: {
       assert.ok(component);
       return component.render(width);
     },
+    setTerminalWidth(width: number) {
+      terminalWidth = width;
+    },
+    resizeState() {
+      return { invalidations, renderRequests, forcedRenderRequests, lastRequestedRender };
+    },
     dispose() {
       for (const handler of handlers.get("session_shutdown") ?? []) handler({}, ctx);
       component?.dispose?.();
     },
   };
 }
+
+test("statusline reflows on silent terminal width changes using the same footer instance", (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const harness = createHarness({ terminalWidth: 120 });
+  try {
+    harness.statuses.set("mode", "ACT");
+    harness.statuses.set("approval-mode", "APPROVAL default");
+    harness.statuses.set("maestro-auto-compact-mode", "AUTO ON");
+    assert.match(stripAnsi(harness.render(120)[0]), /AUTO-COMPACT ON/);
+
+    harness.setTerminalWidth(42);
+    t.mock.timers.tick(250);
+    let state = harness.resizeState();
+    assert.deepEqual(
+      { invalidations: state.invalidations, forcedRenderRequests: state.forcedRenderRequests },
+      { invalidations: 1, forcedRenderRequests: 1 },
+    );
+    assert.ok(state.lastRequestedRender);
+    assert.match(stripAnsi(state.lastRequestedRender[0]), /AUTO/);
+    assert.doesNotMatch(stripAnsi(state.lastRequestedRender[0]), /AUTO-COMPACT ON/);
+    assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 42);
+
+    t.mock.timers.tick(250);
+    assert.equal(harness.resizeState().forcedRenderRequests, 1, "unchanged width must not redraw");
+
+    harness.setTerminalWidth(120);
+    t.mock.timers.tick(250);
+    state = harness.resizeState();
+    assert.equal(state.forcedRenderRequests, 2);
+    assert.ok(state.lastRequestedRender);
+    assert.match(stripAnsi(state.lastRequestedRender[0]), /AUTO-COMPACT ON/);
+    assert.ok(visibleWidth(state.lastRequestedRender[0]) <= 120);
+
+    harness.setTerminalWidth(70);
+    harness.render(70);
+    t.mock.timers.tick(250);
+    assert.equal(
+      harness.resizeState().forcedRenderRequests,
+      2,
+      "a normal resize render must suppress the watchdog redraw",
+    );
+  } finally {
+    harness.dispose();
+    t.mock.timers.reset();
+  }
+});
 
 test("statusline rejects initial and periodic Git results from an older Session", async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
@@ -294,13 +360,42 @@ test("statusline links approval mode with ACT, PLAN and READY using width-aware 
   }
 });
 
+test("statusline renders Swarm iteration and convergence on one optional compact line", () => {
+  const harness = createHarness();
+  try {
+    assert.equal(harness.render(120).length, 1);
+    harness.statuses.set("maestro-swarm", "SWARM 2/4 · CONV 65%");
+    const wide = harness.render(120);
+    assert.equal(wide.length, 2);
+    assert.equal(stripAnsi(wide[1]!), "SWARM 2/4 · CONV 65%");
+
+    for (let width = 1; width <= 80; width++) {
+      const lines = harness.render(width);
+      assert.equal(lines.length, 2);
+      assert.ok(visibleWidth(lines[1]!) <= width, `width ${width}: ${lines[1]}`);
+    }
+
+    harness.statuses.delete("maestro-swarm");
+    assert.equal(harness.render(120).length, 1);
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("statusline renders context pressure across full compact and narrow widths", () => {
   const harness = createHarness();
   try {
     harness.statuses.set("mode", "ACT");
     harness.statuses.set("approval-mode", "APPROVAL default");
+    harness.statuses.set("maestro-auto-compact-mode", "AUTO ON");
+    assert.equal(harness.render(120).length, 1);
+    assert.match(stripAnsi(harness.render(120)[0]), /AUTO-COMPACT ON/);
+    assert.match(stripAnsi(harness.render(70)[0]), /AUTO ON/);
+    assert.match(stripAnsi(harness.render(36)[0]), /AUTO/);
+
     harness.statuses.set("maestro-auto-compact", "CTX AUTO-PRUNE 82000/90000 -3");
     assert.equal(harness.render(120).length, 2);
+    assert.match(stripAnsi(harness.render(120)[0]), /AUTO-COMPACT ON/);
     assert.match(stripAnsi(harness.render(120)[1]), /CTX AUTO-PRUNE 82000\/90000 -3/);
     assert.match(stripAnsi(harness.render(70)[1]), /CTX PRUNE -3/);
     assert.match(stripAnsi(harness.render(36)[1]), /CTX PRUNE -3/);
@@ -321,7 +416,10 @@ test("statusline renders context pressure across full compact and narrow widths"
     }
 
     harness.statuses.delete("maestro-auto-compact");
+    harness.statuses.set("maestro-auto-compact-mode", "AUTO OFF");
     assert.equal(harness.render(120).length, 1);
+    assert.match(stripAnsi(harness.render(120)[0]), /AUTO-COMPACT OFF/);
+    assert.match(stripAnsi(harness.render(36)[0]), /AUTO OFF/);
     assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /AUTO-PRUNE|CRITICAL|P!|C!/);
 
     for (let width = 1; width <= 120; width++) {
@@ -329,6 +427,9 @@ test("statusline renders context pressure across full compact and narrow widths"
         assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
       }
     }
+
+    harness.statuses.delete("maestro-auto-compact-mode");
+    assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /AUTO-COMPACT/);
   } finally {
     harness.dispose();
   }

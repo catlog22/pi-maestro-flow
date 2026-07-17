@@ -97,3 +97,19 @@ Teammate 的多层运行参数必须复用单一 canonical enum，并在 tool sc
 teammate 工具的参数归一化（单/多任务/chain 判定、顶层默认值下沉、空任务校验、{name}/dependsOn 引用校验）必须且只能通过 packages/pi-maestro-teammate/src/runs/execution.ts 的 normalizeTeammateParams() 完成。禁止在 extension/index.ts 的 root execute 或 handleProxyRequest 内联重写归一化逻辑——历史上两份内联实现产生过漂移（含错误消息不一致、chain 默认值合并差异）。守护测试：test/graph-status-and-structured-output.test.ts 以源码正则断言两条路径均调用 normalizeTeammateParams 且不含内联 thinking 解析；行为测试见 test/normalize.test.ts。新增归一化规则时改共享函数并补 normalize.test.ts 用例。
 
 </spec-entry>
+
+<spec-entry category="coding" keywords="swarm,skill-runtime,事件投影,teammate,收敛" date="2026-07-16" sid="S-20260716-fcl4" title="Swarm Skill-runtime 权威边界" description="约束 Swarm Skill 动态编排、native runtime 执行与 dashboard 权威事件投影的职责边界" source="master@4e656d72" status="deprecated" superseded-by="S-20260717-uzgd">
+
+### Swarm Skill-runtime 权威边界
+
+内置 /swarm MUST 只负责激活 bundled swarm Skill 并打开观察面。Skill coordinator MUST 根据当前 objective 与 live teammate catalog 动态编译 dimensions、roles、taskType、missions 和 Prompt；native swarm_runtime MUST 只负责计划校验、teammate dispatch、ACO 数值计算、产物持久化与权威事件。Dashboard 与主消息流 MUST 仅投影 skill_phase、role_bound、prompt_compiled、teammate/tool delta、convergence_decision 和 artifact_produced 等真实事件，MUST NOT 推测阶段或收敛状态。未知 role 或 Prompt 必须 fail closed。验证至少覆盖定向测试、check:types、npm pack 和 fresh Pi 命令/Skill 发现。
+
+</spec-entry>
+
+<spec-entry category="coding" keywords="swarm private-ant role-binding catalog teammate" date="2026-07-17" sid="S-20260717-uzgd" title="Swarm 私有 Ant 与动态评审角色边界" description="固定 Ant 为不可公开选择的系统内建角色，仅 Judge/Analyst 由 Skill 从 live catalog 动态绑定" source="master@3b0379dd" supersedes="S-20260716-fcl4">
+
+### Swarm 私有 Ant 与动态评审角色边界
+
+内置 /swarm MUST 只激活 bundled swarm Skill 与观察面。swarm-ant MUST 是 runtime-private builtin：MUST NOT 出现在 live teammate catalog、teammate-list、父级 agent prompt 或普通 teammate dispatch 中，且项目/用户定义 MUST NOT 覆盖。Swarm plan MUST 仅从 live catalog 动态绑定 judge 与 analyst；Ant contract MUST 仅动态编译 taskType、mission、Prompt、证据和输出要求，不得包含 agent selector。native swarm_runtime MUST 固定加载私有 swarm-ant，并通过内部 capability dispatch；私有定义缺失时 fail closed，禁止回退到公开角色。Dashboard 仅投影真实 role_bound 与执行事件。验证至少覆盖 catalog 隐藏、直接 dispatch 拒绝、内部 dispatch、定向测试、check:types、npm pack 和 fresh Pi 命令/Skill 发现。
+
+</spec-entry>

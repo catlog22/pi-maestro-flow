@@ -1,9 +1,10 @@
 /**
  * Maestro Flow statusline — Pi Extension footer API implementation.
  *
- * Line 1: Mode | Model | Context | Tool calls | Dir+Git | Tokens
+ * Line 1: Mode | Model | Context | Auto-compaction | Tool calls | Dir+Git | Tokens
  * Line 2: Context pressure or active compaction (when present)
- * Line 3: Session and active Workflow Run (when a canonical snapshot is active)
+ * Line 3: Active Swarm iteration and convergence (when present)
+ * Line 4: Session and active Workflow Run (when a canonical snapshot is active)
  *
  * Adapted from maestro2/src/hooks/statusline.ts for the Pi Extension ecosystem.
  */
@@ -147,6 +148,17 @@ function renderPlanModeStatus(
 	return `${colored("phase", modeLabel)}${separator}${renderApprovalMode(approval, approvalLabel)}`;
 }
 
+function renderAutoCompactionMode(value: string | undefined, width: number): string {
+	if (!value) return "";
+	const normalized = value.trim().toUpperCase();
+	if (normalized !== "AUTO ON" && normalized !== "AUTO OFF") return "";
+	const disabled = normalized === "AUTO OFF";
+	const text = disabled
+		? width >= 80 ? "AUTO-COMPACT OFF" : "AUTO OFF"
+		: width >= 80 ? "AUTO-COMPACT ON" : width >= 48 ? "AUTO ON" : "AUTO";
+	return colored(disabled ? "ctxWarn" : "ctxOk", text);
+}
+
 function renderContextPressure(value: string | undefined, width: number): string {
 	if (!value) return "";
 	const normalized = value.replace(/^CTX\s+/i, "").trim();
@@ -230,9 +242,11 @@ function renderLine1(
 	width: number,
 	modeStatus: string | undefined,
 	approvalStatus: string | undefined,
+	compactionStatus: string | undefined,
 ): string {
 	const safeWidth = Math.max(1, width);
 	const modeText = renderPlanModeStatus(modeStatus, approvalStatus, safeWidth);
+	const autoCompactionText = renderAutoCompactionMode(compactionStatus, safeWidth);
 	const modelText = colored("model", `${ICONS.model} ${shortenModel(rs.model)}`);
 	const toolCallText = activeToolCalls > 0
 		? colored("runs", `${ICONS.runs} ${activeToolCalls} call${activeToolCalls > 1 ? "s" : ""}`)
@@ -253,10 +267,10 @@ function renderLine1(
 	}
 
 	const parts = safeWidth >= 80
-		? [modeText, modelText, contextFull, toolCallText, dirText, tokenText]
+		? [modeText, modelText, contextFull, autoCompactionText, toolCallText, dirText, tokenText]
 		: safeWidth >= 48
-			? [modeText, modelText, contextCompact, dirText]
-			: [modeText, contextCompact, modelText];
+			? [modeText, autoCompactionText, modelText, contextCompact, dirText]
+			: [modeText, autoCompactionText, contextCompact, modelText];
 	return truncateToWidth(parts.filter(Boolean).join(SEP), safeWidth, "…");
 }
 
@@ -291,12 +305,18 @@ export function renderWorkflowStatusline(view: WorkflowViewModel, width: number)
 	return truncateToWidth(parts.filter(Boolean).join(SEP), safeWidth, "…");
 }
 
+export function renderSwarmStatusline(value: string | undefined, width: number): string {
+	if (!value?.trim()) return "";
+	return truncateToWidth(colored("runs", value.trim()), Math.max(1, width), "…");
+}
+
 // ---------------------------------------------------------------------------
 // Install — registers footer + event handlers
 // ---------------------------------------------------------------------------
 
 const GIT_REFRESH_INTERVAL = 30_000;
 const GIT_DEBOUNCE_MS = 500;
+const WIDTH_POLL_INTERVAL = 250;
 export function installStatusline(
 	pi: ExtensionAPI,
 	getMaestroState: () => MaestroState,
@@ -371,6 +391,20 @@ export function installStatusline(
 			disposed = false;
 			// Connect invalidate → requestRender
 			invalidateFn = () => tui.requestRender();
+			let observedWidth = tui.terminal.columns;
+			const widthTimer = setInterval(() => {
+				if (disposed || generation !== footerGeneration) {
+					clearInterval(widthTimer);
+					return;
+				}
+				const nextWidth = tui.terminal.columns;
+				if (!Number.isFinite(nextWidth) || nextWidth <= 0 || nextWidth === observedWidth) return;
+				observedWidth = nextWidth;
+				// Some browser-hosted terminals update columns on zoom without a reliable
+				// stdout resize event. Force a fresh layout only when the width changes.
+				tui.invalidate();
+				tui.requestRender(true);
+			}, WIDTH_POLL_INTERVAL);
 
 			// Subscribe to branch changes for git refresh
 			const unsubBranch = footerData.onBranchChange(() => {
@@ -379,6 +413,7 @@ export function installStatusline(
 
 			return {
 				dispose() {
+					clearInterval(widthTimer);
 					unsubBranch();
 					if (generation !== footerGeneration) return;
 					disposed = true;
@@ -392,17 +427,23 @@ export function installStatusline(
 				},
 
 				render(width: number): string[] {
+					if (Number.isFinite(width) && width > 0) observedWidth = width;
 					const state = getMaestroState();
 					const activeToolCalls = (state.activeToolCalls ?? state.activeRuns)?.size ?? 0;
 					const lines: string[] = [];
 
 					const modeStatus = footerData.getExtensionStatuses().get("mode");
 					const approvalStatus = footerData.getExtensionStatuses().get("approval-mode");
+					const compactionModeStatus = footerData.getExtensionStatuses().get("maestro-auto-compact-mode");
 					const pressureStatus = footerData.getExtensionStatuses().get("maestro-auto-compact");
-					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus));
+					const swarmStatus = footerData.getExtensionStatuses().get("maestro-swarm");
+					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, compactionModeStatus));
 
 					const pressureLine = renderPressureLine(pressureStatus, width);
 					if (pressureLine) lines.push(pressureLine);
+
+					const swarmLine = renderSwarmStatusline(swarmStatus, width);
+					if (swarmLine) lines.push(swarmLine);
 
 					const workflow = deriveWorkflowViewModel(getWorkflowSnapshot());
 					if (workflow) lines.push(renderWorkflowStatusline(workflow, width));

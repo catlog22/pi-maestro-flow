@@ -1,0 +1,339 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/catlog22/pi-maestro-flow/schemas/swarm-run.schema.json",
+  "title": "Pi Maestro Flow Swarm Run",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "runId",
+    "objective",
+    "status",
+    "config",
+    "skill",
+    "createdAt",
+    "updatedAt",
+    "artifactDir",
+    "graph",
+    "currentIteration",
+    "metrics",
+    "iterations",
+    "activeAgents",
+    "stageAgents",
+    "preparation",
+    "stream",
+    "convergence",
+    "feedback",
+    "resumeCount"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "2.1" },
+    "runId": { "type": "string", "pattern": "^SW-" },
+    "objective": { "type": "string", "minLength": 1 },
+    "status": {
+      "enum": ["preparing", "running", "converged", "synthesizing", "completed", "cancelled", "failed"]
+    },
+    "config": { "type": "object" },
+    "plan": { "$ref": "#/$defs/plan" },
+    "skill": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "status", "phase"],
+      "properties": {
+        "name": { "const": "swarm" },
+        "status": { "enum": ["activating", "planning", "executing", "completed", "failed"] },
+        "phase": { "type": "string", "minLength": 1 }
+      }
+    },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "completedAt": { "type": "string", "format": "date-time" },
+    "artifactDir": { "type": "string" },
+    "currentIteration": { "type": "integer", "minimum": 0 },
+    "graph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodes", "edges"],
+      "properties": {
+        "nodes": { "type": "array", "items": { "$ref": "#/$defs/node" } },
+        "edges": { "type": "array", "items": { "$ref": "#/$defs/edge" } }
+      }
+    },
+    "metrics": { "type": "array", "items": { "$ref": "#/$defs/metrics" } },
+    "iterations": { "type": "array", "items": { "type": "object" } },
+    "activeAgents": { "type": "array", "items": { "$ref": "#/$defs/agent" } },
+    "stageAgents": { "type": "array", "items": { "$ref": "#/$defs/agent" } },
+    "preparation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "steps", "roles"],
+      "properties": {
+        "status": { "enum": ["pending", "running", "ready", "failed"] },
+        "steps": { "type": "array", "items": { "$ref": "#/$defs/preparationStep" } },
+        "roles": { "type": "array", "items": { "$ref": "#/$defs/preparedRole" } }
+      }
+    },
+    "stream": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["sequence", "timestamp", "kind", "text"],
+        "properties": {
+          "sequence": { "type": "integer", "minimum": 1 },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "kind": { "enum": ["skill", "preparation", "status", "assistant", "tool", "artifact", "convergence", "metric", "system"] },
+          "text": { "type": "string" },
+          "iteration": { "type": "integer", "minimum": 1 },
+          "agentId": { "type": "string" },
+          "complete": { "type": "boolean" }
+        }
+      }
+    },
+    "best": { "type": "object" },
+    "convergence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["converged", "triggeredBy", "reason"],
+      "properties": {
+        "converged": { "type": "boolean" },
+        "triggeredBy": { "type": "array", "items": { "type": "string" } },
+        "reason": { "type": "string" }
+      }
+    },
+    "synthesis": { "type": "object" },
+    "feedback": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["timestamp", "text", "appliesFromIteration"],
+        "properties": {
+          "timestamp": { "type": "string", "format": "date-time" },
+          "text": { "type": "string", "minLength": 1 },
+          "appliesFromIteration": { "type": "integer", "minimum": 1 }
+        }
+      }
+    },
+    "resumeCount": { "type": "integer", "minimum": 0 },
+    "resumedFromStatus": { "enum": ["preparing", "running", "converged", "synthesizing", "completed", "cancelled", "failed"] },
+    "error": { "type": "string" }
+  },
+  "$defs": {
+    "unitInterval": { "type": "number", "minimum": 0, "maximum": 1 },
+    "plan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["rationale", "dimensions", "roles", "ant", "scoring", "synthesis"],
+      "properties": {
+        "rationale": { "type": "string", "minLength": 1 },
+        "dimensions": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 8,
+          "items": { "$ref": "#/$defs/dimension" }
+        },
+        "roles": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": { "$ref": "#/$defs/roleBinding" }
+        },
+        "ant": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["taskType", "mission", "prompt", "evidenceRequirements", "constraints", "outputExpectation"],
+          "properties": {
+            "taskType": { "enum": ["explore", "analysis", "debug", "planning", "development", "review", "testing"] },
+            "mission": { "type": "string", "minLength": 1 },
+            "prompt": { "type": "string", "minLength": 1 },
+            "evidenceRequirements": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } },
+            "constraints": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+            "outputExpectation": { "type": "string", "minLength": 1 }
+          }
+        },
+        "scoring": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["rubric", "instructions"],
+          "properties": {
+            "rubric": { "type": "array", "minItems": 3, "maxItems": 8, "items": { "$ref": "#/$defs/scoringDimension" } },
+            "instructions": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+          }
+        },
+        "synthesis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requirements"],
+          "properties": {
+            "requirements": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+          }
+        }
+      }
+    },
+    "dimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "description"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "roleBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "stage", "agent", "taskType", "mission", "prompt"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "stage": { "enum": ["judge", "analyst"] },
+        "agent": { "type": "string", "minLength": 1 },
+        "taskType": { "enum": ["explore", "analysis", "debug", "planning", "development", "review", "testing"] },
+        "mission": { "type": "string", "minLength": 1 },
+        "prompt": { "type": "string", "minLength": 1 }
+      }
+    },
+    "preparedRole": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "stage", "agent", "taskType", "mission", "prompt", "description", "source", "systemPromptMode", "rolePromptHash", "rolePromptChars", "promptChars", "promptHash", "layers"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "stage": { "enum": ["ant", "judge", "analyst"] },
+        "agent": { "type": "string", "minLength": 1 },
+        "taskType": { "enum": ["explore", "analysis", "debug", "planning", "development", "review", "testing"] },
+        "mission": { "type": "string", "minLength": 1 },
+        "prompt": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" },
+        "source": { "enum": ["builtin", "user", "project"] },
+        "systemPromptMode": { "enum": ["append", "replace"] },
+        "rolePromptHash": { "type": "string" },
+        "rolePromptChars": { "type": "integer", "minimum": 0 },
+        "promptChars": { "type": "integer", "minimum": 0 },
+        "promptHash": { "type": "string" },
+        "layers": { "type": "array", "items": { "type": "string" } }
+      }
+    },
+    "scoringDimension": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "weight", "description"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "label": { "type": "string", "minLength": 1 },
+        "weight": { "$ref": "#/$defs/unitInterval" },
+        "description": { "type": "string", "minLength": 1 }
+      }
+    },
+    "agent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["antId", "iteration", "path", "status", "tokens", "toolCount", "durationMs"],
+      "properties": {
+        "antId": { "type": "string", "minLength": 1 },
+        "iteration": { "type": "integer", "minimum": 0 },
+        "path": { "type": "array", "items": { "type": "string" } },
+        "role": { "type": "string", "minLength": 1 },
+        "stage": { "enum": ["explore", "score", "synthesize"] },
+        "status": { "enum": ["pending", "running", "completed", "failed"] },
+        "correlationId": { "type": "string" },
+        "tokens": { "type": "integer", "minimum": 0 },
+        "toolCount": { "type": "integer", "minimum": 0 },
+        "durationMs": { "type": "number", "minimum": 0 },
+        "startedAt": { "type": "number" },
+        "lastActivityAt": { "type": "number" },
+        "completedAt": { "type": "number" },
+        "completionSignal": { "enum": ["structured_output", "agent_end", "process_exit"] },
+        "lastMessage": { "type": "string" },
+        "recentTools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "status"],
+            "properties": { "name": { "type": "string" }, "status": { "type": "string" } }
+          }
+        },
+        "nativeScore": { "$ref": "#/$defs/unitInterval" },
+        "verifiedScore": { "$ref": "#/$defs/unitInterval" },
+        "score": { "$ref": "#/$defs/unitInterval" },
+        "scoreSource": { "enum": ["verified", "native"] },
+        "hallucinationFlag": { "type": "boolean" },
+        "hallucinationPenalty": { "$ref": "#/$defs/unitInterval" },
+        "output": { "type": "object" },
+        "error": { "type": "string" }
+      }
+    },
+    "preparationStep": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "status", "detail"],
+      "properties": {
+        "id": { "enum": ["contract", "roles", "prompt", "graph"] },
+        "label": { "type": "string" },
+        "status": { "enum": ["pending", "running", "completed", "failed"] },
+        "detail": { "type": "string" },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "completedAt": { "type": "string", "format": "date-time" },
+        "durationMs": { "type": "number", "minimum": 0 }
+      }
+    },
+    "node": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "label", "description", "pheromone", "visits", "bestScore"],
+      "properties": {
+        "id": { "type": "string" },
+        "label": { "type": "string" },
+        "description": { "type": "string" },
+        "pheromone": { "type": "number", "minimum": 0 },
+        "visits": { "type": "integer", "minimum": 0 },
+        "bestScore": { "$ref": "#/$defs/unitInterval" }
+      }
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "source", "target", "pheromone", "probability", "visits", "bestScore"],
+      "properties": {
+        "id": { "type": "string" },
+        "source": { "type": "string" },
+        "target": { "type": "string" },
+        "pheromone": { "type": "number", "minimum": 0 },
+        "probability": { "$ref": "#/$defs/unitInterval" },
+        "visits": { "type": "integer", "minimum": 0 },
+        "bestScore": { "$ref": "#/$defs/unitInterval" }
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "iteration",
+        "bestScore",
+        "meanScore",
+        "scoreDelta",
+        "entropy",
+        "diversity",
+        "consensus",
+        "convergence",
+        "successRate",
+        "totalTokens",
+        "durationMs"
+      ],
+      "properties": {
+        "iteration": { "type": "integer", "minimum": 1 },
+        "bestScore": { "$ref": "#/$defs/unitInterval" },
+        "meanScore": { "$ref": "#/$defs/unitInterval" },
+        "scoreDelta": { "type": "number", "minimum": -1, "maximum": 1 },
+        "entropy": { "$ref": "#/$defs/unitInterval" },
+        "diversity": { "$ref": "#/$defs/unitInterval" },
+        "consensus": { "$ref": "#/$defs/unitInterval" },
+        "convergence": { "$ref": "#/$defs/unitInterval" },
+        "successRate": { "$ref": "#/$defs/unitInterval" },
+        "totalTokens": { "type": "integer", "minimum": 0 },
+        "durationMs": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}
