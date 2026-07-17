@@ -49,3 +49,19 @@ Teammate session handoff MUST maintain exactly one writer. Handoff MUST wait for
 当 npm registry 包与目标源码具有相同 version 但命令或行为合同不一致时，禁止继续按 semver 或该 registry version 集成。必须锁定到可复现的 HTTPS source tarball + commit SHA，通过 package-local wrapper 调用，并在 packed consumer 中启用 install scripts 后实际执行至少一个代表性命令；仅 require.resolve、npm ls 或 --ignore-scripts 安装不足以证明 runtime 可用。
 
 </spec-entry>
+
+<spec-entry category="arch" keywords="api-key,login,provider,base-url,reasoning,deepseek" date="2026-07-17" sid="S-20260717-nxld" title="Custom API Provider 必须使用单入口 API-key 登录" description="Custom API provider 使用 /login 单入口并隔离其他 provider" source="master@3b0379dd" supersedes="S-20260717-bvo9" status="deprecated" superseded-by="S-20260717-wl3q">
+
+### Custom API Provider 必须使用单入口 API-key 登录
+
+OpenAI Responses 与 Anthropic custom provider MUST 位于 /login 的 API-key 分组，并通过 provider-specific apiKeyLogin 在同一流程采集 Base URL、model ID、reasoning capability 与 API key。公开连接配置 MUST 原子写入 models.json，secret MUST 仅由 Pi credential store 写入 auth.json。MUST NOT 注册额外 /api-provider 命令，MUST NOT 使用 OAuth modifyModels 模拟配置，且更新 MUST 保留 DeepSeek 等其他 provider。
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="api-manager models.json provider api-key base-url reasoning deepseek crud" date="2026-07-17" sid="S-20260717-wl3q" title="Custom API Provider 统一由 API Manager 管理" description="通过 /api-manager 和 models.json 管理自定义 API provider CRUD" source="user:2026-07-17" supersedes="S-20260717-nxld">
+
+### Custom API Provider 统一由 API Manager 管理
+
+OpenAI Responses 与 Anthropic custom provider MUST 由 Maestro 的 /api-manager 管理，并以 Pi 官方 models.json 作为持久化入口。命令 MUST 支持 list/show/set/delete/logout/reset；literal API key 或环境变量占位符与 Base URL、model ID、reasoning capability 一并保存在对应 provider 内。新增、更新和删除后 MUST 刷新 ModelRegistry，删除只移除目标 provider，且所有写入 MUST 原子化并保留 DeepSeek 等其他 provider。MUST NOT 依赖 Pi host patch、OAuth modifyModels 或未公开 apiKeyLogin hook。
+
+</spec-entry>

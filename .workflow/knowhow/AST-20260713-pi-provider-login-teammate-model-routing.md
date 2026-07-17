@@ -10,10 +10,13 @@ codePaths:
   - packages/pi-maestro-teammate/src/tui/model-mapping-overlay.ts
 created: 2026-07-13T00:00:00+08:00
 tags: [提供商配置, 登录, 模型路由, 角色映射, 终端界面]
-status: active
+status: deprecated
+supersededBy: AST-20260717-native-api-provider-isolation-contract
 ---
 
 # Pi 通用 Provider 登录与 teammate 模型路由配置
+
+> Deprecated：Provider 登录部分已由 `AST-20260717-native-api-provider-isolation-contract` 替代。teammate 模型路由章节仅保留为历史参考。
 
 ## Overview
 
@@ -91,4 +94,3 @@ Pi 的普通 API-key 登录只采集单个 key。为了在原生 `/login` 内完
 - `packages/pi-maestro-teammate/src/models/model-routing.ts`
 - `packages/pi-maestro-teammate/src/tui/model-mapping-overlay.ts`
 - `packages/pi-maestro-teammate/test/model-routing.test.ts`
-
