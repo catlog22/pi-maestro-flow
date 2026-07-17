@@ -18,8 +18,11 @@ const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localTeammateRoot = resolve(packageRoot, "..", "pi-maestro-teammate");
 const require = createRequire(import.meta.url);
 const npmCommand = [process.execPath, process.env.npm_execpath ?? require.resolve("npm/bin/npm-cli.js")];
+const packTimeout = 360_000;
+const installTimeout = 600_000;
+const testTimeout = packTimeout * 2 + installTimeout + 600_000;
 
-test("packed consumer installs real tarballs and loads in a fresh Pi process", { timeout: 900_000 }, () => {
+test("packed consumer installs real tarballs and loads in a fresh Pi process", { timeout: testTimeout }, () => {
   const shortTempRoot = process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
   const root = join(shortTempRoot, `pme-${process.pid}-${Date.now()}`);
   const consumer = join(root, "consumer");
@@ -38,11 +41,15 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       npmCommand,
       ["pack", "--json", "--pack-destination", root],
       localTeammateRoot,
+      process.env,
+      packTimeout,
     ).stdout);
     const flowPacked = parseTrailingJson(run(
       npmCommand,
       ["pack", "--json", "--pack-destination", root],
       packageRoot,
+      process.env,
+      packTimeout,
     ).stdout);
     const teammateTarball = join(root, teammatePacked[0].filename);
     const flowTarball = join(root, flowPacked[0].filename);
@@ -73,7 +80,7 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       ],
       consumer,
       installEnv,
-      600_000,
+      installTimeout,
     );
 
     const installed = join(consumer, "node_modules", "pi-maestro-flow");
@@ -117,6 +124,31 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       ...installEnv,
       PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
     };
+    const childToolsPath = join(consumer, "child-tools.json");
+    const childVerifierPath = join(consumer, "verify-child-tools.mjs");
+    writeFileSync(childVerifierPath, `import { writeFileSync } from "node:fs";
+export default function register(pi) {
+  pi.on("session_start", () => {
+    writeFileSync(${JSON.stringify(childToolsPath)}, JSON.stringify(pi.getAllTools().map((tool) => tool.name)));
+  });
+}
+`);
+    run(
+      piCommand,
+      [
+        "--offline", "--mode", "rpc", "--no-session", "--no-extensions", "--no-skills",
+        "--no-context-files", "--extension", extensionPath, "--extension", childVerifierPath,
+      ],
+      workflowRoot,
+      { ...runtimeEnv, PI_TEAMMATE_CHILD: "1" },
+      45_000,
+      `${JSON.stringify({ id: "state", type: "get_state" })}\n`,
+    );
+    const childTools = JSON.parse(readFileSync(childToolsPath, "utf8"));
+    assert.ok(childTools.includes("ask-user-question"), childTools.join(","));
+    assert.ok(childTools.includes("todo"), childTools.join(","));
+    assert.equal(childTools.includes("goal"), false, childTools.join(","));
+    assert.equal(childTools.includes("run-control"), false, childTools.join(","));
     const smoke = run(
       piCommand,
       [

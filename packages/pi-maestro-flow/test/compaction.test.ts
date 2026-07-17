@@ -5,6 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
   buildMaestroCompactionPrompt,
+  COMPACTION_MODE_STATUS_KEY,
   COMPACTION_STATUS_KEY,
   createMaestroCompaction,
   mergeCompactionReferences,
@@ -25,7 +26,7 @@ import {
   onSessionStart,
 } from "../src/tools/todo.ts";
 
-test("compaction lifecycle publishes status and always clears it", async () => {
+test("compaction lifecycle publishes active status and always clears it", async () => {
   const statuses: Array<{ key: string; value: string | undefined }> = [];
   const event = {
     preparation: {
@@ -56,6 +57,23 @@ test("compaction lifecycle publishes status and always clears it", async () => {
     key: COMPACTION_STATUS_KEY,
     value: undefined,
   });
+});
+
+test("compaction lifecycle clears active state independently of the auto mode", async () => {
+  const statuses: Array<string | undefined> = [];
+  const event = {
+    preparation: {
+      tokensBefore: 91_000,
+      settings: { enabled: false, reserveTokens: 10_000 },
+    },
+  } as never;
+  const ctx = {
+    model: { contextWindow: 100_000 },
+    ui: { setStatus(_key: string, value: string | undefined) { statuses.push(value); } },
+  } as never;
+
+  await runWithCompactionStatus(event, ctx, async () => undefined);
+  assert.deepEqual(statuses, ["COMPACT 91000/90000", undefined]);
 });
 
 function details(): MaestroCompactionDetails {
@@ -337,8 +355,8 @@ test("mid-turn guard settles state when compact throws synchronously", async () 
   assert.match(notifications[0] ?? "", /sync failure/);
 });
 
-test("mid-turn guard clears idle pressure on agent end but preserves active compaction status", async () => {
-  const statuses: Array<string | undefined> = [];
+test("mid-turn guard restores idle state on agent end but preserves active compaction status", async () => {
+  const statuses = new Map<string, string | undefined>();
   let complete: (() => void) | undefined;
   const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
@@ -350,14 +368,40 @@ test("mid-turn guard clears idle pressure on agent end but preserves active comp
     abort() {},
     compact(options: { onComplete(): void }) { complete = options.onComplete; },
     sessionManager: { getBranch: () => [{ type: "message" }] },
-    ui: { setStatus(_key: string, value: string | undefined) { statuses.push(value); }, notify() {} },
+    ui: { setStatus(key: string, value: string | undefined) { statuses.set(key, value); }, notify() {} },
   } as never;
   await guard.evaluate(pressureToolBatch(), ctx);
   guard.onAgentEnd(ctx);
-  assert.match(statuses.at(-1) ?? "", /COMPACT/);
+  assert.match(statuses.get(COMPACTION_STATUS_KEY) ?? "", /COMPACT/);
   complete?.();
   guard.onAgentEnd(ctx);
-  assert.equal(statuses.at(-1), undefined);
+  assert.equal(statuses.get(COMPACTION_MODE_STATUS_KEY), "AUTO ON");
+  assert.equal(statuses.get(COMPACTION_STATUS_KEY), undefined);
+});
+
+test("mid-turn guard publishes enabled and disabled idle states across its lifecycle", () => {
+  let enabled = true;
+  const statuses: Array<{ key: string; value: string | undefined }> = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    readSettings: () => ({ enabled, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    ui: { setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); } },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  enabled = false;
+  guard.onAgentEnd(ctx);
+  guard.reset(ctx);
+
+  assert.deepEqual(statuses, [
+    { key: COMPACTION_MODE_STATUS_KEY, value: "AUTO ON" },
+    { key: COMPACTION_MODE_STATUS_KEY, value: "AUTO OFF" },
+    { key: COMPACTION_STATUS_KEY, value: undefined },
+    { key: COMPACTION_STATUS_KEY, value: undefined },
+    { key: COMPACTION_MODE_STATUS_KEY, value: undefined },
+  ]);
 });
 
 test("mid-turn reset fences stale compaction callbacks from the next lifecycle", async () => {

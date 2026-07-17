@@ -464,9 +464,11 @@ test("verifier receives bounded raw tool evidence produced after the goal starte
 
 test("automatic verification holds an active Goal when both verdict attempts are inconclusive", async () => {
   const calls: Array<{ agent: string; task?: string; timeoutMs?: number }> = [];
+  const verifierOptions: Array<{ onChildRequest?: unknown }> = [];
   const sent: string[] = [];
-  setGoalVerifierRunnerForTest(async (params) => {
+  setGoalVerifierRunnerForTest(async (params, options) => {
     calls.push(params);
+    verifierOptions.push(options);
     return {
       exitCode: 0,
       messages: [{ role: "assistant", content: "I'll inspect the repository and run tests." }],
@@ -485,6 +487,7 @@ test("automatic verification holds an active Goal when both verdict attempts are
 
     assert.equal(calls.length, 2);
     assert.ok(calls.every((call) => call.agent === "goal-verifier"));
+    assert.ok(verifierOptions.every((options) => typeof options.onChildRequest === "function"));
     assert.ok((calls[1]?.timeoutMs ?? 0) < (calls[0]?.timeoutMs ?? 0));
     assert.match(calls[1]?.task ?? "", /Do not run commands/i);
     assert.match(calls[0]?.task ?? "", /Final assistant message:\nWork is complete\./);

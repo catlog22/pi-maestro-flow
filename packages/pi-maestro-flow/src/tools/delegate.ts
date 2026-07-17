@@ -7,8 +7,9 @@
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { runTeammate } from "pi-maestro-teammate/v1/execution";
+import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
 
 export interface DelegateParams {
   prompt?: string;
@@ -28,6 +29,7 @@ export async function executeDelegate(
   params: DelegateParams,
   signal: AbortSignal,
   ctx: ExtensionContext,
+  pi: ExtensionAPI,
 ): Promise<AgentToolResult> {
   if (!params.prompt) {
     return {
@@ -63,10 +65,7 @@ export async function executeDelegate(
         reply_to: "caller",
         lifecycle: "ephemeral",
       },
-      {
-        baseCwd: ctx.cwd,
-        signal,
-      },
+      createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
     );
 
     const lastMessage =

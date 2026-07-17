@@ -11,12 +11,15 @@ export function preparePackagedSkills({
   if (!existsSync(sourceDir)) {
     throw new Error(`Canonical Pi skills directory not found: ${sourceDir}`);
   }
+  const legacyTeamSwarmDir = resolve(sourceDir, "team-swarm").replaceAll("\\", "/");
   rmSync(targetDir, { recursive: true, force: true });
   cpSync(sourceDir, targetDir, {
     recursive: true,
     filter(source) {
-      const normalized = source.replaceAll("\\", "/");
-      return !normalized.includes("/__pycache__/")
+      const normalized = resolve(source).replaceAll("\\", "/");
+      return normalized !== legacyTeamSwarmDir
+        && !normalized.startsWith(`${legacyTeamSwarmDir}/`)
+        && !normalized.includes("/__pycache__/")
         && !normalized.endsWith("/__pycache__")
         && !normalized.endsWith(".pyc");
     },

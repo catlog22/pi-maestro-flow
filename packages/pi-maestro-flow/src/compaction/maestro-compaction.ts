@@ -99,6 +99,11 @@ interface PersistCompactionDependencies {
 }
 
 export const COMPACTION_STATUS_KEY = "maestro-auto-compact";
+export const COMPACTION_MODE_STATUS_KEY = "maestro-auto-compact-mode";
+
+export function autoCompactionIdleStatus(enabled: boolean): string {
+  return enabled ? "AUTO ON" : "AUTO OFF";
+}
 
 export async function runWithCompactionStatus<T>(
   event: Pick<SessionBeforeCompactEvent, "preparation">,

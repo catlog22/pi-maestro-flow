@@ -8,9 +8,10 @@
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { runTeammate } from "pi-maestro-teammate/v1/execution";
 import type { SingleResult } from "pi-maestro-teammate/v1/types";
+import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
 
 export interface MoaParams {
   prompts?: string[];
@@ -48,6 +49,7 @@ export async function executeMoa(
   params: MoaParams,
   signal: AbortSignal,
   ctx: ExtensionContext,
+  pi: ExtensionAPI,
 ): Promise<AgentToolResult> {
   const prompts = params.prompts ?? [];
   const primaryPrompt = prompts[0];
@@ -82,10 +84,7 @@ export async function executeMoa(
             reply_to: "caller",
             lifecycle: "ephemeral",
           },
-          {
-            baseCwd: ctx.cwd,
-            signal,
-          },
+          createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
         );
 
         const lastMessage =
@@ -151,10 +150,7 @@ export async function executeMoa(
         reply_to: "caller",
         lifecycle: "ephemeral",
       },
-      {
-        baseCwd: ctx.cwd,
-        signal,
-      },
+      createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
     );
 
     const lastMessage =

@@ -7,6 +7,7 @@ import {
   type GoalWidgetModel,
   type GoalWidgetPhase,
 } from "../tui/goal-widget.ts";
+import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
 
 // Lazy-loaded sibling: dynamic import + isModuleNotFound fallback (docs pattern 4)
 interface RunTeammateParams {
@@ -16,7 +17,10 @@ interface RunTeammateParams {
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
 }
-interface RunTeammateOptions { baseCwd: string }
+interface RunTeammateOptions {
+  baseCwd: string;
+  onChildRequest?: (event: Record<string, unknown>, reply: (message: unknown) => void) => void;
+}
 interface TeammateResult {
   messages: Array<{ role: string; content: string }>;
   exitCode?: number;
@@ -527,7 +531,20 @@ async function runVerifier(goal: ActiveGoal, summary: string, ctx: GoalContext):
     "- Finish by calling structured_output exactly once. Do not emit prose after it.",
   ].join("\n");
 
-  const options: RunTeammateOptions = { baseCwd: baseCwd || ctx.cwd };
+  if (!extensionApi) {
+    return {
+      status: "error",
+      pass: false,
+      reasoning: "Verifier unavailable — parent extension API is not initialized.",
+      unmet: ["Independent completion verification could not acquire parent authority"],
+      evidence: [],
+    };
+  }
+  const options: RunTeammateOptions = createDirectTeammateRunOptions(
+    extensionApi,
+    ctx as ExtensionContext,
+    { baseCwd: baseCwd || ctx.cwd },
+  );
 
   try {
     const result = await runTeammateFn(verifierParams(verifyTask, VERIFIER_TIMEOUT_MS), options);

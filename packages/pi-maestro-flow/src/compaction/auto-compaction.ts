@@ -3,6 +3,11 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  autoCompactionIdleStatus,
+  COMPACTION_MODE_STATUS_KEY,
+  COMPACTION_STATUS_KEY,
+} from "./maestro-compaction.ts";
 import { loadPiCompactionInternals, type PiCompactionInternals } from "./pi-internals.ts";
 
 const DEFAULT_RESERVE_TOKENS = 16_384;
@@ -62,6 +67,7 @@ interface MessageRecord {
 }
 
 export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: AutoCompactionDependencies = {}): {
+  onSessionStart(ctx: ExtensionContext): void;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
   onAgentEnd(ctx: ExtensionContext): void;
   reset(ctx?: ExtensionContext): void;
@@ -75,15 +81,22 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
   return {
+    onSessionStart(ctx) {
+      publishIdleStatus(ctx, readSettings(ctx.cwd).enabled);
+    },
     async evaluate(messages, ctx) {
       const generation = state.generation;
       if (state.running) return undefined;
+      const settings = readSettings(ctx.cwd);
+      publishIdleStatus(ctx, settings.enabled);
       if (!ctx.model || !endsWithCompleteToolResultBatch(messages)) {
         clearPressureStatus(ctx);
         return undefined;
       }
-      const settings = readSettings(ctx.cwd);
-      if (!settings.enabled || ctx.model.contextWindow <= settings.reserveTokens) return undefined;
+      if (!settings.enabled || ctx.model.contextWindow <= settings.reserveTokens) {
+        clearPressureStatus(ctx);
+        return undefined;
+      }
       const pressure = applyContextPressurePolicy(messages, ctx.model.contextWindow, settings);
       updatePressureStatus(ctx, pressure);
       if (pressure.band !== "critical") {
@@ -118,7 +131,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return pressure.messages;
       }
       if (!preparation) {
-        ctx.ui.setStatus("maestro-auto-compact", `CTX CRITICAL ${pressure.estimatedTokens}/${thresholdTokens}`);
+        ctx.ui.setStatus(COMPACTION_STATUS_KEY, `CTX CRITICAL ${pressure.estimatedTokens}/${thresholdTokens}`);
         const noCompactableKey = `${thresholdTokens}:${settings.keepRecentTokens}:${branch.length}`;
         if (state.lastNoCompactableKey !== noCompactableKey) {
           state.lastNoCompactableKey = noCompactableKey;
@@ -135,7 +148,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const owner = ++state.nextOwner;
       state.activeOwner = owner;
       ctx.abort();
-      ctx.ui.setStatus("maestro-auto-compact", `COMPACT ${estimate.tokens}/${thresholdTokens}`);
+      ctx.ui.setStatus(COMPACTION_STATUS_KEY, `COMPACT ${estimate.tokens}/${thresholdTokens}`);
       const failCompaction = (error: unknown) => {
         if (state.generation !== generation || state.activeOwner !== owner) return;
         state.running = false;
@@ -167,7 +180,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       return pressure.messages;
     },
     onAgentEnd(ctx) {
-      if (!state.running) clearPressureStatus(ctx);
+      if (!state.running) {
+        publishIdleStatus(ctx, readSettings(ctx.cwd).enabled);
+        clearPressureStatus(ctx);
+      }
     },
     reset(ctx) {
       state.generation += 1;
@@ -176,7 +192,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.lastTriggerKey = undefined;
       state.internalsWarningShown = false;
       state.lastNoCompactableKey = undefined;
-      if (ctx) clearPressureStatus(ctx);
+      if (ctx) {
+        clearPressureStatus(ctx);
+        ctx.ui.setStatus(COMPACTION_MODE_STATUS_KEY, undefined);
+      }
     },
   };
 }
@@ -367,18 +386,22 @@ function pressureResult(
 
 function updatePressureStatus(ctx: ExtensionContext, pressure: ContextPressureResult): void {
   if (pressure.band === "normal") {
-    ctx.ui.setStatus("maestro-auto-compact", undefined);
+    clearPressureStatus(ctx);
     return;
   }
   const pruned = pressure.prunedToolResults > 0 ? ` -${pressure.prunedToolResults}` : "";
   ctx.ui.setStatus(
-    "maestro-auto-compact",
+    COMPACTION_STATUS_KEY,
     `CTX ${pressure.band.toUpperCase()} ${pressure.estimatedTokens}/${pressure.thresholdTokens}${pruned}`,
   );
 }
 
+function publishIdleStatus(ctx: ExtensionContext, enabled: boolean): void {
+  ctx.ui.setStatus(COMPACTION_MODE_STATUS_KEY, autoCompactionIdleStatus(enabled));
+}
+
 function clearPressureStatus(ctx: ExtensionContext): void {
-  ctx.ui.setStatus("maestro-auto-compact", undefined);
+  ctx.ui.setStatus(COMPACTION_STATUS_KEY, undefined);
 }
 
 function roleOf(message: AgentMessage | undefined): string | undefined {

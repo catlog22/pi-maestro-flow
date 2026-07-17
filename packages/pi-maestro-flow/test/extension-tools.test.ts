@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -10,6 +11,11 @@ import registerMaestroExtension, {
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
 import { isRunControlReadAction } from "../src/tools/run-control.ts";
+import {
+  getTeammateChildExtensions,
+  getTeammateChildToolBroker,
+  getTeammatePermissionBroker,
+} from "pi-maestro-teammate/v1/child-extensions";
 
 test("Workflow Goal restore requires a workflow-owned Goal matching the canonical Session", () => {
   const snapshot = workflowAttachSnapshot();
@@ -73,6 +79,13 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   });
 
   registerMaestroExtension(api);
+  assert.equal(getTeammateChildToolBroker("todo"), undefined, "Todo authority must not outlive a root session");
+  assert.equal(getTeammatePermissionBroker(), undefined, "permission authority must not outlive a root session");
+  assert.equal(
+    getTeammateChildExtensions().some((registration) => registration.tools.includes("todo")),
+    false,
+    "child extension inheritance must be session-owned",
+  );
   const names = tools.map((tool) => tool.name);
   assert.ok(names.includes("lsp"));
   assert.ok(names.includes("browser"));
@@ -81,8 +94,18 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(names.filter((name) => name === "browser").length, 1);
   assert.equal(names.filter((name) => name === "search_tool_bm25").length, 1);
   assert.ok(names.includes("run-control"));
+  assert.ok(names.includes("swarm_runtime"));
   assert.ok(commands.includes("maestro-session"));
+  assert.ok(commands.includes("maestro-todo"));
+  assert.ok(commands.includes("swarm"));
   assert.ok(renderers.includes("run-event"));
+
+  const swarmRuntime = tools.find((tool) => tool.name === "swarm_runtime");
+  const swarmSchema = swarmRuntime?.parameters as { type?: string; additionalProperties?: boolean; properties?: Record<string, unknown>; anyOf?: unknown };
+  assert.equal(swarmSchema.type, "object");
+  assert.equal(swarmSchema.additionalProperties, false);
+  assert.equal(swarmSchema.anyOf, undefined);
+  assert.ok(swarmSchema.properties?.plan);
 
   const runControl = tools.find((tool) => tool.name === "run-control");
   const actionSchema = (runControl?.parameters as { properties?: { action?: { anyOf?: Array<{ const?: string }> } } })
@@ -198,6 +221,21 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(permissionPrompts, 1);
   assert.match((toolResult as { reason?: string }).reason ?? "", /denied by user/i);
   for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx);
+  assert.equal(getTeammateChildToolBroker("todo"), undefined);
+  assert.equal(getTeammatePermissionBroker(), undefined);
+});
+
+test("root teammate authority is fenced on session start and disposed on shutdown", () => {
+  const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.match(
+    source,
+    /pi\.on\("session_start"[\s\S]*?disposeTeammateSessionRegistrations\(\)[\s\S]*?activateTeammateSessionRegistrations\(ctx\)/,
+  );
+  assert.match(
+    source,
+    /pi\.on\("session_shutdown"[\s\S]*?disposeTeammateSessionRegistrations\(\)/,
+  );
+  assert.match(source, /generation !== teammateRegistrationGeneration/);
 });
 
 test("teammate child registers only interaction and parent-permission surfaces", async () => {
@@ -224,7 +262,7 @@ test("teammate child registers only interaction and parent-permission surfaces",
     else process.env.PI_TEAMMATE_CHILD = previous;
   }
 
-  assert.deepEqual(tools.map((tool) => tool.name), ["ask-user-question"]);
+  assert.deepEqual(tools.map((tool) => tool.name), ["ask-user-question", "todo"]);
   assert.deepEqual([...handlers.keys()], ["tool_call"]);
   assert.equal(handlers.has("session_start"), false, "child must not compete for the Workflow continuation lease");
   assert.equal(handlers.has("agent_end"), false, "child must not drive the parent Goal continuation loop");

@@ -12,6 +12,7 @@
  *
  * Also registers:
  *   - /goal command
+ *   - /swarm bundled Skill activation + native teammate/MMAS dashboard
  *   - /plan command + Alt+P shortcut (Plan/Act mode toggle)
  *   - Shift+Tab approval-mode cycle (after remapping Pi effort cycling to Shift+E)
  *   - Dynamic LLM providers
@@ -35,8 +36,9 @@ import {
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
 import { executeMoa, type MoaParams } from "../tools/moa.ts";
+import { registerSwarmCommand } from "../tools/swarm.ts";
 import { registerMaestroProviders } from "../providers/provider-registry.ts";
-import { registerLoginProviderConfigs } from "../providers/login-provider-config.ts";
+import { registerApiProviderConfigs } from "../providers/api-provider-config.ts";
 import {
   initGoal,
   registerGoalCommand,
@@ -70,6 +72,7 @@ import {
   onSessionStart as todoSessionStart,
   onSessionShutdown as todoSessionShutdown,
   reconcileMirrorTasks,
+  type TodoActorRef,
   type TodoParams,
   type TodoResultDetails,
   type TodoTask,
@@ -87,12 +90,12 @@ import {
   type RunControlInput,
 } from "../tools/run-control.ts";
 import {
-  nextMaestroPanelMode,
   renderMaestroPanel,
   shouldShowMaestroPanel,
   type MaestroPanelMode,
 } from "../tui/maestro-panel.ts";
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
+import { TodoOverlay } from "../tui/todo-overlay.ts";
 import {
   initPlan,
   PLAN_TOGGLE_KEY,
@@ -122,7 +125,9 @@ import { createMidTurnAutoCompaction } from "../compaction/auto-compaction.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
 import {
+  proxyTeammateChildTool,
   registerTeammateChildExtension,
+  registerTeammateChildToolBroker,
   registerTeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
 
@@ -208,11 +213,41 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     return;
   }
 
-  // Teammates run in separate Pi processes. Explicitly inherit this extension
-  // so permission hooks and ask-user-question remain available in child mode.
-  registerTeammateChildExtension(fileURLToPath(import.meta.url), {
-    tools: ["ask-user-question"],
-  });
+  const teammateExtensionPath = fileURLToPath(import.meta.url);
+  const teammateAuthorityOwner = `pi-maestro-flow:${teammateExtensionPath}`;
+  let todoRootContext: ExtensionContext | undefined;
+  let childTodoMutationQueue: Promise<void> = Promise.resolve();
+  let teammateRegistrationGeneration = 0;
+  let teammateRegistrationDisposers: Array<() => void> = [];
+  const childTodoBroker = (request: Parameters<Parameters<typeof registerTeammateChildToolBroker>[1]>[0]) => {
+    const execute = async (): Promise<AgentToolResult> => {
+      const ctx = todoRootContext;
+      if (!ctx) {
+        return {
+          content: [{ type: "text", text: "Root Todo session is not available." }],
+          isError: true,
+        };
+      }
+      if (!request.actor.correlationId || request.actor.correlationId === "unknown") {
+        return {
+          content: [{ type: "text", text: "Teammate Todo request has no trusted correlation id." }],
+          isError: true,
+        };
+      }
+      const actor: TodoActorRef = {
+        kind: "teammate",
+        id: request.actor.correlationId,
+        label: request.actor.name ?? request.actor.agent ?? request.actor.correlationId.slice(0, 8),
+        ...(request.actor.agent ? { agentType: request.actor.agent } : {}),
+      };
+      const result = await executeTodo(request.input as unknown as TodoParams, ctx, actor);
+      updateTodoWidget();
+      return result;
+    };
+    const result = childTodoMutationQueue.then(execute, execute);
+    childTodoMutationQueue = result.then(() => undefined, () => undefined);
+    return result;
+  };
 
   const midTurnAutoCompaction = createMidTurnAutoCompaction(pi);
   const state: MaestroState = {
@@ -227,7 +262,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
   // Register dynamic providers from cli-tools.json
   try {
-    registerLoginProviderConfigs(pi);
+    registerApiProviderConfigs(pi);
     registerMaestroProviders(pi);
   } catch (error) {
     // Provider registration failures should not block extension load
@@ -280,6 +315,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
               params as unknown as ExploreParams,
               signal,
               ctx,
+              pi,
             );
 
           case "delegate":
@@ -287,6 +323,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
               params as unknown as DelegateParams,
               signal,
               ctx,
+              pi,
             );
 
           case "moa":
@@ -294,6 +331,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
               params as unknown as MoaParams,
               signal,
               ctx,
+              pi,
             );
 
           default:
@@ -413,10 +451,10 @@ When the agent loop ends naturally, the extension verifies completion automatica
     label: "Todo",
     description: `Task management with plain-text context and optional Pi skill execution — 7 actions.
 
-- create: { action: "create", subject: "...", context: "...", skills: [{ name: "maestro-execute", role: "primary", args: "..." }] }
-- update: { action: "update", id: "...", status: "completed", summary: "..." }
+- create: { action: "create", subject: "...", assignee: "self|root|member", context: "...", skills: [{ name: "maestro-execute", role: "primary", args: "..." }] }
+- update: { action: "update", id: "...", assignee: "root|member", status: "completed", summary: "..." }
 - clear context/skills: { action: "update", id: "...", context: "", skills: [] }
-- list: { action: "list", filter: { status: "pending" } }
+- list: { action: "list", filter: { status: "pending", memberId: "root|correlation-id" } }
 - get: { action: "get", id: "..." }
 - delete: { action: "delete", id: "..." }
 - clear: { action: "clear" }
@@ -532,6 +570,7 @@ When the agent loop ends naturally, the extension verifies completion automatica
   initPlan(pi);
   registerPlanTools(pi);
   registerPlanCommand(pi);
+  registerSwarmCommand(pi);
 
   // === Language intelligence, browser control, and tool discovery ===
   registerIntelligenceTools(pi);
@@ -609,6 +648,8 @@ When the agent loop ends naturally, the extension verifies completion automatica
         status: task.status,
         origin: task.origin ? "mirror" : "local",
         blockedBy: task.blockedBy,
+        createdBy: { id: task.createdBy.id, label: task.createdBy.label },
+        assignee: { id: task.assignee.id, label: task.assignee.label },
       })),
     };
   }
@@ -770,9 +811,30 @@ When the agent loop ends naturally, the extension verifies completion automatica
     });
   }
 
+  async function openTodoOverlay(ctx: ExtensionContext): Promise<void> {
+    const tasks = getVisibleTasks().filter((task) => !task.origin);
+    if (tasks.length === 0) {
+      ctx.ui.notify("No local or teammate Todo tasks to display.", "info");
+      return;
+    }
+    await ctx.ui.custom<void>((tui, _theme, _keybindings, done) =>
+      new TodoOverlay({
+        getTasks: () => getVisibleTasks(),
+        requestRender: () => tui.requestRender(),
+        close: () => done(undefined),
+      }), {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "94%", maxHeight: "90%" },
+    });
+  }
+
   pi.registerCommand("maestro-session", {
     description: "Open the canonical Workflow Session control center",
     async handler(_args, ctx) { await openSessionOverlay(ctx); },
+  });
+  pi.registerCommand("maestro-todo", {
+    description: "Open the shared root and teammate Todo center",
+    async handler(_args, ctx) { await openTodoOverlay(ctx); },
   });
 
   // === Statusline ===
@@ -805,21 +867,18 @@ When the agent loop ends naturally, the extension verifies completion automatica
   }
 
   pi.registerShortcut(TODO_TOGGLE_KEY, {
-    description: "Cycle Maestro Panel: collapsed, Todo, panorama",
-    handler(ctx: ExtensionContext) {
-      if (!deriveWorkflowViewModel(workflowSnapshotForUi()) && getVisibleTasks().length === 0) {
-        ctx.ui.notify("No Workflow Session or Todo tasks to display.", "info");
-        return;
-      }
-      panelMode = nextMaestroPanelMode(panelMode);
-      widgetCtx = ctx;
-      updateTodoWidget();
+    description: "Open the shared root and teammate Todo center",
+    async handler(ctx: ExtensionContext) {
+      await openTodoOverlay(ctx);
     },
   });
 
   // === Session lifecycle ===
   pi.on("session_start", async (event, ctx) => {
+    disposeTeammateSessionRegistrations();
     state.baseCwd = ctx.cwd;
+    midTurnAutoCompaction.onSessionStart(ctx);
+    todoRootContext = ctx;
     widgetCtx = ctx;
     panelMode = "collapsed";
     goalSessionStart(ctx, event);
@@ -856,13 +915,16 @@ When the agent loop ends naturally, the extension verifies completion automatica
     if (configuredMode) approvalMode = configuredMode;
     syncApprovalModeStatus(ctx, approvalMode);
     updateTodoWidget();
+    activateTeammateSessionRegistrations(ctx);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    disposeTeammateSessionRegistrations();
     midTurnAutoCompaction.reset(ctx);
     state.activeToolCalls.clear();
     widgetCtx?.ui.setWidget("todo-panel", undefined);
     widgetCtx = undefined;
+    todoRootContext = undefined;
     panelMode = "collapsed";
     goalSessionShutdown(ctx);
     todoSessionShutdown(ctx);
@@ -952,7 +1014,7 @@ When the agent loop ends naturally, the extension verifies completion automatica
   const hookAdapter = registerCodexHookAdapter(pi, {
     getPermissionMode: () => isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
   });
-  registerTeammatePermissionBroker(async (call, ctx) => {
+  const teammatePermissionBroker = async (call: Parameters<Parameters<typeof registerTeammatePermissionBroker>[0]>[0], ctx: ExtensionContext) => {
     const planBlock = onToolCallPlan(call);
     if (planBlock) return { action: "deny", reason: planBlock.reason };
     const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
@@ -964,8 +1026,49 @@ When the agent loop ends naturally, the extension verifies completion automatica
       hookAdapter,
     );
     if (block) return { action: "deny", reason: block.reason };
-    return { action: "allow_once", updatedInput: call.input };
-  });
+    return { action: "allow_once" as const, updatedInput: call.input };
+  };
+
+  function activateTeammateSessionRegistrations(ctx: ExtensionContext): void {
+    disposeTeammateSessionRegistrations();
+    const generation = ++teammateRegistrationGeneration;
+    const nextDisposers: Array<() => void> = [];
+    try {
+      // Teammates run in separate Pi processes. This registration is scoped to
+      // the live root session so a reload cannot retain a stale child surface.
+      nextDisposers.push(registerTeammateChildExtension(teammateExtensionPath, {
+        tools: ["ask-user-question", "todo"],
+      }));
+      nextDisposers.push(registerTeammateChildToolBroker("todo", async (request) => {
+        if (generation !== teammateRegistrationGeneration || todoRootContext !== ctx) {
+          return {
+            content: [{ type: "text", text: "Root Todo authority belongs to a newer session generation." }],
+            isError: true,
+          };
+        }
+        return childTodoBroker(request);
+      }, { owner: `${teammateAuthorityOwner}:todo` }));
+      nextDisposers.push(registerTeammatePermissionBroker(async (call, requestCtx) => {
+        if (generation !== teammateRegistrationGeneration) {
+          return { action: "deny", reason: "Root permission authority belongs to a newer session generation." };
+        }
+        return teammatePermissionBroker(call, requestCtx);
+      }, { owner: `${teammateAuthorityOwner}:permission` }));
+      teammateRegistrationDisposers = nextDisposers;
+    } catch (error) {
+      for (const dispose of nextDisposers.reverse()) dispose();
+      teammateRegistrationGeneration++;
+      throw error;
+    }
+  }
+
+  function disposeTeammateSessionRegistrations(): void {
+    teammateRegistrationGeneration++;
+    const disposers = teammateRegistrationDisposers;
+    teammateRegistrationDisposers = [];
+    for (const dispose of disposers.reverse()) dispose();
+  }
+
   pi.on("tool_call", async (event, ctx) => permissionController.authorize(
     event,
     ctx,
@@ -982,6 +1085,36 @@ When the agent loop ends naturally, the extension verifies completion automatica
  */
 function registerMaestroChildSurface(pi: ExtensionAPI): void {
   registerAskUserQuestionTool(pi);
+  const todoProxyTool: ToolDefinition<typeof TodoToolParams> = {
+    name: "todo",
+    label: "Todo",
+    description: `Manage the shared root Todo list from this teammate.
+
+Tasks created here are attributed to this teammate and assigned to self by default.
+Use assignee="root" to hand work back to root. Teammates can update tasks they created or were assigned; only root can clear the shared list.`,
+    promptSnippet: "Create and update teammate-owned tasks in the shared root Todo list.",
+    promptGuidelines: [
+      "Use todo for newly discovered follow-up work, explicit blockers, and resumable steps.",
+      "Complete or pause your active Todo before activating another task assigned to you.",
+    ],
+    parameters: TodoToolParams,
+    async execute(_id, params, signal) {
+      return proxyTeammateChildTool("todo", params as unknown as Record<string, unknown>, signal);
+    },
+    renderCall(args, theme) {
+      const action = String(args.action ?? "?");
+      const subject = action === "create" && args.subject ? ` ${String(args.subject).slice(0, 40)}` : "";
+      return singleLine(`${theme.fg("toolTitle", theme.bold("todo "))}${action}${subject}`);
+    },
+    renderResult(result, _options, theme) {
+      const block = result.content.find((item) => item.type === "text");
+      const text = block && "text" in block ? block.text : "Todo request completed.";
+      return singleLine((result as { isError?: boolean }).isError
+        ? theme.fg("error", text)
+        : theme.fg("muted", text));
+    },
+  };
+  pi.registerTool(todoProxyTool);
   const permissionController = createPermissionController();
   pi.on("tool_call", (event, ctx) => {
     // structured_output is a schema-validated, child-local termination tool.
@@ -1091,6 +1224,8 @@ interface TodoTaskLike {
   status: string;
   blockedBy: string[];
   skills?: Array<{ name: string; role?: string }>;
+  createdBy?: { id: string; label: string };
+  assignee?: { id: string; label: string };
 }
 
 const WICON: Record<string, string> = {
@@ -1130,10 +1265,11 @@ export function renderTodoWidget(
   return lines;
 }
 
-function renderTodoSummary(tasks: TodoTaskLike[], expanded: boolean, width: number): string {
+function renderTodoSummary(tasks: TodoTaskLike[], _expanded: boolean, width: number): string {
   const done = tasks.filter((t) => t.status === "completed").length;
-  const toggleVerb = expanded ? "collapse" : "expand";
-  const fullMeta = `${done}/${tasks.length} completed  (${TODO_TOGGLE_LABEL} to ${toggleVerb})`;
+  const memberCount = new Set(tasks.flatMap((task) => [task.createdBy?.id, task.assignee?.id]).filter(Boolean)).size;
+  const memberMeta = memberCount > 0 ? ` · ${memberCount} member${memberCount === 1 ? "" : "s"}` : "";
+  const fullMeta = `${done}/${tasks.length} completed${memberMeta}  (${TODO_TOGGLE_LABEL} center)`;
   const compactMeta = `${done}/${tasks.length}  (${TODO_TOGGLE_LABEL})`;
   const minimalMeta = `${done}/${tasks.length}`;
   const next = findNextTodoTask(tasks);
@@ -1169,7 +1305,12 @@ function widgetTaskLine(task: TodoTaskLike, allTasks: TodoTaskLike[]): string {
   const colorFn = WCOLOR[task.status] ?? dim;
   const icon = colorFn(WICON[task.status] ?? "?");
   const subject = task.status === "completed" ? dim(task.subject) : task.subject;
-  let line = `  ${icon} ${subject}`;
+  const actor = task.assignee
+    ? task.createdBy && task.createdBy.id !== task.assignee.id
+      ? `@${widgetActorLabel(task.createdBy, allTasks)}→@${widgetActorLabel(task.assignee, allTasks)}`
+      : `@${widgetActorLabel(task.assignee, allTasks)}`
+    : "";
+  let line = `  ${icon}${actor ? ` ${actor}` : ""} ${subject}`;
   if (task.skills && task.skills.length > 0) {
     const primary = task.skills.find((skill) => skill.role === "primary") ?? task.skills[0];
     line += dim(`  /${primary.name}${task.skills.length > 1 ? ` +${task.skills.length - 1}` : ""}`);
@@ -1187,4 +1328,22 @@ function widgetTaskLine(task: TodoTaskLike, allTasks: TodoTaskLike[]): string {
   }
 
   return line;
+}
+
+function widgetActorLabel(
+  actor: { id: string; label: string },
+  tasks: readonly TodoTaskLike[],
+): string {
+  const ids = new Set(tasks.flatMap((task) => [task.createdBy, task.assignee])
+    .filter((candidate): candidate is { id: string; label: string } => Boolean(candidate))
+    .filter((candidate) => candidate.label === actor.label)
+    .map((candidate) => candidate.id));
+  if (ids.size < 2) return actor.label;
+  for (let length = Math.min(4, actor.id.length); length < actor.id.length; length++) {
+    const prefix = actor.id.slice(0, length);
+    if ([...ids].every((candidate) => candidate === actor.id || !candidate.startsWith(prefix))) {
+      return `${actor.label}#${prefix}`;
+    }
+  }
+  return `${actor.label}#${actor.id}`;
 }

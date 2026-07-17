@@ -3,10 +3,12 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after, before } from "node:test";
+import { Check } from "typebox/value";
 import {
   cleanPackagedSkills,
   preparePackagedSkills,
 } from "../scripts/prepare-package-skills.mjs";
+import { SwarmRuntimeParams } from "../src/tools/swarm.ts";
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const teammateRoot = join(root, "..", "pi-maestro-teammate");
@@ -38,6 +40,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.equal(pkg.devDependencies.typescript, "5.7.3");
   assert.equal(pkg.engines.node, ">=20.6.0");
   assert.equal(pkg.files.includes("tsconfig.intelligence.json"), true);
+  assert.equal(existsSync(join(root, "schemas", "swarm-run.schema.json")), true);
   assert.equal(pkg.peerDependencies?.["pi-maestro-teammate"], undefined);
   assert.equal(pkg.peerDependenciesMeta?.["pi-maestro-teammate"], undefined);
   assert.doesNotMatch(JSON.stringify(pkg), /file:D:|D:\\\\maestro2|link:/i);
@@ -75,6 +78,33 @@ test("Flow production imports use the versioned teammate API", () => {
 test("package contains the canonical workflow skill set", () => {
   const skillPath = join(root, ".pi", "skills", "workflow-skill-designer", "SKILL.md");
   assert.match(readFileSync(skillPath, "utf8"), /workflow skills/i);
+  assert.equal(
+    existsSync(join(root, ".pi", "skills", "team-swarm", "SKILL.md")),
+    false,
+    "legacy Python team-swarm must not be packaged after migration to the native /swarm command",
+  );
+  const swarmSkillPath = join(root, ".pi", "skills", "swarm", "SKILL.md");
+  assert.equal(
+    existsSync(swarmSkillPath),
+    true,
+    "bundled swarm Skill must be packaged for the native /swarm activation path",
+  );
+  const swarmSkill = readFileSync(swarmSkillPath, "utf8");
+  assert.match(
+    swarmSkill,
+    /plan` has all six top-level fields: `rationale`, `dimensions`, `roles`, `ant`, `scoring`, and `synthesis`/,
+    "bundled swarm Skill must require the complete execute plan",
+  );
+  assert.match(swarmSkill, /"scoring":\s*\{[\s\S]*"rubric"[\s\S]*"instructions"/);
+  assert.match(swarmSkill, /"synthesis":\s*\{[\s\S]*"requirements"/);
+  const executeExample = /Use this canonical hierarchy:\s*```json\s*([\s\S]*?)\s*```/.exec(swarmSkill);
+  assert.ok(executeExample, "bundled swarm Skill must include a canonical execute payload");
+  const executePayload = JSON.parse(executeExample[1]);
+  assert.equal(
+    Check(SwarmRuntimeParams, executePayload),
+    true,
+    "bundled swarm Skill execute example must satisfy the live runtime schema",
+  );
 });
 
 function collectTypeScriptFiles(directory) {

@@ -340,7 +340,7 @@ Goal state and loop ownership are separate. Persist Goal entries with the curren
 
 Do not interpret `reason: startup` as Goal ownership. Auto-restore/attach requires both an eligible reason (`startup|reload|resume`) and a persisted Goal entry belonging to the current sessionId. A running canonical Workflow discovered only by cwd is a read-only baseline until explicit Resume or until this Pi session creates/starts a new Workflow.
 
-After compaction, the first action should be `maestro run brief` to re-anchor Workflow Session context.
+After compaction, the first action should be `maestro run brief` to re-anchor Workflow Session context. `run brief --json` is self-sufficient: it returns `upstream` (consumed alias → path/kind/status), `prev_handoff` (previous sealed Run's handoff), an `anchor` block (Intent/Boundary/Progress), a `refs` list (deferred `{path, when}` reads — load only when needed), and a `next` pointer to `maestro run check` (pre-completion preflight, then `run complete`). Backward compatible — these are additive JSON fields; treat missing ones as absent.
 
 ## Smart Search
 
@@ -368,10 +368,10 @@ Use `validation: "strict"` for security/compliance queries. Results are unverifi
 
 ### Mandatory Gate
 
-Run `maestro search` and `maestro load` before reading code, dispatching an explorer, dispatching another teammate, or editing files.
+Run `maestro search` and `maestro load` before reading code, dispatching an explorer, dispatching another teammate, or editing files. Empty results do not exempt the gate: when the response includes a hint (e.g. `code index not initialized`), execute the hinted command and retry before proceeding.
 
 ```bash
-maestro search "<query>" [--type <type>] [--category <category>] [--code] [--kg]
+maestro search "<query>" [--type <type>] [--category <category>] [--kind <kind>] [--code] [--kg]
 maestro load --type <type> [--list] [--category <category>] [--keyword <word>] [--id <id>]
 ```
 
@@ -379,12 +379,31 @@ Types: `spec`, `knowhow`, `domain`, `issue`, `session`, `scratch`, `note`, `proj
 
 Spec categories: `coding`, `arch`, `debug`, `test`, `review`, `learning`, `ui`.
 
+`--kind`: sealed run artifact kind filter (e.g. `diagnosis`, `review-findings`, `lessons`); applies to wiki results only.
+
+**Re-search triggers** — re-search during a task (use different keywords; do not repeat prior queries):
+
+- Entering a new module or subsystem boundary.
+- Same problem fails to fix after 2 attempts.
+- Before any architecture or approach decision.
+
 ### Query Rules
 
-- Use 1-3 core keywords per query; multiple short queries are better than a keyword dump.
-- Separate concepts from code symbols.
-- Add `--code` for symbols and implementation anchors.
-- Add `--kg` when full-source knowledge-graph context is required.
+Use 1-3 core keywords per query; multiple short queries beat a keyword dump. Separate concepts from code symbols.
+
+| Target | Tool |
+|--------|------|
+| Known symbol → definition/signature | `maestro search "<Symbol>" --code` (file:line, no agent cost) |
+| Concept / knowledge / conventions | `maestro search "<keywords>"` |
+| Debug symptoms / review lessons (sealed artifacts) | `maestro search "<keywords>" --kind diagnosis` / `--kind lessons` |
+| Usage sweep / pattern scan | `teammate` + `agent: "explorer"` |
+| Exact regex / line content | `rg` |
+
+**Association follow-through** — after a hit, follow one hop along associations instead of firing a broad new query:
+
+- Hit a chunked entry (id with `-NNN` suffix) → `maestro load --type knowhow --id <parent-id>` for full text.
+- Trace references (who references it / what it references) → `maestro wiki backlinks <id>` / `maestro wiki forward <id>`.
+- Rule evolution chain → `maestro spec history <sid>`.
 
 ```bash
 # Avoid
@@ -415,6 +434,8 @@ Category routing:
 
 Only persist knowledge when the task or user asks for durable capture, or when the active workflow explicitly requires it.
 
+In `session-mode: run`, `maestro run check` emits a finish checklist on all-green (handoff, backfill, conflict markers, verdict) — execute each item; do not skip.
+
 ### Supersession and Conflict
 
 Use separate mechanisms for evolution and disagreement:
@@ -432,7 +453,7 @@ maestro spec history <sid>
 maestro spec conflict mark <file> <line> --note "<reason>"
 ```
 
-Keep confidence, lifecycle status, and time decay as separate dimensions. Resolve contested knowledge through `/manage-knowledge-audit`.
+**Three orthogonal axes**: `confidence` (human/audit ruling) ⊥ `status` (active/deprecated lifecycle) ⊥ time-decay (automatic freshness). Do not conflate them. Resolve contested knowledge through `/manage-knowledge-audit`.
 
 ### Health and Maintenance
 

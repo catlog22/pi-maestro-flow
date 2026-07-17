@@ -113,6 +113,9 @@ export const GoalToolParams = Type.Object({
   tokenBudget: Type.Optional(
     Type.String({ description: "Optional explicit Token budget; omit for no budget. Accepts plain, k, or m values, e.g. '100000', '100k', or '1.5m'; create only" }),
   ),
+  planHandoffKey: Type.Optional(
+    Type.String({ description: "Internal approved-Plan handoff binding; injected by the Plan gate" }),
+  ),
 }, { additionalProperties: false });
 
 // === Ask User Question Schema ===
@@ -166,6 +169,9 @@ const TodoFilterSchema = Type.Object({
   status: Type.Optional(
     StringEnum(["pending", "in_progress", "completed", "blocked"]),
   ),
+  memberId: Type.Optional(
+    Type.String({ description: "Return tasks created by or assigned to this root/teammate member id" }),
+  ),
 });
 
 export const TodoToolParams = Type.Object({
@@ -202,9 +208,15 @@ export const TodoToolParams = Type.Object({
   summary: Type.Optional(
     Type.String({ description: "Short completion summary carried into later todo steps" }),
   ),
+  assignee: Type.Optional(
+    Type.String({ description: "Assignee selector: self, root, a known teammate id, or an unambiguous teammate label" }),
+  ),
 
   id: Type.Optional(
     Type.String({ description: "Task ID (required for get/update/delete)" }),
   ),
   filter: Type.Optional(TodoFilterSchema),
+  planHandoffKey: Type.Optional(
+    Type.String({ description: "Internal approved-Plan handoff binding; injected by the Plan gate" }),
+  ),
 });
