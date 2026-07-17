@@ -15,6 +15,7 @@ import {
   onContextTodo,
   onSessionShutdown,
   onSessionStart,
+  type TodoActorRef,
   type TodoContext,
 } from "../src/tools/todo.ts";
 import { TodoToolParams } from "../src/extension/schemas.ts";
@@ -38,6 +39,12 @@ function startTodo(cwd: string, loader: TodoSkillLoader, entries: unknown[] = []
   };
   onSessionStart(context);
   return context;
+}
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void;
+  const promise = new Promise<void>((done) => { resolve = done; });
+  return { promise, resolve };
 }
 
 test("todo create/update preserves, replaces, and clears context and skills", async () => {
@@ -345,6 +352,7 @@ test("todo public schema exposes only the canonical context and skills contract"
   assert.ok(properties.context);
   assert.ok(properties.skills);
   assert.ok(properties.summary);
+  assert.ok(properties.assignee);
   for (const legacy of ["skill", "injection", "load", "refs", "inject", "owner", "completion", "decision", "metadata"]) {
     assert.equal(properties[legacy], undefined, `legacy field ${legacy} should not be public`);
   }
@@ -382,8 +390,8 @@ test("todo widget bounds expanded rows and keeps actionable work first", () => {
   assert.match(lines.at(-1) ?? "", /92 more/);
 });
 
-test("todo state version is 4", () => {
-  assert.equal(getTodoCompactionSnapshot().stateVersion, 4);
+test("todo state version is 5", () => {
+  assert.equal(getTodoCompactionSnapshot().stateVersion, 5);
 });
 
 test("todo next refuses to activate a second task", async () => {
@@ -406,6 +414,254 @@ test("todo next refuses to activate a second task", async () => {
     assert.equal((second as { isError?: boolean }).isError, true);
     assert.match((second.content[0] as { text: string }).text, /already in progress/);
     assert.deepEqual(getVisibleTasks().map((task) => task.status), ["in_progress", "pending"]);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("root and teammates share Todo state with per-assignee active tasks and ownership permissions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-members-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const api: TodoActorRef = { kind: "teammate", id: "api-correlation", label: "api", agentType: "worker" };
+  const reviewer: TodoActorRef = { kind: "teammate", id: "review-correlation", label: "reviewer", agentType: "reviewer" };
+
+  try {
+    await executeTodo({ action: "create", subject: "Root task" }, ctx);
+    await executeTodo({ action: "create", subject: "API task" }, ctx, api);
+    await executeTodo({ action: "create", subject: "Review task" }, ctx, reviewer);
+
+    const [rootTask, apiTask, reviewTask] = getVisibleTasks();
+    assert.equal(rootTask.createdBy.id, "root");
+    assert.equal(apiTask.createdBy.id, api.id);
+    assert.equal(apiTask.assignee.id, api.id);
+
+    await executeTodo({ action: "next" }, ctx);
+    await executeTodo({ action: "next" }, ctx, api);
+    assert.deepEqual(getVisibleTasks().map((task) => task.status), ["in_progress", "in_progress", "pending"]);
+
+    const denied = await executeTodo({ action: "update", id: reviewTask.id, status: "completed" }, ctx, api);
+    assert.equal((denied as { isError?: boolean }).isError, true);
+    assert.match((denied.content[0] as { text: string }).text, /cannot update/);
+
+    const activeReassign = await executeTodo({ action: "update", id: apiTask.id, assignee: "root" }, ctx, api);
+    assert.equal((activeReassign as { isError?: boolean }).isError, true);
+    assert.match((activeReassign.content[0] as { text: string }).text, /already in progress/);
+
+    const handedBack = await executeTodo({ action: "update", id: apiTask.id, assignee: "root", status: "pending" }, ctx, api);
+    assert.equal((handedBack as { isError?: boolean }).isError, undefined);
+    assert.equal(getVisibleTasks().find((task) => task.id === apiTask.id)?.assignee.id, "root");
+
+    const activeRootBeforeReassign = getVisibleTasks().find((task) => task.id === rootTask.id)!;
+    const reassigned = await executeTodo({ action: "update", id: rootTask.id, assignee: reviewer.id }, ctx);
+    assert.equal((reassigned as { isError?: boolean }).isError, undefined);
+    const activeRootAfterReassign = getVisibleTasks().find((task) => task.id === rootTask.id)!;
+    assert.equal(activeRootAfterReassign.assignee.id, reviewer.id);
+    assert.notEqual(
+      activeRootAfterReassign.skillActivation?.activationId,
+      activeRootBeforeReassign.skillActivation?.activationId,
+      "active reassignment must revalidate the task's activation snapshot",
+    );
+    const reviewerNext = await executeTodo({ action: "next" }, ctx, reviewer);
+    assert.equal((reviewerNext as { isError?: boolean }).isError, true);
+    assert.match((reviewerNext.content[0] as { text: string }).text, /already in progress/);
+
+    const deniedClear = await executeTodo({ action: "clear" }, ctx, reviewer);
+    assert.equal((deniedClear as { isError?: boolean }).isError, true);
+    assert.equal(getVisibleTasks().length, 3);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent skill activations preserve one active task per assignee", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-activation-race-"));
+  const skillDir = join(root, ".pi", "skills", "demo");
+  const skillPath = join(skillDir, "SKILL.md");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(skillPath, "---\nname: demo\ndescription: demo\n---\n# Gated demo\n");
+  const skill: Skill = {
+    name: "demo",
+    description: "demo",
+    filePath: skillPath,
+    baseDir: skillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  };
+  const entered = deferred();
+  const release = deferred();
+  let reloadCount = 0;
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: {
+      async reload() {
+        reloadCount++;
+        if (reloadCount === 1) {
+          entered.resolve();
+          await release.promise;
+        }
+      },
+      getSkills: () => ({ skills: [skill], diagnostics: [] }),
+    },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    await executeTodo({ action: "create", subject: "First", skills: [{ name: "demo", role: "primary" }] }, ctx);
+    await executeTodo({ action: "create", subject: "Second", skills: [{ name: "demo", role: "primary" }] }, ctx);
+    const [first, second] = getVisibleTasks();
+
+    const activateFirst = executeTodo({ action: "update", id: first.id, status: "in_progress" }, ctx);
+    const activateSecond = executeTodo({ action: "update", id: second.id, status: "in_progress" }, ctx);
+    await entered.promise;
+    release.resolve();
+    const [firstResult, secondResult] = await Promise.all([activateFirst, activateSecond]);
+
+    assert.equal((firstResult as { isError?: boolean }).isError, undefined);
+    assert.equal((secondResult as { isError?: boolean }).isError, true);
+    assert.match((secondResult.content[0] as { text: string }).text, /already in progress/);
+    assert.equal(reloadCount, 1, "the rejected activation must not enter async skill loading");
+    assert.deepEqual(getVisibleTasks().map((task) => task.status), ["in_progress", "pending"]);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("queued Todo updates cannot be overwritten by a stale activation draft", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-stale-draft-"));
+  const skillDir = join(root, ".pi", "skills", "demo");
+  const skillPath = join(skillDir, "SKILL.md");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(skillPath, "---\nname: demo\ndescription: demo\n---\n# Gated demo\n");
+  const skill: Skill = {
+    name: "demo",
+    description: "demo",
+    filePath: skillPath,
+    baseDir: skillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  };
+  const entered = deferred();
+  const release = deferred();
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: {
+      async reload() {
+        entered.resolve();
+        await release.promise;
+      },
+      getSkills: () => ({ skills: [skill], diagnostics: [] }),
+    },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    await executeTodo({ action: "create", subject: "Original", skills: [{ name: "demo", role: "primary" }] }, ctx);
+    const id = getVisibleTasks()[0].id;
+    const activation = executeTodo({ action: "update", id, status: "in_progress" }, ctx);
+    await entered.promise;
+    const rename = executeTodo({ action: "update", id, subject: "Renamed while activating" }, ctx);
+    release.resolve();
+    await Promise.all([activation, rename]);
+
+    assert.equal(getVisibleTasks()[0].subject, "Renamed while activating");
+    assert.equal(getVisibleTasks()[0].status, "in_progress");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session generation fences late skill activation commits", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-generation-race-"));
+  const skillDir = join(root, ".pi", "skills", "demo");
+  const skillPath = join(skillDir, "SKILL.md");
+  await mkdir(skillDir, { recursive: true });
+  await writeFile(skillPath, "---\nname: demo\ndescription: demo\n---\n# Gated demo\n");
+  const skill: Skill = {
+    name: "demo",
+    description: "demo",
+    filePath: skillPath,
+    baseDir: skillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  };
+  const entered = deferred();
+  const release = deferred();
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: {
+      async reload() {
+        entered.resolve();
+        await release.promise;
+      },
+      getSkills: () => ({ skills: [skill], diagnostics: [] }),
+    },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    await executeTodo({ action: "create", subject: "Old session", skills: [{ name: "demo", role: "primary" }] }, ctx);
+    const id = getVisibleTasks()[0].id;
+    const activation = executeTodo({ action: "update", id, status: "in_progress" }, ctx);
+    await entered.promise;
+    onSessionShutdown(todoContext);
+    release.resolve();
+    const result = await activation;
+
+    assert.equal((result as { isError?: boolean }).isError, true);
+    assert.match((result.content[0] as { text: string }).text, /session changed/);
+    assert.deepEqual(getVisibleTasks(), []);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("v4 Todo state migrates missing actor fields to root ownership", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-v4-actor-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const now = Date.now();
+  const todoContext = startTodo(root, loader, [{
+    type: "custom",
+    customType: "todo-state",
+    data: {
+      version: 4,
+      tasks: {
+        legacy: {
+          id: "legacy",
+          subject: "Legacy root task",
+          status: "pending",
+          blockedBy: [],
+          skills: [],
+          createdAt: now,
+          updatedAt: now,
+        },
+      },
+    },
+  }]);
+  try {
+    const task = getVisibleTasks()[0];
+    assert.deepEqual(task.createdBy, { kind: "root", id: "root", label: "root" });
+    assert.deepEqual(task.assignee, { kind: "root", id: "root", label: "root" });
   } finally {
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });

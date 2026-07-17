@@ -92,7 +92,7 @@ const PACKAGE_MUTATING_COMMAND = new RegExp(
   "i",
 );
 const GIT_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}git\s+(?:add|apply|clean|commit|push|pull|merge|rebase|reset|restore|checkout|switch|stash|cherry-pick|revert|tag|init|clone)\b`,
+  String.raw`${SHELL_COMMAND_BOUNDARY}git\s+(?:add|apply|clean|commit|push|pull|merge|rebase|reset|restore|checkout|switch|stash|cherry-pick|revert|init|clone)\b`,
   "i",
 );
 const MAESTRO_MUTATING_COMMAND = new RegExp(
@@ -100,7 +100,11 @@ const MAESTRO_MUTATING_COMMAND = new RegExp(
   "i",
 );
 const MAESTRO_RUN_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+run\s+(?:next|create|check|complete|seal-session|advance|pause|resume|retry|cancel)\b`,
+  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+run\s+(?:next|create|check|complete|decide|seal-session|advance|pause|resume|retry|cancel)\b`,
+  "i",
+);
+const MAESTRO_SESSION_MUTATING_COMMAND = new RegExp(
+  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+session\s+(?:create|chain|migrate|meta)\b`,
   "i",
 );
 const IN_PLACE_EDIT_COMMAND = new RegExp(
@@ -127,6 +131,7 @@ const MUTATING_BASH_PATTERNS = [
   GIT_MUTATING_COMMAND,
   MAESTRO_MUTATING_COMMAND,
   MAESTRO_RUN_MUTATING_COMMAND,
+  MAESTRO_SESSION_MUTATING_COMMAND,
   IN_PLACE_EDIT_COMMAND,
   NESTED_MUTATING_COMMAND,
   NESTED_INTERPRETER_COMMAND,
@@ -950,10 +955,138 @@ function hasUnsafeCommandLaunch(command: string, dialect: "posix" | "powershell"
     if (["npm", "yarn", "pnpm", "bun", "pip"].includes(executable)
       && subcommand && ["install", "uninstall", "update", "ci", "link", "publish", "version", "add", "remove", "upgrade"].includes(subcommand)) return true;
     if (executable === "git" && subcommand
-      && ["add", "apply", "clean", "commit", "push", "pull", "merge", "rebase", "reset", "restore", "checkout", "switch", "stash", "cherry-pick", "revert", "tag", "init", "clone"].includes(subcommand)) return true;
+      && ["add", "apply", "clean", "commit", "push", "pull", "merge", "rebase", "reset", "restore", "checkout", "switch", "stash", "cherry-pick", "revert", "init", "clone"].includes(subcommand)) return true;
     if (executable === "maestro" && subcommand && ["install", "uninstall", "update"].includes(subcommand)) return true;
   }
   return false;
+}
+
+const READ_ONLY_EXECUTABLES = new Set([
+  "cat", "cut", "date", "df", "dir", "du", "echo", "fd", "file", "find", "get-childitem",
+  "get-content", "get-item", "get-location", "grep", "head", "hostname", "jq", "kill", "ls",
+  "measure-object", "printf", "pwd", "readlink", "resolve-path", "rg", "select-string", "sleep",
+  "sort", "stat", "tail", "test", "test-path", "tr", "true", "false", "type", "uniq", "wc",
+  "where", "which", "whoami", "write-output", "[",
+]);
+
+const READ_ONLY_GIT_SUBCOMMANDS = new Set([
+  "blame", "cat-file", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
+  "name-rev", "rev-list", "rev-parse", "shortlog", "show", "status",
+]);
+
+const READ_ONLY_SCRIPT_PREFIX = /^(?:test|check|lint|typecheck|verify|validate|audit)(?::|$)/i;
+const MUTATING_SCRIPT_NAME = /(?:^|:)(?:fix|update|write|generate|prepare|install|publish)(?::|$)/i;
+const SAFE_NODE_SCRIPT = /(?:^|[\\/])(?:check|test|lint|verify|validate|audit)[\w.-]*\.(?:[cm]?js|ts)$/i;
+
+function firstSubcommand(args: string[]): { subcommand?: string; rest: string[] } {
+  const index = args.findIndex((arg) => !arg.startsWith("-"));
+  if (index < 0) return { rest: [] };
+  return { subcommand: args[index].toLowerCase(), rest: args.slice(index + 1) };
+}
+
+function isReadOnlyGitCommand(args: string[]): boolean {
+  const { subcommand, rest } = firstSubcommand(args);
+  if (!subcommand) return args.every((arg) => ["--version", "-v", "--help", "-h"].includes(arg));
+  if (READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) return true;
+  if (subcommand === "branch") {
+    if (rest.length === 0) return true;
+    if (rest.length === 1 && ["--show-current", "-a", "-r", "-v", "-vv"].includes(rest[0])) return true;
+    return ["--list", "-l"].includes(rest[0])
+      && rest.slice(1).every((arg) => !arg.startsWith("-"));
+  }
+  if (subcommand === "remote") {
+    if (rest.length === 0 || (rest.length === 1 && rest[0] === "-v")) return true;
+    if (rest[0] === "show") return rest.length === 2 && !rest[1].startsWith("-");
+    if (rest[0] === "get-url") {
+      const names = rest.slice(1).filter((arg) => !["--all", "--push"].includes(arg));
+      return names.length === 1 && !names[0].startsWith("-");
+    }
+    return false;
+  }
+  if (subcommand === "config") {
+    return ["--get", "--get-all", "--get-regexp", "--list", "--show-origin", "--show-scope"]
+      .includes(rest[0] ?? "");
+  }
+  if (subcommand === "tag") {
+    return rest.length === 0
+      || (["--list", "-l"].includes(rest[0]) && rest.slice(1).every((arg) => !arg.startsWith("-")));
+  }
+  if (subcommand === "worktree") return rest[0] === "list";
+  return false;
+}
+
+function isReadOnlyMaestroCommand(args: string[]): boolean {
+  const { subcommand, rest } = firstSubcommand(args);
+  if (!subcommand) return args.every((arg) => ["--version", "-v", "--help", "-h"].includes(arg));
+  if (["search", "load", "explore", "help"].includes(subcommand)) return true;
+  if (subcommand === "run") return ["prepare", "brief", "status"].includes(rest[0] ?? "");
+  if (subcommand === "session") return ["list", "show", "status"].includes(rest[0] ?? "");
+  if (subcommand === "spec") return ["health", "history"].includes(rest[0] ?? "");
+  if (subcommand === "delegate-config") return rest[0] === "show";
+  return rest.includes("--help") || rest.includes("-h");
+}
+
+function isReadOnlyPackageCommand(executable: string, args: string[]): boolean {
+  const { subcommand, rest } = firstSubcommand(args);
+  if (!subcommand) return args.every((arg) => ["--version", "-v", "--help", "-h"].includes(arg));
+  if (subcommand === "test") return !args.some((arg) => /^(?:-u|--updateSnapshot|--write)$/i.test(arg));
+  if (subcommand === "run") {
+    const script = rest[0] ?? "";
+    return READ_ONLY_SCRIPT_PREFIX.test(script) && !MUTATING_SCRIPT_NAME.test(script);
+  }
+  if (subcommand === "audit") return !args.some((arg) => /^(?:--fix|--force)$/i.test(arg));
+  if (subcommand === "list" || subcommand === "ls" || subcommand === "why" || subcommand === "outdated") return true;
+  return executable === "npm" && ["view", "show", "explain", "query", "prefix", "root"].includes(subcommand);
+}
+
+function isReadOnlyNodeCommand(args: string[]): boolean {
+  if (args.length === 0) return false;
+  if (args.every((arg) => ["--version", "-v", "--help", "-h"].includes(arg))) return true;
+  if (args[0] === "--test" || args.includes("--test")) {
+    return !args.some((arg) => /^(?:-u|--update-snapshots?|--test-update-snapshots?)$/i.test(arg));
+  }
+  const script = args.find((arg) => !arg.startsWith("-"));
+  return Boolean(script && SAFE_NODE_SCRIPT.test(script));
+}
+
+function isReadOnlyFindCommand(args: string[]): boolean {
+  return !args.some((arg) => /^(?:-delete|-exec|-execdir|-ok|-okdir|-fprint0?|-fprintf|-fls)$/i.test(arg));
+}
+
+function isReadOnlyCommandLaunch(executable: string, args: string[]): boolean {
+  if (READ_ONLY_EXECUTABLES.has(executable)) {
+    if (executable === "find") return isReadOnlyFindCommand(args);
+    if (executable === "sort") return !args.some((arg) => arg === "-o" || arg.startsWith("--output"));
+    if (executable === "date") return !args.some((arg) => /^(?:-s|--set)(?:=|$)/i.test(arg));
+    if (executable === "hostname") return args.length === 0 || args.every((arg) => arg.startsWith("-"));
+    return true;
+  }
+  if (executable === "git") return isReadOnlyGitCommand(args);
+  if (executable === "maestro") return isReadOnlyMaestroCommand(args);
+  if (["npm", "yarn", "pnpm", "bun"].includes(executable)) {
+    return isReadOnlyPackageCommand(executable, args);
+  }
+  if (["node", "node.exe"].includes(executable)) return isReadOnlyNodeCommand(args);
+  if (/^python\d*(?:\.\d+)?(?:\.exe)?$/.test(executable)) {
+    return args.length > 0 && args.every((arg) => ["--version", "-V", "--help", "-h"].includes(arg));
+  }
+  if (executable === "tsc" || executable === "tsc.exe") return args.includes("--noEmit");
+  if (executable === "eslint" || executable === "eslint.exe") return !args.includes("--fix");
+  if (executable === "prettier" || executable === "prettier.exe") return args.includes("--check");
+  return false;
+}
+
+function hasOnlyReadOnlyCommandLaunches(command: string, dialect: "posix" | "powershell"): boolean {
+  const segments = tokenizeShellCommands(command, dialect);
+  if (segments.length === 0) return false;
+  return segments.every((segment) => {
+    const launch = unwrapCommand(segment);
+    if (!launch) {
+      const executable = executableBasename(segment[0] ?? "");
+      return executable === "command" && ["-v", "-V"].includes(segment[1] ?? "");
+    }
+    return isReadOnlyCommandLaunch(launch.executable, launch.args);
+  });
 }
 
 function isSafeCommand(command: string, dialect: "posix" | "powershell"): boolean {
@@ -967,21 +1100,7 @@ function isSafeCommand(command: string, dialect: "posix" | "powershell"): boolea
   if (hasUnsafeCommandLaunch(trimmed, dialect)) return false;
   if (MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(shellSyntax))) return false;
   if (SHELL_SIDE_EFFECT_ARGUMENTS.test(shellSyntax)) return false;
-  if (/^\s*find(?:\s|$)/i.test(trimmed)) {
-    return !/(?:^|\s)-(?:delete|fprint|fprintf|fls)(?:\s|$)/i.test(trimmed);
-  }
-  if (/^\s*git\s+/i.test(trimmed)) {
-    if (/^\s*git\s+branch(?:\s|$)/i.test(trimmed)) {
-      return /^\s*git\s+branch(?:\s+(?:--show-current|--list(?:\s+\S+)?|-a|-r|-v{1,2}))?\s*$/i.test(trimmed);
-    }
-    if (/^\s*git\s+remote(?:\s|$)/i.test(trimmed)) {
-      return /^\s*git\s+remote(?:\s+-v|\s+show\s+\S+|\s+get-url\s+\S+)?\s*$/i.test(trimmed);
-    }
-    if (/^\s*git\s+config(?:\s|$)/i.test(trimmed)) {
-      return /^\s*git\s+config\s+(?:--get|--get-all|--list|--show-origin|--show-scope)(?:\s|$)/i.test(trimmed);
-    }
-  }
-  return true;
+  return hasOnlyReadOnlyCommandLaunches(trimmed, dialect);
 }
 
 function extractProposedPlan(text: string): string | undefined {

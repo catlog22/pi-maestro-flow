@@ -31,6 +31,8 @@ export interface WorkflowSnapshotTodoLike {
   status?: string;
   origin?: string;
   blockedBy?: readonly string[];
+  createdBy?: { id: string; label: string };
+  assignee?: { id: string; label: string };
 }
 
 export interface WorkflowSnapshotRunLike extends Omit<WorkflowRun, "status"> {
@@ -74,6 +76,8 @@ export interface WorkflowTodoView {
   glyph: string;
   origin?: string;
   blockedBy: readonly string[];
+  createdBy?: { id: string; label: string };
+  assignee?: { id: string; label: string };
 }
 
 export interface WorkflowViewModel {
@@ -179,6 +183,8 @@ export function deriveWorkflowViewModel(
       glyph: GLYPHS[status],
       origin: todo.origin,
       blockedBy: todo.blockedBy ?? [],
+      createdBy: todo.createdBy,
+      assignee: todo.assignee,
     } satisfies WorkflowTodoView;
   });
   const completed = runs.filter((run) => isCompletedStatus(run.status)).length;

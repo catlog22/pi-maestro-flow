@@ -444,18 +444,59 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     }
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run prepare analyze" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run brief run-1" } }), undefined);
-    for (const subcommand of ["next", "next --session s1", "create execute", "check run-1", "complete run-1", "seal-session session-1", "retry run-1", "cancel run-1"]) {
+    for (const subcommand of ["next", "next --session s1", "create execute", "check run-1", "complete run-1", "decide point-1 --session s1 --verdict proceed", "seal-session session-1", "retry run-1", "cancel run-1"]) {
       assert.match(
         onToolCallPlan({ toolName: "bash", input: { command: `maestro run ${subcommand}` } })?.reason ?? "",
         /modify files/,
         subcommand,
       );
     }
+    for (const subcommand of ["create feature --intent x", "chain insert --session s1", "migrate --session s1", "meta update --session s1"]) {
+      assert.match(
+        onToolCallPlan({ toolName: "bash", input: { command: `maestro session ${subcommand}` } })?.reason ?? "",
+        /modify files/,
+        subcommand,
+      );
+    }
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "maestro install" } })?.reason ?? "", /modify files/);
     assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git commit -am x" } })?.reason ?? "", /modify files/);
+    for (const command of [
+      "git rm src/app.ts",
+      "git mv src/app.ts src/renamed.ts",
+      "git update-index --assume-unchanged src/app.ts",
+      "git update-ref refs/heads/main HEAD",
+      "git tag release-candidate",
+      "install source.txt target.txt",
+      "tar -xf archive.tar",
+      "patch -p1 < change.patch",
+      "sort -o output.txt input.txt",
+      "date --set tomorrow",
+      "hostname renamed-host",
+      "node scripts/prepare-package-skills.mjs",
+      "unknown-read-command src/app.ts",
+    ]) {
+      assert.match(
+        onToolCallPlan({ toolName: "bash", input: { command } })?.reason ?? "",
+        /modify files/,
+        command,
+      );
+    }
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "git status; node --version" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "npm test" } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "npm run check:types" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "node scripts/check.mjs" } }), undefined);
+    for (const command of [
+      "git diff -- src/app.ts",
+      "git log -n 1",
+      "git branch --list main",
+      "git tag --list 'v*'",
+      "git worktree list",
+      "find . -name '*.ts'",
+      "tsc --noEmit",
+      "prettier --check src/app.ts",
+    ]) {
+      assert.equal(onToolCallPlan({ toolName: "bash", input: { command } }), undefined, command);
+    }
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "kill 1234" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "rg '\\brm\\b|cp|mv' packages/pi-maestro-flow/src" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "echo 'rm cp mv are write commands'" } }), undefined);

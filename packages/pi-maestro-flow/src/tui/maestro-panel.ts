@@ -39,7 +39,7 @@ export function renderMaestroPanel(
   rows.push(sectionHeading(mode === "todo" ? "Todo" : "Todo · local", inner));
   const localTodos = view.todos.filter((todo) => todo.origin !== "mirror");
   if (localTodos.length === 0) rows.push(fitLine("✓ completed · no local tasks", inner));
-  for (const todo of prioritizedTodos(localTodos).slice(0, 6)) rows.push(renderTodo(todo, inner));
+  for (const todo of prioritizedTodos(localTodos).slice(0, 6)) rows.push(renderTodo(todo, inner, localTodos));
 
   const action = view.recoveryAction ?? view.nextAction;
   if (action) rows.push(fitLine(`» Next: ${action}`, inner));
@@ -64,9 +64,36 @@ function renderRun(run: WorkflowRunView, width: number): string {
   return fitLine(details ? `${label} · ${details}` : label, width);
 }
 
-function renderTodo(todo: WorkflowTodoView, width: number): string {
+function renderTodo(
+  todo: WorkflowTodoView,
+  width: number,
+  allTodos: readonly WorkflowTodoView[],
+): string {
   const blocked = todo.blockedBy.length ? ` · blocked by ${todo.blockedBy.join(",")}` : "";
-  return fitLine(`${workflowStatusLabel(todo.status)} · ${todo.subject}${blocked}`, width);
+  const actor = todo.assignee
+    ? todo.createdBy && todo.createdBy.id !== todo.assignee.id
+      ? ` · @${todoActorLabel(todo.createdBy, allTodos)}→@${todoActorLabel(todo.assignee, allTodos)}`
+      : ` · @${todoActorLabel(todo.assignee, allTodos)}`
+    : "";
+  return fitLine(`${workflowStatusLabel(todo.status)}${actor} · ${todo.subject}${blocked}`, width);
+}
+
+function todoActorLabel(
+  actor: { id: string; label: string },
+  todos: readonly WorkflowTodoView[],
+): string {
+  const ids = new Set(todos.flatMap((todo) => [todo.createdBy, todo.assignee])
+    .filter((candidate): candidate is { id: string; label: string } => Boolean(candidate))
+    .filter((candidate) => candidate.label === actor.label)
+    .map((candidate) => candidate.id));
+  if (ids.size < 2) return actor.label;
+  for (let length = Math.min(4, actor.id.length); length < actor.id.length; length++) {
+    const prefix = actor.id.slice(0, length);
+    if ([...ids].every((candidate) => candidate === actor.id || !candidate.startsWith(prefix))) {
+      return `${actor.label}#${prefix}`;
+    }
+  }
+  return `${actor.label}#${actor.id}`;
 }
 
 function shortRunLabel(run: WorkflowRunView): string {

@@ -13,7 +13,7 @@ import {
   type TodoContext,
 } from "../src/tools/todo.ts";
 
-test("Todo v4 reconciles canonical mirror tasks while preserving user tasks", async () => {
+test("Todo v5 reconciles canonical mirror tasks while preserving user tasks", async () => {
   let persisted: unknown;
   initTodo({
     appendEntry(_type: string, value: unknown) {
@@ -46,13 +46,13 @@ test("Todo v4 reconciles canonical mirror tasks while preserving user tasks", as
     const first = reconcileMirrorTasks(specs, extensionContext);
     assert.equal(first.created.length, 2);
     assert.equal(first.updated.length, 0);
-    assert.equal(getTodoCompactionSnapshot().stateVersion, 4);
+    assert.equal(getTodoCompactionSnapshot().stateVersion, 5);
     assert.equal(getVisibleTasks().find((task) => task.id === "user")?.subject, "User task");
 
     const mirrors = getVisibleTasks().filter((task) => task.origin);
     assert.deepEqual(mirrors.map((task) => task.status), ["completed", "in_progress"]);
     assert.equal(mirrors[1]?.blockedBy.length, 0);
-    assert.equal((persisted as { version?: number }).version, 4);
+    assert.equal((persisted as { version?: number }).version, 5);
     assert.equal(JSON.stringify(persisted).includes("session-1"), true);
 
     const unchanged = reconcileMirrorTasks(specs, extensionContext);
