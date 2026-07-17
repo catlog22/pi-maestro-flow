@@ -360,6 +360,28 @@ test("statusline links approval mode with ACT, PLAN and READY using width-aware 
   }
 });
 
+test("statusline compacts labels before truncating the cwd and Git segment", async () => {
+  const harness = createHarness({
+    exec: async () => ({ code: 0, stdout: "## master\n", stderr: "" }),
+  });
+  try {
+    harness.statuses.set("mode", "ACT");
+    harness.statuses.set("approval-mode", "APPROVAL YOLO");
+    harness.statuses.set("maestro-auto-compact-mode", "AUTO ON");
+    await settleAsyncWork();
+
+    const line = stripAnsi(harness.render(94)[0]);
+    assert.match(line, /^ACT\/YOLO/);
+    assert.match(line, /AUTO ON/);
+    assert.match(line, /pi-maestro-flow/);
+    assert.match(line, /master/);
+    assert.doesNotMatch(line, /…/);
+    assert.ok(visibleWidth(harness.render(94)[0]) <= 94);
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("statusline renders Swarm iteration and convergence on one optional compact line", () => {
   const harness = createHarness();
   try {

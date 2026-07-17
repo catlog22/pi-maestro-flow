@@ -10,7 +10,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { basename } from "node:path";
 import {
 	deriveWorkflowViewModel,
@@ -181,6 +181,14 @@ function renderPressureLine(value: string | undefined, width: number): string {
 
 const SEP = `${ansiFg(COLORS.separator)} · ${ANSI_RESET}`;
 
+function renderFirstFittingLine(candidates: string[][], width: number): string {
+	const lines = candidates.map((parts) => parts.filter(Boolean).join(SEP));
+	for (const line of lines) {
+		if (visibleWidth(line) <= width) return line;
+	}
+	return truncateToWidth(lines.at(-1) ?? "", width, "…");
+}
+
 // ---------------------------------------------------------------------------
 // Git reader (async — cached)
 // ---------------------------------------------------------------------------
@@ -245,8 +253,12 @@ function renderLine1(
 	compactionStatus: string | undefined,
 ): string {
 	const safeWidth = Math.max(1, width);
-	const modeText = renderPlanModeStatus(modeStatus, approvalStatus, safeWidth);
-	const autoCompactionText = renderAutoCompactionMode(compactionStatus, safeWidth);
+	const modeFull = renderPlanModeStatus(modeStatus, approvalStatus, 80);
+	const modeCompact = renderPlanModeStatus(modeStatus, approvalStatus, 48);
+	const modeNarrow = renderPlanModeStatus(modeStatus, approvalStatus, 1);
+	const autoCompactionFull = renderAutoCompactionMode(compactionStatus, 80);
+	const autoCompactionCompact = renderAutoCompactionMode(compactionStatus, 48);
+	const autoCompactionNarrow = renderAutoCompactionMode(compactionStatus, 1);
 	const modelText = colored("model", `${ICONS.model} ${shortenModel(rs.model)}`);
 	const toolCallText = activeToolCalls > 0
 		? colored("runs", `${ICONS.runs} ${activeToolCalls} call${activeToolCalls > 1 ? "s" : ""}`)
@@ -266,12 +278,26 @@ function renderLine1(
 		contextCompact = buildContextBar(usedPct, true);
 	}
 
-	const parts = safeWidth >= 80
-		? [modeText, modelText, contextFull, autoCompactionText, toolCallText, dirText, tokenText]
+	const candidates = safeWidth >= 80
+		? [
+			[modeFull, modelText, contextFull, autoCompactionFull, toolCallText, dirText, tokenText],
+			[modeCompact, modelText, contextCompact, autoCompactionCompact, toolCallText, dirText, tokenText],
+			[modeCompact, modelText, contextCompact, autoCompactionCompact, toolCallText, dirText],
+			[modeCompact, modelText, contextCompact, autoCompactionCompact, dirText],
+			[modeNarrow, autoCompactionNarrow, contextCompact, modelText],
+		]
 		: safeWidth >= 48
-			? [modeText, autoCompactionText, modelText, contextCompact, dirText]
-			: [modeText, autoCompactionText, contextCompact, modelText];
-	return truncateToWidth(parts.filter(Boolean).join(SEP), safeWidth, "…");
+			? [
+				[modeCompact, autoCompactionCompact, modelText, contextCompact, dirText],
+				[modeCompact, autoCompactionCompact, modelText, contextCompact],
+				[modeNarrow, autoCompactionNarrow, contextCompact, modelText],
+			]
+			: [
+				[modeNarrow, autoCompactionNarrow, contextCompact, modelText],
+				[modeNarrow, autoCompactionNarrow, contextCompact],
+				[modeNarrow, contextCompact],
+			];
+	return renderFirstFittingLine(candidates, safeWidth);
 }
 
 export function renderWorkflowStatusline(view: WorkflowViewModel, width: number): string {
