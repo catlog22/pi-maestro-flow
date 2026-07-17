@@ -1,6 +1,6 @@
 ---
 name: workflow-project-researcher
-description: Domain research for project initialization, spawned with different focus angles
+description: "Domain research for project initialization, spawned with different focus angles"
 allowed-tools:
   - Bash
   - Glob

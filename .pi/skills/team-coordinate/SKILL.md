@@ -1,6 +1,6 @@
 ---
 name: team-coordinate
-description: Universal team coordination skill with dynamic role generation. Uses team-worker agent architecture with role-spec files. Only coordinator is built-in -- all worker roles are generated at runtime as role-specs and spawned via team-worker agent. Beat/cadence model for orchestration. Triggers on "Team Coordinate ".
+description: "Universal team coordination skill with dynamic role generation. Uses team-worker agent architecture with role-spec files. Only coordinator is built-in -- all worker roles are generated at runtime as role-specs and spawned via team-worker agent. Beat/cadence model for orchestration. Triggers on \"Team Coordinate \"."
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -17,7 +17,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+@~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Coordinate 
@@ -184,7 +184,7 @@ AskUserQuestion({
 +-- role-specs/                 # Dynamic role-spec definitions (generated Phase 2)
 |   +-- <role-1>.md             # Lightweight: frontmatter + Phase 2-4 only
 |   +-- <role-2>.md
-+-- artifacts/                  # All MD deliverables from workers
++-- artifacts/                  # Legacy; formal deliverables → {run_dir}/outputs/
 |   +-- <artifact>.md
 +-- .msg/                       # Team message bus + state
 |   +-- messages.jsonl          # Message log

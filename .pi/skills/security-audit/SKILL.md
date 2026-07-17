@@ -190,22 +190,23 @@ CONCERNS: {count} critical findings require immediate action
 ```
 
 Status mapping:
-- **DONE** — No critical/high findings
-- **DONE_WITH_CONCERNS** — Critical/high findings documented with remediation
+- **done** — No critical/high findings
+- **done-with-concerns** — Critical/high findings documented with remediation
 
 ### Ralph-invoked completion
 
 End the step by calling the CLI (no text block output):
 ```
-maestro ralph complete <idx> --status {STATUS} [--evidence {path}]
+maestro run complete --session {session_id} --verdict {VERDICT} [--evidence {path}]
 ```
+(run-id 可省略 — 自动解析当前 running 步)
 
 ### Next-step routing
 
 | Condition | Suggestion |
 |-----------|-----------|
-| No critical findings | `maestro run create review -- {phase}` |
-| Critical findings need fix | `maestro run create plan -- {phase} --gaps` |
+| No critical findings | `maestro run create review --session YYYYMMDD-review-{topic} --intent "{goal}" -- {phase}` |
+| Critical findings need fix | `maestro run create plan --session YYYYMMDD-plan-{topic} --intent "{goal}" -- {phase} --gaps` |
 | Need deeper analysis | `/security-audit deep --scope {path}` |
 | Want dependency remediation | Fix vulnerabilities, then re-run `/security-audit` |
 </completion>

@@ -1,7 +1,3 @@
-
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
 # Command: iterate
 
 ## Two Entry Points
@@ -104,7 +100,25 @@ If all completed -> proceed.
 If `config.scoring.mode == "llm"`:
 
 ```
-teammate({ agent: "team-worker", name: "scorer-<k>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  team_name: "swarm",
+  name: "scorer-<k>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: scorer
+role_spec: <skill_root>/roles/scorer/role.md
+session: <session_path>
+session_id: <session_id>
+team_name: swarm
+requirement: score iteration <k> ants
+inner_loop: false
+
+## Context
+Iteration to score: <k>
+Output file: <session>/scores/iter-<k>-scores.json
+Read all artifacts: {run_dir}/outputs/ant-<k>-*.json`
+})
 ```
 
 STOP and await scorer callback. On callback resume at Step 3.

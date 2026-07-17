@@ -1,7 +1,3 @@
-
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
 # Command: dispatch
 
 ## Purpose
@@ -47,16 +43,18 @@ InnerLoop: true`,
 Planner creates EXEC-* tasks at runtime using this template:
 
 ```
-todo({ action: "create", subject: "EXEC-00N: Implement <issue-title>",
+todo({ action: "create" })({
+  subject: "EXEC-00N: Implement <issue-title>",
   description: `Implement solution for issue <issueId>.
 
 Issue ID: <issueId>
-Solution file: <session-folder>/artifacts/solutions/<issueId>.json
+Solution file: {run_dir}/outputs/solutions/<issueId>.json
 Session: <session-folder>
 Execution method: <agent|codex|agy>
 
 InnerLoop: true`,
-  activeForm: "Implementing <issue-title>" })
+  activeForm: "Implementing <issue-title>"
+})
 ```
 
 ### Add Command Task Template

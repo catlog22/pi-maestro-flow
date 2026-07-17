@@ -1,6 +1,6 @@
 ---
 name: workflow-external-researcher
-description: External research agent using Exa MCP for API details, design patterns, and technology evaluation
+description: "External research agent using Exa MCP for API details, design patterns, and technology evaluation"
 allowed-tools:
   - Read
   - mcp__exa__get_code_context_exa

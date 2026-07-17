@@ -6,10 +6,6 @@ additional_prefixes: "[ANALYZE-fix]"
 message_types: 
 ---
 
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
-
 # Deep Analyst
 
 ## Phase 2: Context Loading

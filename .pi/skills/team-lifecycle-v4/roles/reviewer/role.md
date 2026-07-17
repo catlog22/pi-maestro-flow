@@ -7,10 +7,6 @@ discuss_rounds: "[DISCUSS-003]"
 message_types: 
 ---
 
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
-
 # Reviewer
 
 ## Identity

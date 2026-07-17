@@ -1,6 +1,6 @@
 ---
 name: cli-explore-agent
-description: Read-only code exploration via Bash + CLI semantic dual-source analysis, with schema-validated structured output.
+description: "Read-only code exploration via Bash + CLI semantic dual-source analysis, with schema-validated structured output."
 allowed-tools:
   - Bash
   - Glob

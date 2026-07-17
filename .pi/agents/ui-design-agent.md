@@ -1,6 +1,6 @@
 ---
 name: ui-design-agent
-description: UI design token management and prototype generation — W3C Design Tokens Format, state-based components, WCAG AA validation, responsive layout templates.
+description: "UI design token management and prototype generation — W3C Design Tokens Format, state-based components, WCAG AA validation, responsive layout templates."
 allowed-tools:
   - Bash
   - Glob

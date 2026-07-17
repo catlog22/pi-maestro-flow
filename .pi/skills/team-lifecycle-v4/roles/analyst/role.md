@@ -6,10 +6,6 @@ discuss_rounds: "[DISCUSS-001]"
 message_types: 
 ---
 
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
-
 # Analyst
 
 ## Identity

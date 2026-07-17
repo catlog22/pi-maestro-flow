@@ -17,7 +17,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+@~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Lifecycle v4
@@ -159,7 +159,7 @@ AskUserQuestion({
 ├── team-session.json           # Session state + role registry
 ├── spec/                       # Spec phase outputs
 ├── plan/                       # Implementation plan + TASK-*.json
-├── artifacts/                  # All deliverables
+├── artifacts/                  # scratch/intermediate; formal deliverables go to {run_dir}/outputs/
 ├── wisdom/                     # Cross-task knowledge
 ├── explorations/               # Shared explore cache
 ├── discussions/                # Discuss round records

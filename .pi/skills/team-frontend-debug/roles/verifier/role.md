@@ -5,10 +5,6 @@ inner_loop: false
 message_types: 
 ---
 
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
-
 # Verifier
 
 ## Identity
@@ -107,7 +103,7 @@ else:
 
 ### Write Verification Report
 
-Write `<session>/artifacts/VERIFY-001-report.md`:
+Write `{run_dir}/outputs/VERIFY-001-report.md`:
 
 ```markdown
 # Verification Report
@@ -153,7 +149,7 @@ Send state_update:
 {
   "status": "task_complete",
   "task_id": "VERIFY-001",
-  "ref": "<session>/artifacts/VERIFY-001-report.md",
+  "ref": "{run_dir}/outputs/VERIFY-001-report.md",
   "key_findings": ["Verdict: <PASS/FAIL>", "Original bug: <resolved/present>"],
   "decisions": [],
   "verification": "tested",

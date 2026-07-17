@@ -1,6 +1,6 @@
 ---
 name: role-design-author
-description: Generates multi-file role analysis for a brainstorm session — analysis.md index + per-feature files + optional findings under {output_dir}/{role}/.
+description: "Generates multi-file role analysis for a brainstorm session — analysis.md index + per-feature files + optional findings under {output_dir}/{role}/."
 allowed-tools:
   - Glob
   - Grep

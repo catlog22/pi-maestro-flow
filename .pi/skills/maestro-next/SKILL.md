@@ -1,6 +1,6 @@
 ---
 name: maestro-next
-description: "Single-step recommendation engine — route intent to the best next step, with companion utilities"
+description: "Default interactive entry for development intents — score intent + project state, recommend one atomic step, execute after confirmation. Multi-step intents: stepwise, user-confirmed manual-engine chain, or hand off to /maestro. Never auto-orchestrates"
 argument-hint: "<intent>|--list|--suggest [-y] [--dry-run]"
 allowed-tools:
   - AskUserQuestion
@@ -8,10 +8,8 @@ allowed-tools:
   - Edit
   - Glob
   - Grep
-  - goal
   - Read
   - Skill
-  - todo
   - Write
 session-mode: run
 contract: 
@@ -22,20 +20,9 @@ contract:
 </required_reading>
 
 <purpose>
-Parse intent + project state → score candidates from the step registry → recommend a single atomic step → confirm → execute via `maestro run prepare` + `maestro run create`. Also provides companion utilities: knowledge loading (--suggest), structured note recording (--note), and insight promotion (--promote).
-Does not create chains or orchestrate multi-step sequences — that is maestro/ralph territory.
+Default interactive entry for development intents. Parse intent + project state → score candidates from the step registry → recommend a single atomic step → confirm → execute via `maestro run prepare --platform pi` + `maestro run create`. Also provides companion utilities: knowledge loading (--suggest), structured note recording (--note), and insight promotion (--promote).
+Multi-step work has three paths: stepwise (each completed step re-enters lifecycle inference), a user-confirmed manual-engine chain (explicit short chain in session.json, advanced step-by-step via `maestro run next`), or handoff to /maestro. Never auto-orchestrates.
 </purpose>
-
-<host_mirror>
-
-**镜像协议**（状态对账由插件自动完成，LLM 只保留两个语义动作）：
-
-- 步进仅调用 `todo({ action: "next" })`，由 bridge 激活下一步并注入上游摘要与 skill。
-- 完成时让 agent loop 自然结束，由 canonical chain/gates 前置校验与 verifier 自动裁决；禁止调用 Goal 完成动作。
-- 禁止手工创建或更新 Goal/Todo 镜像，禁止直接写 `state.json`、`session.json`、`run.json`、`artifacts.json`。
-- 压缩恢复后先执行 `maestro run brief <run-id>`，再继续 active Run。
-
-</host_mirror>
 
 <context>
 $ARGUMENTS — intent text + optional flags.
@@ -53,21 +40,24 @@ $ARGUMENTS — intent text + optional flags.
 | `--promote` | Interactively promote run insights to spec/knowhow |
 | `--lite` | Force lightweight companion channel (zero-run, knowledge load only) |
 | `--run` | Force standard channel (create a run even for simple tasks) |
+| `--chain` | Force manual-engine chain creation for a multi-step intent (skip detection, go straight to S_CHAIN_CREATE) |
 
 **Mode detection (priority order):**
 1. `--note` → S_NOTE (companion note mode)
 2. `--promote` → S_PROMOTE (companion promote mode)
 3. `--lite` → S_LITE (companion lightweight channel)
-4. `--suggest` → S_RANK → S_PRESENT (suggest only, never execute)
-5. `--list` → S_LIST
-6. Intent text present → S_STATE → S_RANK → S_PRESENT
-7. No arguments → lifecycle inference for natural next step
+4. `--chain` → S_CHAIN_CREATE (build a manual-engine chain from the intent)
+5. `--suggest` → S_RANK → S_PRESENT (suggest only, never execute)
+6. `--list` → S_LIST
+7. Active manual-engine chain with pending steps AND intent empty/"continue" → S_CHAIN_CONT
+8. Intent text present → S_STATE → S_RANK → S_PRESENT
+9. No arguments → lifecycle inference for natural next step
 
-**Candidate pool:** All 13 first-tier steps registered in `prepare/` + `workflows/`. Pipeline orchestrators (`maestro`, `maestro-ralph*`) and standalone commands (`maestro-grill`) are NEVER in the candidate pool.
+**Candidate pool:** All 15 first-tier steps registered in `prepare/` + `workflows/`. Pipeline orchestrators (`maestro`, `maestro-ralph*`) are NEVER in the candidate pool.
 </context>
 
 <invariants>
-1. **No chain creation** — single atomic step execution; orchestration belongs to maestro/ralph
+1. **No auto-orchestration** — chains only via explicit user confirmation, always `--engine manual`, never auto-dispatched. Every chain step requires per-step confirmation; with `-y` execute the current step only, then stop with a continuation hint — never walk the chain unattended. Chain state lives in session.json and is written via CLI verbs only (`run next` / `run complete --verdict`) — never written directly
 2. **Pipeline orchestrators excluded** — only recommend registered steps
 3. **Empty intent or "continue"/"next"** → lifecycle_position inference for natural next step
 4. **Literal match priority** — keyword match takes precedence; lifecycle is tie-breaker
@@ -84,6 +74,9 @@ S_PARSE     — Parse arguments, extract flags, detect mode
 S_LITE      — Lightweight companion: load specs + knowhow for the task, no run creation
 S_NOTE      — Append structured note to active run companion doc
 S_PROMOTE   — Review run outputs, promote insights to spec/knowhow
+S_CHAIN_CREATE — Compose chain definition from intent → create manual-engine session → step
+S_CHAIN_CONT   — Resume active manual-engine chain: show progress, advance the queue head
+S_CHAIN_STEP   — One chain step: `run next` → confirm → execute → `run complete --verdict`
 S_STATE     — Read project state, infer lifecycle_position
 S_RANK      — Score candidates, generate top-N
 S_LIST      — --list mode: grouped display of all steps
@@ -96,13 +89,15 @@ S_FALLBACK  — Intent empty after clarification
 <transitions>
 
 S_PARSE:
-  → S_NOTE       WHEN: --note flag
-  → S_PROMOTE    WHEN: --promote flag
-  → S_LITE       WHEN: --lite flag
-  → S_LIST       WHEN: --list flag
-  → S_STATE      WHEN: intent present / "continue"/"next"/"go"
-  → S_PARSE      WHEN: no intent (1 clarify round via AskUserQuestion)
-  → S_FALLBACK   WHEN: clarification empty
+  → S_NOTE         WHEN: --note flag
+  → S_PROMOTE      WHEN: --promote flag
+  → S_LITE         WHEN: --lite flag
+  → S_CHAIN_CREATE WHEN: --chain flag
+  → S_LIST         WHEN: --list flag
+  → S_CHAIN_CONT   WHEN: active manual-engine chain has pending steps AND intent empty/"continue"
+  → S_STATE        WHEN: intent present / "continue"/"next"/"go"
+  → S_PARSE        WHEN: no intent (1 clarify round via AskUserQuestion)
+  → S_FALLBACK     WHEN: clarification empty
 
 S_LITE:
   → END          DO: load specs + knowhow → display summary → suggest next step (no run)
@@ -112,6 +107,19 @@ S_NOTE:
 
 S_PROMOTE:
   → END          DO: review outputs → Skill(spec, "add") / Skill(manage, "knowledge capture") for each insight
+
+S_CHAIN_CREATE:
+  → S_CHAIN_STEP WHEN: user confirms the chain definition    DO: A_CREATE_CHAIN
+  → END          WHEN: user cancels
+
+S_CHAIN_CONT:
+  → S_CHAIN_STEP WHEN: pending steps remain    DO: show chain progress (step k/n)
+  → END          WHEN: chain exhausted → completion summary
+
+S_CHAIN_STEP:
+  → S_CHAIN_STEP WHEN: step completed AND user confirms "Continue next step"
+  → END          WHEN: user stops / -y single step done / chain exhausted
+  DO: A_STEP_CHAIN
 
 S_STATE:
   → S_RANK       DO: A_INFER_LIFECYCLE
@@ -128,8 +136,9 @@ S_PRESENT:
   → S_CONFIRM    WHEN: interactive
 
 S_CONFIRM:
-  → S_EXECUTE    WHEN: user confirms / selects alternative / modifies args
-  → END          WHEN: user cancels
+  → S_EXECUTE      WHEN: user confirms / selects alternative / modifies args
+  → S_CHAIN_CREATE WHEN: multi_step AND user picks "Create a manual chain"
+  → END            WHEN: user cancels
 
 S_EXECUTE:
   → END          DO: A_EXECUTE_STEP
@@ -146,7 +155,7 @@ S_FALLBACK:
 Read project state to infer `lifecycle_position`:
 
 ```bash
-maestro run prepare --workflow-root .   # check if prepare command works
+maestro run prepare --platform pi --workflow-root .   # check if prepare command works
 cat .workflow/state.json 2>/dev/null
 ```
 
@@ -187,6 +196,8 @@ init → {brainstorm | blueprint | analyze-macro} → roadmap
 | Recent activity avoidance | Low | Recently completed steps demoted |
 | Precondition unmet | Exclude | Remove from pool entirely |
 
+**Multi-step detection:** intent matches keywords of ≥2 distinct steps in the routing table → set `multi_step`. Candidate pool unchanged — orchestrators stay excluded (invariant 2); the flag drives the advisory banner + `Channel: multi-step` in S_PRESENT, offering three continuation modes: a user-confirmed manual-engine chain (S_CHAIN_CREATE), stepwise without a chain, or handoff to /maestro.
+
 **Intent → step routing table (candidate pool):**
 
 | Intent keywords | Recommended step | What it does |
@@ -204,7 +215,8 @@ init → {brainstorm | blueprint | analyze-macro} → roadmap
 | roadmap / milestone / phasing / session plan / work breakdown | roadmap | Decompose requirements into session DAG with scope, success criteria, dependency edges |
 | quick / small / ad-hoc / one-off / trivial | quick | Shortened pipeline for small tasks, preserving atomic commits and state tracking |
 | retrospective / retro / lessons learned / post-mortem / reflect | retrospective | Post-phase four-lens review (technical/process/quality/decision) → spec/knowhow/issue routing |
-| grill / pressure test / stress test | maestro-grill (standalone command) | Not in candidate pool — route to `/maestro-grill` directly |
+| grill / pressure test / stress test | grill | Socratic pressure-test of a plan/idea against codebase reality — adversarial questioning, terminology collision checks |
+| collab / cross-verify / multi-tool / second opinion | collab | Fan out one requirement to multiple CLI tools, cross-verify findings into a unified conclusion |
 | refactor / tech debt | quality-refactor (retained skill) | — |
 | sync docs | manage sync codebase (retained skill) | — |
 | issue / defect | manage issue (retained skill) | — |
@@ -227,28 +239,55 @@ init → {brainstorm | blueprint | analyze-macro} → roadmap
 
 ### A_EXECUTE_STEP
 
+Non-chain path (standalone single run). Steps inside a manual-engine chain advance via A_STEP_CHAIN instead — never mix the two for one step.
+
 For first-tier steps (those with prepare/ + workflows/ files):
 
 ```bash
 # 1. Run prepare to get pre-task thinking content
-maestro run prepare <step> --workflow-root .
+maestro run prepare --platform pi <step> --workflow-root .
 
 # 2. LLM performs pre-task thinking using prepare content
 #    Produces prep YAML (goal/approach/scope/risks/gates/reads)
 
-# 3. Create run with prep input
-maestro run create <step> --workflow-root . [-- args...]
-#    Returns: run_id, run_dir, upstream, workflow content, run-mode, refs
+# 3. Create run — always pass --session (ASCII slug) + --intent
+maestro run create <step> --session YYYYMMDD-<step>-<topic> --intent "<short goal>" --workflow-root . [-- args...]
+#    Returns: run_id, run_dir, upstream (alias→artifact), entry_gates, next (progressive hint)
 
-# 4. LLM executes the workflow (core process)
+# 4. Load the execution manual (follow the `next` hint from create)
+maestro run brief --platform pi <run_id> --workflow-root .
+#    Returns: workflow content, run-mode summary, goal, gate status
 
-# 5. Complete the run
+# 5. LLM executes the workflow (core process)
+
+# 6. Complete the run
 maestro run complete <run_id> --workflow-root .
 ```
 
+After `run complete`: re-infer lifecycle and surface the natural next step as a continuation hint — stepwise multi-step work proceeds by re-invoking `/maestro-next`.
+
 For retained skills (not in step registry): execute via `Skill({ skill: <name>, args: <args> })` directly.
 
-For standalone commands redirected from routing table (e.g. grill → maestro-grill): display redirect message and suggest the user invoke `/maestro-grill` directly. Do NOT attempt step execution.
+### A_CREATE_CHAIN
+
+1. Compose 2-5 steps from the routing-table hits, ordered by the lifecycle main line; `command` values limited to first-tier steps.
+2. Present the chain for confirmation (ordered step list + intent). User can drop/reorder steps before creation.
+3. Create the session — chain definition JSON via stdin, slug per run-mode convention (`YYYYMMDD-next-<topic>`, ASCII ≤64):
+
+```bash
+echo '{"intent":"<phrase>","steps":[{"command":"plan"},{"command":"execute"},{"command":"test"}]}' \
+  | maestro session create YYYYMMDD-next-<topic> --chain-file - --engine manual --intent "<phrase>" --workflow-root .
+```
+
+4. Capture the returned `session_id`. Leave the lease unset — interactive sessions stay unlocked. Proceed to S_CHAIN_STEP.
+
+### A_STEP_CHAIN
+
+1. `maestro run next --session <session_id> --workflow-root .` — the birth packet carries `run_id` / `run_dir` / `upstream`. NEVER call `run create` for this step (birth-packet red line, run-mode.md).
+2. Present the step + chain progress (`step k/n`) → AskUserQuestion: **Execute** / **Skip this step** (`maestro session chain skip`) / **Modify step** (`maestro session chain replace`) / **Stop chain**.
+3. Execute the workflow (re-attach context via `maestro run brief --platform pi <run_id>` when needed), then `maestro run complete <run_id> --verdict done` — the chain step advances atomically.
+4. Pending steps remain → offer **Continue next step** (loop to 1) or stop with a continuation hint (`/maestro-next` resumes the chain). With `-y`: execute the current step only, then stop with the hint — never walk the chain unattended.
+5. No pending steps → chain completion summary (steps done/skipped, artifact paths).
 
 </actions>
 
@@ -258,13 +297,13 @@ For standalone commands redirected from routing table (e.g. grill → maestro-gr
 
 ### Three-way complexity routing
 
-Before executing, assess task complexity to choose the right channel:
+Assess task complexity at S_RANK and surface the verdict in S_PRESENT (`Channel` line), so the routing decision is visible before confirmation:
 
 | Complexity | Channel | Criteria | Action |
 |-----------|---------|----------|--------|
 | Lightweight | Companion (zero-run) | Simple lookup, quick question, knowledge check | Load specs/knowhow, answer directly, no run created |
-| Standard | Single step (one run) | Clear atomic task matching one step | prepare → create → complete |
-| Multi-step | Recommend chain | Task spans multiple steps or needs orchestration | Recommend `/maestro` or `/maestro-ralph` instead |
+| Standard | Single step (one run) | Clear atomic task matching one step | prepare → create → brief → complete |
+| Multi-step | Chain or stepwise | Task spans multiple steps | Create a user-confirmed manual-engine chain (S_CHAIN_CREATE), execute the best first step stepwise, or hand off to `/maestro` |
 
 **Routing preference: prefer Standard over Lightweight.** When uncertain, create a run. A run with a thin report is better than a missed artifact.
 
@@ -279,12 +318,12 @@ Before executing, assess task complexity to choose the right channel:
 
 ### --list mode
 
-Group all 13 first-tier steps by cluster + show retained skills separately:
+Group all 15 first-tier steps by cluster + show retained skills separately:
 
 ```
 Core Chain:  analyze → plan → execute → verify
 Quality:     review, test, auto-test, debug, retrospective
-Discovery:   brainstorm, blueprint, roadmap, quick
+Discovery:   grill, collab, brainstorm, blueprint, roadmap, quick
 
 Retained Skills: quality-refactor, manage sync codebase, manage-*, learn-*, spec-*, ...
 ```
@@ -292,9 +331,12 @@ Retained Skills: quality-refactor, manage sync codebase, manage-*, learn-*, spec
 ### Normal mode
 
 ```
+[⚠ Multi-step intent — create a manual chain, take just the first step, or hand off to /maestro "<intent>"]   ← only when multi_step
+
 Target: /<step-name>
   <description>
   Reason: <match rule + lifecycle position>
+  Channel: companion (zero-run) | single run | multi-step (stepwise / chain)
 
 Alternatives:
   2. /<alt-1> — <description>
@@ -302,6 +344,8 @@ Alternatives:
 
 Args: <args>
 ```
+
+When `multi_step`: the executable recommendation stays the best first step, and the confirmation menu becomes three-way — **Create a manual chain** (Recommended; → S_CHAIN_CREATE), **Just this step** (stepwise; lifecycle inference recommends the follow-up), **Hand off to /maestro**.
 
 `--dry-run` / `--suggest`: display and stop.
 `-y`: execute immediately.
@@ -320,7 +364,9 @@ Otherwise: AskUserQuestion (single-select, header: "Confirm"):
 | E001 | error | Intent empty after clarification | Provide intent or use --list |
 | E002 | error | No steps found in registry | Check prepare/ and workflows/ directories |
 | E003 | error | Selected step has no prepare/workflow files | Verify step installation |
+| E004 | error | Multiple running manual chains, ambiguous resolution | Pass --session <id> explicitly (`run next` lists candidates) |
 | W001 | warning | Top-1 and top-2 scores too close | Force show top 3 for user decision |
 | W002 | warning | No good match for intent | Suggest /maestro or /maestro-ralph for orchestration |
+| W003 | warning | Chain step skipped or replaced | Recorded in chain (status=skipped); remaining steps unaffected |
 
 </error_codes>

@@ -1,7 +1,3 @@
-
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
 # Command: converge
 
 ## Workflow
@@ -24,21 +20,55 @@ Parse stdout JSON. Expected:
 }
 ```
 
-Save full report to `<session>/artifacts/swarm-report.json` (raw data for analyst).
+Save full report to `{run_dir}/outputs/swarm-report.json` (raw data for analyst).
 
 ### Step 2: Spawn analyst worker
 
 ```
-teammate({ agent: "team-worker", name: "analyst", description: "Spawn analyst for swarm synthesis", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn analyst for swarm synthesis",
+  team_name: "swarm",
+  name: "analyst",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: analyst
+role_spec: <skill_root>/roles/analyst/role.md
+session: <session_path>
+session_id: <session_id>
+team_name: swarm
+requirement: synthesize swarm results into human-readable best-solution.md
+inner_loop: false
+
+## Context
+Report data: {run_dir}/outputs/swarm-report.json
+Best solution: <session>/best.json
+All trails: <session>/trails/*.jsonl
+Original objective: <config.ant_prompt.objective>
+
+## Progress Milestones
+Report via team_msg at: report loaded -> synthesis done -> verification done.
+Report completion via team_msg type="task_complete" after final SendMessage.`
+})
 ```
 
 STOP. Resume on analyst callback.
 
 ### Step 3: On analyst callback
 
-Verify `<session>/artifacts/best-solution.md` exists.
+Verify `{run_dir}/outputs/best-solution.md` exists.
 
 If missing -> AskUserQuestion (skip synthesis / retry analyst).
+
+### Step 3.5: Run lifecycle completion
+
+```
+  +- Run lifecycle completion:
+  |   - Read run_id from team-session.json.run.run_id
+  |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
+  |   - Run `maestro run complete <run_id>`
+  |   - If complete fails: log warning, continue (do not block completion action)
+```
 
 ### Step 4: Build completion summary
 
@@ -61,8 +91,8 @@ If missing -> AskUserQuestion (skip synthesis / retry analyst).
 [coordinator]   iter 1: <e1>  iter 2: <e2>  iter 3: <e3>  ...
 [coordinator]
 [coordinator] Deliverables:
-[coordinator]   - artifacts/best-solution.md (analyst synthesis)
-[coordinator]   - artifacts/swarm-report.json (raw data)
+[coordinator]   - {run_dir}/outputs/best-solution.md (analyst synthesis)
+[coordinator]   - {run_dir}/outputs/swarm-report.json (raw data)
 [coordinator]   - best.json (canonical best)
 [coordinator]   - trails/*.jsonl (full exploration log)
 [coordinator]

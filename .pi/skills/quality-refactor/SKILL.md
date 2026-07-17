@@ -1,6 +1,6 @@
 ---
 name: quality-refactor
-description: Use when accumulated tech debt needs systematic identification and safe reduction
+description: Systematic tech-debt identification and safe reduction — plan → confirm → execute with per-change test verification. For explicit refactoring requests; casual tech-debt mentions route via /maestro-next
 argument-hint: "[<scope>]"
 allowed-tools:
   - AskUserQuestion
@@ -90,16 +90,17 @@ CONCERNS: {description if applicable}
 
 End the step by calling the CLI (no text block output):
 ```
-maestro ralph complete <idx> --status {STATUS} [--evidence {path}]
+maestro run complete --session {session_id} --verdict {done|done-with-concerns|needs-retry|blocked} [--evidence {path}]
 ```
+(run-id 可省略 — 自动解析当前 running 步)
 
 ### Next-step routing
 
 | Condition | Suggestion |
 |-----------|-----------|
 | All tests pass | `/manage sync codebase` (update codebase docs) |
-| Test failures after refactor | `maestro run create debug -- "test failures after refactor in {scope}"` |
-| No test suite available | `maestro run create auto-test -- {phase}` |
+| Test failures after refactor | `maestro run create debug --session YYYYMMDD-debug-{topic} --intent "test failures after refactor in {scope}"` |
+| No test suite available | `maestro run create auto-test --session YYYYMMDD-auto-test-{topic} --intent "{goal}" -- {phase}` |
 </completion>
 
 <error_codes>

@@ -1,6 +1,6 @@
 ---
 name: cross-role-reviewer
-description: Compares Decision Digests across role analysis files in a brainstorm session to surface conflicts, gaps, and synergies. Read-only — returns structured text for the orchestrator to apply.
+description: "Compares Decision Digests across role analysis files in a brainstorm session to surface conflicts, gaps, and synergies. Read-only — returns structured text for the orchestrator to apply."
 allowed-tools:
   - Glob
   - Grep

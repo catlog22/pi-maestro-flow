@@ -1,6 +1,6 @@
 ---
 name: odyssey
-description: "Long-running iterative cycle — one entry, five modes (debug|improve|planex|review|ui). Shared archaeology/audit → fix → verify → generalize → discover → persist skeleton with mode-specific dimensions."
+description: "Long-running iterative cycle — one entry, five modes (debug|improve|planex|review|ui). Shared archaeology/audit → fix → verify → generalize → discover → persist skeleton with mode-specific dimensions. User-invoked campaign entry; single-step fixes route via /maestro-next"
 argument-hint: "<intent> --mode debug|improve|planex|review|ui [--auto] [-y] [-c]"
 allowed-tools:
   - AskUserQuestion
@@ -84,6 +84,15 @@ $ARGUMENTS
 | `--executor <tool>` | planex | Explicit CLI executor | first enabled |
 | `--skip-verify` | planex | Skip post-execution validation gate | false |
 
+**Run creation** (per run-mode.md §Start or Resume):
+```bash
+# command-name is odyssey-{mode} — resolves the mode's own prepare contract and workflow
+maestro run create odyssey-<mode> \
+  --session YYYYMMDD-odyssey-{mode}-{topic} \
+  --intent "<short goal phrase>" \
+  [-- flags...]
+```
+
 **Session**: `{run_dir}/outputs/`
 **Output**: `session.json` | `evidence.ndjson` | `understanding.md` | `explore.json` (debug/review only)
 
@@ -121,11 +130,11 @@ All base invariants apply (evidence append-only, session-as-state, phase goal tr
 | 动作 | 工具调用 | 说明 |
 |------|----------|------|
 | 步进 | `todo({ action: "next" })` | 激活下一步 + 注入上游摘要 + 绑定 skill |
-| 完成验收 | agent loop 自然结束 | 自动触发前置校验（chain 全 completed + gates 无 failed）+ verifier |
+| 完成宣告 | `goal done` | 触发前置校验（chain 全 completed + gates 无 failed）+ verifier |
 
 - 禁止手工 `todo({ action: "create" })` / `todo({ action: "update" })` 镜像任务——bridge 从 session.json 自动物化
 - goal 由 bridge 从 session intent + definition_of_done 自动派生
-- 压缩恢复后首个动作：`maestro run brief <run-id>` 重挂协议
+- 压缩恢复后首个动作：`maestro run brief --platform pi <run-id>` 重挂协议
 
 </host_mirror>
 

@@ -1,6 +1,6 @@
 ---
 name: team-planex
-description: Unified team skill for plan-and-execute pipeline. Pure router — coordinator always. Beat model is coordinator-only in monitor.md. Triggers on "team planex".
+description: "Unified team skill for plan-and-execute pipeline. Pure router — coordinator always. Beat model is coordinator-only in monitor.md. Triggers on \"team planex\"."
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -17,7 +17,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+@~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team PlanEx
@@ -100,8 +100,8 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 │   ├── messages.jsonl          # Message bus log
 │   └── meta.json               # Session state
 ├── task-analysis.json          # Coordinator analyze output
-├── artifacts/
-│   └── solutions/              # Planner solution output per issue
+├── artifacts/                  # scratch/intermediate; formal deliverables go to {run_dir}/outputs/
+│   └── solutions/              # Planner solution output per issue -> {run_dir}/outputs/solutions/
 │       ├── <issueId-1>.json
 │       └── <issueId-N>.json
 └── wisdom/                     # Cross-task knowledge

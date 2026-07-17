@@ -1,7 +1,3 @@
-
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
 # Command: Dispatch
 
 ## Phase 2: Context Loading
@@ -64,7 +60,8 @@ Create tasks in dependency order (backward compatible, unchanged):
 
 **ANALYZE-001** (analyzer, Stage 1):
 ```
-todo({ action: "create", subject: "ANALYZE-001",
+todo({ action: "create" })({
+  subject: "ANALYZE-001",
   description: "PURPOSE: Analyze codebase architecture to identify structural issues | Success: Baseline metrics captured, top 3-7 issues ranked by severity
 TASK:
   - Detect project type and available analysis tools
@@ -75,16 +72,18 @@ CONTEXT:
   - Scope: <refactoring-scope>
   - Branch: none
   - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/artifacts/architecture-baseline.json + <session>/artifacts/architecture-report.md | Quantified metrics with evidence
+EXPECTED: {run_dir}/outputs/architecture-baseline.json + {run_dir}/outputs/architecture-report.md | Quantified metrics with evidence
 CONSTRAINTS: Focus on <refactoring-scope> | Analyze before any changes
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "ANALYZE-001", owner: "analyzer" })
 ```
 
 **DESIGN-001** (designer, Stage 2):
 ```
-todo({ action: "create", subject: "DESIGN-001",
+todo({ action: "create" })({
+  subject: "DESIGN-001",
   description: "PURPOSE: Design prioritized refactoring plan from architecture analysis | Success: Actionable plan with measurable success criteria per refactoring
 TASK:
   - Analyze architecture report and baseline metrics
@@ -97,10 +96,11 @@ CONTEXT:
   - Branch: none
   - Upstream artifacts: architecture-baseline.json, architecture-report.md
   - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/artifacts/refactoring-plan.md | Priority-ordered with structural improvement targets, discrete REFACTOR-IDs
+EXPECTED: {run_dir}/outputs/refactoring-plan.md | Priority-ordered with structural improvement targets, discrete REFACTOR-IDs
 CONSTRAINTS: Focus on highest-impact refactorings | Risk assessment required | Non-overlapping file targets per REFACTOR-ID
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "DESIGN-001", addBlockedBy: ["ANALYZE-001"], owner: "designer" })
 ```
 
@@ -128,7 +128,8 @@ todo({ action: "update", taskId: "REFACTOR-001", addBlockedBy: ["DESIGN-001"], o
 
 **VALIDATE-001** (validator, Stage 4 - parallel):
 ```
-todo({ action: "create", subject: "VALIDATE-001",
+todo({ action: "create" })({
+  subject: "VALIDATE-001",
   description: "PURPOSE: Validate refactoring results against baseline | Success: Build passes, tests pass, no metric regressions, API compatible
 TASK:
   - Load architecture baseline and plan success criteria
@@ -142,16 +143,18 @@ CONTEXT:
   - Branch: none
   - Upstream artifacts: architecture-baseline.json, refactoring-plan.md
   - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/artifacts/validation-results.json | Per-dimension validation with verdicts
+EXPECTED: {run_dir}/outputs/validation-results.json | Per-dimension validation with verdicts
 CONSTRAINTS: Must compare against baseline | Flag any regressions or broken imports
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "VALIDATE-001", addBlockedBy: ["REFACTOR-001"], owner: "validator" })
 ```
 
 **REVIEW-001** (reviewer, Stage 4 - parallel):
 ```
-todo({ action: "create", subject: "REVIEW-001",
+todo({ action: "create" })({
+  subject: "REVIEW-001",
   description: "PURPOSE: Review refactoring code for correctness, pattern consistency, and migration safety | Success: All dimensions reviewed, verdict issued
 TASK:
   - Load modified files and refactoring plan
@@ -163,10 +166,11 @@ CONTEXT:
   - Branch: none
   - Upstream artifacts: refactoring-plan.md, validation-results.json (if available)
   - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/artifacts/review-report.md | Per-dimension findings with severity
+EXPECTED: {run_dir}/outputs/review-report.md | Per-dimension findings with severity
 CONSTRAINTS: Focus on refactoring changes only | Provide specific file:line references
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "REVIEW-001", addBlockedBy: ["REFACTOR-001"], owner: "reviewer" })
 ```
 
@@ -192,7 +196,7 @@ For each target index `i` (0-based), with prefix char `P = pipeline_prefix_chars
 
 ```
 // Create session subdirectory for this pipeline
-Bash("mkdir -p <session>/artifacts/pipelines/<P>")
+Bash("mkdir -p {run_dir}/outputs/pipelines/<P>")
 
 todo({ action: "create", subject: "ANALYZE-<P>01", ... })
 todo({ action: "create", subject: "DESIGN-<P>01", ... })
@@ -207,13 +211,14 @@ todo({ action: "update", taskId: "REVIEW-<P>01", addBlockedBy: ["REFACTOR-<P>01"
 
 Task descriptions follow same template as single mode, with additions:
 - `Pipeline: <P>` in CONTEXT
-- Artifact paths use `<session>/artifacts/pipelines/<P>/` instead of `<session>/artifacts/`
+- Artifact paths use `{run_dir}/outputs/pipelines/<P>/` instead of `{run_dir}/outputs/`
 - Meta.json namespace uses `<role>.<P>` (e.g., `analyzer.A`, `refactorer.B`)
 - Each pipeline's scope is its specific target from `independent_targets[i]`
 
 Example for pipeline A with target "refactor auth module":
 ```
-todo({ action: "create", subject: "ANALYZE-A01",
+todo({ action: "create" })({
+  subject: "ANALYZE-A01",
   description: "PURPOSE: Analyze auth module architecture | Success: Auth module structural issues identified
 TASK:
   - Detect project type and available analysis tools
@@ -224,11 +229,12 @@ CONTEXT:
   - Scope: refactor auth module
   - Pipeline: A
   - Shared memory: <session>/wisdom/.msg/meta.json (namespace: analyzer.A)
-EXPECTED: <session>/artifacts/pipelines/A/architecture-baseline.json + architecture-report.md
+EXPECTED: {run_dir}/outputs/pipelines/A/architecture-baseline.json + architecture-report.md
 CONSTRAINTS: Focus on auth module scope
 ---
 InnerLoop: false
-PipelineId: A" })
+PipelineId: A"
+})
 todo({ action: "update", taskId: "ANALYZE-A01", owner: "analyzer" })
 ```
 
@@ -240,7 +246,7 @@ todo({ action: "update", taskId: "ANALYZE-A01", owner: "analyzer" })
 
 **Procedure**:
 
-1. Read `<session>/artifacts/refactoring-plan.md` to count REFACTOR-IDs
+1. Read `{run_dir}/outputs/refactoring-plan.md` to count REFACTOR-IDs
 2. Read `.msg/meta.json` -> `designer.refactoring_count`
 3. **Auto mode decision**:
 
@@ -257,10 +263,10 @@ todo({ action: "update", taskId: "ANALYZE-A01", owner: "analyzer" })
 
 ```
 // Create branch artifact directory
-Bash("mkdir -p <session>/artifacts/branches/B{NN}")
+Bash("mkdir -p {run_dir}/outputs/branches/B{NN}")
 
 // Extract single REFACTOR detail to branch
-Write("<session>/artifacts/branches/B{NN}/refactoring-detail.md",
+Write("{run_dir}/outputs/branches/B{NN}/refactoring-detail.md",
   extracted REFACTOR-{NNN} block from refactoring-plan.md)
 ```
 
@@ -300,7 +306,7 @@ CONTEXT:
   - Branch: B{NN}
   - Upstream artifacts: architecture-baseline.json, branches/B{NN}/refactoring-detail.md
   - Shared memory: <session>/wisdom/.msg/meta.json (namespace: validator.B{NN})
-EXPECTED: <session>/artifacts/branches/B{NN}/validation-results.json
+EXPECTED: {run_dir}/outputs/branches/B{NN}/validation-results.json
 CONSTRAINTS: Only validate this branch's changes
 ---
 InnerLoop: false
@@ -320,7 +326,7 @@ CONTEXT:
   - Branch: B{NN}
   - Upstream artifacts: branches/B{NN}/refactoring-detail.md
   - Shared memory: <session>/wisdom/.msg/meta.json (namespace: reviewer.B{NN})
-EXPECTED: <session>/artifacts/branches/B{NN}/review-report.md
+EXPECTED: {run_dir}/outputs/branches/B{NN}/review-report.md
 CONSTRAINTS: Only review this branch's changes
 ---
 InnerLoop: false

@@ -1,6 +1,6 @@
 ---
 name: team-frontend
-description: Unified team skill for frontend development. Pure router — all roles read this file. Beat model is coordinator-only in monitor.md. Built-in ui-ux-pro-max design intelligence. Triggers on "team frontend".
+description: "Unified team skill for frontend development. Pure router — all roles read this file. Beat model is coordinator-only in monitor.md. Built-in ui-ux-pro-max design intelligence. Triggers on \"team frontend\"."
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -19,7 +19,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+@~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Frontend Development

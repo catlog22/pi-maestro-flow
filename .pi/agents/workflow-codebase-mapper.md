@@ -1,6 +1,6 @@
 ---
 name: workflow-codebase-mapper
-description: Analyzes existing codebase from a specific focus area, spawned in parallel
+description: "Analyzes existing codebase from a specific focus area, spawned in parallel"
 allowed-tools:
   - Bash
   - Glob

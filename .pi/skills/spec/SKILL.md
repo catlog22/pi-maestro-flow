@@ -1,6 +1,6 @@
 ---
 name: spec
-description: "Manage project specs — add, load, remove entries, or initialize the spec system"
+description: "Manage project specs — add, load, remove entries, or initialize the spec system. Spec = 项目约束规则（编码规范、架构约束、质量标准）；可复用知识文档走 /manage knowledge capture。Triggers on \"spec add\", \"记录规范\", \"添加约束\", \"添加规则\", \"加载规范\", \"spec setup\", \"初始化规范\"."
 argument-hint: "add|load|remove|setup [args...]"
 allowed-tools:
   - AskUserQuestion
@@ -22,7 +22,7 @@ Spec management toolkit. Four subcommands:
 </purpose>
 
 <dispatch>
-Parse the first token of $ARGUMENTS. Run `maestro run skill <step>` to load the matched workflow, then follow it completely.
+Parse the first token of $ARGUMENTS. Run `maestro run skill --platform pi <step>` to load the matched workflow, then follow it completely.
 
 | Subcommand | Step | Description |
 |------------|------|-------------|

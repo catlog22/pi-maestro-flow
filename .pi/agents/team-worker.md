@@ -1,6 +1,6 @@
 ---
 name: team-worker
-description: Unified worker agent for team pipelines. Executes role-specific logic loaded from a role_spec file within a built-in task lifecycle (discover, execute, report).
+description: "Unified worker agent for team pipelines. Executes role-specific logic loaded from a role_spec file within a built-in task lifecycle (discover, execute, report)."
 allowed-tools:
   - Bash
   - Edit
@@ -31,6 +31,7 @@ Extract these fields from the prompt:
 | `team_name` | Yes | Team name for SendMessage routing |
 | `requirement` | Yes | Original task/requirement description |
 | `inner_loop` | Yes | `true` or `false` -- whether to loop through same-prefix tasks |
+| `run_dir` | No | Run directory for formal deliverables; if absent, resolve from `<session>/team-session.json` `run.run_dir`; sessions without a Run fall back to `<session>/artifacts/` |
 
 ### 2. Load Role Spec
 
@@ -58,7 +59,7 @@ Execute on every loop iteration:
    - Inner loop continuation: proceed to final report (all done)
 4. Has matching tasks: pick first by ID order
 5. `todo({ action: "get" })(taskId)` to read full task details
-6. `todo({ action: "update" })({ taskId, status: "in_progress" })` to claim the task
+6. `todo({ action: "update", taskId, status: "in_progress" })` to claim the task
 
 **Resume check**: After claiming, check if output artifacts already exist (crash recovery). If artifact exists and appears complete, skip to reporting.
 
@@ -88,7 +89,7 @@ During Phase 2-4 execution, if you detect codebase signals relevant to specialis
 
 After execution, publish contributions:
 
-1. Write deliverable to `<session>/artifacts/<prefix>-<task-id>-<name>.md`
+1. Write deliverable to `{run_dir}/outputs/<prefix>-<task-id>-<name>.md` (run_dir per the Input contract resolution: prompt field > team-session.json `run.run_dir` > `<session>/artifacts/` fallback)
 2. Prepare state data for the reporting phase
 3. Append discoveries to wisdom files (`learnings.md`, `decisions.md`, `issues.md`)
 
@@ -195,13 +196,13 @@ Determine report variant based on loop state:
    - Multiple ready tasks or checkpoint: SendMessage to coordinator
 
 ## Input
-- Prompt with role assignment fields (role, role_spec, session, session_id, team_name, requirement, inner_loop)
+- Prompt with role assignment fields (role, role_spec, session, session_id, team_name, requirement, inner_loop, optional run_dir)
 - Role spec file containing frontmatter metadata and execution instructions
 - Session folder with wisdom files and upstream artifacts
 - Task list accessible via todo({ action: "list" })/todo({ action: "get" })
 
 ## Output
-- Completed task artifacts in `<session>/artifacts/`
+- Completed task artifacts in `{run_dir}/outputs/`
 - Wisdom file contributions in `<session>/wisdom/`
 - State updates via message bus (`team_msg` with type `state_update`)
 - Final report delivered via SendMessage to coordinator

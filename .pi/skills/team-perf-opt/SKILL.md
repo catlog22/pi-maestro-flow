@@ -17,7 +17,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+@~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Performance Optimization
@@ -115,7 +115,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ```
 .workflow/.team/PERF-OPT-<slug>-<date>/
 +-- session.json                    # Session metadata + status + parallel_mode
-+-- artifacts/
++-- {run_dir}/outputs/              # Run deliverables (via maestro run)
 |   +-- baseline-metrics.json       # Profiler: before-optimization metrics
 |   +-- bottleneck-report.md        # Profiler: ranked bottleneck findings
 |   +-- optimization-plan.md        # Strategist: prioritized optimization plan

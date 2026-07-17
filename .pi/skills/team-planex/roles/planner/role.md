@@ -5,10 +5,6 @@ inner_loop: true
 message_types: 
 ---
 
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
-
 # Planner
 
 ## Phase 2: Context Loading
@@ -52,7 +48,7 @@ Parse CLI output to extract solution JSON. If CLI fails, fallback to `ccw issue 
 
 ### 3b. Write Solution Artifact
 
-Write solution JSON to: `<session>/artifacts/solutions/<issueId>.json`
+Write solution JSON to: `{run_dir}/outputs/solutions/<issueId>.json`
 
 ```json
 {
@@ -71,16 +67,18 @@ Overlapping files -> log warning to `wisdom/issues.md`, continue.
 ### 3d. Create EXEC-* Task
 
 ```
-todo({ action: "create", subject: "EXEC-00N: Implement <issue-title>",
+todo({ action: "create" })({
+  subject: "EXEC-00N: Implement <issue-title>",
   description: `Implement solution for issue <issueId>.
 
 Issue ID: <issueId>
-Solution file: <session>/artifacts/solutions/<issueId>.json
+Solution file: {run_dir}/outputs/solutions/<issueId>.json
 Session: <session>
 Execution method: <method>
 
 InnerLoop: true`,
-  activeForm: "Implementing <issue-title>" })
+  activeForm: "Implementing <issue-title>"
+})
 ```
 
 ### 3e. Signal issue_ready

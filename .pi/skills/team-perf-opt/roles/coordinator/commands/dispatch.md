@@ -1,7 +1,3 @@
-
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
 # Command: Dispatch
 
 ## Phase 2: Context Loading
@@ -65,7 +61,8 @@ Create tasks in dependency order (backward compatible, unchanged):
 
 **PROFILE-001** (profiler, Stage 1):
 ```
-todo({ action: "create", subject: "PROFILE-001",
+todo({ action: "create" })({
+  subject: "PROFILE-001",
   description: "PURPOSE: Profile application performance to identify bottlenecks | Success: Baseline metrics captured, top 3-5 bottlenecks ranked by severity
 TASK:
   - Detect project type and available profiling tools
@@ -76,16 +73,18 @@ CONTEXT:
   - Scope: <optimization-scope>
   - Branch: none
   - Shared memory: <session>/.msg/meta.json
-EXPECTED: <session>/artifacts/baseline-metrics.json + <session>/artifacts/bottleneck-report.md | Quantified metrics with evidence
+EXPECTED: {run_dir}/outputs/baseline-metrics.json + {run_dir}/outputs/bottleneck-report.md | Quantified metrics with evidence
 CONSTRAINTS: Focus on <optimization-scope> | Profile before any changes
 ---
 InnerLoop: false",
-  status: "pending" })
+  status: "pending"
+})
 ```
 
 **STRATEGY-001** (strategist, Stage 2):
 ```
-todo({ action: "create", subject: "STRATEGY-001",
+todo({ action: "create" })({
+  subject: "STRATEGY-001",
   description: "PURPOSE: Design prioritized optimization plan from bottleneck analysis | Success: Actionable plan with measurable success criteria per optimization
 TASK:
   - Analyze bottleneck report and baseline metrics
@@ -98,11 +97,12 @@ CONTEXT:
   - Branch: none
   - Upstream artifacts: baseline-metrics.json, bottleneck-report.md
   - Shared memory: <session>/.msg/meta.json
-EXPECTED: <session>/artifacts/optimization-plan.md | Priority-ordered with improvement targets, discrete OPT-IDs
+EXPECTED: {run_dir}/outputs/optimization-plan.md | Priority-ordered with improvement targets, discrete OPT-IDs
 CONSTRAINTS: Focus on highest-impact optimizations | Risk assessment required | Non-overlapping file targets per OPT-ID
 ---
 InnerLoop: false",
-  status: "pending" })
+  status: "pending"
+})
 todo({ action: "update", taskId: "STRATEGY-001", addBlockedBy: ["PROFILE-001"] })
 ```
 
@@ -130,7 +130,8 @@ todo({ action: "update", taskId: "IMPL-001", addBlockedBy: ["STRATEGY-001"] })
 
 **BENCH-001** (benchmarker, Stage 4 - parallel):
 ```
-todo({ action: "create", subject: "BENCH-001",
+todo({ action: "create" })({
+  subject: "BENCH-001",
   description: "PURPOSE: Benchmark optimization results against baseline | Success: All plan success criteria met, no regressions detected
 TASK:
   - Load baseline metrics and plan success criteria
@@ -142,17 +143,19 @@ CONTEXT:
   - Branch: none
   - Upstream artifacts: baseline-metrics.json, optimization-plan.md
   - Shared memory: <session>/.msg/meta.json
-EXPECTED: <session>/artifacts/benchmark-results.json | Per-metric comparison with verdicts
+EXPECTED: {run_dir}/outputs/benchmark-results.json | Per-metric comparison with verdicts
 CONSTRAINTS: Must compare against baseline | Flag any regressions
 ---
 InnerLoop: false",
-  status: "pending" })
+  status: "pending"
+})
 todo({ action: "update", taskId: "BENCH-001", addBlockedBy: ["IMPL-001"] })
 ```
 
 **REVIEW-001** (reviewer, Stage 4 - parallel):
 ```
-todo({ action: "create", subject: "REVIEW-001",
+todo({ action: "create" })({
+  subject: "REVIEW-001",
   description: "PURPOSE: Review optimization code for correctness, side effects, and regression risks | Success: All dimensions reviewed, verdict issued
 TASK:
   - Load modified files and optimization plan
@@ -164,11 +167,12 @@ CONTEXT:
   - Branch: none
   - Upstream artifacts: optimization-plan.md, benchmark-results.json (if available)
   - Shared memory: <session>/.msg/meta.json
-EXPECTED: <session>/artifacts/review-report.md | Per-dimension findings with severity
+EXPECTED: {run_dir}/outputs/review-report.md | Per-dimension findings with severity
 CONSTRAINTS: Focus on optimization changes only | Provide specific file:line references
 ---
 InnerLoop: false",
-  status: "pending" })
+  status: "pending"
+})
 todo({ action: "update", taskId: "REVIEW-001", addBlockedBy: ["IMPL-001"] })
 ```
 
@@ -194,7 +198,7 @@ For each target index `i` (0-based), with prefix char `P = pipeline_prefix_chars
 
 ```
 // Create session subdirectory for this pipeline
-Bash("mkdir -p <session>/artifacts/pipelines/<P>")
+Bash("mkdir -p {run_dir}/outputs/pipelines/<P>")
 
 todo({ action: "create", subject: "PROFILE-<P>01", ... })
 todo({ action: "create", subject: "STRATEGY-<P>01", ... })
@@ -210,13 +214,14 @@ todo({ action: "update", taskId: "REVIEW-<P>01", addBlockedBy: ["IMPL-<P>01"] })
 
 Task descriptions follow same template as single mode, with additions:
 - `Branch: <P>` in CONTEXT
-- Artifact paths use `<session>/artifacts/pipelines/<P>/` instead of `<session>/artifacts/`
+- Artifact paths use `{run_dir}/outputs/pipelines/<P>/` instead of `{run_dir}/outputs/`
 - Shared-memory namespace uses `<role>.<P>` (e.g., `profiler.A`, `optimizer.B`)
 - Each pipeline's scope is its specific target from `independent_targets[i]`
 
 Example for pipeline A with target "optimize rendering":
 ```
-todo({ action: "create", subject: "PROFILE-A01",
+todo({ action: "create" })({
+  subject: "PROFILE-A01",
   description: "PURPOSE: Profile rendering performance | Success: Rendering bottlenecks identified
 TASK:
   - Detect project type and available profiling tools
@@ -227,12 +232,13 @@ CONTEXT:
   - Scope: optimize rendering
   - Pipeline: A
   - Shared memory: <session>/.msg/meta.json (namespace: profiler.A)
-EXPECTED: <session>/artifacts/pipelines/A/baseline-metrics.json + bottleneck-report.md
+EXPECTED: {run_dir}/outputs/pipelines/A/baseline-metrics.json + bottleneck-report.md
 CONSTRAINTS: Focus on rendering scope
 ---
 InnerLoop: false
 PipelineId: A",
-  status: "pending" })
+  status: "pending"
+})
 ```
 
 ---
@@ -243,7 +249,7 @@ PipelineId: A",
 
 **Procedure**:
 
-1. Read `<session>/artifacts/optimization-plan.md` to count OPT-IDs
+1. Read `{run_dir}/outputs/optimization-plan.md` to count OPT-IDs
 2. Read `.msg/meta.json` -> `strategist.optimization_count`
 3. **Auto mode decision**:
 
@@ -260,10 +266,10 @@ PipelineId: A",
 
 ```
 // Create branch artifact directory
-Bash("mkdir -p <session>/artifacts/branches/B{NN}")
+Bash("mkdir -p {run_dir}/outputs/branches/B{NN}")
 
 // Extract single OPT detail to branch
-Write("<session>/artifacts/branches/B{NN}/optimization-detail.md",
+Write("{run_dir}/outputs/branches/B{NN}/optimization-detail.md",
   extracted OPT-{NNN} block from optimization-plan.md)
 ```
 
@@ -303,7 +309,7 @@ CONTEXT:
   - Branch: B{NN}
   - Upstream artifacts: baseline-metrics.json, branches/B{NN}/optimization-detail.md
   - Shared memory: <session>/.msg/meta.json (namespace: benchmarker.B{NN})
-EXPECTED: <session>/artifacts/branches/B{NN}/benchmark-results.json
+EXPECTED: {run_dir}/outputs/branches/B{NN}/benchmark-results.json
 CONSTRAINTS: Only benchmark this branch's metrics
 ---
 InnerLoop: false
@@ -324,7 +330,7 @@ CONTEXT:
   - Branch: B{NN}
   - Upstream artifacts: branches/B{NN}/optimization-detail.md
   - Shared memory: <session>/.msg/meta.json (namespace: reviewer.B{NN})
-EXPECTED: <session>/artifacts/branches/B{NN}/review-report.md
+EXPECTED: {run_dir}/outputs/branches/B{NN}/review-report.md
 CONSTRAINTS: Only review this branch's changes
 ---
 InnerLoop: false

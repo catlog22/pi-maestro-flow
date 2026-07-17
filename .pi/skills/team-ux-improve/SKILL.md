@@ -20,7 +20,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+@~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team UX Improve
@@ -118,7 +118,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ├── .msg/
 │   ├── messages.jsonl      # Team message bus
 │   └── meta.json           # Pipeline config + role state snapshot
-├── artifacts/              # Role deliverables
+├── {run_dir}/outputs/      # Run deliverables (via maestro run)
 │   ├── scan-report.md      # Scanner output
 │   ├── diagnosis.md        # Diagnoser output
 │   ├── design-guide.md     # Designer output

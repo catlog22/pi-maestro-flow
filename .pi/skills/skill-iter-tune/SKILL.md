@@ -292,9 +292,9 @@ Phase 1: Setup
 
 ```javascript
 // Initial state
-todo({ action: "create", subject: "Phase 1: Setup workspace" })
-todo({ action: "create", subject: "Iteration Loop" })
-todo({ action: "create", subject: "Phase 5: Final Report" })
+todo({ action: "create", subject: "Phase 1: Setup workspace", activeForm: "Setting up workspace" })
+todo({ action: "create", subject: "Iteration Loop", activeForm: "Running iterations" })
+todo({ action: "create", subject: "Phase 5: Final Report", activeForm: "Generating report" })
 
 // Chain mode: create per-skill tracking tasks
 if (state.execution_mode === 'chain') {
