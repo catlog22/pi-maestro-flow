@@ -40,6 +40,7 @@ Thumbs.db
 .workflow/specs/ui-conventions.md
 .workflow/state.json
 .workflow/tmp/
+.workflow/swarms/
 .workflow/wiki-index.json
 
 # Scratch session artifacts
