@@ -80,6 +80,6 @@ test("progress tree renders one row per task index when snapshots repeat", () =>
   ], palette);
 
   assert.equal(rows.length, 1);
-  assert.match(rows[0]?.text ?? "", /✓ delegate/);
+  assert.match(rows[0]?.text ?? "", /✓ completed delegate/);
   assert.match(rows[0]?.text ?? "", /second-c/);
 });

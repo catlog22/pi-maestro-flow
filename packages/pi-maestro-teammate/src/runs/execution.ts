@@ -17,7 +17,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { Check } from "typebox/value";
 import crossSpawn from "cross-spawn";
-import { listAgentSummaries, resolveAgent, type AgentConfig } from "../agents/agents.ts";
+import { listAgentSummaries, resolveAgent, resolveInternalAgent, type AgentConfig } from "../agents/agents.ts";
 import { resolvePromptTask } from "../prompts/prompts.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
 import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
@@ -74,6 +74,10 @@ export interface RunTeammateOptions {
     correlationId?: string,
   ) => void;
   onTurnComplete?: (result: SingleResult) => void;
+  /** @internal Grants only the native Swarm runtime access to its private Ant role. */
+  allowInternalSwarmAnt?: boolean;
+  /** @internal Test seam for child lifecycle regression coverage. */
+  spawnChildProcess?: typeof crossSpawn;
 }
 
 // ---------------------------------------------------------------------------
@@ -171,13 +175,20 @@ export function extractValidatedStructuredOutput(
     if (typeof raw === "string") {
       try { value = JSON.parse(raw); } catch { return undefined; }
     }
-    try {
-      return Check(schema, value) ? value : undefined;
-    } catch {
-      return undefined;
-    }
+    return validateStructuredOutputValue(value, schema) ? value : undefined;
   }
   return undefined;
+}
+
+function validateStructuredOutputValue(
+  value: unknown,
+  schema: Record<string, unknown>,
+): boolean {
+  try {
+    return Check(schema, value);
+  } catch {
+    return false;
+  }
 }
 
 export interface Utf8LineDecoder {
@@ -950,20 +961,73 @@ export function ensurePrivateDirectory(directoryPath: string): void {
 }
 
 export function writePrivateTextFile(filePath: string, content: string): void {
+  const fd = openPrivateRegularFile(filePath);
   try {
-    const existing = fs.lstatSync(filePath);
-    if (!existing.isFile() || existing.isSymbolicLink()) {
+    // Secure the opened inode before truncating or writing sensitive content.
+    // Windows relies on its ACL semantics.
+    if (shouldEnforcePosixMode()) fs.fchmodSync(fd, PRIVATE_FILE_MODE);
+    fs.ftruncateSync(fd, 0);
+    fs.writeFileSync(fd, content, { encoding: "utf8" });
+  } finally {
+    fs.closeSync(fd);
+  }
+}
+
+function openPrivateRegularFile(filePath: string): number {
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  const existingFlags = fs.constants.O_WRONLY | noFollow;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd: number;
+    try {
+      fd = fs.openSync(filePath, existingFlags, PRIVATE_FILE_MODE);
+    } catch (error) {
+      const code = errorCode(error);
+      if (code === "ELOOP" || code === "EISDIR") {
+        throw new Error(`Private teammate path is not a regular file: ${filePath}`);
+      }
+      if (code !== "ENOENT") throw error;
+      try {
+        fd = fs.openSync(
+          filePath,
+          existingFlags | fs.constants.O_CREAT | fs.constants.O_EXCL,
+          PRIVATE_FILE_MODE,
+        );
+      } catch (createError) {
+        if (errorCode(createError) === "EEXIST" && attempt === 0) continue;
+        throw createError;
+      }
+    }
+    const stat = fs.fstatSync(fd);
+    if (stat.isFile()) return fd;
+    fs.closeSync(fd);
+    throw new Error(`Private teammate path is not a regular file: ${filePath}`);
+  }
+  throw new Error(`Private teammate path changed while opening: ${filePath}`);
+}
+
+function errorCode(error: unknown): string | undefined {
+  return error instanceof Error && "code" in error
+    ? String((error as NodeJS.ErrnoException).code)
+    : undefined;
+}
+
+function readRegularTextFile(filePath: string): string {
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, fs.constants.O_RDONLY | noFollow);
+  } catch (error) {
+    const code = errorCode(error);
+    if (code === "ELOOP" || code === "EISDIR") {
       throw new Error(`Private teammate path is not a regular file: ${filePath}`);
     }
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+    throw error;
   }
-  const fd = fs.openSync(filePath, "w", PRIVATE_FILE_MODE);
   try {
-    // open mode is creation-only. fchmod secures an existing file before the
-    // new sensitive content is written. Windows relies on its ACL semantics.
-    if (shouldEnforcePosixMode()) fs.fchmodSync(fd, PRIVATE_FILE_MODE);
-    fs.writeFileSync(fd, content, { encoding: "utf8" });
+    if (!fs.fstatSync(fd).isFile()) {
+      throw new Error(`Private teammate path is not a regular file: ${filePath}`);
+    }
+    return fs.readFileSync(fd, "utf8");
   } finally {
     fs.closeSync(fd);
   }
@@ -1164,7 +1228,9 @@ export async function runTeammate(
 
   // Resolve an exact discovered role. Silent generic fallback made misspelled
   // or out-of-project role names look successful while ignoring their prompt.
-  const agentConfig: AgentConfig | undefined = resolveAgent(cwd, params.agent);
+  const agentConfig: AgentConfig | undefined = params.agent === "swarm-ant" && options.allowInternalSwarmAnt
+    ? resolveInternalAgent(params.agent)
+    : resolveAgent(cwd, params.agent);
   if (!agentConfig) {
     const available = listAgentSummaries(cwd).map((agent) => agent.name).join(", ");
     return {
@@ -1327,7 +1393,7 @@ async function runSingleAttempt(
         env: spawnEnv,
         shell: spawnSpec.shell,
       };
-      child = crossSpawn(spawnSpec.command, spawnSpec.args, spawnOpts);
+      child = (options.spawnChildProcess ?? crossSpawn)(spawnSpec.command, spawnSpec.args, spawnOpts);
     } catch (error) {
       cleanupFile(systemPromptFile);
       if (schemaFile) cleanupFile(schemaFile);
@@ -1377,11 +1443,18 @@ async function runSingleAttempt(
         const m = msg as Record<string, unknown>;
         dispatchChildIpcMessage(
           m,
-          options.onChildRequest,
+          options.onChildRequest
+            ? (request, reply) => options.onChildRequest?.({
+                ...request,
+                // The parent process owns this identity; never trust a child-supplied actor id.
+                correlationId,
+              }, reply)
+            : undefined,
           options.onChildEvent
             ? (event) => options.onChildEvent?.({
                 ...event,
-                correlationId: event.correlationId ?? correlationId,
+                // Lifecycle ownership is assigned by the spawning parent.
+                correlationId,
               })
             : undefined,
           (reply) => {
@@ -1425,7 +1498,68 @@ async function runSingleAttempt(
       for (const line of stdoutLines.write(chunk)) processStdoutLine(line);
     });
 
+    function readStructuredOutput(cleanup: boolean): unknown | undefined {
+      let structuredOutput: unknown;
+      if (outputFile) {
+        try {
+          const candidate = JSON.parse(readRegularTextFile(outputFile));
+          if (!params.outputSchema || validateStructuredOutputValue(candidate, params.outputSchema)) {
+            structuredOutput = candidate;
+          }
+        } catch { /* output is absent or not complete */ }
+        if (cleanup) cleanupFile(outputFile);
+      }
+      return structuredOutput ?? capturedStructuredOutput;
+    }
+
+    function completeTurn(structuredOutput: unknown, terminateChild: boolean): void {
+      if (resolved) return;
+      progress.status = "completed";
+      progress.durationMs = Date.now() - startTime;
+      if (messages.length === 0 && lastContent) {
+        appendBoundedTranscriptMessage(messages, { role: "assistant", content: lastContent });
+      }
+      options.onProgress?.(progress);
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      cleanupFile(systemPromptFile);
+      if (schemaFile) cleanupFile(schemaFile);
+      if (outputFile) cleanupFile(outputFile);
+
+      const turnResult: SingleResult = {
+        agent: params.agent,
+        task: params.task ?? "",
+        exitCode: 0,
+        messages: [...messages],
+        usage: { ...usage },
+        model: resolvedModel,
+        correlationId,
+        durationMs: Date.now() - startTime,
+        structuredOutput,
+        attemptedModels: undefined,
+      };
+      resolved = true;
+      resolve(turnResult);
+      try {
+        options.onTurnComplete?.(turnResult);
+      } catch {
+        // Completion observers must not strand a child after the result has
+        // already been published to the caller.
+      } finally {
+        releasePublishedTurnHistory(messages, progress, usage);
+        lastContent = "";
+        streamingText = "";
+        stderrBuffer = "";
+        capturedStructuredOutput = undefined;
+        if (terminateChild) termination.terminate();
+      }
+    }
+
     function processEvent(event: JsonLineEvent): void {
+      // completeTurn() is the authoritative settlement boundary. A child may
+      // already have queued tool_result, turn_start, or agent_end lines when
+      // termination begins; treating the terminal state as absorbing prevents
+      // those buffered lines from reawakening the published agent loop.
+      if (resolved) return;
       if (capturedStructuredOutput === undefined && params.outputSchema) {
         capturedStructuredOutput = extractValidatedStructuredOutput(event, params.outputSchema);
       }
@@ -1539,6 +1673,17 @@ async function runSingleAttempt(
             lastTool.status = "completed";
           }
           options.onProgress?.(progress);
+          const completedTool = (event.toolName as string | undefined)
+            ?? (event.name as string | undefined)
+            ?? lastTool?.name;
+          if (
+            event.type === "tool_execution_end"
+            && completedTool === "structured_output"
+            && event.isError !== true
+          ) {
+            const structuredOutput = readStructuredOutput(false);
+            if (structuredOutput !== undefined) completeTurn(structuredOutput, true);
+          }
           break;
         }
         case "usage": {
@@ -1560,56 +1705,8 @@ async function runSingleAttempt(
           break;
         }
         case "agent_end": {
-          progress.status = "completed";
-          progress.durationMs = Date.now() - startTime;
-          if (messages.length === 0 && lastContent) {
-            appendBoundedTranscriptMessage(messages, { role: "assistant", content: lastContent });
-          }
-          options.onProgress?.(progress);
-
-          if (timeoutTimer) clearTimeout(timeoutTimer);
-          cleanupFile(systemPromptFile);
-          if (schemaFile) cleanupFile(schemaFile);
-
-          let structuredOutput: unknown;
-          if (outputFile) {
-            try {
-              if (fs.existsSync(outputFile)) {
-                structuredOutput = JSON.parse(fs.readFileSync(outputFile, "utf-8"));
-              }
-            } catch { /* ignore */ }
-            cleanupFile(outputFile);
-          }
-          structuredOutput ??= capturedStructuredOutput;
-
-          const turnResult: SingleResult = {
-            agent: params.agent,
-            task: params.task ?? "",
-            exitCode: 0,
-            messages: [...messages],
-            usage: { ...usage },
-            model: resolvedModel,
-            correlationId,
-            durationMs: Date.now() - startTime,
-            structuredOutput,
-            attemptedModels: undefined,
-          };
-
-          if (!resolved) {
-            resolved = true;
-            resolve(turnResult);
-          }
-          try {
-            options.onTurnComplete?.(turnResult);
-          } finally {
-            // The child remains alive for prompt-mode follow-ups. Preserve only
-            // the published result/progress snapshot; release per-turn buffers.
-            releasePublishedTurnHistory(messages, progress, usage);
-            lastContent = "";
-            streamingText = "";
-            stderrBuffer = "";
-            capturedStructuredOutput = undefined;
-          }
+          const structuredOutput = readStructuredOutput(false);
+          completeTurn(structuredOutput, false);
           // Process stays alive. Idle agents must be resumed with an RPC prompt;
           // steer/follow_up only queue while an agent loop is already running.
           break;
@@ -2045,14 +2142,41 @@ export function dispatchChildIpcMessage(
   onEvent: RunTeammateOptions["onChildEvent"],
   reply: (message: unknown) => void,
 ): "request" | "event" {
-  if (
-    (message.type === "teammate_proxy_request" || message.type === "teammate_interaction_request")
-    && onRequest
-  ) {
-    onRequest(message, reply);
+  if (message.type === "teammate_proxy_request" || message.type === "teammate_interaction_request") {
+    if (onRequest) onRequest(message, reply);
+    else {
+      onEvent?.(message);
+      replyUnhandledChildRequest(message, reply);
+    }
     return "request";
   }
   onEvent?.(message);
   return "event";
+}
+
+function replyUnhandledChildRequest(
+  message: Record<string, unknown>,
+  reply: (message: unknown) => void,
+): void {
+  const requestId = typeof message.requestId === "string" ? message.requestId : randomUUID();
+  if (message.type === "teammate_interaction_request") {
+    const permission = message.interaction === "permission";
+    reply({
+      type: "teammate_interaction_response",
+      requestId,
+      result: permission
+        ? { action: "deny", reason: "No parent child-request handler is available." }
+        : { action: "cancel", reason: "No parent child-request handler is available." },
+    });
+    return;
+  }
+  reply({
+    type: "teammate_proxy_result",
+    requestId,
+    result: {
+      content: [{ type: "text", text: "No parent child-request handler is available." }],
+      isError: true,
+    },
+  });
 }
 

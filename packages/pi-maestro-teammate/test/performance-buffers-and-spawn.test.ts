@@ -1,13 +1,21 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
+import { PassThrough } from "node:stream";
 import test from "node:test";
+import type { ChildProcess } from "node:child_process";
 import type { AgentConfig } from "../src/agents/agents.ts";
 import {
   AGENT_BUFFER_LIMITS,
   buildWatchOutput,
   createProgressFlushGate,
+  enforceWakeableAgentBudget,
+  flushProgressBatch,
+  hasTeammateWidgetWork,
+  nextWakeableAgentExpiryDelay,
   retainBoundedAgentHistory,
   runWithProgressFlushCleanup,
+  WAKEABLE_AGENT_BUDGET,
 } from "../src/extension/index.ts";
 import {
   EXECUTION_BUFFER_LIMITS,
@@ -19,7 +27,7 @@ import {
   runTeammate,
   validateModelSpecifier,
 } from "../src/runs/execution.ts";
-import type { ActiveAgent, AgentProgress, AgentProgressSnapshot, Usage } from "../src/shared/types.ts";
+import type { ActiveAgent, AgentProgress, AgentProgressSnapshot, TeammateState, Usage } from "../src/shared/types.ts";
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 
 const baseAgentConfig: AgentConfig = {
@@ -50,6 +58,28 @@ function activeAgent(): ActiveAgent {
   };
 }
 
+function sleepingAgent(id: string, lastActivityAt: number, name?: string): ActiveAgent {
+  const agent = activeAgent();
+  agent.correlationId = id;
+  if (name) agent.name = name;
+  else delete agent.name;
+  agent.status = "sleeping";
+  agent.sleptAt = lastActivityAt;
+  agent.lastActivityAt = lastActivityAt;
+  return agent;
+}
+
+function teammateState(agents: ActiveAgent[]): TeammateState {
+  return {
+    baseCwd: process.cwd(),
+    currentSessionId: "test-session",
+    activeRuns: new Map(agents.map((agent) => [agent.correlationId, agent])),
+    namedAgents: new Map(agents
+      .filter((agent): agent is ActiveAgent & { name: string } => Boolean(agent.name))
+      .map((agent) => [agent.name, agent.correlationId])),
+  };
+}
+
 test("progress bursts coalesce before expensive flush and terminal state flushes immediately", () => {
   let expensiveFlushes = 0;
   const gate = createProgressFlushGate(() => { expensiveFlushes += 1; }, 10_000);
@@ -63,6 +93,103 @@ test("progress bursts coalesce before expensive flush and terminal state flushes
   } finally {
     gate.dispose();
   }
+});
+
+test("one progress flush applies every task delta but publishes one full graph snapshot", () => {
+  const pending = new Map<number, number>();
+  let latest: number | undefined;
+  for (let index = 0; index < 5_000; index += 1) {
+    pending.set(index % 8, index);
+    latest = index;
+  }
+  const applied: number[] = [];
+  const published: number[] = [];
+  flushProgressBatch(pending, latest, (value) => applied.push(value), (value) => published.push(value));
+  assert.equal(applied.length, 8, "only the latest delta per task should be applied");
+  assert.deepEqual(published, [4_999], "the batch must project and broadcast exactly once");
+  assert.equal(pending.size, 0);
+});
+
+test("root graph progress wiring projects and broadcasts only after the batch is applied", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const rootStart = source.indexOf("const pendingByTask = new Map<number, AgentProgress>();");
+  const rootEnd = source.indexOf("onChildRequest:", rootStart);
+  assert.ok(rootStart >= 0 && rootEnd > rootStart);
+  const rootProgress = source.slice(rootStart, rootEnd);
+  assert.match(rootProgress, /flushProgressBatch\(pendingByTask, latest, processProgress, publishProgress\)/);
+  const applyStart = rootProgress.indexOf("const processProgress");
+  const publishStart = rootProgress.indexOf("const publishProgress");
+  assert.ok(applyStart >= 0 && publishStart > applyStart);
+  assert.doesNotMatch(rootProgress.slice(applyStart, publishStart), /progressSnapshot\(\)|TEAMMATE_MESSAGE_EVENT|onUpdate\?\./);
+  const publishBody = rootProgress.slice(publishStart);
+  assert.equal(publishBody.match(/progressSnapshot\(\)/g)?.length, 1);
+  assert.equal(publishBody.match(/TEAMMATE_MESSAGE_EVENT/g)?.length, 1);
+  assert.equal(publishBody.match(/onUpdate\?\./g)?.length, 1);
+});
+
+test("wakeable sleeping budget evicts anonymous LRU agents before named agents and aborts before registry cleanup", () => {
+  const now = Date.now();
+  const named = sleepingAgent("named", now - 10_000, "reviewer");
+  const anonymous = Array.from(
+    { length: WAKEABLE_AGENT_BUDGET.maxSleepingAgents + 2 },
+    (_, index) => sleepingAgent(`anon-${index}`, now - 20_000 + index),
+  );
+  const state = teammateState([named, ...anonymous]);
+  const registryVisibleAtAbort = new Map<string, boolean>();
+  for (const agent of state.activeRuns.values()) {
+    agent.abortController.signal.addEventListener("abort", () => {
+      registryVisibleAtAbort.set(agent.correlationId, state.activeRuns.has(agent.correlationId));
+    });
+  }
+
+  const evicted = enforceWakeableAgentBudget(state, now);
+  assert.equal(state.activeRuns.size, WAKEABLE_AGENT_BUDGET.maxSleepingAgents);
+  assert.ok(state.activeRuns.has(named.correlationId), "named wakeable agents are protected before anonymous agents");
+  assert.equal(state.namedAgents.get("reviewer"), named.correlationId);
+  assert.ok(evicted.includes("anon-0"));
+  assert.ok(evicted.every((id) => registryVisibleAtAbort.get(id) === true));
+});
+
+test("wakeable TTL is longer for named agents and shared running cohorts are never evicted", () => {
+  const now = Date.now();
+  const anonymous = sleepingAgent("anonymous", now - WAKEABLE_AGENT_BUDGET.anonymousTtlMs - 1);
+  const named = sleepingAgent("named", anonymous.lastActivityAt, "pinned-by-name");
+  const sharedController = new AbortController();
+  const sharedSleeping = sleepingAgent("shared-sleeping", now - WAKEABLE_AGENT_BUDGET.namedTtlMs - 1);
+  const sharedRunning = activeAgent();
+  sharedSleeping.abortController = sharedController;
+  sharedRunning.abortController = sharedController;
+  sharedRunning.correlationId = "shared-running";
+  const state = teammateState([anonymous, named, sharedSleeping, sharedRunning]);
+
+  assert.deepEqual(enforceWakeableAgentBudget(state, now), [anonymous.correlationId]);
+  assert.ok(state.activeRuns.has(named.correlationId));
+  assert.ok(state.activeRuns.has(sharedSleeping.correlationId));
+  assert.equal(sharedController.signal.aborted, false);
+  assert.equal(hasTeammateWidgetWork(state, now), true);
+
+  sharedRunning.status = "sleeping";
+  sharedRunning.sleptAt = now - WAKEABLE_AGENT_BUDGET.namedTtlMs - 1;
+  sharedRunning.lastActivityAt = sharedRunning.sleptAt;
+  const expired = enforceWakeableAgentBudget(state, now + WAKEABLE_AGENT_BUDGET.namedTtlMs);
+  assert.ok(expired.includes(named.correlationId));
+  assert.ok(expired.includes(sharedSleeping.correlationId));
+  assert.ok(expired.includes(sharedRunning.correlationId));
+  assert.equal(sharedController.signal.aborted, true);
+  assert.equal(state.namedAgents.has("pinned-by-name"), false);
+  assert.equal(nextWakeableAgentExpiryDelay(state, now), undefined);
+});
+
+test("widget work ignores sleeping agents after the visible grace period", () => {
+  const now = Date.now();
+  const oldSleeping = sleepingAgent("old", now - 60_001);
+  const state = teammateState([oldSleeping]);
+  assert.equal(hasTeammateWidgetWork(state, now), false);
+  oldSleeping.sleptAt = now - 59_999;
+  assert.equal(hasTeammateWidgetWork(state, now), true);
+  oldSleeping.status = "running";
+  oldSleeping.sleptAt = now - 120_000;
+  assert.equal(hasTeammateWidgetWork(state, now), true);
 });
 
 test("root progress cleanup flushes then disposes on success, error, and termination", async () => {
@@ -279,4 +406,133 @@ test("invalid model input is rejected before a child process is spawned", async 
   );
   assert.equal(result.exitCode, 1);
   assert.match(result.messages[0]?.content ?? "", /Invalid teammate model specifier/);
+});
+
+test("structured_output tool completion settles the child without waiting for agent_end", async () => {
+  const payload = {
+    path: ["runtime"],
+    findings: ["settled"],
+    evidence: [{ ref: "src/runtime.ts:1", claim: "tool completed" }],
+    candidate: { summary: "done", details: "done", actions: ["ship"], risks: [] },
+    selfScore: 0.9,
+    confidence: 0.9,
+  };
+  const schema = {
+    type: "object",
+    required: ["path", "findings", "evidence", "candidate", "selfScore", "confidence"],
+    properties: {
+      path: { type: "array", items: { type: "string" } },
+      findings: { type: "array", items: { type: "string" } },
+      evidence: { type: "array" },
+      candidate: { type: "object" },
+      selfScore: { type: "number" },
+      confidence: { type: "number" },
+    },
+  };
+  const progress: AgentProgress[] = [];
+  let killed = false;
+  let completionObserverCalled = false;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    Object.assign(child, {
+      stdin,
+      stdout,
+      stderr,
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() {
+        killed = true;
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+        child.emit("close", 0, null);
+        return true;
+      },
+    });
+    setTimeout(() => {
+      stdout.write(`${JSON.stringify({
+        type: "assistant",
+        message: { content: [{ type: "toolCall", name: "structured_output", arguments: payload }] },
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "tool_execution_start", toolName: "structured_output" })}\n`);
+      stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "structured_output", isError: false })}\n`);
+      // These lines model stdout already buffered when settlement terminates
+      // the child. None may restart progress or alter the published result.
+      stdout.write(`${JSON.stringify({ type: "tool_result", toolName: "structured_output", content: "Structured output saved." })}\n`);
+      stdout.write(`${JSON.stringify({ type: "turn_start" })}\n`);
+      stdout.write(`${JSON.stringify({ type: "message_end", content: "late assistant wake" })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    }, 0);
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+
+  const result = await Promise.race([
+    runTeammate(
+      { agent: "swarm-ant", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+      {
+        baseCwd: process.cwd(),
+        allowInternalSwarmAnt: true,
+        spawnChildProcess,
+        onProgress: (entry) => progress.push({ ...entry, recentTools: [...entry.recentTools] }),
+        onTurnComplete() {
+          completionObserverCalled = true;
+          throw new Error("observer failed after publication");
+        },
+      },
+    ),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("settlement timed out")), 500)),
+  ]);
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(result.structuredOutput, payload);
+  assert.equal(progress.at(-1)?.status, "completed");
+  const completedIndex = progress.findIndex((entry) => entry.status === "completed");
+  assert.ok(completedIndex >= 0);
+  assert.equal(progress.slice(completedIndex + 1).length, 0, "terminal progress must be absorbing");
+  assert.equal(result.messages.some((message) => /late assistant wake|Structured output saved/.test(message.content)), false);
+  assert.equal(completionObserverCalled, true);
+  assert.equal(killed, true, "settled child must be reclaimed after final structured output");
+});
+
+test("parent rejects a schema-invalid structured output file", async () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["ok"],
+    properties: { ok: { type: "boolean" } },
+  };
+  const spawnChildProcess = ((_command: string, _args: readonly string[], options: Record<string, any>) => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    Object.assign(child, {
+      stdin,
+      stdout,
+      stderr,
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    const outputFile = String(options.env.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH);
+    setTimeout(() => {
+      fs.writeFileSync(outputFile, JSON.stringify({ ok: "not-a-boolean" }));
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    }, 0);
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+
+  const result = await runTeammate(
+    { agent: "swarm-ant", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), allowInternalSwarmAnt: true, spawnChildProcess },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.structuredOutput, undefined);
 });

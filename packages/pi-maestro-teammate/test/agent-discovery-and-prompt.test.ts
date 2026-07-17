@@ -9,8 +9,10 @@ import {
   BUILTIN_AGENT_NAMES,
   discoverAgents,
   formatAgentCatalog,
+  PUBLIC_BUILTIN_AGENT_NAMES,
   listAgentSummaries,
   resolveAgent,
+  resolveInternalAgent,
   type AgentConfig,
 } from "../src/agents/agents.ts";
 import {
@@ -51,6 +53,7 @@ Act as the project specialist.
 
   try {
     const summaries = listAgentSummaries(path.join(project, "src"));
+    assert.equal(summaries.some((agent) => agent.name === "swarm-ant"), false);
     const specialist = summaries.find((agent) => agent.name === "specialist");
     assert.deepEqual(specialist, {
       name: "specialist",
@@ -73,6 +76,7 @@ Act as the project specialist.
     assert.match(systemPrompt, /Discovered project and user roles:\n- specialist: Project-specific specialist/);
     assert.doesNotMatch(description, /Act as the project specialist/);
     assert.doesNotMatch(systemPrompt, /Act as the project specialist/);
+    assert.doesNotMatch(systemPrompt, /swarm-ant/);
 
     const roles = buildRoleList(project);
     assert.ok(roles.entries.some((agent) => agent.name === "specialist" && agent.source === "project"));
@@ -145,11 +149,16 @@ Legacy alias override.
 
   try {
     const agents = discoverAgents(project);
-    for (const name of BUILTIN_AGENT_NAMES) {
+    for (const name of PUBLIC_BUILTIN_AGENT_NAMES) {
       const agent = agents.find((candidate) => candidate.name === name);
       assert.equal(agent?.source, "builtin");
       assert.doesNotMatch(agent?.systemPrompt ?? "", /Unsafe project override/);
     }
+    assert.equal(agents.some((agent) => agent.name === "swarm-ant"), false);
+    assert.equal(resolveAgent(project, "swarm-ant"), undefined);
+    const internalAnt = resolveInternalAgent("swarm-ant");
+    assert.equal(internalAnt?.source, "builtin");
+    assert.doesNotMatch(internalAnt?.systemPrompt ?? "", /Unsafe project override/);
     assert.equal(resolveAgent(project, "coordinator")?.name, "workflow");
     assert.equal(agents.some((agent) => agent.name === "coordinator"), false);
   } finally {
@@ -169,6 +178,41 @@ test("goal verifier is a bundled read-only role with objective-scoped checks", (
     assert.match(verifier?.systemPrompt ?? "", /broad unit-test suite/i);
     assert.match(verifier?.systemPrompt ?? "", /structured_output.*mandatory/i);
     assert.match(verifier?.systemPrompt ?? "", /missing evidence.*pass=false/i);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("private swarm Ant stays out of public discovery and direct dispatch while scorer and analyst remain selectable", async () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-swarm-roles-"));
+  try {
+    assert.equal(resolveAgent(project, "swarm-ant"), undefined);
+    assert.equal(listAgentSummaries(project).some((role) => role.name === "swarm-ant"), false);
+    assert.doesNotMatch(formatAgentCatalog(project), /swarm-ant/);
+    const ant = resolveInternalAgent("swarm-ant");
+    assert.equal(ant?.source, "builtin");
+    assert.match(ant?.description ?? "", /read-only ant worker/i);
+    assert.match(ant?.systemPrompt ?? "", /structured_output/i);
+    const blocked = await runTeammate(
+      { agent: "swarm-ant", task: "must remain private" },
+      { baseCwd: project },
+    );
+    assert.equal(blocked.exitCode, 1);
+    assert.match(blocked.messages[0]?.content ?? "", /Unknown teammate agent "swarm-ant"/);
+    assert.doesNotMatch(blocked.messages[0]?.content ?? "", /Available agents:.*swarm-ant/);
+    const expected = [
+      ["swarm-scorer", /blind scorer/i],
+      ["swarm-analyst", /final analyst/i],
+    ] as const;
+    for (const [name, description] of expected) {
+      const role = resolveAgent(project, name);
+      assert.equal(role?.source, "builtin");
+      assert.equal(role?.systemPromptMode, "replace");
+      assert.equal(role?.inheritProjectContext, false);
+      assert.equal(role?.inheritSkills, false);
+      assert.match(role?.description ?? "", description);
+      assert.match(role?.systemPrompt ?? "", /structured_output/i);
+    }
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
   }

@@ -9,7 +9,14 @@ import {
   settleAgent,
 } from "../src/extension/index.ts";
 import { dispatchChildIpcMessage } from "../src/runs/execution.ts";
-import { registerTeammatePermissionBroker } from "../src/runs/child-extensions.ts";
+import {
+  getTeammateChildExtensions,
+  getTeammateChildToolBroker,
+  getTeammatePermissionBroker,
+  registerTeammateChildExtension,
+  registerTeammateChildToolBroker,
+  registerTeammatePermissionBroker,
+} from "../src/runs/child-extensions.ts";
 import type { ActiveAgent, TeammateState } from "../src/shared/types.ts";
 
 function createState(): { state: TeammateState; agent: ActiveAgent } {
@@ -138,6 +145,34 @@ test("child IPC dispatch treats teammate interactions as reply-capable requests"
   assert.deepEqual(events, []);
 });
 
+test("child IPC dispatch fails closed immediately when a direct runner omits its request handler", () => {
+  const replies: any[] = [];
+  const events: unknown[] = [];
+  const permissionKind = dispatchChildIpcMessage(
+    {
+      type: "teammate_interaction_request",
+      requestId: "missing-handler-permission",
+      interaction: "permission",
+    },
+    undefined,
+    (event) => events.push(event),
+    (reply) => replies.push(reply),
+  );
+  const proxyKind = dispatchChildIpcMessage(
+    { type: "teammate_proxy_request", requestId: "missing-handler-proxy", tool: "todo" },
+    undefined,
+    (event) => events.push(event),
+    (reply) => replies.push(reply),
+  );
+
+  assert.equal(permissionKind, "request");
+  assert.equal(proxyKind, "request");
+  assert.equal(events.length, 2, "unhandled requests remain observable as lifecycle events");
+  assert.equal(replies[0].result.action, "deny");
+  assert.match(replies[0].result.reason, /no parent child-request handler/i);
+  assert.equal(replies[1].result.isError, true);
+});
+
 test("headless main session denies permission interactions", async () => {
   const { state, agent } = createState();
   const { pi } = createPi();
@@ -217,6 +252,112 @@ test("direct execution child bridge replies to permissions and rejects nested pr
   } finally {
     unregister();
   }
+});
+
+test("direct execution child bridge dispatches registered extension tools with trusted actor identity", async () => {
+  const { pi } = createPi();
+  const ctx = { hasUI: false, cwd: "D:/workspace" } as ExtensionContext;
+  const { state, agent } = createState();
+  const unregister = registerTeammateChildToolBroker("todo", async (request) => {
+    assert.equal(request.input.subject, "Child task");
+    assert.deepEqual(request.actor, {
+      correlationId: agent.correlationId,
+      name: agent.name,
+      agent: agent.agent,
+    });
+    return {
+      content: [{ type: "text", text: "created" }],
+      details: { id: "todo-1" },
+    };
+  });
+  try {
+    const handler = createTeammateDirectChildRequestHandler(pi, ctx, { state });
+    const reply = await new Promise<any>((resolve) => handler({
+      type: "teammate_proxy_request",
+      requestId: "direct-todo",
+      correlationId: agent.correlationId,
+      tool: "todo",
+      params: { action: "create", subject: "Child task" },
+    }, resolve));
+    assert.equal(reply.type, "teammate_proxy_result");
+    assert.equal(reply.result.content[0].text, "created");
+  } finally {
+    unregister();
+  }
+});
+
+test("child extension registration replacement is generation-owned and old disposal cannot remove the replacement", () => {
+  const path = "D:/extensions/flow.ts";
+  const disposeOld = registerTeammateChildExtension(path, { tools: ["old-tool"] });
+  const disposeCurrent = registerTeammateChildExtension(path, { tools: ["todo"] });
+
+  assert.deepEqual(
+    getTeammateChildExtensions().filter((registration) => registration.path === path),
+    [{ path, tools: ["todo"] }],
+  );
+  disposeOld();
+  assert.deepEqual(
+    getTeammateChildExtensions().filter((registration) => registration.path === path),
+    [{ path, tools: ["todo"] }],
+  );
+  disposeCurrent();
+  assert.deepEqual(
+    getTeammateChildExtensions().filter((registration) => registration.path === path),
+    [],
+  );
+});
+
+test("child tool broker rejects foreign collisions and same-owner replacement survives stale disposal", async () => {
+  const first = async () => ({ content: [{ type: "text" as const, text: "first" }] });
+  const current = async () => ({ content: [{ type: "text" as const, text: "current" }] });
+  const disposeFirst = registerTeammateChildToolBroker("owned-test", first, { owner: "test-owner" });
+  const disposeCurrent = registerTeammateChildToolBroker("owned-test", current, { owner: "test-owner" });
+
+  assert.equal(getTeammateChildToolBroker("owned-test"), current);
+  disposeFirst();
+  assert.equal(getTeammateChildToolBroker("owned-test"), current);
+  assert.throws(
+    () => registerTeammateChildToolBroker("owned-test", first, { owner: "foreign-owner" }),
+    /conflicting teammate child tool broker/i,
+  );
+  disposeCurrent();
+  assert.equal(getTeammateChildToolBroker("owned-test"), undefined);
+});
+
+test("permission broker rejects foreign collisions and disposal restores fail-closed fallback", () => {
+  const first = async () => ({ action: "allow_once" as const });
+  const current = async () => ({ action: "deny" as const, reason: "current" });
+  const disposeFirst = registerTeammatePermissionBroker(first, { owner: "test-permission-owner" });
+  const disposeCurrent = registerTeammatePermissionBroker(current, { owner: "test-permission-owner" });
+
+  assert.equal(getTeammatePermissionBroker(), current);
+  disposeFirst();
+  assert.equal(getTeammatePermissionBroker(), current);
+  assert.throws(
+    () => registerTeammatePermissionBroker(first, { owner: "foreign-permission-owner" }),
+    /conflicting teammate permission broker/i,
+  );
+  disposeCurrent();
+  assert.equal(getTeammatePermissionBroker(), undefined);
+});
+
+test("disposed child tool broker falls back immediately instead of retaining stale authority", async () => {
+  const { pi } = createPi();
+  const ctx = { hasUI: false, cwd: "D:/workspace" } as ExtensionContext;
+  const dispose = registerTeammateChildToolBroker("ephemeral-test", async () => ({
+    content: [{ type: "text", text: "handled" }],
+  }));
+  dispose();
+
+  const handler = createTeammateDirectChildRequestHandler(pi, ctx);
+  const reply = await new Promise<any>((resolve) => handler({
+    type: "teammate_proxy_request",
+    requestId: "disposed-proxy",
+    tool: "ephemeral-test",
+    params: {},
+  }, resolve));
+  assert.equal(reply.result.isError, true);
+  assert.match(reply.result.content[0].text, /unavailable in this direct runtime/i);
 });
 
 test("official child RPC UI requests are answered through the parent dialog UI", async () => {

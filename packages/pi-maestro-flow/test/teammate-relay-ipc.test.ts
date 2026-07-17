@@ -73,14 +73,21 @@ test("real teammate child IPC resumes permission and AskUserQuestion calls", asy
     return { action: "allow_once", updatedInput: { command: "npm test -- --runInBand" } };
   });
   const result = new Promise<Record<string, unknown>>((resolve, reject) => {
-    const timer = setTimeout(() => {
-      reject(new Error(`Timed out waiting for teammate fixture. ${stderr}`));
-    }, 10_000);
+    const fixtureStartupTimeoutMs = process.platform === "win32" ? 60_000 : 20_000;
+    let timer = setTimeout(() => {
+      reject(new Error(`Timed out waiting for teammate fixture startup. ${stderr}`));
+    }, fixtureStartupTimeoutMs);
 
     child.on("message", (message: unknown) => {
       dispatchChildIpcMessage(
         message as Record<string, unknown>,
         (request, reply) => {
+          if (requests.length === 0) {
+            clearTimeout(timer);
+            timer = setTimeout(() => {
+              reject(new Error(`Timed out waiting for teammate interaction replies. ${stderr}`));
+            }, 5_000);
+          }
           requests.push(request);
           void handleChildInteractionRequest(pi, state, request, reply, ctx)
             .then(() => {

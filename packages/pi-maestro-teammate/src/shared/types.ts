@@ -54,7 +54,9 @@ export interface AgentProgressSnapshot {
   recentTools?: Array<{ name: string; status: string }>;
   toolCount?: number;
   tokens?: number;
+  durationMs?: number;
   lastMessage?: string;
+  error?: string;
 }
 
 export interface Details {

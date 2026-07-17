@@ -100,7 +100,11 @@ import {
   applyModelRouting,
   formatModelRoutingConfig,
 } from "../models/model-routing.ts";
-import { getTeammatePermissionBroker } from "../runs/child-extensions.ts";
+import {
+  getTeammateChildToolBroker,
+  getTeammatePermissionBroker,
+  registerTeammateChildProxyCaller,
+} from "../runs/child-extensions.ts";
 
 export const TEAMMATE_PROMPT_SNIPPET =
   "Dispatch bounded work to discovered teammate roles for parallel, sequential, or specialist execution.";
@@ -174,6 +178,14 @@ export const AGENT_BUFFER_LIMITS = Object.freeze({
   logBytes: 512 * 1024,
   lastResultBytes: 256 * 1024,
 });
+
+export const WAKEABLE_AGENT_BUDGET = Object.freeze({
+  maxSleepingAgents: 12,
+  anonymousTtlMs: 15 * 60_000,
+  namedTtlMs: 60 * 60_000,
+});
+
+const AGENT_WIDGET_SLEEP_HIDE_MS = 60_000;
 
 function trimAgentBuffers(agent: ActiveAgent, sleeping = false): void {
   const inboxLimit = sleeping
@@ -250,6 +262,19 @@ export function createProgressFlushGate(
     }
   };
   return { mark, flush, dispose: cancelTimer };
+}
+
+export function flushProgressBatch<T>(
+  pending: Map<number, T>,
+  latest: T | undefined,
+  apply: (value: T) => void,
+  publish: (latestValue: T) => void,
+): void {
+  if (!latest || pending.size === 0) return;
+  const values = [...pending.values()];
+  pending.clear();
+  for (const value of values) apply(value);
+  publish(latest);
 }
 
 export async function runWithProgressFlushCleanup<T>(
@@ -692,6 +717,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     };
     globals[bridgeKey] = bridge;
     const pendingRequests = bridge.pendingRequests;
+    let unregisterChildProxyCaller: (() => void) | undefined;
 
     const sendChildEvent = (message: Record<string, unknown>): void => {
       if (typeof process.send === "function") process.send(message);
@@ -708,6 +734,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     };
 
     pi.on("session_start", (_event, ctx) => {
+      installChildProxyCaller();
       if (bridge.ctx) {
         rejectAllChildProxyRequests(
           pendingRequests,
@@ -728,6 +755,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       bridge.idleStableTicks = 0;
     });
     pi.on("session_shutdown", () => {
+      disposeChildProxyCaller();
       if (bridge.pollTimer) clearInterval(bridge.pollTimer);
       bridge.pollTimer = undefined;
       bridge.ctx = undefined;
@@ -850,13 +878,33 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       const result = await createChildProxyRequest(
         pendingRequests,
         requestId,
-        { type: "teammate_proxy_request", tool, requestId, params },
+        {
+          type: "teammate_proxy_request",
+          tool,
+          requestId,
+          params,
+          correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
+        },
         (message, callback) => process.send!(message, callback),
         CHILD_PROXY_TIMEOUT_MS,
         signal,
       );
       return result as AgentToolResult<T>;
     }
+
+    function installChildProxyCaller(): void {
+      unregisterChildProxyCaller ??= registerTeammateChildProxyCaller((toolName, input, signal) =>
+        proxyCall(toolName, input, signal)
+      );
+    }
+
+    function disposeChildProxyCaller(): void {
+      const unregister = unregisterChildProxyCaller;
+      unregisterChildProxyCaller = undefined;
+      unregister?.();
+    }
+
+    installChildProxyCaller();
 
     const proxyTeammateTool: ToolDefinition<typeof TeammateParams, Details> = {
       name: "teammate",
@@ -1125,7 +1173,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         },
         onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent(state, {
           ...event,
-          correlationId: event.correlationId ?? correlationId,
+          correlationId,
         }),
         onTurnComplete: (result: SingleResult) => {
           const lastMessage = result.messages[result.messages.length - 1]?.content;
@@ -1139,6 +1187,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             loggedToolLines: Map<number, number>;
           }>();
           const pendingByTask = new Map<number, AgentProgress>();
+          let latestPendingProgress: AgentProgress | undefined;
 
           const processProgress = (data: AgentProgress) => {
             activeAgent.lastActivityAt = Date.now();
@@ -1164,8 +1213,6 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
                 : {}),
             };
             progressState.set(progressKey, entry);
-            const currentProgress = progressSnapshot();
-            activeAgent.progress = currentProgress;
             const childAgent = state.activeRuns.get(entry.correlationId);
             if (childAgent && childAgent !== activeAgent) {
               childAgent.lastActivityAt = Date.now();
@@ -1220,6 +1267,14 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             const logLengthBeforeTrim = activeAgent.outputLog.length;
             trimAgentBuffers(activeAgent);
             if (activeAgent.outputLog.length !== logLengthBeforeTrim) logStates.clear();
+          };
+
+          const publishProgress = (data: AgentProgress) => {
+            const progressKey = data.taskIndex ?? 0;
+            const entry = progressState.get(progressKey);
+            if (!entry) return;
+            const currentProgress = progressSnapshot();
+            activeAgent.progress = currentProgress;
 
             // Broadcast the complete graph snapshot so overlays can switch views reliably.
             pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
@@ -1251,15 +1306,16 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           };
 
           const flushGate = createProgressFlushGate(() => {
-            const pending = [...pendingByTask.values()];
-            pendingByTask.clear();
-            for (const data of pending) processProgress(data);
+            const latest = latestPendingProgress;
+            latestPendingProgress = undefined;
+            flushProgressBatch(pendingByTask, latest, processProgress, publishProgress);
           }, UPDATE_INTERVAL);
           progressFlushGate = flushGate;
 
           return (data: AgentProgress) => {
             activeAgent.lastActivityAt = Date.now();
             pendingByTask.set(data.taskIndex ?? 0, data);
+            latestPendingProgress = data;
             flushGate.mark(data.status === "completed" || data.status === "failed");
           };
         })(),
@@ -2336,10 +2392,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       return;
     }
     const now = Date.now();
-    const SLEEP_HIDE_MS = 60_000;
     const visible = Array.from(state.activeRuns.entries()).filter(([, a]) => {
       if (a.status === "completed") return false;
-      if (a.status === "sleeping" && a.sleptAt && now - a.sleptAt > SLEEP_HIDE_MS) return false;
+      if (a.status === "sleeping" && a.sleptAt && now - a.sleptAt > AGENT_WIDGET_SLEEP_HIDE_MS) return false;
       return true;
     });
     if (visible.length === 0) {
@@ -2365,13 +2420,17 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   }
 
   let widgetTimer: ReturnType<typeof setInterval> | null = null;
+  let wakeableEvictionTimer: ReturnType<typeof setTimeout> | null = null;
 
   function startWidgetTimer(): void {
     if (widgetTimer) return;
+    stopWakeableEvictionTimer();
     widgetTimer = setInterval(() => {
-      if (state.activeRuns.size === 0) {
+      enforceWakeableAgentBudget(state);
+      if (!hasTeammateWidgetWork(state)) {
         stopWidgetTimer();
         updateAgentWidget();
+        scheduleWakeableEvictionTimer();
         return;
       }
       updateAgentWidget();
@@ -2385,13 +2444,39 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     }
   }
 
+  function stopWakeableEvictionTimer(): void {
+    if (!wakeableEvictionTimer) return;
+    clearTimeout(wakeableEvictionTimer);
+    wakeableEvictionTimer = null;
+  }
+
+  function scheduleWakeableEvictionTimer(): void {
+    stopWakeableEvictionTimer();
+    const delay = nextWakeableAgentExpiryDelay(state);
+    if (delay === undefined) return;
+    wakeableEvictionTimer = setTimeout(() => {
+      wakeableEvictionTimer = null;
+      enforceWakeableAgentBudget(state);
+      updateAgentWidget();
+      scheduleWakeableEvictionTimer();
+    }, delay);
+    wakeableEvictionTimer.unref?.();
+  }
+
   if (!isChild) {
   pi.events.on(TEAMMATE_STARTED_EVENT, () => {
     updateAgentWidget();
     startWidgetTimer();
   });
   pi.events.on(TEAMMATE_COMPLETE_EVENT, () => {
-    setTimeout(updateAgentWidget, 100);
+    setTimeout(() => {
+      enforceWakeableAgentBudget(state);
+      updateAgentWidget();
+      if (!hasTeammateWidgetWork(state)) {
+        stopWidgetTimer();
+        scheduleWakeableEvictionTimer();
+      }
+    }, 100);
   });
 
   // =========================================================================
@@ -2421,6 +2506,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
 
   pi.on("session_shutdown", () => {
     stopWidgetTimer();
+    stopWakeableEvictionTimer();
     if (state.handoffSwitching) {
       widgetCtx = null;
       state.currentSessionId = null;
@@ -2431,6 +2517,8 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     }
     state.namedAgents.clear();
     state.currentSessionId = null;
+    widgetCtx?.ui.setWidget("teammate-agents", undefined);
+    widgetCtx = null;
   });
 } // end if (!isChild)
 } // end registerTeammateExtension
@@ -2796,6 +2884,103 @@ function retireAgent(
   agent.sleptAt = Date.now();
   agent.lastActivityAt = Date.now();
   trimAgentBuffers(agent, true);
+  enforceWakeableAgentBudget(state);
+}
+
+interface WakeableAgentCohort {
+  controller: AbortController;
+  agents: ActiveAgent[];
+  named: boolean;
+  lastActivityAt: number;
+}
+
+function wakeableAgentCohorts(state: TeammateState): WakeableAgentCohort[] {
+  const byController = new Map<AbortController, ActiveAgent[]>();
+  for (const agent of state.activeRuns.values()) {
+    const cohort = byController.get(agent.abortController) ?? [];
+    cohort.push(agent);
+    byController.set(agent.abortController, cohort);
+  }
+  const namedIds = new Set(state.namedAgents.values());
+  return [...byController.entries()]
+    .filter(([, agents]) => agents.length > 0 && agents.every((agent) => agent.status === "sleeping"))
+    .map(([controller, agents]) => ({
+      controller,
+      agents,
+      named: agents.some((agent) => Boolean(agent.name) || namedIds.has(agent.correlationId)),
+      lastActivityAt: Math.max(...agents.map((agent) => agent.lastActivityAt)),
+    }));
+}
+
+function terminateAndRemoveWakeableCohort(
+  state: TeammateState,
+  cohort: WakeableAgentCohort,
+): string[] {
+  const ids = new Set(cohort.agents.map((agent) => agent.correlationId));
+  // Terminate first so lifecycle callbacks can still resolve the registry owner.
+  cohort.controller.abort();
+  for (const agent of cohort.agents) {
+    releaseAgentMemory(agent);
+    agent.status = "completed";
+  }
+  for (const id of ids) state.activeRuns.delete(id);
+  for (const [name, id] of state.namedAgents) {
+    if (ids.has(id)) state.namedAgents.delete(name);
+  }
+  return [...ids];
+}
+
+export function enforceWakeableAgentBudget(
+  state: TeammateState,
+  now = Date.now(),
+): string[] {
+  const evicted: string[] = [];
+  const expired = wakeableAgentCohorts(state)
+    .filter((cohort) => now - cohort.lastActivityAt >= (cohort.named
+      ? WAKEABLE_AGENT_BUDGET.namedTtlMs
+      : WAKEABLE_AGENT_BUDGET.anonymousTtlMs))
+    .sort((left, right) => left.lastActivityAt - right.lastActivityAt);
+  for (const cohort of expired) {
+    if (!cohort.agents.some((agent) => state.activeRuns.has(agent.correlationId))) continue;
+    evicted.push(...terminateAndRemoveWakeableCohort(state, cohort));
+  }
+
+  let sleepingCount = [...state.activeRuns.values()].filter((agent) => agent.status === "sleeping").length;
+  const overflowCandidates = wakeableAgentCohorts(state).sort((left, right) =>
+    Number(left.named) - Number(right.named)
+      || left.lastActivityAt - right.lastActivityAt
+  );
+  for (const cohort of overflowCandidates) {
+    if (sleepingCount <= WAKEABLE_AGENT_BUDGET.maxSleepingAgents) break;
+    if (!cohort.agents.some((agent) => state.activeRuns.has(agent.correlationId))) continue;
+    evicted.push(...terminateAndRemoveWakeableCohort(state, cohort));
+    sleepingCount -= cohort.agents.length;
+  }
+  return evicted;
+}
+
+export function nextWakeableAgentExpiryDelay(
+  state: TeammateState,
+  now = Date.now(),
+): number | undefined {
+  const delays = wakeableAgentCohorts(state).map((cohort) =>
+    (cohort.named ? WAKEABLE_AGENT_BUDGET.namedTtlMs : WAKEABLE_AGENT_BUDGET.anonymousTtlMs)
+      - (now - cohort.lastActivityAt)
+  );
+  if (delays.length === 0) return undefined;
+  return Math.max(1, Math.min(...delays));
+}
+
+export function hasTeammateWidgetWork(
+  state: TeammateState,
+  now = Date.now(),
+): boolean {
+  return [...state.activeRuns.values()].some((agent) =>
+    agent.status === "running"
+      || agent.status === "pending"
+      || (agent.status === "sleeping"
+        && (!agent.sleptAt || now - agent.sleptAt <= AGENT_WIDGET_SLEEP_HIDE_MS))
+  );
 }
 
 export function settleAgent(
@@ -2826,9 +3011,9 @@ function killAgent(
 ): void {
   const agent = state.activeRuns.get(correlationId);
   if (!agent) return;
+  agent.abortController.abort();
   releaseAgentMemory(agent);
   agent.status = "completed";
-  agent.abortController.abort();
   state.activeRuns.delete(correlationId);
   if (name) state.namedAgents.delete(name);
   for (const [agentName, id] of state.namedAgents) {
@@ -3064,24 +3249,46 @@ export function createTeammateDirectChildRequestHandler(
       return;
     }
 
-    // Direct orchestrators do not own teammate's nested activeRuns lifecycle.
-    // Fail closed and reply immediately instead of leaving a proxy call hung.
     if (event.type === "teammate_proxy_request") {
-      const requestId = typeof event.requestId === "string" ? event.requestId : randomUUID();
-      reply({
-        type: "teammate_proxy_result",
-        requestId,
-        result: {
-          content: [{
-            type: "text",
-            text: "Nested teammate calls are unavailable in this direct runtime; return control to the parent orchestrator.",
-          }],
-          isError: true,
-          details: { mode: "single", results: [] },
-        },
-      });
+      void dispatchRegisteredChildTool(event, reply, state).then((handled) => {
+        if (!handled) replyUnavailableDirectProxy(event, reply);
+      }).catch((error) => replyProxyFailure(event, reply, error));
     }
   };
+}
+
+function replyUnavailableDirectProxy(
+  event: Record<string, unknown>,
+  reply: (message: unknown) => void,
+): void {
+  const requestId = typeof event.requestId === "string" ? event.requestId : randomUUID();
+  reply({
+    type: "teammate_proxy_result",
+    requestId,
+    result: {
+      content: [{
+        type: "text",
+        text: "Nested teammate calls are unavailable in this direct runtime; return control to the parent orchestrator.",
+      }],
+      isError: true,
+      details: { mode: "single", results: [] },
+    },
+  });
+}
+
+function replyProxyFailure(
+  event: Record<string, unknown>,
+  reply: (message: unknown) => void,
+  error: unknown,
+): void {
+  reply({
+    type: "teammate_proxy_result",
+    requestId: typeof event.requestId === "string" ? event.requestId : randomUUID(),
+    result: {
+      content: [{ type: "text", text: error instanceof Error ? error.message : String(error) }],
+      isError: true,
+    },
+  });
 }
 
 function replyChildRequestFailure(
@@ -3268,6 +3475,38 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 // Flat model: handle proxy requests from child processes
 // ===========================================================================
 
+async function dispatchRegisteredChildTool(
+  event: Record<string, unknown>,
+  reply: (message: unknown) => void,
+  state?: TeammateState,
+): Promise<boolean> {
+  const toolName = typeof event.tool === "string" ? event.tool : "";
+  const broker = getTeammateChildToolBroker(toolName);
+  if (!broker) return false;
+  const correlationId = typeof event.correlationId === "string"
+    ? event.correlationId
+    : typeof event.parentCid === "string"
+      ? event.parentCid
+      : "unknown";
+  const active = state?.activeRuns.get(correlationId);
+  const input = isRecord(event.params) ? event.params : {};
+  const result = await broker({
+    toolName,
+    input,
+    actor: {
+      correlationId,
+      ...(active?.name ? { name: active.name } : {}),
+      ...(active?.agent ? { agent: active.agent } : {}),
+    },
+  });
+  reply({
+    type: "teammate_proxy_result",
+    requestId: typeof event.requestId === "string" ? event.requestId : randomUUID(),
+    result,
+  });
+  return true;
+}
+
 async function handleProxyRequest(
   pi: ExtensionAPI,
   state: TeammateState,
@@ -3285,6 +3524,8 @@ async function handleProxyRequest(
   const requestId = event.requestId as string;
   const params = event.params as Record<string, unknown>;
   const parentCid = (event.parentCid as string | undefined) ?? spawnedBy;
+
+  if (await dispatchRegisteredChildTool(event, reply, state)) return;
 
   switch (tool) {
     case "teammate": {
@@ -3461,7 +3702,7 @@ async function handleProxyRequest(
         },
         onChildEvent: (childEvent) => handleChildLifecycleEvent(state, {
           ...childEvent,
-          correlationId: childEvent.correlationId ?? cid,
+          correlationId: cid,
         }),
         onTurnComplete: (result) => {
           if (result.correlationId !== cid) {
@@ -3722,4 +3963,13 @@ async function handleProxyRequest(
       return;
     }
   }
+
+  reply({
+    type: "teammate_proxy_result",
+    requestId,
+    result: {
+      content: [{ type: "text", text: `Unsupported teammate child proxy tool: ${tool}` }],
+      isError: true,
+    },
+  });
 }

@@ -14,6 +14,13 @@ export interface ProgressTreeRow {
   text: string;
 }
 
+function formatDuration(ms: number): string {
+  if (ms < 1000) return `${Math.max(0, Math.round(ms))}ms`;
+  const seconds = Math.floor(ms / 1000);
+  if (seconds < 60) return `${seconds}s`;
+  return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
+}
+
 export function progressIcon(
   status: AgentProgressSnapshot["status"],
   palette: ProgressPalette,
@@ -26,6 +33,13 @@ export function progressIcon(
 
 export function progressLabel(entry: AgentProgressSnapshot): string {
   return entry.name ? `@${entry.name}` : entry.agent;
+}
+
+function statusText(status: AgentProgressSnapshot["status"], palette: ProgressPalette): string {
+  if (status === "running") return palette.running("running");
+  if (status === "completed") return palette.success("completed");
+  if (status === "failed") return palette.error("failed");
+  return palette.dim("pending");
 }
 
 export function buildProgressTree(
@@ -73,11 +87,12 @@ export function buildProgressTree(
     const metaParts = [
       entry.toolCount ? `${entry.toolCount} tools` : "",
       entry.tokens ? `${entry.tokens} tok` : "",
+      entry.durationMs ? formatDuration(entry.durationMs) : "",
     ].filter(Boolean);
     const meta = metaParts.length > 0 ? palette.dim(` · ${metaParts.join(" · ")}`) : "";
     return {
       taskIndex: entry.taskIndex,
-      text: `${palette.dim(prefix + connector)} ${palette.accent(String(entry.taskIndex + 1))} ${progressIcon(entry.status, palette)} ${palette.bold(progressLabel(entry))}${type}${id}${dependencyHint}${meta}`,
+      text: `${palette.dim(prefix + connector)} ${palette.accent(String(entry.taskIndex + 1))} ${progressIcon(entry.status, palette)} ${statusText(entry.status, palette)} ${palette.bold(progressLabel(entry))}${type}${id}${dependencyHint}${meta}`,
     };
   });
 }

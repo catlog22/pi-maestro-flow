@@ -11,25 +11,78 @@ import { Type } from "typebox";
 export const STRUCTURED_OUTPUT_FILE_MODE = 0o600;
 
 export function writeStructuredOutputFile(outputPath: string, content: string): void {
+  const fd = openStructuredOutputFile(outputPath);
   try {
-    const existing = fs.lstatSync(outputPath);
-    if (!existing.isFile() || existing.isSymbolicLink()) {
+    if (!fs.fstatSync(fd).isFile()) {
       throw new Error(`Structured output path is not a regular file: ${outputPath}`);
     }
-  } catch (error) {
-    if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-  }
-  const fd = fs.openSync(outputPath, "w", STRUCTURED_OUTPUT_FILE_MODE);
-  try {
     if (process.platform !== "win32") fs.fchmodSync(fd, STRUCTURED_OUTPUT_FILE_MODE);
+    fs.ftruncateSync(fd, 0);
     fs.writeFileSync(fd, content, { encoding: "utf8" });
   } finally {
     fs.closeSync(fd);
   }
 }
 
+function openStructuredOutputFile(outputPath: string): number {
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  const existingFlags = fs.constants.O_WRONLY | noFollow;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    let fd: number;
+    try {
+      fd = fs.openSync(outputPath, existingFlags, STRUCTURED_OUTPUT_FILE_MODE);
+    } catch (error) {
+      const code = fileErrorCode(error);
+      if (code === "ELOOP" || code === "EISDIR") {
+        throw new Error(`Structured output path is not a regular file: ${outputPath}`);
+      }
+      if (code !== "ENOENT") throw error;
+      try {
+        fd = fs.openSync(
+          outputPath,
+          existingFlags | fs.constants.O_CREAT | fs.constants.O_EXCL,
+          STRUCTURED_OUTPUT_FILE_MODE,
+        );
+      } catch (createError) {
+        if (fileErrorCode(createError) === "EEXIST" && attempt === 0) continue;
+        throw createError;
+      }
+    }
+    if (fs.fstatSync(fd).isFile()) return fd;
+    fs.closeSync(fd);
+    throw new Error(`Structured output path is not a regular file: ${outputPath}`);
+  }
+  throw new Error(`Structured output path changed while opening: ${outputPath}`);
+}
+
+function fileErrorCode(error: unknown): string | undefined {
+  return error instanceof Error && "code" in error
+    ? String((error as NodeJS.ErrnoException).code)
+    : undefined;
+}
+
 function readSchema(schemaPath: string): Record<string, unknown> {
-  const parsed = JSON.parse(fs.readFileSync(schemaPath, "utf-8")) as unknown;
+  const noFollow = fs.constants.O_NOFOLLOW ?? 0;
+  let fd: number;
+  try {
+    fd = fs.openSync(schemaPath, fs.constants.O_RDONLY | noFollow);
+  } catch (error) {
+    const code = fileErrorCode(error);
+    if (code === "ELOOP" || code === "EISDIR") {
+      throw new Error(`Structured output schema path is not a regular file: ${schemaPath}`);
+    }
+    throw error;
+  }
+  let schemaText: string;
+  try {
+    if (!fs.fstatSync(fd).isFile()) {
+      throw new Error(`Structured output schema path is not a regular file: ${schemaPath}`);
+    }
+    schemaText = fs.readFileSync(fd, "utf8");
+  } finally {
+    fs.closeSync(fd);
+  }
+  const parsed = JSON.parse(schemaText) as unknown;
   if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
     throw new Error("PI_TEAMMATE_STRUCTURED_SCHEMA_PATH must contain a JSON Schema object");
   }

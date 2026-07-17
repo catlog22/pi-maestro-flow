@@ -135,8 +135,21 @@ test("root and proxy graph normalization share one implementation that preserves
   assert.match(indexSource, /const normalization = normalizeTeammateParams\(params\)/);
   assert.match(indexSource, /const normalization = normalizeTeammateParams\(p\)/);
   assert.doesNotMatch(indexSource, /thinking:\s*parseTeammateThinkingLevel\(/);
+  assert.match(executionSource, /options\.onChildEvent[\s\S]*?\.\.\.event,\s*\/\/ Lifecycle ownership is assigned by the spawning parent\.\s*correlationId,/);
+  assert.doesNotMatch(executionSource, /correlationId: event\.correlationId \?\? correlationId/);
 
   assert.equal(indexSource.match(/applyModelRouting\(/g)?.length, 2);
+});
+
+test("v1 execution entrypoint exposes an explicit stable whitelist", async () => {
+  const source = fs.readFileSync(new URL("../src/public/v1/execution.ts", import.meta.url), "utf-8");
+  assert.doesNotMatch(source, /export\s+\*/);
+  const api = await import("../src/public/v1/execution.ts");
+  assert.equal(typeof api.runTeammate, "function");
+  assert.equal(typeof api.runGraph, "function");
+  assert.equal(typeof api.normalizeTeammateParams, "function");
+  assert.equal("writePrivateTextFile" in api, false);
+  assert.equal("createChildTerminationController" in api, false);
 });
 
 test("child lifecycle commit wins over a later handback failure recovery", () => {
@@ -145,8 +158,9 @@ test("child lifecycle commit wins over a later handback failure recovery", () =>
   const registrationStart = source.indexOf("export default function registerTeammateExtension(");
   assert.ok(handlerStart >= 0 && handlerStart < registrationStart);
   assert.equal(source.match(/function handleChildLifecycleEvent\(/g)?.length, 1);
-  assert.match(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.event,\s*correlationId: event\.correlationId \?\? correlationId,/s);
-  assert.match(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.childEvent,\s*correlationId: childEvent\.correlationId \?\? cid,/s);
+  assert.match(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.event,\s*correlationId,/s);
+  assert.match(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.childEvent,\s*correlationId: cid,/s);
+  assert.doesNotMatch(source, /correlationId: (?:event|childEvent)\.correlationId \?\?/);
 
   const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lifecycle-state-"));
   const sessionFile = path.join(sessionDir, "session.jsonl");

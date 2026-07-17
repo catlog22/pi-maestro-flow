@@ -24,6 +24,7 @@
     "./v1/extension": "./src/public/v1/extension.ts",
     "./v1/model-routing": "./src/public/v1/model-routing.ts",
     "./v1/prompts": "./src/public/v1/prompts.ts",
+    "./v1/progress-tree": "./src/public/v1/progress-tree.ts",
     "./v1/types": "./src/public/v1/types.ts",
     "./src/*": "./src/*"
   },
