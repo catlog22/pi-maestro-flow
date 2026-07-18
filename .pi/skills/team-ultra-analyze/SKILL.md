@@ -80,10 +80,10 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `UAN`
-- **Session path**: `.workflow/.team/UAN-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **Team name**: `ultra-analyze`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -103,19 +103,19 @@ teammate({ agent: "team-worker", name: "<agent-name>", description: "Spawn <role
 ## Session Directory
 
 ```
-.workflow/.team/UAN-{slug}-{YYYY-MM-DD}/
+{run_dir}/work/team/
 +-- .msg/messages.jsonl          # Message bus log
 +-- .msg/meta.json               # Session metadata + cross-role state
-+-- discussion.md                # Understanding evolution and discussion timeline
++-- {run_dir}/evidence/discussion.md                # Understanding evolution and discussion timeline
 +-- explorations/                # Explorer output
 |   +-- exploration-001.json
 |   +-- exploration-002.json
-+-- analyses/                    # Analyst output
++-- {run_dir}/outputs/analyses/                    # Analyst output
 |   +-- analysis-001.json
 |   +-- analysis-002.json
-+-- discussions/                 # Discussant output
++-- {run_dir}/evidence/discussions/                 # Discussant output
 |   +-- discussion-round-001.json
-+-- conclusions.json             # Synthesizer output
++-- {run_dir}/outputs/conclusions.json             # Synthesizer output
 +-- wisdom/                      # Cross-task knowledge
 |   +-- learnings.md
 |   +-- decisions.md

@@ -20,14 +20,14 @@ TASK:
   - <step 1>
   - <step 2>
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Upstream artifacts: <list>
   - Key files: <list>
 EXPECTED: <artifact path> + <quality criteria>
 CONSTRAINTS: <scope limits>
 ---
 InnerLoop: <true|false>
-RoleSpec: ~  or <project>/.claude/skills/team-lifecycle-v4/roles/<role>/role.md
+RoleSpec: ~  or <project>/.pi/skills/team-lifecycle-v4/roles/<role>/role.md
 ```
 
 ## InnerLoop Flag Rules
@@ -43,7 +43,7 @@ CHECKPOINT tasks are dispatched like regular tasks but handled differently at sp
 - Owner: supervisor
 - **NOT spawned as team-worker** — coordinator wakes the resident supervisor via SendMessage
 - If `supervision: false` in team-session.json, skip creating CHECKPOINT tasks entirely
-- RoleSpec in description: `~  or <project>/.claude/skills/team-lifecycle-v4/roles/supervisor/role.md`
+- RoleSpec in description: `~  or <project>/.pi/skills/team-lifecycle-v4/roles/supervisor/role.md`
 
 ## Dependency Validation
 

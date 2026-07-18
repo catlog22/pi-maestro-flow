@@ -4,7 +4,7 @@
 
 | Input | Source | Required |
 |-------|--------|----------|
-| Session state | <session>/session.json | Yes |
+| Session state | {run_dir}/work/team/session.json | Yes |
 | Task list | todo({ action: "list" }) | Yes |
 | Trigger event | From Entry Router detection | Yes |
 | Pipeline definition | From SKILL.md | Yes |
@@ -144,10 +144,10 @@ TASK:
   - Fix benchmark regressions: <specific-regressions>
   - Re-validate after fixes
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Branch: B{NN}
   - Upstream artifacts: branches/B{NN}/review-report.md, branches/B{NN}/benchmark-results.json
-  - Shared memory: <session>/.msg/meta.json (namespace: optimizer.B{NN})
+  - Shared memory: {run_dir}/work/team/.msg/meta.json (namespace: optimizer.B{NN})
 EXPECTED: Fixed source files for B{NN} only
 CONSTRAINTS: Targeted fixes only | Do not touch other branches
 ---
@@ -212,7 +212,7 @@ Pipeline Status:
   [WAIT]  REVIEW-001   (reviewer)    -> blocked by IMPL-001
 
 Fix Cycles: 0/3
-Session: <session-id>
+Session: <run-id>
 ```
 
 **Fan-out mode**:
@@ -238,7 +238,7 @@ Pipeline Status (fan-out, 3 branches):
     [FAIL]  IMPL-B03     (optimizer)   -> failed
     Fix Cycles: 0/3 [BRANCH FAILED]
 
-Session: <session-id>
+Session: <run-id>
 ```
 
 **Independent mode**:
@@ -252,7 +252,7 @@ Pipeline Status (independent, 2 pipelines):
     [DONE]  PROFILE-B01  -> [DONE]  STRATEGY-B01 -> [DONE] IMPL-B01 -> ...
     Fix Cycles: 1/3
 
-Session: <session-id>
+Session: <run-id>
 ```
 
 Output status -- do NOT advance pipeline.
@@ -293,7 +293,7 @@ Triggered when all pipeline tasks are completed and no fix cycles remain.
   |   - Read run_id from team-session.json.run.run_id
   |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
   |   - Run `maestro run complete <run_id>`
-  |   - If complete fails: log warning, continue (do not block completion action)
+  |   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
   |
 
 **Aggregate results** before transitioning to Phase 5:

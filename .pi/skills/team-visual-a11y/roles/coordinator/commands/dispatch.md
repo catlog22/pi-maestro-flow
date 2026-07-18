@@ -27,11 +27,11 @@ TASK:
   - <step 2: specific action>
   - <step 3: specific action>
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Target: <URL or file path>
   - WCAG Level: <AA|AAA>
   - Upstream artifacts: <artifact-1>, <artifact-2>
-  - Shared memory: <session>/.msg/meta.json
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
 EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits, focus areas>" })
 todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
@@ -60,11 +60,11 @@ TASK:
   - Simulate color blindness (protanopia, deuteranopia, tritanopia)
   - Check dark mode color parity if applicable
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Target: <target>
   - WCAG Level: <level>
-  - Shared memory: <session>/.msg/meta.json
-EXPECTED: <session>/audits/color/color-audit-001.md | Pass/fail per color combination
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
+EXPECTED: {run_dir}/outputs/audits/color/color-audit-001.md | Pass/fail per color combination
 CONSTRAINTS: Read-only analysis | Use Chrome DevTools for computed styles when available" })
 todo({ action: "update", taskId: "COLOR-001", owner: "color-auditor" })
 ```
@@ -81,11 +81,11 @@ TASK:
   - Measure reading width (45-75 characters per line)
   - Assess font loading strategy (font-display values)
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Target: <target>
   - WCAG Level: <level>
-  - Shared memory: <session>/.msg/meta.json
-EXPECTED: <session>/audits/typography/typo-audit-001.md | Breakpoint-by-breakpoint report
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
+EXPECTED: {run_dir}/outputs/audits/typography/typo-audit-001.md | Breakpoint-by-breakpoint report
 CONSTRAINTS: Read-only analysis | Screenshot at multiple viewports if Chrome DevTools available" })
 todo({ action: "update", taskId: "TYPO-001", owner: "typo-auditor" })
 ```
@@ -104,11 +104,11 @@ TASK:
   - Check ARIA roles and states on interactive elements
   - Validate keyboard operability (Enter/Space, Arrow keys)
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Target: <target>
   - WCAG Level: <level>
-  - Shared memory: <session>/.msg/meta.json
-EXPECTED: <session>/audits/focus/focus-audit-001.md | Element-by-element focus report
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
+EXPECTED: {run_dir}/outputs/audits/focus/focus-audit-001.md | Element-by-element focus report
 CONSTRAINTS: Read-only analysis | Tab through elements if Chrome DevTools available" })
 todo({ action: "update", taskId: "FOCUS-001", owner: "focus-auditor" })
 ```
@@ -128,12 +128,12 @@ TASK:
   - Map each fix to WCAG success criterion
   - Estimate effort per fix
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Target: <target>
   - WCAG Level: <level>
-  - Upstream artifacts: audits/color/color-audit-001.md, audits/typography/typo-audit-001.md, audits/focus/focus-audit-001.md
-  - Shared memory: <session>/.msg/meta.json
-EXPECTED: <session>/remediation/remediation-plan.md | All critical/high issues addressed
+  - Upstream artifacts: {run_dir}/outputs/audits/color/color-audit-001.md, {run_dir}/outputs/audits/typography/typo-audit-001.md, {run_dir}/outputs/audits/focus/focus-audit-001.md
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
+EXPECTED: {run_dir}/outputs/remediation/remediation-plan.md | All critical/high issues addressed
 CONSTRAINTS: Read-only synthesis | No code modifications" })
 todo({ action: "update", taskId: "REMED-001", addBlockedBy: ["COLOR-001", "TYPO-001", "FOCUS-001"], owner: "remediation-planner" })
 ```
@@ -158,12 +158,12 @@ TASK:
   - Add skip link if missing
   - Apply fixes in priority order (critical first)
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Target: <target>
   - WCAG Level: <level>
-  - Upstream artifacts: remediation/remediation-plan.md
-  - Shared memory: <session>/.msg/meta.json
-EXPECTED: Modified source files + <session>/fixes/fix-summary-001.md | All critical/high fixes applied
+  - Upstream artifacts: {run_dir}/outputs/remediation/remediation-plan.md
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
+EXPECTED: Modified source files + {run_dir}/outputs/fixes/fix-summary-001.md | All critical/high fixes applied
 CONSTRAINTS: Modify only files identified in remediation plan | Preserve existing functionality" })
 todo({ action: "update", taskId: "FIX-001", addBlockedBy: ["REMED-001"], owner: "fix-implementer" })
 ```
@@ -179,12 +179,12 @@ TASK:
   - Compare before/after for each fixed combination
   - Verify no regressions in unfixed combinations
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Target: <target>
   - WCAG Level: <level>
-  - Upstream artifacts: fixes/fix-summary-001.md, audits/color/color-audit-001.md
-  - Shared memory: <session>/.msg/meta.json
-EXPECTED: <session>/re-audit/color-audit-002.md | Before/after comparison with pass/fail
+  - Upstream artifacts: {run_dir}/outputs/fixes/fix-summary-001.md, {run_dir}/outputs/audits/color/color-audit-001.md
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
+EXPECTED: {run_dir}/outputs/re-audit/color-audit-002.md | Before/after comparison with pass/fail
 CONSTRAINTS: Read-only verification | Focus on fixed items + regression check" })
 todo({ action: "update", taskId: "COLOR-002", addBlockedBy: ["FIX-001"], owner: "color-auditor" })
 ```
@@ -201,12 +201,12 @@ TASK:
   - Test keyboard operability of fixed elements
   - Compare before/after for each fixed element
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Target: <target>
   - WCAG Level: <level>
-  - Upstream artifacts: fixes/fix-summary-001.md, audits/focus/focus-audit-001.md
-  - Shared memory: <session>/.msg/meta.json
-EXPECTED: <session>/re-audit/focus-audit-002.md | Before/after comparison with pass/fail
+  - Upstream artifacts: {run_dir}/outputs/fixes/fix-summary-001.md, {run_dir}/outputs/audits/focus/focus-audit-001.md
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
+EXPECTED: {run_dir}/outputs/re-audit/focus-audit-002.md | Before/after comparison with pass/fail
 CONSTRAINTS: Read-only verification | Focus on fixed items + regression check" })
 todo({ action: "update", taskId: "FOCUS-002", addBlockedBy: ["FIX-001"], owner: "focus-auditor" })
 ```

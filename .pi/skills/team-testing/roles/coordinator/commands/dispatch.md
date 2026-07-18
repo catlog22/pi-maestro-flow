@@ -20,16 +20,16 @@ TASK:
   - <step 1>
   - <step 2>
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <scope>
   - Layer: <L1-unit|L2-integration|L3-e2e>
   - Upstream artifacts: <artifact-1>, <artifact-2>
-  - Shared memory: <session>/wisdom/.msg/meta.json
+  - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits, focus areas>
 ---
 InnerLoop: <true|false>
-RoleSpec: ~  or <project>/.claude/skills/team-testing/roles/<role>/role.md
+RoleSpec: ~  or <project>/.pi/skills/team-testing/roles/<role>/role.md
 ```
 
 ## Pipeline Task Registry
@@ -98,7 +98,7 @@ TESTANA-001 (analyst): Defect pattern analysis, quality report
 ```
 mcp__maestro__team_msg({
   operation: "log",
-  session_id: <session-id>,
+  session_id: <run-id>,
   from: "coordinator",
   type: "pipeline_selected",
   data: { pipeline: "<mode>", task_count: <N> }

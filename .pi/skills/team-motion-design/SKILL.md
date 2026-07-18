@@ -80,9 +80,9 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `MD`
-- **Session path**: `.workflow/.team/MD-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 - **Max GC rounds**: 2
 
 ## Worker Spawn Template
@@ -110,22 +110,22 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/MD-<slug>-<date>/
+{run_dir}/work/team/
 +-- .msg/
 |   +-- messages.jsonl         # Team message bus
 |   +-- meta.json              # Pipeline config + GC state
-+-- research/                  # Motion researcher output
++-- {run_dir}/outputs/research/                  # Motion researcher output
 |   +-- perf-traces/           # Chrome DevTools performance traces
 |   +-- animation-inventory.json
 |   +-- performance-baseline.json
 |   +-- easing-catalog.json
-+-- choreography/              # Choreographer output
++-- {run_dir}/outputs/choreography/              # Choreographer output
 |   +-- motion-tokens.json
 |   +-- sequences/             # Scroll choreography sequences
-+-- animations/                # Animator output
++-- {run_dir}/outputs/animations/                # Animator output
 |   +-- keyframes/             # CSS @keyframes files
 |   +-- orchestrators/         # JS animation orchestrators
-+-- testing/                   # Motion tester output
++-- {run_dir}/outputs/testing/                   # Motion tester output
 |   +-- traces/                # Performance trace data
 |   +-- reports/               # Performance reports
 +-- wisdom/                    # Cross-task knowledge

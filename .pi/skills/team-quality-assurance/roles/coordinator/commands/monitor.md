@@ -49,25 +49,25 @@ TASK:
   - Load execution results and failing test details
   - Fix broken tests and add missing coverage
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Layer: <layer>
-  - Previous results: <session>/results/run-<layer>.json
+  - Previous results: {run_dir}/outputs/results/run-<layer>.json
 EXPECTED: Fixed test files | Improved coverage
 CONSTRAINTS: Only modify test files | No source changes
 ---
 InnerLoop: false
-RoleSpec: ~  or <project>/.claude/skills/team-quality-assurance/roles/generator/role.md" })
+RoleSpec: ~  or <project>/.pi/skills/team-quality-assurance/roles/generator/role.md" })
 todo({ action: "create", subject: "QARUN-gc-<round>: Re-execute <layer> (GC #<round>)",
   description: "PURPOSE: Re-execute tests after fixes | Success: Coverage >= target
 TASK: Execute test suite, measure coverage, report results
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Layer: <layer>
-EXPECTED: <session>/results/run-<layer>-gc-<round>.json
+EXPECTED: {run_dir}/outputs/results/run-<layer>-gc-<round>.json
 CONSTRAINTS: Read-only execution
 ---
 InnerLoop: false
-RoleSpec: ~  or <project>/.claude/skills/team-quality-assurance/roles/executor/role.md" })
+RoleSpec: ~  or <project>/.pi/skills/team-quality-assurance/roles/executor/role.md" })
 todo({ action: "update", taskId: "QARUN-gc-<round>", addBlockedBy: ["QAGEN-fix-<round>"] })
 ```
 
@@ -178,7 +178,7 @@ Pipeline done. Generate report and completion action.
      - Read run_id from team-session.json.run.run_id
      - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
      - Run `maestro run complete <run_id>`
-     - If complete fails: log warning, continue (do not block completion action)
+     - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
    - Read final state from meta.json (quality_score, coverage, gc_rounds)
    - Generate summary (deliverables, stats, discussions)
 4. Read session.completion_action:
@@ -192,7 +192,7 @@ Capability gap reported mid-pipeline.
 
 1. Parse gap description
 2. Check if existing role covers it -> redirect
-3. Role count < 6 -> generate dynamic role-spec in <session>/role-specs/
+3. Role count < 6 -> generate dynamic role-spec in {run_dir}/work/team/role-specs/
 4. Create new task, spawn worker
 5. Role count >= 6 -> merge or pause
 

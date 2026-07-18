@@ -67,7 +67,7 @@ Worker completed. Process and advance.
 
      Fix-Verify Task Creation:
      ```
-     todo({ action: "create", subject: "TDFIX-fix-<round>", description: "PURPOSE: Fix regressions | Session: <session>" })
+     todo({ action: "create", subject: "TDFIX-fix-<round>", description: "PURPOSE: Fix regressions | Session: {run_dir}/work/team" })
      todo({ action: "create", subject: "TDVAL-recheck-<round>", description: "..." })
      todo({ action: "update", taskId: "TDVAL-recheck-<round>", addBlockedBy: ["TDFIX-fix-<round>"] })
      ```
@@ -113,7 +113,7 @@ Pipeline Status (<mode>):
   [WAIT]  TDVAL-001   (validator) -> blocked by TDFIX-001
 
 GC Rounds: 0/3
-Session: <session-id>
+Session: <run-id>
 Commands: 'resume' to advance | 'check' to refresh
 ```
 
@@ -165,7 +165,7 @@ Pipeline done. Generate report and completion action.
      - Read run_id from team-session.json.run.run_id
      - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
      - Run `maestro run complete <run_id>`
-     - If complete fails: log warning, continue (do not block completion action)
+     - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
    - Read final state from .msg/meta.json
    - If worktree exists and validation passed: commit, push, gh pr create, cleanup worktree
    - Compile summary: total tasks, completed, gc_rounds, debt_score_before, debt_score_after
@@ -177,7 +177,7 @@ Capability gap reported mid-pipeline.
 
 1. Parse gap description
 2. Check if existing role covers it -> redirect
-3. Role count < 5 -> generate dynamic role spec in <session>/role-specs/
+3. Role count < 5 -> generate dynamic role spec in {run_dir}/work/team/role-specs/
 4. Create new task, spawn worker
 5. Role count >= 5 -> merge or pause
 

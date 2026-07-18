@@ -78,10 +78,10 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `RD`
-- **Session path**: `.workflow/.team/RD-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **Team name**: `roadmap-dev`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -103,8 +103,8 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/RD-<slug>-<date>/
-+-- roadmap.md                 # Phase plan with requirements and success criteria
+{run_dir}/work/team/
++-- {run_dir}/outputs/roadmap.md                 # Phase plan with requirements and success criteria
 +-- state.md                   # Living memory (concise)
 +-- config.json                # Session settings (mode, depth, gates)
 +-- wisdom/                    # Cross-task knowledge accumulation

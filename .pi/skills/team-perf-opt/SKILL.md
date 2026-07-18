@@ -83,10 +83,10 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `PERF-OPT`
-- **Session path**: `.workflow/.team/PERF-OPT-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **Team name**: `perf-opt`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -113,7 +113,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/PERF-OPT-<slug>-<date>/
+{run_dir}/work/team/
 +-- session.json                    # Session metadata + status + parallel_mode
 +-- {run_dir}/outputs/              # Run deliverables (via maestro run)
 |   +-- baseline-metrics.json       # Profiler: before-optimization metrics
@@ -125,7 +125,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 |   +-- pipelines/A/...             # Independent pipeline artifacts
 +-- explorations/                   # Shared explore cache
 +-- wisdom/patterns.md              # Discovered patterns and conventions
-+-- discussions/                    # Discussion records
++-- {run_dir}/evidence/discussions/                    # Discussion records
 +-- .msg/messages.jsonl             # Team message bus
 +-- .msg/meta.json                  # Session metadata
 ```

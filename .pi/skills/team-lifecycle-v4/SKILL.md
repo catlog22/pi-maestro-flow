@@ -70,9 +70,9 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `TLV4`
-- **Session path**: `.workflow/.team/TLV4-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -155,14 +155,14 @@ AskUserQuestion({
 ## Session Directory
 
 ```
-.workflow/.team/TLV4-<slug>-<date>/
+{run_dir}/work/team/
 ├── team-session.json           # Session state + role registry
-├── spec/                       # Spec phase outputs
-├── plan/                       # Implementation plan + TASK-*.json
+├── {run_dir}/outputs/spec/                       # Spec phase outputs
+├── {run_dir}/outputs/plan/                       # Implementation plan + TASK-*.json
 ├── artifacts/                  # scratch/intermediate; formal deliverables go to {run_dir}/outputs/
 ├── wisdom/                     # Cross-task knowledge
 ├── explorations/               # Shared explore cache
-├── discussions/                # Discuss round records
+├── {run_dir}/evidence/discussions/                # Discuss round records
 └── .msg/                       # Team message bus
 ```
 

@@ -30,11 +30,11 @@ TASK:
   - <step 2: specific action>
   - <step 3: specific action>
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <optimization-scope>
   - Branch: <branch-id or 'none'>
   - Upstream artifacts: <artifact-1>, <artifact-2>
-  - Shared memory: <session>/.msg/meta.json
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
 EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits, focus areas>
 ---
@@ -69,10 +69,10 @@ TASK:
   - Execute profiling across relevant dimensions (CPU, memory, I/O, network, rendering)
   - Collect baseline metrics and rank bottlenecks by severity
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <optimization-scope>
   - Branch: none
-  - Shared memory: <session>/.msg/meta.json
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
 EXPECTED: {run_dir}/outputs/baseline-metrics.json + {run_dir}/outputs/bottleneck-report.md | Quantified metrics with evidence
 CONSTRAINTS: Focus on <optimization-scope> | Profile before any changes
 ---
@@ -92,11 +92,11 @@ TASK:
   - Prioritize by impact/effort ratio, define success criteria
   - Each optimization MUST have a unique OPT-ID (OPT-001, OPT-002, ...) with non-overlapping target files
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <optimization-scope>
   - Branch: none
   - Upstream artifacts: baseline-metrics.json, bottleneck-report.md
-  - Shared memory: <session>/.msg/meta.json
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
 EXPECTED: {run_dir}/outputs/optimization-plan.md | Priority-ordered with improvement targets, discrete OPT-IDs
 CONSTRAINTS: Focus on highest-impact optimizations | Risk assessment required | Non-overlapping file targets per OPT-ID
 ---
@@ -115,11 +115,11 @@ TASK:
   - Apply optimizations in priority order (P0 first)
   - Validate changes compile and pass existing tests
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <optimization-scope>
   - Branch: none
   - Upstream artifacts: optimization-plan.md
-  - Shared memory: <session>/.msg/meta.json
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
 EXPECTED: Modified source files + validation passing | Optimizations applied without regressions
 CONSTRAINTS: Preserve existing behavior | Minimal changes per optimization | Follow code conventions
 ---
@@ -138,11 +138,11 @@ TASK:
   - Run benchmarks matching project type
   - Compare before/after metrics, calculate improvements
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <optimization-scope>
   - Branch: none
   - Upstream artifacts: baseline-metrics.json, optimization-plan.md
-  - Shared memory: <session>/.msg/meta.json
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
 EXPECTED: {run_dir}/outputs/benchmark-results.json | Per-metric comparison with verdicts
 CONSTRAINTS: Must compare against baseline | Flag any regressions
 ---
@@ -162,11 +162,11 @@ TASK:
   - Review across 5 dimensions: correctness, side effects, maintainability, regression risk, best practices
   - Issue verdict: APPROVE, REVISE, or REJECT with actionable feedback
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <optimization-scope>
   - Branch: none
   - Upstream artifacts: optimization-plan.md, benchmark-results.json (if available)
-  - Shared memory: <session>/.msg/meta.json
+  - Shared memory: {run_dir}/work/team/.msg/meta.json
 EXPECTED: {run_dir}/outputs/review-report.md | Per-dimension findings with severity
 CONSTRAINTS: Focus on optimization changes only | Provide specific file:line references
 ---
@@ -228,10 +228,10 @@ TASK:
   - Execute profiling focused on rendering performance
   - Collect baseline metrics and rank rendering bottlenecks
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: optimize rendering
   - Pipeline: A
-  - Shared memory: <session>/.msg/meta.json (namespace: profiler.A)
+  - Shared memory: {run_dir}/work/team/.msg/meta.json (namespace: profiler.A)
 EXPECTED: {run_dir}/outputs/pipelines/A/baseline-metrics.json + bottleneck-report.md
 CONSTRAINTS: Focus on rendering scope
 ---
@@ -284,10 +284,10 @@ TASK:
   - Apply this single optimization to target files
   - Validate changes compile and pass existing tests
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Branch: B{NN}
   - Upstream artifacts: branches/B{NN}/optimization-detail.md
-  - Shared memory: <session>/.msg/meta.json (namespace: optimizer.B{NN})
+  - Shared memory: {run_dir}/work/team/.msg/meta.json (namespace: optimizer.B{NN})
 EXPECTED: Modified source files for OPT-{NNN} only
 CONSTRAINTS: Only implement this branch's optimization | Do not touch files outside OPT-{NNN} scope
 ---
@@ -305,10 +305,10 @@ TASK:
   - Benchmark only metrics relevant to this optimization
   - Compare against baseline, calculate improvement
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Branch: B{NN}
   - Upstream artifacts: baseline-metrics.json, branches/B{NN}/optimization-detail.md
-  - Shared memory: <session>/.msg/meta.json (namespace: benchmarker.B{NN})
+  - Shared memory: {run_dir}/work/team/.msg/meta.json (namespace: benchmarker.B{NN})
 EXPECTED: {run_dir}/outputs/branches/B{NN}/benchmark-results.json
 CONSTRAINTS: Only benchmark this branch's metrics
 ---
@@ -326,10 +326,10 @@ TASK:
   - Review across 5 dimensions for this branch's changes only
   - Issue verdict: APPROVE, REVISE, or REJECT
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Branch: B{NN}
   - Upstream artifacts: branches/B{NN}/optimization-detail.md
-  - Shared memory: <session>/.msg/meta.json (namespace: reviewer.B{NN})
+  - Shared memory: {run_dir}/work/team/.msg/meta.json (namespace: reviewer.B{NN})
 EXPECTED: {run_dir}/outputs/branches/B{NN}/review-report.md
 CONSTRAINTS: Only review this branch's changes
 ---

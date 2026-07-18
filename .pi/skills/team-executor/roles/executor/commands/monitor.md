@@ -18,7 +18,7 @@ Event-driven pipeline coordination with Spawn-and-Stop pattern for team-executor
 
 | Input | Source | Required |
 |-------|--------|----------|
-| Session file | `<session-folder>/team-session.json` | Yes |
+| Session file | `{run_dir}/work/team/team-session.json` | Yes |
 | Task list | `todo({ action: "list" })` | Yes |
 | Active workers | session.active_workers[] | Yes |
 | Role registry | session.roles[] | Yes |
@@ -126,7 +126,7 @@ Ready tasks found?
       |   +- YES -> SKIP spawn (existing worker picks it up)
       |   +- NO -> normal spawn below
       +- todo({ action: "update" }) -> in_progress
-      +- team_msg log -> task_unblocked (session_id=<session-id>)
+      +- team_msg log -> task_unblocked (session_id=<run-id>)
       +- Spawn team-worker (see spawn tool call below)
       +- Add to session.active_workers
       Update session file -> output summary -> STOP

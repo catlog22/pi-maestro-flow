@@ -65,8 +65,8 @@ Worker completed. Process and advance.
      - Optimize will-change usage
      - Verify reduced-motion fallback completeness
    CONTEXT:
-     - Session: <session-folder>
-     - Upstream artifacts: testing/reports/perf-report-<NNN>.md" })
+     - Session: {run_dir}/work/team
+     - Upstream artifacts: {run_dir}/outputs/testing/reports/perf-report-<NNN>.md" })
    todo({ action: "update", taskId: "ANIM-fix-<round>", owner: "animator" })
    ```
    Then create new MTEST task blocked by fix. Increment gc_state.round.
@@ -117,7 +117,7 @@ Pipeline Status (<pipeline-mode>):
 
 GC Rounds: 0/2
 Performance Gate: pending
-Session: <session-id>
+Session: <run-id>
 Commands: 'resume' to advance | 'check' to refresh
 ```
 
@@ -175,7 +175,7 @@ Pipeline done. Generate report and completion action.
    - Read run_id from team-session.json.run.run_id
    - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
    - Run `maestro run complete <run_id>`
-   - If complete fails: log warning, continue (do not block completion action)
+   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 3. If all completed -> transition to coordinator Phase 5
 
 ## handleAdapt

@@ -69,9 +69,9 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `TD`
-- **Session path**: `.workflow/.team/TD-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 - **Max GC rounds**: 3
 
 ## Worker Spawn Template
@@ -100,15 +100,15 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/TD-<slug>-<date>/
+{run_dir}/work/team/
 ├── .msg/
 │   ├── messages.jsonl      # Team message bus
 │   └── meta.json           # Pipeline config + role state snapshot
-├── scan/                   # Scanner output
-├── assessment/             # Assessor output
-├── plan/                   # Planner output
-├── fixes/                  # Executor output
-├── validation/             # Validator output
+├── {run_dir}/outputs/scan/                   # Scanner output
+├── {run_dir}/outputs/assessment/             # Assessor output
+├── {run_dir}/outputs/plan/                   # Planner output
+├── {run_dir}/outputs/fixes/                  # Executor output
+├── {run_dir}/outputs/validation/             # Validator output
 └── wisdom/                 # Cross-task knowledge
 ```
 

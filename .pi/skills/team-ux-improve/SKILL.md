@@ -84,9 +84,9 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `ux-improve`
-- **Session path**: `.workflow/.team/ux-improve-<timestamp>/`
+- **Session path**: `{run_dir}/work/team/`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 - **Max test iterations**: 5
 
 ## Worker Spawn Template
@@ -114,7 +114,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/ux-improve-<timestamp>/
+{run_dir}/work/team/
 ├── .msg/
 │   ├── messages.jsonl      # Team message bus
 │   └── meta.json           # Pipeline config + role state snapshot

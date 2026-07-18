@@ -81,8 +81,8 @@ Worker completed. Process and advance.
      - Parse re-audit reports for remaining issues
      - Apply targeted fixes for color and focus issues
    CONTEXT:
-     - Session: <session-folder>
-     - Upstream artifacts: re-audit/color-audit-002.md, re-audit/focus-audit-002.md" })
+     - Session: {run_dir}/work/team
+     - Upstream artifacts: {run_dir}/outputs/re-{run_dir}/outputs/audit/color-audit-002.md, {run_dir}/outputs/re-{run_dir}/outputs/audit/focus-audit-002.md" })
    todo({ action: "update", taskId: "FIX-002", addBlockedBy: ["COLOR-002", "FOCUS-002"], owner: "fix-implementer" })
    ```
    Then create new re-audit tasks blocked by FIX-002. Increment gc_state.round.
@@ -136,7 +136,7 @@ Pipeline Status (<pipeline-mode>):
 
 Fan-in: 2/3 audits complete
 GC Rounds: 0/2
-Session: <session-id>
+Session: <run-id>
 Commands: 'resume' to advance | 'check' to refresh
 ```
 
@@ -195,7 +195,7 @@ Pipeline done. Generate report and completion action.
    - Read run_id from `team-session.json.run.run_id`
    - Write `{run_dir}/report.md` with frontmatter (verdict/summary/concerns)
    - Run `maestro run complete <run_id>`
-   - If complete fails: log warning, continue (do not block completion action)
+   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 3. If all completed -> transition to coordinator Phase 5
 
 ## handleAdapt

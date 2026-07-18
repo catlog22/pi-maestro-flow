@@ -14,7 +14,7 @@ message_types:
 | Input type + raw input | Task description | Yes |
 | Session folder | Task description `Session:` field | Yes |
 | Execution method | Task description `Execution method:` field | Yes |
-| Wisdom | `<session>/wisdom/` | No |
+| Wisdom | `{run_dir}/work/team/wisdom/` | No |
 
 1. Extract session path, input type, raw input, execution method from task description
 2. Load wisdom files if available
@@ -38,7 +38,7 @@ Use CLI tool for issue planning:
 maestro delegate "PURPOSE: Generate implementation solution for issue <issueId>; success = actionable task breakdown with file paths
 TASK: • Load issue details • Analyze requirements • Design solution approach • Break down into implementation tasks • Identify files to modify/create
 MODE: analysis
-CONTEXT: @**/* | Memory: Session context from <session>/wisdom/
+CONTEXT: @**/* | Memory: Session context from {run_dir}/work/team/wisdom/
 EXPECTED: JSON solution with: title, description, tasks array (each with description, files_touched), estimated_complexity
 CONSTRAINTS: Follow project patterns | Reference existing implementations
 " --tool agy --mode analysis --rule planning-breakdown-task-steps
@@ -52,7 +52,7 @@ Write solution JSON to: `{run_dir}/outputs/solutions/<issueId>.json`
 
 ```json
 {
-  "session_id": "<session-id>",
+  "session_id": "<run-id>",
   "issue_id": "<issueId>",
   "solution": "<solution-from-agent>",
   "planned_at": "<ISO timestamp>"
@@ -73,7 +73,7 @@ todo({ action: "create" })({
 
 Issue ID: <issueId>
 Solution file: {run_dir}/outputs/solutions/<issueId>.json
-Session: <session>
+Session: {run_dir}/work/team
 Execution method: <method>
 
 InnerLoop: true`,

@@ -27,11 +27,11 @@ TASK:
   - <step 2: specific action>
   - <step 3: specific action>
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <design-scope>
   - Industry: <industry>
   - Upstream artifacts: <artifact-1>, <artifact-2>
-  - Shared memory: <session>/wisdom/.msg/meta.json
+  - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits, focus areas>" })
 todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
@@ -59,11 +59,11 @@ TASK:
   - Assess accessibility baseline (WCAG level, ARIA coverage)
   - Retrieve design intelligence via ui-ux-pro-max
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <design-scope>
   - Industry: <industry>
-  - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/research/*.json | All 4 research files with valid JSON
+  - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
+EXPECTED: {run_dir}/outputs/research/*.json | All 4 research files with valid JSON
 CONSTRAINTS: Read-only analysis | Focus on <design-scope>" })
 todo({ action: "update", taskId: "RESEARCH-001", owner: "researcher" })
 ```
@@ -78,12 +78,12 @@ TASK:
   - Ensure accessibility spec (role, ARIA, keyboard, focus)
   - Reference design intelligence recommendations
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <design-scope>
   - Industry: <industry>
-  - Upstream artifacts: research/*.json
-  - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/design/design-tokens.json + component-specs/*.md | Complete token system + spec
+  - Upstream artifacts: {run_dir}/outputs/research/*.json
+  - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
+EXPECTED: {run_dir}/outputs/design/design-tokens.json + component-specs/*.md | Complete token system + spec
 CONSTRAINTS: Follow W3C Design Tokens Format | All color tokens need light/dark" })
 todo({ action: "update", taskId: "DESIGN-001", addBlockedBy: ["RESEARCH-001"], owner: "designer" })
 ```
@@ -98,12 +98,12 @@ TASK:
   - Verify component states and ARIA spec
   - Check against design intelligence anti-patterns
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <design-scope>
   - Industry: <industry>
-  - Upstream artifacts: design/design-tokens.json, design/component-specs/*.md
-  - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/audit/audit-001.md | 5-dimension scored report
+  - Upstream artifacts: {run_dir}/outputs/design/design-tokens.json, {run_dir}/outputs/design/component-specs/*.md
+  - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
+EXPECTED: {run_dir}/outputs/audit/audit-001.md | 5-dimension scored report
 CONSTRAINTS: Read-only analysis | GC convergence: score >= 8 and 0 critical" })
 todo({ action: "update", taskId: "AUDIT-001", addBlockedBy: ["DESIGN-001"], owner: "reviewer" })
 ```
@@ -118,12 +118,12 @@ TASK:
   - Add ARIA attributes and keyboard navigation
   - Validate no hardcoded values
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Scope: <design-scope>
   - Industry: <industry>
-  - Upstream artifacts: design/design-tokens.json, design/component-specs/*.md, audit/audit-001.md
-  - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/build/**/* | Component + tokens CSS/TS + tests
+  - Upstream artifacts: {run_dir}/outputs/design/design-tokens.json, {run_dir}/outputs/design/component-specs/*.md, {run_dir}/outputs/audit/audit-001.md
+  - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
+EXPECTED: {run_dir}/outputs/build/**/* | Component + tokens CSS/TS + tests
 CONSTRAINTS: Use var(--token-name) only | Follow project patterns" })
 todo({ action: "update", taskId: "BUILD-001", addBlockedBy: ["AUDIT-001"], owner: "implementer" })
 ```

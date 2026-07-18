@@ -45,14 +45,14 @@ When coordinator needs to execute a command (analyze, dispatch, monitor):
 | Manual resume | Args contain "resume" or "continue" | -> handleResume (monitor.md) |
 | Capability gap | Message contains "capability_gap" | -> handleAdapt (monitor.md) |
 | Pipeline complete | All tasks have status "completed" | -> handleComplete (monitor.md) |
-| Interrupted session | Active/paused session exists in .workflow/.team/VA-* | -> Phase 0 |
+| Interrupted session | Active/paused session exists in {run_dir}/work/team/ | -> Phase 0 |
 | New session | None of above | -> Phase 1 |
 
 For callback/check/resume/adapt/complete: load `@commands/monitor.md`, execute matched handler, STOP.
 
 ## Phase 0: Session Resume Check
 
-1. Scan `.workflow/.team/VA-*/.msg/meta.json` for active/paused sessions
+1. Scan `{run_dir}/work/team/.msg/meta.json` for active/paused sessions
 2. No sessions -> Phase 1
 3. Single session -> reconcile (audit todo({ action: "list" }), reset in_progress->pending, rebuild team, kick first ready task)
 4. Multiple -> AskUserQuestion for selection
@@ -93,18 +93,18 @@ TEXT-LEVEL ONLY. No source code reading.
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.claude/skills/team-visual-a11y`
+   - `skill_root` = `<project_root>/.pi/skills/team-visual-a11y`
 2. Generate session ID: `VA-<slug>-<YYYY-MM-DD>`
 3. Create session folder structure:
    ```
-   .workflow/.team/VA-<slug>-<date>/audits/color/
-   .workflow/.team/VA-<slug>-<date>/audits/typography/
-   .workflow/.team/VA-<slug>-<date>/audits/focus/
-   .workflow/.team/VA-<slug>-<date>/remediation/
-   .workflow/.team/VA-<slug>-<date>/fixes/
-   .workflow/.team/VA-<slug>-<date>/re-audit/
-   .workflow/.team/VA-<slug>-<date>/evidence/
-   .workflow/.team/VA-<slug>-<date>/.msg/
+   {run_dir}/outputs/audits/color/
+   {run_dir}/outputs/audits/typography/
+   {run_dir}/outputs/audits/focus/
+   {run_dir}/outputs/remediation/
+   {run_dir}/outputs/fixes/
+   {run_dir}/outputs/re-audit/
+   {run_dir}/evidence/
+   {run_dir}/work/team/.msg/
    ```
 4. Initialize `.msg/meta.json` via team_msg state_update with pipeline metadata
 5. TeamCreate(team_name="visual-a11y")
@@ -114,7 +114,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 After session folder creation and before role-spec generation:
 
-1. **Create Run**: `maestro run create team-visual-a11y --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-visual-a11y --session <slug> --intent "<task summary>"`
    - Slug format: `YYYYMMDD-team-visual-a11y-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -148,14 +148,14 @@ Delegate to `@commands/monitor.md#handleSpawnNext`:
 
 | Deliverable | Path |
 |-------------|------|
-| Color Audit | <session>/audits/color/color-audit-001.md |
-| Typography Audit | <session>/audits/typography/typo-audit-001.md |
-| Focus Audit | <session>/audits/focus/focus-audit-001.md |
-| Remediation Plan | <session>/remediation/remediation-plan.md |
-| Fix Summary | <session>/fixes/fix-summary-001.md (full mode) |
-| Re-audit Color | <session>/re-audit/color-audit-002.md (full mode) |
-| Re-audit Focus | <session>/re-audit/focus-audit-002.md (full mode) |
-| Evidence | <session>/evidence/*.png (if Chrome DevTools used) |
+| Color Audit | {run_dir}/outputs/audits/color/color-audit-001.md |
+| Typography Audit | {run_dir}/outputs/audits/typography/typo-audit-001.md |
+| Focus Audit | {run_dir}/outputs/audits/focus/focus-audit-001.md |
+| Remediation Plan | {run_dir}/outputs/remediation/remediation-plan.md |
+| Fix Summary | {run_dir}/outputs/fixes/fix-summary-001.md (full mode) |
+| Re-audit Color | {run_dir}/outputs/re-audit/color-audit-002.md (full mode) |
+| Re-audit Focus | {run_dir}/outputs/re-audit/focus-audit-002.md (full mode) |
+| Evidence | {run_dir}/evidence/*.png (if Chrome DevTools used) |
 
 3. Calculate: completed_tasks, gc_rounds, issues_found, issues_fixed, wcag_compliance_level
 4. Output pipeline summary with [coordinator] prefix

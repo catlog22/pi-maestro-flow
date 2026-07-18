@@ -23,10 +23,10 @@
 
 | Prefix | Role | Role Spec | inner_loop |
 |--------|------|-----------|------------|
-| STRATEGY-* | strategist | `~  or <project>/.claude/skills/team-testing/roles/strategist/role.md` | false |
-| TESTGEN-* | generator | `~  or <project>/.claude/skills/team-testing/roles/generator/role.md` | true |
-| TESTRUN-* | executor | `~  or <project>/.claude/skills/team-testing/roles/executor/role.md` | true |
-| TESTANA-* | analyst | `~  or <project>/.claude/skills/team-testing/roles/analyst/role.md` | false |
+| STRATEGY-* | strategist | `~  or <project>/.pi/skills/team-testing/roles/strategist/role.md` | false |
+| TESTGEN-* | generator | `~  or <project>/.pi/skills/team-testing/roles/generator/role.md` | true |
+| TESTRUN-* | executor | `~  or <project>/.pi/skills/team-testing/roles/executor/role.md` | true |
+| TESTANA-* | analyst | `~  or <project>/.pi/skills/team-testing/roles/analyst/role.md` | false |
 
 ## handleCallback
 
@@ -58,24 +58,24 @@ TASK:
   - Revise tests to address failures
   - Improve coverage for uncovered areas
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Layer: <layer>
-  - Previous results: <session>/results/run-<N>.json
-EXPECTED: Revised test files in <session>/tests/<layer>/
+  - Previous results: {run_dir}/outputs/results/run-<N>.json
+EXPECTED: Revised test files in {run_dir}/outputs/tests/<layer>/
 CONSTRAINTS: Only modify test files
 ---
 InnerLoop: true
-RoleSpec: ~  or <project>/.claude/skills/team-testing/roles/generator/role.md" })
+RoleSpec: ~  or <project>/.pi/skills/team-testing/roles/generator/role.md" })
 todo({ action: "create", subject: "TESTRUN-<layer>-fix-<round>: Re-execute <layer> (GC #<round>)",
   description: "PURPOSE: Re-execute tests after revision | Success: pass_rate >= 0.95
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Layer: <layer>
   - Input: tests/<layer>
-EXPECTED: <session>/results/run-<N>-gc.json
+EXPECTED: {run_dir}/outputs/results/run-<N>-gc.json
 ---
 InnerLoop: true
-RoleSpec: ~  or <project>/.claude/skills/team-testing/roles/executor/role.md",
+RoleSpec: ~  or <project>/.pi/skills/team-testing/roles/executor/role.md",
   blockedBy: ["TESTGEN-<layer>-fix-<round>"] })
 ```
 Update session.gc_rounds[layer]++
@@ -184,7 +184,7 @@ Pipeline done. Generate report and completion action.
      - Read run_id from team-session.json.run.run_id
      - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
      - Run `maestro run complete <run_id>`
-     - If complete fails: log warning, continue (do not block completion action)
+     - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
    - Read final state from meta.json (analyst.quality_score, executor.coverage, gc_rounds)
    - Generate summary (deliverables, task count, GC rounds, coverage metrics)
 4. Read session.completion_action:
@@ -198,7 +198,7 @@ Capability gap reported mid-pipeline.
 
 1. Parse gap description
 2. Check if existing role covers it -> redirect
-3. Role count < 5 -> generate dynamic role-spec in <session>/role-specs/
+3. Role count < 5 -> generate dynamic role-spec in {run_dir}/work/team/role-specs/
 4. Create new task, spawn worker
 5. Role count >= 5 -> merge or pause
 

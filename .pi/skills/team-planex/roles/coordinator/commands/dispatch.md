@@ -25,7 +25,7 @@ todo({ action: "create", subject: "PLAN-001: Requirement decomposition and solut
 
 Input type: <issues|text|plan>
 Input: <raw-input>
-Session: <session-folder>
+Session: {run_dir}/work/team
 Execution method: <agent|codex|agy>
 
 ## Instructions
@@ -49,7 +49,7 @@ todo({ action: "create" })({
 
 Issue ID: <issueId>
 Solution file: {run_dir}/outputs/solutions/<issueId>.json
-Session: <session-folder>
+Session: {run_dir}/work/team
 Execution method: <agent|codex|agy>
 
 InnerLoop: true`,
@@ -67,7 +67,7 @@ todo({ action: "create", subject: "PLAN-00N: Additional requirement decompositio
 
 Input type: <issues|text|plan>
 Input: <new-input>
-Session: <session-folder>
+Session: {run_dir}/work/team
 Execution method: <execution-method>
 
 InnerLoop: true`,

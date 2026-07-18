@@ -92,10 +92,10 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `VA`
-- **Session path**: `.workflow/.team/VA-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **team_name**: `visual-a11y`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 - **Max GC rounds**: 2
 
 ## Worker Spawn Template
@@ -124,25 +124,25 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/VA-<slug>-<date>/
+{run_dir}/work/team/
 +-- .msg/
 |   +-- messages.jsonl         # Team message bus
 |   +-- meta.json              # Pipeline config + GC state
-+-- audits/
++-- {run_dir}/outputs/audits/
 |   +-- color/                 # Color auditor output
 |   |   +-- color-audit-001.md
 |   +-- typography/            # Typography auditor output
 |   |   +-- typo-audit-001.md
 |   +-- focus/                 # Focus auditor output
 |       +-- focus-audit-001.md
-+-- remediation/               # Remediation planner output
++-- {run_dir}/outputs/remediation/               # Remediation planner output
 |   +-- remediation-plan.md
-+-- fixes/                     # Fix implementer output
++-- {run_dir}/outputs/fixes/                     # Fix implementer output
 |   +-- fix-summary-001.md
-+-- re-audit/                  # Re-audit output (GC loop)
++-- {run_dir}/outputs/re-audit/                  # Re-audit output (GC loop)
 |   +-- color-audit-002.md
 |   +-- focus-audit-002.md
-+-- evidence/                  # Screenshots, traces
++-- {run_dir}/evidence/evidence/                  # Screenshots, traces
 ```
 
 ## Error Handling

@@ -57,7 +57,7 @@ For callback/check/resume/complete: load `@commands/monitor.md` and execute matc
 ### Router Implementation
 
 1. **Load session context** (if exists):
-   - Scan `.workflow/.team/PERF-OPT-*/.msg/meta.json` for active/paused sessions
+   - Scan `{run_dir}/work/team/.msg/meta.json` for active/paused sessions
    - If found, extract session folder path, status, and `parallel_mode`
 
 2. **Parse $ARGUMENTS** for detection keywords
@@ -94,7 +94,7 @@ Triggered when an active/paused session is detected on coordinator entry.
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.claude/skills/team-perf-opt`
+   - `skill_root` = `<project_root>/.pi/skills/team-perf-opt`
 2. Create session directory with explorations/, wisdom/, discussions/ subdirs (deliverables go to {run_dir}/outputs/)
 3. Write session.json with extended fields (parallel_mode, max_branches, branches, fix_cycles)
 4. Initialize meta.json with pipeline metadata via team_msg
@@ -104,7 +104,7 @@ Triggered when an active/paused session is detected on coordinator entry.
 
 After session folder creation and before role-spec generation:
 
-1. **Create Run**: `maestro run create team-perf-opt --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-perf-opt --session <slug> --intent "<task summary>"`
    - Slug format: `YYYYMMDD-team-perf-opt-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json

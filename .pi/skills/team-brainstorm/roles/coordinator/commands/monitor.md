@@ -143,7 +143,7 @@ Completion check by mode:
    - Read run_id from team-session.json.run.run_id
    - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
    - Run `maestro run complete <run_id>`
-   - If complete fails: log warning, continue (do not block completion action)
+   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 4. If all completed -> transition to coordinator Phase 5
 
 ## handleConsensus
@@ -162,7 +162,7 @@ Capability gap reported mid-pipeline.
 
 1. Parse gap description
 2. Check if existing role covers it -> redirect
-3. Role count < 5 -> generate dynamic role-spec in <session>/role-specs/
+3. Role count < 5 -> generate dynamic role-spec in {run_dir}/work/team/role-specs/
 4. Create new task, spawn worker
 5. Role count >= 5 -> merge or pause
 

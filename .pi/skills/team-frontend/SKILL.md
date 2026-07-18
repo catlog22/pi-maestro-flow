@@ -75,9 +75,9 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `FE`
-- **Session path**: `.workflow/.team/FE-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -97,22 +97,22 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/FE-<slug>-<YYYY-MM-DD>/
+{run_dir}/work/team/
 ├── .msg/
 │   ├── messages.jsonl          # Message bus log
 │   └── meta.json               # Session state + cross-role state
 ├── task-analysis.json          # Coordinator analyze output
 ├── wisdom/                     # Cross-task knowledge
-├── analysis/                   # Analyst output
+├── {run_dir}/outputs/analysis/                   # Analyst output
 │   ├── design-intelligence.json
 │   └── requirements.md
-├── architecture/               # Architect output
+├── {run_dir}/outputs/architecture/               # Architect output
 │   ├── design-tokens.json
 │   ├── component-specs/
 │   └── project-structure.md
-├── qa/                         # QA output
+├── {run_dir}/outputs/qa/                         # QA output
 │   └── audit-<NNN>.md
-└── build/                      # Developer output
+└── {run_dir}/outputs/build/                      # Developer output
 ```
 
 ## Specs Reference

@@ -26,7 +26,7 @@ TASK:
   - <step 2>
   - <step 3>
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Topic: <topic>
   - Angles: <angle-list>
   - Upstream artifacts: <artifact-list>
@@ -58,10 +58,10 @@ TASK:
   - Generate 3+ ideas per angle with title, description, assumption, impact
   - Self-review for coverage and uniqueness
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Topic: <topic>
   - Angles: <angle-list>
-EXPECTED: <session>/ideas/idea-001.md with >= 6 ideas
+EXPECTED: {run_dir}/outputs/ideas/idea-001.md with >= 6 ideas
 CONSTRAINTS: Divergent thinking only, no evaluation
 ---
 InnerLoop: false" })
@@ -73,14 +73,14 @@ todo({ action: "update", taskId: "IDEA-001", owner: "ideator" })
 todo({ action: "create", subject: "CHALLENGE-001",
   description: "PURPOSE: Challenge assumptions and assess feasibility of generated ideas | Success: Each idea rated by severity
 TASK:
-  - Read all idea files from ideas/ directory
+  - Read all idea files from {run_dir}/outputs/ideas/ directory
   - Challenge each idea across 4 dimensions (assumption, feasibility, risk, competition)
   - Assign severity (CRITICAL/HIGH/MEDIUM/LOW) per idea
   - Determine GC signal (REVISION_NEEDED or CONVERGED)
 CONTEXT:
-  - Session: <session-folder>
-  - Upstream artifacts: ideas/idea-001.md
-EXPECTED: <session>/critiques/critique-001.md with severity table and GC signal
+  - Session: {run_dir}/work/team
+  - Upstream artifacts: {run_dir}/outputs/ideas/idea-001.md
+EXPECTED: {run_dir}/outputs/critiques/critique-001.md with severity table and GC signal
 CONSTRAINTS: Critical analysis only, do not generate alternative ideas
 ---
 InnerLoop: false" })
@@ -96,9 +96,9 @@ TASK:
   - Extract themes, resolve conflicts, group complementary ideas
   - Generate 1-3 integrated proposals with feasibility and innovation scores
 CONTEXT:
-  - Session: <session-folder>
-  - Upstream artifacts: ideas/*.md, critiques/*.md
-EXPECTED: <session>/synthesis/synthesis-001.md with proposals
+  - Session: {run_dir}/work/team
+  - Upstream artifacts: {run_dir}/outputs/ideas/*.md, {run_dir}/outputs/critiques/*.md
+EXPECTED: {run_dir}/outputs/synthesis/synthesis-001.md with proposals
 CONSTRAINTS: Integration and synthesis only, no new ideas
 ---
 InnerLoop: false" })
@@ -114,13 +114,13 @@ Creates all 6 tasks. First 2 same as Quick, then:
 todo({ action: "create", subject: "IDEA-002",
   description: "PURPOSE: Revise ideas based on critique feedback (GC Round 1) | Success: HIGH/CRITICAL challenges addressed
 TASK:
-  - Read critique feedback from critiques/
+  - Read critique feedback from {run_dir}/outputs/critiques/
   - Revise challenged ideas, replace unsalvageable ones
   - Retain unchallenged ideas intact
 CONTEXT:
-  - Session: <session-folder>
-  - Upstream artifacts: critiques/critique-001.md
-EXPECTED: <session>/ideas/idea-002.md with revised ideas
+  - Session: {run_dir}/work/team
+  - Upstream artifacts: {run_dir}/outputs/critiques/critique-001.md
+EXPECTED: {run_dir}/outputs/ideas/idea-002.md with revised ideas
 CONSTRAINTS: Address critique only, focused revision
 ---
 InnerLoop: false" })
@@ -136,9 +136,9 @@ TASK:
   - Re-evaluate previously challenged ideas
   - Assess new replacement ideas
 CONTEXT:
-  - Session: <session-folder>
-  - Upstream artifacts: ideas/idea-002.md
-EXPECTED: <session>/critiques/critique-002.md
+  - Session: {run_dir}/work/team
+  - Upstream artifacts: {run_dir}/outputs/ideas/idea-002.md
+EXPECTED: {run_dir}/outputs/critiques/critique-002.md
 CONSTRAINTS: Focus on revised/new ideas
 ---
 InnerLoop: false" })
@@ -155,9 +155,9 @@ TASK:
   - Score each proposal across 4 dimensions (Feasibility 30%, Innovation 25%, Impact 25%, Cost 20%)
   - Generate final ranking and recommendation
 CONTEXT:
-  - Session: <session-folder>
-  - Upstream artifacts: synthesis/synthesis-001.md
-EXPECTED: <session>/evaluation/evaluation-001.md with scoring matrix
+  - Session: {run_dir}/work/team
+  - Upstream artifacts: {run_dir}/outputs/synthesis/synthesis-001.md
+EXPECTED: {run_dir}/outputs/evaluation/evaluation-001.md with scoring matrix
 CONSTRAINTS: Evaluation only, no new proposals
 ---
 InnerLoop: false" })

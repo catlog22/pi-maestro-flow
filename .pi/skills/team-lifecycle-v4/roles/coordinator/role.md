@@ -15,7 +15,7 @@
 - Create team and spawn team-worker agents in background
 - Dispatch tasks with proper dependency chains
 - Monitor progress via callbacks and route messages
-- Maintain session state (team-session.json)
+- Maintain session state (team-session.json) — sole writer; workers and supervisor read it only
 - Handle capability_gap reports
 - Execute completion action when pipeline finishes
 
@@ -42,14 +42,14 @@ When coordinator needs to execute a specific phase:
 | Manual resume | Args contain "resume" or "continue" | -> handleResume (monitor.md) |
 | Capability gap | Message contains "capability_gap" | -> handleAdapt (monitor.md) |
 | Pipeline complete | All tasks completed | -> handleComplete (monitor.md) |
-| Interrupted session | Active session in .workflow/.team/TLV4-* | -> Phase 0 |
+| Interrupted session | Active session in {run_dir}/work/team/ | -> Phase 0 |
 | New session | None of above | -> Phase 1 |
 
 For callback/check/resume/adapt/complete: load @commands/monitor.md, execute handler, STOP.
 
 ## Phase 0: Session Resume Check
 
-1. Scan .workflow/.team/TLV4-*/team-session.json for active/paused sessions
+1. Scan {run_dir}/work/team/team-session.json for active/paused sessions
 2. No sessions -> Phase 1
 3. Single session -> reconcile:
    a. Audit todo({ action: "list" }), reset in_progress->pending
@@ -74,7 +74,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.claude/skills/team-lifecycle-v4`
+   - `skill_root` = `<project_root>/.pi/skills/team-lifecycle-v4`
 2. Generate session ID: TLV4-<slug>-<date>
 3. Create session folder structure
 4. TeamCreate with team name
@@ -84,7 +84,7 @@ TEXT-LEVEL ONLY. No source code reading.
 8. Initialize pipeline via team_msg state_update:
    ```
    mcp__maestro__team_msg({
-     operation: "log", session_id: "<id>", from: "coordinator",
+     operation: "log", session_id: "<run-id>", from: "coordinator",
      type: "state_update", summary: "Session initialized",
      data: { pipeline_mode: "<mode>", pipeline_stages: [...], team_name: "<name>" }
    })
@@ -99,7 +99,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 After session folder creation and before role-spec generation:
 
-1. **Create Run**: `maestro run create team-lifecycle-v4 --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-lifecycle-v4 --session <slug> --intent "<task summary>"`
    - Slug format: `YYYYMMDD-team-lifecycle-v4-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json

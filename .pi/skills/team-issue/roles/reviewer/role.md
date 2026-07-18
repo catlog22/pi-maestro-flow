@@ -12,9 +12,9 @@ message_types: "[approved, concerns, rejected, error]"
 | Input | Source | Required |
 |-------|--------|----------|
 | Issue IDs | Task description (GH-\d+ or ISS-\d{8}-\d{6}) | Yes |
-| Explorer context | `<session>/explorations/context-<issueId>.json` | No |
+| Explorer context | `{run_dir}/work/team/explorations/context-<issueId>.json` | No |
 | Bound solution | `ccw issue solutions <id> --json` | Yes |
-| wisdom meta | <session>/wisdom/.msg/meta.json | No |
+| wisdom meta | {run_dir}/work/team/wisdom/.msg/meta.json | No |
 
 1. Extract issue IDs from task description via regex
 2. Load explorer context reports for each issue
@@ -74,11 +74,11 @@ total_score = round(
 
 ## Phase 4: Compile Audit Report
 
-1. Write audit report to `<session>/audits/audit-report.json`:
+1. Write audit report to `{run_dir}/outputs/audits/audit-report.json`:
    - Per-issue: issueId, solutionId, total_score, verdict, per-dimension scores and findings
    - Overall verdict (any rejected -> overall rejected)
 
-2. Update `<session>/wisdom/.msg/meta.json` under `reviewer` namespace:
+2. Update `{run_dir}/work/team/wisdom/.msg/meta.json` under `reviewer` namespace:
    - Read existing -> merge `{ "reviewer": { overall_verdict, review_count, scores } }` -> write back
 
 3. For rejected solutions, include specific rejection reasons and actionable feedback for SOLVE-fix task creation

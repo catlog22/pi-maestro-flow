@@ -73,10 +73,10 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `TISL`
-- **Session path**: `.workflow/.team/TISL-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **Team name**: `issue`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -102,7 +102,7 @@ teammate({ agent: "team-worker", name: "<role>-<N>", context: "fresh" })
 ## Session Directory
 
 ```
-.workflow/.team/TISL-<slug>-<date>/
+{run_dir}/work/team/
 ├── session.json                    # Session metadata + pipeline + fix_cycles
 ├── task-analysis.json              # Coordinator analyze output
 ├── .msg/
@@ -115,12 +115,12 @@ teammate({ agent: "team-worker", name: "<role>-<N>", context: "fresh" })
 │   └── issues.md
 ├── explorations/                   # Explorer output
 │   └── context-<issueId>.json
-├── solutions/                      # Planner output
+├── {run_dir}/outputs/solutions/                      # Planner output
 │   └── solution-<issueId>.json
-├── audits/                         # Reviewer output
+├── {run_dir}/outputs/audits/                         # Reviewer output
 │   └── audit-report.json
 ├── queue/                          # Integrator output (also .workflow/issues/queue/)
-└── builds/                         # Implementer output
+└── {run_dir}/outputs/builds/                         # Implementer output
 ```
 
 ## Specs Reference

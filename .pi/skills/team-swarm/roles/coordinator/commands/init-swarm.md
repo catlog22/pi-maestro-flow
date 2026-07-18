@@ -4,7 +4,7 @@
 
 - `swarm-config.json` from Phase 1 (in-memory or already written to candidate session path)
 - `session_id` already computed (`TS-<slug>-<date>`)
-- `skill_root` = `<project>/.claude/skills/team-swarm`
+- `skill_root` = `<project>/.pi/skills/team-swarm`
 
 ## Workflow
 
@@ -12,8 +12,8 @@
 
 ```
 project_root = Bash("pwd")
-skill_root = "<project_root>/.claude/skills/team-swarm"
-session_path = "<project_root>/.workflow/.team/<session_id>"
+skill_root = "<project_root>/.pi/skills/team-swarm"
+session_path = "<project_root>/{run_dir}/work/team/"
 ```
 
 ### Step 2: Create session directory tree
@@ -68,7 +68,7 @@ On success, capture:
 
 ```json
 {
-  "session_id": "<session-id>",
+  "session_id": "<run-id>",
   "task_description": "<user task>",
   "status": "active",
   "team_name": "swarm",
@@ -99,7 +99,7 @@ Create empty wisdom files with headers:
 ```
 team_msg({
   operation: "log",
-  session_id: "<session-id>",
+  session_id: "<run-id>",
   from: "coordinator",
   type: "state_update",
   summary: "Swarm initialized: <n_nodes> nodes, <n_ants> ants/iter, max <K> iterations",
@@ -119,9 +119,9 @@ Do NOT spawn any workers in this command. First spawn happens in iterate.md step
 
 ## Success Criteria
 
-- `<session>/swarm-config.json` exists and validates
-- `<session>/pheromone/current.json` exists with `iteration: 0`
-- `<session>/task-space.json` exists with `n_nodes > 0`
+- `{run_dir}/work/team/swarm-config.json` exists and validates
+- `{run_dir}/work/team/pheromone/current.json` exists with `iteration: 0`
+- `{run_dir}/work/team/task-space.json` exists with `n_nodes > 0`
 - team-session.json initialized with `iteration: 0`
 
 ## Failure Recovery

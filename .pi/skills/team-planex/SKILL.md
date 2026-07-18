@@ -72,9 +72,9 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `PEX`
-- **Session path**: `.workflow/.team/PEX-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -95,7 +95,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/PEX-<slug>-<YYYY-MM-DD>/
+{run_dir}/work/team/
 ├── .msg/
 │   ├── messages.jsonl          # Message bus log
 │   └── meta.json               # Session state

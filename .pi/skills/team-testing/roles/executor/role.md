@@ -15,7 +15,7 @@ message_types:
 | Session path | Extracted from task description | Yes |
 | Test directory | Task description (Input: <path>) | Yes |
 | Coverage target | Task description (default: 80%) | Yes |
-| .msg/meta.json | <session>/wisdom/.msg/meta.json | No |
+| .msg/meta.json | {run_dir}/work/team/wisdom/.msg/meta.json | No |
 
 1. Extract session path and test directory from task description
 2. Load test specs: Run `ccw spec load --category test` for test framework conventions and coverage targets
@@ -25,14 +25,14 @@ message_types:
 
 | Framework | Run Command |
 |-----------|-------------|
-| Jest | `npx jest --coverage --json --outputFile=<session>/results/jest-output.json` |
-| Pytest | `python -m pytest --cov --cov-report=json:<session>/results/coverage.json -v` |
+| Jest | `npx jest --coverage --json --outputFile={run_dir}/outputs/results/jest-output.json` |
+| Pytest | `python -m pytest --cov --cov-report=json:{run_dir}/outputs/results/coverage.json -v` |
 | Vitest | `npx vitest run --coverage --reporter=json` |
 
 5. Find test files to execute:
 
 ```
-Glob("<session>/<test-dir>/**/*")
+Glob("{run_dir}/outputs/<test-dir>/**/*")
 ```
 
 ## Phase 3: Test Execution + Fix Cycle
@@ -59,16 +59,16 @@ Bash({
   command: `maestro delegate "PURPOSE: Fix test failures to achieve pass rate >= 0.95; success = all tests pass
 TASK: • Analyze test failure output • Identify root causes • Fix test code only (not source) • Preserve test intent
 MODE: write
-CONTEXT: @<session>/<test-dir>/**/* | Memory: Test framework: <framework>, iteration <N>/3
+CONTEXT: @{run_dir}/outputs/<test-dir>/**/* | Memory: Test framework: <framework>, iteration <N>/3
 EXPECTED: Fixed test files with: corrected assertions, proper async handling, fixed imports, maintained coverage
 CONSTRAINTS: Only modify test files | Preserve test structure | No source code changes
 Test failures:
-<test-output>" --tool agy --mode write --cd <session>`,
+<test-output>" --tool agy --mode write --cd {run_dir}/work/team`,
   run_in_background: false
 })
 ```
 
-**Save results**: `<session>/results/run-<N>.json`
+**Save results**: `{run_dir}/outputs/results/run-<N>.json`
 
 ## Phase 4: Defect Pattern Extraction & State Update
 
@@ -89,5 +89,5 @@ Test failures:
 | Edge cases | "edge", "boundary", "limit" |
 | Error handling | "should fail", "error", "throw" |
 
-Update `<session>/wisdom/.msg/meta.json` under `executor` namespace:
+Update `{run_dir}/work/team/wisdom/.msg/meta.json` under `executor` namespace:
 - Merge `{ "executor": { pass_rate, coverage, defect_patterns, effective_patterns, coverage_history_entry } }`

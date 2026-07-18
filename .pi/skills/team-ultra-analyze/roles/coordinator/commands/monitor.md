@@ -15,7 +15,7 @@
 
 | Input | Source | Required |
 |-------|--------|----------|
-| Session state | `<session>/session.json` | Yes |
+| Session state | `{run_dir}/work/team/session.json` | Yes |
 | Task list | `todo({ action: "list" })` | Yes |
 | Trigger event | From Entry Router detection | Yes |
 | Pipeline mode | From session.json `pipeline_mode` | Yes |
@@ -133,12 +133,12 @@ TASK:
   - Execute <type> discussion strategy
   - Update discussion timeline
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Topic: <topic>
   - Round: <N>
   - Type: <deepen|direction-adjusted|specific-questions>
-  - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/discussions/discussion-round-<NNN>.json
+  - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
+EXPECTED: {run_dir}/evidence/discussions/discussion-round-<NNN>.json
 ---
 InnerLoop: false" })
 todo({ action: "update", taskId: "DISCUSS-<NNN>", owner: "discussant" })
@@ -153,12 +153,12 @@ TASK:
   - Build on previous exploration findings
   - Generate updated discussion points
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Topic: <topic>
   - Type: direction-fix
   - Adjusted focus: <adjusted_focus>
-  - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/analyses/analysis-fix-<N>.json
+  - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
+EXPECTED: {run_dir}/outputs/analyses/analysis-fix-<N>.json
 ---
 InnerLoop: false" })
 todo({ action: "update", taskId: "ANALYZE-fix-<N>", owner: "analyst" })
@@ -176,11 +176,11 @@ TASK:
   - Extract themes, consolidate evidence, prioritize recommendations
   - Write conclusions and update discussion.md
 CONTEXT:
-  - Session: <session-folder>
+  - Session: {run_dir}/work/team
   - Topic: <topic>
-  - Upstream artifacts: explorations/*.json, analyses/*.json, discussions/*.json
-  - Shared memory: <session>/wisdom/.msg/meta.json
-EXPECTED: <session>/conclusions.json + discussion.md update
+  - Upstream artifacts: explorations/*.json, {run_dir}/outputs/analyses/*.json, discussions/*.json
+  - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
+EXPECTED: {run_dir}/outputs/conclusions.json + {run_dir}/evidence/discussion.md update
 CONSTRAINTS: Pure integration, no new exploration
 ---
 InnerLoop: false" })
@@ -282,7 +282,7 @@ Pipeline Status (<mode> mode):
 
 Discussion Rounds: 0/<max>
 Pipeline Mode: <mode>
-Session: <session-id>
+Session: <run-id>
 ```
 
 Output status -- do NOT advance pipeline.
@@ -313,7 +313,7 @@ Triggered when all pipeline tasks are completed.
    - Read run_id from `team-session.json.run.run_id`
    - Write `{run_dir}/report.md` with frontmatter (verdict/summary/concerns)
    - Run `maestro run complete <run_id>`
-   - If complete fails: log warning, continue (do not block completion action)
+   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 3. If all completed, **inline-execute coordinator Phase 5** (shutdown workers → report → completion action). Do NOT STOP here — continue directly into Phase 5 within the same turn.
 
 ## Phase 4: State Persistence

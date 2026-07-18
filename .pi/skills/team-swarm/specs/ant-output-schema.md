@@ -80,7 +80,7 @@ Example: `{run_dir}/outputs/ant-3-2.json` (ant id 2 in iteration 3)
 |-------|--------|---------|
 | `self_score` | Ant LLM self-report | Cheap early-stop signal; tracked but NOT used for pheromone update |
 | `self_confidence` | Ant LLM self-report | Used to weight self_score when no verified_score is available |
-| `verified_score` | scoring.py OR scorer role | **Authoritative input to pheromone update.** Written to separate file: `<session>/scores/iter-k-scores.json` |
+| `verified_score` | scoring.py OR scorer role | **Authoritative input to pheromone update.** Written to separate file: `{run_dir}/work/team/scores/iter-k-scores.json` |
 
 If `verified_score` is missing for an ant (scorer disabled), pheromone update falls back to:
 ```

@@ -15,7 +15,7 @@ message_types:
 | Solution file | Task description `Solution file:` field | Yes |
 | Session folder | Task description `Session:` field | Yes |
 | Execution method | Task description `Execution method:` field | Yes |
-| Wisdom | `<session>/wisdom/` | No |
+| Wisdom | `{run_dir}/work/team/wisdom/` | No |
 
 1. Extract issue ID, solution file path, session folder, execution method
 2. Load solution JSON from file (file-first)
@@ -38,7 +38,7 @@ message_types:
 maestro delegate "PURPOSE: Implement solution for issue <issueId>; success = all tasks completed, tests pass
 TASK: <solution.tasks as bullet points>
 MODE: write
-CONTEXT: @**/* | Memory: Session wisdom from <session>/wisdom/
+CONTEXT: @**/* | Memory: Session wisdom from {run_dir}/work/team/wisdom/
 EXPECTED: Working implementation with: code changes, test updates, no syntax errors
 CONSTRAINTS: Follow existing patterns | Maintain backward compatibility
 Issue: <issueId>

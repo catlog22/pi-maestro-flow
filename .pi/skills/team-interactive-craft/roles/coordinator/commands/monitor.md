@@ -65,7 +65,7 @@ Worker completed. Process and advance.
      - Parse a11y audit feedback for specific issues
      - Apply targeted fixes to component JS/CSS
    CONTEXT:
-     - Session: <session-folder>
+     - Session: {run_dir}/work/team
      - Upstream artifacts: a11y/a11y-audit-<NNN>.md" })
    todo({ action: "update", taskId: "BUILD-fix-<round>", owner: "builder" })
    ```
@@ -116,7 +116,7 @@ Pipeline Status (<pipeline-mode>):
   [WAIT]  A11Y-001          (a11y-tester)            -> blocked by BUILD-001
 
 GC Rounds: 0/2
-Session: <session-id>
+Session: <run-id>
 Commands: 'resume' to advance | 'check' to refresh
 ```
 
@@ -174,7 +174,7 @@ Pipeline done. Generate report and completion action.
    - Read run_id from team-session.json.run.run_id
    - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
    - Run `maestro run complete <run_id>`
-   - If complete fails: log warning, continue (do not block completion action)
+   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 3. If all completed -> transition to coordinator Phase 5
 
 ## handleAdapt

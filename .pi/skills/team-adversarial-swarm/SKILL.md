@@ -67,12 +67,12 @@ SKILL.md (Coordinator — this file)
 **所有依赖均在本 skill 内部，无外部引用。**
 
 - **Python ACO 脚本**: `<this-skill>/scripts/aco.py`
-  - 运行时解析: `Glob(".claude/skills/team-adversarial-swarm/scripts/aco.py")`
+  - 运行时解析: `Glob(".pi/skills/team-adversarial-swarm/scripts/aco.py")`
   - 依赖模块: `pheromone.py`, `scoring.py`（同目录）
   - 命令: `init` / `select` / `update` / `converged` / `report`
   - 协议: [specs/swarm-protocol.md](specs/swarm-protocol.md)
 - **Workflow 脚本**: `<this-skill>/workflows/wf-swarm-*.js`
-  - 运行时解析: `Glob(".claude/skills/team-adversarial-swarm/workflows/wf-swarm-*.js")`
+  - 运行时解析: `Glob(".pi/skills/team-adversarial-swarm/workflows/wf-swarm-*.js")`
 
 ## Specs Reference
 
@@ -87,7 +87,7 @@ SKILL.md (Coordinator — this file)
 ## Session Directory
 
 ```
-.workflow/.team/TAS-<slug>-<date>/
+{run_dir}/work/team/
 ├── swarm-config.json       # Phase 1 output
 ├── pheromone/              # ACO state (managed by aco.py)
 │   ├── current.json
@@ -111,7 +111,7 @@ SKILL.md (Coordinator — this file)
 
 ### Phase 0: Resume Check
 
-1. `Glob(".workflow/.team/TAS-*/swarm-config.json")` → 查找活跃 session
+1. `Glob("{run_dir}/work/team/swarm-config.json")` → 查找活跃 session
 2. 若存在且有 `workflows/converge-*.json` 未标记 converged → 恢复到对应迭代
 3. 若无活跃 session → Phase 1
 
@@ -137,20 +137,20 @@ SKILL.md (Coordinator — this file)
 }
 ```
 
-Write 到 `<session>/swarm-config.json`。
+Write 到 `{run_dir}/work/team/swarm-config.json`。
 
 ### Phase 2: ACO Init
 
 1. 创建 session 目录: `TAS-<slug>-<date>`
 2. 解析 aco.py 路径（从 team-swarm skill 继承）
-3. `Bash: python <aco.py> --session <session> init`
+3. `Bash: python <aco.py> --session {run_dir}/work/team init`
 4. 解析输出: `{ n_nodes, n_edges, pheromone_path }`
 
 ### Run Lifecycle Integration
 
 After session folder creation and before role-spec generation:
 
-1. **Create Run**: `maestro run create team-adversarial-swarm --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-adversarial-swarm --session <slug> --intent "<task summary>"`
    - Slug format: `YYYYMMDD-team-adversarial-swarm-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -163,7 +163,7 @@ After session folder creation and before role-spec generation:
 ```python
 for k in range(1, max_iterations + 1):
     # 3a. ACO selection
-    assignments = Bash("python aco.py --session <session> select --iter k")
+    assignments = Bash("python aco.py --session {run_dir}/work/team select --iter k")
     
     # 3b. Parallel exploration (Workflow Module 1)
     explore_result = Workflow({
@@ -178,8 +178,8 @@ for k in range(1, max_iterations + 1):
     })
     
     # 3d. Write scores + pheromone update
-    Write("<session>/scores/iter-k-scores.json", score_result)
-    Bash("python aco.py --session <session> update --iter k")
+    Write("{run_dir}/work/team/scores/iter-k-scores.json", score_result)
+    Bash("python aco.py --session {run_dir}/work/team update --iter k")
     
     # 3e. Adversarial convergence check (Workflow Module 3)
     converge_result = Workflow({
@@ -188,7 +188,7 @@ for k in range(1, max_iterations + 1):
     })
     
     # 3f. Save + check
-    Write("<session>/workflows/converge-k.json", converge_result)
+    Write("{run_dir}/work/team/workflows/converge-k.json", converge_result)
     if converge_result.converged: break
 ```
 
@@ -197,7 +197,7 @@ Coordinator 负责 Workflow 间的数据桥接和 Python 脚本调用。
 
 ### Phase 4: Synthesis
 
-1. `Bash: python aco.py --session <session> report` → 获取 best + top_k + curve
+1. `Bash: python aco.py --session {run_dir}/work/team report` → 获取 best + top_k + curve
 2. 调用 Workflow Module 4:
    ```
    Workflow({
@@ -256,7 +256,7 @@ Run lifecycle completion (before displaying results):
 - Read run_id from team-session.json.run.run_id
 - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
 - Run `maestro run complete <run_id>`
-- If complete fails: log warning, continue (do not block completion action)
+- If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 
 展示最终结果 + 交互选择:
 - **归档**: 保存 session，展示 best-solution.md

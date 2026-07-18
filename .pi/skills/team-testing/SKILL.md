@@ -65,10 +65,10 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `TST`
-- **Session path**: `.workflow/.team/TST-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **Team name**: `testing`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -109,14 +109,14 @@ AskUserQuestion({
 ## Session Directory
 
 ```
-.workflow/.team/TST-<slug>-<date>/
+{run_dir}/work/team/
 ├── .msg/messages.jsonl     # Team message bus
 ├── .msg/meta.json          # Session metadata
 ├── wisdom/                 # Cross-task knowledge
-├── strategy/               # Strategist output
-├── tests/                  # Generator output (L1-unit/, L2-integration/, L3-e2e/)
-├── results/                # Executor output
-└── analysis/               # Analyst output
+├── {run_dir}/outputs/strategy/               # Strategist output
+├── {run_dir}/outputs/tests/                  # Generator output (L1-unit/, L2-integration/, L3-e2e/)
+├── {run_dir}/outputs/results/                # Executor output
+└── {run_dir}/outputs/analysis/               # Analyst output
 ```
 
 ## Specs Reference

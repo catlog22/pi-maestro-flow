@@ -5,7 +5,7 @@
 ### Step 1: Call aco.py report
 
 ```
-Bash: python <skill_root>/scripts/aco.py --session <session> report
+Bash: python <skill_root>/scripts/aco.py --session {run_dir}/work/team report
 ```
 
 Parse stdout JSON. Expected:
@@ -35,15 +35,15 @@ teammate({
 role: analyst
 role_spec: <skill_root>/roles/analyst/role.md
 session: <session_path>
-session_id: <session_id>
+session_id: <run-id>
 team_name: swarm
 requirement: synthesize swarm results into human-readable best-solution.md
 inner_loop: false
 
 ## Context
 Report data: {run_dir}/outputs/swarm-report.json
-Best solution: <session>/best.json
-All trails: <session>/trails/*.jsonl
+Best solution: {run_dir}/work/team/best.json
+All trails: {run_dir}/work/team/trails/*.jsonl
 Original objective: <config.ant_prompt.objective>
 
 ## Progress Milestones
@@ -67,7 +67,7 @@ If missing -> AskUserQuestion (skip synthesis / retry analyst).
   |   - Read run_id from team-session.json.run.run_id
   |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
   |   - Run `maestro run complete <run_id>`
-  |   - If complete fails: log warning, continue (do not block completion action)
+  |   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 ```
 
 ### Step 4: Build completion summary

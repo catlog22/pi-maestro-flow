@@ -71,9 +71,9 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `BRS`
-- **Session path**: `.workflow/.team/BRS-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -101,7 +101,7 @@ teammate({ agent: "team-worker", name: "ideator-<N>", context: "fresh" })
 ## Session Directory
 
 ```
-.workflow/.team/BRS-<slug>-<date>/
+{run_dir}/work/team/
 ├── session.json                    # Session metadata + pipeline + gc_round
 ├── task-analysis.json              # Coordinator analyze output
 ├── .msg/
@@ -112,15 +112,15 @@ teammate({ agent: "team-worker", name: "ideator-<N>", context: "fresh" })
 │   ├── decisions.md
 │   ├── conventions.md
 │   └── issues.md
-├── ideas/                          # Ideator output
+├── {run_dir}/outputs/ideas/                          # Ideator output
 │   ├── idea-001.md
 │   └── idea-002.md
-├── critiques/                      # Challenger output
+├── {run_dir}/outputs/critiques/                      # Challenger output
 │   ├── critique-001.md
 │   └── critique-002.md
-├── synthesis/                      # Synthesizer output
+├── {run_dir}/outputs/synthesis/                      # Synthesizer output
 │   └── synthesis-001.md
-└── evaluation/                     # Evaluator output
+└── {run_dir}/outputs/evaluation/                     # Evaluator output
     └── evaluation-001.md
 ```
 

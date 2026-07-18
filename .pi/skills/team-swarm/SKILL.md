@@ -72,10 +72,10 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `TS`
-- **Session path**: `.workflow/.team/TS-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **Team name**: `swarm`
 - **Script root**: `<skill_root>/scripts/aco.py` (Python 3.10+)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -115,7 +115,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/TS-<slug>-<date>/
+{run_dir}/work/team/
 ├── team-session.json           # Session state
 ├── swarm-config.json           # User-facing config (Phase 1 output)
 ├── role-binding.json           # Worker role_spec path map

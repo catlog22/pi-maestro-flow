@@ -76,9 +76,9 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `IC`
-- **Session path**: `.workflow/.team/IC-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 - **Max GC rounds**: 2
 
 ## Worker Spawn Template
@@ -105,22 +105,22 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/IC-<slug>-<date>/
+{run_dir}/work/team/
 +-- .msg/
 |   +-- messages.jsonl         # Team message bus
 |   +-- meta.json              # Pipeline config + GC state
-+-- research/                  # Researcher output
++-- {run_dir}/outputs/research/                  # Researcher output
 |   +-- interaction-inventory.json
 |   +-- browser-api-audit.json
 |   +-- pattern-reference.json
-+-- interaction/               # Interaction designer output
++-- {run_dir}/outputs/interaction/               # Interaction designer output
 |   +-- blueprints/
 |       +-- {component-name}.md
-+-- build/                     # Builder output
++-- {run_dir}/outputs/build/                     # Builder output
 |   +-- components/
 |       +-- {name}.js
 |       +-- {name}.css
-+-- a11y/                      # A11y tester output
++-- {run_dir}/outputs/a11y/                      # A11y tester output
 |   +-- a11y-audit-{NNN}.md
 +-- wisdom/                    # Cross-task knowledge
 ```

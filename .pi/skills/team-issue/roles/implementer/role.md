@@ -21,7 +21,7 @@ message_types: "[impl_complete, impl_failed, error]"
 |-------|--------|----------|
 | Issue ID | Task description (GH-\d+ or ISS-\d{8}-\d{6}) | Yes |
 | Bound solution | `ccw issue solutions <id> --json` | Yes |
-| Explorer context | `<session>/explorations/context-<issueId>.json` | No |
+| Explorer context | `{run_dir}/work/team/explorations/context-<issueId>.json` | No |
 | Execution method | Task description (`execution_method: Codex|Agy|Qwen|Auto`) | Yes |
 | Code review | Task description (`code_review: Skip|Agy Review|Codex Review`) | No |
 
@@ -81,5 +81,5 @@ On CLI failure, resume: `maestro delegate "Continue" --resume issue-<issueId> --
 - Tests pass -> optional code review -> `ccw issue update <issueId> --status resolved` -> report `impl_complete`
 - Tests fail -> report `impl_failed` with truncated test output
 
-Update `<session>/wisdom/.msg/meta.json` under `implementer` namespace:
+Update `{run_dir}/work/team/wisdom/.msg/meta.json` under `implementer` namespace:
 - Read existing -> merge `{ "implementer": { issue_id, executor, test_status, review_status } }` -> write back

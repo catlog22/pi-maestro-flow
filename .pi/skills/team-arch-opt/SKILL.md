@@ -73,9 +73,9 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `TAO`
-- **Session path**: `.workflow/.team/TAO-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -102,7 +102,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/TAO-<slug>-<date>/
+{run_dir}/work/team/
 ├── session.json                    # Session metadata + status + parallel_mode
 ├── task-analysis.json              # Coordinator analyze output
 ├── {run_dir}/outputs/              # Run deliverables (via maestro run)
@@ -125,7 +125,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 │   └── <hash>.md
 ├── wisdom/
 │   └── patterns.md                 # Discovered patterns and conventions
-├── discussions/
+├── {run_dir}/evidence/discussions/
 │   ├── DISCUSS-REFACTOR.md
 │   └── DISCUSS-REVIEW.md
 └── .msg/

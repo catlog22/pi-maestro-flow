@@ -83,7 +83,7 @@ This skill is **executor-only**. Workers do NOT invoke this skill -- they are sp
 
 ### Orchestration Mode
 
-**Invocation**: `Skill(skill="team-executor", args="--session=<session-folder>")`
+**Invocation**: `Skill(skill="team-executor", args="--session={run_dir}/work/team")`
 
 **Lifecycle**:
 ```
@@ -108,7 +108,7 @@ Validate session
 | Role | File | Type |
 |------|------|------|
 | executor | [roles/executor/role.md](roles/executor/role.md) | built-in orchestrator |
-| (dynamic) | `<session>/role-specs/<role-name>.md` | loaded from session |
+| (dynamic) | `{run_dir}/work/team/role-specs/<role-name>.md` | loaded from session |
 
 ---
 

@@ -91,7 +91,7 @@ Pipeline Status (standard):
   [WAIT]  IMPL-001    (implementer) -> blocked by DESIGN-001
   [WAIT]  TEST-001    (tester)      -> blocked by IMPL-001
 
-Session: <session-id>
+Session: <run-id>
 Commands: 'resume' to advance | 'check' to refresh
 ```
 
@@ -146,7 +146,7 @@ Pipeline done. Generate report and completion action.
   |   - Read run_id from team-session.json.run.run_id
   |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
   |   - Run `maestro run complete <run_id>`
-  |   - If complete fails: log warning, continue (do not block completion action)
+  |   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
   |
 
 3. If all completed -> transition to coordinator Phase 5

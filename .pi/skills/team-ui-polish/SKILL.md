@@ -80,9 +80,9 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `UIP`
-- **Session path**: `.workflow/.team/UIP-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 - **Max GC rounds**: 2
 
 ## Worker Spawn Template
@@ -112,19 +112,19 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 ## Session Directory
 
 ```
-.workflow/.team/UIP-<slug>-<date>/
+{run_dir}/work/team/
 +-- .msg/
 |   +-- messages.jsonl         # Team message bus
 |   +-- meta.json              # Pipeline config + GC state
-+-- scan/                      # Scanner output
++-- {run_dir}/outputs/scan/                      # Scanner output
 |   +-- scan-report.md
-+-- diagnosis/                 # Diagnostician output
++-- {run_dir}/outputs/diagnosis/                 # Diagnostician output
 |   +-- diagnosis-report.md
-+-- optimization/              # Optimizer output
++-- {run_dir}/outputs/optimization/              # Optimizer output
 |   +-- fix-log.md
-+-- verification/              # Verifier output
++-- {run_dir}/outputs/verification/              # Verifier output
 |   +-- verify-report.md
-+-- evidence/                  # Screenshots (before/after)
++-- {run_dir}/evidence/evidence/                  # Screenshots (before/after)
 |   +-- *.png
 +-- wisdom/                    # Cross-task knowledge
 ```

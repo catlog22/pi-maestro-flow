@@ -64,10 +64,10 @@ Parse `$ARGUMENTS`:
 ## Shared Constants
 
 - **Session prefix**: `RV`
-- **Session path**: `.workflow/.team/RV-<slug>-<date>/`
+- **Session path**: `{run_dir}/work/team/`
 - **Team name**: `review`
 - **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
-- **Message bus**: `mcp__maestro__team_msg(session_id=<session-id>, ...)`
+- **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
 
@@ -111,13 +111,13 @@ AskUserQuestion({
 ## Session Directory
 
 ```
-.workflow/.team/RV-<slug>-<date>/
+{run_dir}/work/team/
 ├── .msg/messages.jsonl     # Team message bus
 ├── .msg/meta.json          # Session state + cross-role state
 ├── wisdom/                 # Cross-task knowledge
-├── scan/                   # Scanner output
-├── review/                 # Reviewer output
-└── fix/                    # Fixer output
+├── {run_dir}/outputs/scan/                   # Scanner output
+├── {run_dir}/outputs/review/                 # Reviewer output
+└── {run_dir}/outputs/fix/                    # Fixer output
 ```
 
 ## Specs Reference

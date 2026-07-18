@@ -53,9 +53,9 @@ Universal team coordination skill: analyze task -> generate role-specs -> dispat
 | Constant | Value |
 |----------|-------|
 | Session prefix | `TC` |
-| Session path | `.workflow/.team/TC-<slug>-<date>/` |
+| Session path | `{run_dir}/work/team/` |
 | Worker agent | `team-worker` |
-| Message bus | `mcp__maestro__team_msg(session_id=<session-id>, ...)` |
+| Message bus | `mcp__maestro__team_msg(session_id=<run-id>, ...)` |
 | CLI analysis | `maestro delegate --mode analysis` |
 | CLI write | `maestro delegate --mode write` |
 | Max roles | 5 |
@@ -75,7 +75,7 @@ Only coordinator is statically registered. All other roles are dynamic, stored a
 | Role | File | Type |
 |------|------|------|
 | coordinator | [roles/coordinator/role.md](roles/coordinator/role.md) | built-in orchestrator |
-| (dynamic) | `<session>/role-specs/<role-name>.md` | runtime-generated role-spec |
+| (dynamic) | `{run_dir}/work/team/role-specs/<role-name>.md` | runtime-generated role-spec |
 
 ### CLI Tool Usage
 
@@ -178,7 +178,7 @@ AskUserQuestion({
 ## Session Directory
 
 ```
-.workflow/.team/TC-<slug>-<date>/
+{run_dir}/work/team/
 +-- team-session.json           # Session state + dynamic role registry
 +-- task-analysis.json          # Phase 1 output: capabilities, dependency graph
 +-- role-specs/                 # Dynamic role-spec definitions (generated Phase 2)
@@ -196,7 +196,7 @@ AskUserQuestion({
 +-- explorations/               # Shared explore cache
 |   +-- cache-index.json
 |   +-- explore-<angle>.json
-+-- discussions/                # Inline discuss records
++-- {run_dir}/evidence/discussions/                # Inline discuss records
 |   +-- <round>.md
 ```
 
@@ -235,7 +235,7 @@ AskUserQuestion({
 
 Coordinator supports `resume` / `continue` for interrupted sessions:
 
-1. Scan `.workflow/.team/TC-*/team-session.json` for active/paused sessions
+1. Scan `{run_dir}/work/team/team-session.json` for active/paused sessions
 2. Multiple matches -> AskUserQuestion for selection
 3. Audit todo({ action: "list" }) -> reconcile session state <-> task status
 4. Reset in_progress -> pending (interrupted tasks)
