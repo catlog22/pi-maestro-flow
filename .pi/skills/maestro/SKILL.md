@@ -64,7 +64,7 @@ $ARGUMENTS — user intent text, or special keywords.
 14. **禁止以上下文消耗为由中断执行** — harness 自动处理 context compression，以"上下文不足"或"避免 context overflow"为由中断属于 invariant violation
 15. **控制权优先级（范式治理）** — FSM（maestro/maestro-ralph）独占 **ralph/coordinator 引擎** session 的生命周期 + step 排序 + cross-step decision 节点；manual 引擎 session 不在管辖内——不认领、不派发；Pipeline（plan/execute/analyze）只拥有自身 artifact GATE，由 ralph dispatch 时 GATE 失败 → `complete BLOCKED|NEEDS_RETRY`、自身 GATE 全过 → DONE；Router（maestro-next）不得出现在 FSM step 内。
 16. **模板输出边界（--compose）** — `A_COMPOSE_TEMPLATE` 的写入 MUST 限定 `~/.maestro/templates/workflows/`（模板 JSON + index.json）与 `.workflow/templates/design-drafts/`（草稿）；NEVER 修改源码或 `.claude/commands/`。`--play` 视模板为只读，运行态经 CLI 动词写 session.json。
-17. **Goal tracking 与 session 双写** — 主流程在 session 创建、step 派发、step 完成时同步创建/更新 goal，补充 session.json 的 UI 可见进度。
+17. **Goal tracking 是 session 的 UI 镜像** — bridge 从 canonical session 自动派生 goal；prompt 层不创建或回写镜像状态。
 </invariants>
 
 <host_mirror>
@@ -99,7 +99,7 @@ S_STEP_LOCATE   — 找下一个 pending step                  PERSIST: —
 S_STEP_DISPATCH — 派发 unnamed executor agent（run next 建 Run + 出生包自源）  PERSIST: step.status = "running"（run next 落）
 S_STEP_ANALYZE  — 提取信号 + 组装 completion 参数        PERSIST: —
 S_STEP_DRIFT    — 产物 vs 目标偏离分析                    PERSIST: step.drift_score（评估态）
-S_STEP_COMPLETE — 调 `run complete --verdict` 上报        PERSIST: run.json handoff + chain 推进
+S_STEP_COMPLETE — 调 `run complete --verdict` 上报        PERSIST: CLI 落 handoff + 推进 chain step
 S_DECISION_EVAL — 启动分析 Agent 评估质量门            PERSIST: —
 S_APPLY_VERDICT — `run decide` 落盘裁决 + `session chain insert` 插步  PERSIST: decision_point + chain
 S_SESSION_DONE  — 所有 step 完成                      PERSIST: status
@@ -413,7 +413,7 @@ post-analyze-scope 触发：读 macro analyze artifact → 提取 scope_verdict 
    - decision 节点：`step` 携 `decision_ref`（CLI 标为 decision node，不建 Run）；`decision_points[]` 声明重试预算。
    - `boundary_contract` 随建入（decomposition_owner=maestro 语义由 orchestration.decomposition 承载；下游 ralph 见非空即只消费）。
 4. 调 `Bash("printf '%s' '{chain_json}' | maestro session create maestro-{slug} --intent \"{intent}\" --engine ralph --chain-file -")`。返回 `session_id` + `next: maestro run next --session {id}`。
-5. Initialize tracking via `todo({ action: "update" })`
+5. Initialize host mirror via `todo({ action: "next" })`
 6. If `--super`: read `maestro-super.md`, follow it completely
 
 </actions>

@@ -19,6 +19,21 @@ contract:
 @~/.maestro/workflows/run-mode.md
 </required_reading>
 
+<host_mirror>
+
+**镜像协议**（状态对账由插件自动完成，LLM 只保留两个语义动作）：
+
+| 动作 | 工具调用 | 说明 |
+|------|----------|------|
+| 步进 | `todo({ action: "next" })` | 激活下一步 + 注入上游摘要 + 绑定 skill |
+| 完成宣告 | `goal done` | 触发前置校验（chain 全 completed + gates 无 failed）+ verifier |
+
+- 禁止手工 `todo({ action: "create" })` / `todo({ action: "update" })` 镜像任务——bridge 从 session.json 自动物化
+- goal 由 bridge 从 session intent + definition_of_done 自动派生
+- 压缩恢复后首个动作：`maestro run brief --platform pi <run-id>` 重挂协议
+
+</host_mirror>
+
 <purpose>
 Seal a completed session: verify all runs are done, extract knowledge (specs/knowhow promotion), mark session as sealed, and recommend the next dep-ready session from the DAG.
 
@@ -66,7 +81,7 @@ Skip if `--skip-knowledge`. Otherwise:
 4. **Persist** selected items:
    - Specs → `Skill("spec", "add ...")`
    - Knowhow → `Skill("manage", "knowledge capture ...")`
-   - Record promoted IDs in `session.json.lifecycle.promoted[]`（前缀区分 spec:/knowhow:）
+   - 通过 Session CLI 记录 promoted IDs（前缀区分 spec:/knowhow:），不直接写 `session.json`
 
 ### Step 3: Seal Session
 

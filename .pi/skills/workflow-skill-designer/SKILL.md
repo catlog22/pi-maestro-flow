@@ -11,12 +11,8 @@ allowed-tools:
   - Write
   - teammate
   - todo
-session-mode: run
+session-mode: none
 ---
-
-<required_reading>
-@~/.maestro/workflows/run-mode.md
-</required_reading>
 
 # Workflow Skill Designer
 
@@ -47,7 +43,7 @@ Meta-skill for creating structured workflow skills following the orchestrator + 
 The skill this meta-skill produces follows this structure:
 
 ```
-.claude/skills/{skill-name}/
+.pi/skills/{skill-name}/
 ├── SKILL.md                    # Orchestrator: coordination, data flow, todo({ action: "update" })
 ├── phases/
 │   ├── 01-{phase-name}.md      # Phase execution detail (full content)
@@ -283,12 +279,12 @@ Phase 1: Requirements Analysis
 Phase 2: Orchestrator Design (SKILL.md)
    └─ Ref: phases/02-orchestrator-design.md
       ├─ Input: workflowConfig
-      └─ Output: .claude/skills/{name}/SKILL.md
+      └─ Output: .pi/skills/{name}/SKILL.md
 
 Phase 3: Phase Files Design
    └─ Ref: phases/03-phase-design.md
       ├─ Input: workflowConfig + source content
-      └─ Output: .claude/skills/{name}/phases/0N-*.md
+      └─ Output: .pi/skills/{name}/phases/0N-*.md
 
 Phase 4: Validation & Integration
    └─ Ref: phases/04-validation.md
@@ -327,6 +323,7 @@ When converting from command format to skill format:
 | `examples` | _(removed)_ | Examples moved to inline documentation |
 | `allowed-tools` | `allowed-tools` | Expand wildcards: `Skill(*)` → `Skill`, add commonly needed tools |
 | `group` | _(removed)_ | Embedded in `name` prefix |
+| _(none)_ | `session-mode` | Add: `run` if the skill creates a Run / writes `{run_dir}` artifacts, else `none`. When `run`, also add the run-mode.md `<required_reading>` block. |
 
 ## Orchestrator Content Mapping
 
@@ -372,7 +369,13 @@ What goes into SKILL.md vs what goes into phase files:
 name: {skill-name}
 description: {description}. Triggers on "{trigger1}", "{trigger2}".
 allowed-tools: {tools}
+session-mode: {run|none}
 ---
+
+<!-- Include only when session-mode: run -->
+<required_reading>
+@~/.maestro/workflows/run-mode.md
+</required_reading>
 
 # {Title}
 
@@ -484,7 +487,7 @@ When `workflowPreferences.autoYes === true`: {auto-mode behavior}.
 ## Output
 
 - **Variable**: `{variableName}` (e.g., `sessionId`)
-- **File**: `{output file path}`
+- **File**: `{run_dir}/outputs/{artifact}` — formal artifacts go under `{run_dir}/outputs/`; synthesis to `{run_dir}/report.md`, scratch to `{run_dir}/work/` (session-mode: run only). See run-mode.md.
 - **todo({ action: "update" })**: Mark Phase N completed, Phase N+1 in_progress
 
 ## Next Phase

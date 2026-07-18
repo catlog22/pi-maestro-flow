@@ -292,9 +292,7 @@ Phase 1: Setup
 
 ```javascript
 // Initial state
-todo({ action: "create", subject: "Phase 1: Setup workspace", activeForm: "Setting up workspace" })
-todo({ action: "create", subject: "Iteration Loop", activeForm: "Running iterations" })
-todo({ action: "create", subject: "Phase 5: Final Report", activeForm: "Generating report" })
+todo({ action: "next" }) // 激活 canonical Session/Run 镜像；阶段状态由 bridge 投影
 
 // Chain mode: create per-skill tracking tasks
 if (state.execution_mode === 'chain') {

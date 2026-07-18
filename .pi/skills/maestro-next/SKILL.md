@@ -19,6 +19,21 @@ contract:
 @~/.maestro/workflows/run-mode.md
 </required_reading>
 
+<host_mirror>
+
+**镜像协议**（状态对账由插件自动完成，LLM 只保留两个语义动作）：
+
+| 动作 | 工具调用 | 说明 |
+|------|----------|------|
+| 步进 | `todo({ action: "next" })` | 激活下一步 + 注入上游摘要 + 绑定 skill |
+| 完成宣告 | `goal done` | 触发前置校验（chain 全 completed + gates 无 failed）+ verifier |
+
+- 禁止手工 `todo({ action: "create" })` / `todo({ action: "update" })` 镜像任务——bridge 从 session.json 自动物化
+- goal 由 bridge 从 session intent + definition_of_done 自动派生
+- 压缩恢复后首个动作：`maestro run brief --platform pi <run-id>` 重挂协议
+
+</host_mirror>
+
 <purpose>
 Default interactive entry for development intents. Parse intent + project state → score candidates from the step registry → recommend a single atomic step → confirm → execute via `maestro run prepare --platform pi` + `maestro run create`. Also provides companion utilities: knowledge loading (--suggest), structured note recording (--note), and insight promotion (--promote).
 Multi-step work has three paths: stepwise (each completed step re-enters lifecycle inference), a user-confirmed manual-engine chain (explicit short chain in session.json, advanced step-by-step via `maestro run next`), or handoff to /maestro. Never auto-orchestrates.

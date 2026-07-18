@@ -96,7 +96,7 @@ Remaining      → intent (amend_mode 时为 change_request)
 20. **分解契约单一所有者** — `boundary_contract` / `task_decomposition` 由 session 创建者拥有
 21. **控制权优先级（范式治理）** — FSM 独占 session 生命周期 + step 排序 + retry/fix/escalate + cross-step decision 节点
 22. **引擎只做并行加速，不做状态决策** — `--engine swarm|universal` 通过 Workflow 引擎并行执行单个 step，MUST NOT 修改 session state、MUST NOT 推进 step、MUST NOT 触碰 decision 节点；引擎产出写入该 step 的 Run output dir（格式兼容对应命令产物），由主流程照常 `run complete --verdict`。生成/固定脚本对引擎只读（`wf-*.js` 从不被编辑；`uwf-*.js` 仅由 universal 生成器按幂等命名覆盖）。
-23. **Goal tracking 与 session 双写** — 主流程在 session 创建、step 派发、step 完成时同步创建/更新 goal，补充 session.json 的 UI 可见进度。
+23. **Goal tracking 是 session 的 UI 镜像** — bridge 从 canonical session 自动派生 goal；prompt 层不创建或回写镜像状态。
 </invariants>
 
 <host_mirror>
@@ -136,7 +136,7 @@ S_STEP_RESOLVE    — 解析占位符 + 丰富参数                    PERSIST:
 S_STEP_DISPATCH   — 派发 unnamed executor agent（run next 建 Run + 出生包自源）  PERSIST: step.status = "running"（由 run next 落）
 S_STEP_ANALYZE    — 提取信号 + 组装 completion 参数            PERSIST: —
 S_STEP_DRIFT      — 产物 vs 目标偏离分析                      PERSIST: step.drift_score（评估态，内存）
-S_STEP_COMPLETE   — 调 `run complete --verdict` 上报            PERSIST: run.json handoff + chain step 推进
+S_STEP_COMPLETE   — 调 `run complete --verdict` 上报            PERSIST: CLI 落 handoff + 推进 chain step
 S_DECISION_EVAL   — 启动分析 Agent 评估质量门              PERSIST: —
 S_APPLY_VERDICT   — `run decide` 落盘裁决 + `session chain insert` 插步  PERSIST: decision_point 状态 + chain
 S_SESSION_DONE    — 所有 step 完成                        PERSIST: session.status
@@ -272,7 +272,7 @@ S_SESSION_DONE:
 **写入 session**: `session_id`, `session_is_new`。
 
 **新派生 session 时处理**：
-- intent 派生新 session slug → 写入 `session.session_id` 作为标识；`state.json.sessions[]` 由 step `roadmap` / session-seal 创建
+- intent 派生新 session slug → 作为 `maestro session create` 的标识；`state.json.sessions[]` 由 step `roadmap` / session-seal 创建
 - session_is_new=true → 该 session 尚无上游产出，lifecycle 从 analyze 起
 
 ### A_INFER_POSITION

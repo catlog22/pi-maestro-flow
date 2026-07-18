@@ -8,7 +8,7 @@ Generate the SKILL.md orchestrator file from workflowConfig, applying all coordi
 
 ## Objective
 
-- Create `.claude/skills/{skillName}/SKILL.md` as pure coordinator
+- Create `.pi/skills/{skillName}/SKILL.md` as pure coordinator
 - Apply frontmatter conversion rules
 - Generate architecture diagram from phase structure
 - Build execution flow with `Ref:` markers and phase reference table
@@ -19,7 +19,7 @@ Generate the SKILL.md orchestrator file from workflowConfig, applying all coordi
 ## Step 2.1: Create Directory Structure
 
 ```bash
-skillDir=".claude/skills/${workflowConfig.skillName}"
+skillDir=".pi/skills/${workflowConfig.skillName}"
 mkdir -p "${skillDir}/phases"
 
 # Optional directories based on features
@@ -440,7 +440,7 @@ function assembleSkillMd(config, sourceContent) {
 
 ## Output
 
-- **File**: `.claude/skills/{skillName}/SKILL.md`
+- **File**: `.pi/skills/{skillName}/SKILL.md`
 - **todo({ action: "update" })**: Mark Phase 2 completed, Phase 3 in_progress
 
 ## Next Phase
