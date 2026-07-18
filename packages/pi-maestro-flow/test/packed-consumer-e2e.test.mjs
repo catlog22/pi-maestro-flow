@@ -88,7 +88,7 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
     assert.equal(installedPackage.version, "0.4.10");
     assert.equal(
       installedPackage.dependencies["maestro-flow"],
-      "https://codeload.github.com/catlog22/maestro-flow/tar.gz/84ae24f8ed9a12cac3b5c69ea3428840a0a58e1b",
+      "0.5.51",
     );
     assert.equal(installedPackage.dependencies["pi-maestro-teammate"], "0.4.5");
     const installedMaestro = join(consumer, "node_modules", "maestro-flow");
@@ -168,7 +168,7 @@ export default function register(pi) {
     assert.equal(
       existsSync(maestroRuntimeEntry),
       true,
-      "the exact Maestro source dependency must include dist/src/utils/wasm-relaunch.js before consumer installation",
+      "the exact Maestro registry dependency must include dist/src/utils/wasm-relaunch.js before consumer installation",
     );
 
     const prepareDir = join(maestroHome, "prepare");

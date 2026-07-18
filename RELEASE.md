@@ -1,73 +1,83 @@
-# Release v0.4.9 — 2026-07-16
+# Release v0.4.10 — 2026-07-18
 
 ## 概述
 
-v0.4.9 完成 Maestro Workflow Session 的运行闭环，并集中增强 Goal 验证、权限继承、SmartSearch、LSP / Browser 工具与 teammate 多任务运行时。该版本同时规范 Pi Skills 的源码与 npm 包资源形态，补齐 packed consumer 和跨目录本地插件发现验证。
+v0.4.10 集中交付原生 Swarm runtime、增强后的 teammate 多代理执行、actor-aware Todo / Plan 交接、API Manager provider 配置，以及 Session/Run 生命周期加固。本版本同时将团队 Skills 迁移到 canonical `{run_dir}` 目录契约，并恢复全新安装环境中的 Workflow Session 自动 attach。
 
 ## 详细变更
 
-### Workflow Session 与 Goal 生命周期
+### Swarm runtime 与团队 Skills
 
-- 接通 Session、Run、Todo、Goal 与 Workflow coordinator，补齐恢复、投影、状态展示和命令冲突处理。
-- Goal 完成后由独立只读 verifier 基于原始证据给出结构化判定；缺失或无效 verdict 采用 fail-closed 策略。
-- 阻止活跃工具回合中的陈旧 handoff prompt 注入，并新增 Goal widget、状态行和 compaction 可见性。
-- 加固 Plan / Goal / Todo 运行门禁与 Session Run 验收文档，使 `Plan -> Goal -> Todo -> Execute` 保持一致。
+- 在 `packages/pi-maestro-flow/src/swarm/` 与 `src/tools/swarm.ts` 中加入原生 ACO Swarm controller、评分验证、收敛判断、进度发布和可视化状态。
+- 增加私有 Ant、scorer、analyst 角色以及 Swarm overlay；私有 Ant 不暴露给普通 teammate 直接调度。
+- 将 20 余个 team Skills 的 Session 路径统一迁移到 `{run_dir}/work/team`，正式产物进入 `{run_dir}/outputs`，证据进入 `{run_dir}/evidence`。
+- 更新 ACO Python controller，使 `--run-dir` 能从 canonical outputs 读取 Ant 产物，同时保留旧 artifacts fallback。
 
-### SmartSearch 与运行时工具
+### Teammate 0.4.5
 
-- 内置 SmartSearch 工具与完整配置 TUI，覆盖 provider、能力分组、过滤、分页和配置持久化。
-- 集成 LSP、Browser、workspace edit、异步资源与 tool search 能力，并补齐 schema、类型检查和回归测试。
-- 优化扩展工具注册与 child-only 加载路径，减少嵌套 teammate 对父 Session lease 的干扰。
+- 加固 child process 生命周期、权限 broker、结构化输出 settlement、generation ownership、Windows 进程树清理与 bounded buffer。
+- 提供稳定的 `pi-maestro-teammate/v1` 公共入口，覆盖 agents、execution、extension、child extensions、model routing 与 progress tree。
+- 增强多任务模型 / thinking 路由、前台与后台语义、session handoff、attach overlay 和 agent 可观测性。
+- 新增 Swarm 私有角色与更严格的角色发现边界。
 
-### Teammate 0.4.4
+### Todo、Plan、Goal 与 Session/Run
 
-- 统一根执行路径与代理路径的任务归一化、寻址和错误语义。
-- 新增 `dependsOn`、per-task `context`、稳定任务命名、并发限制与结构化输出守护。
-- 修复父级权限模式向 child Pi 的继承，明确 `dontAsk` fail-closed 与 `background: false` 的前台执行契约。
-- 修复 attach overlay 在较矮终端中的高度预算、滚动保持、composer / footer 可见性和进度树展示。
+- Todo v5 支持 `createdBy`、`assignee`、按 actor 激活、共享 root authority 和统一 Todo Center。
+- Plan 增加 revision、锁 owner、恢复、approval commit 与并发安全检查；Goal verifier 继续采用 fail-closed verdict。
+- Session coordinator 加固 lease heartbeat、stale owner fencing、canonical Session 切换检测和 retry lineage。
+- 修复 Goal opt-in 被错误复用于 Session writer attach 的回归：Workflow Goal 仍按归属恢复，而有效 canonical Session 会独立 attach 并发送 `workflow-attach` recovery 消息。
 
-### Skills、打包与文档
+### Provider、Intelligence 与 TUI
 
-- 将 canonical Pi Skills 收敛到仓库根 `.pi/skills`，同步更新 Maestro、Ralph、Odyssey 与 Session Seal 等入口。
-- 在 `prepack` / `postpack` 阶段准备并清理 package Skills，补齐资源测试与隔离 packed consumer 验证。
-- 记录本地插件跨目录 Skill 发现、Pi extension authoring、tool schema 与 Session Run 集成规则。
+- API Manager 接管自定义 provider 配置，支持 Pi `max` thinking level、secret masking、原子写入和动态模型能力。
+- 扩展 LSP、Browser、SmartSearch 和 workspace edit 生命周期安全，包括 Abort、缓存边界、临时文件权限和 shutdown 清理。
+- statusline 优先压缩标签，再截断路径；极长 Git branch 会整体降级，避免窄终端溢出。
+- Swarm、Todo、Session 和 teammate overlays 补齐宽高预算、滚动保持与 recovery-first 显示。
+
+### 安装与依赖契约
+
+- `pi-maestro-flow` 精确依赖 `pi-maestro-teammate@0.4.5`。
+- 将旧 Maestro Git source tarball 替换为 prepared registry artifact `maestro-flow@0.5.51`。
+- 验证新 Maestro artifact 包含完整 `dist/src/utils/wasm-relaunch.js`、`run create/brief/check/complete/cancel` 与 `parent_run_id` 契约。
+- Node.js 最低版本同步提高到 `22.19.0`，与 `maestro-flow@0.5.51` 保持一致。
 
 ## 版本
 
 | 包 | 旧版本 | 新版本 |
 |---|---:|---:|
-| `pi-maestro-flow` | 0.4.8 | 0.4.9 |
-| `pi-maestro-teammate` | 0.4.3 | 0.4.4 |
-
-`pi-maestro-flow@0.4.9` 将 `pi-maestro-teammate` 的内部依赖约束更新为 `^0.4.4`。
+| `pi-maestro-flow` | 0.4.9 | 0.4.10 |
+| `pi-maestro-teammate` | 0.4.4 | 0.4.5 |
+| `maestro-flow` 运行资源 | 0.5.50 source tarball | 0.5.51 registry artifact |
 
 ## 变更统计
 
-- 自 `v0.4.8` 起包含 35 个发布前功能、修复、测试、重构与文档提交。
-- 涉及 722 个文件、95,811 行新增与 16,414 行删除，主要来自 Skills 资源迁移、Workflow Session 闭环、runtime 工具与双包测试扩展。
-- `pi-maestro-flow` 227/227、`pi-maestro-teammate` 119/119 测试通过，共 346 个测试。
-- TypeScript 类型检查、隔离 packed consumer 与双包 `npm publish --dry-run` 通过；flow tarball 为 583 个文件、约 1.1 MB。
+- 自 `v0.4.9` 起共 21 个提交（含本次 release commit）。
+- 涉及 429 个文件、19,956 行新增与 4,611 行删除；主要包括 Flow runtime 与测试、teammate runtime / public API，以及 canonical Pi Skills。
+- `packages/pi-maestro-flow` 涉及 69 个文件，`packages/pi-maestro-teammate` 涉及 31 个文件，`.pi/skills` 涉及 291 个文件。
+- teammate 全套测试、Flow 各功能域测试、TypeScript 类型检查、ACO 80 项脚本测试、主 packed-consumer 与 packed Todo consumer 均通过。
+- 双包 `npm publish --dry-run` 通过：teammate tarball 为 58 个文件、约 116.4 kB；Flow tarball 为 574 个文件、约 1.2 MB。
+- `npm audit --omit=dev` 为 0 个 production vulnerability。
 
 ## 安装
 
 ```bash
-pi install npm:pi-maestro-flow@0.4.9
+pi install npm:pi-maestro-flow@0.4.10
 ```
 
 也可以使用 npm：
 
 ```bash
-npm install pi-maestro-flow@0.4.9
+npm install pi-maestro-flow@0.4.10
 ```
 
 仅安装 teammate：
 
 ```bash
-npm install pi-maestro-teammate@0.4.4
+npm install pi-maestro-teammate@0.4.5
 ```
 
 ## 升级说明
 
-这是 patch 更新，要求 Node.js >= 20.6.0。升级后执行 `/reload` 或重启 Pi。
+版本号为 patch，但由于关联的 Maestro runtime 已升级，Node.js 最低要求变为 `22.19.0`。请先升级 Node.js，再安装本版本；升级后执行 `/reload` 或重启 Pi。
 
-`pi-maestro-teammate@0.4.4` 会让多任务 `context: "fork"` 真正复制父会话，并让 `tasks` 优先于已废弃的 `chain`；依赖旧静默降级行为的调用方应先检查任务定义。源码路径安装与 npm 安装的 Skill 资源形态不同，源码开发安装应按本仓库 knowhow 配置 canonical Skills 路径。
+依赖旧 team Skill session folder 的自定义脚本需要迁移到 `{run_dir}/work/team`、`{run_dir}/outputs` 和 `{run_dir}/evidence`。如果自定义逻辑依赖 Goal opt-in 才 attach Session，应改为区分 Workflow Goal 恢复与 canonical Session writer attach。

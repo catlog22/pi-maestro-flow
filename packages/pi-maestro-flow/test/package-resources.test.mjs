@@ -28,7 +28,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.ok(pkg.files.includes("!.pi/skills/**/*.pyc"));
   assert.equal(
     pkg.dependencies["maestro-flow"],
-    "https://codeload.github.com/catlog22/maestro-flow/tar.gz/84ae24f8ed9a12cac3b5c69ea3428840a0a58e1b",
+    "0.5.51",
   );
   assert.equal(pkg.dependencies["pi-maestro-teammate"], "0.4.5");
   assert.equal(
@@ -38,7 +38,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.equal(pkg.dependencies["puppeteer-core"], "24.31.0");
   assert.equal(pkg.dependencies["cross-spawn"], "7.0.6");
   assert.equal(pkg.devDependencies.typescript, "5.7.3");
-  assert.equal(pkg.engines.node, ">=20.6.0");
+  assert.equal(pkg.engines.node, ">=22.19.0");
   assert.equal(pkg.files.includes("tsconfig.intelligence.json"), true);
   assert.equal(existsSync(join(root, "schemas", "swarm-run.schema.json")), true);
   assert.equal(pkg.peerDependencies?.["pi-maestro-teammate"], undefined);

@@ -192,11 +192,9 @@ export function shouldRestoreWorkflowGoal(
 }
 
 export function shouldAttachWorkflowSession(
-  optedIn: boolean,
   snapshot: WorkflowSnapshot | undefined,
 ): boolean {
-  return optedIn
-    && snapshot?.source === "canonical"
+  return snapshot?.source === "canonical"
     && snapshot.canonicalClaim?.status !== "invalid"
     && snapshot.session?.status === "running";
 }
@@ -701,7 +699,7 @@ When the agent loop ends naturally, the extension verifies completion automatica
       await workflowCoordinator?.release();
       attachedWorkflowSessionId = undefined;
     }
-    if (emitEvents && shouldAttachWorkflowSession(workflowSessionOptedIn, next)
+    if (emitEvents && shouldAttachWorkflowSession(next)
       && attachedWorkflowSessionId !== next.session!.sessionId) {
       await attachWorkflowSession(ctx, next);
     }
@@ -714,7 +712,7 @@ When the agent loop ends naturally, the extension verifies completion automatica
   }
 
   async function attachWorkflowSession(ctx: ExtensionContext, snapshot: WorkflowSnapshot): Promise<boolean> {
-    if (!workflowCoordinator || !shouldAttachWorkflowSession(workflowSessionOptedIn, snapshot)) return false;
+    if (!workflowCoordinator || !shouldAttachWorkflowSession(snapshot)) return false;
     const sessionId = snapshot.session!.sessionId;
     if (attachedWorkflowSessionId === sessionId) return true;
     const hostSessionId = (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.()
@@ -895,7 +893,7 @@ When the agent loop ends naturally, the extension verifies completion automatica
     const snapshot = await refreshWorkflow(ctx);
     workflowSessionOptedIn = shouldRestoreWorkflowGoal(event.reason, restoredGoal, snapshot);
     if (workflowSessionOptedIn && snapshot) reconcileWorkflowGoal(snapshot, ctx);
-    if (snapshot && shouldAttachWorkflowSession(workflowSessionOptedIn, snapshot)) {
+    if (snapshot && shouldAttachWorkflowSession(snapshot)) {
       if (await attachWorkflowSession(ctx, snapshot)) {
         await refreshWorkflow(ctx);
         const recovery = workflowRecoveryIdentity();

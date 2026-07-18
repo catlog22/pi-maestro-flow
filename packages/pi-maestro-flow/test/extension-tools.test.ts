@@ -23,7 +23,7 @@ test("Workflow Goal restore requires a workflow-owned Goal matching the canonica
   assert.equal(shouldRestoreWorkflowGoal("startup", undefined, snapshot), false);
   const unrelatedOptIn = shouldRestoreWorkflowGoal("startup", {}, snapshot);
   assert.equal(unrelatedOptIn, false, "an unrelated user Goal must stay read-only");
-  assert.equal(shouldAttachWorkflowSession(unrelatedOptIn, snapshot), false, "an unrelated Goal must not acquire a writer lease");
+  assert.equal(shouldAttachWorkflowSession(snapshot), true, "canonical Session attachment must not depend on Goal restoration");
   assert.equal(shouldRestoreWorkflowGoal("startup", owned, snapshot), true);
   assert.equal(shouldRestoreWorkflowGoal("reload", owned, snapshot), true);
   assert.equal(shouldRestoreWorkflowGoal("resume", owned, snapshot), true);
@@ -32,11 +32,10 @@ test("Workflow Goal restore requires a workflow-owned Goal matching the canonica
   assert.equal(shouldRestoreWorkflowGoal("fork", owned, snapshot), false);
 });
 
-test("Workflow writer attachment requires explicit session opt-in and a valid canonical claim", () => {
+test("Workflow writer attachment follows a valid canonical Session independently of Goal opt-in", () => {
   const snapshot = workflowAttachSnapshot();
-  assert.equal(shouldAttachWorkflowSession(false, snapshot), false);
-  assert.equal(shouldAttachWorkflowSession(true, snapshot), true);
-  assert.equal(shouldAttachWorkflowSession(true, {
+  assert.equal(shouldAttachWorkflowSession(snapshot), true);
+  assert.equal(shouldAttachWorkflowSession({
     ...snapshot,
     session: undefined,
     canonicalClaim: { activeSessionId: "session-1", status: "invalid", error: "missing session.json" },
