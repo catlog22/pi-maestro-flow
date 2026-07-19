@@ -6,6 +6,9 @@ export const RUN_CONTROL_READ_ACTIONS: ReadonlySet<string> = new Set([
   "status",
   "brief",
   "prepare",
+  "recall",
+  "skill",
+  "mutations",
   "list",
   "show",
 ]);

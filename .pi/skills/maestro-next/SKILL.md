@@ -35,7 +35,7 @@ contract:
 </host_mirror>
 
 <purpose>
-Default interactive entry for development intents. Parse intent + project state → score candidates from the step registry → recommend a single atomic step → confirm → execute via `maestro run prepare --platform pi` + `maestro run create`. Also provides companion utilities: knowledge loading (--suggest), structured note recording (--note), and insight promotion (--promote).
+Default interactive entry for development intents. Parse intent + project state → run read-only `maestro run recall --json` → score candidates from the step registry → recommend resume/fork/import/new or a single atomic step → confirm → execute. Historical similarity is advisory-only and never mutates without an explicit confirmation token.
 Multi-step work has three paths: stepwise (each completed step re-enters lifecycle inference), a user-confirmed manual-engine chain (explicit short chain in session.json, advanced step-by-step via `maestro run next`), or handoff to /maestro. Never auto-orchestrates.
 </purpose>
 
@@ -80,6 +80,7 @@ $ARGUMENTS — intent text + optional flags.
 6. **--suggest never executes** — show recommendation + prepare content only
 7. **--note is append-only** — never overwrite or reorder existing entries
 8. **--promote delegates** — spec/knowhow promotion routes through `spec add` / `manage knowledge capture`, never writes directly
+9. **Recall is advisory** — exact live identity may suggest `session resume`; historical similarity always has `automatic=false` and requires `run recall-confirm` before fork/import/new
 </invariants>
 
 <state_machine>
@@ -259,6 +260,10 @@ Non-chain path (standalone single run). Steps inside a manual-engine chain advan
 For first-tier steps (those with prepare/ + workflows/ files):
 
 ```bash
+# 0. Recall exact live or historical Session candidates (read-only)
+maestro run recall <step> --intent "<short goal>" --json --workflow-root .
+# Exact live → offer `maestro session resume`; historical → confirmation-token fork/import; otherwise continue with a new Run.
+
 # 1. Run prepare to get pre-task thinking content
 maestro run prepare --platform pi <step> --workflow-root .
 

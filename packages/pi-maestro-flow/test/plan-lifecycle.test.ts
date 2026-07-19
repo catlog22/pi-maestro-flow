@@ -444,14 +444,17 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     }
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run prepare analyze" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run brief run-1" } }), undefined);
-    for (const subcommand of ["next", "next --session s1", "create execute", "check run-1", "complete run-1", "decide point-1 --session s1 --verdict proceed", "seal-session session-1", "retry run-1", "cancel run-1"]) {
+    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run recall execute --intent x --json" } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run skill execute" } }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run mutations" } }), undefined);
+    for (const subcommand of ["next", "next --session s1", "create execute", "check run-1", "rebind run-1 --reason x", "complete run-1", "recall-confirm fork", "fork --token t", "import --token t", "new --token t", "decide point-1 --session s1 --verdict proceed", "seal-session session-1", "log-mutation file", "retry run-1", "cancel run-1"]) {
       assert.match(
         onToolCallPlan({ toolName: "bash", input: { command: `maestro run ${subcommand}` } })?.reason ?? "",
         /modify files/,
         subcommand,
       );
     }
-    for (const subcommand of ["create feature --intent x", "chain insert --session s1", "migrate --session s1", "meta update --session s1"]) {
+    for (const subcommand of ["resolve --session s1 --reason x --evidence y", "resume --session s1 --reason x --evidence y", "create feature --intent x", "chain insert --session s1", "migrate --session s1", "meta update --session s1"]) {
       assert.match(
         onToolCallPlan({ toolName: "bash", input: { command: `maestro session ${subcommand}` } })?.reason ?? "",
         /modify files/,

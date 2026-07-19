@@ -100,11 +100,11 @@ const MAESTRO_MUTATING_COMMAND = new RegExp(
   "i",
 );
 const MAESTRO_RUN_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+run\s+(?:next|create|check|complete|decide|seal-session|advance|pause|resume|retry|cancel)\b`,
+  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+run\s+(?:next|create|check|rebind|complete|recall-confirm|fork|import|new|decide|seal-session|log-mutation|advance|pause|resume|retry|cancel)\b`,
   "i",
 );
 const MAESTRO_SESSION_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+session\s+(?:create|chain|migrate|meta)\b`,
+  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+session\s+(?:resolve|resume|create|chain|migrate|meta)\b`,
   "i",
 );
 const IN_PLACE_EDIT_COMMAND = new RegExp(
@@ -1019,7 +1019,7 @@ function isReadOnlyMaestroCommand(args: string[]): boolean {
   const { subcommand, rest } = firstSubcommand(args);
   if (!subcommand) return args.every((arg) => ["--version", "-v", "--help", "-h"].includes(arg));
   if (["search", "load", "explore", "help"].includes(subcommand)) return true;
-  if (subcommand === "run") return ["prepare", "brief", "status"].includes(rest[0] ?? "");
+  if (subcommand === "run") return ["prepare", "brief", "recall", "skill", "mutations", "status", "help"].includes(rest[0] ?? "");
   if (subcommand === "session") return ["list", "show", "status"].includes(rest[0] ?? "");
   if (subcommand === "spec") return ["health", "history"].includes(rest[0] ?? "");
   if (subcommand === "delegate-config") return rest[0] === "show";

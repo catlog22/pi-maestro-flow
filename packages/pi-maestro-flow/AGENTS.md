@@ -340,7 +340,7 @@ Goal state and loop ownership are separate. Persist Goal entries with the curren
 
 Do not interpret `reason: startup` as Goal ownership. Auto-restore/attach requires both an eligible reason (`startup|reload|resume`) and a persisted Goal entry belonging to the current sessionId. A running canonical Workflow discovered only by cwd is a read-only baseline until explicit Resume or until this Pi session creates/starts a new Workflow.
 
-After compaction, the first action should be `maestro run brief` to re-anchor Workflow Session context. `run brief --json` is self-sufficient: it returns `upstream` (consumed alias → path/kind/status), `prev_handoff` (previous sealed Run's handoff), an `anchor` block (Intent/Boundary/Progress), a `refs` list (deferred `{path, when}` reads — load only when needed), and a `next` pointer to `maestro run check` (pre-completion preflight, then `run complete`). Backward compatible — these are additive JSON fields; treat missing ones as absent.
+After compaction, the first action should be `maestro run brief` to re-anchor Workflow Session context. `run brief --json` returns a `run-response/1.0` envelope whose `execution_contract` includes args, resolved/unresolved inputs, declared/effective outputs, schema, gates, freshness, upstream, anchor and the next lifecycle pointer. Before creating a new Session, use read-only `maestro run recall <command> --intent "..." --json`; exact live matches may suggest `session resume`, while historical similarity stays `automatic=false` and requires confirmation-token fork/import/new. Treat missing additive fields as absent for legacy compatibility.
 
 ## Smart Search
 
