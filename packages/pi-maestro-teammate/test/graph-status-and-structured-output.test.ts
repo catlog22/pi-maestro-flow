@@ -9,10 +9,13 @@ import { visibleWidth } from "@earendil-works/pi-tui";
 import registerStructuredOutput from "../src/extension/structured-output.ts";
 import registerTeammateExtension, {
   buildAgentList,
+  buildAgentSelectorRows,
   buildWatchOutput,
   correlationIdPrefix,
   handleChildLifecycleEvent,
+  renderAgentSelectorPanel,
   renderAgentStatusWidget,
+  resolveProxyParentCorrelationId,
   restoreMainOwnershipIfHandbackPending,
   resolveWatchTarget,
   switchConversationSession,
@@ -669,12 +672,77 @@ test("teammate-watch explains provider queueing before first activity", () => {
 
 test("nested proxy preserves parentage, graph children, and explicit background semantics", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
-  assert.match(source, /const parentCid = \(event\.parentCid as string \| undefined\) \?\? spawnedBy/);
+  assert.equal(resolveProxyParentCorrelationId({ correlationId: "actual-child" }, "root-graph"), "actual-child");
+  assert.equal(resolveProxyParentCorrelationId({ parentCid: "explicit-parent", correlationId: "actual-child" }, "root-graph"), "explicit-parent");
   assert.match(source, /spawnedBy: cid,[\s\S]*if \(task\.name\) state\.namedAgents\.set\(task\.name, childId\)/);
   assert.match(source, /normalizedTasks \? \{ taskCorrelationIds \} : \{ correlationId: cid \}/);
   assert.match(source, /if \(p\.background === false\) \{[\s\S]*await executeNested\(\)/);
   assert.match(source, /running in background\. correlationId=\$\{cid\}/);
   assert.doesNotMatch(source, /spawned @\$\{p\.name \?\? p\.agent\}/);
+});
+
+test("agent selector explains unnamed recursive agents with hierarchy and live detail", () => {
+  const now = Date.now();
+  const shared = {
+    startedAt: now - 5_000,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    sleepMs: 0,
+  };
+  const rootId = "aaaaaaaa-root";
+  const childId = "bbbbbbbb-child";
+  const nestedId = "36180e85-nested";
+  const agents = [{
+    ...shared,
+    agent: "graph(1)",
+    correlationId: rootId,
+    status: "running" as const,
+  }, {
+    ...shared,
+    agent: "explorer",
+    name: "session_architecture",
+    correlationId: childId,
+    spawnedBy: rootId,
+    status: "running" as const,
+  }, {
+    ...shared,
+    agent: "explorer",
+    correlationId: nestedId,
+    spawnedBy: childId,
+    status: "sleeping" as const,
+    progress: [{
+      agent: "explorer",
+      correlationId: nestedId,
+      taskIndex: 0,
+      dependencies: [],
+      status: "completed" as const,
+      recentTools: [{ name: "read", status: "completed" }],
+      lastMessage: "architecture stream tail",
+    }],
+  }];
+
+  const rows = buildAgentSelectorRows(agents);
+  assert.deepEqual(rows.map((row) => row.label), [
+    "graph#aaaaaaaa",
+    "session_architecture",
+    "unnamed#36180e85",
+  ]);
+  assert.equal(rows[1].treePrefix, "└─ ");
+  assert.equal(rows[2].treePrefix, "   └─ ");
+  assert.equal(rows[2].parentLabel, "session_architecture");
+
+  const rendered = renderAgentSelectorPanel(rows, 2, "", 80).join("\n");
+  assert.match(rendered, /explorer\/unnamed#36180e85/);
+  assert.match(rendered, /child of session_architecture/);
+  assert.match(rendered, /Tool.*✓.*read/);
+  assert.match(rendered, /architecture stream tail/);
+  for (let width = 1; width <= 120; width += 1) {
+    for (const line of renderAgentSelectorPanel(rows, 2, "", width)) {
+      assert.ok(visibleWidth(line) <= width, `selector overflowed width ${width}: ${line}`);
+    }
+  }
 });
 
 test("agent conversation expands in overlay and sends composed messages", async () => {

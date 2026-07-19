@@ -313,6 +313,179 @@ interface AgentWidgetRow {
   tokens: number;
 }
 
+export interface AgentSelectorRow {
+  correlationId: string;
+  agent: string;
+  name?: string;
+  label: string;
+  parentLabel?: string;
+  status: ActiveAgent["status"];
+  startedAt: number;
+  depth: number;
+  treePrefix: string;
+  recentTools: Array<{ name: string; status: string }>;
+  lastMessage?: string;
+}
+
+export function resolveProxyParentCorrelationId(
+  event: Record<string, unknown>,
+  spawnedBy?: string,
+): string | undefined {
+  return (event.parentCid as string | undefined)
+    ?? (event.correlationId as string | undefined)
+    ?? spawnedBy;
+}
+
+function selectorAgentLabel(agent: ActiveAgent): string {
+  if (agent.name) return agent.name;
+  const kind = agent.agent.startsWith("graph(") ? "graph" : "unnamed";
+  return `${kind}#${agent.correlationId.slice(0, 8)}`;
+}
+
+export function buildAgentSelectorRows(agents: ActiveAgent[]): AgentSelectorRow[] {
+  const visible = agents.filter((agent) => agent.status !== "completed");
+  const byId = new Map(visible.map((agent) => [agent.correlationId, agent]));
+  const progressById = new Map<string, AgentProgressSnapshot>();
+  for (const agent of visible) {
+    for (const progress of agent.progress ?? []) {
+      progressById.set(progress.correlationId, progress);
+    }
+  }
+
+  const childrenByParent = new Map<string, ActiveAgent[]>();
+  for (const agent of visible) {
+    if (!agent.spawnedBy || !byId.has(agent.spawnedBy)) continue;
+    const children = childrenByParent.get(agent.spawnedBy) ?? [];
+    children.push(agent);
+    childrenByParent.set(agent.spawnedBy, children);
+  }
+
+  const rows: AgentSelectorRow[] = [];
+  const visited = new Set<string>();
+  const append = (agent: ActiveAgent, depth: number, prefix: string, isLast: boolean): void => {
+    if (visited.has(agent.correlationId)) return;
+    visited.add(agent.correlationId);
+    const progress = progressById.get(agent.correlationId)
+      ?? agent.progress?.find((item) => item.correlationId === agent.correlationId);
+    const parent = agent.spawnedBy ? byId.get(agent.spawnedBy) : undefined;
+    const logTail = agent.outputLog.at(-1);
+    const lastMessage = progress?.lastMessage ?? agent.lastResult ?? logTail;
+    rows.push({
+      correlationId: agent.correlationId,
+      agent: agent.agent,
+      ...(agent.name ? { name: agent.name } : {}),
+      label: selectorAgentLabel(agent),
+      ...(parent ? { parentLabel: selectorAgentLabel(parent) } : {}),
+      status: agent.status,
+      startedAt: agent.startedAt,
+      depth,
+      treePrefix: depth === 0 ? "" : `${prefix}${isLast ? "└─ " : "├─ "}`,
+      recentTools: progress?.recentTools ?? [],
+      ...(lastMessage ? { lastMessage } : {}),
+    });
+
+    const children = childrenByParent.get(agent.correlationId) ?? [];
+    const childPrefix = depth === 0 ? "" : `${prefix}${isLast ? "   " : "│  "}`;
+    children.forEach((child, index) => append(child, depth + 1, childPrefix, index === children.length - 1));
+  };
+
+  const roots = visible.filter((agent) => !agent.spawnedBy || !byId.has(agent.spawnedBy));
+  roots.forEach((root, index) => append(root, 0, "", index === roots.length - 1));
+  visible.forEach((agent, index) => append(agent, 0, "", index === visible.length - 1));
+  return rows;
+}
+
+export function renderAgentSelectorPanel(
+  rows: AgentSelectorRow[],
+  cursor: number,
+  query: string,
+  width: number,
+): string[] {
+  const dim = (value: string) => `\x1b[2m${value}\x1b[22m`;
+  const bold = (value: string) => `\x1b[1m${value}\x1b[22m`;
+  const green = (value: string) => `\x1b[32m${value}\x1b[39m`;
+  const yellow = (value: string) => `\x1b[33m${value}\x1b[39m`;
+  const red = (value: string) => `\x1b[31m${value}\x1b[39m`;
+  const w = Math.max(1, Math.min(width, 60));
+  const selectedIndex = Math.max(0, Math.min(cursor, Math.max(0, rows.length - 1)));
+  const selected = rows[selectedIndex];
+  const statusView = (row: AgentSelectorRow): { icon: string; text: string } => {
+    if (row.status === "sleeping") return { icon: yellow("◉"), text: yellow("Sleeping") };
+    if (row.status === "failed") return { icon: red("✗"), text: red("Failed") };
+    if (row.status === "pending") return { icon: dim("□"), text: dim("Pending") };
+    return { icon: green("■"), text: green("Running") };
+  };
+
+  if (w < 20) {
+    if (!selected) return [truncateToWidth(`${dim("□")} no matches`, w, "…")];
+    const status = statusView(selected);
+    return [truncateToWidth(
+      `Esc · ${status.icon} ${selected.agent}/${selected.label} ${dim(selected.status)}`,
+      w,
+      "…",
+    )];
+  }
+
+  const inner = w - 2;
+  const out: string[] = [];
+  const frameLine = (content: string) =>
+    dim("│") + truncateToWidth(` ${content}`, inner, "…", true) + dim("│");
+  const maxVisible = 5;
+  const start = Math.max(0, Math.min(
+    Math.max(0, rows.length - maxVisible),
+    selectedIndex - Math.floor(maxVisible / 2),
+  ));
+  const visibleRows = rows.slice(start, start + maxVisible);
+  const range = rows.length > maxVisible
+    ? dim(` ${start + 1}-${start + visibleRows.length}/${rows.length}`)
+    : "";
+  const nestedCount = rows.filter((row) => row.depth > 0).length;
+  const scope = w >= 46 && rows.length > 0
+    ? dim(` · ${rows.length - nestedCount} root · ${nestedCount} nested`)
+    : "";
+
+  out.push(dim("╭" + "─".repeat(inner) + "╮"));
+  out.push(frameLine(`${green("❯")} ${query}${dim("│")}${range}${scope}`));
+  out.push(dim("├" + "─".repeat(inner) + "┤"));
+
+  for (let index = 0; index < visibleRows.length; index++) {
+    const absoluteIndex = start + index;
+    const row = visibleRows[index];
+    const status = statusView(row);
+    const up = Math.round((Date.now() - row.startedAt) / 1000);
+    const selection = absoluteIndex === selectedIndex ? green("▸") : " ";
+    out.push(frameLine(
+      `${selection} ${status.icon} ${bold(`${row.treePrefix}${row.agent}/${row.label}`)} ${status.text} ${dim(`${up}s`)}`,
+    ));
+  }
+  if (rows.length === 0) out.push(frameLine(dim("□ no matches · Backspace clears the filter")));
+
+  if (selected) {
+    out.push(dim("├" + "─".repeat(inner) + "┤"));
+    const lineage = selected.parentLabel ? `child of ${selected.parentLabel}` : "root run";
+    out.push(frameLine(`${green("»")} ${bold(`${selected.agent}/${selected.label}`)} ${dim(lineage)}`));
+    const recentTool = selected.recentTools.find((tool) => tool.status === "running")
+      ?? selected.recentTools.at(-1);
+    if (recentTool) {
+      const toolIcon = recentTool.status === "running" ? yellow("■") : recentTool.status === "failed" ? red("✗") : dim("✓");
+      out.push(frameLine(`${dim("Tool")} ${toolIcon} ${sanitizeSingleLineInput(recentTool.name)}`));
+    } else {
+      out.push(frameLine(`${dim("Tool")} ${dim("idle")}`));
+    }
+    const message = selected.lastMessage
+      ? sanitizeSingleLineInput(selected.lastMessage.split(/\r?\n/).filter((line) => line.trim()).at(-1) ?? "")
+      : "";
+    out.push(frameLine(`${dim("│")} ${message || (selected.status === "pending" ? "Waiting for dependencies…" : "Waiting for output…")}`));
+  }
+
+  out.push(dim("╰" + "─".repeat(inner) + "╯"));
+  const footer = w < 46
+    ? " Esc cancel · Enter attach · ↑↓ select"
+    : " Esc cancel · Enter attach · ↑↓ select · type to filter";
+  out.push(truncateToWidth(dim(footer), w, "…"));
+  return out;
+}
+
 function compactMetric(value: number): string {
   if (value < 1000) return String(value);
   if (value < 1_000_000) return `${(value / 1000).toFixed(value < 100_000 ? 1 : 0)}k`;
@@ -1985,23 +2158,19 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   }
 
   async function showAgentSelector(ctx: ExtensionContext): Promise<void> {
-    const entries = Array.from(state.activeRuns.entries()).filter(([, a]) => a.status !== "completed");
-    if (entries.length === 0) {
+    if (buildAgentSelectorRows(Array.from(state.activeRuns.values())).length === 0) {
       ctx.ui.notify("No active teammates. Start one with the teammate tool.", "warning");
       return;
     }
-    if (entries.length === 1) {
-      await showAttachOverlay(entries[0][0], ctx);
+    const initialRows = buildAgentSelectorRows(Array.from(state.activeRuns.values()));
+    if (initialRows.length === 1) {
+      await showAttachOverlay(initialRows[0].correlationId, ctx);
       return;
     }
 
     // Fuzzy search panel above the editor for agent selection.
-    const { truncateToWidth: trunc } = await import("@earendil-works/pi-tui");
-    type AgentEntry = [string, ActiveAgent];
-
-    function matchScore(entry: AgentEntry, rawQuery: string): number | undefined {
-      const [, agent] = entry;
-      const text = `${agent.agent} ${agent.name ?? ""} ${agent.correlationId.slice(0, 8)}`.toLowerCase();
+    function matchScore(row: AgentSelectorRow, rawQuery: string): number | undefined {
+      const text = `${row.agent} ${row.name ?? ""} ${row.label} ${row.correlationId}`.toLowerCase();
       const query = rawQuery.trim().toLowerCase();
       if (!query) return 0;
       const direct = text.indexOf(query);
@@ -2027,20 +2196,24 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         let lastWidth = 80;
         const pasteDecoder = new BracketedPasteDecoder();
         let pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
+        const refreshTimer = setInterval(requestRender, 1000);
+        refreshTimer.unref?.();
 
-        function filtered(): AgentEntry[] {
-          if (!query) return entries;
-          return entries
-            .map((entry, index) => ({ entry, index, score: matchScore(entry, query) }))
-            .filter((item): item is { entry: AgentEntry; index: number; score: number } => item.score !== undefined)
+        function filtered(): AgentSelectorRow[] {
+          const rows = buildAgentSelectorRows(Array.from(state.activeRuns.values()));
+          const matches = !query ? rows : rows
+            .map((row, index) => ({ row, index, score: matchScore(row, query) }))
+            .filter((item): item is { row: AgentSelectorRow; index: number; score: number } => item.score !== undefined)
             .sort((a, b) => b.score - a.score || a.index - b.index)
-            .map((item) => item.entry);
+            .map((item) => item.row);
+          cursor = Math.max(0, Math.min(cursor, Math.max(0, matches.length - 1)));
+          return matches;
         }
 
         function handleDecodedInput(data: string): void {
           const matches = filtered();
           if (data === "\r" || data === "\n") {
-            done(matches[cursor]?.[0] ?? null);
+            done(matches[cursor]?.correlationId ?? null);
           } else if (data === "\x1b") {
             done(null);
           } else if (data === "\x1b[A" || (data === "k" && !query)) {
@@ -2072,60 +2245,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
 
         return {
           render(width: number) {
-            const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
-            const bold = (s: string) => `\x1b[1m${s}\x1b[22m`;
-            const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
-            const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
             const w = Math.max(1, Math.min(width, 60));
             lastWidth = w;
-            const matches = filtered();
-            if (w < 20) {
-              const current = matches[cursor];
-              const compact = current
-                ? `${current[1].status === "sleeping" ? yellow("◉") : green("■")} ${current[1].agent}/${current[1].name ?? current[0].slice(0, 6)} ${dim(current[1].status)}`
-                : `${dim("□")} no matches · Backspace clears filter`;
-              const queryPrefix = query ? `${query} ${dim("»")} ` : "";
-              return [trunc(`Esc · ${queryPrefix}${compact}`, w, "…")];
-            }
-
-            const inner = w - 2;
-            const out: string[] = [];
-            const frameLine = (content: string) =>
-              dim("│") + trunc(` ${content}`, inner, "…", true) + dim("│");
-            const maxVisible = 5;
-            const start = Math.max(0, Math.min(
-              Math.max(0, matches.length - maxVisible),
-              cursor - Math.floor(maxVisible / 2),
-            ));
-            const visibleMatches = matches.slice(start, start + maxVisible);
-            const range = matches.length > maxVisible
-              ? dim(` ${start + 1}-${start + visibleMatches.length}/${matches.length}`)
-              : "";
-
-            out.push(dim("╭" + "─".repeat(inner) + "╮"));
-            out.push(frameLine(`${green("❯")} ${query}${dim("│")}${range}`));
-            out.push(dim("├" + "─".repeat(inner) + "┤"));
-
-            for (let i = 0; i < visibleMatches.length; i++) {
-              const absoluteIndex = start + i;
-              const [cid, a] = visibleMatches[i];
-              const icon = a.status === "sleeping" ? yellow("◉") : green("■");
-              const name = a.name ?? cid.slice(0, 8);
-              const up = Math.round((Date.now() - a.startedAt) / 1000);
-              const status = a.status === "sleeping" ? yellow("Sleeping") : green("Running");
-              const prefix = absoluteIndex === cursor ? green("▸") : " ";
-              out.push(frameLine(`${prefix} ${icon} ${bold(`${a.agent}/${name}`)} ${status} ${dim(`${up}s`)}`));
-            }
-            if (matches.length === 0) {
-              out.push(frameLine(dim("□ no matches · Backspace clears the filter")));
-            }
-
-            out.push(dim("╰" + "─".repeat(inner) + "╯"));
-            const footer = w < 46
-              ? " Esc cancel · Enter attach · ↑↓ select"
-              : " Esc cancel · Enter attach · ↑↓ select · type to filter";
-            out.push(trunc(dim(footer), w, "…"));
-            return out;
+            return renderAgentSelectorPanel(filtered(), cursor, query, w);
           },
 
           handleInput(data: string) {
@@ -2146,7 +2268,10 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           },
 
           invalidate() {},
-          dispose() { if (pasteFlushTimer) clearTimeout(pasteFlushTimer); },
+          dispose() {
+            if (pasteFlushTimer) clearTimeout(pasteFlushTimer);
+            clearInterval(refreshTimer);
+          },
         };
       },
       null,
@@ -3523,7 +3648,7 @@ async function handleProxyRequest(
   const tool = event.tool as string;
   const requestId = event.requestId as string;
   const params = event.params as Record<string, unknown>;
-  const parentCid = (event.parentCid as string | undefined) ?? spawnedBy;
+  const parentCid = resolveProxyParentCorrelationId(event, spawnedBy);
 
   if (await dispatchRegisteredChildTool(event, reply, state)) return;
 
