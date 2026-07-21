@@ -23,15 +23,18 @@ export interface ApiProviderSettings {
   baseUrl: string;
   modelId: string;
   reasoning: boolean;
-  apiKey?: string;
+  apiKey: string;
   maxThinking?: boolean;
+}
+
+interface LoadedApiProviderSettings extends ApiProviderSettings {
+  configured: boolean;
 }
 
 interface ProviderDefaults {
   id: ApiProviderId;
   name: string;
   api: "openai-responses" | "anthropic-messages";
-  apiKey: string;
   baseUrl: string;
   modelId: string;
   contextWindow: number;
@@ -45,6 +48,7 @@ interface SaveApiProviderResult {
 
 export interface RegisterApiProviderOptions {
   modelsPath?: string;
+  defaultsPath?: string;
 }
 
 type ApiProviderAction = "configure" | "delete" | "list" | "logout" | "reset" | "show";
@@ -57,7 +61,6 @@ const PROVIDERS: readonly ProviderDefaults[] = [
     id: "maestro-openai",
     name: "OpenAI Responses (Custom)",
     api: "openai-responses",
-    apiKey: "$OPENAI_API_KEY",
     baseUrl: "https://api.openai.com/v1",
     modelId: "gpt-5.4",
     contextWindow: 400_000,
@@ -67,7 +70,6 @@ const PROVIDERS: readonly ProviderDefaults[] = [
     id: "maestro-anthropic",
     name: "Anthropic (Custom)",
     api: "anthropic-messages",
-    apiKey: "$ANTHROPIC_API_KEY",
     baseUrl: "https://api.anthropic.com",
     modelId: "claude-sonnet-4-5",
     contextWindow: 200_000,
@@ -87,6 +89,7 @@ export function registerApiProviderConfigs(
   options: RegisterApiProviderOptions = {},
 ): void {
   const modelsPath = options.modelsPath ?? join(getAgentDir(), "models.json");
+  const defaultsPath = options.defaultsPath ?? join(dirname(modelsPath), "api-manager.json");
   const configured = configuredProviderIds(modelsPath);
   if (typeof pi.registerProvider === "function") {
     for (const provider of PROVIDERS) {
@@ -101,31 +104,39 @@ export function registerApiProviderConfigs(
     description: "增删查改 OpenAI Responses / Anthropic API 配置",
     async handler(args, ctx) {
       try {
-        await showApiProviderManager(pi, args, ctx, modelsPath);
+        await showApiProviderManager(pi, args, ctx, modelsPath, defaultsPath);
       } catch (error) {
         ctx.ui.notify(`API 配置失败：${errorMessage(error)}`, "error");
       }
     },
   });
+  if (typeof pi.on === "function") {
+    pi.on("model_select", async (event) => {
+      const level = await loadModelThinkingDefault(event.model.provider, event.model.id, defaultsPath);
+      if (level) setPiThinkingLevel(pi, level);
+    });
+  }
 }
 
 export async function loadApiProviderSettings(
   provider: ApiProviderId,
   modelsPath = join(getAgentDir(), "models.json"),
-): Promise<ApiProviderSettings> {
+): Promise<LoadedApiProviderSettings> {
   const defaults = providerDefaults(provider);
   const root = await readModelsRoot(modelsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
-  const config = isRecord(providers[provider]) ? providers[provider] : {};
+  const configured = isRecord(providers[provider]);
+  const config = configured ? providers[provider] : {};
   const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
   const model = models[0];
   const thinkingLevelMap = isRecord(model?.thinkingLevelMap) ? model.thinkingLevelMap : {};
   return {
+    configured,
     provider,
     baseUrl: typeof config.baseUrl === "string" ? config.baseUrl : defaults.baseUrl,
     modelId: typeof model?.id === "string" ? model.id : defaults.modelId,
     reasoning: typeof model?.reasoning === "boolean" ? model.reasoning : true,
-    apiKey: typeof config.apiKey === "string" ? config.apiKey : defaults.apiKey,
+    apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
     maxThinking: typeof thinkingLevelMap.max === "string",
   };
 }
@@ -139,9 +150,7 @@ export async function saveApiProviderSettings(
     baseUrl: normalizeBaseUrl(settings.baseUrl),
     modelId: required(settings.modelId, "Model ID"),
     reasoning: settings.reasoning,
-    apiKey: settings.apiKey === undefined
-      ? providerDefaults(settings.provider).apiKey
-      : required(settings.apiKey, "API key config"),
+    apiKey: required(settings.apiKey ?? "", "API key config"),
     maxThinking: settings.maxThinking === true,
   };
   let result: SaveApiProviderResult | undefined;
@@ -168,6 +177,29 @@ export async function deleteApiProviderSettings(
   return result;
 }
 
+export async function deleteApiProviderModelSettings(
+  provider: ApiProviderId,
+  modelId: string,
+  modelsPath = join(getAgentDir(), "models.json"),
+): Promise<SaveApiProviderResult> {
+  let result: SaveApiProviderResult | undefined;
+  await serializeMutation(modelsPath, async () => {
+    const exists = await fileExists(modelsPath);
+    const root = await readModelsRoot(modelsPath);
+    const providers = isRecord(root.providers) ? { ...root.providers } : {};
+    const config = isRecord(providers[provider]) ? { ...providers[provider] } : undefined;
+    if (!config) throw new Error(`Provider ${provider} is not configured`);
+    const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
+    const remaining = models.filter((model) => model.id !== modelId);
+    if (remaining.length === models.length) throw new Error(`Model ${modelId} is not configured`);
+    if (remaining.length === 0) delete providers[provider];
+    else providers[provider] = { ...config, models: remaining };
+    result = await writeModelsRoot({ ...root, providers }, modelsPath, exists);
+  });
+  if (!result) throw new Error("API model settings were not deleted");
+  return result;
+}
+
 export function normalizeBaseUrl(value: string): string {
   const normalized = required(value, "Base URL").replace(/\/+$/, "");
   const parsed = new URL(normalized);
@@ -182,6 +214,7 @@ async function showApiProviderManager(
   args: string,
   ctx: ExtensionCommandContext,
   modelsPath: string,
+  defaultsPath: string,
 ): Promise<void> {
   const parsed = parseManagerArgs(args);
   if (!ctx.hasUI && !parsed.action) {
@@ -200,7 +233,7 @@ async function showApiProviderManager(
     return;
   }
   if (action === "show") {
-    await showProvider(ctx, provider, modelsPath);
+    await showProvider(ctx, provider, modelsPath, defaultsPath);
     return;
   }
   if (!ctx.hasUI) {
@@ -208,13 +241,13 @@ async function showApiProviderManager(
     return;
   }
   if (action === "configure") {
-    await configureProvider(pi, provider, ctx, modelsPath);
+    await configureProvider(pi, provider, ctx, modelsPath, defaultsPath);
   } else if (action === "delete") {
-    await deleteProvider(pi, provider, ctx, modelsPath);
+    await deleteProvider(pi, provider, ctx, modelsPath, defaultsPath);
   } else if (action === "logout") {
-    await removeProviderKey(pi, provider, ctx, modelsPath);
+    await removeProviderKey(pi, provider, ctx, modelsPath, defaultsPath);
   } else {
-    await resetProvider(pi, provider, ctx, modelsPath);
+    await resetProvider(pi, provider, ctx, modelsPath, defaultsPath);
   }
 }
 
@@ -223,13 +256,16 @@ async function configureProvider(
   provider: ProviderDefaults,
   ctx: ExtensionCommandContext,
   modelsPath: string,
+  defaultsPath: string,
 ): Promise<void> {
   const current = await loadApiProviderSettings(provider.id, modelsPath);
   const maxThinking = current.maxThinking === true || runtimeSupportsMaxThinking(ctx);
-  const baseUrlInput = await ctx.ui.input(`${provider.name} Base URL`, current.baseUrl);
+  const baseUrlInput = await ctx.ui.input(`${provider.name} Base URL`, current.configured ? current.baseUrl : "");
   if (baseUrlInput === undefined) return;
-  const modelInput = await ctx.ui.input(`${provider.name} model ID`, current.modelId);
+  const baseUrl = normalizeBaseUrl(baseUrlInput);
+  const modelInput = await ctx.ui.input(`${provider.name} model ID`, current.configured ? current.modelId : provider.modelId);
   if (modelInput === undefined) return;
+  const modelId = required(modelInput, "Model ID");
   const maxSuffix = maxThinking ? " / max" : "";
   const enabledLabel = provider.id === "maestro-openai"
     ? `启用：minimal / low / medium / high / xhigh${maxSuffix}`
@@ -244,34 +280,20 @@ async function configureProvider(
     ctx,
     provider,
     reasoningChoice === enabledLabel,
-    currentDefaultThinkingLevel(ctx, modelsPath),
+    await loadModelThinkingDefault(provider.id, modelId, defaultsPath)
+      ?? currentDefaultThinkingLevel(ctx, modelsPath),
     maxThinking,
   );
   if (!defaultThinkingLevel) return;
 
-  const useEnvironmentLabel = `使用环境变量 ${provider.apiKey}`;
-  const enterKeyLabel = hasLiteralApiKey(current.apiKey, provider.apiKey)
-    ? "更新 API key"
-    : "输入 API key";
-  const keepKeyLabel = "保留当前 API key";
-  const keyOptions = hasLiteralApiKey(current.apiKey, provider.apiKey)
-    ? [keepKeyLabel, enterKeyLabel, useEnvironmentLabel]
-    : [enterKeyLabel, useEnvironmentLabel];
-  const keyChoice = await ctx.ui.select("认证方式", keyOptions);
-  if (!keyChoice) return;
-  let apiKey = current.apiKey ?? provider.apiKey;
-  if (keyChoice === enterKeyLabel) {
-    const keyInput = await ctx.ui.input(`${provider.name} API key`, "输入后将写入 models.json");
-    if (keyInput === undefined) return;
-    apiKey = required(keyInput, "API key");
-  } else if (keyChoice === useEnvironmentLabel) {
-    apiKey = provider.apiKey;
-  }
+  const keyInput = await ctx.ui.input(`${provider.name} API key`, "");
+  if (keyInput === undefined) return;
+  const apiKey = required(keyInput, "API key");
 
   const next: ApiProviderSettings = {
     provider: provider.id,
-    baseUrl: normalizeBaseUrl(baseUrlInput.trim() || current.baseUrl),
-    modelId: required(modelInput.trim() || current.modelId, "Model ID"),
+    baseUrl,
+    modelId,
     reasoning: reasoningChoice === enabledLabel,
     apiKey,
     maxThinking,
@@ -283,14 +305,15 @@ async function configureProvider(
       `Model：${next.modelId}`,
       `Reasoning：${next.reasoning ? "enabled" : "disabled"}`,
       `Default thinking（Pi 全局）：${defaultThinkingLevel}`,
-      `Auth：${apiKey === provider.apiKey ? provider.apiKey : "stored API key"}`,
+      "Auth：stored API key",
     ].join("\n"),
   );
   if (!confirmed) return;
   const result = await saveApiProviderSettings(next, modelsPath);
+  await saveModelThinkingDefault(provider.id, next.modelId, defaultThinkingLevel, defaultsPath);
   await saveDefaultThinkingLevel(ctx, modelsPath, defaultThinkingLevel);
   reloadProviderRegistration(pi, ctx, provider);
-  applyThinkingLevelToActiveProvider(pi, ctx, provider, defaultThinkingLevel);
+  applyThinkingLevelToActiveModel(pi, ctx, provider, next.modelId, defaultThinkingLevel);
   notifySaved(
     ctx,
     provider,
@@ -304,16 +327,22 @@ async function removeProviderKey(
   provider: ProviderDefaults,
   ctx: ExtensionCommandContext,
   modelsPath: string,
+  defaultsPath: string,
 ): Promise<void> {
-  const current = await loadApiProviderSettings(provider.id, modelsPath);
+  if (!await isProviderConfigured(provider.id, modelsPath)) {
+    ctx.ui.notify(`${provider.name} 尚未配置，无需注销。`, "info");
+    return;
+  }
   const confirmed = await ctx.ui.confirm(
-    `移除 ${provider.name} API key？`,
-    `将恢复为环境变量 ${provider.apiKey}；Base URL 和模型配置会保留。`,
+    `注销 ${provider.name}？`,
+    "将删除该 provider 的 Base URL、models 和 API key；重新新增必须显式输入独立 URL 和 API key。",
   );
   if (!confirmed) return;
-  const result = await saveApiProviderSettings({ ...current, apiKey: provider.apiKey }, modelsPath);
-  reloadProviderRegistration(pi, ctx, provider);
-  notifySaved(ctx, provider, result, `已移除已保存 key；现在使用 ${provider.apiKey}`);
+  const result = await deleteApiProviderSettings(provider.id, modelsPath);
+  await deleteProviderThinkingDefaults(provider.id, defaultsPath);
+  pi.unregisterProvider(provider.id);
+  ctx.modelRegistry.refresh();
+  notifySaved(ctx, provider, result, "已注销；连接配置和 API key 已移除");
 }
 
 async function resetProvider(
@@ -321,24 +350,23 @@ async function resetProvider(
   provider: ProviderDefaults,
   ctx: ExtensionCommandContext,
   modelsPath: string,
+  defaultsPath: string,
 ): Promise<void> {
+  if (!await isProviderConfigured(provider.id, modelsPath)) {
+    ctx.ui.notify(`${provider.name} 尚未配置，无需重置。`, "info");
+    return;
+  }
   const confirmed = await ctx.ui.confirm(
-    `恢复 ${provider.name} 默认配置？`,
-    "Base URL、model、推理能力和 API key 配置都会恢复默认值。",
+    `重置 ${provider.name}？`,
+    "将清除该 provider 的连接配置、models、API key 和思考强度默认值；不会写入环境变量占位。",
   );
   if (!confirmed) return;
-  const result = await saveApiProviderSettings({
-    provider: provider.id,
-    baseUrl: provider.baseUrl,
-    modelId: provider.modelId,
-    reasoning: true,
-    apiKey: provider.apiKey,
-    maxThinking: runtimeSupportsMaxThinking(ctx),
-  }, modelsPath);
+  const result = await deleteApiProviderSettings(provider.id, modelsPath);
+  await deleteProviderThinkingDefaults(provider.id, defaultsPath);
   await saveDefaultThinkingLevel(ctx, modelsPath, DEFAULT_THINKING_LEVEL);
-  reloadProviderRegistration(pi, ctx, provider);
-  applyThinkingLevelToActiveProvider(pi, ctx, provider, DEFAULT_THINKING_LEVEL);
-  notifySaved(ctx, provider, result, `已恢复默认配置；默认思考强度为 ${DEFAULT_THINKING_LEVEL}`);
+  pi.unregisterProvider(provider.id);
+  ctx.modelRegistry.refresh();
+  notifySaved(ctx, provider, result, `已重置为未配置；默认思考强度为 ${DEFAULT_THINKING_LEVEL}`);
 }
 
 async function deleteProvider(
@@ -346,20 +374,30 @@ async function deleteProvider(
   provider: ProviderDefaults,
   ctx: ExtensionCommandContext,
   modelsPath: string,
+  defaultsPath: string,
 ): Promise<void> {
   if (!await isProviderConfigured(provider.id, modelsPath)) {
     ctx.ui.notify(`${provider.name} 尚未配置，无需删除。`, "info");
     return;
   }
+  const modelIds = await configuredModelIds(provider.id, modelsPath);
+  const modelId = modelIds.length === 1
+    ? modelIds[0]
+    : await ctx.ui.select(`选择要删除的 ${provider.name} model`, modelIds);
+  if (!modelId) return;
   const confirmed = await ctx.ui.confirm(
-    `删除 ${provider.name}？`,
-    "将从 models.json 删除该 provider 的 URL、model、推理能力和 API key；其他 provider 不受影响。",
+    `删除 ${provider.name}/${modelId}？`,
+    modelIds.length === 1
+      ? "这是最后一个 model，provider 配置也会一并删除；其他 provider 不受影响。"
+      : "只删除所选 model；同 provider 的其他 model 与连接配置会保留。",
   );
   if (!confirmed) return;
-  const result = await deleteApiProviderSettings(provider.id, modelsPath);
-  pi.unregisterProvider(provider.id);
+  const result = await deleteApiProviderModelSettings(provider.id, modelId, modelsPath);
+  await deleteModelThinkingDefault(provider.id, modelId, defaultsPath);
+  if (modelIds.length === 1) pi.unregisterProvider(provider.id);
+  else reloadProviderRegistration(pi, ctx, provider);
   ctx.modelRegistry.refresh();
-  notifySaved(ctx, provider, result, "已删除；该模型已从 /model 移除");
+  notifySaved(ctx, provider, result, `已删除 ${modelId}；该模型已从 /model 移除`);
 }
 
 async function listProviders(ctx: ExtensionCommandContext, modelsPath: string): Promise<void> {
@@ -370,8 +408,8 @@ async function listProviders(ctx: ExtensionCommandContext, modelsPath: string): 
     if (!configured) return `- ${provider.name}：未配置`;
     const config = providers[provider.id];
     const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
-    const modelId = typeof models[0]?.id === "string" ? models[0].id : provider.modelId;
-    return `- ${provider.name}：${modelId} · ${authSource(config.apiKey, provider)}`;
+    const modelIds = models.map((model) => model.id).filter((id): id is string => typeof id === "string");
+    return `- ${provider.name}（${modelIds.length}）：${modelIds.join(", ")} · ${authSource(config.apiKey)}`;
   });
   ctx.ui.notify([
     "API Provider 配置：",
@@ -385,19 +423,28 @@ async function showProvider(
   ctx: ExtensionCommandContext,
   provider: ProviderDefaults,
   modelsPath: string,
+  defaultsPath: string,
 ): Promise<void> {
   if (!await isProviderConfigured(provider.id, modelsPath)) {
     ctx.ui.notify(`${provider.name}：未配置。使用 /api-manager set ${provider.id.replace("maestro-", "")} 新增。`, "info");
     return;
   }
-  const settings = await loadApiProviderSettings(provider.id, modelsPath);
+  const root = await readModelsRoot(modelsPath);
+  const providers = isRecord(root.providers) ? root.providers : {};
+  const config = isRecord(providers[provider.id]) ? providers[provider.id] : {};
+  const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
+  const modelLines = await Promise.all(models.map(async (model) => {
+    const id = typeof model.id === "string" ? model.id : "<invalid>";
+    const level = id === "<invalid>" ? undefined : await loadModelThinkingDefault(provider.id, id, defaultsPath);
+    return `- ${id} · reasoning=${model.reasoning === true ? "enabled" : "disabled"} · default=${level ?? "global"}`;
+  }));
   ctx.ui.notify([
     provider.name,
-    `Base URL：${settings.baseUrl}`,
-    `Model：${settings.modelId}`,
-    `Reasoning：${settings.reasoning ? "enabled" : "disabled"}`,
+    `Base URL：${typeof config.baseUrl === "string" ? config.baseUrl : provider.baseUrl}`,
+    `Models（${models.length}）：`,
+    ...modelLines,
     `Default thinking（Pi 全局）：${currentDefaultThinkingLevel(ctx, modelsPath)}`,
-    `Auth：${authSource(settings.apiKey, provider)}`,
+    `Auth：${authSource(config.apiKey)}`,
     `文件：${modelsPath}`,
   ].join("\n"), "info");
 }
@@ -416,7 +463,8 @@ async function writeApiProviderSettings(
   const currentModels = Array.isArray(currentProvider.models)
     ? currentProvider.models.filter(isRecord)
     : [];
-  const existingModel = currentModels.find((model) => model.id === settings.modelId) ?? {};
+  const existingIndex = currentModels.findIndex((model) => model.id === settings.modelId);
+  const existingModel = existingIndex >= 0 ? currentModels[existingIndex] : {};
   const nextModel: Record<string, unknown> = {
     ...existingModel,
     id: settings.modelId,
@@ -443,8 +491,10 @@ async function writeApiProviderSettings(
     ...currentProvider,
     baseUrl: settings.baseUrl,
     api: defaults.api,
-    apiKey: settings.apiKey ?? defaults.apiKey,
-    models: [nextModel],
+    apiKey: settings.apiKey,
+    models: existingIndex >= 0
+      ? currentModels.map((model, index) => index === existingIndex ? nextModel : model)
+      : [...currentModels, nextModel],
   };
   const nextRoot = { ...root, providers };
 
@@ -562,8 +612,8 @@ async function chooseAction(ctx: ExtensionCommandContext): Promise<ApiProviderAc
     { action: "configure", label: "新增或修改配置" },
     { action: "show", label: "查看单个配置" },
     { action: "delete", label: "删除 provider 配置" },
-    { action: "logout", label: "移除保存的 API key" },
-    { action: "reset", label: "恢复默认配置" },
+    { action: "logout", label: "注销 provider 配置" },
+    { action: "reset", label: "重置为未配置" },
   ];
   const choice = await ctx.ui.select("选择操作", choices.map((entry) => entry.label));
   return choices.find((entry) => entry.label === choice)?.action;
@@ -589,10 +639,6 @@ function providerFromArg(value: string): ProviderDefaults | undefined {
     return providerDefaults("maestro-anthropic");
   }
   return undefined;
-}
-
-function hasLiteralApiKey(value: string | undefined, defaultEnvironmentKey: string): boolean {
-  return Boolean(value && value !== defaultEnvironmentKey);
 }
 
 async function chooseDefaultThinkingLevel(
@@ -639,15 +685,82 @@ async function saveDefaultThinkingLevel(
   }
 }
 
-function applyThinkingLevelToActiveProvider(
+function applyThinkingLevelToActiveModel(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   provider: ProviderDefaults,
+  modelId: string,
   level: ApiThinkingLevel,
 ): void {
-  if (ctx.model?.provider !== provider.id) return;
+  if (ctx.model?.provider !== provider.id || ctx.model.id !== modelId) return;
+  setPiThinkingLevel(pi, level);
+}
+
+function setPiThinkingLevel(pi: ExtensionAPI, level: ApiThinkingLevel): void {
   const setThinkingLevel = pi.setThinkingLevel.bind(pi) as (value: ApiThinkingLevel) => void;
   setThinkingLevel(level);
+}
+
+function modelThinkingKey(provider: string, modelId: string): string {
+  return `${provider}/${modelId}`;
+}
+
+async function loadModelThinkingDefault(
+  provider: string,
+  modelId: string,
+  defaultsPath: string,
+): Promise<ApiThinkingLevel | undefined> {
+  const root = await readModelsRoot(defaultsPath);
+  if (!isRecord(root.modelDefaults)) return undefined;
+  const value = root.modelDefaults[modelThinkingKey(provider, modelId)];
+  return typeof value === "string" && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value)
+    ? value as ApiThinkingLevel
+    : undefined;
+}
+
+async function saveModelThinkingDefault(
+  provider: ApiProviderId,
+  modelId: string,
+  level: ApiThinkingLevel,
+  defaultsPath: string,
+): Promise<void> {
+  await serializeMutation(defaultsPath, async () => {
+    const exists = await fileExists(defaultsPath);
+    const root = await readModelsRoot(defaultsPath);
+    const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
+    modelDefaults[modelThinkingKey(provider, modelId)] = level;
+    await writeModelsRoot({ ...root, version: 1, modelDefaults }, defaultsPath, exists);
+  });
+}
+
+async function deleteModelThinkingDefault(
+  provider: ApiProviderId,
+  modelId: string,
+  defaultsPath: string,
+): Promise<void> {
+  if (!await fileExists(defaultsPath)) return;
+  await serializeMutation(defaultsPath, async () => {
+    const root = await readModelsRoot(defaultsPath);
+    const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
+    delete modelDefaults[modelThinkingKey(provider, modelId)];
+    await writeModelsRoot({ ...root, modelDefaults }, defaultsPath, true);
+  });
+}
+
+async function deleteProviderThinkingDefaults(
+  provider: ApiProviderId,
+  defaultsPath: string,
+): Promise<void> {
+  if (!await fileExists(defaultsPath)) return;
+  await serializeMutation(defaultsPath, async () => {
+    const root = await readModelsRoot(defaultsPath);
+    const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
+    const prefix = `${provider}/`;
+    for (const key of Object.keys(modelDefaults)) {
+      if (key.startsWith(prefix)) delete modelDefaults[key];
+    }
+    await writeModelsRoot({ ...root, modelDefaults }, defaultsPath, true);
+  });
 }
 
 function runtimeSupportsMaxThinking(ctx: ExtensionCommandContext): boolean {
@@ -670,11 +783,17 @@ async function isProviderConfigured(provider: ApiProviderId, modelsPath: string)
   return isRecord(root.providers) && isRecord(root.providers[provider]);
 }
 
-function authSource(value: unknown, provider: ProviderDefaults): string {
-  if (value === provider.apiKey) {
-    const environmentName = provider.apiKey.slice(1);
-    return `${provider.apiKey}（${process.env[environmentName] ? "已设置" : "未设置"}）`;
-  }
+async function configuredModelIds(provider: ApiProviderId, modelsPath: string): Promise<string[]> {
+  const root = await readModelsRoot(modelsPath);
+  if (!isRecord(root.providers) || !isRecord(root.providers[provider])) return [];
+  const models = root.providers[provider].models;
+  if (!Array.isArray(models)) return [];
+  return models.filter(isRecord)
+    .map((model) => model.id)
+    .filter((id): id is string => typeof id === "string");
+}
+
+function authSource(value: unknown): string {
   return typeof value === "string" && value ? "models.json 已保存 key" : "未配置";
 }
 

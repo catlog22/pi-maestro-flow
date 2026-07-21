@@ -7,10 +7,31 @@ import { getModels } from "@earendil-works/pi-ai";
 import { AuthStorage } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
 import { ModelRegistry } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/model-registry.js";
 import {
+  deleteApiProviderModelSettings,
   normalizeBaseUrl,
   registerApiProviderConfigs,
   saveApiProviderSettings,
 } from "../src/providers/api-provider-config.ts";
+
+test("upserts multiple models under the same API provider", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-multi-model-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const base = { provider: "maestro-openai" as const, baseUrl: "https://gateway.example.com/v1", apiKey: "secret" };
+  await saveApiProviderSettings({ ...base, modelId: "model-a", reasoning: true }, modelsPath);
+  await saveApiProviderSettings({ ...base, modelId: "model-b", reasoning: true }, modelsPath);
+  await saveApiProviderSettings({ ...base, modelId: "model-a", reasoning: false }, modelsPath);
+
+  let saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(saved.providers["maestro-openai"].models.map((model: any) => model.id), ["model-a", "model-b"]);
+  assert.equal(saved.providers["maestro-openai"].models[0].reasoning, false);
+  assert.equal(saved.providers["maestro-openai"].models[1].reasoning, true);
+
+  await deleteApiProviderModelSettings("maestro-openai", "model-a", modelsPath);
+  saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(saved.providers["maestro-openai"].models.map((model: any) => model.id), ["model-b"]);
+  assert.equal(saved.providers["maestro-openai"].baseUrl, "https://gateway.example.com/v1");
+});
 
 test("registers configured providers and the /api-manager command", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-register-"));
@@ -21,12 +42,14 @@ test("registers configured providers and the /api-manager command", async (t) =>
     baseUrl: "https://api.openai.com/v1",
     modelId: "gpt-5.4",
     reasoning: true,
+    apiKey: "openai-secret",
   }, modelsPath);
   await saveApiProviderSettings({
     provider: "maestro-anthropic",
     baseUrl: "https://api.anthropic.com",
     modelId: "claude-sonnet-4-5",
     reasoning: true,
+    apiKey: "anthropic-secret",
   }, modelsPath);
   const registered: Array<{ name: string; config: any }> = [];
   const commands = new Map<string, any>();
@@ -58,6 +81,24 @@ test("validates custom API base URLs", () => {
   assert.throws(() => normalizeBaseUrl(""), /cannot be empty/);
 });
 
+test("requires an explicit API key when saving API settings", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-required-key-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+
+  await assert.rejects(
+    () => saveApiProviderSettings({
+      provider: "maestro-openai",
+      baseUrl: "https://gateway.example.com/v1",
+      modelId: "gpt-5.4",
+      reasoning: true,
+      apiKey: "",
+    }, modelsPath),
+    /API key config cannot be empty/,
+  );
+  assert.equal(existsSync(modelsPath), false);
+});
+
 test("atomically saves API settings while preserving other providers", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-store-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
@@ -75,13 +116,14 @@ test("atomically saves API settings while preserving other providers", async (t)
     baseUrl: "https://gateway.example.com/v1/",
     modelId: "gpt-5.4",
     reasoning: true,
+    apiKey: "openai-secret",
   }, modelsPath);
   const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
   assert.deepEqual(saved.providers.deepseek, deepseek);
   assert.equal(saved.version, 1);
   assert.equal(saved.providers["maestro-openai"].baseUrl, "https://gateway.example.com/v1");
   assert.equal(saved.providers["maestro-openai"].api, "openai-responses");
-  assert.equal(saved.providers["maestro-openai"].apiKey, "$OPENAI_API_KEY");
+  assert.equal(saved.providers["maestro-openai"].apiKey, "openai-secret");
   assert.deepEqual(saved.providers["maestro-openai"].models[0].thinkingLevelMap, { off: null, xhigh: "xhigh" });
   assert.ok(result.backupPath);
   assert.equal(existsSync(result.backupPath!), true);
@@ -94,6 +136,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   const registrations: Array<{ name: string; config: any }> = [];
   const unregistered: string[] = [];
   const appliedThinkingLevels: string[] = [];
+  let modelSelectHandler: ((event: any) => Promise<void>) | undefined;
   const commands = new Map<string, any>();
   registerApiProviderConfigs({
     registerProvider(name: string, config: any) {
@@ -108,13 +151,15 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
     setThinkingLevel(level: string) {
       appliedThinkingLevels.push(level);
     },
+    on(event: string, handler: (event: any) => Promise<void>) {
+      if (event === "model_select") modelSelectHandler = handler;
+    },
   } as any, { modelsPath });
 
   const inputAnswers = ["https://proxy.example.com/v1/", "gpt-5.4", "openai-secret"];
   const selectAnswers = [
     "启用：minimal / low / medium / high / xhigh / max",
     "max",
-    "输入 API key",
   ];
   const selectOptions: string[][] = [];
   const notifications: Array<{ type: string; message: string }> = [];
@@ -123,7 +168,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   await command.handler("openai", {
     cwd: tempDir,
     hasUI: true,
-    model: { provider: "maestro-openai" },
+    model: { provider: "maestro-openai", id: "other-model" },
     modelRegistry: {
       refresh() {},
       getAll() { return [{ thinkingLevelMap: { max: "max" } }]; },
@@ -153,8 +198,14 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(saved.providers["maestro-openai"].apiKey, "openai-secret");
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
   assert.equal(settings.defaultThinkingLevel, "max");
+  assert.deepEqual(appliedThinkingLevels, []);
+  assert.ok(modelSelectHandler);
+  await modelSelectHandler!({ model: { provider: "maestro-openai", id: "gpt-5.4" } });
   assert.deepEqual(appliedThinkingLevels, ["max"]);
+  const defaults = JSON.parse(readFileSync(join(tempDir, "api-manager.json"), "utf8"));
+  assert.equal(defaults.modelDefaults["maestro-openai/gpt-5.4"], "max");
   assert.ok(selectOptions[1]?.includes("max"));
+  assert.doesNotMatch(selectOptions.flat().join("\n"), /环境变量|保留当前 API key/);
   assert.deepEqual(unregistered, []);
   assert.equal(registrations.length, 1);
   assert.deepEqual(registrations.at(-1), {
@@ -165,10 +216,92 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(notifications.at(-1)?.type, "info");
 });
 
-test("/api-manager logout removes only the saved provider key", async (t) => {
+test("/api-manager rejects empty URL and API key instead of reusing current values", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-explicit-input-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://old.example.com/v1",
+    modelId: "gpt-old",
+    reasoning: true,
+    apiKey: "old-secret",
+  }, modelsPath);
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) {
+      commands.set(name, command);
+    },
+  } as any, { modelsPath });
+  const command = commands.get("api-manager");
+  const makeContext = (
+    inputAnswers: Array<string | undefined>,
+    selectAnswers: Array<string | undefined> = [],
+  ) => {
+    const notifications: Array<{ type: string; message: string }> = [];
+    const selectOptions: string[][] = [];
+    let confirms = 0;
+    return {
+      notifications,
+      selectOptions,
+      ctx: {
+        cwd: tempDir,
+        hasUI: true,
+        modelRegistry: {
+          refresh() {},
+          getAll() { return [{ thinkingLevelMap: { max: "max" } }]; },
+        },
+        ui: {
+          async input() {
+            return inputAnswers.shift();
+          },
+          async select(_title: string, options: string[]) {
+            selectOptions.push(options);
+            return selectAnswers.shift();
+          },
+          async confirm() {
+            confirms += 1;
+            return true;
+          },
+          notify(message: string, type: string) {
+            notifications.push({ message, type });
+          },
+        },
+      },
+      get confirms() {
+        return confirms;
+      },
+    };
+  };
+
+  const emptyUrl = makeContext([""]);
+  await command.handler("set openai", emptyUrl.ctx);
+  let saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.equal(saved.providers["maestro-openai"].baseUrl, "https://old.example.com/v1");
+  assert.equal(saved.providers["maestro-openai"].apiKey, "old-secret");
+  assert.equal(emptyUrl.confirms, 0);
+  assert.match(emptyUrl.notifications.at(-1)?.message ?? "", /Base URL cannot be empty/);
+
+  const emptyKey = makeContext(
+    ["https://new.example.com/v1", "gpt-new", ""],
+    ["启用：minimal / low / medium / high / xhigh / max", "medium"],
+  );
+  await command.handler("set openai", emptyKey.ctx);
+  saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.equal(saved.providers["maestro-openai"].baseUrl, "https://old.example.com/v1");
+  assert.equal(saved.providers["maestro-openai"].models[0].id, "gpt-old");
+  assert.equal(saved.providers["maestro-openai"].apiKey, "old-secret");
+  assert.equal(emptyKey.confirms, 0);
+  assert.match(emptyKey.notifications.at(-1)?.message ?? "", /API key cannot be empty/);
+  assert.doesNotMatch(emptyKey.selectOptions.flat().join("\n"), /环境变量|保留当前 API key/);
+});
+
+test("/api-manager logout clears provider config instead of falling back to env vars", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-logout-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
   await saveApiProviderSettings({
     provider: "maestro-openai",
     baseUrl: "https://proxy.example.com/v1",
@@ -176,10 +309,19 @@ test("/api-manager logout removes only the saved provider key", async (t) => {
     reasoning: false,
     apiKey: "stored-secret",
   }, modelsPath);
+  writeFileSync(defaultsPath, JSON.stringify({
+    version: 1,
+    modelDefaults: {
+      "maestro-openai/gpt-private": "high",
+      "deepseek/deepseek-private": "low",
+    },
+  }));
   const commands = new Map<string, any>();
+  const unregistered: string[] = [];
+  let refreshes = 0;
   registerApiProviderConfigs({
     registerProvider() {},
-    unregisterProvider() {},
+    unregisterProvider(name: string) { unregistered.push(name); },
     registerCommand(name: string, command: any) {
       commands.set(name, command);
     },
@@ -189,7 +331,7 @@ test("/api-manager logout removes only the saved provider key", async (t) => {
     cwd: tempDir,
     hasUI: true,
     modelRegistry: {
-      refresh() {},
+      refresh() { refreshes += 1; },
       getAll() { return [{ thinkingLevelMap: { max: "max" } }]; },
     },
     ui: {
@@ -199,16 +341,19 @@ test("/api-manager logout removes only the saved provider key", async (t) => {
   });
 
   const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
-  assert.equal(saved.providers["maestro-openai"].apiKey, "$OPENAI_API_KEY");
-  assert.equal(saved.providers["maestro-openai"].baseUrl, "https://proxy.example.com/v1");
-  assert.equal(saved.providers["maestro-openai"].models[0].id, "gpt-private");
-  assert.equal(saved.providers["maestro-openai"].models[0].reasoning, false);
+  assert.equal(saved.providers["maestro-openai"], undefined);
+  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.equal(defaults.modelDefaults["maestro-openai/gpt-private"], undefined);
+  assert.equal(defaults.modelDefaults["deepseek/deepseek-private"], "low");
+  assert.deepEqual(unregistered, ["maestro-openai"]);
+  assert.equal(refreshes, 1);
 });
 
-test("/api-manager reset restores Anthropic defaults", async (t) => {
+test("/api-manager reset clears provider config and restores the global thinking default", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-reset-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
   await saveApiProviderSettings({
     provider: "maestro-anthropic",
     baseUrl: "https://anthropic-proxy.example.com",
@@ -216,10 +361,18 @@ test("/api-manager reset restores Anthropic defaults", async (t) => {
     reasoning: false,
     apiKey: "anthropic-secret",
   }, modelsPath);
+  writeFileSync(defaultsPath, JSON.stringify({
+    version: 1,
+    modelDefaults: {
+      "maestro-anthropic/claude-private": "high",
+    },
+  }));
   const commands = new Map<string, any>();
+  const unregistered: string[] = [];
+  let refreshes = 0;
   registerApiProviderConfigs({
     registerProvider() {},
-    unregisterProvider() {},
+    unregisterProvider(name: string) { unregistered.push(name); },
     registerCommand(name: string, command: any) {
       commands.set(name, command);
     },
@@ -229,7 +382,7 @@ test("/api-manager reset restores Anthropic defaults", async (t) => {
     cwd: tempDir,
     hasUI: true,
     modelRegistry: {
-      refresh() {},
+      refresh() { refreshes += 1; },
       getAll() { return [{ thinkingLevelMap: { max: "max" } }]; },
     },
     ui: {
@@ -239,14 +392,13 @@ test("/api-manager reset restores Anthropic defaults", async (t) => {
   });
 
   const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
-  const anthropic = saved.providers["maestro-anthropic"];
-  assert.equal(anthropic.baseUrl, "https://api.anthropic.com");
-  assert.equal(anthropic.apiKey, "$ANTHROPIC_API_KEY");
-  assert.equal(anthropic.models[0].id, "claude-sonnet-4-5");
-  assert.equal(anthropic.models[0].reasoning, true);
-  assert.deepEqual(anthropic.models[0].thinkingLevelMap, { xhigh: "high", max: "max" });
+  assert.equal(saved.providers["maestro-anthropic"], undefined);
+  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.equal(defaults.modelDefaults["maestro-anthropic/claude-private"], undefined);
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
   assert.equal(settings.defaultThinkingLevel, "medium");
+  assert.deepEqual(unregistered, ["maestro-anthropic"]);
+  assert.equal(refreshes, 1);
 });
 
 test("/api-manager lists and deletes one provider without changing DeepSeek", async (t) => {
@@ -315,7 +467,7 @@ test("models.json custom API settings preserve DeepSeek models", (t) => {
       "maestro-openai": {
         baseUrl: "https://gateway.example.com/v1",
         api: "openai-responses",
-        apiKey: "$OPENAI_API_KEY",
+        apiKey: "openai-test-key",
         models: [{
           id: "gpt-5.4",
           name: "GPT-5.4 Gateway",
