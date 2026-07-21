@@ -65,7 +65,7 @@ callback <-- executor impl_complete ---------------------+
 | `--exec=codex` specified | codex |
 | `--exec=agy` specified | agy |
 | `-y` or `--yes` flag present | Auto (default agy) |
-| No flags (interactive) | AskUserQuestion -> user choice |
+| No flags (interactive) | user prompt -> user choice |
 | Auto + task_count <= 3 | agy |
 | Auto + task_count > 3 | codex |
 

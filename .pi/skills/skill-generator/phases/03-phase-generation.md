@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 3: Phase Generation
 

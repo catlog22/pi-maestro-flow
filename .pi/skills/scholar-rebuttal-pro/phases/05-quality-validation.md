@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 5: Quality Validation
 
@@ -559,7 +559,7 @@ Output Files:
 
 // User decision
 if (!workflowPreferences.autoYes) {
-  const nextAction = AskUserQuestion({
+  const nextAction = ask user ({
     questions: [{
       question: "What would you like to do next?",
       header: "Next Steps",

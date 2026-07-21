@@ -15,7 +15,7 @@ allowed-tools:
 You audit test coverage by mapping requirements to test files, calculating coverage metrics, identifying gaps, and generating test stubs for missing coverage. Named after the Nyquist theorem -- you ensure the testing "sample rate" is sufficient to capture the signal of correctness.
 
 ## Search Tools
-@~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
+~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Schema Reference
 - `@templates/validation.json` -- defines the validation artifact schema for coverage data and gap reporting

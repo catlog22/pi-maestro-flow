@@ -24,7 +24,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team UI Polish

@@ -62,7 +62,7 @@ Each phase runs independently based on user selection.
 
 ## Interactive Preference Collection
 
-Collect workflow preferences via AskUserQuestion before dispatching to phases:
+Collect workflow preferences via user prompt before dispatching to phases:
 
 ```
 Step 1: Identify paper context
@@ -73,7 +73,7 @@ Step 1: Identify paper context
         - Co-authors (for tagging in promotion)"
 
 Step 2: Select outputs to generate
-  AskUserQuestion:
+  user prompt:
     question: "Which outputs would you like to generate?"
     options:
       - "Presentation slides outline" → enablePresentation = true

@@ -237,8 +237,8 @@ RoleSpec: ~  or <project>/.pi/skills/team-frontend-debug/roles/fixer/role.md
 | Condition | Action |
 |-----------|--------|
 | test-pipeline + TEST-001 finds 0 issues | Skip ANALYZE/FIX/VERIFY → pipeline complete |
-| test-pipeline + TEST-001 finds only warnings | AskUserQuestion: fix warnings or complete |
-| debug-pipeline + REPRODUCE-001 cannot reproduce | AskUserQuestion: retry with more info or abort |
+| test-pipeline + TEST-001 finds only warnings | user prompt: fix warnings or complete |
+| debug-pipeline + REPRODUCE-001 cannot reproduce | user prompt: retry with more info or abort |
 
 ## InnerLoop Flag Rules
 

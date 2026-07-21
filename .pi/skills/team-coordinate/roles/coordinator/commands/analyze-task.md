@@ -11,7 +11,7 @@ Parse user task description -> detect required capabilities -> build dependency 
 
 **Allowed:**
 - Parse user task description text
-- AskUserQuestion for clarification
+- user prompt for clarification
 - Keyword-to-capability mapping
 - Write `task-analysis.json`
 
@@ -36,7 +36,7 @@ If task context requires codebase knowledge, set `needs_research: true`. Phase 2
 | Input | Source | Required |
 |-------|--------|----------|
 | Task description | User input from Phase 1 | Yes |
-| Clarification answers | AskUserQuestion results (if any) | No |
+| Clarification answers | user prompt results (if any) | No |
 | Session folder | From coordinator Phase 2 | Yes |
 
 ## Phase 3: Task Analysis
@@ -244,5 +244,5 @@ Write `{run_dir}/work/team/task-analysis.json`:
 |----------|------------|
 | No capabilities detected | Default to single `general` role with TASK prefix |
 | Circular dependency in graph | Break cycle at lowest-tier edge, warn |
-| Task description too vague | Return minimal analysis, coordinator will AskUserQuestion |
+| Task description too vague | Return minimal analysis, coordinator will user prompt |
 | All capabilities merge into one | Valid -- single-role execution via team-worker |

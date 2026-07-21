@@ -26,7 +26,7 @@ Tech debt pipeline modes and task registry.
 
 | Checkpoint | Trigger | Condition | Action |
 |------------|---------|-----------|--------|
-| Plan Approval Gate | TDPLAN-001 completes | Always | AskUserQuestion: Approve / Revise / Abort |
+| Plan Approval Gate | TDPLAN-001 completes | Always | user prompt: Approve / Revise / Abort |
 | Worktree Creation | Plan approved | Before TDFIX | git worktree add .worktrees/TD-<slug>-<date> |
 | Fix-Verify GC Loop | TDVAL-* completes | Regressions found | Create TDFIX-fix-<round> + TDVAL-recheck-<round> (max 3 rounds) |
 

@@ -163,7 +163,7 @@ Identify 1-2 backup methods in case the primary approach fails.
 
 Present method selection to user for confirmation (unless autoYes):
 ```
-AskUserQuestion:
+user prompt:
   question: "Here is the proposed method selection with justification. Do you agree with this approach, or would you like to adjust?"
   → Incorporate user feedback
 ```

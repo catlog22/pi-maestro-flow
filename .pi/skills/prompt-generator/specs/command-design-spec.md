@@ -8,7 +8,7 @@ Guidelines for Claude Code **command files** (orchestration workflows). Commands
 |---------|-------------------|-----------------|
 | Argument parsing | Yes | No |
 | Path resolution | Yes | No |
-| User prompts (AskUserQuestion) | Yes | No |
+| User prompts (user prompt) | Yes | No |
 | Status banners | Yes | No |
 | Agent spawning (Task) | Yes | No |
 | Flow control (if/else routing) | Yes | No |
@@ -26,7 +26,7 @@ Guidelines for Claude Code **command files** (orchestration workflows). Commands
 name: command-name           # Required: lowercase with hyphens
 description: Description     # Required: brief purpose
 argument-hint: "[args]"      # Optional: argument format hint
-allowed-tools: Tool1, Tool2  # Optional: restricted tool set
+allowed-tools: Tool1, Tool2 # Optional: restricted tool set
 ---
 ```
 
@@ -121,7 +121,7 @@ Load context, parse arguments.
 
 Check preconditions.
 
-## 3. Spawn Agent
+## 3. dispatch via teammate
 
 Display banner, construct prompt, spawn.
 
@@ -154,7 +154,7 @@ Check preconditions.
 </step>
 
 <step name="spawn_agent">
-Construct prompt, spawn agent.
+Construct prompt, dispatch via teammate.
 </step>
 
 <step name="report">
@@ -262,7 +262,7 @@ Track `iteration_count` (starts at 1).
 
 **If iteration_count < 3:**
 - Display: "Sending back for revision... (iteration {N}/3)"
-- Spawn agent with revision prompt + checker issues
+- dispatch via teammate with revision prompt + checker issues
 - After agent returns → spawn checker again, increment count
 
 **If iteration_count >= 3:**
@@ -328,7 +328,7 @@ Status: {metric 1} | {metric 2}
 </offer_next>
 ```
 
-## AskUserQuestion Pattern
+## user prompt Pattern
 
 For user decisions within commands:
 
@@ -361,7 +361,7 @@ If "Option B": {action}
 
 | Domain | Typical Steps |
 |--------|--------------|
-| Multi-Agent Pipeline | Initialize, Validate, Spawn Agent A, Handle A Result, Spawn Agent B, Revision Loop, Present Status |
+| Multi-Agent Pipeline | Initialize, Validate, dispatch via teammate A, Handle A Result, dispatch via teammate B, Revision Loop, Present Status |
 | Deploy/Release | Initialize, Validate Config, Run Deployment, Verify Health, Present Status |
 | CRUD | Initialize, Validate Entity, Persist Changes, Present Status |
 | Analysis | Initialize, Gather Context, Spawn Analyzer, Present Findings |

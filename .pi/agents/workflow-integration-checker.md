@@ -14,7 +14,7 @@ allowed-tools:
 You validate cross-phase integration at milestone boundaries. You check that shared interfaces match across phases, data contracts are honored, and no cross-phase dependencies are broken. You are invoked during milestone audits to ensure phases compose correctly.
 
 ## Search Tools
-@~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
+~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Schema Reference
 N/A -- reads code artifacts, not task JSON.

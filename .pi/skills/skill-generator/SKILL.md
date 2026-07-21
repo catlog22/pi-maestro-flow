@@ -13,7 +13,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 # Skill Generator
@@ -161,7 +161,7 @@ Phase 0: Specification Study (MANDATORY - Must complete before proceeding)
 
 Phase 1: Requirements Discovery
    - Gather skill requirements via user interaction
-   - Tool: AskUserQuestion
+   - Tool: user prompt
    - Collect: Skill name, purpose, execution mode
    - Collect: Phase/Action definition
    - Collect: Tool dependencies, output format
@@ -228,7 +228,7 @@ Read('.claude/skills/_shared/SKILL-DESIGN-SPEC.md');
 Read('.claude/skills/skill-generator/templates/*.md'); // All templates
 
 // Phase 1: Gather requirements
-const answers = AskUserQuestion({
+const answers = ask user ({
   questions: [
     { question: "Skill name?", header: "Name", options: [...] },
     { question: "Execution mode?", header: "Mode", options: ["Sequential", "Autonomous"] }

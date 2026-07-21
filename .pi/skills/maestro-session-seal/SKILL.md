@@ -16,7 +16,7 @@ contract:
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 <host_mirror>
@@ -70,7 +70,7 @@ Skip if `--skip-knowledge`. Otherwise:
    - Decisions with `status: accepted` from `runs/*/run.json.handoff.decisions[]` → spec candidates
    - Patterns/recipes discovered during execution → knowhow candidates
    - Risks that materialized or were mitigated → learning candidates
-3. **Present to user** via `AskUserQuestion`:
+3. **Present to user** via `user prompt`:
    ```
    question: "以下知识候选项值得持久化吗？"
    options:
@@ -118,7 +118,7 @@ Status: DONE
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Next session activated | step `analyze` (`maestro run prepare --platform pi analyze` + `maestro run create analyze --session {next-slug} --intent "{goal}"`) |
+| Next session activated | `maestro run start "{goal}" --cmd analyze --session {next-slug} --platform pi --workflow-root .` |
 | DAG complete (all sealed) | `/manage status` |
 | Knowledge review needed | `/manage knowledge audit` |
 </completion>

@@ -3,7 +3,7 @@ role: coordinator
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Coordinator Role
@@ -94,7 +94,7 @@ Phase 1 needs task analysis
 | todo({ action: "create" }) / todo({ action: "list" }) / todo({ action: "get" }) / todo({ action: "update" }) | System | Task lifecycle |
 | team_msg | System | Message bus operations |
 | SendMessage | System | Inter-agent communication |
-| AskUserQuestion | System | User interaction |
+| user prompt | System | User interaction |
 
 ---
 
@@ -137,7 +137,7 @@ For callback/check/resume/adapt/complete: load `@commands/monitor.md` and execut
 1. Scan `{run_dir}/work/team/team-session.json` for sessions with status "active" or "paused"
 2. No sessions found -> proceed to Phase 1
 3. Single session found -> resume it (-> Session Reconciliation)
-4. Multiple sessions -> AskUserQuestion for user selection
+4. Multiple sessions -> user prompt for user selection
 
 **Session Reconciliation**:
 1. Audit todo({ action: "list" }) -> get real status of all tasks
@@ -163,7 +163,7 @@ For callback/check/resume/adapt/complete: load `@commands/monitor.md` and execut
 
 1. **Parse user task description**
 
-2. **Clarify if ambiguous** via AskUserQuestion:
+2. **Clarify if ambiguous** via user prompt:
    - What is the scope? (specific files, module, project-wide)
    - What deliverables are expected? (documents, code, analysis reports)
    - Any constraints? (timeline, technology, style)
@@ -234,7 +234,7 @@ Regardless of complexity score or role count, coordinator MUST:
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-coordinate --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-coordinate --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-coordinate-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -353,7 +353,7 @@ Delegate to `@commands/dispatch.md` which creates the full task chain:
 
 | Mode | Behavior |
 |------|----------|
-| `interactive` | AskUserQuestion with Archive/Keep/Export options |
+| `interactive` | user prompt with Archive/Keep/Export options |
 | `auto_archive` | Execute Archive & Clean without prompt |
 | `auto_keep` | Execute Keep Active without prompt |
 
@@ -368,7 +368,7 @@ Delegate to `@commands/dispatch.md` which creates the full task chain:
 | Task timeout | Log, mark failed, ask user to retry or skip |
 | Worker crash | Respawn worker, reassign task |
 | Dependency cycle | Detect in task analysis, report to user, halt |
-| Task description too vague | AskUserQuestion for clarification |
+| Task description too vague | user prompt for clarification |
 | Session corruption | Attempt recovery, fallback to manual reconciliation |
 | Role-spec generation fails | Fall back to single general-purpose role |
 | capability_gap reported | handleAdapt: generate new role-spec, create tasks, spawn |

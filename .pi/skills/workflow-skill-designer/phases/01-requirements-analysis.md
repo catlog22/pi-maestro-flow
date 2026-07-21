@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 1: Requirements Analysis
 
@@ -109,7 +109,7 @@ When source is a natural language workflow description:
 
 ```javascript
 // Interactive requirements gathering
-const basicInfo = AskUserQuestion({
+const basicInfo = ask user ({
   questions: [
     {
       question: "What is this workflow skill's name? (kebab-case)",
@@ -136,7 +136,7 @@ const basicInfo = AskUserQuestion({
 // For each phase, gather details
 const phases = [];
 for (let i = 0; i < phaseCount; i++) {
-  const phaseInfo = AskUserQuestion({
+  const phaseInfo = ask user ({
     questions: [
       {
         question: `Phase ${i+1}: What does this phase do?`,
@@ -165,7 +165,7 @@ for (let i = 0; i < phaseCount; i++) {
 }
 
 // Gather conditional logic
-const conditions = AskUserQuestion({
+const conditions = ask user ({
   questions: [{
     question: "Are any phases conditional (skipped based on previous results)?",
     header: "Conditions",
@@ -218,7 +218,7 @@ const workflowConfig = {
   title: "Workflow Plan",               // Human-readable
   description: "5-phase planning...",   // One-line description
   triggers: ["workflow-plan"],          // Trigger phrases
-  allowedTools: ["Agent", "AskUserQuestion", "todo({ action: "update" })", "Read", "Write", "Edit", "Bash", "Glob", "Grep", "Skill"],
+  allowedTools: ["Agent", "user prompt", "todo({ action: "update" })", "Read", "Write", "Edit", "Bash", "Glob", "Grep", "Skill"],
 
   // Source information
   source: {
@@ -306,7 +306,7 @@ const workflowConfig = {
 
   // Features
   features: {
-    hasAutoMode: true,                  // Interactive preference collection (AskUserQuestion)
+    hasAutoMode: true,                  // Interactive preference collection (user prompt)
     hasConditionalPhases: true,         // some phases may be skipped
     hasTodoWriteSubTasks: true,         // phases expand into sub-tasks
     hasPlanningNotes: true,             // accumulated state document
@@ -334,7 +334,7 @@ Workflow Analysis Complete:
   Features: ${Object.entries(workflowConfig.features).filter(([,v]) => v).map(([k]) => k).join(', ')}
 `);
 
-const confirm = AskUserQuestion({
+const confirm = ask user ({
   questions: [{
     question: "Proceed with this workflow structure?",
     header: "Confirm",

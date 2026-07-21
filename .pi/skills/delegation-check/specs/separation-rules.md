@@ -24,7 +24,7 @@ A delegation prompt tells the agent what to do *this time*. The agent definition
 | Cross-cutting policy | `<deep_work_rules>` | Anti-shallow execution rules (applies to all agents) |
 | Per-invocation quality | `<quality_gate>` (in prompt) | Invocation-specific checks (e.g., "every task has `<read_first>`") |
 | Flow control | Revision loops, return routing | "If TASK COMPLETE → step 13. If BLOCKED → offer options" |
-| User interaction | `AskUserQuestion` | "Provide context / Skip / Abort" |
+| User interaction | `user prompt` | "Provide context / Skip / Abort" |
 | Banners | Status display | "━━━ GSD ► PLANNING PHASE {X} ━━━" |
 
 ### Agent Role Definition Owns
@@ -245,4 +245,4 @@ GSD's plan-phase uses `<deep_work_rules>` in delegation prompts. This is a delib
 | Revision instructions | ✅ Yes (what changed) | ❌ No |
 | Heuristics / philosophy | ❌ Never | ✅ Always |
 | Banner display | ✅ Yes | ❌ Never |
-| AskUserQuestion | ✅ Yes | ❌ Never |
+| user prompt | ✅ Yes | ❌ Never |

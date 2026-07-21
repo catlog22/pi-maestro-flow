@@ -93,7 +93,7 @@ Receive callback from [<role>]
   |   |   |   +- Update coordinates.step = "plan_done"
   |   |   |   +- Is this initial plan (gap_iteration === 0)?
   |   |   |   |   +- YES + config.gates.plan_check?
-  |   |   |   |   |   +- AskUserQuestion:
+  |   |   |   |   |   +- user prompt:
   |   |   |   |   |       question: "Phase <N> plan ready. Proceed with execution?"
   |   |   |   |   |       header: "Plan Review"
   |   |   |   |   |       options:
@@ -120,7 +120,7 @@ Receive callback from [<role>]
   |   |           +- YES + gap_iteration < MAX_GAP_ITERATIONS?
   |   |           |   +- -> triggerGapClosure
   |   |           +- YES + gap_iteration >= MAX_GAP_ITERATIONS?
-  |   |               +- AskUserQuestion:
+  |   |               +- user prompt:
   |   |                   question: "Phase <N> still has <count> gaps after <max> attempts."
   |   |                   header: "Gap Closure Limit"
   |   |                   options:
@@ -143,7 +143,7 @@ advanceToNextPhase:
   +- current_phase < total_phases?
   |   +- YES:
   |   |   +- config.mode === "interactive"?
-  |   |   |   +- AskUserQuestion:
+  |   |   |   +- user prompt:
   |   |   |       question: "Phase <N> complete. Proceed to phase <N+1>?"
   |   |   |       header: "Phase Transition"
   |   |   |       options:
@@ -339,7 +339,7 @@ All phases completed (no pending, no in_progress across all phases)
   +- Run lifecycle completion:
   |   - Read run_id from team-session.json.run.run_id
   |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
-  |   - Run `maestro run complete <run_id>`
+  |   - Run `maestro run done <run_id>`
   |   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
   |
   +- Generate project-level summary:

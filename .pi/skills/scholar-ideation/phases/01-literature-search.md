@@ -43,7 +43,7 @@ AND
 
 **Present keywords to user for confirmation** (unless autoYes):
 ```
-AskUserQuestion:
+user prompt:
   question: "Here are the proposed search keywords. Would you like to modify them?"
   → If modifications requested, update keywords
 ```
@@ -144,7 +144,7 @@ try {
   mcp__zotero__create_collection(name: "Research-{topic_keyword}-{YYYY}")
 } catch (error) {
   // If Zotero MCP not available, guide user to manual organization
-  AskUserQuestion: "Zotero MCP not detected. Would you like to:
+  user prompt: "Zotero MCP not detected. Would you like to:
     1. Organize papers manually (create local markdown index)
     2. Skip organization (proceed to synthesis)"
 }

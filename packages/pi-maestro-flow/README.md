@@ -39,6 +39,26 @@ After installation:
 - LSP navigation/refactoring, named-tab browser control, and BM25 tool discovery are available through `lsp`, `browser`, and `search_tool_bm25`
 - Maestro workflow docs installed at `~/.maestro/workflows/`
 
+## Pi Skill Conversion
+
+Pi skills are generated in two stages. `convert.mjs` performs the source-to-Pi
+directory conversion; `convert-pi.mjs --dst .pi` then applies Pi-specific prompt
+semantics, including the current Run/Session command surface. The latter is not an
+install or prepack concern: package preparation copies the already converted canonical
+`.pi/skills` tree unchanged.
+
+Use these checks before publishing a skill change:
+
+```bash
+node convert-pi.mjs --dst .pi
+npm --prefix packages/pi-maestro-flow run test:conversion
+npm --prefix packages/pi-maestro-flow run check:maestro-run-cli
+```
+
+Generated human-facing prompts use `maestro run start`, `maestro run done`,
+`maestro run edit`, and simple `--chain` commands. `session create --chain-file` is
+reserved for coordinator chains that require structured decision or decomposition data.
+
 ## Skills Categories
 
 **Workflow orchestration:** `maestro-analyze`, `maestro-plan`, `maestro-execute`, `maestro-ralph-v2`, `maestro-roadmap`
@@ -356,7 +376,7 @@ file from the installed package and appends it to Pi's system prompt through the
 `before_agent_start` event. This keeps the instructions available after npm installation
 without requiring a repository-root `AGENTS.md`, which other coding agents may discover.
 
-`pi-maestro-flow` pins `maestro-flow@0.5.51` as an associated workflow resource package.
+`pi-maestro-flow` pins `maestro-flow@0.5.53` as an associated workflow resource package.
 During postinstall it calls Maestro's workflows-only installer from the prepared registry
 artifact, which includes the complete runtime `dist` tree and canonical workflow documents.
 The installer writes to `~/.maestro/workflows`. The active Maestro CLI remains an environment

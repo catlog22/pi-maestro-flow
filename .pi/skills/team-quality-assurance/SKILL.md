@@ -17,7 +17,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Quality Assurance
@@ -94,7 +94,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 When pipeline completes, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Quality Assurance pipeline complete. What would you like to do?",
     header: "Completion",

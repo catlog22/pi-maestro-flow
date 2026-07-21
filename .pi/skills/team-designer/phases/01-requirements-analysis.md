@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Phase 1: Requirements Analysis
 
@@ -33,12 +33,12 @@ function detectInputSource(userInput) {
 
 **For reference source**: Read the referenced skill's SKILL.md and role files to extract structure.
 
-**For natural language**: Use AskUserQuestion to gather missing details interactively.
+**For natural language**: Use user prompt to gather missing details interactively.
 
 ## Step 1.2: Gather Core Identity
 
 ```javascript
-const coreIdentity = AskUserQuestion({
+const coreIdentity = ask user ({
   questions: [
     {
       question: "团队技能名称？(kebab-case, e.g., team-code-review)",
@@ -261,7 +261,7 @@ Templates: (none)
 ╚══════════════════════════════════════════╝
 ```
 
-Use AskUserQuestion to confirm or allow modifications.
+Use user prompt to confirm or allow modifications.
 
 ## Output
 

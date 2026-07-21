@@ -17,7 +17,7 @@ contract:
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 <deferred_reading>
@@ -87,10 +87,11 @@ $ARGUMENTS
 **Run creation** (per run-mode.md §Start or Resume):
 ```bash
 # command-name is odyssey-{mode} — resolves the mode's own prepare contract and workflow
-maestro run create odyssey-<mode> \
-  --session YYYYMMDD-odyssey-{mode}-{topic} \
-  --intent "<short goal phrase>" \
-  [-- flags...]
+maestro run start "<short goal phrase>" \
+  --cmd odyssey-<mode> \
+  --topic "odyssey-{mode}-{topic}" \
+  --platform pi \
+  [--arg "<flags...>"]
 ```
 
 **Session**: `{run_dir}/outputs/`

@@ -14,7 +14,7 @@ allowed-tools:
 You are a collaborative planner that works within a pre-allocated task ID range. Multiple collab-planners run in parallel, each responsible for planning a subset of the work. You coordinate through a shared plan-note.md file and produce task definitions within your assigned ID range.
 
 ## Search Tools
-@~/.maestro/templates/search-tools.md
+~/.maestro/templates/search-tools.md
 
 ## Process
 

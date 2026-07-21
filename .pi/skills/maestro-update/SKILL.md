@@ -38,7 +38,7 @@ $ARGUMENTS — optional flags.
 <invariants>
 1. **Backup before migration** — a timestamped backup of `.workflow/state.json` MUST be created before any schema migration runs; NEVER execute migration without backup
 2. **Idempotent** — running update when already on latest version MUST be a no-op (display "up to date"); NEVER re-apply migrations
-3. **Confirmation before execute** — migration diff MUST be displayed and user MUST confirm via AskUserQuestion before execution (unless `--force`); NEVER silently apply schema changes
+3. **Confirmation before execute** — migration diff MUST be displayed and user MUST confirm via user prompt before execution (unless `--force`); NEVER silently apply schema changes
 4. **Migration diff always visible** — even with `--force`, the migration diff MUST be displayed for audit visibility; NEVER skip diff display
 5. **Restore path on failure** — if migration fails, the backup restore command MUST be displayed; NEVER leave user without recovery instructions
 6. **Sequential migration** — all intermediate version steps MUST be applied in order by the schema registry; NEVER skip intermediate versions
@@ -85,7 +85,7 @@ IF `--setup-only`:
 3. IF status = "up-to-date":
      Display "Already up to date (v{version})"
      → Glob: ~/.maestro/workflows/updates/update-v{version}-setup.md
-     → IF exists: AskUserQuestion "Run setup for v{version}?" → load and follow
+     → IF exists: user prompt "Run setup for v{version}?" → load and follow
      → EXIT
 
 4. Display target:
@@ -102,7 +102,7 @@ IF `--dry-run` → display info and EXIT.
    Show schema changes that will be applied.
 
 2. Confirm (unless --force):
-   AskUserQuestion: "Upgrade v{current} → v{target}?"
+   user prompt: "Upgrade v{current} → v{target}?"
    Options: [执行 / 取消]
 
 3. Create backup:

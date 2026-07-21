@@ -16,7 +16,7 @@ contract:
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 <purpose>
@@ -99,8 +99,8 @@ maestro run complete --session {session_id} --verdict {done|done-with-concerns|n
 | Condition | Suggestion |
 |-----------|-----------|
 | All tests pass | `/manage sync codebase` (update codebase docs) |
-| Test failures after refactor | `maestro run create debug --session YYYYMMDD-debug-{topic} --intent "test failures after refactor in {scope}"` |
-| No test suite available | `maestro run create auto-test --session YYYYMMDD-auto-test-{topic} --intent "{goal}" -- {phase}` |
+| Test failures after refactor | `maestro run start "test failures after refactor in {scope}" --cmd debug --topic "{topic}" --platform pi --workflow-root .` |
+| No test suite available | `maestro run start "{goal}" --cmd auto-test --topic "{topic}" --arg "{phase}" --platform pi --workflow-root .` |
 </completion>
 
 <error_codes>

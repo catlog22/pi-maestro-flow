@@ -178,7 +178,7 @@ Score each candidate question using the evaluation matrix.
 
 Present candidate research questions to user for selection (unless autoYes):
 ```
-AskUserQuestion:
+user prompt:
   question: "Here are the candidate research questions with evaluations. Which would you like to pursue? You may also refine them."
   → Store user selection/refinement
 ```

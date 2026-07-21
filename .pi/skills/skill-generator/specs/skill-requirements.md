@@ -147,7 +147,7 @@ interface SkillConfig {
 ### Phase 1: Basic Information
 
 ```javascript
-AskUserQuestion({
+ask user ({
   questions: [
     {
       question: "What is the Skill name? (English, lowercase with hyphens)",
@@ -177,7 +177,7 @@ AskUserQuestion({
 ### Phase 2: Execution Mode
 
 ```javascript
-AskUserQuestion({
+ask user ({
   questions: [
     {
       question: "Select execution mode:",
@@ -207,7 +207,7 @@ AskUserQuestion({
 #### Sequential Mode
 
 ```javascript
-AskUserQuestion({
+ask user ({
   questions: [
     {
       question: "How many execution phases do you need?",
@@ -227,7 +227,7 @@ AskUserQuestion({
 #### Autonomous Mode
 
 ```javascript
-AskUserQuestion({
+ask user ({
   questions: [
     {
       question: "What are the core actions?",
@@ -249,7 +249,7 @@ AskUserQuestion({
 ### Phase 4: Context Strategy (P0 Enhancement)
 
 ```javascript
-AskUserQuestion({
+ask user ({
   questions: [
     {
       question: "Select context management strategy:",
@@ -273,7 +273,7 @@ AskUserQuestion({
 ### Phase 5: LLM Integration (P1 Enhancement)
 
 ```javascript
-AskUserQuestion({
+ask user ({
   questions: [
     {
       question: "Do you need LLM invocation capability?",
@@ -295,7 +295,7 @@ AskUserQuestion({
 
 // If LLM enabled
 if (llmEnabled) {
-  AskUserQuestion({
+  ask user ({
     questions: [
       {
         question: "Select default LLM tool:",
@@ -315,7 +315,7 @@ if (llmEnabled) {
 ### Phase 6: Tool Dependencies
 
 ```javascript
-AskUserQuestion({
+ask user ({
   questions: [
     {
       question: "What tools do you need?",
@@ -323,7 +323,7 @@ AskUserQuestion({
       multiSelect: true,
       options: [
         { label: "Basic tools", description: "Task, Read, Write, Glob, Grep, Bash" },
-        { label: "User interaction", description: "AskUserQuestion" },
+        { label: "User interaction", description: "user prompt" },
         { label: "Chrome screenshot", description: "mcp__chrome__*" },
         { label: "External search", description: "mcp__exa__search" },
         { label: "maestro delegate invocation", description: "maestro delegate (agy/qwen/codex)" }
@@ -458,7 +458,7 @@ function validateSkillConfig(config) {
     ],
     "termination_conditions": ["user_exit", "error_limit"]
   },
-  "allowed_tools": ["Task", "AskUserQuestion", "Read", "Write"],
+  "allowed_tools": ["Task", "user prompt", "Read", "Write"],
   "output": {
     "format": "json",
     "location": "{run_dir}/outputs/tasks",

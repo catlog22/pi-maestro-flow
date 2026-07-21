@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Coordinator Role
 
@@ -54,7 +54,7 @@ For callback/check/resume/adapt/complete: load `@commands/monitor.md`, execute m
 1. Scan `{run_dir}/work/team/.msg/meta.json` for active/paused sessions
 2. No sessions -> Phase 1
 3. Single session -> reconcile (audit todo({ action: "list" }), reset in_progress->pending, rebuild team, kick first ready task)
-4. Multiple -> AskUserQuestion for selection
+4. Multiple -> user prompt for selection
 
 ## Phase 1: Requirement Clarification
 
@@ -63,7 +63,7 @@ TEXT-LEVEL ONLY. No source code reading.
 1. Parse `$ARGUMENTS` for project path and framework flag:
    - `<project-path>` (required)
    - `--framework react|vue` (optional, auto-detect if omitted)
-2. If project path missing -> AskUserQuestion for path
+2. If project path missing -> user prompt for path
 3. Delegate to `@commands/analyze.md` -> output scope context
 4. Store: project_path, framework, pipeline_mode, issue_signals
 
@@ -90,7 +90,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-ux-improve --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-ux-improve --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-ux-improve-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -126,14 +126,14 @@ Delegate to `@commands/monitor.md#handleSpawnNext`:
 | Test Report | {run_dir}/outputs/test-report.md |
 
 3. **Wisdom Consolidation**: Check `{run_dir}/work/team/wisdom/contributions/` for worker contributions
-   - If contributions exist -> AskUserQuestion to merge to permanent wisdom
+   - If contributions exist -> user prompt to merge to permanent wisdom
    - If approved -> copy to `<skill_root>/wisdom/`
 
 4. Calculate: completed_tasks, total_issues_found, issues_fixed, test_pass_rate
 5. Output pipeline summary with [coordinator] prefix
 6. Execute completion action:
    ```
-   AskUserQuestion({
+   ask user ({
      questions: [{ question: "Pipeline complete. What next?", header: "Completion", options: [
        { label: "Archive & Clean", description: "Archive session and clean up team resources" },
        { label: "Keep Active", description: "Keep session for follow-up work" },
@@ -147,7 +147,7 @@ Delegate to `@commands/monitor.md#handleSpawnNext`:
 | Error | Resolution |
 |-------|------------|
 | Project path invalid | Re-prompt user for valid path |
-| Framework detection fails | AskUserQuestion for framework selection |
+| Framework detection fails | user prompt for framework selection |
 | Task timeout | Log, mark failed, ask user to retry or skip |
 | Worker crash | Reset task to pending, respawn worker |
 | Dependency cycle | Detect, report to user, halt |

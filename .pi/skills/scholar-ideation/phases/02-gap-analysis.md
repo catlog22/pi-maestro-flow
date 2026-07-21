@@ -230,7 +230,7 @@ Compile results into a structured analysis:
 
 Present gap analysis to user for feedback (unless autoYes):
 ```
-AskUserQuestion:
+user prompt:
   question: "Here is the gap analysis. Which gaps interest you most? Would you like to adjust priorities?"
   → Incorporate user feedback into final priorities
 ```

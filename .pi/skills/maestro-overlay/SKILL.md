@@ -33,7 +33,7 @@ survives reinstall.
 
 **Where overlays live**
 - User overlays: `~/.maestro/overlays/*.json` — created by this skill
-- Shared docs: `~/.maestro/overlays/docs/*.md` — referenced via `@~/.maestro/overlays/docs/*.md` inside patch content
+- Shared docs: `~/.maestro/overlays/docs/*.md` — referenced via `~/.maestro/overlays/docs/*.md` inside patch content
 - Shipped examples: `~/.maestro/overlays/_shipped/` — read-only, do not edit
 
 **Management** — listing and removing overlays is handled by `maestro overlay list` (ink TUI with interactive delete). This skill focuses solely on creation.
@@ -51,7 +51,7 @@ survives reinstall.
 | `--scan` | Auto-scan .workflow/ | Discover all workflow-related signals |
 | _(positional text)_ | User description | Direct observation |
 
-Multiple combinable. `--amend` with no flags/description → interactive (scan + AskUserQuestion).
+Multiple combinable. `--amend` with no flags/description → interactive (scan + user prompt).
 Amend control: `--dry-run` (preview, don't install), `-y` (skip confirmations).
 Amend output: `~/.maestro/overlays/amend-{slug}.json` + optional `~/.maestro/overlays/docs/amend-{slug}.md`.
 
@@ -63,8 +63,8 @@ Amend output: `~/.maestro/overlays/amend-{slug}.json` + optional `~/.maestro/ove
 2. **Idempotent** — re-running `maestro overlay apply` with the same overlay JSON MUST produce no file changes
 3. **Creation only** — this skill MUST only create overlays; listing and removal are handled by `maestro overlay list` (ink TUI)
 4. **Pristine source preferred** — injection point analysis MUST read from `$PKG_ROOT/.claude/commands/` (untouched originals) first, fall back to `~/.claude/commands/` only if pristine unavailable
-5. **User approval before write** — overlay JSON MUST be shown and approved via AskUserQuestion before writing to disk; NEVER auto-install without confirmation
-6. **Chain skip option mandatory** — if a skill chain is configured, the injected content MUST include a "Skip" option in AskUserQuestion; NEVER force the user into a chain
+5. **User approval before write** — overlay JSON MUST be shown and approved via user prompt before writing to disk; NEVER auto-install without confirmation
+6. **Chain skip option mandatory** — if a skill chain is configured, the injected content MUST include a "Skip" option in user prompt; NEVER force the user into a chain
 
 **Amend mode only** (when `--amend`):
 
@@ -79,7 +79,7 @@ Amend output: `~/.maestro/overlays/amend-{slug}.json` + optional `~/.maestro/ove
 
 ### 1. Parse user intent
 
-Treat the argument as natural-language intent. If unclear, ask up to 2 questions with AskUserQuestion: (a) which command(s) to target, (b) where in the command flow the injection should happen.
+Treat the argument as natural-language intent. If unclear, ask up to 2 questions with user prompt: (a) which command(s) to target, (b) where in the command flow the injection should happen.
 
 ### 2. Identify targets, injection points, and visualize
 
@@ -106,18 +106,18 @@ If the user wants a whole new section, use `mode: new-section` with `afterSectio
   <success_criteria>
 ```
 
-Use AskUserQuestion to confirm:
+Use user prompt to confirm:
 - **"Confirm"** — proceed with this injection point
 - **"Pick different section"** — re-select section/mode
 - **"Cancel"** — abort
 
 ### 2.5. Skill chain configuration
 
-After confirming the injection point, ask whether this overlay should chain to another skill upon completion. This enables the overlay's injected content to hand off to a skill via AskUserQuestion at runtime, using `Skill({ skill: "...", args: "..." })` syntax.
+After confirming the injection point, ask whether this overlay should chain to another skill upon completion. This enables the overlay's injected content to hand off to a skill via user prompt at runtime, using `invoke /skill: "...", args: "..." })` syntax.
 
-Use AskUserQuestion:
+Use user prompt:
 - **"No chain"** — standard overlay, no skill handoff
-- **"Chain to skill"** → ask for the target skill name (e.g., a step like `review`, `execute`, `test` invoked via `maestro run prepare --platform pi <step>` + `maestro run create <step> --session YYYYMMDD-<step>-{topic} --intent "{goal}"`)
+- **"Chain to skill"** → ask for the target skill name (e.g., a step like `review`, `execute`, `test` invoked via `maestro run start "{goal}" --cmd <step> --topic "{topic}" --platform pi --workflow-root .`, or via `maestro run edit <step> --after latest --workflow-root .` inside an existing chain)
 - **"Chain with alternatives"** → ask for primary skill + 1-2 alternative skills
 
 If chain is selected, record the skill name(s) for use in Step 3.
@@ -146,37 +146,37 @@ Build a slug from the user's intent (kebab-case, lowercase). Write to `~/.maestr
 **Content guidelines**
 - Lead the injected block with a heading that includes `(overlay)` so readers see it's machine-injected
 - Keep content concise — overlays should add a step, not rewrite the command
-- `@~/.maestro/...` references are encouraged for pointing at docs
+- `~/.maestro/...` references are encouraged for pointing at docs
 - Escape `\n` in JSON strings; use a HEREDOC via Bash if content is long
 
-**Skill chain content** — if a chain was configured in Step 2.5, append a Skill Handoff block at the end of the patch `content`. The handoff uses AskUserQuestion so the user controls whether to proceed:
+**Skill chain content** — if a chain was configured in Step 2.5, append a Skill Handoff block at the end of the patch `content`. The handoff uses user prompt so the user controls whether to proceed:
 
 ```markdown
 ---
 
 **Skill Handoff** (overlay)
 
-After the above step completes, use AskUserQuestion:
-- "Proceed to review" — Hand off to step `review` (`maestro run prepare --platform pi review` + `maestro run create review --session YYYYMMDD-review-{topic} --intent "{goal}"`)
+After the above step completes, use user prompt:
+- "Proceed to review" — Hand off to step `review` (`maestro run edit review --after latest --workflow-root .`, or `maestro run start "{goal}" --cmd review --topic "{topic}" --platform pi --workflow-root .` when no chain exists)
 - "Skip" — Continue with current command flow
 - "Alternative: execute" — Run step `execute` with built-in verification instead
 
 On user selection:
-- Proceed → run step `review` (`maestro run prepare --platform pi review` + `maestro run create review --session YYYYMMDD-review-{topic} --intent "{goal}"`)
-- Alternative → run step `execute` (`maestro run prepare --platform pi execute` + `maestro run create execute --session YYYYMMDD-execute-{topic} --intent "{goal}"`)
+- Proceed → run step `review` (`maestro run edit review --after latest --workflow-root .`, or `maestro run start "{goal}" --cmd review --topic "{topic}" --platform pi --workflow-root .` when no chain exists)
+- Alternative → run step `execute` (`maestro run edit execute --after latest --workflow-root .`, or `maestro run start "{goal}" --cmd execute --topic "{topic}" --platform pi --workflow-root .` when no chain exists)
 - Skip → continue normally
 ```
 
 Handoff rules:
 - Always include a **"Skip"** option — the user can always decline the chain
-- Use `Skill({ skill: "<name>", args: "..." })` syntax for handoff calls
+- Use `invoke /skill: "<name>", args: "..." })` syntax for handoff calls
 - Mark handoff heading with `(overlay)` tag
 - Support runtime variable placeholders: `{phase}`, `{description}`, `{session_id}`
 - Keep handoff block under 10 lines of markdown
 
 ### 3.5. Content approval
 
-Display the full overlay JSON to the user. AskUserQuestion:
+Display the full overlay JSON to the user. user prompt:
 - **"Approve & install"** — proceed to installation
 - **"Edit"** — user provides corrections, re-draft
 - **"Cancel"** — discard overlay, do not write
@@ -207,7 +207,7 @@ Show the user:
 Name:    <slug>
 Path:    ~/.maestro/overlays/<slug>.json
 Targets: quick (applied), maestro-init (skipped: missing)
-Chain:   review (via AskUserQuestion) | none
+Chain:   review (via user prompt) | none
 Scopes:  [global]
 
 Re-apply: maestro overlay apply
@@ -273,7 +273,7 @@ Group by target command + section (merge same command+section). Granularity: 1-2
 
 ### D. Preview & confirm
 
-Display the section map with injection points. AskUserQuestion: **Apply all** / **Select patches** / **Edit** (modify signal target/section, loop back) / **Cancel**. Skip confirmation if `-y`.
+Display the section map with injection points. user prompt: **Apply all** / **Select patches** / **Edit** (modify signal target/section, loop back) / **Cancel**. Skip confirmation if `-y`.
 
 ### E. Draft overlays
 
@@ -315,7 +315,7 @@ Default mode:
 - [ ] Re-running `maestro overlay apply` produces no file changes (idempotent)
 - [ ] User shown the report with target list and removal instructions
 - [ ] Injection point preview shown (with existing overlays + `>>>` marker) and confirmed before drafting
-- [ ] If chain configured, `content` includes Skill Handoff block with AskUserQuestion + Skip option + `Skill()` calls
+- [ ] If chain configured, `content` includes Skill Handoff block with user prompt + Skip option + `Skill()` calls
 
 Amend mode:
 - [ ] Signals classified: command deficiency vs code bug

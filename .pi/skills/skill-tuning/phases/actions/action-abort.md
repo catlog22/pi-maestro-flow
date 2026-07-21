@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Action: Abort
 
@@ -110,7 +110,7 @@ ${state.current_action || 'Unknown'}
   Write(`${workDir}/errors.json`, JSON.stringify(errors, null, 2));
 
   // Notify user
-  await AskUserQuestion({
+  await ask user ({
     questions: [{
       question: `Skill tuning aborted due to ${errors.length} errors. Would you like to restore the original skill?`,
       header: 'Restore',

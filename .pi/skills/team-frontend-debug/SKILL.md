@@ -18,7 +18,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Frontend Debug Team
@@ -148,7 +148,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 When pipeline completes, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Pipeline complete. What would you like to do?",
     header: "Completion",

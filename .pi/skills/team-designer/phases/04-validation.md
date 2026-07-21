@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Phase 4: Validation
 
@@ -300,7 +300,7 @@ Usage:
 
 ```javascript
 if (report.gate === 'FAIL') {
-  const recovery = AskUserQuestion({
+  const recovery = ask user ({
     questions: [{
       question: `Validation found ${report.errors.length} errors. How to proceed?`,
       header: "Recovery",

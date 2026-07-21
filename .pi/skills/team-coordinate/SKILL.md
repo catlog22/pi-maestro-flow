@@ -17,7 +17,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Coordinate 
@@ -140,7 +140,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 When pipeline completes (all tasks done), coordinator presents an interactive choice:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Team pipeline complete. What would you like to do?",
     header: "Completion",
@@ -236,7 +236,7 @@ AskUserQuestion({
 Coordinator supports `resume` / `continue` for interrupted sessions:
 
 1. Scan `{run_dir}/work/team/team-session.json` for active/paused sessions
-2. Multiple matches -> AskUserQuestion for selection
+2. Multiple matches -> user prompt for selection
 3. Audit todo({ action: "list" }) -> reconcile session state <-> task status
 4. Reset in_progress -> pending (interrupted tasks)
 5. Rebuild team and spawn needed workers only

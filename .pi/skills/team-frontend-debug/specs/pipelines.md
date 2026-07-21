@@ -9,7 +9,7 @@
 | 功能, feature, 清单, list, 测试, test, 完成, done, 验收 | `test-pipeline` |
 | bug, 错误, 报错, crash, 问题, 不工作, 白屏, 异常 | `debug-pipeline` |
 | performance, 性能, slow, 慢, latency, memory | `debug-pipeline` (perf dimension) |
-| Ambiguous / unclear | AskUserQuestion |
+| Ambiguous / unclear | user prompt |
 
 ## 2. Test Pipeline (Feature-List Driven)
 
@@ -32,7 +32,7 @@ TEST-001 → [issues found?] → ANALYZE-001 → FIX-001 → VERIFY-001
 
 After TEST-001 completes, coordinator reads `TEST-001-issues.json`:
 - `issues.length === 0` → All pass. Skip downstream tasks, report success.
-- `issues.filter(i => i.severity !== "low").length === 0` → Only warnings. AskUserQuestion: fix or complete.
+- `issues.filter(i => i.severity !== "low").length === 0` → Only warnings. user prompt: fix or complete.
 - `issues.filter(i => i.severity === "high" || i.severity === "medium").length > 0` → Proceed with ANALYZE → FIX → VERIFY.
 
 ### Re-Fix Iteration

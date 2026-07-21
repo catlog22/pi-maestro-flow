@@ -17,7 +17,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Ultra Analyze
@@ -128,7 +128,7 @@ teammate({ agent: "team-worker", name: "<agent-name>", description: "Spawn <role
 When pipeline completes, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Ultra-Analyze pipeline complete. What would you like to do?",
     header: "Completion",
@@ -146,7 +146,7 @@ AskUserQuestion({
 |--------|--------|
 | Archive & Clean | Update session status="completed" -> TeamDelete() -> output final summary |
 | Keep Active | Update session status="paused" -> output resume instructions |
-| Export Results | AskUserQuestion for target path -> copy deliverables -> Archive & Clean |
+| Export Results | user prompt for target path -> copy deliverables -> Archive & Clean |
 
 ## Specs Reference
 

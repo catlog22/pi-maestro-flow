@@ -15,7 +15,7 @@
 | `--exec=codex` specified | Codex |
 | `--exec=agy` specified | Agy |
 | `-y` or `--yes` flag present | Auto (default Agy) |
-| No flags (interactive) | AskUserQuestion -> user choice |
+| No flags (interactive) | user prompt -> user choice |
 | Auto + task_count <= 3 | Agy |
 | Auto + task_count > 3 | Codex |
 

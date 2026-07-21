@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Phase 2: Scaffold Generation
 
@@ -159,7 +159,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 When pipeline completes, coordinator presents:
 
 \```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Pipeline complete. What would you like to do?",
     header: "Completion",

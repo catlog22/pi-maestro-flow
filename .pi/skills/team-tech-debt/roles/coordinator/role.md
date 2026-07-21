@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Coordinator Role
 
@@ -53,7 +53,7 @@ For callback/check/resume/complete: load `@commands/monitor.md`, execute matched
 1. Scan `{run_dir}/work/team/.msg/meta.json` for active/paused sessions
 2. No sessions -> Phase 1
 3. Single session -> reconcile (audit todo({ action: "list" }), reset in_progress->pending, rebuild team, kick first ready task)
-4. Multiple -> AskUserQuestion for selection
+4. Multiple -> user prompt for selection
 
 ## Phase 1: Requirement Clarification
 
@@ -70,7 +70,7 @@ TEXT-LEVEL ONLY. No source code reading.
 | Default | remediate |
 
 3. Ask for missing parameters (skip if auto mode):
-   - AskUserQuestion: Tech Debt Target (自定义 / 全项目扫描 / 完整治理 / 定向修复)
+   - user prompt: Tech Debt Target (自定义 / 全项目扫描 / 完整治理 / 定向修复)
 4. Store: mode, scope, focus, constraints
 5. Delegate to @commands/analyze.md -> output task-analysis context
 
@@ -89,7 +89,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-tech-debt --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-tech-debt --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-tech-debt-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -122,7 +122,7 @@ Delegate to @commands/monitor.md#handleSpawnNext:
 3. Calculate: debt_items_found, items_fixed, reduction_rate
 4. Generate report with mode, debt scores, validation status
 5. Output with [coordinator] prefix
-6. Execute completion action (AskUserQuestion: 新目标 / 深度修复 / 关闭团队)
+6. Execute completion action (user prompt: 新目标 / 深度修复 / 关闭团队)
 
 ## Error Handling
 

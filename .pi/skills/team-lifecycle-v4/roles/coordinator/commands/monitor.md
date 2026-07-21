@@ -39,7 +39,7 @@ Worker completed. Process and advance.
      f. Log: `team_msg(type="specialist_injection", data={ specialist, signals, priority, evidence })`
      g. Dedup: skip if same specialist already injected this session
 5. Check for checkpoints:
-   - CHECKPOINT-* with verdict "block" -> AskUserQuestion: Override / Revise upstream / Abort
+   - CHECKPOINT-* with verdict "block" -> user prompt: Override / Revise upstream / Abort
    - CHECKPOINT-* with verdict "warn" -> log risks to wisdom, proceed normally
    - CHECKPOINT-* with verdict "pass" -> proceed normally
    - QUALITY-001 -> display quality gate, pause for user commands
@@ -183,7 +183,7 @@ Pipeline done. Generate report and completion action.
   +- Run lifecycle completion:
   |   - Read run_id from team-session.json.run.run_id
   |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
-  |   - Run `maestro run complete <run_id>`
+  |   - Run `maestro run done <run_id>`
   |   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
   |
 2. Generate summary (deliverables, stats, discussions)

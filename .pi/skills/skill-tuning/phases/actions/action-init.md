@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Action: Initialize Tuning Session
 
@@ -23,7 +23,7 @@ Initialize the skill-tuning session by collecting target skill information, crea
 ```javascript
 async function execute(state, workDir) {
   // 1. Ask user for target skill
-  const skillInput = await AskUserQuestion({
+  const skillInput = await ask user ({
     questions: [{
       question: "Which skill do you want to tune?",
       header: "Target Skill",
@@ -58,7 +58,7 @@ async function execute(state, workDir) {
   const specs = Glob(`${skillPath}/specs/**/*.md`).map(f => f.replace(skillPath + '/', ''));
 
   // 6. Ask for problem description
-  const issueInput = await AskUserQuestion({
+  const issueInput = await ask user ({
     questions: [{
       question: "Describe the issue or what you want to optimize:",
       header: "Issue",
@@ -73,7 +73,7 @@ async function execute(state, workDir) {
   });
 
   // 7. Ask for focus areas
-  const focusInput = await AskUserQuestion({
+  const focusInput = await ask user ({
     questions: [{
       question: "Which areas should be diagnosed? (Select all that apply)",
       header: "Focus",

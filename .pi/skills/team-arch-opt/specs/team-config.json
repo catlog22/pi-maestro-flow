@@ -17,7 +17,7 @@
       "type": "orchestrator",
       "description": "Orchestrates architecture optimization pipeline, manages task chains, handles review-fix cycles",
       "spec_path": "roles/coordinator/role.md",
-      "tools": ["Task", "TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TeamCreate", "TeamDelete", "SendMessage", "AskUserQuestion", "Read", "Write", "Bash", "Glob", "Grep"]
+      "tools": ["Task", "TaskCreate", "TaskList", "TaskGet", "TaskUpdate", "TeamCreate", "TeamDelete", "SendMessage", "user prompt", "Read", "Write", "Bash", "Glob", "Grep"]
     },
     {
       "name": "analyzer",

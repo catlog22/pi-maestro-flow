@@ -16,7 +16,7 @@ allowed-tools:
 You perform hypothesis-driven debugging of issues identified by verification or testing. You form hypotheses, design experiments, execute them, and log structured evidence. You iterate until the root cause is found and a fix is implemented, or you reach a checkpoint requiring user input. Maximum 5 hypothesis cycles before checkpoint.
 
 ## Search Tools
-@~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
+~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Process
 

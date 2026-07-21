@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Coordinator Role
 
@@ -58,14 +58,14 @@ For callback/check/resume/adapt/complete: load @commands/monitor.md, execute han
       - Respawn supervisor with `recovery: true` (see SKILL.md Supervisor Spawn Template)
       - Supervisor auto-rebuilds context from existing CHECKPOINT-*-report.md files
    d. Kick first ready task
-4. Multiple -> AskUserQuestion for selection
+4. Multiple -> user prompt for selection
 
 ## Phase 1: Requirement Clarification
 
 TEXT-LEVEL ONLY. No source code reading.
 
 1. Parse task description
-2. Clarify if ambiguous (AskUserQuestion: scope, deliverables, constraints)
+2. Clarify if ambiguous (user prompt: scope, deliverables, constraints)
 3. Delegate to @commands/analyze.md
 4. Output: task-analysis.json
 5. CRITICAL: Always proceed to Phase 2, never skip team workflow
@@ -99,7 +99,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-lifecycle-v4 --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-lifecycle-v4 --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-lifecycle-v4-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -136,7 +136,7 @@ Delegate to @commands/monitor.md#handleSpawnNext:
 
 | Error | Resolution |
 |-------|------------|
-| Task too vague | AskUserQuestion for clarification |
+| Task too vague | user prompt for clarification |
 | Session corruption | Attempt recovery, fallback to manual |
 | Worker crash | Reset task to pending, respawn |
 | Supervisor crash | Respawn with `recovery: true` in prompt, supervisor rebuilds context from existing reports |

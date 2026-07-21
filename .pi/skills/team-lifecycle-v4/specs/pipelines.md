@@ -10,7 +10,7 @@
 | implement, build, fix, code | `impl-only` |
 | full, lifecycle, end-to-end | `full-lifecycle` |
 | frontend, UI, react, vue | `fe-only` or `fullstack` |
-| Ambiguous / unclear | AskUserQuestion |
+| Ambiguous / unclear | user prompt |
 
 ## 2. Spec-Only Pipeline
 

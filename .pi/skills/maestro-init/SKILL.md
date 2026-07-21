@@ -48,7 +48,7 @@ Check for `.workflow/state.json` -- loads context if project already initialized
 </invariants>
 
 <interview_protocol>
-Follows @~/.maestro/workflows/interview-mechanics.md standard.
+Follows ~/.maestro/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (strict order): project type (greenfield / existing codebase onboarding) → tech stack detection and confirmation → directory structure preferences → initial configuration (specs categories, wiki bootstrap)
@@ -129,11 +129,11 @@ Verdicts:
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Roadmap needed (default light) | step `roadmap` (`maestro run prepare --platform pi roadmap` + `maestro run create roadmap --session YYYYMMDD-roadmap-{topic} --intent "{goal}"`) |
-| Full spec package | step `blueprint` (`maestro run prepare --platform pi blueprint` + `maestro run create blueprint --session YYYYMMDD-blueprint-{topic} --intent "{goal}"`) |
-| Explore ideas first | step `brainstorm` (`maestro run prepare --platform pi brainstorm` + `maestro run create brainstorm --session YYYYMMDD-brainstorm-{topic} --intent "{goal}"`) |
+| Roadmap needed (default light) | step `roadmap` (`maestro run start "{goal}" --cmd roadmap --topic "{topic}" --platform pi --workflow-root .`) |
+| Full spec package | step `blueprint` (`maestro run start "{goal}" --cmd blueprint --topic "{topic}" --platform pi --workflow-root .`) |
+| Explore ideas first | step `brainstorm` (`maestro run start "{goal}" --cmd brainstorm --topic "{topic}" --platform pi --workflow-root .`) |
 | View project dashboard | `/manage status` |
-| Quick ad-hoc task | step `quick` (`maestro run prepare --platform pi quick` + `maestro run create quick --session YYYYMMDD-quick-{topic} --intent "{goal}"`) |
+| Quick ad-hoc task | step `quick` (`maestro run start "{goal}" --cmd quick --topic "{topic}" --platform pi --workflow-root .`) |
 </completion>
 
 <error_codes>

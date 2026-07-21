@@ -20,7 +20,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team UX Improve
@@ -140,7 +140,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 | Unknown command | Error with available command list |
 | Role not found | Error with role registry |
 | Project path invalid | Re-prompt user for valid path |
-| Framework detection fails | AskUserQuestion for framework selection |
+| Framework detection fails | user prompt for framework selection |
 | Session corruption | Attempt recovery, fallback to manual |
 | Fast-advance conflict | Coordinator reconciles on next callback |
 | No UI issues found | Complete with empty fix list, generate clean bill report |

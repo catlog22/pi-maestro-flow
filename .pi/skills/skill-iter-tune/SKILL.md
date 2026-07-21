@@ -16,7 +16,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 # Skill Iter Tune
@@ -85,7 +85,7 @@ if (autoYes) {
     executionMode: 'single'
   }
 } else {
-  const prefResponse = AskUserQuestion({
+  const prefResponse = ask user ({
     questions: [
       {
         question: "选择迭代调优配置：",
@@ -111,7 +111,7 @@ if (autoYes) {
   workflowPreferences = { autoYes: false, ...configMap[selected] }
 
   // ★ Mode selection: chain vs single
-  const modeResponse = AskUserQuestion({
+  const modeResponse = ask user ({
     questions: [{
       question: "选择调优模式：",
       header: "Tune Mode",

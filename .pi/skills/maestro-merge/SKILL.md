@@ -16,7 +16,7 @@ contract:
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 <purpose>
@@ -55,7 +55,7 @@ Follow '~/.maestro/workflows/merge.md' completely.
 <completion>
 ### Knowledge inquiry
 
-After successful merge, use `AskUserQuestion` to confirm knowledge persistence:
+After successful merge, use `user prompt` to confirm knowledge persistence:
 
 ```
 question: "Merge 完成。是否记录本次工作经验教训？"
@@ -72,8 +72,8 @@ User selects "记录经验" → prompt for title/insight, then persist via `Skil
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Merge complete | Skill({ skill: "manage", args: "status" }) |
-| Next dep-ready session | step `analyze` for session (`maestro run prepare --platform pi analyze --session {next-dep-ready-slug}` + `maestro run create analyze --session {next-dep-ready-slug} --intent "{goal}"`) |
+| Merge complete | invoke /skill: "manage", args: "status" }) |
+| Next dep-ready session | `maestro run start "{goal}" --cmd analyze --session {next-dep-ready-slug} --platform pi --workflow-root .` |
 </completion>
 
 <error_codes>

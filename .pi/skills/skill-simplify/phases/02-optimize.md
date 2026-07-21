@@ -36,7 +36,7 @@ Process `analysisResult.optimizationPlan.operations` sorted by priority:
 
 | Target Pattern | Action |
 |----------------|--------|
-| Multiple similar AskUserQuestion blocks | Extract shared function with mode parameter |
+| Multiple similar user prompt blocks | Extract shared function with mode parameter |
 | Repeated Option A/B/C routing | Unify into single dispatch |
 | Sequential single-line bash commands | Combine into single code block |
 | todo({ action: "update" }) full blocks x N | Template ONCE, subsequent as one-line comment |

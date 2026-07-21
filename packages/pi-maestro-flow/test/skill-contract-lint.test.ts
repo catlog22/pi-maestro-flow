@@ -14,6 +14,7 @@ const coreSkills = new Set([
   "maestro",
   "maestro-session-seal",
 ]);
+const piCoordinatorSkills = ["maestro-next", "maestro-ralph", "maestro"] as const;
 
 interface ContractFinding {
   file: string;
@@ -26,6 +27,36 @@ test("core Session/Run skills satisfy the host mirror contract", () => {
     const file = join(skillsRoot, name, "SKILL.md");
     return auditSkill(file, true);
   });
+  assert.deepEqual(findings, []);
+});
+
+test("Pi coordinators consume the read-only Topic Session reuse contract", () => {
+  for (const name of piCoordinatorSkills) {
+    const file = join(skillsRoot, name, "SKILL.md");
+    const content = readFileSync(file, "utf8");
+
+    assert.match(content, /Topic Session resolution/, `${name}: missing Topic Session resolution`);
+    assert.match(content, /ReuseAssessment/, `${name}: missing ReuseAssessment`);
+    assert.match(content, /same-Session sealed|同 Session sealed|Same-Session sealed/i, `${name}: missing sealed same-Session output fence`);
+    assert.match(content, /argument_requirements/, `${name}: missing structured argument requirements`);
+    for (const field of ["required", "missing", "type", "source", "default", "question"]) {
+      assert.match(content, new RegExp(`\\b${field}\\b`), `${name}: argument requirement field ${field} is undocumented`);
+    }
+    assert.match(content, /brief\.command/, `${name}: compact birth packet must point to brief.command`);
+    assert.match(content, /suggest_only=true|suggest_only === true/, `${name}: completion next must be suggest-only`);
+
+    assert.doesNotMatch(content, /maestro\s+run\s+(?:recall-confirm|fork|import|new|rebind)\b/i, `${name}: legacy Run mutation is recommended`);
+    assert.doesNotMatch(content, /maestro\s+session\s+resume\b/i, `${name}: historical Session mutation is recommended`);
+    assert.doesNotMatch(content, /\.workflow[\\/]state\.json/i, `${name}: local projection must not drive Topic Session resolution`);
+  }
+
+  const ralph = readFileSync(join(skillsRoot, "maestro-ralph", "SKILL.md"), "utf8");
+  assert.doesNotMatch(ralph, /`--(?:from|dir)\b/i, "maestro-ralph must consume selected artifact refs instead of composing source/path args");
+});
+
+test("generated Pi prompts use the current Run/Session human CLI", () => {
+  const generatedRoot = join(repoRoot, ".pi");
+  const findings = listPromptFiles(generatedRoot).flatMap((file) => auditRunSessionPrompt(file));
   assert.deepEqual(findings, []);
 });
 
@@ -103,6 +134,37 @@ function listSkillFiles(root: string): string[] {
     else if (entry.isFile() && entry.name === "SKILL.md") files.push(path);
   }
   return files;
+}
+
+function listPromptFiles(root: string): string[] {
+  const files: string[] = [];
+  for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const path = join(root, entry.name);
+    if (entry.isDirectory()) files.push(...listPromptFiles(path));
+    else if (entry.isFile() && (entry.name.endsWith(".md") || entry.name.endsWith(".json"))) files.push(path);
+  }
+  return files;
+}
+
+function auditRunSessionPrompt(file: string): ContractFinding[] {
+  const content = readFileSync(file, "utf8");
+  const displayPath = relative(repoRoot, file).replaceAll("\\", "/");
+  const findings: ContractFinding[] = [];
+
+  for (const [index, line] of content.split(/\r?\n/).entries()) {
+    if (/\bmaestro\s+run\s+(?:prepare|create)\b/i.test(line) && !isNegativeExample(line)) {
+      findings.push({ file: displayPath, rule: "legacy-run-entry", detail: `line ${index + 1}: ${line.trim()}` });
+    }
+    if (/\bmaestro\s+session\s+create\b[^\n]*--chain-file\b/i.test(line)
+      && !/(?:advanced|高级|internal|machine|decision_points|decomposition|argument_requirements|retry)/i.test(line)) {
+      findings.push({ file: displayPath, rule: "chain-file-default", detail: `line ${index + 1}: ${line.trim()}` });
+    }
+  }
+  return findings;
+}
+
+function isNegativeExample(line: string): boolean {
+  return /(?:禁止|不得|do not|must not|never|avoid|不要|不调用|不重复)/i.test(line);
 }
 
 function oneLine(value: string): string {

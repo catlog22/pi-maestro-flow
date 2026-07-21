@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Action: Analyze Requirements
 
@@ -271,7 +271,7 @@ async function handleAmbiguities(ambiguities, dimensions) {
     };
   });
   
-  return await AskUserQuestion({ questions });
+  return await ask user ({ questions });
 }
 
 function getCategoryLabel(category) {

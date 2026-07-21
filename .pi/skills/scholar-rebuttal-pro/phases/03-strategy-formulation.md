@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 3: Strategy Formulation
 
@@ -420,7 +420,7 @@ Write("{run_dir}/outputs/evidence-references.json", JSON.stringify(evidenceRefer
 
 ```javascript
 if (!workflowPreferences.autoYes) {
-  const confirm = AskUserQuestion({
+  const confirm = ask user ({
     questions: [{
       question: "Review strategy matrix and evidence references. Proceed to rebuttal writing?",
       header: "Confirm",

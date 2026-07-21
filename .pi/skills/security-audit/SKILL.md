@@ -15,7 +15,7 @@ contract:
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 <purpose>
@@ -205,8 +205,8 @@ maestro run complete --session {session_id} --verdict {VERDICT} [--evidence {pat
 
 | Condition | Suggestion |
 |-----------|-----------|
-| No critical findings | `maestro run create review --session YYYYMMDD-review-{topic} --intent "{goal}" -- {phase}` |
-| Critical findings need fix | `maestro run create plan --session YYYYMMDD-plan-{topic} --intent "{goal}" -- {phase} --gaps` |
+| No critical findings | `maestro run start "{goal}" --cmd review --topic "{topic}" --arg "{phase}" --platform pi --workflow-root .` |
+| Critical findings need fix | `maestro run start "{goal}" --cmd plan --topic "{topic}" --arg "{phase}" --arg "--gaps" --platform pi --workflow-root .` |
 | Need deeper analysis | `/security-audit deep --scope {path}` |
 | Want dependency remediation | Fix vulnerabilities, then re-run `/security-audit` |
 </completion>

@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Coordinator Role
 
@@ -54,7 +54,7 @@ For callback/check/resume/adapt/complete: load `@commands/monitor.md`, execute m
 1. Scan `{run_dir}/work/team/.msg/meta.json` for active/paused sessions
 2. No sessions -> Phase 1
 3. Single session -> reconcile (audit todo({ action: "list" }), reset in_progress->pending, rebuild team, kick first ready task)
-4. Multiple -> AskUserQuestion for selection
+4. Multiple -> user prompt for selection
 
 ## Phase 1: Requirement Clarification
 
@@ -72,7 +72,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 3. Ask for missing parameters if scope unclear:
    ```
-   AskUserQuestion({
+   ask user ({
      questions: [
        { question: "Interactive component scope?", header: "Scope", options: [
          { label: "Single component", description: "One interactive element (split compare, lightbox, etc.)" },
@@ -114,7 +114,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-interactive-craft --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-interactive-craft --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-interactive-craft-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -159,7 +159,7 @@ Delegate to `@commands/monitor.md#handleSpawnNext`:
 4. Output pipeline summary with [coordinator] prefix
 5. Execute completion action:
    ```
-   AskUserQuestion({
+   ask user ({
      questions: [{ question: "Pipeline complete. What next?", header: "Completion", options: [
        { label: "Archive & Clean", description: "Archive session and clean up team resources" },
        { label: "Keep Active", description: "Keep session for follow-up work" },

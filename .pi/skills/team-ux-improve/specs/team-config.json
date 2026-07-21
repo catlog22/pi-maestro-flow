@@ -19,7 +19,7 @@
       "role_spec": "roles/coordinator/role.md",
       "task_prefix": null,
       "inner_loop": false,
-      "allowed_tools": ["Agent", "AskUserQuestion", "Read", "Write", "Bash", "Glob", "Grep", "TaskList", "TaskGet", "TaskUpdate", "TaskCreate", "TeamCreate", "TeamDelete", "SendMessage", "mcp__maestro__team_msg"],
+      "allowed_tools": ["Agent", "user prompt", "Read", "Write", "Bash", "Glob", "Grep", "TaskList", "TaskGet", "TaskUpdate", "TaskCreate", "TeamCreate", "TeamDelete", "SendMessage", "mcp__maestro__team_msg"],
       "description": "Orchestrates the UX improvement pipeline, spawns workers, monitors progress"
     },
     {

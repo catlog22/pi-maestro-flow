@@ -150,7 +150,7 @@ All tasks completed (no pending, no in_progress)
   +- Read session.completion_action:
       |
       +- "interactive":
-      |   AskUserQuestion -> user choice:
+      |   user prompt -> user choice:
       |   +- "Archive & Clean": session status="completed" -> TeamDelete -> summary
       |   +- "Keep Active": session status="paused" -> resume command
       |   +- "Export Results": copy artifacts -> Archive & Clean

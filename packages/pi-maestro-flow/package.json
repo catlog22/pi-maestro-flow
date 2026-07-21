@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.4.11",
+  "version": "0.4.12",
   "description": "Pi extension for Maestro knowledge and workflow orchestration with teammate dispatch",
   "type": "module",
   "engines": {
@@ -11,7 +11,9 @@
     "prepack": "node scripts/prepare-package-skills.mjs",
     "postpack": "node scripts/prepare-package-skills.mjs --clean",
     "test:install": "node --test test/configure-keybindings.test.mjs test/install-workflows.test.mjs",
-    "test:package": "node --experimental-transform-types --test test/prepare-package-skills.test.mjs test/package-resources.test.mjs test/package-resources-runtime.test.ts",
+    "test:package": "node scripts/verify-maestro-run-capabilities.mjs && node --experimental-transform-types --test test/prepare-package-skills.test.mjs test/package-resources.test.mjs test/package-resources-runtime.test.ts",
+    "test:conversion": "node --experimental-transform-types --test test/convert-pi.test.mjs test/maestro-run-capabilities.test.mjs test/skill-contract-lint.test.ts",
+    "check:maestro-run-cli": "node scripts/verify-maestro-run-capabilities.mjs",
     "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/todo.test.ts test/todo-overlay.test.ts",
     "test:compaction": "node --experimental-transform-types --test test/compaction.test.ts",
     "test:hooks": "node --experimental-transform-types --test test/hooks.test.ts",
@@ -66,7 +68,7 @@
     "@earendil-works/pi-tui": "0.74.0",
     "@konbakuyomu/smart-search": "https://codeload.github.com/konbakuyomu/smartsearch/tar.gz/667c465d0f6ea16a423f03c434f94e21505d3595",
     "cross-spawn": "7.0.6",
-    "maestro-flow": "0.5.52",
+    "maestro-flow": "0.5.53",
     "pi-maestro-teammate": "0.4.5",
     "puppeteer-core": "24.31.0",
     "typebox": "1.1.24"

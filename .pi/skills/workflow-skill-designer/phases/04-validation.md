@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 4: Validation & Integration
 
@@ -410,7 +410,7 @@ If validation fails, offer recovery options:
 
 ```javascript
 if (report.gate === 'FAIL') {
-  const recovery = AskUserQuestion({
+  const recovery = ask user ({
     questions: [{
       question: `Validation found ${report.errors.length} errors. How to proceed?`,
       header: "Recovery",
@@ -452,7 +452,7 @@ Design Patterns Applied:
   ✓ Phase file hygiene (no flag parsing, no invocation syntax)
   ${config.features.hasTodoWriteSubTasks ? '✓' : '○'} todo({ action: "update" }) attachment/collapse
   ${config.features.hasConditionalPhases ? '✓' : '○'} Conditional phase execution
-  ${config.features.hasAutoMode ? '✓' : '○'} Interactive preference collection (AskUserQuestion)
+  ${config.features.hasAutoMode ? '✓' : '○'} Interactive preference collection (user prompt)
   ${config.features.hasPostPhaseUpdates ? '✓' : '○'} Post-phase state updates
   ${config.features.hasPlanningNotes ? '✓' : '○'} Accumulated planning notes
 

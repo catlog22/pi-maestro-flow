@@ -63,7 +63,7 @@ const inventory = {
 - **Data structures**: Match `const xxx = {`, `const xxx = [`, JSON schema objects
 - **Routing branches**: Match `if/else`, `switch/case`, ternary `? :` with meaningful branching
 - **Error handlers**: Match `catch`, error table rows `| Error |`, fallback patterns
-- **AskUserQuestion**: Match `AskUserQuestion({`, count questions array length
+- **user prompt**: Match `ask user ({`, count questions array length
 - **Input modes**: Match `Mode 1/2/3`, `--flag`, argument parsing
 - **Output artifacts**: Match `Write(`, `Output:`, file path patterns in comments
 - **todo({ action: "update" })**: Match `todo({ action: "update" })({`, count todo items
@@ -77,7 +77,7 @@ For each code block, determine its role:
 
 | Role | Criteria | Examples |
 |------|----------|---------|
-| `functional` | Contains algorithm logic, routing branches, conditional code, agent calls, schema definitions, data processing, AskUserQuestion, Skill invocations | `if/else`, `teammate({  })`, `const schema = {...}`, `Bash({...})` |
+| `functional` | Contains algorithm logic, routing branches, conditional code, agent calls, schema definitions, data processing, user prompt, Skill invocations | `if/else`, `teammate({  })`, `const schema = {...}`, `Bash({...})` |
 | `descriptive` | Contains ASCII art, usage examples, display templates, illustrative good/bad comparisons, folder structure trees | `┌───┐`, `# Example usage`, `❌ Bad / ✅ Good`, `├── file.ts` |
 
 **Classification rules**:
@@ -169,7 +169,7 @@ const redundancyMap = {
 
 | Pattern | Strategy |
 |---------|----------|
-| Multiple similar AskUserQuestion calls | Extract shared function with mode parameter |
+| Multiple similar user prompt calls | Extract shared function with mode parameter |
 | Repeated Option routing | Unify into single dispatch |
 | Sequential single-line operations | Combine into one code block |
 | todo({ action: "update" }) full blocks x N | Template once + delta comments |

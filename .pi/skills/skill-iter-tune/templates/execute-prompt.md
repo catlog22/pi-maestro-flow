@@ -37,7 +37,7 @@ EXPECTED:
 CONSTRAINTS:
 - Follow the skill execution flow exactly — do not skip or reorder phases
 - Produce realistic, high-quality output (not placeholder content)
-- If the skill requires user interaction (AskUserQuestion), use reasonable defaults
+- If the skill requires user interaction (user prompt), use reasonable defaults
 - If the skill invokes external tools/CLIs, document what would be called but produce expected output directly
 ```
 

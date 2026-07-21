@@ -18,7 +18,7 @@ contract:
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 <deferred_reading>
@@ -218,7 +218,7 @@ Before reading any command workflow:
    - `↺` marks refine loop with max iteration count
    - Conditional steps show trigger condition
    - Skipped conditional steps marked `(skipped)`
-3. **Confirm chain session**: AskUserQuestion "Create chain session for '{chain_type}' targeting '{target}'?" — proceed only if user confirms. On decline, abort chain.
+3. **Confirm chain session**: user prompt "Create chain session for '{chain_type}' targeting '{target}'?" — proceed only if user confirms. On decline, abort chain.
    Create session: `.workflow/.maestro/ui-craft-{YYYYMMDD-HHmmss}/status.json`
    ```json
    { "chain_type": "...", "target": "...", "steps": [...], "current_step": 0,
@@ -260,7 +260,7 @@ Extract a design system from existing source code into tokens, a reference packa
 ### Codify Invariants
 1. **Source read-only** — the source path being analyzed MUST NOT be modified; extraction is purely read-only
 2. **Phase-sequential loading** — workflow files (ui-codify-extract, ui-codify-package, ui-codify-knowhow) MUST be read only when their phase starts; NEVER load all phases eagerly
-3. **User confirmation before knowhow** — Phase 3→4 gate MUST present AskUserQuestion before generating knowledge assets; NEVER auto-proceed to knowhow generation
+3. **User confirmation before knowhow** — Phase 3→4 gate MUST present user prompt before generating knowledge assets; NEVER auto-proceed to knowhow generation
 4. **Overwrite protection** — existing package directory MUST NOT be overwritten without `--overwrite` flag (E102)
 5. **Artifact completeness** — all 5 required artifacts MUST exist before reporting completion; NEVER skip artifact verification
 6. **Token-first extraction** — design-tokens.json MUST be generated before layout-templates.json; layout extraction depends on token foundation
@@ -287,7 +287,7 @@ Route to `~/.maestro/workflows/ui-codify.md` and follow completely. The workflow
 **GATE Phase 3 → Phase 4: Package → Knowhow**
 - REQUIRED: preview.html + preview.css generated as interactive showcase.
 - BLOCKED if missing: preview artifacts not generated — knowhow phase needs rendered reference for validation.
-- REQUIRED: AskUserQuestion confirmation before proceeding to knowhow generation:
+- REQUIRED: user prompt confirmation before proceeding to knowhow generation:
   ```
   question: "Preview 生成完成。是否继续将设计系统持久化为 knowhow 知识资产？"
   options:

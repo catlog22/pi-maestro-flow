@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Coordinator Role
 
@@ -55,7 +55,7 @@ For callback/check/resume/iteration/complete: load commands/monitor.md, execute 
    a. Audit todo({ action: "list" }), reset in_progress->pending
    b. Rebuild team workers
    c. Kick first ready task
-4. Multiple -> AskUserQuestion for selection
+4. Multiple -> user prompt for selection
 
 ## Phase 1: Requirement Clarification
 
@@ -64,11 +64,11 @@ TEXT-LEVEL ONLY. No source code reading.
 1. Parse user input — detect mode:
    - Feature list / 功能清单 → **test-pipeline**
    - Bug report / 错误描述 → **debug-pipeline**
-   - Ambiguous → AskUserQuestion to clarify
+   - Ambiguous → user prompt to clarify
 2. Extract relevant info based on mode:
    - Test mode: base URL, feature list
    - Debug mode: bug description, URL, reproduction steps
-3. Clarify if ambiguous (AskUserQuestion)
+3. Clarify if ambiguous (user prompt)
 4. Delegate to @commands/analyze.md
 5. Output: task-analysis.json
 6. CRITICAL: Always proceed to Phase 2, never skip team workflow
@@ -98,7 +98,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-frontend-debug --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-frontend-debug --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-frontend-debug-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -138,7 +138,7 @@ Delegate to @commands/monitor.md#handleSpawnNext:
 
 | Error | Resolution |
 |-------|------------|
-| Bug report too vague | AskUserQuestion for URL, steps, expected behavior |
+| Bug report too vague | user prompt for URL, steps, expected behavior |
 | Session corruption | Attempt recovery, fallback to manual |
 | Worker crash | Reset task to pending, respawn |
 | Dependency cycle | Detect in analysis, halt |

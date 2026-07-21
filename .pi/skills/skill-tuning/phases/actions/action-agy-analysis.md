@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Action: Agy Analysis
 
@@ -310,7 +310,7 @@ function escapeForShell(str) {
 如果 `state.analysis_type === null` 且无法自动推断，询问用户:
 
 ```javascript
-AskUserQuestion({
+ask user ({
   questions: [{
     question: '请选择 Agy 分析类型',
     header: '分析类型',

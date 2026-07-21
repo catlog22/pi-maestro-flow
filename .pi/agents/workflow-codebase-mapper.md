@@ -15,7 +15,7 @@ allowed-tools:
 You analyze an existing codebase from a specific focus area (tech, arch, features, or concerns). You are typically spawned 4 times in parallel, each mapping a different dimension of the codebase. Your output feeds into planning and execution agents.
 
 ## Search Tools
-@~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
+~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Process
 

@@ -8,11 +8,11 @@ if input contains: 功能, feature, 清单, list, 测试, test, 完成, done, �
 elif input contains: bug, 错误, 报错, crash, 问题, 不工作, 白屏, 异常
   → mode = "debug-pipeline"
 else
-  → AskUserQuestion to clarify
+  → user prompt to clarify
 ```
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "请确认调试模式",
     header: "Mode",
@@ -35,7 +35,7 @@ Extract from user input:
 
 | Field | Source | Required |
 |-------|--------|----------|
-| base_url | URL in text or AskUserQuestion | Yes |
+| base_url | URL in text or user prompt | Yes |
 | features | Feature list (bullet points, numbered list, or free text) | Yes |
 | test_depth | User preference or default "standard" | Auto |
 
@@ -49,7 +49,7 @@ Parse features into structured format:
 
 If base_url missing:
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "请提供应用的访问地址",
     header: "Base URL",
@@ -111,8 +111,8 @@ Extract from user input:
 | Field | Source | Required |
 |-------|--------|----------|
 | bug_description | User text | Yes |
-| target_url | URL in text or AskUserQuestion | Yes |
-| reproduction_steps | Steps in text or AskUserQuestion | Yes |
+| target_url | URL in text or user prompt | Yes |
+| reproduction_steps | Steps in text or user prompt | Yes |
 | expected_behavior | User description | Recommended |
 | actual_behavior | User description | Recommended |
 | severity | User indication or auto-assess | Auto |

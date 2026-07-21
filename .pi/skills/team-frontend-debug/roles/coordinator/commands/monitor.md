@@ -28,7 +28,7 @@ Worker completed. Process and advance.
 4. Completion -> mark task done, remove from active_workers
 5. Check for special conditions:
    - **TEST-001 with 0 issues** -> skip ANALYZE/FIX/VERIFY (mark as completed), handleComplete
-   - **TEST-001 with only warnings** -> AskUserQuestion: fix warnings or complete
+   - **TEST-001 with only warnings** -> user prompt: fix warnings or complete
    - **TEST-001 with high/medium issues** -> proceed to ANALYZE-001
    - ANALYZE-001 with `need_more_evidence: true` -> handleIteration
    - VERIFY-001 with `verdict: fail` -> re-dispatch FIX (create FIX-002 blocked by VERIFY-001)
@@ -122,7 +122,7 @@ Pipeline done. Generate debug report and completion action.
   +- Run lifecycle completion:
   |   - Read run_id from team-session.json.run.run_id
   |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
-  |   - Run `maestro run complete <run_id>`
+  |   - Run `maestro run done <run_id>`
   |   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
   |
 

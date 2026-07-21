@@ -35,7 +35,7 @@ Worker completed. Process and advance.
 6. Check for checkpoints:
    - **TDPLAN-001 completes** -> Plan Approval Gate:
      ```
-     AskUserQuestion({
+     ask user ({
        questions: [{ question: "Remediation plan generated. Review and decide:",
          header: "Plan Review", multiSelect: false,
          options: [
@@ -164,7 +164,7 @@ Pipeline done. Generate report and completion action.
    - Run lifecycle completion:
      - Read run_id from team-session.json.run.run_id
      - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
-     - Run `maestro run complete <run_id>`
+     - Run `maestro run done <run_id>`
      - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
    - Read final state from .msg/meta.json
    - If worktree exists and validation passed: commit, push, gh pr create, cleanup worktree

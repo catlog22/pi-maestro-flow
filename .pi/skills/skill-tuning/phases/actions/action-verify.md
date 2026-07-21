@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Action: Verify Applied Fixes
 
@@ -155,7 +155,7 @@ async function execute(state, workDir) {
   // Ask user if they want to continue
   let continueIteration = false;
   if (newQualityGate !== 'pass' && newIterationCount < state.max_iterations) {
-    const continueResponse = await AskUserQuestion({
+    const continueResponse = await ask user ({
       questions: [{
         question: `Verification complete. Quality gate: ${newQualityGate}. Continue with another iteration?`,
         header: 'Continue',

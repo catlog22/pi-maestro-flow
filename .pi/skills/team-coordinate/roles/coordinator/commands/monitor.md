@@ -198,7 +198,7 @@ All tasks completed (no pending, no in_progress)
   +- Run lifecycle completion:
   |   - Read run_id from team-session.json.run.run_id
   |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
-  |   - Run `maestro run complete <run_id>`
+  |   - Run `maestro run done <run_id>`
   |   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
   |
   +- Generate pipeline summary:
@@ -209,7 +209,7 @@ All tasks completed (no pending, no in_progress)
   +- Read session.completion_action:
       |
       +- "interactive":
-      |   AskUserQuestion({
+      |   ask user ({
       |     questions: [{
       |       question: "Team pipeline complete. What would you like to do?",
       |       header: "Completion",
@@ -229,7 +229,7 @@ All tasks completed (no pending, no in_progress)
       |   |   Update session status="paused"
       |   |   Output: "Resume with: Skill(skill='team-coordinate', args='resume')"
       |   +- "Export Results":
-      |       AskUserQuestion for target directory
+      |       user prompt for target directory
       |       Copy deliverables to target
       |       Execute Archive & Clean flow
       |

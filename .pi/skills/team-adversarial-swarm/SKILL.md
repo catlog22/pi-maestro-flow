@@ -15,7 +15,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Adversarial Swarm
@@ -119,7 +119,7 @@ SKILL.md (Coordinator — this file)
 
 解析用户 intent，生成 `swarm-config.json`。
 
-若 intent 不够明确，用 AskUserQuestion 澄清：
+若 intent 不够明确，用 user prompt 澄清：
 - 搜索空间是什么？（文件 glob / 节点列表 / 抽象决策集）
 - 目标是什么？（最优方案 / 发现问题 / 优化路径）
 - 如何评分？（测试通过率 / lint / 自定义规则 / LLM 对抗评分）
@@ -150,7 +150,7 @@ Write 到 `{run_dir}/work/team/swarm-config.json`。
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-adversarial-swarm --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-adversarial-swarm --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-adversarial-swarm-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -206,7 +206,7 @@ Coordinator 负责 Workflow 间的数据桥接和 Python 脚本调用。
    })
    ```
 3. 将 synthesis 结果写入 `{run_dir}/outputs/best-solution.md`
-4. 展示完成摘要 + AskUserQuestion（归档 / 保留 / 导出 / 再跑一轮）
+4. 展示完成摘要 + user prompt（归档 / 保留 / 导出 / 再跑一轮）
 
 ---
 
@@ -246,16 +246,16 @@ synthesize(best, top_k) → best-solution.md
 | aco.py 未找到 | Glob team-swarm skill 路径；提示安装 |
 | Python < 3.10 | 尝试 python3；报告依赖 |
 | Workflow 执行失败 | 记录错误，提供 --resume 恢复点 |
-| 所有蚁全部失败 | 暂停，AskUserQuestion（重试/终止/调整config） |
+| 所有蚁全部失败 | 暂停，user prompt（重试/终止/调整config） |
 | 收敛从不触发 | max_iterations 安全网总会触发 |
-| 幻觉集群 (>50% 蚁被降分) | 暂停，AskUserQuestion（继续/调整评分规则） |
+| 幻觉集群 (>50% 蚁被降分) | 暂停，user prompt（继续/调整评分规则） |
 
 ## Completion
 
 Run lifecycle completion (before displaying results):
 - Read run_id from team-session.json.run.run_id
 - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
-- Run `maestro run complete <run_id>`
+- Run `maestro run done <run_id>`
 - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 
 展示最终结果 + 交互选择:

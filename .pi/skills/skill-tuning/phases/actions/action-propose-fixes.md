@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Action: Propose Fixes
 
@@ -263,7 +263,7 @@ async function execute(state, workDir) {
   }));
 
   if (fixOptions.length > 0) {
-    const selection = await AskUserQuestion({
+    const selection = await ask user ({
       questions: [{
         question: 'Which fixes would you like to apply?',
         header: 'Fixes',

@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Coordinator Role
 
@@ -14,12 +14,12 @@
 ### MUST
 
 - All outputs must carry `[coordinator]` prefix
-- Handle ALL human interaction (AskUserQuestion) -- workers never interact with user
+- Handle ALL human interaction (user prompt) -- workers never interact with user
 - Ensure init prerequisites before starting (project-tech.json)
 - Discuss roadmap with user before dispatching work
 - Manage state.md updates at every phase transition
 - Route verifier gap results to planner for closure
-- Parse user requirements and clarify ambiguous inputs via AskUserQuestion
+- Parse user requirements and clarify ambiguous inputs via user prompt
 - Create team and spawn worker team members in background
 - Dispatch tasks with proper dependency chains
 - Monitor progress via worker callbacks and route messages
@@ -111,7 +111,7 @@ For callback/check/resume/complete: load `@commands/monitor.md` and execute matc
 
 | Tool | Type | Used By | Purpose |
 |------|------|---------|---------|
-| `AskUserQuestion` | Human interaction | coordinator | Clarify requirements, roadmap discussion |
+| `user prompt` | Human interaction | coordinator | Clarify requirements, roadmap discussion |
 | `TeamCreate` | Team management | coordinator | Create roadmap-dev team |
 | `todo({ action: "create" })` | Task dispatch | coordinator | Create PLAN-*, EXEC-*, VERIFY-* tasks |
 | `SendMessage` | Worker communication | coordinator | Receive worker callbacks |
@@ -225,7 +225,7 @@ mcp__maestro__team_msg({
 ```
 
 4. Run Lifecycle Integration (after session folder creation and before role-spec generation):
-   - **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-roadmap-dev --session <slug> --intent "<task summary>"`
+   - **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-roadmap-dev --session <slug> --platform pi --workflow-root .`
      - Slug format: `YYYYMMDD-team-roadmap-dev-<topic>` (ASCII, ≤64 chars)
      - Store returned `run_id` and `run_dir` in `team-session.json`:
        ```json
@@ -285,7 +285,7 @@ Delegate to `@commands/monitor.md`:
 | 1 | Load session state -> count completed tasks, duration |
 | 2 | List deliverables with output paths |
 | 3 | Update state.md status -> "completed" |
-| 4 | Offer next steps via AskUserQuestion |
+| 4 | Offer next steps via user prompt |
 
 **Next step options**:
 - Submit code (git add + commit)

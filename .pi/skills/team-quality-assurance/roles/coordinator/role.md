@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Coordinator Role
 
@@ -52,7 +52,7 @@ For callback/check/resume/adapt/complete: load @commands/monitor.md, execute han
 1. Scan {run_dir}/work/team/session.json for active/paused sessions
 2. No sessions -> Phase 1
 3. Single session -> reconcile (audit todo({ action: "list" }), reset in_progress->pending, rebuild team, kick first ready task)
-4. Multiple -> AskUserQuestion for selection
+4. Multiple -> user prompt for selection
 
 ## Phase 1: Requirement Clarification
 
@@ -70,7 +70,7 @@ TEXT-LEVEL ONLY. No source code reading.
 | Task description contains: test/coverage/TDD keywords | testing |
 | No explicit flag and no keyword match | full (default) |
 
-3. Clarify if ambiguous (AskUserQuestion: scope, deliverables, constraints)
+3. Clarify if ambiguous (user prompt: scope, deliverables, constraints)
 4. Delegate to @commands/analyze.md
 5. Output: task-analysis.json
 6. CRITICAL: Always proceed to Phase 2, never skip team workflow
@@ -111,7 +111,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-quality-assurance --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-quality-assurance --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-quality-assurance-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -148,7 +148,7 @@ Delegate to @commands/monitor.md#handleSpawnNext:
 
 | Error | Resolution |
 |-------|------------|
-| Task too vague | AskUserQuestion for clarification |
+| Task too vague | user prompt for clarification |
 | Session corruption | Attempt recovery, fallback to manual |
 | Worker crash | Reset task to pending, respawn |
 | Dependency cycle | Detect in analysis, halt |

@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Phase 3: Content Generation
 
@@ -67,7 +67,7 @@ If `{run_dir}/work/team/team-session.json` exists:
 ## Phase 1: Requirement Clarification
 
 - Parse user's task description at TEXT LEVEL
-- Use AskUserQuestion if requirements are ambiguous
+- Use user prompt if requirements are ambiguous
 - Execute `commands/analyze.md` for signal detection + complexity scoring
 
 ## Phase 2: Team Setup

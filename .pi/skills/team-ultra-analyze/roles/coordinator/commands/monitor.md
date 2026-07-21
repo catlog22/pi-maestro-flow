@@ -100,7 +100,7 @@ ELSE IF discussion_round >= MAX_ROUNDS:
 
 ELSE:
     // Collect user feedback
-    AskUserQuestion({
+    ask user ({
       questions: [{
         question: "Discussion round <N> complete. What next?",
         header: "Discussion Feedback",
@@ -114,12 +114,12 @@ ELSE:
     })
 ```
 
-6. **Feedback handling** (still inside handleCallback, after AskUserQuestion returns):
+6. **Feedback handling** (still inside handleCallback, after user prompt returns):
 
 | Feedback | Action |
 |----------|--------|
 | "Continue deeper" | Create new DISCUSS-`<N+1>` task (pending, no blockedBy). Record decision in discussion.md. Proceed to handleSpawnNext |
-| "Adjust direction" | AskUserQuestion for new focus. Create ANALYZE-fix-`<N>` task (pending). Create DISCUSS-`<N+1>` task (pending, blockedBy ANALYZE-fix-`<N>`). Record direction change in discussion.md. Proceed to handleSpawnNext |
+| "Adjust direction" | user prompt for new focus. Create ANALYZE-fix-`<N>` task (pending). Create DISCUSS-`<N+1>` task (pending, blockedBy ANALYZE-fix-`<N>`). Record direction change in discussion.md. Proceed to handleSpawnNext |
 | "Done" | Check if SYNTH-001 already exists (from dispatch): if yes, ensure blockedBy is updated to reference last DISCUSS task; if no, create SYNTH-001 (pending, blockedBy last DISCUSS). Record decision in discussion.md. Proceed to handleSpawnNext |
 
 **Dynamic task creation templates**:
@@ -312,7 +312,7 @@ Triggered when all pipeline tasks are completed.
 2. Run lifecycle completion (before Phase 5):
    - Read run_id from `team-session.json.run.run_id`
    - Write `{run_dir}/report.md` with frontmatter (verdict/summary/concerns)
-   - Run `maestro run complete <run_id>`
+   - Run `maestro run done <run_id>`
    - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 3. If all completed, **inline-execute coordinator Phase 5** (shutdown workers → report → completion action). Do NOT STOP here — continue directly into Phase 5 within the same turn.
 
@@ -334,7 +334,7 @@ After every handler execution **except handleComplete**:
 | Scenario | Resolution |
 |----------|------------|
 | Worker callback but task not completed | Log warning, reset task to pending, include in next handleSpawnNext |
-| Worker spawn fails | Retry once. If still fails, report to user via AskUserQuestion: retry / skip / abort |
+| Worker spawn fails | Retry once. If still fails, report to user via user prompt: retry / skip / abort |
 | Discussion loop exceeds max rounds | Force create SYNTH-001, proceed to synthesis |
 | Synthesis fails | Report partial results from analyses and discussions |
 | Pipeline stall (no ready + no running) | Check blockedBy chains, report blockage to user |

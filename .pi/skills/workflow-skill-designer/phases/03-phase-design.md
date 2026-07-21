@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 3: Phase Files Design
 
@@ -35,7 +35,7 @@ Phase files are internal execution documents. They MUST NOT contain the followin
 
 | Prohibited Pattern | Detection | Correct Location |
 |-------------------|-----------|-----------------|
-| Flag parsing (`$ARGUMENTS.includes(...)`) | Grep: `\$ARGUMENTS\.includes` | SKILL.md via AskUserQuestion → `workflowPreferences` |
+| Flag parsing (`$ARGUMENTS.includes(...)`) | Grep: `\$ARGUMENTS\.includes` | SKILL.md via user prompt → `workflowPreferences` |
 | Invocation syntax (`/skill-name "..."`) | Grep: `\/\w+[\-:]\w+\s+"` | Removed entirely (phase files are not user-facing) |
 | Conversion provenance (`Source: Converted from...`) | Grep: `Source:.*Converted from` | Removed entirely (implementation detail) |
 | Skill routing for inter-phase (`Skill(skill="...")`) | Grep: `Skill\(skill=` | Direct `Read("phases/0N-xxx.md")` |
@@ -232,9 +232,9 @@ function verifyContentPreservation(sourceContent, phaseContent) {
     sourceTables: (sourceContent.match(/\|.*\|.*\|/g) || []).length,
     phaseTables: (phaseContent.match(/\|.*\|.*\|/g) || []).length,
 
-    // Count AskUserQuestion calls
-    sourceAUQ: (sourceContent.match(/AskUserQuestion/g) || []).length,
-    phaseAUQ: (phaseContent.match(/AskUserQuestion/g) || []).length,
+    // Count user prompt calls
+    sourceAUQ: (sourceContent.match(/user prompt/g) || []).length,
+    phaseAUQ: (phaseContent.match(/user prompt/g) || []).length,
 
     // Line count comparison (phase should be >= source minus frontmatter)
     sourceLines: sourceContent.split('\n').length,
@@ -255,7 +255,7 @@ function verifyContentPreservation(sourceContent, phaseContent) {
     issues.push(`Missing tables: source=${checks.sourceTables}, phase=${checks.phaseTables}`);
   }
   if (checks.phaseAUQ < checks.sourceAUQ) {
-    issues.push(`Missing AskUserQuestion: source=${checks.sourceAUQ}, phase=${checks.phaseAUQ}`);
+    issues.push(`Missing user prompt: source=${checks.sourceAUQ}, phase=${checks.phaseAUQ}`);
   }
 
   return { checks, issues, passed: issues.length === 0 };

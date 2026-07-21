@@ -11,7 +11,7 @@ Discuss project roadmap with the user using project-tech.json + specs/*.md as co
 
 ## Strategy
 
-Direct interaction via AskUserQuestion. No delegation to workers or CLI tools. Coordinator handles this entirely.
+Direct interaction via user prompt. No delegation to workers or CLI tools. Coordinator handles this entirely.
 
 ## Parameters
 
@@ -46,7 +46,7 @@ const overview = `[coordinator] Project context loaded.
 - Task: ${taskDescription}
 ${projectGuidelines ? `- Guidelines: ${projectGuidelines.conventions?.length || 0} conventions loaded` : '- Guidelines: not configured'}`
 
-// Display overview (via direct output, not AskUserQuestion)
+// Display overview (via direct output, not user prompt)
 ```
 
 ### Step 3: Confirm Project Goal and Scope
@@ -54,7 +54,7 @@ ${projectGuidelines ? `- Guidelines: ${projectGuidelines.conventions?.length || 
 ```javascript
 // Skip if taskDescription is already detailed enough, or autoYes
 if (!autoYes && !taskDescription) {
-  AskUserQuestion({
+  ask user ({
     questions: [{
       question: "What is the project goal and scope for this session?",
       header: "Goal",
@@ -71,7 +71,7 @@ const projectGoal = taskDescription || userResponse
 
 ```javascript
 if (!autoYes) {
-  AskUserQuestion({
+  ask user ({
     questions: [{
       question: "How should phase transitions be handled?",
       header: "Execution Mode",
@@ -89,7 +89,7 @@ if (!autoYes) {
 
 // If "custom" selected, follow up with gate selection:
 if (mode === "custom") {
-  AskUserQuestion({
+  ask user ({
     questions: [{
       question: "Which gates should require confirmation?",
       header: "Custom Gates",
@@ -108,7 +108,7 @@ if (mode === "custom") {
 
 ```javascript
 if (!autoYes) {
-  AskUserQuestion({
+  ask user ({
     questions: [{
       question: "How thorough should the analysis be?",
       header: "Analysis Depth",
@@ -155,7 +155,7 @@ CONSTRAINTS: Max 5 phases | Each phase independently verifiable | No implementat
 // Display the generated roadmap to user
 // Output the roadmap content directly, then ask for adjustments
 
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Review the roadmap above. Any adjustments needed?",
     header: "Roadmap Review",
@@ -282,4 +282,4 @@ Edit(`${sessionFolder}/work/team/state.md`, {
 | User provides no goal | Re-prompt with examples |
 | CLI analysis fails | Retry with simpler prompt, or ask user to describe phases manually |
 | User keeps adjusting roadmap | Max 5 adjustment rounds, then proceed with latest version |
-| autoYes flag set | Skip all AskUserQuestion calls, use defaults: mode=yolo, depth=standard |
+| autoYes flag set | Skip all user prompt calls, use defaults: mode=yolo, depth=standard |

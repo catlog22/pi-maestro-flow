@@ -182,7 +182,7 @@ $ARGUMENTS → Parse:
 
 ### 上游起源 + 核心 (core)
 
-> 裸名称为 first-tier step：经 `/maestro "<意图>"` 自动路由，或 `maestro run prepare --platform pi <step>` + `maestro run create <step> ...` 直接执行；`/` 前缀为独立命令。
+> 裸名称为 first-tier step：经 `/maestro "<意图>"` 自动路由，或 `maestro run start "<intent>" --cmd <step> --platform pi ...` 直接执行；`/` 前缀为独立命令。
 
 | 命令 | 用途 |
 |------|------|

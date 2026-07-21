@@ -288,7 +288,7 @@ Before returning, verify:
 
 | Anti-Pattern | Why It's Wrong | Correct Approach |
 |-------------|----------------|------------------|
-| Agent contains `AskUserQuestion` | Agents don't interact with users | Return `## CHECKPOINT REACHED` |
+| Agent contains `user prompt` | Agents don't interact with users | Return `## CHECKPOINT REACHED` |
 | Agent parses `$ARGUMENTS` | Arguments belong to the command | Receive pre-parsed values in prompt |
 | Agent displays banners | UI is the command's job | Return structured data |
 | `<role>` is not first section | Identity must be established first | Always lead with `<role>` |

@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 2: Orchestrator Design
 
@@ -53,7 +53,7 @@ function convertCommandFrontmatter(commandFm, config) {
     // examples → removed (moved to inline docs)
     // group → embedded in name prefix
     allowedTools: expandToolWildcards(commandFm['allowed-tools'])
-    // "Skill(*), todo({ action: "update" })(*), Read(*)" → "Task, AskUserQuestion, todo({ action: "update" }), Read, Write, Edit, Bash, Glob, Grep, Skill"
+    // "Skill(*), todo({ action: "update" })(*), Read(*)" → "Task, user prompt, todo({ action: "update" }), Read, Write, Edit, Bash, Glob, Grep, Skill"
   };
 }
 
@@ -69,7 +69,7 @@ function expandToolWildcards(toolsStr) {
     .replace(/Task\(\*\)/g, 'Task');
 
   // Add commonly needed tools if not present
-  const baseTools = ['Task', 'AskUserQuestion', 'todo({ action: "update" })', 'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'];
+  const baseTools = ['Task', 'user prompt', 'todo({ action: "update" })', 'Read', 'Write', 'Edit', 'Bash', 'Glob', 'Grep'];
   const current = expanded.split(',').map(t => t.trim());
   const merged = [...new Set([...current, ...baseTools])];
   return merged;
@@ -341,7 +341,7 @@ function generateDefaultErrorHandling() {
 
 ## Step 2.8: Generate Interactive Preference Collection
 
-When the skill has configurable behaviors (auto mode, force options, etc.), generate the AskUserQuestion-based preference collection section for SKILL.md:
+When the skill has configurable behaviors (auto mode, force options, etc.), generate the user prompt-based preference collection section for SKILL.md:
 
 ```javascript
 function generateInteractivePreferenceCollection(config) {
@@ -350,9 +350,9 @@ function generateInteractivePreferenceCollection(config) {
   }
 
   let section = '## Interactive Preference Collection\n\n';
-  section += 'Collect workflow preferences via AskUserQuestion before dispatching to phases:\n\n';
+  section += 'Collect workflow preferences via user prompt before dispatching to phases:\n\n';
   section += '```javascript\n';
-  section += 'const prefResponse = AskUserQuestion({\n';
+  section += 'const prefResponse = ask user ({\n';
   section += '  questions: [\n';
 
   // Always include auto mode question if feature enabled

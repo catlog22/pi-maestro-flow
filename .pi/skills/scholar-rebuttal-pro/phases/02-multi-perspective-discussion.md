@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 2: Multi-Perspective Discussion
 
@@ -358,7 +358,7 @@ try {
 
 ```javascript
 if (!workflowPreferences.autoYes) {
-  const confirm = AskUserQuestion({
+  const confirm = ask user ({
     questions: [{
       question: "Review discussion results and consensus strategies. Proceed to strategy formulation?",
       header: "Confirm",

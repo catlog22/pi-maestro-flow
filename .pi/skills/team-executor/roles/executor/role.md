@@ -147,7 +147,7 @@ TeamCreate if team does not exist.
 
 | Mode | Behavior |
 |------|----------|
-| `interactive` | AskUserQuestion with Archive/Keep/Export options |
+| `interactive` | user prompt with Archive/Keep/Export options |
 | `auto_archive` | Execute Archive & Clean without prompt |
 | `auto_keep` | Execute Keep Active without prompt |
 

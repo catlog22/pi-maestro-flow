@@ -184,7 +184,7 @@ Collect user input, append new record to context.items.
 \`\`\`javascript
 async function execute(state) {
   // 1. Collect input
-  const input = await AskUserQuestion({
+  const input = await ask user ({
     questions: [{
       question: "Please enter item name:",
       header: "Name",

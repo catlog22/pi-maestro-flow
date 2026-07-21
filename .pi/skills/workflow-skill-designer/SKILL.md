@@ -118,13 +118,13 @@ CONTEXT: [background/constraints]
 
 ### Pattern 6: Interactive Preference Collection (SKILL.md Responsibility)
 
-Workflow preferences (auto mode, force explore, etc.) MUST be collected via AskUserQuestion in SKILL.md **before** dispatching to phases. Phases reference these as `workflowPreferences.{key}` context variables.
+Workflow preferences (auto mode, force explore, etc.) MUST be collected via user prompt in SKILL.md **before** dispatching to phases. Phases reference these as `workflowPreferences.{key}` context variables.
 
 **Anti-Pattern**: Command-line flags (`--yes`, `-e`, `--explore`) parsed within phase files via `$ARGUMENTS.includes(...)`.
 
 ```javascript
 // CORRECT: In SKILL.md (before phase dispatch)
-const prefResponse = AskUserQuestion({
+const prefResponse = ask user ({
   questions: [
     { question: "是否跳过确认？", header: "Auto Mode", options: [
       { label: "Interactive (Recommended)", description: "交互模式" },
@@ -160,7 +160,7 @@ Phase files are internal execution documents. They MUST NOT contain:
 
 | Prohibited | Reason | Correct Location |
 |------------|--------|------------------|
-| Flag parsing (`$ARGUMENTS.includes(...)`) | Preferences collected in SKILL.md | SKILL.md via AskUserQuestion |
+| Flag parsing (`$ARGUMENTS.includes(...)`) | Preferences collected in SKILL.md | SKILL.md via user prompt |
 | Invocation syntax (`/skill-name "..."`) | Not user-facing docs | Removed or SKILL.md only |
 | Conversion provenance (`Source: Converted from...`) | Implementation detail | Removed |
 | Skill routing for inter-phase (`Skill(skill="...")`) | Use direct phase read | Direct `Read("phases/...")` |
@@ -374,7 +374,7 @@ session-mode: {run|none}
 
 <!-- Include only when session-mode: run -->
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 # {Title}
@@ -392,8 +392,8 @@ session-mode: {run|none}
 
 ## Interactive Preference Collection
 
-Collect workflow preferences via AskUserQuestion before dispatching to phases:
-{AskUserQuestion code with preference derivation → workflowPreferences}
+Collect workflow preferences via user prompt before dispatching to phases:
+{user prompt code with preference derivation → workflowPreferences}
 
 ## Auto Mode Defaults
 
@@ -508,6 +508,6 @@ When designing a new workflow skill, answer these questions:
 | What's the todo({ action: "update" }) granularity? | todo({ action: "update" }) Pattern | Some phases have sub-tasks, others are atomic |
 | Is there a planning notes pattern? | Post-Phase Updates | Accumulated state document across phases |
 | What's the error recovery? | Error Handling | Retry once then report, vs rollback |
-| Does it need preference collection? | Interactive Preference Collection | Collect via AskUserQuestion in SKILL.md, pass as workflowPreferences |
+| Does it need preference collection? | Interactive Preference Collection | Collect via user prompt in SKILL.md, pass as workflowPreferences |
 | Does phase N hand off to phase M? | Direct Phase Handoff (Pattern 7) | Read phase doc directly, not Skill() routing |
 | Will later phases run after long context? | Compact Recovery (Pattern 9) | Add sentinel + checkpoints, mark 🔄 in Phase Reference table |

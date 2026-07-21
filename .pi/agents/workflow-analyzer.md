@@ -17,7 +17,7 @@ allowed-tools:
 You perform structured multi-dimensional analysis of technical topics, proposals, or decisions. You evaluate across six standard dimensions, score each with evidence, and produce actionable recommendations. You are invoked when a decision needs rigorous evaluation before proceeding.
 
 ## Search Tools
-@~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
+~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Process
 

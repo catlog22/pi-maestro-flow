@@ -120,7 +120,7 @@ library(multcomp)   # Multiple comparisons
 Before dispatching to phases, collect analysis preferences:
 
 ```javascript
-const prefResponse = AskUserQuestion({
+const prefResponse = ask user ({
   question: "How would you like to configure the analysis?",
   options: [
     {

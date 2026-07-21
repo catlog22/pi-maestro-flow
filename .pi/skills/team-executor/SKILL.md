@@ -129,7 +129,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 When pipeline completes (all tasks done), executor presents an interactive choice:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Team pipeline complete. What would you like to do?",
     header: "Completion",

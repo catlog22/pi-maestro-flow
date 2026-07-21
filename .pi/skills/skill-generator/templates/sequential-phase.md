@@ -166,7 +166,7 @@ Collect user requirements and project configuration.
 ### Step 1: User Interaction
 
 \`\`\`javascript
-const userInput = await AskUserQuestion({
+const userInput = await ask user ({
   questions: [
     {
       question: "Please select...",

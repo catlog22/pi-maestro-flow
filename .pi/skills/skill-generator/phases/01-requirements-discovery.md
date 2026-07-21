@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 1: Requirements Discovery
 
@@ -16,7 +16,7 @@
 ### Step 1: Basic Information Collection
 
 ```javascript
-const basicInfo = await AskUserQuestion({
+const basicInfo = await ask user ({
   questions: [
     {
       question: "What is the name of the new Skill? (English, lowercase with hyphens, e.g., 'api-docs')",
@@ -58,7 +58,7 @@ const purposeTemplates = {
 ### Step 2: Execution Mode Selection
 
 ```javascript
-const modeInfo = await AskUserQuestion({
+const modeInfo = await ask user ({
   questions: [
     {
       question: "Select execution mode:",
@@ -92,7 +92,7 @@ const executionMode = modeInfo["Execution Mode"].includes("Sequential") ? "seque
 
 ```javascript
 if (executionMode === "sequential") {
-  const phaseInfo = await AskUserQuestion({
+  const phaseInfo = await ask user ({
     questions: [
       {
         question: "How many execution phases are needed?",
@@ -138,7 +138,7 @@ if (executionMode === "sequential") {
 
 ```javascript
 if (executionMode === "autonomous") {
-  const actionInfo = await AskUserQuestion({
+  const actionInfo = await ask user ({
     questions: [
       {
         question: "What are the core actions? (Multiple selection allowed)",
@@ -161,14 +161,14 @@ if (executionMode === "autonomous") {
 ### Step 4: Tool and Output Configuration
 
 ```javascript
-const toolsInfo = await AskUserQuestion({
+const toolsInfo = await ask user ({
   questions: [
     {
       question: "Which special tools are needed? (Basic tools are included by default)",
       header: "Tool Selection",
       multiSelect: true,
       options: [
-        { label: "User Interaction (AskUserQuestion)", description: "Need to dialog with user" },
+        { label: "User Interaction (user prompt)", description: "Need to dialog with user" },
         { label: "Chrome Screenshot (mcp__chrome__*)", description: "Need web page screenshots" },
         { label: "External Search (mcp__exa__search)", description: "Need to search external information" },
         { label: "No Special Requirements", description: "Use basic tools only" }

@@ -3,7 +3,7 @@ role: coordinator
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Coordinator — Issue Resolution Team
@@ -58,7 +58,7 @@ For callback/check/resume/consensus/adapt/complete: load `@commands/monitor.md`,
 1. Scan `{run_dir}/work/team/session.json` for active/paused sessions
 2. No sessions -> Phase 1
 3. Single session -> reconcile (audit todo({ action: "list" }), reset in_progress->pending, rebuild team, spawn first ready task)
-4. Multiple -> AskUserQuestion for selection
+4. Multiple -> user prompt for selection
 
 ## Phase 1: Requirement Clarification
 
@@ -73,7 +73,7 @@ TEXT-LEVEL ONLY. No source code reading.
 | `--mode=<mode>` | Explicit mode override |
 | `--all-pending` | Load all pending issues via `Bash("ccw issue list --status registered,pending --json")` |
 
-2. If no issue IDs found -> AskUserQuestion for clarification
+2. If no issue IDs found -> user prompt for clarification
 
 3. **Mode auto-detection** (when `--mode` not specified):
 
@@ -121,7 +121,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-issue --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-issue --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-issue-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -161,7 +161,7 @@ Delegate to @commands/monitor.md#handleSpawnNext:
 
 4. Execute completion action (interactive):
    ```
-   AskUserQuestion({
+   ask user ({
      questions: [{ question: "Issue pipeline complete. What would you like to do?",
        options: [
          { label: "Archive & Clean (Recommended)", description: "Archive session, clean up tasks and team" },
@@ -182,7 +182,7 @@ Delegate to @commands/monitor.md#handleSpawnNext:
 
 | Error | Resolution |
 |-------|------------|
-| No issue IDs provided | AskUserQuestion for clarification |
+| No issue IDs provided | user prompt for clarification |
 | Session corruption | Attempt recovery, fallback to manual |
 | Worker crash | Reset task to pending, respawn |
 | Review rejection exceeds 2 rounds | Force convergence to MARSHAL |

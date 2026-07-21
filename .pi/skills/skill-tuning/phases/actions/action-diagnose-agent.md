@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Action: Diagnose Agent Coordination
 
@@ -197,7 +197,7 @@ async function execute(state, workDir) {
       type: 'agent_failure',
       severity: 'medium',
       location: { file: 'SKILL.md' },
-      description: 'Agent tool used but not declared in allowed-tools',
+      description: 'teammate tool used but not declared in allowed-tools',
       evidence: [`${totalCalls} Task calls found, but Task not in allowed-tools`],
       root_cause: 'Tool declaration mismatch',
       impact: 'May cause runtime permission issues',

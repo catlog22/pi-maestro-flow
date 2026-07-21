@@ -362,7 +362,7 @@ Write(`${workDir}/state.json`, JSON.stringify(consolidated, null, 2));
 ### reconcile_conflicting_definitions
 
 ```javascript
-// 1. Present conflict to user via AskUserQuestion
+// 1. Present conflict to user via user prompt
 // 2. Apply chosen version across all files
 // 3. Verify no remaining conflicts
 ```

@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Coordinator Role
 
@@ -57,7 +57,7 @@ For callback/check/resume: load `@commands/monitor.md` and execute the appropria
 1. Scan `{run_dir}/work/team/.msg/meta.json` for sessions with status "active" or "paused"
 2. No sessions -> Phase 1
 3. Single session -> resume (Session Reconciliation)
-4. Multiple sessions -> AskUserQuestion for selection
+4. Multiple sessions -> user prompt for selection
 
 **Session Reconciliation**:
 1. Audit todo({ action: "list" }) -> reconcile session state vs task status
@@ -74,7 +74,7 @@ TEXT-LEVEL ONLY. No source code reading.
 3. Determine execution method (see specs/pipelines.md Selection Decision Table):
    - Explicit `--exec` flag -> use specified method
    - `-y` / `--yes` flag -> Auto mode
-   - No flags -> AskUserQuestion for method choice
+   - No flags -> user prompt for method choice
 4. Store requirements: input_type, raw_input, execution_method
 5. CRITICAL: Always proceed to Phase 2, never skip team workflow
 
@@ -108,7 +108,7 @@ mcp__maestro__team_msg({
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-planex --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-planex --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-planex-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -137,7 +137,7 @@ Delegate to `@commands/dispatch.md`:
 Run lifecycle completion (before generating the summary):
 - Read run_id from team-session.json.run.run_id
 - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
-- Run `maestro run complete <run_id>`
+- Run `maestro run done <run_id>`
 - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 
 1. Load session state -> count completed tasks, duration

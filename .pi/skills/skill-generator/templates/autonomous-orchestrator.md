@@ -251,7 +251,7 @@ Ask user to select next action:
 
 ```javascript
 async function selectByUser(state, availableActions) {
-  const response = await AskUserQuestion({
+  const response = await ask user ({
     questions: [{
       question: "Select next operation:",
       header: "Operations",

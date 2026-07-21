@@ -353,7 +353,7 @@ ${executiveSummary}
 
 Present the complete plan to user for review:
 ```javascript
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "The research plan is complete. Would you like to adjust anything before finalizing?",
     header: "Plan Review",

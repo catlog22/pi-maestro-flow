@@ -9,7 +9,7 @@ Defines the structural pattern for generated **command files**. The generator us
 name: {$NAME}
 description: {$DESCRIPTION}
 argument-hint: {$ARGUMENT_HINT}  # omit if empty
-allowed-tools: {tools}           # omit if unrestricted
+allowed-tools: {tools} # omit if unrestricted
 ---
 
 <purpose>
@@ -105,7 +105,7 @@ teammate({
 | Deploy/Release | Initialize, Validate Config, Run Deployment, Verify Health, Present Status |
 | CRUD | Initialize, Validate Entity, Persist Changes, Present Status |
 | Analysis | Initialize, Gather Context, Spawn Analyzer, Present Findings |
-| Multi-Agent | Initialize, Spawn Agent A, Handle A Result, Spawn Agent B, Revision Loop, Present Status |
+| Multi-Agent | Initialize, dispatch via teammate A, Handle A Result, dispatch via teammate B, Revision Loop, Present Status |
 | Pipeline | Initialize, Stage 1, Handle Stage 1, Stage 2, Handle Stage 2, Present Status |
 
 ## Content Quality Rules

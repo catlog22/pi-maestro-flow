@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 1: Setup
 
@@ -33,7 +33,7 @@ const chainOrder = rawPaths.map(p => p.startsWith('.claude/') ? p.split('/').pop
 
 // If no scenario, ask user
 if (!scenarioText) {
-  const response = AskUserQuestion({
+  const response = ask user ({
     questions: [{
       question: "Please describe the test scenario for evaluating this skill:",
       header: "Test Scenario",

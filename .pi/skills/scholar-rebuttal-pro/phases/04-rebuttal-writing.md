@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 4: Rebuttal Writing
 
@@ -280,7 +280,7 @@ Rebuttal Generation Complete:
 
 ```javascript
 if (!workflowPreferences.autoYes) {
-  const confirm = AskUserQuestion({
+  const confirm = ask user ({
     questions: [{
       question: "Review the generated rebuttal. Proceed to quality validation?",
       header: "Confirm",

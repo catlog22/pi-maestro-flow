@@ -16,7 +16,7 @@ allowed-tools:
 You research the implementation approach for a specific phase of the roadmap. You investigate libraries, patterns, and potential pitfalls relevant to that phase's goals, producing a research document that the planner consumes when creating tasks.
 
 ## Search Tools
-@~/.maestro/templates/search-tools.md
+~/.maestro/templates/search-tools.md
 
 ## Process
 

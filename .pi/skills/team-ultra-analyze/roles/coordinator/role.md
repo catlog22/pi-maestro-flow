@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Coordinator - Ultra Analyze Team
 
@@ -102,7 +102,7 @@ TEXT-LEVEL ONLY. No source code reading.
 1. Parse user task description from $ARGUMENTS
 2. Extract explicit settings: `--mode`, scope, focus areas
 3. Delegate to `@commands/analyze.md` for signal detection and pipeline mode selection
-4. **Interactive clarification** (non-auto mode): AskUserQuestion for focus, perspectives, depth.
+4. **Interactive clarification** (non-auto mode): user prompt for focus, perspectives, depth.
 
 ---
 
@@ -149,7 +149,7 @@ mcp__maestro__team_msg({
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-ultra-analyze --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-ultra-analyze --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-ultra-analyze-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -227,7 +227,7 @@ Before reporting, gracefully shut down all active teammates. This is a **multi-t
 5. **Completion Action** (interactive):
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Ultra-Analyze pipeline complete. What would you like to do?",
     header: "Completion",

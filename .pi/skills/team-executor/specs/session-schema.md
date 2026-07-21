@@ -121,7 +121,7 @@ team-executor validates the following before execution:
 | `session_id` | string | Unique session identifier |
 | `task_description` | string | Original task description from user |
 | `status` | string | One of: "active", "paused", "completed" |
-| `team_name` | string | Team name for Agent tool |
+| `team_name` | string | Team name for teammate tool |
 | `roles` | array | List of role definitions |
 | `roles[].name` | string | Role name (must match .md filename) |
 | `roles[].prefix` | string | Task prefix for this role |

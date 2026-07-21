@@ -1,6 +1,6 @@
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Coordinator
 
@@ -53,7 +53,7 @@ For callback/check/resume/consensus/adapt/complete: load @commands/monitor.md, e
 1. Scan `{run_dir}/work/team/session.json` for active/paused sessions
 2. No sessions -> Phase 1
 3. Single session -> reconcile (audit todo({ action: "list" }), reset in_progress->pending, rebuild team, kick first ready task)
-4. Multiple -> AskUserQuestion for selection
+4. Multiple -> user prompt for selection
 
 ## Phase 1: Topic Clarification + Complexity Assessment
 
@@ -75,7 +75,7 @@ TEXT-LEVEL ONLY. No source code reading.
 | 2-3 | Medium | deep |
 | 0-1 | Low | quick |
 
-3. AskUserQuestion for pipeline mode and divergence angles
+3. user prompt for pipeline mode and divergence angles
 4. Store requirements: mode, scope, angles, constraints
 
 ## Phase 2: Create Team + Initialize Session
@@ -101,7 +101,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-brainstorm --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-brainstorm --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-brainstorm-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -147,7 +147,7 @@ Delegate to @commands/monitor.md#handleSpawnNext:
 
 | Error | Resolution |
 |-------|------------|
-| Task too vague | AskUserQuestion for clarification |
+| Task too vague | user prompt for clarification |
 | Session corruption | Attempt recovery, fallback to manual |
 | Worker crash | Reset task to pending, respawn |
 | GC loop exceeded | Force convergence to synthesizer |

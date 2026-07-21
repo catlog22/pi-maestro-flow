@@ -18,7 +18,7 @@ after(() => cleanPackagedSkills());
 
 test("package manifest publishes the extension and canonical Pi skills", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  assert.equal(pkg.version, "0.4.11");
+  assert.equal(pkg.version, "0.4.12");
   assert.equal(pkg.files.includes(".pi/skills/"), true);
   assert.equal(pkg.files.includes("workflows/"), false);
   assert.equal(pkg.files.includes("AGENTS.md"), true);
@@ -28,7 +28,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.ok(pkg.files.includes("!.pi/skills/**/*.pyc"));
   assert.equal(
     pkg.dependencies["maestro-flow"],
-    "0.5.52",
+    "0.5.53",
   );
   assert.equal(pkg.dependencies["pi-maestro-teammate"], "0.4.5");
   assert.equal(

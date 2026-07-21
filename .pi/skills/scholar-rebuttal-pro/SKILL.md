@@ -19,7 +19,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 # Scholar Rebuttal Pro
@@ -61,10 +61,10 @@ Enhanced academic paper review response workflow combining Agy/CLI collaborative
 
 ## Interactive Preference Collection
 
-Collect workflow preferences via AskUserQuestion before dispatching to phases:
+Collect workflow preferences via user prompt before dispatching to phases:
 
 ```javascript
-const prefResponse = AskUserQuestion({
+const prefResponse = ask user ({
   questions: [
     {
       question: "是否跳过所有确认步骤（自动模式）？",
