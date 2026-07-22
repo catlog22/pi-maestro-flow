@@ -201,8 +201,8 @@ export const TodoToolParams = Type.Object({
     Type.String({ description: "Plain-text execution context. On update, an empty string clears the stored context" }),
   ),
   skills: Type.Optional(
-    Type.Union([Type.Array(TodoSkillBindingSchema), Type.Null()], {
-      description: "Ordered Pi skill bindings. On update, an empty array or null clears the stored skills",
+    Type.Array(TodoSkillBindingSchema, {
+      description: "Ordered Pi skill bindings. Omit when no skill is needed; on update, an empty array clears the stored skills",
     }),
   ),
   summary: Type.Optional(

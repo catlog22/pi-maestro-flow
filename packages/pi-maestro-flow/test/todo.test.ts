@@ -369,6 +369,9 @@ test("todo public schema exposes only the canonical context and skills contract"
   const properties = (TodoToolParams as unknown as { properties: Record<string, unknown> }).properties;
   assert.ok(properties.context);
   assert.ok(properties.skills);
+  const skills = properties.skills as { type?: string; anyOf?: unknown };
+  assert.equal(skills.type, "array", "public skills must remain a direct array schema for provider compatibility");
+  assert.equal(skills.anyOf, undefined, "public skills must not use an array/null union");
   assert.ok(properties.summary);
   assert.ok(properties.assignee);
   for (const legacy of ["skill", "injection", "load", "refs", "inject", "owner", "completion", "decision", "metadata"]) {
