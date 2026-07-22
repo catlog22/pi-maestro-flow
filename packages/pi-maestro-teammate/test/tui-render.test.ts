@@ -117,10 +117,35 @@ test("streaming teammate result shows child agent lifecycle separately from task
         parentCorrelationId: "planner-parent",
         parentName: "planner",
         status: "running",
+        recentTools: [{ name: "teammate", status: "running" }],
       }],
     },
   }, { expanded: false }, theme as never).render(100).join("\n");
 
   assert.match(rendered, /1 child agent/);
-  assert.match(rendered, /@review child agent · running · called by @planner/);
+  assert.match(rendered, /@review child agent · running · using teammate · called by @planner/);
+});
+
+test("streaming teammate result wraps long agent output instead of truncating it", () => {
+  const message = "There are no previous user messages, no prior assistant turns, and no inherited parent context visible.";
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "streaming" }],
+    details: {
+      mode: "single",
+      results: [],
+      progress: [{
+        agent: "delegate",
+        name: "fresh",
+        correlationId: "fresh-agent",
+        taskIndex: 0,
+        dependencies: [],
+        status: "running",
+        lastMessage: message,
+      }],
+    },
+  }, { expanded: false }, theme as never).render(40).join("\n");
+
+  assert.match(rendered, /previous user messages/);
+  assert.match(rendered, /inherited parent context visible/);
+  assert.doesNotMatch(rendered.split("\n").filter((line) => line.startsWith("│")).join("\n"), /…/);
 });

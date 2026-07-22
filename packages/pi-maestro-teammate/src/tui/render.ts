@@ -31,6 +31,10 @@ function statusMeta(parts: string[], theme: Theme): string {
   return filtered.length > 0 ? theme.fg("dim", filtered.join(" · ")) : "";
 }
 
+function elapsed(seconds: number): string {
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m${seconds % 60}s`;
+}
+
 function dynamicComponent(build: (width: number) => string[]): Component {
   return { render: (w: number) => build(w), invalidate() {} };
 }
@@ -258,6 +262,8 @@ function renderProgress(
     const failedChildren = childCalls.filter((child) => child.status === "failed").length;
     const focus = focusTaskIndex(entries);
     const focused = entries.find((entry) => entry.taskIndex === focus) ?? entries[0];
+    const idleMs = focused?.lastActivityAt ? Date.now() - focused.lastActivityAt : 0;
+    const stalled = focused?.status === "running" && idleMs >= 30_000;
     const treeRows = buildProgressTree(entries, palette);
     const maxTreeRows = options.expanded ? 8 : 5;
     const failedIndexes = entries.filter((entry) => entry.status === "failed").map((entry) => entry.taskIndex);
@@ -266,7 +272,7 @@ function renderProgress(
       : selectProgressWindow(treeRows, maxTreeRows, focus);
     const range = "hidden" in treeWindow && treeWindow.hidden > 0
       ? `${treeWindow.rows.length}/${treeWindow.total} shown`
-      : treeWindow.total > treeWindow.rows.length
+      : "start" in treeWindow && treeWindow.total > treeWindow.rows.length
         ? `${treeWindow.start + 1}-${treeWindow.start + treeWindow.rows.length}/${treeWindow.total}`
         : `${treeWindow.total}`;
     const mode = details?.mode ?? "single";
@@ -283,7 +289,7 @@ function renderProgress(
         ? theme.fg("warning", "■")
         : theme.fg("success", "✓");
     const lines: string[] = [
-      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, pending ? `${pending} pending` : "", entries.length ? `agents ${range}` : "", runningChildren ? `${runningChildren} delegated` : ""], theme)}`,
+      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, pending ? `${pending} pending` : "", entries.length ? `agents ${range}` : "", runningChildren ? `${runningChildren} delegated` : "", stalled ? theme.fg("error", `stalled ${Math.floor(idleMs / 1000)}s`) : ""], theme)}`,
       ...treeWindow.rows.map((row) => row.text),
     ];
 
@@ -294,7 +300,13 @@ function renderProgress(
           ? theme.fg("error", "✗")
           : theme.fg("success", "✓");
       const parent = child.parentName ? ` · called by @${child.parentName}` : "";
-      lines.push(`${theme.fg("dim", "↳")} ${childIcon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `child agent · ${child.status}${parent}`)}`);
+      const activeTool = child.recentTools?.find((tool) => tool.status === "running");
+      const activity = activeTool ? ` · using ${activeTool.name}` : child.lastMessage ? " · streaming" : "";
+      const tokens = child.inputTokens !== undefined || child.outputTokens !== undefined
+        ? ` · in ${child.inputTokens ?? 0} · out ${child.outputTokens ?? 0}`
+        : "";
+      const duration = child.startedAt ? ` · ${elapsed(Math.max(0, Math.floor((Date.now() - child.startedAt) / 1000)))}` : "";
+      lines.push(`${theme.fg("dim", "↳")} ${childIcon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `child agent · ${child.status}${duration}${activity}${tokens}${parent}`)}`);
     }
     if (childCalls.length > (options.expanded ? 4 : 2)) {
       lines.push(theme.fg("dim", `↳ … ${childCalls.length - (options.expanded ? 4 : 2)} more child agents`));
@@ -308,10 +320,12 @@ function renderProgress(
         const toolIcon = activeTool.status === "running" ? theme.fg("warning", "■") : theme.fg("dim", "✓");
         lines.push(`${theme.fg("dim", "»")} ${theme.fg("accent", String(focused.taskIndex + 1))} ${toolIcon} ${activeTool.name}`);
       }
-      const maxStreamRows = options.expanded ? 4 : 2;
-      const tail = focused.lastMessage?.split("\n").filter((line) => line.trim()).slice(-maxStreamRows) ?? [];
+      const maxStreamLines = options.expanded ? 12 : 6;
+      const tail = focused.lastMessage?.split("\n").filter((line) => line.trim()).slice(-maxStreamLines) ?? [];
       for (const line of tail) {
-        lines.push(`${theme.fg("dim", "│")} ${theme.fg("dim", line)}`);
+        for (const wrappedLine of wrapTextWithAnsi(line, Math.max(1, w - 3))) {
+          lines.push(`${theme.fg("dim", "│")} ${theme.fg("dim", wrappedLine)}`);
+        }
       }
     }
     if (entries.length > 1) lines.push(theme.fg("dim", `Alt+R details · 1-${Math.min(9, entries.length)} view · 0 overview`));

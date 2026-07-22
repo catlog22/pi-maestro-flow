@@ -20,6 +20,8 @@ export interface SingleResult {
   model: string;
   correlationId: string;
   durationMs: number;
+  /** Whether the child process remains available for teammate-send after this turn. */
+  wakeable?: boolean;
   structuredOutput?: unknown;
   attemptedModels?: string[];
 }
@@ -36,6 +38,8 @@ export interface AgentProgress {
   recentTools: Array<{ name: string; status: string }>;
   toolCount: number;
   tokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
   durationMs: number;
   lastActivityAt: number;
   startedAt: number;
@@ -54,7 +58,10 @@ export interface AgentProgressSnapshot {
   recentTools?: Array<{ name: string; status: string }>;
   toolCount?: number;
   tokens?: number;
+  inputTokens?: number;
+  outputTokens?: number;
   durationMs?: number;
+  lastActivityAt?: number;
   lastMessage?: string;
   error?: string;
 }
@@ -66,6 +73,12 @@ export interface ChildAgentCallSnapshot {
   parentCorrelationId?: string;
   parentName?: string;
   status: "running" | "completed" | "failed";
+  startedAt?: number;
+  lastActivityAt?: number;
+  recentTools?: Array<{ name: string; status: string }>;
+  lastMessage?: string;
+  inputTokens?: number;
+  outputTokens?: number;
 }
 
 export interface Details {

@@ -312,6 +312,7 @@ interface AgentWidgetRow {
   direction: "↑" | "↓";
   toolCount: number;
   tokens: number;
+  startedAt: number;
   parentLabel?: string;
   resultLabels?: string[];
 }
@@ -544,6 +545,7 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
           agent: direct?.agent ?? existing.agent,
           status,
           action: status === "sleeping" ? "sleeping" : existing.action,
+          startedAt: direct?.startedAt ?? existing.startedAt,
           ...(parent ? { parentLabel: labelFor(parent) } : {}),
         });
         continue;
@@ -557,6 +559,7 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
         direction: runningTool ? "↓" : "↑",
         toolCount: progress?.toolCount ?? 0,
         tokens: progress?.tokens ?? 0,
+        startedAt: direct?.startedAt ?? active.startedAt,
         ...(parent ? { parentLabel: labelFor(parent) } : {}),
         ...(resultLabels?.length ? { resultLabels } : {}),
       });
@@ -633,6 +636,7 @@ export function renderAgentStatusWidget(
     const metrics = [
       row.tokens ? `${row.direction} ${compactMetric(row.tokens)} tokens` : "",
       row.toolCount ? `${row.toolCount} tools` : "",
+      `${Math.max(0, Math.floor((Date.now() - row.startedAt) / 1000))}s`,
     ].filter(Boolean).join(" · ");
     const meta = metrics ? ` · ${metrics}` : "";
     const relationship = [
@@ -642,8 +646,9 @@ export function renderAgentStatusWidget(
         : "",
     ].filter(Boolean).join(" · ");
     const relationshipText = relationship ? ` · ${relationship}` : "";
+    const agentText = safeWidth < 40 ? "" : ` ${theme.fg("muted", row.agent)}`;
     lines.push(truncateToWidth(
-      `${theme.fg("dim", connector)} ${icon(row)} ${theme.fg("accent", `@${row.label}`)} ${theme.fg("muted", row.agent)} · ${row.action}${theme.fg("dim", relationshipText + meta)}`,
+      `${theme.fg("dim", connector)} ${icon(row)} ${theme.fg("accent", `@${row.label}`)}${agentText} · ${row.action}${theme.fg("dim", relationshipText + meta)}`,
       safeWidth,
       "…",
     ));
@@ -1390,7 +1395,13 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         }),
         onTurnComplete: (result: SingleResult) => {
           const lastMessage = result.messages[result.messages.length - 1]?.content;
-          retireAgent(state, result.correlationId, lastMessage);
+          settleAgent(
+            state,
+            result.correlationId,
+            result.exitCode,
+            lastMessage,
+            result.wakeable !== false,
+          );
         },
         onProgress: (() => {
           const UPDATE_INTERVAL = 300; // ms — throttle TUI updates
@@ -1418,6 +1429,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               recentTools: data.recentTools,
               toolCount: data.toolCount,
               tokens: data.tokens,
+              lastActivityAt: data.lastActivityAt,
               ...(data.lastMessage
                 ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
                 : {}),
@@ -1514,6 +1526,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
                 mode: (graphMode ?? "single") as Details["mode"],
                 results: [],
                 progress: currentProgress,
+                ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
               },
             });
           };
@@ -1612,7 +1625,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             const { results, hasError, totalDur, summaries, structuredOutput, progress } = await executeGraph();
 
             emitComplete(pi, id, graphMode, correlationId, hasError ? 1 : 0, totalDur);
-            settleAgent(state, correlationId, hasError ? 1 : 0, summaries);
+            settleAgent(state, correlationId, hasError ? 1 : 0, summaries, params.context !== "fork");
 
             return {
               content: [{ type: "text", text: warningPrefix + summaries }],
@@ -1630,7 +1643,13 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           const bgPromise = executeGraph();
 
           bgPromise.then(({ results, summaries, progress }) => {
-            settleAgent(state, correlationId, results.some((result) => result.exitCode !== 0) ? 1 : 0, summaries);
+            settleAgent(
+              state,
+              correlationId,
+              results.some((result) => result.exitCode !== 0) ? 1 : 0,
+              summaries,
+              params.context !== "fork",
+            );
 
             pi.sendMessage(
               {
@@ -1683,7 +1702,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             const result = race.result!;
             emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
             const lastMessage = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-            settleAgent(state, correlationId, result.exitCode, lastMessage);
+            settleAgent(state, correlationId, result.exitCode, lastMessage, result.wakeable !== false);
             const toolResult: AgentToolResult<Details> = {
               content: [{ type: "text", text: warningPrefix + lastMessage }],
               isError: result.exitCode !== 0,
@@ -1700,7 +1719,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           runPromise.then((result) => {
             emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
             const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-            settleAgent(state, correlationId, result.exitCode, lastMsg);
+            settleAgent(state, correlationId, result.exitCode, lastMsg, result.wakeable !== false);
             pi.sendMessage(
               {
                 customType: "teammate-complete",
@@ -1731,7 +1750,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         bgPromise.then((result) => {
           emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
           const lastMsg = result.messages[result.messages.length - 1]?.content ?? "(no output)";
-          settleAgent(state, correlationId, result.exitCode, lastMsg);
+          settleAgent(state, correlationId, result.exitCode, lastMsg, result.wakeable !== false);
 
           pi.sendMessage(
             {
@@ -1811,6 +1830,31 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       }
 
       const agent = state.activeRuns.get(cid);
+      if (agent && requestedMode === "abort") {
+        if (agent.stdin?.writable && canChildWrite(agent.lease)) {
+          sendRpcMessage(agent.stdin, message, "abort", agent.lease ? leaseToken(agent.lease) : undefined);
+        }
+        const now = Date.now();
+        agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ abort: ${message.slice(0, 100)}`);
+        agent.lastActivityAt = now;
+        pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+          correlationId: cid,
+          from: "caller",
+          to: params.to,
+          mode: "abort",
+          message,
+          isSend: true,
+        });
+        const terminated = killAgentTree(state, cid);
+        return {
+          content: [{
+            type: "text",
+            text: `Agent "${params.to}" aborted; terminated ${terminated.length} agent${terminated.length === 1 ? "" : "s"} in its subtree.`,
+          }],
+          isError: false,
+          details: { delivered: true },
+        };
+      }
       if (!agent?.stdin?.writable) {
         state.namedAgents.delete(params.to);
         return {
@@ -1857,15 +1901,6 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       agent.lastActivityAt = now;
 
       pi.events.emit(TEAMMATE_MESSAGE_EVENT, { correlationId: cid, from: "caller", to: params.to, mode, message, isSend: true });
-
-      if (mode === "abort") {
-        killAgent(state, cid, params.to);
-        return {
-          content: [{ type: "text", text: `Agent "${params.to}" aborted and terminated.` }],
-          isError: false,
-          details: { delivered: true },
-        };
-      }
 
       const modeLabel = wasSleeping ? "woken up + prompt" : mode === "steer" ? "interrupted + injected" : "queued after current turn";
       return {
@@ -3154,8 +3189,9 @@ export function settleAgent(
   correlationId: string,
   exitCode: number,
   lastResult?: string,
+  wakeable = true,
 ): void {
-  if (exitCode === 0) retireAgent(state, correlationId, lastResult);
+  if (exitCode === 0 && wakeable) retireAgent(state, correlationId, lastResult);
   else killAgent(state, correlationId);
 }
 
@@ -3185,6 +3221,54 @@ function killAgent(
   for (const [agentName, id] of state.namedAgents) {
     if (id === correlationId) state.namedAgents.delete(agentName);
   }
+}
+
+export function killAgentTree(
+  state: TeammateState,
+  correlationId: string,
+): string[] {
+  if (!state.activeRuns.has(correlationId)) return [];
+
+  const selected = new Set([correlationId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    const controllers = new Set(
+      [...selected]
+        .map((id) => state.activeRuns.get(id)?.abortController)
+        .filter((controller): controller is AbortController => controller !== undefined),
+    );
+    for (const agent of state.activeRuns.values()) {
+      if (
+        selected.has(agent.correlationId)
+        || (agent.spawnedBy && selected.has(agent.spawnedBy))
+        || controllers.has(agent.abortController)
+      ) {
+        if (!selected.has(agent.correlationId)) {
+          selected.add(agent.correlationId);
+          changed = true;
+        }
+      }
+    }
+  }
+
+  const controllers = new Set<AbortController>();
+  for (const id of selected) {
+    const agent = state.activeRuns.get(id);
+    if (agent) controllers.add(agent.abortController);
+  }
+  for (const controller of controllers) controller.abort();
+  for (const id of selected) {
+    const agent = state.activeRuns.get(id);
+    if (!agent) continue;
+    releaseAgentMemory(agent);
+    agent.status = "completed";
+    state.activeRuns.delete(id);
+  }
+  for (const [agentName, id] of state.namedAgents) {
+    if (selected.has(id)) state.namedAgents.delete(agentName);
+  }
+  return [...selected];
 }
 
 function agentActiveMs(a: ActiveAgent): number {
@@ -3757,14 +3841,25 @@ async function handleProxyRequest(
       if (p.name) state.namedAgents.set(p.name, cid);
 
       const parentAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
-      const reportChildStatus = (status: ChildAgentCallSnapshot["status"]): void => {
+      const reportChildStatus = (
+        status: ChildAgentCallSnapshot["status"],
+        progress?: AgentProgress,
+      ): void => {
         onChildStatus?.({
           agent: activeAgent.agent,
           ...(p.name ? { name: p.name } : {}),
           correlationId: cid,
           ...(parentCid ? { parentCorrelationId: parentCid } : {}),
           ...(parentAgent ? { parentName: parentAgent.name ?? parentAgent.agent } : {}),
+          startedAt: activeAgent.startedAt,
           status,
+          ...(progress ? {
+            lastActivityAt: progress.lastActivityAt,
+            recentTools: progress.recentTools,
+            inputTokens: progress.inputTokens,
+            outputTokens: progress.outputTokens,
+            ...(progress.lastMessage ? { lastMessage: truncateUtf8Tail(progress.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) } : {}),
+          } : {}),
         });
       };
       reportChildStatus("running");
@@ -3822,6 +3917,7 @@ async function handleProxyRequest(
           recentTools: data.recentTools,
           toolCount: data.toolCount,
           tokens: data.tokens,
+          lastActivityAt: data.lastActivityAt,
           ...(data.lastMessage
             ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
             : {}),
@@ -3887,18 +3983,26 @@ async function handleProxyRequest(
         onTurnComplete: (result) => {
           if (result.correlationId !== cid) {
             const lastMessage = result.messages[result.messages.length - 1]?.content;
-            settleAgent(state, result.correlationId, result.exitCode, lastMessage);
+            settleAgent(
+              state,
+              result.correlationId,
+              result.exitCode,
+              lastMessage,
+              result.wakeable !== false,
+            );
           }
         },
-        onProgress: normalizedTasks
-          ? (data) => {
+        onProgress: (data) => {
+            if (!normalizedTasks) {
+              reportChildStatus("running", data);
+              return;
+            }
               const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
               if (taskIndex < 0) return;
               activeAgent.lastActivityAt = Date.now();
               pendingProgressByTask.set(taskIndex, data);
               proxyProgressFlushGate!.mark(data.status === "completed" || data.status === "failed");
-            }
-          : undefined,
+            },
         onChildRequest: (evt, rep) => {
           if (evt.type === "teammate_interaction_request" || evt.type === "teammate_rpc_ui_request") {
             onInteraction?.(evt, rep, cid);
@@ -3974,7 +4078,7 @@ async function handleProxyRequest(
       if (p.background === false) {
         try {
           const completed = await executeNested();
-          settleAgent(state, cid, completed.exitCode, completed.summary);
+          settleAgent(state, cid, completed.exitCode, completed.summary, p.context !== "fork");
           reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
           reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
         } catch (error) {
@@ -3993,7 +4097,7 @@ async function handleProxyRequest(
       }
 
       void executeNested().then((completed) => {
-        settleAgent(state, cid, completed.exitCode, completed.summary);
+        settleAgent(state, cid, completed.exitCode, completed.summary, p.context !== "fork");
         reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
         pi.sendMessage(
           {
@@ -4055,6 +4159,21 @@ async function handleProxyRequest(
       }
 
       const agent = state.activeRuns.get(cid);
+      if (agent && requestedMode === "abort") {
+        if (agent.stdin?.writable && canChildWrite(agent.lease)) {
+          sendRpcMessage(agent.stdin, message, "abort", agent.lease ? leaseToken(agent.lease) : undefined);
+        }
+        const terminated = killAgentTree(state, cid);
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{
+            type: "text",
+            text: `Agent "${to}" aborted; terminated ${terminated.length} agent${terminated.length === 1 ? "" : "s"} in its subtree.`,
+          }],
+          isError: false,
+          details: { delivered: true },
+        }});
+        return;
+      }
       if (!agent?.stdin?.writable) {
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: `Agent "${to}" is no longer running.` }],

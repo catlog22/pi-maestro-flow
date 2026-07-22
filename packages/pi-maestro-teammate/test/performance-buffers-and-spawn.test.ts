@@ -12,6 +12,7 @@ import {
   enforceWakeableAgentBudget,
   flushProgressBatch,
   hasTeammateWidgetWork,
+  killAgentTree,
   nextWakeableAgentExpiryDelay,
   retainBoundedAgentHistory,
   runWithProgressFlushCleanup,
@@ -24,6 +25,7 @@ import {
   createUtf8LineDecoder,
   getPiSpawnCommand,
   releasePublishedTurnHistory,
+  resolveModelSpecifier,
   runTeammate,
   validateModelSpecifier,
 } from "../src/runs/execution.ts";
@@ -240,7 +242,7 @@ test("proxy graph progress batches burst snapshots and synchronously publishes t
   assert.match(proxyProgress, /createProgressFlushGate\(/);
   assert.match(proxyProgress, /pendingProgressByTask\.set\(taskIndex, data\)/);
   assert.match(proxyProgress, /\.mark\(data\.status === "completed" \|\| data\.status === "failed"\)/);
-  const callbackStart = proxyProgress.indexOf("onProgress: normalizedTasks");
+  const callbackStart = proxyProgress.indexOf("onProgress: (data) =>");
   assert.ok(callbackStart >= 0);
   assert.doesNotMatch(proxyProgress.slice(callbackStart), /progressSnapshot\(\)/);
 
@@ -408,6 +410,145 @@ test("invalid model input is rejected before a child process is spawned", async 
   assert.match(result.messages[0]?.content ?? "", /Invalid teammate model specifier/);
 });
 
+test("model specifiers resolve provider shorthand and reject unavailable exact routes", () => {
+  const models = [
+    { id: "maestro-qwen/qwen3.8-max-preview" },
+    { id: "deepseek/deepseek-v4-pro" },
+  ];
+  assert.equal(
+    resolveModelSpecifier("maestro-qwen", models),
+    "maestro-qwen/qwen3.8-max-preview",
+  );
+  assert.equal(
+    resolveModelSpecifier("deepseek-v4-pro", models),
+    "deepseek/deepseek-v4-pro",
+  );
+  assert.throws(
+    () => resolveModelSpecifier("anthropic/claude-sonnet", models),
+    /Unknown teammate model specifier/,
+  );
+});
+
+test("fresh agents publish follow-up turns while fork agents terminate after their first result", async () => {
+  const completions: string[] = [];
+  let freshStdout: PassThrough | undefined;
+  let freshKilled = false;
+  const spawnFresh = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdin = new PassThrough();
+    freshStdout = new PassThrough();
+    const stderr = new PassThrough();
+    Object.assign(child, {
+      stdin,
+      stdout: freshStdout,
+      stderr,
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { freshKilled = true; return true; },
+    });
+    setTimeout(() => {
+      freshStdout!.write(`${JSON.stringify({ type: "message_end", message: { role: "user", content: "original prompt" } })}\n`);
+      freshStdout!.write(`${JSON.stringify({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "first answer" }],
+          model: "maestro-qwen/qwen3.8-max-preview",
+          usage: { input: 12, output: 4, cacheRead: 2, cacheWrite: 1, cost: { total: 0.01 } },
+        },
+      })}\n`);
+      freshStdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    }, 0);
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+
+  const first = await runTeammate(
+    { agent: "delegate", task: "original prompt", context: "fresh", timeoutMs: 2_000 },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess: spawnFresh,
+      onTurnComplete(result) {
+        completions.push(result.messages.at(-1)?.content ?? "");
+      },
+    },
+  );
+  assert.deepEqual(first.messages.map((message) => message.content), ["first answer"]);
+  assert.equal(first.model, "maestro-qwen/qwen3.8-max-preview");
+  assert.equal(first.usage.inputTokens, 12);
+  assert.equal(first.usage.outputTokens, 4);
+  assert.equal(first.wakeable, true);
+  assert.equal(freshKilled, false);
+
+  freshStdout!.write(`${JSON.stringify({ type: "turn_start" })}\n`);
+  freshStdout!.write(`${JSON.stringify({
+    type: "message_end",
+    message: {
+      role: "assistant",
+      content: [{ type: "text", text: "follow-up answer" }],
+      usage: { input: 6, output: 3, cacheRead: 0, cacheWrite: 0, cost: { total: 0.005 } },
+    },
+  })}\n`);
+  freshStdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.deepEqual(completions, ["first answer", "follow-up answer"]);
+
+  let forkKilled = false;
+  const spawnFork = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() {
+        forkKilled = true;
+        child.exitCode = 0;
+        child.emit("exit", 0, null);
+        child.emit("close", 0, null);
+        return true;
+      },
+    });
+    setTimeout(() => {
+      stdout.write(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fork answer" }] } })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    }, 0);
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  const fork = await runTeammate(
+    { agent: "delegate", task: "fork once", context: "fork", timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), spawnChildProcess: spawnFork },
+  );
+  assert.equal(fork.wakeable, false);
+  assert.equal(forkKilled, true);
+});
+
+test("recursive abort removes descendants and every agent sharing their process controller", () => {
+  const root = activeAgent();
+  root.correlationId = "root";
+  const child = activeAgent();
+  child.correlationId = "child";
+  child.spawnedBy = "root";
+  const shared = activeAgent();
+  shared.correlationId = "shared";
+  shared.abortController = child.abortController;
+  const grandchild = activeAgent();
+  grandchild.correlationId = "grandchild";
+  grandchild.spawnedBy = "child";
+  const unrelated = activeAgent();
+  unrelated.correlationId = "unrelated";
+  const state = teammateState([root, child, shared, grandchild, unrelated]);
+  state.namedAgents.set("child-name", "child");
+
+  const terminated = new Set(killAgentTree(state, "root"));
+  assert.deepEqual(terminated, new Set(["root", "child", "shared", "grandchild"]));
+  assert.equal(root.abortController.signal.aborted, true);
+  assert.equal(child.abortController.signal.aborted, true);
+  assert.equal(grandchild.abortController.signal.aborted, true);
+  assert.equal(state.activeRuns.has("unrelated"), true);
+  assert.equal(state.namedAgents.has("child-name"), false);
+});
+
 test("structured_output tool completion settles the child without waiting for agent_end", async () => {
   const payload = {
     path: ["runtime"],
@@ -533,6 +674,7 @@ test("parent rejects a schema-invalid structured output file", async () => {
     { baseCwd: process.cwd(), allowInternalSwarmAnt: true, spawnChildProcess },
   );
 
-  assert.equal(result.exitCode, 0);
+  assert.equal(result.exitCode, 1);
   assert.equal(result.structuredOutput, undefined);
+  assert.match(result.messages.at(-1)?.content ?? "", /schema-valid value/);
 });

@@ -281,14 +281,31 @@ function emptyUsage(): Usage {
   };
 }
 
-function accumulateUsage(total: Usage, partial: Partial<Usage>): void {
-  if (partial.inputTokens) total.inputTokens += partial.inputTokens;
-  if (partial.outputTokens) total.outputTokens += partial.outputTokens;
-  if (partial.cacheReadTokens)
-    total.cacheReadTokens += partial.cacheReadTokens;
-  if (partial.cacheWriteTokens)
-    total.cacheWriteTokens += partial.cacheWriteTokens;
-  if (partial.cost) total.cost += partial.cost;
+function usageNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function setUsageSnapshot(total: Usage, partial: Record<string, unknown>): void {
+  total.inputTokens = usageNumber(partial.inputTokens ?? partial.input);
+  total.outputTokens = usageNumber(partial.outputTokens ?? partial.output);
+  total.cacheReadTokens = usageNumber(partial.cacheReadTokens ?? partial.cacheRead);
+  total.cacheWriteTokens = usageNumber(partial.cacheWriteTokens ?? partial.cacheWrite);
+  const cost = partial.cost;
+  total.cost = usageNumber(
+    typeof cost === "object" && cost !== null
+      ? (cost as Record<string, unknown>).total
+      : cost,
+  );
+}
+
+function addUsageSnapshot(total: Usage, partial: Record<string, unknown>): void {
+  const snapshot = emptyUsage();
+  setUsageSnapshot(snapshot, partial);
+  total.inputTokens += snapshot.inputTokens;
+  total.outputTokens += snapshot.outputTokens;
+  total.cacheReadTokens += snapshot.cacheReadTokens;
+  total.cacheWriteTokens += snapshot.cacheWriteTokens;
+  total.cost += snapshot.cost;
 }
 
 function resetUsage(usage: Usage): void {
@@ -855,6 +872,27 @@ export function validateModelSpecifier(model: string): string {
   return model;
 }
 
+export function resolveModelSpecifier(
+  model: string,
+  modelCapabilities: readonly TeammateModelCapability[] = [],
+): string {
+  validateModelSpecifier(model);
+  if (modelCapabilities.length === 0) return model;
+  if (model.includes("/")) {
+    if (modelCapabilities.some((candidate) => candidate.id === model)) return model;
+    throw new TypeError(`Unknown teammate model specifier ${JSON.stringify(model)}. Use an available provider/model identifier.`);
+  }
+
+  const matches = modelCapabilities
+    .map((candidate) => candidate.id)
+    .filter((candidate) => candidate.startsWith(`${model}/`) || candidate.endsWith(`/${model}`));
+  if (matches.length === 1) return matches[0];
+  if (matches.length > 1) {
+    throw new TypeError(`Ambiguous teammate model specifier ${JSON.stringify(model)}. Matches: ${matches.join(", ")}`);
+  }
+  throw new TypeError(`Unknown teammate model specifier ${JSON.stringify(model)}. Use an exact provider/model identifier.`);
+}
+
 export function buildPiArgs(
   agentConfig: AgentConfig,
   params: RunTeammateParams,
@@ -894,7 +932,7 @@ export function buildPiArgs(
 
   const model = modelOverride ?? params.model ?? agentConfig.model;
   if (model) {
-    args.push("--model", validateModelSpecifier(model));
+    args.push("--model", resolveModelSpecifier(model, modelCapabilities));
   }
 
   const requestedThinking = parseTeammateThinkingLevel(params.thinking) ?? agentConfig.thinking;
@@ -1036,11 +1074,15 @@ function readRegularTextFile(filePath: string): string {
 export function writeSystemPromptFile(
   agentConfig: AgentConfig,
   correlationId: string,
+  outputSchema?: Record<string, unknown>,
 ): string {
   const tmpDir = path.join(os.tmpdir(), "pi-teammate");
   ensurePrivateDirectory(tmpDir);
   const promptFile = path.join(tmpDir, `prompt-${correlationSessionDirectoryName(correlationId)}.md`);
-  writePrivateTextFile(promptFile, agentConfig.systemPrompt);
+  const structuredOutputInstruction = outputSchema
+    ? "\n\n## Required structured output\nYou must finish by calling the structured_output tool exactly once with a value that satisfies its JSON Schema. A prose-only final answer is invalid. Do not emit any answer after that tool call."
+    : "";
+  writePrivateTextFile(promptFile, `${agentConfig.systemPrompt}${structuredOutputInstruction}`);
   return promptFile;
 }
 
@@ -1072,6 +1114,8 @@ function createProgress(agent: string, startTime: number): AgentProgress {
     recentTools: [],
     toolCount: 0,
     tokens: 0,
+    inputTokens: 0,
+    outputTokens: 0,
     durationMs: 0,
     lastActivityAt: startTime,
     startedAt: startTime,
@@ -1261,7 +1305,9 @@ export async function runTeammate(
     agentConfig.fallbackModels,
   );
   try {
-    for (const candidate of candidates) validateModelSpecifier(candidate);
+    for (let index = 0; index < candidates.length; index += 1) {
+      candidates[index] = resolveModelSpecifier(candidates[index], options.modelCapabilities);
+    }
   } catch (error) {
     return {
       agent: params.agent,
@@ -1306,10 +1352,10 @@ async function runSingleAttempt(
   modelOverride: string | undefined,
   options: RunTeammateOptions,
 ): Promise<SingleResult> {
-  const systemPromptFile = writeSystemPromptFile(agentConfig, correlationId);
-
   // AC5: Session directory + fork context
   const effectiveContext = params.context ?? agentConfig.defaultContext;
+  const wakeable = effectiveContext !== "fork";
+  const systemPromptFile = writeSystemPromptFile(agentConfig, correlationId, params.outputSchema);
   let sessionDir: string | undefined;
   let forkSessionFile: string | undefined;
   let forkWarning: string | undefined;
@@ -1350,6 +1396,7 @@ async function runSingleAttempt(
   );
 
   const usage = emptyUsage();
+  const pendingMessageUsage = emptyUsage();
   const messages: Array<{ role: string; content: string }> = [];
   if (forkWarning) {
     appendBoundedTranscriptMessage(messages, { role: "system", content: forkWarning });
@@ -1364,7 +1411,8 @@ async function runSingleAttempt(
 
   return new Promise<SingleResult>((resolve) => {
     let child: ChildProcess;
-    let resolved = false;
+    let initialResultPublished = false;
+    let terminal = false;
 
     const spawnEnv: Record<string, string | undefined> = {
       ...process.env,
@@ -1474,9 +1522,21 @@ async function runSingleAttempt(
 
     // Timeout handling
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+    let firstActivityTimer: ReturnType<typeof setTimeout> | undefined;
+    let receivedFirstActivity = false;
     if (params.timeoutMs) {
       timeoutTimer = setTimeout(() => termination.terminate(), params.timeoutMs);
     }
+    firstActivityTimer = setTimeout(() => {
+      if (initialResultPublished || receivedFirstActivity) return;
+      const message = "Timed out waiting for the first child agent event. The child process started but did not report model activity.";
+      lastContent = message;
+      progress.status = "failed";
+      progress.durationMs = Date.now() - startTime;
+      progress.lastMessage = message;
+      options.onProgress?.(progress);
+      termination.terminate();
+    }, Math.min(params.timeoutMs ?? 120_000, 120_000));
 
     // Parse JSON lines from stdout
     const stdoutLines = createUtf8LineDecoder();
@@ -1512,15 +1572,20 @@ async function runSingleAttempt(
       return structuredOutput ?? capturedStructuredOutput;
     }
 
-    function completeTurn(structuredOutput: unknown, terminateChild: boolean): void {
-      if (resolved) return;
-      progress.status = "completed";
+    function completeTurn(
+      structuredOutput: unknown,
+      terminateChild: boolean,
+      exitCode = 0,
+    ): void {
+      if (terminal) return;
+      progress.status = exitCode === 0 ? "completed" : "failed";
       progress.durationMs = Date.now() - startTime;
       if (messages.length === 0 && lastContent) {
         appendBoundedTranscriptMessage(messages, { role: "assistant", content: lastContent });
       }
       options.onProgress?.(progress);
       if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (firstActivityTimer) clearTimeout(firstActivityTimer);
       cleanupFile(systemPromptFile);
       if (schemaFile) cleanupFile(schemaFile);
       if (outputFile) cleanupFile(outputFile);
@@ -1528,17 +1593,20 @@ async function runSingleAttempt(
       const turnResult: SingleResult = {
         agent: params.agent,
         task: params.task ?? "",
-        exitCode: 0,
+        exitCode,
         messages: [...messages],
         usage: { ...usage },
         model: resolvedModel,
         correlationId,
         durationMs: Date.now() - startTime,
+        wakeable: !terminateChild,
         structuredOutput,
         attemptedModels: undefined,
       };
-      resolved = true;
-      resolve(turnResult);
+      if (!initialResultPublished) {
+        initialResultPublished = true;
+        resolve(turnResult);
+      }
       try {
         options.onTurnComplete?.(turnResult);
       } catch {
@@ -1550,16 +1618,24 @@ async function runSingleAttempt(
         streamingText = "";
         stderrBuffer = "";
         capturedStructuredOutput = undefined;
-        if (terminateChild) termination.terminate();
+        resetUsage(pendingMessageUsage);
+        if (terminateChild) {
+          terminal = true;
+          termination.terminate();
+        }
       }
     }
 
     function processEvent(event: JsonLineEvent): void {
+      if (!receivedFirstActivity) {
+        receivedFirstActivity = true;
+        if (firstActivityTimer) clearTimeout(firstActivityTimer);
+      }
       // completeTurn() is the authoritative settlement boundary. A child may
       // already have queued tool_result, turn_start, or agent_end lines when
       // termination begins; treating the terminal state as absorbing prevents
       // those buffered lines from reawakening the published agent loop.
-      if (resolved) return;
+      if (terminal) return;
       if (capturedStructuredOutput === undefined && params.outputSchema) {
         capturedStructuredOutput = extractValidatedStructuredOutput(event, params.outputSchema);
       }
@@ -1595,6 +1671,8 @@ async function runSingleAttempt(
         }
         case "message_end":
         case "assistant": {
+          const msg = event.message as Record<string, unknown> | undefined;
+          if (event.type === "message_end" && msg?.role !== "assistant") break;
           const text = extractTextContent(event) || streamingText || undefined;
           if (text) {
             lastContent = text;
@@ -1603,13 +1681,19 @@ async function runSingleAttempt(
             progress.lastMessage = text;
             options.onProgress?.(progress);
           }
-          if (event.usage) {
-            accumulateUsage(usage, event.usage);
+          const messageUsage = (msg?.usage as Record<string, unknown> | undefined)
+            ?? (event.usage as Record<string, unknown> | undefined);
+          if (messageUsage) {
+            addUsageSnapshot(usage, messageUsage);
+            resetUsage(pendingMessageUsage);
             usage.turns += 1;
             progress.tokens = usage.inputTokens + usage.outputTokens;
+            progress.inputTokens = usage.inputTokens;
+            progress.outputTokens = usage.outputTokens;
           }
-          if (event.model) {
-            resolvedModel = event.model;
+          const messageModel = typeof msg?.model === "string" ? msg.model : event.model;
+          if (messageModel) {
+            resolvedModel = messageModel;
           }
           break;
         }
@@ -1635,10 +1719,13 @@ async function runSingleAttempt(
 
           // Extract usage from message snapshot
           const msg = event.message as Record<string, unknown> | undefined;
-          const msgUsage = msg?.usage as Partial<Usage> | undefined;
+          const msgUsage = msg?.usage as Record<string, unknown> | undefined;
           if (msgUsage) {
-            accumulateUsage(usage, msgUsage);
-            progress.tokens = usage.inputTokens + usage.outputTokens;
+            setUsageSnapshot(pendingMessageUsage, msgUsage);
+            progress.tokens = usage.inputTokens + usage.outputTokens
+              + pendingMessageUsage.inputTokens + pendingMessageUsage.outputTokens;
+            progress.inputTokens = usage.inputTokens + pendingMessageUsage.inputTokens;
+            progress.outputTokens = usage.outputTokens + pendingMessageUsage.outputTokens;
           }
           break;
         }
@@ -1688,15 +1775,18 @@ async function runSingleAttempt(
         }
         case "usage": {
           if (event.usage) {
-            accumulateUsage(usage, event.usage);
-            progress.tokens = usage.inputTokens + usage.outputTokens;
+            setUsageSnapshot(pendingMessageUsage, event.usage as Record<string, unknown>);
+            progress.tokens = usage.inputTokens + usage.outputTokens
+              + pendingMessageUsage.inputTokens + pendingMessageUsage.outputTokens;
+            progress.inputTokens = usage.inputTokens + pendingMessageUsage.inputTokens;
+            progress.outputTokens = usage.outputTokens + pendingMessageUsage.outputTokens;
           }
           break;
         }
         case "turn_end": {
           const msg = event.message as Record<string, unknown> | undefined;
-          if (msg) {
-            const text = extractTextContent({ message: msg } as JsonLineEvent);
+          if (msg?.role === "assistant") {
+            const text = extractTextContent({ type: "turn_end", message: msg });
             if (text && appendDistinctAssistantMessage(messages, text)) {
               lastContent = text;
               progress.lastMessage = text;
@@ -1706,7 +1796,15 @@ async function runSingleAttempt(
         }
         case "agent_end": {
           const structuredOutput = readStructuredOutput(false);
-          completeTurn(structuredOutput, false);
+          if (params.outputSchema && structuredOutput === undefined) {
+            appendBoundedTranscriptMessage(messages, {
+              role: "system",
+              content: "The teammate completed without calling structured_output with a schema-valid value.",
+            });
+            completeTurn(undefined, true, 1);
+            break;
+          }
+          completeTurn(structuredOutput, !wakeable);
           // Process stays alive. Idle agents must be resumed with an RPC prompt;
           // steer/follow_up only queue while an agent loop is already running.
           break;
@@ -1733,6 +1831,7 @@ async function runSingleAttempt(
 
     child.on("close", (code) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (firstActivityTimer) clearTimeout(firstActivityTimer);
       termination.cleanup();
       unbindTerminationSignal();
 
@@ -1748,7 +1847,7 @@ async function runSingleAttempt(
       // agent_end already published the turn result and released its buffers.
       // A later process close must not replace the sleeping agent's last result
       // with a synthetic "(no output)" record.
-      if (resolved) return;
+      if (initialResultPublished) return;
 
       if (messages.length === 0) {
         const content =
@@ -1764,31 +1863,31 @@ async function runSingleAttempt(
       options.onProgress?.(progress);
 
       // AC6: Read structured output if available
-      let structuredOutput: unknown;
-      if (outputFile) {
-        try {
-          if (fs.existsSync(outputFile)) {
-            structuredOutput = JSON.parse(fs.readFileSync(outputFile, "utf-8"));
-          }
-        } catch {
-          // Schema validation failed or file not written
-        }
-        cleanupFile(outputFile);
-      }
-      structuredOutput ??= capturedStructuredOutput;
+      const structuredOutput = readStructuredOutput(true);
       if (schemaFile) cleanupFile(schemaFile);
 
-      if (!resolved) {
-        resolved = true;
+      const exitCode = code === 0 && params.outputSchema && structuredOutput === undefined
+        ? 1
+        : code ?? 1;
+      if (exitCode !== 0 && params.outputSchema && structuredOutput === undefined) {
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content: "The teammate exited without schema-valid structured_output.",
+        });
+      }
+
+      if (!initialResultPublished) {
+        initialResultPublished = true;
         resolve({
           agent: params.agent,
           task: params.task ?? "",
-          exitCode: code ?? 1,
+          exitCode,
           messages,
           usage,
           model: resolvedModel,
           correlationId,
           durationMs: Date.now() - startTime,
+          wakeable: false,
           structuredOutput,
         });
       }
@@ -1796,6 +1895,7 @@ async function runSingleAttempt(
 
     child.on("error", (error) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (firstActivityTimer) clearTimeout(firstActivityTimer);
       unbindTerminationSignal();
 
       cleanupFile(systemPromptFile);
@@ -1806,8 +1906,8 @@ async function runSingleAttempt(
       progress.durationMs = Date.now() - startTime;
       options.onProgress?.(progress);
 
-      if (!resolved) {
-        resolved = true;
+      if (!initialResultPublished) {
+        initialResultPublished = true;
         resolve({
           agent: params.agent,
           task: params.task ?? "",
@@ -1820,6 +1920,7 @@ async function runSingleAttempt(
           model: resolvedModel,
           correlationId,
           durationMs: Date.now() - startTime,
+          wakeable: false,
         });
       }
     });
