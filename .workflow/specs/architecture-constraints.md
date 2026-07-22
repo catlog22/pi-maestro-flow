@@ -97,3 +97,19 @@ OpenAI Responses 与 Anthropic 的 Base URL、API 类型和 API key 属于 provi
 API Manager MUST 以 provider/modelId 为键持久化每模型 defaultThinkingLevel，并在 Pi model_select 完成后调用 setThinkingLevel 应用。settings.json.defaultThinkingLevel 仅作为全局 fallback。即时应用 MUST 同时匹配 provider 与 model ID，禁止配置同 provider 的其他模型时改变当前模型。删除模型 MUST 同步删除其默认强度。thinkingLevelMap 仍只表达 capability，不承载默认值。
 
 </spec-entry>
+
+<spec-entry category="arch" keywords="effort thinking-level provider model-defaults atomic" date="2026-07-22" sid="S-20260722-hxna" title="统一 /effort 的模型级思考强度边界" description="锁定 /effort 的统一 Provider 覆盖、canonical level 与原子提交语义" source="analyze:20260722-001-analyze">
+
+### 统一 /effort 的模型级思考强度边界
+
+单一 /effort 命令 MUST 以当前 ctx.model 的 provider/modelId 为键复用 modelDefaults，覆盖 API Manager 与 Pi 系统原生 provider；UI MUST 只展示当前模型支持的 Pi canonical levels（off/minimal/low/medium/high/xhigh），Provider wire value（如 max）只能由 thinkingLevelMap 映射，MUST NOT 作为 level 传给 setThinkingLevel。选择提交 MUST 先原子持久化再应用 runtime，取消或失败不得改变当前状态。
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="effort selector thinking current" date="2026-07-22" sid="S-20260722-rkyp" title="标准 /effort selector 的当前值表达" description="记录用户 Choice A：canonical 顺序优先，当前值使用文本标记。" source="master@03709e70">
+
+### 标准 /effort selector 的当前值表达
+
+在 ExtensionAPI 的标准 ctx.ui.select 不提供 selectedIndex 时，/effort MUST 保持 capability-filtered canonical level 顺序；当前有效级别 MUST 通过 label 中的（当前）标记表达，MUST NOT 通过把当前项移动到首位来伪造预选，也不要求真正预选。
+
+</spec-entry>
