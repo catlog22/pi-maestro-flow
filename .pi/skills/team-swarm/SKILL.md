@@ -17,7 +17,7 @@ session-mode: run
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Swarm
@@ -140,7 +140,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 When swarm converges, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Swarm pipeline complete. What would you like to do?",
     header: "Completion",
@@ -161,7 +161,7 @@ AskUserQuestion({
 |----------|------------|
 | `aco.py` not found | Verify `<skill_root>/scripts/aco.py`; check Python install |
 | Python version < 3.10 | Use `python3` or report dependency error |
-| Config validation fails | AskUserQuestion to fix, regenerate, retry |
+| Config validation fails | user prompt to fix, regenerate, retry |
 | All ants fail in iteration | Halt, AskUserQuestion (retry / abort / refine config) |
 | Hallucination cluster (>50%) | Pause, AskUserQuestion (continue / refine scoring) |
 | Convergence never trips | `max_iterations` safety net always fires |

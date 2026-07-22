@@ -144,7 +144,7 @@ Configured task-type model routing for ${cwd}:
 ${formatModelRoutingConfig(cwd)}`;
 }
 
-const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running teammate agent, addressed by name, correlation ID, or unique ID prefix.
+const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID, or unique ID prefix.
 
 Modes (default: follow_up):
   - "steer" — interrupt the current turn and inject immediately
@@ -166,7 +166,7 @@ const TEAMMATE_WATCH_DESCRIPTION =
   "View a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result.";
 const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activity and output.";
 const TEAMMATE_WATCH_GUIDELINES = [
-  "Use teammate-watch for targeted live inspection after selecting an agent name or correlation ID from teammate-list.",
+  "Use teammate-watch for targeted live inspection after selecting an agent name, displayed selector, or correlation ID from teammate-list.",
 ];
 
 export const AGENT_BUFFER_LIMITS = Object.freeze({
@@ -347,6 +347,20 @@ function selectorAgentLabel(agent: ActiveAgent): string {
   if (agent.name) return agent.name;
   const kind = agent.agent.startsWith("graph(") ? "graph" : "unnamed";
   return `${kind}#${agent.correlationId.slice(0, 8)}`;
+}
+
+function emitTeammateStarted(
+  pi: ExtensionAPI,
+  agent: ActiveAgent,
+  extra: Record<string, unknown> = {},
+): void {
+  pi.events.emit(TEAMMATE_STARTED_EVENT, {
+    ...extra,
+    correlationId: agent.correlationId,
+    agent: agent.agent,
+    name: agent.name,
+    spawnedBy: agent.spawnedBy,
+  });
 }
 
 export function buildAgentSelectorRows(agents: ActiveAgent[]): AgentSelectorRow[] {
@@ -1370,6 +1384,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           };
           state.activeRuns.set(childId, childAgent);
           if (task.name) state.namedAgents.set(task.name, childId);
+          emitTeammateStarted(pi, childAgent);
         });
       }
 
@@ -1377,12 +1392,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         state.namedAgents.set(params.name, correlationId);
       }
 
-      pi.events.emit(TEAMMATE_STARTED_EVENT, {
-        id,
-        agent: agentLabel,
-        name: params.name,
-        correlationId,
-      });
+      emitTeammateStarted(pi, activeAgent, { id });
 
       const abortForward = () => abortController.abort();
       signal.addEventListener("abort", abortForward, { once: true });
@@ -2952,10 +2962,24 @@ type WatchTarget =
   | { kind: "agent"; agent: ActiveAgent }
   | { kind: "graph-task"; agent: ActiveAgent; progress: AgentProgressSnapshot };
 
+interface AgentTargetSelector {
+  value: string;
+  decorated?: { name: string; idPrefix: string };
+}
+
+function parseAgentTargetSelector(target: string): AgentTargetSelector {
+  const value = target.trim().replace(/^@/, "");
+  const marker = value.lastIndexOf("#");
+  return marker > 0 && marker < value.length - 1
+    ? { value, decorated: { name: value.slice(0, marker), idPrefix: value.slice(marker + 1) } }
+    : { value };
+}
+
 export function resolveWatchTarget(
   state: TeammateState,
   target: string,
 ): { match?: WatchTarget; error?: string; available: string[] } {
+  const selector = parseAgentTargetSelector(target);
   const available = new Set<string>();
   const correlationIds = new Set<string>();
   for (const [cid, agent] of state.activeRuns) {
@@ -2969,20 +2993,34 @@ export function resolveWatchTarget(
     }
   }
 
-  const namedCid = state.namedAgents.get(target);
+  const namedCid = state.namedAgents.get(selector.value);
   if (namedCid) {
     const agent = state.activeRuns.get(namedCid);
     if (agent) return { match: { kind: "agent", agent }, available: [...available] };
   }
 
-  const exactAgent = state.activeRuns.get(target);
+  if (selector.decorated) {
+    const decoratedCid = state.namedAgents.get(selector.decorated.name);
+    const agent = decoratedCid?.startsWith(selector.decorated.idPrefix)
+      ? state.activeRuns.get(decoratedCid)
+      : undefined;
+    if (agent) return { match: { kind: "agent", agent }, available: [...available] };
+  }
+
+  const exactAgent = state.activeRuns.get(selector.value);
   if (exactAgent) return { match: { kind: "agent", agent: exactAgent }, available: [...available] };
 
   const exactTaskMatches: Array<{ agent: ActiveAgent; progress: AgentProgressSnapshot }> = [];
   for (const agent of state.activeRuns.values()) {
     for (const progress of agent.progress ?? []) {
       if (state.activeRuns.has(progress.correlationId)) continue;
-      if (progress.correlationId === target || progress.name === target) {
+      if (
+        progress.correlationId === selector.value
+        || progress.name === selector.value
+        || (selector.decorated
+          && progress.name === selector.decorated.name
+          && progress.correlationId.startsWith(selector.decorated.idPrefix))
+      ) {
         exactTaskMatches.push({ agent, progress });
       }
     }
@@ -2995,11 +3033,18 @@ export function resolveWatchTarget(
   }
 
   const prefixMatches: WatchTarget[] = [];
+  const idPrefix = selector.decorated?.idPrefix ?? selector.value;
   for (const [cid, agent] of state.activeRuns) {
-    if (cid.startsWith(target)) prefixMatches.push({ kind: "agent", agent });
+    const label = agent.name ?? agent.agent;
+    if (cid.startsWith(idPrefix) && (!selector.decorated || label === selector.decorated.name)) {
+      prefixMatches.push({ kind: "agent", agent });
+    }
     for (const progress of agent.progress ?? []) {
       if (state.activeRuns.has(progress.correlationId)) continue;
-      if (progress.correlationId.startsWith(target)) {
+      if (
+        progress.correlationId.startsWith(idPrefix)
+        && (!selector.decorated || progress.name === selector.decorated.name)
+      ) {
         prefixMatches.push({ kind: "graph-task", agent, progress });
       }
     }
@@ -3230,11 +3275,20 @@ export function resolveAgentCorrelationId(
   state: TeammateState,
   target: string,
 ): string | undefined {
-  const named = state.namedAgents.get(target);
+  const selector = parseAgentTargetSelector(target);
+  const named = state.namedAgents.get(selector.value);
   if (named) return named;
-  if (state.activeRuns.has(target)) return target;
-  const matches = [...state.activeRuns.keys()].filter((correlationId) => correlationId.startsWith(target));
-  return matches.length === 1 ? matches[0] : undefined;
+  if (selector.decorated) {
+    const decorated = state.namedAgents.get(selector.decorated.name);
+    if (decorated?.startsWith(selector.decorated.idPrefix)) return decorated;
+  }
+  if (state.activeRuns.has(selector.value)) return selector.value;
+  const idPrefix = selector.decorated?.idPrefix ?? selector.value;
+  const matches = [...state.activeRuns].filter(([correlationId, agent]) =>
+    correlationId.startsWith(idPrefix)
+      && (!selector.decorated || (agent.name ?? agent.agent) === selector.decorated.name)
+  );
+  return matches.length === 1 ? matches[0][0] : undefined;
 }
 
 function killAgent(
@@ -3897,7 +3951,7 @@ async function handleProxyRequest(
       reportChildStatus("running");
       normalizedTasks?.forEach((task, index) => {
         const childId = taskCorrelationIds[index];
-        state.activeRuns.set(childId, {
+        const childAgent: ActiveAgent = {
           agent: task.agent,
           name: task.name,
           correlationId: childId,
@@ -3911,8 +3965,10 @@ async function handleProxyRequest(
           sleepMs: 0,
           lease: createChildLease(),
           promptSeq: task.task ? 1 : 0,
-        });
+        };
+        state.activeRuns.set(childId, childAgent);
         if (task.name) state.namedAgents.set(task.name, childId);
+        emitTeammateStarted(pi, childAgent);
       });
 
       const spawnerAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
@@ -3925,12 +3981,7 @@ async function handleProxyRequest(
         },
         { triggerTurn: true },
       );
-      pi.events.emit(TEAMMATE_STARTED_EVENT, {
-        correlationId: cid,
-        agent: activeAgent.agent,
-        name: p.name,
-        spawnedBy: parentCid,
-      });
+      emitTeammateStarted(pi, activeAgent);
 
       const processProxyProgress = (data: AgentProgress) => {
         const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");

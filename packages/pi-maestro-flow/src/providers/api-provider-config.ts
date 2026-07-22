@@ -16,7 +16,7 @@ import {
   type ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
 
-export type ApiProviderId = "maestro-openai" | "maestro-anthropic";
+export type ApiProviderId = "maestro-openai" | "maestro-qwen" | "maestro-anthropic";
 
 export interface ApiProviderSettings {
   provider: ApiProviderId;
@@ -34,11 +34,12 @@ interface LoadedApiProviderSettings extends ApiProviderSettings {
 interface ProviderDefaults {
   id: ApiProviderId;
   name: string;
-  api: "openai-responses" | "anthropic-messages";
+  api: "openai-responses" | "openai-completions" | "anthropic-messages";
   baseUrl: string;
   modelId: string;
   contextWindow: number;
   maxTokens: number;
+  compat?: Record<string, unknown>;
 }
 
 interface SaveApiProviderResult {
@@ -67,6 +68,19 @@ const PROVIDERS: readonly ProviderDefaults[] = [
     maxTokens: 128_000,
   },
   {
+    id: "maestro-qwen",
+    name: "Qwen Compatible (Custom)",
+    api: "openai-completions",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    modelId: "qwen3.8-max-preview",
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+    compat: {
+      supportsDeveloperRole: false,
+      thinkingFormat: "qwen",
+    },
+  },
+  {
     id: "maestro-anthropic",
     name: "Anthropic (Custom)",
     api: "anthropic-messages",
@@ -80,7 +94,7 @@ const PROVIDERS: readonly ProviderDefaults[] = [
 const mutationQueues = new Map<string, Promise<void>>();
 
 /**
- * Register custom OpenAI Responses and Anthropic providers through Pi's
+ * Register custom OpenAI Responses, Qwen-compatible, and Anthropic providers through Pi's
  * documented models.json contract. /api-manager manages the provider config and
  * models.json API key without requiring changes to Pi itself.
  */
@@ -101,7 +115,7 @@ export function registerApiProviderConfigs(
 
   if (typeof pi.registerCommand !== "function") return;
   pi.registerCommand("api-manager", {
-    description: "增删查改 OpenAI Responses / Anthropic API 配置",
+    description: "增删查改 OpenAI Responses / Qwen Compatible / Anthropic API 配置",
     async handler(args, ctx) {
       try {
         await showApiProviderManager(pi, args, ctx, modelsPath, defaultsPath);
@@ -229,7 +243,7 @@ async function showApiProviderManager(
   }
   const provider = parsed.provider ?? (ctx.hasUI ? await chooseProvider(ctx) : undefined);
   if (!provider) {
-    ctx.ui.notify("请指定 provider：openai 或 anthropic。", "warning");
+    ctx.ui.notify("请指定 provider：openai、qwen 或 anthropic。", "warning");
     return;
   }
   if (action === "show") {
@@ -267,7 +281,7 @@ async function configureProvider(
   if (modelInput === undefined) return;
   const modelId = required(modelInput, "Model ID");
   const maxSuffix = maxThinking ? " / max" : "";
-  const enabledLabel = provider.id === "maestro-openai"
+  const enabledLabel = provider.api === "openai-responses"
     ? `启用：minimal / low / medium / high / xhigh${maxSuffix}`
     : `启用：off / minimal / low / medium / high / xhigh${maxSuffix}`;
   const disabledLabel = "关闭：仅 off";
@@ -311,14 +325,14 @@ async function configureProvider(
   if (!confirmed) return;
   const result = await saveApiProviderSettings(next, modelsPath);
   await saveModelThinkingDefault(provider.id, next.modelId, defaultThinkingLevel, defaultsPath);
-  await saveDefaultThinkingLevel(ctx, modelsPath, defaultThinkingLevel);
+  await saveDefaultModelAndThinking(ctx, modelsPath, provider.id, next.modelId, defaultThinkingLevel);
   reloadProviderRegistration(pi, ctx, provider);
   applyThinkingLevelToActiveModel(pi, ctx, provider, next.modelId, defaultThinkingLevel);
   notifySaved(
     ctx,
     provider,
     result,
-    `已保存；默认思考强度为 ${defaultThinkingLevel}，打开 /model 即可选择模型`,
+    `已保存；默认模型为 ${provider.id}/${next.modelId}，默认思考强度为 ${defaultThinkingLevel}`,
   );
 }
 
@@ -479,15 +493,15 @@ async function writeApiProviderSettings(
       : defaults.maxTokens,
   };
   if (settings.reasoning) {
-    const thinkingLevelMap: Record<string, string | null> = settings.provider === "maestro-openai"
-      ? { off: null, xhigh: "xhigh" }
-      : { xhigh: "high" };
+    const thinkingLevelMap: Record<string, string | null> = defaults.api === "anthropic-messages"
+      ? { xhigh: "high" }
+      : { off: null, xhigh: "xhigh" };
     if (settings.maxThinking) thinkingLevelMap.max = "max";
     nextModel.thinkingLevelMap = thinkingLevelMap;
   } else {
     delete nextModel.thinkingLevelMap;
   }
-  providers[settings.provider] = {
+  const nextProvider: Record<string, unknown> = {
     ...currentProvider,
     baseUrl: settings.baseUrl,
     api: defaults.api,
@@ -496,6 +510,8 @@ async function writeApiProviderSettings(
       ? currentModels.map((model, index) => index === existingIndex ? nextModel : model)
       : [...currentModels, nextModel],
   };
+  if (defaults.compat) nextProvider.compat = defaults.compat;
+  providers[settings.provider] = nextProvider;
   const nextRoot = { ...root, providers };
 
   return writeModelsRoot(nextRoot, modelsPath, exists);
@@ -596,7 +612,7 @@ function parseManagerArgs(args: string): {
     if (action && provider) return { action, provider };
   }
   throw new Error(
-    "用法：/api-manager list | show|set|delete|logout|reset [openai|anthropic]",
+    "用法：/api-manager list | show|set|delete|logout|reset [openai|qwen|anthropic]",
   );
 }
 
@@ -635,6 +651,9 @@ function providerFromArg(value: string): ProviderDefaults | undefined {
   if (value === "openai" || value === "maestro-openai") {
     return providerDefaults("maestro-openai");
   }
+  if (value === "qwen" || value === "maestro-qwen") {
+    return providerDefaults("maestro-qwen");
+  }
   if (value === "anthropic" || value === "maestro-anthropic") {
     return providerDefaults("maestro-anthropic");
   }
@@ -649,7 +668,7 @@ async function chooseDefaultThinkingLevel(
   maxThinking: boolean,
 ): Promise<ApiThinkingLevel | undefined> {
   const supported: ApiThinkingLevel[] = reasoning
-    ? provider.id === "maestro-openai"
+    ? provider.api === "openai-responses"
       ? ["minimal", "low", "medium", "high", "xhigh"]
       : ["off", "minimal", "low", "medium", "high", "xhigh"]
     : ["off"];
@@ -682,6 +701,24 @@ async function saveDefaultThinkingLevel(
   const errors = manager.drainErrors();
   if (errors.length > 0) {
     throw new Error(`Unable to save default thinking level: ${errors.map((entry) => entry.error.message).join("; ")}`);
+  }
+}
+
+async function saveDefaultModelAndThinking(
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  provider: ApiProviderId,
+  modelId: string,
+  level: ApiThinkingLevel,
+): Promise<void> {
+  const manager = SettingsManager.create(ctx.cwd, dirname(modelsPath));
+  manager.setDefaultModelAndProvider(provider, modelId);
+  const setDefaultThinkingLevel = manager.setDefaultThinkingLevel.bind(manager) as (value: ApiThinkingLevel) => void;
+  setDefaultThinkingLevel(level);
+  await manager.flush();
+  const errors = manager.drainErrors();
+  if (errors.length > 0) {
+    throw new Error(`Unable to save default model settings: ${errors.map((entry) => entry.error.message).join("; ")}`);
   }
 }
 

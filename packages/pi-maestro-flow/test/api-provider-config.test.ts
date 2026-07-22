@@ -45,6 +45,13 @@ test("registers configured providers and the /api-manager command", async (t) =>
     apiKey: "openai-secret",
   }, modelsPath);
   await saveApiProviderSettings({
+    provider: "maestro-qwen",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    modelId: "qwen3.8-max-preview",
+    reasoning: true,
+    apiKey: "qwen-secret",
+  }, modelsPath);
+  await saveApiProviderSettings({
     provider: "maestro-anthropic",
     baseUrl: "https://api.anthropic.com",
     modelId: "claude-sonnet-4-5",
@@ -62,9 +69,10 @@ test("registers configured providers and the /api-manager command", async (t) =>
     },
   } as any, { modelsPath });
 
-  assert.deepEqual(registered.map((entry) => entry.name), ["maestro-openai", "maestro-anthropic"]);
+  assert.deepEqual(registered.map((entry) => entry.name), ["maestro-openai", "maestro-qwen", "maestro-anthropic"]);
   assert.deepEqual(registered[0].config, { name: "OpenAI Responses (Custom)" });
-  assert.deepEqual(registered[1].config, { name: "Anthropic (Custom)" });
+  assert.deepEqual(registered[1].config, { name: "Qwen Compatible (Custom)" });
+  assert.deepEqual(registered[2].config, { name: "Anthropic (Custom)" });
   assert.equal(commands.size, 1);
   assert.ok(commands.has("api-manager"));
   assert.equal(commands.has("api-login"), false);
@@ -127,6 +135,33 @@ test("atomically saves API settings while preserving other providers", async (t)
   assert.deepEqual(saved.providers["maestro-openai"].models[0].thinkingLevelMap, { off: null, xhigh: "xhigh" });
   assert.ok(result.backupPath);
   assert.equal(existsSync(result.backupPath!), true);
+});
+
+test("saves Qwen as an OpenAI-compatible completions provider", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-qwen-store-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+
+  await saveApiProviderSettings({
+    provider: "maestro-qwen",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1/",
+    modelId: "qwen3.8-max-preview",
+    reasoning: true,
+    apiKey: "qwen-secret",
+    maxThinking: true,
+  }, modelsPath);
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  const qwen = saved.providers["maestro-qwen"];
+  assert.equal(qwen.baseUrl, "https://dashscope.aliyuncs.com/compatible-mode/v1");
+  assert.equal(qwen.api, "openai-completions");
+  assert.equal(qwen.apiKey, "qwen-secret");
+  assert.deepEqual(qwen.compat, {
+    supportsDeveloperRole: false,
+    thinkingFormat: "qwen",
+  });
+  assert.equal(qwen.models[0].id, "qwen3.8-max-preview");
+  assert.deepEqual(qwen.models[0].thinkingLevelMap, { off: null, xhigh: "xhigh", max: "max" });
 });
 
 test("/api-manager creates or updates URL, model, reasoning, and API key", async (t) => {
@@ -197,6 +232,8 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(saved.providers["maestro-openai"].models[0].thinkingLevelMap.max, "max");
   assert.equal(saved.providers["maestro-openai"].apiKey, "openai-secret");
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  assert.equal(settings.defaultProvider, "maestro-openai");
+  assert.equal(settings.defaultModel, "gpt-5.4");
   assert.equal(settings.defaultThinkingLevel, "max");
   assert.deepEqual(appliedThinkingLevels, []);
   assert.ok(modelSelectHandler);
@@ -212,8 +249,77 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
     name: "maestro-openai",
     config: { name: "OpenAI Responses (Custom)" },
   });
-  assert.match(notifications.at(-1)?.message ?? "", /打开 \/model 即可选择模型/);
+  assert.match(notifications.at(-1)?.message ?? "", /默认模型为 maestro-openai\/gpt-5\.4/);
   assert.equal(notifications.at(-1)?.type, "info");
+});
+
+test("/api-manager qwen creates an OpenAI-compatible provider and default model", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-qwen-login-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const registrations: Array<{ name: string; config: any }> = [];
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider(name: string, config: any) {
+      registrations.push({ name, config });
+    },
+    registerCommand(name: string, command: any) {
+      commands.set(name, command);
+    },
+    setThinkingLevel() {},
+  } as any, { modelsPath });
+
+  const inputAnswers = [
+    "https://dashscope.aliyuncs.com/compatible-mode/v1/",
+    "qwen3.8-max-preview",
+    "qwen-secret",
+  ];
+  const selectAnswers = [
+    "启用：off / minimal / low / medium / high / xhigh / max",
+    "high",
+  ];
+  const selectOptions: string[][] = [];
+  const command = commands.get("api-manager");
+  assert.ok(command);
+  await command.handler("qwen", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: {
+      refresh() {},
+      getAll() { return [{ thinkingLevelMap: { max: "max" } }]; },
+    },
+    ui: {
+      async input() {
+        return inputAnswers.shift();
+      },
+      async select(_title: string, options: string[]) {
+        selectOptions.push(options);
+        return selectAnswers.shift();
+      },
+      async confirm() {
+        return true;
+      },
+      notify() {},
+    },
+  });
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.equal(saved.providers["maestro-qwen"].api, "openai-completions");
+  assert.deepEqual(saved.providers["maestro-qwen"].compat, {
+    supportsDeveloperRole: false,
+    thinkingFormat: "qwen",
+  });
+  assert.equal(saved.providers["maestro-qwen"].models[0].id, "qwen3.8-max-preview");
+  assert.equal(saved.providers["maestro-qwen"].models[0].thinkingLevelMap.max, "max");
+  const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  assert.equal(settings.defaultProvider, "maestro-qwen");
+  assert.equal(settings.defaultModel, "qwen3.8-max-preview");
+  assert.equal(settings.defaultThinkingLevel, "high");
+  assert.ok(selectOptions[0]?.includes("启用：off / minimal / low / medium / high / xhigh / max"));
+  assert.deepEqual(registrations.at(-1), {
+    name: "maestro-qwen",
+    config: { name: "Qwen Compatible (Custom)" },
+  });
 });
 
 test("/api-manager rejects empty URL and API key instead of reusing current values", async (t) => {

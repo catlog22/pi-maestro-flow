@@ -613,10 +613,9 @@ test("structured_output tool completion settles the child without waiting for ag
 
   const result = await Promise.race([
     runTeammate(
-      { agent: "swarm-ant", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+      { agent: "delegate", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
       {
         baseCwd: process.cwd(),
-        allowInternalSwarmAnt: true,
         spawnChildProcess,
         onProgress: (entry) => progress.push({ ...entry, recentTools: [...entry.recentTools] }),
         onTurnComplete() {
@@ -670,8 +669,8 @@ test("parent rejects a schema-invalid structured output file", async () => {
   }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
 
   const result = await runTeammate(
-    { agent: "swarm-ant", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
-    { baseCwd: process.cwd(), allowInternalSwarmAnt: true, spawnChildProcess },
+    { agent: "delegate", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), spawnChildProcess },
   );
 
   assert.equal(result.exitCode, 1);

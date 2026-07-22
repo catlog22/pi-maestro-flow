@@ -56,7 +56,7 @@ Bash: python <skill_root>/scripts/aco.py --session <session_path> init
 ```
 
 Parse stdout JSON. On `status: "error"`:
-- exit_code 2 -> config validation error -> AskUserQuestion to fix
+- exit_code 2 -> config validation error -> user prompt to fix
 - exit_code 1 -> runtime error -> log to issues.md + retry once
 
 On success, capture:
@@ -128,7 +128,7 @@ Do NOT spawn any workers in this command. First spawn happens in iterate.md step
 
 | Failure | Action |
 |---------|--------|
-| Config invalid | AskUserQuestion, regenerate, retry |
+| Config invalid | user prompt, regenerate, retry |
 | `aco.py init` runtime error | Log to issues.md, retry once, then AskUserQuestion (abort/refine) |
 | Directory creation fails | Check disk space / permissions, retry |
 | TeamCreate fails | Check team name conflict (existing swarm session), prompt to clean or resume |

@@ -126,6 +126,23 @@ test("Plan confirmation keeps clear-context execution unavailable outside comman
   assert.equal(await pending, "cancel");
 });
 
+test("Plan confirmation keeps compact execution unavailable from tool-result context", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan",
+    canClearContext: false,
+    canCompactContext: false,
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\r");
+  assert.equal(harness.doneValue, undefined);
+  assert.match(harness.component.render(100).join("\n"), /Use \/plan approve to compact before execution/);
+  harness.component.handleInput("\x1b");
+  assert.equal(await pending, "cancel");
+});
+
 test("Plan confirmation accepts Ctrl+Enter across modifyOtherKeys encoding", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {

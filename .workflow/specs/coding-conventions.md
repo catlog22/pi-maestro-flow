@@ -106,10 +106,26 @@ teammate 工具的参数归一化（单/多任务/chain 判定、顶层默认值
 
 </spec-entry>
 
-<spec-entry category="coding" keywords="swarm private-ant role-binding catalog teammate" date="2026-07-17" sid="S-20260717-uzgd" title="Swarm 私有 Ant 与动态评审角色边界" description="固定 Ant 为不可公开选择的系统内建角色，仅 Judge/Analyst 由 Skill 从 live catalog 动态绑定" source="master@3b0379dd" supersedes="S-20260716-fcl4">
+<spec-entry category="coding" keywords="swarm private-ant role-binding catalog teammate" date="2026-07-17" sid="S-20260717-uzgd" title="Swarm 私有 Ant 与动态评审角色边界" description="固定 Ant 为不可公开选择的系统内建角色，仅 Judge/Analyst 由 Skill 从 live catalog 动态绑定" source="master@3b0379dd" supersedes="S-20260716-fcl4" status="deprecated" superseded-by="S-20260718-mn6g">
 
 ### Swarm 私有 Ant 与动态评审角色边界
 
 内置 /swarm MUST 只激活 bundled swarm Skill 与观察面。swarm-ant MUST 是 runtime-private builtin：MUST NOT 出现在 live teammate catalog、teammate-list、父级 agent prompt 或普通 teammate dispatch 中，且项目/用户定义 MUST NOT 覆盖。Swarm plan MUST 仅从 live catalog 动态绑定 judge 与 analyst；Ant contract MUST 仅动态编译 taskType、mission、Prompt、证据和输出要求，不得包含 agent selector。native swarm_runtime MUST 固定加载私有 swarm-ant，并通过内部 capability dispatch；私有定义缺失时 fail closed，禁止回退到公开角色。Dashboard 仅投影真实 role_bound 与执行事件。验证至少覆盖 catalog 隐藏、直接 dispatch 拒绝、内部 dispatch、定向测试、check:types、npm pack 和 fresh Pi 命令/Skill 发现。
+
+</spec-entry>
+
+<spec-entry category="coding" keywords="swarm,manual-invocation,skill-runtime,sendusermessage,observability" date="2026-07-18" sid="S-20260718-mn6g" title="Swarm 手动 Skill 调用与观察面边界" description="约束 Swarm 由用户手动调用 Skill，/swarm 仅准备配置与观察面" source="master@6499957e" supersedes="S-20260717-uzgd" status="deprecated" superseded-by="S-20260718-nikf">
+
+### Swarm 手动 Skill 调用与观察面边界
+
+用户 MUST 手动执行 /skill:swarm <objective>、/skill:swarm resume 或 /skill:swarm continue；Extension MUST NOT 通过 sendUserMessage 自动注入 /skill:swarm。/swarm <options> <objective> MAY 仅准备自定义 controller 配置与观察面并提示等价手动命令；直接 /skill:swarm 使用 runtime 默认配置。swarm Skill 继续负责编译动态计划，swarm_runtime 继续负责校验、调度、ACO、产物和权威事件。
+
+</spec-entry>
+
+<spec-entry category="coding" keywords="team-swarm,json-projection,swarm-runtime,read-only,observability" date="2026-07-18" sid="S-20260718-nikf" title="Team Swarm 单一执行权与 JSON 只读投影边界" description="规定 team-swarm 独占执行，Maestro Flow 仅从 canonical JSON 提取只读显示" source="master@6499957e" supersedes="S-20260718-mn6g">
+
+### Team Swarm 单一执行权与 JSON 只读投影边界
+
+用户 MUST 通过 /skill:team-swarm <objective>、resume 或 continue 启动和恢复 Swarm；team-swarm coordinator 与 scripts/aco.py 是 worker dispatch、评分、pheromone、收敛和产物的唯一执行权威。Maestro Flow MUST NOT 注册 /swarm extension command、swarm_runtime tool，或维护 native Swarm controller、engine、private Ant 与独立 schema。Flow MAY 从最新 {run_dir}/work/team/team-session.json、swarm-config.json、task-space.json、pheromone/*.json、trails/*.jsonl、best.json 及 {run_dir}/outputs/swarm-report.json、best-solution.md 做 fail-soft 只读投影，用于 statusline 和 overlay；投影 MUST NOT 写入状态、推测 teammate live delta 或改变 team-swarm 生命周期。可保留未注册的 /swarm status|inspect 兼容入口，但只能读取并展示 JSON。验证至少覆盖定向测试、check:types、package resources、npm pack dry-run 以及仓库外 fresh Pi 的 command/Skill 发现。
 
 </spec-entry>

@@ -1,5 +1,5 @@
 import { type Component, type Focusable, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
-import type { TodoActorRef, TodoTask } from "../tools/todo.ts";
+import { formatTodoActorSelector, type TodoActorRef, type TodoTask } from "../tools/todo.ts";
 
 export interface TodoOverlayParams {
   getTasks: () => readonly TodoTask[];
@@ -242,21 +242,7 @@ function actorTag(task: TodoTask, tasks: readonly TodoTask[]): string {
 }
 
 function actorLabel(actor: TodoActorRef, tasks: readonly TodoTask[]): string {
-  const collidingIds = new Set<string>();
-  for (const task of tasks) {
-    for (const candidate of [task.createdBy, task.assignee]) {
-      if (candidate.label === actor.label) collidingIds.add(candidate.id);
-    }
-  }
-  return collidingIds.size > 1 ? `${actor.label}#${uniqueIdPrefix(actor.id, collidingIds)}` : actor.label;
-}
-
-function uniqueIdPrefix(id: string, ids: ReadonlySet<string>): string {
-  for (let length = Math.min(4, id.length); length < id.length; length++) {
-    const prefix = id.slice(0, length);
-    if ([...ids].every((candidate) => candidate === id || !candidate.startsWith(prefix))) return prefix;
-  }
-  return id;
+  return formatTodoActorSelector(actor, tasks.flatMap((task) => [task.createdBy, task.assignee]));
 }
 
 function statusLabel(status: TodoTask["status"]): string {

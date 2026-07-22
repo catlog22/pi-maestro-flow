@@ -293,52 +293,26 @@ Unicode symbols. Bold and dim ANSI styling are supported when the terminal imple
 them, but a single statusline cannot select a different font family from the rest of
 the terminal.
 
-## Native swarm command
+## Team swarm JSON display
 
-`/swarm <objective>` activates the bundled `swarm` Skill through Pi's native Skill
-expansion path. The Skill first reads the live teammate catalog, then derives task-specific dimensions,
-role bindings, task types, Prompts, evidence rules, scoring weights, missions, and synthesis requirements
-from the objective. It submits that plan to the built-in
-`swarm_runtime` bridge; the TypeScript runtime owns teammate dispatch, MMAS/ACO math,
-contract validation, event persistence, and visualization. The runtime resolves the exact catalog roles
-selected by the Skill and fails closed on unknown roles, missing stages, unsupported task types, or blank
-Prompts. No Python script or shell controller sits between
-the Skill and runtime.
+`/skill:team-swarm <objective>` is the sole Swarm execution entry. Its coordinator and
+`scripts/aco.py` own worker dispatch, pheromone updates, scoring, convergence, resume, and
+final synthesis. Maestro Flow no longer registers `/swarm` or exposes `swarm_runtime`.
 
-The command keeps its primary monitor in Pi's footer as one compact line containing the
-current/max iteration and convergence percentage. `/swarm status` reports the same compact
-state without opening another surface. The detailed height-aware overlay is diagnostic-only
-and opens explicitly through `/swarm inspect`; it provides Live, Prepare, Topology, Metrics,
-and Result views. Live and Topology reuse teammate's progress tree and show every
-Ant, Scorer, and Analyst with explicit status text, correlation id, tools, tokens, duration,
-trail, latest message, idle diagnostics, settlement signal, and errors. It projects authoritative `skill_phase`, `role_bound`,
-`prompt_compiled`, teammate assistant/tool delta, `convergence_decision`, and
-`artifact_produced` events. Live output is rendered with follow-tail and scroll
-controls; a throttled aggregate also appears in Pi's main message stream. Close the
-overlay without stopping the run, reopen it with `/swarm inspect`, or preserve partial
-artifacts while cancelling with `/swarm stop`. Parallel Ants receive complementary exploration
-lenses, and later iterations receive a capped set of prior verified candidates as untrusted
-evidence so they can refine or challenge earlier findings. Every run writes a stable
-visualization-first contract under `.workflow/swarms/<run-id>/`:
+The extension retains a read-only display adapter. It scans the latest canonical
+`{run_dir}/work/team/` JSON state and projects a compact footer plus Summary, Topology,
+Metrics, and Result views. The projection reads only:
 
-Runtime controls:
+- `team-session.json` — status, iteration, worker ids, and execution envelope
+- `swarm-config.json` / `task-space.json` — objective and task-space nodes
+- `pheromone/current.json` and `pheromone/history/*.json` — edge weights and entropy
+- `trails/*.jsonl` — per-iteration verified best/mean scores
+- `best.json` and `outputs/swarm-report.json` — best candidate and final report paths
 
-- `/swarm --ants 5 --iterations 5 --path-length 5 <objective>` — override the normalized execution envelope
-- `/swarm feedback <text>` — apply user guidance from the next iteration
-- `/swarm resume [run-id]` — reconcile and resume the latest incomplete persisted run
-- `/swarm continue [K] [run-id]` — preserve graph/best/feedback and add more iterations
-- `/swarm export <directory>` — export `result.json`, `swarm-report.json`, `best.json`, and `best-solution.md`
-- `/swarm archive` — detach the run while retaining all artifacts
-
-Core artifacts:
-
-- `run.json` — complete current snapshot, graph, agents, and metric history
-- `iterations/<nnn>.json` — immutable per-iteration assignments and outcomes
-- `metrics.jsonl` — chart-ready convergence time series
-- `events.jsonl` — ordered Skill, Prompt, teammate, convergence, and artifact event stream
-- `result.json` — compact best solution and final synthesis
-
-External dashboards can validate `run.json` against `schemas/swarm-run.schema.json`.
+The adapter never writes these files, launches teammates, changes convergence, or invents
+missing live events. A hidden compatibility input accepts only `/swarm status` and
+`/swarm inspect`; it is intentionally absent from command discovery and autocomplete.
+All execution and lifecycle controls remain with `team-swarm`.
 
 ## Shared root and teammate Todo
 

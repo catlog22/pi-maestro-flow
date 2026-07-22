@@ -390,3 +390,10 @@ test("terminal failures are removed while successful agents remain wakeable by c
     successful.agent.correlationId,
   );
 });
+
+test("agent routing accepts displayed @name and name#id-prefix selectors", () => {
+  const { state, agent } = createState();
+  for (const target of ["reviewer", "@reviewer", "reviewer#child-12", "@reviewer#child-12"]) {
+    assert.equal(resolveAgentCorrelationId(state, target), agent.correlationId, target);
+  }
+});

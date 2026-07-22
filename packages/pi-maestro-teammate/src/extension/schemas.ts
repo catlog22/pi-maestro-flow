@@ -274,7 +274,7 @@ export const TeammateParams = Type.Object({
 export const TeammateSendParams = Type.Object({
   to: Type.String({
     description:
-      "Target agent — a name, a correlation ID, or a unique correlation ID prefix (from teammate-list)",
+      "Target agent — name, @name, displayed name#id-prefix, correlation ID, or unique ID prefix from teammate-list",
   }),
   message: Type.Optional(
     Type.String({
@@ -300,7 +300,7 @@ export const TeammateListParams = Type.Object({
 
 export const TeammateWatchParams = Type.Object({
   name: Type.String({
-    description: "Agent name or correlation ID/prefix from teammate-list",
+    description: "Agent name, @name, displayed name#id-prefix, or correlation ID/prefix from teammate-list",
   }),
   lines: Type.Optional(
     Type.Integer({

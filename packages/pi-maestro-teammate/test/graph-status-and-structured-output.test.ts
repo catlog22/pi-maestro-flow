@@ -560,6 +560,8 @@ test("agent list prefers attachable physical chain children over duplicate progr
   assert.equal(listed[0].hasStdin, true);
   assert.equal(listed[0].depth, 1);
   assert.equal(resolveWatchTarget(state, "child").match?.kind, "agent");
+  assert.equal(resolveWatchTarget(state, "@scan").match?.kind, "agent");
+  assert.equal(resolveWatchTarget(state, "@scan#child").match?.kind, "agent");
 });
 
 test("teammate-list expands graph tasks and watch keeps sleeping messages visible", () => {
@@ -672,6 +674,7 @@ test("teammate-watch explains provider queueing before first activity", () => {
 
 test("nested proxy preserves parentage, graph children, and explicit background semantics", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  assert.equal(source.match(/emitTeammateStarted\(pi, childAgent\)/g)?.length, 2);
   assert.equal(resolveProxyParentCorrelationId({ correlationId: "actual-child" }, "root-graph"), "actual-child");
   assert.equal(resolveProxyParentCorrelationId({ parentCid: "explicit-parent", correlationId: "actual-child" }, "root-graph"), "explicit-parent");
   assert.match(source, /spawnedBy: cid,[\s\S]*if \(task\.name\) state\.namedAgents\.set\(task\.name, childId\)/);

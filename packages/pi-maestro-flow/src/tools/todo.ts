@@ -193,6 +193,27 @@ export function getTodoActors(): TodoActorRef[] {
   );
 }
 
+export function registerTodoActor(actor: TodoActorRef): void {
+  rememberActor(actor);
+}
+
+export function formatTodoActorSelector(
+  actor: { id: string; label: string },
+  actors: readonly { id: string; label: string }[],
+): string {
+  const collidingIds = new Set(actors
+    .filter((candidate) => candidate.label === actor.label)
+    .map((candidate) => candidate.id));
+  if (collidingIds.size < 2) return actor.label;
+  for (let length = Math.min(4, actor.id.length); length < actor.id.length; length++) {
+    const prefix = actor.id.slice(0, length);
+    if ([...collidingIds].every((candidate) => candidate === actor.id || !candidate.startsWith(prefix))) {
+      return `${actor.label}#${prefix}`;
+    }
+  }
+  return `${actor.label}#${actor.id}`;
+}
+
 /**
  * Internal projection boundary. Canonical Session/Run state is authoritative;
  * this function never writes canonical files and is intentionally not exposed
@@ -417,7 +438,7 @@ async function executeTodoAction(
       case "update":
         return await handleUpdate(params, ctx, actor, generation);
       case "list":
-        return handleList(params);
+        return handleList(params, actor);
       case "get":
         return handleGet(params);
       case "delete":
@@ -586,15 +607,22 @@ async function handleUpdate(
   return ok(`Updated #${draft.id}: ${draft.subject}${statusNote}`, "update");
 }
 
-function handleList(params: TodoParams): AgentToolResult {
+function handleList(params: TodoParams, actor: TodoActorRef): AgentToolResult {
   let filtered = getVisibleTasks();
 
   if (params.filter?.status) {
     filtered = filtered.filter((t) => t.status === params.filter!.status);
   }
-  if (params.filter?.memberId) {
-    filtered = filtered.filter((task) => task.createdBy.id === params.filter!.memberId
-      || task.assignee.id === params.filter!.memberId);
+  const memberSelector = params.filter?.memberId;
+  if (memberSelector) {
+    const member = resolveTodoActorSelector(memberSelector, actor);
+    if ("error" in member) {
+      if (member.reason === "ambiguous") return err(member.error, "list");
+      filtered = [];
+    } else {
+      filtered = filtered.filter((task) => task.createdBy.id === member.actor.id
+        || task.assignee.id === member.actor.id);
+    }
   }
 
   if (filtered.length === 0) {
@@ -1208,23 +1236,66 @@ function rememberActor(actor: TodoActorRef): void {
   knownActors.set(actor.id, cloneActor(actor));
 }
 
+type TodoActorResolution =
+  | { actor: TodoActorRef }
+  | { error: string; reason: "unknown" | "ambiguous" };
+
+function resolveTodoActorSelector(requested: string, actor: TodoActorRef): TodoActorResolution {
+  const selector = requested.trim().replace(/^@/, "");
+  if (selector === "self" || selector === actor.id || selector === actor.label) {
+    return { actor: cloneActor(actor) };
+  }
+  if (selector === ROOT_TODO_ACTOR.id) return { actor: cloneActor(ROOT_TODO_ACTOR) };
+
+  const exactId = knownActors.get(selector);
+  if (exactId) return { actor: cloneActor(exactId) };
+
+  const labelMatches = [...knownActors.values()].filter((candidate) => candidate.label === selector);
+  if (labelMatches.length === 1) return { actor: cloneActor(labelMatches[0]) };
+  if (labelMatches.length > 1) {
+    return {
+      error: `Ambiguous Todo member selector: ${requested}; use label#unique-id-prefix or the full member id`,
+      reason: "ambiguous",
+    };
+  }
+
+  const marker = selector.lastIndexOf("#");
+  if (marker > 0 && marker < selector.length - 1) {
+    const label = selector.slice(0, marker);
+    const idPrefix = selector.slice(marker + 1);
+    const decoratedMatches = [...knownActors.values()].filter((candidate) =>
+      candidate.label === label && candidate.id.startsWith(idPrefix)
+    );
+    if (decoratedMatches.length === 1) return { actor: cloneActor(decoratedMatches[0]) };
+    if (decoratedMatches.length > 1) {
+      return {
+        error: `Ambiguous Todo member selector: ${requested}; use a longer id prefix`,
+        reason: "ambiguous",
+      };
+    }
+  }
+
+  return { error: `Unknown Todo member selector: ${requested}`, reason: "unknown" };
+}
+
 function resolveAssignee(
   requested: string | undefined,
   actor: TodoActorRef,
 ): { actor: TodoActorRef } | { error: string } {
-  if (!requested || requested === "self" || requested === actor.id || requested === actor.label) {
-    return { actor: cloneActor(actor) };
+  if (!requested) return { actor: cloneActor(actor) };
+  const resolved = resolveTodoActorSelector(requested, actor);
+  if ("error" in resolved) {
+    if (actor.kind !== "root") {
+      return { error: `@${actor.label} can only assign Todo tasks to self or root` };
+    }
+    return { error: resolved.reason === "ambiguous"
+      ? resolved.error.replace("member selector", "assignee")
+      : `Unknown Todo assignee: ${requested}` };
   }
-  if (requested === "root") return { actor: cloneActor(ROOT_TODO_ACTOR) };
-  if (actor.kind !== "root") {
+  if (actor.kind !== "root" && resolved.actor.id !== actor.id && resolved.actor.id !== ROOT_TODO_ACTOR.id) {
     return { error: `@${actor.label} can only assign Todo tasks to self or root` };
   }
-  const matches = [...knownActors.values()].filter((candidate) =>
-    candidate.id === requested || candidate.label === requested
-  );
-  if (matches.length === 0) return { error: `Unknown Todo assignee: ${requested}` };
-  if (matches.length > 1) return { error: `Ambiguous Todo assignee label: ${requested}; use the full member id` };
-  return { actor: cloneActor(matches[0]) };
+  return resolved;
 }
 
 function canEditTask(actor: TodoActorRef, task: TodoTask): boolean {
@@ -1238,9 +1309,12 @@ function canDeleteTask(actor: TodoActorRef, task: TodoTask): boolean {
 }
 
 function actorTag(task: TodoTask): string {
+  const actors = [...knownActors.values()];
+  const createdBy = formatTodoActorSelector(task.createdBy, actors);
+  const assignee = formatTodoActorSelector(task.assignee, actors);
   return task.createdBy.id === task.assignee.id
-    ? `@${task.assignee.label}`
-    : `@${task.createdBy.label}→@${task.assignee.label}`;
+    ? `@${assignee}`
+    : `@${createdBy}→@${assignee}`;
 }
 
 function findActiveTask(assigneeId: string, excludeId?: string): TodoTask | undefined {

@@ -15,6 +15,7 @@ import {
   onContextTodo,
   onSessionShutdown,
   onSessionStart,
+  registerTodoActor,
   type TodoActorRef,
   type TodoContext,
 } from "../src/tools/todo.ts";
@@ -463,6 +464,22 @@ test("root and teammates share Todo state with per-assignee active tasks and own
     assert.equal(apiTask.createdBy.id, api.id);
     assert.equal(apiTask.assignee.id, api.id);
 
+    const listFor = async (memberId: string, actor?: TodoActorRef) => {
+      const result = await executeTodo({ action: "list", filter: { memberId } }, ctx, actor);
+      return (result.content[0] as { text: string }).text;
+    };
+    for (const selector of [api.id, api.label, `@${api.label}`]) {
+      const text = await listFor(selector);
+      assert.match(text, /API task/);
+      assert.doesNotMatch(text, /Root task|Review task/);
+    }
+    const ownTasks = await listFor("self", reviewer);
+    assert.match(ownTasks, /Review task/);
+    assert.doesNotMatch(ownTasks, /Root task|API task/);
+    const rootTasks = await listFor("root", api);
+    assert.match(rootTasks, /Root task/);
+    assert.doesNotMatch(rootTasks, /API task|Review task/);
+
     await executeTodo({ action: "next" }, ctx);
     await executeTodo({ action: "next" }, ctx, api);
     assert.deepEqual(getVisibleTasks().map((task) => task.status), ["in_progress", "in_progress", "pending"]);
@@ -496,6 +513,48 @@ test("root and teammates share Todo state with per-assignee active tasks and own
     const deniedClear = await executeTodo({ action: "clear" }, ctx, reviewer);
     assert.equal((deniedClear as { isError?: boolean }).isError, true);
     assert.equal(getVisibleTasks().length, 3);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Todo selectors round-trip displayed actors and support proactive teammate registration", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-selectors-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const first: TodoActorRef = { kind: "teammate", id: "api-1111", label: "api", agentType: "worker" };
+  const second: TodoActorRef = { kind: "teammate", id: "api-2222", label: "api", agentType: "reviewer" };
+  const solo: TodoActorRef = { kind: "teammate", id: "solo-3333", label: "solo", agentType: "worker" };
+
+  try {
+    registerTodoActor(first);
+    registerTodoActor(second);
+    registerTodoActor(solo);
+
+    const soloCreate = await executeTodo({ action: "create", subject: "Solo", assignee: "@solo" }, ctx);
+    assert.equal((soloCreate as { isError?: boolean }).isError, undefined);
+    await executeTodo({ action: "create", subject: "First API", assignee: "@api#api-1" }, ctx);
+    await executeTodo({ action: "create", subject: "Second API", assignee: "api#api-2" }, ctx);
+
+    const ambiguous = await executeTodo({ action: "list", filter: { memberId: "api" } }, ctx);
+    assert.equal((ambiguous as { isError?: boolean }).isError, true);
+    assert.match((ambiguous.content[0] as { text: string }).text, /Ambiguous Todo member selector/);
+
+    const firstList = await executeTodo({ action: "list", filter: { memberId: "@api#api-1" } }, ctx);
+    const firstText = (firstList.content[0] as { text: string }).text;
+    assert.match(firstText, /@api#api-1/);
+    assert.match(firstText, /First API/);
+    assert.doesNotMatch(firstText, /Second API/);
+
+    const firstTask = getVisibleTasks().find((task) => task.subject === "First API")!;
+    const selfUpdate = await executeTodo({ action: "update", id: firstTask.id, assignee: "@api" }, ctx, first);
+    assert.equal((selfUpdate as { isError?: boolean }).isError, undefined);
   } finally {
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });

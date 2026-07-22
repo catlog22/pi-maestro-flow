@@ -3,7 +3,7 @@ role: coordinator
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
 # Coordinator Role — team-swarm
@@ -62,7 +62,7 @@ When coordinator needs to execute a phase command:
 | team-worker | Subagent | Worker spawning (ant, scorer, analyst) |
 | todo({ action: "create" }) / todo({ action: "list" }) / todo({ action: "get" }) / todo({ action: "update" }) | System | Task lifecycle |
 | team_msg | System | Message bus |
-| SendMessage / AskUserQuestion | System | Comms |
+| SendMessage / user prompt | System | Comms |
 
 ---
 
@@ -83,7 +83,7 @@ When coordinator needs to execute a phase command:
 ## Phase 0: Session Resume Check
 
 1. Scan `{run_dir}/work/team/team-session.json` for `status` in {active, paused}
-2. Single session -> resume; multiple -> AskUserQuestion
+2. Single session -> resume; multiple -> user prompt
 3. Reconcile: todo({ action: "list" }) vs session.iteration vs pheromone/current.json
 4. If interrupted mid-iteration -> reset in_progress ant tasks to pending, respawn
 5. If iteration was complete but update not run -> call `aco.py update` for that iter
@@ -98,7 +98,7 @@ When coordinator needs to execute a phase command:
 **Workflow**:
 
 1. Parse user task description (text-level only, no codebase exploration)
-2. Clarify via AskUserQuestion if ambiguous:
+2. Clarify via user prompt if ambiguous:
    - What is the search space? (file glob, explicit node list, abstract decisions)
    - What is the objective? (find best X, discover Y, optimize Z)
    - How should results be scored? (test pass rate, lint, custom rule, LLM judge)
@@ -139,7 +139,7 @@ Delegate to `@commands/init-swarm.md`:
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-swarm --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-swarm --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-swarm-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -205,7 +205,7 @@ Delegate to `@commands/converge.md`:
    - Best score + best path + best solution summary
    - Convergence reason
    - Top 5 trails table
-5. Execute completion action (interactive AskUserQuestion: Archive / Keep / Export)
+5. Execute completion action (interactive user prompt: Archive / Keep / Export)
 
 ---
 
@@ -219,5 +219,5 @@ Delegate to `@commands/converge.md`:
 | Convergence flag never trips | max_iterations safety net always triggers |
 | Script not found | Resolve `<skill_root>/scripts/aco.py`; if missing, fail with install hint |
 | Hallucination cluster (>50% ants flagged) | Pause, AskUserQuestion (continue / refine config) |
-| Task description too vague | AskUserQuestion before Phase 1 config generation |
+| Task description too vague | user prompt before Phase 1 config generation |
 | Session corruption | Phase 0 reconciliation; if irrecoverable, archive and start fresh |

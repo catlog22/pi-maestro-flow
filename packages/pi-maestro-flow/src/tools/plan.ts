@@ -139,9 +139,6 @@ const MUTATING_BASH_PATTERNS = [
 
 const SHELL_SIDE_EFFECT_ARGUMENTS = /(?:^|\s)(?:--output(?:=|\s)|--outfile(?:=|\s)|-OutFile(?:\s|$)|--in-place(?:=|\s|$)|--exec(?:=|\s|$)|--exec-batch(?:=|\s|$)|--ext-diff(?:\s|$)|--textconv(?:\s|$)|--open-files-in-pager(?:=|\s|$)|--pre(?:=|\s|$)|--fix(?:\s|$))/i;
 
-const PlanEnterParams = Type.Object({
-  prompt: Type.Optional(Type.String({ description: "Optional planning request to queue after entering Plan mode" })),
-});
 const PlanUpdateParams = Type.Object({
   markdown: Type.String({ description: "Complete Markdown text for current.md" }),
   expectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -463,6 +460,7 @@ async function reviewPlan(
       markdown: latestPlan ?? "",
       pathLabel: store.currentPath,
       canClearContext: typeof ctx.newSession === "function",
+      canCompactContext: handoffDelivery !== "tool-result",
     });
     if (action === "modify") {
       await editPlan(ctx, store.currentPath);
@@ -675,18 +673,14 @@ function requirePlanMode(action: PlanToolDetails["action"]): AgentToolResult<Pla
 }
 
 export function registerPlanTools(pi: ExtensionAPI): void {
-  const enterTool: ToolDefinition<typeof PlanEnterParams, PlanToolDetails> = {
+  const enterTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: PLAN_ENTER_TOOL,
     label: "Plan Enter",
     description: "Enter durable Plan mode, load this chat session's current.md draft, and activate Plan-only tools.",
     promptSnippet: "Use plan-enter before producing or editing an implementation Plan.",
-    parameters: PlanEnterParams,
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    parameters: EmptyPlanParams,
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
       if (mode !== "plan") await enterPlanMode(ctx);
-      if (params.prompt) {
-        const opts = ctx.isIdle?.() ? undefined : { deliverAs: "followUp" as const };
-        extensionApi?.sendUserMessage(params.prompt, opts);
-      }
       return result(`Plan mode active. Draft: ${currentStore?.currentPath ?? ""}`, currentDetails("enter"));
     },
     renderCall(_args, theme) { return new Text(theme.fg("toolTitle", theme.bold("plan enter")), 0, 0); },
@@ -1197,8 +1191,11 @@ export function registerPlanCommand(pi: ExtensionAPI): void {
       }
       if (trimmed) {
         if (!isPlanMode()) await enterPlanMode(ctx);
-        const opts = ctx.isIdle?.() ? undefined : { deliverAs: "followUp" as const };
-        extensionApi?.sendUserMessage(trimmed, opts);
+        if (ctx.isIdle?.() === false) {
+          ctx.ui.notify("Plan mode active. Planning prompt was not queued because the agent is still busy.", "warning");
+          return;
+        }
+        extensionApi?.sendUserMessage(trimmed);
         return;
       }
       await toggleMode(ctx);

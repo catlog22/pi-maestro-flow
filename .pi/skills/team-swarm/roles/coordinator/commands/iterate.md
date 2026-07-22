@@ -196,7 +196,7 @@ After each iteration:
 
 | Condition | Handling |
 |-----------|----------|
-| Ant task failed | Mark task failed; if >50% failed in iter -> halt, AskUserQuestion |
+| Ant task failed | Mark task failed; if >50% failed in iter -> halt, user prompt |
 | Ant produced no artifact | Script's update will skip it; if all skipped -> error -> halt |
 | `aco.py update` fails | Retry once; if persistent -> halt with error report |
 | Scorer worker fails | Fall back to `script` or `fallback` mode for this iter, log warning |

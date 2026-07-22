@@ -17,7 +17,7 @@ import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
 import { Check } from "typebox/value";
 import crossSpawn from "cross-spawn";
-import { listAgentSummaries, resolveAgent, resolveInternalAgent, type AgentConfig } from "../agents/agents.ts";
+import { listAgentSummaries, resolveAgent, type AgentConfig } from "../agents/agents.ts";
 import { resolvePromptTask } from "../prompts/prompts.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
 import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
@@ -74,8 +74,6 @@ export interface RunTeammateOptions {
     correlationId?: string,
   ) => void;
   onTurnComplete?: (result: SingleResult) => void;
-  /** @internal Grants only the native Swarm runtime access to its private Ant role. */
-  allowInternalSwarmAnt?: boolean;
   /** @internal Test seam for child lifecycle regression coverage. */
   spawnChildProcess?: typeof crossSpawn;
 }
@@ -1272,9 +1270,7 @@ export async function runTeammate(
 
   // Resolve an exact discovered role. Silent generic fallback made misspelled
   // or out-of-project role names look successful while ignoring their prompt.
-  const agentConfig: AgentConfig | undefined = params.agent === "swarm-ant" && options.allowInternalSwarmAnt
-    ? resolveInternalAgent(params.agent)
-    : resolveAgent(cwd, params.agent);
+  const agentConfig: AgentConfig | undefined = resolveAgent(cwd, params.agent);
   if (!agentConfig) {
     const available = listAgentSummaries(cwd).map((agent) => agent.name).join(", ");
     return {

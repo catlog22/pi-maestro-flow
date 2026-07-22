@@ -19,20 +19,13 @@ export const BUILTIN_AGENT_NAMES = [
   "delegate",
   "explorer",
   "goal-verifier",
-  "swarm-ant",
-  "swarm-scorer",
-  "swarm-analyst",
   "workflow",
 ] as const;
 export type BuiltinAgentName = (typeof BUILTIN_AGENT_NAMES)[number];
-export const INTERNAL_BUILTIN_AGENT_NAMES = ["swarm-ant"] as const;
-export type InternalBuiltinAgentName = (typeof INTERNAL_BUILTIN_AGENT_NAMES)[number];
 export const PUBLIC_BUILTIN_AGENT_NAMES = [
   "delegate",
   "explorer",
   "goal-verifier",
-  "swarm-scorer",
-  "swarm-analyst",
   "workflow",
 ] as const satisfies readonly BuiltinAgentName[];
 
@@ -257,13 +250,6 @@ export function resolveAgent(
   const agents = discoverAgents(cwd);
   const canonicalName = canonicalAgentName(agentName);
   return agents.find((a) => a.name === canonicalName);
-}
-
-/** Resolve a runtime-private builtin that is intentionally absent from public discovery. */
-export function resolveInternalAgent(agentName: string): AgentConfig | undefined {
-  if (!(INTERNAL_BUILTIN_AGENT_NAMES as readonly string[]).includes(agentName)) return undefined;
-  return loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin")
-    .find((agent) => agent.name === agentName && isBuiltinAgentName(agent.name));
 }
 
 /** Return resolved role metadata without exposing the role prompt body. */

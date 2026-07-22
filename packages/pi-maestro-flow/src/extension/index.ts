@@ -36,7 +36,7 @@ import {
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
 import { executeMoa, type MoaParams } from "../tools/moa.ts";
-import { registerSwarmCommand } from "../tools/swarm.ts";
+import { registerSwarmDisplay } from "../tools/swarm.ts";
 import { registerMaestroProviders } from "../providers/provider-registry.ts";
 import { registerApiProviderConfigs } from "../providers/api-provider-config.ts";
 import {
@@ -64,10 +64,12 @@ import {
 import {
   initTodo,
   executeTodo,
+  formatTodoActorSelector,
   getVisibleTasks,
   onAgentEndTodo,
   onBeforeAgentStartTodo,
   onContextTodo,
+  registerTodoActor,
   onSessionStart as todoSessionStart,
   onSessionShutdown as todoSessionShutdown,
   reconcileMirrorTasks,
@@ -129,6 +131,7 @@ import {
   registerTeammateChildToolBroker,
   registerTeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
+import { TEAMMATE_STARTED_EVENT } from "pi-maestro-teammate/v1/types";
 
 interface MaestroState {
   baseCwd: string;
@@ -198,10 +201,38 @@ export function shouldAttachWorkflowSession(
     && snapshot.session?.status === "running";
 }
 
+/**
+ * A canonical Workflow Session is workspace-wide, while Todo is owned by the
+ * current Pi session. Never project or attach it into a fresh/forked Pi
+ * session until that session explicitly resumes its workflow-owned Goal or
+ * performs a Workflow write.
+ */
+export function shouldActivateWorkflowSession(
+  snapshot: WorkflowSnapshot | undefined,
+  workflowSessionOptedIn: boolean,
+): boolean {
+  return workflowSessionOptedIn && shouldAttachWorkflowSession(snapshot);
+}
+
 export function isWorkflowOptInCommand(command: string): boolean {
   if (/\bmaestro\s+ralph\b/.test(command)) return true;
   const runAction = /\bmaestro\s+run\s+([\w-]+)/.exec(command)?.[1];
   return Boolean(runAction && !isRunControlReadAction(runAction));
+}
+
+export function todoActorFromTeammateStarted(event: unknown): TodoActorRef | undefined {
+  if (!event || typeof event !== "object") return undefined;
+  const record = event as Record<string, unknown>;
+  const correlationId = typeof record.correlationId === "string" ? record.correlationId.trim() : "";
+  if (!correlationId || correlationId === "unknown") return undefined;
+  const name = typeof record.name === "string" && record.name.trim() ? record.name.trim() : undefined;
+  const agent = typeof record.agent === "string" && record.agent.trim() ? record.agent.trim() : undefined;
+  return {
+    kind: "teammate",
+    id: correlationId,
+    label: name ?? agent ?? correlationId.slice(0, 8),
+    ...(agent ? { agentType: agent } : {}),
+  };
 }
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
@@ -443,16 +474,21 @@ When the agent loop ends naturally, the extension verifies completion automatica
 
   // === Todo Tool ===
   initTodo(pi);
+  pi.events.on(TEAMMATE_STARTED_EVENT, (event) => {
+    if (!todoRootContext) return;
+    const actor = todoActorFromTeammateStarted(event);
+    if (actor) registerTodoActor(actor);
+  });
 
   const todoTool: ToolDefinition<typeof TodoToolParams> = {
     name: "todo",
     label: "Todo",
     description: `Task management with plain-text context and optional Pi skill execution — 7 actions.
 
-- create: { action: "create", subject: "...", assignee: "self|root|member", context: "...", skills: [{ name: "maestro-execute", role: "primary", args: "..." }] }
-- update: { action: "update", id: "...", assignee: "root|member", status: "completed", summary: "..." }
+- create: { action: "create", subject: "...", assignee: "self|root|id|label|@label|label#id-prefix", context: "...", skills: [{ name: "maestro-execute", role: "primary", args: "..." }] }
+- update: { action: "update", id: "...", assignee: "self|root|id|label|@label|label#id-prefix", status: "completed", summary: "..." }
 - clear context/skills: { action: "update", id: "...", context: "", skills: [] }
-- list: { action: "list", filter: { status: "pending", memberId: "root|correlation-id" } }
+- list: { action: "list", filter: { status: "pending", memberId: "self|root|correlation-id|label|@label|label#id-prefix" } }
 - get: { action: "get", id: "..." }
 - delete: { action: "delete", id: "..." }
 - clear: { action: "clear" }
@@ -542,9 +578,15 @@ When the agent loop ends naturally, the extension verifies completion automatica
           details: { ok: false, action: params.action, message: "Workflow Coordinator is not attached." },
         };
       }
+      const actionOptsIn = !isRunControlReadAction(params.action);
+      if (actionOptsIn && !workflowSessionOptedIn) {
+        const snapshot = workflowBridge?.getSnapshot() ?? await refreshWorkflow(ctx);
+        if (snapshot && shouldAttachWorkflowSession(snapshot) && await attachWorkflowSession(ctx, snapshot)) {
+          workflowSessionOptedIn = true;
+        }
+      }
       const result = await executeRunControl(params as RunControlInput, workflowCoordinator);
       if (result.ok) {
-        const actionOptsIn = !isRunControlReadAction(params.action);
         await refreshWorkflow(ctx, true, actionOptsIn);
       }
       return {
@@ -568,7 +610,7 @@ When the agent loop ends naturally, the extension verifies completion automatica
   initPlan(pi);
   registerPlanTools(pi);
   registerPlanCommand(pi);
-  registerSwarmCommand(pi);
+  registerSwarmDisplay(pi);
 
   // === Language intelligence, browser control, and tool discovery ===
   registerIntelligenceTools(pi);
@@ -691,7 +733,8 @@ When the agent loop ends naturally, the extension verifies completion automatica
       workflowSessionOptedIn = true;
     }
 
-    const nextAttachSessionId = next.source === "canonical" && next.session?.status === "running"
+    const activateWorkflowSession = shouldActivateWorkflowSession(next, workflowSessionOptedIn);
+    const nextAttachSessionId = activateWorkflowSession
       ? next.session.sessionId
       : undefined;
     if (attachedWorkflowSessionId && attachedWorkflowSessionId !== nextAttachSessionId) {
@@ -699,13 +742,17 @@ When the agent loop ends naturally, the extension verifies completion automatica
       await workflowCoordinator?.release();
       attachedWorkflowSessionId = undefined;
     }
-    if (emitEvents && shouldAttachWorkflowSession(next)
+    if (emitEvents && activateWorkflowSession
       && attachedWorkflowSessionId !== next.session!.sessionId) {
       await attachWorkflowSession(ctx, next);
     }
-    reconcileMirrorTasks(buildTodoMirrorSpecs(next), ctx, next.sessionGeneration);
+    reconcileMirrorTasks(
+      activateWorkflowSession ? buildTodoMirrorSpecs(next) : [],
+      ctx,
+      next.sessionGeneration,
+    );
     if (workflowSessionOptedIn) reconcileWorkflowGoal(next, ctx);
-    if (emitEvents) emitRunTransitions(next);
+    if (emitEvents && activateWorkflowSession) emitRunTransitions(next);
     else lastRunStates = new Map(next.session?.runs.map((run) => [run.runId, run.status]) ?? []);
     updateTodoWidget();
     return next;
@@ -887,12 +934,12 @@ When the agent loop ends naturally, the extension verifies completion automatica
       ctx.cwd,
     );
     setWorkflowCoordinator(workflowCoordinator);
-    const snapshot = await refreshWorkflow(ctx);
+    const snapshot = await workflowBridge.refresh();
     workflowSessionOptedIn = shouldRestoreWorkflowGoal(event.reason, restoredGoal, snapshot);
     if (workflowSessionOptedIn && snapshot) reconcileWorkflowGoal(snapshot, ctx);
-    if (snapshot && shouldAttachWorkflowSession(snapshot)) {
+    if (snapshot && shouldActivateWorkflowSession(snapshot, workflowSessionOptedIn)) {
       if (await attachWorkflowSession(ctx, snapshot)) {
-        await refreshWorkflow(ctx);
+        await refreshWorkflow(ctx, true);
         const recovery = workflowRecoveryIdentity();
         if (recovery) {
           pi.sendMessage({
@@ -902,7 +949,11 @@ When the agent loop ends naturally, the extension verifies completion automatica
             details: recovery,
           });
         }
+      } else {
+        await refreshWorkflow(ctx);
       }
+    } else {
+      await refreshWorkflow(ctx);
     }
     await onSessionStartPlan(ctx);
     const configuredMode = await permissionController.reload(ctx);
@@ -1328,16 +1379,7 @@ function widgetActorLabel(
   actor: { id: string; label: string },
   tasks: readonly TodoTaskLike[],
 ): string {
-  const ids = new Set(tasks.flatMap((task) => [task.createdBy, task.assignee])
-    .filter((candidate): candidate is { id: string; label: string } => Boolean(candidate))
-    .filter((candidate) => candidate.label === actor.label)
-    .map((candidate) => candidate.id));
-  if (ids.size < 2) return actor.label;
-  for (let length = Math.min(4, actor.id.length); length < actor.id.length; length++) {
-    const prefix = actor.id.slice(0, length);
-    if ([...ids].every((candidate) => candidate === actor.id || !candidate.startsWith(prefix))) {
-      return `${actor.label}#${prefix}`;
-    }
-  }
-  return `${actor.label}#${actor.id}`;
+  const actors = tasks.flatMap((task) => [task.createdBy, task.assignee])
+    .filter((candidate): candidate is { id: string; label: string } => Boolean(candidate));
+  return formatTodoActorSelector(actor, actors);
 }

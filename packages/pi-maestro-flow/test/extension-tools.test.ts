@@ -5,8 +5,10 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import { visibleWidth } from "@earendil-works/pi-tui";
 import registerMaestroExtension, {
   isWorkflowOptInCommand,
+  shouldActivateWorkflowSession,
   shouldAttachWorkflowSession,
   shouldRestoreWorkflowGoal,
+  todoActorFromTeammateStarted,
 } from "../src/extension/index.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
@@ -32,14 +34,39 @@ test("Workflow Goal restore requires a workflow-owned Goal matching the canonica
   assert.equal(shouldRestoreWorkflowGoal("fork", owned, snapshot), false);
 });
 
-test("Workflow writer attachment follows a valid canonical Session independently of Goal opt-in", () => {
+test("teammate started events expose a Todo actor before the teammate calls Todo", () => {
+  assert.deepEqual(todoActorFromTeammateStarted({
+    correlationId: "worker-correlation",
+    name: "worker-alpha",
+    agent: "delegate",
+  }), {
+    kind: "teammate",
+    id: "worker-correlation",
+    label: "worker-alpha",
+    agentType: "delegate",
+  });
+  assert.equal(todoActorFromTeammateStarted({ correlationId: "unknown", agent: "delegate" }), undefined);
+});
+
+test("Workflow writer attachment and Todo projection require local Workflow opt-in", () => {
   const snapshot = workflowAttachSnapshot();
   assert.equal(shouldAttachWorkflowSession(snapshot), true);
+  assert.equal(
+    shouldActivateWorkflowSession(snapshot, false),
+    false,
+    "a fresh or forked Pi session must retain its own Todo state",
+  );
+  assert.equal(shouldActivateWorkflowSession(snapshot, true), true);
   assert.equal(shouldAttachWorkflowSession({
     ...snapshot,
     session: undefined,
     canonicalClaim: { activeSessionId: "session-1", status: "invalid", error: "missing session.json" },
   }), false);
+  assert.equal(shouldActivateWorkflowSession({
+    ...snapshot,
+    session: undefined,
+    canonicalClaim: { activeSessionId: "session-1", status: "invalid", error: "missing session.json" },
+  }, true), false);
   assert.equal(isWorkflowOptInCommand("maestro run brief run-1"), false);
   assert.equal(isWorkflowOptInCommand("maestro run status"), false);
   assert.equal(isWorkflowOptInCommand("maestro run prepare analyze"), false);
@@ -66,6 +93,14 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
       if (property === "getAllTools") return () => tools.map((tool) => ({ name: tool.name, description: tool.description, parameters: tool.parameters, sourceInfo: { path: "test", type: "extension" } }));
       if (property === "getActiveTools") return () => [...active];
       if (property === "setActiveTools") return (names: string[]) => { active.splice(0, active.length, ...names); };
+      if (property === "events") return {
+        on(event: string, handler: (...args: unknown[]) => unknown) {
+          const list = handlers.get(event) ?? [];
+          list.push(handler);
+          handlers.set(event, list);
+        },
+        emit() {},
+      };
       if (property === "on") return (event: string, handler: (...args: unknown[]) => unknown) => {
         const list = handlers.get(event) ?? [];
         list.push(handler);
@@ -93,18 +128,11 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(names.filter((name) => name === "browser").length, 1);
   assert.equal(names.filter((name) => name === "search_tool_bm25").length, 1);
   assert.ok(names.includes("run-control"));
-  assert.ok(names.includes("swarm_runtime"));
+  assert.equal(names.includes("swarm_runtime"), false);
   assert.ok(commands.includes("maestro-session"));
   assert.ok(commands.includes("maestro-todo"));
-  assert.ok(commands.includes("swarm"));
+  assert.equal(commands.includes("swarm"), false);
   assert.ok(renderers.includes("run-event"));
-
-  const swarmRuntime = tools.find((tool) => tool.name === "swarm_runtime");
-  const swarmSchema = swarmRuntime?.parameters as { type?: string; additionalProperties?: boolean; properties?: Record<string, unknown>; anyOf?: unknown };
-  assert.equal(swarmSchema.type, "object");
-  assert.equal(swarmSchema.additionalProperties, false);
-  assert.equal(swarmSchema.anyOf, undefined);
-  assert.ok(swarmSchema.properties?.plan);
 
   const runControl = tools.find((tool) => tool.name === "run-control");
   const actionSchema = (runControl?.parameters as { properties?: { action?: { anyOf?: Array<{ const?: string }> } } })
@@ -235,6 +263,7 @@ test("root teammate authority is fenced on session start and disposed on shutdow
     /pi\.on\("session_shutdown"[\s\S]*?disposeTeammateSessionRegistrations\(\)/,
   );
   assert.match(source, /generation !== teammateRegistrationGeneration/);
+  assert.match(source, /pi\.events\.on\(TEAMMATE_STARTED_EVENT[\s\S]*?registerTodoActor\(actor\)/);
 });
 
 test("teammate child registers only interaction and parent-permission surfaces", async () => {

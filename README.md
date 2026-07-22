@@ -347,7 +347,7 @@ Skills are on-demand capability packages loaded via `/skill:name` or auto-loaded
 | `team-arch-opt` | Architecture optimization |
 | `team-perf-opt` | Performance optimization (single/fan-out/parallel modes) |
 | `team-tech-debt` | Tech debt identification and remediation |
-| `/swarm <objective>` | Bundled `swarm` Skill + private system Ant + live-catalog Judge/Analyst bindings, objective-compiled Prompts/contracts, live Agent diagnostics/topology, and convergence artifacts |
+| `team-swarm` | Canonical ACO swarm executor with Python-owned pheromone/convergence state; Maestro Flow adds read-only JSON status, topology, metrics, and result projection |
 | `team-adversarial-swarm` | ACO swarm with adversarial decision gates |
 | `team-ultra-analyze` | Deep collaborative multi-role investigation |
 

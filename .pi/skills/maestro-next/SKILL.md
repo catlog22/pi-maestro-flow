@@ -142,9 +142,16 @@ Standalone step：
 1. 使用已解析的 `argument_requirements` 创建当前 step 的 Run：
    `maestro run start "<intent>" --cmd <step> --arg "<resolved step input>" --platform pi --workflow-root .`。
 2. 不得用路径扫描补 upstream；artifact 输入必须来自 authoritative same-Session sealed refs。
-3. 按 start result 的 `brief.command` 加载完整执行指南。
-4. 执行 workflow，写正式 deliverables，运行 gates。
-5. `maestro run done <run_id> --verdict done --workflow-root .`。
+3. **Entry blocker 降级（execute 专属）**：若 step == execute 且 start result 的 `entry_blockers` 非空（缺少 current-plan）：
+   - 检查 upstream 中是否有替代 artifact（latest-review、latest-debug、latest-fix-directions）。
+   - 按 prepare/execute.md 的降级路由表处置：
+     - 小范围（≤3 findings，每个 ≤2 文件）→ seal run 为 needs-retry，展示 /maestro-companion
+     - 较大范围 → seal run 为 needs-retry，展示 /odyssey-planex
+     - 无替代 upstream → seal run 为 blocked，展示 E001 + 建议 /plan
+   - 不得带着 blocked 的 execute run 继续加载 brief。
+4. 按 start result 的 `brief.command` 加载完整执行指南。
+5. 执行 workflow，写正式 deliverables，运行 gates。
+6. `maestro run done <run_id> --verdict done --workflow-root .`。
 
 Existing chain step：
 

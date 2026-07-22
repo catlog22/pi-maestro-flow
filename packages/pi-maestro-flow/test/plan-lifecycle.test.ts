@@ -13,12 +13,17 @@ import {
   onSessionShutdownPlan,
   onSessionStartPlan,
   onToolCallPlan,
+  registerPlanCommand,
   registerPlanTools,
 } from "../src/tools/plan.ts";
 import { PlanStore } from "../src/tools/plan-store.ts";
 
 interface ToolLike {
   execute(id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext): Promise<any>;
+}
+
+interface CommandLike {
+  handler(args: string, ctx: ExtensionContext): Promise<void> | void;
 }
 
 function createHarness(
@@ -35,6 +40,7 @@ function createHarness(
 ) {
   let active = ["Read", "Write", "todo", "custom-tool"];
   const tools = new Map<string, ToolLike>();
+  const commands = new Map<string, CommandLike>();
   const messages: string[] = [];
   const notifications: string[] = [];
   const statuses: Array<string | undefined> = [];
@@ -69,6 +75,7 @@ function createHarness(
   };
   const pi = {
     registerTool(tool: { name: string }) { tools.set(tool.name, tool as unknown as ToolLike); },
+    registerCommand(name: string, command: CommandLike) { commands.set(name, command); },
     getActiveTools() { return [...active]; },
     setActiveTools(names: string[]) { active = [...names]; },
     sendUserMessage(message: string) { messages.push(message); },
@@ -153,10 +160,12 @@ function createHarness(
     hasExecutableTodo: (handoffKey) => handoff.todoKeys.includes(handoffKey),
   });
   registerPlanTools(pi);
+  registerPlanCommand(pi);
   return {
     pi,
     ctx,
     tools,
+    commands,
     messages,
     notifications,
     statuses,
@@ -171,6 +180,12 @@ async function execute(harness: ReturnType<typeof createHarness>, name: string, 
   const tool = harness.tools.get(name);
   assert.ok(tool, `missing tool ${name}`);
   return tool.execute(name, params, undefined, undefined, harness.ctx);
+}
+
+async function executeCommand(harness: ReturnType<typeof createHarness>, name: string, args = "") {
+  const command = harness.commands.get(name);
+  assert.ok(command, `missing command ${name}`);
+  await command.handler(args, harness.ctx);
 }
 
 test("Plan lifecycle keeps non-editing tools and restores the exact Act snapshot", async () => {
@@ -206,6 +221,37 @@ test("Plan lifecycle keeps non-editing tools and restores the exact Act snapshot
     assert.deepEqual(harness.active, actSnapshot);
     await onSessionStartPlan(harness.ctx);
     assert.deepEqual(harness.active, actSnapshot);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("plan-enter ignores prompt parameters instead of queuing follow-up work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-enter-prompt-"));
+  const harness = createHarness(root);
+  harness.ctx.isIdle = () => false;
+  try {
+    await onSessionStartPlan(harness.ctx);
+    const entered = await execute(harness, "plan-enter", { prompt: "Draft a follow-up plan" });
+    assert.equal(entered.details.mode, "plan");
+    assert.equal(harness.messages.length, 0);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/plan prompt refuses to queue while the agent is busy", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-command-busy-"));
+  const harness = createHarness(root);
+  harness.ctx.isIdle = () => false;
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await executeCommand(harness, "plan", "基于缺口分析报告，制定修复方案。");
+    assert.equal(getMode(), "plan");
+    assert.equal(harness.messages.length, 0);
+    assert.match(harness.notifications.join("\n"), /prompt was not queued/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -270,15 +316,14 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
   }
 });
 
-test("Plan confirmation compacts with an explicit approved-Plan link before execution", async () => {
+test("/plan approve compacts with an explicit approved-Plan link before execution", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-compact-"));
   const harness = createHarness(root, false, false, false, false, "compact-chat", ["\x1b[B", "\x1b[B", "\r"]);
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Compact Plan\n\nKeep boundary A" });
-    const confirmed = await execute(harness, "plan-confirm");
-    assert.equal(confirmed.details.approved, true);
+    await executeCommand(harness, "plan", "approve");
     assert.equal(harness.compactions.length, 1);
     assert.match(harness.compactions[0].customInstructions ?? "", /authoritative execution contract/);
     assert.match(harness.compactions[0].customInstructions ?? "", /# Compact Plan/);
@@ -287,6 +332,25 @@ test("Plan confirmation compacts with an explicit approved-Plan link before exec
     assert.equal(harness.messages.length, 1);
     assert.doesNotMatch(harness.messages.at(-1) ?? "", /# Compact Plan/);
     assert.match(harness.messages.at(-1) ?? "", /already in the current context/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("plan-confirm tool keeps compact execution out of the follow-up queue", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-tool-compact-"));
+  const harness = createHarness(root, false, false, false, false, "compact-tool-chat", ["\x1b[B", "\x1b[B", "\r", "\x1b"]);
+  harness.ctx.isIdle = () => false;
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Compact Tool Plan" });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, false);
+    assert.equal(harness.compactions.length, 0);
+    assert.equal(harness.messages.length, 0);
+    assert.match(harness.notifications.join("\n"), /draft preserved without approval/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -447,7 +511,28 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run recall execute --intent x --json" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run skill execute" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run mutations" } }), undefined);
-    for (const subcommand of ["next", "next --session s1", "create execute", "check run-1", "rebind run-1 --reason x", "complete run-1", "recall-confirm fork", "fork --token t", "import --token t", "new --token t", "decide point-1 --session s1 --verdict proceed", "seal-session session-1", "log-mutation file", "retry run-1", "cancel run-1"]) {
+    const activeLifecycleMutations = [
+      "next",
+      "next --session s1",
+      "create execute",
+      "check run-1",
+      "complete run-1",
+      "decide point-1 --session s1 --verdict proceed",
+      "seal-session session-1",
+      "log-mutation file",
+      "retry run-1",
+      "cancel run-1",
+    ];
+    // These commands remain denylisted for Plan compatibility only. Pi coordinator
+    // Skills must not recommend them as part of the normal Topic Session flow.
+    const legacyMutationDenylist = [
+      "rebind run-1 --reason x",
+      "recall-confirm fork",
+      "fork --token t",
+      "import --token t",
+      "new --token t",
+    ];
+    for (const subcommand of [...activeLifecycleMutations, ...legacyMutationDenylist]) {
       assert.match(
         onToolCallPlan({ toolName: "bash", input: { command: `maestro run ${subcommand}` } })?.reason ?? "",
         /modify files/,

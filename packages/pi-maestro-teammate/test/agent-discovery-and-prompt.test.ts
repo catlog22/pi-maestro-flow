@@ -12,7 +12,6 @@ import {
   PUBLIC_BUILTIN_AGENT_NAMES,
   listAgentSummaries,
   resolveAgent,
-  resolveInternalAgent,
   type AgentConfig,
 } from "../src/agents/agents.ts";
 import {
@@ -154,11 +153,6 @@ Legacy alias override.
       assert.equal(agent?.source, "builtin");
       assert.doesNotMatch(agent?.systemPrompt ?? "", /Unsafe project override/);
     }
-    assert.equal(agents.some((agent) => agent.name === "swarm-ant"), false);
-    assert.equal(resolveAgent(project, "swarm-ant"), undefined);
-    const internalAnt = resolveInternalAgent("swarm-ant");
-    assert.equal(internalAnt?.source, "builtin");
-    assert.doesNotMatch(internalAnt?.systemPrompt ?? "", /Unsafe project override/);
     assert.equal(resolveAgent(project, "coordinator")?.name, "workflow");
     assert.equal(agents.some((agent) => agent.name === "coordinator"), false);
   } finally {
@@ -183,35 +177,20 @@ test("goal verifier is a bundled read-only role with objective-scoped checks", (
   }
 });
 
-test("private swarm Ant stays out of public discovery and direct dispatch while scorer and analyst remain selectable", async () => {
+test("native swarm runtime roles are no longer bundled by teammate", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-swarm-roles-"));
   try {
-    assert.equal(resolveAgent(project, "swarm-ant"), undefined);
-    assert.equal(listAgentSummaries(project).some((role) => role.name === "swarm-ant"), false);
-    assert.doesNotMatch(formatAgentCatalog(project), /swarm-ant/);
-    const ant = resolveInternalAgent("swarm-ant");
-    assert.equal(ant?.source, "builtin");
-    assert.match(ant?.description ?? "", /read-only ant worker/i);
-    assert.match(ant?.systemPrompt ?? "", /structured_output/i);
-    const blocked = await runTeammate(
-      { agent: "swarm-ant", task: "must remain private" },
-      { baseCwd: project },
-    );
-    assert.equal(blocked.exitCode, 1);
-    assert.match(blocked.messages[0]?.content ?? "", /Unknown teammate agent "swarm-ant"/);
-    assert.doesNotMatch(blocked.messages[0]?.content ?? "", /Available agents:.*swarm-ant/);
-    const expected = [
-      ["swarm-scorer", /blind scorer/i],
-      ["swarm-analyst", /final analyst/i],
-    ] as const;
-    for (const [name, description] of expected) {
-      const role = resolveAgent(project, name);
-      assert.equal(role?.source, "builtin");
-      assert.equal(role?.systemPromptMode, "replace");
-      assert.equal(role?.inheritProjectContext, false);
-      assert.equal(role?.inheritSkills, false);
-      assert.match(role?.description ?? "", description);
-      assert.match(role?.systemPrompt ?? "", /structured_output/i);
+    const removedRoles = ["swarm-ant", "swarm-scorer", "swarm-analyst"] as const;
+    const summaries = listAgentSummaries(project);
+    const catalog = formatAgentCatalog(project);
+    for (const name of removedRoles) {
+      assert.equal((BUILTIN_AGENT_NAMES as readonly string[]).includes(name), false);
+      assert.equal(resolveAgent(project, name), undefined);
+      assert.equal(summaries.some((role) => role.name === name), false);
+      assert.doesNotMatch(catalog, new RegExp(name));
+      const blocked = await runTeammate({ agent: name, task: "must not exist" }, { baseCwd: project });
+      assert.equal(blocked.exitCode, 1);
+      assert.match(blocked.messages[0]?.content ?? "", new RegExp(`Unknown teammate agent "${name}"`));
     }
   } finally {
     fs.rmSync(project, { recursive: true, force: true });

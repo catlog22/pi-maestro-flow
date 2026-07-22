@@ -19,6 +19,7 @@ export interface PlanConfirmationOptions {
   markdown: string;
   pathLabel?: string;
   canClearContext: boolean;
+  canCompactContext?: boolean;
 }
 
 interface ConfirmationItem {
@@ -50,7 +51,12 @@ export async function openPlanConfirmation(
           description: options.canClearContext ? "Start with a clean context" : "Available from /plan approve",
           enabled: options.canClearContext,
         },
-        { action: "execute-compact", label: "Compact then execute", description: "Preserve this Plan in the checkpoint", enabled: true },
+        {
+          action: "execute-compact",
+          label: "Compact then execute",
+          description: options.canCompactContext === false ? "Available from /plan approve" : "Preserve this Plan in the checkpoint",
+          enabled: options.canCompactContext !== false,
+        },
         { action: "modify", label: "Modify Plan", description: "Open the full-screen Markdown editor", enabled: true },
         { action: "cancel", label: "Exit Plan mode", description: "Keep the draft without approval", enabled: true },
       ];
@@ -73,7 +79,7 @@ export async function openPlanConfirmation(
         const item = items.find((candidate) => candidate.action === action);
         if (!item) return;
         if (!item.enabled) {
-          status = "Use /plan approve to start execution in a new session.";
+          status = unavailableMessage(item);
           tui.requestRender();
           return;
         }
@@ -183,6 +189,12 @@ export async function openPlanConfirmation(
   );
 
   return result ?? "cancel";
+}
+
+function unavailableMessage(item: ConfirmationItem): string {
+  if (item.action === "execute-clear") return "Use /plan approve to start execution in a new session.";
+  if (item.action === "execute-compact") return "Use /plan approve to compact before execution.";
+  return item.description;
 }
 
 function renderFrame(

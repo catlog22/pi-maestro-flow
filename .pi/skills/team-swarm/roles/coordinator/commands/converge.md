@@ -66,7 +66,7 @@ If missing -> AskUserQuestion (skip synthesis / retry analyst).
   +- Run lifecycle completion:
   |   - Read run_id from team-session.json.run.run_id
   |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
-  |   - Run `maestro run complete <run_id>`
+  |   - Run `maestro run done <run_id>`
   |   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 ```
 
@@ -120,7 +120,7 @@ team_msg.log({
 ### Step 6: Completion action (interactive)
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Swarm pipeline complete. What would you like to do?",
     header: "Completion",
@@ -151,4 +151,4 @@ AskUserQuestion({
 | `aco.py report` fails | Read best.json directly + manual top-K from trails/ |
 | Analyst worker crashes | Generate minimal best-solution.md from best.json template |
 | best.json missing | Pipeline ran but no successful ant - report failure, keep session for inspection |
-| Run Another Round chosen but max_iterations already at limit | AskUserQuestion to raise the cap before continuing |
+| Run Another Round chosen but max_iterations already at limit | user prompt to raise the cap before continuing |

@@ -170,7 +170,7 @@ const TodoFilterSchema = Type.Object({
     StringEnum(["pending", "in_progress", "completed", "blocked"]),
   ),
   memberId: Type.Optional(
-    Type.String({ description: "Return tasks created by or assigned to this root/teammate member id" }),
+    Type.String({ description: "Return tasks created by or assigned to self, root, a teammate id, label, @label, or label#id-prefix" }),
   ),
 });
 
@@ -209,7 +209,7 @@ export const TodoToolParams = Type.Object({
     Type.String({ description: "Short completion summary carried into later todo steps" }),
   ),
   assignee: Type.Optional(
-    Type.String({ description: "Assignee selector: self, root, a known teammate id, or an unambiguous teammate label" }),
+    Type.String({ description: "Assignee selector: self, root, a known teammate id, label, @label, or label#id-prefix" }),
   ),
 
   id: Type.Optional(
