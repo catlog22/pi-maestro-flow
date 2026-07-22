@@ -484,7 +484,7 @@ test("automatic verification makes one final-output-only verdict attempt", async
     await onAgentEnd({
       messages: [
         { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "Earlier loop output must not be judged." }] },
-        { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Work is complete." }] },
+        { message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Work is complete." }] } },
       ],
     }, ctx);
 
@@ -495,10 +495,8 @@ test("automatic verification makes one final-output-only verdict attempt", async
     assert.doesNotMatch(calls[0]?.task ?? "", /Earlier loop output/);
     assert.doesNotMatch(calls[0]?.task ?? "", /Recent Session Evidence|Canonical Workflow Evidence|RECOVERY REQUEST/);
     assert.equal(getActiveGoal()?.status, "active");
-    assert.deepEqual(sent, []);
-    idle = true;
-    assert.match((await executeGoalCommand({ action: "resume" }, ctx)).text, /continuation requested/i);
     assert.equal(sent.length, 1);
+    assert.match(sent[0] ?? "", /^Continue the active goal:/);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);

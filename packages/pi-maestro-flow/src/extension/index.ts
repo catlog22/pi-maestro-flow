@@ -982,10 +982,10 @@ When the agent loop ends naturally, the extension verifies completion automatica
 
   pi.on("agent_end", async (event, ctx) => {
     await onAgentEndPlan(event, ctx);
+    await refreshWorkflow(ctx, true);
     await goalAgentEnd(event, ctx);
     onAgentEndTodo();
     midTurnAutoCompaction.onAgentEnd(ctx);
-    await refreshWorkflow(ctx, true);
     updateTodoWidget();
   });
 

@@ -89,7 +89,7 @@ interface AssistantMessageLike {
   role: "assistant";
   stopReason?: AgentStopReason;
   errorMessage?: string;
-  content?: unknown[];
+  content?: unknown;
   usage?: { input?: number; output?: number };
 }
 
@@ -903,8 +903,8 @@ async function verifyGoalAfterLoop(
     updateUsage(activeGoal, ctx);
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
-    ctx.ui.notify("Automatic Goal verification was inconclusive. The Goal remains active; use /goal resume to retry.", "warning");
-    return "hold";
+    ctx.ui.notify("Automatic Goal verification was inconclusive. Continuing the active Goal.", "warning");
+    return "continue";
   }
 
   if (verdict.status === "fail" || !verdict.pass) {
@@ -1518,13 +1518,16 @@ function findFinalAssistant(messages: unknown[]): AssistantMessageLike | undefin
   for (let i = messages.length - 1; i >= 0; i--) {
     const m = messages[i];
     if (!m || typeof m !== "object") continue;
-    const c = m as Record<string, unknown>;
+    const entry = m as Record<string, unknown>;
+    const c = entry.message && typeof entry.message === "object"
+      ? entry.message as Record<string, unknown>
+      : entry;
     if (c.role !== "assistant") continue;
     return {
       role: "assistant",
       stopReason: isStopReason(c.stopReason) ? c.stopReason : undefined,
       errorMessage: typeof c.errorMessage === "string" ? c.errorMessage : undefined,
-      content: Array.isArray(c.content) ? c.content : undefined,
+      content: c.content,
       usage: c.usage as { input?: number; output?: number } | undefined,
     };
   }
