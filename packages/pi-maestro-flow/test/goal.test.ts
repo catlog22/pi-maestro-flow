@@ -460,7 +460,7 @@ test("verifier receives bounded raw tool evidence produced after the goal starte
   assert.match(evidence, /\[ERROR\] goal\nverifier feedback/);
 });
 
-test("automatic verification holds an active Goal when both verdict attempts are inconclusive", async () => {
+test("automatic verification makes one final-output-only verdict attempt", async () => {
   const calls: Array<{ agent: string; task?: string; timeoutMs?: number }> = [];
   const verifierOptions: Array<{ onChildRequest?: unknown }> = [];
   const sent: string[] = [];
@@ -481,14 +481,19 @@ test("automatic verification holds an active Goal when both verdict attempts are
 
   try {
     await executeGoal({ action: "create", objective: "Exercise the goal verification lifecycle" }, ctx);
-    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Work is complete." }] }] }, ctx);
+    await onAgentEnd({
+      messages: [
+        { role: "assistant", stopReason: "toolUse", content: [{ type: "text", text: "Earlier loop output must not be judged." }] },
+        { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Work is complete." }] },
+      ],
+    }, ctx);
 
-    assert.equal(calls.length, 2);
+    assert.equal(calls.length, 1);
     assert.ok(calls.every((call) => call.agent === "goal-verifier"));
     assert.ok(verifierOptions.every((options) => typeof options.onChildRequest === "function"));
-    assert.ok((calls[1]?.timeoutMs ?? 0) < (calls[0]?.timeoutMs ?? 0));
-    assert.match(calls[1]?.task ?? "", /Do not run commands/i);
-    assert.match(calls[0]?.task ?? "", /Final assistant message:\nWork is complete\./);
+    assert.match(calls[0]?.task ?? "", /Final Agent-Loop Output\nWork is complete\./);
+    assert.doesNotMatch(calls[0]?.task ?? "", /Earlier loop output/);
+    assert.doesNotMatch(calls[0]?.task ?? "", /Recent Session Evidence|Canonical Workflow Evidence|RECOVERY REQUEST/);
     assert.equal(getActiveGoal()?.status, "active");
     assert.deepEqual(sent, []);
     idle = true;
@@ -501,16 +506,10 @@ test("automatic verification holds an active Goal when both verdict attempts are
   }
 });
 
-test("automatic verification completes a Goal from a valid bounded-recovery verdict", async () => {
+test("automatic verification completes a Goal from a valid one-shot verdict", async () => {
   let callCount = 0;
   setGoalVerifierRunnerForTest(async () => {
     callCount++;
-    if (callCount === 1) {
-      return {
-        exitCode: 0,
-        messages: [{ role: "assistant", content: "Verification is complete, preparing the verdict." }],
-      };
-    }
     return {
       exitCode: 0,
       messages: [{ role: "assistant", content: "Structured output saved." }],
@@ -529,7 +528,7 @@ test("automatic verification completes a Goal from a valid bounded-recovery verd
     await executeGoal({ action: "create", objective: "Exercise the automatic Goal verifier" }, ctx);
     await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
 
-    assert.equal(callCount, 2);
+    assert.equal(callCount, 1);
     assert.equal(getActiveGoal(), undefined);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
