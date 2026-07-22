@@ -39,6 +39,7 @@ import { executeMoa, type MoaParams } from "../tools/moa.ts";
 import { registerSwarmDisplay } from "../tools/swarm.ts";
 import { registerMaestroProviders } from "../providers/provider-registry.ts";
 import { registerApiProviderConfigs } from "../providers/api-provider-config.ts";
+import registerMcpAdapter from "../mcp/index.ts";
 import {
   initGoal,
   registerGoalCommand,
@@ -296,6 +297,15 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     // Provider registration failures should not block extension load
     console.error(
       `[maestro] Provider registration warning: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  try {
+    registerMcpAdapter(pi);
+  } catch (error) {
+    // MCP 注册失败不得阻断 Maestro 现有工具与 Provider。
+    console.error(
+      `[maestro] MCP adapter registration warning: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 
