@@ -1,61 +1,71 @@
-# Release v0.4.11 — 2026-07-19
+# Release v0.4.12 — 2026-07-22
 
 ## 概述
 
-v0.4.11 将 Pi 的 Session/Run 入口完整对齐到 Maestro Flow 0.5.52：支持 `session/1.2`、`command-run/1.2` 与 `run-response/1.0`，区分只读 recall 和需要 confirmation token 的 mutation，并让 Pi skill 在执行前读取下一命令的 args、requirements、已解析输入与缺失输入。本版本只发布 `pi-maestro-flow`，`pi-maestro-teammate` 继续保持 0.4.5。
+v0.4.12 将 Pi 的 Session/Run 控制壳与执行降级路由对齐到 Maestro Flow 0.5.54，并大幅强化 teammate 子代理的生命周期管理与可观测性（流式状态、运行指标、停滞状态回收）。同时稳定 Goal 自动续跑与单回合确认、收紧 Goal 验证重试与输出长度，完善 Todo 工具（member selector 支持 unique id prefix、skills 参数 schema 稳定化），并收紧 API Manager 新增认证配置。本版本只发布 `pi-maestro-flow`，`pi-maestro-teammate` 继续保持 0.4.5。
 
 ## 详细变更
 
-### Session/Run 1.2
+### Session/Run 控制壳与执行契约
 
-- 将 Pi `maestro`、`maestro-ralph` 与 `maestro-next` skill 对齐到 `session/1.2` 和 `command-run/1.2`。
-- `run complete` 后消费 Maestro 返回的 `run-response/1.0` 与 `next_action`，使用简要 command/skill 信息继续执行，而不是依赖冗长自由文本。
-- 下一 Run 的 birth packet 透出 command args、requirements、resolved inputs 和 missing inputs，便于 LLM 在派发前识别所需上下文。
-- exact live resume 使用 Unicode-safe intent identity；历史近似 Session 仅作为 `automatic=false` 的 advisory recall，不自动恢复。
+- 同步 Session Run 控制壳（`run-control`），Pi 通过 canonical writer 驱动 Session 生命周期（`2d684ba7`）。
+- 同步 execute 降级路由：缺少 current-plan 时优雅降级而非卡死，并批量收口 pending 变更（`581141b3`）。
+- 完善 Pi Run Session 适配层（`55709240`）与 Run Control 工具描述（`94808312`）。
+- Maestro runtime 依赖从 `0.5.53` 精确升级到 `0.5.54`，确保 Pi 与 CLI schema/response 同步。
 
-### Recall 与 Plan mode 权限
+### Teammate 子代理生命周期与可观测性
 
-- Plan mode 允许只读 `recall`、skill discovery 和状态查询。
-- `recall-confirm`、`fork`、`import`、`new`、`rebind`、`resolve`、`resume` 被视为 mutating 操作，必须经过正常确认边界。
-- historical recall 的 fork/import/new 必须使用 Maestro 返回的 confirmation token，防止过期、重复消费或跨 Session 误用。
+- 区分 teammate 结果依赖与子代理，避免依赖关系误判（`0c292ccb`）。
+- 显示子代理流式状态，提升多代理执行透明度（`eaf6d5dd`）。
+- 修复 teammate 子代理生命周期与状态回收，防止泄漏与僵尸状态（`768ebca8`）。
+- 补全代理运行指标与停滞状态检测（`3c3a3c0f`），并记录代理进度指标投影规则（`e6b1c16c`）。
+- 完善 teammate Agent 选择器（`a64c5542`）。
 
-### 执行契约与文档
+### Goal 自动续跑与确认
 
-- 更新 `AGENTS.md` 的 execution contract，明确 machine payload 是权威接口，display 文本只用于人类阅读。
-- Pi canonical skill 源继续位于 `.pi/skills`，打包时由 `prepare-package-skills.mjs` 复制到 npm package。
-- Maestro runtime 依赖从 `0.5.51` 精确升级到 `0.5.52`，确保 Pi 与 CLI schema/response 同步。
+- 恢复 Goal 自动续跑与 Todo 上方显示（`4a7076b8`），简化 Goal 单回合确认（`5f8b4203`）。
+- 自动续跑未确认的 Goal（`c7379b92`），刷新 Goal 时间并隔离续跑归属（`2404ab64`）。
+- 限制 Goal 验证重试次数与输出长度，防止失控循环（`58273a20`）。
+
+### Todo 工具
+
+- Todo member selector 支持 unique id prefix 匹配：无 `#` 的选择器若唯一匹配单个 actor 则命中，歧义前缀返回显式错误（`351397b2`）。
+- 稳定 Todo skills 参数 schema（`19611661`）。
+- 移除状态栏 Todo 重复显示（`a524d79d`）。
+
+### API Manager
+
+- 收紧 API Manager 新增认证配置，防止误配置（`6d54c5ae`）。
 
 ## 版本
 
 | 包 | 旧版本 | 新版本 |
 |---|---:|---:|
-| `pi-maestro-flow` | 0.4.10 | 0.4.11 |
+| `pi-maestro-flow` | 0.4.11 | 0.4.12 |
 | `pi-maestro-teammate` | 0.4.5 | 0.4.5 |
-| `maestro-flow` 运行依赖 | 0.5.51 | 0.5.52 |
+| `maestro-flow` 运行依赖 | 0.5.53 | 0.5.54 |
 
 ## 验证
 
-- Plan mode lifecycle tests：61 项通过。
-- Session/Run tests：46 项通过。
-- Permission tests：31 项通过。
-- Package resource tests：6 项通过。
 - TypeScript `check:types` 通过。
-- npm publish dry-run 验证 package resources、canonical Pi skills 与 `maestro-flow@0.5.52` 依赖。
+- Session/Run tests：49 项（48 通过 / 1 跳过 / 0 失败）。
+- Todo tests：36 项通过。
+- npm publish dry-run 验证 package resources、canonical Pi skills 与 `maestro-flow@0.5.54` 依赖。
 
 ## 安装
 
 ```bash
-pi install npm:pi-maestro-flow@0.4.11
+pi install npm:pi-maestro-flow@0.4.12
 ```
 
 也可以使用 npm：
 
 ```bash
-npm install pi-maestro-flow@0.4.11
+npm install pi-maestro-flow@0.4.12
 ```
 
 ## 升级说明
 
-升级后执行 `/reload` 或重启 Pi。消费 Session/Run 返回值的自定义逻辑应优先读取 `run-response/1.0` machine payload；历史相似 Session 不再自动 resume，需要按 recall 建议显式确认 fork/import/new。
+升级后执行 `/reload` 或重启 Pi。Session/Run 控制现已通过 canonical writer 驱动并支持 execute 降级路由；teammate 子代理提供更细粒度的流式状态与运行指标。Todo member selector 现可用 unique id prefix 直接定位单个 actor。
 
-**Full Changelog**: https://github.com/catlog22/pi-maestro-flow/compare/v0.4.10...v0.4.11
+**Full Changelog**: https://github.com/catlog22/pi-maestro-flow/compare/v0.4.11...v0.4.12

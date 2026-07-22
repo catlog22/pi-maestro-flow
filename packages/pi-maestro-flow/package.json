@@ -68,7 +68,7 @@
     "@earendil-works/pi-tui": "0.74.0",
     "@konbakuyomu/smart-search": "https://codeload.github.com/konbakuyomu/smartsearch/tar.gz/667c465d0f6ea16a423f03c434f94e21505d3595",
     "cross-spawn": "7.0.6",
-    "maestro-flow": "0.5.53",
+    "maestro-flow": "0.5.54",
     "pi-maestro-teammate": "0.4.5",
     "puppeteer-core": "24.31.0",
     "typebox": "1.1.24"
