@@ -10,13 +10,15 @@ import {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const teammateRoot = join(root, "..", "pi-maestro-teammate");
+const exactSemver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
 
 before(() => preparePackagedSkills());
 after(() => cleanPackagedSkills());
 
 test("package manifest publishes the extension and canonical Pi skills", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
-  assert.equal(pkg.version, "0.4.12");
+  const teammatePkg = JSON.parse(readFileSync(join(teammateRoot, "package.json"), "utf8"));
+  assert.match(pkg.version, exactSemver);
   assert.equal(pkg.files.includes(".pi/skills/"), true);
   assert.equal(pkg.files.includes("workflows/"), false);
   assert.equal(pkg.files.includes("AGENTS.md"), true);
@@ -24,11 +26,8 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.match(pkg.scripts.postinstall, /install-workflows\.mjs/);
   assert.ok(pkg.files.includes("!.pi/skills/**/__pycache__/**"));
   assert.ok(pkg.files.includes("!.pi/skills/**/*.pyc"));
-  assert.equal(
-    pkg.dependencies["maestro-flow"],
-    "0.5.53",
-  );
-  assert.equal(pkg.dependencies["pi-maestro-teammate"], "0.4.5");
+  assert.match(pkg.dependencies["maestro-flow"], exactSemver);
+  assert.equal(pkg.dependencies["pi-maestro-teammate"], teammatePkg.version);
   assert.equal(
     pkg.dependencies["@konbakuyomu/smart-search"],
     "https://codeload.github.com/konbakuyomu/smartsearch/tar.gz/667c465d0f6ea16a423f03c434f94e21505d3595",
@@ -50,7 +49,7 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
 
 test("teammate package publishes a versioned API with a real root entry", () => {
   const pkg = JSON.parse(readFileSync(join(teammateRoot, "package.json"), "utf8"));
-  assert.equal(pkg.version, "0.4.5");
+  assert.match(pkg.version, exactSemver);
   assert.equal(pkg.main, "./src/index.ts");
   assert.equal(pkg.types, "./src/index.ts");
   assert.equal(pkg.exports["."], pkg.main);
