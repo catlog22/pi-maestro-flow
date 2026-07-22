@@ -487,7 +487,7 @@ test("initial teammate prompt carries the child lease token", async () => {
   });
 });
 
-test("parallel graph rows keep independent IDs in the split tree", () => {
+test("parallel graph rows keep independent IDs without implying an agent hierarchy", () => {
   const plain = (text: string) => text;
   const rows = buildProgressTree([
     {
@@ -518,8 +518,8 @@ test("parallel graph rows keep independent IDs in the split tree", () => {
   assert.equal(rows.length, 2);
   assert.match(rows[0].text, /@api.*#11111111/);
   assert.match(rows[1].text, /@db.*#22222222/);
-  assert.match(rows[0].text, /├─/);
-  assert.match(rows[1].text, /└─/);
+  assert.match(rows[0].text, /^• 1/);
+  assert.match(rows[1].text, /^• 2/);
 });
 
 test("graph concurrency is finite, positive, and bounded by task count", () => {
@@ -993,6 +993,44 @@ test("persistent agent widget deduplicates graph progress and direct child rows"
   assert.match(output, /Agents  1 sleeping/);
   assert.equal(output.match(/@pkg-info/g)?.length, 1);
   assert.match(output, /@pkg-info.*sleeping.*1 tools/);
+});
+
+test("persistent agent widget distinguishes child agents from result dependencies", () => {
+  const now = Date.now();
+  const parentId = "parent";
+  const writerId = "writer";
+  const shared = {
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    sleepMs: 0,
+  };
+  const parent = {
+    ...shared,
+    agent: "orchestrator",
+    name: "plan",
+    correlationId: parentId,
+    status: "running" as const,
+    progress: [
+      { agent: "researcher", name: "research", correlationId: "research", taskIndex: 0, dependencies: [], status: "completed" as const },
+      { agent: "writer", name: "write", correlationId: writerId, taskIndex: 1, dependencies: [0], status: "running" as const },
+    ],
+  };
+  const writer = {
+    ...shared,
+    agent: "writer",
+    name: "write",
+    correlationId: writerId,
+    spawnedBy: parentId,
+    status: "running" as const,
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+
+  const output = renderAgentStatusWidget([parent, writer], 120, theme).join("\n");
+
+  assert.match(output, /@write.*child of @plan.*result from @research/);
 });
 
 function makeResult(agent: string, content: string): SingleResult {

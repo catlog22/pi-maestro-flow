@@ -311,6 +311,8 @@ interface AgentWidgetRow {
   direction: "↑" | "↓";
   toolCount: number;
   tokens: number;
+  parentLabel?: string;
+  resultLabels?: string[];
 }
 
 export interface AgentSelectorRow {
@@ -503,12 +505,19 @@ function toolAction(name: string): string {
 function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
   const rows = new Map<string, AgentWidgetRow>();
   const directAgents = new Map(agents.map((agent) => [agent.correlationId, agent]));
+  const labelFor = (agent: ActiveAgent): string => agent.name ?? agent.agent;
   for (const active of agents) {
     const snapshots = active.progress ?? [];
     const effective = snapshots.length > 1 ? snapshots : [snapshots[0]];
+    const snapshotByIndex = new Map(snapshots.map((snapshot) => [snapshot.taskIndex, snapshot]));
     for (const progress of effective) {
       const correlationId = progress?.correlationId ?? active.correlationId;
       const direct = directAgents.get(correlationId);
+      const parent = direct?.spawnedBy ? directAgents.get(direct.spawnedBy) : undefined;
+      const resultLabels = progress?.dependencies
+        .map((dependency) => snapshotByIndex.get(dependency))
+        .filter((dependency): dependency is AgentProgressSnapshot => dependency !== undefined)
+        .map((dependency) => dependency.name ?? `task ${dependency.taskIndex + 1}`);
       const runningTool = progress?.recentTools?.find((tool) => tool.status === "running");
       const status = direct?.status === "sleeping" || (!direct && active.status === "sleeping")
         ? "sleeping"
@@ -534,6 +543,7 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
           agent: direct?.agent ?? existing.agent,
           status,
           action: status === "sleeping" ? "sleeping" : existing.action,
+          ...(parent ? { parentLabel: labelFor(parent) } : {}),
         });
         continue;
       }
@@ -546,6 +556,8 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
         direction: runningTool ? "↓" : "↑",
         toolCount: progress?.toolCount ?? 0,
         tokens: progress?.tokens ?? 0,
+        ...(parent ? { parentLabel: labelFor(parent) } : {}),
+        ...(resultLabels?.length ? { resultLabels } : {}),
       });
     }
   }
@@ -622,8 +634,15 @@ export function renderAgentStatusWidget(
       row.toolCount ? `${row.toolCount} tools` : "",
     ].filter(Boolean).join(" · ");
     const meta = metrics ? ` · ${metrics}` : "";
+    const relationship = [
+      row.parentLabel ? `child of @${row.parentLabel}` : "",
+      row.resultLabels?.length
+        ? `result from ${row.resultLabels.map((label) => `@${label}`).join(", ")}`
+        : "",
+    ].filter(Boolean).join(" · ");
+    const relationshipText = relationship ? ` · ${relationship}` : "";
     lines.push(truncateToWidth(
-      `${theme.fg("dim", connector)} ${icon(row)} ${theme.fg("accent", `@${row.label}`)} ${theme.fg("muted", row.agent)} · ${row.action}${theme.fg("dim", meta)}`,
+      `${theme.fg("dim", connector)} ${icon(row)} ${theme.fg("accent", `@${row.label}`)} ${theme.fg("muted", row.agent)} · ${row.action}${theme.fg("dim", relationshipText + meta)}`,
       safeWidth,
       "…",
     ));

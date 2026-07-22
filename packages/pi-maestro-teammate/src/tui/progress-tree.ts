@@ -49,40 +49,16 @@ export function buildProgressTree(
   const byIndex = new Map<number, AgentProgressSnapshot>();
   for (const entry of progress) byIndex.set(entry.taskIndex, entry);
   const entries = [...byIndex.values()].sort((a, b) => a.taskIndex - b.taskIndex);
-  const depthCache = new Map<number, number>();
 
-  function depthOf(taskIndex: number, visiting = new Set<number>()): number {
-    const cached = depthCache.get(taskIndex);
-    if (cached !== undefined) return cached;
-    if (visiting.has(taskIndex)) return 0;
-    visiting.add(taskIndex);
-    const entry = byIndex.get(taskIndex);
-    const depth = !entry || entry.dependencies.length === 0
-      ? 0
-      : 1 + Math.max(0, ...entry.dependencies.map((dependency) => depthOf(dependency, visiting)));
-    visiting.delete(taskIndex);
-    depthCache.set(taskIndex, depth);
-    return depth;
-  }
-
-  const ordered = entries
-    .map((entry) => ({ entry, depth: depthOf(entry.taskIndex) }))
-    .sort((a, b) => a.depth - b.depth || a.entry.taskIndex - b.entry.taskIndex);
-  const groupCounts = new Map<number, number>();
-  const groupSeen = new Map<number, number>();
-  for (const item of ordered) groupCounts.set(item.depth, (groupCounts.get(item.depth) ?? 0) + 1);
-
-  return ordered.map(({ entry, depth }) => {
-    const seen = groupSeen.get(depth) ?? 0;
-    groupSeen.set(depth, seen + 1);
-    const connector = seen === (groupCounts.get(depth) ?? 1) - 1 ? "└─" : "├─";
-    const prefix = depth > 0 ? "│ ".repeat(depth) : "";
+  return entries.map((entry) => {
+    // Dependencies transfer task results; they are not parent-child agent relations.
+    const flowMarker = entry.dependencies.length > 0 ? "→" : "•";
     const type = entry.name ? palette.dim(` (${entry.agent})`) : "";
     const id = entry.correlationId.startsWith("preview-")
       ? ""
       : palette.dim(` #${entry.correlationId.slice(0, 8)}`);
     const dependencyHint = entry.dependencies.length > 0
-      ? palette.dim(` ← ${entry.dependencies.map((dependency) => dependency + 1).join(",")}`)
+      ? palette.dim(` ← result${entry.dependencies.length === 1 ? "" : "s"} ${entry.dependencies.map((dependency) => `#${dependency + 1}`).join(", ")}`)
       : "";
     const metaParts = [
       entry.toolCount ? `${entry.toolCount} tools` : "",
@@ -92,7 +68,7 @@ export function buildProgressTree(
     const meta = metaParts.length > 0 ? palette.dim(` · ${metaParts.join(" · ")}`) : "";
     return {
       taskIndex: entry.taskIndex,
-      text: `${palette.dim(prefix + connector)} ${palette.accent(String(entry.taskIndex + 1))} ${progressIcon(entry.status, palette)} ${statusText(entry.status, palette)} ${palette.bold(progressLabel(entry))}${type}${id}${dependencyHint}${meta}`,
+      text: `${palette.dim(flowMarker)} ${palette.accent(String(entry.taskIndex + 1))} ${progressIcon(entry.status, palette)} ${statusText(entry.status, palette)} ${palette.bold(progressLabel(entry))}${type}${id}${dependencyHint}${meta}`,
     };
   });
 }

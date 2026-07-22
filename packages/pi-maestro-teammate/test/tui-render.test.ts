@@ -83,3 +83,23 @@ test("progress tree renders one row per task index when snapshots repeat", () =>
   assert.match(rows[0]?.text ?? "", /✓ completed delegate/);
   assert.match(rows[0]?.text ?? "", /second-c/);
 });
+
+test("progress tree shows dependencies as result flow rather than agent hierarchy", () => {
+  const palette = {
+    dim: (text: string) => text,
+    accent: (text: string) => text,
+    running: (text: string) => text,
+    success: (text: string) => text,
+    error: (text: string) => text,
+    bold: (text: string) => text,
+  };
+  const rows = buildProgressTree([
+    { agent: "researcher", name: "research", correlationId: "research", taskIndex: 0, dependencies: [], status: "completed" },
+    { agent: "writer", name: "write", correlationId: "write", taskIndex: 1, dependencies: [0], status: "pending" },
+  ], palette);
+
+  assert.match(rows[0]?.text ?? "", /^• 1/);
+  assert.match(rows[1]?.text ?? "", /^→ 2/);
+  assert.match(rows[1]?.text ?? "", /result #1/);
+  assert.doesNotMatch(rows[1]?.text ?? "", /[├└│]/);
+});

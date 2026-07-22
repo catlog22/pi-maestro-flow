@@ -125,7 +125,7 @@ function renderMultiTaskCall(
   let topoLabel = "";
   if (hasDeps) {
     const allLinear = isLinearChain(tasks, taskNames);
-    topoLabel = allLinear ? " chain" : " graph";
+    topoLabel = allLinear ? " result chain" : " result graph";
   }
 
   const header = `${theme.fg("success", "■")} ${theme.bold(`${tasks.length}${topoLabel} ${modeWord} agents launched`)}${hint}`;
