@@ -488,6 +488,103 @@ test("long tool-loop replay progressively prunes old outputs before compacting",
   assert.notEqual(pressure.band, "critical");
 });
 
+test("pressure policy keeps prior tool-result prunes stable across provider usage updates", () => {
+  const oldAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { total: 0 } },
+  };
+  const oldResult = {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }],
+    isError: false,
+  };
+  const frontier = { role: "user", content: [{ type: "text", text: "keep".repeat(1_500) }] };
+  const latestAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "latest", name: "read", arguments: {} }],
+    usage: { input: 8_700, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 8_700, cost: { total: 0 } },
+  };
+  const latestResult = {
+    role: "toolResult",
+    toolCallId: "latest",
+    toolName: "read",
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
+  };
+  const messages = [oldAssistant, oldResult, frontier, latestAssistant, latestResult] as never;
+  const settings = { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 };
+  const prunedToolCallIds = new Set<string>();
+
+  const first = applyContextPressurePolicy(messages, 10_000, settings, prunedToolCallIds);
+  assert.equal(first.prunedToolResults, 1);
+  assert.deepEqual([...prunedToolCallIds], ["old"]);
+  assert.match(JSON.stringify(first.messages[1]), /stale large output/);
+
+  latestAssistant.usage.input = first.estimatedTokens;
+  latestAssistant.usage.totalTokens = first.estimatedTokens;
+  const second = applyContextPressurePolicy(messages, 10_000, settings, prunedToolCallIds);
+
+  assert.equal(second.band, "normal");
+  assert.equal(second.prunedToolResults, 1);
+  assert.match(JSON.stringify(second.messages[1]), /stale large output/);
+  assert.notEqual(second.messages, messages);
+  assert.equal(second.estimatedTokens, estimateContextTokens(second.messages).tokens);
+});
+
+test("mid-turn guard keeps recorded prunes on later non-tool contexts", async () => {
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 }),
+  });
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: "keep".repeat(1_500) }],
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "latest", name: "read", arguments: {} }],
+    usage: { input: 8_700, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 8_700, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "latest",
+    toolName: "read",
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
+  }] as never;
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  const first = await guard.evaluate(messages, ctx);
+  assert.match(JSON.stringify(first?.[1]), /stale large output/);
+
+  const next = await guard.evaluate([
+    ...messages,
+    { role: "user", content: [{ type: "text", text: "continue" }] },
+  ] as never, ctx);
+  assert.match(JSON.stringify(next?.[1]), /stale large output/);
+
+  guard.onCompact();
+  const afterCompact = await guard.evaluate([
+    ...messages,
+    { role: "user", content: [{ type: "text", text: "continue" }] },
+  ] as never, ctx);
+  assert.equal(afterCompact, undefined);
+});
+
 test("custom compaction captures the persisted active Todo skill", async () => {
   const entries = [{
     type: "custom",

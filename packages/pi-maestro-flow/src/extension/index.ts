@@ -1078,6 +1078,7 @@ When NOT to use:
   });
 
   pi.on("session_compact", async (event, ctx) => {
+    midTurnAutoCompaction.onCompact();
     try {
       await persistMaestroCompactionKnowhow(event, ctx);
     } catch (error) {

@@ -14,6 +14,7 @@ const DEFAULT_RESERVE_TOKENS = 16_384;
 const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 const AUTO_PRUNE_RATIO = 0.8;
 const NUDGE_RATIO = 0.7;
+const AUTO_PRUNE_TARGET_RATIO = NUDGE_RATIO;
 const MIN_PRUNABLE_TOOL_RESULT_CHARS = 4_000;
 const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find"]);
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
@@ -28,6 +29,12 @@ interface ContextEstimate {
   tokens: number;
   usageTokens: number;
   trailingTokens: number;
+}
+
+interface AppliedPrunes {
+  messages: AgentMessage[];
+  prunedToolResults: number;
+  savedTokens: number;
 }
 
 export type ContextPressureBand = "normal" | "nudge" | "auto-prune" | "critical";
@@ -49,6 +56,7 @@ interface AutoCompactionState {
   lastTriggerKey?: string;
   internalsWarningShown: boolean;
   lastNoCompactableKey?: string;
+  prunedToolCallIds: Set<string>;
 }
 
 interface AutoCompactionDependencies {
@@ -70,6 +78,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   onSessionStart(ctx: ExtensionContext): void;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
   onAgentEnd(ctx: ExtensionContext): void;
+  onCompact(): void;
   reset(ctx?: ExtensionContext): void;
 } {
   const state: AutoCompactionState = {
@@ -77,11 +86,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     generation: 0,
     nextOwner: 0,
     internalsWarningShown: false,
+    prunedToolCallIds: new Set(),
   };
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
   return {
     onSessionStart(ctx) {
+      state.prunedToolCallIds.clear();
       publishIdleStatus(ctx, readSettings(ctx.cwd).enabled);
     },
     async evaluate(messages, ctx) {
@@ -89,15 +100,27 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (state.running) return undefined;
       const settings = readSettings(ctx.cwd);
       publishIdleStatus(ctx, settings.enabled);
-      if (!ctx.model || !endsWithCompleteToolResultBatch(messages)) {
+      if (!ctx.model) {
         clearPressureStatus(ctx);
         return undefined;
       }
       if (!settings.enabled || ctx.model.contextWindow <= settings.reserveTokens) {
+        state.prunedToolCallIds.clear();
         clearPressureStatus(ctx);
         return undefined;
       }
-      const pressure = applyContextPressurePolicy(messages, ctx.model.contextWindow, settings);
+      retainVisiblePrunes(state.prunedToolCallIds, messages);
+      if (!endsWithCompleteToolResultBatch(messages)) {
+        clearPressureStatus(ctx);
+        const stable = applyRecordedPrunes(messages, state.prunedToolCallIds);
+        return stable.prunedToolResults > 0 ? stable.messages : undefined;
+      }
+      const pressure = applyContextPressurePolicy(
+        messages,
+        ctx.model.contextWindow,
+        settings,
+        state.prunedToolCallIds,
+      );
       updatePressureStatus(ctx, pressure);
       if (pressure.band !== "critical") {
         state.lastNoCompactableKey = undefined;
@@ -185,6 +208,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         clearPressureStatus(ctx);
       }
     },
+    onCompact() {
+      state.prunedToolCallIds.clear();
+      state.lastTriggerKey = undefined;
+      state.lastNoCompactableKey = undefined;
+    },
     reset(ctx) {
       state.generation += 1;
       state.running = false;
@@ -192,6 +220,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.lastTriggerKey = undefined;
       state.internalsWarningShown = false;
       state.lastNoCompactableKey = undefined;
+      state.prunedToolCallIds.clear();
       if (ctx) {
         clearPressureStatus(ctx);
         ctx.ui.setStatus(COMPACTION_MODE_STATUS_KEY, undefined);
@@ -204,35 +233,47 @@ export function applyContextPressurePolicy(
   messages: AgentMessage[],
   contextWindow: number,
   settings: CompactionSettings,
+  prunedToolCallIds: Set<string> = new Set(),
 ): ContextPressureResult {
   const thresholdTokens = contextWindow - settings.reserveTokens;
-  const initial = estimateContextTokens(messages).tokens;
+  const applied = applyRecordedPrunes(messages, prunedToolCallIds);
+  const transformed = applied.messages;
+  let savedTokens = applied.savedTokens;
+  let prunedToolResults = applied.prunedToolResults;
+
+  // The latest provider usage already includes every persistent prune that
+  // preceded it. Estimate against the stable outgoing view and subtract only
+  // prunes introduced during this evaluation.
+  const initial = estimateContextTokens(transformed).tokens;
   const criticalRatio = thresholdTokens / contextWindow;
   const initialRatio = initial / contextWindow;
   const initiallyCritical = initial > thresholdTokens;
   if (!settings.enabled || (!initiallyCritical && initialRatio < NUDGE_RATIO)) {
-    return pressureResult(messages, "normal", initial, thresholdTokens, 0, 0);
+    return pressureResult(transformed, "normal", initial, thresholdTokens, prunedToolResults, savedTokens);
   }
   if (!initiallyCritical && initialRatio < AUTO_PRUNE_RATIO) {
-    return pressureResult(messages, "nudge", initial, thresholdTokens, 0, 0);
+    return pressureResult(transformed, "nudge", initial, thresholdTokens, prunedToolResults, savedTokens);
   }
 
-  const frontierStart = protectedFrontierStart(messages, settings.keepRecentTokens);
-  const transformed = [...messages];
-  let savedTokens = 0;
-  let prunedToolResults = 0;
-  const pruneTarget = Math.min(thresholdTokens, Math.floor(contextWindow * AUTO_PRUNE_RATIO));
-  for (let index = 0; index < frontierStart && initial - savedTokens > pruneTarget; index++) {
+  const frontierStart = protectedFrontierStart(transformed, settings.keepRecentTokens);
+  let newlySavedTokens = 0;
+  const pruneTarget = Math.min(thresholdTokens, Math.floor(contextWindow * AUTO_PRUNE_TARGET_RATIO));
+  for (let index = 0; index < frontierStart && initial - newlySavedTokens > pruneTarget; index++) {
+    const callId = toolResultCallId(transformed[index]);
+    if (!callId || prunedToolCallIds.has(callId)) continue;
     const replacement = replaceableToolResult(transformed[index]);
     if (!replacement) continue;
     const before = estimateMessageTokens(transformed[index]);
     const after = estimateMessageTokens(replacement);
     if (after >= before) continue;
     transformed[index] = replacement;
-    savedTokens += before - after;
+    const saved = before - after;
+    prunedToolCallIds.add(callId);
+    newlySavedTokens += saved;
+    savedTokens += saved;
     prunedToolResults++;
   }
-  const estimatedTokens = Math.max(0, initial - savedTokens);
+  const estimatedTokens = Math.max(0, initial - newlySavedTokens);
   const ratio = estimatedTokens / contextWindow;
   const band: ContextPressureBand = ratio > criticalRatio
     ? "critical"
@@ -244,6 +285,33 @@ export function applyContextPressurePolicy(
         ? "nudge"
         : "normal";
   return pressureResult(transformed, band, estimatedTokens, thresholdTokens, prunedToolResults, savedTokens);
+}
+
+function applyRecordedPrunes(messages: AgentMessage[], prunedToolCallIds: Set<string>): AppliedPrunes {
+  const transformed = [...messages];
+  let savedTokens = 0;
+  let prunedToolResults = 0;
+  for (let index = 0; index < transformed.length; index++) {
+    const callId = toolResultCallId(transformed[index]);
+    if (!callId || !prunedToolCallIds.has(callId)) continue;
+    const replacement = replaceableToolResult(transformed[index]);
+    if (!replacement) continue;
+    const before = estimateMessageTokens(transformed[index]);
+    const after = estimateMessageTokens(replacement);
+    if (after >= before) continue;
+    transformed[index] = replacement;
+    savedTokens += before - after;
+    prunedToolResults++;
+  }
+  return { messages: transformed, prunedToolResults, savedTokens };
+}
+
+function retainVisiblePrunes(prunedToolCallIds: Set<string>, messages: AgentMessage[]): void {
+  if (prunedToolCallIds.size === 0) return;
+  const visible = new Set(messages.map(toolResultCallId).filter((id): id is string => Boolean(id)));
+  for (const callId of prunedToolCallIds) {
+    if (!visible.has(callId)) prunedToolCallIds.delete(callId);
+  }
 }
 
 export function shouldCompactMidTurn(input: {
