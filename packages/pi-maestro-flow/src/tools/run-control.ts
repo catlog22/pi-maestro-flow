@@ -29,30 +29,60 @@ export const RunControlParams = Type.Object({
     Type.Literal("next"),
     Type.Literal("done"),
     Type.Literal("edit"),
-  ]),
-  runId: Type.Optional(Type.String()),
-  step: Type.Optional(Type.String()),
-  pick: Type.Optional(Type.String()),
+  ], {
+    description: "Operation to perform. Read: status, brief, prepare, check. Write: next, done, edit.",
+  }),
+  runId: Type.Optional(Type.String({
+    description: "Run ID. Required for done; optional for brief/check, which default to the active Run.",
+  })),
+  step: Type.Optional(Type.String({
+    description: "Workflow step or command to preview; required for prepare.",
+  })),
+  pick: Type.Optional(Type.String({
+    description: "Optional pending chain-step selector for next.",
+  })),
   verdict: Type.Optional(Type.Union([
     Type.Literal("done"),
     Type.Literal("done-with-concerns"),
     Type.Literal("needs-retry"),
     Type.Literal("blocked"),
-  ])),
-  summary: Type.Optional(Type.String()),
-  reason: Type.Optional(Type.String()),
-  notes: Type.Optional(Type.Array(Type.String())),
-  decisions: Type.Optional(Type.Array(Type.String())),
-  evidence: Type.Optional(Type.Array(Type.String())),
-  artifacts: Type.Optional(Type.Array(Type.String())),
-  commands: Type.Optional(Type.Array(Type.String())),
-  after: Type.Optional(Type.String()),
-  replace: Type.Optional(Type.String()),
-  remove: Type.Optional(Type.String()),
-  args: Type.Optional(Type.String()),
-  stage: Type.Optional(Type.String()),
-  goalRef: Type.Optional(Type.String()),
-  insertedBy: Type.Optional(Type.String()),
+  ], {
+    description: "Completion verdict for done; defaults to done.",
+  })),
+  summary: Type.Optional(Type.String({ description: "Completion summary for done." })),
+  reason: Type.Optional(Type.String({ description: "Completion reason for done." })),
+  notes: Type.Optional(Type.Array(Type.String(), {
+    description: "Completion notes for done; each item is forwarded as --note.",
+  })),
+  decisions: Type.Optional(Type.Array(Type.String(), {
+    description: "Decision records for done; each item is forwarded as --decision.",
+  })),
+  evidence: Type.Optional(Type.Array(Type.String(), {
+    description: "Evidence paths for done; each item is forwarded as --evidence.",
+  })),
+  artifacts: Type.Optional(Type.Array(Type.String(), {
+    description: "Artifact paths for done; each item is forwarded as --artifact.",
+  })),
+  commands: Type.Optional(Type.Array(Type.String(), {
+    description: "Commands to insert with edit. Supply one command for replace; omit when only removing a step.",
+  })),
+  after: Type.Optional(Type.String({
+    description: "Insertion selector for edit: current, latest, start, a step ID, or an index; defaults to current.",
+  })),
+  replace: Type.Optional(Type.String({
+    description: "Pending step ID to replace with the first edit command.",
+  })),
+  remove: Type.Optional(Type.String({
+    description: "Pending step ID to remove by marking it skipped; commands may be omitted.",
+  })),
+  args: Type.Optional(Type.String({
+    description: "Step arguments for edit; valid only when commands contains exactly one command.",
+  })),
+  stage: Type.Optional(Type.String({ description: "Optional stage label for an inserted edit step." })),
+  goalRef: Type.Optional(Type.String({ description: "Optional goal reference for an inserted edit step." })),
+  insertedBy: Type.Optional(Type.String({
+    description: "Actor recorded for an inserted edit step; Maestro defaults to manual.",
+  })),
 });
 
 export interface RunControlInput {

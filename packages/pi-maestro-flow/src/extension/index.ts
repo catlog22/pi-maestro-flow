@@ -568,7 +568,16 @@ When the agent loop ends naturally, the extension verifies completion automatica
   const runControlTool: ToolDefinition<typeof RunControlParams> = {
     name: "run-control",
     label: "Run Control",
-    description: "Read or control the active canonical Maestro Workflow Session through its CLI writer.",
+    description: `Read or control canonical Maestro Workflow Runs through one typed shell.
+Actions:
+- status: read the current projected Session snapshot; no CLI mutation.
+- brief: load a Run resume packet; runId is optional and defaults to the active Run.
+- prepare: preview a workflow step without creating a Run; requires step.
+- check: evaluate Run gates and finish guidance; runId is optional and defaults to the active Run.
+- next: allocate the next chain Run with optional pick; if a Run is already active, return its brief instead.
+- done: seal a Run with a verdict; requires runId, defaults verdict to done, and delegates to the stable complete protocol.
+- edit: modify future chain steps with commands/after/replace/remove and optional metadata.
+Mutating actions next/done/edit require an attached canonical Session and the Flow host mutation lease.`,
     parameters: RunControlParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!workflowCoordinator) {

@@ -135,11 +135,23 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.ok(renderers.includes("run-event"));
 
   const runControl = tools.find((tool) => tool.name === "run-control");
-  const actionSchema = (runControl?.parameters as { properties?: { action?: { anyOf?: Array<{ const?: string }> } } })
-    ?.properties?.action;
+  const runControlProperties = (runControl?.parameters as {
+    properties?: Record<string, { description?: string; anyOf?: Array<{ const?: string }> }>;
+  })?.properties;
+  const actionSchema = runControlProperties?.action;
   assert.deepEqual(actionSchema?.anyOf?.map((item) => item.const), [
     "status", "brief", "prepare", "check", "next", "done", "edit",
   ]);
+  assert.match(runControl?.description ?? "", /status: read the current projected Session snapshot/);
+  assert.match(runControl?.description ?? "", /next: allocate the next chain Run/);
+  assert.match(runControl?.description ?? "", /done: seal a Run with a verdict/);
+  assert.match(runControl?.description ?? "", /edit: modify future chain steps/);
+  assert.match(actionSchema?.description ?? "", /Read: status, brief, prepare, check/);
+  assert.match(runControlProperties?.runId?.description ?? "", /Required for done/);
+  assert.match(runControlProperties?.step?.description ?? "", /required for prepare/);
+  assert.match(runControlProperties?.verdict?.description ?? "", /defaults to done/);
+  assert.match(runControlProperties?.commands?.description ?? "", /Supply one command for replace/);
+  assert.match(runControlProperties?.args?.description ?? "", /exactly one command/);
 
   const maestro = tools.find((tool) => tool.name === "maestro");
   const maestroProperties = (maestro?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties;
