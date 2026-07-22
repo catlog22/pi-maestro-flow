@@ -942,8 +942,8 @@ test("persistent agent widget renders a bounded below-editor style status list",
 
   const full = renderAgentStatusWidget([active], 100, theme);
   assert.ok(full.length > 2);
-  assert.match(full.join("\n"), /@ant-1-1.*waiting for model.*↑ 70\.4k tokens.*22 tools/);
-  assert.match(full.join("\n"), /@ant-1-2.*writing file.*↓ 89\.8k tokens.*18 tools/);
+  assert.match(full.join("\n"), /@ant-1-1.*↑ 70\.4k tokens.*22 tools.*running.*waiting for model/);
+  assert.match(full.join("\n"), /@ant-1-2.*↓ 89\.8k tokens.*18 tools.*running.*writing file/);
   assert.match(full.join("\n"), /@ant-1-4.*streaming/);
   assert.match(full.join("\n"), /@ant-1-3.*waiting for dependencies/);
 
@@ -995,7 +995,7 @@ test("persistent agent widget deduplicates graph progress and direct child rows"
 
   assert.match(output, /Agents  1 sleeping/);
   assert.equal(output.match(/@pkg-info/g)?.length, 1);
-  assert.match(output, /@pkg-info.*sleeping.*1 tools/);
+  assert.match(output, /@pkg-info.*1 tools.*sleeping/);
 });
 
 test("persistent agent widget distinguishes child agents from result dependencies", () => {

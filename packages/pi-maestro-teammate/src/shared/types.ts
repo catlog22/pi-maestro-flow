@@ -74,6 +74,7 @@ export interface ChildAgentCallSnapshot {
   parentName?: string;
   status: "running" | "completed" | "failed";
   startedAt?: number;
+  durationMs?: number;
   lastActivityAt?: number;
   recentTools?: Array<{ name: string; status: string }>;
   lastMessage?: string;

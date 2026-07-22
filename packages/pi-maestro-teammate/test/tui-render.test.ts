@@ -104,6 +104,36 @@ test("progress tree shows dependencies as result flow rather than agent hierarch
   assert.doesNotMatch(rows[1]?.text ?? "", /[├└│]/);
 });
 
+test("streaming progress shows live duration and split token usage", () => {
+  const now = Date.now();
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "working" }],
+    details: {
+      mode: "single",
+      results: [],
+      progress: [{
+        agent: "delegate",
+        name: "metrics",
+        correlationId: "metrics-agent",
+        taskIndex: 0,
+        dependencies: [],
+        status: "running",
+        startedAt: new Date(now - 65_000).toISOString(),
+        lastActivityAt: now - 45_000,
+        durationMs: 60_000,
+        inputTokens: 1_234,
+        outputTokens: 56,
+        tokens: 1_290,
+      }],
+    },
+  }, { expanded: false }, theme as never).render(120).join("\n");
+
+  assert.match(rendered, /1m5s/);
+  assert.match(rendered, /in 1\.2k/);
+  assert.match(rendered, /out 56/);
+  assert.match(rendered, /stalled 4[45]s/);
+});
+
 test("streaming teammate result shows child agent lifecycle separately from task progress", () => {
   const rendered = renderTeammateResult({
     content: [{ type: "text", text: "delegating" }],
@@ -124,6 +154,31 @@ test("streaming teammate result shows child agent lifecycle separately from task
 
   assert.match(rendered, /1 child agent/);
   assert.match(rendered, /@review child agent · running · using teammate · called by @planner/);
+});
+
+test("streaming child agent shows stalled state, duration, and split tokens", () => {
+  const now = Date.now();
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "delegating" }],
+    details: {
+      mode: "single",
+      results: [],
+      childCalls: [{
+        agent: "reviewer",
+        name: "review",
+        correlationId: "review-child",
+        status: "running",
+        startedAt: now - 70_000,
+        lastActivityAt: now - 40_000,
+        durationMs: 65_000,
+        inputTokens: 200,
+        outputTokens: 30,
+      }],
+    },
+  }, { expanded: false }, theme as never).render(120).join("\n");
+
+  assert.match(rendered, /@review child agent · stalled 4[01]s · 1m1[01]s/);
+  assert.match(rendered, /in 200 · out 30/);
 });
 
 test("streaming teammate result wraps long agent output instead of truncating it", () => {

@@ -21,6 +21,20 @@ function formatDuration(ms: number): string {
   return `${Math.floor(seconds / 60)}m${seconds % 60}s`;
 }
 
+function formatTokens(count: number): string {
+  if (count < 1000) return String(count);
+  if (count < 1_000_000) return `${(count / 1000).toFixed(1)}k`;
+  return `${(count / 1_000_000).toFixed(2)}M`;
+}
+
+export function progressDurationMs(entry: AgentProgressSnapshot, now = Date.now()): number | undefined {
+  const reported = entry.durationMs;
+  if (entry.status !== "running" || !entry.startedAt) return reported;
+  const startedAt = Date.parse(entry.startedAt);
+  if (!Number.isFinite(startedAt)) return reported;
+  return Math.max(reported ?? 0, now - startedAt);
+}
+
 export function progressIcon(
   status: AgentProgressSnapshot["status"],
   palette: ProgressPalette,
@@ -60,10 +74,16 @@ export function buildProgressTree(
     const dependencyHint = entry.dependencies.length > 0
       ? palette.dim(` ← result${entry.dependencies.length === 1 ? "" : "s"} ${entry.dependencies.map((dependency) => `#${dependency + 1}`).join(", ")}`)
       : "";
+    const tokenParts = entry.inputTokens !== undefined || entry.outputTokens !== undefined
+      ? [`in ${formatTokens(entry.inputTokens ?? 0)}`, `out ${formatTokens(entry.outputTokens ?? 0)}`]
+      : entry.tokens
+        ? [`${formatTokens(entry.tokens)} tok`]
+        : [];
+    const durationMs = progressDurationMs(entry);
     const metaParts = [
       entry.toolCount ? `${entry.toolCount} tools` : "",
-      entry.tokens ? `${entry.tokens} tok` : "",
-      entry.durationMs ? formatDuration(entry.durationMs) : "",
+      ...tokenParts,
+      durationMs !== undefined ? formatDuration(durationMs) : "",
     ].filter(Boolean);
     const meta = metaParts.length > 0 ? palette.dim(` · ${metaParts.join(" · ")}`) : "";
     return {

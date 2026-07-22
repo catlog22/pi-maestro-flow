@@ -30,3 +30,35 @@ test("agent widget keeps failed work and the live edge visible in the compact bu
   assert.match(compact, /1 running/);
   assert.match(compact, /■ @worker-8/);
 });
+
+test("agent widget keeps duration, split tokens, and stalled state visible", () => {
+  const now = Date.now();
+  const parent = {
+    agent: "graph",
+    correlationId: "parent",
+    startedAt: now - 65_000,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now - 45_000,
+    status: "running" as const,
+    sleepMs: 0,
+    progress: [{
+      agent: "worker",
+      name: "worker-live",
+      correlationId: "worker-live",
+      taskIndex: 0,
+      dependencies: [],
+      status: "running" as const,
+      inputTokens: 1_234,
+      outputTokens: 56,
+      tokens: 1_290,
+      lastActivityAt: now - 45_000,
+    }],
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const output = renderAgentStatusWidget([parent], 120, theme).join("\n");
+
+  assert.match(output, /@worker-live worker · 65s · in 1\.2k · out 56/);
+  assert.match(output, /stalled 4[45]s/);
+});

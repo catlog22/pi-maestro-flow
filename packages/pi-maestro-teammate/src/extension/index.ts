@@ -312,7 +312,10 @@ interface AgentWidgetRow {
   direction: "↑" | "↓";
   toolCount: number;
   tokens: number;
+  inputTokens?: number;
+  outputTokens?: number;
   startedAt: number;
+  lastActivityAt: number;
   parentLabel?: string;
   resultLabels?: string[];
 }
@@ -559,7 +562,10 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
         direction: runningTool ? "↓" : "↑",
         toolCount: progress?.toolCount ?? 0,
         tokens: progress?.tokens ?? 0,
+        inputTokens: progress?.inputTokens,
+        outputTokens: progress?.outputTokens,
         startedAt: direct?.startedAt ?? active.startedAt,
+        lastActivityAt: progress?.lastActivityAt ?? direct?.lastActivityAt ?? active.lastActivityAt,
         ...(parent ? { parentLabel: labelFor(parent) } : {}),
         ...(resultLabels?.length ? { resultLabels } : {}),
       });
@@ -633,12 +639,25 @@ export function renderAgentStatusWidget(
   for (let index = 0; index < visible.length; index++) {
     const row = visible[index];
     const connector = index === visible.length - 1 && hidden === 0 ? "└─" : "├─";
+    const now = Date.now();
+    const duration = `${Math.max(0, Math.floor((now - row.startedAt) / 1000))}s`;
+    const idleMs = Math.max(0, now - row.lastActivityAt);
+    const stalled = row.status === "running" && idleMs >= 30_000;
+    const state = stalled
+      ? `stalled ${Math.floor(idleMs / 1000)}s`
+      : row.status === "running"
+        ? `running · ${row.action}`
+        : row.action;
+    const tokenMetrics = row.inputTokens !== undefined || row.outputTokens !== undefined
+      ? [`in ${compactMetric(row.inputTokens ?? 0)}`, `out ${compactMetric(row.outputTokens ?? 0)}`]
+      : row.tokens
+        ? [`${row.direction} ${compactMetric(row.tokens)} tokens`]
+        : [];
     const metrics = [
-      row.tokens ? `${row.direction} ${compactMetric(row.tokens)} tokens` : "",
+      duration,
+      ...tokenMetrics,
       row.toolCount ? `${row.toolCount} tools` : "",
-      `${Math.max(0, Math.floor((Date.now() - row.startedAt) / 1000))}s`,
     ].filter(Boolean).join(" · ");
-    const meta = metrics ? ` · ${metrics}` : "";
     const relationship = [
       row.parentLabel ? `child of @${row.parentLabel}` : "",
       row.resultLabels?.length
@@ -647,8 +666,11 @@ export function renderAgentStatusWidget(
     ].filter(Boolean).join(" · ");
     const relationshipText = relationship ? ` · ${relationship}` : "";
     const agentText = safeWidth < 40 ? "" : ` ${theme.fg("muted", row.agent)}`;
+    const rowContent = safeWidth < 40
+      ? `${theme.fg("accent", `@${row.label}`)} · ${state} · ${theme.fg("dim", duration)}`
+      : `${theme.fg("accent", `@${row.label}`)}${agentText} · ${theme.fg("dim", metrics)} · ${state}${theme.fg("dim", relationshipText)}`;
     lines.push(truncateToWidth(
-      `${theme.fg("dim", connector)} ${icon(row)} ${theme.fg("accent", `@${row.label}`)}${agentText} · ${row.action}${theme.fg("dim", relationshipText + meta)}`,
+      `${theme.fg("dim", connector)} ${icon(row)} ${rowContent}`,
       safeWidth,
       "…",
     ));
@@ -1307,7 +1329,10 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
 
       const childCalls = new Map<string, ChildAgentCallSnapshot>();
       const publishChildCallStatus = (child: ChildAgentCallSnapshot): void => {
-        childCalls.set(child.correlationId, child);
+        childCalls.set(child.correlationId, {
+          ...childCalls.get(child.correlationId),
+          ...child,
+        });
         const currentProgress = progressSnapshot();
         if (isMultiTask) activeAgent.progress = currentProgress;
         const childLabel = child.name ?? child.agent;
@@ -1429,6 +1454,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               recentTools: data.recentTools,
               toolCount: data.toolCount,
               tokens: data.tokens,
+              inputTokens: data.inputTokens,
+              outputTokens: data.outputTokens,
+              durationMs: data.durationMs,
               lastActivityAt: data.lastActivityAt,
               ...(data.lastMessage
                 ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
@@ -1611,6 +1639,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
                 recentTools: current?.recentTools ?? [],
                 toolCount: current?.toolCount ?? 0,
                 tokens: result.usage.inputTokens + result.usage.outputTokens,
+                inputTokens: result.usage.inputTokens,
+                outputTokens: result.usage.outputTokens,
+                durationMs: result.durationMs,
                 lastMessage: result.messages[result.messages.length - 1]?.content ?? "",
               });
             });
@@ -3854,6 +3885,7 @@ async function handleProxyRequest(
           startedAt: activeAgent.startedAt,
           status,
           ...(progress ? {
+            durationMs: progress.durationMs,
             lastActivityAt: progress.lastActivityAt,
             recentTools: progress.recentTools,
             inputTokens: progress.inputTokens,
@@ -3917,6 +3949,9 @@ async function handleProxyRequest(
           recentTools: data.recentTools,
           toolCount: data.toolCount,
           tokens: data.tokens,
+          inputTokens: data.inputTokens,
+          outputTokens: data.outputTokens,
+          durationMs: data.durationMs,
           lastActivityAt: data.lastActivityAt,
           ...(data.lastMessage
             ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
@@ -3994,7 +4029,10 @@ async function handleProxyRequest(
         },
         onProgress: (data) => {
             if (!normalizedTasks) {
-              reportChildStatus("running", data);
+              reportChildStatus(
+                data.status === "completed" ? "completed" : data.status === "failed" ? "failed" : "running",
+                data,
+              );
               return;
             }
               const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
@@ -4040,6 +4078,9 @@ async function handleProxyRequest(
               recentTools: current?.recentTools ?? [],
               toolCount: current?.toolCount ?? 0,
               tokens: result.usage.inputTokens + result.usage.outputTokens,
+              inputTokens: result.usage.inputTokens,
+              outputTokens: result.usage.outputTokens,
+              durationMs: result.durationMs,
               lastMessage: result.messages[result.messages.length - 1]?.content ?? "",
             });
           });

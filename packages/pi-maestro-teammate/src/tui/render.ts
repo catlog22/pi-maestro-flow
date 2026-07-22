@@ -19,6 +19,7 @@ import {
   focusTaskIndex,
   progressIcon,
   progressLabel,
+  progressDurationMs,
   selectPriorityProgressRows,
   selectProgressWindow,
   type ProgressPalette,
@@ -264,6 +265,12 @@ function renderProgress(
     const focused = entries.find((entry) => entry.taskIndex === focus) ?? entries[0];
     const idleMs = focused?.lastActivityAt ? Date.now() - focused.lastActivityAt : 0;
     const stalled = focused?.status === "running" && idleMs >= 30_000;
+    const focusedDurationMs = focused ? progressDurationMs(focused) : undefined;
+    const focusedTokens = focused && (focused.inputTokens !== undefined || focused.outputTokens !== undefined)
+      ? `in ${formatTokens(focused.inputTokens ?? 0)} · out ${formatTokens(focused.outputTokens ?? 0)}`
+      : focused?.tokens
+        ? `${formatTokens(focused.tokens)} tokens`
+        : "";
     const treeRows = buildProgressTree(entries, palette);
     const maxTreeRows = options.expanded ? 8 : 5;
     const failedIndexes = entries.filter((entry) => entry.status === "failed").map((entry) => entry.taskIndex);
@@ -289,7 +296,7 @@ function renderProgress(
         ? theme.fg("warning", "■")
         : theme.fg("success", "✓");
     const lines: string[] = [
-      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, pending ? `${pending} pending` : "", entries.length ? `agents ${range}` : "", runningChildren ? `${runningChildren} delegated` : "", stalled ? theme.fg("error", `stalled ${Math.floor(idleMs / 1000)}s`) : ""], theme)}`,
+      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, focusedDurationMs !== undefined ? formatDuration(focusedDurationMs) : "", focusedTokens, pending ? `${pending} pending` : "", entries.length ? `agents ${range}` : "", runningChildren ? `${runningChildren} delegated` : "", stalled ? theme.fg("error", `stalled ${Math.floor(idleMs / 1000)}s`) : ""], theme)}`,
       ...treeWindow.rows.map((row) => row.text),
     ];
 
@@ -305,8 +312,18 @@ function renderProgress(
       const tokens = child.inputTokens !== undefined || child.outputTokens !== undefined
         ? ` · in ${child.inputTokens ?? 0} · out ${child.outputTokens ?? 0}`
         : "";
-      const duration = child.startedAt ? ` · ${elapsed(Math.max(0, Math.floor((Date.now() - child.startedAt) / 1000)))}` : "";
-      lines.push(`${theme.fg("dim", "↳")} ${childIcon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `child agent · ${child.status}${duration}${activity}${tokens}${parent}`)}`);
+      const childDurationMs = child.status === "running" && child.startedAt
+        ? Math.max(child.durationMs ?? 0, Date.now() - child.startedAt)
+        : child.durationMs;
+      const duration = childDurationMs !== undefined
+        ? ` · ${elapsed(Math.max(0, Math.floor(childDurationMs / 1000)))}`
+        : "";
+      const childActivityAt = child.lastActivityAt ?? child.startedAt;
+      const childIdleMs = childActivityAt ? Math.max(0, Date.now() - childActivityAt) : 0;
+      const childState = child.status === "running" && childIdleMs >= 30_000
+        ? `stalled ${Math.floor(childIdleMs / 1000)}s`
+        : child.status;
+      lines.push(`${theme.fg("dim", "↳")} ${childIcon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `child agent · ${childState}${duration}${activity}${tokens}${parent}`)}`);
     }
     if (childCalls.length > (options.expanded ? 4 : 2)) {
       lines.push(theme.fg("dim", `↳ … ${childCalls.length - (options.expanded ? 4 : 2)} more child agents`));

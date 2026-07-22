@@ -1650,6 +1650,8 @@ async function runSingleAttempt(
           progress.recentTools = [];
           progress.toolCount = 0;
           progress.tokens = 0;
+          progress.inputTokens = 0;
+          progress.outputTokens = 0;
           options.onProgress?.(progress);
           break;
         }
@@ -1679,7 +1681,6 @@ async function runSingleAttempt(
             streamingText = "";
             appendDistinctAssistantMessage(messages, text);
             progress.lastMessage = text;
-            options.onProgress?.(progress);
           }
           const messageUsage = (msg?.usage as Record<string, unknown> | undefined)
             ?? (event.usage as Record<string, unknown> | undefined);
@@ -1695,11 +1696,13 @@ async function runSingleAttempt(
           if (messageModel) {
             resolvedModel = messageModel;
           }
+          options.onProgress?.(progress);
           break;
         }
         case "message_update": {
           const ame = event.assistantMessageEvent as Record<string, unknown> | undefined;
           const deltaType = ame?.type as string | undefined;
+          let progressChanged = false;
 
           if (deltaType === "text_delta") {
             const delta = ame?.delta as string | undefined;
@@ -1710,7 +1713,7 @@ async function runSingleAttempt(
                 EXECUTION_BUFFER_LIMITS.streamBytes,
               );
               progress.lastMessage = streamingText;
-              options.onProgress?.(progress);
+              progressChanged = true;
             }
           } else if (deltaType === "text_start") {
             streamingText = "";
@@ -1726,7 +1729,9 @@ async function runSingleAttempt(
               + pendingMessageUsage.inputTokens + pendingMessageUsage.outputTokens;
             progress.inputTokens = usage.inputTokens + pendingMessageUsage.inputTokens;
             progress.outputTokens = usage.outputTokens + pendingMessageUsage.outputTokens;
+            progressChanged = true;
           }
+          if (progressChanged) options.onProgress?.(progress);
           break;
         }
         case "response": {
