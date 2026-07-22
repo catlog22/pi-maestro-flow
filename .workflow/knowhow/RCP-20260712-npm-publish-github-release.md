@@ -36,6 +36,24 @@ git diff <last-tag>..HEAD --stat
 git diff <last-tag>..HEAD --stat -- "packages/<pkg>/"
 ```
 
+### Step 1.5: 检查 workspace 依赖包是否有未发布变更（必做）
+
+monorepo 中某个包版本未变，**不代表它没有未发布变更**。发布主包前必须逐个检查其 workspace 依赖包：
+
+```bash
+# 1) 依赖包上次发布时间
+npm view <dep-pkg> time --json | tail -5
+
+# 2) 自上个主包 tag 以来，依赖包目录是否有新 commit
+git log <last-tag>..HEAD --oneline -- packages/<dep-pkg>/
+
+# 3) 依赖包本地版本 vs npm 已发布版本是否一致
+node -e "console.log(require('./packages/<dep-pkg>/package.json').version)"
+npm view <dep-pkg> version
+```
+
+若依赖包有已提交未发布变更，且主包 release note 描述了这些特性，则**必须先发布依赖包**（bump + publish），再把主包的依赖版本升上去，否则已发布产物会缺少 release note 宣称的特性。
+
 ### Step 2: 撰写 RELEASE.md
 
 基于 commit 分析结果撰写 release note，必须覆盖：
@@ -106,6 +124,8 @@ gh release create vX.Y.Z \
 | npm publish 但文件不全 | `files` 字段过滤 | 检查 package.json 的 `files` 字段 |
 | 本地 git tag 和 remote 不一致 | 忘记 `--tags` | `git push --tags` |
 | monorepo 包间版本依赖不一致 | 手改漏掉某个包 | 检查所有 `peerDependencies` 中的版本引用 |
+| 主包 release note 宣称的特性实际不在产物里 | workspace 依赖包有已提交未发布变更，主包仍 pin 旧版 | 发布前执行 Step 1.5；先发布依赖包再升主包依赖 |
+| npm 无法重发同一版本修正依赖 | 同版本号不允许 republish | bump 主包 patch（如 0.4.12→0.4.13）重发，并在 RELEASE.md 注明 supersedes |
 
 ## 参考
 
