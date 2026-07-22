@@ -49,7 +49,6 @@ import {
   onBeforeCompact as goalBeforeCompact,
   onCompact as goalCompact,
   onInput as goalInput,
-  onToolCall as goalToolCall,
   onBeforeAgentStart as goalBeforeAgentStart,
   onAgentEnd as goalAgentEnd,
   getActiveGoal,
@@ -378,20 +377,21 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const goalTool: ToolDefinition<typeof GoalToolParams> = {
     name: "goal",
     label: "Goal",
-    description: `Read or create an autonomous Goal. Lifecycle control belongs to the user through /goal commands.
+    description: `Read, create, or update an autonomous Goal. Lifecycle control belongs to the user through /goal commands.
 
 - get: Read the current Goal state. { action: "get" }
 - create: Create a new Goal without a budget by default. { action: "create", objective: "..." }
+- update: Replace the active Goal objective and resume it automatically. { action: "update", objective: "..." }
 - optional budget: Include tokenBudget only when the user explicitly requests one. { action: "create", objective: "...", tokenBudget: "100k" }
 
-When the agent loop ends naturally, the extension verifies completion automatically. The model cannot stop, resume, clear, update, or mark a Goal done.`,
+When the agent loop ends naturally, the extension verifies completion automatically. The model cannot stop, resume, clear, or mark a Goal done.`,
 
-    promptSnippet: "Read the active Goal or create a new autonomous Goal; completion is verified automatically",
+    promptSnippet: "Read, create, or update an autonomous Goal; completion is verified automatically",
     promptGuidelines: [
       "When a goal is active, keep working until it is complete; do not stop with only a plan or partial progress.",
-      "Use goal get to inspect state. Use goal create only when no Goal exists.",
+      "Use goal get to inspect state. Use goal create only when no Goal exists; use goal update to replace its objective and resume it.",
       "Omit tokenBudget by default. Set it only when the user explicitly requests a Token budget.",
-      "Do not attempt to stop, resume, clear, update, or mark a Goal done; those transitions are user- or verifier-owned.",
+      "Do not attempt to stop, resume, clear, or mark a Goal done; those transitions are user- or verifier-owned.",
     ],
 
     parameters: GoalToolParams,
@@ -413,7 +413,7 @@ When the agent loop ends naturally, the extension verifies completion automatica
     renderCall(args, theme) {
       const action = (args.action as string) ?? "?";
       let detail = "";
-      if (action === "create") {
+      if (action === "create" || action === "update") {
         const obj = (args.objective as string) ?? "";
         detail = obj ? ` ${obj.slice(0, 40)}${obj.length > 40 ? "…" : ""}` : "";
       }
@@ -846,22 +846,19 @@ When the agent loop ends naturally, the extension verifies completion automatica
     if (!widgetCtx) return;
     const tasks = getVisibleTasks();
     const view = deriveWorkflowViewModel(workflowSnapshotForUi());
-    if (!view && tasks.length === 0) {
-      widgetCtx.ui.setWidget("todo-panel", undefined);
-      return;
-    }
-    if (view && !shouldShowMaestroPanel(view, panelMode)) {
+    const showMaestroPanel = view !== undefined && shouldShowMaestroPanel(view, panelMode);
+    if (!showMaestroPanel && tasks.length === 0) {
       widgetCtx.ui.setWidget("todo-panel", undefined);
       return;
     }
     widgetCtx.ui.setWidget("todo-panel", () => ({
       render(width: number): string[] {
-        return view
+        return showMaestroPanel
           ? renderMaestroPanel(view, panelMode, width)
           : renderTodoWidget(tasks, panelMode !== "collapsed", width);
       },
       invalidate() {},
-    }));
+    }), { placement: "aboveEditor" });
   }
 
   pi.registerShortcut(TODO_TOGGLE_KEY, {
@@ -879,7 +876,7 @@ When the agent loop ends naturally, the extension verifies completion automatica
     todoRootContext = ctx;
     widgetCtx = ctx;
     panelMode = "collapsed";
-    goalSessionStart(ctx, event);
+    await goalSessionStart(ctx, event);
     const restoredGoal = getActiveGoal();
     workflowSessionOptedIn = false;
     todoSessionStart(ctx);
@@ -1073,7 +1070,6 @@ When the agent loop ends naturally, the extension verifies completion automatica
     isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
     hookAdapter,
   ));
-  pi.on("tool_call", () => goalToolCall());
 }
 
 /**

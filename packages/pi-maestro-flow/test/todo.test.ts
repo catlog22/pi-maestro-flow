@@ -41,6 +41,24 @@ function startTodo(cwd: string, loader: TodoSkillLoader, entries: unknown[] = []
   return context;
 }
 
+test("Todo keeps its task summary out of the statusline", async () => {
+  const statusValues: Array<string | undefined> = [];
+  initTodo({ appendEntry() {} } as never);
+  const todoContext: TodoContext = {
+    cwd: "",
+    ui: { setStatus(_key, value) { statusValues.push(value); } },
+    sessionManager: { getEntries: () => [] },
+  };
+  onSessionStart(todoContext);
+
+  try {
+    await executeTodo({ action: "create", subject: "Render above the input" }, makeExtensionContext());
+    assert.deepEqual(statusValues, [undefined]);
+  } finally {
+    onSessionShutdown(todoContext);
+  }
+});
+
 function deferred(): { promise: Promise<void>; resolve: () => void } {
   let resolve!: () => void;
   const promise = new Promise<void>((done) => { resolve = done; });

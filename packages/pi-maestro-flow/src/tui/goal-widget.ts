@@ -5,7 +5,7 @@ export type GoalWidgetPhase = "normal" | "waiting" | "verifying" | "verified";
 export interface GoalWidgetModel {
   objective: string;
   status: "active" | "paused" | "done";
-  pauseReason?: "user" | "budget" | "gate" | "error";
+  pauseReason?: "user" | "budget" | "gate";
   iteration: number;
   tokensUsed: number;
   tokenBudget?: number;
@@ -60,9 +60,6 @@ function visualState(goal: GoalWidgetModel, phase: GoalWidgetPhase): VisualState
   }
   if (goal.pauseReason === "gate") {
     return { glyph: "!", label: "BLOCKED", color: "error", hint: "resolve Workflow gate" };
-  }
-  if (goal.pauseReason === "error") {
-    return { glyph: "!", label: "ERROR", color: "error", hint: "/goal resume" };
   }
   return { glyph: "⏸", label: "STOPPED", color: "warning", hint: "/goal resume" };
 }

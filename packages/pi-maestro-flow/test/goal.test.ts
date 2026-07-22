@@ -80,7 +80,6 @@ test("goal widget renders explicit lifecycle states within widths 1 through 120"
     { goal: { ...base, status: "paused", pauseReason: "user" }, phase: "normal", label: /STOPPED/ },
     { goal: { ...base, status: "paused", pauseReason: "budget" }, phase: "normal", label: /BUDGET/ },
     { goal: { ...base, status: "paused", pauseReason: "gate" }, phase: "normal", label: /BLOCKED/ },
-    { goal: { ...base, status: "paused", pauseReason: "error" }, phase: "normal", label: /ERROR/ },
   ];
 
   for (const variant of variants) {
@@ -110,7 +109,7 @@ test("goal widget omits Token metrics when no budget was explicitly set", () => 
   assert.doesNotMatch(rendered, /13\.8k|tok|\[█|\[░/i);
 });
 
-test("goal lifecycle keeps an above-editor widget synchronized", async () => {
+test("goal lifecycle keeps a below-editor widget synchronized without displacing Todo", async () => {
   let widgetKey: string | undefined;
   let widgetContent: unknown;
   let widgetPlacement: string | undefined;
@@ -137,11 +136,11 @@ test("goal lifecycle keeps an above-editor widget synchronized", async () => {
 
   onSessionStart(ctx);
   try {
-    await executeGoal({ action: "create", objective: "Show Goal above the editor", tokenBudget: "50k" }, ctx);
+    await executeGoal({ action: "create", objective: "Keep Todo above the editor", tokenBudget: "50k" }, ctx);
     assert.equal(widgetKey, "goal-panel");
-    assert.equal(widgetPlacement, "aboveEditor");
+    assert.equal(widgetPlacement, "belowEditor");
     assert.match(renderCurrent(), /ACTIVE/);
-    assert.match(renderCurrent(), /Show Goal above the editor/);
+    assert.match(renderCurrent(), /Keep Todo above the editor/);
 
     await executeGoalCommand({ action: "stop" }, ctx);
     assert.match(renderCurrent(), /STOPPED/);
@@ -242,6 +241,8 @@ test("Goal state is session-scoped and ordinary inputs do not acquire Goal loop 
   onSessionStart(sessionA, { reason: "startup" });
   try {
     await executeGoal({ action: "create", objective: "Goal owned by session A" }, sessionA);
+    await executeGoalCommand({ action: "stop" }, sessionA);
+    assert.equal(getActiveGoal()?.status, "paused");
     assert.equal(getActiveGoal()?.text, "Goal owned by session A");
     onSessionShutdown(sessionA);
     assert.equal(getActiveGoal(), undefined, "shutdown must release module-local Goal state");
@@ -264,7 +265,7 @@ test("Goal state is session-scoped and ordinary inputs do not acquire Goal loop 
     const mismatchedResume = createContext({
       sessionManager: { getSessionId: () => "session-b", getEntries: () => entries },
     });
-    onSessionStart(mismatchedResume, { reason: "resume" });
+    await onSessionStart(mismatchedResume, { reason: "resume" });
     assert.equal(getActiveGoal(), undefined, "resume must reject Goal entries from a different session identity");
     onSessionShutdown(mismatchedResume);
 
@@ -272,15 +273,12 @@ test("Goal state is session-scoped and ordinary inputs do not acquire Goal loop 
       isIdle: () => false,
       sessionManager: { getSessionId: () => "session-a", getEntries: () => entries },
     });
-    onSessionStart(resumedA, { reason: "resume" });
+    await onSessionStart(resumedA, { reason: "resume" });
     assert.equal(getActiveGoal()?.text, "Goal owned by session A", "same-session resume should restore its Goal");
+    assert.equal(getActiveGoal()?.status, "active", "same-session resume should reactivate a paused Goal");
 
     await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, resumedA);
-    assert.equal(verifierCalls, 0, "a restored Goal must wait for explicit /goal resume");
-
-    await executeGoalCommand({ action: "resume" }, resumedA);
-    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, resumedA);
-    assert.equal(verifierCalls, 1, "explicit /goal resume should own exactly one agent loop");
+    assert.equal(verifierCalls, 1, "a restored Goal should automatically own its resumed agent loop");
     await executeGoalCommand({ action: "clear" }, resumedA);
     onSessionShutdown(resumedA);
   } finally {
@@ -792,6 +790,108 @@ test("goal create is exclusive and user stop/resume controls the active agent lo
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
     setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("goal update replaces a paused objective and resumes its agent loop", async () => {
+  const sent: string[] = [];
+  initGoal({
+    appendEntry() {},
+    sendMessage(message: { content: string }) { sent.push(message.content); },
+  } as never);
+  setGoalVerifierRunnerForTest(async () => ({
+    exitCode: 0,
+    messages: [{ role: "assistant", content: "Structured output saved." }],
+    structuredOutput: {
+      pass: false,
+      reasoning: "Work remains.",
+      unmet: ["Continue the updated Goal"],
+      evidence: [],
+    },
+  }));
+  const ctx = createContext({ isIdle: () => false, hasPendingMessages: () => false });
+  onSessionStart(ctx);
+
+  try {
+    await executeGoal({ action: "create", objective: "Original objective" }, ctx);
+    await executeGoalCommand({ action: "stop" }, ctx);
+    assert.equal(getActiveGoal()?.status, "paused");
+
+    const updated = await executeGoal({ action: "update", objective: "Updated objective" }, ctx);
+    assert.equal(updated.isError, false);
+    assert.match(updated.text, /updated and resumed/i);
+    assert.equal(getActiveGoal()?.text, "Updated objective");
+    assert.equal(getActiveGoal()?.status, "active");
+
+    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0] ?? "", /^Continue the active goal:/);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("agent errors pause a Goal without creating an error lifecycle state", async () => {
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext({ isIdle: () => false, hasPendingMessages: () => false });
+  onSessionStart(ctx);
+
+  try {
+    await executeGoal({ action: "create", objective: "Recover from a provider failure" }, ctx);
+    await onAgentEnd({
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "invalid API key", content: [] }],
+    }, ctx);
+
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, undefined);
+    assert.match(renderGoalWidget({
+      objective: getActiveGoal()!.text,
+      status: getActiveGoal()!.status,
+      pauseReason: getActiveGoal()!.pauseReason,
+      iteration: getActiveGoal()!.iteration,
+      tokensUsed: getActiveGoal()!.tokensUsed,
+      tokenBudget: getActiveGoal()!.tokenBudget,
+      timeUsedSeconds: getActiveGoal()!.timeUsedSeconds,
+    }, "normal", 120, goalWidgetTheme).join("\n"), /STOPPED/);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("resuming a legacy Goal clears its obsolete error pause reason and reactivates it", async () => {
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext({
+    sessionManager: {
+      getEntries: () => [{
+        type: "custom",
+        customType: "goal-state",
+        data: {
+          goal: {
+            id: "legacy-error-goal",
+            text: "Legacy Goal",
+            status: "paused",
+            pauseReason: "error",
+            startedAt: 1,
+            updatedAt: 1,
+            iteration: 0,
+            tokensUsed: 0,
+            timeUsedSeconds: 0,
+            baselineTokens: 0,
+          },
+        },
+      }],
+    },
+  });
+
+  await onSessionStart(ctx, { reason: "resume" });
+  try {
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.pauseReason, undefined);
+  } finally {
+    onSessionShutdown(ctx);
   }
 });
 

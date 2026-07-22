@@ -106,9 +106,9 @@ export const MaestroParams = Type.Object({
 // providers reject a root-level anyOf even when every union variant is an
 // object. Action-specific requirements are enforced by executeGoal().
 export const GoalToolParams = Type.Object({
-  action: StringEnum(["get", "create"]),
+  action: StringEnum(["get", "create", "update"]),
   objective: Type.Optional(
-    Type.String({ description: "Goal objective; required when action is 'create'" }),
+    Type.String({ description: "Goal objective; required when action is 'create' or 'update'" }),
   ),
   tokenBudget: Type.Optional(
     Type.String({ description: "Optional explicit Token budget; omit for no budget. Accepts plain, k, or m values, e.g. '100000', '100k', or '1.5m'; create only" }),

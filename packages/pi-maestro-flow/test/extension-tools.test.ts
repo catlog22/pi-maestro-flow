@@ -159,7 +159,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(goalSchema.anyOf, undefined, "provider function schemas must not use a root-level anyOf");
   assert.equal(goalSchema.additionalProperties, false);
   assert.deepEqual(goalSchema.required, ["action"]);
-  assert.deepEqual(goalSchema.properties?.action?.enum, ["get", "create"]);
+  assert.deepEqual(goalSchema.properties?.action?.enum, ["get", "create", "update"]);
   assert.ok(goalSchema.properties?.objective);
   assert.ok(goalSchema.properties?.tokenBudget);
   assert.match(String(goalSchema.properties?.tokenBudget?.description), /omit for no budget/i);

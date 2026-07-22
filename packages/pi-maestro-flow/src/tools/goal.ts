@@ -65,7 +65,7 @@ function isModuleNotFound(err: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 type GoalStatus = "active" | "paused" | "done";
-export type PauseReason = "user" | "budget" | "gate" | "error";
+export type PauseReason = "user" | "budget" | "gate";
 type AgentStopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 
 export interface ActiveGoal {
@@ -150,7 +150,6 @@ let extensionApi: ExtensionAPI | undefined;
 let baseCwd = "";
 let continuationPending: ContinuationPending | undefined;
 let goalRecovery: { goalId: string; kind: string } | undefined;
-let staleToolCallsBlocked = false;
 let completionTimer: ReturnType<typeof setTimeout> | undefined;
 let verificationInFlight: { goalId: string; updatedAt: number; epoch: number } | undefined;
 let goalLifecycleEpoch = 0;
@@ -160,7 +159,7 @@ let workflowCoordinator: WorkflowCoordinator | undefined;
 const issuedGoalMarkers = new Set<string>();
 
 // ---------------------------------------------------------------------------
-// Public: LLM tool contract (read/create only)
+// Public: LLM tool contract
 // ---------------------------------------------------------------------------
 
 export interface GoalGetParams {
@@ -174,7 +173,12 @@ export interface GoalCreateParams {
   planHandoffKey?: string;
 }
 
-export type GoalParams = GoalGetParams | GoalCreateParams;
+export interface GoalUpdateParams {
+  action: "update";
+  objective: string;
+}
+
+export type GoalParams = GoalGetParams | GoalCreateParams | GoalUpdateParams;
 
 export type GoalCommandParams =
   | { action: "status" }
@@ -200,8 +204,14 @@ export async function executeGoal(
       }
       return handleCreate(params.objective, params.tokenBudget, ctx, params.planHandoffKey);
     }
+    case "update": {
+      if (typeof params.objective !== "string" || params.objective.trim().length === 0) {
+        return { text: "Goal update requires a non-empty objective.", isError: true };
+      }
+      return handleUpdate(params.objective, ctx);
+    }
     default:
-      return { text: "Unknown action. Valid: get, create", isError: true };
+      return { text: "Unknown action. Valid: get, create, update", isError: true };
   }
 }
 
@@ -299,7 +309,6 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
       return activeGoal;
     }
     activeGoal = createWorkflowGoal(session, ctx, snapshot.sessionGeneration);
-    clearStaleBlock();
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
     return activeGoal;
@@ -316,7 +325,6 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
   }
   if (activeGoal.workflowSessionId === session.sessionId && failedGate && activeGoal.status === "active") {
     cancelContinuation();
-    blockStale();
     activeGoal = pauseGoal(activeGoal, "gate");
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
@@ -324,7 +332,7 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
   return activeGoal;
 }
 
-export function onSessionStart(
+export async function onSessionStart(
   ctx: GoalContext,
   event: { reason?: "startup" | "reload" | "new" | "resume" | "fork" } = {},
 ) {
@@ -334,14 +342,18 @@ export function onSessionStart(
   clearCompletionTimer();
   clearContinuation();
   clearRecovery();
-  clearStaleBlock();
   baseCwd = ctx.cwd;
   goalSessionId = currentSessionId(ctx);
   activeGoal = event.reason === "new" || event.reason === "fork"
     ? undefined
     : loadGoalFromSession(ctx, goalSessionId);
-  if (activeGoal) updateStatusLine(ctx, activeGoal);
-  else clearGoalDisplay(ctx);
+  if (!activeGoal) {
+    clearGoalDisplay(ctx);
+    return;
+  }
+
+  updateStatusLine(ctx, activeGoal);
+  if (event.reason === "resume") await handleResume(undefined, ctx);
 }
 
 export function onSessionShutdown(ctx: GoalContext) {
@@ -353,7 +365,6 @@ export function onSessionShutdown(ctx: GoalContext) {
   goalSessionId = undefined;
   clearContinuation();
   clearRecovery();
-  clearStaleBlock();
   clearGoalDisplay(ctx);
   clearCompletionTimer();
 }
@@ -386,7 +397,6 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
       activeGoal = pauseGoal(activeGoal, "gate");
       persistGoal(activeGoal);
       updateStatusLine(ctx, activeGoal);
-      blockStale();
       ctx.ui.notify(`Goal paused because active Run brief recovery failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
       return;
     }
@@ -401,16 +411,6 @@ export function onInput(event: { source?: string; text?: string }) {
     return;
   }
   clearRecovery();
-  clearStaleBlock();
-}
-
-export function onToolCall() {
-  if (!staleToolCallsBlocked) return;
-  if (!activeGoal || activeGoal.status !== "paused") {
-    clearStaleBlock();
-    return;
-  }
-  return { block: true, reason: "Blocked stale goal tool call after the goal was paused or interrupted." };
 }
 
 export function onBeforeAgentStart(event: { prompt: string }) {
@@ -868,7 +868,6 @@ async function handleCreate(
 
   cancelContinuation();
   clearRecovery();
-  clearStaleBlock();
   activeGoal = createGoal(objective, tokenBudget, currentTokenTotal(ctx), planHandoffKey);
   if (ctx.isIdle?.() !== true) armGoalLoop(activeGoal);
   persistGoal(activeGoal);
@@ -877,6 +876,26 @@ async function handleCreate(
   await sendGoalPrompt(ctx, activeGoal);
   updateStatusLine(ctx, activeGoal);
   return { text: `Goal started: ${objective}`, isError: false };
+}
+
+async function handleUpdate(
+  objective: string,
+  ctx: GoalContext,
+): Promise<{ text: string; isError: boolean }> {
+  if (!activeGoal) return { text: "No active goal to update.", isError: true };
+  const err = validateObjective(objective);
+  if (err) return { text: err, isError: true };
+
+  updateUsage(activeGoal, ctx);
+  activeGoal = { ...activeGoal, text: objective.trim(), updatedAt: Date.now() };
+  persistGoal(activeGoal);
+  updateStatusLine(ctx, activeGoal);
+
+  const resumed = await handleResume(undefined, ctx);
+  if (resumed.isError) {
+    return { text: `Goal updated but could not resume: ${resumed.text}`, isError: true };
+  }
+  return { text: `Goal updated and resumed: ${activeGoal?.text ?? objective.trim()}`, isError: false };
 }
 
 type VerificationOutcome = "done" | "continue" | "hold";
@@ -963,7 +982,6 @@ async function handleStop(ctx: GoalContext): Promise<{ text: string; isError: bo
   goalLoopOwner = undefined;
   cancelContinuation();
   await fenceWorkflowContinuation();
-  blockStale();
   activeGoal = pauseGoal(activeGoal, "user");
   persistGoal(activeGoal);
   updateStatusLine(ctx, activeGoal);
@@ -977,7 +995,6 @@ async function handleClear(ctx: GoalContext): Promise<{ text: string; isError: b
   if (!activeGoal) {
     cancelContinuation();
     clearRecovery();
-    clearStaleBlock();
     clearPersistedGoal();
     clearGoalDisplay(ctx);
     return { text: "No active goal.", isError: false };
@@ -1023,7 +1040,6 @@ async function handleResume(
   }
 
   clearRecovery();
-  clearStaleBlock();
   activeGoal = { ...activeGoal, status: "active", pauseReason: undefined, updatedAt: Date.now() };
   persistGoal(activeGoal);
   updateStatusLine(ctx, activeGoal);
@@ -1120,8 +1136,9 @@ function createGoal(
   };
 }
 
-function pauseGoal(goal: ActiveGoal, reason: PauseReason): ActiveGoal {
-  return { ...goal, status: "paused", pauseReason: reason, updatedAt: Date.now() };
+function pauseGoal(goal: ActiveGoal, reason?: PauseReason): ActiveGoal {
+  const { pauseReason: _pauseReason, ...rest } = goal;
+  return { ...rest, status: "paused", ...(reason ? { pauseReason: reason } : {}), updatedAt: Date.now() };
 }
 
 function createWorkflowGoal(
@@ -1164,7 +1181,6 @@ function updateUsage(goal: ActiveGoal, ctx: GoalContext) {
 function clearActive(ctx: GoalContext) {
   cancelContinuation();
   clearRecovery();
-  clearStaleBlock();
   activeGoal = undefined;
   goalLoopOwner = undefined;
   clearPersistedGoal();
@@ -1192,7 +1208,14 @@ function loadGoalFromSession(ctx: GoalContext, sessionId: string | undefined): A
   const entry = entries.filter((e) => e.type === "custom" && e.customType === GOAL_STATE_ENTRY_TYPE).pop();
   const data = entry?.data as { sessionId?: string; goal?: ActiveGoal | null } | undefined;
   if (data?.sessionId && sessionId && data.sessionId !== sessionId) return undefined;
-  return isGoal(data?.goal) && data.goal.status !== "done" ? data.goal : undefined;
+  return isGoal(data?.goal) && data.goal.status !== "done" ? normalizeLoadedGoal(data.goal) : undefined;
+}
+
+function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
+  const rawGoal = goal as ActiveGoal & { pauseReason?: unknown };
+  if (rawGoal.pauseReason !== "error") return goal;
+  const { pauseReason: _pauseReason, ...normalized } = rawGoal;
+  return normalized;
 }
 
 function currentSessionId(ctx: GoalContext): string | undefined {
@@ -1212,6 +1235,7 @@ function isGoal(v: unknown): v is ActiveGoal {
     typeof g.startedAt === "number" && typeof g.updatedAt === "number" &&
     typeof g.iteration === "number" &&
     typeof g.tokensUsed === "number" && typeof g.baselineTokens === "number" &&
+    (g.pauseReason === undefined || ["user", "budget", "gate", "error"].includes(String(g.pauseReason))) &&
     (g.planHandoffKey === undefined || typeof g.planHandoffKey === "string") &&
     (g.workflowSessionId === undefined || typeof g.workflowSessionId === "string") &&
     (g.workflowSessionGeneration === undefined || typeof g.workflowSessionGeneration === "string")
@@ -1284,7 +1308,6 @@ async function sendContinuation(ctx: GoalContext, goal: ActiveGoal) {
       activeGoal = pauseGoal(goal, "gate");
       persistGoal(activeGoal);
       updateStatusLine(ctx, activeGoal);
-      blockStale();
       ctx.ui.notify(`Goal paused by Workflow Coordinator: ${error instanceof Error ? error.message : String(error)}`, "warning");
       return false;
     }
@@ -1383,9 +1406,8 @@ function markerComment(marker: string): string { return `<!-- ${CONTINUATION_MAR
 
 function pauseAfterEnd(ctx: GoalContext, goal: ActiveGoal, assistant: AssistantMessageLike) {
   cancelContinuation();
-  blockStale();
   abortTurn(ctx);
-  activeGoal = pauseGoal(goal, "error");
+  activeGoal = pauseGoal(goal);
   persistGoal(activeGoal);
   updateStatusLine(ctx, activeGoal);
   const reason = assistant.stopReason === "aborted" ? "interruption" : "agent error";
@@ -1410,8 +1432,6 @@ function isPiRetry(event: unknown, goalId: string): boolean {
     && (e.reason === undefined || e.reason === "overflow");
 }
 
-function blockStale() { staleToolCallsBlocked = true; }
-function clearStaleBlock() { staleToolCallsBlocked = false; }
 function clearRecovery() { goalRecovery = undefined; }
 function clearRecoveryFor(id: string) { if (goalRecovery?.goalId === id) goalRecovery = undefined; }
 async function fenceWorkflowContinuation(): Promise<void> {
@@ -1475,12 +1495,12 @@ function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetP
       return renderGoalWidget(model, phase, width, theme);
     },
     invalidate() {},
-  }), { placement: "aboveEditor" });
+  }), { placement: "belowEditor" });
 }
 
 function clearGoalDisplay(ctx: GoalContext): void {
   ctx.ui.setStatus(STATUS_KEY, undefined);
-  ctx.ui.setWidget?.(GOAL_WIDGET_KEY, undefined, { placement: "aboveEditor" });
+  ctx.ui.setWidget?.(GOAL_WIDGET_KEY, undefined, { placement: "belowEditor" });
 }
 
 function clearCompletionTimer() { if (completionTimer) { clearTimeout(completionTimer); completionTimer = undefined; } }

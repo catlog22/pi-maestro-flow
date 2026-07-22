@@ -131,7 +131,6 @@ export interface TodoContext {
 
 const TODO_STATE_ENTRY_TYPE = "todo-state";
 const TODO_STATE_VERSION = 5;
-const STATUS_KEY = "todo";
 
 let tasks: Map<string, TodoTask> = new Map();
 let knownActors: Map<string, TodoActorRef> = new Map([[ROOT_TODO_ACTOR.id, ROOT_TODO_ACTOR]]);
@@ -166,7 +165,7 @@ export function onSessionStart(ctx: TodoContext): void {
     rememberActor(task.assignee);
   }
   markTodoChanged();
-  updateStatusLine(ctx);
+  ctx.ui.setStatus("todo", undefined);
 }
 
 export function onSessionShutdown(ctx: TodoContext): void {
@@ -179,7 +178,7 @@ export function onSessionShutdown(ctx: TodoContext): void {
   activeSkillSnapshots.clear();
   runInjectedStackRevision = undefined;
   markTodoChanged();
-  ctx.ui.setStatus(STATUS_KEY, undefined);
+  ctx.ui.setStatus("todo", undefined);
 }
 
 export function getVisibleTasks(): TodoTask[] {
@@ -298,7 +297,7 @@ export function reconcileMirrorTasks(
   }
 
   if (result.created.length || result.updated.length || result.tombstoned.length) {
-    commitTodoState(nextTasks, ctx);
+    commitTodoState(nextTasks);
     clearCommittedSkillSnapshots(skillSnapshotsToClear);
   }
   return result;
@@ -470,7 +469,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
 
   const nextTasks = new Map(tasks);
   nextTasks.set(id, task);
-  commitTodoState(nextTasks, ctx);
+  commitTodoState(nextTasks);
 
   return ok(`Created #${id}: ${task.subject} (${task.status})`, "create");
 }
@@ -575,7 +574,7 @@ async function handleUpdate(
 
   // Persist and update the UI against the detached candidate state. Only after
   // every fallible operation succeeds do we publish the task and skill snapshot.
-  commitTodoState(nextTasks, ctx);
+  commitTodoState(nextTasks);
   if (activation) {
     activeSkillSnapshots.set(draft.id, activation);
     runInjectedStackRevision = undefined;
@@ -666,7 +665,7 @@ function handleDelete(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
     }
   }
 
-  commitTodoState(nextTasks, ctx);
+  commitTodoState(nextTasks);
   clearCommittedSkillSnapshots(new Set([deleted.id]));
   return ok(`Deleted #${deleted.id}: ${deleted.subject}`, "delete");
 }
@@ -675,7 +674,7 @@ function handleClear(ctx: ExtensionContext, actor: TodoActorRef): AgentToolResul
   if (actor.kind !== "root") return err("Only root can clear the shared Todo list.", "clear");
   const count = [...tasks.values()].filter((t) => t.status !== "deleted").length;
   const nextTasks = new Map<string, TodoTask>();
-  commitTodoState(nextTasks, ctx);
+  commitTodoState(nextTasks);
   clearSkillSnapshot();
   return ok(`Cleared ${count} task(s).`, "clear");
 }
@@ -763,7 +762,7 @@ async function handleNext(
   draft.updatedAt = Date.now();
   const nextTasks = new Map(tasks);
   nextTasks.set(draft.id, draft);
-  commitTodoState(nextTasks, ctx);
+  commitTodoState(nextTasks);
   activeSkillSnapshots.set(draft.id, activation);
   runInjectedStackRevision = undefined;
 
@@ -918,10 +917,8 @@ function persist(state: Map<string, TodoTask> = tasks): void {
 
 function commitTodoState(
   nextTasks: Map<string, TodoTask>,
-  ctx: { ui: { setStatus: (key: string, value: string | undefined) => void } },
 ): void {
   persist(nextTasks);
-  updateStatusLine(ctx, nextTasks);
   tasks = nextTasks;
   markTodoChanged();
 }
@@ -1014,21 +1011,6 @@ function revalidateAsyncTodoMutation(check: AsyncTodoMutationCheck): TodoTask {
     throw new Error(`Invalid status transition: ${current.status} → ${check.draft.status}`);
   }
   return current;
-}
-
-function updateStatusLine(
-  ctx: { ui: { setStatus: (key: string, value: string | undefined) => void } },
-  state: Map<string, TodoTask> = tasks,
-): void {
-  const visible = [...state.values()].filter((t) => t.status !== "deleted");
-  if (visible.length === 0) {
-    ctx.ui.setStatus(STATUS_KEY, undefined);
-    return;
-  }
-  const done = visible.filter((t) => t.status === "completed").length;
-  const inProg = visible.filter((t) => t.status === "in_progress").length;
-  const pending = visible.filter((t) => t.status === "pending" || t.status === "blocked").length;
-  ctx.ui.setStatus(STATUS_KEY, `${done}/${visible.length} done${inProg ? ` ${inProg} running` : ""}${pending ? ` ${pending} pending` : ""}`);
 }
 
 function statusIcon(status: TaskStatus): string {

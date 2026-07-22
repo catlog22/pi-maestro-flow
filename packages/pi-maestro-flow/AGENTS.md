@@ -304,12 +304,13 @@ Cross-turn persistence engine — auto-continuation, token budget, compaction su
 ```text
 goal({ action: "create", objective: "Implement JWT auth module" })
 goal({ action: "create", objective: "Implement JWT auth module", tokenBudget: "500k" })  # explicit budget
+goal({ action: "update", objective: "Implement JWT auth module with refresh tokens" })
 goal({ action: "get" })
 ```
 
-The LLM-facing tool exposes only `get` and `create`. `create` is exclusive: it fails while any Goal already exists. There is no default budget: omit `tokenBudget` unless the user explicitly requests one. Explicit budget format is `"100k"`, `"2m"`, or a plain number. The `/goal` command provides native argument-completion hints for `--tokens`.
+The LLM-facing tool exposes `get`, `create`, and `update`. `create` is exclusive: it fails while any Goal already exists. `update` replaces the active objective and automatically resumes its agent loop. There is no default budget: omit `tokenBudget` unless the user explicitly requests one. Explicit budget format is `"100k"`, `"2m"`, or a plain number. The `/goal` command provides native argument-completion hints for `--tokens`.
 
-The function schema must remain a single root JSON object for provider compatibility. `objective` is optional in the flat JSON Schema but is required and validated at runtime for `create`.
+The function schema must remain a single root JSON object for provider compatibility. `objective` is optional in the flat JSON Schema but is required and validated at runtime for `create` and `update`.
 
 ### User Lifecycle Commands
 
@@ -321,7 +322,7 @@ The function schema must remain a single root JSON object for provider compatibi
 | `/goal resume [--tokens 100k]` | Resume; optionally raise an exhausted budget |
 | `/goal clear` | Abandon and remove the Goal |
 
-Legacy `/goal set`, `/goal pause`, and `/goal done|complete` commands are rejected with migration guidance. Lifecycle control is user-owned; the model cannot stop, resume, clear, update, or mark a Goal done.
+Legacy `/goal set`, `/goal pause`, and `/goal done|complete` commands are rejected with migration guidance. Lifecycle control is user-owned except that the model may replace an objective through `goal update`; it cannot stop, resume directly, clear, or mark a Goal done.
 
 ### Automatic Verification
 
@@ -334,7 +335,7 @@ Verification runs only after a normal `agent_end`, meaning the whole agent loop 
 
 The `goal-panel` widget is lifecycle-owned and rendered above the input editor. Every state transition must update both footer status and the widget; clearing or shutting down a Goal must remove both. The renderer must remain width-safe from 1–120 columns and preserve explicit status text without depending on color.
 
-Goal state and loop ownership are separate. Persist Goal entries with the current Pi `sessionId`; `session_start` with `reason: new|fork` must not load an older Goal, while same-ID `resume|reload|startup` may restore it. A restored or inconclusive Goal is `WAITING` and must not claim ordinary user prompts. Only explicit create/resume or an internal continuation may arm Goal ownership for an agent loop; `onAgentEnd` must ignore unowned loops.
+Goal state and loop ownership are separate. Persist Goal entries with the current Pi `sessionId`; `session_start` with `reason: new|fork` must not load an older Goal, while same-ID `resume|reload|startup` may restore it. A same-ID `resume` automatically reactivates and arms the restored Goal; `startup` and `reload` keep the restored Goal waiting. Paused Goals must not impose a global tool-call block. `onAgentEnd` must ignore unowned loops.
 
 `reason: new|fork` also disables automatic canonical Workflow attach and Goal projection for that Pi session. Only an explicit Resume action in `/maestro-session` may acquire the Workflow lease and re-enable projection.
 
