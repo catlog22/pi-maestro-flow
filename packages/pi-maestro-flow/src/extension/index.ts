@@ -314,7 +314,22 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   { action: "delegate", prompt: "Analyze the auth flow", tool: "gemini", mode: "analysis" }
 
 - **moa**: Mixture-of-Agents — parallel reference analysis across models, then aggregator synthesis.
-  { action: "moa", prompts: ["Compare auth strategies"], preset: "deep" }`,
+  { action: "moa", prompts: ["Compare auth strategies"], preset: "deep" }
+
+When to use:
+- explore: broad read-only code search needing multiple angles fast — each prompt is one independent search agent.
+- delegate: route a task to an EXTERNAL CLI model (gemini/codex/etc.) when a specific external provider is required.
+- moa: high-stakes decisions or comparisons that benefit from independent multi-model analysis synthesized into one answer.
+
+When NOT to use:
+- For normal delegation to a pi agent, use the teammate tool instead — maestro delegate targets external CLIs only.
+- For a single known-symbol lookup or exact regex, use maestro search --code or rg directly, not explore.`,
+
+    promptSnippet: "Parallel code search (explore), external-CLI delegation (delegate), and multi-model synthesis (moa)",
+    promptGuidelines: [
+      "Use maestro explore for broad multi-angle read-only code search; use maestro delegate only to route work to an external CLI model (gemini/codex); use maestro moa for multi-model analysis synthesized into one answer.",
+      "Prefer the teammate tool over maestro delegate for ordinary pi-agent delegation; maestro delegate targets external CLIs only.",
+    ],
 
     parameters: MaestroParams,
 
@@ -415,6 +430,12 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 - update: Replace the active Goal objective and resume it automatically. { action: "update", objective: "..." }
 - optional budget: Include tokenBudget only when the user explicitly requests one. { action: "create", objective: "...", tokenBudget: "100k" }
 
+When to use:
+- create a Goal for multi-turn autonomous work that needs sustained momentum, a token budget, or verified completion.
+
+When NOT to use:
+- single-turn tasks; or when an active Workflow Session already projects a Goal — do not create a competing one.
+
 When the agent loop ends naturally, the extension verifies completion automatically. The model cannot stop, resume, clear, or mark a Goal done.`,
 
     promptSnippet: "Read, create, or update an autonomous Goal; completion is verified automatically",
@@ -492,13 +513,20 @@ When the agent loop ends naturally, the extension verifies completion automatica
 - get: { action: "get", id: "..." }
 - delete: { action: "delete", id: "..." }
 - clear: { action: "clear" }
-- next: { action: "next" } — activate the next pending task and return its resolved context`,
+- next: { action: "next" } — activate the next pending task and return its resolved context
 
-    promptSnippet: "Track multi-step work and activate the next Todo task with resolved context and optional skill guidance.",
+Rules:
+- subject is the title; description is the detail — do not swap. Set summary on completion; the next action consumes prior summaries.
+- One in_progress task at a time in the root session.
+- Skill binding requires exactly one primary; guard/support are optional. Skill file changes after activation mark the binding stale — re-activate.
+- In update: omitted fields are preserved, null clears, empty array replaces.`,
+
+    promptSnippet: "Track multi-step work (≥3 steps) and activate the next Todo task with resolved context and optional skill guidance.",
     promptGuidelines: [
-      "Use todo for multi-step work that needs explicit progress tracking, dependencies, or resumable task context.",
-      "Call todo with action=next to activate the next pending task before executing it.",
-      "When an active Todo task is complete, call todo update with status=completed and a concise summary before activating another task.",
+      "Use todo for multi-step work: create a todo list BEFORE executing whenever a request needs ≥3 distinct steps, spans multiple tool-call rounds, names multiple deliverables or files, has step dependencies, or needs resumable cross-turn context. This trigger is mandatory — do not pause to judge whether tracking is needed.",
+      "Skip todo only for single-action work (one tool call or edit fully satisfies the request) or when an active Workflow Session already mirrors tasks.",
+      "Decision rule: 1–2 steps → skip; ≥3 steps → always create todos. When ambiguous, count the deliverables, not the perceived difficulty.",
+      "Drive each step with todo action=next, and close it with todo update status=completed plus a concise summary before starting the next step.",
     ],
 
     parameters: TodoToolParams,
@@ -577,7 +605,14 @@ Actions:
 - next: allocate the next chain Run with optional pick; if a Run is already active, return its brief instead.
 - done: seal a Run with a verdict; requires runId, defaults verdict to done, and delegates to the stable complete protocol.
 - edit: modify future chain steps with commands/after/replace/remove and optional metadata.
-Mutating actions next/done/edit require an attached canonical Session and the Flow host mutation lease.`,
+Mutating actions next/done/edit require an attached canonical Session and the Flow host mutation lease.
+
+When to use:
+- Inside an active Maestro Workflow Session: status/brief/check to inspect (read-only), next/done/edit to drive the chain (mutating).
+
+When NOT to use:
+- No active workflow or coordinator not attached — the call errors; do not invoke it.`,
+    promptSnippet: "Read (status/brief/check) or drive (next/done/edit) canonical Maestro Workflow Runs",
     parameters: RunControlParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
       if (!workflowCoordinator) {
@@ -891,6 +926,34 @@ Mutating actions next/done/edit require an attached canonical Session and the Fl
     description: "Open the shared root and teammate Todo center",
     async handler(_args, ctx) { await openTodoOverlay(ctx); },
   });
+  pi.registerCommand("sysprompt", {
+    description: "Inspect the active system prompt — mode, size, and key markers. Use 'full' to dump the whole prompt.",
+    async handler(args, ctx) {
+      const prompt = ctx.getSystemPrompt();
+      const opts = ctx.getSystemPromptOptions();
+      if (args.trim().toLowerCase() === "full") {
+        ctx.ui.notify(prompt, "info");
+        return;
+      }
+      const lines = prompt.split("\n");
+      const has = (marker: string) => (prompt.includes(marker) ? "yes" : "NO");
+      const contextFiles = (opts.contextFiles ?? []).map((f) => f.path);
+      const summary = [
+        `System prompt: ${prompt.length} chars / ${lines.length} lines`,
+        `Mode: ${opts.customPrompt ? "customPrompt (SYSTEM.md or --system-prompt)" : "default base prompt"}`,
+        `First line: ${lines[0]?.slice(0, 90) ?? "(empty)"}`,
+        `Markers:`,
+        `  # Engineering Principles       : ${has("# Engineering Principles")}`,
+        `  # Task Tracking (todo)         : ${has("# Task Tracking (todo)")}`,
+        `  # Knowledge System             : ${has("# Knowledge System")}`,
+        `  Available tools: (default only): ${has("Available tools:")}`,
+        `  <project_instructions>         : ${has("<project_instructions>")}`,
+        `  <available_skills>             : ${has("<available_skills>")}`,
+        `Context files (${contextFiles.length}): ${contextFiles.join(", ") || "(none)"}`,
+      ].join("\n");
+      ctx.ui.notify(summary, "info");
+    },
+  });
 
   // === Statusline ===
   installStatusline(pi, () => state, () => workflowSnapshotForUi());
@@ -1190,7 +1253,19 @@ function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 - Multi-select: { questions: [{ question: "Which features?", multiSelect: true, options: [...] }] }
 - Open-ended: { questions: [{ question: "What should the name be?" }] }
 
-The tool returns structured answers only. Plan mode owns proposed-plan Markdown; /plan approve is the explicit confirmation command.`,
+The tool returns structured answers only. Plan mode owns proposed-plan Markdown; /plan approve is the explicit confirmation command.
+
+When to use:
+- A genuine decision fork the user must own (approach A vs B, which features, naming) that you cannot resolve by reading code or docs.
+
+When NOT to use:
+- Questions you could answer yourself with a grep or a doc read — investigate first, then ask only a specific question.
+- Confirming a proposed plan — that is owned by /plan approve, not this tool.`,
+
+    promptSnippet: "Collect a structured user decision via a keyboard-first TUI wizard (up to 4 questions)",
+    promptGuidelines: [
+      "Use ask-user-question only for genuine decisions the user must own; before asking, do up to a minute of read-only investigation (grep/docs/knowledge) so the question is specific rather than open-ended.",
+    ],
 
     parameters: AskUserQuestionParams,
 
