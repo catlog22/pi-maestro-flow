@@ -155,6 +155,7 @@ let goalLifecycleEpoch = 0;
 let goalSessionId: string | undefined;
 let goalLoopOwner: { goalId: string; epoch: number } | undefined;
 let workflowCoordinator: WorkflowCoordinator | undefined;
+let elapsedTimer: ReturnType<typeof setInterval> | undefined;
 const issuedGoalMarkers = new Set<string>();
 
 // ---------------------------------------------------------------------------
@@ -339,6 +340,7 @@ export async function onSessionStart(
   verificationInFlight = undefined;
   goalLoopOwner = undefined;
   clearCompletionTimer();
+  clearElapsedTimer();
   clearContinuation();
   clearRecovery();
   baseCwd = ctx.cwd;
@@ -366,6 +368,7 @@ export function onSessionShutdown(ctx: GoalContext) {
   clearRecovery();
   clearGoalDisplay(ctx);
   clearCompletionTimer();
+  clearElapsedTimer();
 }
 
 export function onBeforeCompact(ctx: GoalContext) {
@@ -1137,6 +1140,7 @@ function clearActive(ctx: GoalContext) {
   clearRecovery();
   activeGoal = undefined;
   goalLoopOwner = undefined;
+  clearElapsedTimer();
   clearPersistedGoal();
   clearGoalDisplay(ctx);
 }
@@ -1254,7 +1258,7 @@ async function sendContinuation(ctx: GoalContext, goal: ActiveGoal) {
   if (hasPending(ctx)) return false;
   let marker = `${goal.id}:${goal.iteration}:${randomUUID()}`;
   let genericMarker = true;
-  if (workflowCoordinator?.status()?.session) {
+  if (goal.workflowSessionId && workflowCoordinator?.status()?.session) {
     try {
       marker = workflowCoordinator.continuationMarker(goal.iteration);
       genericMarker = false;
@@ -1418,6 +1422,8 @@ function currentTokenTotal(ctx: GoalContext): number {
 
 function updateStatusLine(ctx: GoalContext, goal: ActiveGoal) {
   clearCompletionTimer();
+  if (goal.status === "active") ensureElapsedTimer(ctx, goal.id);
+  else clearElapsedTimer();
   const waiting = goal.status === "active"
     && (goalLoopOwner?.goalId !== goal.id || goalLoopOwner.epoch !== goalLifecycleEpoch);
   ctx.ui.setStatus(STATUS_KEY, waiting ? "waiting" : fmtStatusLine(goal));
@@ -1458,6 +1464,22 @@ function clearGoalDisplay(ctx: GoalContext): void {
 }
 
 function clearCompletionTimer() { if (completionTimer) { clearTimeout(completionTimer); completionTimer = undefined; } }
+function clearElapsedTimer() { if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = undefined; } }
+
+function ensureElapsedTimer(ctx: GoalContext, goalId: string): void {
+  if (elapsedTimer) return;
+  elapsedTimer = setInterval(() => {
+    const goal = activeGoal;
+    if (!goal || goal.id !== goalId || goal.status !== "active") {
+      clearElapsedTimer();
+      return;
+    }
+    const elapsed = Math.max(0, Math.floor((Date.now() - goal.startedAt) / 1000));
+    if (elapsed === goal.timeUsedSeconds) return;
+    goal.timeUsedSeconds = elapsed;
+    updateStatusLine(ctx, goal);
+  }, 1_000);
+}
 
 export function fmtStatusLine(goal: ActiveGoal | undefined): string | undefined {
   if (!goal) return undefined;
