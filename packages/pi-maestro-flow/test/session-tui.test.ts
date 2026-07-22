@@ -105,6 +105,17 @@ test("WorkflowViewModel derives one status projection for Session, Run, Goal and
   assert.equal(view.goal?.glyph, "⏸");
 });
 
+test("WorkflowViewModel never promotes a Todo title into the statusline action", () => {
+  const withoutWorkflowAction = structuredClone(snapshot);
+  withoutWorkflowAction.nextAction = undefined;
+  withoutWorkflowAction.session!.runs.find((candidate) => candidate.runId === "003")!.handoff = null;
+
+  const view = deriveWorkflowViewModel(withoutWorkflowAction);
+  assert.ok(view);
+  assert.equal(view.nextAction, undefined);
+  assert.equal(view.todos.find((todo) => todo.id === "local-1")?.subject, "Update README");
+});
+
 test("WorkflowViewModel treats an explicit null Goal as session-scoped absence", () => {
   const withoutGoal = structuredClone(snapshot);
   withoutGoal.goal = null;

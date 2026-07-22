@@ -199,12 +199,8 @@ export function deriveWorkflowViewModel(
   const decisionPending = (snapshot.decisionPoints ?? []).some(
     (point) => normalizeWorkflowStatus(point.status) === "pending",
   );
-  const nextTodo = todos.find((todo) => todo.status === "running")
-    ?? todos.find((todo) => todo.status === "pending" && todo.blockedBy.length === 0)
-    ?? todos.find((todo) => todo.status === "blocked" || todo.status === "pending");
   const nextAction = snapshot.nextAction
-    ?? activeRun?.nextAction
-    ?? nextTodo?.subject;
+    ?? activeRun?.nextAction;
   const totalGates = session.gates.length;
   const passedGates = session.gates.filter((gate) =>
     gate.status === "passed" || gate.status === "waived" || gate.status === "skipped",
