@@ -8,10 +8,44 @@ import { AuthStorage } from "../../../node_modules/@earendil-works/pi-coding-age
 import { ModelRegistry } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/model-registry.js";
 import {
   deleteApiProviderModelSettings,
+  loadApiProviderSettings,
   normalizeBaseUrl,
   registerApiProviderConfigs,
   saveApiProviderSettings,
 } from "../src/providers/api-provider-config.ts";
+
+function createEffortHarness(options: {
+  modelsPath: string;
+  defaultsPath: string;
+  current?: string;
+  apply?: (level: string) => void;
+  registerProvider?: (name: string, config: any) => void;
+}) {
+  const commands = new Map<string, any>();
+  let modelSelect: ((event: any) => Promise<void>) | undefined;
+  registerApiProviderConfigs({
+    registerProvider: options.registerProvider ?? (() => {}),
+    registerCommand(name: string, command: any) {
+      commands.set(name, command);
+    },
+    getThinkingLevel() {
+      return options.current ?? "medium";
+    },
+    setThinkingLevel(level: string) {
+      options.apply?.(level);
+    },
+    on(event: string, handler: (event: any) => Promise<void>) {
+      if (event === "model_select") modelSelect = handler;
+    },
+  } as any, options);
+  return {
+    command: commands.get("effort"),
+    commands,
+    get modelSelect() {
+      return modelSelect;
+    },
+  };
+}
 
 test("upserts multiple models under the same API provider", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-multi-model-"));
@@ -70,11 +104,15 @@ test("registers configured providers and the /api-manager command", async (t) =>
   } as any, { modelsPath });
 
   assert.deepEqual(registered.map((entry) => entry.name), ["maestro-openai", "maestro-qwen", "maestro-anthropic"]);
-  assert.deepEqual(registered[0].config, { name: "OpenAI Responses (Custom)" });
-  assert.deepEqual(registered[1].config, { name: "Qwen Compatible (Custom)" });
-  assert.deepEqual(registered[2].config, { name: "Anthropic (Custom)" });
-  assert.equal(commands.size, 1);
+  assert.equal(registered[0].config.name, undefined);
+  assert.equal(registered[0].config.models[0].id, "gpt-5.4");
+  assert.equal(registered[1].config.name, undefined);
+  assert.equal(registered[1].config.models[0].id, "qwen3.8-max-preview");
+  assert.equal(registered[2].config.name, undefined);
+  assert.equal(registered[2].config.models[0].id, "claude-sonnet-4-5");
+  assert.equal(commands.size, 2);
   assert.ok(commands.has("api-manager"));
+  assert.ok(commands.has("effort"));
   assert.equal(commands.has("api-login"), false);
 
   assert.ok(getModels("openai").length > 0);
@@ -161,7 +199,7 @@ test("saves Qwen as an OpenAI-compatible completions provider", async (t) => {
     thinkingFormat: "qwen",
   });
   assert.equal(qwen.models[0].id, "qwen3.8-max-preview");
-  assert.deepEqual(qwen.models[0].thinkingLevelMap, { off: null, xhigh: "xhigh", max: "max" });
+  assert.deepEqual(qwen.models[0].thinkingLevelMap, { off: null, xhigh: "max" });
 });
 
 test("/api-manager creates or updates URL, model, reasoning, and API key", async (t) => {
@@ -229,7 +267,8 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(saved.providers["maestro-openai"].baseUrl, "https://proxy.example.com/v1");
   assert.equal(saved.providers["maestro-openai"].models[0].id, "gpt-5.4");
   assert.equal(saved.providers["maestro-openai"].models[0].reasoning, true);
-  assert.equal(saved.providers["maestro-openai"].models[0].thinkingLevelMap.max, "max");
+  assert.equal(saved.providers["maestro-openai"].models[0].thinkingLevelMap.xhigh, "max");
+  assert.equal("max" in saved.providers["maestro-openai"].models[0].thinkingLevelMap, false);
   assert.equal(saved.providers["maestro-openai"].apiKey, "openai-secret");
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
   assert.equal(settings.defaultProvider, "maestro-openai");
@@ -238,17 +277,16 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.deepEqual(appliedThinkingLevels, []);
   assert.ok(modelSelectHandler);
   await modelSelectHandler!({ model: { provider: "maestro-openai", id: "gpt-5.4" } });
-  assert.deepEqual(appliedThinkingLevels, ["max"]);
+  assert.deepEqual(appliedThinkingLevels, ["xhigh"]);
   const defaults = JSON.parse(readFileSync(join(tempDir, "api-manager.json"), "utf8"));
-  assert.equal(defaults.modelDefaults["maestro-openai/gpt-5.4"], "max");
+  assert.equal(defaults.modelDefaults["maestro-openai/gpt-5.4"], "xhigh");
   assert.ok(selectOptions[1]?.includes("max"));
   assert.doesNotMatch(selectOptions.flat().join("\n"), /环境变量|保留当前 API key/);
   assert.deepEqual(unregistered, []);
   assert.equal(registrations.length, 1);
-  assert.deepEqual(registrations.at(-1), {
-    name: "maestro-openai",
-    config: { name: "OpenAI Responses (Custom)" },
-  });
+  assert.equal(registrations.at(-1)?.name, "maestro-openai");
+  assert.equal(registrations.at(-1)?.config.name, undefined);
+  assert.equal(registrations.at(-1)?.config.models[0].id, "gpt-5.4");
   assert.match(notifications.at(-1)?.message ?? "", /默认模型为 maestro-openai\/gpt-5\.4/);
   assert.equal(notifications.at(-1)?.type, "info");
 });
@@ -310,16 +348,16 @@ test("/api-manager qwen creates an OpenAI-compatible provider and default model"
     thinkingFormat: "qwen",
   });
   assert.equal(saved.providers["maestro-qwen"].models[0].id, "qwen3.8-max-preview");
-  assert.equal(saved.providers["maestro-qwen"].models[0].thinkingLevelMap.max, "max");
+  assert.equal(saved.providers["maestro-qwen"].models[0].thinkingLevelMap.xhigh, "max");
+  assert.equal("max" in saved.providers["maestro-qwen"].models[0].thinkingLevelMap, false);
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
   assert.equal(settings.defaultProvider, "maestro-qwen");
   assert.equal(settings.defaultModel, "qwen3.8-max-preview");
   assert.equal(settings.defaultThinkingLevel, "high");
   assert.ok(selectOptions[0]?.includes("启用：off / minimal / low / medium / high / xhigh / max"));
-  assert.deepEqual(registrations.at(-1), {
-    name: "maestro-qwen",
-    config: { name: "Qwen Compatible (Custom)" },
-  });
+  assert.equal(registrations.at(-1)?.name, "maestro-qwen");
+  assert.equal(registrations.at(-1)?.config.name, undefined);
+  assert.equal(registrations.at(-1)?.config.models[0].id, "qwen3.8-max-preview");
 });
 
 test("/api-manager rejects empty URL and API key instead of reusing current values", async (t) => {
@@ -606,7 +644,7 @@ test("models.json custom API settings preserve DeepSeek models", (t) => {
   assert.equal(customOpenAi?.baseUrl, "https://gateway.example.com/v1");
   assert.equal(customOpenAi?.reasoning, true);
   assert.deepEqual(customOpenAi?.thinkingLevelMap, { off: null, xhigh: "xhigh" });
-  assert.equal(registry.getProviderDisplayName("maestro-openai"), "OpenAI Responses (Custom)");
+  assert.equal(registry.getProviderDisplayName("maestro-openai"), "maestro-openai");
   assert.equal(registry.getProviderDisplayName("maestro-anthropic"), "maestro-anthropic");
 
   const deepseekAfter = registry.getAll()
@@ -614,4 +652,402 @@ test("models.json custom API settings preserve DeepSeek models", (t) => {
     .map((model) => ({ id: model.id, name: model.name }));
   assert.deepEqual(deepseekAfter, deepseekBefore);
   assert.ok(deepseekAfter.some((model) => model.id === "deepseek-v4-pro"));
+});
+
+test("/effort renders canonical capability order with current marker and progress bars", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-canonical-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const applied: string[] = [];
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+    current: "medium",
+    apply(level) { applied.push(level); },
+  });
+  const notifications: Array<{ message: string; type: string }> = [];
+  let rendered: string[] = [];
+  await harness.command.handler("", {
+    model: {
+      provider: "maestro-openai",
+      id: "gpt-5.4",
+      reasoning: true,
+      thinkingLevelMap: { xhigh: "xhigh" },
+    },
+    ui: {
+      async select(_title: string, options: string[]) {
+        rendered = options;
+        return "high [████░]";
+      },
+      notify(message: string, type: string) { notifications.push({ message, type }); },
+    },
+  });
+
+  assert.deepEqual(rendered, [
+    "off [░░░░░]",
+    "minimal [█░░░░]",
+    "low [██░░░]",
+    "medium（当前） [███░░]",
+    "high [████░]",
+    "xhigh [█████]",
+  ]);
+  assert.deepEqual(applied, ["high"]);
+  assert.deepEqual(notifications.at(-1), { message: "思考强度已设为 high [████░]", type: "info" });
+});
+
+test("/effort filters unsupported canonical levels", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-filter-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath: join(tempDir, "api-manager.json"),
+  });
+  let rendered: string[] = [];
+  await harness.command.handler("", {
+    model: {
+      provider: "test",
+      id: "filtered",
+      reasoning: true,
+      thinkingLevelMap: { off: null, minimal: null, xhigh: null },
+    },
+    ui: {
+      async select(_title: string, options: string[]) {
+        rendered = options;
+        return undefined;
+      },
+      notify() {},
+    },
+  });
+  assert.deepEqual(rendered, ["low [██░░░]", "medium（当前） [███░░]", "high [████░]"]);
+});
+
+test("/effort persists API Manager and system providers by model key", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-provider-keys-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  writeFileSync(modelsPath, "invalid models file");
+  const applied: string[] = [];
+  const harness = createEffortHarness({
+    modelsPath,
+    defaultsPath,
+    apply(level) { applied.push(level); },
+  });
+  const invoke = async (model: any, selected: string) => {
+    await harness.command.handler("", {
+      model,
+      ui: {
+        async select() { return selected; },
+        notify() {},
+      },
+    });
+  };
+  await invoke(
+    { provider: "maestro-openai", id: "gpt-5.4", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    "high [████░]",
+  );
+  await invoke(
+    { provider: "anthropic", id: "claude-sonnet", reasoning: true, thinkingLevelMap: { xhigh: "high" } },
+    "xhigh [█████]",
+  );
+
+  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.equal(defaults.modelDefaults["maestro-openai/gpt-5.4"], "high");
+  assert.equal(defaults.modelDefaults["anthropic/claude-sonnet"], "xhigh");
+  assert.deepEqual(applied, ["high", "xhigh"]);
+  assert.equal(readFileSync(modelsPath, "utf8"), "invalid models file");
+});
+
+test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live max mapping", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-qwen-entry-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const siblingModel = {
+    id: "qwen-sibling",
+    name: "Qwen Sibling",
+    reasoning: false,
+    input: ["text"],
+    cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
+    contextWindow: 32_000,
+    maxTokens: 4_096,
+  };
+  const otherProvider = {
+    baseUrl: "https://other.example.com/v1",
+    api: "openai-completions",
+    apiKey: "other-secret",
+    models: [{ ...siblingModel, id: "other-model" }],
+  };
+  writeFileSync(modelsPath, JSON.stringify({
+    rootSentinel: { keep: true },
+    providers: {
+      "maestro-qwen": {
+        name: "Qwen Fixture",
+        baseUrl: "https://qwen.example.com/v1",
+        api: "openai-completions",
+        apiKey: "qwen-secret",
+        headers: { "X-Provider": "qwen" },
+        authHeader: false,
+        compat: {
+          supportsDeveloperRole: false,
+          thinkingFormat: "qwen",
+          openRouterRouting: { allow_fallbacks: true, data_collection: "deny" },
+          vercelGatewayRouting: { only: ["provider-default"], order: ["provider-default", "backup"] },
+        },
+        models: [{
+          id: "qwen-max",
+          name: "Qwen Max",
+          api: "openai-completions",
+          baseUrl: "https://qwen-model.example.com/v1",
+          reasoning: true,
+          thinkingLevelMap: { off: null, xhigh: "xhigh", max: "max", extra: "keep-me" },
+          input: ["text", "image"],
+          cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
+          contextWindow: 400_000,
+          maxTokens: 128_000,
+          headers: { "X-Model": "qwen-max" },
+          compat: {
+            supportsDeveloperRole: true,
+            openRouterRouting: { allow_fallbacks: false, require_parameters: true },
+            vercelGatewayRouting: { order: ["model-first"] },
+          },
+        }, siblingModel],
+      },
+      other: otherProvider,
+    },
+  }, null, 2));
+  const registry = ModelRegistry.create(AuthStorage.inMemory({
+    "maestro-qwen": { type: "api_key", key: "qwen-secret" },
+  }), modelsPath);
+  const captured: Array<{ name: string; config: any }> = [];
+  const applied: string[] = [];
+  const harness = createEffortHarness({
+    modelsPath,
+    defaultsPath,
+    current: "xhigh",
+    apply(level) { applied.push(level); },
+    registerProvider(name, config) {
+      captured.push({ name, config });
+      registry.registerProvider(name, config);
+    },
+  });
+
+  const registration = captured.find((entry) => entry.name === "maestro-qwen")?.config;
+  assert.ok(registration);
+  assert.equal("compat" in registration, false);
+  assert.deepEqual(registration.headers, { "X-Provider": "qwen" });
+  assert.equal(registration.authHeader, false);
+  const registeredModel = registration.models.find((model: any) => model.id === "qwen-max");
+  assert.deepEqual(registeredModel.headers, { "X-Model": "qwen-max" });
+  assert.deepEqual(registeredModel.thinkingLevelMap, { off: null, xhigh: "max", extra: "keep-me" });
+  assert.equal("max" in registeredModel.thinkingLevelMap, false);
+
+  const live = registry.find("maestro-qwen", "qwen-max")!;
+  assert.equal(live.provider, "maestro-qwen");
+  assert.equal(live.api, "openai-completions");
+  assert.equal(live.baseUrl, "https://qwen-model.example.com/v1");
+  assert.equal(live.reasoning, true);
+  assert.deepEqual(live.input, ["text", "image"]);
+  assert.deepEqual(live.cost, { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
+  assert.equal(live.contextWindow, 400_000);
+  assert.equal(live.maxTokens, 128_000);
+  assert.deepEqual(live.compat, {
+    supportsDeveloperRole: true,
+    thinkingFormat: "qwen",
+    openRouterRouting: { allow_fallbacks: false, data_collection: "deny", require_parameters: true },
+    vercelGatewayRouting: { only: ["provider-default"], order: ["model-first"] },
+  });
+  assert.equal(live.thinkingLevelMap?.xhigh, "max");
+  assert.equal("max" in (live.thinkingLevelMap ?? {}), false);
+  const request = await registry.getApiKeyAndHeaders(live);
+  assert.equal(request.ok, true);
+  assert.deepEqual(request.headers, { "X-Provider": "qwen", "X-Model": "qwen-max" });
+
+  await harness.command.handler("", {
+    model: live,
+    ui: {
+      async select() { return "xhigh（当前） [█████]"; },
+      notify() {},
+    },
+  });
+  assert.ok(harness.modelSelect);
+  await harness.modelSelect!({ model: live });
+  assert.deepEqual(applied, ["xhigh", "xhigh"]);
+
+  const loaded = await loadApiProviderSettings("maestro-qwen", modelsPath);
+  assert.equal(loaded.maxThinking, true);
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(saved.rootSentinel, { keep: true });
+  assert.deepEqual(saved.providers.other, otherProvider);
+  assert.deepEqual(saved.providers["maestro-qwen"].models[1], siblingModel);
+  assert.deepEqual(saved.providers["maestro-qwen"].models[0].thinkingLevelMap, {
+    off: null,
+    xhigh: "max",
+    extra: "keep-me",
+  });
+});
+
+test("runtime max capability accepts legacy and canonical mappings", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-runtime-max-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+  } as any, { modelsPath });
+  const manager = commands.get("api-manager");
+  for (const thinkingLevelMap of [{ max: "max" }, { xhigh: "max" }]) {
+    const inputs = ["https://qwen.example.com/v1", "qwen-max"];
+    const rendered: string[][] = [];
+    await manager.handler("qwen", {
+      hasUI: true,
+      modelRegistry: { getAll() { return [{ thinkingLevelMap }]; } },
+      ui: {
+        async input() { return inputs.shift(); },
+        async select(_title: string, options: string[]) {
+          rendered.push(options);
+          return undefined;
+        },
+        notify() {},
+      },
+    });
+    assert.ok(rendered[0]?.includes("启用：off / minimal / low / medium / high / xhigh / max"));
+  }
+
+  await saveApiProviderSettings({
+    provider: "maestro-qwen",
+    baseUrl: "https://qwen.example.com/v1",
+    modelId: "qwen-max",
+    reasoning: true,
+    apiKey: "qwen-secret",
+    maxThinking: true,
+  }, modelsPath);
+  const registrations: any[] = [];
+  registerApiProviderConfigs({
+    registerProvider(name: string, config: any) { registrations.push({ name, config }); },
+  } as any, { modelsPath });
+  const map = registrations[0].config.models[0].thinkingLevelMap;
+  assert.deepEqual(map, { off: null, xhigh: "max" });
+  assert.equal("max" in map, false);
+});
+
+test("/effort cancellation and missing model are no-ops", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-noop-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const applied: string[] = [];
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+    apply(level) { applied.push(level); },
+  });
+  await harness.command.handler("", {
+    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    ui: { async select() { return undefined; }, notify() {} },
+  });
+  assert.equal(existsSync(defaultsPath), false);
+  assert.deepEqual(applied, []);
+
+  const notifications: Array<{ message: string; type: string }> = [];
+  await harness.command.handler("", {
+    model: undefined,
+    ui: { notify(message: string, type: string) { notifications.push({ message, type }); } },
+  });
+  assert.equal(notifications.at(-1)?.type, "warning");
+  assert.equal(notifications.at(-1)?.message, "当前没有模型，无法调整思考强度。");
+  assert.deepEqual(applied, []);
+});
+
+test("/effort persistence failure preserves existing default bytes and runtime", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-save-failure-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  writeFileSync(defaultsPath, "[\n  \"sentinel\"\n]\n");
+  const before = readFileSync(defaultsPath);
+  const applied: string[] = [];
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+    apply(level) { applied.push(level); },
+  });
+  const notifications: Array<{ message: string; type: string }> = [];
+  await harness.command.handler("", {
+    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    ui: {
+      async select() { return "high [████░]"; },
+      notify(message: string, type: string) { notifications.push({ message, type }); },
+    },
+  });
+  assert.deepEqual(readFileSync(defaultsPath), before);
+  assert.deepEqual(applied, []);
+  assert.equal(notifications.at(-1)?.type, "error");
+  assert.match(notifications.at(-1)?.message ?? "", /^思考强度保存失败：/);
+});
+
+test("model_select restores canonical effort and never passes max", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-model-select-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  writeFileSync(defaultsPath, JSON.stringify({
+    version: 1,
+    modelDefaults: {
+      "maestro-openai/gpt-5.4": "max",
+      "anthropic/claude-sonnet": "max",
+    },
+  }));
+  const applied: string[] = [];
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+    apply(level) { applied.push(level); },
+  });
+  assert.ok(harness.modelSelect);
+  await harness.modelSelect!({ model: { provider: "maestro-openai", id: "gpt-5.4" } });
+  await harness.modelSelect!({ model: { provider: "anthropic", id: "claude-sonnet" } });
+  assert.deepEqual(applied, ["xhigh", "xhigh"]);
+  assert.equal(applied.includes("max"), false);
+});
+
+test("/effort does not change global defaultThinkingLevel", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-global-default-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const settingsPath = join(tempDir, "settings.json");
+  writeFileSync(settingsPath, JSON.stringify({ defaultThinkingLevel: "medium", sentinel: true }));
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath: join(tempDir, "api-manager.json"),
+  });
+  await harness.command.handler("", {
+    cwd: tempDir,
+    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    ui: { async select() { return "high [████░]"; }, notify() {} },
+  });
+  const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.equal(settings.defaultThinkingLevel, "medium");
+  assert.equal(settings.sentinel, true);
+});
+
+test("/effort reports synchronous runtime apply errors after durable save", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-apply-failure-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const defaultsPath = join(tempDir, "api-manager.json");
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath,
+    apply() { throw new Error("runtime unavailable"); },
+  });
+  const notifications: Array<{ message: string; type: string }> = [];
+  await harness.command.handler("", {
+    model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
+    ui: {
+      async select() { return "high [████░]"; },
+      notify(message: string, type: string) { notifications.push({ message, type }); },
+    },
+  });
+  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.equal(defaults.modelDefaults["openai/gpt"], "high");
+  assert.equal(notifications.at(-1)?.type, "error");
+  assert.match(notifications.at(-1)?.message ?? "", /^思考强度应用失败：/);
+  assert.equal(notifications.some((entry) => entry.message.startsWith("思考强度已设为")), false);
 });

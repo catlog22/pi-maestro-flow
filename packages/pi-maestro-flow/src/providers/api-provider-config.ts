@@ -14,7 +14,11 @@ import {
   SettingsManager,
   type ExtensionAPI,
   type ExtensionCommandContext,
+  type ProviderConfig,
+  type ProviderModelConfig,
 } from "@earendil-works/pi-coding-agent";
+import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 
 export type ApiProviderId = "maestro-openai" | "maestro-qwen" | "maestro-anthropic";
 
@@ -56,6 +60,15 @@ type ApiProviderAction = "configure" | "delete" | "list" | "logout" | "reset" | 
 type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
+const EFFORT_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const EFFORT_BARS: Record<ThinkingLevel, string> = {
+  off: "[░░░░░]",
+  minimal: "[█░░░░]",
+  low: "[██░░░]",
+  medium: "[███░░]",
+  high: "[████░]",
+  xhigh: "[█████]",
+};
 
 const PROVIDERS: readonly ProviderDefaults[] = [
   {
@@ -108,7 +121,7 @@ export function registerApiProviderConfigs(
   if (typeof pi.registerProvider === "function") {
     for (const provider of PROVIDERS) {
       if (configured.has(provider.id)) {
-        pi.registerProvider(provider.id, configuredProviderRegistration(provider));
+        pi.registerProvider(provider.id, configuredProviderRegistration(provider, modelsPath));
       }
     }
   }
@@ -124,6 +137,40 @@ export function registerApiProviderConfigs(
       }
     },
   });
+  pi.registerCommand("effort", {
+    description: "调整当前模型的思考强度",
+    async handler(_args, ctx) {
+      if (!ctx.model) {
+        ctx.ui.notify("当前没有模型，无法调整思考强度。", "warning");
+        return;
+      }
+      const current = pi.getThinkingLevel();
+      const supported = getSupportedThinkingLevels(ctx.model).filter(isThinkingLevel);
+      const labels = new Map<string, ThinkingLevel>();
+      const options = supported.map((level) => {
+        const label = `${level}${level === current ? "（当前）" : ""} ${EFFORT_BARS[level]}`;
+        labels.set(label, level);
+        return label;
+      });
+      const choice = await ctx.ui.select("选择思考强度", options);
+      if (choice === undefined) return;
+      const selected = labels.get(choice);
+      if (!selected) return;
+      try {
+        await saveModelThinkingDefault(ctx.model.provider, ctx.model.id, selected, defaultsPath);
+      } catch (error) {
+        ctx.ui.notify(`思考强度保存失败：${errorMessage(error)}`, "error");
+        return;
+      }
+      try {
+        setPiThinkingLevel(pi, selected);
+      } catch (error) {
+        ctx.ui.notify(`思考强度应用失败：${errorMessage(error)}`, "error");
+        return;
+      }
+      ctx.ui.notify(`思考强度已设为 ${selected} ${EFFORT_BARS[selected]}`, "info");
+    },
+  });
   if (typeof pi.on === "function") {
     pi.on("model_select", async (event) => {
       const level = await loadModelThinkingDefault(event.model.provider, event.model.id, defaultsPath);
@@ -136,6 +183,7 @@ export async function loadApiProviderSettings(
   provider: ApiProviderId,
   modelsPath = join(getAgentDir(), "models.json"),
 ): Promise<LoadedApiProviderSettings> {
+  await migrateLegacyProviderThinkingMaps(provider, modelsPath);
   const defaults = providerDefaults(provider);
   const root = await readModelsRoot(modelsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
@@ -151,7 +199,7 @@ export async function loadApiProviderSettings(
     modelId: typeof model?.id === "string" ? model.id : defaults.modelId,
     reasoning: typeof model?.reasoning === "boolean" ? model.reasoning : true,
     apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
-    maxThinking: typeof thinkingLevelMap.max === "string",
+    maxThinking: thinkingLevelMap.xhigh === "max" || thinkingLevelMap.max === "max",
   };
 }
 
@@ -324,10 +372,15 @@ async function configureProvider(
   );
   if (!confirmed) return;
   const result = await saveApiProviderSettings(next, modelsPath);
-  await saveModelThinkingDefault(provider.id, next.modelId, defaultThinkingLevel, defaultsPath);
+  await saveModelThinkingDefault(
+    provider.id,
+    next.modelId,
+    canonicalThinkingLevel(defaultThinkingLevel),
+    defaultsPath,
+  );
   await saveDefaultModelAndThinking(ctx, modelsPath, provider.id, next.modelId, defaultThinkingLevel);
-  reloadProviderRegistration(pi, ctx, provider);
-  applyThinkingLevelToActiveModel(pi, ctx, provider, next.modelId, defaultThinkingLevel);
+  reloadProviderRegistration(pi, ctx, provider, modelsPath);
+  applyThinkingLevelToActiveModel(pi, ctx, provider, next.modelId, canonicalThinkingLevel(defaultThinkingLevel));
   notifySaved(
     ctx,
     provider,
@@ -409,7 +462,7 @@ async function deleteProvider(
   const result = await deleteApiProviderModelSettings(provider.id, modelId, modelsPath);
   await deleteModelThinkingDefault(provider.id, modelId, defaultsPath);
   if (modelIds.length === 1) pi.unregisterProvider(provider.id);
-  else reloadProviderRegistration(pi, ctx, provider);
+  else reloadProviderRegistration(pi, ctx, provider, modelsPath);
   ctx.modelRegistry.refresh();
   notifySaved(ctx, provider, result, `已删除 ${modelId}；该模型已从 /model 移除`);
 }
@@ -496,7 +549,7 @@ async function writeApiProviderSettings(
     const thinkingLevelMap: Record<string, string | null> = defaults.api === "anthropic-messages"
       ? { xhigh: "high" }
       : { off: null, xhigh: "xhigh" };
-    if (settings.maxThinking) thinkingLevelMap.max = "max";
+    if (settings.maxThinking) thinkingLevelMap.xhigh = "max";
     nextModel.thinkingLevelMap = thinkingLevelMap;
   } else {
     delete nextModel.thinkingLevelMap;
@@ -588,10 +641,90 @@ function configuredProviderIds(modelsPath: string): Set<ApiProviderId> {
   }
 }
 
+export function canonicalizeLegacyThinkingLevelMap(value: unknown): {
+  map: Record<string, string | null> | undefined;
+  changed: boolean;
+} {
+  if (!isRecord(value)) return { map: undefined, changed: false };
+  const map = Object.fromEntries(
+    Object.entries(value).filter((entry): entry is [string, string | null] =>
+      typeof entry[1] === "string" || entry[1] === null
+    ),
+  );
+  if (map.xhigh !== "xhigh" || map.max !== "max") return { map, changed: false };
+  map.xhigh = "max";
+  delete map.max;
+  return { map, changed: true };
+}
+
+export function materializeProviderCompat(providerCompat: unknown, modelCompat: unknown):
+  ProviderModelConfig["compat"] | undefined {
+  const provider = isRecord(providerCompat) ? { ...providerCompat } : undefined;
+  const model = isRecord(modelCompat) ? { ...modelCompat } : undefined;
+  if (!provider && !model) return undefined;
+  const merged: Record<string, unknown> = { ...provider, ...model };
+  for (const key of ["openRouterRouting", "vercelGatewayRouting"] as const) {
+    const providerRouting = isRecord(provider?.[key]) ? provider[key] : undefined;
+    const modelRouting = isRecord(model?.[key]) ? model[key] : undefined;
+    if (providerRouting || modelRouting) merged[key] = { ...providerRouting, ...modelRouting };
+  }
+  return merged as ProviderModelConfig["compat"];
+}
+
 function configuredProviderRegistration(
   provider: ProviderDefaults,
-): { name: string } {
-  return { name: provider.name };
+  modelsPath: string,
+): ProviderConfig {
+  let config: Record<string, unknown> | undefined;
+  try {
+    const root = JSON.parse(readFileSync(modelsPath, "utf8")) as unknown;
+    if (isRecord(root) && isRecord(root.providers)) {
+      const providerConfig = root.providers[provider.id];
+      if (isRecord(providerConfig)) config = providerConfig;
+    }
+  } catch {
+    return { name: provider.name };
+  }
+  if (!config || !Array.isArray(config.models)) return { name: provider.name };
+
+  const registration: ProviderConfig = {};
+  if (typeof config.name === "string") registration.name = config.name;
+  if (typeof config.baseUrl === "string") registration.baseUrl = config.baseUrl;
+  if (typeof config.apiKey === "string") registration.apiKey = config.apiKey;
+  if (typeof config.api === "string") registration.api = config.api;
+  if (typeof config.streamSimple === "function") registration.streamSimple = config.streamSimple as ProviderConfig["streamSimple"];
+  if (isStringRecord(config.headers)) registration.headers = { ...config.headers };
+  if (typeof config.authHeader === "boolean") registration.authHeader = config.authHeader;
+  if (isRecord(config.oauth)) registration.oauth = { ...config.oauth } as ProviderConfig["oauth"];
+
+  registration.models = config.models.filter(isRecord).flatMap((model) => {
+    if (typeof model.id !== "string" || model.id.length === 0) return [];
+    const normalizedMap = canonicalizeLegacyThinkingLevelMap(model.thinkingLevelMap).map;
+    const input: Array<"text" | "image"> = Array.isArray(model.input)
+        && model.input.every((value) => value === "text" || value === "image")
+      ? [...model.input]
+      : ["text"];
+    const cost = isCost(model.cost)
+      ? { ...model.cost }
+      : { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+    const clone: ProviderModelConfig = {
+      id: model.id,
+      name: typeof model.name === "string" ? model.name : model.id,
+      reasoning: typeof model.reasoning === "boolean" ? model.reasoning : false,
+      input,
+      cost,
+      contextWindow: typeof model.contextWindow === "number" ? model.contextWindow : 128_000,
+      maxTokens: typeof model.maxTokens === "number" ? model.maxTokens : 16_384,
+    };
+    if (typeof model.api === "string") clone.api = model.api;
+    if (typeof model.baseUrl === "string") clone.baseUrl = model.baseUrl;
+    if (normalizedMap) clone.thinkingLevelMap = normalizedMap;
+    if (isStringRecord(model.headers)) clone.headers = { ...model.headers };
+    const compat = materializeProviderCompat(config.compat, model.compat);
+    if (compat) clone.compat = compat;
+    return [clone];
+  });
+  return registration;
 }
 
 function parseManagerArgs(args: string): {
@@ -727,15 +860,14 @@ function applyThinkingLevelToActiveModel(
   ctx: ExtensionCommandContext,
   provider: ProviderDefaults,
   modelId: string,
-  level: ApiThinkingLevel,
+  level: ThinkingLevel,
 ): void {
   if (ctx.model?.provider !== provider.id || ctx.model.id !== modelId) return;
   setPiThinkingLevel(pi, level);
 }
 
-function setPiThinkingLevel(pi: ExtensionAPI, level: ApiThinkingLevel): void {
-  const setThinkingLevel = pi.setThinkingLevel.bind(pi) as (value: ApiThinkingLevel) => void;
-  setThinkingLevel(level);
+function setPiThinkingLevel(pi: ExtensionAPI, level: ThinkingLevel): void {
+  pi.setThinkingLevel(level);
 }
 
 function modelThinkingKey(provider: string, modelId: string): string {
@@ -746,19 +878,18 @@ async function loadModelThinkingDefault(
   provider: string,
   modelId: string,
   defaultsPath: string,
-): Promise<ApiThinkingLevel | undefined> {
+): Promise<ThinkingLevel | undefined> {
   const root = await readModelsRoot(defaultsPath);
   if (!isRecord(root.modelDefaults)) return undefined;
   const value = root.modelDefaults[modelThinkingKey(provider, modelId)];
-  return typeof value === "string" && ["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(value)
-    ? value as ApiThinkingLevel
-    : undefined;
+  if (value === "max") return "xhigh";
+  return isThinkingLevel(value) ? value : undefined;
 }
 
 async function saveModelThinkingDefault(
-  provider: ApiProviderId,
+  provider: string,
   modelId: string,
-  level: ApiThinkingLevel,
+  level: ThinkingLevel,
   defaultsPath: string,
 ): Promise<void> {
   await serializeMutation(defaultsPath, async () => {
@@ -801,18 +932,48 @@ async function deleteProviderThinkingDefaults(
 }
 
 function runtimeSupportsMaxThinking(ctx: ExtensionCommandContext): boolean {
-  return ctx.modelRegistry.getAll().some((model) =>
-    isRecord(model.thinkingLevelMap) && typeof model.thinkingLevelMap.max === "string"
-  );
+  return ctx.modelRegistry.getAll().some((model) => {
+    const map = model.thinkingLevelMap as Record<string, string | null> | undefined;
+    return map?.xhigh === "max" || map?.max === "max";
+  });
 }
 
 function reloadProviderRegistration(
   pi: ExtensionAPI,
   ctx: ExtensionCommandContext,
   provider: ProviderDefaults,
+  modelsPath: string,
 ): void {
   ctx.modelRegistry.refresh();
-  pi.registerProvider(provider.id, configuredProviderRegistration(provider));
+  pi.registerProvider(provider.id, configuredProviderRegistration(provider, modelsPath));
+}
+
+async function migrateLegacyProviderThinkingMaps(
+  provider: ApiProviderId,
+  modelsPath: string,
+): Promise<void> {
+  await serializeMutation(modelsPath, async () => {
+    const exists = await fileExists(modelsPath);
+    if (!exists) return;
+    const root = await readModelsRoot(modelsPath);
+    if (!isRecord(root.providers) || !isRecord(root.providers[provider])) return;
+    const currentProvider = root.providers[provider];
+    if (!Array.isArray(currentProvider.models)) return;
+    let changed = false;
+    const models = currentProvider.models.map((model) => {
+      if (!isRecord(model)) return model;
+      const normalized = canonicalizeLegacyThinkingLevelMap(model.thinkingLevelMap);
+      if (!normalized.changed || !normalized.map) return model;
+      changed = true;
+      return { ...model, thinkingLevelMap: normalized.map };
+    });
+    if (!changed) return;
+    const providers = {
+      ...root.providers,
+      [provider]: { ...currentProvider, models },
+    };
+    await writeModelsRoot({ ...root, providers }, modelsPath, true);
+  });
 }
 
 async function isProviderConfigured(provider: ApiProviderId, modelsPath: string): Promise<boolean> {
@@ -856,6 +1017,26 @@ function required(value: string, label: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+  return isRecord(value) && Object.values(value).every((entry) => typeof entry === "string");
+}
+
+function isCost(value: unknown): value is ProviderModelConfig["cost"] {
+  return isRecord(value)
+    && typeof value.input === "number"
+    && typeof value.output === "number"
+    && typeof value.cacheRead === "number"
+    && typeof value.cacheWrite === "number";
+}
+
+function isThinkingLevel(value: unknown): value is ThinkingLevel {
+  return typeof value === "string" && EFFORT_LEVELS.includes(value as ThinkingLevel);
+}
+
+function canonicalThinkingLevel(level: ApiThinkingLevel): ThinkingLevel {
+  return level === "max" ? "xhigh" : level;
 }
 
 function isErrno(error: unknown, code: string): error is NodeJS.ErrnoException {
