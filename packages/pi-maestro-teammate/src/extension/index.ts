@@ -72,6 +72,7 @@ import type {
   TeammateState,
   AgentProgress,
   AgentProgressSnapshot,
+  ChildAgentCallSnapshot,
   ActiveAgent,
   MessageEnvelope,
   SingleResult,
@@ -1299,6 +1300,26 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       };
       state.activeRuns.set(correlationId, activeAgent);
 
+      const childCalls = new Map<string, ChildAgentCallSnapshot>();
+      const publishChildCallStatus = (child: ChildAgentCallSnapshot): void => {
+        childCalls.set(child.correlationId, child);
+        const currentProgress = progressSnapshot();
+        if (isMultiTask) activeAgent.progress = currentProgress;
+        const childLabel = child.name ?? child.agent;
+        onUpdate?.({
+          content: [{
+            type: "text",
+            text: `[${childLabel}] child agent ${child.status}`,
+          }],
+          details: {
+            mode: (graphMode ?? "single") as Details["mode"],
+            results: [],
+            ...(isMultiTask ? { progress: currentProgress } : {}),
+            childCalls: [...childCalls.values()],
+          },
+        });
+      };
+
       if (isMultiTask) {
         normalizedTasks.forEach((task, index) => {
           const childId = taskCorrelationIds[index];
@@ -1524,6 +1545,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             correlationId,
             refreshModelCatalog(ctx).models,
             (request, respond, childId) => enqueueChildInteraction(request, respond, ctx, childId),
+            publishChildCallStatus,
           );
         },
       });
@@ -3663,6 +3685,7 @@ async function handleProxyRequest(
     reply: (message: unknown) => void,
     correlationId: string,
   ) => void,
+  onChildStatus?: (child: ChildAgentCallSnapshot) => void,
 ): Promise<void> {
   const tool = event.tool as string;
   const requestId = event.requestId as string;
@@ -3732,6 +3755,19 @@ async function handleProxyRequest(
       };
       state.activeRuns.set(cid, activeAgent);
       if (p.name) state.namedAgents.set(p.name, cid);
+
+      const parentAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
+      const reportChildStatus = (status: ChildAgentCallSnapshot["status"]): void => {
+        onChildStatus?.({
+          agent: activeAgent.agent,
+          ...(p.name ? { name: p.name } : {}),
+          correlationId: cid,
+          ...(parentCid ? { parentCorrelationId: parentCid } : {}),
+          ...(parentAgent ? { parentName: parentAgent.name ?? parentAgent.agent } : {}),
+          status,
+        });
+      };
+      reportChildStatus("running");
       normalizedTasks?.forEach((task, index) => {
         const childId = taskCorrelationIds[index];
         state.activeRuns.set(childId, {
@@ -3868,7 +3904,7 @@ async function handleProxyRequest(
             onInteraction?.(evt, rep, cid);
             return;
           }
-          handleProxyRequest(pi, state, evt, rep, cid, modelCapabilities, onInteraction);
+          handleProxyRequest(pi, state, evt, rep, cid, modelCapabilities, onInteraction, onChildStatus);
         },
       };
 
@@ -3939,9 +3975,11 @@ async function handleProxyRequest(
         try {
           const completed = await executeNested();
           settleAgent(state, cid, completed.exitCode, completed.summary);
+          reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
           reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
         } catch (error) {
           killAgent(state, cid);
+          reportChildStatus("failed");
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{
               type: "text",
@@ -3956,6 +3994,7 @@ async function handleProxyRequest(
 
       void executeNested().then((completed) => {
         settleAgent(state, cid, completed.exitCode, completed.summary);
+        reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
         pi.sendMessage(
           {
             customType: "teammate-complete",
@@ -3971,6 +4010,7 @@ async function handleProxyRequest(
         );
       }).catch((error) => {
         killAgent(state, cid);
+        reportChildStatus("failed");
         notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error);
       });
 

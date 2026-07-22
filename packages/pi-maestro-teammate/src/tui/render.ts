@@ -204,8 +204,9 @@ function renderProgress(
   theme: Theme,
 ): Component {
   const progress = details?.progress;
+  const childCalls = details?.childCalls ?? [];
 
-  if (!progress?.length) {
+  if (!progress?.length && childCalls.length === 0) {
     const content = typeof result.content === "string"
       ? result.content
       : result.content
@@ -220,12 +221,20 @@ function renderProgress(
   }
 
   return dynamicComponent((w) => {
-    const entries = progress as AgentProgressSnapshot[];
+    const entries = progress ?? [];
     if (w < 20) {
       const running = entries.filter((entry) => entry.status === "running").length;
       const failed = entries.filter((entry) => entry.status === "failed").length;
-      const icon = running > 0 ? theme.fg("warning", "■") : theme.fg("success", "✓");
-      const label = entries.length === 1
+      const runningChildren = childCalls.filter((child) => child.status === "running").length;
+      const failedChildren = childCalls.filter((child) => child.status === "failed").length;
+      const icon = failed > 0 || failedChildren > 0
+        ? theme.fg("error", "✗")
+        : running > 0 || runningChildren > 0
+          ? theme.fg("warning", "■")
+          : theme.fg("success", "✓");
+      const label = entries.length === 0
+        ? `${runningChildren || childCalls.length} child agent${childCalls.length === 1 ? "" : "s"}`
+        : entries.length === 1
         ? progressLabel(entries[0])
         : failed > 0
           ? `${failed}/${entries.length} failed`
@@ -245,6 +254,8 @@ function renderProgress(
     const pending = entries.filter((entry) => entry.status === "pending").length;
     const completed = entries.filter((entry) => entry.status === "completed").length;
     const failed = entries.filter((entry) => entry.status === "failed").length;
+    const runningChildren = childCalls.filter((child) => child.status === "running").length;
+    const failedChildren = childCalls.filter((child) => child.status === "failed").length;
     const focus = focusTaskIndex(entries);
     const focused = entries.find((entry) => entry.taskIndex === focus) ?? entries[0];
     const treeRows = buildProgressTree(entries, palette);
@@ -259,16 +270,35 @@ function renderProgress(
         ? `${treeWindow.start + 1}-${treeWindow.start + treeWindow.rows.length}/${treeWindow.total}`
         : `${treeWindow.total}`;
     const mode = details?.mode ?? "single";
-    const stateText = failed > 0
+    const stateText = entries.length === 0
+      ? `${runningChildren || childCalls.length} child agent${childCalls.length === 1 ? "" : "s"}`
+      : failed > 0
       ? `${failed} failed`
       : running > 0
         ? `${running} running`
         : `${completed}/${entries.length} completed`;
-    const headerIcon = failed > 0 ? theme.fg("error", "!") : running > 0 ? theme.fg("warning", "■") : theme.fg("success", "✓");
+    const headerIcon = failed > 0 || failedChildren > 0
+      ? theme.fg("error", "!")
+      : running > 0 || runningChildren > 0
+        ? theme.fg("warning", "■")
+        : theme.fg("success", "✓");
     const lines: string[] = [
-      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, pending ? `${pending} pending` : "", `agents ${range}`], theme)}`,
+      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, pending ? `${pending} pending` : "", entries.length ? `agents ${range}` : "", runningChildren ? `${runningChildren} delegated` : ""], theme)}`,
       ...treeWindow.rows.map((row) => row.text),
     ];
+
+    for (const child of childCalls.slice(0, options.expanded ? 4 : 2)) {
+      const childIcon = child.status === "running"
+        ? theme.fg("warning", "■")
+        : child.status === "failed"
+          ? theme.fg("error", "✗")
+          : theme.fg("success", "✓");
+      const parent = child.parentName ? ` · called by @${child.parentName}` : "";
+      lines.push(`${theme.fg("dim", "↳")} ${childIcon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `child agent · ${child.status}${parent}`)}`);
+    }
+    if (childCalls.length > (options.expanded ? 4 : 2)) {
+      lines.push(theme.fg("dim", `↳ … ${childCalls.length - (options.expanded ? 4 : 2)} more child agents`));
+    }
 
     if (focused) {
       const recentTools = focused.recentTools ?? [];

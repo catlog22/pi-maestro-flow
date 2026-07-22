@@ -678,6 +678,8 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   assert.match(source, /normalizedTasks \? \{ taskCorrelationIds \} : \{ correlationId: cid \}/);
   assert.match(source, /if \(p\.background === false\) \{[\s\S]*await executeNested\(\)/);
   assert.match(source, /running in background\. correlationId=\$\{cid\}/);
+  assert.match(source, /handleProxyRequest\([\s\S]*?publishChildCallStatus/);
+  assert.match(source, /reportChildStatus\("running"\)[\s\S]*?reportChildStatus\(completed\.exitCode === 0 \? "completed" : "failed"\)/);
   assert.doesNotMatch(source, /spawned @\$\{p\.name \?\? p\.agent\}/);
 });
 

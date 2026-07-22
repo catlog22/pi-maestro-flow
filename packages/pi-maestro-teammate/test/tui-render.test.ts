@@ -103,3 +103,24 @@ test("progress tree shows dependencies as result flow rather than agent hierarch
   assert.match(rows[1]?.text ?? "", /result #1/);
   assert.doesNotMatch(rows[1]?.text ?? "", /[├└│]/);
 });
+
+test("streaming teammate result shows child agent lifecycle separately from task progress", () => {
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "delegating" }],
+    details: {
+      mode: "single",
+      results: [],
+      childCalls: [{
+        agent: "reviewer",
+        name: "review",
+        correlationId: "review-child",
+        parentCorrelationId: "planner-parent",
+        parentName: "planner",
+        status: "running",
+      }],
+    },
+  }, { expanded: false }, theme as never).render(100).join("\n");
+
+  assert.match(rendered, /1 child agent/);
+  assert.match(rendered, /@review child agent · running · called by @planner/);
+});

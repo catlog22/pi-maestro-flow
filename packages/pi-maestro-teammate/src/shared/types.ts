@@ -59,11 +59,21 @@ export interface AgentProgressSnapshot {
   error?: string;
 }
 
+export interface ChildAgentCallSnapshot {
+  agent: string;
+  name?: string;
+  correlationId: string;
+  parentCorrelationId?: string;
+  parentName?: string;
+  status: "running" | "completed" | "failed";
+}
+
 export interface Details {
   mode: "single" | "parallel" | "chain" | "graph";
   results: SingleResult[];
   structuredOutput?: unknown;
   progress?: AgentProgressSnapshot[];
+  childCalls?: ChildAgentCallSnapshot[];
 }
 
 export type MessageKind = "task" | "notification" | "result";
