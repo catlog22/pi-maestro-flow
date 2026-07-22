@@ -235,18 +235,18 @@ test("Session overlay provides list/detail/confirm controls and preserves select
   overlay.handleInput("\x1b[B");
   overlay.handleInput("\r");
   assert.match(overlay.render(100).join("\n"), /002\/grill/);
-  overlay.handleInput("x");
-  assert.match(overlay.render(100).join("\n"), /⊘ Cancel 002/);
+  overlay.handleInput("D");
+  assert.match(overlay.render(100).join("\n"), /✓ Complete 002/);
   overlay.handleInput("\r");
   await flushAsync();
-  assert.deepEqual(actions, [{ action: "cancel", runId: "002" }]);
+  assert.deepEqual(actions, [{ action: "done", runId: "002" }]);
   overlay.handleInput("p");
   await flushAsync();
   const failed = overlay.render(100).join("\n");
   assert.match(failed, /002\/grill/);
   assert.match(failed, /Action failed: gate service unavailable/);
   assert.deepEqual(actions, [
-    { action: "cancel", runId: "002" },
+    { action: "done", runId: "002" },
     { action: "pause", runId: "002" },
   ]);
 

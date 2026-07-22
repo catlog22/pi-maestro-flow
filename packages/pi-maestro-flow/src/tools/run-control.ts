@@ -6,14 +6,15 @@ export const RUN_CONTROL_READ_ACTIONS: ReadonlySet<string> = new Set([
   "status",
   "brief",
   "prepare",
+  "check",
   "recall",
   "skill",
   "mutations",
   "list",
   "show",
 ]);
-export const RUN_CONTROL_WRITE_ACTIONS = new Set(["advance", "complete", "retry", "cancel"] as const);
-export type RunControlAction = "status" | "brief" | "prepare" | "advance" | "complete" | "retry" | "cancel";
+export const RUN_CONTROL_WRITE_ACTIONS = new Set(["next", "done", "edit"] as const);
+export type RunControlAction = "status" | "brief" | "prepare" | "check" | "next" | "done" | "edit";
 
 export function isRunControlReadAction(action: string): boolean {
   return RUN_CONTROL_READ_ACTIONS.has(action);
@@ -24,23 +25,56 @@ export const RunControlParams = Type.Object({
     Type.Literal("status"),
     Type.Literal("brief"),
     Type.Literal("prepare"),
-    Type.Literal("advance"),
-    Type.Literal("complete"),
-    Type.Literal("retry"),
-    Type.Literal("cancel"),
+    Type.Literal("check"),
+    Type.Literal("next"),
+    Type.Literal("done"),
+    Type.Literal("edit"),
   ]),
   runId: Type.Optional(Type.String()),
   step: Type.Optional(Type.String()),
-  command: Type.Optional(Type.String()),
-  args: Type.Optional(Type.Array(Type.String())),
+  pick: Type.Optional(Type.String()),
+  verdict: Type.Optional(Type.Union([
+    Type.Literal("done"),
+    Type.Literal("done-with-concerns"),
+    Type.Literal("needs-retry"),
+    Type.Literal("blocked"),
+  ])),
+  summary: Type.Optional(Type.String()),
+  reason: Type.Optional(Type.String()),
+  notes: Type.Optional(Type.Array(Type.String())),
+  decisions: Type.Optional(Type.Array(Type.String())),
+  evidence: Type.Optional(Type.Array(Type.String())),
+  artifacts: Type.Optional(Type.Array(Type.String())),
+  commands: Type.Optional(Type.Array(Type.String())),
+  after: Type.Optional(Type.String()),
+  replace: Type.Optional(Type.String()),
+  remove: Type.Optional(Type.String()),
+  args: Type.Optional(Type.String()),
+  stage: Type.Optional(Type.String()),
+  goalRef: Type.Optional(Type.String()),
+  insertedBy: Type.Optional(Type.String()),
 });
 
 export interface RunControlInput {
   action: RunControlAction;
   runId?: string;
   step?: string;
-  command?: string;
-  args?: string[];
+  pick?: string;
+  verdict?: "done" | "done-with-concerns" | "needs-retry" | "blocked";
+  summary?: string;
+  reason?: string;
+  notes?: string[];
+  decisions?: string[];
+  evidence?: string[];
+  artifacts?: string[];
+  commands?: string[];
+  after?: string;
+  replace?: string;
+  remove?: string;
+  args?: string;
+  stage?: string;
+  goalRef?: string;
+  insertedBy?: string;
 }
 
 export interface RunControlResult {
@@ -70,20 +104,36 @@ export async function executeRunControl(
         const result = await coordinator.prepare(required(input.step, "step"));
         return success(input.action, result.stdout, result);
       }
-      case "advance": {
-        const result = await coordinator.advance(required(input.command, "command"), input.args ?? []);
+      case "check": {
+        const result = await coordinator.check(input.runId);
+        return success(input.action, result.stdout, result);
+      }
+      case "next": {
+        const result = await coordinator.next(input.pick);
         return success(input.action, result.command.stdout, result);
       }
-      case "complete": {
-        const result = await coordinator.complete(required(input.runId, "runId"));
+      case "done": {
+        const result = await coordinator.done(required(input.runId, "runId"), {
+          verdict: input.verdict,
+          summary: input.summary,
+          reason: input.reason,
+          notes: input.notes,
+          decisions: input.decisions,
+          evidence: input.evidence,
+          artifacts: input.artifacts,
+        });
         return success(input.action, result.command.stdout, result);
       }
-      case "retry": {
-        const result = await coordinator.retry(required(input.runId, "runId"));
-        return success(input.action, result.command.stdout, result);
-      }
-      case "cancel": {
-        const result = await coordinator.cancel(required(input.runId, "runId"));
+      case "edit": {
+        const result = await coordinator.edit(input.commands ?? [], {
+          after: input.after,
+          replace: input.replace,
+          remove: input.remove,
+          args: input.args,
+          stage: input.stage,
+          goalRef: input.goalRef,
+          insertedBy: input.insertedBy,
+        });
         return success(input.action, result.command.stdout, result);
       }
     }

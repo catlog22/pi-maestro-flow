@@ -14,8 +14,29 @@ export interface RunCliResult {
 
 export interface RunCliCapabilities {
   commands: ReadonlySet<string>;
-  retryViaParentRun: boolean;
-  cancel: boolean;
+}
+
+export type RunCompletionVerdict = "done" | "done-with-concerns" | "needs-retry" | "blocked";
+
+export interface RunDoneOptions {
+  verdict?: RunCompletionVerdict;
+  summary?: string;
+  reason?: string;
+  notes?: readonly string[];
+  decisions?: readonly string[];
+  evidence?: readonly string[];
+  artifacts?: readonly string[];
+}
+
+export interface RunEditOptions {
+  sessionId: string;
+  after?: string;
+  replace?: string;
+  remove?: string;
+  args?: string;
+  stage?: string;
+  goalRef?: string;
+  insertedBy?: string;
 }
 
 export type RunCliRunner = (args: readonly string[], cwd: string) => Promise<RunCliResult>;
@@ -40,16 +61,7 @@ export class RunCliAdapter {
     const help = await this.invoke(["run", "--help"]);
     const commands = new Set<string>();
     for (const match of help.stdout.matchAll(/^\s{2}([a-z][a-z-]*)\b/gm)) commands.add(match[1]);
-    let retryViaParentRun = false;
-    if (commands.has("create")) {
-      const createHelp = await this.invoke(["run", "create", "--help"]);
-      retryViaParentRun = /--parent-run\b/.test(createHelp.stdout);
-    }
-    this.detected = {
-      commands,
-      retryViaParentRun,
-      cancel: commands.has("cancel"),
-    };
+    this.detected = { commands };
     return this.detected;
   }
 
@@ -67,41 +79,56 @@ export class RunCliAdapter {
     ]);
   }
 
-  async create(
-    command: string,
-    args: readonly string[] = [],
-    options: { sessionId?: string; intent?: string; parentRunId?: string } = {},
-  ): Promise<RunCliResult> {
-    const capabilities = await this.capabilities();
-    if (!capabilities.commands.has("create")) throw new UnsupportedRunCapabilityError("create");
-    if (options.parentRunId && !capabilities.retryViaParentRun) {
-      throw new UnsupportedRunCapabilityError("retry via create --parent-run");
-    }
+  async check(runId: string, sessionId?: string): Promise<RunCliResult> {
+    await this.requireCommand("check");
     return this.invoke([
-      "run", "create", required(command, "command"),
-      ...(options.sessionId ? ["--session", options.sessionId] : []),
-      ...(options.intent ? ["--intent", options.intent] : []),
-      ...(options.parentRunId ? ["--parent-run", options.parentRunId] : []),
-      ...args.flatMap((arg) => ["--arg", arg]),
+      "run", "check", required(runId, "runId"),
+      ...(sessionId ? ["--session", sessionId] : []),
+      "--json",
       "--workflow-root", this.workflowRoot,
     ]);
   }
 
-  async complete(runId: string, sessionId?: string): Promise<RunCliResult> {
+  async next(sessionId: string, pick?: string): Promise<RunCliResult> {
+    await this.requireCommand("next");
+    return this.invoke([
+      "run", "next",
+      "--session", required(sessionId, "sessionId"),
+      ...(pick ? ["--pick", pick] : []),
+      "--json",
+      "--workflow-root", this.workflowRoot,
+    ]);
+  }
+
+  async done(runId: string, sessionId: string, options: RunDoneOptions = {}): Promise<RunCliResult> {
     await this.requireCommand("complete");
     return this.invoke([
       "run", "complete", required(runId, "runId"),
-      ...(sessionId ? ["--session", sessionId] : []),
+      "--session", required(sessionId, "sessionId"),
+      "--verdict", options.verdict ?? "done",
+      ...(options.summary ? ["--summary", options.summary] : []),
+      ...(options.reason ? ["--reason", options.reason] : []),
+      ...(options.notes ?? []).flatMap((note) => ["--note", note]),
+      ...(options.decisions ?? []).flatMap((decision) => ["--decision", decision]),
+      ...(options.evidence ?? []).flatMap((path) => ["--evidence", path]),
+      ...(options.artifacts ?? []).flatMap((path) => ["--artifact", path]),
+      "--json",
       "--workflow-root", this.workflowRoot,
     ]);
   }
 
-  async cancel(runId: string, sessionId?: string): Promise<RunCliResult> {
-    const capabilities = await this.capabilities();
-    if (!capabilities.cancel) throw new UnsupportedRunCapabilityError("cancel");
+  async edit(commands: readonly string[], options: RunEditOptions): Promise<RunCliResult> {
+    await this.requireCommand("edit");
     return this.invoke([
-      "run", "cancel", required(runId, "runId"),
-      ...(sessionId ? ["--session", sessionId] : []),
+      "run", "edit", ...commands,
+      "--session", required(options.sessionId, "sessionId"),
+      ...(options.after ? ["--after", options.after] : []),
+      ...(options.replace ? ["--replace", options.replace] : []),
+      ...(options.remove ? ["--remove", options.remove] : []),
+      ...(options.args ? ["--args", options.args] : []),
+      ...(options.stage ? ["--stage", options.stage] : []),
+      ...(options.goalRef ? ["--goal-ref", options.goalRef] : []),
+      ...(options.insertedBy ? ["--inserted-by", options.insertedBy] : []),
       "--workflow-root", this.workflowRoot,
     ]);
   }

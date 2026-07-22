@@ -5,7 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import { defaultRunner, RunCliAdapter, type RunCliResult } from "../src/session/cli-adapter.ts";
+import {
+  defaultRunner,
+  RunCliAdapter,
+  type RunCliResult,
+  type RunDoneOptions,
+  type RunEditOptions,
+} from "../src/session/cli-adapter.ts";
 import {
   WorkflowCoordinator,
   WorkflowLeaseBusyError,
@@ -14,17 +20,31 @@ import {
   type WorkflowSnapshotProvider,
 } from "../src/session/coordinator.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
+import { executeRunControl } from "../src/tools/run-control.ts";
 
-test("coordinator attaches brief-first and fences old continuation markers on retry", async () => {
+test("coordinator attaches brief-first and fences old continuation markers across done and next", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-coordinator-"));
   const snapshot = workflowSnapshot("running");
   const bridge = fakeBridge(snapshot);
   const calls: string[][] = [];
-  const adapter = fakeAdapter(calls, { retryViaParentRun: true, cancel: false }, {
-    onCreate(_command, _args, options) {
-      const retry = retryRun(snapshot, "run-2", options.parentRunId ?? null);
-      snapshot.session!.runs.push(retry);
-      snapshot.session!.activeRunId = retry.runId;
+  const adapter = fakeAdapter(calls, {
+    onDone(_runId, _sessionId, options) {
+      snapshot.session!.runs[0]!.status = "sealed";
+      snapshot.session!.activeRunId = null;
+      snapshot.session!.chain[0]!.status = options.verdict === "needs-retry" ? "pending" : "sealed";
+      snapshot.session!.chain[0]!.runId = null;
+    },
+    onNext() {
+      snapshot.session!.runs.push({
+        ...snapshot.session!.runs[0]!,
+        runId: "run-2",
+        status: "running",
+        startedAt: "2026-07-15T00:01:00.000Z",
+        endedAt: null,
+      });
+      snapshot.session!.activeRunId = "run-2";
+      snapshot.session!.chain[0]!.status = "running";
+      snapshot.session!.chain[0]!.runId = "run-2";
     },
   });
   const coordinator = new WorkflowCoordinator(bridge, adapter, new WorkflowLeaseStore(root));
@@ -39,18 +59,16 @@ test("coordinator attaches brief-first and fences old continuation markers on re
     const fencedMarker = coordinator.continuationMarker(3);
     await coordinator.fenceContinuation();
     assert.equal(coordinator.acceptsContinuation(fencedMarker), false);
-    const retryMarker = coordinator.continuationMarker(4);
+    const doneMarker = coordinator.continuationMarker(4);
+    const completed = await coordinator.done("run-1", { verdict: "needs-retry" });
+    assert.equal(completed.command.stdout, "done run-1");
+    assert.equal(coordinator.acceptsContinuation(doneMarker), false);
+    assert.deepEqual(calls.at(-1), ["done", "run-1", "session-1", "needs-retry"]);
 
-    snapshot.session!.runs[0]!.status = "failed";
-    const retried = await coordinator.retry("run-1");
-    assert.equal(retried.command.stdout, "created execute");
-    assert.equal(coordinator.acceptsContinuation(retryMarker), false);
-    assert.deepEqual(calls.at(-1), ["create", "execute", "session-1", "run-1", "--scope", "core"]);
-    assert.equal(retried.snapshot.session!.runs[0]!.status, "failed");
-    assert.equal(retried.snapshot.session!.runs[1]!.parentRunId, "run-1");
-
-    const cancel = coordinator.cancel("run-1");
-    await assert.rejects(cancel, /does not expose canonical run cancel/);
+    const next = await coordinator.next();
+    assert.equal(next.command.stdout, "next session-1");
+    assert.deepEqual(calls.at(-1), ["next", "session-1", ""]);
+    assert.equal(next.snapshot.session!.activeRunId, "run-2");
   } finally {
     await coordinator.release();
     await rm(root, { recursive: true, force: true });
@@ -200,7 +218,7 @@ test("heartbeat publication failure clears ownership and blocks continuation and
   });
   const coordinator = new WorkflowCoordinator(
     fakeBridge(snapshot),
-    fakeAdapter(calls, { retryViaParentRun: true, cancel: true }),
+    fakeAdapter(calls),
     store,
   );
   try {
@@ -211,8 +229,8 @@ test("heartbeat publication failure clears ownership and blocks continuation and
     assert.equal(store.current(), undefined);
     assert.equal(coordinator.acceptsContinuation(marker), false);
     assert.throws(() => coordinator.continuationMarker(2), /lease is not held/);
-    await assert.rejects(coordinator.complete("run-1"), /lease is not held/);
-    assert.equal(calls.some(([operation]) => operation === "complete"), false);
+    await assert.rejects(coordinator.done("run-1"), /lease is not held/);
+    assert.equal(calls.some(([operation]) => operation === "done"), false);
   } finally {
     await coordinator.release();
     await rm(root, { recursive: true, force: true });
@@ -225,10 +243,9 @@ test("every coordinator mutation rejects a canonical Session switch after attach
     status: "running" | "failed" | "completed";
     mutate: (coordinator: WorkflowCoordinator) => Promise<unknown>;
   }> = [
-    { name: "advance", status: "completed", mutate: (coordinator) => coordinator.advance("review") },
-    { name: "complete", status: "running", mutate: (coordinator) => coordinator.complete("run-1") },
-    { name: "retry", status: "failed", mutate: (coordinator) => coordinator.retry("run-1") },
-    { name: "cancel", status: "running", mutate: (coordinator) => coordinator.cancel("run-1") },
+    { name: "next", status: "completed", mutate: (coordinator) => coordinator.next() },
+    { name: "done", status: "running", mutate: (coordinator) => coordinator.done("run-1") },
+    { name: "edit", status: "running", mutate: (coordinator) => coordinator.edit(["review"]) },
     { name: "fenceContinuation", status: "running", mutate: (coordinator) => coordinator.fenceContinuation() },
   ];
 
@@ -252,7 +269,7 @@ test("every coordinator mutation rejects a canonical Session switch after attach
     const store = new WorkflowLeaseStore(root);
     const coordinator = new WorkflowCoordinator(
       bridge,
-      fakeAdapter(calls, { retryViaParentRun: true, cancel: true }),
+      fakeAdapter(calls),
       store,
     );
     try {
@@ -265,7 +282,7 @@ test("every coordinator mutation rejects a canonical Session switch after attach
       );
       assert.equal(store.current()?.token, leaseBefore?.token, `${scenario.name} must not fence the old lease`);
       assert.equal(
-        calls.some(([operation]) => ["create", "complete", "cancel"].includes(operation ?? "")),
+        calls.some(([operation]) => ["next", "done", "edit"].includes(operation ?? "")),
         false,
         `${scenario.name} must not reach a mutating CLI call`,
       );
@@ -293,13 +310,13 @@ test("coordinator mutation fails closed when the canonical Session disappears af
   const calls: string[][] = [];
   const coordinator = new WorkflowCoordinator(
     bridge,
-    fakeAdapter(calls, { retryViaParentRun: true, cancel: true }),
+    fakeAdapter(calls),
     new WorkflowLeaseStore(root),
   );
   try {
     await coordinator.attach("host-1");
-    await assert.rejects(coordinator.complete("run-1"), /No active canonical Workflow Session/);
-    assert.equal(calls.some(([operation]) => operation === "complete"), false);
+    await assert.rejects(coordinator.done("run-1"), /No active canonical Workflow Session/);
+    assert.equal(calls.some(([operation]) => operation === "done"), false);
   } finally {
     await coordinator.release();
     await rm(root, { recursive: true, force: true });
@@ -312,7 +329,7 @@ test("attach heartbeats its token and safely stops on Session switch and release
   const store = new WorkflowLeaseStore(root, 1_000);
   const coordinator = new WorkflowCoordinator(
     fakeBridge(snapshot),
-    fakeAdapter([], { retryViaParentRun: true, cancel: true }),
+    fakeAdapter([]),
     store,
     5,
   );
@@ -347,7 +364,7 @@ test("continuation rejects failed and blocked gates at issue and consume boundar
   const snapshot = workflowSnapshot("running");
   const coordinator = new WorkflowCoordinator(
     fakeBridge(snapshot),
-    fakeAdapter([], { retryViaParentRun: true, cancel: true }),
+    fakeAdapter([]),
     new WorkflowLeaseStore(root),
   );
   try {
@@ -364,84 +381,102 @@ test("continuation rejects failed and blocked gates at issue and consume boundar
     snapshot.session!.runs[0]!.gates = [{ id: "late-block", blocking: true, status: "blocked" }];
     assert.equal(coordinator.acceptsContinuation(marker), false);
     snapshot.session!.runs[0]!.gates = [];
-    const cancelMarker = coordinator.continuationMarker(3);
-    await coordinator.cancel("run-1");
-    assert.equal(coordinator.acceptsContinuation(cancelMarker), false, "cancel must fence pending continuation");
+    const doneMarker = coordinator.continuationMarker(3);
+    await coordinator.done("run-1", { verdict: "blocked" });
+    assert.equal(coordinator.acceptsContinuation(doneMarker), false, "done must fence pending continuation");
   } finally {
     await coordinator.release();
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("retry validates parent-derived attempt while canonical artifacts retain lineage", async () => {
-  const root = await mkdtemp(join(tmpdir(), "pi-workflow-retry-lineage-"));
-  const snapshot = workflowSnapshot("failed");
-  snapshot.session!.artifacts.push({
-    artifactId: "artifact-1",
-    kind: "report",
-    role: "primary",
-    runId: "run-1",
-    path: "outputs/report-1.md",
-    hash: "hash-1",
-    status: "sealed",
-    replaces: null,
-  });
-  const adapter = fakeAdapter([], { retryViaParentRun: true, cancel: true }, {
-    onCreate(_command, _args, options) {
-      snapshot.session!.runs.push(retryRun(snapshot, "run-2", options.parentRunId ?? null));
-      snapshot.session!.activeRunId = "run-2";
-      // Artifact registry remains a Maestro-owned fixture; the coordinator only refreshes and observes it.
-      snapshot.session!.artifacts.push({
-        artifactId: "artifact-2",
-        kind: "report",
-        role: "primary",
-        runId: "run-2",
-        path: "outputs/report-2.md",
-        hash: "hash-2",
-        status: "draft",
-        replaces: "artifact-1",
-      });
-    },
-  });
-  const coordinator = new WorkflowCoordinator(fakeBridge(snapshot), adapter, new WorkflowLeaseStore(root));
-  try {
-    await coordinator.attach("host-1");
-    const retried = await coordinator.retry("run-1");
-    assert.deepEqual(retried.snapshot.session!.runs.map((run) => [run.runId, run.parentRunId]), [
-      ["run-1", null],
-      ["run-2", "run-1"],
-    ]);
-    assert.equal(retried.snapshot.session!.runs[0]!.status, "failed", "failed Run must not be overwritten");
-    assert.deepEqual(retried.snapshot.session!.artifacts.map((artifact) => [artifact.artifactId, artifact.replaces]), [
-      ["artifact-1", null],
-      ["artifact-2", "artifact-1"],
-    ]);
-  } finally {
-    await coordinator.release();
-    await rm(root, { recursive: true, force: true });
-  }
-});
-
-test("CLI adapter detects parent-run retry and rejects unsupported cancel", async () => {
+test("CLI adapter maps canonical check, next, done, and edit commands", async () => {
   const calls: string[][] = [];
   const adapter = new RunCliAdapter("D:/workspace", async (args) => {
     calls.push([...args]);
     if (args.join(" ") === "run --help") {
-      return result(args, "Commands:\n  prepare <step>\n  create <command>\n  complete <run-id>\n  brief <run-id>\n");
+      return result(args, "Commands:\n  prepare <step>\n  brief <run-id>\n  check <run-id>\n  next\n  complete <run-id>\n  edit [commands...]\n");
     }
-    if (args.join(" ") === "run create --help") return result(args, "Options:\n  --parent-run <id>\n");
-    return result(args, "created");
+    return result(args, "ok");
   });
 
   const capabilities = await adapter.capabilities();
-  assert.equal(capabilities.retryViaParentRun, true);
-  assert.equal(capabilities.cancel, false);
-  await adapter.create("execute", ["--scope", "core"], { sessionId: "session-1", parentRunId: "run-1" });
+  assert.deepEqual([...capabilities.commands], ["prepare", "brief", "check", "next", "complete", "edit"]);
+  await adapter.check("run-1", "session-1");
   assert.deepEqual(calls.at(-1), [
-    "run", "create", "execute", "--session", "session-1", "--parent-run", "run-1",
-    "--arg", "--scope", "--arg", "core", "--workflow-root", "D:/workspace",
+    "run", "check", "run-1", "--session", "session-1", "--json", "--workflow-root", "D:/workspace",
   ]);
-  await assert.rejects(adapter.cancel("run-1"), /does not support run capability: cancel/);
+  await adapter.next("session-1", "step-2");
+  assert.deepEqual(calls.at(-1), [
+    "run", "next", "--session", "session-1", "--pick", "step-2", "--json", "--workflow-root", "D:/workspace",
+  ]);
+  await adapter.done("run-1", "session-1", {
+    verdict: "done-with-concerns",
+    notes: ["note"],
+    decisions: ["decision"],
+  });
+  assert.deepEqual(calls.at(-1), [
+    "run", "complete", "run-1", "--session", "session-1", "--verdict", "done-with-concerns",
+    "--note", "note", "--decision", "decision", "--json", "--workflow-root", "D:/workspace",
+  ]);
+  await adapter.edit(["review"], { sessionId: "session-1", after: "latest", args: "--scope core" });
+  assert.deepEqual(calls.at(-1), [
+    "run", "edit", "review", "--session", "session-1", "--after", "latest",
+    "--args", "--scope core", "--workflow-root", "D:/workspace",
+  ]);
+});
+
+test("run-control forwards canonical lifecycle inputs without legacy action aliases", async () => {
+  const calls: Array<[string, ...unknown[]]> = [];
+  const command = result([], "ok");
+  const transition = { command, snapshot: workflowSnapshot("running") };
+  const coordinator = {
+    async check(runId?: string) { calls.push(["check", runId]); return command; },
+    async next(pick?: string) { calls.push(["next", pick]); return transition; },
+    async done(runId: string, options: RunDoneOptions) { calls.push(["done", runId, options]); return transition; },
+    async edit(commands: readonly string[], options: Omit<RunEditOptions, "sessionId">) {
+      calls.push(["edit", commands, options]);
+      return transition;
+    },
+  } as unknown as WorkflowCoordinator;
+
+  assert.equal((await executeRunControl({ action: "check", runId: "run-1" }, coordinator)).ok, true);
+  assert.equal((await executeRunControl({ action: "next", pick: "step-2" }, coordinator)).ok, true);
+  assert.equal((await executeRunControl({
+    action: "done",
+    runId: "run-1",
+    verdict: "done-with-concerns",
+    notes: ["note"],
+  }, coordinator)).ok, true);
+  assert.equal((await executeRunControl({
+    action: "edit",
+    commands: ["review"],
+    after: "latest",
+    args: "--scope core",
+  }, coordinator)).ok, true);
+
+  assert.deepEqual(calls, [
+    ["check", "run-1"],
+    ["next", "step-2"],
+    ["done", "run-1", {
+      verdict: "done-with-concerns",
+      summary: undefined,
+      reason: undefined,
+      notes: ["note"],
+      decisions: undefined,
+      evidence: undefined,
+      artifacts: undefined,
+    }],
+    ["edit", ["review"], {
+      after: "latest",
+      replace: undefined,
+      remove: undefined,
+      args: "--scope core",
+      stage: undefined,
+      goalRef: undefined,
+      insertedBy: undefined,
+    }],
+  ]);
 });
 
 test("default CLI runner times out and terminates a hung process", async () => {
@@ -522,47 +557,31 @@ function fakeBridge(snapshot: WorkflowSnapshot): WorkflowSnapshotProvider {
 
 function fakeAdapter(
   calls: string[][],
-  capabilities: { retryViaParentRun: boolean; cancel: boolean },
   hooks: {
-    onCreate?: (
-      command: string,
-      args: readonly string[],
-      options: { sessionId?: string; intent?: string; parentRunId?: string },
-    ) => void;
+    onNext?: (sessionId: string, pick?: string) => void;
+    onDone?: (runId: string, sessionId: string, options: RunDoneOptions) => void;
+    onEdit?: (commands: readonly string[], options: RunEditOptions) => void;
   } = {},
 ): WorkflowRunAdapter {
   return {
-    async capabilities() {
-      return {
-        commands: new Set(["prepare", "create", "brief", "complete"]),
-        retryViaParentRun: capabilities.retryViaParentRun,
-        cancel: capabilities.cancel,
-      };
-    },
     async prepare(step) { calls.push(["prepare", step]); return result([], `prepare ${step}`); },
     async brief(runId, sessionId) { calls.push(["brief", runId, sessionId ?? ""]); return result([], `brief ${runId}`); },
-    async create(command, args = [], options = {}) {
-      calls.push(["create", command, options.sessionId ?? "", options.parentRunId ?? "", ...args]);
-      hooks.onCreate?.(command, args, options);
-      return result([], `created ${command}`);
+    async check(runId, sessionId) { calls.push(["check", runId, sessionId ?? ""]); return result([], `check ${runId}`); },
+    async next(sessionId, pick) {
+      calls.push(["next", sessionId, pick ?? ""]);
+      hooks.onNext?.(sessionId, pick);
+      return result([], `next ${sessionId}`);
     },
-    async complete(runId, sessionId) { calls.push(["complete", runId, sessionId ?? ""]); return result([], `complete ${runId}`); },
-    async cancel(runId, sessionId) { calls.push(["cancel", runId, sessionId ?? ""]); return result([], `cancel ${runId}`); },
-  };
-}
-
-function retryRun(snapshot: WorkflowSnapshot, runId: string, parentRunId: string | null) {
-  const parent = snapshot.session!.runs.find((run) => run.runId === parentRunId) ?? snapshot.session!.runs[0]!;
-  return {
-    ...parent,
-    runId,
-    parentRunId,
-    status: "running" as const,
-    gates: [],
-    primaryArtifactId: null,
-    handoff: null,
-    startedAt: "2026-07-15T00:01:00.000Z",
-    endedAt: null,
+    async done(runId, sessionId, options = {}) {
+      calls.push(["done", runId, sessionId, options.verdict ?? "done"]);
+      hooks.onDone?.(runId, sessionId, options);
+      return result([], `done ${runId}`);
+    },
+    async edit(commands, options) {
+      calls.push(["edit", ...commands, options.sessionId]);
+      hooks.onEdit?.(commands, options);
+      return result([], `edit ${commands.join(" ")}`);
+    },
   };
 }
 

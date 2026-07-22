@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { chmod, link, lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import type { RunCliAdapter, RunCliCapabilities, RunCliResult } from "./cli-adapter.ts";
+import type {
+  RunCliAdapter,
+  RunCliResult,
+  RunDoneOptions,
+  RunEditOptions,
+} from "./cli-adapter.ts";
 import type { WorkflowBridge } from "./bridge.ts";
 import { activeWorkflowRun, type WorkflowRun, type WorkflowSnapshot } from "./types.ts";
 
@@ -11,16 +16,12 @@ export interface WorkflowSnapshotProvider {
 }
 
 export interface WorkflowRunAdapter {
-  capabilities(refresh?: boolean): Promise<RunCliCapabilities>;
   prepare(step: string): Promise<RunCliResult>;
   brief(runId: string, sessionId?: string): Promise<RunCliResult>;
-  create(
-    command: string,
-    args?: readonly string[],
-    options?: { sessionId?: string; intent?: string; parentRunId?: string },
-  ): Promise<RunCliResult>;
-  complete(runId: string, sessionId?: string): Promise<RunCliResult>;
-  cancel(runId: string, sessionId?: string): Promise<RunCliResult>;
+  check(runId: string, sessionId?: string): Promise<RunCliResult>;
+  next(sessionId: string, pick?: string): Promise<RunCliResult>;
+  done(runId: string, sessionId: string, options?: RunDoneOptions): Promise<RunCliResult>;
+  edit(commands: readonly string[], options: RunEditOptions): Promise<RunCliResult>;
 }
 
 export interface WorkflowLease {
@@ -405,7 +406,16 @@ export class WorkflowCoordinator {
     return this.adapter.brief(target, session.sessionId);
   }
 
-  async advance(command: string, args: readonly string[] = []): Promise<WorkflowTransitionResult> {
+  async check(runId?: string): Promise<RunCliResult> {
+    const snapshot = await this.bridge.refresh();
+    const session = requireSession(snapshot);
+    const target = runId ?? session.activeRunId;
+    if (!target) throw new Error("Workflow Session has no active Run");
+    requireRun(session.runs, target);
+    return this.adapter.check(target, session.sessionId);
+  }
+
+  async next(pick?: string): Promise<WorkflowTransitionResult> {
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
     const active = activeWorkflowRun(snapshot);
@@ -413,51 +423,24 @@ export class WorkflowCoordinator {
       return { command: await this.adapter.brief(active.runId, session.sessionId), snapshot };
     }
     await this.fenceLease(session.sessionId);
-    const result = await this.adapter.create(command, args, { sessionId: session.sessionId });
+    const result = await this.adapter.next(session.sessionId, pick);
     return { command: result, snapshot: await this.bridge.refresh() };
   }
 
-  async complete(runId: string): Promise<WorkflowTransitionResult> {
+  async done(runId: string, options: RunDoneOptions = {}): Promise<WorkflowTransitionResult> {
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
     requireRun(session.runs, runId);
     await this.fenceLease(session.sessionId);
-    const result = await this.adapter.complete(runId, session.sessionId);
+    const result = await this.adapter.done(runId, session.sessionId, options);
     return { command: result, snapshot: await this.bridge.refresh() };
   }
 
-  async retry(runId: string): Promise<WorkflowTransitionResult> {
+  async edit(commands: readonly string[], options: Omit<RunEditOptions, "sessionId"> = {}): Promise<WorkflowTransitionResult> {
     const snapshot = await this.bridge.refresh();
     const session = requireSession(snapshot);
-    const failed = requireRun(session.runs, runId);
-    if (failed.status !== "failed") throw new Error(`Run ${runId} is ${failed.status}; only failed Runs can be retried`);
-    this.requireMutationLease(session.sessionId);
-    const capabilities = await this.adapter.capabilities();
-    if (!capabilities.retryViaParentRun) throw new Error("Installed Maestro CLI cannot preserve retry parent_run_id");
-    const retryBaseline = {
-      sessionId: session.sessionId,
-      runIds: new Set(session.runs.map((run) => run.runId)),
-      failedAttempt: lineageAttempt(session.runs, failed),
-    };
     await this.fenceLease(session.sessionId);
-    const result = await this.adapter.create(failed.command, failed.args, {
-      sessionId: session.sessionId,
-      parentRunId: failed.runId,
-    });
-    const refreshed = await this.bridge.refresh();
-    validateRetrySnapshot(refreshed, failed.runId, retryBaseline);
-    return { command: result, snapshot: refreshed };
-  }
-
-  async cancel(runId: string): Promise<WorkflowTransitionResult> {
-    const snapshot = await this.bridge.refresh();
-    const session = requireSession(snapshot);
-    requireRun(session.runs, runId);
-    this.requireMutationLease(session.sessionId);
-    const capabilities = await this.adapter.capabilities();
-    if (!capabilities.cancel) throw new Error("Installed Maestro CLI does not expose canonical run cancel");
-    await this.fenceLease(session.sessionId);
-    const result = await this.adapter.cancel(runId, session.sessionId);
+    const result = await this.adapter.edit(commands, { ...options, sessionId: session.sessionId });
     return { command: result, snapshot: await this.bridge.refresh() };
   }
 
@@ -612,40 +595,4 @@ function requireRun(runs: WorkflowRun[], runId: string): WorkflowRun {
 
 function hasBlockingFailure(gates: Array<{ blocking: boolean; status: string }>): boolean {
   return gates.some((gate) => gate.blocking && ["failed", "blocked"].includes(gate.status));
-}
-
-function validateRetrySnapshot(
-  after: WorkflowSnapshot,
-  failedRunId: string,
-  baseline: { sessionId: string; runIds: ReadonlySet<string>; failedAttempt: number },
-): WorkflowRun {
-  const afterSession = requireSession(after);
-  if (afterSession.sessionId !== baseline.sessionId) {
-    throw new Error(`Retry switched canonical Workflow Session from ${baseline.sessionId} to ${afterSession.sessionId}`);
-  }
-  const retained = requireRun(afterSession.runs, failedRunId);
-  if (retained.status !== "failed") throw new Error(`Retry did not retain failed Run ${failedRunId}`);
-  const retries = afterSession.runs.filter((run) => !baseline.runIds.has(run.runId) && run.parentRunId === failedRunId);
-  if (retries.length !== 1) {
-    throw new Error(`Retry must create exactly one new Run with parent_run_id ${failedRunId}; found ${retries.length}`);
-  }
-  const retry = retries[0]!;
-  const retryAttempt = lineageAttempt(afterSession.runs, retry);
-  if (retryAttempt !== baseline.failedAttempt + 1) {
-    throw new Error(`Retry Run ${retry.runId} has attempt ${retryAttempt}; expected ${baseline.failedAttempt + 1}`);
-  }
-  return retry;
-}
-
-function lineageAttempt(runs: WorkflowRun[], run: WorkflowRun): number {
-  const visited = new Set<string>();
-  let attempt = 1;
-  let current = run;
-  while (current.parentRunId) {
-    if (visited.has(current.runId)) throw new Error(`Retry lineage contains a cycle at ${current.runId}`);
-    visited.add(current.runId);
-    current = requireRun(runs, current.parentRunId);
-    attempt += 1;
-  }
-  return attempt;
 }

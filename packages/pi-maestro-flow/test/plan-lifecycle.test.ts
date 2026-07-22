@@ -500,10 +500,10 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro load --type project --list" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro search \"Plan Mode\" --code" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro explore \"FIND: plan hooks\\nSCOPE: packages/pi-maestro-flow/src/tools/plan.ts\"" } }), undefined);
-    for (const action of ["status", "brief", "prepare"]) {
+    for (const action of ["status", "brief", "prepare", "check"]) {
       assert.equal(onToolCallPlan({ toolName: "run-control", input: { action } }), undefined, action);
     }
-    for (const action of ["advance", "complete", "retry", "cancel", "pause", "resume"]) {
+    for (const action of ["next", "done", "edit", "pause", "resume"]) {
       assert.match(onToolCallPlan({ toolName: "run-control", input: { action } })?.reason ?? "", /blocks/, action);
     }
     assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run prepare analyze" } }), undefined);

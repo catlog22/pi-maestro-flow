@@ -138,7 +138,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   const actionSchema = (runControl?.parameters as { properties?: { action?: { anyOf?: Array<{ const?: string }> } } })
     ?.properties?.action;
   assert.deepEqual(actionSchema?.anyOf?.map((item) => item.const), [
-    "status", "brief", "prepare", "advance", "complete", "retry", "cancel",
+    "status", "brief", "prepare", "check", "next", "done", "edit",
   ]);
 
   const maestro = tools.find((tool) => tool.name === "maestro");

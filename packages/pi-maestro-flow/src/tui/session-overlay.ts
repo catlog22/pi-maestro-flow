@@ -5,7 +5,7 @@ import {
   workflowStatusLabel,
 } from "../session/view-model.ts";
 
-export type SessionOverlayAction = "pause" | "resume" | "decision" | "cancel" | "retry" | "brief";
+export type SessionOverlayAction = "pause" | "resume" | "decision" | "brief" | "check" | "next" | "done";
 
 export interface SessionOverlayParams {
   view: WorkflowViewModel;
@@ -23,7 +23,7 @@ export class SessionOverlay implements Component, Focusable {
   private selected = 0;
   private pending = false;
   private status = "";
-  private confirmAction: "cancel" | "retry" | undefined;
+  private confirmAction: "done" | undefined;
 
   constructor(private readonly params: SessionOverlayParams) {
     this.view = params.view;
@@ -84,7 +84,7 @@ export class SessionOverlay implements Component, Focusable {
 
     const action = actionForInput(data);
     if (!action) return;
-    if (action === "cancel" || action === "retry") {
+    if (action === "done") {
       this.confirmAction = action;
       this.mode = "confirm";
       this.params.requestRender();
@@ -141,10 +141,9 @@ export class SessionOverlay implements Component, Focusable {
 
   private renderConfirm(width: number): string[] {
     const inner = width - 2;
-    const action = this.confirmAction ?? "cancel";
     const run = this.selectedRun();
     const rows = [
-      fitLine(`${action === "retry" ? "↻ Retry" : "⊘ Cancel"} ${run?.id ?? "session"}?`, inner),
+      fitLine(`✓ Complete ${run?.id ?? "session"}?`, inner),
       fitLine("Enter confirm · Esc back", inner),
     ];
     return frame(rows, width);
@@ -162,9 +161,9 @@ export class SessionOverlay implements Component, Focusable {
     const segments = [];
     const recovery = this.view.recoveryAction ?? this.view.nextAction;
     if (recovery) segments.push(`» ${recovery}`);
-    segments.push("Enter detail", "r resume", "p pause", "b brief");
+    segments.push("Enter detail", "r resume", "p pause", "b brief", "c check", "n next");
     if (this.view.decisionPending) segments.push("d decision");
-    segments.push("R retry", "x cancel", escapeLabel);
+    segments.push("D done", escapeLabel);
     return segments;
   }
 
@@ -198,9 +197,10 @@ function actionForInput(data: string): SessionOverlayAction | undefined {
   if (data === "p") return "pause";
   if (data === "r") return "resume";
   if (data === "d") return "decision";
-  if (data === "x") return "cancel";
-  if (data === "R") return "retry";
   if (data === "b") return "brief";
+  if (data === "c") return "check";
+  if (data === "n") return "next";
+  if (data === "D") return "done";
   return undefined;
 }
 

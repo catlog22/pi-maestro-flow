@@ -835,12 +835,13 @@ When the agent loop ends naturally, the extension verifies completion automatica
             }
           } else if (action === "brief") {
             await workflowCoordinator!.brief(runId);
-          } else if (action === "retry") {
+          } else if (action === "check") {
+            await workflowCoordinator!.check(runId);
+          } else if (action === "next") {
+            await workflowCoordinator!.next();
+          } else if (action === "done") {
             if (!runId) throw new Error("No Run selected");
-            await workflowCoordinator!.retry(runId);
-          } else if (action === "cancel") {
-            if (!runId) throw new Error("No Run selected");
-            await workflowCoordinator!.cancel(runId);
+            await workflowCoordinator!.done(runId, { verdict: "done" });
           } else {
             ctx.ui.notify("Resolve the decision through AskUserQuestion; the overlay is a recovery fallback only.", "info");
           }
