@@ -535,6 +535,28 @@ test("automatic verification completes a Goal from a valid one-shot verdict", as
   }
 });
 
+test("Goal pauses after repeated inconclusive one-shot verification", async () => {
+  setGoalVerifierRunnerForTest(async () => ({
+    exitCode: 0,
+    messages: [{ role: "assistant", content: "No structured verdict." }],
+  }));
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+
+  try {
+    await executeGoal({ action: "create", objective: "Bound verifier retries" }, ctx);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Still working." }] }] }, ctx);
+    }
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.verificationFailures, 3);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
 test("automatic verification starts the next agent loop only for a valid fail verdict", async () => {
   const sent: string[] = [];
   setGoalVerifierRunnerForTest(async () => ({

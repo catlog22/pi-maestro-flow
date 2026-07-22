@@ -83,6 +83,7 @@ export interface ActiveGoal {
   workflowSessionId?: string;
   planHandoffKey?: string;
   workflowSessionGeneration?: string;
+  verificationFailures?: number;
 }
 
 interface AssistantMessageLike {
@@ -131,6 +132,8 @@ const GOAL_STATE_ENTRY_TYPE = "goal-state";
 const MAX_OBJECTIVE_LENGTH = 4_000;
 const CONTINUATION_MARKER_PREFIX = "maestro-goal-continuation:";
 const VERIFIER_TIMEOUT_MS = 90_000;
+const MAX_FINAL_OUTPUT_CHARS = 4_000;
+const MAX_VERIFICATION_FAILURES = 3;
 const MAX_VERIFIER_EVIDENCE_ITEMS = 16;
 const MAX_VERIFIER_EVIDENCE_ITEM_CHARS = 1_200;
 const MAX_VERIFIER_EVIDENCE_CHARS = 8_000;
@@ -861,7 +864,9 @@ type VerificationOutcome = "done" | "continue" | "hold";
 
 function finalAgentOutput(finalMessage: AssistantMessageLike | undefined): string {
   const finalText = contentText(finalMessage?.content).trim();
-  return finalText || "(The agent loop ended without a final assistant text output.)";
+  if (!finalText) return "(The agent loop ended without a final assistant text output.)";
+  if (finalText.length <= MAX_FINAL_OUTPUT_CHARS) return finalText;
+  return `(Final output truncated to its last ${MAX_FINAL_OUTPUT_CHARS} characters.)\n${finalText.slice(-MAX_FINAL_OUTPUT_CHARS)}`;
 }
 
 async function verifyGoalAfterLoop(
@@ -903,6 +908,15 @@ async function verifyGoalAfterLoop(
   }
 
   if (verdict.status === "inconclusive" || verdict.status === "error") {
+    const verificationFailures = (activeGoal.verificationFailures ?? 0) + 1;
+    if (verificationFailures >= MAX_VERIFICATION_FAILURES) {
+      activeGoal = pauseGoal({ ...activeGoal, verificationFailures });
+      persistGoal(activeGoal);
+      updateStatusLine(ctx, activeGoal);
+      ctx.ui.notify(`Goal paused after ${verificationFailures} inconclusive verification attempts. Use /goal resume to retry.`, "warning");
+      return "hold";
+    }
+    activeGoal = { ...activeGoal, verificationFailures };
     updateUsage(activeGoal, ctx);
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
@@ -911,6 +925,7 @@ async function verifyGoalAfterLoop(
   }
 
   if (verdict.status === "fail" || !verdict.pass) {
+    activeGoal = { ...activeGoal, verificationFailures: 0 };
     updateUsage(activeGoal, ctx);
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
@@ -1197,6 +1212,7 @@ function isGoal(v: unknown): v is ActiveGoal {
     (g.planHandoffKey === undefined || typeof g.planHandoffKey === "string") &&
     (g.workflowSessionId === undefined || typeof g.workflowSessionId === "string") &&
     (g.workflowSessionGeneration === undefined || typeof g.workflowSessionGeneration === "string")
+    && (g.verificationFailures === undefined || (typeof g.verificationFailures === "number" && g.verificationFailures >= 0))
   );
 }
 
