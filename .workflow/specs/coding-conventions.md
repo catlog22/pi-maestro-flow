@@ -129,3 +129,11 @@ teammate 工具的参数归一化（单/多任务/chain 判定、顶层默认值
 用户 MUST 通过 /skill:team-swarm <objective>、resume 或 continue 启动和恢复 Swarm；team-swarm coordinator 与 scripts/aco.py 是 worker dispatch、评分、pheromone、收敛和产物的唯一执行权威。Maestro Flow MUST NOT 注册 /swarm extension command、swarm_runtime tool，或维护 native Swarm controller、engine、private Ant 与独立 schema。Flow MAY 从最新 {run_dir}/work/team/team-session.json、swarm-config.json、task-space.json、pheromone/*.json、trails/*.jsonl、best.json 及 {run_dir}/outputs/swarm-report.json、best-solution.md 做 fail-soft 只读投影，用于 statusline 和 overlay；投影 MUST NOT 写入状态、推测 teammate live delta 或改变 team-swarm 生命周期。可保留未注册的 /swarm status|inspect 兼容入口，但只能读取并展示 JSON。验证至少覆盖定向测试、check:types、package resources、npm pack dry-run 以及仓库外 fresh Pi 的 command/Skill 发现。
 
 </spec-entry>
+
+<spec-entry category="coding" keywords="context-transform compaction prompt-cache auto-prune" date="2026-07-22" sid="S-20260722-zng4" title="Context transform 裁剪必须跨 turn 稳定" description="防止非持久裁剪恢复原文并反复击穿 prompt cache" source="master@5337efc8">
+
+### Context transform 裁剪必须跨 turn 稳定
+
+对 provider 发送的非持久 context transform 一旦裁剪历史，必须在同一 compaction epoch 持续应用相同 replacement。最新 provider usage 已包含旧裁剪，只能扣除本轮新增节省；在 session compaction 或 reset 时清理裁剪 manifest。
+
+</spec-entry>
