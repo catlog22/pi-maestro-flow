@@ -485,10 +485,10 @@ When the agent loop ends naturally, the extension verifies completion automatica
     label: "Todo",
     description: `Task management with plain-text context and optional Pi skill execution — 7 actions.
 
-- create: { action: "create", subject: "...", assignee: "self|root|id|label|@label|label#id-prefix", context: "...", skills: [{ name: "maestro-execute", role: "primary", args: "..." }] }
-- update: { action: "update", id: "...", assignee: "self|root|id|label|@label|label#id-prefix", status: "completed", summary: "..." }
+- create: { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name: "maestro-execute", role: "primary", args: "..." }] }
+- update: { action: "update", id: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", status: "completed", summary: "..." }
 - clear context/skills: { action: "update", id: "...", context: "", skills: [] }
-- list: { action: "list", filter: { status: "pending", memberId: "self|root|correlation-id|label|@label|label#id-prefix" } }
+- list: { action: "list", filter: { status: "pending", memberId: "self|root|correlation-id|unique-id-prefix|label|@label|label#id-prefix" } }
 - get: { action: "get", id: "..." }
 - delete: { action: "delete", id: "..." }
 - clear: { action: "clear" }

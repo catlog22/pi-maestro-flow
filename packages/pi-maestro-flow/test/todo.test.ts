@@ -531,16 +531,21 @@ test("Todo selectors round-trip displayed actors and support proactive teammate 
   const first: TodoActorRef = { kind: "teammate", id: "api-1111", label: "api", agentType: "worker" };
   const second: TodoActorRef = { kind: "teammate", id: "api-2222", label: "api", agentType: "reviewer" };
   const solo: TodoActorRef = { kind: "teammate", id: "solo-3333", label: "solo", agentType: "worker" };
+  const workerAlpha: TodoActorRef = { kind: "teammate", id: "d16d57c2-full", label: "worker-alpha", agentType: "delegate" };
+  const workerBeta: TodoActorRef = { kind: "teammate", id: "d16d9999-full", label: "worker-beta", agentType: "delegate" };
 
   try {
     registerTodoActor(first);
     registerTodoActor(second);
     registerTodoActor(solo);
+    registerTodoActor(workerAlpha);
+    registerTodoActor(workerBeta);
 
     const soloCreate = await executeTodo({ action: "create", subject: "Solo", assignee: "@solo" }, ctx);
     assert.equal((soloCreate as { isError?: boolean }).isError, undefined);
     await executeTodo({ action: "create", subject: "First API", assignee: "@api#api-1" }, ctx);
     await executeTodo({ action: "create", subject: "Second API", assignee: "api#api-2" }, ctx);
+    await executeTodo({ action: "create", subject: "Alpha by displayed ID", assignee: "d16d57c2" }, ctx);
 
     const ambiguous = await executeTodo({ action: "list", filter: { memberId: "api" } }, ctx);
     assert.equal((ambiguous as { isError?: boolean }).isError, true);
@@ -551,6 +556,15 @@ test("Todo selectors round-trip displayed actors and support proactive teammate 
     assert.match(firstText, /@api#api-1/);
     assert.match(firstText, /First API/);
     assert.doesNotMatch(firstText, /Second API/);
+
+    const displayedIdList = await executeTodo({ action: "list", filter: { memberId: "d16d57c2" } }, ctx);
+    const displayedIdText = (displayedIdList.content[0] as { text: string }).text;
+    assert.match(displayedIdText, /Alpha by displayed ID/);
+    assert.doesNotMatch(displayedIdText, /Solo|First API|Second API/);
+
+    const ambiguousIdPrefix = await executeTodo({ action: "list", filter: { memberId: "d16d" } }, ctx);
+    assert.equal((ambiguousIdPrefix as { isError?: boolean }).isError, true);
+    assert.match((ambiguousIdPrefix.content[0] as { text: string }).text, /use a longer id prefix/);
 
     const firstTask = getVisibleTasks().find((task) => task.subject === "First API")!;
     const selfUpdate = await executeTodo({ action: "update", id: firstTask.id, assignee: "@api" }, ctx, first);

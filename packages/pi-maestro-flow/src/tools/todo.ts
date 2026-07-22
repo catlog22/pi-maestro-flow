@@ -1275,6 +1275,17 @@ function resolveTodoActorSelector(requested: string, actor: TodoActorRef): TodoA
     }
   }
 
+  if (!selector.includes("#")) {
+    const idPrefixMatches = [...knownActors.values()].filter((candidate) => candidate.id.startsWith(selector));
+    if (idPrefixMatches.length === 1) return { actor: cloneActor(idPrefixMatches[0]) };
+    if (idPrefixMatches.length > 1) {
+      return {
+        error: `Ambiguous Todo member selector: ${requested}; use a longer id prefix or the full member id`,
+        reason: "ambiguous",
+      };
+    }
+  }
+
   return { error: `Unknown Todo member selector: ${requested}`, reason: "unknown" };
 }
 
