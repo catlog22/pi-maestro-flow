@@ -1,8 +1,10 @@
-# Release v0.4.12 — 2026-07-22
+# Release v0.4.13 — 2026-07-22
 
 ## 概述
 
-v0.4.12 将 Pi 的 Session/Run 控制壳与执行降级路由对齐到 Maestro Flow 0.5.54，并大幅强化 teammate 子代理的生命周期管理与可观测性（流式状态、运行指标、停滞状态回收）。同时稳定 Goal 自动续跑与单回合确认、收紧 Goal 验证重试与输出长度，完善 Todo 工具（member selector 支持 unique id prefix、skills 参数 schema 稳定化），并收紧 API Manager 新增认证配置。本版本只发布 `pi-maestro-flow`，`pi-maestro-teammate` 继续保持 0.4.5。
+v0.4.13 将 Pi 的 Session/Run 控制壳与执行降级路由对齐到 Maestro Flow 0.5.54，并大幅强化 teammate 子代理的生命周期管理与可观测性（流式状态、运行指标、停滞状态回收）。同时稳定 Goal 自动续跑与单回合确认、收紧 Goal 验证重试与输出长度，完善 Todo 工具（member selector 支持 unique id prefix、skills 参数 schema 稳定化），并收紧 API Manager 新增认证配置。
+
+> **本版本取代 v0.4.12**：0.4.12 误将 `pi-maestro-teammate` pin 在 0.4.5，未包含下述 teammate 子代理特性。v0.4.13 同步发布 `pi-maestro-teammate@0.4.6` 并将依赖升级至 0.4.6，使这些特性随产物交付。
 
 ## 详细变更
 
@@ -41,8 +43,8 @@ v0.4.12 将 Pi 的 Session/Run 控制壳与执行降级路由对齐到 Maestro F
 
 | 包 | 旧版本 | 新版本 |
 |---|---:|---:|
-| `pi-maestro-flow` | 0.4.11 | 0.4.12 |
-| `pi-maestro-teammate` | 0.4.5 | 0.4.5 |
+| `pi-maestro-flow` | 0.4.12 | 0.4.13 |
+| `pi-maestro-teammate` | 0.4.5 | 0.4.6 |
 | `maestro-flow` 运行依赖 | 0.5.53 | 0.5.54 |
 
 ## 验证
@@ -50,22 +52,23 @@ v0.4.12 将 Pi 的 Session/Run 控制壳与执行降级路由对齐到 Maestro F
 - TypeScript `check:types` 通过。
 - Session/Run tests：49 项（48 通过 / 1 跳过 / 0 失败）。
 - Todo tests：36 项通过。
-- npm publish dry-run 验证 package resources、canonical Pi skills 与 `maestro-flow@0.5.54` 依赖。
+- Teammate tests：174 项（173 通过 / 1 跳过 / 0 失败）。
+- npm publish dry-run 验证两个包：`pi-maestro-flow@0.4.13`（canonical Pi skills、`maestro-flow@0.5.54`、`pi-maestro-teammate@0.4.6` 依赖）与 `pi-maestro-teammate@0.4.6`。
 
 ## 安装
 
 ```bash
-pi install npm:pi-maestro-flow@0.4.12
+pi install npm:pi-maestro-flow@0.4.13
 ```
 
 也可以使用 npm：
 
 ```bash
-npm install pi-maestro-flow@0.4.12
+npm install pi-maestro-flow@0.4.13
 ```
 
 ## 升级说明
 
 升级后执行 `/reload` 或重启 Pi。Session/Run 控制现已通过 canonical writer 驱动并支持 execute 降级路由；teammate 子代理提供更细粒度的流式状态与运行指标。Todo member selector 现可用 unique id prefix 直接定位单个 actor。
 
-**Full Changelog**: https://github.com/catlog22/pi-maestro-flow/compare/v0.4.11...v0.4.12
+**Full Changelog**: https://github.com/catlog22/pi-maestro-flow/compare/v0.4.11...v0.4.13
