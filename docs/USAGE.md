@@ -1,5 +1,9 @@
 # pi-maestro-flow 功能使用说明
 
+<p align="center">
+  <strong>中文</strong> | <a href="USAGE_EN.md">English</a>
+</p>
+
 > 本文档详细介绍 pi-maestro-flow 插件为 Pi Coding Agent 注册的所有工具、能力和使用方法。
 > Skills 为简要索引，完整定义请参阅 [Maestro Flow](https://github.com/catlog22/maestro-flow) 项目。
 

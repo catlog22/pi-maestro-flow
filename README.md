@@ -1,8 +1,12 @@
 # pi-maestro-flow
 
 <p align="center">
-  <strong>🎼 Multi-Agent Orchestration for Pi Coding Agent</strong><br />
-  <em>Turn a single coding agent into a coordinated engineering team.</em>
+  <strong>🎼 Pi 编码智能体的多智能体编排层</strong><br />
+  <em>将一个编码智能体，变成一支协同工程团队。</em>
+</p>
+
+<p align="center">
+  <strong>中文</strong> | <a href="README_EN.md">English</a>
 </p>
 
 <p align="center">
@@ -14,42 +18,93 @@
 
 ---
 
-## Why pi-maestro-flow?
+## 核心特性
 
-Pi is a powerful coding agent — but one agent can only do one thing at a time. **pi-maestro-flow** gives Pi the ability to:
+Pi 是强大的编码智能体 — 但一个智能体一次只能做一件事。**pi-maestro-flow** 让 Pi 拥有：
 
-- 🔀 **Spawn parallel agents** — dispatch multiple subprocess agents with DAG task graphs, RPC messaging, and per-task thinking depth control
-- 🧠 **Remember everything** — persistent knowledge system with semantic search, specs, knowhow, and conflict/supersession lifecycle
-- 📋 **Orchestrate complex workflows** — plan→execute→verify pipelines, long-running autonomous cycles, and Goal lifecycle with independent verification
-- 👥 **Coordinate teams** — 27 specialized agent roles (explorer, reviewer, debugger, planner…) in structured pipelines
-- 🔌 **Connect anything** — full MCP client (OAuth, UI sessions, streaming), LSP integration, browser control, web search
-- 🔒 **Control permissions** — 5 permission modes, fine-grained allow/ask/deny rules, teammate child relay
-- 🎯 **104 skills** — from code review to academic writing, UI design to security auditing
+### 🔀 并行多智能体调度
+一次派出多个子进程智能体并行工作。支持 DAG 依赖图、RPC 消息、结构化 Prompt 模板，每个任务可独立控制模型和思考深度。
 
-> **One command, one team.** Describe what you want — pi-maestro-flow routes it to the right agents, skills, and knowledge.
-
----
-
-## Quick Start
-
-```bash
-# 1. Install (Pi Coding Agent + Node.js ≥ 22.19 required)
-pi install npm:pi-maestro-flow
-
-# 2. Start Pi
-pi
-
-# 3. Go — describe your task in natural language, or use skills directly
-/skill:maestro-help          # Browse all commands
-/skill:maestro-analyze       # Analyze a problem before planning
-/skill:team-review           # Multi-role code review
+```javascript
+teammate({
+  tasks: [
+    { name: "defs", agent: "explorer", task: "FIND: Auth 导出\nSCOPE: src/auth/" },
+    { name: "calls", agent: "explorer", task: "FIND: Auth 导入\nSCOPE: src/" },
+    { name: "report", agent: "delegate", task: "合并 {defs} + {calls} 生成缺口报告" }
+  ]
+})
 ```
 
-That's it. Pi now has 104 skills, 27 agents, and a full knowledge system.
+### 🎯 Goal 模式 — 自主长时目标
+设定一个目标和可选的 Token 预算，智能体跨多轮自主循环执行。完成后由**独立验证器**审计完成声明。
+
+```javascript
+goal({ action: "create", objective: "实现 JWT 认证模块", tokenBudget: "100k" })
+```
+
+```bash
+/goal status                 # 查看进度（输入框上方实时面板）
+/goal stop                   # 暂停（状态持久化）
+/goal resume --tokens 200k   # 恢复并提高预算
+```
+
+**工作流程：** 创建 → 自主循环（规划→执行→自检）→ 独立验证 → `pass` 自动完成 / `fail` 携带未满足需求继续 / `inconclusive` 等待用户恢复
+
+### 📝 Plan 模式 — 先批准再动手
+进入只读规划状态：起草 Markdown 计划，获得用户明确批准后才恢复编辑工具。
+
+```bash
+/plan                        # 切换 Plan/Act 模式（或 Alt+P）
+/plan approve                # 批准计划，恢复编辑工具
+```
+
+**工作流程：** 进入计划模式（编辑工具被阻止）→ 起草计划 → 用户审批 → 提交并恢复 / 放弃不提交。适合复杂或高风险的多步骤工作。
+
+### 🧠 持久化知识系统
+语义搜索、规范（Spec）管理、经验（Knowhow）沉淀，跨会话存活。支持替代/冲突生命周期。
+
+```bash
+maestro search "认证模式" --code     # 语义搜索（跨 spec + 代码）
+/spec-add coding "Result 类型" "..."  # 沉淀编码约定
+```
+
+### 🔌 全协议连接
+- **MCP 客户端** — 统一代理工具访问任意 MCP 服务器（OAuth、UI 会话、流式传输）
+- **LSP 集成** — 诊断、定义跳转、引用查找、重命名
+- **浏览器控制** — 通过 CDP 控制 Chromium（截图、JS 执行）
+- **网络搜索** — 快速查询、深度研究、URL 内容提取
+
+### 🔒 权限控制
+5 种权限模式（default / acceptEdits / plan / dontAsk / bypassPermissions），细粒度 allow/ask/deny 规则，teammate 子进程权限中继。
+
+### 👥 27 个专业 Agent 角色
+explorer、reviewer、debugger、planner、verifier、roadmapper… 在结构化管线中协同工作。
+
+### 💡 思考深度控制
+每个任务独立控制推理深度：`off` → `minimal` → `low` → `medium` → `high` → `xhigh`
 
 ---
 
-## Architecture
+## 快速开始
+
+```bash
+# 1. 安装（需要 Pi Coding Agent + Node.js ≥ 22.19）
+pi install npm:pi-maestro-flow
+
+# 2. 启动 Pi
+pi
+
+# 3. 开始 — 用自然语言描述任务，或直接使用技能
+/skill:maestro-help          # 浏览所有命令
+/skill:maestro-analyze       # 分析问题再规划
+/skill:team-review           # 多角色代码审查
+```
+
+安装后 Pi 即拥有 17 个注册工具、27 个 Agent、20 个 Prompt 模板和完整知识系统。
+
+---
+
+## 架构
 
 ```
 ┌───────────────────────────────────────────────────────────┐
@@ -60,145 +115,95 @@ That's it. Pi now has 104 skills, 27 agents, and a full knowledge system.
 │  ┌────────────────────┐       ┌───────────────────────┐   │
 │  │ maestro · goal      │◄────►│ teammate · send        │   │
 │  │ todo · run-control  │       │ list · watch · wait    │   │
-│  │ lsp · browser · mcp │       │ DAG graphs · RPC       │   │
-│  │ smart_search · fff  │       │ thinking depth         │   │
-│  │ permissions · plan  │       │ model routing          │   │
+│  │ lsp · browser · mcp │       │ DAG 依赖图 · RPC       │   │
+│  │ smart_search · fff  │       │ 思考深度 · 模型路由     │   │
+│  │ permissions · plan  │       │                        │   │
 │  └─────────┬──────────┘       └───────────┬───────────┘   │
 │            │                               │               │
 │  ┌─────────▼───────────────────────────────▼───────────┐   │
 │  │  .pi/skills/ (104)   .pi/agents/ (27)   prompts (20) │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                                                            │
-│  Runtime: auto-compaction · GUI sidecar (UCL) · TUI panels │
+│  运行时: 自动压缩 · GUI sidecar (UCL) · TUI 面板           │
 └───────────────────────────────────────────────────────────┘
 ```
 
-| Package | Role |
-|---------|------|
-| **pi-maestro-teammate** | Core dispatch engine — `teammate` tool, DAG graphs, RPC subprocesses, thinking depth, model routing |
-| **pi-maestro-flow** | Maestro tools, Goal/Todo/Run lifecycle, MCP client, LSP, browser, permissions, 104 skills, knowledge system |
+| 包 | 职责 |
+|---|------|
+| **pi-maestro-teammate** | 核心调度引擎 — `teammate` 工具、DAG 图、RPC 子进程、思考深度、模型路由 |
+| **pi-maestro-flow** | Maestro 工具、Goal/Todo/Run 生命周期、MCP 客户端、LSP、浏览器、权限、知识系统 |
 
 ---
 
-## What Can It Do?
+## 注册工具（17 个）
 
-### 🚀 Parallel Code Exploration
-```javascript
-teammate({
-  tasks: [
-    { name: "defs", agent: "explorer", task: "FIND: Auth exports\nSCOPE: src/auth/" },
-    { name: "calls", agent: "explorer", task: "FIND: Auth imports\nSCOPE: src/" },
-    { name: "report", agent: "delegate", task: "Merge {defs} + {calls} into a gap report" }
-  ]
-})
-```
+| 工具 | 来源 | 用途 |
+|------|------|------|
+| `teammate` | teammate | 多智能体调度（单任务 / 并行 / DAG / 后台） |
+| `teammate-send` | teammate | 向运行中 Agent 发消息（follow_up / steer / abort） |
+| `teammate-list` | teammate | 列出活跃 Agent |
+| `teammate-watch` | teammate | 查看 Agent 输出 |
+| `teammate-wait` | teammate | 事件驱动等待 Agent 完成 |
+| `maestro` | flow | 知识感知调度（explore / delegate / moa） |
+| `goal` | flow | 长时目标生命周期 + 独立验证 |
+| `todo` | flow | 任务分解与跟踪（支持 Skill 绑定） |
+| `run-control` | flow | 工作流 Run 生命周期（status / next / done / edit） |
+| `mcp` | flow | 统一 MCP 客户端（连接 / 调用 / 搜索 / OAuth / UI） |
+| `lsp` | flow | 语言服务器集成（诊断 / 定义 / 引用 / 重命名…） |
+| `browser` | flow | Chromium 浏览器控制（CDP） |
+| `smart_search` | flow | 网络搜索 / 深度研究 / URL 抓取 |
+| `ffgrep` / `fffind` | flow | FFF 快速内容搜索 / 模糊文件搜索 |
+| `search_tool_bm25` | flow | BM25 工具发现 |
+| `ask-user-question` | flow | 结构化 TUI 用户输入 |
+| `plan-enter` | flow | 进入持久化 Plan 模式 |
 
-### 🔄 Plan → Execute → Verify
-```
-/skill:maestro-analyze → /skill:maestro-plan → /skill:maestro-execute → /skill:quality-review
-```
-
-### 🐛 Long-Running Debug Cycles
-```
-/skill:odyssey-debug "Memory leak in WebSocket handler"
-```
-
-### 👥 Team Code Review
-```
-/skill:team-review src/ --level deep    # scanner → reviewer → fixer pipeline
-```
-
-### 📚 Knowledge That Persists
-```bash
-maestro search "auth pattern"           # Semantic search across specs + code
-/spec-add coding "Result types" "..."   # Capture conventions
-```
-
-### 🔌 MCP + LSP + Browser
-```javascript
-mcp({ tool: "github_create_issue", args: '{"title":"Bug"}' })  // Call any MCP tool
-lsp({ action: "references", file: "src/auth.ts", line: 42 })   // Find all references
-browser({ action: "open", url: "http://localhost:3000" })       // Control Chromium
-```
+**运行时子系统：** 权限控制器（5 种模式）· 自动上下文压缩 · GUI sidecar（`PI_GUI=1`）· TUI 面板与覆盖层
 
 ---
 
-## Plugin Tools (17 Registered)
+## 技能与 Agent
 
-| Tool | Source | Purpose |
-|------|--------|---------|
-| `teammate` | teammate | Multi-agent dispatch (single / parallel / DAG / background) |
-| `teammate-send` | teammate | Message running agents (follow_up / steer / abort) |
-| `teammate-list` | teammate | List active agents |
-| `teammate-watch` | teammate | Inspect agent output |
-| `teammate-wait` | teammate | Event-driven wait for agent completion |
-| `maestro` | flow | Knowledge-aware dispatch (explore / delegate / moa) |
-| `goal` | flow | Long-running objective lifecycle with verification |
-| `todo` | flow | Task decomposition and tracking with skill bindings |
-| `run-control` | flow | Workflow Run lifecycle (status / next / done / edit) |
-| `mcp` | flow | Unified MCP client (connect / call / search / OAuth / UI) |
-| `lsp` | flow | Language server integration (diagnostics / definition / rename…) |
-| `browser` | flow | Chromium control via CDP (open / run / screenshot) |
-| `smart_search` | flow | Web search / deep research / URL fetch |
-| `ffgrep` / `fffind` | flow | FFF-backed fast content & file search |
-| `search_tool_bm25` | flow | BM25 tool discovery across all registered tools |
-| `ask-user-question` | flow | Structured TUI user input (single / multi-select / open) |
-| `plan-enter` | flow | Enter durable Plan mode with approval workflow |
+104 个技能覆盖编排、质量、UI 设计、团队协作、学术写作、知识管理等领域。
+完整技能列表和工作流定义请参阅 **[Maestro Flow](https://github.com/catlog22/maestro-flow)** 项目。
 
-**Runtime subsystems:** permission controller (5 modes) · auto-compaction · GUI sidecar (`PI_GUI=1`) · TUI panels & overlays
+| 领域 | 示例技能 |
+|------|---------|
+| 编排 | `maestro-plan`, `maestro-execute`, `maestro-ralph` |
+| 质量 | `quality-refactor`, `security-audit`, `team-review` |
+| 团队 | `team-coordinate`, `team-lifecycle-v4`, `team-swarm` |
+| 学术 | `scholar-writing`, `scholar-review`, `scholar-citation-verify` |
+| UI | `maestro-impeccable`, `team-uidesign`, `team-visual-a11y` |
+
+27 个 Agent 角色：`explorer` · `delegate` · `workflow-planner` · `workflow-executor` · `workflow-reviewer` · `workflow-debugger` · `workflow-verifier` · `goal-verifier` · `ui-design-agent` · `impeccable-agent` 等。
 
 ---
 
-## Skills Overview (104)
+## 📖 文档
 
-| Domain | Count | Highlights |
-|--------|-------|------------|
-| **Orchestration** | ~25 | `maestro-plan`, `maestro-execute`, `maestro-ralph-v2`, `maestro-brainstorm` |
-| **Quality & Testing** | ~12 | `quality-review`, `quality-debug`, `security-audit`, `team-review` |
-| **UI / Design** | ~10 | `maestro-impeccable`, `team-uidesign`, `team-visual-a11y` |
-| **Team Coordination** | ~15 | `team-coordinate`, `team-lifecycle-v4`, `team-swarm` |
-| **Knowledge** | ~18 | `spec-add`, `manage-knowhow-capture`, `manage-knowledge-audit` |
-| **Academic Writing** | 10 | `scholar-writing`, `scholar-review`, `scholar-citation-verify` |
-| **Meta / Tooling** | ~9 | `skill-generator`, `prompt-generator`, `maestro-composer` |
-| **Learning** | ~5 | `learn-investigate`, `learn-follow`, `learn-decompose` |
+| 文档 | 说明 |
+|------|------|
+| **[使用指南](docs/USAGE.md)** | 完整功能文档 — 全部 17 个工具、MCP、权限、思考深度、Agent、工作流 |
+| **[Usage Guide（English）](docs/USAGE_EN.md)** | Complete feature documentation |
+| **[用户手册](GUIDE.md)** | 深入教程，每个子系统附示例 |
+| **[发布说明](RELEASE.md)** | 版本历史与变更日志 |
 
 ---
 
-## Agent Roles (27)
+## 环境要求
 
-| Category | Agents |
-|----------|--------|
-| **Core** | `explorer`, `delegate`, `coordinator`, `goal-verifier`, `ralph-executor` |
-| **Workflow** | `workflow-planner`, `workflow-executor`, `workflow-reviewer`, `workflow-debugger`, `workflow-verifier`, `workflow-roadmapper` + 9 more |
-| **Specialist** | `team-supervisor`, `team-worker`, `ui-design-agent`, `impeccable-agent`, `aggregator`, `reference` + 3 more |
-
----
-
-## 📖 Documentation
-
-| Document | Description |
-|----------|-------------|
-| **[Usage Guide](docs/USAGE.md)** | Complete feature documentation — all 17 tools, MCP, permissions, thinking depth, agents, workflows |
-| **[User Guide](GUIDE.md)** | In-depth tutorial with examples for every subsystem |
-| **[Release Notes](RELEASE.md)** | Version history and changelog |
-
----
-
-## Requirements
-
-| Component | Version |
-|-----------|---------|
+| 组件 | 版本 |
+|------|------|
 | Node.js | ≥ 22.19.0 |
 | [Pi Coding Agent](https://github.com/earendil-works/pi) | ≥ 0.74.0 |
-| [Maestro CLI](https://github.com/catlog22/maestro2) | ≥ 1.0.0 (for knowledge features) |
+| [Maestro CLI](https://github.com/catlog22/maestro2) | ≥ 1.0.0（知识系统功能） |
 
 ---
 
-## Credits
+## 致谢
 
-- **[Maestro-Flow](https://github.com/catlog22/maestro-flow)** — intent-driven workflow orchestration by [@catlog22](https://github.com/catlog22)
-- **[Pi Coding Agent](https://github.com/earendil-works/pi)** — terminal coding harness by [@earendil-works](https://github.com/earendil-works)
+- **[Maestro-Flow](https://github.com/catlog22/maestro-flow)** — 意图驱动工作流编排框架 by [@catlog22](https://github.com/catlog22)
+- **[Pi Coding Agent](https://github.com/earendil-works/pi)** — 终端编码智能体 by [@earendil-works](https://github.com/earendil-works)
 
-## License
+## 许可证
 
 [MIT](LICENSE) © 2026 catlog22
