@@ -224,7 +224,12 @@ export async function executeGoal(
     case "complete": {
       if (typeof params.summary !== "string" || params.summary.trim().length === 0) return { text: "Goal complete requires a non-empty summary.", isError: true };
       const outcome = await verifyGoalAfterLoop(params.summary, ctx);
-      return { text: outcome === "done" ? "Goal done (verified)." : "Goal completion was not verified; continue the active Goal.", isError: false };
+      return {
+        text: outcome.status === "done"
+          ? "Goal done (verified)."
+          : `Goal completion was not verified; continue the active Goal. Reason: ${outcome.reason}`,
+        isError: false,
+      };
     }
     default:
       return { text: "Unknown action. Valid: get, create, update, complete", isError: true };
@@ -869,7 +874,9 @@ async function handleUpdate(
   return { text: `Goal updated and resumed: ${activeGoal?.text ?? objective.trim()}`, isError: false };
 }
 
-type VerificationOutcome = "done" | "continue" | "hold";
+type VerificationOutcome =
+  | { status: "done" }
+  | { status: "continue" | "hold"; reason: string };
 
 function finalAgentOutput(finalMessage: AssistantMessageLike | undefined): string {
   const finalText = contentText(finalMessage?.content).trim();
@@ -882,9 +889,11 @@ async function verifyGoalAfterLoop(
   finalOutput: string,
   ctx: GoalContext,
 ): Promise<VerificationOutcome> {
-  if (!activeGoal || activeGoal.status !== "active") return "hold";
+  if (!activeGoal || activeGoal.status !== "active") {
+    return { status: "hold", reason: "There is no active Goal awaiting completion verification." };
+  }
   if (verificationInFlight?.goalId === activeGoal.id) {
-    return "hold";
+    return { status: "hold", reason: "Completion verification is already in progress." };
   }
 
   const canonicalBlockers = canonicalCompletionBlockers(workflowCoordinator?.status());
@@ -892,7 +901,10 @@ async function verifyGoalAfterLoop(
     updateUsage(activeGoal, ctx);
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
-    return "continue";
+    return {
+      status: "continue",
+      reason: `The canonical Workflow is blocked: ${canonicalBlockers.join("; ")}.`,
+    };
   }
 
   ctx.ui.setStatus(STATUS_KEY, "verifying");
@@ -913,7 +925,10 @@ async function verifyGoalAfterLoop(
     || activeGoal.id !== goalSnapshot.id
     || activeGoal.status !== "active"
     || activeGoal.updatedAt !== goalSnapshot.updatedAt) {
-    return "hold";
+    return {
+      status: "hold",
+      reason: "The active Goal changed while completion verification was running.",
+    };
   }
 
   if (verdict.status === "inconclusive" || verdict.status === "error") {
@@ -923,14 +938,14 @@ async function verifyGoalAfterLoop(
       persistGoal(activeGoal);
       updateStatusLine(ctx, activeGoal);
       ctx.ui.notify(`Goal paused after ${verificationFailures} inconclusive verification attempts. Use /goal resume to retry.`, "warning");
-      return "hold";
+      return { status: "hold", reason: verdict.reasoning };
     }
     activeGoal = { ...activeGoal, verificationFailures };
     updateUsage(activeGoal, ctx);
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
     ctx.ui.notify("Automatic Goal verification was inconclusive. Continuing the active Goal.", "warning");
-    return "continue";
+    return { status: "continue", reason: verdict.reasoning };
   }
 
   if (verdict.status === "fail" || !verdict.pass) {
@@ -940,7 +955,8 @@ async function verifyGoalAfterLoop(
     updateStatusLine(ctx, activeGoal);
     const next = verdict.unmet?.[0] ? ` Next: ${verdict.unmet[0]}` : "";
     ctx.ui.notify(`Goal is not complete.${next}`, "info");
-    return "continue";
+    const unmet = verdict.unmet?.length ? ` Unmet: ${verdict.unmet.join("; ")}.` : "";
+    return { status: "continue", reason: `${verdict.reasoning}${unmet}` };
   }
 
   const goalText = activeGoal.text;
@@ -951,7 +967,7 @@ async function verifyGoalAfterLoop(
   clearActive(ctx);
   showCompletionStatus(ctx, completedGoal);
   ctx.ui.notify(`Goal done (verified): ${goalText}`, "info");
-  return "done";
+  return { status: "done" };
 }
 
 async function handleStop(ctx: GoalContext): Promise<{ text: string; isError: boolean }> {

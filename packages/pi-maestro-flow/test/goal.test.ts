@@ -410,6 +410,39 @@ test("verifier parsing is fail-closed and requires consistent concrete evidence"
   assert.equal(grounded.pass, true);
 });
 
+test("goal completion rejection includes the verifier reason", async () => {
+  setGoalVerifierRunnerForTest(async () => ({
+    exitCode: 0,
+    messages: [{ role: "assistant", content: "Structured output saved." }],
+    structuredOutput: {
+      pass: false,
+      reasoning: "The release smoke test has not run.",
+      unmet: ["Run the release smoke test"],
+      evidence: ["Only unit-test output was supplied"],
+    },
+  }));
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  onSessionStart(ctx);
+
+  try {
+    await executeGoal({ action: "create", objective: "Finish and verify the release" }, ctx);
+    const result = await executeGoal({
+      action: "complete",
+      summary: "Implementation and unit tests are complete.",
+    }, ctx);
+
+    assert.equal(result.isError, false);
+    assert.match(result.text, /Reason: The release smoke test has not run\./);
+    assert.match(result.text, /Unmet: Run the release smoke test\./);
+    assert.equal(getActiveGoal()?.status, "active");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
 test("verifier receives bounded raw tool evidence produced after the goal started", () => {
   const since = Date.parse("2026-07-15T00:00:00.000Z");
   const ctx = createContext({
