@@ -1,7 +1,7 @@
 /**
  * Teammate Extension Entry Point
  *
- * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status)
+ * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status), teammate-wait
  * TUI: Alt+R composer panel, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
@@ -15,7 +15,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { truncateToWidth } from "@earendil-works/pi-tui";
-import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams } from "./schemas.ts";
+import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams } from "./schemas.ts";
 import {
   runTeammate,
   runGraph,
@@ -168,6 +168,12 @@ const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activ
 const TEAMMATE_WATCH_GUIDELINES = [
   "Use teammate-watch for targeted live inspection after selecting an agent name, displayed selector, or correlation ID from teammate-list.",
 ];
+const TEAMMATE_WAIT_DESCRIPTION =
+  "Wait for a teammate agent to settle, or wait for a fixed delay. This is event-driven and avoids repeated teammate-watch calls.";
+const TEAMMATE_WAIT_SNIPPET = "Wait for a teammate to finish or for a bounded delay.";
+const TEAMMATE_WAIT_GUIDELINES = [
+  "Use teammate-wait instead of repeatedly calling teammate-watch while an agent is running or retrying.",
+];
 
 export const AGENT_BUFFER_LIMITS = Object.freeze({
   inboxItems: 64,
@@ -179,6 +185,7 @@ export const AGENT_BUFFER_LIMITS = Object.freeze({
   logBytes: 512 * 1024,
   lastResultBytes: 256 * 1024,
 });
+export const TEAMMATE_STALL_TIMEOUT_MS = 30_000;
 
 export const WAKEABLE_AGENT_BUDGET = Object.freeze({
   maxSleepingAgents: 12,
@@ -316,6 +323,7 @@ interface AgentWidgetRow {
   outputTokens?: number;
   startedAt: number;
   lastActivityAt: number;
+  resultReadyAt?: number;
   parentLabel?: string;
   resultLabels?: string[];
 }
@@ -543,8 +551,12 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
         : progress?.status ?? direct?.status ?? active.status;
       const action = runningTool
         ? toolAction(runningTool.name)
+        : (progress?.resultReadyAt ?? direct?.resultReadyAt) !== undefined
+          ? "result ready; confirming terminal"
         : status === "sleeping"
           ? "sleeping"
+          : status === "retrying"
+            ? `retry ${direct?.retry?.attempt ?? "?"}/${direct?.retry?.maxRetries ?? "?"}`
           : status === "pending"
             ? "waiting for dependencies"
             : status === "failed"
@@ -580,6 +592,9 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
         outputTokens: progress?.outputTokens,
         startedAt: direct?.startedAt ?? active.startedAt,
         lastActivityAt: progress?.lastActivityAt ?? direct?.lastActivityAt ?? active.lastActivityAt,
+        ...(progress?.resultReadyAt ?? direct?.resultReadyAt
+          ? { resultReadyAt: progress?.resultReadyAt ?? direct?.resultReadyAt }
+          : {}),
         ...(parent ? { parentLabel: labelFor(parent) } : {}),
         ...(resultLabels?.length ? { resultLabels } : {}),
       });
@@ -599,9 +614,10 @@ export function renderAgentStatusWidget(
   const statusRank = (status: AgentWidgetRow["status"]): number => {
     if (status === "failed") return 0;
     if (status === "running") return 1;
-    if (status === "sleeping") return 2;
-    if (status === "pending") return 3;
-    return 4;
+    if (status === "retrying") return 2;
+    if (status === "sleeping") return 3;
+    if (status === "pending") return 4;
+    return 5;
   };
   rows.sort((a, b) => statusRank(a.status) - statusRank(b.status));
 
@@ -609,8 +625,10 @@ export function renderAgentStatusWidget(
   const required = new Set<AgentWidgetRow>();
   const failedAnchor = rows.find((row) => row.status === "failed");
   const running = rows.find((row) => row.status === "running");
+  const retrying = rows.find((row) => row.status === "retrying");
   if (failedAnchor) required.add(failedAnchor);
   if (running) required.add(running);
+  if (retrying) required.add(retrying);
   for (const row of rows) {
     if (required.size >= maxVisible) break;
     required.add(row);
@@ -619,6 +637,7 @@ export function renderAgentStatusWidget(
   const hidden = rows.length - visible.length;
   const icon = (row: AgentWidgetRow): string => {
     if (row.status === "running") return theme.fg("success", "■");
+    if (row.status === "retrying") return theme.fg("warning", "↻");
     if (row.status === "sleeping") return theme.fg("warning", "◉");
     if (row.status === "failed") return theme.fg("error", "✗");
     if (row.status === "completed") return theme.fg("muted", "✓");
@@ -636,11 +655,13 @@ export function renderAgentStatusWidget(
   }
 
   const runningCount = rows.filter((row) => row.status === "running").length;
+  const retryingCount = rows.filter((row) => row.status === "retrying").length;
   const sleeping = rows.filter((row) => row.status === "sleeping").length;
   const pending = rows.filter((row) => row.status === "pending").length;
   const failedCount = rows.filter((row) => row.status === "failed").length;
   const summary = [
     runningCount ? `${runningCount} running` : "",
+    retryingCount ? `${retryingCount} retrying` : "",
     sleeping ? `${sleeping} sleeping` : "",
     pending ? `${pending} pending` : "",
     failedCount ? `${failedCount} failed` : "",
@@ -656,11 +677,15 @@ export function renderAgentStatusWidget(
     const now = Date.now();
     const duration = `${Math.max(0, Math.floor((now - row.startedAt) / 1000))}s`;
     const idleMs = Math.max(0, now - row.lastActivityAt);
-    const stalled = row.status === "running" && idleMs >= 30_000;
-    const state = stalled
+    const stalled = row.status === "running" && row.resultReadyAt === undefined && idleMs >= TEAMMATE_STALL_TIMEOUT_MS;
+    const state = row.resultReadyAt !== undefined && row.status === "running"
+      ? "result ready; confirming terminal"
+      : stalled
       ? `stalled ${Math.floor(idleMs / 1000)}s`
       : row.status === "running"
         ? `running · ${row.action}`
+        : row.status === "retrying"
+          ? `retrying · ${row.action}`
         : row.action;
     const tokenMetrics = row.inputTokens !== undefined || row.outputTokens !== undefined
       ? [`in ${compactMetric(row.inputTokens ?? 0)}`, `out ${compactMetric(row.outputTokens ?? 0)}`]
@@ -1195,6 +1220,18 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       },
     });
 
+    pi.registerTool({
+      name: "teammate-wait",
+      label: "Teammate Wait",
+      description: TEAMMATE_WAIT_DESCRIPTION,
+      promptSnippet: TEAMMATE_WAIT_SNIPPET,
+      promptGuidelines: TEAMMATE_WAIT_GUIDELINES,
+      parameters: TeammateWaitParams,
+      async execute(_id: string, params: { name?: string; timeoutMs?: number; waitMs?: number }, signal: AbortSignal) {
+        return proxyCall<{ status: TeammateWaitStatus; output: string[] }>("teammate-wait", params, signal);
+      },
+    });
+
     return; // Child mode done — skip root-mode registration
   }
 
@@ -1422,12 +1459,15 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           target.sendControl = sendControl;
           target.sessionDir = sessionDir;
           target.status = "running";
+          target.retry = undefined;
+          target.resultReadyAt = undefined;
           if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
         },
         onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent(state, {
           ...event,
           correlationId,
         }),
+        onRetry: (retry) => applyAgentRetryState(state, retry),
         onTurnComplete: (result: SingleResult) => {
           const lastMessage = result.messages[result.messages.length - 1]?.content;
           settleAgent(
@@ -1468,6 +1508,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               outputTokens: data.outputTokens,
               durationMs: data.durationMs,
               lastActivityAt: data.lastActivityAt,
+              resultReadyAt: data.resultReadyAt,
               ...(data.lastMessage
                 ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
                 : {}),
@@ -1476,10 +1517,19 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
                 : {}),
             };
             progressState.set(progressKey, entry);
+            if (data.resultReadyAt !== undefined) {
+              applyAgentResultReadyState(state, {
+                correlationId: entry.correlationId,
+                resultReadyAt: data.resultReadyAt,
+              });
+            } else if (data.status === "running") {
+              clearAgentResultReadyState(state, entry.correlationId);
+            }
             const childAgent = state.activeRuns.get(entry.correlationId);
             if (childAgent && childAgent !== activeAgent) {
               childAgent.lastActivityAt = Date.now();
               childAgent.status = entry.status === "completed" ? "sleeping" : entry.status;
+              if (entry.status === "running") childAgent.retry = undefined;
               childAgent.outputLog = [...activeAgent.outputLog];
               trimAgentBuffers(childAgent, childAgent.status === "sleeping");
             }
@@ -2030,6 +2080,28 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     },
   };
 
+  const waitTool: ToolDefinition<typeof TeammateWaitParams, { status: TeammateWaitStatus; output: string[] }> = {
+    name: "teammate-wait",
+    label: "Teammate Wait",
+    description: TEAMMATE_WAIT_DESCRIPTION,
+    promptSnippet: TEAMMATE_WAIT_SNIPPET,
+    promptGuidelines: TEAMMATE_WAIT_GUIDELINES,
+    parameters: TeammateWaitParams,
+
+    async execute(
+      _id: string,
+      params: { name?: string; timeoutMs?: number; waitMs?: number },
+      signal: AbortSignal,
+    ): Promise<AgentToolResult<{ status: TeammateWaitStatus; output: string[] }>> {
+      const result = await waitForTeammate(state, params, signal);
+      return {
+        content: [{ type: "text", text: result.output.join("\n") }],
+        isError: result.status === "not-found" || result.status === "stalled" || result.status === "timeout" || result.status === "aborted",
+        details: { status: result.status, output: result.output },
+      };
+    },
+  };
+
   // =========================================================================
   // Register tools (LLM-callable)
   // =========================================================================
@@ -2038,6 +2110,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   pi.registerTool(sendTool);
   pi.registerTool(listTool);
   pi.registerTool(watchTool);
+  pi.registerTool(waitTool);
 
   // =========================================================================
   // Alt+R shortcut — attach overlay (user-facing TUI)
@@ -2931,6 +3004,7 @@ export function buildAgentList(
   const iconFor = (status: ListedAgentStatus): string => {
     if (status === "pending") return "○";
     if (status === "running") return "●";
+    if (status === "retrying") return "↻";
     if (status === "sleeping") return "◉";
     if (status === "failed") return "✗";
     return "✓";
@@ -3068,6 +3142,13 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
       "---",
       ...log,
     ];
+    if (agent.status === "retrying" && agent.retry) {
+      const retryIn = Math.max(0, Math.ceil((agent.retry.nextRetryAt - Date.now()) / 1000));
+      output.push(`Retry ${agent.retry.attempt}/${agent.retry.maxRetries} in ${retryIn}s: ${agent.retry.lastError}`);
+    }
+    if (agent.resultReadyAt !== undefined && agent.status === "running") {
+      output.push("Pi completed a no-tool assistant turn; final agent_end confirmation is pending.");
+    }
     const lastResult = agent.lastResult?.trim();
     if (lastResult) {
       output.push("--- last result ---", ...lastResult.split("\n").slice(-lineCount));
@@ -3098,6 +3179,9 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
     ...log,
   ];
   const lastMessage = progress.lastMessage?.trim();
+  if (progress.resultReadyAt !== undefined && progress.status === "running") {
+    output.push("Pi completed a no-tool assistant turn; final agent_end confirmation is pending.");
+  }
   if (lastMessage) {
     output.push("--- last message ---", ...lastMessage.split("\n").slice(-lineCount));
   } else if (log.length === 0) {
@@ -3113,6 +3197,153 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
     output.push("", "[graph is sleeping — this task's captured messages remain available]");
   }
   return output;
+}
+
+export type TeammateWaitStatus = "completed" | "failed" | "terminated" | "result-ready" | "stalled" | "timeout" | "not-found" | "delayed" | "aborted";
+
+export interface TeammateWaitResult {
+  status: TeammateWaitStatus;
+  output: string[];
+}
+
+interface PendingTeammateWaiter {
+  resolve: (result: TeammateWaitResult) => void;
+  timer?: ReturnType<typeof setTimeout>;
+  signal?: AbortSignal;
+  abortHandler?: () => void;
+}
+
+const teammateWaiters = new WeakMap<TeammateState, Map<string, Set<PendingTeammateWaiter>>>();
+
+function waitOutput(status: TeammateWaitStatus, target?: string): string[] {
+  const subject = target ? `Agent "${target}"` : "Delay";
+  if (status === "completed") return [`${subject} completed.`];
+  if (status === "failed") return [`${subject} failed.`];
+  if (status === "terminated") return [`${subject} was terminated.`];
+  if (status === "result-ready") return [`${subject} produced a final no-tool assistant turn; final agent_end confirmation is pending.`];
+  if (status === "stalled") return [`${subject} stopped reporting activity; inspect its captured output before retrying or terminating it.`];
+  if (status === "timeout") return [`${subject} did not settle before the wait timeout.`];
+  if (status === "aborted") return [`${subject} wait was aborted.`];
+  if (status === "not-found") return [`${subject} was not found.`];
+  return [`${subject} elapsed.`];
+}
+
+function clearWaiter(waiters: Set<PendingTeammateWaiter>, waiter: PendingTeammateWaiter): void {
+  waiters.delete(waiter);
+  if (waiter.timer) clearTimeout(waiter.timer);
+  if (waiter.signal && waiter.abortHandler) waiter.signal.removeEventListener("abort", waiter.abortHandler);
+}
+
+function settleTeammateWaiters(
+  state: TeammateState,
+  correlationId: string,
+  status: Extract<TeammateWaitStatus, "completed" | "failed" | "terminated" | "result-ready">,
+): void {
+  const byAgent = teammateWaiters.get(state);
+  const waiters = byAgent?.get(correlationId);
+  if (!waiters) return;
+  byAgent?.delete(correlationId);
+  for (const waiter of [...waiters]) {
+    clearWaiter(waiters, waiter);
+    waiter.resolve({ status, output: waitOutput(status, correlationId) });
+  }
+}
+
+function statusForWatchTarget(
+  target: WatchTarget,
+  now = Date.now(),
+): Extract<TeammateWaitStatus, "completed" | "failed" | "result-ready" | "stalled"> | undefined {
+  const status = target.kind === "agent" ? target.agent.status : target.progress.status;
+  if (status === "sleeping" || status === "completed") return "completed";
+  if (status === "failed") return "failed";
+  const resultReadyAt = target.kind === "agent" ? target.agent.resultReadyAt : target.progress.resultReadyAt;
+  if (resultReadyAt !== undefined) return "result-ready";
+  const lastActivityAt = target.kind === "agent"
+    ? target.agent.lastActivityAt
+    : target.progress.lastActivityAt ?? target.agent.lastActivityAt;
+  if (status === "running" && now - lastActivityAt >= TEAMMATE_STALL_TIMEOUT_MS) return "stalled";
+  return undefined;
+}
+
+function waitDelayForWatchTarget(target: WatchTarget, timeoutAt: number | undefined): number {
+  const lastActivityAt = target.kind === "agent"
+    ? target.agent.lastActivityAt
+    : target.progress.lastActivityAt ?? target.agent.lastActivityAt;
+  const stalledAt = lastActivityAt + TEAMMATE_STALL_TIMEOUT_MS;
+  const nextAt = Math.min(stalledAt, timeoutAt ?? Number.POSITIVE_INFINITY);
+  return Math.max(1, nextAt - Date.now());
+}
+
+export function waitForTeammate(
+  state: TeammateState,
+  params: { name?: string; timeoutMs?: number; waitMs?: number },
+  signal?: AbortSignal,
+): Promise<TeammateWaitResult> {
+  if (!params.name) {
+    if (!params.waitMs) {
+      return Promise.resolve({ status: "not-found", output: ["Provide an agent name or waitMs."] });
+    }
+    if (signal?.aborted) return Promise.resolve({ status: "aborted", output: waitOutput("aborted") });
+    return new Promise((resolve) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const abortHandler = () => finish("aborted");
+      const finish = (status: "delayed" | "aborted") => {
+        if (timer) clearTimeout(timer);
+        signal?.removeEventListener("abort", abortHandler);
+        resolve({ status, output: waitOutput(status) });
+      };
+      signal?.addEventListener("abort", abortHandler, { once: true });
+      timer = setTimeout(() => finish("delayed"), params.waitMs);
+    });
+  }
+
+  const resolved = resolveWatchTarget(state, params.name);
+  if (!resolved.match) {
+    return Promise.resolve({ status: "not-found", output: [
+      resolved.error ?? `Agent "${params.name}" not found.${resolved.available.length ? ` Available: ${resolved.available.join(", ")}` : ""}`,
+    ] });
+  }
+  const settled = statusForWatchTarget(resolved.match);
+  if (settled) {
+    return Promise.resolve({
+      status: settled,
+      output: [...waitOutput(settled, params.name), ...buildWatchOutput(resolved.match, 20)],
+    });
+  }
+  if (signal?.aborted) return Promise.resolve({ status: "aborted", output: waitOutput("aborted", params.name) });
+
+  const correlationId = resolved.match.kind === "agent"
+    ? resolved.match.agent.correlationId
+    : resolved.match.progress.correlationId;
+  const byAgent = teammateWaiters.get(state) ?? new Map<string, Set<PendingTeammateWaiter>>();
+  teammateWaiters.set(state, byAgent);
+  const waiters = byAgent.get(correlationId) ?? new Set<PendingTeammateWaiter>();
+  byAgent.set(correlationId, waiters);
+  return new Promise((resolve) => {
+    const waiter: PendingTeammateWaiter = { resolve };
+    const finish = (status: "completed" | "failed" | "result-ready" | "stalled" | "timeout" | "aborted") => {
+      clearWaiter(waiters, waiter);
+      if (waiters.size === 0) byAgent.delete(correlationId);
+      const output = status === "result-ready" || status === "stalled" || status === "completed" || status === "failed"
+        ? [...waitOutput(status, params.name), ...buildWatchOutput(resolved.match!, 20)]
+        : waitOutput(status, params.name);
+      resolve({ status, output });
+    };
+    const timeoutAt = params.timeoutMs ? Date.now() + params.timeoutMs : undefined;
+    const check = () => {
+      const currentStatus = statusForWatchTarget(resolved.match!);
+      if (currentStatus) return finish(currentStatus);
+      if (timeoutAt !== undefined && Date.now() >= timeoutAt) return finish("timeout");
+      waiter.timer = setTimeout(check, waitDelayForWatchTarget(resolved.match!, timeoutAt));
+    };
+    if (signal) {
+      waiter.signal = signal;
+      waiter.abortHandler = () => finish("aborted");
+      signal.addEventListener("abort", waiter.abortHandler, { once: true });
+    }
+    waiters.add(waiter);
+    check();
+  });
 }
 
 function emitComplete(
@@ -3155,13 +3386,83 @@ function retireAgent(
   const agent = state.activeRuns.get(correlationId);
   if (!agent) return;
   agent.status = "sleeping";
+  agent.retry = undefined;
   agent.lastResult = lastResult === undefined
     ? undefined
     : truncateUtf8Tail(lastResult, AGENT_BUFFER_LIMITS.lastResultBytes);
   agent.sleptAt = Date.now();
   agent.lastActivityAt = Date.now();
   trimAgentBuffers(agent, true);
+  settleTeammateWaiters(state, correlationId, "completed");
   enforceWakeableAgentBudget(state);
+}
+
+export function applyAgentRetryState(
+  state: TeammateState,
+  retry: {
+    correlationId: string;
+    attempt: number;
+    maxRetries: number;
+    delayMs: number;
+    nextRetryAt: number;
+    error: string;
+  },
+): void {
+  const agent = state.activeRuns.get(retry.correlationId);
+  if (!agent) return;
+  agent.status = "retrying";
+  agent.retry = {
+    attempt: retry.attempt,
+    maxRetries: retry.maxRetries,
+    nextRetryAt: retry.nextRetryAt,
+    lastError: truncateUtf8Tail(retry.error, AGENT_BUFFER_LIMITS.logLineBytes),
+  };
+  agent.lastActivityAt = Date.now();
+  agent.outputLog.push(
+    `[${new Date(agent.lastActivityAt).toISOString().slice(11, 19)}] ↻ retry ${retry.attempt}/${retry.maxRetries} in ${Math.ceil(retry.delayMs / 1000)}s: ${agent.retry.lastError}`,
+  );
+  trimAgentBuffers(agent);
+  for (const parent of state.activeRuns.values()) {
+    const progress = parent.progress?.find((item) => item.correlationId === retry.correlationId);
+    if (!progress) continue;
+    progress.status = "retrying";
+    progress.lastMessage = agent.retry.lastError;
+    progress.lastActivityAt = agent.lastActivityAt;
+  }
+}
+
+/**
+ * A strict Pi `turn_end` can make the assistant answer consumable before the
+ * authoritative `agent_end` lifecycle line arrives. Keep the run active, but
+ * release event-driven waiters with that distinction made explicit.
+ */
+export function applyAgentResultReadyState(
+  state: TeammateState,
+  resultReady: { correlationId: string; resultReadyAt: number },
+): void {
+  const agent = state.activeRuns.get(resultReady.correlationId);
+  if (!agent) return;
+  agent.resultReadyAt = resultReady.resultReadyAt;
+  agent.lastActivityAt = Math.max(agent.lastActivityAt, resultReady.resultReadyAt);
+  const marker = "◆ Pi final assistant turn received; awaiting agent_end.";
+  if (agent.outputLog.at(-1) !== marker) agent.outputLog.push(marker);
+  trimAgentBuffers(agent);
+  for (const parent of state.activeRuns.values()) {
+    const progress = parent.progress?.find((item) => item.correlationId === resultReady.correlationId);
+    if (!progress) continue;
+    progress.resultReadyAt = resultReady.resultReadyAt;
+    progress.lastActivityAt = Math.max(progress.lastActivityAt ?? 0, resultReady.resultReadyAt);
+  }
+  settleTeammateWaiters(state, resultReady.correlationId, "result-ready");
+}
+
+function clearAgentResultReadyState(state: TeammateState, correlationId: string): void {
+  const agent = state.activeRuns.get(correlationId);
+  if (agent) agent.resultReadyAt = undefined;
+  for (const parent of state.activeRuns.values()) {
+    const progress = parent.progress?.find((item) => item.correlationId === correlationId);
+    if (progress) progress.resultReadyAt = undefined;
+  }
 }
 
 interface WakeableAgentCohort {
@@ -3199,6 +3500,7 @@ function terminateAndRemoveWakeableCohort(
   for (const agent of cohort.agents) {
     releaseAgentMemory(agent);
     agent.status = "completed";
+    settleTeammateWaiters(state, agent.correlationId, "terminated");
   }
   for (const id of ids) state.activeRuns.delete(id);
   for (const [name, id] of state.namedAgents) {
@@ -3268,7 +3570,7 @@ export function settleAgent(
   wakeable = true,
 ): void {
   if (exitCode === 0 && wakeable) retireAgent(state, correlationId, lastResult);
-  else killAgent(state, correlationId);
+  else killAgent(state, correlationId, undefined, "failed");
 }
 
 export function resolveAgentCorrelationId(
@@ -3295,12 +3597,14 @@ function killAgent(
   state: TeammateState,
   correlationId: string,
   name?: string,
+  waitStatus: Extract<TeammateWaitStatus, "failed" | "terminated"> = "terminated",
 ): void {
   const agent = state.activeRuns.get(correlationId);
   if (!agent) return;
   agent.abortController.abort();
   releaseAgentMemory(agent);
   agent.status = "completed";
+  settleTeammateWaiters(state, correlationId, waitStatus);
   state.activeRuns.delete(correlationId);
   if (name) state.namedAgents.delete(name);
   for (const [agentName, id] of state.namedAgents) {
@@ -3348,6 +3652,7 @@ export function killAgentTree(
     if (!agent) continue;
     releaseAgentMemory(agent);
     agent.status = "completed";
+    settleTeammateWaiters(state, id, "terminated");
     state.activeRuns.delete(id);
   }
   for (const [agentName, id] of state.namedAgents) {
@@ -3941,6 +4246,7 @@ async function handleProxyRequest(
           ...(progress ? {
             durationMs: progress.durationMs,
             lastActivityAt: progress.lastActivityAt,
+            resultReadyAt: progress.resultReadyAt,
             recentTools: progress.recentTools,
             inputTokens: progress.inputTokens,
             outputTokens: progress.outputTokens,
@@ -4004,6 +4310,7 @@ async function handleProxyRequest(
           outputTokens: data.outputTokens,
           durationMs: data.durationMs,
           lastActivityAt: data.lastActivityAt,
+          resultReadyAt: data.resultReadyAt,
           ...(data.lastMessage
             ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
             : {}),
@@ -4012,12 +4319,21 @@ async function handleProxyRequest(
             : {}),
         };
         progressState.set(taskIndex, entry);
+        if (data.resultReadyAt !== undefined) {
+          applyAgentResultReadyState(state, {
+            correlationId: entry.correlationId,
+            resultReadyAt: data.resultReadyAt,
+          });
+        } else if (data.status === "running") {
+          clearAgentResultReadyState(state, entry.correlationId);
+        }
         activeAgent.lastActivityAt = Date.now();
 
         const childAgent = state.activeRuns.get(correlationId);
         if (childAgent && childAgent !== activeAgent) {
           childAgent.lastActivityAt = Date.now();
           childAgent.status = data.status === "completed" ? "sleeping" : data.status;
+          if (data.status === "running") childAgent.retry = undefined;
           if (data.lastMessage) {
             const lastLine = data.lastMessage.split("\n").pop()?.trim();
             if (lastLine) {
@@ -4060,12 +4376,18 @@ async function handleProxyRequest(
           target.sendControl = sendControl;
           target.sessionDir = sessionDir;
           target.status = "running";
+          target.retry = undefined;
+          target.resultReadyAt = undefined;
           if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
         },
         onChildEvent: (childEvent) => handleChildLifecycleEvent(state, {
           ...childEvent,
           correlationId: cid,
         }),
+        onRetry: (retry) => {
+          applyAgentRetryState(state, retry);
+          reportChildStatus("retrying");
+        },
         onTurnComplete: (result) => {
           if (result.correlationId !== cid) {
             const lastMessage = result.messages[result.messages.length - 1]?.content;
@@ -4080,6 +4402,11 @@ async function handleProxyRequest(
         },
         onProgress: (data) => {
             if (!normalizedTasks) {
+              if (data.resultReadyAt !== undefined) {
+                applyAgentResultReadyState(state, { correlationId: cid, resultReadyAt: data.resultReadyAt });
+              } else if (data.status === "running") {
+                clearAgentResultReadyState(state, cid);
+              }
               reportChildStatus(
                 data.status === "completed" ? "completed" : data.status === "failed" ? "failed" : "running",
                 data,
@@ -4223,6 +4550,20 @@ async function handleProxyRequest(
           results: [],
           ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
         },
+      }});
+      return;
+    }
+
+    case "teammate-wait": {
+      const result = await waitForTeammate(state, {
+        name: typeof params.name === "string" ? params.name : undefined,
+        timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : undefined,
+        waitMs: typeof params.waitMs === "number" ? params.waitMs : undefined,
+      });
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: result.output.join("\n") }],
+        isError: result.status === "not-found" || result.status === "timeout" || result.status === "aborted",
+        details: { status: result.status, output: result.output },
       }});
       return;
     }

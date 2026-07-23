@@ -1,6 +1,6 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
 
-export type GoalWidgetPhase = "normal" | "waiting" | "verifying" | "verified";
+export type GoalWidgetPhase = "normal" | "waiting" | "retrying" | "verifying" | "verified";
 
 export interface GoalWidgetModel {
   objective: string;
@@ -10,6 +10,8 @@ export interface GoalWidgetModel {
   tokensUsed: number;
   tokenBudget?: number;
   timeUsedSeconds: number;
+  retryAttempt?: number;
+  retryMaxRetries?: number;
 }
 
 export interface GoalWidgetTheme {
@@ -50,6 +52,13 @@ function visualState(goal: GoalWidgetModel, phase: GoalWidgetPhase): VisualState
   if (phase === "verifying") return { glyph: "◐", label: "VERIFYING", color: "accent" };
   if (phase === "verified" || goal.status === "done") {
     return { glyph: "✓", label: "VERIFIED", color: "success" };
+  }
+  if (phase === "retrying") {
+    return {
+      glyph: "↻",
+      label: `RETRYING ${goal.retryAttempt ?? 1}/${goal.retryMaxRetries ?? 5}`,
+      color: "warning",
+    };
   }
   if (phase === "waiting") {
     return { glyph: "○", label: "WAITING", color: "warning", hint: "/goal resume" };

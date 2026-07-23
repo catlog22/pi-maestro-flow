@@ -10,6 +10,7 @@ import {
   getActiveGoal,
   goalArgumentCompletions,
   initGoal,
+  isRetryableGoalFailure,
   onAgentEnd,
   onBeforeAgentStart,
   onInput,
@@ -35,6 +36,12 @@ function createContext(overrides: Partial<GoalContext> = {}): GoalContext {
     ...overrides,
   };
 }
+
+test("Goal shares teammate retry classification for transient provider failures", () => {
+  assert.equal(isRetryableGoalFailure({ stopReason: "error", errorMessage: "fetch failed: ECONNRESET" }), true);
+  assert.equal(isRetryableGoalFailure({ stopReason: "error", errorMessage: "Provider returned error: 503" }), true);
+  assert.equal(isRetryableGoalFailure({ stopReason: "error", errorMessage: "Invalid API key" }), false);
+});
 
 test("Goal creation persists the approved Plan handoff binding", async () => {
   const entries: Array<{ type: string; data: unknown }> = [];
@@ -72,9 +79,10 @@ test("goal widget renders explicit lifecycle states within widths 1 through 120"
     tokenBudget: 50_000,
     timeUsedSeconds: 125,
   };
-  const variants: Array<{ goal: GoalWidgetModel; phase: "normal" | "waiting" | "verifying" | "verified"; label: RegExp }> = [
+  const variants: Array<{ goal: GoalWidgetModel; phase: "normal" | "waiting" | "retrying" | "verifying" | "verified"; label: RegExp }> = [
     { goal: base, phase: "normal", label: /ACTIVE/ },
     { goal: base, phase: "waiting", label: /WAITING/ },
+    { goal: { ...base, retryAttempt: 2, retryMaxRetries: 5 }, phase: "retrying", label: /RETRYING 2\/5/ },
     { goal: base, phase: "verifying", label: /VERIFYING/ },
     { goal: { ...base, status: "done" }, phase: "verified", label: /VERIFIED/ },
     { goal: { ...base, status: "paused", pauseReason: "user" }, phase: "normal", label: /STOPPED/ },
@@ -874,6 +882,32 @@ test("agent errors pause a Goal without creating an error lifecycle state", asyn
       tokenBudget: getActiveGoal()!.tokenBudget,
       timeUsedSeconds: getActiveGoal()!.timeUsedSeconds,
     }, "normal", 120, goalWidgetTheme).join("\n"), /STOPPED/);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("transient Goal provider failures share the bounded retry status projection", async () => {
+  initGoal({ appendEntry() {} } as never);
+  const statuses: string[] = [];
+  const ctx = createContext({
+    isIdle: () => false,
+    ui: {
+      notify() {},
+      setStatus(_key, value) { if (value) statuses.push(value); },
+    },
+  });
+  onSessionStart(ctx);
+
+  try {
+    await executeGoal({ action: "create", objective: "Recover from a transient network failure" }, ctx);
+    await onAgentEnd({
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed: ECONNRESET", content: [] }],
+    }, ctx);
+
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.ok(statuses.includes("retrying 1/5"));
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);

@@ -26,7 +26,7 @@ export interface SingleResult {
   attemptedModels?: string[];
 }
 
-export type AgentProgressStatus = "pending" | "running" | "completed" | "failed";
+export type AgentProgressStatus = "pending" | "running" | "retrying" | "completed" | "failed";
 
 export interface AgentProgress {
   agent: string;
@@ -43,6 +43,8 @@ export interface AgentProgress {
   durationMs: number;
   lastActivityAt: number;
   startedAt: number;
+  /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
+  resultReadyAt?: number;
   lastMessage?: string;
 }
 
@@ -62,6 +64,8 @@ export interface AgentProgressSnapshot {
   outputTokens?: number;
   durationMs?: number;
   lastActivityAt?: number;
+  /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
+  resultReadyAt?: number;
   lastMessage?: string;
   error?: string;
 }
@@ -72,10 +76,12 @@ export interface ChildAgentCallSnapshot {
   correlationId: string;
   parentCorrelationId?: string;
   parentName?: string;
-  status: "running" | "completed" | "failed";
+  status: "running" | "retrying" | "completed" | "failed";
   startedAt?: number;
   durationMs?: number;
   lastActivityAt?: number;
+  /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
+  resultReadyAt?: number;
   recentTools?: Array<{ name: string; status: string }>;
   lastMessage?: string;
   inputTokens?: number;
@@ -102,7 +108,14 @@ export interface MessageEnvelope {
   timestamp: number;
 }
 
-export type AgentStatus = "pending" | "running" | "sleeping" | "completed" | "failed";
+export type AgentStatus = "pending" | "running" | "retrying" | "sleeping" | "completed" | "failed";
+
+export interface AgentRetryState {
+  attempt: number;
+  maxRetries: number;
+  nextRetryAt: number;
+  lastError: string;
+}
 
 export interface TeammateInteractionRecord {
   requestId: string;
@@ -145,6 +158,9 @@ export interface ActiveAgent {
   replyTo?: string;
   spawnedBy?: string;
   status: AgentStatus;
+  retry?: AgentRetryState;
+  /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
+  resultReadyAt?: number;
   lastResult?: string;
   sleptAt?: number;
   sleepMs: number;

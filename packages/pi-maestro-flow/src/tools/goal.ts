@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { NETWORK_RETRY_POLICY, isRetryableProviderError } from "pi-maestro-teammate/v1/retry";
 import type { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSession, type WorkflowSnapshot } from "../session/types.ts";
 import {
@@ -151,7 +152,12 @@ let activeGoal: ActiveGoal | undefined;
 let extensionApi: ExtensionAPI | undefined;
 let baseCwd = "";
 let continuationPending: ContinuationPending | undefined;
-let goalRecovery: { goalId: string; kind: string } | undefined;
+let goalRecovery: {
+  goalId: string;
+  kind: "compaction_retry" | "provider_retry";
+  attempt?: number;
+  maxRetries?: number;
+} | undefined;
 let completionTimer: ReturnType<typeof setTimeout> | undefined;
 let verificationInFlight: { goalId: string; updatedAt: number; epoch: number } | undefined;
 let goalLifecycleEpoch = 0;
@@ -394,7 +400,7 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
   updateStatusLine(ctx, activeGoal);
 
   const wasPiRetry = isPiRetry(event, activeGoal.id);
-  clearRecoveryFor(activeGoal.id);
+  if (!wasPiRetry) clearRecoveryFor(activeGoal.id);
   if (workflowCoordinator?.status()?.session?.activeRunId) {
     try {
       await workflowCoordinator.brief();
@@ -436,7 +442,7 @@ export async function onAgentEnd(event: { messages: unknown[] }, ctx: GoalContex
 
   if (finalMsg?.stopReason === "aborted" || finalMsg?.stopReason === "error") {
     if (isRetryable(finalMsg)) {
-      goalRecovery = { goalId, kind: isOverflow(finalMsg) ? "compaction_retry" : "provider_retry" };
+      markGoalRecovery(goalId, isOverflow(finalMsg) ? "compaction_retry" : "provider_retry");
       cancelContinuation();
       persistGoal(activeGoal);
       updateStatusLine(ctx, activeGoal);
@@ -1389,10 +1395,14 @@ function pauseAfterEnd(ctx: GoalContext, goal: ActiveGoal, assistant: AssistantM
   ctx.ui.notify(`Goal paused after ${reason}${details}. Use /goal resume to continue.`, "warning");
 }
 
-function isRetryable(a: AssistantMessageLike): boolean {
+export function isRetryableGoalFailure(a: AssistantMessageLike): boolean {
   if (a.stopReason !== "error" || !a.errorMessage) return false;
   if (NON_RETRYABLE_RE.test(a.errorMessage)) return false;
-  return isOverflow(a) || RETRYABLE_RE.test(a.errorMessage);
+  return isOverflow(a) || RETRYABLE_RE.test(a.errorMessage) || isRetryableProviderError(a.errorMessage);
+}
+
+function isRetryable(a: AssistantMessageLike): boolean {
+  return isRetryableGoalFailure(a);
 }
 
 function isOverflow(a: AssistantMessageLike): boolean {
@@ -1404,6 +1414,22 @@ function isPiRetry(event: unknown, goalId: string): boolean {
   if (e.willRetry === true) return true;
   return goalRecovery?.goalId === goalId && goalRecovery.kind === "compaction_retry"
     && (e.reason === undefined || e.reason === "overflow");
+}
+
+function markGoalRecovery(goalId: string, kind: "compaction_retry" | "provider_retry"): void {
+  if (kind === "compaction_retry") {
+    goalRecovery = { goalId, kind };
+    return;
+  }
+  const previousAttempt = goalRecovery?.goalId === goalId && goalRecovery.kind === kind
+    ? goalRecovery.attempt ?? 0
+    : 0;
+  goalRecovery = {
+    goalId,
+    kind,
+    attempt: Math.min(previousAttempt + 1, NETWORK_RETRY_POLICY.maxRetries),
+    maxRetries: NETWORK_RETRY_POLICY.maxRetries,
+  };
 }
 
 function clearRecovery() { goalRecovery = undefined; }
@@ -1442,8 +1468,11 @@ function updateStatusLine(ctx: GoalContext, goal: ActiveGoal) {
   else clearElapsedTimer();
   const waiting = goal.status === "active"
     && (goalLoopOwner?.goalId !== goal.id || goalLoopOwner.epoch !== goalLifecycleEpoch);
-  ctx.ui.setStatus(STATUS_KEY, waiting ? "waiting" : fmtStatusLine(goal));
-  updateGoalWidget(ctx, goal, waiting ? "waiting" : "normal");
+  const retry = goalRecovery?.goalId === goal.id && goalRecovery.kind === "provider_retry"
+    ? goalRecovery
+    : undefined;
+  ctx.ui.setStatus(STATUS_KEY, retry ? `retrying ${retry.attempt}/${retry.maxRetries}` : waiting ? "waiting" : fmtStatusLine(goal));
+  updateGoalWidget(ctx, goal, retry ? "retrying" : waiting ? "waiting" : "normal");
 }
 
 function showCompletionStatus(ctx: GoalContext, goal: ActiveGoal) {
@@ -1465,6 +1494,12 @@ function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetP
     tokensUsed: goal.tokensUsed,
     tokenBudget: goal.tokenBudget,
     timeUsedSeconds: goal.timeUsedSeconds,
+    retryAttempt: goalRecovery?.goalId === goal.id && goalRecovery.kind === "provider_retry"
+      ? goalRecovery.attempt
+      : undefined,
+    retryMaxRetries: goalRecovery?.goalId === goal.id && goalRecovery.kind === "provider_retry"
+      ? goalRecovery.maxRetries
+      : undefined,
   };
   ctx.ui.setWidget?.(GOAL_WIDGET_KEY, (_tui, theme) => ({
     render(width: number): string[] {

@@ -264,7 +264,8 @@ function renderProgress(
     const focus = focusTaskIndex(entries);
     const focused = entries.find((entry) => entry.taskIndex === focus) ?? entries[0];
     const idleMs = focused?.lastActivityAt ? Date.now() - focused.lastActivityAt : 0;
-    const stalled = focused?.status === "running" && idleMs >= 30_000;
+    const resultReady = focused?.status === "running" && focused.resultReadyAt !== undefined;
+    const stalled = focused?.status === "running" && !resultReady && idleMs >= 30_000;
     const focusedDurationMs = focused ? progressDurationMs(focused) : undefined;
     const focusedTokens = focused && (focused.inputTokens !== undefined || focused.outputTokens !== undefined)
       ? `in ${formatTokens(focused.inputTokens ?? 0)} · out ${formatTokens(focused.outputTokens ?? 0)}`
@@ -296,7 +297,7 @@ function renderProgress(
         ? theme.fg("warning", "■")
         : theme.fg("success", "✓");
     const lines: string[] = [
-      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, focusedDurationMs !== undefined ? formatDuration(focusedDurationMs) : "", focusedTokens, pending ? `${pending} pending` : "", entries.length ? `agents ${range}` : "", runningChildren ? `${runningChildren} delegated` : "", stalled ? theme.fg("error", `stalled ${Math.floor(idleMs / 1000)}s`) : ""], theme)}`,
+      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, focusedDurationMs !== undefined ? formatDuration(focusedDurationMs) : "", focusedTokens, pending ? `${pending} pending` : "", entries.length ? `agents ${range}` : "", runningChildren ? `${runningChildren} delegated` : "", resultReady ? theme.fg("success", "result ready; confirming terminal") : stalled ? theme.fg("error", `stalled ${Math.floor(idleMs / 1000)}s`) : ""], theme)}`,
       ...treeWindow.rows.map((row) => row.text),
     ];
 
@@ -320,8 +321,10 @@ function renderProgress(
         : "";
       const childActivityAt = child.lastActivityAt ?? child.startedAt;
       const childIdleMs = childActivityAt ? Math.max(0, Date.now() - childActivityAt) : 0;
-      const childState = child.status === "running" && childIdleMs >= 30_000
-        ? `stalled ${Math.floor(childIdleMs / 1000)}s`
+      const childState = child.status === "running" && child.resultReadyAt !== undefined
+        ? "result ready; confirming terminal"
+        : child.status === "running" && childIdleMs >= 30_000
+          ? `stalled ${Math.floor(childIdleMs / 1000)}s`
         : child.status;
       lines.push(`${theme.fg("dim", "↳")} ${childIcon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `child agent · ${childState}${duration}${activity}${tokens}${parent}`)}`);
     }

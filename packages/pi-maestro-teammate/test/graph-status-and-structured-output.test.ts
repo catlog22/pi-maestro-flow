@@ -8,6 +8,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import registerStructuredOutput from "../src/extension/structured-output.ts";
 import registerTeammateExtension, {
+  applyAgentRetryState,
+  applyAgentResultReadyState,
   buildAgentList,
   buildAgentSelectorRows,
   buildWatchOutput,
@@ -18,7 +20,9 @@ import registerTeammateExtension, {
   resolveProxyParentCorrelationId,
   restoreMainOwnershipIfHandbackPending,
   resolveWatchTarget,
+  settleAgent,
   switchConversationSession,
+  waitForTeammate,
 } from "../src/extension/index.ts";
 import {
   appendDistinctAssistantMessage,
@@ -670,6 +674,125 @@ test("teammate-watch explains provider queueing before first activity", () => {
   const resolved = resolveWatchTarget(state, correlationId);
   assert.ok(resolved.match);
   assert.match(buildWatchOutput(resolved.match, 20).join("\n"), /Waiting for model capacity or first activity/);
+});
+
+test("teammate-wait settles from lifecycle events without polling teammate-watch", async () => {
+  const correlationId = "wait-for-completion";
+  const now = Date.now();
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    namedAgents: new Map([["worker", correlationId]]),
+    activeRuns: new Map([[correlationId, {
+      agent: "delegate",
+      name: "worker",
+      correlationId,
+      startedAt: now,
+      abortController: new AbortController(),
+      inbox: [],
+      outputLog: [],
+      lastActivityAt: now,
+      status: "running",
+      sleepMs: 0,
+    }]]),
+  };
+
+  const waiting = waitForTeammate(state, { name: "worker", timeoutMs: 1_000 });
+  settleAgent(state, correlationId, 0, "done");
+  const result = await waiting;
+
+  assert.equal(result.status, "completed");
+  assert.match(result.output.join("\n"), /completed/);
+});
+
+test("teammate-wait returns result-ready when Pi has a final answer but agent_end is pending", async () => {
+  const correlationId = "wait-for-pi-result-ready";
+  const now = Date.now();
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    namedAgents: new Map([["explorer", correlationId]]),
+    activeRuns: new Map([[correlationId, {
+      agent: "explorer",
+      name: "explorer",
+      correlationId,
+      startedAt: now - 5_000,
+      abortController: new AbortController(),
+      inbox: [],
+      outputLog: ["## Summary\nA useful result was already returned."],
+      lastActivityAt: now - 5_000,
+      status: "running",
+      sleepMs: 0,
+    }]]),
+  };
+
+  const waiting = waitForTeammate(state, { name: "explorer", timeoutMs: 1_000 });
+  applyAgentResultReadyState(state, { correlationId, resultReadyAt: now });
+  const result = await waiting;
+
+  assert.equal(result.status, "result-ready");
+  assert.match(result.output.join("\n"), /final no-tool assistant turn/);
+  const immediate = await waitForTeammate(state, { name: "explorer" });
+  assert.equal(immediate.status, "result-ready");
+  assert.match(immediate.output.join("\n"), /useful result/);
+});
+
+test("teammate-wait returns captured output for an agent that has stalled", async () => {
+  const correlationId = "wait-for-stalled-output";
+  const now = Date.now();
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    namedAgents: new Map([["explorer", correlationId]]),
+    activeRuns: new Map([[correlationId, {
+      agent: "explorer",
+      name: "explorer",
+      correlationId,
+      startedAt: now - 60_000,
+      abortController: new AbortController(),
+      inbox: [],
+      outputLog: ["## Summary\nA useful result was already returned."],
+      lastActivityAt: now - 30_000,
+      status: "running",
+      sleepMs: 0,
+    }]]),
+  };
+
+  const result = await waitForTeammate(state, { name: "explorer" });
+
+  assert.equal(result.status, "stalled");
+  assert.match(result.output.join("\n"), /stopped reporting activity/);
+  assert.match(result.output.join("\n"), /useful result/);
+});
+
+test("retrying agents remain distinct from sleeping and expose retry metadata", () => {
+  const correlationId = "retrying-agent";
+  const now = Date.now();
+  const agent = {
+    agent: "delegate",
+    correlationId,
+    startedAt: now,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    status: "running" as const,
+    sleepMs: 0,
+  };
+  const state: TeammateState = {
+    baseCwd: process.cwd(), currentSessionId: null, namedAgents: new Map(),
+    activeRuns: new Map([[correlationId, agent]]),
+  };
+
+  applyAgentRetryState(state, {
+    correlationId, attempt: 2, maxRetries: 5, delayMs: 2_000,
+    nextRetryAt: now + 2_000, error: "ECONNRESET",
+  });
+
+  assert.equal(agent.status, "retrying");
+  const watched = buildWatchOutput({ kind: "agent", agent }, 20).join("\n");
+  assert.match(watched, /Retry 2\/5/);
+  assert.doesNotMatch(watched, /\[sleeping/);
 });
 
 test("nested proxy preserves parentage, graph children, and explicit background semantics", () => {

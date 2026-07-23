@@ -309,3 +309,23 @@ export const TeammateWatchParams = Type.Object({
     }),
   ),
 });
+
+export const TeammateWaitParams = Type.Object({
+  name: Type.Optional(
+    Type.String({
+      description: "Agent name, @name, displayed name#id-prefix, or correlation ID/prefix to wait for",
+    }),
+  ),
+  timeoutMs: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      description: "Maximum time to wait for the selected agent to settle",
+    }),
+  ),
+  waitMs: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      description: "Fixed delay in milliseconds when no agent name is supplied",
+    }),
+  ),
+});

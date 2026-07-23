@@ -34,7 +34,7 @@ export interface ControlCenterActiveAgent {
   correlationId: string;
   agent: string;
   name?: string;
-  status: "pending" | "running" | "sleeping" | "completed" | "failed";
+  status: "pending" | "running" | "retrying" | "sleeping" | "completed" | "failed";
   startedAt: number;
   inboxCount: number;
   taskCount: number;
@@ -98,6 +98,7 @@ function clampIndex(index: number, length: number): number {
 function activeStatus(status: ControlCenterActiveAgent["status"]): { icon: string; label: string; tone: string } {
   if (status === "pending") return { icon: "○", label: "Pending", tone: "dim" };
   if (status === "failed") return { icon: "✗", label: "Failed", tone: "error" };
+  if (status === "retrying") return { icon: "↻", label: "Retrying", tone: "warning" };
   if (status === "sleeping") return { icon: "◉", label: "Sleeping", tone: "warning" };
   if (status === "completed") return { icon: "✓", label: "Done", tone: "dim" };
   return { icon: "■", label: "Running", tone: "success" };

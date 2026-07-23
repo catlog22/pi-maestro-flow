@@ -134,6 +134,31 @@ test("streaming progress shows live duration and split token usage", () => {
   assert.match(rendered, /stalled 4[45]s/);
 });
 
+test("streaming progress shows a Pi result-ready turn instead of stalled", () => {
+  const now = Date.now();
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "answer captured" }],
+    details: {
+      mode: "single",
+      results: [],
+      progress: [{
+        agent: "explorer",
+        name: "explorer",
+        correlationId: "explorer-agent",
+        taskIndex: 0,
+        dependencies: [],
+        status: "running",
+        startedAt: new Date(now - 65_000).toISOString(),
+        lastActivityAt: now - 45_000,
+        resultReadyAt: now - 44_000,
+      }],
+    },
+  }, { expanded: false }, theme as never).render(120).join("\n");
+
+  assert.match(rendered, /result ready; confirming terminal/);
+  assert.doesNotMatch(rendered, /stalled/);
+});
+
 test("streaming teammate result shows child agent lifecycle separately from task progress", () => {
   const rendered = renderTeammateResult({
     content: [{ type: "text", text: "delegating" }],

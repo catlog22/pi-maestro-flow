@@ -30,6 +30,11 @@ import {
   type TeammateThinkingInput,
   type TeammateThinkingLevel,
 } from "../shared/thinking.ts";
+import {
+  NETWORK_RETRY_POLICY,
+  isRetryableProviderError,
+  retryDelayMs,
+} from "./retry.ts";
 
 // ---------------------------------------------------------------------------
 // Public param / option interfaces
@@ -63,6 +68,14 @@ export interface RunTeammateOptions {
   taskCorrelationIds?: string[];
   signal?: AbortSignal;
   onProgress?: (data: AgentProgress) => void;
+  onRetry?: (retry: {
+    correlationId: string;
+    attempt: number;
+    maxRetries: number;
+    delayMs: number;
+    nextRetryAt: number;
+    error: string;
+  }) => void;
   onChildRequest?: (event: Record<string, unknown>, reply: (msg: unknown) => void) => void;
   onChildEvent?: (event: Record<string, unknown>) => void;
   parentSessionFile?: string;
@@ -76,6 +89,8 @@ export interface RunTeammateOptions {
   onTurnComplete?: (result: SingleResult) => void;
   /** @internal Test seam for child lifecycle regression coverage. */
   spawnChildProcess?: typeof crossSpawn;
+  /** @internal Test seam for retry scheduling. */
+  waitForRetry?: (delayMs: number, signal?: AbortSignal) => Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,6 +164,25 @@ function extractTextContent(event: JsonLineEvent): string | undefined {
     }
   }
   return undefined;
+}
+
+/**
+ * Pi's `agent_end` remains the authoritative terminal event. This stricter
+ * `turn_end` shape means the model has supplied a usable final answer while
+ * the child may still be waiting to publish its lifecycle confirmation.
+ */
+export function isPiResultReadyTurn(event: Record<string, unknown>): boolean {
+  if (event.type !== "turn_end") return false;
+  const message = event.message as Record<string, unknown> | undefined;
+  if (message?.role !== "assistant" || message.stopReason !== "stop") return false;
+  if (!Array.isArray(message.content) || !Array.isArray(event.toolResults) || event.toolResults.length !== 0) {
+    return false;
+  }
+  return !message.content.some((item) => (
+    item !== null
+    && typeof item === "object"
+    && (item as Record<string, unknown>).type === "toolCall"
+  ));
 }
 
 /**
@@ -819,9 +853,30 @@ function isRetryableModelError(messages: Array<{ role: string; content: string }
   for (const msg of messages) {
     if (msg.role !== "system") continue;
     const lower = msg.content.toLowerCase();
-    if (errorPatterns.some((p) => lower.includes(p))) return true;
+    if (isRetryableProviderError(msg.content) || errorPatterns.some((p) => lower.includes(p))) return true;
   }
   return false;
+}
+
+function resultFailureMessage(messages: Array<{ role: string; content: string }>): string {
+  return [...messages].reverse().find((message) => message.role === "system")?.content
+    ?? messages.at(-1)?.content
+    ?? "Unknown teammate failure";
+}
+
+function waitForRetryDelay(delayMs: number, signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const abort = () => finish(false);
+    const finish = (ready: boolean) => {
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
+      resolve(ready);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+    timer = setTimeout(() => finish(true), delayMs);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,14 +1375,39 @@ export async function runTeammate(
     };
   }
   const attemptedModels: string[] = [];
+  let retryCount = 0;
 
   for (let mi = 0; mi <= candidates.length; mi++) {
     const modelToUse = mi < candidates.length ? candidates[mi] : undefined;
     if (modelToUse) attemptedModels.push(modelToUse);
 
-    const result = await runSingleAttempt(
+    let result = await runSingleAttempt(
       params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, options,
     );
+
+    while (
+      result.exitCode !== 0
+      && retryCount < NETWORK_RETRY_POLICY.maxRetries
+      && isRetryableProviderError(resultFailureMessage(result.messages))
+      && !options.signal?.aborted
+    ) {
+      retryCount++;
+      const delayMs = retryDelayMs(retryCount);
+      const error = resultFailureMessage(result.messages);
+      options.onRetry?.({
+        correlationId,
+        attempt: retryCount,
+        maxRetries: NETWORK_RETRY_POLICY.maxRetries,
+        delayMs,
+        nextRetryAt: Date.now() + delayMs,
+        error,
+      });
+      const ready = await (options.waitForRetry?.(delayMs, options.signal) ?? waitForRetryDelay(delayMs, options.signal));
+      if (!ready) break;
+      result = await runSingleAttempt(
+        params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, options,
+      );
+    }
 
     if (result.exitCode === 0 || mi >= candidates.length - 1 || !isRetryableModelError(result.messages)) {
       result.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
@@ -1643,6 +1723,7 @@ async function runSingleAttempt(
         case "agent_start":
         case "turn_start": {
           progress.status = "running";
+          progress.resultReadyAt = undefined;
           progress.recentTools = [];
           progress.toolCount = 0;
           progress.tokens = 0;
@@ -1792,6 +1873,10 @@ async function runSingleAttempt(
               lastContent = text;
               progress.lastMessage = text;
             }
+          }
+          if (isPiResultReadyTurn(event)) {
+            progress.resultReadyAt = Date.now();
+            options.onProgress?.(progress);
           }
           break;
         }

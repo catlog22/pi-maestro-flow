@@ -24,11 +24,13 @@ import {
   buildPiArgs,
   createUtf8LineDecoder,
   getPiSpawnCommand,
+  isPiResultReadyTurn,
   releasePublishedTurnHistory,
   resolveModelSpecifier,
   runTeammate,
   validateModelSpecifier,
 } from "../src/runs/execution.ts";
+import { NETWORK_RETRY_POLICY, classifyRetryError, retryDelayMs } from "../src/runs/retry.ts";
 import type { ActiveAgent, AgentProgress, AgentProgressSnapshot, TeammateState, Usage } from "../src/shared/types.ts";
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 
@@ -427,6 +429,118 @@ test("model specifiers resolve provider shorthand and reject unavailable exact r
     () => resolveModelSpecifier("anthropic/claude-sonnet", models),
     /Unknown teammate model specifier/,
   );
+});
+
+test("network retry policy is bounded, progressive, and rejects permanent failures", () => {
+  assert.equal(NETWORK_RETRY_POLICY.maxRetries, 5);
+  assert.deepEqual([1, 2, 3, 4, 5].map(retryDelayMs), [1_000, 2_000, 4_000, 8_000, 16_000]);
+  assert.equal(classifyRetryError("fetch failed: ECONNRESET"), "network");
+  assert.equal(classifyRetryError("Provider returned error: 503"), "provider");
+  assert.equal(classifyRetryError("Invalid API key"), "non-retryable");
+  assert.equal(classifyRetryError("context length exceeded"), "non-retryable");
+});
+
+test("Pi result-ready marker accepts only a final assistant turn with no tool work", () => {
+  assert.equal(isPiResultReadyTurn({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text: "completed analysis" }],
+    },
+    toolResults: [],
+  }), true);
+  assert.equal(isPiResultReadyTurn({
+    type: "message_end",
+    message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "not terminal" }] },
+  }), false);
+  assert.equal(isPiResultReadyTurn({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "toolCall", id: "call-1", name: "read" }],
+    },
+    toolResults: [],
+  }), false);
+  assert.equal(isPiResultReadyTurn({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      content: [{ type: "text", text: "answer" }],
+    },
+    toolResults: [{ toolCallId: "call-1" }],
+  }), false);
+});
+
+test("teammate retries a transient network failure before succeeding", async () => {
+  let attempts = 0;
+  const retryDelays: number[] = [];
+  const spawnChildProcess = ((_command: string, _args: readonly string[]) => {
+    attempts++;
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      if (attempts === 1) {
+        child.emit("error", new Error("fetch failed: ECONNRESET"));
+        return;
+      }
+      stdout.write(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "recovered" }] } })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+
+  const result = await runTeammate(
+    { agent: "delegate", task: "Recover from a transient failure", context: "fork" },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      onRetry(retry) { retryDelays.push(retry.delayMs); },
+      async waitForRetry(delayMs) { return delayMs === 1_000; },
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(attempts, 2);
+  assert.deepEqual(retryDelays, [1_000]);
+  assert.match(result.messages.at(-1)?.content ?? "", /recovered/);
+});
+
+test("teammate stops after the initial attempt and five transient retries", async () => {
+  let attempts = 0;
+  const retries: number[] = [];
+  const spawnChildProcess = ((_command: string, _args: readonly string[]) => {
+    attempts++;
+    const child = new EventEmitter() as ChildProcess;
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => child.emit("error", new Error("fetch failed: ECONNRESET")));
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+
+  const result = await runTeammate(
+    { agent: "delegate", task: "Bound transient retries", context: "fork" },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      onRetry(retry) { retries.push(retry.attempt); },
+      async waitForRetry() { return true; },
+    },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(attempts, 6);
+  assert.deepEqual(retries, [1, 2, 3, 4, 5]);
 });
 
 test("fresh agents publish follow-up turns while fork agents terminate after their first result", async () => {

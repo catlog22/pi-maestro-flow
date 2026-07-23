@@ -62,3 +62,33 @@ test("agent widget keeps duration, split tokens, and stalled state visible", () 
   assert.match(output, /@worker-live worker · 65s · in 1\.2k · out 56/);
   assert.match(output, /stalled 4[45]s/);
 });
+
+test("agent widget distinguishes a Pi result-ready turn from a stalled agent", () => {
+  const now = Date.now();
+  const parent = {
+    agent: "graph",
+    correlationId: "parent",
+    startedAt: now - 65_000,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now - 45_000,
+    status: "running" as const,
+    sleepMs: 0,
+    progress: [{
+      agent: "explorer",
+      name: "explorer",
+      correlationId: "explorer-live",
+      taskIndex: 0,
+      dependencies: [],
+      status: "running" as const,
+      lastActivityAt: now - 45_000,
+      resultReadyAt: now - 44_000,
+    }],
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const output = renderAgentStatusWidget([parent], 120, theme).join("\n");
+
+  assert.match(output, /result ready; confirming terminal/);
+  assert.doesNotMatch(output, /stalled/);
+});

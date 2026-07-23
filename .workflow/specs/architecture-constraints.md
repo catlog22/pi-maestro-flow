@@ -113,3 +113,11 @@ API Manager MUST 以 provider/modelId 为键持久化每模型 defaultThinkingLe
 在 ExtensionAPI 的标准 ctx.ui.select 不提供 selectedIndex 时，/effort MUST 保持 capability-filtered canonical level 顺序；当前有效级别 MUST 通过 label 中的（当前）标记表达，MUST NOT 通过把当前项移动到首位来伪造预选，也不要求真正预选。
 
 </spec-entry>
+
+<spec-entry category="arch" keywords="provider retry teammate pi-core waiter" date="2026-07-23" sid="S-20260723-3tih" title="Provider 重试执行所有权与状态投影" description="统一重试策略，同时保持 Pi core 与 teammate 的执行所有权边界" source="master@a218c49e">
+
+### Provider 重试执行所有权与状态投影
+
+teammate 子进程的网络/Provider 重试由 teammate 执行器负责；Pi 主 Agent 的 provider 重试由 Pi core 负责。两端必须复用同一纯错误分类、重试上限与退避策略；Flow 只能投影主 Agent 的 retrying 状态，不得绕过或重复 Pi core 重试器。等待 teammate 终态必须使用事件驱动 waiter，禁止循环调用 teammate-watch。
+
+</spec-entry>
