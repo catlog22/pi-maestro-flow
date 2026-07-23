@@ -51,7 +51,9 @@ export class SkillRuntime {
     const loaded = await Promise.all(
       ordered.map(async (binding) => ({
         role: binding.role,
-        skill: await this.loader.load(binding, context),
+        skill: await this.loader.load(binding, context, {
+          allowModelInvocationDisabled: restored !== undefined,
+        }),
       })),
     );
     const stackRevision = createHash("sha256")

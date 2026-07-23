@@ -8,6 +8,7 @@ export type SkillParamValue = string | boolean | number;
 export interface SkillDefaults {
   params: Record<string, SkillParamValue>;
   updated?: string;
+  "disable-model-invocation"?: boolean;
 }
 
 export interface SkillPromptBudgets {
@@ -15,9 +16,14 @@ export interface SkillPromptBudgets {
   maxTotalBytes: number;
 }
 
+export interface SkillGroupConfig {
+  skills: string[];
+}
+
 export interface SkillConfigFile {
   version: string;
   skills: Record<string, SkillDefaults>;
+  groups: Record<string, SkillGroupConfig>;
   limits: SkillPromptBudgets;
 }
 
@@ -36,6 +42,7 @@ export const DEFAULT_SKILL_PROMPT_BUDGETS: SkillPromptBudgets = {
 const DEFAULT_CONFIG: SkillConfigFile = {
   version: "1.0.0",
   skills: {},
+  groups: {},
   limits: DEFAULT_SKILL_PROMPT_BUDGETS,
 };
 
@@ -62,6 +69,7 @@ export async function loadSkillConfig(
   const config: SkillConfigFile = {
     version: project?.version ?? global?.version ?? DEFAULT_CONFIG.version,
     skills: mergeSkills(global?.skills ?? {}, project?.skills ?? {}),
+    groups: { ...(global?.groups ?? {}), ...(project?.groups ?? {}) },
     limits: {
       ...DEFAULT_SKILL_PROMPT_BUDGETS,
       ...(global?.limits ?? {}),
@@ -135,19 +143,34 @@ function validateConfig(raw: unknown, filePath: string): SkillConfigFile {
 
   const skills: Record<string, SkillDefaults> = {};
   for (const [skillName, value] of Object.entries(skillsRaw)) {
-    if (!isRecord(value) || !isRecord(value.params)) {
+    if (!isRecord(value)) {
+      throw new SkillConfigError("E_SKILL_CONFIG_INVALID", filePath, `skills.${skillName} must be an object`);
+    }
+    const paramsRaw = value.params ?? {};
+    if (!isRecord(paramsRaw)) {
       throw new SkillConfigError("E_SKILL_CONFIG_INVALID", filePath, `skills.${skillName}.params must be an object`);
     }
     const params: Record<string, SkillParamValue> = {};
-    for (const [param, paramValue] of Object.entries(value.params)) {
+    for (const [param, paramValue] of Object.entries(paramsRaw)) {
       if (!["string", "boolean", "number"].includes(typeof paramValue)) {
         throw new SkillConfigError("E_SKILL_CONFIG_INVALID", filePath, `skills.${skillName}.params.${param} must be a primitive`);
       }
       params[param] = paramValue as SkillParamValue;
     }
+    const disableModelInvocation = value["disable-model-invocation"];
+    if (disableModelInvocation !== undefined && typeof disableModelInvocation !== "boolean") {
+      throw new SkillConfigError(
+        "E_SKILL_CONFIG_INVALID",
+        filePath,
+        `skills.${skillName}.disable-model-invocation must be a boolean`,
+      );
+    }
     skills[skillName] = {
       params,
       ...(typeof value.updated === "string" ? { updated: value.updated } : {}),
+      ...(typeof disableModelInvocation === "boolean"
+        ? { "disable-model-invocation": disableModelInvocation }
+        : {}),
     };
   }
 
@@ -163,7 +186,23 @@ function validateConfig(raw: unknown, filePath: string): SkillConfigFile {
     throw new SkillConfigError("E_SKILL_CONFIG_INVALID", filePath, "limits.maxTotalBytes must be >= limits.maxFileBytes");
   }
 
-  return { version, skills, limits };
+  const groupsRaw = raw.groups ?? {};
+  if (!isRecord(groupsRaw)) {
+    throw new SkillConfigError("E_SKILL_CONFIG_INVALID", filePath, "groups must be an object");
+  }
+  const groups: Record<string, SkillGroupConfig> = {};
+  for (const [groupName, value] of Object.entries(groupsRaw)) {
+    if (!isRecord(value) || !Array.isArray(value.skills) || !value.skills.every((skill) => typeof skill === "string")) {
+      throw new SkillConfigError(
+        "E_SKILL_CONFIG_INVALID",
+        filePath,
+        `groups.${groupName}.skills must be an array of strings`,
+      );
+    }
+    groups[groupName] = { skills: [...new Set(value.skills.map((skill) => skill.trim()).filter(Boolean))] };
+  }
+
+  return { version, skills, groups, limits };
 }
 
 function mergeSkills(
@@ -177,6 +216,11 @@ function mergeSkills(
       ? {
           params: { ...existing.params, ...defaults.params },
           updated: defaults.updated ?? existing.updated,
+          ...("disable-model-invocation" in defaults
+            ? { "disable-model-invocation": defaults["disable-model-invocation"] }
+            : "disable-model-invocation" in existing
+              ? { "disable-model-invocation": existing["disable-model-invocation"] }
+              : {}),
         }
       : defaults;
   }

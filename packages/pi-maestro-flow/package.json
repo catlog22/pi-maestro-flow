@@ -14,7 +14,7 @@
     "test:package": "node scripts/verify-maestro-run-capabilities.mjs && node --experimental-transform-types --test test/prepare-package-skills.test.mjs test/package-resources.test.mjs test/package-resources-runtime.test.ts",
     "test:conversion": "node --experimental-transform-types --test test/convert-pi.test.mjs test/maestro-run-capabilities.test.mjs test/skill-contract-lint.test.ts",
     "check:maestro-run-cli": "node scripts/verify-maestro-run-capabilities.mjs",
-    "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/todo.test.ts test/todo-overlay.test.ts",
+    "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/skill-manager.test.ts test/todo.test.ts test/todo-overlay.test.ts",
     "test:compaction": "node --experimental-transform-types --test test/compaction.test.ts",
     "test:hooks": "node --experimental-transform-types --test test/hooks.test.ts",
     "test:permissions": "node --experimental-transform-types --test test/permissions.test.ts test/ask.test.ts test/approval-mode.test.ts test/teammate-relay-ipc.test.ts test/direct-teammate-runtime.test.ts",

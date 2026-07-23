@@ -69,6 +69,10 @@ export interface TodoSkillLoaderOptions {
   compiledCacheBytes?: number;
 }
 
+export interface TodoSkillLoadOptions {
+  allowModelInvocationDisabled?: boolean;
+}
+
 interface RawFileSnapshot {
   readonly filePath: string;
   readonly content: string;
@@ -92,6 +96,7 @@ export class TodoSkillLoadError extends Error {
       | "E_SKILL_READ_FAILED"
       | "E_SKILL_REQUIRED_MISSING"
       | "E_SKILL_FRONTMATTER_INVALID"
+      | "E_SKILL_MODEL_INVOCATION_DISABLED"
       | "E_SKILL_BUDGET_EXCEEDED",
     message: string,
   ) {
@@ -134,12 +139,23 @@ export class TodoSkillLoader {
     this.initialized = true;
   }
 
-  async load(spec: TodoSkillConfig, inlineContext = ""): Promise<LoadedTodoSkill> {
+  async load(
+    spec: TodoSkillConfig,
+    inlineContext = "",
+    options: TodoSkillLoadOptions = {},
+  ): Promise<LoadedTodoSkill> {
     const name = spec.name.trim();
     if (!name) throw new TodoSkillLoadError("E_SKILL_NOT_FOUND", "skill name is empty");
 
     const skill = await this.findSkill(name);
     const { config, configHash } = await loadSkillConfig(this.cwd, this.agentDir);
+    const configuredModelInvocation = config.skills[name]?.["disable-model-invocation"];
+    if ((configuredModelInvocation ?? skill.disableModelInvocation) && !options.allowModelInvocationDisabled) {
+      throw new TodoSkillLoadError(
+        "E_SKILL_MODEL_INVOCATION_DISABLED",
+        `skill "${name}" only allows explicit user invocation`,
+      );
+    }
     const budgets = config.limits;
     const main = await this.readRawFile(skill.filePath, budgets, "skill");
     const { body, frontmatter } = parseFrontmatter<TodoSkillFrontmatter>(main.content);

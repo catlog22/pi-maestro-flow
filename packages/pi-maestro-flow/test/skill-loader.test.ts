@@ -250,3 +250,55 @@ test("loader refreshes once on miss and reports budget/config failures", async (
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Todo loader rejects skills configured for explicit user invocation only", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-manual-skill-"));
+  const agentDir = join(root, "agent");
+  const projectDir = join(root, "project");
+  const skillDir = join(projectDir, ".pi", "skills", "manual");
+  const skillPath = join(skillDir, "SKILL.md");
+  await mkdir(skillDir, { recursive: true });
+  await mkdir(agentDir, { recursive: true });
+  await writeFile(skillPath, `---
+name: manual
+description: manual only
+---
+# Manual
+`);
+  await writeFile(join(projectDir, ".pi", "skill-config.json"), JSON.stringify({
+    version: "1.0.0",
+    skills: { manual: { "disable-model-invocation": true } },
+  }));
+  const skill = {
+    name: "manual",
+    description: "manual only",
+    filePath: skillPath,
+    baseDir: skillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  } satisfies Skill;
+  const loader = new TodoSkillLoader({
+    cwd: projectDir,
+    agentDir,
+    resourceLoader: {
+      async reload() {},
+      getSkills() { return { skills: [skill], diagnostics: [] }; },
+    },
+  });
+
+  try {
+    await assert.rejects(
+      loader.load({ name: "manual" }),
+      (error: unknown) =>
+        error instanceof TodoSkillLoadError && error.code === "E_SKILL_MODEL_INVOCATION_DISABLED",
+    );
+    const restored = await loader.load(
+      { name: "manual" },
+      "",
+      { allowModelInvocationDisabled: true },
+    );
+    assert.equal(restored.name, "manual");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});

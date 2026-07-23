@@ -134,6 +134,7 @@ import {
 } from "../compaction/maestro-compaction.ts";
 import { createMidTurnAutoCompaction } from "../compaction/auto-compaction.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
+import { registerSkillManager } from "../skills/skill-manager.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
 import { registerFff } from "../tools/fff.ts";
 import {
@@ -352,6 +353,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   }
 
   registerMaestroPackageResources(pi);
+  registerSkillManager(pi);
 
   // === Main Tool: maestro ===
   const maestroTool: ToolDefinition<typeof MaestroParams> = {
