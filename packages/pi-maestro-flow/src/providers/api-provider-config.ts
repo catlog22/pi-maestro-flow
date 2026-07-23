@@ -19,6 +19,12 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import {
+  EFFORT_LEVELS,
+  EFFORT_STATUS_KEY,
+  effortProgressBar,
+  isThinkingLevel as isCanonicalThinkingLevel,
+} from "../effort-display.ts";
 
 export type ApiProviderId = "maestro-openai" | "maestro-qwen" | "maestro-anthropic";
 
@@ -60,15 +66,6 @@ type ApiProviderAction = "configure" | "delete" | "list" | "logout" | "reset" | 
 type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
-const EFFORT_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
-const EFFORT_BARS: Record<ThinkingLevel, string> = {
-  off: "[░░░░░]",
-  minimal: "[█░░░░]",
-  low: "[██░░░]",
-  medium: "[███░░]",
-  high: "[████░]",
-  xhigh: "[█████]",
-};
 
 const PROVIDERS: readonly ProviderDefaults[] = [
   {
@@ -148,11 +145,11 @@ export function registerApiProviderConfigs(
       const supported = getSupportedThinkingLevels(ctx.model).filter(isThinkingLevel);
       const labels = new Map<string, ThinkingLevel>();
       const options = supported.map((level) => {
-        const label = `${level}${level === current ? "（当前）" : ""} ${EFFORT_BARS[level]}`;
+        const label = `${level}${level === current ? "（当前）" : ""} ${effortProgressBar(level)}`;
         labels.set(label, level);
         return label;
       });
-      const choice = await ctx.ui.select("选择思考强度", options);
+      const choice = await ctx.ui.select(`选择思考强度（当前：${current}）`, options);
       if (choice === undefined) return;
       const selected = labels.get(choice);
       if (!selected) return;
@@ -168,14 +165,21 @@ export function registerApiProviderConfigs(
         ctx.ui.notify(`思考强度应用失败：${errorMessage(error)}`, "error");
         return;
       }
-      ctx.ui.notify(`思考强度已设为 ${selected} ${EFFORT_BARS[selected]}`, "info");
+      syncEffortStatus(ctx, selected);
+      ctx.ui.notify(`思考强度已设为 ${selected} ${effortProgressBar(selected)}`, "info");
     },
   });
   if (typeof pi.on === "function") {
-    pi.on("model_select", async (event) => {
+    pi.on("session_start", (_event, ctx) => {
+      syncEffortStatus(ctx, pi.getThinkingLevel());
+    });
+    pi.on("model_select", async (event, ctx) => {
       const level = await loadModelThinkingDefault(event.model.provider, event.model.id, defaultsPath);
       if (level) setPiThinkingLevel(pi, level);
+      syncEffortStatus(ctx, level ?? pi.getThinkingLevel());
     });
+    pi.on("thinking_level_select", (event, ctx) => syncEffortStatus(ctx, event.level));
+    pi.on("session_shutdown", (_event, ctx) => syncEffortStatus(ctx, undefined));
   }
 }
 
@@ -1032,7 +1036,17 @@ function isCost(value: unknown): value is ProviderModelConfig["cost"] {
 }
 
 function isThinkingLevel(value: unknown): value is ThinkingLevel {
-  return typeof value === "string" && EFFORT_LEVELS.includes(value as ThinkingLevel);
+  return isCanonicalThinkingLevel(value);
+}
+
+function syncEffortStatus(
+  ctx: Pick<ExtensionCommandContext, "ui"> | undefined,
+  level: unknown,
+): void {
+  const setStatus = ctx?.ui?.setStatus;
+  if (typeof setStatus === "function") {
+    setStatus(EFFORT_STATUS_KEY, isThinkingLevel(level) ? level : undefined);
+  }
 }
 
 function canonicalThinkingLevel(level: ApiThinkingLevel): ThinkingLevel {

@@ -666,7 +666,9 @@ test("/effort renders canonical capability order with current marker and progres
     apply(level) { applied.push(level); },
   });
   const notifications: Array<{ message: string; type: string }> = [];
+  const statuses: Array<{ key: string; value: string | undefined }> = [];
   let rendered: string[] = [];
+  let title = "";
   await harness.command.handler("", {
     model: {
       provider: "maestro-openai",
@@ -675,11 +677,13 @@ test("/effort renders canonical capability order with current marker and progres
       thinkingLevelMap: { xhigh: "xhigh" },
     },
     ui: {
-      async select(_title: string, options: string[]) {
+      async select(nextTitle: string, options: string[]) {
+        title = nextTitle;
         rendered = options;
         return "high [████░]";
       },
       notify(message: string, type: string) { notifications.push({ message, type }); },
+      setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); },
     },
   });
 
@@ -691,8 +695,10 @@ test("/effort renders canonical capability order with current marker and progres
     "high [████░]",
     "xhigh [█████]",
   ]);
+  assert.equal(title, "选择思考强度（当前：medium）");
   assert.deepEqual(applied, ["high"]);
   assert.deepEqual(notifications.at(-1), { message: "思考强度已设为 high [████░]", type: "info" });
+  assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "high" });
 });
 
 test("/effort filters unsupported canonical levels", async (t) => {
@@ -985,7 +991,7 @@ test("/effort persistence failure preserves existing default bytes and runtime",
   assert.match(notifications.at(-1)?.message ?? "", /^思考强度保存失败：/);
 });
 
-test("model_select restores canonical effort and never passes max", async (t) => {
+test("model_select restores canonical effort, synchronizes the status, and never passes max", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-model-select-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const defaultsPath = join(tempDir, "api-manager.json");
@@ -997,16 +1003,22 @@ test("model_select restores canonical effort and never passes max", async (t) =>
     },
   }));
   const applied: string[] = [];
+  const statuses: Array<{ key: string; value: string | undefined }> = [];
   const harness = createEffortHarness({
     modelsPath: join(tempDir, "models.json"),
     defaultsPath,
     apply(level) { applied.push(level); },
   });
   assert.ok(harness.modelSelect);
-  await harness.modelSelect!({ model: { provider: "maestro-openai", id: "gpt-5.4" } });
-  await harness.modelSelect!({ model: { provider: "anthropic", id: "claude-sonnet" } });
+  const ctx = { ui: { setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); } } };
+  await harness.modelSelect!({ model: { provider: "maestro-openai", id: "gpt-5.4" } }, ctx);
+  await harness.modelSelect!({ model: { provider: "anthropic", id: "claude-sonnet" } }, ctx);
   assert.deepEqual(applied, ["xhigh", "xhigh"]);
   assert.equal(applied.includes("max"), false);
+  assert.deepEqual(statuses, [
+    { key: "maestro-effort", value: "xhigh" },
+    { key: "maestro-effort", value: "xhigh" },
+  ]);
 });
 
 test("/effort does not change global defaultThinkingLevel", async (t) => {

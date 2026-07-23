@@ -394,6 +394,28 @@ test("statusline keeps a short context progress bar in compact layouts", () => {
   }
 });
 
+test("statusline renders the linked effort name after the model", () => {
+  const harness = createHarness();
+  try {
+    harness.statuses.set("mode", "ACT");
+    harness.statuses.set("approval-mode", "APPROVAL default");
+    harness.statuses.set("maestro-effort", "high");
+    assert.match(stripAnsi(harness.render(120)[0]), /test · high/);
+    assert.match(stripAnsi(harness.render(70)[0]), /test · high/);
+    assert.match(stripAnsi(harness.render(42)[0]), /test · high/);
+    assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /EFFORT/);
+    assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /high\s+\[/);
+
+    for (let width = 1; width <= 120; width++) {
+      for (const line of harness.render(width)) {
+        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+      }
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("statusline drops an extreme Git branch as a whole before dropping the cwd", async () => {
   const longBranch = `feature/${"界面修复🚀".repeat(20)}`;
   const harness = createHarness({

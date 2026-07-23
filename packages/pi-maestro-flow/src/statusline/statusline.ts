@@ -18,6 +18,7 @@ import {
 	type WorkflowViewModel,
 	workflowStatusLabel,
 } from "../session/view-model.ts";
+import { EFFORT_STATUS_KEY, formatEffortStatus } from "../effort-display.ts";
 import {
 	ansiFg,
 	ANSI_BOLD,
@@ -252,6 +253,7 @@ function renderLine1(
 	modeStatus: string | undefined,
 	approvalStatus: string | undefined,
 	compactionStatus: string | undefined,
+	effortStatus: string | undefined,
 ): string {
 	const safeWidth = Math.max(1, width);
 	const modeFull = renderPlanModeStatus(modeStatus, approvalStatus, 80);
@@ -260,7 +262,8 @@ function renderLine1(
 	const autoCompactionFull = renderAutoCompactionMode(compactionStatus, 80);
 	const autoCompactionCompact = renderAutoCompactionMode(compactionStatus, 48);
 	const autoCompactionNarrow = renderAutoCompactionMode(compactionStatus, 1);
-	const modelText = colored("model", `${ICONS.model} ${shortenModel(rs.model)}`);
+	const effort = formatEffortStatus(effortStatus);
+	const modelText = colored("model", `${ICONS.model} ${shortenModel(rs.model)}${effort ? ` · ${effort}` : ""}`);
 	const toolCallText = activeToolCalls > 0
 		? colored("runs", `${ICONS.runs} ${activeToolCalls} call${activeToolCalls > 1 ? "s" : ""}`)
 		: "";
@@ -464,9 +467,10 @@ export function installStatusline(
 					const modeStatus = footerData.getExtensionStatuses().get("mode");
 					const approvalStatus = footerData.getExtensionStatuses().get("approval-mode");
 					const compactionModeStatus = footerData.getExtensionStatuses().get("maestro-auto-compact-mode");
+					const effortStatus = footerData.getExtensionStatuses().get(EFFORT_STATUS_KEY);
 					const pressureStatus = footerData.getExtensionStatuses().get("maestro-auto-compact");
 					const swarmStatus = footerData.getExtensionStatuses().get("maestro-swarm");
-					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, compactionModeStatus));
+					lines.push(renderLine1(rs, activeToolCalls, cwd, width, modeStatus, approvalStatus, compactionModeStatus, effortStatus));
 
 					const pressureLine = renderPressureLine(pressureStatus, width);
 					if (pressureLine) lines.push(pressureLine);
