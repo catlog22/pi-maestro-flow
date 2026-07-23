@@ -150,6 +150,7 @@ const RETRYABLE_RE =
 
 let activeGoal: ActiveGoal | undefined;
 let extensionApi: ExtensionAPI | undefined;
+let onGoalStateChanged: (() => void) | undefined;
 let baseCwd = "";
 let continuationPending: ContinuationPending | undefined;
 let goalRecovery: {
@@ -186,8 +187,9 @@ export interface GoalUpdateParams {
   action: "update";
   objective: string;
 }
+export interface GoalCompleteParams { action: "complete"; summary: string; }
 
-export type GoalParams = GoalGetParams | GoalCreateParams | GoalUpdateParams;
+export type GoalParams = GoalGetParams | GoalCreateParams | GoalUpdateParams | GoalCompleteParams;
 
 export type GoalCommandParams =
   | { action: "status" }
@@ -219,8 +221,13 @@ export async function executeGoal(
       }
       return handleUpdate(params.objective, ctx);
     }
+    case "complete": {
+      if (typeof params.summary !== "string" || params.summary.trim().length === 0) return { text: "Goal complete requires a non-empty summary.", isError: true };
+      const outcome = await verifyGoalAfterLoop(params.summary, ctx);
+      return { text: outcome === "done" ? "Goal done (verified)." : "Goal completion was not verified; continue the active Goal.", isError: false };
+    }
     default:
-      return { text: "Unknown action. Valid: get, create, update", isError: true };
+      return { text: "Unknown action. Valid: get, create, update, complete", isError: true };
   }
 }
 
@@ -472,10 +479,6 @@ export async function onAgentEnd(event: { messages: unknown[] }, ctx: GoalContex
     if (continuationPending?.goalId === goalId) continuationPending = undefined;
   }
 
-  if (!activeGoal || activeGoal.id !== goalId || activeGoal.status !== "active") return;
-  if (hasPending(ctx)) return;
-  const verificationOutcome = await verifyGoalAfterLoop(finalAgentOutput(finalMsg), ctx);
-  if (verificationOutcome !== "continue") return;
   if (!activeGoal || activeGoal.id !== goalId || activeGoal.status !== "active") return;
   if (hasPending(ctx)) return;
   await sendContinuation(ctx, activeGoal);
@@ -1172,10 +1175,17 @@ function clearActive(ctx: GoalContext) {
 
 function persistGoal(goal: ActiveGoal) {
   extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, { sessionId: goalSessionId, goal });
+  onGoalStateChanged?.();
 }
 
 function clearPersistedGoal() {
   extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, { sessionId: goalSessionId, goal: null });
+  onGoalStateChanged?.();
+}
+
+/** Bind the root UI/UCL to durable Goal state changes. */
+export function setGoalStateChangeListener(listener: (() => void) | undefined): void {
+  onGoalStateChanged = listener;
 }
 
 function loadGoalFromSession(ctx: GoalContext, sessionId: string | undefined): ActiveGoal | undefined {

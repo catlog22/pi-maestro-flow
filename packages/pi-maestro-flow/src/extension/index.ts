@@ -55,6 +55,7 @@ import {
   getActiveGoal,
   reconcileWorkflowGoal,
   setWorkflowCoordinator,
+  setGoalStateChangeListener,
   type GoalParams as GoalActionParams,
 } from "../tools/goal.ts";
 import {
@@ -71,6 +72,7 @@ import {
   onBeforeAgentStartTodo,
   onContextTodo,
   registerTodoActor,
+  setTodoStateChangeListener,
   onSessionStart as todoSessionStart,
   onSessionShutdown as todoSessionShutdown,
   reconcileMirrorTasks,
@@ -80,6 +82,8 @@ import {
   type TodoTask,
 } from "../tools/todo.ts";
 import { WorkflowBridge, buildTodoMirrorSpecs } from "../session/bridge.ts";
+import { guiEnabled, startGuiSubsystem, registerGuiTool, isGuiToolAllowed, getGuiTool, createGuiEventForwarder, GUI_EVENTS, type GuiServerHandle, type GuiPermissionGateway } from "../gui/index.ts";
+import { loadLatestTeamSwarmProjection } from "../swarm/projection.ts";
 import { RunCliAdapter } from "../session/cli-adapter.ts";
 import { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
@@ -112,6 +116,11 @@ import {
   onBeforeAgentStartPlan,
   onToolCallPlan,
   onAgentEndPlan,
+  getMode as getPlanMode,
+  hasPlan,
+  getPlanText,
+  getPlanHandoffStatus,
+  setPlanModeChangeListener,
 } from "../tools/plan.ts";
 import { installStatusline } from "../statusline/statusline.ts";
 import { registerCodexHookAdapter } from "../hooks/pi-adapter.ts";
@@ -126,13 +135,14 @@ import {
 import { createMidTurnAutoCompaction } from "../compaction/auto-compaction.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
+import { registerFff } from "../tools/fff.ts";
 import {
   proxyTeammateChildTool,
   registerTeammateChildExtension,
   registerTeammateChildToolBroker,
   registerTeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
-import { TEAMMATE_STARTED_EVENT } from "pi-maestro-teammate/v1/types";
+import { TEAMMATE_STARTED_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_COMPLETE_EVENT } from "pi-maestro-teammate/v1/types";
 
 interface MaestroState {
   baseCwd: string;
@@ -242,9 +252,41 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     return;
   }
 
+  // UCL: capture only the locked extension-tool surface. pi.getAllTools() exposes
+  // schemas but not execute(), so the registry is the invocation source for the
+  // GUI sidecar. Do not capture built-ins or unrelated extension registrations.
+  const originalRegisterTool = pi.registerTool.bind(pi);
+  (pi as unknown as { registerTool: (tool: unknown) => unknown }).registerTool = (tool: unknown) => {
+    const candidate = tool as { name?: unknown; execute?: unknown; label?: unknown };
+    if (candidate && typeof candidate.name === "string" && typeof candidate.execute === "function") {
+      const owner = typeof candidate.label === "string" && candidate.label.startsWith("MCP:") ? "mcp" : "pi-maestro-flow";
+      if (!isGuiToolAllowed(candidate.name, owner)) return originalRegisterTool(tool as ToolDefinition);
+      try {
+        registerGuiTool(tool as ToolDefinition, owner);
+      } catch {
+        // GUI capture must never break tool registration.
+      }
+    }
+    return originalRegisterTool(tool as ToolDefinition);
+  };
+
   const teammateExtensionPath = fileURLToPath(import.meta.url);
   const teammateAuthorityOwner = `pi-maestro-flow:${teammateExtensionPath}`;
   let todoRootContext: ExtensionContext | undefined;
+  let guiServer: GuiServerHandle | null = null;
+  const guiEvents = createGuiEventForwarder();
+  // Forward teammate lifecycle events (shared EventBus) to the GUI SSE stream.
+  pi.events.on(TEAMMATE_STARTED_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateStarted, event));
+  pi.events.on(TEAMMATE_MESSAGE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateProgress, event));
+  pi.events.on(TEAMMATE_COMPLETE_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateComplete, event));
+  const emitGoalChanged = (): void => {
+    if (!guiEvents.isActive()) return;
+    const goal = getActiveGoal();
+    guiEvents.emitDeduped(GUI_EVENTS.goalChanged, JSON.stringify(goal ?? null), goal);
+  };
+  setTodoStateChangeListener(updateTodoWidget);
+  setGoalStateChangeListener(emitGoalChanged);
+  setPlanModeChangeListener(updateTodoWidget);
   let childTodoMutationQueue: Promise<void> = Promise.resolve();
   let teammateRegistrationGeneration = 0;
   let teammateRegistrationDisposers: Array<() => void> = [];
@@ -438,6 +480,7 @@ When NOT to use:
 - get: Read the current Goal state. { action: "get" }
 - create: Create a new Goal without a budget by default. { action: "create", objective: "..." }
 - update: Replace the active Goal objective and resume it automatically. { action: "update", objective: "..." }
+- complete: Request independent completion verification after all work is done. { action: "complete", summary: "..." }
 - optional budget: Include tokenBudget only when the user explicitly requests one. { action: "create", objective: "...", tokenBudget: "100k" }
 
 When to use:
@@ -446,14 +489,14 @@ When to use:
 When NOT to use:
 - single-turn tasks; or when an active Workflow Session already projects a Goal — do not create a competing one.
 
-When the agent loop ends naturally, the extension verifies completion automatically. The model cannot stop, resume, clear, or mark a Goal done.`,
+Only request completion after all work is done; the extension verifies it independently. The model cannot stop, resume, or clear a Goal.`,
 
-    promptSnippet: "Read, create, or update an autonomous Goal; completion is verified automatically",
+    promptSnippet: "Read, create, update, or request independent verification for an autonomous Goal",
     promptGuidelines: [
       "When a goal is active, keep working until it is complete; do not stop with only a plan or partial progress.",
       "Use goal get to inspect state. Use goal create only when no Goal exists; use goal update to replace its objective and resume it.",
       "Omit tokenBudget by default. Set it only when the user explicitly requests a Token budget.",
-      "Do not attempt to stop, resume, clear, or mark a Goal done; those transitions are user- or verifier-owned.",
+      "Use goal complete only after all requirements are met and provide concise verification evidence; the verifier owns the done transition.",
     ],
 
     parameters: GoalToolParams,
@@ -668,6 +711,7 @@ When NOT to use:
 
   // === Language intelligence, browser control, and tool discovery ===
   registerIntelligenceTools(pi);
+  registerFff(pi);
 
   pi.registerShortcut(PLAN_TOGGLE_KEY, {
     description: `Toggle Plan/Act mode (${PLAN_TOGGLE_LABEL})`,
@@ -851,6 +895,13 @@ When NOT to use:
             : undefined,
         } satisfies RunEventDetails,
       });
+      guiEvents.emit(GUI_EVENTS.runTransition, {
+        runId: run.runId,
+        from: previous,
+        to: run.status,
+        command: run.command,
+      });
+      guiEvents.emit(GUI_EVENTS.stateChanged, { subsystem: GUI_EVENTS.runTransition, runId: run.runId });
     }
     lastRunStates = nextStates;
   }
@@ -973,8 +1024,14 @@ When NOT to use:
   let panelMode: MaestroPanelMode = "collapsed";
 
   function updateTodoWidget(): void {
-    if (!widgetCtx) return;
     const tasks = getVisibleTasks();
+    if (guiEvents.isActive()) {
+      const todoFp = JSON.stringify(tasks.map((task) => [task.id, task.status, task.subject, task.summary]));
+      guiEvents.emitDeduped(GUI_EVENTS.todoUpdated, todoFp, { count: tasks.length, tasks });
+      const effectiveMode = isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode;
+      guiEvents.emitDeduped(GUI_EVENTS.planMode, effectiveMode, { mode: effectiveMode, isPlanMode: isPlanMode() });
+    }
+    if (!widgetCtx) return;
     const view = deriveWorkflowViewModel(workflowSnapshotForUi());
     const showMaestroPanel = view !== undefined && shouldShowMaestroPanel(view, panelMode);
     if (!showMaestroPanel && tasks.length === 0) {
@@ -1045,6 +1102,47 @@ When NOT to use:
     syncApprovalModeStatus(ctx, approvalMode);
     updateTodoWidget();
     activateTeammateSessionRegistrations(ctx);
+    if (guiEnabled()) {
+      guiServer?.close("session-restart");
+      const guiSessionId =
+        (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? "unknown";
+      guiServer = await startGuiSubsystem({
+        sessionId: guiSessionId,
+        cwd: ctx.cwd,
+        getHealth: () => ({ approvalMode }),
+        listAllTools: () => pi.getAllTools(),
+        gateway: buildGuiPermissionGateway(ctx),
+        getCtx: () => ctx,
+        stateProviders: {
+          workflow: () => deriveWorkflowViewModel(workflowSnapshotForUi()),
+          todos: () => getVisibleTasks(),
+          goal: () => getActiveGoal(),
+          plan: () => ({
+            mode: getPlanMode(),
+            isPlanMode: isPlanMode(),
+            hasPlan: hasPlan(),
+            text: getPlanText(),
+            handoffStatus: getPlanHandoffStatus(),
+          }),
+          teammates: async () => {
+            const entry = getGuiTool("teammate-list");
+            if (!entry) return null;
+            const result = await entry.execute(
+              "gui-state-teammates",
+              { view: "active" } as never,
+              undefined,
+              undefined,
+              ctx,
+            );
+            return (result.details as { agents?: unknown } | undefined)?.agents ?? null;
+          },
+          swarm: () => loadLatestTeamSwarmProjection(ctx.cwd) ?? null,
+          approvalMode: () => (isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode),
+          sessionId: () => guiSessionId,
+        },
+      });
+      guiEvents.bind(guiServer);
+    }
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -1067,6 +1165,9 @@ When NOT to use:
     onSessionShutdownPlan(ctx);
     ctx.ui.setStatus("approval-mode", undefined);
     await shutdownIntelligenceTools();
+    guiServer?.close("session-shutdown");
+    guiServer = null;
+    guiEvents.bind(null);
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
@@ -1119,6 +1220,7 @@ When NOT to use:
     await onAgentEndPlan(event, ctx);
     await refreshWorkflow(ctx, true);
     await goalAgentEnd(event, ctx);
+    emitGoalChanged();
     onAgentEndTodo();
     midTurnAutoCompaction.onAgentEnd(ctx);
     updateTodoWidget();
@@ -1126,6 +1228,7 @@ When NOT to use:
 
   pi.on("tool_execution_end", async (event, ctx) => {
     if (event.toolName === "todo") updateTodoWidget();
+    if (event.toolName === "goal") emitGoalChanged();
     const command = event.toolName === "bash"
       ? String((event as { input?: { command?: unknown } }).input?.command ?? "")
       : "";
@@ -1158,6 +1261,27 @@ When NOT to use:
     if (block) return { action: "deny", reason: block.reason };
     return { action: "allow_once" as const, updatedInput: call.input };
   };
+
+  // UCL permission gateway: GUI tool invocation runs the exact same chain as the
+  // LLM tool-call path (plan hard boundary -> codex hooks -> authorize). The
+  // interactive approval prompt (ctx.ui.select) surfaces over RPC as
+  // extension_ui_request for the GUI to answer.
+  function buildGuiPermissionGateway(ctx: ExtensionContext): GuiPermissionGateway {
+    const mode = (): string => (isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode);
+    return {
+      mode,
+      authorize: async (toolName, input) => {
+        const call = { toolName, input };
+        const planBlock = onToolCallPlan(call);
+        if (planBlock) return { block: true, reason: planBlock.reason };
+        const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
+        if (hookBlock) return { block: true, reason: hookBlock.reason };
+        const block = await permissionController.authorize(call, ctx, mode(), hookAdapter);
+        if (block) return { block: true, reason: block.reason };
+        return undefined;
+      },
+    };
+  }
 
   function activateTeammateSessionRegistrations(ctx: ExtensionContext): void {
     disposeTeammateSessionRegistrations();
