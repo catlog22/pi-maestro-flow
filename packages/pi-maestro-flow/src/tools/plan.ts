@@ -78,67 +78,6 @@ const BLOCKED_BUILTIN_TOOLS = new Set([
   "Edit", "Write", "NotebookEdit", "edit", "write", "notebook_edit",
 ]);
 
-const SHELL_COMMAND_BOUNDARY = String.raw`(?:^|[\r\n;|&{(]|\$\(|<\()\s*`;
-const FILE_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}(?:sudo\s+)?(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|ln|tee|truncate|dd)\b`,
-  "i",
-);
-const POWERSHELL_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}(?:Set-Content|Add-Content|Clear-Content|Out-File|Remove-Item|Move-Item|Copy-Item|New-Item|Rename-Item)\b`,
-  "i",
-);
-const PACKAGE_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}(?:npm\s+(?:install|uninstall|update|ci|link|publish|version)|yarn\s+(?:add|remove|install|publish|upgrade)|pnpm\s+(?:add|remove|install|publish|update)|bun\s+(?:add|remove|install|update|publish)|pip\s+(?:install|uninstall))\b`,
-  "i",
-);
-const GIT_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}git\s+(?:add|apply|clean|commit|push|pull|merge|rebase|reset|restore|checkout|switch|stash|cherry-pick|revert|init|clone)\b`,
-  "i",
-);
-const MAESTRO_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+(?:install|uninstall|update)\b`,
-  "i",
-);
-const MAESTRO_RUN_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+run\s+(?:next|create|check|rebind|complete|recall-confirm|fork|import|new|decide|seal-session|log-mutation|advance|pause|resume|retry|cancel)\b`,
-  "i",
-);
-const MAESTRO_SESSION_MUTATING_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}maestro\s+session\s+(?:resolve|resume|create|chain|migrate|meta)\b`,
-  "i",
-);
-const IN_PLACE_EDIT_COMMAND = new RegExp(
-  String.raw`${SHELL_COMMAND_BOUNDARY}(?:sed|perl)\b[^\r\n;|&]*\s-[a-z]*i(?:[a-z]*|\.[^\s]+)?(?:\s|$)`,
-  "i",
-);
-const NESTED_MUTATING_COMMAND = /(?:^|\s)-(?:exec|execdir|x|X)\s+(?:sudo\s+)?(?:rm|rmdir|mv|cp|mkdir|touch|chmod|chown|ln|tee|truncate|dd)\b/i;
-const INTERPRETER_PATH_PREFIX = String.raw`(?:[^\s;|&()]+[\\/])*`;
-const INTERPRETER_WRAPPER_PREFIX = String.raw`(?:sudo\s+)?(?:(?:env|command)\s+)?${INTERPRETER_PATH_PREFIX}`;
-const SHELL_INTERPRETER = String.raw`(?:ba|z|da|k)?sh(?:\.exe)?`;
-const NESTED_INTERPRETER_COMMAND = new RegExp([
-  String.raw`${SHELL_COMMAND_BOUNDARY}${INTERPRETER_WRAPPER_PREFIX}${SHELL_INTERPRETER}\b[^\r\n;|&]*\s-(?:c|lc)\b`,
-  String.raw`${SHELL_COMMAND_BOUNDARY}${INTERPRETER_WRAPPER_PREFIX}(?:powershell|pwsh)(?:\.exe)?\b[^\r\n;|&]*\s-(?:c|command|encodedcommand)\b`,
-  String.raw`${SHELL_COMMAND_BOUNDARY}${INTERPRETER_WRAPPER_PREFIX}cmd(?:\.exe)?\b[^\r\n;|&]*\/(?:c|k)\b`,
-  String.raw`${SHELL_COMMAND_BOUNDARY}${INTERPRETER_WRAPPER_PREFIX}(?:node|deno|bun)(?:\.exe)?\b[^\r\n;|&]*\s(?:-e|--eval)\b`,
-  String.raw`${SHELL_COMMAND_BOUNDARY}${INTERPRETER_WRAPPER_PREFIX}(?:python\d*(?:\.\d+)?|perl|ruby)(?:\.exe)?\b[^\r\n;|&]*\s-(?:c|e)\b`,
-  String.raw`${SHELL_COMMAND_BOUNDARY}xargs\b[^\r\n;|&]*\s+${INTERPRETER_PATH_PREFIX}${SHELL_INTERPRETER}\b[^\r\n;|&]*\s-(?:c|lc)\b`,
-  String.raw`(?:^|\s)-(?:exec|execdir)\s+${INTERPRETER_PATH_PREFIX}${SHELL_INTERPRETER}\b[^\r\n;|&]*\s-(?:c|lc)\b`,
-].join("|"), "i");
-const MUTATING_BASH_PATTERNS = [
-  FILE_MUTATING_COMMAND,
-  POWERSHELL_MUTATING_COMMAND,
-  PACKAGE_MUTATING_COMMAND,
-  GIT_MUTATING_COMMAND,
-  MAESTRO_MUTATING_COMMAND,
-  MAESTRO_RUN_MUTATING_COMMAND,
-  MAESTRO_SESSION_MUTATING_COMMAND,
-  IN_PLACE_EDIT_COMMAND,
-  NESTED_MUTATING_COMMAND,
-  NESTED_INTERPRETER_COMMAND,
-];
-
-const SHELL_SIDE_EFFECT_ARGUMENTS = /(?:^|\s)(?:--output(?:=|\s)|--outfile(?:=|\s)|-OutFile(?:\s|$)|--in-place(?:=|\s|$)|--exec(?:=|\s|$)|--exec-batch(?:=|\s|$)|--ext-diff(?:\s|$)|--textconv(?:\s|$)|--open-files-in-pager(?:=|\s|$)|--pre(?:=|\s|$)|--fix(?:\s|$))/i;
-
 const PlanUpdateParams = Type.Object({
   markdown: Type.String({ description: "Complete Markdown text for current.md" }),
   expectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -406,13 +345,6 @@ function blockMutatingToolCall(event: {
     return boundary === "Plan mode"
       ? intelligenceBlock
       : { block: true, reason: `${boundary} is incomplete. ${intelligenceBlock.reason}` };
-  }
-  if (["bash", "Bash", "powershell", "PowerShell"].includes(name)) {
-    const command = readCommand(event.input);
-    const dialect = name.toLowerCase() === "powershell" ? "powershell" : "posix";
-    if (!command || !isSafeCommand(command, dialect)) {
-      return { block: true, reason: `${boundary} blocks commands that may modify files or repository state.\nCommand: ${command.slice(0, 120)}` };
-    }
   }
 }
 

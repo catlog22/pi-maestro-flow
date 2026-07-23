@@ -38,7 +38,7 @@ function createHarness(
   handoff: { goalKey?: string; todoKeys: string[] } = { todoKeys: [] },
   replacementFailure?: "approval" | "send",
 ) {
-  let active = ["Read", "Write", "todo", "custom-tool"];
+  let active = ["Read", "Write", "Bash", "todo", "custom-tool"];
   const tools = new Map<string, ToolLike>();
   const commands = new Map<string, CommandLike>();
   const messages: string[] = [];
@@ -195,13 +195,13 @@ test("Plan lifecycle keeps non-editing tools and restores the exact Act snapshot
     await onSessionStartPlan(harness.ctx);
     assert.equal(harness.statuses.at(-1), "ACT");
     const actSnapshot = [...harness.active];
-    assert.deepEqual(actSnapshot, ["Read", "Write", "todo", "custom-tool", "plan-enter"]);
+    assert.deepEqual(actSnapshot, ["Read", "Write", "Bash", "todo", "custom-tool", "plan-enter"]);
 
     await execute(harness, "plan-enter");
     assert.equal(getMode(), "plan");
     assert.equal(harness.statuses.at(-1), "PLAN");
     assert.deepEqual(harness.active, [
-      "Read", "todo", "custom-tool", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status",
+      "Read", "Bash", "todo", "custom-tool", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status",
     ]);
     assert.match(onToolCallPlan({ toolName: "maestro", input: { action: "delegate" } })?.reason ?? "", /requires delegate mode='analysis'/);
     assert.equal(onToolCallPlan({ toolName: "maestro", input: { action: "delegate", mode: "analysis" } }), undefined);
@@ -474,7 +474,7 @@ test("Approval failure leaves Plan mode and Plan tools active", async () => {
   }
 });
 
-test("Plan hooks keep compatibility capture and block unapproved tools", async () => {
+test("Plan hooks keep compatibility capture, block editing tools, and allow shell commands", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-hooks-"));
   const harness = createHarness(root);
   try {
@@ -489,6 +489,8 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.match(planPrompt, /scope, boundaries, non-goals/);
     assert.match(planPrompt, /one active Goal/);
     assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /blocks/);
+    assert.match(onToolCallPlan({ toolName: "Edit", input: {} })?.reason ?? "", /blocks/);
+    assert.match(onToolCallPlan({ toolName: "NotebookEdit", input: {} })?.reason ?? "", /blocks/);
     assert.equal(onToolCallPlan({ toolName: "custom-tool", input: {} }), undefined);
     assert.equal(onToolCallPlan({ toolName: "search_tool_bm25", input: { query: "browser" } }), undefined);
     assert.equal(onToolCallPlan({ toolName: "lsp", input: { action: "diagnostics", file: "src/app.ts" } }), undefined);
@@ -496,176 +498,16 @@ test("Plan hooks keep compatibility capture and block unapproved tools", async (
     assert.match(onToolCallPlan({ toolName: "lsp", input: { action: "rename", file: "src/app.ts", new_name: "next" } })?.reason ?? "", /may modify files/);
     assert.match(onToolCallPlan({ toolName: "lsp", input: { action: "code_actions", file: "src/app.ts", apply: true } })?.reason ?? "", /may modify files/);
     assert.match(onToolCallPlan({ toolName: "browser", input: { action: "open", url: "https:\/\/example.com" } })?.reason ?? "", /blocks browser control/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git status" } })?.reason ?? "allowed", /allowed/);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro load --type project --list" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro search \"Plan Mode\" --code" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro explore \"FIND: plan hooks\\nSCOPE: packages/pi-maestro-flow/src/tools/plan.ts\"" } }), undefined);
+    for (const toolName of ["bash", "Bash", "powershell", "PowerShell"]) {
+      assert.equal(onToolCallPlan({ toolName, input: {} }), undefined, toolName);
+      assert.equal(onToolCallPlan({ toolName, input: { command: "touch src/app.ts" } }), undefined, toolName);
+    }
     for (const action of ["status", "brief", "prepare", "check"]) {
       assert.equal(onToolCallPlan({ toolName: "run-control", input: { action } }), undefined, action);
     }
     for (const action of ["next", "done", "edit", "pause", "resume"]) {
       assert.match(onToolCallPlan({ toolName: "run-control", input: { action } })?.reason ?? "", /blocks/, action);
     }
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run prepare analyze" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run brief run-1" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run recall execute --intent x --json" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run skill execute" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "maestro run mutations" } }), undefined);
-    const activeLifecycleMutations = [
-      "next",
-      "next --session s1",
-      "create execute",
-      "check run-1",
-      "complete run-1",
-      "decide point-1 --session s1 --verdict proceed",
-      "seal-session session-1",
-      "log-mutation file",
-      "retry run-1",
-      "cancel run-1",
-    ];
-    // These commands remain denylisted for Plan compatibility only. Pi coordinator
-    // Skills must not recommend them as part of the normal Topic Session flow.
-    const legacyMutationDenylist = [
-      "rebind run-1 --reason x",
-      "recall-confirm fork",
-      "fork --token t",
-      "import --token t",
-      "new --token t",
-    ];
-    for (const subcommand of [...activeLifecycleMutations, ...legacyMutationDenylist]) {
-      assert.match(
-        onToolCallPlan({ toolName: "bash", input: { command: `maestro run ${subcommand}` } })?.reason ?? "",
-        /modify files/,
-        subcommand,
-      );
-    }
-    for (const subcommand of ["resolve --session s1 --reason x --evidence y", "resume --session s1 --reason x --evidence y", "create feature --intent x", "chain insert --session s1", "migrate --session s1", "meta update --session s1"]) {
-      assert.match(
-        onToolCallPlan({ toolName: "bash", input: { command: `maestro session ${subcommand}` } })?.reason ?? "",
-        /modify files/,
-        subcommand,
-      );
-    }
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "maestro install" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git commit -am x" } })?.reason ?? "", /modify files/);
-    for (const command of [
-      "git rm src/app.ts",
-      "git mv src/app.ts src/renamed.ts",
-      "git update-index --assume-unchanged src/app.ts",
-      "git update-ref refs/heads/main HEAD",
-      "git tag release-candidate",
-      "install source.txt target.txt",
-      "tar -xf archive.tar",
-      "patch -p1 < change.patch",
-      "sort -o output.txt input.txt",
-      "date --set tomorrow",
-      "hostname renamed-host",
-      "node scripts/prepare-package-skills.mjs",
-      "unknown-read-command src/app.ts",
-    ]) {
-      assert.match(
-        onToolCallPlan({ toolName: "bash", input: { command } })?.reason ?? "",
-        /modify files/,
-        command,
-      );
-    }
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "git status; node --version" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "npm test" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "npm run check:types" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "node scripts/check.mjs" } }), undefined);
-    for (const command of [
-      "git diff -- src/app.ts",
-      "git log -n 1",
-      "git branch --list main",
-      "git tag --list 'v*'",
-      "git worktree list",
-      "find . -name '*.ts'",
-      "tsc --noEmit",
-      "prettier --check src/app.ts",
-    ]) {
-      assert.equal(onToolCallPlan({ toolName: "bash", input: { command } }), undefined, command);
-    }
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "kill 1234" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "rg '\\brm\\b|cp|mv' packages/pi-maestro-flow/src" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "echo 'rm cp mv are write commands'" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "rg '\\$\\(|`|>|sh -c' packages/pi-maestro-flow/src" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "bash", input: { command: "rg \"\\$\\(\" packages/pi-maestro-flow/src" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "PowerShell", input: { command: "Select-String -Pattern '\\$\\(|>|pwsh -Command' src/app.ts" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "PowerShell", input: { command: "Get-Content x | Select-String plan" } }), undefined);
-    assert.match(onToolCallPlan({ toolName: "PowerShell", input: { command: "Get-Content x | Set-Content y" } })?.reason ?? "", /modify files/);
-    assert.equal(onToolCallPlan({ toolName: "PowerShell", input: { command: "Get-Content x" } }), undefined);
-    assert.match(onToolCallPlan({ toolName: "bash", input: {} })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "find . -delete" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "find . -exec rm {} ;" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git diff --output=review.patch" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git log --ext-diff" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git branch -D old" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git remote set-url origin evil" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git grep x --open-files-in-pager=sh" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "fd pattern -x rm" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "rg pattern --pre 'rm file'" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "npm audit --fix" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "git status && rm src/app.ts" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "bash", input: { command: "sed -i 's/a/b/' src/app.ts" } })?.reason ?? "", /modify files/);
-    assert.match(onToolCallPlan({ toolName: "PowerShell", input: { command: "Remove-Item src/app.ts" } })?.reason ?? "", /modify files/);
-    for (const command of [
-      "sh -c \"rm src/app.ts\"",
-      "bash -lc 'touch src/app.ts'",
-      "/bin/sh -c \"rm src/app.ts\"",
-      "/bin/rm src/app.ts",
-      "env bash -c \"rm src/app.ts\"",
-      "env -S bash -c \"rm src/app.ts\"",
-      "bash -O extglob -c \"rm src/app.ts\"",
-      "bash -xec 'rm src/app.ts'",
-      "command rm src/app.ts",
-      "xargs -0 sh -c \"rm src/app.ts\"",
-      "find . -exec /bin/sh -c \"rm src/app.ts\" ;",
-      "cmd /c \"del src\\app.ts\"",
-      "cmd /d /c \"del src\\app.ts\"",
-      "pwsh -NoProfile -Command \"Set-Content src/app.ts x\"",
-      "pwsh -ExecutionPolicy Bypass -Command \"Set-Content src/app.ts x\"",
-      "eval 'rm src/app.ts'",
-      "source 'scripts/write.sh'",
-      ". 'scripts/write.sh'",
-      "iex 'Set-Content src/app.ts x'",
-      "Invoke-Expression 'Set-Content src/app.ts x'",
-      "node --eval \"require('fs').writeFileSync('src/app.ts', 'x')\"",
-      "node --input-type=module -e \"require('fs').writeFileSync('src/app.ts', 'x')\"",
-      "python3 -c \"open('src/app.ts', 'w').write('x')\"",
-      "python3 -I -c \"open('src/app.ts', 'w').write('x')\"",
-      "echo $(printf safe)",
-      "echo \"$(rm src/app.ts)\"",
-      "echo `rm src/app.ts`",
-      "Get-Content source.txt > copy.txt",
-      "Get-Content < source.txt",
-    ]) {
-      assert.match(
-        onToolCallPlan({ toolName: "bash", input: { command } })?.reason ?? "",
-        /modify files/,
-        command,
-      );
-    }
-    assert.match(
-      onToolCallPlan({
-        toolName: "PowerShell",
-        input: { command: '& "$env:SystemRoot\\System32\\cmd.exe" /c del src\\app.ts' },
-      })?.reason ?? "",
-      /modify files/,
-    );
-    assert.equal(
-      onToolCallPlan({
-        toolName: "bash",
-        input: { command: "rg '/bin/rm|bash -xec|env -S bash -c|command rm|eval|source' packages/pi-maestro-flow/src" },
-      }),
-      undefined,
-    );
-    assert.equal(
-      onToolCallPlan({
-        toolName: "PowerShell",
-        input: { command: "Select-String -Pattern '& \\\"cmd.exe\\\" /c del|iex|Invoke-Expression' src/app.ts" },
-      }),
-      undefined,
-    );
 
     await onAgentEndPlan({
       messages: [{ role: "assistant", content: "<proposed_plan>\n# Legacy plan\n</proposed_plan>" }],
