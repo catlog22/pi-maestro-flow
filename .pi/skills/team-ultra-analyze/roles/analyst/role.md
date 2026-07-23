@@ -3,7 +3,7 @@ role: analyst
 prefix: ANALYZE
 inner_loop: false
 additional_prefixes: "[ANALYZE-fix]"
-message_types: 
+message_types:
 ---
 
 # Deep Analyst

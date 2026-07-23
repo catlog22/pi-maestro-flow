@@ -6,12 +6,12 @@
 |-------|--------|----------|
 | User requirement | From coordinator Phase 1 | Yes |
 | Session folder | From coordinator Phase 2 | Yes |
-| Pipeline mode | From session.json `pipeline` | Yes |
-| Industry config | From session.json `industry` | Yes |
+| Pipeline mode | From team-session.json `pipeline` | Yes |
+| Industry config | From team-session.json `industry` | Yes |
 
-1. Load user requirement and design scope from session.json
+1. Load user requirement and design scope from team-session.json
 2. Load pipeline stage definitions from specs/pipelines.md
-3. Read `pipeline` and `industry` from session.json
+3. Read `pipeline` and `industry` from team-session.json
 
 ## Phase 3: Task Chain Creation (Mode-Branched)
 
@@ -20,7 +20,8 @@
 Every task description uses structured format:
 
 ```
-todo({ action: "create", subject: "<TASK-ID>",
+todo({ action: "create" })({
+  subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -33,7 +34,8 @@ CONTEXT:
   - Upstream artifacts: <artifact-1>, <artifact-2>
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: <deliverable path> + <quality criteria>
-CONSTRAINTS: <scope limits, focus areas>" })
+CONSTRAINTS: <scope limits, focus areas>"
+})
 todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
@@ -51,7 +53,8 @@ todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>],
 
 **RESEARCH-001** (researcher):
 ```
-todo({ action: "create", subject: "RESEARCH-001",
+todo({ action: "create" })({
+  subject: "RESEARCH-001",
   description: "PURPOSE: Analyze existing design system, build component inventory, assess accessibility baseline | Success: 4 research artifacts produced with valid data
 TASK:
   - Analyze existing design tokens and styling patterns
@@ -64,13 +67,15 @@ CONTEXT:
   - Industry: <industry>
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/outputs/research/*.json | All 4 research files with valid JSON
-CONSTRAINTS: Read-only analysis | Focus on <design-scope>" })
+CONSTRAINTS: Read-only analysis | Focus on <design-scope>"
+})
 todo({ action: "update", taskId: "RESEARCH-001", owner: "researcher" })
 ```
 
 **DESIGN-001** (designer):
 ```
-todo({ action: "create", subject: "DESIGN-001",
+todo({ action: "create" })({
+  subject: "DESIGN-001",
   description: "PURPOSE: Define component design with tokens and specifications | Success: Design tokens + component spec with all states defined
 TASK:
   - Define design tokens consuming research findings
@@ -84,13 +89,15 @@ CONTEXT:
   - Upstream artifacts: {run_dir}/outputs/research/*.json
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/outputs/design/design-tokens.json + component-specs/*.md | Complete token system + spec
-CONSTRAINTS: Follow W3C Design Tokens Format | All color tokens need light/dark" })
+CONSTRAINTS: Follow W3C Design Tokens Format | All color tokens need light/dark"
+})
 todo({ action: "update", taskId: "DESIGN-001", addBlockedBy: ["RESEARCH-001"], owner: "designer" })
 ```
 
 **AUDIT-001** (reviewer):
 ```
-todo({ action: "create", subject: "AUDIT-001",
+todo({ action: "create" })({
+  subject: "AUDIT-001",
   description: "PURPOSE: Audit design for consistency, accessibility, and quality | Success: Audit score >= 8 with 0 critical issues
 TASK:
   - Score 5 dimensions: consistency, accessibility, completeness, quality, industry compliance
@@ -104,13 +111,15 @@ CONTEXT:
   - Upstream artifacts: {run_dir}/outputs/design/design-tokens.json, {run_dir}/outputs/design/component-specs/*.md
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/outputs/audit/audit-001.md | 5-dimension scored report
-CONSTRAINTS: Read-only analysis | GC convergence: score >= 8 and 0 critical" })
+CONSTRAINTS: Read-only analysis | GC convergence: score >= 8 and 0 critical"
+})
 todo({ action: "update", taskId: "AUDIT-001", addBlockedBy: ["DESIGN-001"], owner: "reviewer" })
 ```
 
 **BUILD-001** (implementer):
 ```
-todo({ action: "create", subject: "BUILD-001",
+todo({ action: "create" })({
+  subject: "BUILD-001",
   description: "PURPOSE: Implement component code from design specs | Success: Production code with token consumption and accessibility
 TASK:
   - Generate CSS custom properties from design tokens
@@ -124,7 +133,8 @@ CONTEXT:
   - Upstream artifacts: {run_dir}/outputs/design/design-tokens.json, {run_dir}/outputs/design/component-specs/*.md, {run_dir}/outputs/audit/audit-001.md
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/outputs/build/**/* | Component + tokens CSS/TS + tests
-CONSTRAINTS: Use var(--token-name) only | Follow project patterns" })
+CONSTRAINTS: Use var(--token-name) only | Follow project patterns"
+})
 todo({ action: "update", taskId: "BUILD-001", addBlockedBy: ["AUDIT-001"], owner: "implementer" })
 ```
 

@@ -4,7 +4,7 @@ prefix: REVIEW
 inner_loop: false
 additional_prefixes: "[QUALITY]"
 discuss_rounds: "[DISCUSS-REVIEW]"
-message_types: 
+message_types:
 ---
 
 # Optimization Reviewer

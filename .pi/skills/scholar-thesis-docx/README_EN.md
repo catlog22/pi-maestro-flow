@@ -10,10 +10,10 @@
 
 Its purpose is not merely bulk formatting. The intended workflow is:
 
-1. check Word automation first  
-2. audit before editing  
-3. strictly enforce school-defined rules  
-4. preserve formatting that the school guide does not define  
+1. check Word automation first
+2. audit before editing
+3. strictly enforce school-defined rules
+4. preserve formatting that the school guide does not define
 5. export to PDF and review page by page
 
 ## Features

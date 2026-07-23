@@ -3,7 +3,7 @@ role: analyst
 prefix: RESEARCH
 inner_loop: false
 discuss_rounds: "[DISCUSS-001]"
-message_types: 
+message_types:
 ---
 
 # Analyst

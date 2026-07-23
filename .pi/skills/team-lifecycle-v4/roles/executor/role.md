@@ -2,7 +2,7 @@
 role: executor
 prefix: IMPL
 inner_loop: true
-message_types: 
+message_types:
 ---
 
 # Executor

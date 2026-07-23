@@ -107,7 +107,30 @@ Find ready tasks, spawn workers, STOP.
    b. team_msg log -> task_unblocked
    c. Spawn team-worker (see SKILL.md Spawn Template):
       ```
-      teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
+      teammate({
+        subagent_type: "team-worker",
+        description: "Spawn <role> worker for <task-id>",
+        team_name: "brainstorm",
+        name: "<role>",
+        run_in_background: true,
+        prompt: `## Role Assignment
+      role: <role>
+      role_spec: ~  or <project>/.claude/skills/team-brainstorm/roles/<role>/role.md
+      session: {run_dir}/work/team
+      session_id: <run-id>
+      team_name: brainstorm
+      requirement: <task-description>
+      inner_loop: false
+
+      ## Progress Milestones
+      session_id: <run-id>
+      Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+      Report blockers immediately via team_msg type="blocker".
+      Report completion via team_msg type="task_complete" after final SendMessage.
+
+      Read role_spec file to load Phase 2-4 domain instructions.
+      Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+      })
       ```
    d. Add to active_workers
 5. Parallel spawn rules:

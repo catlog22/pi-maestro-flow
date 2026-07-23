@@ -13,7 +13,7 @@ allowed-tools:
   - teammate
   - todo
 session-mode: run
-contract: 
+contract:
 ---
 
 <required_reading>

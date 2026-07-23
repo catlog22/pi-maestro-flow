@@ -2,7 +2,7 @@
 role: fixer
 prefix: FIX
 inner_loop: true
-message_types: 
+message_types:
 ---
 
 # Fixer

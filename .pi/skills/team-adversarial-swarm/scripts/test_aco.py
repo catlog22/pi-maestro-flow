@@ -443,6 +443,11 @@ def test_run_dir_artifacts():
                 for j in range(len(path) - 1)
             ]
             art = {
+                "_meta": {
+                    "kind": "adversarial-swarm-ant-result",
+                    "schema": "adversarial-swarm-ant-result/1.0",
+                    "role": "evidence",
+                },
                 "schema_version": "1.0",
                 "ant_id": f"ANT-1-{i}",
                 "iteration": 1,

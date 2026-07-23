@@ -9,7 +9,7 @@ Defines the structural pattern for generated **command files**. The generator us
 name: {$NAME}
 description: {$DESCRIPTION}
 argument-hint: {$ARGUMENT_HINT}  # omit if empty
-allowed-tools: {tools} # omit if unrestricted
+allowed-tools: {tools}           # omit if unrestricted
 ---
 
 <purpose>

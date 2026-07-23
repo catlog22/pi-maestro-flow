@@ -4,7 +4,7 @@ prefix: VERIFY
 inner_loop: true
 cli_tools:
   - agy --mode analysis
-message_types: 
+message_types:
 ---
 
 # Verifier

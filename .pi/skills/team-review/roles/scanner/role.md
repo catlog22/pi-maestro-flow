@@ -2,7 +2,7 @@
 role: scanner
 prefix: SCAN
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Code Scanner

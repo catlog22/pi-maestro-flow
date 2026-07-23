@@ -9,7 +9,7 @@
 5. For each task (in order):
    - todo({ action: "create" }) with structured description (see template below)
    - todo({ action: "update" }) with addBlockedBy + owner assignment
-6. Update session.json with pipeline.tasks_total
+6. Update team-session.json with pipeline.tasks_total
 7. Validate chain (no orphans, no cycles, all refs valid)
 
 ## Task Description Template
@@ -28,7 +28,7 @@ EXPECTED: <artifact path> + <quality criteria>
 CONSTRAINTS: <scope limits>
 ---
 InnerLoop: <true|false>
-RoleSpec: ~  or <project>/.pi/skills/team-quality-assurance/roles/<role>/role.md
+RoleSpec: ~  or <project>/.claude/skills/team-quality-assurance/roles/<role>/role.md
 ```
 
 ## Pipeline Task Registry

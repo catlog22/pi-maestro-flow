@@ -56,7 +56,7 @@ Worker completed. Process and advance.
 
    **GC Fix Task Creation**:
    ```
-   todo({ action: "create", subject: "OPT-fix-<round>",
+   todo({ action: "create" })({ subject: "OPT-fix-<round>",
      description: "PURPOSE: Address verification regressions | Success: All regressions resolved
    TASK:
      - Parse verification feedback for specific regressions
@@ -141,7 +141,30 @@ Find ready tasks, spawn workers, STOP.
    d. Spawn team-worker:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <task-id>",
+  team_name: "ui-polish",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: <project>/.claude/skills/team-ui-polish/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: ui-polish
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
 **Spawn rules by mode**:

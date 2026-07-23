@@ -1,5 +1,6 @@
 ---
 name: team-swarm
+disable-model-invocation: true
 description: "Swarm intelligence team skill — ACO-driven multi-agent exploration with hybrid LLM coordinator + Python optimization controller. Coordinator generates swarm-config from user task, then runs K iterations of N parallel ants guided by pheromone state. Universal task space via config (nodes + scoring rule). Triggers on \"team swarm\", \"swarm intelligence\", \"蚁群\"."
 allowed-tools:
   - AskUserQuestion
@@ -82,7 +83,33 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker",
+  team_name: "swarm",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: <skill_root>/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: swarm
+requirement: <task-description>
+inner_loop: false
+
+## Assignment (ant only)
+<assignment JSON from aco.py select>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries.
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file (@<skill_root>/roles/<role>/role.md) to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
 ## User Commands
@@ -126,10 +153,10 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 │   └── history/<iter>.json     # Per-iter snapshot
 ├── trails/<iter>.jsonl         # Per-iter all-ant paths + scores
 ├── scores/iter-<iter>-scores.json  # Scorer output (if mode == llm)
-├── artifacts/                  # scratch/intermediate (aco.py working dir); formal deliverables go to {run_dir}/outputs/
-│   ├── ant-<iter>-<id>.json    # Per-ant schema-locked output -> {run_dir}/outputs/ant-<iter>-<id>.json
-│   ├── swarm-report.json       # Phase 4 full report dump -> {run_dir}/outputs/swarm-report.json
-│   └── best-solution.md        # Analyst final synthesis -> {run_dir}/outputs/best-solution.md
+├── {run_dir}/outputs/          # Formal deliverables
+│   ├── ant-<iter>-<id>.json    # Per-ant schema-locked output
+│   ├── swarm-report.json       # Phase 4 full report dump
+│   └── best-solution.md        # Analyst final synthesis
 ├── best.json                   # Canonical best solution
 ├── wisdom/                     # learnings / decisions / issues
 └── .msg/                       # Message bus

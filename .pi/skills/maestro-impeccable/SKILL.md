@@ -1,5 +1,6 @@
 ---
 name: maestro-impeccable
+disable-model-invocation: true
 description: "Use when designing, auditing, polishing, improving, or codifying frontend UI — websites, dashboards, landing pages, components, design systems"
 argument-hint: "build|redesign|improve|enhance|launch|harden|foundation|live [target] [--codify <path>]"
 allowed-tools:
@@ -14,7 +15,7 @@ allowed-tools:
   - teammate
   - todo
 session-mode: run
-contract: 
+contract:
 ---
 
 <required_reading>
@@ -363,7 +364,7 @@ Never auto-select: teach, shape, craft, live, document, extract, overdrive, crit
 | E002 | error | Source/target path not found | Verify path exists |
 | E003 | error | PRODUCT.md missing and teach step failed | Run `maestro impeccable teach` manually first |
 | E004 | error | Chain quality gate failed after max loops | Review findings manually, fix critical issues, then resume |
-| W001 | warning | UI specs not found via spec load | Continuing without specs — output may miss project conventions |
+| W001 | warning | UI specs not found via maestro-spec load | Continuing without specs — output may miss project conventions |
 | W002 | warning | Quality gate score below threshold but P0 == 0 | Auto-refine loop triggered |
 | W003 | warning | Chain step failed but non-blocking | Step failure documented, chain continues |
 | E101 | error | Codify: source path not found or not a directory | Verify `--codify <source-path>` exists |
@@ -390,7 +391,7 @@ Chain mode:
 - [ ] Final report with scores, trend, and commands executed
 
 Codify mode:
-- [ ] UI specs loaded via `spec load --category ui` (if available)
+- [ ] UI specs loaded via `maestro-spec load --category ui` (if available)
 - [ ] Source path validated and file discovery completed
 - [ ] design-tokens.json generated with color, typography, spacing tokens
 - [ ] layout-templates.json generated with component patterns (universal/specialized)

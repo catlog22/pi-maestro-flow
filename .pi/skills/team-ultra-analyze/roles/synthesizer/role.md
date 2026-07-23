@@ -2,7 +2,7 @@
 role: synthesizer
 prefix: SYNTH
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Synthesizer

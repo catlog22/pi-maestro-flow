@@ -27,7 +27,7 @@ const inputType = detectInputType(userInput);
 | Path to `.claude/commands/**/*.md` | `command_set` | Read orchestrator + discover sub-commands |
 | Free text describing workflow | `text_description` | Interactive requirements gathering |
 | Path to `.md` or `.json` requirements | `requirements_doc` | Parse structured requirements |
-| Path to `.pi/skills/**/*.md` | `existing_skill` | Analyze and restructure |
+| Path to `.claude/skills/**/*.md` | `existing_skill` | Analyze and restructure |
 
 ## Step 1.2: Source-Specific Analysis
 

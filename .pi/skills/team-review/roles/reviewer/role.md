@@ -2,7 +2,7 @@
 role: reviewer
 prefix: REV
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Finding Reviewer
@@ -17,7 +17,7 @@ message_types:
 | .msg/meta.json | {run_dir}/work/team/.msg/meta.json | No |
 
 1. Extract session path, input path, dimensions from task description
-2. Load review specs: Run `ccw spec load --category review` for review standards, checklists, and approval gates
+2. Load review specs: Run `maestro spec load --category review` for review standards, checklists, and approval gates
 3. Load scan results. If missing or empty -> report clean, complete immediately
 3. Load wisdom files from `{run_dir}/work/team/wisdom/`
 4. Triage findings into two buckets:

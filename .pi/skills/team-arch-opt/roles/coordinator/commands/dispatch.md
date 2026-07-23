@@ -7,14 +7,14 @@
 | User requirement | From coordinator Phase 1 | Yes |
 | Session folder | From coordinator Phase 2 | Yes |
 | Pipeline definition | From SKILL.md Pipeline Definitions | Yes |
-| Parallel mode | From session.json `parallel_mode` | Yes |
-| Max branches | From session.json `max_branches` | Yes |
-| Independent targets | From session.json `independent_targets` (independent mode only) | Conditional |
+| Parallel mode | From team-session.json `parallel_mode` | Yes |
+| Max branches | From team-session.json `max_branches` | Yes |
+| Independent targets | From team-session.json `independent_targets` (independent mode only) | Conditional |
 
-1. Load user requirement and refactoring scope from session.json
+1. Load user requirement and refactoring scope from team-session.json
 2. Load pipeline stage definitions from SKILL.md Task Metadata Registry
-3. Read `parallel_mode` and `max_branches` from session.json
-4. For `independent` mode: read `independent_targets` array from session.json
+3. Read `parallel_mode` and `max_branches` from team-session.json
+4. For `independent` mode: read `independent_targets` array from team-session.json
 
 ## Phase 3: Task Chain Creation (Mode-Branched)
 
@@ -23,7 +23,8 @@
 Every task description uses structured format for clarity:
 
 ```
-todo({ action: "create", subject: "<TASK-ID>",
+todo({ action: "create" })({
+  subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -39,7 +40,8 @@ EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits, focus areas>
 ---
 InnerLoop: <true|false>
-BranchId: <B01|A|none>" })
+BranchId: <B01|A|none>"
+})
 todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
@@ -106,7 +108,8 @@ todo({ action: "update", taskId: "DESIGN-001", addBlockedBy: ["ANALYZE-001"], ow
 
 **REFACTOR-001** (refactorer, Stage 3):
 ```
-todo({ action: "create", subject: "REFACTOR-001",
+todo({ action: "create" })({
+  subject: "REFACTOR-001",
   description: "PURPOSE: Implement refactoring changes per design plan | Success: All planned refactorings applied, code compiles, existing tests pass
 TASK:
   - Load refactoring plan and identify target files
@@ -122,7 +125,8 @@ CONTEXT:
 EXPECTED: Modified source files + validation passing | Refactorings applied without regressions
 CONSTRAINTS: Preserve existing behavior | Update all references | Follow code conventions
 ---
-InnerLoop: true" })
+InnerLoop: true"
+})
 todo({ action: "update", taskId: "REFACTOR-001", addBlockedBy: ["DESIGN-001"], owner: "refactorer" })
 ```
 
@@ -255,7 +259,7 @@ todo({ action: "update", taskId: "ANALYZE-A01", owner: "analyzer" })
 | count <= 2 | Switch to `single` mode -- create REFACTOR-001, VALIDATE-001, REVIEW-001 (standard single pipeline) |
 | count >= 3 | Switch to `fan-out` mode -- create branch tasks below |
 
-4. Update session.json with resolved `parallel_mode` (auto -> single or fan-out)
+4. Update team-session.json with resolved `parallel_mode` (auto -> single or fan-out)
 
 5. **Fan-out branch creation** (when count >= 3 or forced fan-out):
    - Truncate to `max_branches` if `refactoring_count > max_branches` (keep top N by priority)
@@ -335,7 +339,7 @@ BranchId: B{NN}"
 todo({ action: "update" })({ taskId: "REVIEW-B{NN}", addBlockedBy: ["REFACTOR-B{NN}"], owner: "reviewer" })
 ```
 
-7. Update session.json:
+7. Update team-session.json:
    - `branches`: array of branch IDs (["B01", "B02", ...])
    - `fix_cycles`: object keyed by branch ID, all initialized to 0
 
@@ -352,7 +356,7 @@ Verify task chain integrity:
 | No circular dependencies | Trace dependency graph | Acyclic |
 | Task IDs use correct prefixes | Pattern check | Match naming rules per mode |
 | Structured descriptions complete | Each has PURPOSE/TASK/CONTEXT/EXPECTED/CONSTRAINTS | All present |
-| Branch/Pipeline IDs consistent | Cross-check with session.json | Match |
+| Branch/Pipeline IDs consistent | Cross-check with team-session.json | Match |
 
 ### Naming Rules Summary
 

@@ -2,7 +2,7 @@
 role: benchmarker
 prefix: BENCH
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Performance Benchmarker

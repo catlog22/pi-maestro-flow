@@ -11,7 +11,7 @@ allowed-tools:
   - Write
   - teammate
 session-mode: run
-contract: 
+contract:
 ---
 
 <required_reading>

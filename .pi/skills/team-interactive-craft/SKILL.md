@@ -1,5 +1,6 @@
 ---
 name: team-interactive-craft
+disable-model-invocation: true
 description: "Unified team skill for interactive component crafting. Vanilla JS + CSS interactive components with zero dependencies. Research -> interaction design -> build -> a11y test. Uses team-worker agent architecture. Triggers on \"team interactive craft\", \"interactive component\"."
 allowed-tools:
   - AskUserQuestion
@@ -86,7 +87,30 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <task-id>",
+  team_name: "interactive-craft",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: <skill_root>/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: interactive-craft
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file (@<skill_root>/roles/<role>/role.md) to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
 ## User Commands

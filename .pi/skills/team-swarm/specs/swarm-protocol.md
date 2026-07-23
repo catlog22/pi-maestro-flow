@@ -55,7 +55,7 @@ Master protocol document for team-swarm: defines how the LLM coordinator and Pyt
   ├─> todo({ action: "create" }) × N ant tasks
   ├─> spawn N × team-worker(ant) in background
   └─> STOP (await all callbacks)
-  
+
 [Callback] all ants done → handleIterationComplete
   ├─> (optional) spawn scorer worker → verified_scores.json
   ├─> python aco.py update --iter k

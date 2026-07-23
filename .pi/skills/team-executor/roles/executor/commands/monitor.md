@@ -8,7 +8,7 @@ Event-driven pipeline coordination with Spawn-and-Stop pattern for team-executor
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| SPAWN_MODE | background | All workers spawned via `Task(run_in_background: true)` |
+| SPAWN_MODE | background | All workers spawned via `teammate(subagent_type: "team-worker", run_in_background: true)` |
 | ONE_STEP_PER_INVOCATION | true | Executor does one operation then STOPS |
 | FAST_ADVANCE_AWARE | true | Workers may skip executor for simple linear successors |
 | ROLE_GENERATION | disabled | handleAdapt cannot generate new role-specs |
@@ -135,7 +135,23 @@ Ready tasks found?
 **Spawn worker tool call**:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <subject>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <subject>",
+  team_name: <team-name>,
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: {run_dir}/work/team/role-specs/<role>.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: <team-name>
+requirement: <task-description>
+inner_loop: <true|false>
+
+Read role_spec file to load Phase 2-4 domain instructions.`
+})
 ```
 
 ---
@@ -146,6 +162,12 @@ Pipeline complete. Execute completion action.
 
 ```
 All tasks completed (no pending, no in_progress)
+  +- Run lifecycle completion (the upstream team-coordinate Run must be sealed here):
+  |   - Read run_id from team-session.json.run.run_id (created upstream, not by executor)
+  |   - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
+  |   - Run `maestro run complete <run_id>`
+  |   - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
+  |
   +- Generate pipeline summary (deliverables, stats, duration)
   +- Read session.completion_action:
       |

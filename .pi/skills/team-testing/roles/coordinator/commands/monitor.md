@@ -23,10 +23,10 @@
 
 | Prefix | Role | Role Spec | inner_loop |
 |--------|------|-----------|------------|
-| STRATEGY-* | strategist | `~  or <project>/.pi/skills/team-testing/roles/strategist/role.md` | false |
-| TESTGEN-* | generator | `~  or <project>/.pi/skills/team-testing/roles/generator/role.md` | true |
-| TESTRUN-* | executor | `~  or <project>/.pi/skills/team-testing/roles/executor/role.md` | true |
-| TESTANA-* | analyst | `~  or <project>/.pi/skills/team-testing/roles/analyst/role.md` | false |
+| STRATEGY-* | strategist | `~  or <project>/.claude/skills/team-testing/roles/strategist/role.md` | false |
+| TESTGEN-* | generator | `~  or <project>/.claude/skills/team-testing/roles/generator/role.md` | true |
+| TESTRUN-* | executor | `~  or <project>/.claude/skills/team-testing/roles/executor/role.md` | true |
+| TESTANA-* | analyst | `~  or <project>/.claude/skills/team-testing/roles/analyst/role.md` | false |
 
 ## handleCallback
 
@@ -51,7 +51,8 @@ Worker completed. Process and advance.
 
 **GC Fix Task Creation** (when coverage below target):
 ```
-todo({ action: "create", subject: "TESTGEN-<layer>-fix-<round>: Revise <layer> tests (GC #<round>)",
+todo({ action: "create" })({
+  subject: "TESTGEN-<layer>-fix-<round>: Revise <layer> tests (GC #<round>)",
   description: "PURPOSE: Revise tests to fix failures and improve coverage | Success: pass_rate >= 0.95 AND coverage >= target
 TASK:
   - Read previous test results and failure details
@@ -65,8 +66,10 @@ EXPECTED: Revised test files in {run_dir}/outputs/tests/<layer>/
 CONSTRAINTS: Only modify test files
 ---
 InnerLoop: true
-RoleSpec: ~  or <project>/.pi/skills/team-testing/roles/generator/role.md" })
-todo({ action: "create", subject: "TESTRUN-<layer>-fix-<round>: Re-execute <layer> (GC #<round>)",
+RoleSpec: ~  or <project>/.claude/skills/team-testing/roles/generator/role.md"
+})
+todo({ action: "create" })({
+  subject: "TESTRUN-<layer>-fix-<round>: Re-execute <layer> (GC #<round>)",
   description: "PURPOSE: Re-execute tests after revision | Success: pass_rate >= 0.95
 CONTEXT:
   - Session: {run_dir}/work/team
@@ -75,8 +78,9 @@ CONTEXT:
 EXPECTED: {run_dir}/outputs/results/run-<N>-gc.json
 ---
 InnerLoop: true
-RoleSpec: ~  or <project>/.pi/skills/team-testing/roles/executor/role.md",
-  blockedBy: ["TESTGEN-<layer>-fix-<round>"] })
+RoleSpec: ~  or <project>/.claude/skills/team-testing/roles/executor/role.md",
+  blockedBy: ["TESTGEN-<layer>-fix-<round>"]
+})
 ```
 Update session.gc_rounds[layer]++
 
@@ -162,7 +166,34 @@ Find ready tasks, spawn workers, STOP.
    e. Spawn team-worker:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <subject>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <subject>",
+  team_name: "testing",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: ~  or <project>/.claude/skills/team-testing/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: testing
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Current Task
+- Task ID: <task-id>
+- Task: <subject>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
    f. Add to active_workers
@@ -171,7 +202,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
    - TESTGEN-001 + TESTGEN-002 both unblocked -> spawn both in parallel (name: "generator-1", "generator-2")
    - TESTRUN-001 + TESTRUN-002 both unblocked -> spawn both in parallel (name: "executor-1", "executor-2")
 
-6. Update session.json, output summary, STOP
+6. Update team-session.json, output summary, STOP
 
 ## handleComplete
 
@@ -214,7 +245,7 @@ On every coordinator wake:
 After every handler execution:
 1. Reconcile active_workers with actual todo({ action: "list" }) states
 2. Remove entries for completed/deleted tasks
-3. Write updated session.json
+3. Write updated team-session.json
 4. STOP (wait for next callback)
 
 ## Error Handling

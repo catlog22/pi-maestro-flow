@@ -3,7 +3,7 @@ role: scorer
 prefix: SCORE
 inner_loop: false
 output_tag: "[scorer]"
-message_types: 
+message_types:
 ---
 
 # Scorer Role — Phase 2-4

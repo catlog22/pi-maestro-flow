@@ -1,5 +1,6 @@
 ---
 name: team-arch-opt
+disable-model-invocation: true
 description: "Unified team skill for architecture optimization. Uses team-worker agent architecture with role directories for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team arch-opt\"."
 allowed-tools:
   - AskUserQuestion
@@ -82,7 +83,30 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker",
+  team_name: "arch-opt",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: <skill_root>/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: arch-opt
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file (@<skill_root>/roles/<role>/role.md) to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
 **Inner Loop roles** (refactorer): Set `inner_loop` dynamically — `true` for single mode, `false` for fan-out/independent (parallel branches).
@@ -103,7 +127,7 @@ teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> work
 
 ```
 {run_dir}/work/team/
-├── session.json                    # Session metadata + status + parallel_mode
+├── team-session.json                    # Session metadata + status + parallel_mode
 ├── task-analysis.json              # Coordinator analyze output
 ├── {run_dir}/outputs/              # Run deliverables (via maestro run)
 │   ├── architecture-baseline.json  # Analyzer: pre-refactoring metrics

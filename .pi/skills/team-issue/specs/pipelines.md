@@ -86,7 +86,7 @@ Note: BUILD tasks are created dynamically after MARSHAL completes and execution-
 ## Shared State (meta.json)
 
 | Role | State Key |
-|------|-----------| 
+|------|-----------|
 | explorer | `explorer` (issue_id, complexity, impact_scope, file_count) |
 | planner | `planner` (issue_id, solution_id, task_count, is_revision) |
 | reviewer | `reviewer` (overall_verdict, review_count, scores) |
@@ -119,7 +119,7 @@ AUDIT verdict: rejected
 ## Deferred BUILD Creation (Batch Mode)
 
 BUILD tasks are not created during initial dispatch. After MARSHAL-001 completes:
-1. Read `.workflow/issues/queue/execution-queue.json`
+1. Read `{run_dir}/outputs/queue/execution-queue.json`
 2. Parse `parallel_groups` to determine M
 3. Create BUILD-001..M tasks with `addBlockedBy: ["MARSHAL-001"]`
 4. Assign owners: M <= 2 → "implementer"; M > 2 → "implementer-1".."implementer-M" (max 3)

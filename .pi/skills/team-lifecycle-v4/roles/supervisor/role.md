@@ -3,7 +3,7 @@ role: supervisor
 prefix: CHECKPOINT
 inner_loop: false
 discuss_rounds: "[]"
-message_types: 
+message_types:
 ---
 
 # Supervisor

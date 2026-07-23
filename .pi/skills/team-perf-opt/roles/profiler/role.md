@@ -2,7 +2,7 @@
 role: profiler
 prefix: PROFILE
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Performance Profiler

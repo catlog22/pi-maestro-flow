@@ -145,12 +145,6 @@ mcp__maestro__team_msg({
 })
 ```
 
-**CLI fallback** (when MCP unavailable):
-
-```
-Bash("ccw team log --session-id <run-id> --from coordinator --type <type> --json")
-```
-
 ---
 
 ## Execution (5-Phase)
@@ -202,7 +196,7 @@ Delegate to `@commands/roadmap-discuss.md`:
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.pi/skills/team-roadmap-dev`
+   - `skill_root` = `<project_root>/.claude/skills/team-roadmap-dev`
 
 2. Call `TeamCreate({ team_name: "roadmap-dev" })`
 
@@ -231,7 +225,7 @@ mcp__maestro__team_msg({
        ```json
        "run": { "run_id": "<id>", "run_dir": "<path>" }
        ```
-   - **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field.
+   - **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field. If `run.run_id` is missing, resolve in order: birth-packet injection, then `<session>/artifacts/`; if all are absent, fail closed — report session corruption and do NOT create a new Run.
 5. Spawn worker roles (see SKILL.md Coordinator Spawn Template)
 6. Load `@commands/dispatch.md` for task chain creation
 
@@ -251,7 +245,7 @@ mcp__maestro__team_msg({
 **Objective**: Monitor phase execution, handle callbacks, advance pipeline.
 
 **Design**: Spawn-and-Stop + Callback pattern.
-- Spawn workers with `Task(run_in_background: true)` -> immediately return
+- Spawn workers with `teammate(subagent_type: "team-worker", run_in_background: true)` -> immediately return
 - Worker completes -> SendMessage callback -> auto-advance
 - User can use "check" / "resume" to manually advance
 - Coordinator does one operation per invocation, then STOPS

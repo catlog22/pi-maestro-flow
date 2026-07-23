@@ -49,7 +49,7 @@ For callback/check/resume/adapt/complete: load @commands/monitor.md, execute han
 
 ## Phase 0: Session Resume Check
 
-1. Scan {run_dir}/work/team/session.json for active/paused sessions
+1. Scan {run_dir}/work/team/team-session.json for active/paused sessions
 2. No sessions -> Phase 1
 3. Single session -> reconcile (audit todo({ action: "list" }), reset in_progress->pending, rebuild team, kick first ready task)
 4. Multiple -> user prompt for selection
@@ -79,12 +79,12 @@ TEXT-LEVEL ONLY. No source code reading.
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.pi/skills/team-quality-assurance`
+   - `skill_root` = `<project_root>/.claude/skills/team-quality-assurance`
 2. Generate session ID: QA-<slug>-<date>
 3. Create session folder structure
 4. TeamCreate with team name "quality-assurance"
 5. Read specs/pipelines.md -> select pipeline based on mode
-6. Register roles in session.json
+6. Register roles in team-session.json
 7. Initialize shared infrastructure (wisdom/*.md)
 8. Initialize pipeline via team_msg state_update:
    ```
@@ -105,7 +105,7 @@ TEXT-LEVEL ONLY. No source code reading.
      }
    })
    ```
-9. Write session.json
+9. Write team-session.json
 
 ### Run Lifecycle Integration
 
@@ -117,7 +117,7 @@ After session folder creation and before role-spec generation:
      ```json
      "run": { "run_id": "<id>", "run_dir": "<path>" }
      ```
-2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field.
+2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field. If `run.run_id` is missing, resolve in order: birth-packet injection, then `<session>/artifacts/`; if all are absent, fail closed — report session corruption and do NOT create a new Run.
 
 ## Phase 3: Create Task Chain
 
@@ -126,7 +126,7 @@ Delegate to @commands/dispatch.md:
 2. Read specs/pipelines.md for selected pipeline's task registry
 3. Topological sort tasks
 4. Create tasks via todo({ action: "create" }), then todo({ action: "update" }) with addBlockedBy
-5. Update session.json
+5. Update team-session.json
 
 ## Phase 4: Spawn-and-Stop
 

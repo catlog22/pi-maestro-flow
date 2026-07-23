@@ -25,7 +25,7 @@ Event-driven pipeline coordination with Spawn-and-Stop pattern. Role names are r
 
 | Constant | Value | Description |
 |----------|-------|-------------|
-| SPAWN_MODE | background | All workers spawned via `Task(run_in_background: true)` |
+| SPAWN_MODE | background | All workers spawned via `teammate(subagent_type: "team-worker", run_in_background: true)` |
 | ONE_STEP_PER_INVOCATION | true | Coordinator does one operation then STOPS |
 | FAST_ADVANCE_AWARE | true | Workers may skip coordinator for simple linear successors |
 | WORKER_AGENT | team-worker | All workers spawned as team-worker agents |
@@ -184,7 +184,29 @@ Ready tasks found?
 **Spawn worker tool call** (one per ready task):
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <subject>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <subject>",
+  team_name: <team-name>,
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: {run_dir}/work/team/role-specs/<role>.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: <team-name>
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.`
+})
 ```
 
 ---

@@ -2,7 +2,7 @@
 role: analyst
 prefix: ANALYZE
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Requirements Analyst

@@ -2,7 +2,7 @@
 role: qa
 prefix: QA
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # QA Engineer

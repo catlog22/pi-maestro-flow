@@ -2,7 +2,7 @@
 role: planner
 prefix: PLAN
 inner_loop: true
-message_types: 
+message_types:
 ---
 
 # Planner
@@ -22,8 +22,8 @@ message_types:
 
 | Detection | Condition | Action |
 |-----------|-----------|--------|
-| Issue IDs | `ISS-\d{8}-\d{6}` pattern | Use directly |
-| `--text '...'` | Flag in input | Create issue(s) via `ccw issue create` |
+| Issue IDs | `ISS-\d{8}-\d{3}` pattern | Use directly |
+| `--text '...'` | Flag in input | Create issue(s) via `Bash("maestro issue create ... --json")` |
 | `--plan <path>` | Flag in input | Read file, parse phases, batch create issues |
 
 ## Phase 3: Issue Processing Loop
@@ -44,7 +44,7 @@ CONSTRAINTS: Follow project patterns | Reference existing implementations
 " --tool agy --mode analysis --rule planning-breakdown-task-steps
 ```
 
-Parse CLI output to extract solution JSON. If CLI fails, fallback to `ccw issue solution <issueId> --json`.
+Parse CLI output to extract solution JSON. If CLI fails, stop and report the missing Run solution artifact; do not consult a second solution store.
 
 ### 3b. Write Solution Artifact
 

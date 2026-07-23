@@ -206,7 +206,15 @@ def _load_iteration_artifacts(paths: SessionPaths, iteration: int) -> List[dict]
     return artifacts
 
 
-def _validate_artifact(art: dict, valid_nodes: set) -> Optional[str]:
+def _validate_artifact(art: dict, valid_nodes: set, require_meta: bool = False) -> Optional[str]:
+    if require_meta:
+        meta = art.get("_meta")
+        if not isinstance(meta, dict):
+            return "missing or invalid _meta"
+        if not isinstance(meta.get("kind"), str) or not meta["kind"].strip():
+            return "missing or invalid _meta.kind"
+        if not isinstance(meta.get("schema"), str) or not meta["schema"].strip():
+            return "missing or invalid _meta.schema"
     required = ["schema_version", "ant_id", "iteration", "path", "self_score", "self_confidence"]
     for f in required:
         if f not in art:
@@ -252,7 +260,7 @@ def cmd_update(args: argparse.Namespace) -> None:
     hallucinations = []
     scored = []
     for art in artifacts:
-        err = _validate_artifact(art, valid_nodes)
+        err = _validate_artifact(art, valid_nodes, require_meta=paths.run_dir is not None)
         if err:
             print(f"warning: invalid artifact {art.get('ant_id', '?')}: {err}", file=sys.stderr)
             continue

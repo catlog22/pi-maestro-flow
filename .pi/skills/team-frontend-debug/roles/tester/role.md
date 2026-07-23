@@ -2,7 +2,7 @@
 role: tester
 prefix: TEST
 inner_loop: true
-message_types: 
+message_types:
 ---
 
 # Tester

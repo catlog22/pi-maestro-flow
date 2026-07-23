@@ -77,7 +77,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.pi/skills/team-review`
+   - `skill_root` = `<project_root>/.claude/skills/team-review`
 2. Generate session ID: RV-<slug>-<date>
 3. Create `{run_dir}/work/team/wisdom/` and formal directories `{run_dir}/outputs/{scan,review,fix}/`
 4. TeamCreate with team name "review"

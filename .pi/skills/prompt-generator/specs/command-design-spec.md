@@ -26,7 +26,7 @@ Guidelines for Claude Code **command files** (orchestration workflows). Commands
 name: command-name           # Required: lowercase with hyphens
 description: Description     # Required: brief purpose
 argument-hint: "[args]"      # Optional: argument format hint
-allowed-tools: Tool1, Tool2 # Optional: restricted tool set
+allowed-tools: Tool1, Tool2  # Optional: restricted tool set
 ---
 ```
 

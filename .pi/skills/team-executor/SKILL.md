@@ -1,5 +1,6 @@
 ---
 name: team-executor
+disable-model-invocation: true
 description: "Lightweight session execution skill. Resumes existing team-coordinate sessions for pure execution via team-worker agents. No analysis, no role generation -- only loads and executes. Session path required. Triggers on \"Team Executor\"."
 allowed-tools:
   - AskUserQuestion
@@ -83,7 +84,9 @@ This skill is **executor-only**. Workers do NOT invoke this skill -- they are sp
 
 ### Orchestration Mode
 
-**Invocation**: `Skill(skill="team-executor", args="--session={run_dir}/work/team")`
+**Invocation**: `Skill(skill="team-executor", args="--session=.workflow/sessions/<session-id>/runs/<run-id>/work/team")`
+
+The `--session` path is the `work/team` directory of an existing team-coordinate Run; its `run_dir` was created by that upstream Run, not by team-executor.
 
 **Lifecycle**:
 ```
@@ -119,7 +122,29 @@ Validate session
 When executor spawns workers, use `team-worker` agent with role-spec path:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker",
+  team_name: <team-name>,
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: {run_dir}/work/team/role-specs/<role>.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: <team-name>
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.`
+})
 ```
 
 ---

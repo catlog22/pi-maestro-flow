@@ -28,7 +28,8 @@ Create task chains based on execution mode. Generate structured task description
 Every task description uses structured format for clarity:
 
 ```
-todo({ action: "create", subject: "<TASK-ID>",
+todo({ action: "create" })({
+  subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -44,7 +45,8 @@ EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits, focus areas>
 ---
 InnerLoop: <true|false>
-<additional-metadata-fields>" })
+<additional-metadata-fields>"
+})
 todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 

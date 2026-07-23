@@ -1,5 +1,6 @@
 ---
 name: workflow-skill-designer
+disable-model-invocation: true
 description: "Meta-skill for designing orchestrator+phases structured workflow skills. Creates SKILL.md coordinator with progressive phase loading, TodoWrite patterns, and data flow. Triggers on \"design workflow skill\", \"create workflow skill\", \"workflow skill designer\"."
 allowed-tools:
   - AskUserQuestion
@@ -43,7 +44,7 @@ Meta-skill for creating structured workflow skills following the orchestrator + 
 The skill this meta-skill produces follows this structure:
 
 ```
-.pi/skills/{skill-name}/
+.claude/skills/{skill-name}/
 ├── SKILL.md                    # Orchestrator: coordination, data flow, todo({ action: "update" })
 ├── phases/
 │   ├── 01-{phase-name}.md      # Phase execution detail (full content)
@@ -279,12 +280,12 @@ Phase 1: Requirements Analysis
 Phase 2: Orchestrator Design (SKILL.md)
    └─ Ref: phases/02-orchestrator-design.md
       ├─ Input: workflowConfig
-      └─ Output: .pi/skills/{name}/SKILL.md
+      └─ Output: .claude/skills/{name}/SKILL.md
 
 Phase 3: Phase Files Design
    └─ Ref: phases/03-phase-design.md
       ├─ Input: workflowConfig + source content
-      └─ Output: .pi/skills/{name}/phases/0N-*.md
+      └─ Output: .claude/skills/{name}/phases/0N-*.md
 
 Phase 4: Validation & Integration
    └─ Ref: phases/04-validation.md

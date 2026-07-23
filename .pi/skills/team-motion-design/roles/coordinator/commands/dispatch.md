@@ -6,12 +6,12 @@
 |-------|--------|----------|
 | User requirement | From coordinator Phase 1 | Yes |
 | Session folder | From coordinator Phase 2 | Yes |
-| Pipeline mode | From session.json `pipeline` | Yes |
-| Framework config | From session.json `framework` | Yes |
+| Pipeline mode | From team-session.json `pipeline` | Yes |
+| Framework config | From team-session.json `framework` | Yes |
 
-1. Load user requirement and motion scope from session.json
+1. Load user requirement and motion scope from team-session.json
 2. Load pipeline stage definitions from specs/pipelines.md
-3. Read `pipeline` and `framework` from session.json
+3. Read `pipeline` and `framework` from team-session.json
 
 ## Phase 3: Task Chain Creation (Mode-Branched)
 
@@ -20,7 +20,8 @@
 Every task description uses structured format:
 
 ```
-todo({ action: "create", subject: "<TASK-ID>",
+todo({ action: "create" })({
+  subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -33,7 +34,8 @@ CONTEXT:
   - Upstream artifacts: <artifact-1>, <artifact-2>
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: <deliverable path> + <quality criteria>
-CONSTRAINTS: <scope limits, focus areas>" })
+CONSTRAINTS: <scope limits, focus areas>"
+})
 todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
@@ -51,7 +53,8 @@ todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>],
 
 **MRESEARCH-001** (motion-researcher):
 ```
-todo({ action: "create", subject: "MRESEARCH-001",
+todo({ action: "create" })({
+  subject: "MRESEARCH-001",
   description: "PURPOSE: Audit existing animations, measure performance baseline, catalog easing patterns | Success: 3 research artifacts produced with valid data
 TASK:
   - Scan codebase for existing CSS @keyframes, transitions, JS animation code
@@ -64,13 +67,15 @@ CONTEXT:
   - Framework: <framework>
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/outputs/research/*.json | All 3 research files with valid JSON
-CONSTRAINTS: Read-only analysis | Focus on existing animation patterns" })
+CONSTRAINTS: Read-only analysis | Focus on existing animation patterns"
+})
 todo({ action: "update", taskId: "MRESEARCH-001", owner: "motion-researcher" })
 ```
 
 **CHOREO-001** (choreographer):
 ```
-todo({ action: "create", subject: "CHOREO-001",
+todo({ action: "create" })({
+  subject: "CHOREO-001",
   description: "PURPOSE: Design animation token system with easing functions, duration scale, stagger formulas | Success: Complete motion-tokens.json with all token categories
 TASK:
   - Define easing functions (ease-out, ease-in-out, ease-spring) as cubic-bezier values
@@ -85,13 +90,15 @@ CONTEXT:
   - Upstream artifacts: {run_dir}/outputs/research/*.json
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/outputs/choreography/motion-tokens.json | Complete token system
-CONSTRAINTS: Follow motion-tokens.md schema | All tokens must have reduced-motion fallback" })
+CONSTRAINTS: Follow motion-tokens.md schema | All tokens must have reduced-motion fallback"
+})
 todo({ action: "update", taskId: "CHOREO-001", addBlockedBy: ["MRESEARCH-001"], owner: "choreographer" })
 ```
 
 **ANIM-001** (animator):
 ```
-todo({ action: "create", subject: "ANIM-001",
+todo({ action: "create" })({
+  subject: "ANIM-001",
   description: "PURPOSE: Implement CSS custom properties and utility classes from motion tokens | Success: Production-ready CSS with token consumption and reduced-motion overrides
 TASK:
   - Generate CSS custom properties from motion-tokens.json
@@ -105,13 +112,15 @@ CONTEXT:
   - Upstream artifacts: choreography/motion-tokens.json
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/outputs/animations/keyframes/*.css | Token CSS + utility classes + reduced-motion
-CONSTRAINTS: Compositor-only animations | No layout-triggering properties | will-change budget" })
+CONSTRAINTS: Compositor-only animations | No layout-triggering properties | will-change budget"
+})
 todo({ action: "update", taskId: "ANIM-001", addBlockedBy: ["CHOREO-001"], owner: "animator" })
 ```
 
 **MTEST-001** (motion-tester):
 ```
-todo({ action: "create", subject: "MTEST-001",
+todo({ action: "create" })({
+  subject: "MTEST-001",
   description: "PURPOSE: Verify animation performance and accessibility compliance | Success: 60fps confirmed, no layout thrashing, reduced-motion present
 TASK:
   - Start Chrome DevTools performance trace (if available)
@@ -126,7 +135,8 @@ CONTEXT:
   - Upstream artifacts: animations/keyframes/*.css, choreography/motion-tokens.json
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/outputs/testing/reports/perf-report-001.md | Performance validation report
-CONSTRAINTS: Target 60fps | Flag any layout-triggering properties" })
+CONSTRAINTS: Target 60fps | Flag any layout-triggering properties"
+})
 todo({ action: "update", taskId: "MTEST-001", addBlockedBy: ["ANIM-001"], owner: "motion-tester" })
 ```
 
@@ -153,7 +163,8 @@ GC loop between animator and motion-tester (max 2 rounds).
 
 **ANIM-001..N** (parallel): One ANIM task per scroll section or page area:
 ```
-todo({ action: "create", subject: "ANIM-<NNN>",
+todo({ action: "create" })({
+  subject: "ANIM-<NNN>",
   description: "PURPOSE: Implement animations for <section-name> | Success: Scroll-triggered reveals with 60fps performance
 TASK:
   - Implement IntersectionObserver-based scroll triggers for <section-name>
@@ -166,7 +177,8 @@ CONTEXT:
   - Upstream artifacts: choreography/sequences/<section>.md, choreography/motion-tokens.json
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/outputs/animations/keyframes/<section>.css + orchestrators/<section>.js
-CONSTRAINTS: Compositor-only | will-change budget | Follow motion-tokens" })
+CONSTRAINTS: Compositor-only | will-change budget | Follow motion-tokens"
+})
 todo({ action: "update", taskId: "ANIM-<NNN>", addBlockedBy: ["CHOREO-001"], owner: "animator" })
 ```
 

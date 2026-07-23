@@ -67,7 +67,7 @@ Worker completed. Process and advance.
 
      Fix-Verify Task Creation:
      ```
-     todo({ action: "create", subject: "TDFIX-fix-<round>", description: "PURPOSE: Fix regressions | Session: {run_dir}/work/team" })
+     todo({ action: "create" })({ subject: "TDFIX-fix-<round>", description: "PURPOSE: Fix regressions | Session: {run_dir}/work/team" })
      todo({ action: "create", subject: "TDVAL-recheck-<round>", description: "..." })
      todo({ action: "update", taskId: "TDVAL-recheck-<round>", addBlockedBy: ["TDFIX-fix-<round>"] })
      ```
@@ -140,7 +140,30 @@ Find ready tasks, spawn workers, STOP.
    d. Spawn team-worker:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <task-id>",
+  team_name: "tech-debt",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: ~  or <project>/.claude/skills/team-tech-debt/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: tech-debt
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
 Stage-to-role mapping:

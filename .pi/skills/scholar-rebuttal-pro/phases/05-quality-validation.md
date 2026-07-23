@@ -38,14 +38,14 @@ function parseCLIOutput(cliResult, expectedFields, phaseName) {
   try {
     // Parse JSON from stdout
     const output = JSON.parse(cliResult.stdout || cliResult);
-    
+
     // Validate required fields
     for (const field of expectedFields) {
       if (!(field in output)) {
         throw new Error(`Missing required field: ${field}`);
       }
     }
-    
+
     return { success: true, data: output };
   } catch (error) {
     console.error(`[${phaseName}] Failed to parse CLI output:`, error.message);
@@ -113,7 +113,7 @@ Quality Validation Input:
 Use Agy CLI to perform comprehensive quality validation:
 
 ```bash
-ccw cli -p "PURPOSE: Validate academic rebuttal quality across multiple dimensions (completeness, professionalism, persuasiveness, evidence strength)
+maestro delegate "PURPOSE: Validate academic rebuttal quality across multiple dimensions (completeness, professionalism, persuasiveness, evidence strength)
 
 REBUTTAL DOCUMENT:
 ${rebuttalContent}
@@ -198,7 +198,7 @@ EXPECTED: JSON with {
     {'priority': 1, 'issue': '...', 'action': '...', 'impact': 'high|medium|low'}
   ],
   'summary': '...'
-}" --tool agy --mode analysis --rule analysis-review-code-quality
+}" --to agy --mode analysis --rule analysis-review-code-quality
 ```
 
 ### Step 5.3: Parse Validation Results

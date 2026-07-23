@@ -2,7 +2,7 @@
 role: architect
 prefix: ARCH
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Frontend Architect

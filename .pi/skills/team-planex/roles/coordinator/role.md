@@ -82,13 +82,14 @@ TEXT-LEVEL ONLY. No source code reading.
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.pi/skills/team-planex`
+   - `skill_root` = `<project_root>/.claude/skills/team-planex`
 2. Generate session ID: `PEX-<slug>-<date>`
 3. Create session folder: `{run_dir}/work/team/`
 4. Create subdirectories: `wisdom/` (planner solutions go to `{run_dir}/outputs/solutions/`)
 5. Call `TeamCreate` with team name (default: "planex")
 6. Initialize wisdom files (learnings.md, decisions.md, conventions.md, issues.md)
-7. Initialize meta.json with pipeline metadata:
+7. Write `team-session.json` (coordination state + `run` block — see Run Lifecycle Integration below)
+8. Initialize meta.json with pipeline metadata:
 ```typescript
 mcp__maestro__team_msg({
   operation: "log", session_id: "<run-id>", from: "coordinator",
@@ -108,13 +109,16 @@ mcp__maestro__team_msg({
 
 After session folder creation and before role-spec generation:
 
+**Session-state file split**: `{run_dir}/work/team/team-session.json` holds coordination state (`run` block, roles, status); `.msg/meta.json` stays a pure message-bus/state_update log. Both are written — team-worker fallback resolves `run_dir` from `team-session.json.run`.
+
 1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-planex --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-planex-<topic>` (ASCII, ≤64 chars)
-   - Store returned `run_id` and `run_dir` in `team-session.json`:
-     ```json
-     "run": { "run_id": "<id>", "run_dir": "<path>" }
-     ```
-2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field.
+2. **Write `team-session.json`**: create `{run_dir}/work/team/team-session.json` with the returned `run_id` / `run_dir`, session_id, team_name, status="active":
+   ```json
+   { "session_id": "PEX-<slug>-<date>", "team_name": "planex", "status": "active",
+     "run": { "run_id": "<id>", "run_dir": "<path>" } }
+   ```
+3. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field.
 
 ## Phase 3: Create Task Chain
 

@@ -7,14 +7,14 @@
 | User requirement | From coordinator Phase 1 | Yes |
 | Session folder | From coordinator Phase 2 | Yes |
 | Pipeline definition | From SKILL.md Pipeline Definitions | Yes |
-| Parallel mode | From session.json `parallel_mode` | Yes |
-| Max branches | From session.json `max_branches` | Yes |
-| Independent targets | From session.json `independent_targets` (independent mode only) | Conditional |
+| Parallel mode | From team-session.json `parallel_mode` | Yes |
+| Max branches | From team-session.json `max_branches` | Yes |
+| Independent targets | From team-session.json `independent_targets` (independent mode only) | Conditional |
 
-1. Load user requirement and optimization scope from session.json
+1. Load user requirement and optimization scope from team-session.json
 2. Load pipeline stage definitions from SKILL.md Task Metadata Registry
-3. Read `parallel_mode` and `max_branches` from session.json
-4. For `independent` mode: read `independent_targets` array from session.json
+3. Read `parallel_mode` and `max_branches` from team-session.json
+4. For `independent` mode: read `independent_targets` array from team-session.json
 
 ## Phase 3: Task Chain Creation (Mode-Branched)
 
@@ -23,7 +23,8 @@
 Every task description uses structured format for clarity:
 
 ```
-todo({ action: "create", subject: "<TASK-ID>",
+todo({ action: "create" })({
+  subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <measurable completion criteria>
 TASK:
   - <step 1: specific action>
@@ -40,7 +41,8 @@ CONSTRAINTS: <scope limits, focus areas>
 ---
 InnerLoop: <true|false>
 BranchId: <B01|A|none>",
-  status: "pending" })
+  status: "pending"
+})
 todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
@@ -108,7 +110,8 @@ todo({ action: "update", taskId: "STRATEGY-001", addBlockedBy: ["PROFILE-001"] }
 
 **IMPL-001** (optimizer, Stage 3):
 ```
-todo({ action: "create", subject: "IMPL-001",
+todo({ action: "create" })({
+  subject: "IMPL-001",
   description: "PURPOSE: Implement optimization changes per strategy plan | Success: All planned optimizations applied, code compiles, existing tests pass
 TASK:
   - Load optimization plan and identify target files
@@ -124,7 +127,8 @@ EXPECTED: Modified source files + validation passing | Optimizations applied wit
 CONSTRAINTS: Preserve existing behavior | Minimal changes per optimization | Follow code conventions
 ---
 InnerLoop: true",
-  status: "pending" })
+  status: "pending"
+})
 todo({ action: "update", taskId: "IMPL-001", addBlockedBy: ["STRATEGY-001"] })
 ```
 
@@ -258,7 +262,7 @@ PipelineId: A",
 | count <= 2 | Switch to `single` mode -- create IMPL-001, BENCH-001, REVIEW-001 (standard single pipeline) |
 | count >= 3 | Switch to `fan-out` mode -- create branch tasks below |
 
-4. Update session.json with resolved `parallel_mode` (auto -> single or fan-out)
+4. Update team-session.json with resolved `parallel_mode` (auto -> single or fan-out)
 
 5. **Fan-out branch creation** (when count >= 3 or forced fan-out):
    - Truncate to `max_branches` if `optimization_count > max_branches` (keep top N by priority)
@@ -340,7 +344,7 @@ BranchId: B{NN}",
 todo({ action: "update" })({ taskId: "REVIEW-B{NN}", addBlockedBy: ["IMPL-B{NN}"] })
 ```
 
-7. Update session.json:
+7. Update team-session.json:
    - `branches`: array of branch IDs (["B01", "B02", ...])
    - `fix_cycles`: object keyed by branch ID, all initialized to 0
 
@@ -357,7 +361,7 @@ Verify task chain integrity:
 | No circular dependencies | Trace dependency graph | Acyclic |
 | Task IDs use correct prefixes | Pattern check | Match naming rules per mode |
 | Structured descriptions complete | Each has PURPOSE/TASK/CONTEXT/EXPECTED/CONSTRAINTS | All present |
-| Branch/Pipeline IDs consistent | Cross-check with session.json | Match |
+| Branch/Pipeline IDs consistent | Cross-check with team-session.json | Match |
 
 ### Naming Rules Summary
 

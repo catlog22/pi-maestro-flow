@@ -2,7 +2,7 @@
 role: discussant
 prefix: DISCUSS
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Discussant

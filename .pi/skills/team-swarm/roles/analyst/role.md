@@ -3,7 +3,7 @@ role: analyst
 prefix: ANALYST
 inner_loop: false
 output_tag: "[analyst]"
-message_types: 
+message_types:
 ---
 
 # Analyst Role — Phase 2-4

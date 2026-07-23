@@ -75,14 +75,14 @@ Worker completed. Process and advance.
 
    **GC Fix Task Creation** (when re-audit finds issues):
    ```
-   todo({ action: "create", subject: "FIX-002",
+   todo({ action: "create" })({ subject: "FIX-002",
      description: "PURPOSE: Address remaining issues from re-audit | Success: All critical/high issues resolved
    TASK:
      - Parse re-audit reports for remaining issues
      - Apply targeted fixes for color and focus issues
    CONTEXT:
      - Session: {run_dir}/work/team
-     - Upstream artifacts: {run_dir}/outputs/re-{run_dir}/outputs/audit/color-audit-002.md, {run_dir}/outputs/re-{run_dir}/outputs/audit/focus-audit-002.md" })
+     - Upstream artifacts: {run_dir}/outputs/re-audit/color-audit-002.md, {run_dir}/outputs/re-audit/focus-audit-002.md" })
    todo({ action: "update", taskId: "FIX-002", addBlockedBy: ["COLOR-002", "FOCUS-002"], owner: "fix-implementer" })
    ```
    Then create new re-audit tasks blocked by FIX-002. Increment gc_state.round.
@@ -163,7 +163,30 @@ Find ready tasks, spawn workers, STOP.
    d. Spawn team-worker:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <task-id>",
+  team_name: "visual-a11y",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: <skill_root>/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: visual-a11y
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
 **Parallel spawn rules by mode**:

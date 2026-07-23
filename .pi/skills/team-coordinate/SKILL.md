@@ -1,5 +1,6 @@
 ---
 name: team-coordinate
+disable-model-invocation: true
 description: "Universal team coordination skill with dynamic role generation. Uses team-worker agent architecture with role-spec files. Only coordinator is built-in -- all worker roles are generated at runtime as role-specs and spawned via team-worker agent. Beat/cadence model for orchestration. Triggers on \"Team Coordinate \"."
 allowed-tools:
   - AskUserQuestion
@@ -20,7 +21,7 @@ session-mode: run
 ~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 
-# Team Coordinate 
+# Team Coordinate
 
 Universal team coordination skill: analyze task -> generate role-specs -> dispatch -> execute -> deliver. Only the **coordinator** is built-in. All worker roles are **dynamically generated** as lightweight role-spec files and spawned via the `team-worker` agent.
 
@@ -126,7 +127,30 @@ User provides task description
 When coordinator spawns workers, use `team-worker` agent with role-spec path:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker",
+  team_name: <team-name>,
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: {run_dir}/work/team/role-specs/<role>.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: <team-name>
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery) -> role-spec Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
 **Inner Loop roles** (role has 2+ serial same-prefix tasks): Set `inner_loop: true`. The team-worker agent handles the loop internally.
@@ -178,26 +202,28 @@ ask user ({
 ## Session Directory
 
 ```
-{run_dir}/work/team/
-+-- team-session.json           # Session state + dynamic role registry
-+-- task-analysis.json          # Phase 1 output: capabilities, dependency graph
-+-- role-specs/                 # Dynamic role-spec definitions (generated Phase 2)
-|   +-- <role-1>.md             # Lightweight: frontmatter + Phase 2-4 only
-|   +-- <role-2>.md
-+-- artifacts/                  # Legacy; formal deliverables → {run_dir}/outputs/
+{run_dir}/
++-- outputs/                    # Formal worker deliverables
 |   +-- <artifact>.md
-+-- .msg/                       # Team message bus + state
-|   +-- messages.jsonl          # Message log
-|   +-- meta.json               # Session metadata + cross-role state
-+-- wisdom/                     # Cross-task knowledge
-|   +-- learnings.md
-|   +-- decisions.md
-|   +-- issues.md
-+-- explorations/               # Shared explore cache
-|   +-- cache-index.json
-|   +-- explore-<angle>.json
-+-- {run_dir}/evidence/discussions/                # Inline discuss records
++-- evidence/discussions/       # Inline discuss records
 |   +-- <round>.md
++-- report.md                   # Human-readable synthesis + handoff
++-- work/team/                  # Team coordination (non-artifact)
+    +-- team-session.json       # Session state + dynamic role registry
+    +-- task-analysis.json      # Phase 1 output: capabilities, dependency graph
+    +-- role-specs/             # Dynamic role-spec definitions (generated Phase 2)
+    |   +-- <role-1>.md         # Lightweight: frontmatter + Phase 2-4 only
+    |   +-- <role-2>.md
+    +-- .msg/                   # Team message bus + state
+    |   +-- messages.jsonl      # Message log
+    |   +-- meta.json           # Session metadata + cross-role state
+    +-- wisdom/                 # Cross-task knowledge
+    |   +-- learnings.md
+    |   +-- decisions.md
+    |   +-- issues.md
+    +-- explorations/           # Shared explore cache
+        +-- cache-index.json
+        +-- explore-<angle>.json
 ```
 
 ### team-session.json Schema

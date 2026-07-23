@@ -3,7 +3,7 @@ role: generator
 prefix: QAGEN
 inner_loop: false
 additional_prefixes: "[QAGEN-fix]"
-message_types: 
+message_types:
 ---
 
 # Test Generator

@@ -1,5 +1,6 @@
 ---
 name: maestro-init
+disable-model-invocation: true
 description: Initialize project with auto state detection
 argument-hint: "[-y] [--from <source>] [--from-brainstorm SESSION-ID]"
 allowed-tools:
@@ -132,8 +133,8 @@ Verdicts:
 | Roadmap needed (default light) | step `roadmap` (`maestro run start "{goal}" --cmd roadmap --topic "{topic}" --platform pi --workflow-root .`) |
 | Full spec package | step `blueprint` (`maestro run start "{goal}" --cmd blueprint --topic "{topic}" --platform pi --workflow-root .`) |
 | Explore ideas first | step `brainstorm` (`maestro run start "{goal}" --cmd brainstorm --topic "{topic}" --platform pi --workflow-root .`) |
-| View project dashboard | `/manage status` |
-| Quick ad-hoc task | step `quick` (`maestro run start "{goal}" --cmd quick --topic "{topic}" --platform pi --workflow-root .`) |
+| View project dashboard | `/maestro-manage status` |
+| Quick ad-hoc task | `/maestro-companion "{goal}"` |
 </completion>
 
 <error_codes>

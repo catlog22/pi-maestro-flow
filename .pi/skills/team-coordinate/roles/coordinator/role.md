@@ -207,7 +207,7 @@ Regardless of complexity score or role count, coordinator MUST:
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.pi/skills/team-coordinate`
+   - `skill_root` = `<project_root>/.claude/skills/team-coordinate`
 
 2. **Check `needs_research` flag** from task-analysis.json:
    - If `true`: **Spawn researcher worker first** to gather codebase context
@@ -215,17 +215,19 @@ Regardless of complexity score or role count, coordinator MUST:
      - Merge research findings into task context
      - Update task-analysis.json with enriched context
 
-3. **Generate session ID**: `TC-<slug>-<date>` (slug from first 3 meaningful words of task)
+3. **Generate session ID**: `TC-<slug>-<date>` (slug from first 3 meaningful words of task). This is the internal `team-session.json` identifier, distinct from the Run slug composed in Run Lifecycle Integration below. When the slug feeds a Run slug, constrain it to ASCII-only, ≤64 chars, never raw Chinese words.
 
 4. **Create session folder structure**:
    ```
-   {run_dir}/work/team/
-   +-- role-specs/
-   +-- artifacts/          # scratch/intermediate; formal deliverables go to {run_dir}/outputs/
-   +-- wisdom/
-   +-- explorations/
-   +-- discussions/
-   +-- .msg/
+   {run_dir}/
+   +-- outputs/                 # Formal deliverables
+   +-- evidence/discussions/    # Inline discuss records
+   +-- report.md                # Human-readable synthesis + handoff
+   +-- work/team/               # Team coordination (non-artifact)
+       +-- role-specs/
+       +-- wisdom/
+       +-- explorations/
+       +-- .msg/
    ```
 
 5. **Call TeamCreate** with team name derived from session ID
@@ -240,7 +242,7 @@ After session folder creation and before role-spec generation:
      ```json
      "run": { "run_id": "<id>", "run_dir": "<path>" }
      ```
-2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field.
+2. **Resume**: Resolve `run_dir` / `run_id` through the chain `birth-packet (dispatch prompt) > team-session.json.run > artifacts`. Take the first that resolves, then `maestro run check <run_id>` (idempotent); if status=sealed, create a new run and update `team-session.json`. If none resolves, fail closed — surface the missing run_dir to the user, do NOT glob/mtime-guess a path.
 
 6. **Read `specs/role-spec-template.md`** for Behavioral Traits + Reference Patterns
 

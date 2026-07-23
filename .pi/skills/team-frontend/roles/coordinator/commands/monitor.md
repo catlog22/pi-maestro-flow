@@ -22,12 +22,12 @@
 
 | Input | Source | Required |
 |-------|--------|----------|
-| Session state | {run_dir}/work/team/session.json | Yes |
+| Session state | {run_dir}/work/team/team-session.json | Yes |
 | Task list | todo({ action: "list" }) | Yes |
 | Trigger event | From Entry Router detection | Yes |
 | Pipeline definition | From SKILL.md | Yes |
 
-1. Load session.json for current state, `pipeline_mode`, `gc_rounds`
+1. Load team-session.json for current state, `pipeline_mode`, `gc_rounds`
 2. Run todo({ action: "list" }) to get current task statuses
 3. Identify trigger event type from Entry Router
 
@@ -73,7 +73,8 @@ todo({ action: "update", taskId: "<task-id>", status: "completed" })
 
 **GC Fix Task Creation**:
 ```
-todo({ action: "create", subject: "DEV-fix-<round>",
+todo({ action: "create" })({
+  subject: "DEV-fix-<round>",
   description: "PURPOSE: Fix issues identified in QA audit | Success: All critical/high issues resolved
 TASK:
   - Load QA audit report with findings
@@ -84,10 +85,12 @@ CONTEXT:
   - Upstream artifacts: {run_dir}/outputs/qa/audit-<NNN>.md
   - Shared memory: {run_dir}/work/team/.msg/meta.json
 EXPECTED: Fixed source files | QA issues resolved
-CONSTRAINTS: Targeted fixes only | Do not introduce regressions" })
+CONSTRAINTS: Targeted fixes only | Do not introduce regressions"
+})
 todo({ action: "update", taskId: "DEV-fix-<round>", owner: "developer" })
 
-todo({ action: "create", subject: "QA-recheck-<round>",
+todo({ action: "create" })({
+  subject: "QA-recheck-<round>",
   description: "PURPOSE: Re-audit after developer fixes | Success: Score >= 8, critical == 0
 TASK:
   - Execute 5-dimension audit on fixed code
@@ -98,7 +101,8 @@ CONTEXT:
   - Review type: code-review
   - Shared memory: {run_dir}/work/team/.msg/meta.json
 EXPECTED: {run_dir}/outputs/qa/audit-<NNN>.md | Improved score
-CONSTRAINTS: Read-only review" })
+CONSTRAINTS: Read-only review"
+})
 todo({ action: "update", taskId: "QA-recheck-<round>", addBlockedBy: ["DEV-fix-<round>"], owner: "qa" })
 ```
 
@@ -115,7 +119,30 @@ Find and spawn the next ready tasks.
 2. For each ready task, spawn team-worker:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <task-id>",
+  team_name: "frontend",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: ~  or <project>/.claude/skills/team-frontend/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: frontend
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 -> role-spec Phase 2-4 -> built-in Phase 5.`
+})
 ```
 
 3. **Parallel spawn rules**:
@@ -204,6 +231,6 @@ Triggered when all pipeline tasks are completed.
 
 After every handler execution:
 
-1. Update session.json with current state (active tasks, gc_rounds, last event)
+1. Update team-session.json with current state (active tasks, gc_rounds, last event)
 2. Verify task list consistency
 3. STOP and wait for next event

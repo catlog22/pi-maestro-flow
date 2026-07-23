@@ -232,23 +232,23 @@ If a LaTeX compiler is available, attempt to compile the template to verify it w
 # Check if pdflatex is available
 if command -v pdflatex &> /dev/null; then
   echo "pdflatex found, attempting compilation..."
-  
+
   cd "$OUTPUT_DIR"
-  
+
   # Set TEXINPUTS to include styles directory
   export TEXINPUTS="./styles//:$TEXINPUTS"
-  
+
   # First pass
   pdflatex -interaction=nonstopmode main.tex 2>&1 | tail -20
-  
+
   # Check for bibtex
   if command -v bibtex &> /dev/null; then
     bibtex main 2>&1 | tail -5
   fi
-  
+
   # Second pass (resolve references)
   pdflatex -interaction=nonstopmode main.tex 2>&1 | tail -20
-  
+
   # Check result
   if [ -f main.pdf ]; then
     echo "Compilation successful: main.pdf generated"
@@ -260,10 +260,10 @@ if command -v pdflatex &> /dev/null; then
     echo "  - Encoding issues: ensure UTF-8 encoding"
     echo "  - Path issues: check \\graphicspath and \\input paths"
   fi
-  
+
   # Clean auxiliary files
   rm -f main.aux main.log main.out main.bbl main.blg main.fls main.fdb_latexmk main.synctex.gz 2>/dev/null
-  
+
 else
   echo "pdflatex not found. Skipping compilation check."
   echo "The template should compile correctly on Overleaf."

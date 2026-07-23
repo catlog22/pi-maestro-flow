@@ -2,7 +2,7 @@
 role: executor
 prefix: TESTRUN
 inner_loop: true
-message_types: 
+message_types:
 ---
 
 # Test Executor
@@ -18,7 +18,7 @@ message_types:
 | .msg/meta.json | {run_dir}/work/team/wisdom/.msg/meta.json | No |
 
 1. Extract session path and test directory from task description
-2. Load test specs: Run `ccw spec load --category test` for test framework conventions and coverage targets
+2. Load test specs: Run `maestro spec load --category test` for test framework conventions and coverage targets
 3. Extract coverage target (default: 80%)
 3. Read .msg/meta.json for framework info (from strategist namespace)
 4. Determine test framework:

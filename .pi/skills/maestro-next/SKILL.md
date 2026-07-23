@@ -1,7 +1,8 @@
 ---
 name: maestro-next
-description: "Default interactive entry for development intents — resolve one atomic step from read-only Session/Run context, confirm, execute, then stop"
-argument-hint: "<intent>|--list|--suggest [-y] [--dry-run]"
+disable-model-invocation: false
+description: "Unified entry for all development intents — classify intent, assess complexity, route to the correct execution channel: /maestro-companion (lightweight), standard single run, or /maestro (multi-step with manual/ralph engine). Pure router, never runs execution loops itself"
+argument-hint: "<intent>|--list|--suggest [-y] [--dry-run] [--lite] [--run]"
 allowed-tools:
   - AskUserQuestion
   - Bash
@@ -9,7 +10,6 @@ allowed-tools:
   - Glob
   - Grep
   - Read
-  - Skill
   - Write
 session-mode: run
 contract:
@@ -21,181 +21,357 @@ contract:
 
 <host_mirror>
 
-**镜像协议**（状态对账由插件自动完成，LLM 只保留两个语义动作）：
+Pi mirrors canonical Session/Run state automatically:
 
-| 动作 | 工具调用 | 说明 |
-|------|----------|------|
-| 步进 | `todo({ action: "next" })` | 激活下一步 + 注入上游摘要 + 绑定 skill |
-| 完成宣告 | `goal done` | 触发前置校验（chain 全 completed + gates 无 failed）+ verifier |
-
-- 禁止手工 `todo({ action: "create" })` / `todo({ action: "update" })` 镜像任务——bridge 从 canonical Session 自动物化。
-- goal 由 bridge 从 Session intent + definition_of_done 自动派生。
-- 上下文压缩后，只按当前 Run 的 `brief.command` 重新加载完整执行指南。
+- Advance only with `todo({ action: "next" })`; do not create or update mirror tasks manually.
+- Goal completion is derived from terminal chain state and clean gates.
+- After compaction, reattach through the current Run's `brief.command`.
 
 </host_mirror>
 
 <purpose>
-为开发意图推荐并执行一个 atomic step。Pi 不自行搜索、复制或改变历史 Session；它只消费宿主注入的 read-only Topic Session resolution、`ReuseAssessment`，以及该 Topic Session 中 sealed Run 的 authoritative output refs。多步工作可逐步调用本 Skill、创建 user-confirmed simple chain，或显式交给 `/maestro`；本 Skill 不无人值守遍历 chain。
+Unified interactive entry for all development intents. Pure router: parse intent + project state → classify → assess complexity → route to the appropriate channel:
+- **Companion** (lightweight): route to `/maestro-companion "<intent>"` — minimal run lifecycle, continuous evidence recording
+- **Standard** (single run): recommend a step → confirm → execute via `maestro run start --cmd`
+- **Multi-step**: route to `/maestro "<intent>"` with engine hint (manual for stepwise control, ralph for closed-loop orchestration)
+
+This command is the single entry point. It classifies and routes. Multi-step execution loops (manual or orchestrated) live in `/maestro`.
 </purpose>
 
-<context_contract>
+<pi_context_contract>
 
-正常流程只接受以下 read model：
+- Consume the injected Topic Session resolution and ReuseAssessment as read-only routing evidence.
+- Accept upstream only from same-Session sealed outputs.
+- Resolve each `argument_requirements` entry through `required`, `missing`, `type`, `source`, optional `default`, and `question`.
+- Treat the birth packet as compact routing; load the execution protocol from `brief.command`.
+- A completion hint with `suggest_only=true` is displayed and never executed implicitly.
 
-1. **Topic Session resolution（read-only）**：当前 topic 对应的 Session 结论、`session_id`、状态与证据；无结论或多候选时必须询问用户。
-2. **ReuseAssessment（read-only）**：宿主给出的复用判定及原因。它只影响“使用已解析 Session 还是创建独立 Session”的建议，不授予任何历史 Session mutation 权限。
-3. **Same-Session sealed outputs（read-only）**：只消费 `session_id` 等于 Topic Session 且 Run 已 sealed 的 artifact refs。跨 Session、未 sealed、路径猜测或按“最新文件”扫描得到的产物均不得作为 upstream。
-
-禁止从 local project projection、目录时间戳或相似意图重新推导 Topic Session，也禁止把历史相似结果转换成 mutation 建议。
-</context_contract>
-
-<arguments_contract>
-
-每个候选 step 必须携带顶层 `argument_requirements` 数组。每项结构为：
-
-```json
-{
-  "name": "target",
-  "required": true,
-  "missing": true,
-  "type": "string",
-  "source": "unresolved",
-  "default": null,
-  "question": "Which target should this step operate on?"
-}
-```
-
-- 必填字段：`name`、`required`、`missing`、`type`、`source`；`default`、`question` 可省略。
-- `source` 只能说明真实来源，例如 `user`、`known_args`、`default`、`llm_inference`、`topic_session`、`upstream_ref`、`unresolved`。
-- `missing=true` 时，只能依次使用已知 args、声明的 default、LLM 基于明确证据的推断，或 `user prompt` 的用户回答补齐；不得伪造 resolved value。
-- LLM 推断不唯一、风险较高或会改变范围时，必须询问用户。补齐后更新 `missing=false` 与实际 `source`。
-- artifact 类输入必须来自 authoritative same-Session sealed output ref，不得手工拼 source/path 参数或文件路径。
-</arguments_contract>
+</pi_context_contract>
 
 <context>
+$ARGUMENTS — intent text + optional flags.
 
-`$ARGUMENTS` = intent text + optional flags。
+**Flags:**
 
 | Flag | Effect |
 |------|--------|
-| `-y` / `--yes` | 仅跳过当前 atomic step 的确认，不自动执行后续建议 |
-| `--dry-run` | 展示 recommendation 与 argument requirements 后停止 |
-| `--suggest` | suggest-only；展示 recommendation 后停止 |
-| `--top N` | 展示前 N 个候选，默认 3 |
-| `--list` | 按 cluster 展示可用 steps |
-| `--lite` | 只加载知识并回答，不创建 Run |
-| `--run` | 强制 standard single-Run channel |
-| `--chain` | 用户明确要求多步时，创建 simple manual chain 后停止，不自动派发 |
+| `-y` / `--yes` | Skip confirmation, execute/route top pick directly |
+| `--dry-run` | Show recommendation only, do not execute |
+| `--top N` | Show top N candidates (default 3) |
+| `--list` | List all available steps grouped by workflow cluster |
+| `--suggest` | Suggest-only mode: show recommendation + prepare content, NEVER auto-execute |
+| `--lite` | Force companion channel: route to `/maestro-companion "<intent>"` |
+| `--run` | Force standard channel (create a run even for simple tasks) |
 
-Candidate pool 仅包含 first-tier registered steps；`maestro`、`maestro-ralph` 不进入候选池。
+**Mode detection (priority order):**
+1. `--lite` → route to `/maestro-companion "<intent>"` (suggest invocation, execute if -y)
+2. `--suggest` → S_RANK → S_PRESENT (suggest only, never execute)
+3. `--list` → S_LIST
+4. Intent text present → S_STATE → S_RANK → route by complexity verdict
+5. No arguments → lifecycle inference for natural next step
+
+**Candidate pool:** All 14 first-tier steps registered in `prepare/` + `workflows/`. Companion is a routing channel, not a first-tier step. Pipeline orchestrators (`maestro`, `maestro-ralph*`) are NEVER in the candidate pool.
 </context>
 
 <invariants>
-
-1. 一次只执行一个 atomic step；`-y` 也必须在当前 step 完成后停止。
-2. Session 选择只消费 Topic Session resolution 与 `ReuseAssessment`，不运行历史 mutation 流程。
-3. upstream 只接受当前 Topic Session 的 sealed Run output refs。
-4. `run next` birth packet 是紧凑路由包，不是执行手册。只读取 `session_id`、`run_id`、`run_dir`、step identity、entry blockers、authoritative upstream refs 与 `brief.command`。
-5. 完整 workflow、required reading、gates、目标和执行规则只从 `maestro run brief --platform pi <run_id>` 加载。
-6. `run complete` 返回的 `next` 必须满足 `suggest_only=true`；只展示，不在同一动作中执行其 command。
-7. 所有 missing arguments 按 `<arguments_contract>` 由已知输入、default、LLM 明确推断或用户补齐。
-8. Session/Run canonical files 只读；状态变化只能由正式 CLI lifecycle verb 完成。
-9. simple chain 只通过 `maestro run start --chain ... --no-dispatch` 或 `maestro session create --chain ...` 创建；不得为同一任务的每个 skill 新建独立 Session。
+1. **Pure router for multi-step** — this command never runs execution loops (manual chain or orchestrated). All multi-step execution is delegated to `/maestro`
+2. **Pipeline orchestrators excluded** — only recommend registered steps as single-run targets
+3. **Empty intent or "continue"/"next"** → lifecycle_position inference for natural next step
+4. **Literal match priority** — keyword match takes precedence; lifecycle is tie-breaker
+5. **Argument pass-through** — `--intent` is Session metadata only; the selected step's domain payload becomes command input through repeatable `--arg <value>` or arguments after `--`. The user can modify command inputs at confirmation; `-y` only passes through when the user provided it
+6. **--suggest never executes** — show recommendation + prepare content only
+7. **Manual campaigns excluded** — `team-*` and `maestro-odyssey` are never candidates, recommendations, retained utilities, or handoff targets
+8. **Retained commands are suggest-only** — route retained commands to an exact slash command. Never execute them in this turn; `-y` applies only to first-tier steps
+9. **Companion routing is suggest-or-execute** — when complexity == lightweight, output `/maestro-companion "<intent>"` invocation. With `-y`, invoke it directly; otherwise present it as the recommended channel for user confirmation
+10. **Multi-step always routes to /maestro** — when intent spans ≥2 steps or needs orchestration, output `/maestro "<intent>"` with appropriate engine hint. This command never creates sessions or manages chains itself
+9. simple chain 只通过 `maestro run start --chain ... --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。
 10. 中途新增下一步用 `maestro run edit <cmd...>` 修改未来 chain，不调用新的 `run start` 制造第二个 Topic Session。
 </invariants>
 
-<workflow>
+<state_machine>
 
-### 1. Parse and resolve
+<states>
+S_PARSE    — Parse arguments, extract flags, detect mode
+S_STATE    — Read project state, infer lifecycle_position
+S_RANK     — Score candidates, assess complexity, determine channel
+S_LIST     — --list mode: grouped display of all steps
+S_PRESENT  — Show top pick + alternatives + reasoning + channel verdict
+S_CONFIRM  — user prompt for confirmation (skipped by -y)
+S_EXECUTE  — Run prepare + create for selected single step
+S_FALLBACK — Intent empty after clarification
+</states>
 
-1. 解析 intent 与 flags。
-2. 读取宿主注入的 Topic Session resolution、`ReuseAssessment` 与 same-Session sealed output refs。
-3. resolution 为空或 ambiguous 时，用 `user prompt` 让用户选择 topic/session boundary；不要自行选择历史候选。
-4. 从 intent、resolved topic 与 first-tier registry 推导 lifecycle position 和候选 step。
+<transitions>
 
-### 2. Rank and present
+S_PARSE:
+  → S_LIST     WHEN: --list flag
+  → S_STATE    WHEN: intent present / "continue"/"next"/"go" / --lite / --run
+  → S_PARSE    WHEN: no intent (1 clarify round via user prompt)
+  → S_FALLBACK WHEN: clarification empty
 
-按以下优先级评分：明确 intent match → 宿主给出的 Topic Session position → authoritative upstream availability → precondition。展示：
+S_STATE:
+  → S_RANK     DO: A_INFER_LIFECYCLE
 
-```text
-Recommended: <step>
-Reason: <why>
-Topic Session: <session_id|none>
-ReuseAssessment: <decision + evidence>
-Arguments: <argument_requirements>
-Alternatives: <up to N-1>
+S_RANK:
+  → S_PRESENT  DO: A_SCORE_CANDIDATES (channel verdict embedded in presentation)
+
+S_LIST:
+  → END        DO: group steps by cluster, display with descriptions
+
+S_PRESENT:
+  → END        WHEN: target_kind == retained-command    DO: display exact slash command; suggest only
+  → END        WHEN: --dry-run OR --suggest             DO: display recommendation + channel
+  → S_EXECUTE  WHEN: -y AND channel == standard
+  → END        WHEN: -y AND channel == companion        DO: output `/maestro-companion "<intent>" -y`
+  → END        WHEN: -y AND channel == multi-step       DO: output `/maestro "<intent>" -y`
+  → S_CONFIRM  WHEN: interactive
+
+S_CONFIRM:
+  → S_EXECUTE  WHEN: user confirms standard step / selects alternative / modifies args
+  → END        WHEN: user picks companion → output `/maestro-companion "<intent>"`
+  → END        WHEN: user picks multi-step → output `/maestro "<intent>"`
+  → END        WHEN: user cancels
+
+S_EXECUTE:
+  → END        DO: A_EXECUTE_STEP
+
+S_FALLBACK:
+  → END        DO: raise E001
+
+</transitions>
+
+<actions>
+
+### A_INFER_LIFECYCLE
+
+Read project state to infer `lifecycle_position`:
+
+```bash
+maestro run status --workflow-root .   # read canonical Session/Run position
+# Topic Session resolution and ReuseAssessment are injected read-only inputs
 ```
 
-`--dry-run` / `--suggest` 到此结束。
+**State → lifecycle_position → natural next step:**
 
-### 3. Resolve arguments
+| State | lifecycle_position | Natural next |
+|-------|-------------------|-------------|
+| No `.workflow/` + no source code | brainstorm | brainstorm |
+| No `.workflow/` + has source code | init | (maestro-init, not a step) |
+| state.json exists, no roadmap, no sessions | analyze-macro | analyze |
+| Has macro analysis, no roadmap | roadmap | roadmap |
+| Has roadmap, dep-ready session unstarted | analyze | analyze --session {slug} |
+| Latest artifact = analysis | plan | plan --session {active} |
+| Latest artifact = plan | execute | execute --session {active} |
+| Latest artifact = execution | review | review --session {active} |
+| Review verdict = PASS | auto-test | auto-test --session {active} |
+| Tests green + active session | session-seal | (maestro-session-seal, not a step) |
+| Any stage has gaps/failures | debug | debug {gap} |
 
-1. 为选中 step 生成 `argument_requirements`。
-2. 绑定 known args、declared defaults、Topic Session 与 authoritative upstream refs。
-3. 对 remaining `missing=true` 项，先做可证实且唯一的 LLM inference；否则询问用户。
-4. 任一 required argument 仍 missing 时 BLOCK，不创建或推进 Run。
+**Lifecycle main line:**
+```
+init → {brainstorm | blueprint | analyze-macro} → roadmap
+  → [per session] analyze → plan → execute
+  → [quality gate] review → auto-test → test
+  → session-seal → next dep-ready session
+```
 
-### 4. Execute one step
+### A_SCORE_CANDIDATES
 
-Standalone step：
+**Scoring signals (high → low):**
 
-1. 使用已解析的 `argument_requirements` 创建当前 step 的 Run：
-   `maestro run start "<intent>" --cmd <step> --arg "<resolved step input>" --platform pi --workflow-root .`。
-2. 不得用路径扫描补 upstream；artifact 输入必须来自 authoritative same-Session sealed refs。
-3. **Entry blocker 降级（execute 专属）**：若 step == execute 且 start result 的 `entry_blockers` 非空（缺少 current-plan）：
-   - 检查 upstream 中是否有替代 artifact（latest-review、latest-debug、latest-fix-directions）。
-   - 按 prepare/execute.md 的降级路由表处置：
-     - 小范围（≤3 findings，每个 ≤2 文件）→ seal run 为 needs-retry，展示 /maestro-companion
-     - 较大范围 → seal run 为 needs-retry，展示 /odyssey-planex
-     - 无替代 upstream → seal run 为 blocked，展示 E001 + 建议 /plan
-   - 不得带着 blocked 的 execute run 继续加载 brief。
-4. 按 start result 的 `brief.command` 加载完整执行指南。
-5. 执行 workflow，写正式 deliverables，运行 gates。
-6. `maestro run done <run_id> --verdict done --workflow-root .`。
+| Signal | Weight | Description |
+|--------|--------|-------------|
+| Intent keyword match | High | Literal match against routing table |
+| Lifecycle natural next | High | Decisive when intent is empty/"continue" |
+| Step name keyword match | Medium | Intent contains "test" → test/auto-test boosted |
+| Workflow cluster match | Medium | Learning/knowledge/issue clusters |
+| Recent activity avoidance | Low | Recently completed steps demoted |
+| Precondition unmet | Exclude | Remove from pool entirely |
 
-Existing chain step：
+**Complexity assessment (determines channel):**
 
-1. `maestro run next --session <session_id> --workflow-root .`。
-2. birth packet 只作 identity/ref routing；不得把 packet 摘要当成 workflow body。
-3. 立即执行 packet 的 `brief.command`，以 brief 为唯一完整执行指南。
-4. 完成当前 step 后调用 `maestro run done <run_id> --verdict done --workflow-root .`。
+| Complexity | Channel | Criteria | Engine hint |
+|-----------|---------|----------|-------------|
+| Lightweight | `/maestro-companion` | Mechanically clear intent, no design decisions, no artifact handoff, no gate value | — |
+| Standard | Single step (one run) | Produces typed artifacts, needs downstream handoff or gate checks | — |
+| Multi-step (manual) | `/maestro` | Intent spans ≥2 distinct steps, user wants stepwise control, no auto-retry needed | `--engine manual` |
+| Multi-step (orchestrated) | `/maestro` | Intent needs closed-loop: decision nodes, drift analysis, auto-retry, decomposition | `--engine ralph` (default) |
 
-Multi-step simple chain：
+**Routing preference: prefer the lightest channel that satisfies the task.** Default to Companion for anything that looks like a quick fix/lookup/exploration. Only upgrade to Standard when there is concrete evidence the task produces artifacts a downstream step will consume, or needs a gate/verdict for lifecycle tracking. Only route to /maestro when the intent genuinely spans ≥2 distinct lifecycle steps. When in doubt between Companion and Standard, ask the user via the confirmation menu rather than auto-upgrading.
 
-1. 仅当用户明确选择 `--chain` 或在确认界面选择 simple chain 时进入。
-2. 将 2-5 个 first-tier step 排成命令名列表，展示 topic、chain、argument gaps。
-3. 用户确认后调用：
-   `maestro run start "<intent>" --chain <cmd...> --no-dispatch --platform pi --workflow-root .`。
-4. 展示返回的 `session_id` 与 `maestro run next --session <session_id>`，然后停止；后续每次推进都必须重新由用户确认。
-5. 如果用户在同一任务中追加 step，使用 `maestro run edit <cmd...> --after latest --workflow-root .`，不要创建第二个 Session。
+**Lightweight signals (all must hold):**
+- Intent is mechanically clear — user knows exactly what to change, no design decisions or multi-angle analysis needed (file count is irrelevant; a 20-file rename is still lightweight)
+- No typed artifact needs to be consumed by a downstream step
+- No gate/verdict needs to be recorded for lifecycle tracking
+- Task does not require pre-task thinking (prepare) or structured brief to execute correctly
 
-### 5. Stop at suggest-only next
+**Multi-step detection:** intent matches keywords of ≥2 distinct steps in the routing table → set `multi_step`.
 
-读取 completion result 的 `next`：
+**Engine hint logic (for /maestro routing):**
+- Manual: user explicitly asks for stepwise/per-step control, or intent is a simple sequential pipeline without quality gates
+- Ralph (default): intent implies closed-loop quality (broad refactoring, migration, "end-to-end", "full lifecycle"), or needs decision gates/drift analysis
 
-- `suggest_only=true`：展示 command、reason、preconditions，并停止。
-- 缺少 `suggest_only=true`：视为 contract violation，BLOCK。
+**Override flags:**
+- `--lite` forces Companion channel regardless of complexity assessment
+- `--run` forces Standard channel (single run) regardless of complexity assessment
+- Neither flag: auto-detect from the signals above; verdict shown to user before routing
 
-用户要继续时重新调用 `/maestro-next`，由新一轮 Topic Session resolution 决定下一步。
-</workflow>
+**Intent routing table:** first-tier rows enter the executable candidate pool. Retained-command rows are advisory routes: show the exact slash command and stop.
 
-<errors>
+> **Scope guard:** keyword match identifies the *candidate step*, but the complexity verdict still applies independently. A keyword hit does NOT override lightweight signals. Example: "rename this variable" matches `execute/implement` keywords → candidate = execute step, but complexity = lightweight (1 file, no handoff) → channel = `/maestro-companion`. The routing table answers "which step?", the complexity assessment answers "which channel?".
 
-| Code | Condition | Action |
-|------|-----------|--------|
-| E001 | intent 缺失且无法推导 | user prompt 一轮；仍缺失则停止 |
-| E002 | Topic Session resolution ambiguous | 展示候选证据并让用户选择 |
-| E003 | required argument 仍 missing | BLOCK 并询问对应 `question` |
-| E004 | upstream 非同 Session 或 Run 未 sealed | 拒绝该 ref，要求 authoritative replacement |
-| E005 | birth packet 无 `brief.command` | BLOCK，不猜 workflow path |
-| E006 | completion `next` 非 suggest-only | BLOCK，不自动执行 |
-</errors>
+| Intent keywords | Recommended step | What it does |
+|----------------|-----------------|--------------|
+| brainstorm / ideate / what-if / perspectives / multi-role | brainstorm | Multi-role creative exploration with cross-role conflict resolution |
+| blueprint / PRD / architecture doc / formal spec / epic | blueprint | Generate formal specification package (Brief, PRD, Architecture, Epics) via 6-phase document chain |
+| analyze / assess / evaluate / multi-dimension / findings | analyze | Systematic multi-angle assessment producing findings + risk-matrix for plan consumption |
+| plan / decompose / breakdown / task split / DAG / waves | plan | Decompose confirmed analysis into executable task DAG with waves and collision avoidance |
+| execute / implement / build / code / develop | execute | Implement code changes following current-plan DAG+waves with smoke self-check |
+| verify / validate / acceptance / confirm implementation | verify | Independent verification of requirement coverage and behavioral correctness against plan |
+| debug / bug / error / root cause / failing / broken / trace | debug | Scientific-method root cause diagnosis — reproduction, hypothesis testing, backward tracing |
+| review / code review / audit / inspect / PR review | review | Layered multi-dimensional code review producing traceable review-findings |
+| test / UAT / manual test / browser test / acceptance test | test | Conversational UAT + coverage + optional browser acceptance on verified deliverables |
+| auto-test / automated test / CI test / pipeline test / L0-L3 | auto-test | Automated CSV-layered test pipeline iterating to convergence |
+| roadmap / milestone / phasing / session plan / work breakdown | roadmap | Decompose requirements into session DAG with scope, success criteria, dependency edges |
+| quick / small / ad-hoc / one-off / trivial | `/maestro-companion "<intent>"` | Lightweight direct execution with no typed artifact handoff |
+| retrospective / retro / lessons learned / post-mortem / reflect | retrospective | Post-phase four-lens review (technical/process/quality/decision) → spec/knowhow/issue routing |
+| grill / pressure test / stress test | grill | Socratic pressure-test of a plan/idea against codebase reality — adversarial questioning, terminology collision checks |
+| collab / cross-verify / multi-tool / second opinion | collab | Fan out one requirement to multiple CLI tools, cross-verify findings into a unified conclusion |
+| refactor / tech debt | `/maestro-odyssey "<scope>" --mode improve` (odyssey campaign) | Output invocation; user invokes it |
+| sync docs | `/maestro-manage sync codebase` (retained command) | Suggest exact slash command; user invokes it |
+| issue / defect | `/maestro-manage issue <subcommand> ...` (retained command) | Suggest exact slash command; user invokes it |
+| wiki / knowledge graph | `/maestro-manage knowledge wiki ...` (retained command) | Suggest exact slash command; user invokes it |
+| spec / rule / constraint | `/maestro-spec load ...` or `/maestro-spec add ...` (retained command) | Suggest exact slash command; user invokes it |
+| init / project setup | `/maestro-init ...` (retained command) | Suggest exact slash command; user invokes it |
+| status / dashboard | `/maestro-manage status` (retained command) | Suggest exact slash command; user invokes it |
+| security / OWASP | `/maestro-odyssey "<scope>" --mode security` (odyssey campaign) | Output invocation; user invokes it |
+| learn / explore code / follow | `/maestro-learn follow|investigate|decompose|consult ...` (retained command) | Suggest exact slash command; user invokes it |
+| UI design / design system / polish / impeccable | `/maestro-impeccable "<intent>" ...` (retained command) | Suggest exact slash command; user invokes it |
+| harvest / extract knowledge | `/maestro-manage knowledge harvest ...` (retained command) | Suggest exact slash command; user invokes it |
+| fork / parallel dev | `/maestro-fork ...` (retained command) | Suggest exact slash command; user invokes it |
+| note / record observation | `/maestro-companion --note "<text>"` (companion utility) | Route to companion note mode |
+| promote / distill insights | `/maestro-companion --promote` (companion utility) | Route to companion promote mode |
 
-<done>
+**Auxiliary workflow clusters:**
 
-- [ ] 只消费 Topic Session resolution、`ReuseAssessment`、same-Session sealed outputs
-- [ ] 每项参数都有 `argument_requirements` descriptor，required 参数均 `missing=false`
-- [ ] birth packet 保持紧凑，完整指南来自 brief
-- [ ] 当前 atomic step 已验证并 complete
-- [ ] completion next 仅作为 suggest-only 展示
-</done>
+| Cluster | Trigger | Chain |
+|---------|---------|-------|
+| Learning | New code / unknown module | maestro-learn follow → maestro-learn decompose → maestro-learn consult |
+| Knowledge | Distill experience | maestro-manage knowledge harvest → maestro-manage knowledge capture → maestro-spec add |
+| Issue | Defect management | maestro-manage issue discover → maestro-manage issue |
+
+### A_EXECUTE_STEP
+
+Single-run path only. Multi-step execution is handled by `/maestro`.
+
+For first-tier steps (those with prepare/ + workflows/ files):
+
+```bash
+# Create one Run through the friendly unified entry.
+maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [--arg "<required command input>"]
+# Returns run_id, run_dir, authoritative upstream refs, entry gates/blockers, and brief.command.
+```
+
+# Entry blocker degradation (execute-specific)
+#    IF step == execute AND entry_blockers is non-empty (missing current-plan):
+#      Inspect upstream for alternative artifacts (latest-review, latest-debug, latest-fix-directions).
+#      Route per the degradation table in prepare/execute.md:
+#        - Small scope (≤3 findings, ≤2 files each) → seal run as needs-retry, surface /maestro-companion
+#        - Larger scope → seal run as needs-retry, surface /odyssey-planex
+#        - No alternative upstream → seal run as blocked, surface E001 + suggest /plan
+#      Do NOT proceed to step 4 with a blocked execute run.
+
+# 4. Load the execution manual (follow the `next` hint from create)
+maestro run brief --platform pi <run_id> --workflow-root .
+#    Returns: workflow content, run-mode summary, goal, gate status
+
+# 5. LLM executes the workflow (core process)
+
+# 6. Complete the run
+maestro run done <run_id> --workflow-root .
+```
+
+After `run complete`: re-infer lifecycle and surface the natural next step as a continuation hint — stepwise multi-step work proceeds by re-invoking `/maestro-next` or `/maestro -c`.
+
+For retained commands, output the exact slash command as a suggest-only result. Do not execute it, including under `-y`; the user invokes it explicitly in a subsequent message.
+
+</actions>
+
+</state_machine>
+
+<presentation>
+
+### --list mode
+
+Group all 14 first-tier steps by cluster + show channels and retained commands:
+
+```
+Core Chain:  analyze → plan → execute → verify
+Quality:     review, test, auto-test, debug, retrospective
+Discovery:   grill, collab, brainstorm, blueprint, roadmap
+
+Channels:
+  /maestro-companion       — lightweight tasks (≤1-2 files, no artifact handoff)
+  /maestro --engine manual — multi-step stepwise (per-step confirm, no gates)
+  /maestro                 — multi-step orchestrated (decision nodes, drift, auto-retry)
+
+Retained Commands (manual): /maestro-manage ..., /maestro-learn ..., /maestro-spec ..., /maestro-impeccable ...
+```
+
+### Normal mode
+
+```
+[⚠ Multi-step intent detected]   ← only when multi_step
+
+Target: /<step-name>
+Kind: first-tier step | retained command | companion | multi-step
+  <description>
+  Reason: <match rule + lifecycle position>
+  Channel: /maestro-companion | single run | /maestro (manual) | /maestro (ralph)
+  Invocation:
+    companion       → /maestro-companion "<intent>"
+    single run      → Confirm to execute through Maestro Run lifecycle
+    multi-step      → /maestro "<intent>" (stepwise or orchestrated)
+    retained        → Run manually: /<command> <subcommand> <args> (suggest only)
+
+Alternatives:
+  2. /<alt-1> — <description> — <invocation method>
+  3. /<alt-2> — <description> — <invocation method>
+
+Args: <args>
+```
+
+**Confirmation menu varies by channel verdict:**
+
+When `channel == companion`:
+- **Run as companion** (Recommended) → `/maestro-companion "<intent>"`
+- **Upgrade to standard run** → S_EXECUTE
+- **Cancel**
+
+When `channel == standard`:
+- **Execute recommendation** (Recommended)
+- **Choose alternative**
+- **Modify arguments**
+- **Cancel**
+
+When `multi_step`:
+- **Hand off to /maestro** (Recommended) → `/maestro "<intent>"`
+- **Just this step** (execute only the top pick as single run)
+- **Cancel**
+
+`--dry-run` / `--suggest`: display and stop.
+`-y`: execute/route immediately per channel.
+
+</presentation>
+
+<error_codes>
+
+| Code | Severity | Condition | Recovery |
+|------|----------|-----------|----------|
+| E001 | error | Intent empty after clarification | Provide intent or use --list |
+| E002 | error | No steps found in registry | Check prepare/ and workflows/ directories |
+| E003 | error | Selected step has no prepare/workflow files | Verify step installation |
+| W001 | warning | Top-1 and top-2 scores too close | Force show top 3 for user decision |
+| W002 | warning | No good match for intent | Suggest /maestro for orchestration |
+
+</error_codes>

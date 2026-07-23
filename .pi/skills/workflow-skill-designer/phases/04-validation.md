@@ -18,7 +18,7 @@ Validate the generated skill package for structural completeness, reference inte
 
 ```javascript
 function validateStructure(config) {
-  const skillDir = `.pi/skills/${config.skillName}`;
+  const skillDir = `.claude/skills/${config.skillName}`;
   const results = { errors: [], warnings: [], info: [] };
 
   // Check SKILL.md exists
@@ -59,7 +59,7 @@ function validateStructure(config) {
 
 ```javascript
 function validateReferences(config) {
-  const skillDir = `.pi/skills/${config.skillName}`;
+  const skillDir = `.claude/skills/${config.skillName}`;
   const results = { errors: [], warnings: [], info: [] };
   const skillMd = Read(`${skillDir}/SKILL.md`);
 
@@ -113,7 +113,7 @@ function validateReferences(config) {
 
 ```javascript
 function validateContentQuality(config) {
-  const skillDir = `.pi/skills/${config.skillName}`;
+  const skillDir = `.claude/skills/${config.skillName}`;
   const results = { errors: [], warnings: [], info: [] };
 
   if (config.source.type !== 'command_set') {
@@ -175,7 +175,7 @@ function validateContentQuality(config) {
 
 ```javascript
 function validateDataFlow(config) {
-  const skillDir = `.pi/skills/${config.skillName}`;
+  const skillDir = `.claude/skills/${config.skillName}`;
   const results = { errors: [], warnings: [], info: [] };
   const skillMd = Read(`${skillDir}/SKILL.md`);
 
@@ -211,7 +211,7 @@ function validateDataFlow(config) {
 
 ```javascript
 function validateSkillMdSections(config) {
-  const skillDir = `.pi/skills/${config.skillName}`;
+  const skillDir = `.claude/skills/${config.skillName}`;
   const results = { errors: [], warnings: [], info: [] };
   const skillMd = Read(`${skillDir}/SKILL.md`);
 
@@ -268,7 +268,7 @@ Scan generated phase files for prohibited content patterns. Phase files are inte
 
 ```javascript
 function validatePhaseFileHygiene(config) {
-  const skillDir = `.pi/skills/${config.skillName}`;
+  const skillDir = `.claude/skills/${config.skillName}`;
   const results = { errors: [], warnings: [], info: [] };
 
   const prohibitedPatterns = [
@@ -374,7 +374,7 @@ function generateValidationReport(config) {
                allErrors.length <= 2 ? 'REVIEW' : 'FAIL';
 
   // Display report
-  const skillDir = `.pi/skills/${config.skillName}`;
+  const skillDir = `.claude/skills/${config.skillName}`;
 
   console.log(`
 ╔══════════════════════════════════════╗
@@ -441,7 +441,7 @@ if (report.gate === 'FAIL') {
 function displayIntegrationSummary(config) {
   console.log(`
 Integration Complete:
-  Location: .pi/skills/${config.skillName}/
+  Location: .claude/skills/${config.skillName}/
   Files: ${config.phases.length + 1} (SKILL.md + ${config.phases.length} phases)
 
 Usage:
@@ -472,4 +472,4 @@ Next Steps:
 
 ## Completion
 
-Workflow Skill Designer has completed. The generated skill package is ready at `.pi/skills/{skillName}/`.
+Workflow Skill Designer has completed. The generated skill package is ready at `.claude/skills/{skillName}/`.

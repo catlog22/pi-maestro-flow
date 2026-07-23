@@ -1,5 +1,6 @@
 ---
 name: skill-iter-tune
+disable-model-invocation: true
 description: "Iterative skill tuning via execute-evaluate-improve feedback loop. Uses maestro delegate Claude to execute skill, Agy to evaluate quality, and Agent to apply improvements. Iterates until quality threshold or max iterations. Triggers on \"skill iter tune\", \"iterative skill tuning\", \"tune skill\"."
 allowed-tools:
   - AskUserQuestion
@@ -292,7 +293,9 @@ Phase 1: Setup
 
 ```javascript
 // Initial state
-todo({ action: "next" }) // 激活 canonical Session/Run 镜像；阶段状态由 bridge 投影
+todo({ action: "create", subject: "Phase 1: Setup workspace" })
+todo({ action: "create", subject: "Iteration Loop" })
+todo({ action: "create", subject: "Phase 5: Final Report" })
 
 // Chain mode: create per-skill tracking tasks
 if (state.execution_mode === 'chain') {

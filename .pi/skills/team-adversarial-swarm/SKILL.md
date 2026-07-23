@@ -1,5 +1,6 @@
 ---
 name: team-adversarial-swarm
+disable-model-invocation: true
 description: "ACO swarm intelligence with modular Workflow composition and adversarial decision gates. Coordinator drives iteration loop; 4 composable Workflow scripts handle exploration, scoring, convergence, and synthesis — each with built-in adversarial patterns."
 allowed-tools:
   - AskUserQuestion
@@ -54,7 +55,7 @@ SKILL.md (Coordinator — this file)
 ## Workflow Module Registry
 
 | Module | Script | Args Interface | Adversarial Pattern | Returns |
-|--------|--------|---------------|--------------------|---------| 
+|--------|--------|---------------|--------------------|---------|
 | **Explore** | `workflows/wf-swarm-explore.js` | `{ iteration, assignments[], objective, session, config }` | N ants parallel | `{ ant_results[] }` |
 | **Score** | `workflows/wf-swarm-score.js` | `{ iteration, ant_results[], objective, rubric? }` | 3-vote per ant (prosecutor/defender/judge) | `{ scores{}, calibration }` |
 | **Converge** | `workflows/wf-swarm-converge.js` | `{ iteration, best, history[], config }` | prosecutor(continue)/defender(stop)/judge | `{ converged, reason, confidence }` |
@@ -67,12 +68,12 @@ SKILL.md (Coordinator — this file)
 **所有依赖均在本 skill 内部，无外部引用。**
 
 - **Python ACO 脚本**: `<this-skill>/scripts/aco.py`
-  - 运行时解析: `Glob(".pi/skills/team-adversarial-swarm/scripts/aco.py")`
+  - 运行时解析: `Glob(".claude/skills/team-adversarial-swarm/scripts/aco.py")`
   - 依赖模块: `pheromone.py`, `scoring.py`（同目录）
   - 命令: `init` / `select` / `update` / `converged` / `report`
   - 协议: [specs/swarm-protocol.md](specs/swarm-protocol.md)
 - **Workflow 脚本**: `<this-skill>/workflows/wf-swarm-*.js`
-  - 运行时解析: `Glob(".pi/skills/team-adversarial-swarm/workflows/wf-swarm-*.js")`
+  - 运行时解析: `Glob(".claude/skills/team-adversarial-swarm/workflows/wf-swarm-*.js")`
 
 ## Specs Reference
 
@@ -95,9 +96,9 @@ SKILL.md (Coordinator — this file)
 ├── trails/                 # Per-iteration trails (managed by aco.py)
 ├── scores/                 # Adversarial scoring results
 │   └── iter-<k>-scores.json
-├── artifacts/              # scratch/intermediate; formal deliverables go to {run_dir}/outputs/
+├── {run_dir}/outputs/      # Formal deliverables
 │   ├── ant-<k>-<id>.json   # Ant outputs
-│   └── best-solution.md    # Final synthesis -> {run_dir}/outputs/best-solution.md
+│   └── best-solution.md    # Final synthesis
 ├── workflows/              # Workflow run artifacts
 │   ├── explore-<k>.json    # Per-iteration explore results
 │   ├── score-<k>.json      # Per-iteration score results
@@ -156,7 +157,7 @@ After session folder creation and before role-spec generation:
      ```json
      "run": { "run_id": "<id>", "run_dir": "<path>" }
      ```
-2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field.
+2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field. If `run.run_id` is missing, resolve in order: birth-packet injection, then `<session>/artifacts/`; if all are absent, fail closed — report session corruption and do NOT create a new Run.
 
 ### Phase 3: Iteration Loop
 
@@ -164,29 +165,29 @@ After session folder creation and before role-spec generation:
 for k in range(1, max_iterations + 1):
     # 3a. ACO selection
     assignments = Bash("python aco.py --session {run_dir}/work/team select --iter k")
-    
+
     # 3b. Parallel exploration (Workflow Module 1)
     explore_result = Workflow({
         scriptPath: "<skill>/workflows/wf-swarm-explore.js",
         args: { iteration: k, assignments, objective, session, config }
     })
-    
+
     # 3c. Adversarial scoring (Workflow Module 2)
     score_result = Workflow({
         scriptPath: "<skill>/workflows/wf-swarm-score.js",
         args: { iteration: k, ant_results: explore_result.ant_results, objective, rubric }
     })
-    
+
     # 3d. Write scores + pheromone update
     Write("{run_dir}/work/team/scores/iter-k-scores.json", score_result)
-    Bash("python aco.py --session {run_dir}/work/team update --iter k")
-    
+    Bash("python aco.py --session {run_dir}/work/team --run-dir <run_dir> update --iter k")
+
     # 3e. Adversarial convergence check (Workflow Module 3)
     converge_result = Workflow({
         scriptPath: "<skill>/workflows/wf-swarm-converge.js",
         args: { iteration: k, best: aco_best, history: iter_history, config }
     })
-    
+
     # 3f. Save + check
     Write("{run_dir}/work/team/workflows/converge-k.json", converge_result)
     if converge_result.converged: break

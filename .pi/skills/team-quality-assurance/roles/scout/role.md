@@ -2,7 +2,7 @@
 role: scout
 prefix: SCOUT
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Multi-Perspective Scout

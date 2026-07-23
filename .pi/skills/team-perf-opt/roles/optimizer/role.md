@@ -3,7 +3,7 @@ role: optimizer
 prefix: IMPL
 inner_loop: dynamic
 additional_prefixes: "[FIX]"
-message_types: 
+message_types:
 ---
 
 # Code Optimizer

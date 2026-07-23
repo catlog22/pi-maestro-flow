@@ -4,7 +4,7 @@ prefix: EXEC
 inner_loop: true
 cli_tools:
   - agy --mode write
-message_types: 
+message_types:
 ---
 
 # Executor

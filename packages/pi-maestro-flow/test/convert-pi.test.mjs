@@ -32,8 +32,8 @@ allowed-tools: Agent AskUserQuestion
     verify(output) {
       assert.match(output, /maestro run start/);
       assert.match(output, /maestro run edit/);
-      assert.match(output, /简单命令链使用/);
-      assert.match(output, /高级 coordinator chain/);
+      assert.match(output, /简单链使用/);
+      assert.match(output, /高级链/);
     },
   },
   {
@@ -72,6 +72,32 @@ maestro run complete <run_id>
       assert.match(output, /maestro run start/);
       assert.doesNotMatch(output, /maestro run create/);
       assert.doesNotThrow(() => JSON.parse(output));
+    },
+  },
+  {
+    name: "injects the Pi host and read-only coordinator contracts into current core skills",
+    file: "D:/fixture/skills/maestro/SKILL.md",
+    input: `<required_reading>
+~/.maestro/workflows/run-mode.md
+</required_reading>
+<purpose>Unified coordinator</purpose>
+`,
+    verify(output) {
+      assert.match(output, /<host_mirror>/);
+      assert.match(output, /Topic Session resolution/);
+      assert.match(output, /ReuseAssessment/);
+      assert.match(output, /same-Session sealed outputs/);
+      assert.match(output, /brief\.command/);
+      assert.match(output, /suggest_only=true/);
+      assert.doesNotMatch(output, /maestro session create/);
+    },
+  },
+  {
+    name: "removes Claude-only todo activeForm fields",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: `todo({ action: "create", subject: "Phase 1", activeForm: "Running phase 1" })`,
+    verify(output) {
+      assert.equal(output, `todo({ action: "create", subject: "Phase 1" })`);
     },
   },
 ];

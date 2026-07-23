@@ -1,5 +1,6 @@
 ---
 name: maestro-fork
+disable-model-invocation: true
 description: Create or sync session worktree for parallel dev
 argument-hint: "--session <session_id> [--base <branch>] [--sync]"
 allowed-tools:
@@ -12,7 +13,7 @@ allowed-tools:
   - Write
   - teammate
 session-mode: run
-contract: 
+contract:
 ---
 
 <required_reading>
@@ -78,7 +79,7 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 |-----------|-----------|
 | Fork complete | `cd {wt.path}` then `maestro run start "{goal}" --cmd analyze --topic "{topic}" --platform pi --workflow-root .` |
 | Fork + automated | `maestro delegate "run full lifecycle for session" --cd {wt.path} --mode write` |
-| Fork + status check | invoke /skill: "manage", args: "status" }) |
+| Fork + status check | Recommend `/maestro-manage status` |
 | Sync complete | Resume work in worktree |
 | Sync conflicts found | Resolve manually, then retry |
 </completion>

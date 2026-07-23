@@ -87,7 +87,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.pi/skills/team-frontend`
+   - `skill_root` = `<project_root>/.claude/skills/team-frontend`
 3. Generate session ID: `FE-<slug>-<YYYY-MM-DD>`
 4. Create session folder structure:
 ```
@@ -111,7 +111,7 @@ mcp__maestro__team_msg({
   }
 })
 ```
-9. Write session.json
+9. Write team-session.json
 
 ### Run Lifecycle Integration
 
@@ -123,14 +123,14 @@ After session folder creation and before role-spec generation:
      ```json
      "run": { "run_id": "<id>", "run_dir": "<path>" }
      ```
-2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field.
+2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field. If `run.run_id` is missing, resolve in order: birth-packet injection, then `<session>/artifacts/`; if all are absent, fail closed — report session corruption and do NOT create a new Run.
 
 ## Phase 3: Task Chain Creation
 
 Delegate to @commands/dispatch.md:
 1. Read specs/pipelines.md for selected pipeline task registry
 2. Create tasks via todo({ action: "create" }), then set blockedBy via todo({ action: "update" })
-3. Update session.json
+3. Update team-session.json
 
 ## Phase 4: Spawn-and-Stop
 

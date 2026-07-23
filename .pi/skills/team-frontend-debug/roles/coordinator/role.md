@@ -77,13 +77,13 @@ TEXT-LEVEL ONLY. No source code reading.
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.pi/skills/team-frontend-debug`
+   - `skill_root` = `<project_root>/.claude/skills/team-frontend-debug`
 2. Generate session ID: TFD-<slug>-<date>
 3. Create session folder structure:
    ```
    {run_dir}/work/team/
    ├── team-session.json
-   ├── evidence/
+   ├── {run_dir}/evidence/
    ├── {run_dir}/outputs/   # Run deliverables (via maestro run)
    ├── wisdom/
    └── .msg/
@@ -104,7 +104,7 @@ After session folder creation and before role-spec generation:
      ```json
      "run": { "run_id": "<id>", "run_dir": "<path>" }
      ```
-2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field.
+2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field. If `run.run_id` is missing, resolve in order: birth-packet injection, then `<session>/artifacts/`; if all are absent, fail closed — report session corruption and do NOT create a new Run.
 
 ## Phase 3: Create Task Chain
 

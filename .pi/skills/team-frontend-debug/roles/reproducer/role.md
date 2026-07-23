@@ -2,7 +2,7 @@
 role: reproducer
 prefix: REPRODUCE
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Reproducer

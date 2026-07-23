@@ -2,7 +2,7 @@
 role: generator
 prefix: TESTGEN
 inner_loop: true
-message_types: 
+message_types:
 ---
 
 # Test Generator
@@ -17,7 +17,7 @@ message_types:
 | .msg/meta.json | {run_dir}/work/team/wisdom/.msg/meta.json | No |
 
 1. Extract session path and layer from task description
-2. Load test specs: Run `ccw spec load --category test` for test framework conventions and coverage targets
+2. Load test specs: Run `maestro spec load --category test` for test framework conventions and coverage targets
 3. Read test strategy:
 
 ```

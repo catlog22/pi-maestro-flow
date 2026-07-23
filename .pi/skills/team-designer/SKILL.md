@@ -1,5 +1,6 @@
 ---
 name: team-designer
+disable-model-invocation: true
 description: "Meta-skill for generating team skills following the v4 architecture pattern. Produces complete skill packages with SKILL.md router, coordinator, worker roles, specs, and templates. Triggers on \"team-designer\", \"design team\"."
 allowed-tools:
   - AskUserQuestion
@@ -11,12 +12,8 @@ allowed-tools:
   - Write
   - mcp__maestro__team_msg
   - teammate
-session-mode: run
+session-mode: none
 ---
-
-<required_reading>
-~/.maestro/workflows/run-mode-lite.md
-</required_reading>
 
 # Team Skill Designer
 
@@ -46,7 +43,7 @@ Generate complete team skills following the team-lifecycle-v4 architecture: SKIL
 ## Key Design Principles
 
 1. **v4 Architecture Compliance**: Generated skills follow team-lifecycle-v4 pattern — SKILL.md = pure router, beat model = coordinator-only, unified structure (roles/ + specs/ + templates/)
-2. **Golden Sample Reference**: Uses `team-lifecycle-v4` as reference implementation at `~  or <project>/.pi/skills/team-lifecycle-v4/`
+2. **Golden Sample Reference**: Uses `team-lifecycle-v4` as reference implementation at `~  or <project>/.claude/skills/team-lifecycle-v4/`
 3. **Intelligent Commands Distribution**: Auto-determines which roles need `commands/` (2+ commands) vs inline logic (1 command)
 4. **team-worker Compatibility**: Role.md files include correct YAML frontmatter for team-worker agent parsing
 
@@ -97,7 +94,7 @@ Return:
 
 ## Golden Sample
 
-Generated skills follow the architecture of `~  or <project>/.pi/skills/team-lifecycle-v4/`:
+Generated skills follow the architecture of `~  or <project>/.claude/skills/team-lifecycle-v4/`:
 
 ```
 .claude/skills/<skill-name>/

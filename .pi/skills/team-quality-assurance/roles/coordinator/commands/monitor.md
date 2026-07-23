@@ -43,7 +43,8 @@ Worker completed. Process and advance.
 
 **GC Fix Task Creation** (when coverage below target):
 ```
-todo({ action: "create", subject: "QAGEN-fix-<round>: Fix tests for <layer> (GC #<round>)",
+todo({ action: "create" })({
+  subject: "QAGEN-fix-<round>: Fix tests for <layer> (GC #<round>)",
   description: "PURPOSE: Fix failing tests and improve coverage | Success: Coverage meets target
 TASK:
   - Load execution results and failing test details
@@ -56,8 +57,10 @@ EXPECTED: Fixed test files | Improved coverage
 CONSTRAINTS: Only modify test files | No source changes
 ---
 InnerLoop: false
-RoleSpec: ~  or <project>/.pi/skills/team-quality-assurance/roles/generator/role.md" })
-todo({ action: "create", subject: "QARUN-gc-<round>: Re-execute <layer> (GC #<round>)",
+RoleSpec: ~  or <project>/.claude/skills/team-quality-assurance/roles/generator/role.md"
+})
+todo({ action: "create" })({
+  subject: "QARUN-gc-<round>: Re-execute <layer> (GC #<round>)",
   description: "PURPOSE: Re-execute tests after fixes | Success: Coverage >= target
 TASK: Execute test suite, measure coverage, report results
 CONTEXT:
@@ -67,7 +70,8 @@ EXPECTED: {run_dir}/outputs/results/run-<layer>-gc-<round>.json
 CONSTRAINTS: Read-only execution
 ---
 InnerLoop: false
-RoleSpec: ~  or <project>/.pi/skills/team-quality-assurance/roles/executor/role.md" })
+RoleSpec: ~  or <project>/.claude/skills/team-quality-assurance/roles/executor/role.md"
+})
 todo({ action: "update", taskId: "QARUN-gc-<round>", addBlockedBy: ["QAGEN-fix-<round>"] })
 ```
 
@@ -161,7 +165,34 @@ Find ready tasks, spawn workers, STOP.
    e. Spawn team-worker:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <subject>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <subject>",
+  team_name: "quality-assurance",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: ~  or <project>/.claude/skills/team-quality-assurance/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: quality-assurance
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Current Task
+- Task ID: <task-id>
+- Task: <subject>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
    f. Add to active_workers

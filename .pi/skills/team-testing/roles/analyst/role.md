@@ -2,7 +2,7 @@
 role: analyst
 prefix: TESTANA
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Test Quality Analyst

@@ -38,14 +38,14 @@ function parseCLIOutput(cliResult, expectedFields, phaseName) {
   try {
     // Parse JSON from stdout
     const output = JSON.parse(cliResult.stdout || cliResult);
-    
+
     // Validate required fields
     for (const field of expectedFields) {
       if (!(field in output)) {
         throw new Error(`Missing required field: ${field}`);
       }
     }
-    
+
     return { success: true, data: output };
   } catch (error) {
     console.error(`[${phaseName}] Failed to parse CLI output:`, error.message);
@@ -181,7 +181,7 @@ if (paperPath) {
   for (const strategy of strategyMatrix) {
     if (strategy.responseType === 'Defend' || strategy.responseType === 'Clarify') {
       // Use Agy CLI to search for relevant sections
-      const cliCommand = `ccw cli -p "PURPOSE: Search paper content for evidence supporting response to reviewer comment
+      const cliCommand = `maestro delegate "PURPOSE: Search paper content for evidence supporting response to reviewer comment
 
 REVIEWER COMMENT:
 ${strategy.issueText}
@@ -208,7 +208,7 @@ EXPECTED: JSON with {
   'equations': [{'equationId': '...', 'content': '...', 'relevance': '...'}],
   'evidenceStrength': 'strong|moderate|weak',
   'gaps': ['gap1', 'gap2']
-}" --tool agy --mode analysis --rule analysis-trace-code-execution`
+}" --to agy --mode analysis --rule analysis-trace-code-execution`
 
       // Execute CLI command
       Bash({
@@ -226,7 +226,7 @@ EXPECTED: JSON with {
   for (const strategy of strategyMatrix) {
     if (strategy.responseType === 'Defend' || strategy.responseType === 'Clarify') {
       const cliResult = <from CLI output>
-      
+
       // Parse CLI output with validation
       const parseResult = parseCLIOutput(
         cliResult,

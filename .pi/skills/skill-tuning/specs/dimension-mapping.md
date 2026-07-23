@@ -39,22 +39,22 @@
 ```javascript
 function matchCategory(keywords) {
   const categoryScores = {};
-  
+
   for (const keyword of keywords) {
     const normalizedKeyword = keyword.toLowerCase();
-    
+
     for (const [category, categoryKeywords] of Object.entries(KEYWORD_MAP)) {
       if (categoryKeywords.some(k => normalizedKeyword.includes(k) || k.includes(normalizedKeyword))) {
         categoryScores[category] = (categoryScores[category] || 0) + 1;
       }
     }
   }
-  
+
   // 返回得分最高的类别
   const sorted = Object.entries(categoryScores).sort((a, b) => b[1] - a[1]);
-  
+
   if (sorted.length === 0) return null;
-  
+
   // 如果前两名得分相同，返回多类别（需澄清）
   if (sorted.length > 1 && sorted[0][1] === sorted[1][1]) {
     return {
@@ -63,7 +63,7 @@ function matchCategory(keywords) {
       ambiguous: true
     };
   }
-  
+
   return {
     primary: sorted[0][0],
     secondary: sorted[1]?.[0] || null,
@@ -132,12 +132,12 @@ function matchCategory(keywords) {
 ```javascript
 function evaluateSatisfaction(specMatch) {
   // 核心标准：有可用的修复策略
-  const hasFix = specMatch.strategy_match !== null && 
+  const hasFix = specMatch.strategy_match !== null &&
                  specMatch.strategy_match.strategies.length > 0;
-  
+
   // 辅助标准：有检测手段
   const hasDetection = specMatch.taxonomy_match !== null;
-  
+
   return {
     satisfied: hasFix,
     detection_available: hasDetection,

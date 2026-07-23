@@ -74,7 +74,7 @@ TEXT-LEVEL ONLY. No source code reading.
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.pi/skills/team-lifecycle-v4`
+   - `skill_root` = `<project_root>/.claude/skills/team-lifecycle-v4`
 2. Generate session ID: TLV4-<slug>-<date>
 3. Create session folder structure
 4. TeamCreate with team name

@@ -2,7 +2,7 @@
 role: verifier
 prefix: VERIFY
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Verifier

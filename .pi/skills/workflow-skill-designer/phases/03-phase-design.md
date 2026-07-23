@@ -308,14 +308,14 @@ function generatePhaseFromRequirements(phase, config) {
       phaseContent += `### Step: ${agentType} Delegation\n\n`;
       phaseContent += '```javascript\n';
       phaseContent += `const result = teammate({\n`;
-      phaseContent += `  agent: "${mapAgentType(agentType)}",\n`;
-      phaseContent += `  task: \`\n`;
+      phaseContent += `  subagent_type: "${mapAgentType(agentType)}",\n`;
+      phaseContent += `  prompt: \`\n`;
       phaseContent += `    [ROLE] ${agentType}\n`;
       phaseContent += `    [TASK] ${phase.description}\n`;
       phaseContent += `    [INPUT] \${inputData}\n`;
       phaseContent += `    [OUTPUT] \${outputPath}\n`;
       phaseContent += `  \`,\n`;
-      phaseContent += `  context: "fresh"\n`;
+      phaseContent += `  run_in_background: false\n`;
       phaseContent += `});\n`;
       phaseContent += '```\n\n';
     }
@@ -366,7 +366,7 @@ function mapAgentType(agentType) {
 
 ```javascript
 function writePhaseFiles(config) {
-  const skillDir = `.pi/skills/${config.skillName}`;
+  const skillDir = `.claude/skills/${config.skillName}`;
 
   for (const phase of config.phases) {
     const filename = `${String(phase.number).padStart(2, '0')}-${phase.slug}.md`;
@@ -410,7 +410,7 @@ After generating all phase files, verify cross-phase consistency:
 
 ```javascript
 function checkCrossPhaseConsistency(config) {
-  const skillDir = `.pi/skills/${config.skillName}`;
+  const skillDir = `.claude/skills/${config.skillName}`;
   const issues = [];
 
   for (const phase of config.phases) {
@@ -454,7 +454,7 @@ Expected phase file sizes relative to their source commands:
 
 ## Output
 
-- **Files**: `.pi/skills/{skillName}/phases/0N-{slug}.md` for each phase
+- **Files**: `.claude/skills/{skillName}/phases/0N-{slug}.md` for each phase
 - **todo({ action: "update" })**: Mark Phase 3 completed, Phase 4 in_progress
 
 ## Next Phase

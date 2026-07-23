@@ -22,9 +22,9 @@
 
 | Prefix | Role | Role Spec | inner_loop |
 |--------|------|-----------|------------|
-| SCAN-* | scanner | `~  or <project>/.pi/skills/team-review/roles/scanner/role.md` | false |
-| REV-* | reviewer | `~  or <project>/.pi/skills/team-review/roles/reviewer/role.md` | false |
-| FIX-* | fixer | `~  or <project>/.pi/skills/team-review/roles/fixer/role.md` | true |
+| SCAN-* | scanner | `~  or <project>/.claude/skills/team-review/roles/scanner/role.md` | false |
+| REV-* | reviewer | `~  or <project>/.claude/skills/team-review/roles/reviewer/role.md` | false |
+| FIX-* | fixer | `~  or <project>/.claude/skills/team-review/roles/fixer/role.md` | true |
 
 ## handleCallback
 
@@ -139,7 +139,34 @@ Find ready tasks, spawn workers, STOP.
    d. Spawn team-worker:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <subject>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <subject>",
+  team_name: "review",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: ~  or <project>/.claude/skills/team-review/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: review
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Current Task
+- Task ID: <task-id>
+- Task: <subject>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
    e. Add to active_workers

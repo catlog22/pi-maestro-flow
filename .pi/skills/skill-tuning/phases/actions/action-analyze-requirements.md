@@ -67,22 +67,22 @@ EXPECTED: JSON (不要包含 markdown 代码块标记)
   ],
   "analysis_notes": "整体分析说明"
 }
-RULES: 
+RULES:
 - 每个维度必须独立，不重叠
 - 低于 0.5 置信度的推断应标注需要澄清
 - 如果用户描述非常模糊，至少提取一个 "general" 维度
 `;
 
   const cliCommand = `maestro delegate "${escapeForShell(prompt)}" --to agy --mode analysis --cd "${state.target_skill.path}"`;
-  
+
   console.log('Phase 1: 执行 Agy 维度拆解分析...');
-  
+
   const result = Bash({
     command: cliCommand,
     run_in_background: true,
     timeout: 300000
   });
-  
+
   return result;
 }
 ```
@@ -150,9 +150,9 @@ function evaluateCoverage(specMatches) {
   const total = specMatches.length;
   const withDetection = specMatches.filter(m => m.taxonomy_match !== null).length;
   const withFix = specMatches.filter(m => m.has_fix).length;
-  
+
   const rate = total > 0 ? Math.round((withFix / total) * 100) : 0;
-  
+
   let status;
   if (rate >= 80) {
     status = 'satisfied';
@@ -161,7 +161,7 @@ function evaluateCoverage(specMatches) {
   } else {
     status = 'unsatisfied';
   }
-  
+
   return {
     total_dimensions: total,
     with_detection: withDetection,
@@ -179,10 +179,10 @@ function evaluateCoverage(specMatches) {
 ```javascript
 function detectAmbiguities(dimensions, specMatches) {
   const ambiguities = [];
-  
+
   for (const dim of dimensions) {
     const match = specMatches.find(m => m.dimension_id === dim.id);
-    
+
     // 检测1: 低置信度 (< 0.5)
     if (dim.confidence < 0.5) {
       ambiguities.push({
@@ -193,7 +193,7 @@ function detectAmbiguities(dimensions, specMatches) {
         needs_clarification: true
       });
     }
-    
+
     // 检测2: 无匹配类别
     if (!match || (!match.taxonomy_match && !match.strategy_match)) {
       ambiguities.push({
@@ -204,7 +204,7 @@ function detectAmbiguities(dimensions, specMatches) {
         needs_clarification: true
       });
     }
-    
+
     // 检测3: 关键词冲突（可能属于多个类别）
     if (dim.keywords.length > 3 && hasConflictingKeywords(dim.keywords)) {
       ambiguities.push({
@@ -216,7 +216,7 @@ function detectAmbiguities(dimensions, specMatches) {
       });
     }
   }
-  
+
   return ambiguities;
 }
 
@@ -252,14 +252,14 @@ function getKeywordCategoryHint(keyword) {
 ```javascript
 async function handleAmbiguities(ambiguities, dimensions) {
   const needsClarification = ambiguities.filter(a => a.needs_clarification);
-  
+
   if (needsClarification.length === 0) {
     return null;  // 无需澄清
   }
-  
+
   const questions = needsClarification.slice(0, 4).map(a => {
     const dim = dimensions.find(d => d.id === a.dimension_id);
-    
+
     return {
       question: `关于 "${dim.description}"，您具体指的是？`,
       header: a.dimension_id,
@@ -270,7 +270,7 @@ async function handleAmbiguities(ambiguities, dimensions) {
       multiSelect: false
     };
   });
-  
+
   return await ask user ({ questions });
 }
 
@@ -324,7 +324,7 @@ function deriveOptimalFocusAreas(specMatches) {
       return null;
     })
     .filter(f => f && coreCategories.includes(f));
-  
+
   // 去重
   return [...new Set(matched)];
 }
@@ -333,14 +333,14 @@ function generateSummary(dimensions, coverage, ambiguities) {
   const dimCount = dimensions.length;
   const coverageStatus = coverage.status;
   const ambiguityCount = ambiguities.filter(a => a.needs_clarification).length;
-  
+
   let summary = `分析完成：${dimCount} 个维度`;
   summary += `，覆盖度 ${coverage.coverage_rate}% (${coverageStatus})`;
-  
+
   if (ambiguityCount > 0) {
     summary += `，${ambiguityCount} 个歧义点待澄清`;
   }
-  
+
   return summary;
 }
 ```

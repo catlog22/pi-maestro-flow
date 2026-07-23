@@ -128,7 +128,7 @@ If `scoring.mode == "script"` or `"fallback"` -> proceed directly to Step 3.
 ### Step 3: Call aco.py update
 
 ```
-Bash: python <skill_root>/scripts/aco.py --session {run_dir}/work/team update --iter <k>
+Bash: python <skill_root>/scripts/aco.py --session {run_dir}/work/team --run-dir <run_dir> update --iter <k>
 ```
 
 Parse stdout JSON. Expected:

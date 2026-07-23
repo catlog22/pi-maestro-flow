@@ -11,17 +11,17 @@ message_types: "[approved, concerns, rejected, error]"
 
 | Input | Source | Required |
 |-------|--------|----------|
-| Issue IDs | Task description (GH-\d+ or ISS-\d{8}-\d{6}) | Yes |
+| Issue IDs | Task description (GH-\d+ or ISS-\d{8}-\d{3}) | Yes |
 | Explorer context | `{run_dir}/work/team/explorations/context-<issueId>.json` | No |
-| Bound solution | `ccw issue solutions <id> --json` | Yes |
+| Solution artifact | `{run_dir}/outputs/solutions/solution-<issueId>.json` | Yes |
 | wisdom meta | {run_dir}/work/team/wisdom/.msg/meta.json | No |
 
 1. Extract issue IDs from task description via regex
 2. Load explorer context reports for each issue
-3. Load bound solutions for each issue:
+3. Load the canonical Run solution artifact for each issue:
 
 ```
-Bash("ccw issue solutions <issueId> --json")
+Read("{run_dir}/outputs/solutions/solution-<issueId>.json")
 ```
 
 ## Phase 3: Multi-Dimensional Review

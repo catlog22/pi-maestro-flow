@@ -41,7 +41,12 @@ The SKILL.md follows a strict template. Every generated SKILL.md contains these 
 name: ${teamConfig.skillName}
 description: "${teamConfig.domain}. Triggers on ${teamConfig.skillName}."
 allowed-tools: TeamCreate(*), TeamDelete(*), SendMessage(*), todo({ action: "create" })(*), todo({ action: "update" })(*), todo({ action: "list" })(*), todo({ action: "get" })(*), teammate(*), AskUserQuestion(*), Read(*), Write(*), Edit(*), Bash(*), Glob(*), Grep(*)
+session-mode: run
 ---
+
+<required_reading>
+~/.maestro/workflows/run-mode-lite.md
+</required_reading>
 ```
 
 ### Section 2: Title + Architecture Diagram
@@ -190,15 +195,18 @@ ${teamConfig.specs.map(s =>
 ## Session Directory
 
 \```
-{run_dir}/work/team/
-├── team-session.json           # Session state + role registry
-├── {run_dir}/outputs/spec/                       # Spec phase outputs
-├── {run_dir}/outputs/plan/                       # Implementation plan + TASK-*.json
-├── artifacts/                  # All deliverables
-├── wisdom/                     # Cross-task knowledge
-├── explorations/               # Shared explore cache
-├── {run_dir}/evidence/discussions/                # Discuss round records
-└── .msg/                       # Team message bus
+{run_dir}/
+├── outputs/                    # All formal deliverables
+│   ├── spec/                   # Spec phase outputs
+│   └── plan/                   # Implementation plan + TASK-*.json
+├── evidence/
+│   └── discussions/            # Discuss round records
+├── report.md                   # Human-readable synthesis + handoff
+└── work/team/                  # Team coordination (non-artifact)
+    ├── team-session.json       # Session state + role registry
+    ├── wisdom/                 # Cross-task knowledge
+    ├── explorations/           # Shared explore cache
+    └── .msg/                   # Team message bus
 \```
 ```
 

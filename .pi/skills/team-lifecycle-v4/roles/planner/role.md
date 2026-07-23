@@ -2,7 +2,7 @@
 role: planner
 prefix: PLAN
 inner_loop: true
-message_types: 
+message_types:
 ---
 
 # Planner

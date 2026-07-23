@@ -255,7 +255,7 @@ output:
   format: json
   file: structure-analysis.json
 mcp_tools:
-  - 
+  -
 \`\`\`
 
 ### 2. Design Pattern Extraction
@@ -320,7 +320,7 @@ output:
   format: json
   file: security-report.json
 mcp_tools:
-  - 
+  -
 \`\`\`
 
 ---

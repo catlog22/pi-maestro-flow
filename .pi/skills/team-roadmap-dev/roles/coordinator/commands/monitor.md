@@ -4,7 +4,7 @@
 
 | Key | Value | Description |
 |-----|-------|-------------|
-| SPAWN_MODE | background | All workers spawned via `Task(run_in_background: true)` |
+| SPAWN_MODE | background | All workers spawned via `teammate(subagent_type: "team-worker", run_in_background: true)` |
 | ONE_STEP_PER_INVOCATION | true | Coordinator does one operation then STOPS |
 | WORKER_AGENT | team-worker | All workers spawned as team-worker agents |
 | MAX_GAP_ITERATIONS | 3 | Maximum gap closure re-plan/exec/verify cycles per phase |
@@ -13,9 +13,9 @@
 
 | Prefix | Role | Role Spec | inner_loop |
 |--------|------|-----------|------------|
-| PLAN | planner | `~  or <project>/.pi/skills/team-roadmap-dev/roles/planner/role.md` | true (cli_tools: agy --mode analysis) |
-| EXEC | executor | `~  or <project>/.pi/skills/team-roadmap-dev/roles/executor/role.md` | true (cli_tools: agy --mode write) |
-| VERIFY | verifier | `~  or <project>/.pi/skills/team-roadmap-dev/roles/verifier/role.md` | true |
+| PLAN | planner | `~  or <project>/.claude/skills/team-roadmap-dev/roles/planner/role.md` | true (cli_tools: agy --mode analysis) |
+| EXEC | executor | `~  or <project>/.claude/skills/team-roadmap-dev/roles/executor/role.md` | true (cli_tools: agy --mode write) |
+| VERIFY | verifier | `~  or <project>/.claude/skills/team-roadmap-dev/roles/verifier/role.md` | true |
 
 ### Pipeline Structure
 
@@ -237,7 +237,36 @@ Ready tasks found?
 **Spawn worker tool call** (one per ready task):
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <subject>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <subject>",
+  team_name: "roadmap-dev",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: ~  or <project>/.claude/skills/team-roadmap-dev/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: roadmap-dev
+requirement: <task-description>
+inner_loop: true
+
+## Current Task
+- Task ID: <task-id>
+- Task: <subject>
+- Phase: <current_phase>
+- Gap Iteration: <gap_iteration>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 -> role-spec Phase 2-4 -> built-in Phase 5.`
+})
 ```
 
 ---

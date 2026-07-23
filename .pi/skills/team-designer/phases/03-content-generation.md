@@ -14,7 +14,7 @@
 
 ## Golden Sample Reference
 
-Read the golden sample at `~  or <project>/.pi/skills/team-lifecycle-v4/` for each file type before generating. This ensures pattern fidelity.
+Read the golden sample at `~  or <project>/.claude/skills/team-lifecycle-v4/` for each file type before generating. This ensures pattern fidelity.
 
 ## Step 3.1: Generate Coordinator
 
@@ -76,6 +76,18 @@ If `{run_dir}/work/team/team-session.json` exists:
 - Initialize team_msg message bus
 - Create session directory structure
 
+### Run Lifecycle Integration
+
+After session folder creation and before task dispatch:
+
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd ${teamConfig.skillName} --session <slug> --platform pi --workflow-root .`
+   - Slug format: `YYYYMMDD-${teamConfig.skillName}-<topic>` (ASCII, ≤64 chars)
+   - Store returned `run_id` and `run_dir` in `team-session.json`:
+     \```json
+     "run": { "run_id": "<id>", "run_dir": "<path>" }
+     \```
+2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field.
+
 ## Phase 3: Dispatch
 
 - Execute `commands/dispatch.md`
@@ -88,6 +100,12 @@ If `{run_dir}/work/team/team-session.json` exists:
 - **STOP after spawning** — wait for callback
 
 ## Phase 5: Report & Completion
+
+Run lifecycle completion (before generating the summary):
+- Read run_id from team-session.json.run.run_id
+- Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
+- Run `maestro run complete <run_id>`
+- If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 
 - Aggregate all task artifacts
 - Present completion action to user
@@ -307,7 +325,7 @@ For each additional spec in `teamConfig.specs` (beyond pipelines), generate doma
 
 For each template in `teamConfig.templates`:
 
-1. Check if golden sample has matching template at `~  or <project>/.pi/skills/team-lifecycle-v4/templates/`
+1. Check if golden sample has matching template at `~  or <project>/.claude/skills/team-lifecycle-v4/templates/`
 2. If exists: copy and adapt for new domain
 3. If not: generate domain-appropriate template structure
 

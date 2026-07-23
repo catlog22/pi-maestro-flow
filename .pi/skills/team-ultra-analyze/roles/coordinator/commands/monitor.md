@@ -15,13 +15,13 @@
 
 | Input | Source | Required |
 |-------|--------|----------|
-| Session state | `{run_dir}/work/team/session.json` | Yes |
+| Session state | `{run_dir}/work/team/team-session.json` | Yes |
 | Task list | `todo({ action: "list" })` | Yes |
 | Trigger event | From Entry Router detection | Yes |
-| Pipeline mode | From session.json `pipeline_mode` | Yes |
-| Discussion round | From session.json `discussion_round` | Yes |
+| Pipeline mode | From team-session.json `pipeline_mode` | Yes |
+| Discussion round | From team-session.json `discussion_round` | Yes |
 
-1. Load session.json for current state, `pipeline_mode`, `discussion_round`
+1. Load team-session.json for current state, `pipeline_mode`, `discussion_round`
 2. Run `todo({ action: "list" })` to get current task statuses
 3. Identify trigger event type from Entry Router
 4. Compute max discussion rounds from pipeline mode:
@@ -84,7 +84,7 @@ discussion_round = session.discussion_round || 0
 discussion_round++
 
 // Update session state
-Update session.json: discussion_round = discussion_round
+Update team-session.json: discussion_round = discussion_round
 
 // Check if discussion loop applies
 IF pipeline_mode === 'quick':
@@ -126,7 +126,8 @@ ELSE:
 
 DISCUSS-N (subsequent round):
 ```
-todo({ action: "create", subject: "DISCUSS-<NNN>",
+todo({ action: "create" })({
+  subject: "DISCUSS-<NNN>",
   description: "PURPOSE: Process discussion round <N> | Success: Updated understanding
 TASK:
   - Process previous round results
@@ -140,13 +141,15 @@ CONTEXT:
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/evidence/discussions/discussion-round-<NNN>.json
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "DISCUSS-<NNN>", owner: "discussant" })
 ```
 
 ANALYZE-fix-N (direction adjustment):
 ```
-todo({ action: "create", subject: "ANALYZE-fix-<N>",
+todo({ action: "create" })({
+  subject: "ANALYZE-fix-<N>",
   description: "PURPOSE: Supplementary analysis with adjusted focus | Success: New insights from adjusted direction
 TASK:
   - Re-analyze from adjusted perspective: <adjusted_focus>
@@ -160,7 +163,8 @@ CONTEXT:
   - Shared memory: {run_dir}/work/team/wisdom/.msg/meta.json
 EXPECTED: {run_dir}/outputs/analyses/analysis-fix-<N>.json
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "ANALYZE-fix-<N>", owner: "analyst" })
 ```
 
@@ -169,7 +173,8 @@ SYNTH-001 (created dynamically — check existence first):
 // Guard: only create if SYNTH-001 doesn't exist yet (dispatch may have pre-created it)
 const existingSynth = todo({ action: "list" }).find(t => t.subject === 'SYNTH-001')
 if (!existingSynth) {
-todo({ action: "create", subject: "SYNTH-001",
+todo({ action: "create" })({
+  subject: "SYNTH-001",
   description: "PURPOSE: Integrate all analysis into final conclusions | Success: Executive summary with recommendations
 TASK:
   - Load all exploration, analysis, and discussion artifacts
@@ -183,7 +188,8 @@ CONTEXT:
 EXPECTED: {run_dir}/outputs/conclusions.json + {run_dir}/evidence/discussion.md update
 CONSTRAINTS: Pure integration, no new exploration
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 }
 // Always update blockedBy to reference the last DISCUSS task (whether pre-existing or newly created)
 todo({ action: "update", taskId: "SYNTH-001", addBlockedBy: ["<last-DISCUSS-task-id>"], owner: "synthesizer" })
@@ -226,7 +232,35 @@ Find and spawn the next ready tasks.
 3. Spawn team-worker for each ready task:
 
 ```
-teammate({ agent: "team-worker", name: "<agent-name>", description: "Spawn <role> worker for <task-subject>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <task-subject>",
+  team_name: "ultra-analyze",
+  name: "<agent-name>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: <skill_root>/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: ultra-analyze
+requirement: <task-description>
+agent_name: <agent-name>
+inner_loop: false
+
+## Current Task
+- Task ID: <task-id>
+- Task: <task-subject>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery, owner=<agent-name>) -> role-spec Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
 4. **Parallel spawn rules**:
@@ -320,7 +354,7 @@ Triggered when all pipeline tasks are completed.
 
 After every handler execution **except handleComplete**:
 
-1. Update session.json with current state:
+1. Update team-session.json with current state:
    - `discussion_round`: current round count
    - `last_event`: event type and timestamp
    - `active_tasks`: list of in-progress task IDs

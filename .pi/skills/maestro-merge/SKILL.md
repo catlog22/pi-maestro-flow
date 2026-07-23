@@ -1,5 +1,6 @@
 ---
 name: maestro-merge
+disable-model-invocation: true
 description: Merge session worktree branch back to main
 argument-hint: "--session <session_id> [--force] [--dry-run] [--no-cleanup] [--continue]"
 allowed-tools:
@@ -12,7 +13,7 @@ allowed-tools:
   - Write
   - teammate
 session-mode: run
-contract: 
+contract:
 ---
 
 <required_reading>
@@ -61,18 +62,18 @@ After successful merge, use `user prompt` to confirm knowledge persistence:
 question: "Merge 完成。是否记录本次工作经验教训？"
 options:
   - label: "记录经验"
-    description: "通过 spec add 持久化此次工作的关键洞察"
+    description: "通过 maestro-spec add 持久化此次工作的关键洞察"
   - label: "跳过"
     description: "不记录，直接完成"
 ```
 
-User selects "记录经验" → prompt for title/insight, then persist via `Skill("spec", "add learning \"<title>\" \"<insight>\" --keywords <kw1>,<kw2> --description \"<summary>\"")`. User selects "跳过" → proceed to next-step routing.
+User selects "记录经验" → prompt for title/insight, then recommend `/maestro-spec add learning "<title>" "<insight>" --keywords <kw1>,<kw2> --description "<summary>"`. User selects "跳过" → proceed to next-step routing.
 
 ### Next-step routing
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Merge complete | invoke /skill: "manage", args: "status" }) |
+| Merge complete | Recommend `/maestro-manage status` |
 | Next dep-ready session | `maestro run start "{goal}" --cmd analyze --session {next-dep-ready-slug} --platform pi --workflow-root .` |
 </completion>
 

@@ -3,7 +3,7 @@ role: ant
 prefix: ANT
 inner_loop: false
 output_tag: "[ant]"
-message_types: 
+message_types:
 ---
 
 # Ant Role — Phase 2-4

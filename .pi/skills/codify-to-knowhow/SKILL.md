@@ -1,5 +1,6 @@
 ---
 name: codify-to-knowhow
+disable-model-invocation: true
 description: "Manifest-driven knowledge asset generator — converts any structured package into maestro knowhow + spec entries with ref linking. Triggers on \"codify-to-knowhow\", \"style to knowhow\", \"知识固化\"."
 allowed-tools:
   - Bash
@@ -171,5 +172,5 @@ Completion report
 
 ## Related Commands
 
-**上游**: `maestro-impeccable --codify`, `learn decompose`, 或任何生成 manifest 的 skill
+**上游**: `maestro-impeccable --codify`, `maestro-learn decompose`, 或任何生成 manifest 的 skill
 **后续**: `maestro wiki list --category coding`, `maestro load --type spec --keyword <slug>`

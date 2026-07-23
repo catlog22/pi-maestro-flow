@@ -16,6 +16,11 @@ Example: `{run_dir}/outputs/ant-3-2.json` (ant id 2 in iteration 3)
 
 ```json
 {
+  "_meta": {
+    "kind": "swarm-ant-result",
+    "schema": "swarm-ant-result/1.0",
+    "role": "evidence"
+  },
   "schema_version": "1.0",
   "ant_id": "ANT-3-2",
   "iteration": 3,
@@ -63,6 +68,7 @@ Example: `{run_dir}/outputs/ant-3-2.json` (ant id 2 in iteration 3)
 
 | Field | Type | Required | Constraint |
 |-------|------|----------|------------|
+| `_meta` | object | yes | complete artifact metadata; `kind` = `swarm-ant-result`, `schema` = `swarm-ant-result/1.0` |
 | `schema_version` | string | yes | must be `"1.0"` |
 | `ant_id` | string | yes | matches assignment |
 | `iteration` | int | yes | matches assignment |

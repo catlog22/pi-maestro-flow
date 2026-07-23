@@ -2,7 +2,7 @@
 role: analyst
 prefix: QAANA
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Quality Analyst

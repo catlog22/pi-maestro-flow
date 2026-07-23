@@ -4,12 +4,12 @@
 
 | Input | Source | Required |
 |-------|--------|----------|
-| Session state | {run_dir}/work/team/session.json | Yes |
+| Session state | {run_dir}/work/team/team-session.json | Yes |
 | Task list | todo({ action: "list" }) | Yes |
 | Trigger event | From Entry Router detection | Yes |
 | Pipeline definition | From SKILL.md | Yes |
 
-1. Load session.json for current state, `parallel_mode`, `branches`, `fix_cycles`
+1. Load team-session.json for current state, `parallel_mode`, `branches`, `fix_cycles`
 2. Run todo({ action: "list" }) to get current task statuses
 3. Identify trigger event type from Entry Router
 
@@ -63,7 +63,30 @@ Find and spawn the next ready tasks.
 2. For each ready task, spawn team-worker:
 
 ```
-teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker for <task-id>",
+  team_name: "perf-opt",
+  name: "<role>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: ~  or <project>/.claude/skills/team-perf-opt/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: perf-opt
+requirement: <task-description>
+inner_loop: <true|false>
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 -> role-spec Phase 2-4 -> built-in Phase 5.`
+})
 ```
 
 3. **Parallel spawn rules by mode**:
@@ -114,7 +137,7 @@ When both BENCH-{P}01 and REVIEW-{P}01 are completed for a specific pipeline:
 
 #### Fix Cycle Count Tracking
 
-Fix cycles are tracked per branch/pipeline in `session.json`:
+Fix cycles are tracked per branch/pipeline in `team-session.json`:
 
 ```json
 // Single mode
@@ -339,6 +362,6 @@ Triggered by user "feedback <text>" command.
 
 After every handler execution:
 
-1. Update session.json with current state (active tasks, fix cycle counts per branch, last event, resolved parallel_mode)
+1. Update team-session.json with current state (active tasks, fix cycle counts per branch, last event, resolved parallel_mode)
 2. Verify task list consistency
 3. STOP and wait for next event

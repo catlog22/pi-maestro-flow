@@ -1,5 +1,6 @@
 ---
 name: maestro-session-seal
+disable-model-invocation: true
 description: Seal current session with knowledge extraction and DAG progression
 argument-hint: "[--session <session_id>] [-y] [--skip-knowledge]"
 allowed-tools:
@@ -12,7 +13,7 @@ allowed-tools:
   - Write
   - teammate
 session-mode: run
-contract: 
+contract:
 ---
 
 <required_reading>
@@ -21,16 +22,11 @@ contract:
 
 <host_mirror>
 
-**镜像协议**（状态对账由插件自动完成，LLM 只保留两个语义动作）：
+Pi mirrors canonical Session/Run state automatically:
 
-| 动作 | 工具调用 | 说明 |
-|------|----------|------|
-| 步进 | `todo({ action: "next" })` | 激活下一步 + 注入上游摘要 + 绑定 skill |
-| 完成宣告 | `goal done` | 触发前置校验（chain 全 completed + gates 无 failed）+ verifier |
-
-- 禁止手工 `todo({ action: "create" })` / `todo({ action: "update" })` 镜像任务——bridge 从 session.json 自动物化
-- goal 由 bridge 从 session intent + definition_of_done 自动派生
-- 压缩恢复后首个动作：`maestro run brief --platform pi <run-id>` 重挂协议
+- Advance only with `todo({ action: "next" })`; do not create or update mirror tasks manually.
+- Goal completion is derived from terminal chain state and clean gates.
+- After compaction, reattach through the current Run's `brief.command`.
 
 </host_mirror>
 
@@ -79,9 +75,9 @@ Skip if `--skip-knowledge`. Otherwise:
      - "跳过" (no knowledge extraction)
    ```
 4. **Persist** selected items:
-   - Specs → `Skill("spec", "add ...")`
-   - Knowhow → `Skill("manage", "knowledge capture ...")`
-   - 通过 Session CLI 记录 promoted IDs（前缀区分 spec:/knowhow:），不直接写 `session.json`
+   - Specs → recommend `/maestro-spec add ...`
+   - Knowhow → recommend `/maestro-manage knowledge capture ...`
+   - Use the Runtime CLI to persist promoted IDs in `session.json.lifecycle.promoted[]`（前缀区分 spec:/knowhow:）
 
 ### Step 3: Seal Session
 
@@ -119,8 +115,8 @@ Status: DONE
 | Condition | Suggestion |
 |-----------|-----------|
 | Next session activated | `maestro run start "{goal}" --cmd analyze --session {next-slug} --platform pi --workflow-root .` |
-| DAG complete (all sealed) | `/manage status` |
-| Knowledge review needed | `/manage knowledge audit` |
+| DAG complete (all sealed) | `/maestro-manage status` |
+| Knowledge review needed | `/maestro-manage knowledge audit` |
 </completion>
 
 <error_codes>

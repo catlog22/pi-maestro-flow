@@ -54,7 +54,7 @@ Worker completed. Process and advance.
 
 5. **Deferred BUILD task creation** (when integrator completes):
    - If completed task is MARSHAL-* AND pipeline is batch:
-   - Read execution queue from `.workflow/issues/queue/execution-queue.json`
+   - Read execution queue from `{run_dir}/outputs/queue/execution-queue.json`
    - Parse parallel_groups to determine BUILD task count M
    - Create BUILD-001..M tasks dynamically (see dispatch.md Batch Pipeline BUILD section)
    - Proceed to handleSpawnNext
@@ -117,7 +117,30 @@ Find ready tasks, spawn workers, STOP.
    b. team_msg log -> task_unblocked
    c. Spawn team-worker (see SKILL.md Spawn Template):
       ```
-      teammate({ agent: "team-worker", name: "<role>", description: "Spawn <role> worker for <task-id>", context: "fresh" })
+      teammate({
+        subagent_type: "team-worker",
+        description: "Spawn <role> worker for <task-id>",
+        team_name: "issue",
+        name: "<role>",
+        run_in_background: true,
+        prompt: `## Role Assignment
+      role: <role>
+      role_spec: ~  or <project>/.claude/skills/team-issue/roles/<role>/role.md
+      session: {run_dir}/work/team
+      session_id: <run-id>
+      team_name: issue
+      requirement: <task-description>
+      inner_loop: false
+
+      ## Progress Milestones
+      session_id: <run-id>
+      Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+      Report blockers immediately via team_msg type="blocker".
+      Report completion via team_msg type="task_complete" after final SendMessage.
+
+      Read role_spec file to load Phase 2-4 domain instructions.
+      Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 (report).`
+      })
       ```
    d. Add to active_workers
 
@@ -133,7 +156,30 @@ Find ready tasks, spawn workers, STOP.
 
 **Parallel spawn** (Batch mode with multiple ready tasks for same role):
 ```
-teammate({ agent: "team-worker", name: "<role>-<N>", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  name: "<role>-<N>",
+  team_name: "issue",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: ~  or <project>/.claude/skills/team-issue/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: issue
+requirement: <task-description>
+agent_name: <role>-<N>
+inner_loop: false
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery, owner=<role>-<N>) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
 6. Update session, output summary, STOP

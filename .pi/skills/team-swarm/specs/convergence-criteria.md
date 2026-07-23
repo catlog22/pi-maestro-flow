@@ -55,27 +55,27 @@ The swarm stops when **any** of the configured criteria triggers:
 ```
 def check_convergence(history, config):
     triggered = []
-    
+
     if iteration >= config.max_iterations:
         triggered.append("max_iterations")
-    
+
     if config.stagnation.enabled:
         recent = history[-config.stagnation.patience-1:]
         if len(recent) > config.stagnation.patience:
-            deltas = [abs(recent[i].best - recent[i-1].best) 
+            deltas = [abs(recent[i].best - recent[i-1].best)
                       for i in range(1, len(recent))]
             if all(d < config.stagnation.min_delta for d in deltas):
                 triggered.append("stagnation")
-    
+
     if config.entropy_floor.enabled and current_entropy < threshold:
         triggered.append("entropy_floor")
-    
+
     if config.budget_tokens.enabled and total_tokens > config.budget_tokens.max:
         triggered.append("budget_tokens")
-    
+
     if config.target_score.enabled and best_score >= config.target_score.value:
         triggered.append("target_score")
-    
+
     return {"converged": len(triggered) > 0, "triggered_by": triggered}
 ```
 

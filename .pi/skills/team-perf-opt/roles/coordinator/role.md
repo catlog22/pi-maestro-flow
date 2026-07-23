@@ -73,7 +73,7 @@ For callback/check/resume/complete: load `@commands/monitor.md` and execute matc
 
 Triggered when an active/paused session is detected on coordinator entry.
 
-1. Load session.json from detected session folder
+1. Load team-session.json from detected session folder
 2. Audit task list: `todo({ action: "list" })`
 3. Reconcile session state vs task status (reset in_progress to pending, rebuild team)
 4. Spawn workers for ready tasks -> Phase 4 coordination loop
@@ -94,9 +94,9 @@ Triggered when an active/paused session is detected on coordinator entry.
 
 1. Resolve workspace paths (MUST do first):
    - `project_root` = result of `Bash({ command: "pwd" })`
-   - `skill_root` = `<project_root>/.pi/skills/team-perf-opt`
+   - `skill_root` = `<project_root>/.claude/skills/team-perf-opt`
 2. Create session directory with explorations/, wisdom/, discussions/ subdirs (deliverables go to {run_dir}/outputs/)
-3. Write session.json with extended fields (parallel_mode, max_branches, branches, fix_cycles)
+3. Write team-session.json with extended fields (parallel_mode, max_branches, branches, fix_cycles)
 4. Initialize meta.json with pipeline metadata via team_msg
 5. Call `TeamCreate({ team_name: "perf-opt" })`
 
@@ -110,7 +110,7 @@ After session folder creation and before role-spec generation:
      ```json
      "run": { "run_id": "<id>", "run_dir": "<path>" }
      ```
-2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field.
+2. **Resume**: Read `team-session.json.run.run_id` → `maestro run check <run_id>` (idempotent). If status=sealed, create a new run and update the field. If `run.run_id` is missing, resolve in order: birth-packet injection, then `<session>/artifacts/`; if all are absent, fail closed — report session corruption and do NOT create a new Run.
 
 ---
 

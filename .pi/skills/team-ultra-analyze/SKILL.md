@@ -1,5 +1,6 @@
 ---
 name: team-ultra-analyze
+disable-model-invocation: true
 description: "Deep collaborative analysis team skill. Multi-role investigation with coordinator-driven synthesis. Triggers on \"team ultra-analyze\", \"team analyze\"."
 allowed-tools:
   - AskUserQuestion
@@ -90,7 +91,31 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-teammate({ agent: "team-worker", name: "<agent-name>", description: "Spawn <role> worker", context: "fresh" })
+teammate({
+  subagent_type: "team-worker",
+  description: "Spawn <role> worker",
+  team_name: "ultra-analyze",
+  name: "<agent-name>",
+  run_in_background: true,
+  prompt: `## Role Assignment
+role: <role>
+role_spec: <skill_root>/roles/<role>/role.md
+session: {run_dir}/work/team
+session_id: <run-id>
+team_name: ultra-analyze
+requirement: <topic-description>
+agent_name: <agent-name>
+inner_loop: false
+
+## Progress Milestones
+session_id: <run-id>
+Report progress via team_msg at natural phase boundaries (context loaded -> core work done -> verification).
+Report blockers immediately via team_msg type="blocker".
+Report completion via team_msg type="task_complete" after final SendMessage.
+
+Read role_spec file (@<skill_root>/roles/<role>/role.md) to load Phase 2-4 domain instructions.
+Execute built-in Phase 1 (task discovery, owner=<agent-name>) -> role Phase 2-4 -> built-in Phase 5 (report).`
+})
 ```
 
 ## User Commands

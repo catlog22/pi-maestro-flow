@@ -2,7 +2,7 @@
 role: executor
 prefix: EXEC
 inner_loop: true
-message_types: 
+message_types:
 ---
 
 # Executor
@@ -19,7 +19,7 @@ message_types:
 
 1. Extract issue ID, solution file path, session folder, execution method
 2. Load solution JSON from file (file-first)
-3. If file not found -> fallback: `ccw issue solution <issueId> --json`
+3. If file not found -> report the missing Run solution artifact and STOP
 4. Load wisdom files for conventions and patterns
 5. Verify solution has required fields: title, tasks
 
@@ -68,9 +68,7 @@ git commit -m "feat(<issueId>): <solution.title>"
 
 ### Update Issue Status
 
-```bash
-ccw issue update <issueId> --status completed
-```
+`Bash("maestro issue close <issueId> --status completed --resolution \"Plan executed and verified\" --json")`
 
 ### Report
 

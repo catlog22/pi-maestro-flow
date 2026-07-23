@@ -6,10 +6,10 @@
 |-------|--------|----------|
 | User topic | From coordinator Phase 1 | Yes |
 | Session folder | From coordinator Phase 2 | Yes |
-| Pipeline mode | From session.json pipeline | Yes |
-| Angles | From session.json angles | Yes |
+| Pipeline mode | From team-session.json pipeline | Yes |
+| Angles | From team-session.json angles | Yes |
 
-1. Load topic, pipeline mode, and angles from session.json
+1. Load topic, pipeline mode, and angles from team-session.json
 2. Determine task chain from pipeline mode
 
 ## Phase 3: Task Chain Creation
@@ -19,7 +19,8 @@
 Every task description uses structured format:
 
 ```
-todo({ action: "create", subject: "<TASK-ID>",
+todo({ action: "create" })({
+  subject: "<TASK-ID>",
   description: "PURPOSE: <what this task achieves> | Success: <completion criteria>
 TASK:
   - <step 1>
@@ -33,7 +34,8 @@ CONTEXT:
 EXPECTED: <deliverable path> + <quality criteria>
 CONSTRAINTS: <scope limits>
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>], owner: "<role>" })
 ```
 
@@ -51,7 +53,8 @@ todo({ action: "update", taskId: "<TASK-ID>", addBlockedBy: [<dependency-list>],
 
 **IDEA-001** (ideator):
 ```
-todo({ action: "create", subject: "IDEA-001",
+todo({ action: "create" })({
+  subject: "IDEA-001",
   description: "PURPOSE: Generate multi-angle ideas for brainstorm topic | Success: >= 6 unique ideas across all angles
 TASK:
   - Read topic and angles from session context
@@ -64,13 +67,15 @@ CONTEXT:
 EXPECTED: {run_dir}/outputs/ideas/idea-001.md with >= 6 ideas
 CONSTRAINTS: Divergent thinking only, no evaluation
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "IDEA-001", owner: "ideator" })
 ```
 
 **CHALLENGE-001** (challenger):
 ```
-todo({ action: "create", subject: "CHALLENGE-001",
+todo({ action: "create" })({
+  subject: "CHALLENGE-001",
   description: "PURPOSE: Challenge assumptions and assess feasibility of generated ideas | Success: Each idea rated by severity
 TASK:
   - Read all idea files from {run_dir}/outputs/ideas/ directory
@@ -83,13 +88,15 @@ CONTEXT:
 EXPECTED: {run_dir}/outputs/critiques/critique-001.md with severity table and GC signal
 CONSTRAINTS: Critical analysis only, do not generate alternative ideas
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "CHALLENGE-001", addBlockedBy: ["IDEA-001"], owner: "challenger" })
 ```
 
 **SYNTH-001** (synthesizer):
 ```
-todo({ action: "create", subject: "SYNTH-001",
+todo({ action: "create" })({
+  subject: "SYNTH-001",
   description: "PURPOSE: Synthesize ideas and critiques into integrated proposals | Success: >= 1 consolidated proposal
 TASK:
   - Read all ideas and critiques
@@ -101,7 +108,8 @@ CONTEXT:
 EXPECTED: {run_dir}/outputs/synthesis/synthesis-001.md with proposals
 CONSTRAINTS: Integration and synthesis only, no new ideas
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "SYNTH-001", addBlockedBy: ["CHALLENGE-001"], owner: "synthesizer" })
 ```
 
@@ -111,7 +119,8 @@ Creates all 6 tasks. First 2 same as Quick, then:
 
 **IDEA-002** (ideator, GC revision):
 ```
-todo({ action: "create", subject: "IDEA-002",
+todo({ action: "create" })({
+  subject: "IDEA-002",
   description: "PURPOSE: Revise ideas based on critique feedback (GC Round 1) | Success: HIGH/CRITICAL challenges addressed
 TASK:
   - Read critique feedback from {run_dir}/outputs/critiques/
@@ -123,13 +132,15 @@ CONTEXT:
 EXPECTED: {run_dir}/outputs/ideas/idea-002.md with revised ideas
 CONSTRAINTS: Address critique only, focused revision
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "IDEA-002", addBlockedBy: ["CHALLENGE-001"], owner: "ideator" })
 ```
 
 **CHALLENGE-002** (challenger, round 2):
 ```
-todo({ action: "create", subject: "CHALLENGE-002",
+todo({ action: "create" })({
+  subject: "CHALLENGE-002",
   description: "PURPOSE: Validate revised ideas (GC Round 2) | Success: Severity assessment of revised ideas
 TASK:
   - Read revised idea files
@@ -141,14 +152,16 @@ CONTEXT:
 EXPECTED: {run_dir}/outputs/critiques/critique-002.md
 CONSTRAINTS: Focus on revised/new ideas
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "CHALLENGE-002", addBlockedBy: ["IDEA-002"], owner: "challenger" })
 ```
 
 **SYNTH-001** blocked by CHALLENGE-002. **EVAL-001** blocked by SYNTH-001:
 
 ```
-todo({ action: "create", subject: "EVAL-001",
+todo({ action: "create" })({
+  subject: "EVAL-001",
   description: "PURPOSE: Score and rank synthesized proposals | Success: Ranked list with weighted scores
 TASK:
   - Read synthesis results
@@ -160,7 +173,8 @@ CONTEXT:
 EXPECTED: {run_dir}/outputs/evaluation/evaluation-001.md with scoring matrix
 CONSTRAINTS: Evaluation only, no new proposals
 ---
-InnerLoop: false" })
+InnerLoop: false"
+})
 todo({ action: "update", taskId: "EVAL-001", addBlockedBy: ["SYNTH-001"], owner: "evaluator" })
 ```
 

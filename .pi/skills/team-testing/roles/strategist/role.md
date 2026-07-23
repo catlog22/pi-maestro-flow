@@ -2,7 +2,7 @@
 role: strategist
 prefix: STRATEGY
 inner_loop: false
-message_types: 
+message_types:
 ---
 
 # Test Strategist

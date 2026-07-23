@@ -38,14 +38,14 @@ function parseCLIOutput(cliResult, expectedFields, phaseName) {
   try {
     // Parse JSON from stdout
     const output = JSON.parse(cliResult.stdout || cliResult);
-    
+
     // Validate required fields
     for (const field of expectedFields) {
       if (!(field in output)) {
         throw new Error(`Missing required field: ${field}`);
       }
     }
-    
+
     return { success: true, data: output };
   } catch (error) {
     console.error(`[${phaseName}] Failed to parse CLI output:`, error.message);
@@ -102,7 +102,7 @@ Use Agy CLI to simulate three perspectives discussing each major issue:
 ```bash
 # For each major issue, run multi-perspective analysis
 for issue in majorIssues:
-  ccw cli -p "PURPOSE: Simulate multi-perspective discussion on reviewer comment to develop robust response strategy
+  maestro delegate "PURPOSE: Simulate multi-perspective discussion on reviewer comment to develop robust response strategy
 
 PERSPECTIVES:
 1. Author Perspective: How can we most effectively respond to this concern? What evidence do we have? What experiments can we add?
@@ -145,7 +145,7 @@ EXPECTED: JSON with {
     'priority': '...',
     'sourceStrategyId': 0
   }
-}" --tool agy --mode analysis --rule analysis-review-architecture
+}" --to agy --mode analysis --rule analysis-review-architecture
 ```
 
 **Alternative: Use team-ultra-analyze skill**
@@ -187,7 +187,7 @@ const discussionResults = []
 for (const issue of majorIssues) {
   // Execute CLI or agent call
   const cliResult = <from CLI execution>
-  
+
   // Parse CLI output with validation
   const parseResult = parseCLIOutput(
     cliResult,
@@ -327,7 +327,7 @@ const consensusStrategies = {
     const sourceStrategyId = r.consensusRecommendation?.sourceStrategyId;
     const sourceStrategy = r.authorStrategies.find(s => s.id === sourceStrategyId);
     const reviewerEval = r.reviewerEvaluation.find(e => e.strategyId === sourceStrategyId);
-    
+
     return {
       issueId: r.issueId,
       issueText: r.issueText,
