@@ -326,19 +326,19 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 - **moa**: Mixture-of-Agents — parallel reference analysis across models, then aggregator synthesis.
   { action: "moa", prompts: ["Compare auth strategies"], preset: "deep" }
 
-When to use:
-- explore: broad read-only code search needing multiple angles fast — each prompt is one independent search agent.
-- delegate: route a task to an EXTERNAL CLI model (gemini/codex/etc.) when a specific external provider is required.
-- moa: high-stakes decisions or comparisons that benefit from independent multi-model analysis synthesized into one answer.
+When to use: in the pi-agent, prefer the **teammate** tool for ALL delegation, code exploration, and multi-model synthesis — teammate supports prompt templates (the prompt field) and model selection (the model field). The maestro actions below route to external CLI endpoints (gemini/codex CLI processes) and are rarely needed directly:
+- explore: external-CLI-backed parallel search.
+- delegate: route a task to an external CLI process (gemini/codex).
+- moa: multi-model synthesis across external CLI endpoints.
 
 When NOT to use:
-- For normal delegation to a pi agent, use the teammate tool instead — maestro delegate targets external CLIs only.
-- For a single known-symbol lookup or exact regex, use maestro search --code or rg directly, not explore.`,
+- For pi-agent code discovery, delegation, analysis, or synthesis — use teammate (agent: "explorer" for discovery; the prompt field for templates; the model field for external models).
+- For a single known-symbol lookup or exact regex — use maestro search --code or rg directly.`,
 
-    promptSnippet: "Parallel code search (explore), external-CLI delegation (delegate), and multi-model synthesis (moa)",
+    promptSnippet: "External-CLI-endpoint routing (explore/delegate/moa). In the pi-agent, prefer teammate for delegation, exploration, and synthesis.",
     promptGuidelines: [
-      "Use maestro explore for broad multi-angle read-only code search; use maestro delegate only to route work to an external CLI model (gemini/codex); use maestro moa for multi-model analysis synthesized into one answer.",
-      "Prefer the teammate tool over maestro delegate for ordinary pi-agent delegation; maestro delegate targets external CLIs only.",
+      "In the pi-agent, use the teammate tool for all delegation, code exploration, and multi-model synthesis — teammate supports prompt templates (prompt field) and model selection (model field). Do not call the maestro tool's explore/delegate/moa for ordinary pi-agent work.",
+      "Reserve the maestro tool (explore/delegate/moa) for the rare case of routing work directly to an external CLI endpoint (gemini/codex CLI process); for knowledge search use the maestro search/load bash CLI.",
     ],
 
     parameters: MaestroParams,
