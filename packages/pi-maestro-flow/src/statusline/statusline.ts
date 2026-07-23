@@ -78,11 +78,12 @@ function formatTokens(n: number): string {
 }
 
 function buildContextBar(usedPct: number, compact = false): string {
-	const filled = Math.floor(usedPct / 10);
-	const bar = "█".repeat(filled) + "░".repeat(10 - filled);
+	const size = compact ? 5 : 10;
+	const filled = Math.floor((usedPct / 100) * size);
+	const bar = "█".repeat(filled) + "░".repeat(size - filled);
 	const level = getCtxLevel(usedPct);
 	const color = getCtxColor(level);
-	const value = compact ? `${ICONS.ctx} ${usedPct}%` : `${ICONS.ctx} ${bar} ${usedPct}%`;
+	const value = `${ICONS.ctx} ${bar} ${usedPct}%`;
 	return `${ansiFg(color)}${value}${ANSI_RESET}`;
 }
 

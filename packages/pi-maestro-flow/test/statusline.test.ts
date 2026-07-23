@@ -382,6 +382,18 @@ test("statusline compacts labels before truncating the cwd and Git segment", asy
   }
 });
 
+test("statusline keeps a short context progress bar in compact layouts", () => {
+  const harness = createHarness();
+  try {
+    const compact = stripAnsi(harness.render(70)[0]);
+    const narrow = stripAnsi(harness.render(36)[0]);
+    assert.match(compact, /██░░░ 42%/);
+    assert.match(narrow, /██░░░ 42%/);
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("statusline drops an extreme Git branch as a whole before dropping the cwd", async () => {
   const longBranch = `feature/${"界面修复🚀".repeat(20)}`;
   const harness = createHarness({
