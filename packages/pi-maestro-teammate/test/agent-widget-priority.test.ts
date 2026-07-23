@@ -89,6 +89,6 @@ test("agent widget distinguishes a Pi result-ready turn from a stalled agent", (
   const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
   const output = renderAgentStatusWidget([parent], 120, theme).join("\n");
 
-  assert.match(output, /result ready; confirming terminal/);
+  assert.match(output, /result returned; lifecycle pending/);
   assert.doesNotMatch(output, /stalled/);
 });

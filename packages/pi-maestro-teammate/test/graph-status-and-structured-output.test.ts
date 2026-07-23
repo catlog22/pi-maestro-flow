@@ -735,6 +735,18 @@ test("teammate-wait returns result-ready when Pi has a final answer but agent_en
   const immediate = await waitForTeammate(state, { name: "explorer" });
   assert.equal(immediate.status, "result-ready");
   assert.match(immediate.output.join("\n"), /useful result/);
+
+  settleAgent(state, correlationId, 0, "A useful result was already returned.");
+  const settled = state.activeRuns.get(correlationId);
+  assert.equal(settled?.status, "sleeping");
+  assert.equal(settled?.resultReadyAt, undefined);
+  const plain = (text: string) => text;
+  const widget = renderAgentStatusWidget(
+    settled ? [settled] : [],
+    100,
+    { fg: (_name: string, text: string) => text, bold: plain },
+  ).join("\n");
+  assert.doesNotMatch(widget, /lifecycle pending/);
 });
 
 test("teammate-wait returns captured output for an agent that has stalled", async () => {

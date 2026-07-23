@@ -27,11 +27,19 @@ import {
   isPiResultReadyTurn,
   releasePublishedTurnHistory,
   resolveModelSpecifier,
+  runGraph,
   runTeammate,
   validateModelSpecifier,
 } from "../src/runs/execution.ts";
 import { NETWORK_RETRY_POLICY, classifyRetryError, retryDelayMs } from "../src/runs/retry.ts";
-import type { ActiveAgent, AgentProgress, AgentProgressSnapshot, TeammateState, Usage } from "../src/shared/types.ts";
+import type {
+  ActiveAgent,
+  AgentProgress,
+  AgentProgressSnapshot,
+  SingleResult,
+  TeammateState,
+  Usage,
+} from "../src/shared/types.ts";
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 
 const baseAgentConfig: AgentConfig = {
@@ -129,6 +137,15 @@ test("root graph progress wiring projects and broadcasts only after the batch is
   assert.equal(publishBody.match(/progressSnapshot\(\)/g)?.length, 1);
   assert.equal(publishBody.match(/TEAMMATE_MESSAGE_EVENT/g)?.length, 1);
   assert.equal(publishBody.match(/onUpdate\?\./g)?.length, 1);
+  assert.match(publishBody, /if \(params\.background !== false\) \{\s*onUpdate\?\./);
+
+  const childStatusStart = source.indexOf("const publishChildCallStatus");
+  const childStatusEnd = source.indexOf("\n\n      if (isMultiTask) {\n        normalizedTasks.forEach", childStatusStart);
+  assert.ok(childStatusStart >= 0 && childStatusEnd > childStatusStart);
+  assert.match(
+    source.slice(childStatusStart, childStatusEnd),
+    /if \(params\.background !== false\) \{\s*onUpdate\?\./,
+  );
 });
 
 test("wakeable sleeping budget evicts anonymous LRU agents before named agents and aborts before registry cleanup", () => {
@@ -472,6 +489,320 @@ test("Pi result-ready marker accepts only a final assistant turn with no tool wo
     },
     toolResults: [{ toolCallId: "call-1" }],
   }), false);
+  assert.equal(isPiResultReadyTurn({
+    type: "turn_end",
+    message: {
+      role: "assistant",
+      stopReason: "stop",
+      errorMessage: "provider failed after producing partial text",
+      content: [{ type: "text", text: "partial answer" }],
+    },
+    toolResults: [],
+  }), false);
+});
+
+test("final turn_end publishes a wakeable result before agent_end settles lifecycle", async () => {
+  const completions: string[] = [];
+  const progress: AgentProgress[] = [];
+  let stdout: PassThrough | undefined;
+  let killed = false;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { killed = true; return true; },
+    });
+    queueMicrotask(() => {
+      stdout!.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "ready answer" }] },
+      })}\n`);
+      stdout!.write(`${JSON.stringify({
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "ready answer" }],
+        },
+        toolResults: [],
+      })}\n`);
+    });
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+
+  const result = await Promise.race([
+    runTeammate(
+      { agent: "delegate", task: "Return before lifecycle confirmation", context: "fresh", timeoutMs: 2_000 },
+      {
+        baseCwd: process.cwd(),
+        spawnChildProcess,
+        onProgress: (entry) => progress.push({ ...entry, recentTools: [...entry.recentTools] }),
+        onTurnComplete: (entry) => completions.push(entry.messages.at(-1)?.content ?? ""),
+      },
+    ),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("result-ready publication timed out")), 500)),
+  ]);
+
+  assert.equal(result.messages.at(-1)?.content, "ready answer");
+  assert.equal(result.lifecyclePending, true);
+  assert.equal(result.wakeable, true);
+  assert.equal(killed, false);
+  assert.deepEqual(completions, []);
+  assert.equal(progress.at(-1)?.status, "running");
+  assert.notEqual(progress.at(-1)?.resultReadyAt, undefined);
+
+  stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.deepEqual(completions, ["ready answer"]);
+  assert.equal(progress.at(-1)?.status, "completed");
+  assert.equal(progress.at(-1)?.resultReadyAt, undefined);
+  assert.equal(killed, false, "fresh teammate must remain wakeable after lifecycle confirmation");
+});
+
+test("four parallel teammates return after final turn_end without waiting for agent_end", async () => {
+  const stdoutStreams: PassThrough[] = [];
+  let killed = 0;
+  let spawnIndex = 0;
+  const spawnChildProcess = (() => {
+    const index = spawnIndex++;
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    stdoutStreams.push(stdout);
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { killed++; return true; },
+    });
+    queueMicrotask(() => {
+      const answer = `parallel-${index}`;
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: answer }] },
+      })}\n`);
+      stdout.write(`${JSON.stringify({
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: answer }],
+        },
+        toolResults: [],
+      })}\n`);
+    });
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+
+  const results = await Promise.race([
+    runGraph(
+      Array.from({ length: 4 }, (_, index) => ({
+        agent: "delegate",
+        task: `parallel task ${index}`,
+        name: `parallel_${index}`,
+        context: "fresh" as const,
+        timeoutMs: 2_000,
+      })),
+      4,
+      { baseCwd: process.cwd(), spawnChildProcess },
+    ),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("parallel result publication timed out")), 500)),
+  ]);
+
+  assert.equal(spawnIndex, 4);
+  assert.deepEqual(
+    results.map((result) => result.messages.at(-1)?.content).sort(),
+    ["parallel-0", "parallel-1", "parallel-2", "parallel-3"],
+  );
+  assert.equal(results.every((result) => result.lifecyclePending === true), true);
+  assert.equal(killed, 0);
+
+  for (const stream of stdoutStreams) stream.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(killed, 0);
+});
+
+test("DAG dependencies advance on result publication instead of agent_end", async () => {
+  const stdoutStreams: PassThrough[] = [];
+  let spawnIndex = 0;
+  const spawnChildProcess = (() => {
+    const index = spawnIndex++;
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    stdoutStreams.push(stdout);
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      const answer = index === 0 ? "seed result" : "dependent result";
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: answer }] },
+      })}\n`);
+      stdout.write(`${JSON.stringify({
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: answer }],
+        },
+        toolResults: [],
+      })}\n`);
+    });
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+
+  const results = await Promise.race([
+    runGraph(
+      [
+        { agent: "delegate", task: "produce seed", name: "seed", context: "fresh", timeoutMs: 2_000 },
+        {
+          agent: "delegate",
+          task: "consume {seed}",
+          name: "dependent",
+          dependsOn: ["seed"],
+          context: "fresh",
+          timeoutMs: 2_000,
+        },
+      ],
+      2,
+      { baseCwd: process.cwd(), spawnChildProcess },
+    ),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("DAG result publication timed out")), 500)),
+  ]);
+
+  assert.equal(spawnIndex, 2, "dependent task must start before upstream agent_end");
+  assert.deepEqual(results.map((result) => result.messages.at(-1)?.content), ["seed result", "dependent result"]);
+  for (const stream of stdoutStreams) stream.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+});
+
+test("process close after result publication confirms lifecycle exactly once", async () => {
+  const completions: SingleResult[] = [];
+  let child: ChildProcess | undefined;
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout!.write(`${JSON.stringify({
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "close-ready" }],
+        },
+        toolResults: [],
+      })}\n`);
+    });
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+
+  const result = await Promise.race([
+    runTeammate(
+      { agent: "delegate", task: "Close after result", context: "fresh", timeoutMs: 2_000 },
+      {
+        baseCwd: process.cwd(),
+        spawnChildProcess,
+        onTurnComplete: (entry) => completions.push(entry),
+      },
+    ),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("close-race publication timed out")), 500)),
+  ]);
+  assert.equal(result.lifecyclePending, true);
+
+  child!.exitCode = 0;
+  child!.emit("close", 0, null);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0].wakeable, false);
+  assert.equal(completions[0].lifecyclePending, undefined);
+});
+
+test("process error after result publication fails lifecycle without retracting the result", async () => {
+  const completions: SingleResult[] = [];
+  let child: ChildProcess | undefined;
+  const spawnChildProcess = (() => {
+    child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() {
+        child!.exitCode = 1;
+        child!.emit("exit", 1, null);
+        child!.emit("close", 1, null);
+        return true;
+      },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "result survives lifecycle error" }],
+        },
+        toolResults: [],
+      })}\n`);
+    });
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+
+  const result = await Promise.race([
+    runTeammate(
+      { agent: "delegate", task: "Error after result", context: "fresh", timeoutMs: 2_000 },
+      {
+        baseCwd: process.cwd(),
+        spawnChildProcess,
+        onTurnComplete: (entry) => completions.push(entry),
+      },
+    ),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("error-race publication timed out")), 500)),
+  ]);
+  assert.equal(result.messages.at(-1)?.content, "result survives lifecycle error");
+  assert.equal(result.lifecyclePending, true);
+
+  child!.emit("error", new Error("late transport failure"));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0].exitCode, 1);
+  assert.equal(completions[0].wakeable, false);
+  assert.match(completions[0].messages.at(-1)?.content ?? "", /late transport failure/);
 });
 
 test("teammate retries a transient network failure before succeeding", async () => {

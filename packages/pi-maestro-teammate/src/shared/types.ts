@@ -22,6 +22,11 @@ export interface SingleResult {
   durationMs: number;
   /** Whether the child process remains available for teammate-send after this turn. */
   wakeable?: boolean;
+  /**
+   * The final assistant result is available, but the child has not yet emitted
+   * its authoritative lifecycle confirmation (`agent_end`, close, or error).
+   */
+  lifecyclePending?: boolean;
   structuredOutput?: unknown;
   attemptedModels?: string[];
 }

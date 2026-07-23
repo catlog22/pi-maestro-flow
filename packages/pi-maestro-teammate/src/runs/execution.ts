@@ -175,6 +175,7 @@ export function isPiResultReadyTurn(event: Record<string, unknown>): boolean {
   if (event.type !== "turn_end") return false;
   const message = event.message as Record<string, unknown> | undefined;
   if (message?.role !== "assistant" || message.stopReason !== "stop") return false;
+  if (typeof message.errorMessage === "string" && message.errorMessage.trim()) return false;
   if (!Array.isArray(message.content) || !Array.isArray(event.toolResults) || event.toolResults.length !== 0) {
     return false;
   }
@@ -1488,6 +1489,7 @@ async function runSingleAttempt(
   return new Promise<SingleResult>((resolve) => {
     let child: ChildProcess;
     let initialResultPublished = false;
+    let turnLifecycleSettled = false;
     let terminal = false;
 
     const spawnEnv: Record<string, string | undefined> = {
@@ -1653,8 +1655,10 @@ async function runSingleAttempt(
       terminateChild: boolean,
       exitCode = 0,
     ): void {
-      if (terminal) return;
+      if (terminal || turnLifecycleSettled) return;
+      turnLifecycleSettled = true;
       progress.status = exitCode === 0 ? "completed" : "failed";
+      progress.resultReadyAt = undefined;
       progress.durationMs = Date.now() - startTime;
       if (messages.length === 0 && lastContent) {
         appendBoundedTranscriptMessage(messages, { role: "assistant", content: lastContent });
@@ -1702,6 +1706,28 @@ async function runSingleAttempt(
       }
     }
 
+    function publishResultReady(): void {
+      if (initialResultPublished) return;
+      if (messages.length === 0 && lastContent) {
+        appendBoundedTranscriptMessage(messages, { role: "assistant", content: lastContent });
+      }
+      if (timeoutTimer) clearTimeout(timeoutTimer);
+      if (firstActivityTimer) clearTimeout(firstActivityTimer);
+      initialResultPublished = true;
+      resolve({
+        agent: params.agent,
+        task: params.task ?? "",
+        exitCode: 0,
+        messages: [...messages],
+        usage: { ...usage },
+        model: resolvedModel,
+        correlationId,
+        durationMs: Date.now() - startTime,
+        wakeable,
+        lifecyclePending: true,
+      });
+    }
+
     function processEvent(event: JsonLineEvent): void {
       if (!receivedFirstActivity) {
         receivedFirstActivity = true;
@@ -1722,6 +1748,7 @@ async function runSingleAttempt(
       switch (event.type) {
         case "agent_start":
         case "turn_start": {
+          turnLifecycleSettled = false;
           progress.status = "running";
           progress.resultReadyAt = undefined;
           progress.recentTools = [];
@@ -1877,6 +1904,7 @@ async function runSingleAttempt(
           if (isPiResultReadyTurn(event)) {
             progress.resultReadyAt = Date.now();
             options.onProgress?.(progress);
+            if (!params.outputSchema) publishResultReady();
           }
           break;
         }
@@ -1930,10 +1958,9 @@ async function runSingleAttempt(
         EXECUTION_BUFFER_LIMITS.stderrBytes,
       );
 
-      // agent_end already published the turn result and released its buffers.
-      // A later process close must not replace the sleeping agent's last result
-      // with a synthetic "(no output)" record.
-      if (initialResultPublished) return;
+      // A lifecycle event may have been present in the final decoded stdout
+      // chunk, or terminal structured output may have initiated this close.
+      if (turnLifecycleSettled) return;
 
       if (messages.length === 0) {
         const content =
@@ -1960,6 +1987,11 @@ async function runSingleAttempt(
           role: "system",
           content: "The teammate exited without schema-valid structured_output.",
         });
+      }
+
+      if (initialResultPublished) {
+        completeTurn(structuredOutput, true, exitCode);
+        return;
       }
 
       if (!initialResultPublished) {
@@ -1991,6 +2023,15 @@ async function runSingleAttempt(
       progress.status = "failed";
       progress.durationMs = Date.now() - startTime;
       options.onProgress?.(progress);
+
+      if (initialResultPublished) {
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content: `Process error: ${error.message}`,
+        });
+        completeTurn(undefined, true, 1);
+        return;
+      }
 
       if (!initialResultPublished) {
         initialResultPublished = true;
