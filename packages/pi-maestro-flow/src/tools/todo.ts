@@ -138,7 +138,24 @@ let extensionApi: ExtensionAPI | undefined;
 let skillLoader: TodoSkillLoader | undefined;
 let skillRuntime: SkillRuntime | undefined;
 let activeSkillSnapshots: Map<string, SkillActivation> = new Map();
-let runInjectedStackRevision: string | undefined;
+interface ContextInjectionAnchor {
+  index: number;
+  previousMessage?: AgentMessage;
+  previousFingerprint?: string;
+}
+
+type RunSkillInjection = {
+  taskId: string;
+  stackRevision: string;
+  channel: "system";
+} | {
+  taskId: string;
+  stackRevision: string;
+  channel: "context";
+  anchor: ContextInjectionAnchor;
+};
+
+let runSkillInjection: RunSkillInjection | undefined;
 let todoRevision = 0;
 let todoGeneration = 0;
 let todoMutationQueue: Promise<void> = Promise.resolve();
@@ -157,7 +174,7 @@ export function onSessionStart(ctx: TodoContext): void {
   skillLoader = ctx.skillLoader ?? new TodoSkillLoader({ cwd: ctx.cwd });
   skillRuntime = new SkillRuntime(skillLoader);
   activeSkillSnapshots = new Map();
-  runInjectedStackRevision = undefined;
+  runSkillInjection = undefined;
   tasks = loadTasksFromSession(ctx);
   knownActors = new Map([[ROOT_TODO_ACTOR.id, cloneActor(ROOT_TODO_ACTOR)]]);
   for (const task of tasks.values()) {
@@ -176,7 +193,7 @@ export function onSessionShutdown(ctx: TodoContext): void {
   skillLoader = undefined;
   skillRuntime = undefined;
   activeSkillSnapshots.clear();
-  runInjectedStackRevision = undefined;
+  runSkillInjection = undefined;
   markTodoChanged();
   ctx.ui.setStatus("todo", undefined);
 }
@@ -365,12 +382,16 @@ export async function onBeforeAgentStartTodo(
 ): Promise<{ systemPrompt: string } | undefined> {
   const active = findActiveTask(ROOT_TODO_ACTOR.id);
   if (!active || active.skills.length === 0) {
-    runInjectedStackRevision = undefined;
+    runSkillInjection = undefined;
     return undefined;
   }
   const activation = await ensureSkillActivation(active);
   assertActiveSkillStack(active, activation);
-  runInjectedStackRevision = activation.stackRevision;
+  runSkillInjection = {
+    taskId: active.id,
+    stackRevision: activation.stackRevision,
+    channel: "system",
+  };
   return {
     systemPrompt: `${event.systemPrompt}\n\n${renderActivationPrompt(active, activation)}`,
   };
@@ -383,28 +404,33 @@ export async function onContextTodo(
   if (!active || active.skills.length === 0) return undefined;
   const activation = await ensureSkillActivation(active);
   assertActiveSkillStack(active, activation);
-  if (runInjectedStackRevision === activation.stackRevision) return undefined;
+  if (runSkillInjection?.taskId === active.id
+    && runSkillInjection.stackRevision === activation.stackRevision
+    && runSkillInjection.channel === "system") return undefined;
+  if (runSkillInjection?.taskId !== active.id
+    || runSkillInjection.stackRevision !== activation.stackRevision
+    || runSkillInjection.channel !== "context") {
+    runSkillInjection = {
+      taskId: active.id,
+      stackRevision: activation.stackRevision,
+      channel: "context",
+      anchor: createContextInjectionAnchor(messages),
+    };
+  }
+  const anchor = resolveContextInjectionAnchor(messages, runSkillInjection.anchor);
+  runSkillInjection.anchor = anchor;
+  const injected = createActiveSkillMessage(active, activation);
   return {
     messages: [
-      ...messages,
-      {
-        role: "custom",
-        customType: "todo-active-skill",
-        content: renderActivationPrompt(active, activation),
-        display: false,
-        details: {
-          taskId: active.id,
-          activationId: activation.activationId,
-          stackRevision: activation.stackRevision,
-        },
-        timestamp: activation.activatedAt,
-      },
+      ...messages.slice(0, anchor.index),
+      injected,
+      ...messages.slice(anchor.index),
     ],
   };
 }
 
 export function onAgentEndTodo(): void {
-  runInjectedStackRevision = undefined;
+  runSkillInjection = undefined;
 }
 
 export async function executeTodo(
@@ -598,7 +624,7 @@ async function handleUpdate(
   commitTodoState(nextTasks);
   if (activation) {
     activeSkillSnapshots.set(draft.id, activation);
-    runInjectedStackRevision = undefined;
+    runSkillInjection = undefined;
   } else if (activationInputsChanged || draft.status !== "in_progress") {
     clearSkillSnapshot(draft.id);
   }
@@ -792,7 +818,7 @@ async function handleNext(
   nextTasks.set(draft.id, draft);
   commitTodoState(nextTasks);
   activeSkillSnapshots.set(draft.id, activation);
-  runInjectedStackRevision = undefined;
+  runSkillInjection = undefined;
 
   return ok(parts.join("\n"), "next");
 }
@@ -1155,13 +1181,54 @@ async function ensureSkillActivation(task: TodoTask): Promise<SkillActivation> {
 function clearSkillSnapshot(taskId?: string): void {
   if (taskId) activeSkillSnapshots.delete(taskId);
   else activeSkillSnapshots.clear();
-  runInjectedStackRevision = undefined;
+  if (!taskId || runSkillInjection?.taskId === taskId) runSkillInjection = undefined;
 }
 
 function clearCommittedSkillSnapshots(taskIds: ReadonlySet<string>): void {
   if (taskIds.size === 0) return;
   for (const taskId of taskIds) activeSkillSnapshots.delete(taskId);
-  runInjectedStackRevision = undefined;
+  if (runSkillInjection && taskIds.has(runSkillInjection.taskId)) runSkillInjection = undefined;
+}
+
+function createActiveSkillMessage(task: TodoTask, activation: SkillActivation): AgentMessage {
+  return {
+    role: "custom",
+    customType: "todo-active-skill",
+    content: renderActivationPrompt(task, activation),
+    display: false,
+    details: {
+      taskId: task.id,
+      activationId: activation.activationId,
+      stackRevision: activation.stackRevision,
+    },
+    timestamp: activation.activatedAt,
+  } as AgentMessage;
+}
+
+function createContextInjectionAnchor(messages: AgentMessage[]): ContextInjectionAnchor {
+  const previousMessage = messages.at(-1);
+  return {
+    index: messages.length,
+    ...(previousMessage ? {
+      previousMessage,
+      previousFingerprint: contextMessageFingerprint(previousMessage),
+    } : {}),
+  };
+}
+
+function resolveContextInjectionAnchor(
+  messages: AgentMessage[],
+  anchor: ContextInjectionAnchor,
+): ContextInjectionAnchor {
+  if (anchor.index === 0) return anchor;
+  const previousMessage = messages[anchor.index - 1];
+  if (previousMessage === anchor.previousMessage
+    || (previousMessage && contextMessageFingerprint(previousMessage) === anchor.previousFingerprint)) return anchor;
+  return createContextInjectionAnchor(messages);
+}
+
+function contextMessageFingerprint(message: AgentMessage): string {
+  return createHash("sha256").update(JSON.stringify(message)).digest("hex");
 }
 
 function renderActivationPrompt(task: TodoTask, activation: SkillActivation): string {

@@ -803,6 +803,18 @@ test("active skills inject through system prompt and context fallback without du
     assert.equal(fallback?.messages[0].role, "custom");
     assert.match(String((fallback?.messages[0] as { content?: string }).content), /# Injected demo/);
 
+    const base = { role: "user", content: [{ type: "text", text: "start" }], timestamp: 1 } as never;
+    onAgentEndTodo();
+    const firstTurn = await onContextTodo([base]);
+    assert.equal(firstTurn?.messages[0], base);
+    assert.equal(firstTurn?.messages[1].role, "custom");
+    const response = { role: "assistant", content: [{ type: "text", text: "working" }], timestamp: 2 } as never;
+    const nextTurn = await onContextTodo([base, response]);
+    assert.equal(nextTurn?.messages[0], base);
+    assert.equal(nextTurn?.messages[1].role, "custom");
+    assert.equal(nextTurn?.messages[2], response);
+    assert.deepEqual(firstTurn?.messages, nextTurn?.messages.slice(0, 2));
+
     const active = getVisibleTasks()[0];
     await executeTodo({ action: "update", id: active.id, status: "completed" }, ctx);
     assert.equal(await onContextTodo([]), undefined);

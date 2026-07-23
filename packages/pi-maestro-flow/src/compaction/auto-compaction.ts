@@ -18,6 +18,8 @@ const AUTO_PRUNE_TARGET_RATIO = NUDGE_RATIO;
 const MIN_PRUNABLE_TOOL_RESULT_CHARS = 4_000;
 const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find"]);
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
+const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
+const PRUNE_STATE_VERSION = 1;
 
 export interface CompactionSettings {
   enabled: boolean;
@@ -35,7 +37,17 @@ interface AppliedPrunes {
   messages: AgentMessage[];
   prunedToolResults: number;
   savedTokens: number;
+  pendingSavedTokens: number;
 }
+
+export interface PruneManifestEntry {
+  replacement: AgentMessage;
+  savedTokens: number;
+  introducedAtUsageEpoch?: string;
+}
+
+/** Set is retained for callers that used the original exported policy signature. */
+export type PruneManifest = Set<string> | Map<string, PruneManifestEntry>;
 
 export type ContextPressureBand = "normal" | "nudge" | "auto-prune" | "critical";
 
@@ -56,7 +68,10 @@ interface AutoCompactionState {
   lastTriggerKey?: string;
   internalsWarningShown: boolean;
   lastNoCompactableKey?: string;
-  prunedToolCallIds: Set<string>;
+  pruneManifest: Map<string, PruneManifestEntry>;
+  restoredPruneIds: Set<string>;
+  sessionId?: string;
+  persistedPruneKey?: string;
 }
 
 interface AutoCompactionDependencies {
@@ -86,13 +101,17 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     generation: 0,
     nextOwner: 0,
     internalsWarningShown: false,
-    prunedToolCallIds: new Set(),
+    pruneManifest: new Map(),
+    restoredPruneIds: new Set(),
   };
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
   return {
     onSessionStart(ctx) {
-      state.prunedToolCallIds.clear();
+      state.pruneManifest.clear();
+      state.sessionId = sessionIdOf(ctx);
+      state.restoredPruneIds = loadPersistedPruneIds(ctx, state.sessionId);
+      state.persistedPruneKey = pruneKey(state.restoredPruneIds);
       publishIdleStatus(ctx, readSettings(ctx.cwd).enabled);
     },
     async evaluate(messages, ctx) {
@@ -105,23 +124,28 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return undefined;
       }
       if (!settings.enabled || ctx.model.contextWindow <= settings.reserveTokens) {
-        state.prunedToolCallIds.clear();
+        state.pruneManifest.clear();
+        state.restoredPruneIds.clear();
+        persistPruneManifest(pi, state);
         clearPressureStatus(ctx);
         return undefined;
       }
-      retainVisiblePrunes(state.prunedToolCallIds, messages);
+      hydrateRestoredPrunes(state, messages);
+      retainVisiblePrunes(state.pruneManifest, messages);
       if (!endsWithCompleteToolResultBatch(messages)) {
         clearPressureStatus(ctx);
-        const stable = applyRecordedPrunes(messages, state.prunedToolCallIds);
+        const stable = applyRecordedPrunes(messages, state.pruneManifest);
+        persistPruneManifest(pi, state);
         return stable.prunedToolResults > 0 ? stable.messages : undefined;
       }
       const pressure = applyContextPressurePolicy(
         messages,
         ctx.model.contextWindow,
         settings,
-        state.prunedToolCallIds,
+        state.pruneManifest,
       );
       updatePressureStatus(ctx, pressure);
+      persistPruneManifest(pi, state);
       if (pressure.band !== "critical") {
         state.lastNoCompactableKey = undefined;
         return pressure.prunedToolResults > 0 ? pressure.messages : undefined;
@@ -209,7 +233,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
     },
     onCompact() {
-      state.prunedToolCallIds.clear();
+      state.pruneManifest.clear();
+      state.restoredPruneIds.clear();
+      state.persistedPruneKey = undefined;
       state.lastTriggerKey = undefined;
       state.lastNoCompactableKey = undefined;
     },
@@ -220,7 +246,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.lastTriggerKey = undefined;
       state.internalsWarningShown = false;
       state.lastNoCompactableKey = undefined;
-      state.prunedToolCallIds.clear();
+      state.pruneManifest.clear();
+      state.restoredPruneIds.clear();
+      state.persistedPruneKey = undefined;
+      persistPruneManifest(pi, state);
       if (ctx) {
         clearPressureStatus(ctx);
         ctx.ui.setStatus(COMPACTION_MODE_STATUS_KEY, undefined);
@@ -233,18 +262,18 @@ export function applyContextPressurePolicy(
   messages: AgentMessage[],
   contextWindow: number,
   settings: CompactionSettings,
-  prunedToolCallIds: Set<string> = new Set(),
+  pruneManifest: PruneManifest = new Map(),
 ): ContextPressureResult {
   const thresholdTokens = contextWindow - settings.reserveTokens;
-  const applied = applyRecordedPrunes(messages, prunedToolCallIds);
+  const applied = applyRecordedPrunes(messages, pruneManifest);
   const transformed = applied.messages;
   let savedTokens = applied.savedTokens;
   let prunedToolResults = applied.prunedToolResults;
 
-  // The latest provider usage already includes every persistent prune that
-  // preceded it. Estimate against the stable outgoing view and subtract only
-  // prunes introduced during this evaluation.
-  const initial = estimateContextTokens(transformed).tokens;
+  // A prune introduced after the latest successful provider usage is still
+  // pending acknowledgement. Its saved tokens must remain deducted until a
+  // later provider response establishes a new usage epoch.
+  const initial = Math.max(0, estimateContextTokens(transformed).tokens - applied.pendingSavedTokens);
   const criticalRatio = thresholdTokens / contextWindow;
   const initialRatio = initial / contextWindow;
   const initiallyCritical = initial > thresholdTokens;
@@ -258,9 +287,10 @@ export function applyContextPressurePolicy(
   const frontierStart = protectedFrontierStart(transformed, settings.keepRecentTokens);
   let newlySavedTokens = 0;
   const pruneTarget = Math.min(thresholdTokens, Math.floor(contextWindow * AUTO_PRUNE_TARGET_RATIO));
-  for (let index = 0; index < frontierStart && initial - newlySavedTokens > pruneTarget; index++) {
+  const usageEpoch = latestProviderUsageEpoch(messages);
+  for (let index = frontierStart - 1; index >= 0 && initial - newlySavedTokens > pruneTarget; index--) {
     const callId = toolResultCallId(transformed[index]);
-    if (!callId || prunedToolCallIds.has(callId)) continue;
+    if (!callId || hasRecordedPrune(pruneManifest, callId)) continue;
     const replacement = replaceableToolResult(transformed[index]);
     if (!replacement) continue;
     const before = estimateMessageTokens(transformed[index]);
@@ -268,7 +298,11 @@ export function applyContextPressurePolicy(
     if (after >= before) continue;
     transformed[index] = replacement;
     const saved = before - after;
-    prunedToolCallIds.add(callId);
+    recordPrune(pruneManifest, callId, {
+      replacement,
+      savedTokens: saved,
+      introducedAtUsageEpoch: usageEpoch,
+    });
     newlySavedTokens += saved;
     savedTokens += saved;
     prunedToolResults++;
@@ -287,31 +321,100 @@ export function applyContextPressurePolicy(
   return pressureResult(transformed, band, estimatedTokens, thresholdTokens, prunedToolResults, savedTokens);
 }
 
-function applyRecordedPrunes(messages: AgentMessage[], prunedToolCallIds: Set<string>): AppliedPrunes {
+function applyRecordedPrunes(messages: AgentMessage[], pruneManifest: PruneManifest): AppliedPrunes {
   const transformed = [...messages];
   let savedTokens = 0;
   let prunedToolResults = 0;
+  let pendingSavedTokens = 0;
+  const usageEpoch = latestProviderUsageEpoch(messages);
   for (let index = 0; index < transformed.length; index++) {
     const callId = toolResultCallId(transformed[index]);
-    if (!callId || !prunedToolCallIds.has(callId)) continue;
-    const replacement = replaceableToolResult(transformed[index]);
+    if (!callId) continue;
+    const recorded = getRecordedPrune(pruneManifest, callId);
+    if (!recorded && !hasRecordedPrune(pruneManifest, callId)) continue;
+    const replacement = recorded?.replacement ?? replaceableToolResult(transformed[index]);
     if (!replacement) continue;
-    const before = estimateMessageTokens(transformed[index]);
-    const after = estimateMessageTokens(replacement);
-    if (after >= before) continue;
+    const saved = recorded?.savedTokens ?? estimateMessageTokens(transformed[index]) - estimateMessageTokens(replacement);
+    if (saved <= 0) continue;
     transformed[index] = replacement;
-    savedTokens += before - after;
+    savedTokens += saved;
     prunedToolResults++;
+    if (recorded?.introducedAtUsageEpoch === usageEpoch) pendingSavedTokens += saved;
   }
-  return { messages: transformed, prunedToolResults, savedTokens };
+  return { messages: transformed, prunedToolResults, savedTokens, pendingSavedTokens };
 }
 
-function retainVisiblePrunes(prunedToolCallIds: Set<string>, messages: AgentMessage[]): void {
-  if (prunedToolCallIds.size === 0) return;
+function retainVisiblePrunes(pruneManifest: PruneManifest, messages: AgentMessage[]): void {
+  if (pruneManifest.size === 0) return;
   const visible = new Set(messages.map(toolResultCallId).filter((id): id is string => Boolean(id)));
-  for (const callId of prunedToolCallIds) {
-    if (!visible.has(callId)) prunedToolCallIds.delete(callId);
+  for (const callId of pruneManifest.keys()) {
+    if (!visible.has(callId)) pruneManifest.delete(callId);
   }
+}
+
+function hasRecordedPrune(manifest: PruneManifest, callId: string): boolean {
+  return manifest.has(callId);
+}
+
+function getRecordedPrune(manifest: PruneManifest, callId: string): PruneManifestEntry | undefined {
+  return manifest instanceof Map ? manifest.get(callId) : undefined;
+}
+
+function recordPrune(manifest: PruneManifest, callId: string, entry: PruneManifestEntry): void {
+  if (manifest instanceof Map) manifest.set(callId, entry);
+  else manifest.add(callId);
+}
+
+function hydrateRestoredPrunes(state: AutoCompactionState, messages: AgentMessage[]): void {
+  if (state.restoredPruneIds.size === 0) return;
+  const usageEpoch = latestProviderUsageEpoch(messages);
+  const visibleIds = new Set<string>();
+  for (const message of messages) {
+    const callId = toolResultCallId(message);
+    if (!callId || !state.restoredPruneIds.has(callId)) continue;
+    visibleIds.add(callId);
+    const replacement = replaceableToolResult(message);
+    if (!replacement) continue;
+    const savedTokens = estimateMessageTokens(message) - estimateMessageTokens(replacement);
+    if (savedTokens <= 0) continue;
+    state.pruneManifest.set(callId, { replacement, savedTokens, introducedAtUsageEpoch: usageEpoch });
+  }
+  state.restoredPruneIds = new Set([...state.restoredPruneIds].filter((id) => !visibleIds.has(id)));
+}
+
+function persistPruneManifest(pi: ExtensionAPI, state: AutoCompactionState): void {
+  const toolCallIds = [...state.pruneManifest.keys()].sort();
+  const nextKey = pruneKey(toolCallIds);
+  if (nextKey === state.persistedPruneKey) return;
+  state.persistedPruneKey = nextKey;
+  pi.appendEntry?.(PRUNE_STATE_ENTRY_TYPE, {
+    version: PRUNE_STATE_VERSION,
+    sessionId: state.sessionId,
+    toolCallIds,
+  });
+}
+
+function loadPersistedPruneIds(ctx: ExtensionContext, sessionId: string | undefined): Set<string> {
+  const manager = ctx.sessionManager as {
+    getBranch?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
+    getEntries?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
+  } | undefined;
+  const entries = manager?.getBranch?.() ?? manager?.getEntries?.() ?? [];
+  const entry = entries.filter((candidate) => candidate.type === "custom" && candidate.customType === PRUNE_STATE_ENTRY_TYPE).pop();
+  const data = entry?.data as { version?: unknown; sessionId?: unknown; toolCallIds?: unknown } | undefined;
+  if (data?.version !== PRUNE_STATE_VERSION || (sessionId && data.sessionId !== sessionId) || !Array.isArray(data?.toolCallIds)) {
+    return new Set();
+  }
+  return new Set(data.toolCallIds.filter((value): value is string => typeof value === "string"));
+}
+
+function sessionIdOf(ctx: ExtensionContext): string | undefined {
+  const manager = ctx.sessionManager as { getSessionId?: () => string } | undefined;
+  return manager?.getSessionId?.();
+}
+
+function pruneKey(toolCallIds: Iterable<string>): string {
+  return [...toolCallIds].sort().join("\u0000");
 }
 
 export function shouldCompactMidTurn(input: {
@@ -404,6 +507,16 @@ function assistantUsage(message: AgentMessage): { input: number; output: number;
     cacheWrite: cacheWrite!,
     ...(finiteNumber(usage.totalTokens) !== undefined ? { totalTokens: finiteNumber(usage.totalTokens) } : {}),
   };
+}
+
+function latestProviderUsageEpoch(messages: AgentMessage[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const usage = assistantUsage(messages[index]);
+    if (!usage) continue;
+    const record = messages[index] as MessageRecord & { timestamp?: unknown };
+    return `${index}:${String(record.timestamp ?? "")}:${JSON.stringify(usage)}`;
+  }
+  return undefined;
 }
 
 function finiteNumber(value: unknown): number | undefined {
