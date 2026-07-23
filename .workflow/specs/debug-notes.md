@@ -32,3 +32,11 @@ PlanStore 在清理 approval archive 前必须严格验证 manifest 的 revision
 严格 final turn_end 只发布可消费结果并标记 lifecyclePending，不得 kill 或转 sleeping；agent_end、close、error 才负责清除 resultReadyAt、触发 onTurnComplete 并落定可唤醒生命周期。并行与 DAG 依赖以结果发布为释放边界。
 
 </spec-entry>
+
+<spec-entry category="debug" keywords="teammate background wait watch prompt" date="2026-07-23" sid="S-20260723-1qsb" title="Teammate 异步等待提示约束" description="避免异步 teammate 完成后持续轮询和界面回弹" source="master@945d3f37">
+
+### Teammate 异步等待提示约束
+
+teammate background acknowledgement 必须引导调用方结束当前 turn 并等待自动 teammate-complete 通知。若当前 turn 必须消费结果，只调用一次带有限 timeout 的 teammate-wait。teammate-watch 和 teammate-list 仅用于一次性检查，不得作为完成轮询机制；result-ready 已可返回结果，不应只为等待 agent_end 继续阻塞。
+
+</spec-entry>
