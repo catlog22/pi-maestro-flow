@@ -274,6 +274,62 @@ test("Pi adapter maps PreToolUse deny output to tool_call blocking", async () =>
   }
 });
 
+test("Pi adapter does not append a Stop continuation behind a pending message", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-stop-pending-"));
+  const configDir = join(root, ".pi");
+  const trustPath = join(root, "user", "hook-trust.json");
+  const scriptPath = join(root, "stop.cjs");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(scriptPath, "process.stdout.write(JSON.stringify({ decision: 'block', reason: 'continue from the hook' }));");
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
+  await writeFile(join(configDir, "hooks.json"), JSON.stringify({
+    hooks: {
+      Stop: [{ hooks: [{ type: "command", command, timeout: 5 }] }],
+    },
+  }));
+  const loaded = await loadCodexHooks(root);
+  await trustHookConfig(trustPath, loaded.filePath, loaded.hash ?? "");
+
+  type Handler = (event: any, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  const handlers = new Map<string, Handler[]>();
+  const continuations: string[] = [];
+  const fakePi = {
+    on(name: string, handler: Handler) {
+      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+    },
+    registerCommand() {},
+    sendMessage() {},
+    sendUserMessage(message: string) { continuations.push(message); },
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd: root,
+    model: { id: "test-model" },
+    hasPendingMessages: () => true,
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getSessionFile: () => undefined,
+    },
+    ui: {
+      notify() {},
+      setStatus() {},
+    },
+  } as unknown as ExtensionContext;
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+
+  try {
+    for (const handler of handlers.get("session_start") ?? []) {
+      await handler({ type: "session_start", reason: "startup" }, ctx);
+    }
+    for (const handler of handlers.get("agent_end") ?? []) {
+      await handler({ type: "agent_end", messages: [{ role: "assistant", content: [] }] }, ctx);
+    }
+
+    assert.deepEqual(continuations, []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Pi adapter maps PreToolUse ask and PermissionRequest decisions", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-hooks-permission-request-"));
   const configDir = join(root, ".pi");

@@ -344,6 +344,8 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
     if (outputs.some(hasContinueFalse)) return;
     const reason = blockingReason(outputs);
     if (!reason) return;
+    // Goal 或压缩恢复可能已拥有下一轮；Stop Hook 不得在其后追加第二条续接。
+    if (ctx.hasPendingMessages?.()) return;
     state.stopHookActive = true;
     pi.sendUserMessage(reason, { deliverAs: "followUp" });
   });

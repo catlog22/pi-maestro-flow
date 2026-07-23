@@ -396,6 +396,31 @@ test("mid-turn guard restores idle state on agent end but preserves active compa
   assert.equal(statuses.get(COMPACTION_STATUS_KEY), undefined);
 });
 
+test("mid-turn guard preserves an already queued continuation", async () => {
+  const sent: string[] = [];
+  let complete: (() => void) | undefined;
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    hasPendingMessages: () => true,
+    compact(options: { onComplete(): void }) { complete = options.onComplete; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.evaluate(pressureToolBatch(), ctx);
+  complete?.();
+
+  assert.deepEqual(sent, []);
+});
+
 test("mid-turn guard publishes enabled and disabled idle states across its lifecycle", () => {
   let enabled = true;
   const statuses: Array<{ key: string; value: string | undefined }> = [];

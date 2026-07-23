@@ -213,6 +213,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             state.activeOwner = undefined;
             state.lastTriggerKey = undefined;
             clearPressureStatus(ctx);
+            // 压缩完成期间，Goal 或其他扩展可能已投递恢复提示；保留最先入队的续接。
+            if (ctx.hasPendingMessages?.()) return;
             try {
               pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
             } catch (error) {
