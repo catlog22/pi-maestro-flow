@@ -29,7 +29,8 @@ export type PlanHandoffStatus = "none" | "goal-required" | "todo-required" | "re
 export type PlanContext = Pick<
   ExtensionContext,
   "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager" | "compact"
-> & Partial<Pick<ExtensionCommandContext, "newSession">>;
+> & Partial<Pick<ExtensionContext, "abort" | "getContextUsage">>
+  & Partial<Pick<ExtensionCommandContext, "newSession">>;
 
 interface PlanReviewOutcome {
   approved: boolean;
@@ -86,6 +87,7 @@ const EmptyPlanParams = Type.Object({});
 
 let mode: Mode = "act";
 let extensionApi: ExtensionAPI | undefined;
+let onPlanModeChanged: (() => void) | undefined;
 let storeFactory: (cwd: string, session: PlanSessionIdentity) => PlanStore = (cwd, session) => new PlanStore(cwd, { session });
 let currentStore: PlanStore | undefined;
 let currentStoreKey = "";
@@ -222,16 +224,24 @@ function exitPlanMode(ctx: PlanContext): void {
 export async function toggleMode(ctx: PlanContext): Promise<Mode> {
   if (mode === "act") {
     await enterPlanMode(ctx);
+    onPlanModeChanged?.();
     return mode;
   }
   if (hasPlan() && ctx.hasUI !== false) {
     const outcome = await reviewPlan(ctx, true);
     if (!outcome.approved && !outcome.exited) ctx.ui.notify("Staying in Plan mode", "info");
+    onPlanModeChanged?.();
     return mode;
   }
   exitPlanMode(ctx);
   ctx.ui.notify("Act mode · draft preserved", "info");
+  onPlanModeChanged?.();
   return mode;
+}
+
+/** Bind the root UI/UCL to Plan/Act mode transitions. */
+export function setPlanModeChangeListener(listener: (() => void) | undefined): void {
+  onPlanModeChanged = listener;
 }
 
 export async function onSessionStartPlan(ctx: PlanContext): Promise<void> {
@@ -393,15 +403,24 @@ async function reviewPlan(
       pathLabel: store.currentPath,
       canClearContext: typeof ctx.newSession === "function",
       canCompactContext: handoffDelivery !== "tool-result",
+      contextPercent: ctx.getContextUsage?.()?.percent,
     });
     if (action === "modify") {
       await editPlan(ctx, store.currentPath);
       continue;
     }
-    if (action === "cancel") {
-      exitPlanMode(ctx);
-      ctx.ui.notify("Act mode · Plan draft preserved without approval", "info");
-      return { approved: false, exited: true };
+    if (action === "continue") {
+      const discussion = await ctx.ui.input(
+        "Continue discussing the Plan",
+        "Enter feedback or a question",
+      );
+      if (!discussion?.trim()) continue;
+      queuePlanDiscussion(ctx, discussion.trim());
+      return { approved: false, exited: false };
+    }
+    if (action === "close") {
+      abortPlanTurn(ctx);
+      return { approved: false, exited: false };
     }
 
     const markdown = latestPlan ?? "";
@@ -423,6 +442,23 @@ async function reviewPlan(
       handoffDelivery,
     );
     return { approved: true, exited: true, executionMode, executionMessage };
+  }
+}
+
+function queuePlanDiscussion(ctx: PlanContext, discussion: string): void {
+  const busy = ctx.isIdle?.() === false;
+  extensionApi?.sendUserMessage(
+    discussion,
+    busy ? { deliverAs: "followUp" } : undefined,
+  );
+  if (busy) abortPlanTurn(ctx);
+}
+
+function abortPlanTurn(ctx: PlanContext): void {
+  try {
+    ctx.abort?.();
+  } catch {
+    // 关闭确认页不应因宿主中断失败而阻塞。
   }
 }
 
@@ -652,7 +688,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-confirm",
     label: "Plan Confirm",
-    description: "Render the Markdown Plan and choose how to execute, modify, or exit. Approval commits the archive before Act mode.",
+    description: "Render the Markdown Plan and choose how to execute, review, or continue discussing it. Approval commits the archive before Act mode.",
     promptSnippet: "Use plan-confirm only after plan-update has produced a decision-complete draft.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
@@ -661,9 +697,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       const outcome = await reviewPlan(ctx, true, "tool-result");
       const summary = outcome.approved
         ? `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context).`
-        : outcome.exited
-          ? "Plan confirmation cancelled; Act mode restored and draft preserved."
-          : "Plan not approved; Plan mode remains active.";
+        : "Plan not approved; Plan mode remains active.";
       const text = outcome.executionMessage
         ? `${summary}\n\n${outcome.executionMessage}`
         : summary;

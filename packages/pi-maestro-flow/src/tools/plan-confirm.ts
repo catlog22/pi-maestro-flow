@@ -13,13 +13,15 @@ export type PlanConfirmationAction =
   | "execute-clear"
   | "execute-compact"
   | "modify"
-  | "cancel";
+  | "continue"
+  | "close";
 
 export interface PlanConfirmationOptions {
   markdown: string;
   pathLabel?: string;
   canClearContext: boolean;
   canCompactContext?: boolean;
+  contextPercent?: number;
 }
 
 interface ConfirmationItem {
@@ -39,26 +41,16 @@ export async function openPlanConfirmation(
   ctx: Pick<ExtensionContext, "hasUI" | "ui">,
   options: PlanConfirmationOptions,
 ): Promise<PlanConfirmationAction> {
-  if (!ctx.hasUI) return "cancel";
+  if (!ctx.hasUI) return "close";
 
   const result = await ctx.ui.custom<PlanConfirmationAction>(
     (tui, theme, _keybindings, done) => {
+      const contextItem = contextExecutionItem(options);
       const items: ConfirmationItem[] = [
         { action: "execute", label: "Execute", description: "Keep the current context", enabled: true },
-        {
-          action: "execute-clear",
-          label: "Execute in new session",
-          description: options.canClearContext ? "Start with a clean context" : "Available from /plan approve",
-          enabled: options.canClearContext,
-        },
-        {
-          action: "execute-compact",
-          label: "Compact then execute",
-          description: options.canCompactContext === false ? "Available from /plan approve" : "Preserve this Plan in the checkpoint",
-          enabled: options.canCompactContext !== false,
-        },
-        { action: "modify", label: "Modify Plan", description: "Open the full-screen Markdown editor", enabled: true },
-        { action: "cancel", label: "Exit Plan mode", description: "Keep the draft without approval", enabled: true },
+        contextItem,
+        { action: "modify", label: "View / modify Plan", description: "Open the full-screen Markdown editor", enabled: true },
+        { action: "continue", label: "Continue discussion", description: "Enter feedback or a question", enabled: true },
       ];
       const markdown = new Markdown(options.markdown, 0, 0, markdownTheme(theme));
       let selected = 0;
@@ -94,7 +86,7 @@ export async function openPlanConfirmation(
           if (safeWidth < 24) {
             return [
               truncateToWidth(`Plan confirm · ${selected + 1}/${items.length} ${selectedItem.label}`, safeWidth, "…"),
-              truncateToWidth(actionFooter(safeWidth, ["Esc exit", "Enter choose", "↑↓ select"]), safeWidth, "…"),
+              truncateToWidth(actionFooter(safeWidth, ["Esc exit", "Enter choose", "↑↓ scroll"]), safeWidth, "…"),
             ];
           }
 
@@ -111,8 +103,8 @@ export async function openPlanConfirmation(
           const footer = status || actionFooter(innerWidth, [
             "Esc close",
             "Enter choose",
-            "1-5 choose",
-            "↑↓ action",
+            "1-4 choose",
+            "↑↓ plan",
             "Ctrl+Enter execute",
             "PgUp/PgDn plan",
           ]);
@@ -140,20 +132,18 @@ export async function openPlanConfirmation(
 
         handleInput(data: string): void {
           if (lastWidth < 20) {
-            if (matchesKey(data, Key.escape)) choose("cancel");
+            if (matchesKey(data, Key.escape)) done("close");
             return;
           }
           if (matchesKey(data, Key.up)) {
-            selected = (selected - 1 + items.length) % items.length;
-            status = "";
+            previewOffset = Math.max(0, previewOffset - 1);
           } else if (matchesKey(data, Key.down)) {
-            selected = (selected + 1) % items.length;
-            status = "";
+            previewOffset += 1;
           } else if (matchesKey(data, Key.pageUp)) {
             previewOffset = Math.max(0, previewOffset - 5);
           } else if (matchesKey(data, Key.pageDown)) {
             previewOffset += 5;
-          } else if (/^[1-5]$/.test(data)) {
+          } else if (/^[1-4]$/.test(data)) {
             selected = Number(data) - 1;
             choose();
             return;
@@ -164,7 +154,7 @@ export async function openPlanConfirmation(
             choose("execute");
             return;
           } else if (matchesKey(data, Key.escape)) {
-            choose("cancel");
+            done("close");
             return;
           }
           tui.requestRender();
@@ -188,13 +178,31 @@ export async function openPlanConfirmation(
     },
   );
 
-  return result ?? "cancel";
+  return result ?? "close";
 }
 
 function unavailableMessage(item: ConfirmationItem): string {
   if (item.action === "execute-clear") return "Use /plan approve to start execution in a new session.";
   if (item.action === "execute-compact") return "Use /plan approve to compact before execution.";
   return item.description;
+}
+
+function contextExecutionItem(options: PlanConfirmationOptions): ConfirmationItem {
+  const contextPercent = options.contextPercent ?? 0;
+  if (contextPercent > 50 && options.canCompactContext !== false) {
+    return {
+      action: "execute-compact",
+      label: "Compact then execute",
+      description: `Context ${Math.round(contextPercent)}% · preserve this Plan in the checkpoint`,
+      enabled: true,
+    };
+  }
+  return {
+    action: "execute-clear",
+    label: "Execute in new session",
+    description: options.canClearContext ? "Start with a clean context" : "Available from /plan approve",
+    enabled: options.canClearContext,
+  };
 }
 
 function renderFrame(

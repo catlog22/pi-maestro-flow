@@ -37,6 +37,7 @@ function createHarness(
   supportsNewSession = false,
   handoff: { goalKey?: string; todoKeys: string[] } = { todoKeys: [] },
   replacementFailure?: "approval" | "send",
+  runtime: { contextPercent?: number; discussionInput?: string; idle?: boolean } = {},
 ) {
   let active = ["Read", "Write", "Bash", "todo", "custom-tool"];
   const tools = new Map<string, ToolLike>();
@@ -46,6 +47,7 @@ function createHarness(
   const statuses: Array<string | undefined> = [];
   const compactions: Array<{ customInstructions?: string; onComplete?: (result: unknown) => void }> = [];
   let newSessions = 0;
+  let aborts = 0;
   const tui = { requestRender() {} };
   const theme = {
     fg: (_name: string, text: string) => text,
@@ -55,6 +57,7 @@ function createHarness(
   const ui = {
     setStatus(_key: string, value: string | undefined) { statuses.push(value); },
     notify(message: string) { notifications.push(message); },
+    async input() { return runtime.discussionInput; },
     async custom(factory: Function) {
       return new Promise((resolve) => {
         const component = factory(tui, theme, {}, resolve);
@@ -83,7 +86,9 @@ function createHarness(
   const ctx = {
     cwd: join(root, "workspace"),
     hasUI: true,
-    isIdle: () => true,
+    isIdle: () => runtime.idle ?? true,
+    abort() { aborts++; },
+    getContextUsage: () => ({ percent: runtime.contextPercent ?? 0 }),
     compact(options: { customInstructions?: string; onComplete?: (result: unknown) => void }) {
       compactions.push(options);
       setImmediate(() => options.onComplete?.({}));
@@ -170,6 +175,7 @@ function createHarness(
     notifications,
     statuses,
     compactions,
+    get aborts() { return aborts; },
     get newSessions() { return newSessions; },
     get active() { return active; },
     handoff,
@@ -318,7 +324,19 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
 
 test("/plan approve compacts with an explicit approved-Plan link before execution", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-compact-"));
-  const harness = createHarness(root, false, false, false, false, "compact-chat", ["\x1b[B", "\x1b[B", "\r"]);
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "compact-chat",
+    ["2"],
+    false,
+    { todoKeys: [] },
+    undefined,
+    { contextPercent: 75 },
+  );
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
@@ -338,9 +356,9 @@ test("/plan approve compacts with an explicit approved-Plan link before executio
   }
 });
 
-test("plan-confirm tool keeps compact execution out of the follow-up queue", async () => {
+test("plan-confirm tool keeps unavailable context execution in Plan mode", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-tool-compact-"));
-  const harness = createHarness(root, false, false, false, false, "compact-tool-chat", ["\x1b[B", "\x1b[B", "\r", "\x1b"]);
+  const harness = createHarness(root, false, false, false, false, "compact-tool-chat", ["2", "\x1b"]);
   harness.ctx.isIdle = () => false;
   try {
     await onSessionStartPlan(harness.ctx);
@@ -350,7 +368,8 @@ test("plan-confirm tool keeps compact execution out of the follow-up queue", asy
     assert.equal(confirmed.details.approved, false);
     assert.equal(harness.compactions.length, 0);
     assert.equal(harness.messages.length, 0);
-    assert.match(harness.notifications.join("\n"), /draft preserved without approval/);
+    assert.equal(getMode(), "plan");
+    assert.equal(harness.aborts, 1);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -359,7 +378,7 @@ test("plan-confirm tool keeps compact execution out of the follow-up queue", asy
 
 test("Plan confirmation can execute in a new session from command-capable context", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-clear-"));
-  const harness = createHarness(root, false, false, false, false, "clear-chat", ["\x1b[B", "\r"], true);
+  const harness = createHarness(root, false, false, false, false, "clear-chat", ["2"], true);
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
@@ -402,7 +421,7 @@ for (const failure of ["approval", "send"] as const) {
       false,
       false,
       `clear-${failure}-chat`,
-      ["\x1b[B", "\r"],
+      ["2"],
       true,
       { todoKeys: [] },
       failure,
@@ -426,7 +445,7 @@ for (const failure of ["approval", "send"] as const) {
   });
 }
 
-test("Cancelling Plan confirmation exits Plan mode and preserves the draft", async () => {
+test("Esc closes Plan confirmation, interrupts the turn, and preserves Plan mode", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-cancel-"));
   const harness = createHarness(root, false, false, false, false, "cancel-chat", ["\x1b"]);
   try {
@@ -435,7 +454,8 @@ test("Cancelling Plan confirmation exits Plan mode and preserves the draft", asy
     await execute(harness, "plan-update", { markdown: "# Preserved Draft" });
     const confirmed = await execute(harness, "plan-confirm");
     assert.equal(confirmed.details.approved, false);
-    assert.equal(getMode(), "act");
+    assert.equal(getMode(), "plan");
+    assert.equal(harness.aborts, 1);
     const store = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
       session: { id: harness.ctx.sessionManager.getSessionId() },
@@ -443,6 +463,36 @@ test("Cancelling Plan confirmation exits Plan mode and preserves the draft", asy
     const loaded = await store.load();
     assert.equal(loaded.manifest.status, "draft");
     assert.equal(loaded.markdown, "# Preserved Draft");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Continue discussion opens text input, queues the response, and interrupts the turn", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-discuss-"));
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "discuss-chat",
+    ["4"],
+    false,
+    { todoKeys: [] },
+    undefined,
+    { discussionInput: "Keep the API compatible", idle: false },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Discuss Plan" });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, false);
+    assert.equal(getMode(), "plan");
+    assert.deepEqual(harness.messages, ["Keep the API compatible"]);
+    assert.equal(harness.aborts, 1);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

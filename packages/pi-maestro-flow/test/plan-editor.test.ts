@@ -88,6 +88,7 @@ test("Plan confirmation renders Markdown and selects compact execution", async (
     markdown: "# Approved Plan\n\n- Preserve boundaries",
     pathLabel: "current.md",
     canClearContext: true,
+    contextPercent: 75,
   });
   assert.ok(harness.component);
   for (const width of [20, 40, 80, 120]) {
@@ -97,17 +98,15 @@ test("Plan confirmation renders Markdown and selects compact execution", async (
       assert.match(lines[0], /╭/);
       assert.match(lines.at(-1) ?? "", /╰/);
       assert.match(lines.join("\n"), /1\. Execute/);
-      assert.match(lines.join("\n"), /2\. Execute in new session/);
-      assert.match(lines.join("\n"), /3\. Compact then execute/);
-      assert.match(lines.join("\n"), /4\. Modify Plan/);
-      assert.match(lines.join("\n"), /5\. Exit Plan mode/);
+      assert.match(lines.join("\n"), /2\. Compact then execute/);
+      assert.match(lines.join("\n"), /3\. View \/ modify Plan/);
+      assert.match(lines.join("\n"), /4\. Continue discussion/);
+      assert.doesNotMatch(lines.join("\n"), /Exit Plan mode/);
       assert.ok(lines.length <= 28);
     }
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
   }
-  harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\r");
+  harness.component.handleInput("2");
   assert.equal(await pending, "execute-compact");
 });
 
@@ -118,29 +117,27 @@ test("Plan confirmation keeps clear-context execution unavailable outside comman
     canClearContext: false,
   });
   assert.ok(harness.component);
-  harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\r");
+  harness.component.handleInput("2");
   assert.equal(harness.doneValue, undefined);
   assert.match(harness.component.render(100).join("\n"), /Use \/plan approve/);
   harness.component.handleInput("\x1b");
-  assert.equal(await pending, "cancel");
+  assert.equal(await pending, "close");
 });
 
-test("Plan confirmation keeps compact execution unavailable from tool-result context", async () => {
+test("Plan confirmation falls back to unavailable new-session execution when compact is unavailable", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: "# Plan",
     canClearContext: false,
     canCompactContext: false,
+    contextPercent: 75,
   });
   assert.ok(harness.component);
-  harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\x1b[B");
-  harness.component.handleInput("\r");
+  harness.component.handleInput("2");
   assert.equal(harness.doneValue, undefined);
-  assert.match(harness.component.render(100).join("\n"), /Use \/plan approve to compact before execution/);
+  assert.match(harness.component.render(100).join("\n"), /Use \/plan approve to start execution in a new session/);
   harness.component.handleInput("\x1b");
-  assert.equal(await pending, "cancel");
+  assert.equal(await pending, "close");
 });
 
 test("Plan confirmation accepts Ctrl+Enter across modifyOtherKeys encoding", async () => {
@@ -161,8 +158,19 @@ test("Plan confirmation number keys match the numbered actions", async () => {
     canClearContext: true,
   });
   assert.ok(harness.component);
-  harness.component.handleInput("4");
+  harness.component.handleInput("3");
   assert.equal(await pending, "modify");
+});
+
+test("Plan confirmation exposes continue discussion as the fourth action", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan",
+    canClearContext: true,
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("4");
+  assert.equal(await pending, "continue");
 });
 
 test("Plan confirmation blocks invisible actions below 20 columns", async () => {
@@ -178,7 +186,7 @@ test("Plan confirmation blocks invisible actions below 20 columns", async () => 
   harness.component.handleInput("\x1b[27;5;13~");
   assert.equal(harness.doneValue, undefined);
   harness.component.handleInput("\x1b");
-  assert.equal(await pending, "cancel");
+  assert.equal(await pending, "close");
 });
 
 test("Plan editor blocks invisible editing below the minimum width", async () => {
