@@ -117,7 +117,10 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "Give every multi-task teammate item a stable unique name so nested work remains traceable and addressable; a {ref} that matches no task name is passed through as literal text.",
   "Set teammate concurrency explicitly for provider-safe fan-out; use background: false whenever the caller needs child results before continuing.",
   'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default, and in multi-task mode prefer per-task fork over a top-level default.',
-  "Use teammate-list or teammate-watch only when status or live output is needed, and teammate-send for steering or follow-up.",
+  "After teammate returns a background acknowledgement, normally end the current turn and wait for the automatic teammate-complete notification, which will trigger a new turn with the result.",
+  "Do not poll teammate-watch or teammate-list after starting background work; use teammate-watch only for a one-off inspection explicitly needed for debugging or requested by the user.",
+  "If the current turn must wait for an already-backgrounded result, call teammate-wait exactly once with the returned name or correlation ID and a bounded timeout; never loop teammate-watch.",
+  "Use teammate-send for steering or follow-up while a teammate remains running or wakeable.",
   "Omit model to use teammate task-type model routing; an exact task-level provider/model overrides the top-level model, and the top-level model overrides automatic routing.",
 ];
 
@@ -133,6 +136,8 @@ Call forms:
   - Fixed prompt: { agent: "delegate", prompt: "analysis", task: "Inspect auth", promptArgs: ["@src/auth", "file:line findings"] }
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
+
+For background work, wait for the automatic teammate-complete notification. Do not poll teammate-watch or teammate-list; if the current turn must wait, call teammate-wait once with the returned correlation ID.
 
 Available teammate agents for ${cwd}:
 ${formatAgentCatalog(cwd, Number.MAX_SAFE_INTEGER, 160)}
@@ -163,17 +168,23 @@ const TEAMMATE_LIST_GUIDELINES = [
 ];
 
 const TEAMMATE_WATCH_DESCRIPTION =
-  "View a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result.";
+  "Perform a one-shot inspection of a running or sleeping teammate agent's recent output, tool activity, inbox messages, and last result. This is not a completion-wait tool.";
 const TEAMMATE_WATCH_SNIPPET = "Inspect a specific teammate agent's recent activity and output.";
 const TEAMMATE_WATCH_GUIDELINES = [
-  "Use teammate-watch for targeted live inspection after selecting an agent name, displayed selector, or correlation ID from teammate-list.",
+  "Use teammate-watch only for a one-off live inspection after selecting an agent name, displayed selector, or correlation ID; never call it repeatedly to wait for completion.",
+  "Use teammate-wait once when completion or a result is required, or wait for the automatic teammate-complete notification.",
 ];
 const TEAMMATE_WAIT_DESCRIPTION =
-  "Wait for a teammate agent to settle, or wait for a fixed delay. This is event-driven and avoids repeated teammate-watch calls.";
-const TEAMMATE_WAIT_SNIPPET = "Wait for a teammate to finish or for a bounded delay.";
+  "Wait once for a teammate result, lifecycle settlement, or a fixed delay. Agent waits are event-driven and replace repeated teammate-watch calls.";
+const TEAMMATE_WAIT_SNIPPET = "Wait once for a teammate result or for a bounded delay.";
 const TEAMMATE_WAIT_GUIDELINES = [
-  "Use teammate-wait instead of repeatedly calling teammate-watch while an agent is running or retrying.",
+  "Call teammate-wait exactly once with a returned name or correlation ID and a bounded timeout instead of repeatedly calling teammate-watch.",
+  "Treat result-ready as a usable teammate result; do not continue waiting only for agent_end lifecycle confirmation.",
 ];
+
+function backgroundWaitGuidance(correlationId: string): string {
+  return `correlationId=${correlationId}. Automatic teammate-complete notification will trigger a new turn with the result. Do not poll teammate-watch or teammate-list. If this turn must consume the result, call teammate-wait exactly once with { name: "${correlationId}" }; otherwise end the turn now.`;
+}
 
 export const AGENT_BUFFER_LIMITS = Object.freeze({
   inboxItems: 64,
@@ -1767,7 +1778,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           return {
             content: [{
               type: "text",
-              text: `${warningPrefix}${normalizedTasks.length} tasks (${graphMode}) running in background. correlationId=${correlationId}. Use teammate-list to check status.`,
+              text: `${warningPrefix}${normalizedTasks.length} tasks (${graphMode}) running in background. ${backgroundWaitGuidance(correlationId)}`,
             }],
             isError: false,
             details: { mode: graphMode as Details["mode"], results: [], progress: progressSnapshot() },
@@ -1837,7 +1848,10 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             notifyBackgroundFailure(pi, id, params.agent, correlationId, error);
           });
           return {
-            content: [{ type: "text", text: `■ @${params.name ?? params.agent} detached · completion notification enabled` }],
+            content: [{
+              type: "text",
+              text: `■ @${params.name ?? params.agent} detached. ${backgroundWaitGuidance(correlationId)}`,
+            }],
             isError: false,
             details: { mode: "single", results: [] },
           };
@@ -1874,7 +1888,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         return {
           content: [{
             type: "text",
-            text: `${warningPrefix}■ @${params.name ?? params.agent} running in background · teammate-list status · teammate-send message`,
+            text: `${warningPrefix}■ @${params.name ?? params.agent} running in background. ${backgroundWaitGuidance(correlationId)}`,
           }],
           isError: false,
           details: { mode: "single", results: [] },
@@ -4571,7 +4585,7 @@ async function handleProxyRequest(
       reply({ type: "teammate_proxy_result", requestId, result: {
         content: [{
           type: "text",
-          text: `${warningPrefix}@${runningLabel} running in background. correlationId=${cid}. Use teammate-list to check status.`,
+          text: `${warningPrefix}@${runningLabel} running in background. ${backgroundWaitGuidance(cid)}`,
         }],
         isError: false,
         details: {

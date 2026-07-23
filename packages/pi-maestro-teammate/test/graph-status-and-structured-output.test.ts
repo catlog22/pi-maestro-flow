@@ -815,7 +815,11 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   assert.match(source, /spawnedBy: cid,[\s\S]*if \(task\.name\) state\.namedAgents\.set\(task\.name, childId\)/);
   assert.match(source, /normalizedTasks \? \{ taskCorrelationIds \} : \{ correlationId: cid \}/);
   assert.match(source, /if \(p\.background === false\) \{[\s\S]*await executeNested\(\)/);
-  assert.match(source, /running in background\. correlationId=\$\{cid\}/);
+  assert.match(source, /running in background\. \$\{backgroundWaitGuidance\(cid\)\}/);
+  assert.match(source, /function backgroundWaitGuidance\(/);
+  assert.equal(source.match(/backgroundWaitGuidance\(/g)?.length, 5);
+  assert.match(source, /Do not poll teammate-watch or teammate-list/);
+  assert.match(source, /call teammate-wait exactly once/);
   assert.match(source, /handleProxyRequest\([\s\S]*?publishChildCallStatus/);
   assert.match(source, /reportChildStatus\("running"\)[\s\S]*?reportChildStatus\(completed\.exitCode === 0 \? "completed" : "failed"\)/);
   assert.match(source, /progress: currentProgress,[\s\S]*?childCalls: \[\.\.\.childCalls\.values\(\)\]/);

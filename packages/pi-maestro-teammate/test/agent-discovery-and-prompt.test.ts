@@ -295,6 +295,9 @@ test("teammate prompt guidance names the tool and explains selection boundaries"
   }
   assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /Do not use teammate/.test(guideline)));
   assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /context: "fork"/.test(guideline)));
+  assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /automatic teammate-complete notification/i.test(guideline)));
+  assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /do not poll teammate-watch or teammate-list/i.test(guideline)));
+  assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /call teammate-wait exactly once/i.test(guideline)));
 });
 
 test("child Pi arguments honor prompt mode and resource inheritance", () => {
