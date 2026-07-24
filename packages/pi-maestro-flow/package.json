@@ -85,7 +85,7 @@
     "cross-spawn": "7.0.6",
     "maestro-flow": "0.5.55",
     "open": "10.2.0",
-    "pi-maestro-teammate": "0.4.6",
+    "pi-maestro-teammate": "0.4.7",
     "puppeteer-core": "24.31.0",
     "recheck": "4.5.0",
     "typebox": "1.1.24",
