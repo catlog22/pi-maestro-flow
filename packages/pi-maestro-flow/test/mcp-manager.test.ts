@@ -10,7 +10,6 @@ const servers: McpManagerServerView[] = [
     path: "/user/mcp.json",
     readOnly: false,
     status: "connected",
-    canAuthenticate: false,
     toolNames: ["read_file", "write_file", "list_directory"],
     entry: {
       command: "npx",
@@ -27,7 +26,6 @@ const servers: McpManagerServerView[] = [
     path: "/project/.mcp.json",
     readOnly: false,
     status: "needs-auth",
-    canAuthenticate: true,
     toolNames: ["search_packages"],
     entry: { url: "https://mcp.example.com", auth: "oauth", lifecycle: "eager" },
   },
@@ -38,7 +36,6 @@ const servers: McpManagerServerView[] = [
     readOnly: true,
     importKind: "cursor",
     status: "failed",
-    canAuthenticate: false,
     toolNames: [],
     entry: { command: "cursor-mcp" },
   },
@@ -71,48 +68,49 @@ test("MCP manager renders width-safely from 1 through 120 columns", () => {
     }
   }
   const wide = overlay.render(100).join("\n");
-  assert.match(wide, /MCP Control Center/);
-  assert.match(wide, /filesystem/);
-  assert.match(wide, /read_file, write_file, list_directory/);
-  assert.match(wide, /MCP_TOKEN=\*\*\*\*\*\*\*\*/);
-  assert.doesNotMatch(wide, /super-secret/);
+  assert.match(wide, /管理服务/);
+  assert.match(wide, /编辑配置/);
   assert.match(overlay.render(12)[0], /Esc/);
 });
 
-test("MCP manager supports paste filtering, scope cycling, detail back navigation, and actions", () => {
+test("MCP 菜单进入管理与配置，管理页使用显式筛选", () => {
   const filtered = createOverlay();
   filtered.overlay.render(60);
+  filtered.overlay.handleInput("\r");
+  assert.match(filtered.overlay.render(60).join("\n"), /filesystem/);
+  assert.match(filtered.overlay.render(60).join("\n"), /按 \/ 输入服务名/);
+
+  filtered.overlay.handleInput("/");
   filtered.overlay.handleInput("private-registry");
   assert.match(filtered.overlay.render(60).join("\n"), /private-registry/);
-  assert.doesNotMatch(filtered.overlay.render(60).join("\n"), /› ● Connected filesystem/);
+  assert.doesNotMatch(filtered.overlay.render(60).join("\n"), /filesystem · 本地/);
   assert.ok(filtered.renders() > 0);
 
-  filtered.overlay.handleInput("a");
-  assert.equal(filtered.action(), undefined, "lowercase text must remain available to the filter");
-  filtered.overlay.handleInput("\x7f");
-
-  filtered.overlay.handleInput("\r");
-  assert.match(filtered.overlay.render(60).join("\n"), /https:\/\/mcp\.example\.com/);
-  filtered.overlay.handleInput("\x1b");
-  assert.doesNotMatch(filtered.overlay.render(60).join("\n"), /https:\/\/mcp\.example\.com/);
+  filtered.overlay.handleInput("D");
+  assert.equal(filtered.action(), undefined, "筛选中不能触发字母功能键");
   filtered.overlay.handleInput("\x1b");
   assert.match(filtered.overlay.render(60).join("\n"), /filesystem/);
 
-  const scoped = createOverlay();
-  scoped.overlay.render(80);
-  scoped.overlay.handleInput("\t");
-  const userOnly = scoped.overlay.render(80).join("\n");
-  assert.match(userOnly, /\[User\]/);
-  assert.match(userOnly, /filesystem/);
-  assert.doesNotMatch(userOnly, /private-registry/);
+  const toggle = createOverlay();
+  toggle.overlay.render(80);
+  toggle.overlay.handleInput("\r");
+  toggle.overlay.handleInput(" ");
+  assert.equal(toggle.action()?.kind, "toggle");
+  assert.equal(toggle.action()?.serverName, "filesystem");
 
-  scoped.overlay.handleInput("E");
-  assert.equal(scoped.action()?.kind, "edit");
-  assert.equal(scoped.action()?.serverName, "filesystem");
-  assert.equal(scoped.action()?.uiState.scope, "user");
+  const remove = createOverlay();
+  remove.overlay.render(80);
+  remove.overlay.handleInput("\r");
+  remove.overlay.handleInput("d");
+  assert.equal(remove.action()?.kind, "delete");
+
+  const edit = createOverlay();
+  edit.overlay.render(80);
+  edit.overlay.handleInput("2");
+  assert.equal(edit.action()?.kind, "edit-config");
 });
 
-test("MCP manager keeps an add recovery path for empty configurations", () => {
+test("MCP 菜单为空配置保留编辑入口", () => {
   let action: McpManagerAction | undefined;
   const overlay = new McpManagerOverlay({
     servers: [],
@@ -120,7 +118,7 @@ test("MCP manager keeps an add recovery path for empty configurations", () => {
     requestRender() {},
     done: (next) => { action = next; },
   });
-  assert.match(overlay.render(48).join("\n"), /press A to add one/);
-  overlay.handleInput("A");
-  assert.equal(action?.kind, "add");
+  assert.match(overlay.render(48).join("\n"), /编辑配置/);
+  overlay.handleInput("2");
+  assert.equal(action?.kind, "edit-config");
 });

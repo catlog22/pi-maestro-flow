@@ -2,7 +2,6 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { McpManagerOverlay, type McpManagerAction, type McpManagerServerView, type McpManagerStatus, type McpManagerUiState } from "./mcp-manager.ts";
 import {
   McpManagerStore,
-  type McpConfigScope,
   type McpManagedServer,
   type McpManagerSnapshot,
   validateServerName,
@@ -12,13 +11,16 @@ import type { ServerEntry } from "./types.ts";
 export interface McpManagerRuntime {
   status(serverName: string): McpManagerStatus;
   toolNames(serverName: string): string[];
-  canAuthenticate(serverName: string): boolean;
-  reconnect(serverName: string): Promise<boolean>;
-  authenticate(serverName: string): Promise<{ ok: boolean; message?: string }>;
 }
 
 export interface McpManagerFlowResult {
   configChanged: boolean;
+}
+
+interface ConfigEditorResult {
+  configChanged: boolean;
+  notice?: string;
+  snapshot?: McpManagerSnapshot;
 }
 
 export async function runMcpManager(
@@ -27,8 +29,8 @@ export async function runMcpManager(
   runtime: McpManagerRuntime,
 ): Promise<McpManagerFlowResult> {
   let snapshot = await store.load();
-  let uiState: Partial<McpManagerUiState> = { scope: "all", detail: false, query: "" };
-  let notice = snapshot.servers.length === 0 ? "No servers yet · press A to add one" : undefined;
+  let uiState: Partial<McpManagerUiState> = { detail: false, query: "" };
+  let notice = snapshot.servers.length === 0 ? "没有服务 · 按 E 粘贴或编辑 MCP 配置" : undefined;
   let configChanged = false;
 
   while (true) {
@@ -39,94 +41,56 @@ export async function runMcpManager(
       ? snapshot.servers.find((server) => server.name === action.serverName)
       : undefined;
 
-    if (action.kind === "add" || action.kind === "edit") {
-      if (action.kind === "edit" && !selected) {
-        notice = "Cannot edit · no server selected";
-        continue;
-      }
-      try {
-        const draft = await promptForServer(ctx, action.kind === "edit" ? selected : undefined);
-        if (!draft) {
-          notice = "Edit cancelled · no changes saved";
-          continue;
-        }
-        ctx.ui.setStatus("mcp-manager", `MCP · Saving ${draft.name}…`);
-        snapshot = await store.save({
-          previousName: selected?.readOnly ? undefined : selected?.name,
-          name: draft.name,
-          entry: draft.entry,
-          scope: draft.scope,
-          allowImportedOverride: selected?.readOnly === true,
-        });
-        configChanged = true;
-        uiState = { ...uiState, selectedName: draft.name };
-        notice = `Saved · ${draft.name} · reload pending`;
-      } catch (error) {
-        notice = `Save failed · ${errorMessage(error)}`;
-      } finally {
-        ctx.ui.setStatus("mcp-manager", undefined);
-      }
+    if (action.kind === "edit-config") {
+      const result = await editMcpConfig(ctx, store);
+      if (result.snapshot) snapshot = result.snapshot;
+      configChanged ||= result.configChanged;
+      notice = result.notice;
       continue;
     }
 
     if (!selected) {
-      notice = `Cannot ${action.kind} · no server selected`;
+      notice = "无法操作 · 未选择服务";
+      continue;
+    }
+
+    if (action.kind === "toggle") {
+      try {
+        const nextEnabled = selected.entry.enabled === false;
+        ctx.ui.setStatus("mcp-manager", `MCP · 正在${nextEnabled ? "启用" : "停用"} ${selected.name}…`);
+        snapshot = await store.toggle(selected);
+        configChanged = true;
+        uiState = { ...uiState, selectedName: selected.name };
+        notice = `${nextEnabled ? "已启用" : "已停用"} · ${selected.name} · 关闭后重载`;
+      } catch (error) {
+        notice = `更新开关失败 · ${errorMessage(error)}`;
+      } finally {
+        ctx.ui.setStatus("mcp-manager", undefined);
+      }
       continue;
     }
 
     if (action.kind === "delete") {
       if (selected.readOnly) {
-        notice = `Cannot delete · ${selected.name} is imported and read-only`;
+        notice = `无法删除 · ${selected.name} 是只读导入项`;
         continue;
       }
       const confirmed = await ctx.ui.confirm(
-        `Delete MCP server "${selected.name}"?`,
-        `This removes the ${scopeLabel(selected.scope)} configuration from:\n${selected.path}\nOther MCP servers are unchanged.`,
+        `删除 MCP 服务「${selected.name}」？`,
+        `这会从${scopeLabel(selected.scope)}配置中删除该服务：\n${selected.path}\n其他 MCP 服务不会受影响。`,
       );
       if (!confirmed) {
-        notice = "Delete cancelled · server kept";
+        notice = "已取消删除 · 服务保持不变";
         continue;
       }
       try {
-        ctx.ui.setStatus("mcp-manager", `MCP · Deleting ${selected.name}…`);
+        ctx.ui.setStatus("mcp-manager", `MCP · 正在删除 ${selected.name}…`);
         snapshot = await store.delete(selected);
         configChanged = true;
         uiState = { ...uiState, selectedName: undefined, detail: false };
-        notice = `Deleted · ${selected.name} · reload pending`;
+        notice = `已删除 · ${selected.name} · 关闭后重载`;
       } catch (error) {
-        notice = `Delete failed · ${errorMessage(error)}`;
-      } finally {
-        ctx.ui.setStatus("mcp-manager", undefined);
-      }
-      continue;
-    }
-
-    if (action.kind === "reconnect") {
-      ctx.ui.setStatus("mcp-manager", `MCP · Connecting ${selected.name}…`);
-      try {
-        const connected = await runtime.reconnect(selected.name);
-        notice = connected ? `Connected · ${selected.name}` : `Reconnect failed · ${selected.name}`;
-      } catch (error) {
-        notice = `Reconnect failed · ${errorMessage(error)}`;
-      } finally {
-        ctx.ui.setStatus("mcp-manager", undefined);
-      }
-      continue;
-    }
-
-    if (action.kind === "authenticate") {
-      if (!runtime.canAuthenticate(selected.name)) {
-        notice = `Cannot authenticate · ${selected.name} does not use OAuth`;
-        continue;
-      }
-      ctx.ui.setStatus("mcp-manager", `MCP · Authenticating ${selected.name}…`);
-      try {
-        const result = await runtime.authenticate(selected.name);
-        notice = result.ok
-          ? `Authenticated · ${selected.name}`
-          : `Authentication failed · ${result.message ?? selected.name}`;
-      } catch (error) {
-        notice = `Authentication failed · ${errorMessage(error)}`;
+        notice = `删除失败 · ${errorMessage(error)}`;
       } finally {
         ctx.ui.setStatus("mcp-manager", undefined);
       }
@@ -134,6 +98,24 @@ export async function runMcpManager(
   }
 
   return { configChanged };
+}
+
+async function editMcpConfig(
+  ctx: ExtensionContext,
+  store: McpManagerStore,
+): Promise<ConfigEditorResult> {
+  try {
+    const document = store.getEditableConfig();
+    const nextText = await ctx.ui.editor(`编辑 MCP 配置 · ${document.path}`, document.text);
+    if (nextText === undefined) return { configChanged: false, notice: "已取消编辑 · 未保存更改" };
+    ctx.ui.setStatus("mcp-manager", "MCP · 正在保存配置…");
+    const snapshot = await store.replaceEditableConfig(nextText);
+    return { configChanged: true, snapshot, notice: "已保存配置 · 关闭后重载" };
+  } catch (error) {
+    return { configChanged: false, notice: `保存配置失败 · ${errorMessage(error)}` };
+  } finally {
+    ctx.ui.setStatus("mcp-manager", undefined);
+  }
 }
 
 async function openManagerOverlay(
@@ -158,193 +140,88 @@ async function openManagerOverlay(
 function buildViews(snapshot: McpManagerSnapshot, runtime: McpManagerRuntime): McpManagerServerView[] {
   return snapshot.servers.map((server) => ({
     ...server,
-    status: runtime.status(server.name),
-    toolNames: runtime.toolNames(server.name),
-    canAuthenticate: runtime.canAuthenticate(server.name),
+    status: server.entry.enabled === false ? "disabled" : runtime.status(server.name),
+    toolNames: server.entry.enabled === false ? [] : runtime.toolNames(server.name),
   }));
 }
 
-interface ServerDraft {
+interface RecognizedMcpServer {
   name: string;
-  scope: McpConfigScope;
   entry: ServerEntry;
 }
 
-async function promptForServer(ctx: ExtensionContext, current?: McpManagedServer): Promise<ServerDraft | undefined> {
-  const copyImported = current?.readOnly === true;
-  const nameInput = await ctx.ui.input(
-    copyImported ? "Copy imported MCP server as User override" : current ? "MCP server name" : "New MCP server name",
-    current?.name ?? "",
-  );
-  if (nameInput === undefined) return undefined;
-  const name = validateServerName(nameInput);
-
-  const currentTransport = current?.entry.url ? "HTTP" : "stdio";
-  const transport = await selectCurrentFirst(ctx, "Transport", currentTransport, ["stdio", "HTTP"] as const);
-  if (!transport) return undefined;
-
-  let scope: McpConfigScope;
-  if (current && !copyImported) {
-    scope = current.scope as McpConfigScope;
-  } else {
-    const selectedScope = await selectScope(ctx);
-    if (!selectedScope) return undefined;
-    scope = selectedScope;
-  }
-
-  const lifecycle = await selectCurrentFirst(
-    ctx,
-    "Lifecycle",
-    current?.entry.lifecycle ?? "lazy",
-    ["lazy", "keep-alive", "eager"] as const,
-  );
-  if (!lifecycle) return undefined;
-
-  const currentDirectMode = Array.isArray(current?.entry.directTools)
-    ? "Keep selected direct tools"
-    : current?.entry.directTools === true ? "Direct + proxy" : "Proxy only";
-  const directMode = await selectCurrentFirst(
-    ctx,
-    "Tool exposure",
-    currentDirectMode,
-    ["Proxy only", "Direct + proxy", "Keep selected direct tools"] as const,
-  );
-  if (!directMode) return undefined;
-
-  const resources = await selectCurrentFirst(
-    ctx,
-    "MCP resources",
-    current?.entry.exposeResources ? "Expose as tools" : "Keep hidden",
-    ["Keep hidden", "Expose as tools"] as const,
-  );
-  if (!resources) return undefined;
-
-  const timeoutInput = await ctx.ui.input(
-    "Request timeout in milliseconds (blank = default)",
-    current?.entry.requestTimeoutMs ? String(current.entry.requestTimeoutMs) : "",
-  );
-  if (timeoutInput === undefined) return undefined;
-  const requestTimeoutMs = optionalPositiveInteger(timeoutInput, "Request timeout");
-
-  const base: ServerEntry = {
-    ...(current?.entry ?? {}),
-    lifecycle,
-    directTools: directMode === "Keep selected direct tools"
-      ? current?.entry.directTools
-      : directMode === "Direct + proxy",
-    exposeResources: resources === "Expose as tools",
-  };
-  if (requestTimeoutMs) base.requestTimeoutMs = requestTimeoutMs;
-  else delete base.requestTimeoutMs;
-
-  let entry: ServerEntry;
-  if (transport === "stdio") {
-    const commandInput = await ctx.ui.input("Command", currentTransport === "stdio" ? current?.entry.command ?? "" : "");
-    if (commandInput === undefined) return undefined;
-    const command = required(commandInput, "Command");
-    const argsInput = await ctx.ui.input(
-      "Arguments as JSON array",
-      currentTransport === "stdio" && current?.entry.args ? JSON.stringify(current.entry.args) : "[]",
-    );
-    if (argsInput === undefined) return undefined;
-    const cwdInput = await ctx.ui.input("Working directory (blank = current project)", currentTransport === "stdio" ? current?.entry.cwd ?? "" : "");
-    if (cwdInput === undefined) return undefined;
-    const envInput = await ctx.ui.input(
-      `Environment as JSON object${currentTransport === "stdio" && current?.entry.env ? " (blank keeps existing)" : ""}`,
-      "",
-    );
-    if (envInput === undefined) return undefined;
-    const env = envInput.trim()
-      ? parseStringRecord(envInput, "Environment")
-      : currentTransport === "stdio" ? current?.entry.env : undefined;
-    entry = {
-      ...base,
-      command,
-      args: parseStringArray(argsInput, "Arguments"),
-      ...(cwdInput.trim() ? { cwd: cwdInput.trim() } : {}),
-      ...(env ? { env } : {}),
-    };
-    if (!env) delete entry.env;
-    delete entry.url;
-    delete entry.headers;
-    delete entry.auth;
-    delete entry.bearerToken;
-    delete entry.bearerTokenEnv;
-    delete entry.oauth;
-  } else {
-    const urlInput = await ctx.ui.input("MCP server URL", currentTransport === "HTTP" ? current?.entry.url ?? "" : "");
-    if (urlInput === undefined) return undefined;
-    const url = normalizeHttpUrl(urlInput);
-    const auth = await selectCurrentFirst(
-      ctx,
-      "Authentication",
-      authChoice(current?.entry),
-      ["Auto detect", "OAuth", "Bearer token from env", "No authentication"] as const,
-    );
-    if (!auth) return undefined;
-    const headersInput = await ctx.ui.input(
-      `Headers as JSON object${currentTransport === "HTTP" && current?.entry.headers ? " (blank keeps existing)" : ""}`,
-      "",
-    );
-    if (headersInput === undefined) return undefined;
-    const headers = headersInput.trim()
-      ? parseStringRecord(headersInput, "Headers")
-      : currentTransport === "HTTP" ? current?.entry.headers : undefined;
-    let bearerTokenEnv: string | undefined;
-    if (auth === "Bearer token from env") {
-      const bearerInput = await ctx.ui.input("Bearer token environment variable", current?.entry.bearerTokenEnv ?? "MCP_TOKEN");
-      if (bearerInput === undefined) return undefined;
-      bearerTokenEnv = required(bearerInput, "Bearer token environment variable");
-    }
-    entry = {
-      ...base,
-      url,
-      auth: auth === "OAuth" ? "oauth" : auth === "Bearer token from env" ? "bearer" : auth === "No authentication" ? false : undefined,
-      ...(bearerTokenEnv ? { bearerTokenEnv } : {}),
-      ...(headers ? { headers } : {}),
-    };
-    delete entry.command;
-    delete entry.args;
-    delete entry.env;
-    delete entry.cwd;
-    if (!headers) delete entry.headers;
-    if (auth !== "OAuth") delete entry.oauth;
-    if (auth !== "Bearer token from env") {
-      delete entry.bearerToken;
-      delete entry.bearerTokenEnv;
-    }
-    if (auth === "Auto detect") delete entry.auth;
-  }
-
-  const confirmed = await ctx.ui.confirm(
-    `${current ? copyImported ? "Copy" : "Save" : "Add"} MCP server "${name}"?`,
-    [
-      `Scope: ${scopeLabel(scope)}`,
-      `Transport: ${transport}`,
-      transport === "stdio" ? `Command: ${entry.command}` : `URL: ${entry.url}`,
-      `Lifecycle: ${entry.lifecycle}`,
-      `Tools: ${entry.directTools ? "direct + proxy" : "proxy only"}`,
-      `Resources: ${entry.exposeResources ? "exposed" : "hidden"}`,
-    ].join("\n"),
-  );
-  return confirmed ? { name, scope, entry } : undefined;
+/** Serializes one server as a portable .mcp.json snippet for copying or editing. */
+export function serializeMcpServerJson(name: string, entry: ServerEntry): string {
+  return `${JSON.stringify({ mcpServers: { [validateServerName(name)]: entry } }, null, 2)}\n`;
 }
 
-async function selectScope(ctx: ExtensionContext): Promise<McpConfigScope | undefined> {
-  const choice = await ctx.ui.select("Configuration scope", ["User · all projects", "Project · current workspace"]);
-  if (choice === "User · all projects") return "user";
-  if (choice === "Project · current workspace") return "project";
-  return undefined;
+/**
+ * Recognizes standard MCP JSON snippets from Pi, Cursor, Claude, Codex, and
+ * VS Code. A raw server entry is intentionally rejected because it has no
+ * portable server name.
+ */
+export function parseMcpJsonServers(value: string): RecognizedMcpServer[] {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error("MCP JSON is invalid", { cause: error });
+  }
+  if (!isRecord(parsed)) throw new Error("MCP JSON must be an object");
+
+  const rawServers = parsed.mcpServers ?? parsed["mcp-servers"];
+  if (!isRecord(rawServers)) {
+    throw new Error('MCP JSON must contain an "mcpServers" object');
+  }
+  const candidates = Object.entries(rawServers).map(([name, rawEntry]) => ({
+    name: validateServerName(name),
+    entry: validateMcpServerEntry(rawEntry),
+  }));
+  if (candidates.length === 0) throw new Error("MCP JSON contains no servers");
+  return candidates;
 }
 
-async function selectCurrentFirst<T extends string>(
-  ctx: ExtensionContext,
-  title: string,
-  current: T,
-  choices: readonly T[],
-): Promise<T | undefined> {
-  const ordered = [current, ...choices.filter((choice) => choice !== current)];
-  return await ctx.ui.select(title, ordered) as T | undefined;
+function validateMcpServerEntry(value: unknown): ServerEntry {
+  if (!isRecord(value)) throw new Error("Each MCP server must be a JSON object");
+  const entry = value as ServerEntry;
+  if (typeof entry.command !== "string" && typeof entry.url !== "string") {
+    throw new Error("Each MCP server needs a string command or URL");
+  }
+  if (entry.command !== undefined && typeof entry.command !== "string") throw new Error("MCP command must be a string");
+  if (entry.url !== undefined) normalizeHttpUrl(entry.url);
+  if (entry.args !== undefined && (!Array.isArray(entry.args) || !entry.args.every((arg) => typeof arg === "string"))) {
+    throw new Error("MCP arguments must be a JSON array of strings");
+  }
+  validateStringRecord(entry.env, "MCP environment");
+  validateStringRecord(entry.headers, "MCP headers");
+  if (entry.lifecycle !== undefined && !["lazy", "keep-alive", "eager"].includes(entry.lifecycle)) {
+    throw new Error("MCP lifecycle must be lazy, keep-alive, or eager");
+  }
+  if (entry.auth !== undefined && entry.auth !== "oauth" && entry.auth !== "bearer" && entry.auth !== false) {
+    throw new Error("MCP authentication must be oauth, bearer, or false");
+  }
+  if (entry.directTools !== undefined && entry.directTools !== true && entry.directTools !== false
+    && (!Array.isArray(entry.directTools) || !entry.directTools.every((tool) => typeof tool === "string"))) {
+    throw new Error("MCP directTools must be a boolean or string array");
+  }
+  if (entry.excludeTools !== undefined && (!Array.isArray(entry.excludeTools) || !entry.excludeTools.every((tool) => typeof tool === "string"))) {
+    throw new Error("MCP excludeTools must be a string array");
+  }
+  if (entry.requestTimeoutMs !== undefined && (!Number.isInteger(entry.requestTimeoutMs) || entry.requestTimeoutMs <= 0)) {
+    throw new Error("MCP requestTimeoutMs must be a positive integer");
+  }
+  return entry;
+}
+
+function validateStringRecord(value: unknown, label: string): void {
+  if (value === undefined) return;
+  if (!isRecord(value) || !Object.values(value).every((item) => typeof item === "string")) {
+    throw new Error(`${label} must be a JSON object with string values`);
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === "object" && !Array.isArray(value);
 }
 
 export function parseStringArray(value: string, label: string): string[] {
@@ -386,30 +263,16 @@ export function normalizeHttpUrl(value: string): string {
   return normalized;
 }
 
-function optionalPositiveInteger(value: string, label: string): number | undefined {
-  if (!value.trim()) return undefined;
-  const parsed = Number(value);
-  if (!Number.isInteger(parsed) || parsed <= 0) throw new Error(`${label} must be a positive integer`);
-  return parsed;
-}
-
 function required(value: string, label: string): string {
   const normalized = value.trim();
   if (!normalized) throw new Error(`${label} is required`);
   return normalized;
 }
 
-function authChoice(entry: ServerEntry | undefined): "Auto detect" | "OAuth" | "Bearer token from env" | "No authentication" {
-  if (entry?.auth === "oauth") return "OAuth";
-  if (entry?.auth === "bearer") return "Bearer token from env";
-  if (entry?.auth === false) return "No authentication";
-  return "Auto detect";
-}
-
 function scopeLabel(scope: McpManagedServer["scope"]): string {
-  if (scope === "user") return "User";
-  if (scope === "project") return "Project";
-  return "Imported";
+  if (scope === "user") return "用户";
+  if (scope === "project") return "项目";
+  return "导入";
 }
 
 function errorMessage(error: unknown): string {

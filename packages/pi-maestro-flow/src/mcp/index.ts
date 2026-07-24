@@ -158,7 +158,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
   pi.on("tool_result", (event) => toolErrorOverride(event.details));
 
   pi.registerCommand("mcp", {
-    description: "Show MCP server status",
+    description: "管理 MCP 服务与配置",
     handler: async (args, ctx) => {
       if (!state && initPromise) {
         try {
@@ -186,6 +186,14 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         case "tools":
           await showTools(state, ctx);
           break;
+        case "direct": {
+          const result = await openMcpPanel(state, pi, ctx, earlyConfigPath);
+          if (result?.configChanged) {
+            await ctx.reload();
+            return;
+          }
+          break;
+        }
         case "setup": {
           const result = await openMcpSetup(state, pi, ctx, earlyConfigPath, "setup");
           if (result?.configChanged) {
@@ -196,6 +204,15 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         }
         case "manage":
         case "manager": {
+          const result = await openMcpManager(state, pi, ctx, earlyConfigPath);
+          if (result.configChanged) {
+            await ctx.reload();
+            return;
+          }
+          break;
+        }
+        case "config":
+        case "配置": {
           const result = await openMcpManager(state, pi, ctx, earlyConfigPath);
           if (result.configChanged) {
             await ctx.reload();
@@ -216,7 +233,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         case "":
         default:
           if (ctx.hasUI) {
-            const result = await openMcpPanel(state, pi, ctx, earlyConfigPath);
+            const result = await openMcpManager(state, pi, ctx, earlyConfigPath);
             if (result?.configChanged) {
               await ctx.reload();
               return;
@@ -226,27 +243,6 @@ export default function mcpAdapter(pi: ExtensionAPI) {
           }
           break;
       }
-    },
-  });
-
-  pi.registerCommand("mcp-manager", {
-    description: "Manage MCP server configuration",
-    handler: async (_args, ctx) => {
-      if (!state && initPromise) {
-        try {
-          state = await initPromise;
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error);
-          if (ctx.hasUI) ctx.ui.notify(`MCP initialization failed: ${message}`, "error");
-          return;
-        }
-      }
-      if (!state) {
-        if (ctx.hasUI) ctx.ui.notify("MCP not initialized", "error");
-        return;
-      }
-      const result = await openMcpManager(state, pi, ctx, earlyConfigPath);
-      if (result.configChanged) await ctx.reload();
     },
   });
 

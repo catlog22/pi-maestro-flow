@@ -3,7 +3,9 @@ import {
   getPiGlobalConfigPath,
   getProjectConfigPath,
   getServerProvenance,
-  loadMcpConfig,
+  loadMcpManagementConfig,
+  readMcpConfigDocument,
+  writeMcpConfigDocument,
   writeManagedServerEntry,
 } from "./config.ts";
 import type { McpConfig, ServerEntry } from "./types.ts";
@@ -43,7 +45,7 @@ export class McpManagerStore {
   ) {}
 
   async load(): Promise<McpManagerSnapshot> {
-    const config = loadMcpConfig(this.overridePath, this.cwd);
+    const config = loadMcpManagementConfig(this.overridePath, this.cwd);
     const provenance = getServerProvenance(this.overridePath, this.cwd);
     const userPath = getPiGlobalConfigPath(this.overridePath);
     const projectPath = getProjectConfigPath(this.cwd);
@@ -84,6 +86,29 @@ export class McpManagerStore {
     if (server.readOnly) throw new Error(`Imported server "${server.name}" is read-only`);
     await serializeMutation(server.path, () => {
       deleteManagedServerEntry(server.path, server.name);
+    });
+    return this.load();
+  }
+
+  async toggle(server: McpManagedServer): Promise<McpManagerSnapshot> {
+    return this.save({
+      previousName: server.readOnly ? undefined : server.name,
+      name: server.name,
+      entry: { ...server.entry, enabled: server.entry.enabled === false },
+      scope: server.scope === "project" ? "project" : "user",
+      allowImportedOverride: server.readOnly,
+    });
+  }
+
+  getEditableConfig(): { path: string; text: string } {
+    const path = getPiGlobalConfigPath(this.overridePath);
+    return { path, text: readMcpConfigDocument(path) };
+  }
+
+  async replaceEditableConfig(text: string): Promise<McpManagerSnapshot> {
+    const path = getPiGlobalConfigPath(this.overridePath);
+    await serializeMutation(path, () => {
+      writeMcpConfigDocument(path, text);
     });
     return this.load();
   }

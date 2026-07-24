@@ -182,6 +182,20 @@ export function getMcpDiscoverySummary(overridePath?: string, cwd = process.cwd(
 }
 
 export function loadMcpConfig(overridePath?: string, cwd = process.cwd()): McpConfig {
+  const config = loadMcpManagementConfig(overridePath, cwd);
+  return {
+    ...config,
+    mcpServers: Object.fromEntries(
+      Object.entries(config.mcpServers).filter(([, entry]) => entry.enabled !== false),
+    ),
+  };
+}
+
+/**
+ * Loads every configured server, including servers disabled through the manager.
+ * Runtime code must use loadMcpConfig so disabled entries are never connected.
+ */
+export function loadMcpManagementConfig(overridePath?: string, cwd = process.cwd()): McpConfig {
   let config: McpConfig = { mcpServers: {} };
 
   for (const source of getConfigSources(overridePath, cwd)) {
@@ -600,6 +614,34 @@ export function writeSharedServerEntry(filePath: string, serverName: string, ent
   servers[serverName] = entry;
   setServersObject(raw, servers);
   writeRawConfigObject(filePath, raw);
+  return filePath;
+}
+
+export function readMcpConfigDocument(filePath: string): string {
+  if (!existsSync(filePath)) return serializeRawConfig({ mcpServers: {} });
+  const text = readFileSync(filePath, "utf-8");
+  return text.endsWith("\n") ? text : `${text}\n`;
+}
+
+export function writeMcpConfigDocument(filePath: string, text: string): string {
+  let raw: unknown;
+  try {
+    raw = JSON.parse(text);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`配置 JSON 无效：${message}`);
+  }
+
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("配置必须是 JSON 对象");
+  }
+  const config = raw as Record<string, unknown>;
+  const servers = config.mcpServers ?? config["mcp-servers"];
+  if (!servers || typeof servers !== "object" || Array.isArray(servers)) {
+    throw new Error("配置必须包含对象形式的 mcpServers");
+  }
+
+  writeRawConfigObject(filePath, config);
   return filePath;
 }
 

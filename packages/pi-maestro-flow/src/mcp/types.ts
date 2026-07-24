@@ -282,6 +282,8 @@ export interface OAuthConfig {
 
 // Server configuration
 export interface ServerEntry {
+  /** Whether this server is loaded. Defaults to true for existing configurations. */
+  enabled?: boolean;
   command?: string;
   args?: string[];
   env?: Record<string, string>;

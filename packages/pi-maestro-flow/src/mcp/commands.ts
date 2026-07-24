@@ -358,9 +358,6 @@ export async function openMcpManager(
   return runMcpManager(ctx, store, {
     status: (serverName) => callbacks.getConnectionStatus(serverName),
     toolNames: (serverName) => (state.toolMetadata.get(serverName) ?? []).map((tool) => tool.originalName),
-    canAuthenticate: callbacks.canAuthenticate,
-    reconnect: callbacks.reconnect,
-    authenticate: callbacks.authenticate,
   });
 }
 
