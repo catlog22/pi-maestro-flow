@@ -231,6 +231,20 @@ export function shouldActivateWorkflowSession(
   return workflowSessionOptedIn && shouldAttachWorkflowSession(snapshot);
 }
 
+/**
+ * A canonical Session is workspace-wide, so every Pi session can read it. The
+ * statusline must only surface the Session the current Pi session actually
+ * leases; otherwise an unattached session would display a Session owned by
+ * another Pi session.
+ */
+export function workflowSnapshotForAttachedSession(
+  snapshot: WorkflowSnapshotLike | undefined,
+  attachedSessionId: string | undefined,
+): WorkflowSnapshotLike | undefined {
+  const sessionId = snapshot?.session?.sessionId;
+  return sessionId && attachedSessionId === sessionId ? snapshot : undefined;
+}
+
 export function isWorkflowOptInCommand(command: string): boolean {
   if (/\bmaestro\s+ralph\b/.test(command)) return true;
   const runAction = /\bmaestro\s+run\s+([\w-]+)/.exec(command)?.[1];
@@ -1043,7 +1057,9 @@ When NOT to use:
   });
 
   // === Statusline ===
-  installStatusline(pi, () => state, () => workflowSnapshotForUi());
+  installStatusline(pi, () => state, () =>
+    workflowSnapshotForAttachedSession(workflowSnapshotForUi(), attachedWorkflowSessionId),
+  );
 
   // === Maestro Panel (above editor) ===
   let widgetCtx: ExtensionContext | undefined;
@@ -1059,15 +1075,14 @@ When NOT to use:
     }
     if (!widgetCtx) return;
     const view = deriveWorkflowViewModel(workflowSnapshotForUi());
-    const goal = view?.goal;
     const runs = view?.runs;
-    if (tasks.length === 0 && !goal && !(runs && runs.length > 0)) {
+    if (tasks.length === 0 && !(runs && runs.length > 0)) {
       widgetCtx.ui.setWidget("todo-panel", undefined);
       return;
     }
     widgetCtx.ui.setWidget("todo-panel", () => ({
       render(width: number): string[] {
-        return renderTodoWidget(tasks, panelMode !== "collapsed", width, goal, runs);
+        return renderTodoWidget(tasks, panelMode !== "collapsed", width, runs);
       },
       invalidate() {},
     }), { placement: "aboveEditor" });
@@ -1239,6 +1254,8 @@ When NOT to use:
   pi.on("tool_call", (event) => onToolCallPlan(event));
 
   pi.on("before_agent_start", async (event) => {
+    // Pick up compaction settings edited while idle; cached again within the turn.
+    midTurnAutoCompaction.refreshSettings();
     // Plan owns the stable mode prompt; Goal only acknowledges continuation markers.
     const planResult = onBeforeAgentStartPlan(event);
     goalBeforeAgentStart(event);
@@ -1548,13 +1565,6 @@ const WCOLOR: Record<string, (s: string) => string> = {
   pending: dim,
 };
 
-interface WidgetGoalLike {
-  objective: string;
-  status: string;
-  tokensUsed?: number;
-  tokenBudget?: number;
-}
-
 interface WidgetRunLike {
   id: string;
   sequence?: number;
@@ -1570,14 +1580,12 @@ export function renderTodoWidget(
   tasks: TodoTaskLike[],
   expanded = false,
   width = 120,
-  goal?: WidgetGoalLike | null,
   runs?: readonly WidgetRunLike[] | null,
 ): string[] {
   const safeWidth = Math.max(1, width);
   const hasTasks = tasks.length > 0;
   const lines: string[] = [];
   if (hasTasks) lines.push(renderTodoSummary(tasks, expanded, safeWidth));
-  if (goal) lines.push(truncateToWidth(widgetGoalLine(goal, lines.length === 0), safeWidth, "…"));
   if (runs && runs.length > 0) lines.push(truncateToWidth(widgetRunsCountLine(runs, lines.length === 0), safeWidth, "…"));
   if (!expanded) return lines;
   if (runs && runs.length > 0) {
@@ -1650,14 +1658,6 @@ function workflowStatusColor(status: string): (s: string) => string {
   if (status === "failed") return red;
   if (status === "sealed" || status === "completed" || status === "ready") return green;
   return dim;
-}
-
-function widgetGoalLine(goal: WidgetGoalLike, topLevel: boolean): string {
-  const budget = goal.tokensUsed != null && goal.tokenBudget != null
-    ? dim(`  ${formatWidgetTokens(goal.tokensUsed)}/${formatWidgetTokens(goal.tokenBudget)}`)
-    : "";
-  const prefix = topLevel ? "" : "  ";
-  return `${prefix}${workflowStatusColor(goal.status)(workflowStatusLabel(goal.status as never))} ${goal.objective}${budget}`;
 }
 
 function widgetRunsCountLine(runs: readonly WidgetRunLike[], topLevel: boolean): string {

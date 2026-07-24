@@ -121,3 +121,11 @@ API Manager MUST 以 provider/modelId 为键持久化每模型 defaultThinkingLe
 teammate 子进程的网络/Provider 重试由 teammate 执行器负责；Pi 主 Agent 的 provider 重试由 Pi core 负责。两端必须复用同一纯错误分类、重试上限与退避策略；Flow 只能投影主 Agent 的 retrying 状态，不得绕过或重复 Pi core 重试器。等待 teammate 终态必须使用事件驱动 waiter，禁止循环调用 teammate-watch。
 
 </spec-entry>
+
+<spec-entry category="arch" keywords="api-manager,contextwindow,models.json,provider" date="2026-07-23" sid="S-20260723-nsgh" title="API Manager 管理模型上下文窗口" description="API Manager 的模型上下文窗口编辑与兼容规则" source="run:20260723-001-maestro-impeccable">
+
+### API Manager 管理模型上下文窗口
+
+自定义 Provider 的 contextWindow 必须作为模型级正整数由 API Manager 显式查看和修改，并写入 models.json；更新已有模型时若调用方未提供该值，必须保留已有 contextWindow，避免兼容调用静默回退默认值。
+
+</spec-entry>

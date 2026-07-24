@@ -1,0 +1,3 @@
+{"ts":"2026-07-23T22:37:26+08:00","type":"code","source":"packages/pi-maestro-flow/src/providers/api-provider-config.ts:86","relevance":"high","content":"Qwen provider default contextWindow is 400_000.","note":"Confirms source default."}
+{"ts":"2026-07-23T22:37:26+08:00","type":"config","source":"C:/Users/dyw/.pi/agent/models.json:59","relevance":"high","content":"maestro-qwen/qwen3.8-max-preview contextWindow is 400000.","note":"Confirms active local registration."}
+{"ts":"2026-07-23T22:37:26+08:00","type":"code","source":"packages/pi-maestro-flow/src/tui/compaction-settings.ts:495","relevance":"high","content":"Compaction TUI receives ctx.model.contextWindow without clamping.","note":"Disproves a TUI-side 400K cap."}

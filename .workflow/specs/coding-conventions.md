@@ -137,3 +137,27 @@ teammate 工具的参数归一化（单/多任务/chain 判定、顶层默认值
 对 provider 发送的非持久 context transform 一旦裁剪历史，必须在同一 compaction epoch 持续应用相同 replacement。最新 provider usage 已包含旧裁剪，只能扣除本轮新增节省；在 session compaction 或 reset 时清理裁剪 manifest。
 
 </spec-entry>
+
+<spec-entry category="coding" keywords="mcp enabled tui" date="2026-07-23" sid="S-20260723-k228" title="MCP 服务开关的加载边界" description="管理态与运行态分离，保证停用服务可见且不参与运行时加载。" source="master@ac980ed6">
+
+### MCP 服务开关的加载边界
+
+MCP 服务管理必须从完整配置读取，以显示 enabled: false 的服务；运行时必须通过 loadMcpConfig 过滤 enabled: false，确保停用服务不会连接或注册工具。完整 JSON 编辑器应写入 Pi 用户级配置并在当前界面保留保存结果。
+
+</spec-entry>
+
+<spec-entry category="coding" keywords="skill tui disable-model-invocation group" date="2026-07-23" sid="S-20260723-pju8" title="Skill 管理的加载与调用边界" description="约束 Skill TUI、native resource 加载和模型调用权限的一致性" source="master@6a8cac5a">
+
+### Skill 管理的加载与调用边界
+
+Skill 管理 TUI 必须从 Pi DefaultPackageManager 的完整 ResolvedResource 列表读取，使 disabled Skill 仍可见；加载开关必须写入 Pi SettingsManager resource override 并在 reload 后从 native ResourceLoader 排除。disable-model-invocation 必须同时从系统提示的 available_skills 隐藏并拒绝新的 Todo 工具激活，但允许已有 Skill activation 恢复。未加入自定义组的 Skill 按名称首个连字符前缀自动分组，组级开关批量复用单项持久化边界。
+
+</spec-entry>
+
+<spec-entry category="coding" keywords="compaction,tui,threshold,reservetokens" date="2026-07-23" sid="S-20260723-dqb7" title="派生阈值 TUI 直接编辑与底层映射" description="压缩阈值直接编辑并保持 Pi 配置兼容" source="run:20260723-001-maestro-impeccable">
+
+### 派生阈值 TUI 直接编辑与底层映射
+
+当用户目标是修改压缩阈值，而持久化格式仅提供 reserveTokens 时，TUI 必须优先展示并直接编辑 thresholdTokens = contextWindow - reserveTokens，确认后再换算回 reserveTokens；不得新增重复的 thresholdTokens 配置字段。缺少有效 contextWindow 时，界面必须明确降级为编辑预留输出空间。
+
+</spec-entry>

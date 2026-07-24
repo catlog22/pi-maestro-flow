@@ -9,6 +9,7 @@ import registerMaestroExtension, {
   shouldAttachWorkflowSession,
   shouldRestoreWorkflowGoal,
   todoActorFromTeammateStarted,
+  workflowSnapshotForAttachedSession,
 } from "../src/extension/index.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
@@ -32,6 +33,23 @@ test("Workflow Goal restore requires a workflow-owned Goal matching the canonica
   assert.equal(shouldRestoreWorkflowGoal("resume", { workflowSessionId: "session-other" }, snapshot), false);
   assert.equal(shouldRestoreWorkflowGoal("new", owned, snapshot), false);
   assert.equal(shouldRestoreWorkflowGoal("fork", owned, snapshot), false);
+});
+
+test("statusline snapshot is filtered to the Workflow Session the Pi session leases", () => {
+  const snapshot = workflowAttachSnapshot();
+  assert.equal(
+    workflowSnapshotForAttachedSession(snapshot, "session-1"),
+    snapshot,
+    "the leased Session must reach the statusline",
+  );
+  assert.equal(
+    workflowSnapshotForAttachedSession(snapshot, "session-other"),
+    undefined,
+    "a Session owned by another Pi session must stay hidden",
+  );
+  assert.equal(workflowSnapshotForAttachedSession(snapshot, undefined), undefined);
+  assert.equal(workflowSnapshotForAttachedSession(undefined, "session-1"), undefined);
+  assert.equal(workflowSnapshotForAttachedSession({ ...snapshot, session: undefined }, "session-1"), undefined);
 });
 
 test("teammate started events expose a Todo actor before the teammate calls Todo", () => {
@@ -192,18 +210,18 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     type?: string;
     additionalProperties?: boolean;
     required?: string[];
-    properties?: Record<string, { enum?: string[] }>;
+    properties?: Record<string, { enum?: string[]; description?: string }>;
     anyOf?: unknown;
   };
   assert.equal(goalSchema.type, "object", "provider function schemas must have an object root");
   assert.equal(goalSchema.anyOf, undefined, "provider function schemas must not use a root-level anyOf");
   assert.equal(goalSchema.additionalProperties, false);
   assert.deepEqual(goalSchema.required, ["action"]);
-  assert.deepEqual(goalSchema.properties?.action?.enum, ["get", "create", "update"]);
+  assert.deepEqual(goalSchema.properties?.action?.enum, ["get", "create", "update", "complete"]);
   assert.ok(goalSchema.properties?.objective);
   assert.ok(goalSchema.properties?.tokenBudget);
   assert.match(String(goalSchema.properties?.tokenBudget?.description), /omit for no budget/i);
-  assert.equal(goalSchema.properties?.summary, undefined);
+  assert.match(String(goalSchema.properties?.summary?.description), /complete/i);
   const renderGoalCall = goalTool.renderCall as unknown as (
     args: Record<string, unknown>,
     theme: { fg(name: string, text: string): string; bold(text: string): string },

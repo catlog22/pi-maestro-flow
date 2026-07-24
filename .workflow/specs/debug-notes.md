@@ -40,3 +40,11 @@ PlanStore 在清理 approval archive 前必须严格验证 manifest 的 revision
 teammate background acknowledgement 必须引导调用方结束当前 turn 并等待自动 teammate-complete 通知。若当前 turn 必须消费结果，只调用一次带有限 timeout 的 teammate-wait。teammate-watch 和 teammate-list 仅用于一次性检查，不得作为完成轮询机制；result-ready 已可返回结果，不应只为等待 agent_end 继续阻塞。
 
 </spec-entry>
+
+<spec-entry category="debug" keywords="compaction mid-turn file-operations race" date="2026-07-23" sid="S-20260723-rflx" title="Mid-turn 压缩必须与 Pi 原生压缩仲裁" description="避免 mid-turn manual API 与 Pi 原生 auto-compaction 竞态" source="learn:20260723-001-learn">
+
+### Mid-turn 压缩必须与 Pi 原生压缩仲裁
+
+保留基于已完成 file-operation/tool-result checkpoint 的 mid-turn 检测，但不得在 context hook 内与 Pi 原生 threshold/overflow auto-compaction 并发提交。自动 intent 应在 agent settled 后重读 branch 并由单一 owner 提交；自动完成后继续任务，用户手动 /compact 完成后保持 idle。调用前 prepareCompaction 不是互斥锁，必须防止 TOCTOU 导致 Already compacted。
+
+</spec-entry>
