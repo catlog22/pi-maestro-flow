@@ -58,9 +58,17 @@ export class RunCliAdapter {
 
   async capabilities(refresh = false): Promise<RunCliCapabilities> {
     if (this.detected && !refresh) return this.detected;
-    const help = await this.invoke(["run", "--help"]);
     const commands = new Set<string>();
-    for (const match of help.stdout.matchAll(/^\s{2}([a-z][a-z-]*)\b/gm)) commands.add(match[1]);
+    // Detect run-level commands (brief, check, prepare, create, ...)
+    const runHelp = await this.invoke(["run", "--help"]);
+    for (const match of runHelp.stdout.matchAll(/^\s{2}([a-z][a-z-]*)\b/gm)) commands.add(match[1]);
+    // Detect session-level commands (next, done, decide, seal, ...)
+    try {
+      const sessionHelp = await this.invoke(["session", "--help"]);
+      for (const match of sessionHelp.stdout.matchAll(/^\s{2}([a-z][a-z-]*)\b/gm)) commands.add(match[1]);
+    } catch {
+      // Older maestro without session command — fall back to run aliases
+    }
     this.detected = { commands };
     return this.detected;
   }
@@ -92,8 +100,9 @@ export class RunCliAdapter {
   async next(sessionId: string, pick?: string): Promise<RunCliResult> {
     await this.requireCommand("next");
     return this.invoke([
-      "run", "next",
+      "session", "next",
       "--session", required(sessionId, "sessionId"),
+      "--inline-brief",
       ...(pick ? ["--pick", pick] : []),
       "--json",
       "--workflow-root", this.workflowRoot,
@@ -101,9 +110,9 @@ export class RunCliAdapter {
   }
 
   async done(runId: string, sessionId: string, options: RunDoneOptions = {}): Promise<RunCliResult> {
-    await this.requireCommand("complete");
+    await this.requireCommand("done");
     return this.invoke([
-      "run", "complete", required(runId, "runId"),
+      "session", "done", required(runId, "runId"),
       "--session", required(sessionId, "sessionId"),
       "--verdict", options.verdict ?? "done",
       ...(options.summary ? ["--summary", options.summary] : []),
@@ -118,6 +127,9 @@ export class RunCliAdapter {
   }
 
   async edit(commands: readonly string[], options: RunEditOptions): Promise<RunCliResult> {
+    // run edit is the unified chain-edit interface (insert/skip/replace via flags).
+    // session chain insert/skip/replace are the split subcommands but run edit
+    // remains the stable machine protocol for programmatic callers.
     await this.requireCommand("edit");
     return this.invoke([
       "run", "edit", ...commands,

@@ -55,8 +55,8 @@ npm --prefix packages/pi-maestro-flow run test:conversion
 npm --prefix packages/pi-maestro-flow run check:maestro-run-cli
 ```
 
-Generated human-facing prompts use `maestro run start`, `maestro run done`,
-`maestro run edit`, and simple `--chain` commands. `session create --chain-file` is
+Generated human-facing prompts use `maestro session start`, `maestro session done`,
+`maestro session chain edit`, and simple `--chain` commands. `session create --chain-file` is
 reserved for coordinator chains that require structured decision or decomposition data.
 
 ## Skills Categories

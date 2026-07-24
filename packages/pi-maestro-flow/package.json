@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.4.14",
+  "version": "0.5.0",
   "description": "Pi extension for Maestro knowledge and workflow orchestration with teammate dispatch",
   "type": "module",
   "engines": {
@@ -26,7 +26,7 @@
     "test:swarm": "node --experimental-transform-types --test test/swarm-projection.test.ts test/swarm-tui.test.ts",
     "test:packed": "node --test test/packed-consumer-e2e.test.mjs",
     "test:packed-todo": "node --test test/packed-todo-consumer.test.mjs",
-    "test:intelligence": "node --experimental-transform-types --test test/search-tool-bm25.test.ts test/smart-search.test.ts test/smart-search-config.test.ts test/lsp-client.test.ts test/lsp-manager.test.ts test/lsp-tool.test.ts test/lsp-auto-diagnostics.test.ts test/lsp-output.test.ts test/workspace-edit.test.ts test/browser-tool.test.ts test/extension-tools.test.ts",
+    "test:intelligence": "node --experimental-transform-types --test test/search-tool-bm25.test.ts test/smart-search.test.ts test/smart-search-config.test.ts test/lsp-client.test.ts test/lsp-manager.test.ts test/lsp-tool.test.ts test/lsp-output.test.ts test/lsp-auto-diagnostics.test.ts test/workspace-edit.test.ts test/browser-tool.test.ts test/extension-tools.test.ts test/fff.test.ts",
     "check:mcp": "tsc -p tsconfig.mcp.json",
     "check:types": "tsc -p tsconfig.intelligence.json"
   },
@@ -70,6 +70,7 @@
   },
   "dependencies": {
     "@earendil-works/pi-tui": "0.74.0",
+    "@ff-labs/fff-node": "0.10.1",
     "@konbakuyomu/smart-search": "https://codeload.github.com/konbakuyomu/smartsearch/tar.gz/667c465d0f6ea16a423f03c434f94e21505d3595",
     "@modelcontextprotocol/ext-apps": "1.7.4",
     "@modelcontextprotocol/sdk": "1.29.0",
