@@ -736,16 +736,26 @@ test("unbound and mismatched Goals exclude unrelated canonical Workflow evidence
   initGoal({ appendEntry() {} } as never);
   const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
   const sessionOne = completionReadyWorkflowSnapshot("session-1");
-  let currentSnapshot = sessionOne;
+  const unrelatedLegacy = completionReadyWorkflowSnapshot("legacy-a", "legacy:legacy-a:1");
+  unrelatedLegacy.source = "legacy";
+  unrelatedLegacy.canonicalClaim = undefined;
+  unrelatedLegacy.session!.activeRunId = null;
+  unrelatedLegacy.session!.chain[0]!.status = "skipped";
+  let currentSnapshot = unrelatedLegacy;
   setWorkflowCoordinator({ status: () => currentSnapshot } as never);
   onSessionStart(ctx);
 
   try {
+    assert.deepEqual(canonicalCompletionBlockers(unrelatedLegacy), [
+      "Step execute (execute) is skipped",
+    ]);
     await executeGoal({ action: "create", objective: "Independent user Goal" }, ctx);
-    await executeGoal({
+    const independentResult = await executeGoal({
       action: "complete",
       summary: "The independent Goal work is complete.",
     }, ctx);
+    assert.doesNotMatch(independentResult.text, /canonical Workflow is blocked/i);
+    assert.match(independentResult.text, /supplied evidence is insufficient/i);
     assert.match(
       tasks[0] ?? "",
       /"relatedCanonicalWorkflowEvidence": "\(Unavailable: this Goal is not bound to a canonical Workflow Session\.\)"/,
@@ -788,10 +798,11 @@ test("canonical blockers prevent verifier startup and use one Workflow snapshot"
       },
     };
   });
+  const snapshot = workflowSnapshot();
   setWorkflowCoordinator({
     status() {
       statusCalls++;
-      return workflowSnapshot();
+      return snapshot;
     },
   } as never);
   initGoal({ appendEntry() {} } as never);
@@ -799,7 +810,7 @@ test("canonical blockers prevent verifier startup and use one Workflow snapshot"
   onSessionStart(ctx);
 
   try {
-    await executeGoal({ action: "create", objective: "Do not bypass canonical blockers" }, ctx);
+    reconcileWorkflowGoal(snapshot, ctx);
     const result = await executeGoal({
       action: "complete",
       summary: "Request completion while the canonical Run is blocked.",

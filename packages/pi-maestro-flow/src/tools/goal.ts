@@ -537,10 +537,7 @@ async function runVerifier(
   try {
     const sessionEvidence = collectVerifierEvidence(ctx, goal.startedAt)
       || "(Unavailable: no post-start session evidence was captured for this Goal.)";
-    const hasMatchingWorkflowSession = goal.workflowSessionId !== undefined
-      && goal.workflowSessionGeneration !== undefined
-      && goal.workflowSessionId === snapshot?.session?.sessionId
-      && goal.workflowSessionGeneration === snapshot?.sessionGeneration;
+    const hasMatchingWorkflowSession = hasMatchingWorkflowBinding(goal, snapshot);
     const canonicalEvidence = hasMatchingWorkflowSession
       ? buildCanonicalEvidence(snapshot)
         || "(Unavailable: the bound canonical Workflow Session has no evidence to report.)"
@@ -987,6 +984,19 @@ export function canonicalCompletionBlockers(snapshot: WorkflowSnapshot | undefin
   return [...new Set(blockers)];
 }
 
+function hasMatchingWorkflowBinding(
+  goal: Pick<ActiveGoal, "workflowSessionId" | "workflowSessionGeneration">,
+  snapshot: WorkflowSnapshot | undefined,
+): boolean {
+  if (!goal.workflowSessionId || !snapshot) return false;
+  if (snapshot.canonicalClaim?.status === "invalid") {
+    return snapshot.canonicalClaim.activeSessionId === goal.workflowSessionId;
+  }
+  return goal.workflowSessionGeneration !== undefined
+    && goal.workflowSessionId === snapshot.session?.sessionId
+    && goal.workflowSessionGeneration === snapshot.sessionGeneration;
+}
+
 export function buildCanonicalEvidence(snapshot: WorkflowSnapshot | undefined): string {
   if (snapshot?.canonicalClaim?.status === "invalid") {
     return boundedSecretText(canonicalCompletionBlockers(snapshot)[0] ?? "", MAX_VERIFIER_EVIDENCE_CHARS);
@@ -1101,7 +1111,9 @@ async function verifyGoalCompletion(
   }
 
   const workflowSnapshot = workflowCoordinator?.status();
-  const canonicalBlockers = canonicalCompletionBlockers(workflowSnapshot);
+  const canonicalBlockers = hasMatchingWorkflowBinding(activeGoal, workflowSnapshot)
+    ? canonicalCompletionBlockers(workflowSnapshot)
+    : [];
   if (canonicalBlockers.length > 0) {
     updateUsage(activeGoal, ctx);
     persistGoal(activeGoal);
