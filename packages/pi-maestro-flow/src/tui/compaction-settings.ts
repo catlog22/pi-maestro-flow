@@ -24,6 +24,7 @@ import {
   type CompactionSettingsSnapshot,
   type SoftCompactionConfigPatch,
 } from "../compaction/compaction-settings.ts";
+import { effectiveReserveTokens, MIN_RESERVE_RATIO } from "../compaction/auto-compaction.ts";
 
 type CompactionField = typeof COMPACTION_FIELDS[number];
 type MenuItem = "threshold" | "enabled" | "keepRecentTokens" | "softEnabled";
@@ -244,15 +245,32 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       const contextWindow = this.params.contextWindow;
       if (contextWindow) {
         const reserve = contextWindow - Number(this.editValue);
+        const validReserve = Number.isSafeInteger(reserve) && reserve > 0;
         rows.push(
           fitLine(`上下文窗口 · ${formatNumber(contextWindow)} Token`, inner),
           fitLine(
-            Number.isSafeInteger(reserve) && reserve > 0
+            validReserve
               ? `保存后预留输出 · ${formatNumber(reserve)} Token`
               : "保存后预留输出 · 必须大于 0 Token",
             inner,
           ),
         );
+        if (validReserve) {
+          const ratioPct = Math.round(MIN_RESERVE_RATIO * 100);
+          const ratioFloor = Math.floor(contextWindow * MIN_RESERVE_RATIO);
+          const maxOutput = this.params.maxTokens ?? 0;
+          const effective = effectiveReserveTokens({ reserveTokens: reserve }, contextWindow, this.params.maxTokens);
+          const trigger = contextWindow - effective;
+          const triggerPct = Math.round((trigger / contextWindow) * 100);
+          rows.push(
+            fitLine(`最大输出 · ${formatNumber(maxOutput)} Token`, inner),
+            this.params.theme.fg("accent", fitLine(
+              `公式 · max(配置 ${formatNumber(reserve)}, 窗口${ratioPct}% ${formatNumber(ratioFloor)}, 输出 ${formatNumber(maxOutput)})`,
+              inner,
+            )),
+            fitLine(`有效预留 = ${formatNumber(effective)} · 约 ${formatNumber(trigger)} (${triggerPct}%) 触发压缩`, inner),
+          );
+        }
       } else {
         rows.push(this.params.theme.fg("warning", fitLine(
           "△ 当前模型缺少上下文窗口，正在编辑预留输出空间",

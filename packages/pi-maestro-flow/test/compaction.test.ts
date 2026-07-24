@@ -26,8 +26,10 @@ import {
   derivePressureBand,
   EMPTY_VELOCITY_TRACKER,
   endsWithCompleteToolResultBatch,
+  effectiveReserveTokens,
   estimateContextTokens,
   MAX_CONSECUTIVE_COMPACTION_FAILURES,
+  MAX_OUTPUT_LIMIT_COMPACTIONS,
   observeVelocity,
   recordCompactionFailure,
   redundantToolResultCallIds,
@@ -1093,6 +1095,137 @@ test("Maestro compaction recomputes knowhow paths and rejects cross-session deta
   }
 });
 
+test("effective reserve integrates context window, configured ceiling, and max output", () => {
+  assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 8_000), 40_000, "ratio floor dominates when max output is small");
+  assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 64_000), 64_000, "max output dominates to guarantee room for a full response");
+  assert.equal(effectiveReserveTokens({ reserveTokens: 80_000 }, 400_000, 64_000), 80_000, "explicit larger configured ceiling is honored");
+  assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 900_000), 360_000, "max output is capped below the window so compaction stays enabled");
+  assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 100_000), 16_384, "small window keeps the absolute reserve");
+});
+
+test("shouldCompactMidTurn triggers around 90% on a large window instead of hugging the limit", () => {
+  const settings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 10 };
+  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(368_000), contextWindow: 400_000, settings }), true, "92% now compacts proactively");
+  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(340_000), contextWindow: 400_000, settings }), false, "85% stays below the proactive threshold");
+});
+
+test("shouldCompactMidTurn reserves room for the model max output", () => {
+  const settings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 10 };
+  // 400K window, maxTokens 64K → effective reserve 64K → trigger at 336K (84%).
+  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(350_000), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }), true, "87.5% exceeds the max-output-aware trigger");
+  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(330_000), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }), false, "82.5% stays below the max-output-aware trigger");
+});
+
+test("output-limit guard compacts and continues when a length stop hits high context pressure", async () => {
+  const sent: string[] = [];
+  let complete: (() => void) | undefined;
+  let compactCalls = 0;
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100, soft: { enabled: true, nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 } }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000 },
+    getContextUsage: () => ({ tokens: 376_000, contextWindow: 400_000, percent: 94 }),
+    hasPendingMessages: () => false,
+    compact(options: { onComplete(): void }) { compactCalls++; complete = options.onComplete; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  assert.equal(compactCalls, 1);
+  complete?.();
+  assert.equal(sent.length, 1);
+  assert.match(sent[0] ?? "", /output token limit/);
+  assert.match(sent[0] ?? "", /Continue/);
+});
+
+test("output-limit guard ignores a length stop below the pressure threshold", async () => {
+  let compactCalls = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100, soft: { enabled: true, nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 } }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000 },
+    getContextUsage: () => ({ tokens: 200_000, contextWindow: 400_000, percent: 50 }),
+    hasPendingMessages: () => false,
+    compact() { compactCalls++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  assert.equal(compactCalls, 0);
+});
+
+test("output-limit guard ignores a normal stop and resets its breaker", async () => {
+  let compactCalls = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100, soft: { enabled: true, nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 } }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000 },
+    getContextUsage: () => ({ tokens: 376_000, contextWindow: 400_000, percent: 94 }),
+    hasPendingMessages: () => false,
+    compact() { compactCalls++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch("stop"), ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  assert.equal(compactCalls, 2, "a normal stop resets the breaker so the next length stop compacts again");
+});
+
+test("output-limit guard stops compacting after the breaker cap", async () => {
+  let compactCalls = 0;
+  const notifications: string[] = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100, soft: { enabled: true, nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 } }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000 },
+    getContextUsage: () => ({ tokens: 376_000, contextWindow: 400_000, percent: 94 }),
+    hasPendingMessages: () => false,
+    compact() { compactCalls++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
+  } as never;
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  assert.equal(compactCalls, MAX_OUTPUT_LIMIT_COMPACTIONS);
+  assert.equal(notifications.length, 1);
+  assert.match(notifications[0] ?? "", /output token limit/i);
+});
+
+test("output-limit guard defers when a continuation is already queued", async () => {
+  let compactCalls = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100, soft: { enabled: true, nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 } }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000 },
+    getContextUsage: () => ({ tokens: 376_000, contextWindow: 400_000, percent: 94 }),
+    hasPendingMessages: () => true,
+    compact() { compactCalls++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  assert.equal(compactCalls, 0);
+});
+
 function pressureToolBatch() {
   return [{
     role: "assistant",
@@ -1104,6 +1237,29 @@ function pressureToolBatch() {
     toolName: "read",
     content: [{ type: "text", text: "small" }],
     isError: false,
+  }] as never;
+}
+
+function highUsageToolBatch(inputTokens: number) {
+  return [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call", name: "read", arguments: {} }],
+    usage: { input: inputTokens, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "call",
+    toolName: "read",
+    content: [{ type: "text", text: "small" }],
+    isError: false,
+  }] as never;
+}
+
+function lengthTruncatedBatch(stopReason = "length") {
+  return [{
+    role: "assistant",
+    content: [{ type: "text", text: "partial response that was cut off" }],
+    stopReason,
+    usage: { input: 376_000, output: 24_000, cacheRead: 0, cacheWrite: 0 },
   }] as never;
 }
 

@@ -1,4 +1,4 @@
-export type CompactionRequestOwner = "mid-turn" | "plan-handoff";
+export type CompactionRequestOwner = "mid-turn" | "plan-handoff" | "output-limit";
 export type CompactionOwner = CompactionRequestOwner | "native";
 
 export interface CompactionLease {

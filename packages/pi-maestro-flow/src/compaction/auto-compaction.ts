@@ -31,6 +31,9 @@ const TOKEN_RATIO_CODE = 3.5;
 const TOKEN_RATIO_WHITESPACE_HEAVY = 6;
 const TOKEN_RATIO_DEFAULT = 4;
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
+const OUTPUT_LIMIT_CONTINUE_PROMPT = "Your previous response was cut off at the model output token limit, and the context was just compacted to free room. Continue exactly from where the interrupted response stopped and complete it. Do not restart or wait for another user request.";
+const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
+export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
 const PRUNE_STATE_VERSION = 1;
 
@@ -137,6 +140,8 @@ interface AutoCompactionState {
   breakerTrippedAtTurn?: number;
   breakerNotified: boolean;
   turnCount: number;
+  outputLimitCompactions: number;
+  outputLimitBreakerNotified: boolean;
 }
 
 interface AutoCompactionDependencies {
@@ -159,6 +164,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   onSessionStart(ctx: ExtensionContext): void;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
   onAgentEnd(ctx: ExtensionContext): void;
+  onOutputLimit(messages: AgentMessage[], ctx: ExtensionContext): Promise<void>;
   onCompact(): void;
   reset(ctx?: ExtensionContext): void;
   refreshSettings(): void;
@@ -174,6 +180,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     consecutiveFailures: 0,
     breakerNotified: false,
     turnCount: 0,
+    outputLimitCompactions: 0,
+    outputLimitBreakerNotified: false,
   };
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
@@ -199,6 +207,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.breakerTrippedAtTurn = undefined;
       state.breakerNotified = false;
       state.turnCount = 0;
+      state.outputLimitCompactions = 0;
+      state.outputLimitBreakerNotified = false;
       publishIdleStatus(ctx, settingsFor(ctx).enabled);
     },
     async evaluate(messages, ctx) {
@@ -225,10 +235,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         persistPruneManifest(pi, state);
         return stable.prunedToolResults > 0 ? stable.messages : undefined;
       }
+      const effectiveSettings: CompactionSettings = {
+        ...settings,
+        reserveTokens: effectiveReserveTokens(settings, ctx.model.contextWindow, ctx.model.maxTokens),
+      };
       const pressure = applyContextPressurePolicy(
         messages,
         ctx.model.contextWindow,
-        settings,
+        effectiveSettings,
         state.pruneManifest,
         state.velocityTracker,
       );
@@ -327,7 +341,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const instructions = buildMidTurnInstructions(
         estimate,
         ctx.model.contextWindow,
-        settings.reserveTokens,
+        effectiveSettings.reserveTokens,
       );
       try {
         ctx.compact({
@@ -367,6 +381,69 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         clearPressureStatus(ctx);
       }
     },
+    async onOutputLimit(messages, ctx) {
+      const settings = settingsFor(ctx);
+      const finalStopReason = finalAssistantStopReason(messages);
+      if (!settings.enabled || !ctx.model || finalStopReason !== "length") {
+        state.outputLimitCompactions = 0;
+        state.outputLimitBreakerNotified = false;
+        return;
+      }
+      const usage = ctx.getContextUsage?.();
+      const threshold = settings.soft?.pruneRatio ?? DEFAULT_OUTPUT_LIMIT_RATIO;
+      if (usage?.percent == null || usage.percent / 100 < threshold) return;
+      if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS) {
+        if (!state.outputLimitBreakerNotified) {
+          state.outputLimitBreakerNotified = true;
+          ctx.ui.notify(
+            `Output-limit compaction stopped after ${state.outputLimitCompactions} attempts; the response keeps hitting the model output token limit. Raise maxTokens or reduce per-response size.`,
+            "warning",
+          );
+        }
+        return;
+      }
+      if (ctx.hasPendingMessages?.()) return;
+      if (dependencies.arbiter?.currentOwner()) return;
+      let internals: PiCompactionInternals;
+      try {
+        internals = await loadInternals();
+      } catch {
+        return;
+      }
+      const branch = ctx.sessionManager.getBranch();
+      let preparation: unknown;
+      try {
+        preparation = internals.prepareCompaction(branch, settings);
+      } catch {
+        return;
+      }
+      if (!preparation) return;
+      const lease = dependencies.arbiter?.request("output-limit");
+      if (dependencies.arbiter && !lease) return;
+      state.outputLimitCompactions += 1;
+      const instructions = buildOutputLimitInstructions(usage, effectiveReserveTokens(settings, ctx.model.contextWindow, ctx.model.maxTokens));
+      const failOutputLimit = (error: unknown) => {
+        lease?.release();
+        ctx.ui.notify(`Output-limit compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+      };
+      try {
+        ctx.compact({
+          customInstructions: lease?.tagInstructions(instructions) ?? instructions,
+          onComplete: () => {
+            lease?.release();
+            if (ctx.hasPendingMessages?.()) return;
+            try {
+              pi.sendUserMessage(OUTPUT_LIMIT_CONTINUE_PROMPT, { deliverAs: "followUp" });
+            } catch (error) {
+              ctx.ui.notify(`Output-limit continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+            }
+          },
+          onError: failOutputLimit,
+        });
+      } catch (error) {
+        failOutputLimit(error);
+      }
+    },
     onCompact() {
       state.pruneManifest.clear();
       state.restoredPruneIds.clear();
@@ -377,6 +454,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.consecutiveFailures = 0;
       state.breakerTrippedAtTurn = undefined;
       state.breakerNotified = false;
+      state.outputLimitCompactions = 0;
+      state.outputLimitBreakerNotified = false;
     },
     reset(ctx) {
       state.generation += 1;
@@ -397,6 +476,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.breakerTrippedAtTurn = undefined;
       state.breakerNotified = false;
       state.turnCount = 0;
+      state.outputLimitCompactions = 0;
+      state.outputLimitBreakerNotified = false;
       persistPruneManifest(pi, state);
       if (ctx) {
         clearPressureStatus(ctx);
@@ -407,6 +488,39 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.settingsSnapshot = undefined;
     },
   };
+}
+
+/**
+ * Minimum context-window fraction kept free when neither the configured reserve
+ * nor the model's max output demand more. A fixed absolute reserve (e.g. 16K)
+ * sits dangerously close to 100% on large windows — 400K would only trigger
+ * compaction past 95.9% — so this ratio floor keeps compaction starting around
+ * 90% regardless of window size.
+ */
+export const MIN_RESERVE_RATIO = 0.1;
+
+/**
+ * Derive the reserve that drives the proactive compaction trigger from the
+ * model's real limits:
+ * - the configured reserve (the user's compaction ceiling), honored as a floor;
+ * - a ratio of the context window, so large windows still keep output room;
+ * - the model's maximum single-response output, so the trigger never sits closer
+ *   to the limit than one full response and a max-size response cannot truncate
+ *   against the context window.
+ * The max-output term is capped below the window so compaction always retains a
+ * usable recent context and never disables itself.
+ */
+export function effectiveReserveTokens(
+  settings: Pick<CompactionSettings, "reserveTokens">,
+  contextWindow: number,
+  modelMaxTokens?: number,
+): number {
+  const ratioFloor = Math.floor(contextWindow * MIN_RESERVE_RATIO);
+  let reserve = Math.max(settings.reserveTokens, ratioFloor);
+  if (typeof modelMaxTokens === "number" && modelMaxTokens > reserve) {
+    reserve = Math.min(modelMaxTokens, contextWindow - ratioFloor);
+  }
+  return reserve;
 }
 
 export function applyContextPressurePolicy(
@@ -576,10 +690,12 @@ export function shouldCompactMidTurn(input: {
   messages: AgentMessage[];
   contextWindow: number;
   settings: CompactionSettings;
+  modelMaxTokens?: number;
 }): boolean {
   if (!input.settings.enabled || input.contextWindow <= input.settings.reserveTokens) return false;
   if (!endsWithCompleteToolResultBatch(input.messages)) return false;
-  return applyContextPressurePolicy(input.messages, input.contextWindow, input.settings).band === "critical";
+  const effectiveSettings = { ...input.settings, reserveTokens: effectiveReserveTokens(input.settings, input.contextWindow, input.modelMaxTokens) };
+  return applyContextPressurePolicy(input.messages, input.contextWindow, effectiveSettings).band === "critical";
 }
 
 export function estimateContextTokens(messages: AgentMessage[]): ContextEstimate {
@@ -1044,6 +1160,26 @@ function assistantToolCallIds(message: AgentMessage): string[] | undefined {
 function toolResultCallId(message: AgentMessage): string | undefined {
   const record = message as MessageRecord;
   return record.role === "toolResult" && typeof record.toolCallId === "string" ? record.toolCallId : undefined;
+}
+
+function finalAssistantStopReason(messages: AgentMessage[]): string | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const record = messages[index] as MessageRecord;
+    if (record.role !== "assistant") continue;
+    return typeof record.stopReason === "string" ? record.stopReason : undefined;
+  }
+  return undefined;
+}
+
+function buildOutputLimitInstructions(
+  usage: { percent: number; tokens: number | null; contextWindow: number },
+  reserveTokens: number,
+): string {
+  return [
+    "This compaction was triggered because the previous assistant response was truncated at the model output token limit while context pressure was high.",
+    "Preserve the exact current objective, completed work, modified files, and the interrupted response's intent so execution can resume and complete the truncated output immediately.",
+    `Context usage: ${usage.tokens ?? "unknown"}/${usage.contextWindow} tokens (${Math.round(usage.percent)}%); reserve: ${reserveTokens}.`,
+  ].join("\n");
 }
 
 function buildMidTurnInstructions(estimate: ContextEstimate, contextWindow: number, reserveTokens: number): string {

@@ -124,6 +124,15 @@ test("compaction TUI falls back to reserve-token editing when model context is u
   assert.match(rendered, /新值 · 10,000 Token/);
 });
 
+test("compaction TUI shows the effective-reserve formula while editing the threshold", () => {
+  const overlay = createOverlay();
+  overlay.handleInput("\r");
+  const rendered = overlay.render(80).join("\n");
+  assert.match(rendered, /最大输出 · 16,000 Token/);
+  assert.match(rendered, /公式 · max\(配置 10,000, 窗口10% 30,000, 输出 16,000\)/);
+  assert.match(rendered, /有效预留 = 30,000 · 约 270,000 \(90%\) 触发压缩/);
+});
+
 test("/maestro-compaction reloads exactly once only after a successful save", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-compaction-command-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;

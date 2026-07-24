@@ -25,7 +25,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   MaestroParams,
@@ -1331,6 +1331,7 @@ When NOT to use:
     await goalAgentEnd(event, ctx);
     emitGoalChanged();
     onAgentEndTodo();
+    await midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx);
     midTurnAutoCompaction.onAgentEnd(ctx);
     updateTodoWidget();
   });
