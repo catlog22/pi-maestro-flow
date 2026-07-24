@@ -161,3 +161,11 @@ Skill 管理 TUI 必须从 Pi DefaultPackageManager 的完整 ResolvedResource �
 当用户目标是修改压缩阈值，而持久化格式仅提供 reserveTokens 时，TUI 必须优先展示并直接编辑 thresholdTokens = contextWindow - reserveTokens，确认后再换算回 reserveTokens；不得新增重复的 thresholdTokens 配置字段。缺少有效 contextWindow 时，界面必须明确降级为编辑预留输出空间。
 
 </spec-entry>
+
+<spec-entry category="coding" keywords="compaction,token-estimate,graduated-eviction,cache" date="2026-07-24" sid="S-20260724-xmqe" title="压缩 token 估算应内容感知且分级驱逐" source="master@d8c8ca96">
+
+### 压缩 token 估算应内容感知且分级驱逐
+
+对话压缩的 token 估算不应使用扁平 length/4：fenced code 约 3.5 chars/token（token 密集），whitespace 占比>0.3 的日志/表格约 6 chars/token（token 稀疏），普通内容保持 /4 默认。驱逐应分级（cheapest-first）：先剪可重放工具(read/grep/glob/search/find)，压力持续再剪 bulk 数据工具(bash/shell/edit/write)；两级都走缓存稳定 prune manifest。
+
+</spec-entry>

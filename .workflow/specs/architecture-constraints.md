@@ -129,3 +129,11 @@ teammate 子进程的网络/Provider 重试由 teammate 执行器负责；Pi 主
 自定义 Provider 的 contextWindow 必须作为模型级正整数由 API Manager 显式查看和修改，并写入 models.json；更新已有模型时若调用方未提供该值，必须保留已有 contextWindow，避免兼容调用静默回退默认值。
 
 </spec-entry>
+
+<spec-entry category="arch" keywords="compaction,prune-invariant,cache-prefix,control-tool" date="2026-07-24" sid="S-20260724-cbhh" title="压缩剪除的三项不变量" source="master@d8c8ca96">
+
+### 压缩剪除的三项不变量
+
+pi-maestro-flow 压缩剪除必须保持：(1) isError 的 tool result 永不剪除；(2) 控制类工具(如 todo)输出永不驱逐——驱逐集合用 allowlist(REPLAYABLE + EVICTABLE_BULK)而非'所有非可重放'；(3) 剪除顺序保持 latest-first（先剪靠近 frontier 的安全输出）以保留更长的 prompt cache 前缀。recent keepRecentTokens 窗口受保护。冗余惩罚不能用作剪除排序（与 latest-first 缓存不变量冲突），只能作为遥测/重要性信号。
+
+</spec-entry>

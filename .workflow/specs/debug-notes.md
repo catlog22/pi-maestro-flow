@@ -48,3 +48,11 @@ teammate background acknowledgement 必须引导调用方结束当前 turn 并�
 保留基于已完成 file-operation/tool-result checkpoint 的 mid-turn 检测，但不得在 context hook 内与 Pi 原生 threshold/overflow auto-compaction 并发提交。自动 intent 应在 agent settled 后重读 branch 并由单一 owner 提交；自动完成后继续任务，用户手动 /compact 完成后保持 idle。调用前 prepareCompaction 不是互斥锁，必须防止 TOCTOU 导致 Already compacted。
 
 </spec-entry>
+
+<spec-entry category="debug" keywords="compaction,circuit-breaker,reliability,retry" date="2026-07-24" sid="S-20260724-c5w4" title="压缩失败需熔断器防止无限重试" source="master@d8c8ca96">
+
+### 压缩失败需熔断器防止无限重试
+
+mid-turn 自动压缩若持续失败（模型鉴权/summary 过大/provider 错误），不能每轮无限重试浪费 API。应加连续失败计数（MAX=3）+ 冷却退避（5 turns）+ 成功后重置。Claude Code 真实数据：1279 个 session 出现 50+ 连续失败，每天浪费约 250K API 调用。熔断逻辑抽成纯函数(recordCompactionFailure/compactionBreakerAllows)便于单测。
+
+</spec-entry>
