@@ -2,7 +2,7 @@
 
 > 面向需要调用本插件对外暴露工具接口的开发者。
 > 涵盖工具清单、调用机制、逐工具参数/返回/示例，以及编程式 `v1` API。
-> 对应版本：`pi-maestro-flow@0.4.14` · `pi-maestro-teammate@0.4.6`
+> 对应版本：`pi-maestro-flow@0.5.0` · `pi-maestro-teammate@0.4.6`
 
 ---
 
@@ -22,10 +22,14 @@
    - 4.8 [todo — 任务管理](#48-todo--任务管理)
    - 4.9 [run-control — 工作流 Run 控制](#49-run-control--工作流-run-控制)
    - 4.10 [ask-user-question — 结构化用户提问](#410-ask-user-question--结构化用户提问)
+   - 4.11 [ffgrep — FFF 内容搜索](#411-ffgrep--fff-内容搜索)
+   - 4.12 [fffind — FFF 文件路径搜索](#412-fffind--fff-文件路径搜索)
 5. [编程式 API（v1）](#5-编程式-apiv1)
-6. [对接示例](#6-对接示例)
-7. [错误处理与最佳实践](#7-错误处理与最佳实践)
-8. [附录：参数速查表](#8-附录参数速查表)
+6. [GUI/UCL 侧车 HTTP API](#6-guiucl-侧车-http-api)
+7. [压缩设置与仲裁编程式接口](#7-压缩设置与仲裁编程式接口)
+8. [对接示例](#8-对接示例)
+9. [错误处理与最佳实践](#9-错误处理与最佳实践)
+10. [附录：参数速查表](#10-附录参数速查表)
 
 ---
 
@@ -35,10 +39,10 @@
 
 | 包 | 版本 | 注册的工具 | 角色 |
 |----|------|-----------|------|
-| `pi-maestro-flow` | 0.4.14 | `maestro`、`goal`、`todo`、`run-control`、`ask-user-question` | 扩展包：流程命令、目标、任务、Run 控制、提问 |
+| `pi-maestro-flow` | 0.5.0 | `maestro`、`goal`、`todo`、`run-control`、`ask-user-question`、`ffgrep`、`fffind` | 扩展包：流程命令、目标、任务、Run 控制、提问、FFF 搜索 |
 | `pi-maestro-teammate` | 0.4.6 | `teammate`、`teammate-send`、`teammate-list`、`teammate-watch`、`teammate-wait` | 核心派发引擎：子代理 DAG 调度、RPC 消息 |
 
-**工具总览（10 个对外工具）**：
+**工具总览（12 个对外工具）**：
 
 | 工具 | 一句话功能 | 来源包 |
 |------|-----------|--------|
@@ -52,6 +56,8 @@
 | `todo` | 任务管理（create/update/list/get/delete/clear/next） | flow |
 | `run-control` | 读写规范化 Maestro Workflow Run（status/brief/check/next/done/edit） | flow |
 | `ask-user-question` | 通过键盘优先的 TUI 向导收集结构化用户答案 | flow |
+| `ffgrep` | FFF 后端快速字面内容搜索 | flow |
+| `fffind` | FFF 后端模糊文件路径搜索 | flow |
 
 > **对接方式选择**
 > - 在 Pi 代理 / LLM 上下文内调用 → 直接按工具名发起 JSON 工具调用（见 §3、§4）。
@@ -344,6 +350,7 @@ goal({ action: "complete", summary: "所有模块实现并通过测试，证据�
 | `id` | string | get/update/delete ✅ | 任务 ID |
 | `filter` | object | list | `{ status?, memberId? }` |
 | `planHandoffKey` | string | | 内部 Plan 交接绑定 |
+| `goalId` | string | | 质量门 Goal ID。绑定后任务仅在该 Goal 验证通过（`done`）后才能 `completed`。update 时传空串清除。批量 create 中也可在每个 task 指定 |
 
 **`SkillBinding`**：`{ name: string(✅), role: "primary"|"guard"|"support"(✅), args?: string }`。skill 绑定需恰好一个 `primary`。
 
@@ -358,7 +365,7 @@ todo({ action: "list", filter: { status: "pending" } })
 todo({ action: "next" })   // 激活下一个 pending 任务并返回其解析后的 context
 ```
 
-**注意**：update 时省略的字段保持不变，`null` 清除，空数组替换。根会话同一时刻仅一个 `in_progress` 任务。
+**注意**：update 时省略的字段保持不变，`null` 清除，空数组替换。根会话同一时刻仅一个 `in_progress` 任务。`goalId` 绑定质量门后，`next` 会自动切换到该 Goal（`switchCurrentGoal` resume）；完成 task 时若 Goal 未 `done` 则拒绝并提示先调用 `goal complete`。
 
 ---
 
@@ -435,6 +442,53 @@ askUserQuestion({ questions: [
     options: [{ label: "A", description: "方案 A" }, { label: "B", description: "方案 B" }] }
 ] })
 ```
+
+---
+
+### 4.11 `ffgrep` — FFF 内容搜索
+
+基于 [FFF](https://github.com/ff-labs/fff-node) 原生索引的快速字面内容搜索。仅注册在根 Pi 会话，不影响 Pi 内置 grep/find。
+
+**参数**（`FffGrepParams`）：
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|:---:|------|
+| `pattern` | string | ✅ | 字面搜索文本（minLength 1） |
+| `context` | integer | | 上下文行数（0–20，默认 0） |
+| `limit` | integer | | 最大结果数（1–100，默认 20） |
+
+**返回**：`AgentToolResult<unknown>`，`content[0].text` 为 `path:line: content` 格式的匹配行；无匹配时为 `No matches found`。
+
+**示例**：
+
+```js
+ffgrep({ pattern: "CompactionArbiter", context: 2, limit: 10 })
+```
+
+**注意**：首次调用会触发 FFF 索引初始化（含初始扫描，超时 15s）；`cwd` 变化时自动重建索引。搜索使用 `smartCase`（全小写时不区分大小写）并启用 `classifyDefinitions`。
+
+---
+
+### 4.12 `fffind` — FFF 文件路径搜索
+
+基于 FFF 原生索引的模糊文件路径搜索。
+
+**参数**（`FffFindParams`）：
+
+| 参数 | 类型 | 必需 | 说明 |
+|------|------|:---:|------|
+| `pattern` | string | ✅ | 模糊路径查询（minLength 1） |
+| `limit` | integer | | 最大结果数（1–100，默认 30） |
+
+**返回**：`AgentToolResult<unknown>`，`content[0].text` 为每行一个相对路径；无匹配时为 `No files found`。
+
+**示例**：
+
+```js
+fffind({ pattern: "compaction arbiter", limit: 5 })
+```
+
+**注意**：与 `ffgrep` 共享同一个 `FileFinder` 实例和索引生命周期。两个工具均在权限白名单中（`ALWAYS_ALLOWED_TOOLS`），所有审批模式下自动放行。
 
 ---
 
@@ -550,7 +604,276 @@ interface SingleResult {
 
 ---
 
-## 6. 对接示例
+## 6. GUI/UCL 侧车 HTTP API
+
+`pi-maestro-flow@0.5.0` 新增 **Unified Communication Layer (UCL)** 侧车：一个 loopback HTTP + SSE 服务，向外部 GUI 进程暴露工具发现/调用、聚合状态快照和变更事件。会话/消息/模型控制仍走 `pi --mode rpc`，UCL 仅覆盖工具、状态和事件三个面。
+
+> **启用方式**：设置环境变量 `PI_GUI=1`（可选 `PI_GUI_PORT` 指定端口，默认 OS 分配）。未启用时零开销——不监听、不写发现文件。
+
+### 6.1 发现与认证
+
+启动后在 `<cwd>/.workflow/gui.json` 写入发现文件（`0o600`），关闭时自动删除：
+
+```json
+{
+  "version": 1,
+  "port": 54321,
+  "token": "<uuid>",
+  "sessionId": "<pi-session-id>",
+  "url": "http://127.0.0.1:54321/?session=<uuid>",
+  "eventsUrl": "http://127.0.0.1:54321/events?session=<uuid>",
+  "pid": 12345,
+  "startedAt": "2026-07-24T00:00:00.000Z"
+}
+```
+
+所有请求须携带 session token（三选一）：`Authorization: Bearer <token>` 头、`?session=<token>` 查询参数、或 POST body 中的 `token` 字段。未通过认证返回 `403 { ok: false, code: "unauthorized" }`。
+
+### 6.2 响应信封
+
+所有 JSON 响应统一包装：
+
+```ts
+type GuiEnvelope<T> =
+  | { ok: true; result: T }
+  | { ok: false; error: string; code?: string };
+```
+
+### 6.3 内置端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/health` | 健康检查，返回 `{ healthy, sessionId, ...extra }` |
+| `GET` | `/events` | SSE 事件流（支持 `Last-Event-Id` 断线重连回放，最多 256 条） |
+
+### 6.4 工具端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/tools` | 工具发现：返回所有工具的 schema、来源、是否 GUI 可调用 |
+| `POST` | `/tools/:name` | 工具调用（须经权限网关授权） |
+| `POST` | `/cancel` | 取消进行中的调用（`{ invokeId }`) |
+
+**`GET /tools` 响应**（`GuiToolView[]`）：
+
+```ts
+interface GuiToolView {
+  name: string;
+  description: string;
+  parameters: unknown;      // JSON Schema
+  sourceInfo: unknown;
+  guiCallable: boolean;     // UCL 注册表是否持有 execute
+  mutating: boolean;        // 咨询性标记（权限网关仍为强制门）
+  owner: string;            // "pi-maestro-flow" | "pi-maestro-teammate" | "mcp" | "pi-core"
+}
+```
+
+**`POST /tools/:name` 请求体**：
+
+```json
+{ "args": { "action": "get" }, "invokeId": "my-id", "timeoutMs": 30000 }
+```
+
+成功返回 `{ toolCallId, invokeId, content, details, terminate? }`。失败码：`403 permission_denied`、`404 not_invocable`、`429 rate_limited`（默认最多 16 并发）、`499 cancelled`、`500 tool_error`、`503 no_context`。
+
+**GUI 可调用工具白名单**（通过 `globalThis[Symbol.for("pi-maestro.gui-tool-registry")]` 跨扩展注册）：
+
+| 来源 | 允许的工具 |
+|------|----------|
+| `pi-maestro-flow` | `maestro`、`goal`、`todo`、`run-control`、`ask-user-question`、`plan-*` |
+| `pi-maestro-teammate` | `teammate`、`teammate-*` |
+| `mcp` | 所有动态注册的 MCP 工具 |
+
+### 6.5 状态端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| `GET` | `/state` | 聚合快照（所有子系统并行读取） |
+| `GET` | `/state/:sub` | 单个子系统快照 |
+
+子系统：`workflow`、`todos`、`goal`、`plan`、`teammates`、`swarm`。聚合响应还包含 `approvalMode` 和 `sessionId`。所有值经 JSON round-trip 克隆，保证可序列化且不含活引用。
+
+### 6.6 SSE 事件
+
+通过 `GET /events` 订阅。事件类型：
+
+| 事件名 | 触发时机 |
+|--------|--------|
+| `state.changed` | 任何子系统变更（去重后附带推送） |
+| `todo.updated` | Todo 任务变更 |
+| `goal.changed` | Goal 状态变更 |
+| `run.transition` | Workflow Run 状态转换 |
+| `teammate.started` / `teammate.progress` / `teammate.complete` | 子代理生命周期 |
+| `plan.mode` | Plan/Act 模式切换 |
+| `tool.invoked` / `tool.progress` | UCL 工具调用与进度 |
+| `permission.request` | 权限请求 |
+| `server-close` | 服务关闭 |
+
+SSE 心跳间隔默认 15s。事件日志保留最近 256 条，支持 `Last-Event-Id` 断线重连回放。
+
+### 6.7 参考客户端（Node）
+
+```ts
+import { GuiClient } from "pi-maestro-flow/gui/client";
+
+// 从发现文件创建
+const client = await GuiClient.fromDiscovery(".workflow/gui.json");
+
+// 或直接指定
+const client = new GuiClient({ port: 54321, token: "<uuid>" });
+
+// 健康检查
+const health = await client.health();
+
+// 工具发现
+const tools = await client.listTools();
+
+// 工具调用
+const result = await client.invoke("goal", { action: "get" });
+
+// 取消调用
+await client.cancel("my-invoke-id");
+
+// 状态快照
+const state = await client.getState();
+const todos = await client.getStateSub("todos");
+
+// SSE 订阅
+const unsubscribe = client.subscribe(
+  ({ name, data }) => console.log(name, data),
+  (err) => console.error(err),
+);
+// 稍后取消
+unsubscribe();
+```
+
+`GuiClientError` 携带 `status`（HTTP 状态码）和 `code`（业务错误码）。
+
+### 6.8 编程式服务端 API
+
+```ts
+import { startGuiSubsystem, type GuiSubsystemOptions } from "pi-maestro-flow/gui";
+import { createGuiEventForwarder, GUI_EVENTS } from "pi-maestro-flow/gui";
+import { registerGuiTool, listGuiTools } from "pi-maestro-flow/gui";
+
+// 启动侧车（PI_GUI 未启用时返回 null）
+const server = await startGuiSubsystem({
+  sessionId: "my-session",
+  cwd: process.cwd(),
+  listAllTools: () => pi.getAllTools(),
+  gateway: permissionGateway,
+  getCtx: () => currentCtx,
+  stateProviders: { workflow: () => snapshot, todos: () => tasks, goal: () => goal },
+});
+
+// 事件转发器（去重 + 自动 state.changed）
+const forwarder = createGuiEventForwarder();
+forwarder.bind(server);
+forwarder.emitDeduped(GUI_EVENTS.todoUpdated, taskKey, payload);
+forwarder.emit(GUI_EVENTS.teammateStarted, { agent: "explorer" });
+```
+
+---
+
+## 7. 压缩设置与仲裁编程式接口
+
+`pi-maestro-flow@0.5.0` 将压缩设置和仲裁逻辑提取为独立模块，可通过 `exports` 子路径导入。
+
+### 7.1 压缩设置（`pi-maestro-flow/compaction/settings`）
+
+```ts
+import {
+  readEffectiveCompactionSettings,
+  readCompactionSettingsSnapshot,
+  writeCompactionSettings,
+  validateCompactionPatch,
+  DEFAULT_RESERVE_TOKENS,
+  DEFAULT_KEEP_RECENT_TOKENS,
+  DEFAULT_SOFT_COMPACTION,
+  type EffectiveCompactionSettings,
+  type CompactionConfigPatch,
+  type CompactionScope,
+} from "pi-maestro-flow/compaction/settings";
+```
+
+**配置层级**：项目级 `.pi/settings.json` 覆盖用户级 `~/.pi/agent/settings.json`，均覆盖默认值。`compaction` 字段：
+
+```json
+{
+  "compaction": {
+    "enabled": true,
+    "reserveTokens": 16384,
+    "keepRecentTokens": 20000,
+    "soft": {
+      "enabled": true,
+      "nudgeRatio": 0.7,
+      "pruneRatio": 0.8,
+      "pruneTargetRatio": 0.7
+    }
+  }
+}
+```
+
+| 字段 | 默认值 | 说明 |
+|------|--------|------|
+| `enabled` | `true` | 是否启用自动压缩 |
+| `reserveTokens` | `16384` | 为输出预留的 Token 数；阈值 = contextWindow − reserveTokens |
+| `keepRecentTokens` | `20000` | 保护最近 N Token 不被裁剪 |
+| `soft.enabled` | `true` | 是否启用软压缩层（nudge + auto-prune） |
+| `soft.nudgeRatio` | `0.7` | 上下文占比超过此值时发出 nudge 警告 |
+| `soft.pruneRatio` | `0.8` | 超过此值时触发自动裁剪工具结果 |
+| `soft.pruneTargetRatio` | `0.7` | 自动裁剪的目标占比 |
+
+**`EffectiveCompactionSettings`** 还包含 `source` 字段，记录每个配置项的来源（`project` / `user` / `default`）。
+
+**写入**：`writeCompactionSettings(scope, patch, cwd)` 原子写入（临时文件 + rename），`scope` 为 `"project"` 或 `"user"`。
+
+### 7.2 压缩仲裁器（`pi-maestro-flow/compaction/arbiter`）
+
+```ts
+import {
+  CompactionArbiter,
+  compactionRequestFromInstructions,
+  type CompactionLease,
+  type CompactionOwner,
+} from "pi-maestro-flow/compaction/arbiter";
+```
+
+防止 mid-turn 自动压缩、Plan handoff 压缩与 Pi 原生压缩竞态。会话级单例，由扩展入口创建并注入 `createMidTurnAutoCompaction` 和 `initPlan`。
+
+**核心流程**：
+
+```ts
+const arbiter = new CompactionArbiter();
+
+// 扩展请求压缩租约（已有活跃压缩时返回 undefined）
+const lease = arbiter.request("mid-turn");
+if (!lease) { /* 已有压缩在进行，跳过 */ }
+
+// 标记压缩指令（嵌入 owner tag 供 observeStart 识别）
+const tagged = lease.tagInstructions("Preserve the approved plan...");
+
+// 压缩完成后释放
+lease.release();
+
+// Pi 原生压缩入口观测（session_before_compact hook）
+const observed = arbiter.observeStart(request, signal);
+if (observed.allowed) { /* 允许执行 */ }
+observed.releaseIfNative();
+
+// 压缩完成
+arbiter.complete();
+```
+
+**仲裁规则**：
+- 同一时刻最多一个活跃压缩（`request` 互斥）。
+- Pi 原生压缩（无 request 参数）始终优先，会抢占扩展租约。
+- `tagInstructions` 在指令头部嵌入 `[maestro-compaction-owner:<owner>:<id>]` 标记，`compactionRequestFromInstructions` 可反向解析。
+- 原生压缩有 5 分钟安全超时自动释放。
+
+---
+
+## 8. 对接示例
 
 ### 6.1 LLM 工具调用（在 Pi 代理内）
 
@@ -597,7 +920,7 @@ console.log("风险清单:", risks);
 
 ---
 
-## 7. 错误处理与最佳实践
+## 9. 错误处理与最佳实践
 
 **错误识别**：
 - 工具调用：检查 `AgentToolResult.isError === true`，错误描述在 `content[0].text`。
@@ -620,7 +943,7 @@ console.log("风险清单:", risks);
 
 ---
 
-## 8. 附录：参数速查表
+## 10. 附录：参数速查表
 
 | 工具 | 必填参数 | 关键可选参数 | 返回 `details` |
 |------|---------|-------------|----------------|
@@ -631,10 +954,12 @@ console.log("风险清单:", risks);
 | `teammate-wait` | — | `name`/`timeoutMs`/`waitMs` | `{ status, output[] }` |
 | `maestro` | `action` | explore:`prompts`/`concurrency`；delegate:`prompt`/`tool`/`mode`；moa:`preset` | 文本结果 |
 | `goal` | `action`（+`objective`/`summary` 视 action） | `tokenBudget` | 文本状态 |
-| `todo` | `action`（+`subject`/`id` 视 action） | `status`/`context`/`skills`/`filter`/`summary` | `{ tasks[], action, error? }` |
+| `todo` | `action`（+`subject`/`id` 视 action） | `status`/`context`/`skills`/`filter`/`summary`/`goalId` | `{ tasks[], action, error? }` |
 | `run-control` | `action`（+`runId`/`step` 视 action） | `verdict`/`summary`/`commands`/`after` | CLI stdout + 结构化结果 |
 | `ask-user-question` | `questions` | `options`/`multiSelect`/`header` | 结构化答案文本 |
+| `ffgrep` | `pattern` | `context`/`limit` | `path:line: content` 文本 |
+| `fffind` | `pattern` | `limit` | 相对路径列表文本 |
 
 ---
 
-*本指南基于源码 schema 提取：`packages/pi-maestro-flow/src/extension/schemas.ts`、`packages/pi-maestro-teammate/src/extension/schemas.ts`、`packages/pi-maestro-teammate/src/public/v1/*`、`packages/pi-maestro-teammate/src/shared/types.ts`。如与最新代码不一致，以源码为准。*
+*本指南基于源码 schema 提取：`packages/pi-maestro-flow/src/extension/schemas.ts`、`packages/pi-maestro-flow/src/tools/fff.ts`、`packages/pi-maestro-flow/src/gui/*`、`packages/pi-maestro-flow/src/compaction/compaction-settings.ts`、`packages/pi-maestro-flow/src/compaction/compaction-arbiter.ts`、`packages/pi-maestro-teammate/src/extension/schemas.ts`、`packages/pi-maestro-teammate/src/public/v1/*`、`packages/pi-maestro-teammate/src/shared/types.ts`、`packages/pi-maestro-teammate/src/shared/gui-registry.ts`。如与最新代码不一致，以源码为准。*
