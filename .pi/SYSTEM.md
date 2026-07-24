@@ -134,6 +134,8 @@ Use `teammate` for all delegated work.
 |------|------|
 | Delegate work to a pi agent | `teammate` |
 | Delegate to an external model | `teammate` (set the `model` field) |
+| Check reachable teammate + delegate models | `model-availability` |
+| Delegate to an external CLI model NOT in the teammate catalog | `maestro delegate --to <tool>` (bash CLI) |
 | Cross-turn execution with budget control | `goal` |
 | Web search / deep research / URL fetch | `smart_search` |
 | Read-only code discovery | `teammate` + `agent: "explorer"` |
@@ -142,7 +144,20 @@ Use `teammate` for all delegated work.
 
 The pi-agent runs maestro as **bash CLI commands** for knowledge and workflow only: `maestro search`, `maestro load`, `maestro spec`, `maestro wiki`, `maestro run`, `maestro knowhow`.
 
-For all delegation, code exploration, and multi-model synthesis, use **teammate** (templates via `prompt`, models via `model`). Do not call `maestro delegate` / `explore` / `moa` from the pi-agent.
+For all delegation, code exploration, and multi-model synthesis, use **teammate** (templates via `prompt`, models via `model`). Do not call `maestro delegate` / `explore` / `moa` from the pi-agent for ordinary work — the one exception is the delegate fallback below.
+
+## Delegate as Teammate Fallback
+
+**Use when**: a user explicitly requests an external model (codex, gemini, claude, opencode) absent from `<available_teammate_models>`.
+**Skip when**: any capable model suffices — use `teammate` directly.
+
+`model-availability` reports both pi teammate models and the Maestro delegate config (`~/.maestro/cli-tools.json`); its `delegate_fallback` field lists tools reachable only via delegate. Route them through the bash CLI:
+
+```bash
+maestro delegate "<PROMPT>" --to <tool> --mode analysis
+```
+
+`--to <tool>` is mandatory — a bare `maestro delegate codex` sends `codex` as the prompt to the first enabled tool (the "no output" cause). Contract: `D:\maestro2\workflows\delegate-usage.md`.
 
 ## Tool Choice Examples
 

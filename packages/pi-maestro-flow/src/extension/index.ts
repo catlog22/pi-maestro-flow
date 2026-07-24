@@ -138,6 +138,7 @@ import { registerMaestroPackageResources } from "../resources/maestro-package.ts
 import { registerSkillManager } from "../skills/skill-manager.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
 import { registerFff } from "../tools/fff.ts";
+import { registerModelAvailability } from "../tools/model-availability.ts";
 import {
   proxyTeammateChildTool,
   registerTeammateChildExtension,
@@ -395,14 +396,19 @@ When to use: in the pi-agent, prefer the **teammate** tool for ALL delegation, c
 - delegate: route a task to an external CLI process (gemini/codex).
 - moa: multi-model synthesis across external CLI endpoints.
 
+Progressive fallback (delegate as teammate degradation): when a user explicitly requests a specific external model (codex, gemini, claude, opencode) that is NOT listed in <available_teammate_models>, it may still be reachable through the Maestro delegate CLI. Call the **model-availability** tool to confirm what is enabled, then route via the bash CLI:
+  maestro delegate "<PROMPT>" --to <tool> --mode analysis
+The --to flag is MANDATORY to target a tool. A bare \`maestro delegate codex\` treats "codex" as the prompt and silently falls back to the first enabled tool — this is the cause of "no output" reports. Full delegate contract (options, --rule templates, resume, message delivery): D:\\maestro2\\workflows\\delegate-usage.md.
+
 When NOT to use:
 - For pi-agent code discovery, delegation, analysis, or synthesis — use teammate (agent: "explorer" for discovery; the prompt field for templates; the model field for external models).
 - For a single known-symbol lookup or exact regex — use maestro search --code or rg directly.`,
 
-    promptSnippet: "External-CLI-endpoint routing (explore/delegate/moa). In the pi-agent, prefer teammate for delegation, exploration, and synthesis.",
+    promptSnippet: "External-CLI-endpoint routing (explore/delegate/moa) with a delegate-as-teammate-fallback path. Prefer teammate; fall back to maestro delegate --to <tool> for explicit external models missing from the teammate catalog.",
     promptGuidelines: [
       "In the pi-agent, use the teammate tool for all delegation, code exploration, and multi-model synthesis — teammate supports prompt templates (prompt field) and model selection (model field). Do not call the maestro tool's explore/delegate/moa for ordinary pi-agent work.",
       "Reserve the maestro tool (explore/delegate/moa) for the rare case of routing work directly to an external CLI endpoint (gemini/codex CLI process); for knowledge search use the maestro search/load bash CLI.",
+      "Progressive fallback: when a user explicitly requests an external model (codex/gemini/claude/opencode) that is NOT in <available_teammate_models>, call the model-availability tool, then route via bash `maestro delegate \"<PROMPT>\" --to <tool> --mode analysis`. The --to flag is mandatory — a bare `maestro delegate codex` sends \"codex\" as the prompt to the first enabled tool. Contract: D:\\maestro2\\workflows\\delegate-usage.md.",
     ],
 
     parameters: MaestroParams,
@@ -742,6 +748,7 @@ When NOT to use:
   // === Language intelligence, browser control, and tool discovery ===
   registerIntelligenceTools(pi);
   registerFff(pi);
+  registerModelAvailability(pi);
 
   pi.registerShortcut(PLAN_TOGGLE_KEY, {
     description: `Toggle Plan/Act mode (${PLAN_TOGGLE_LABEL})`,
