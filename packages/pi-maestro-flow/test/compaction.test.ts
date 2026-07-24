@@ -17,13 +17,17 @@ import {
 } from "../src/compaction/maestro-compaction.ts";
 import {
   applyContextPressurePolicy,
+  buildVelocityInfo,
   computeContextSignals,
   createMidTurnAutoCompaction,
   decideContextAction,
   derivePressureBand,
+  EMPTY_VELOCITY_TRACKER,
   endsWithCompleteToolResultBatch,
   estimateContextTokens,
+  observeVelocity,
   shouldCompactMidTurn,
+  shouldVelocityEscalate,
 } from "../src/compaction/auto-compaction.ts";
 import {
   CompactionArbiter,
@@ -1196,4 +1200,148 @@ test("pressure policy exposes action consistent with band", () => {
   );
   assert.equal(critical.band, "critical");
   assert.equal(critical.action, "compact");
+});
+
+function velocityScenarioMessages(usageTotal: number) {
+  return [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(8_000) }],
+    isError: false,
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "recent", name: "read", arguments: {} }],
+    usage: { input: usageTotal, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: usageTotal, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "recent",
+    toolName: "read",
+    content: [{ type: "text", text: "r".repeat(8_000) }],
+    isError: false,
+  }] as never;
+}
+
+function velocitySettings(velocity: { enabled: boolean; epochsToCritical?: number; minFullness?: number }) {
+  return {
+    enabled: true,
+    reserveTokens: 1_000,
+    keepRecentTokens: 2_000,
+    soft: {
+      enabled: true,
+      nudgeRatio: 0.7,
+      pruneRatio: 0.8,
+      pruneTargetRatio: 0.7,
+      velocity: { enabled: velocity.enabled, epochsToCritical: velocity.epochsToCritical ?? 3, minFullness: velocity.minFullness ?? 0.7 },
+      cache: { enabled: false },
+    },
+  };
+}
+
+const risingTracker = () => ({
+  samples: [
+    { epoch: "e1", tokens: 6_000 },
+    { epoch: "e2", tokens: 6_500 },
+    { epoch: "e3", tokens: 7_000 },
+  ],
+});
+
+test("observeVelocity accumulates samples, caps the ring buffer, and dedupes epochs", () => {
+  let tracker = EMPTY_VELOCITY_TRACKER;
+  let result = observeVelocity(tracker, { epoch: "e1", tokens: 1_000 });
+  tracker = result.tracker;
+  result = observeVelocity(tracker, { epoch: "e2", tokens: 1_500 });
+  tracker = result.tracker;
+  assert.equal(result.slope, undefined, "fewer than three samples yield no slope");
+  result = observeVelocity(tracker, { epoch: "e3", tokens: 2_000 });
+  tracker = result.tracker;
+  assert.equal(result.slope, 500, "median of [500,500]");
+  assert.equal(result.robustGrowth, true);
+
+  const deduped = observeVelocity(tracker, { epoch: "e3", tokens: 9_999 });
+  assert.equal(deduped.tracker.samples.length, 3, "same epoch is not re-added");
+
+  let capped = tracker;
+  for (const [epoch, tokens] of [["e4", 2_500], ["e5", 3_000]] as const) {
+    capped = observeVelocity(capped, { epoch, tokens }).tracker;
+  }
+  assert.equal(capped.samples.length, 4, "ring buffer caps at four samples");
+  assert.equal(capped.samples[0].epoch, "e2", "oldest sample is dropped");
+});
+
+test("observeVelocity treats a single usage spike as non-robust growth", () => {
+  let tracker = EMPTY_VELOCITY_TRACKER;
+  for (const [epoch, tokens] of [["e1", 1_000], ["e2", 1_500], ["e3", 1_200]] as const) {
+    tracker = observeVelocity(tracker, { epoch, tokens }).tracker;
+  }
+  const result = observeVelocity(tracker, { epoch: "e3", tokens: 1_200 });
+  assert.equal(result.robustGrowth, false, "one positive then one negative diff is not robust");
+});
+
+test("observeVelocity returns unknown slope without a usable usage epoch", () => {
+  const result = observeVelocity(EMPTY_VELOCITY_TRACKER, { epoch: undefined, tokens: 1_000 });
+  assert.equal(result.tracker.samples.length, 0);
+  assert.equal(result.slope, undefined);
+  assert.equal(result.robustGrowth, false);
+});
+
+test("shouldVelocityEscalate gates on enabled, fullness, robust growth and horizon", () => {
+  const soft = velocitySettings({ enabled: true, epochsToCritical: 3, minFullness: 0.7 }).soft;
+  const growing = buildVelocityInfo({ slope: 500, robustGrowth: true }, 1_500); // 3 epochs to critical
+  assert.equal(shouldVelocityEscalate(growing, soft, 0.75), true);
+
+  assert.equal(shouldVelocityEscalate(growing, velocitySettings({ enabled: false }).soft, 0.75), false, "disabled");
+  assert.equal(shouldVelocityEscalate(growing, soft, 0.5), false, "below minFullness");
+  const spiky = buildVelocityInfo({ slope: 500, robustGrowth: false }, 1_500);
+  assert.equal(shouldVelocityEscalate(spiky, soft, 0.75), false, "non-robust growth");
+  const far = buildVelocityInfo({ slope: 100, robustGrowth: true }, 1_500); // 15 epochs away
+  assert.equal(shouldVelocityEscalate(far, soft, 0.75), false, "critical too far away");
+});
+
+test("velocity escalation promotes a nudge to auto-prune when growth is robust and critical is near", () => {
+  const messages = velocityScenarioMessages(5_500); // ratio ~0.75 -> nudge without velocity
+  const disabled = applyContextPressurePolicy(messages, 10_000, velocitySettings({ enabled: false }), new Map(), risingTracker());
+  assert.equal(disabled.band, "nudge");
+  assert.equal(disabled.action, "none");
+  assert.equal(disabled.prunedToolResults, 0);
+
+  const enabled = applyContextPressurePolicy(messages, 10_000, velocitySettings({ enabled: true }), new Map(), risingTracker());
+  assert.equal(enabled.band, "auto-prune");
+  assert.equal(enabled.action, "prune");
+  assert.equal(enabled.prunedToolResults, 1);
+});
+
+test("velocity escalation does not fire on a single usage spike", () => {
+  const messages = velocityScenarioMessages(5_500);
+  const spikyTracker = { samples: [{ epoch: "e1", tokens: 6_000 }, { epoch: "e2", tokens: 7_000 }, { epoch: "e3", tokens: 6_500 }] };
+  const result = applyContextPressurePolicy(messages, 10_000, velocitySettings({ enabled: true }), new Map(), spikyTracker);
+  assert.equal(result.band, "nudge", "spike must not escalate");
+  assert.equal(result.prunedToolResults, 0);
+});
+
+test("velocity escalation stays idle when the critical horizon is far away", () => {
+  const messages = velocityScenarioMessages(5_300); // ratio ~0.73, horizon > 3 epochs at slope 500
+  const result = applyContextPressurePolicy(messages, 10_000, velocitySettings({ enabled: true }), new Map(), risingTracker());
+  assert.equal(result.band, "nudge");
+  assert.equal(result.prunedToolResults, 0);
+});
+
+test("velocity escalation respects the minFullness floor", () => {
+  const messages = velocityScenarioMessages(5_500); // ratio ~0.75
+  const result = applyContextPressurePolicy(messages, 10_000, velocitySettings({ enabled: true, minFullness: 0.8 }), new Map(), risingTracker());
+  assert.equal(result.band, "nudge", "fullness below minFullness must not escalate");
+  assert.equal(result.prunedToolResults, 0);
+});
+
+test("pressure policy threads the velocity tracker and dedupes the current epoch", () => {
+  const messages = velocityScenarioMessages(5_500);
+  const settings = velocitySettings({ enabled: true });
+  const first = applyContextPressurePolicy(messages, 10_000, settings, new Map(), risingTracker());
+  assert.equal(first.velocityTracker.samples.length, 4, "current epoch appended");
+  const second = applyContextPressurePolicy(messages, 10_000, settings, new Map(), first.velocityTracker);
+  assert.equal(second.velocityTracker.samples.length, 4, "same epoch not re-added");
 });
