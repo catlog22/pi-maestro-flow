@@ -1,8 +1,14 @@
-import { existsSync, readFileSync } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  DEFAULT_SOFT_COMPACTION,
+  readEffectiveCompactionSettings,
+  type EffectiveCompactionSettings,
+} from "./compaction-settings.ts";
+import {
+  type CompactionArbiter,
+  type CompactionLease,
+} from "./compaction-arbiter.ts";
 import {
   autoCompactionIdleStatus,
   COMPACTION_MODE_STATUS_KEY,
@@ -10,22 +16,16 @@ import {
 } from "./maestro-compaction.ts";
 import { loadPiCompactionInternals, type PiCompactionInternals } from "./pi-internals.ts";
 
-const DEFAULT_RESERVE_TOKENS = 16_384;
-const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
-const AUTO_PRUNE_RATIO = 0.8;
-const NUDGE_RATIO = 0.7;
-const AUTO_PRUNE_TARGET_RATIO = NUDGE_RATIO;
 const MIN_PRUNABLE_TOOL_RESULT_CHARS = 4_000;
 const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find"]);
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
 const PRUNE_STATE_VERSION = 1;
 
-export interface CompactionSettings {
-  enabled: boolean;
-  reserveTokens: number;
-  keepRecentTokens: number;
-}
+export type CompactionSettings = Pick<
+  EffectiveCompactionSettings,
+  "enabled" | "reserveTokens" | "keepRecentTokens"
+> & { soft?: EffectiveCompactionSettings["soft"] };
 
 interface ContextEstimate {
   tokens: number;
@@ -65,6 +65,7 @@ interface AutoCompactionState {
   generation: number;
   nextOwner: number;
   activeOwner?: number;
+  activeLease?: CompactionLease;
   lastTriggerKey?: string;
   internalsWarningShown: boolean;
   lastNoCompactableKey?: string;
@@ -72,11 +73,14 @@ interface AutoCompactionState {
   restoredPruneIds: Set<string>;
   sessionId?: string;
   persistedPruneKey?: string;
+  settingsSnapshot?: CompactionSettings;
+  settingsCwd?: string;
 }
 
 interface AutoCompactionDependencies {
   loadInternals?: () => Promise<PiCompactionInternals>;
   readSettings?: (projectRoot: string) => CompactionSettings;
+  arbiter?: CompactionArbiter;
 }
 
 interface MessageRecord {
@@ -95,6 +99,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   onAgentEnd(ctx: ExtensionContext): void;
   onCompact(): void;
   reset(ctx?: ExtensionContext): void;
+  refreshSettings(): void;
 } {
   const state: AutoCompactionState = {
     running: false,
@@ -106,18 +111,29 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   };
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
+  // Settings are reparsed at most once per turn boundary (F11): the snapshot is
+  // reused across the many context-hook evaluations within a turn and re-read only
+  // when the cwd changes or refreshSettings() invalidates it.
+  function settingsFor(ctx: ExtensionContext): CompactionSettings {
+    if (!state.settingsSnapshot || state.settingsCwd !== ctx.cwd) {
+      state.settingsSnapshot = readSettings(ctx.cwd);
+      state.settingsCwd = ctx.cwd;
+    }
+    return state.settingsSnapshot;
+  }
   return {
     onSessionStart(ctx) {
       state.pruneManifest.clear();
       state.sessionId = sessionIdOf(ctx);
       state.restoredPruneIds = loadPersistedPruneIds(ctx, state.sessionId);
       state.persistedPruneKey = pruneKey(state.restoredPruneIds);
-      publishIdleStatus(ctx, readSettings(ctx.cwd).enabled);
+      state.settingsSnapshot = undefined;
+      publishIdleStatus(ctx, settingsFor(ctx).enabled);
     },
     async evaluate(messages, ctx) {
       const generation = state.generation;
       if (state.running) return undefined;
-      const settings = readSettings(ctx.cwd);
+      const settings = settingsFor(ctx);
       publishIdleStatus(ctx, settings.enabled);
       if (!ctx.model) {
         clearPressureStatus(ctx);
@@ -168,6 +184,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return pressure.messages;
       }
       if (state.generation !== generation || state.running) return undefined;
+      // Defer before Pi's prepareCompaction scan: an in-flight owner will deny the
+      // lease anyway, and preparing a compaction we cannot own widens the TOCTOU
+      // window that can surface "Already compacted".
+      if (dependencies.arbiter?.currentOwner()) return pressure.messages;
       const branch = ctx.sessionManager.getBranch();
       let preparation: unknown;
       try {
@@ -190,8 +210,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return pressure.messages;
       }
       state.lastNoCompactableKey = undefined;
+      const lease = dependencies.arbiter?.request("mid-turn");
+      if (dependencies.arbiter && !lease) return pressure.messages;
       state.lastTriggerKey = triggerKey;
       state.running = true;
+      state.activeLease = lease;
       const owner = ++state.nextOwner;
       state.activeOwner = owner;
       ctx.abort();
@@ -201,17 +224,26 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.running = false;
         state.activeOwner = undefined;
         state.lastTriggerKey = undefined;
+        state.activeLease?.release();
+        state.activeLease = undefined;
         clearPressureStatus(ctx);
         ctx.ui.notify(`Mid-turn compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       };
+      const instructions = buildMidTurnInstructions(
+        estimate,
+        ctx.model.contextWindow,
+        settings.reserveTokens,
+      );
       try {
         ctx.compact({
-          customInstructions: buildMidTurnInstructions(estimate, ctx.model.contextWindow, settings.reserveTokens),
+          customInstructions: state.activeLease?.tagInstructions(instructions) ?? instructions,
           onComplete: () => {
             if (state.generation !== generation || state.activeOwner !== owner) return;
             state.running = false;
             state.activeOwner = undefined;
             state.lastTriggerKey = undefined;
+            state.activeLease?.release();
+            state.activeLease = undefined;
             clearPressureStatus(ctx);
             // 压缩完成期间，Goal 或其他扩展可能已投递恢复提示；保留最先入队的续接。
             if (ctx.hasPendingMessages?.()) return;
@@ -230,7 +262,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     },
     onAgentEnd(ctx) {
       if (!state.running) {
-        publishIdleStatus(ctx, readSettings(ctx.cwd).enabled);
+        // Turn boundary: refresh so settings edited during the turn are reflected.
+        state.settingsSnapshot = undefined;
+        publishIdleStatus(ctx, settingsFor(ctx).enabled);
         clearPressureStatus(ctx);
       }
     },
@@ -245,17 +279,24 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.generation += 1;
       state.running = false;
       state.activeOwner = undefined;
+      state.activeLease?.release();
+      state.activeLease = undefined;
       state.lastTriggerKey = undefined;
       state.internalsWarningShown = false;
       state.lastNoCompactableKey = undefined;
       state.pruneManifest.clear();
       state.restoredPruneIds.clear();
       state.persistedPruneKey = undefined;
+      state.settingsSnapshot = undefined;
+      state.settingsCwd = undefined;
       persistPruneManifest(pi, state);
       if (ctx) {
         clearPressureStatus(ctx);
         ctx.ui.setStatus(COMPACTION_MODE_STATUS_KEY, undefined);
       }
+    },
+    refreshSettings() {
+      state.settingsSnapshot = undefined;
     },
   };
 }
@@ -276,38 +317,43 @@ export function applyContextPressurePolicy(
   // pending acknowledgement. Its saved tokens must remain deducted until a
   // later provider response establishes a new usage epoch.
   const initial = Math.max(0, estimateContextTokens(transformed).tokens - applied.pendingSavedTokens);
+  const soft = settings.soft ?? DEFAULT_SOFT_COMPACTION;
   const criticalRatio = thresholdTokens / contextWindow;
   const initialRatio = initial / contextWindow;
   const initiallyCritical = initial > thresholdTokens;
-  if (!settings.enabled || (!initiallyCritical && initialRatio < NUDGE_RATIO)) {
+  if (!settings.enabled || (!initiallyCritical && (!soft.enabled || initialRatio < soft.nudgeRatio))) {
     return pressureResult(transformed, "normal", initial, thresholdTokens, prunedToolResults, savedTokens);
   }
-  if (!initiallyCritical && initialRatio < AUTO_PRUNE_RATIO) {
+  if (soft.enabled && !initiallyCritical && initialRatio < soft.pruneRatio) {
     return pressureResult(transformed, "nudge", initial, thresholdTokens, prunedToolResults, savedTokens);
   }
 
-  const frontierStart = protectedFrontierStart(transformed, settings.keepRecentTokens);
+  // The soft layer gates only NEW pruning. Recorded prunes above stay applied so
+  // the request prefix remains stable within the compaction epoch.
   let newlySavedTokens = 0;
-  const pruneTarget = Math.min(thresholdTokens, Math.floor(contextWindow * AUTO_PRUNE_TARGET_RATIO));
-  const usageEpoch = latestProviderUsageEpoch(messages);
-  for (let index = frontierStart - 1; index >= 0 && initial - newlySavedTokens > pruneTarget; index--) {
-    const callId = toolResultCallId(transformed[index]);
-    if (!callId || hasRecordedPrune(pruneManifest, callId)) continue;
-    const replacement = replaceableToolResult(transformed[index]);
-    if (!replacement) continue;
-    const before = estimateMessageTokens(transformed[index]);
-    const after = estimateMessageTokens(replacement);
-    if (after >= before) continue;
-    transformed[index] = replacement;
-    const saved = before - after;
-    recordPrune(pruneManifest, callId, {
-      replacement,
-      savedTokens: saved,
-      introducedAtUsageEpoch: usageEpoch,
-    });
-    newlySavedTokens += saved;
-    savedTokens += saved;
-    prunedToolResults++;
+  if (soft.enabled) {
+    const frontierStart = protectedFrontierStart(transformed, settings.keepRecentTokens);
+    const pruneTarget = Math.min(thresholdTokens, Math.floor(contextWindow * soft.pruneTargetRatio));
+    const usageEpoch = latestProviderUsageEpoch(messages);
+    for (let index = frontierStart - 1; index >= 0 && initial - newlySavedTokens > pruneTarget; index--) {
+      const callId = toolResultCallId(transformed[index]);
+      if (!callId || hasRecordedPrune(pruneManifest, callId)) continue;
+      const replacement = replaceableToolResult(transformed[index]);
+      if (!replacement) continue;
+      const before = estimateMessageTokens(transformed[index]);
+      const after = estimateMessageTokens(replacement);
+      if (after >= before) continue;
+      transformed[index] = replacement;
+      const saved = before - after;
+      recordPrune(pruneManifest, callId, {
+        replacement,
+        savedTokens: saved,
+        introducedAtUsageEpoch: usageEpoch,
+      });
+      newlySavedTokens += saved;
+      savedTokens += saved;
+      prunedToolResults++;
+    }
   }
   const estimatedTokens = Math.max(0, initial - newlySavedTokens);
   const ratio = estimatedTokens / contextWindow;
@@ -315,9 +361,9 @@ export function applyContextPressurePolicy(
     ? "critical"
     : prunedToolResults > 0
       ? "auto-prune"
-    : ratio >= AUTO_PRUNE_RATIO
+    : ratio >= soft.pruneRatio
       ? "auto-prune"
-      : ratio >= NUDGE_RATIO
+      : ratio >= soft.nudgeRatio
         ? "nudge"
         : "normal";
   return pressureResult(transformed, band, estimatedTokens, thresholdTokens, prunedToolResults, savedTokens);
@@ -459,37 +505,6 @@ export function endsWithCompleteToolResultBatch(messages: AgentMessage[]): boole
   return callIds.length === resultIds.length
     && new Set(callIds).size === callIds.length
     && callIds.every((id) => resultIds.includes(id));
-}
-
-function readEffectiveCompactionSettings(projectRoot: string): CompactionSettings {
-  let settings: CompactionSettings = {
-    enabled: true,
-    reserveTokens: DEFAULT_RESERVE_TOKENS,
-    keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
-  };
-  for (const path of [join(resolveAgentDir(), "settings.json"), join(projectRoot, ".pi", "settings.json")]) {
-    if (!existsSync(path)) continue;
-    try {
-      const payload = JSON.parse(readFileSync(path, "utf8")) as { compaction?: Partial<CompactionSettings> };
-      if (!payload.compaction || typeof payload.compaction !== "object") continue;
-      settings = {
-        enabled: typeof payload.compaction.enabled === "boolean" ? payload.compaction.enabled : settings.enabled,
-        reserveTokens: positiveNumber(payload.compaction.reserveTokens) ?? settings.reserveTokens,
-        keepRecentTokens: positiveNumber(payload.compaction.keepRecentTokens) ?? settings.keepRecentTokens,
-      };
-    } catch {
-      // Pi owns settings validation. A malformed optional override must not break provider requests.
-    }
-  }
-  return settings;
-}
-
-function resolveAgentDir(): string {
-  return process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
-}
-
-function positiveNumber(value: unknown): number | undefined {
-  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
 }
 
 function assistantUsage(message: AgentMessage): { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number } | undefined {

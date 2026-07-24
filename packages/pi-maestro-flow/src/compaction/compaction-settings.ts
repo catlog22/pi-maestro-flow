@@ -1,0 +1,372 @@
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+
+export const DEFAULT_RESERVE_TOKENS = 16_384;
+export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
+
+export interface SoftCompactionConfigPatch {
+  enabled?: boolean;
+  nudgeRatio?: number;
+  pruneRatio?: number;
+  pruneTargetRatio?: number;
+}
+
+export interface SoftCompactionSettings {
+  enabled: boolean;
+  nudgeRatio: number;
+  pruneRatio: number;
+  pruneTargetRatio: number;
+}
+
+/** Balanced soft-layer conditions; equivalent to the historical hardcoded ratios. */
+export const DEFAULT_SOFT_COMPACTION: SoftCompactionSettings = {
+  enabled: true,
+  nudgeRatio: 0.7,
+  pruneRatio: 0.8,
+  pruneTargetRatio: 0.7,
+};
+
+export interface CompactionConfigPatch {
+  enabled?: boolean;
+  reserveTokens?: number;
+  keepRecentTokens?: number;
+  soft?: SoftCompactionConfigPatch;
+}
+
+export const COMPACTION_FIELDS = ["enabled", "reserveTokens", "keepRecentTokens"] as const;
+
+export type CompactionSettingSource = "project" | "user" | "default";
+
+export interface EffectiveCompactionSettings {
+  enabled: boolean;
+  reserveTokens: number;
+  keepRecentTokens: number;
+  soft: SoftCompactionSettings;
+  source: Record<keyof CompactionConfigPatch, CompactionSettingSource>;
+}
+
+export type CompactionScope = "project" | "user";
+
+export interface CompactionSettingsSnapshot {
+  scopes: Record<CompactionScope, CompactionConfigPatch>;
+  effective: EffectiveCompactionSettings;
+}
+
+export interface CompactionValidation {
+  errors: string[];
+  warnings: string[];
+}
+
+export function resolveUserSettingsPath(): string {
+  const dir = process.env.PI_CODING_AGENT_DIR ?? join(homedir(), ".pi", "agent");
+  return join(dir, "settings.json");
+}
+
+export function resolveProjectSettingsPath(projectRoot: string): string {
+  return join(projectRoot, ".pi", "settings.json");
+}
+
+function settingsPathForScope(scope: CompactionScope, projectRoot: string): string {
+  return scope === "project" ? resolveProjectSettingsPath(projectRoot) : resolveUserSettingsPath();
+}
+
+function readRawCompaction(path: string): CompactionConfigPatch {
+  if (!existsSync(path)) return {};
+  try {
+    const payload = JSON.parse(readFileSync(path, "utf8")) as { compaction?: unknown };
+    if (!payload.compaction || typeof payload.compaction !== "object") return {};
+    const c = payload.compaction as Record<string, unknown>;
+    const patch: CompactionConfigPatch = {};
+    if (typeof c.enabled === "boolean") patch.enabled = c.enabled;
+    const hard = isRecord(c.hard) ? c.hard : undefined;
+    const rt = positiveNumber(hard?.reserveTokens) ?? positiveNumber(c.reserveTokens);
+    if (rt !== undefined) patch.reserveTokens = rt;
+    const kr = positiveNumber(hard?.keepRecentTokens) ?? positiveNumber(c.keepRecentTokens);
+    if (kr !== undefined) patch.keepRecentTokens = kr;
+    const soft = readRawSoft(c.soft);
+    if (soft) patch.soft = soft;
+    return patch;
+  } catch {
+    return {};
+  }
+}
+
+function readRawSoft(value: unknown): SoftCompactionConfigPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const soft: SoftCompactionConfigPatch = {};
+  if (typeof value.enabled === "boolean") soft.enabled = value.enabled;
+  const nudgeRatio = ratioNumber(value.nudgeRatio);
+  if (nudgeRatio !== undefined) soft.nudgeRatio = nudgeRatio;
+  const pruneRatio = ratioNumber(value.pruneRatio);
+  if (pruneRatio !== undefined) soft.pruneRatio = pruneRatio;
+  const pruneTargetRatio = ratioNumber(value.pruneTargetRatio);
+  if (pruneTargetRatio !== undefined) soft.pruneTargetRatio = pruneTargetRatio;
+  return Object.keys(soft).length > 0 ? soft : undefined;
+}
+
+function ratioNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 && value < 1 ? value : undefined;
+}
+
+export function readScopeCompaction(scope: CompactionScope, projectRoot: string): CompactionConfigPatch {
+  return readRawCompaction(settingsPathForScope(scope, projectRoot));
+}
+
+export function readEffectiveCompactionSettings(projectRoot: string): EffectiveCompactionSettings {
+  return readCompactionSettings(projectRoot).effective;
+}
+
+export function readCompactionSettings(projectRoot: string): CompactionSettingsSnapshot {
+  const scopes = {
+    user: readRawCompaction(resolveUserSettingsPath()),
+    project: readRawCompaction(resolveProjectSettingsPath(projectRoot)),
+  };
+  return {
+    scopes,
+    effective: resolveEffectiveCompactionSettings(scopes.user, scopes.project),
+  };
+}
+
+export function resolveEffectiveCompactionSettings(
+  userPatch: CompactionConfigPatch,
+  projectPatch: CompactionConfigPatch,
+): EffectiveCompactionSettings {
+  const source: Record<keyof CompactionConfigPatch, CompactionSettingSource> = {
+    enabled: "default",
+    reserveTokens: "default",
+    keepRecentTokens: "default",
+    soft: "default",
+  };
+
+  let enabled = true;
+  let reserveTokens = DEFAULT_RESERVE_TOKENS;
+  let keepRecentTokens = DEFAULT_KEEP_RECENT_TOKENS;
+  const soft: SoftCompactionSettings = { ...DEFAULT_SOFT_COMPACTION };
+
+  for (const [patch, src] of [[userPatch, "user"], [projectPatch, "project"]] as const) {
+    if (patch.enabled !== undefined) { enabled = patch.enabled; source.enabled = src; }
+    if (patch.reserveTokens !== undefined) { reserveTokens = patch.reserveTokens; source.reserveTokens = src; }
+    if (patch.keepRecentTokens !== undefined) { keepRecentTokens = patch.keepRecentTokens; source.keepRecentTokens = src; }
+    if (patch.soft !== undefined) {
+      if (patch.soft.enabled !== undefined) soft.enabled = patch.soft.enabled;
+      if (patch.soft.nudgeRatio !== undefined) soft.nudgeRatio = patch.soft.nudgeRatio;
+      if (patch.soft.pruneRatio !== undefined) soft.pruneRatio = patch.soft.pruneRatio;
+      if (patch.soft.pruneTargetRatio !== undefined) soft.pruneTargetRatio = patch.soft.pruneTargetRatio;
+      source.soft = src;
+    }
+  }
+
+  return { enabled, reserveTokens, keepRecentTokens, soft, source };
+}
+
+export function validateCompactionPatch(
+  patch: CompactionConfigPatch,
+  contextWindow?: number,
+  maxTokens?: number,
+): CompactionValidation {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  for (const field of ["reserveTokens", "keepRecentTokens"] as const) {
+    const value = patch[field];
+    if (value === undefined) continue;
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      errors.push(`${field} must be a positive safe integer`);
+    }
+  }
+
+  const rt = patch.reserveTokens;
+  if (rt !== undefined && Number.isSafeInteger(rt) && rt > 0) {
+    if (contextWindow !== undefined && rt >= contextWindow) {
+      errors.push(`reserveTokens (${rt}) must be less than contextWindow (${contextWindow})`);
+    }
+    if (contextWindow !== undefined && rt < contextWindow) {
+      const threshold = contextWindow - rt;
+      const kr = patch.keepRecentTokens;
+      if (kr !== undefined && kr >= threshold) {
+        warnings.push(`keepRecentTokens (${kr}) >= thresholdTokens (${threshold}): little compressible history`);
+      }
+      if (maxTokens !== undefined && rt < maxTokens) {
+        warnings.push(`reserveTokens (${rt}) < maxTokens (${maxTokens}): may not leave enough room for a single response`);
+      }
+    }
+  }
+
+  const soft = patch.soft;
+  if (soft !== undefined) {
+    for (const field of ["nudgeRatio", "pruneRatio", "pruneTargetRatio"] as const) {
+      const value = soft[field];
+      if (value === undefined) continue;
+      if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value >= 1) {
+        errors.push(`soft.${field} must be a number in (0, 1)`);
+      }
+    }
+    if (soft.nudgeRatio !== undefined && soft.pruneRatio !== undefined && soft.nudgeRatio >= soft.pruneRatio) {
+      errors.push(`soft.nudgeRatio (${soft.nudgeRatio}) must be less than soft.pruneRatio (${soft.pruneRatio})`);
+    }
+    if (soft.pruneTargetRatio !== undefined && soft.pruneRatio !== undefined && soft.pruneTargetRatio >= soft.pruneRatio) {
+      errors.push(`soft.pruneTargetRatio (${soft.pruneTargetRatio}) must be less than soft.pruneRatio (${soft.pruneRatio})`);
+    }
+  }
+
+  if (contextWindow === undefined) {
+    warnings.push("No model context window available; threshold validation skipped");
+  }
+
+  return { errors, warnings };
+}
+
+const writeQueues = new Map<string, Promise<void>>();
+
+function enqueueWrite(path: string, fn: () => Promise<void>): Promise<void> {
+  const prev = writeQueues.get(path) ?? Promise.resolve();
+  const next = prev.catch(() => undefined).then(fn);
+  const settled = next.catch(() => undefined);
+  writeQueues.set(path, settled);
+  void settled.finally(() => {
+    if (writeQueues.get(path) === settled) writeQueues.delete(path);
+  });
+  return next;
+}
+
+export async function saveCompactionPatch(
+  scope: CompactionScope,
+  projectRoot: string,
+  patch: CompactionConfigPatch,
+): Promise<void> {
+  const path = settingsPathForScope(scope, projectRoot);
+  return enqueueWrite(path, () => patchSettingsFile(path, patch));
+}
+
+export async function unsetCompactionField(
+  scope: CompactionScope,
+  projectRoot: string,
+  field: keyof CompactionConfigPatch,
+): Promise<void> {
+  const path = settingsPathForScope(scope, projectRoot);
+  return enqueueWrite(path, () => unsetFieldInSettingsFile(path, field));
+}
+
+export async function saveCompactionScope(
+  scope: CompactionScope,
+  projectRoot: string,
+  values: CompactionConfigPatch,
+): Promise<void> {
+  const path = settingsPathForScope(scope, projectRoot);
+  return enqueueWrite(path, () => replaceKnownFieldsInSettingsFile(path, values));
+}
+
+function normalizeCompactionRecord(compaction: Record<string, unknown>): Record<string, unknown> {
+  const result = { ...compaction };
+  const hard = isRecord(result.hard) ? { ...result.hard } : {};
+  if (result.reserveTokens !== undefined) { hard.reserveTokens = result.reserveTokens; delete result.reserveTokens; }
+  if (result.keepRecentTokens !== undefined) { hard.keepRecentTokens = result.keepRecentTokens; delete result.keepRecentTokens; }
+  if (Object.keys(hard).length > 0) result.hard = hard;
+  return result;
+}
+
+async function patchSettingsFile(path: string, patch: CompactionConfigPatch): Promise<void> {
+  const root = readJsonRoot(path);
+  const compaction = normalizeCompactionRecord(isRecord(root.compaction) ? { ...root.compaction } : {});
+  if (patch.enabled !== undefined) compaction.enabled = patch.enabled;
+  if (patch.reserveTokens !== undefined || patch.keepRecentTokens !== undefined) {
+    const hard = isRecord(compaction.hard) ? { ...compaction.hard } : {};
+    if (patch.reserveTokens !== undefined) hard.reserveTokens = patch.reserveTokens;
+    if (patch.keepRecentTokens !== undefined) hard.keepRecentTokens = patch.keepRecentTokens;
+    compaction.hard = hard;
+  }
+  if (patch.soft !== undefined) {
+    const merged: Record<string, unknown> = isRecord(compaction.soft) ? { ...compaction.soft } : {};
+    for (const [key, value] of Object.entries(patch.soft)) {
+      if (value !== undefined) merged[key] = value;
+    }
+    compaction.soft = merged;
+  }
+  root.compaction = compaction;
+  await atomicWriteJson(path, root);
+}
+
+async function unsetFieldInSettingsFile(path: string, field: keyof CompactionConfigPatch): Promise<void> {
+  const root = readJsonRoot(path);
+  if (isRecord(root.compaction)) {
+    if (field === "reserveTokens" || field === "keepRecentTokens") {
+      delete root.compaction[field];
+      if (isRecord(root.compaction.hard)) {
+        delete root.compaction.hard[field];
+        if (Object.keys(root.compaction.hard).length === 0) delete root.compaction.hard;
+      }
+    } else {
+      delete root.compaction[field];
+    }
+    if (Object.keys(root.compaction).length === 0) {
+      delete root.compaction;
+    }
+  }
+  await atomicWriteJson(path, root);
+}
+
+async function replaceKnownFieldsInSettingsFile(path: string, values: CompactionConfigPatch): Promise<void> {
+  const root = readJsonRoot(path);
+  const compaction = normalizeCompactionRecord(isRecord(root.compaction) ? { ...root.compaction } : {});
+  if (values.enabled === undefined) delete compaction.enabled;
+  else compaction.enabled = values.enabled;
+  const hard = isRecord(compaction.hard) ? { ...compaction.hard } : {};
+  if (values.reserveTokens === undefined) delete hard.reserveTokens;
+  else hard.reserveTokens = values.reserveTokens;
+  if (values.keepRecentTokens === undefined) delete hard.keepRecentTokens;
+  else hard.keepRecentTokens = values.keepRecentTokens;
+  if (Object.keys(hard).length === 0) delete compaction.hard;
+  else compaction.hard = hard;
+  if (values.soft !== undefined) {
+    const soft: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(values.soft)) {
+      if (value !== undefined) soft[key] = value;
+    }
+    compaction.soft = soft;
+  }
+  if (Object.keys(compaction).length === 0) delete root.compaction;
+  else root.compaction = compaction;
+  await atomicWriteJson(path, root);
+}
+
+function readJsonRoot(path: string): Record<string, unknown> {
+  if (!existsSync(path)) return {};
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (!isRecord(parsed)) throw new Error(`Settings root must be a JSON object: ${path}`);
+    return parsed;
+  } catch (error) {
+    throw new Error(
+      `Cannot safely update malformed settings file ${path}: ${error instanceof Error ? error.message : String(error)}`,
+      { cause: error },
+    );
+  }
+}
+
+async function atomicWriteJson(path: string, value: unknown): Promise<void> {
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", flag: "wx", mode: 0o600 });
+  try {
+    await rename(temporaryPath, path);
+  } catch (error) {
+    const code = isRecord(error) && typeof error.code === "string" ? error.code : "";
+    if (process.platform === "win32" && ["EEXIST", "EPERM", "ENOTEMPTY"].includes(code)) {
+      await unlink(path).catch(() => undefined);
+      await rename(temporaryPath, path);
+      return;
+    }
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
+}
+
+function positiveNumber(value: unknown): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}

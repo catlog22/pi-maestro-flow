@@ -23,6 +23,10 @@ import {
   shouldCompactMidTurn,
 } from "../src/compaction/auto-compaction.ts";
 import {
+  CompactionArbiter,
+  compactionRequestFromInstructions,
+} from "../src/compaction/compaction-arbiter.ts";
+import {
   initTodo,
   onSessionShutdown,
   onSessionStart,
@@ -188,6 +192,33 @@ test("mid-turn compaction only evaluates complete assistant tool-result batches"
   assert.equal(endsWithCompleteToolResultBatch([assistant, { ...result, toolCallId: "other" }]), false);
 });
 
+test("compaction arbiter serializes extension requests while only observing native compaction", () => {
+  const arbiter = new CompactionArbiter();
+  const midTurn = arbiter.request("mid-turn");
+  assert.ok(midTurn);
+  assert.equal(arbiter.request("plan-handoff"), undefined);
+  const competingNative = arbiter.observeStart();
+  assert.equal(competingNative.allowed, true);
+  assert.equal(competingNative.owner, "native");
+  assert.equal(arbiter.currentOwner(), "native");
+  const request = compactionRequestFromInstructions(midTurn.tagInstructions("summary"));
+  assert.ok(request);
+  const requestedObservation = arbiter.observeStart(request);
+  assert.equal(requestedObservation.owner, "native");
+  assert.equal(requestedObservation.allowed, false);
+  requestedObservation.releaseIfNative();
+  assert.equal(arbiter.currentOwner(), undefined);
+  assert.equal(arbiter.observeStart(request).allowed, false, "a revoked lease cannot restart after native completion");
+  midTurn.release();
+  assert.equal(arbiter.currentOwner(), undefined);
+
+  const native = arbiter.observeStart();
+  assert.equal(native.owner, "native");
+  assert.equal(arbiter.request("mid-turn"), undefined);
+  native.releaseIfNative();
+  assert.equal(arbiter.currentOwner(), undefined);
+});
+
 test("mid-turn token estimate adds tool results after the last assistant usage", () => {
   const messages = [{
     role: "assistant",
@@ -291,6 +322,66 @@ test("pressure policy protects non-replayable control tool outputs", () => {
   assert.equal(pressure.messages[1], messages[1]);
 });
 
+test("pressure policy with soft layer disabled skips pruning but keeps the hard critical band", () => {
+  const oldAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }],
+    usage: { input: 700, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const oldResult = {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "read",
+    content: [{ type: "text", text: "o".repeat(8_000) }],
+    isError: false,
+  } as never;
+  const recentAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "recent", name: "read", arguments: {} }],
+  } as never;
+  const recentResult = {
+    role: "toolResult",
+    toolCallId: "recent",
+    toolName: "read",
+    content: [{ type: "text", text: "r".repeat(8_000) }],
+    isError: false,
+  } as never;
+  const messages = [oldAssistant, oldResult, recentAssistant, recentResult];
+  const settings = {
+    enabled: true,
+    reserveTokens: 400,
+    keepRecentTokens: 2_000,
+    soft: { enabled: false, nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 },
+  };
+  const pressure = applyContextPressurePolicy(messages, 4_000, settings);
+  assert.equal(pressure.prunedToolResults, 0, "disabled soft layer must not prune");
+  assert.equal(pressure.messages[1], oldResult, "original tool result stays intact");
+  assert.equal(pressure.band, "critical", "hard threshold still escalates");
+});
+
+test("pressure policy honors custom soft nudgeRatio when classifying bands", () => {
+  const assistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call", name: "bash", arguments: {} }],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const result = {
+    role: "toolResult",
+    toolCallId: "call",
+    toolName: "bash",
+    content: [{ type: "text", text: "x".repeat(2_900) }],
+    isError: false,
+  } as never;
+  const messages = [assistant, result];
+  const hard = { enabled: true, reserveTokens: 100, keepRecentTokens: 100 };
+  assert.equal(applyContextPressurePolicy(messages, 1_000, hard).band, "nudge");
+  const raised = applyContextPressurePolicy(messages, 1_000, {
+    ...hard,
+    soft: { enabled: true, nudgeRatio: 0.8, pruneRatio: 0.9, pruneTargetRatio: 0.8 },
+  });
+  assert.equal(raised.band, "normal");
+});
+
 test("mid-turn guard does not abort when Pi reports no compactable history", async () => {
   let aborted = 0;
   let compacted = 0;
@@ -325,6 +416,58 @@ test("mid-turn guard does not abort when Pi reports no compactable history", asy
   assert.equal(compacted, 0);
   assert.equal(notifications.length, 1);
   assert.match(statuses.get("maestro-auto-compact") ?? "", /CRITICAL/);
+});
+
+test("mid-turn compaction yields when native or plan compaction owns the arbiter", async () => {
+  const arbiter = new CompactionArbiter();
+  const native = arbiter.observeStart();
+  let aborted = 0;
+  let compacted = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    arbiter,
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const result = await guard.evaluate(pressureToolBatch(), {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { aborted++; },
+    compact() { compacted++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never);
+
+  assert.ok(result);
+  assert.equal(aborted, 0);
+  assert.equal(compacted, 0);
+  native.releaseIfNative();
+});
+
+test("mid-turn compaction defers before Pi preparation when the arbiter is owned", async () => {
+  const arbiter = new CompactionArbiter();
+  const native = arbiter.observeStart();
+  let prepareCalls = 0;
+  let aborted = 0;
+  let compacted = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    arbiter,
+    loadInternals: async () => ({ prepareCompaction: () => { prepareCalls++; return { messagesToSummarize: [{}] }; } }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const result = await guard.evaluate(pressureToolBatch(), {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { aborted++; },
+    compact() { compacted++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never);
+
+  assert.ok(result);
+  assert.equal(prepareCalls, 0, "owned arbiter must short-circuit before Pi preparation");
+  assert.equal(aborted, 0);
+  assert.equal(compacted, 0);
+  native.releaseIfNative();
 });
 
 test("mid-turn guard clears its trigger key after compaction failure", async () => {
@@ -444,6 +587,36 @@ test("mid-turn guard publishes enabled and disabled idle states across its lifec
     { key: COMPACTION_STATUS_KEY, value: undefined },
     { key: COMPACTION_MODE_STATUS_KEY, value: undefined },
   ]);
+});
+
+test("mid-turn guard reuses a session settings snapshot across evaluations until invalidated", async () => {
+  let readCount = 0;
+  let enabled = true;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => undefined }),
+    readSettings: () => {
+      readCount++;
+      return { enabled, reserveTokens: 100, keepRecentTokens: 100 };
+    },
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    compact() {},
+    sessionManager: { getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const messages = pressureToolBatch();
+  await guard.evaluate(messages, ctx);
+  await guard.evaluate(messages, ctx);
+  await guard.evaluate(messages, ctx);
+  assert.equal(readCount, 1, "settings parsed once and cached across evaluations");
+
+  guard.refreshSettings();
+  enabled = false;
+  await guard.evaluate(messages, ctx);
+  assert.equal(readCount, 2, "refreshSettings invalidates the snapshot for the next evaluation");
 });
 
 test("mid-turn reset fences stale compaction callbacks from the next lifecycle", async () => {

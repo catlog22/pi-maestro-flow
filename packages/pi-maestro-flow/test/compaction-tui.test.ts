@@ -1,0 +1,232 @@
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test from "node:test";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import {
+  CompactionSettingsOverlay,
+  registerCompactionSettingsCommand,
+  type CompactionSettingsResult,
+} from "../src/tui/compaction-settings.ts";
+import type { CompactionScope } from "../src/compaction/compaction-settings.ts";
+
+const theme = {
+  fg(_role: string, text: string) { return text; },
+  bold(text: string) { return text; },
+};
+
+test("compaction TUI renders safely at narrow, boundary, and wide widths", () => {
+  const overlay = createOverlay();
+  for (const width of [1, 12, 20, 40, 76, 80, 120]) {
+    const lines = overlay.render(width);
+    assert.ok(lines.length > 0);
+    for (const line of lines) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+    }
+  }
+  assert.match(overlay.render(80).join("\n"), /Maestro 压缩设置/);
+  assert.match(overlay.render(80).join("\n"), /压缩阈值/);
+  assert.match(overlay.render(80).join("\n"), /290,000 \/ 300,000 \(96\.7%\)/);
+  assert.match(overlay.render(20).join("\n"), /Esc关闭 Enter修改/);
+  overlay.handleInput("\r");
+  assert.match(overlay.render(20).join("\n"), /Esc返回 Enter确认/);
+  overlay.handleInput("\x1b");
+});
+
+test("compaction TUI supports direct threshold editing, scope tabs, toggle, inherit, and save", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  let result: CompactionSettingsResult | undefined;
+  const overlay = createOverlay({
+    done(next) { result = next; },
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+
+  overlay.handleInput("U");
+  assert.match(overlay.render(80).join("\n"), /压缩阈值 · 280,000 \/ 300,000 \(93\.3%\) · 继承自用户/);
+  assert.match(overlay.render(20).join("\n"), /Esc关闭 Ctrl\+S保存/);
+  overlay.handleInput("\x1b[B");
+  overlay.handleInput(" ");
+  overlay.handleInput("\t");
+  overlay.handleInput("\x1b[A");
+  overlay.handleInput("\r");
+  for (let index = 0; index < 6; index++) overlay.handleInput("\x7f");
+  overlay.handleInput("285000");
+  overlay.handleInput("\r");
+  overlay.handleInput("\x13");
+  await flushAsync();
+
+  assert.deepEqual(saves, [{
+    scope: "user",
+    values: { enabled: false, reserveTokens: 15_000 },
+  }, {
+    scope: "project",
+    values: { enabled: true, keepRecentTokens: 12_000 },
+  }]);
+  assert.deepEqual(result, { saved: true });
+});
+
+test("compaction TUI keeps draft and selection after a failed save", async () => {
+  let attempts = 0;
+  const overlay = createOverlay({
+    async saveScope() {
+      attempts++;
+      throw new Error("disk full");
+    },
+  });
+  overlay.handleInput("\r");
+  for (let index = 0; index < 6; index++) overlay.handleInput("\x7f");
+  overlay.handleInput("250000");
+  overlay.handleInput("\r");
+  overlay.handleInput("\x13");
+  await flushAsync();
+
+  const rendered = overlay.render(80).join("\n");
+  assert.equal(attempts, 1);
+  assert.match(rendered, /250,000 \/ 300,000 \(83\.3%\)/);
+  assert.match(rendered, /保存失败 · disk full/);
+  assert.match(rendered, /压缩阈值/);
+});
+
+test("compaction TUI validates inline and uses layered Esc without saving", async () => {
+  let saves = 0;
+  let result: CompactionSettingsResult | undefined;
+  const overlay = createOverlay({
+    done(next) { result = next; },
+    async saveScope() { saves++; },
+  });
+  overlay.handleInput("\r");
+  for (let index = 0; index < 6; index++) overlay.handleInput("\x7f");
+  overlay.handleInput("300000");
+  overlay.handleInput("\r");
+  assert.match(overlay.render(80).join("\n"), /× 压缩阈值必须小于上下文窗口 300,000/);
+  overlay.handleInput("\x1b");
+  assert.match(overlay.render(80).join("\n"), /设置菜单/);
+
+  overlay.handleInput("\r");
+  for (let index = 0; index < 6; index++) overlay.handleInput("\x7f");
+  overlay.handleInput("299999");
+  overlay.handleInput("\r");
+  assert.match(overlay.render(80).join("\n"), /△ 提醒/);
+  assert.equal(saves, 0);
+
+  overlay.handleInput("\x1b");
+  assert.equal(result, undefined, "first Esc arms discard for a dirty draft");
+  overlay.handleInput("\x1b");
+  assert.deepEqual(result, { saved: false });
+});
+
+test("compaction TUI falls back to reserve-token editing when model context is unavailable", () => {
+  const overlay = createOverlay({ contextWindow: undefined });
+  overlay.handleInput("\r");
+  const rendered = overlay.render(80).join("\n");
+  assert.match(rendered, /当前模型缺少上下文窗口，正在编辑预留输出空间/);
+  assert.match(rendered, /新值 · 10,000 Token/);
+});
+
+test("/maestro-compaction reloads exactly once only after a successful save", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-compaction-command-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = join(root, "agent");
+  let command: { handler(args: string, ctx: any): Promise<void> | void } | undefined;
+  let reloads = 0;
+  try {
+    registerCompactionSettingsCommand({
+      registerCommand(name: string, value: typeof command) {
+        if (name === "maestro-compaction") command = value;
+      },
+    } as never);
+    assert.ok(command);
+    await command.handler("", {
+      cwd: join(root, "project"),
+      hasUI: true,
+      model: { contextWindow: 300_000, maxTokens: 20_000 },
+      async reload() { reloads++; },
+      ui: {
+        notify() {},
+        async custom(factory: Function) {
+          return new Promise((resolve) => {
+            const component = factory({ requestRender() {} }, theme, {}, resolve);
+            setImmediate(() => {
+              component.handleInput("\x1b[B");
+              component.handleInput(" ");
+              component.handleInput("\x13");
+            });
+          });
+        },
+      },
+    });
+    assert.equal(reloads, 1);
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("compaction TUI toggles the soft-compression switch independently and saves the soft group", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  const overlay = createOverlay({
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+  overlay.handleInput("\x1b[B"); // -> enabled
+  overlay.handleInput("\x1b[B"); // -> keepRecentTokens
+  overlay.handleInput("\x1b[B"); // -> softEnabled
+  assert.match(overlay.render(80).join("\n"), /软压缩开关 · 已开启/);
+  overlay.handleInput(" ");
+  assert.match(overlay.render(80).join("\n"), /软压缩开关 · 已关闭/);
+  overlay.handleInput("\x13");
+  await flushAsync();
+  const projectSave = saves.find((save) => save.scope === "project");
+  assert.deepEqual(projectSave?.values, {
+    reserveTokens: 10_000,
+    keepRecentTokens: 12_000,
+    soft: { enabled: false },
+  });
+});
+
+test("compaction TUI pressure preview derives from the effective soft ratios", () => {
+  const overlay = createOverlay({
+    snapshot: {
+      scopes: {
+        user: {},
+        project: { soft: { nudgeRatio: 0.5, pruneRatio: 0.65, pruneTargetRatio: 0.5 } },
+      },
+      effective: {} as never,
+    },
+  });
+  assert.match(overlay.render(120).join("\n"), /正常 <50% · 提醒 50–65% · 清理 65–/);
+});
+
+function createOverlay(overrides: Partial<ConstructorParameters<typeof CompactionSettingsOverlay>[0]> = {}) {
+  return new CompactionSettingsOverlay({
+    projectRoot: "D:\\repo",
+    snapshot: {
+      scopes: {
+        user: { enabled: false, reserveTokens: 20_000 },
+        project: { reserveTokens: 10_000, keepRecentTokens: 12_000 },
+      },
+      effective: {
+        enabled: false,
+        reserveTokens: 10_000,
+        keepRecentTokens: 12_000,
+        source: {
+          enabled: "user",
+          reserveTokens: "project",
+          keepRecentTokens: "project",
+        },
+      },
+    },
+    contextWindow: 300_000,
+    maxTokens: 16_000,
+    theme,
+    requestRender() {},
+    done() {},
+    async saveScope() {},
+    ...overrides,
+  });
+}
+
+async function flushAsync(): Promise<void> {
+  await new Promise((resolve) => setImmediate(resolve));
+}
