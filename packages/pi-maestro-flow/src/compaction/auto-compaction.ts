@@ -80,6 +80,8 @@ export interface ContextSignals {
   fullnessRatio: number;
   criticalGap: number;
   prunableFraction: number;
+  /** Fraction of estimated tokens occupied by stale duplicate tool outputs. */
+  redundantFraction?: number;
   cacheHitRatio: number | undefined;
 }
 
@@ -738,6 +740,60 @@ function evictableBulkToolResult(message: AgentMessage): AgentMessage | undefine
   } as AgentMessage;
 }
 
+const REDUNDANCY_PATTERN_PREFIX_CHARS = 120;
+
+/**
+ * Dedup key for a tool result: tool name plus a prefix of its text content.
+ * Error results and content-less results have no key (never treated as redundant).
+ */
+export function toolResultPatternKey(message: AgentMessage): string | undefined {
+  const record = message as MessageRecord;
+  if (record.role !== "toolResult" || record.isError === true) return undefined;
+  if (typeof record.toolName !== "string") return undefined;
+  const content = record.content;
+  let text = "";
+  if (typeof content === "string") {
+    text = content;
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      const blockText = (block as { text?: unknown } | null)?.text;
+      if (typeof blockText === "string") text += blockText;
+    }
+  }
+  if (text.length === 0) return undefined;
+  return `${record.toolName}:${text.slice(0, REDUNDANCY_PATTERN_PREFIX_CHARS)}`;
+}
+
+/**
+ * Call ids of stale duplicate tool results: for any content pattern that occurs
+ * more than once, every occurrence except the newest is redundant. Prune ordering
+ * stays latest-first for cache-prefix retention; this signal is used for telemetry
+ * and future importance-aware eviction.
+ */
+export function redundantToolResultCallIds(messages: AgentMessage[]): Set<string> {
+  const countByPattern = new Map<string, number>();
+  const newestByPattern = new Map<string, string>();
+  for (const message of messages) {
+    const callId = toolResultCallId(message);
+    if (!callId) continue;
+    const key = toolResultPatternKey(message);
+    if (!key) continue;
+    countByPattern.set(key, (countByPattern.get(key) ?? 0) + 1);
+    newestByPattern.set(key, callId);
+  }
+  const redundant = new Set<string>();
+  for (const message of messages) {
+    const callId = toolResultCallId(message);
+    if (!callId) continue;
+    const key = toolResultPatternKey(message);
+    if (!key) continue;
+    if ((countByPattern.get(key) ?? 0) > 1 && newestByPattern.get(key) !== callId) {
+      redundant.add(callId);
+    }
+  }
+  return redundant;
+}
+
 interface PressureResultInput {
   messages: AgentMessage[];
   band: ContextPressureBand;
@@ -805,7 +861,15 @@ export function computeContextSignals(input: {
     prunableTokens += estimateMessageTokens(message);
   }
   const prunableFraction = estimatedTokens > 0 ? Math.min(1, prunableTokens / estimatedTokens) : 0;
-  return { fullnessRatio, criticalGap, prunableFraction, cacheHitRatio: latestCacheHitRatio(messages) };
+  const redundantIds = redundantToolResultCallIds(messages);
+  let redundantTokens = 0;
+  for (const message of messages) {
+    const callId = toolResultCallId(message);
+    if (!callId || !redundantIds.has(callId)) continue;
+    redundantTokens += estimateMessageTokens(message);
+  }
+  const redundantFraction = estimatedTokens > 0 ? Math.min(1, redundantTokens / estimatedTokens) : 0;
+  return { fullnessRatio, criticalGap, prunableFraction, redundantFraction, cacheHitRatio: latestCacheHitRatio(messages) };
 }
 
 /**
@@ -816,6 +880,7 @@ export function decideContextAction(band: ContextPressureBand, signals: ContextS
   const action: ContextAction = band === "critical" ? "compact" : band === "auto-prune" ? "prune" : "none";
   const reasons: string[] = [];
   if (signals.prunableFraction > 0) reasons.push(`prunable:${Math.round(signals.prunableFraction * 100)}%`);
+  if (signals.redundantFraction && signals.redundantFraction > 0) reasons.push(`redundant:${Math.round(signals.redundantFraction * 100)}%`);
   if (signals.cacheHitRatio !== undefined) reasons.push(`cache:${Math.round(signals.cacheHitRatio * 100)}%`);
   return { band, action, reasons };
 }
