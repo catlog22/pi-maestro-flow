@@ -1485,6 +1485,18 @@ async function runSingleAttempt(
 
   // AC8: Rich progress tracking
   const progress = createProgress(params.agent, startTime);
+  // Result usage remains turn-scoped, while status usage stays cumulative for
+  // the lifetime of a wakeable agent.
+  let completedInputTokens = 0;
+  let completedOutputTokens = 0;
+
+  const updateProgressUsage = (): void => {
+    const inputTokens = completedInputTokens + usage.inputTokens + pendingMessageUsage.inputTokens;
+    const outputTokens = completedOutputTokens + usage.outputTokens + pendingMessageUsage.outputTokens;
+    progress.inputTokens = Math.max(progress.inputTokens ?? 0, inputTokens);
+    progress.outputTokens = Math.max(progress.outputTokens ?? 0, outputTokens);
+    progress.tokens = progress.inputTokens + progress.outputTokens;
+  };
 
   return new Promise<SingleResult>((resolve) => {
     let child: ChildProcess;
@@ -1693,6 +1705,8 @@ async function runSingleAttempt(
         // Completion observers must not strand a child after the result has
         // already been published to the caller.
       } finally {
+        completedInputTokens = Math.max(completedInputTokens, progress.inputTokens ?? 0);
+        completedOutputTokens = Math.max(completedOutputTokens, progress.outputTokens ?? 0);
         releasePublishedTurnHistory(messages, progress, usage);
         lastContent = "";
         streamingText = "";
@@ -1753,9 +1767,6 @@ async function runSingleAttempt(
           progress.resultReadyAt = undefined;
           progress.recentTools = [];
           progress.toolCount = 0;
-          progress.tokens = 0;
-          progress.inputTokens = 0;
-          progress.outputTokens = 0;
           options.onProgress?.(progress);
           break;
         }
@@ -1792,9 +1803,7 @@ async function runSingleAttempt(
             addUsageSnapshot(usage, messageUsage);
             resetUsage(pendingMessageUsage);
             usage.turns += 1;
-            progress.tokens = usage.inputTokens + usage.outputTokens;
-            progress.inputTokens = usage.inputTokens;
-            progress.outputTokens = usage.outputTokens;
+            updateProgressUsage();
           }
           const messageModel = typeof msg?.model === "string" ? msg.model : event.model;
           if (messageModel) {
@@ -1829,10 +1838,7 @@ async function runSingleAttempt(
           const msgUsage = msg?.usage as Record<string, unknown> | undefined;
           if (msgUsage) {
             setUsageSnapshot(pendingMessageUsage, msgUsage);
-            progress.tokens = usage.inputTokens + usage.outputTokens
-              + pendingMessageUsage.inputTokens + pendingMessageUsage.outputTokens;
-            progress.inputTokens = usage.inputTokens + pendingMessageUsage.inputTokens;
-            progress.outputTokens = usage.outputTokens + pendingMessageUsage.outputTokens;
+            updateProgressUsage();
             progressChanged = true;
           }
           if (progressChanged) options.onProgress?.(progress);
@@ -1885,10 +1891,8 @@ async function runSingleAttempt(
         case "usage": {
           if (event.usage) {
             setUsageSnapshot(pendingMessageUsage, event.usage as Record<string, unknown>);
-            progress.tokens = usage.inputTokens + usage.outputTokens
-              + pendingMessageUsage.inputTokens + pendingMessageUsage.outputTokens;
-            progress.inputTokens = usage.inputTokens + pendingMessageUsage.inputTokens;
-            progress.outputTokens = usage.outputTokens + pendingMessageUsage.outputTokens;
+            updateProgressUsage();
+            options.onProgress?.(progress);
           }
           break;
         }

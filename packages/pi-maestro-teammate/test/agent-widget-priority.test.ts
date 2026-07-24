@@ -92,3 +92,24 @@ test("agent widget distinguishes a Pi result-ready turn from a stalled agent", (
   assert.match(output, /result returned; lifecycle pending/);
   assert.doesNotMatch(output, /stalled/);
 });
+
+test("agent widget freezes duration while an agent is sleeping", () => {
+  const now = Date.now();
+  const agent = {
+    agent: "delegate",
+    name: "sleeper",
+    correlationId: "sleeping-agent",
+    startedAt: now - 90_000,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now - 60_000,
+    status: "sleeping" as const,
+    sleptAt: now - 60_000,
+    sleepMs: 0,
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const output = renderAgentStatusWidget([agent], 120, theme).join("\n");
+
+  assert.match(output, /@sleeper delegate · 30s/);
+});

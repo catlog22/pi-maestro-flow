@@ -876,6 +876,7 @@ test("teammate stops after the initial attempt and five transient retries", asyn
 
 test("fresh agents publish follow-up turns while fork agents terminate after their first result", async () => {
   const completions: string[] = [];
+  const progressUsage: Array<[number | undefined, number | undefined]> = [];
   let freshStdout: PassThrough | undefined;
   let freshKilled = false;
   const spawnFresh = (() => {
@@ -914,6 +915,9 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
     {
       baseCwd: process.cwd(),
       spawnChildProcess: spawnFresh,
+      onProgress(progress) {
+        progressUsage.push([progress.inputTokens, progress.outputTokens]);
+      },
       onTurnComplete(result) {
         completions.push(result.messages.at(-1)?.content ?? "");
       },
@@ -927,6 +931,8 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
   assert.equal(freshKilled, false);
 
   freshStdout!.write(`${JSON.stringify({ type: "turn_start" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(progressUsage.at(-1), [12, 4]);
   freshStdout!.write(`${JSON.stringify({
     type: "message_end",
     message: {
@@ -938,6 +944,7 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
   freshStdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(completions, ["first answer", "follow-up answer"]);
+  assert.deepEqual(progressUsage.at(-1), [18, 7]);
 
   let forkKilled = false;
   const spawnFork = (() => {

@@ -14,6 +14,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { isGuiTeammateToolAllowed, registerGuiTool } from "../shared/gui-registry.ts";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams } from "./schemas.ts";
 import {
@@ -333,6 +334,7 @@ interface AgentWidgetRow {
   inputTokens?: number;
   outputTokens?: number;
   startedAt: number;
+  durationMs: number;
   lastActivityAt: number;
   resultReadyAt?: number;
   parentLabel?: string;
@@ -601,7 +603,17 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
         tokens: progress?.tokens ?? 0,
         inputTokens: progress?.inputTokens,
         outputTokens: progress?.outputTokens,
-        startedAt: direct?.startedAt ?? active.startedAt,
+        startedAt: direct?.startedAt
+          ?? (progress?.startedAt ? new Date(progress.startedAt).getTime() : active.startedAt),
+        durationMs: direct
+          ? agentActiveMs(direct)
+          : progress?.completedAt
+            ? progressDurationMs(progress, active)
+            : status === "sleeping"
+              ? agentActiveMs(active)
+              : progress
+                ? Math.max(progress.durationMs ?? 0, progressDurationMs(progress, active))
+                : agentActiveMs(active),
         lastActivityAt: progress?.lastActivityAt ?? direct?.lastActivityAt ?? active.lastActivityAt,
         ...(status === "running" && (progress?.resultReadyAt ?? direct?.resultReadyAt)
           ? { resultReadyAt: progress?.resultReadyAt ?? direct?.resultReadyAt }
@@ -686,7 +698,7 @@ export function renderAgentStatusWidget(
     const row = visible[index];
     const connector = index === visible.length - 1 && hidden === 0 ? "└─" : "├─";
     const now = Date.now();
-    const duration = `${Math.max(0, Math.floor((now - row.startedAt) / 1000))}s`;
+    const duration = `${Math.max(0, Math.floor(row.durationMs / 1000))}s`;
     const idleMs = Math.max(0, now - row.lastActivityAt);
     const stalled = row.status === "running" && row.resultReadyAt === undefined && idleMs >= TEAMMATE_STALL_TIMEOUT_MS;
     const state = row.resultReadyAt !== undefined && row.status === "running"
@@ -936,6 +948,24 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   );
 
   const isChild = process.env.PI_TEAMMATE_CHILD === "1";
+
+  // UCL: expose teammate tools to the GUI sidecar via the shared cross-extension
+  // registry (globalThis symbol). Each extension owns a distinct registerTool, so
+  // this capture is independent of pi-maestro-flow's. Root mode only.
+  if (!isChild) {
+    const originalRegisterTool = pi.registerTool.bind(pi);
+    (pi as unknown as { registerTool: (tool: unknown) => unknown }).registerTool = (tool: unknown) => {
+      const candidate = tool as { name?: unknown; execute?: unknown };
+      if (candidate && typeof candidate.name === "string" && typeof candidate.execute === "function" && isGuiTeammateToolAllowed(candidate.name, "pi-maestro-teammate")) {
+        try {
+          registerGuiTool(tool as ToolDefinition, "pi-maestro-teammate");
+        } catch {
+          // GUI capture must never break tool registration.
+        }
+      }
+      return originalRegisterTool(tool as ToolDefinition);
+    };
+  }
   let modelCatalog: ModelCatalogSnapshot = createModelCatalogSnapshot([]);
 
   const refreshModelCatalog = (ctx: ExtensionContext): ModelCatalogSnapshot => {
