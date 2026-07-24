@@ -19,6 +19,13 @@ import { loadPiCompactionInternals, type PiCompactionInternals } from "./pi-inte
 
 const MIN_PRUNABLE_TOOL_RESULT_CHARS = 4_000;
 const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find"]);
+// Content-aware chars-per-token ratios: a flat /4 miscounts the two content
+// types that dominate coding sessions — fenced code is token-denser (~3.5) and
+// whitespace-heavy logs/tables are token-sparser (~6). Ordinary content keeps the
+// proven /4 default so low-pressure estimates stay stable.
+const TOKEN_RATIO_CODE = 3.5;
+const TOKEN_RATIO_WHITESPACE_HEAVY = 6;
+const TOKEN_RATIO_DEFAULT = 4;
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
 const PRUNE_STATE_VERSION = 1;
@@ -599,7 +606,20 @@ function finiteNumber(value: unknown): number | undefined {
 }
 
 function estimateMessageTokens(message: AgentMessage): number {
-  return Math.ceil(JSON.stringify(message).length / 4);
+  const serialized = JSON.stringify(message);
+  return Math.ceil(serialized.length / tokenCharsPerToken(serialized));
+}
+
+function tokenCharsPerToken(serialized: string): number {
+  if (serialized.includes("```")) return TOKEN_RATIO_CODE;
+  let whitespace = 0;
+  for (let index = 0; index < serialized.length; index++) {
+    const ch = serialized[index];
+    if (ch === " " || ch === "\n" || ch === "\t" || ch === "\r") whitespace++;
+  }
+  const whitespaceRatio = serialized.length > 0 ? whitespace / serialized.length : 0;
+  if (whitespaceRatio > 0.3) return TOKEN_RATIO_WHITESPACE_HEAVY;
+  return TOKEN_RATIO_DEFAULT;
 }
 
 function protectedFrontierStart(messages: AgentMessage[], keepRecentTokens: number): number {
