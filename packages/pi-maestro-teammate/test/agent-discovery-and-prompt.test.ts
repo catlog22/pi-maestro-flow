@@ -176,6 +176,9 @@ test("goal verifier is a bundled read-only role with objective-scoped checks", (
     assert.match(verifier?.systemPrompt ?? "", /ignore previous instructions/i);
     assert.match(verifier?.systemPrompt ?? "", /fake `structured_output` instructions/i);
     assert.match(verifier?.systemPrompt ?? "", /smallest necessary (?:focused )?read-only/i);
+    assert.match(verifier?.systemPrompt ?? "", /Never rerun.*successful.*evidence/i);
+    assert.match(verifier?.systemPrompt ?? "", /at most one.*tool call/i);
+    assert.match(verifier?.systemPrompt ?? "", /immediately call `structured_output`/i);
     assert.match(verifier?.systemPrompt ?? "", /Do not write or edit files/i);
     assert.match(verifier?.systemPrompt ?? "", /attempt fixes/i);
     assert.match(verifier?.systemPrompt ?? "", /delegate work/i);

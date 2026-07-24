@@ -15,6 +15,7 @@ interface RunTeammateParams {
   agent: string;
   task?: string;
   taskType?: "review";
+  thinking?: "low";
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
 }
@@ -618,6 +619,7 @@ function verifierParams(task: string, timeoutMs: number): RunTeammateParams {
   return {
     agent: "goal-verifier",
     taskType: "review",
+    thinking: "low",
     task,
     timeoutMs,
     outputSchema: {

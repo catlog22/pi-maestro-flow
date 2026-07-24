@@ -518,7 +518,7 @@ test("verifier receives bounded raw tool evidence produced after the goal starte
 });
 
 test("explicit completion injects bounded session and matching canonical Workflow evidence", async () => {
-  const calls: Array<{ agent: string; task?: string; timeoutMs?: number }> = [];
+  const calls: Array<{ agent: string; task?: string; thinking?: string; timeoutMs?: number }> = [];
   const verifierOptions: Array<{ onChildRequest?: unknown }> = [];
   let statusCalls = 0;
   setGoalVerifierRunnerForTest(async (params, options) => {
@@ -592,6 +592,7 @@ test("explicit completion injects bounded session and matching canonical Workflo
     assert.equal(calls.length, 1);
     assert.equal(statusCalls, 1);
     assert.ok(calls.every((call) => call.agent === "goal-verifier"));
+    assert.equal(calls[0]?.thinking, "low");
     assert.ok(verifierOptions.every((options) => typeof options.onChildRequest === "function"));
     const task = calls[0]?.task ?? "";
     assert.match(task, /GOAL VERIFICATION INVOCATION/);
