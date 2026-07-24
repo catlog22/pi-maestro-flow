@@ -19,12 +19,20 @@ export interface GoalPanelEntry extends GoalWidgetModel {
   todoSubject?: string;
 }
 
+export interface GoalDetailEntry extends GoalPanelEntry {
+  startedAt: number;
+  updatedAt: number;
+  verificationFailures?: number;
+  acceptance?: string[];
+  workflowSessionId?: string;
+}
+
 export interface GoalWidgetTheme {
   fg(color: "accent" | "success" | "warning" | "error" | "dim", text: string): string;
   bold(text: string): string;
 }
 
-interface VisualState {
+export interface GoalVisualState {
   glyph: string;
   label: string;
   color: "accent" | "success" | "warning" | "error";
@@ -38,7 +46,7 @@ export function renderGoalWidget(
   theme: GoalWidgetTheme,
 ): string[] {
   const safeWidth = Math.max(1, width);
-  const state = visualState(goal, phase);
+  const state = goalVisualState(goal, phase);
   const title = theme.fg(state.color, theme.bold(`${state.glyph} Goal`));
   if (safeWidth < 20) return [truncateToWidth(`${title} ${state.label}`, safeWidth, "…")];
 
@@ -53,6 +61,11 @@ export function renderGoalWidget(
   return lines;
 }
 
+/**
+ * Compact below-editor strip: the current goal gets one metric line, every
+ * other goal collapses into a status chip on a shared line. Objective text
+ * and other details live in the Goal overlay (Alt+G).
+ */
 export function renderGoalPanel(
   goals: GoalPanelEntry[],
   currentGoalId: string | undefined,
@@ -64,10 +77,11 @@ export function renderGoalPanel(
   if (goals.length === 0) return [];
   const total = goals.length;
   const lines: string[] = [];
+  const chips: string[] = [];
   goals.forEach((goal, index) => {
     const order = `${index + 1}/${total}`;
     if (goal.id === currentGoalId) {
-      const state = visualState(goal, phase);
+      const state = goalVisualState(goal, phase);
       const title = theme.fg(state.color, theme.bold(`${state.glyph} Goal ${order}`));
       if (safeWidth < 20) {
         lines.push(truncateToWidth(`${title} ${state.label}`, safeWidth, "…"));
@@ -75,23 +89,19 @@ export function renderGoalPanel(
       }
       const metrics = metricText(goal, safeWidth);
       const hint = state.hint ? ` · ${theme.fg("dim", state.hint)}` : "";
-      const header = `${title} · ${state.label}${metrics ? ` · ${metrics}` : ""}${hint}`;
+      const detail = ` · ${theme.fg("dim", "Alt+G details")}`;
+      const header = `${title} · ${state.label}${metrics ? ` · ${metrics}` : ""}${hint}${detail}`;
       lines.push(truncateToWidth(header, safeWidth, "…"));
-      if (safeWidth >= 44) {
-        lines.push(truncateToWidth(`${theme.fg("dim", "↳ ")}${goal.objective}`, safeWidth, "…"));
-      }
       return;
     }
-    const state = visualState(goal, "normal");
-    const glyph = theme.fg(state.color, state.glyph);
-    const label = theme.fg("dim", state.label.toLowerCase());
-    const todoRef = goal.todoSubject ? theme.fg("dim", ` · ${goal.todoSubject}`) : "";
-    lines.push(truncateToWidth(`${glyph} ${order} ${goal.objective} ${label}${todoRef}`, safeWidth, "…"));
+    const state = goalVisualState(goal, "normal");
+    chips.push(`${theme.fg(state.color, state.glyph)} ${order} ${theme.fg("dim", state.label.toLowerCase())}`);
   });
+  if (chips.length > 0) lines.push(truncateToWidth(chips.join(" · "), safeWidth, "…"));
   return lines;
 }
 
-function visualState(goal: GoalWidgetModel, phase: GoalWidgetPhase): VisualState {
+export function goalVisualState(goal: GoalWidgetModel, phase: GoalWidgetPhase): GoalVisualState {
   if (phase === "verifying") return { glyph: "◐", label: "VERIFYING", color: "accent" };
   if (phase === "verified" || goal.status === "done") {
     return { glyph: "✓", label: "VERIFIED", color: "success" };
@@ -117,30 +127,29 @@ function visualState(goal: GoalWidgetModel, phase: GoalWidgetPhase): VisualState
 }
 
 function metricText(goal: GoalWidgetModel, width: number): string {
-  const elapsed = formatDuration(goal.timeUsedSeconds);
+  const elapsed = formatGoalDuration(goal.timeUsedSeconds);
   const round = `round ${Math.max(1, goal.iteration + 1)}`;
   if (goal.tokenBudget === undefined) return width >= 64 ? `${round} · ${elapsed}` : elapsed;
 
-  const budget = `${formatTokens(goal.tokensUsed)}/${formatTokens(goal.tokenBudget)}`;
+  const budget = `${formatGoalTokens(goal.tokensUsed)}/${formatGoalTokens(goal.tokenBudget)}`;
   if (width < 64) return budget;
-  return `${round} · ${elapsed} · ${budget} ${progressBar(goal.tokensUsed, goal.tokenBudget)}`;
+  return `${round} · ${elapsed} · ${budget} ${goalProgressBar(goal.tokensUsed, goal.tokenBudget)}`;
 }
 
-function progressBar(used: number, budget: number): string {
-  const size = 8;
+export function goalProgressBar(used: number, budget: number, size = 8): string {
   const ratio = budget > 0 ? Math.min(1, Math.max(0, used / budget)) : 0;
   const filled = Math.round(ratio * size);
   return `[${"█".repeat(filled)}${"░".repeat(size - filled)}]`;
 }
 
-function formatDuration(seconds: number): string {
+export function formatGoalDuration(seconds: number): string {
   if (seconds < 60) return `${seconds}s`;
   const minutes = Math.floor(seconds / 60);
   if (minutes < 60) return `${minutes}m`;
   return `${Math.floor(minutes / 60)}h${minutes % 60}m`;
 }
 
-function formatTokens(value: number): string {
+export function formatGoalTokens(value: number): string {
   if (value < 1_000) return String(value);
   if (value < 1_000_000) return `${trimDecimal(value / 1_000)}k`;
   return `${trimDecimal(value / 1_000_000)}m`;
