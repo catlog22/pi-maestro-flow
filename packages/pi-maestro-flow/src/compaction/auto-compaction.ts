@@ -19,6 +19,10 @@ import { loadPiCompactionInternals, type PiCompactionInternals } from "./pi-inte
 
 const MIN_PRUNABLE_TOOL_RESULT_CHARS = 4_000;
 const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find"]);
+// Bulk data tools whose large non-error output is transient and safe to evict
+// under sustained pressure. Control tools (e.g. todo) are deliberately absent so
+// their state-bearing output is never pruned.
+const EVICTABLE_BULK_TOOL_NAMES = new Set(["bash", "shell", "edit", "write"]);
 // Content-aware chars-per-token ratios: a flat /4 miscounts the two content
 // types that dominate coding sessions — fenced code is token-denser (~3.5) and
 // whitespace-heavy logs/tables are token-sparser (~6). Ordinary content keeps the
@@ -452,25 +456,17 @@ export function applyContextPressurePolicy(
     const frontierStart = protectedFrontierStart(transformed, settings.keepRecentTokens);
     const pruneTarget = Math.min(thresholdTokens, Math.floor(contextWindow * soft.pruneTargetRatio));
     const usageEpoch = latestProviderUsageEpoch(messages);
-    for (let index = frontierStart - 1; index >= 0 && initial - newlySavedTokens > pruneTarget; index--) {
-      const callId = toolResultCallId(transformed[index]);
-      if (!callId || hasRecordedPrune(pruneManifest, callId)) continue;
-      const replacement = replaceableToolResult(transformed[index]);
-      if (!replacement) continue;
-      const before = estimateMessageTokens(transformed[index]);
-      const after = estimateMessageTokens(replacement);
-      if (after >= before) continue;
-      transformed[index] = replacement;
-      const saved = before - after;
-      recordPrune(pruneManifest, callId, {
-        replacement,
-        savedTokens: saved,
-        introducedAtUsageEpoch: usageEpoch,
-      });
-      newlySavedTokens += saved;
-      savedTokens += saved;
-      prunedToolResults++;
-    }
+    // Graduated eviction, cheapest/most-reversible first: pass 1 strips replayable
+    // tools (re-runnable); pass 2 strips bulk data tools (bash/edit/write) only if
+    // pressure persists. Control tools (e.g. todo) are in neither set and survive.
+    const replayable = runPrunePass({ transformed, pruneManifest, frontierStart, pruneTarget, effectiveTokens: initial, usageEpoch, selector: replaceableToolResult });
+    newlySavedTokens += replayable.savedTokens;
+    savedTokens += replayable.savedTokens;
+    prunedToolResults += replayable.prunedToolResults;
+    const bulk = runPrunePass({ transformed, pruneManifest, frontierStart, pruneTarget, effectiveTokens: replayable.effectiveTokens, usageEpoch, selector: evictableBulkToolResult });
+    newlySavedTokens += bulk.savedTokens;
+    savedTokens += bulk.savedTokens;
+    prunedToolResults += bulk.prunedToolResults;
   }
   const estimatedTokens = Math.max(0, initial - newlySavedTokens);
   const ratio = estimatedTokens / contextWindow;
@@ -677,6 +673,39 @@ function protectedFrontierStart(messages: AgentMessage[], keepRecentTokens: numb
   return start;
 }
 
+interface PrunePassInput {
+  transformed: AgentMessage[];
+  pruneManifest: PruneManifest;
+  frontierStart: number;
+  pruneTarget: number;
+  effectiveTokens: number;
+  usageEpoch: string | undefined;
+  selector: (message: AgentMessage) => AgentMessage | undefined;
+}
+
+function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolResults: number; effectiveTokens: number } {
+  const { transformed, pruneManifest, frontierStart, pruneTarget, usageEpoch, selector } = input;
+  let effectiveTokens = input.effectiveTokens;
+  let savedTokens = 0;
+  let prunedToolResults = 0;
+  for (let index = frontierStart - 1; index >= 0 && effectiveTokens > pruneTarget; index--) {
+    const callId = toolResultCallId(transformed[index]);
+    if (!callId || hasRecordedPrune(pruneManifest, callId)) continue;
+    const replacement = selector(transformed[index]);
+    if (!replacement) continue;
+    const before = estimateMessageTokens(transformed[index]);
+    const after = estimateMessageTokens(replacement);
+    if (after >= before) continue;
+    transformed[index] = replacement;
+    const saved = before - after;
+    recordPrune(pruneManifest, callId, { replacement, savedTokens: saved, introducedAtUsageEpoch: usageEpoch });
+    savedTokens += saved;
+    prunedToolResults++;
+    effectiveTokens -= saved;
+  }
+  return { savedTokens, prunedToolResults, effectiveTokens };
+}
+
 function replaceableToolResult(message: AgentMessage): AgentMessage | undefined {
   const record = message as MessageRecord;
   if (record.role !== "toolResult" || record.isError === true) return undefined;
@@ -689,6 +718,22 @@ function replaceableToolResult(message: AgentMessage): AgentMessage | undefined 
     content: [{
       type: "text",
       text: `[Maestro context pressure: stale large output from ${toolName} was pruned. Re-run the tool if the full payload is needed.]`,
+    }],
+  } as AgentMessage;
+}
+
+function evictableBulkToolResult(message: AgentMessage): AgentMessage | undefined {
+  const record = message as MessageRecord;
+  if (record.role !== "toolResult" || record.isError === true) return undefined;
+  if (typeof record.toolName !== "string" || !EVICTABLE_BULK_TOOL_NAMES.has(record.toolName.toLowerCase())) return undefined;
+  const serialized = JSON.stringify(record.content);
+  if (serialized.length < MIN_PRUNABLE_TOOL_RESULT_CHARS) return undefined;
+  const toolName = record.toolName;
+  return {
+    ...message,
+    content: [{
+      type: "text",
+      text: `[Maestro context pressure: stale large output from ${toolName} was evicted to reclaim context. The original payload is no longer available; re-derive it from the affected files or commands if still needed.]`,
     }],
   } as AgentMessage;
 }
@@ -756,7 +801,7 @@ export function computeContextSignals(input: {
   const criticalGap = thresholdTokens - estimatedTokens;
   let prunableTokens = 0;
   for (const message of messages) {
-    if (!replaceableToolResult(message)) continue;
+    if (!replaceableToolResult(message) && !evictableBulkToolResult(message)) continue;
     prunableTokens += estimateMessageTokens(message);
   }
   const prunableFraction = estimatedTokens > 0 ? Math.min(1, prunableTokens / estimatedTokens) : 0;
