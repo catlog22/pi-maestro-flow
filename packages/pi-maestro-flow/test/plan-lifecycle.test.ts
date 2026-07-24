@@ -745,6 +745,52 @@ test("Approved Plan handoff gate is restored from the manifest after restart", a
   }
 });
 
+test("Approved Plan handoff stays satisfied after execution switches to a quality-gate Goal", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-handoff-qgate-"));
+  initGoal({ appendEntry() {} } as never);
+  const goalCtx: GoalContext = {
+    cwd: root,
+    ui: { notify() {}, setStatus() {} },
+    isIdle: () => false,
+    abort() {},
+  };
+  goalOnSessionStart(goalCtx, { reason: "new" });
+  setGoalVerifierRunnerForTest(() => Promise.resolve({
+    exitCode: 0,
+    messages: [{ role: "assistant", content: "ok" }],
+    structuredOutput: { pass: true, reasoning: "verified", unmet: [], evidence: ["gate evidence"] },
+  }));
+  const harness = createHarness(root, true, false, false, false, "qgate-chat", undefined, false, { todoKeys: [] }, undefined, {}, true);
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Approved\n\nShip it" });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, true);
+
+    const store = new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: harness.ctx.sessionManager.getSessionId() },
+    });
+    const loaded = await store.load();
+    const handoffKey = loaded.manifest.handoffKey!;
+    assert.ok(handoffKey);
+
+    addGoal("Plan handoff goal", goalCtx, { planHandoffKey: handoffKey });
+    const completion = await executeGoal({ action: "complete", summary: "plan goal done" }, goalCtx);
+    assert.match(completion.text, /done/i);
+    addGoal("Quality-gate goal", goalCtx);
+
+    harness.handoff.todoKeys.push(handoffKey);
+    assert.equal(getPlanHandoffStatus(), "ready");
+  } finally {
+    setGoalVerifierRunnerForTest(undefined);
+    goalOnSessionShutdown(goalCtx);
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Compatibility capture errors are isolated inside the Plan hook", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-capture-fail-"));
   const harness = createHarness(root, false, false, true);
