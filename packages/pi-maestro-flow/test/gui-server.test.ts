@@ -1,0 +1,213 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import http from "node:http";
+import { mkdtemp, readFile, access } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { startGuiServer } from "../src/gui/gui-server.ts";
+import { GUI_DISCOVERY_FILENAME, type GuiDiscoveryFile } from "../src/gui/types.ts";
+
+interface JsonResp {
+  status: number;
+  body: any;
+}
+
+async function requestJson(
+  port: number,
+  path: string,
+  init: { method?: string; token?: string; body?: unknown; headers?: Record<string, string> } = {},
+): Promise<JsonResp> {
+  const headers: Record<string, string> = { ...(init.headers ?? {}) };
+  let payload: string | undefined;
+  if (init.body !== undefined) {
+    payload = JSON.stringify(init.body);
+    headers["Content-Type"] = "application/json";
+  }
+  if (init.token) headers.Authorization = `Bearer ${init.token}`;
+  const res = await fetch(`http://127.0.0.1:${port}${path}`, {
+    method: init.method ?? "GET",
+    headers,
+    body: payload,
+  });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null };
+}
+
+/** Connect to the SSE stream and collect events until `count` events or timeout. */
+function collectSse(
+  port: number,
+  token: string,
+  count: number,
+  opts: { lastEventId?: string; timeoutMs?: number } = {},
+): Promise<Array<{ id: string; event: string; data: any }>> {
+  return new Promise((resolve, reject) => {
+    const events: Array<{ id: string; event: string; data: any }> = [];
+    const headers: Record<string, string> = {};
+    if (opts.lastEventId) headers["Last-Event-ID"] = opts.lastEventId;
+    const req = http.get(
+      { host: "127.0.0.1", port, path: `/events?session=${token}`, headers },
+      (res) => {
+        let buffer = "";
+        let current: Partial<{ id: string; event: string; data: string }> = {};
+        res.on("data", (chunk: Buffer) => {
+          buffer += chunk.toString("utf-8");
+          let newlineIndex: number;
+          while ((newlineIndex = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, newlineIndex);
+            buffer = buffer.slice(newlineIndex + 1);
+            if (line.startsWith(":")) continue; // comment / heartbeat
+            if (line === "") {
+              if (current.data !== undefined) {
+                events.push({
+                  id: current.id ?? "",
+                  event: current.event ?? "message",
+                  data: JSON.parse(current.data),
+                });
+                if (events.length >= count) {
+                  req.destroy();
+                  resolve(events);
+                  return;
+                }
+              }
+              current = {};
+              continue;
+            }
+            const colon = line.indexOf(":");
+            const field = colon >= 0 ? line.slice(0, colon) : line;
+            const value = colon >= 0 ? line.slice(colon + 1).trimStart() : "";
+            if (field === "id") current.id = value;
+            else if (field === "event") current.event = value;
+            else if (field === "data") current.data = value;
+          }
+        });
+        res.on("error", () => resolve(events));
+      },
+    );
+    req.on("error", reject);
+    setTimeout(() => {
+      req.destroy();
+      resolve(events);
+    }, opts.timeoutMs ?? 2000);
+  });
+}
+
+test("gui-server: health requires a valid token", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "gui-server-"));
+  const server = await startGuiServer({ sessionId: "sess-1", cwd, writeDiscovery: false });
+  try {
+    const ok = await requestJson(server.port, "/health", { token: server.token });
+    assert.equal(ok.status, 200);
+    assert.equal(ok.body.ok, true);
+    assert.equal(ok.body.result.healthy, true);
+    assert.equal(ok.body.result.sessionId, "sess-1");
+
+    const noToken = await requestJson(server.port, "/health");
+    assert.equal(noToken.status, 403);
+    assert.equal(noToken.body.ok, false);
+
+    const badToken = await requestJson(server.port, "/health", { token: "wrong" });
+    assert.equal(badToken.status, 403);
+
+    const queryToken = await fetch(`http://127.0.0.1:${server.port}/health?session=${server.token}`);
+    assert.equal(queryToken.status, 200);
+  } finally {
+    server.close("test-done");
+  }
+});
+
+test("gui-server: SSE delivers pushed events and replays via Last-Event-ID", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "gui-server-"));
+  const server = await startGuiServer({ sessionId: "sess-2", cwd, writeDiscovery: false });
+  try {
+    const live = collectSse(server.port, server.token, 1);
+    // Give the client a moment to connect before pushing.
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    server.pushEvent("todo.updated", { revision: 7 });
+    const events = await live;
+    assert.equal(events.length, 1);
+    assert.equal(events[0].event, "todo.updated");
+    assert.deepEqual(events[0].data, { revision: 7 });
+    const firstId = events[0].id;
+
+    // Push a second event, then reconnect with Last-Event-ID = firstId; expect only the second.
+    server.pushEvent("goal.changed", { phase: "run" });
+    const replayed = await collectSse(server.port, server.token, 1, { lastEventId: firstId });
+    assert.equal(replayed.length, 1);
+    assert.equal(replayed[0].event, "goal.changed");
+    assert.deepEqual(replayed[0].data, { phase: "run" });
+  } finally {
+    server.close("test-done");
+  }
+});
+
+test("gui-server: route registry handles GET, POST, path params, and 404", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "gui-server-"));
+  const server = await startGuiServer({ sessionId: "sess-3", cwd, writeDiscovery: false });
+  try {
+    server.registerRoute("GET", "/tools", () => ({ result: [{ name: "todo" }] }));
+    server.registerRoute("GET", "/state/:sub", (req) => ({ result: { sub: req.params.sub } }));
+    server.registerRoute("POST", "/tools/:name", (req) => {
+      if (req.body?.args === undefined) return { error: "args required", code: "bad_request" };
+      return { result: { invoked: req.params.name, args: req.body.args } };
+    });
+
+    const list = await requestJson(server.port, "/tools", { token: server.token });
+    assert.equal(list.status, 200);
+    assert.deepEqual(list.body.result, [{ name: "todo" }]);
+
+    const sub = await requestJson(server.port, "/state/goal", { token: server.token });
+    assert.equal(sub.status, 200);
+    assert.deepEqual(sub.body.result, { sub: "goal" });
+
+    const invoke = await requestJson(server.port, "/tools/todo", {
+      method: "POST",
+      token: server.token,
+      body: { args: { action: "list" } },
+    });
+    assert.equal(invoke.status, 200);
+    assert.deepEqual(invoke.body.result, { invoked: "todo", args: { action: "list" } });
+
+    const invokeNoToken = await requestJson(server.port, "/tools/todo", {
+      method: "POST",
+      body: { token: "wrong", args: {} },
+    });
+    assert.equal(invokeNoToken.status, 403);
+
+    const badInvoke = await requestJson(server.port, "/tools/todo", {
+      method: "POST",
+      token: server.token,
+      body: {},
+    });
+    assert.equal(badInvoke.status, 400);
+    assert.equal(badInvoke.body.ok, false);
+
+    const missing = await requestJson(server.port, "/nope", { token: server.token });
+    assert.equal(missing.status, 404);
+  } finally {
+    server.close("test-done");
+  }
+});
+
+test("gui-server: writes and removes the discovery file", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "gui-server-"));
+  const server = await startGuiServer({ sessionId: "sess-4", cwd });
+  const discoveryPath = join(cwd, ".workflow", GUI_DISCOVERY_FILENAME);
+  try {
+    assert.ok(server.discoveryPath, "discoveryPath should be set");
+    assert.equal(server.discoveryPath, discoveryPath);
+    const raw = await readFile(discoveryPath, "utf-8");
+    const discovery = JSON.parse(raw) as GuiDiscoveryFile;
+    assert.equal(discovery.version, 1);
+    assert.equal(discovery.port, server.port);
+    assert.equal(discovery.token, server.token);
+    assert.equal(discovery.sessionId, "sess-4");
+    assert.equal(discovery.pid, process.pid);
+    assert.ok(discovery.url.includes(`session=${server.token}`));
+    assert.ok(discovery.eventsUrl.includes("/events"));
+  } finally {
+    server.close("test-done");
+  }
+  // Discovery file is removed asynchronously on close.
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await assert.rejects(async () => access(discoveryPath));
+});
