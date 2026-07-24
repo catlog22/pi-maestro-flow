@@ -20,6 +20,7 @@ import {
   parseVerifierOutput,
   parseGoalCommand,
   reconcileWorkflowGoal,
+  setAcceptanceRunnerForTest,
   setGoalVerifierRunnerForTest,
   setWorkflowCoordinator,
   switchCurrentGoal,
@@ -174,24 +175,34 @@ test("goal widget renders explicit lifecycle states within widths 1 through 120"
   }
 });
 
-test("goal panel renders flat time-ordered goals with the current goal highlighted", () => {
+test("goal panel renders a compact strip: current goal metrics plus one shared chip line, no objective text", () => {
   const goals: GoalPanelEntry[] = [
     { id: "g1", objective: "First gate", status: "done", iteration: 0, tokensUsed: 0, timeUsedSeconds: 5, todoSubject: "Task A" },
     { id: "g2", objective: "Second gate", status: "active", iteration: 1, tokensUsed: 12_000, tokenBudget: 50_000, timeUsedSeconds: 60, todoSubject: "Task B" },
     { id: "g3", objective: "Final acceptance", status: "paused", pauseReason: "user", iteration: 0, tokensUsed: 0, timeUsedSeconds: 0, todoSubject: "Task C" },
   ];
   const lines = renderGoalPanel(goals, "g2", "normal", 120, goalWidgetTheme);
+  assert.equal(lines.length, 2);
   const text = lines.join("\n");
   assert.match(text, /Goal 2\/3/);
   assert.match(text, /ACTIVE/);
-  assert.match(text, /Second gate/);
-  assert.match(text, /1\/3 First gate/);
-  assert.match(text, /3\/3 Final acceptance/);
-  assert.match(text, /Task A/);
-  assert.match(text, /Task C/);
+  assert.match(text, /12k\/50k/);
+  assert.match(text, /Alt\+G details/);
+  assert.match(text, /✓ 1\/3 verified/);
+  assert.match(text, /⏸ 3\/3 stopped/);
+  assert.doesNotMatch(text, /First gate|Second gate|Final acceptance|Task [ABC]/);
+
+  for (let width = 1; width <= 120; width++) {
+    const rendered = renderGoalPanel(goals, "g2", "normal", width, goalWidgetTheme);
+    assert.ok(rendered.length <= 2, `width ${width} produced ${rendered.length} lines`);
+    assert.ok(
+      rendered.every((line) => visibleWidth(line) <= width),
+      `panel exceeded width ${width}: ${rendered.join(" | ")}`,
+    );
+  }
 
   const narrow = renderGoalPanel(goals, "g2", "normal", 15, goalWidgetTheme);
-  assert.equal(narrow.length, 3);
+  assert.equal(narrow.length, 2);
 
   assert.deepEqual(renderGoalPanel([], "g2", "normal", 120, goalWidgetTheme), []);
 });
@@ -241,7 +252,8 @@ test("goal lifecycle keeps a below-editor widget synchronized without displacing
     assert.equal(widgetKey, "goal-panel");
     assert.equal(widgetPlacement, "belowEditor");
     assert.match(renderCurrent(), /ACTIVE/);
-    assert.match(renderCurrent(), /Keep Todo above the editor/);
+    assert.match(renderCurrent(), /Alt\+G details/);
+    assert.doesNotMatch(renderCurrent(), /Keep Todo above the editor/);
 
     await executeGoalCommand({ action: "stop" }, ctx);
     assert.match(renderCurrent(), /STOPPED/);
@@ -507,7 +519,9 @@ test("verifier parsing is fail-closed and requires consistent concrete evidence"
     evidence: ["npm test passed"],
   }));
   assert.equal(contradictory.pass, false);
-  assert.match(contradictory.reasoning, /contradictory/);
+  assert.equal(contradictory.status, "fail");
+  assert.deepEqual(contradictory.unmet, ["Missing runtime verification"]);
+  assert.match(contradictory.reasoning, /unmet requirement/);
 
   const grounded = parseVerifierOutput(JSON.stringify({
     pass: true,
@@ -775,6 +789,262 @@ test("Goal pauses after three inconclusive explicit completion attempts", async 
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
     setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("contradictory verdict is normalized to an actionable fail that does not consume the failure budget", async () => {
+  setGoalVerifierRunnerForTest(async () => ({
+    exitCode: 0,
+    messages: [{ role: "assistant", content: "Structured output saved." }],
+    structuredOutput: {
+      pass: true,
+      reasoning: "Looks complete",
+      unmet: ["Missing runtime verification"],
+      evidence: ["npm test passed"],
+    },
+  }));
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  onSessionStart(ctx);
+  try {
+    await executeGoal({ action: "create", objective: "Normalize a contradictory verdict" }, ctx);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      const result = await executeGoal({ action: "complete", summary: `Attempt ${attempt + 1}.` }, ctx);
+      assert.match(result.text, /Unmet: Missing runtime verification\./);
+    }
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.verificationFailures, 0);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("verifier infrastructure error does not consume the failure budget or pause the Goal", async () => {
+  setGoalVerifierRunnerForTest(async () => ({
+    exitCode: 1,
+    messages: [{ role: "assistant", content: "Verifier crashed." }],
+  }));
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  onSessionStart(ctx);
+  try {
+    await executeGoal({ action: "create", objective: "Survive verifier infrastructure errors" }, ctx);
+    for (let attempt = 0; attempt < 4; attempt++) {
+      await executeGoal({ action: "complete", summary: `Attempt ${attempt + 1}.` }, ctx);
+    }
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.verificationFailures ?? 0, 0);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("acceptance commands exiting 0 via the real runner complete the Goal without the agent", async () => {
+  let agentCalls = 0;
+  setAcceptanceRunnerForTest(undefined);
+  setGoalVerifierRunnerForTest(async () => {
+    agentCalls++;
+    return {
+      exitCode: 0,
+      messages: [{ role: "assistant", content: "Structured output saved." }],
+      structuredOutput: { pass: true, reasoning: "agent", unmet: [], evidence: ["agent"] },
+    };
+  });
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  try {
+    await executeGoal({
+      action: "create",
+      objective: "Real acceptance runner passes",
+      acceptance: ['node -e "process.exit(0)"'],
+    }, ctx);
+    const result = await executeGoal({ action: "complete", summary: "Done." }, ctx);
+    assert.match(result.text, /Goal done \(verified\)\./);
+    assert.equal(getActiveGoal(), undefined);
+    assert.equal(agentCalls, 0);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("a real acceptance command exiting non-zero fails completion with the exit code", async () => {
+  let agentCalls = 0;
+  setAcceptanceRunnerForTest(undefined);
+  setGoalVerifierRunnerForTest(async () => {
+    agentCalls++;
+    return {
+      exitCode: 0,
+      messages: [{ role: "assistant", content: "Structured output saved." }],
+      structuredOutput: { pass: true, reasoning: "agent", unmet: [], evidence: ["agent"] },
+    };
+  });
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  try {
+    await executeGoal({
+      action: "create",
+      objective: "Real acceptance runner fails",
+      acceptance: ['node -e "process.exit(3)"'],
+    }, ctx);
+    const result = await executeGoal({ action: "complete", summary: "Done." }, ctx);
+    assert.match(result.text, /completion was not verified/i);
+    assert.match(result.text, /exit 3/);
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(agentCalls, 0);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("a timed-out acceptance command fails completion with a timed-out unmet entry", async () => {
+  setAcceptanceRunnerForTest(async (command) => ({
+    command,
+    exitCode: null,
+    output: "",
+    timedOut: true,
+  }));
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  try {
+    await executeGoal({ action: "create", objective: "Timed-out acceptance", acceptance: ["slow-command"] }, ctx);
+    const result = await executeGoal({ action: "complete", summary: "Done." }, ctx);
+    assert.match(result.text, /completion was not verified/i);
+    assert.match(result.text, /slow-command \(timed out\)/);
+    assert.equal(getActiveGoal()?.status, "active");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setAcceptanceRunnerForTest(undefined);
+  }
+});
+
+test("acceptance commands beyond the limit are truncated to the first five", async () => {
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  onSessionStart(ctx);
+  try {
+    await executeGoal({
+      action: "create",
+      objective: "Cap acceptance commands",
+      acceptance: ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7"],
+    }, ctx);
+    assert.deepEqual(getActiveGoal()?.acceptance, ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5"]);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("acceptance commands exiting 0 complete the Goal without invoking the agent verifier", async () => {
+  let agentCalls = 0;
+  setAcceptanceRunnerForTest(async (command) => ({ command, exitCode: 0, output: "ok" }));
+  setGoalVerifierRunnerForTest(async () => {
+    agentCalls++;
+    return {
+      exitCode: 0,
+      messages: [{ role: "assistant", content: "Structured output saved." }],
+      structuredOutput: { pass: true, reasoning: "agent", unmet: [], evidence: ["agent"] },
+    };
+  });
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  try {
+    await executeGoal({
+      action: "create",
+      objective: "Verify via acceptance commands",
+      acceptance: ["npm test", "npm run typecheck"],
+    }, ctx);
+    const result = await executeGoal({ action: "complete", summary: "Done." }, ctx);
+    assert.match(result.text, /Goal done \(verified\)\./);
+    assert.equal(getActiveGoal(), undefined);
+    assert.equal(agentCalls, 0, "agent verifier must not run when acceptance commands decide");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+    setAcceptanceRunnerForTest(undefined);
+  }
+});
+
+test("a failing acceptance command fails completion with the command as unmet and skips the agent", async () => {
+  let agentCalls = 0;
+  setAcceptanceRunnerForTest(async (command) => ({
+    command,
+    exitCode: command === "npm test" ? 1 : 0,
+    output: command === "npm test" ? "test failed" : "ok",
+  }));
+  setGoalVerifierRunnerForTest(async () => {
+    agentCalls++;
+    return {
+      exitCode: 0,
+      messages: [{ role: "assistant", content: "Structured output saved." }],
+      structuredOutput: { pass: true, reasoning: "agent", unmet: [], evidence: ["agent"] },
+    };
+  });
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  try {
+    await executeGoal({
+      action: "create",
+      objective: "Failing acceptance command",
+      acceptance: ["npm test", "npm run typecheck"],
+    }, ctx);
+    const result = await executeGoal({ action: "complete", summary: "Done." }, ctx);
+    assert.match(result.text, /completion was not verified/i);
+    assert.match(result.text, /npm test \(exit 1\)/);
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(agentCalls, 0);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+    setAcceptanceRunnerForTest(undefined);
+  }
+});
+
+test("a Goal without acceptance commands falls back to the agent verifier", async () => {
+  let agentCalls = 0;
+  setGoalVerifierRunnerForTest(async () => {
+    agentCalls++;
+    return {
+      exitCode: 0,
+      messages: [{ role: "assistant", content: "Structured output saved." }],
+      structuredOutput: { pass: true, reasoning: "agent verified", unmet: [], evidence: ["agent"] },
+    };
+  });
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  try {
+    await executeGoal({ action: "create", objective: "No acceptance commands" }, ctx);
+    await executeGoal({ action: "complete", summary: "Done." }, ctx);
+    assert.equal(agentCalls, 1, "agent verifier runs when no acceptance commands are declared");
+    assert.equal(getActiveGoal(), undefined);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("goal update can attach acceptance commands to the active Goal", async () => {
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  try {
+    await executeGoal({ action: "create", objective: "Update acceptance" }, ctx);
+    assert.equal(getActiveGoal()?.acceptance, undefined);
+    await executeGoal({ action: "update", objective: "Update acceptance", acceptance: ["npm test"] }, ctx);
+    assert.deepEqual(getActiveGoal()?.acceptance, ["npm test"]);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
   }
 });
 
@@ -1107,7 +1377,7 @@ test("only an explicit safe integer zero verifier exit can accept a structured p
       await executeGoal({ action: "create", objective: `Reject ${testCase.name} verifier exit` }, ctx);
       await executeGoal({ action: "complete", summary: "All requested checks passed." }, ctx);
       assert.equal(getActiveGoal()?.status, "active", testCase.name);
-      assert.equal(getActiveGoal()?.verificationFailures, 1, testCase.name);
+      assert.equal(getActiveGoal()?.verificationFailures ?? 0, 0, testCase.name);
       assert.equal(typeof widgetContent, "function", testCase.name);
       const component = (widgetContent as (
         tui: unknown,
@@ -1314,7 +1584,7 @@ test("session evidence collection is reverse-bounded and preserves selected chro
       throw new Error("older entry must not be read");
     },
   }));
-  countBoundEntries.push(...Array.from({ length: 16 }, (_, index) => ({
+  countBoundEntries.push(...Array.from({ length: 24 }, (_, index) => ({
     type: "message",
     timestamp: since + 100 + index,
     message: { role: "user", content: `selected-${String(index).padStart(2, "0")}` },
@@ -1323,8 +1593,8 @@ test("session evidence collection is reverse-bounded and preserves selected chro
     sessionManager: { getEntries: () => countBoundEntries },
   }), since);
   assert.equal(oldMessageReads, 0);
-  assert.equal(countBound.match(/\[USER\]/g)?.length, 16);
-  assert.ok(countBound.indexOf("selected-00") < countBound.indexOf("selected-15"));
+  assert.equal(countBound.match(/\[USER\]/g)?.length, 24);
+  assert.ok(countBound.indexOf("selected-00") < countBound.indexOf("selected-23"));
 
   let contentReads = 0;
   const charBoundEntries = Array.from({ length: 30 }, (_, index) => ({
@@ -1341,12 +1611,12 @@ test("session evidence collection is reverse-bounded and preserves selected chro
   const charBound = collectVerifierEvidence(createContext({
     sessionManager: { getEntries: () => charBoundEntries },
   }), since);
-  assert.ok(charBound.length <= 8_000);
-  assert.equal(contentReads, 8);
-  assert.match(charBound, /char-23/);
+  assert.ok(charBound.length <= 12_000);
+  assert.equal(contentReads, 11);
+  assert.match(charBound, /char-20/);
   assert.match(charBound, /char-29/);
-  assert.doesNotMatch(charBound, /char-22/);
-  assert.ok(charBound.indexOf("char-23") < charBound.indexOf("char-29"));
+  assert.doesNotMatch(charBound, /char-19/);
+  assert.ok(charBound.indexOf("char-20") < charBound.indexOf("char-29"));
 
   let argumentReads = 0;
   const oversizedArguments: Record<string, unknown> = {};
@@ -1375,7 +1645,7 @@ test("session evidence collection is reverse-bounded and preserves selected chro
   assert.match(argumentBound, /\[TRUNCATED\]/);
 });
 
-test("getBranch and getEntries evidence failures share UI recovery and pause-after-three", async () => {
+test("getBranch and getEntries evidence failures share UI recovery without consuming the failure budget", async () => {
   for (const method of ["getBranch", "getEntries"] as const) {
     let runnerCalls = 0;
     let throwing = false;
@@ -1413,13 +1683,11 @@ test("getBranch and getEntries evidence failures share UI recovery and pause-aft
         }, ctx);
         assert.match(result.text, /completion was not verified/i);
         assert.equal(runnerCalls, 0);
-        assert.equal(getActiveGoal()?.verificationFailures, attempt);
-        if (attempt < 3) {
-          assert.equal(getActiveGoal()?.status, "active");
-          assert.notEqual(statuses.at(-1), "verifying");
-        }
+        assert.equal(getActiveGoal()?.verificationFailures ?? 0, 0);
+        assert.equal(getActiveGoal()?.status, "active");
+        assert.notEqual(statuses.at(-1), "verifying");
       }
-      assert.equal(getActiveGoal()?.status, "paused");
+      assert.equal(getActiveGoal()?.status, "active");
       assert.ok(notifications.includes(
         "Verifier evidence collection failed. Completion remains unverified.",
       ));

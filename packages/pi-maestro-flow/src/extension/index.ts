@@ -53,6 +53,9 @@ import {
   onBeforeAgentStart as goalBeforeAgentStart,
   onAgentEnd as goalAgentEnd,
   getActiveGoal,
+  getGoalPanelEntries,
+  currentGoalPhase,
+  switchCurrentGoal,
   reconcileWorkflowGoal,
   setWorkflowCoordinator,
   setGoalStateChangeListener,
@@ -97,6 +100,7 @@ import {
 } from "../tools/run-control.ts";
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
 import { TodoOverlay } from "../tui/todo-overlay.ts";
+import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import {
   initPlan,
   PLAN_TOGGLE_KEY,
@@ -181,6 +185,8 @@ export function nextApprovalMode(
 
 const TODO_TOGGLE_KEY = "alt+t";
 const TODO_TOGGLE_LABEL = "Alt+T";
+const GOAL_OVERLAY_KEY = "alt+g";
+const GOAL_OVERLAY_LABEL = "Alt+G";
 
 function singleLine(text: string): Component {
   return {
@@ -508,8 +514,9 @@ When NOT to use:
 - get: Read the current Goal state. { action: "get" }
 - create: Create a new Goal without a budget by default. { action: "create", objective: "..." }
 - update: Replace the active Goal objective and resume it automatically. { action: "update", objective: "..." }
-- complete: Request independent completion verification after all work is done. { action: "complete", summary: "..." }
+- complete: Request independent completion verification after all work is done. Run the acceptance commands first and include their fresh output in the summary. { action: "complete", summary: "..." }
 - optional budget: Include tokenBudget only when the user explicitly requests one. { action: "create", objective: "...", tokenBudget: "100k" }
+- optional acceptance: Declare up to 5 acceptance commands the harness runs during verification as functional evidence of completion (results are supplied to the verifier). { action: "create", objective: "...", acceptance: ["npm test -- foo.test.ts"] }
 
 When to use:
 - create a Goal for multi-turn autonomous work that needs sustained momentum, a token budget, or verified completion.
@@ -525,6 +532,7 @@ Only request completion after all work is done; the extension verifies it indepe
       "Use goal get to inspect state. Use goal create only when no Goal exists; use goal update to replace its objective and resume it.",
       "Omit tokenBudget by default. Set it only when the user explicitly requests a Token budget.",
       "Use goal complete only after all requirements are met and provide concise verification evidence; the verifier owns the done transition.",
+      "Prefer declaring acceptance commands at goal create; before goal complete, run them yourself and put their fresh output in the summary so the verifier can confirm functionally.",
     ],
 
     parameters: GoalToolParams,
@@ -1026,6 +1034,33 @@ When NOT to use:
     });
   }
 
+  async function openGoalOverlay(ctx: ExtensionContext): Promise<void> {
+    await ctx.ui.custom<void>((tui, theme, _keybindings, done) =>
+      new GoalOverlay({
+        getEntries: () => getGoalPanelEntries(),
+        getCurrentGoalId: () => getActiveGoal()?.id,
+        getPhase: () => currentGoalPhase(),
+        requestRender: () => tui.requestRender(),
+        close: () => done(undefined),
+        theme,
+        onAction: async (action: GoalOverlayAction, goalId: string) => {
+          // Lifecycle commands act on the current goal, so surface the selected one first.
+          if (getActiveGoal()?.id !== goalId && !switchCurrentGoal(goalId, ctx)) {
+            throw new Error(`Unknown goal: ${goalId}`);
+          }
+          if (action === "switch") return;
+          const result = await executeGoalCommand(
+            { action: action === "stop" ? "stop" : action === "resume" ? "resume" : "clear" },
+            ctx,
+          );
+          if (result.isError) throw new Error(result.text);
+        },
+      }), {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
+    });
+  }
+
   pi.registerCommand("maestro-session", {
     description: "Open the canonical Workflow Session control center",
     async handler(_args, ctx) { await openSessionOverlay(ctx); },
@@ -1033,6 +1068,10 @@ When NOT to use:
   pi.registerCommand("maestro-todo", {
     description: "Open the shared root and teammate Todo center",
     async handler(_args, ctx) { await openTodoOverlay(ctx); },
+  });
+  pi.registerCommand("maestro-goal", {
+    description: "Open the Goal control center — every goal with full details, switch/stop/resume/clear",
+    async handler(_args, ctx) { await openGoalOverlay(ctx); },
   });
   pi.registerCommand("sysprompt", {
     description: "Inspect the active system prompt — mode, size, and key markers. Use 'full' to dump the whole prompt.",
@@ -1100,6 +1139,13 @@ When NOT to use:
     async handler(_ctx: ExtensionContext) {
       panelMode = panelMode === "collapsed" ? "expanded" : "collapsed";
       updateTodoWidget();
+    },
+  });
+
+  pi.registerShortcut(GOAL_OVERLAY_KEY, {
+    description: `Open the Goal overlay (${GOAL_OVERLAY_LABEL}) — full details for every goal, switch/stop/resume/clear`,
+    async handler(ctx: ExtensionContext) {
+      await openGoalOverlay(ctx);
     },
   });
 

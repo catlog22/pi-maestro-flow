@@ -1,11 +1,12 @@
 import { randomUUID } from "node:crypto";
+import { spawn, type ChildProcess } from "node:child_process";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { NETWORK_RETRY_POLICY, isRetryableProviderError } from "pi-maestro-teammate/v1/retry";
 import type { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSession, type WorkflowSnapshot } from "../session/types.ts";
 import {
   renderGoalPanel,
-  type GoalPanelEntry,
+  type GoalDetailEntry,
   type GoalWidgetPhase,
 } from "../tui/goal-widget.ts";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
@@ -87,6 +88,7 @@ export interface ActiveGoal {
   planHandoffKey?: string;
   workflowSessionGeneration?: string;
   verificationFailures?: number;
+  acceptance?: string[];
 }
 
 interface AssistantMessageLike {
@@ -135,11 +137,15 @@ const GOAL_STATE_ENTRY_TYPE = "goal-state";
 const MAX_OBJECTIVE_LENGTH = 4_000;
 const MAX_COMPLETION_SUMMARY_CHARS = 4_000;
 const CONTINUATION_MARKER_PREFIX = "maestro-goal-continuation:";
-const VERIFIER_TIMEOUT_MS = 90_000;
+const VERIFIER_TIMEOUT_MS = 180_000;
 const MAX_VERIFICATION_FAILURES = 3;
-const MAX_VERIFIER_EVIDENCE_ITEMS = 16;
+const MAX_VERIFIER_EVIDENCE_ITEMS = 24;
 const MAX_VERIFIER_EVIDENCE_ITEM_CHARS = 1_200;
-const MAX_VERIFIER_EVIDENCE_CHARS = 8_000;
+const MAX_VERIFIER_EVIDENCE_CHARS = 12_000;
+const MAX_ACCEPTANCE_COMMANDS = 5;
+const MAX_ACCEPTANCE_COMMAND_CHARS = 500;
+const ACCEPTANCE_COMMAND_TIMEOUT_MS = 60_000;
+const ACCEPTANCE_OUTPUT_CHARS = 1_500;
 
 const NON_RETRYABLE_RE =
   /usage[_\s-]*limit|multi-auth rotation failed|unauthori[sz]ed|invalid api key/i;
@@ -184,11 +190,13 @@ export interface GoalCreateParams {
   objective: string;
   tokenBudget?: string;
   planHandoffKey?: string;
+  acceptance?: string[];
 }
 
 export interface GoalUpdateParams {
   action: "update";
   objective: string;
+  acceptance?: string[];
 }
 export interface GoalCompleteParams { action: "complete"; summary: string; }
 
@@ -216,13 +224,13 @@ export async function executeGoal(
       if (typeof params.objective !== "string" || params.objective.trim().length === 0) {
         return { text: "Goal create requires a non-empty objective.", isError: true };
       }
-      return handleCreate(params.objective, params.tokenBudget, ctx, params.planHandoffKey);
+      return handleCreate(params.objective, params.tokenBudget, ctx, params.planHandoffKey, params.acceptance);
     }
     case "update": {
       if (typeof params.objective !== "string" || params.objective.trim().length === 0) {
         return { text: "Goal update requires a non-empty objective.", isError: true };
       }
-      return handleUpdate(params.objective, ctx);
+      return handleUpdate(params.objective, ctx, params.acceptance);
     }
     case "complete": {
       if (typeof params.summary !== "string" || params.summary.trim().length === 0) {
@@ -548,9 +556,9 @@ export function switchCurrentGoal(
 export function addGoal(
   objective: string,
   ctx: GoalContext,
-  opts: { tokenBudget?: number; planHandoffKey?: string } = {},
+  opts: { tokenBudget?: number; planHandoffKey?: string; acceptance?: string[] } = {},
 ): ActiveGoal {
-  const goal = createGoal(objective, opts.tokenBudget, currentTokenTotal(ctx) ?? 0, opts.planHandoffKey);
+  const goal = createGoal(objective, opts.tokenBudget, currentTokenTotal(ctx) ?? 0, opts.planHandoffKey, normalizeAcceptance(opts.acceptance));
   upsertGoalRegistry(goal);
   activeGoal = goal;
   persistGoal(activeGoal);
@@ -637,6 +645,79 @@ async function runVerifier(
     );
     return { status: "error", pass: false, reasoning: "Verifier unavailable — cannot confirm completion", evidence: [] };
   }
+}
+
+export interface AcceptanceResult {
+  command: string;
+  exitCode: number | null;
+  output: string;
+  timedOut?: boolean;
+}
+
+type AcceptanceRunner = (command: string, cwd: string) => Promise<AcceptanceResult>;
+
+let _acceptanceRunner: AcceptanceRunner | undefined;
+
+/** @internal Test seam for the acceptance command runner. Pass undefined to restore the real runner. */
+export function setAcceptanceRunnerForTest(runner: AcceptanceRunner | undefined): void {
+  _acceptanceRunner = runner;
+}
+
+async function runAcceptanceCommand(command: string, cwd: string): Promise<AcceptanceResult> {
+  if (_acceptanceRunner) return _acceptanceRunner(command, cwd);
+  return new Promise((resolve) => {
+    let output = "";
+    let settled = false;
+    let timedOut = false;
+    let child: ChildProcess | undefined;
+    const finish = (exitCode: number | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve({
+        command,
+        exitCode,
+        output: boundedSecretText(output.trim(), ACCEPTANCE_OUTPUT_CHARS),
+        ...(timedOut ? { timedOut: true } : {}),
+      });
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      try { child?.kill("SIGKILL"); } catch { /* already exited */ }
+      finish(null);
+    }, ACCEPTANCE_COMMAND_TIMEOUT_MS);
+    try {
+      child = spawn(command, { shell: true, cwd });
+      const append = (chunk: Buffer | string) => {
+        if (output.length < ACCEPTANCE_OUTPUT_CHARS * 2) output += String(chunk);
+      };
+      child.stdout?.on("data", append);
+      child.stderr?.on("data", append);
+      child.on("error", () => finish(null));
+      child.on("close", (code) => finish(code));
+    } catch {
+      finish(null);
+    }
+  });
+}
+
+async function runAcceptanceCommands(commands: string[] | undefined, cwd: string): Promise<AcceptanceResult[]> {
+  if (!commands || commands.length === 0) return [];
+  const results: AcceptanceResult[] = [];
+  for (const command of commands) {
+    results.push(await runAcceptanceCommand(command, cwd));
+  }
+  return results;
+}
+
+function normalizeAcceptance(value: unknown): string[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const commands = value
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => boundedSecretText(item.trim(), MAX_ACCEPTANCE_COMMAND_CHARS))
+    .filter(Boolean)
+    .slice(0, MAX_ACCEPTANCE_COMMANDS);
+  return commands.length > 0 ? commands : undefined;
 }
 
 function buildVerifierTask(
@@ -755,10 +836,13 @@ function normalizeVerifierVerdict(value: unknown): VerifierVerdict {
     return { status: "inconclusive", pass: false, reasoning: "Verifier verdict is missing pass or reasoning.", unmet, evidence };
   }
   if (verdict.pass && unmet.length > 0) {
+    // A pass that still lists unmet requirements is treated as an actionable
+    // fail (not a structural inconclusive) so the model receives the concrete
+    // gaps and the failure budget is reset rather than consumed.
     return {
-      status: "inconclusive",
+      status: "fail",
       pass: false,
-      reasoning: `Verifier verdict was contradictory: pass=true with ${unmet.length} unmet requirement(s).`,
+      reasoning: `Verifier reported pass=true but listed ${unmet.length} unmet requirement(s); treating the Goal as incomplete.`,
       unmet,
       evidence,
     };
@@ -1120,6 +1204,7 @@ async function handleCreate(
   budget: string | undefined,
   ctx: GoalContext,
   planHandoffKey?: string,
+  acceptance?: unknown,
 ): Promise<{ text: string; isError: boolean }> {
   const err = validateObjective(objective);
   if (err) return { text: err, isError: true };
@@ -1136,7 +1221,7 @@ async function handleCreate(
 
   cancelContinuation();
   clearRecovery();
-  activeGoal = createGoal(objective, tokenBudget, currentTokenTotal(ctx) ?? 0, planHandoffKey);
+  activeGoal = createGoal(objective, tokenBudget, currentTokenTotal(ctx) ?? 0, planHandoffKey, normalizeAcceptance(acceptance));
   if (ctx.isIdle?.() !== true) armGoalLoop(activeGoal);
   persistGoal(activeGoal);
   updateStatusLine(ctx, activeGoal);
@@ -1149,13 +1234,19 @@ async function handleCreate(
 async function handleUpdate(
   objective: string,
   ctx: GoalContext,
+  acceptance?: unknown,
 ): Promise<{ text: string; isError: boolean }> {
   if (!activeGoal) return { text: "No active goal to update.", isError: true };
   const err = validateObjective(objective);
   if (err) return { text: err, isError: true };
 
   updateUsage(activeGoal, ctx);
-  activeGoal = { ...activeGoal, text: objective.trim(), updatedAt: Date.now() };
+  activeGoal = {
+    ...activeGoal,
+    text: objective.trim(),
+    updatedAt: Date.now(),
+    ...(acceptance !== undefined ? { acceptance: normalizeAcceptance(acceptance) } : {}),
+  };
   persistGoal(activeGoal);
   updateStatusLine(ctx, activeGoal);
 
@@ -1169,6 +1260,31 @@ async function handleUpdate(
 type VerificationOutcome =
   | { status: "done" }
   | { status: "continue" | "hold"; reason: string };
+
+async function verifyByAcceptanceCommands(goal: ActiveGoal, ctx: GoalContext): Promise<VerifierVerdict> {
+  const results = await runAcceptanceCommands(goal.acceptance, baseCwd || ctx.cwd);
+  const evidence = results.map((r) => {
+    const status = r.timedOut ? "timed out" : `exit ${r.exitCode}`;
+    return boundedSecretText(`[${status}] ${r.command}${r.output ? `\n${r.output}` : ""}`, MAX_VERIFIER_EVIDENCE_ITEM_CHARS);
+  });
+  const failed = results.filter((r) => r.exitCode !== 0);
+  if (failed.length === 0) {
+    return {
+      status: "pass",
+      pass: true,
+      reasoning: `All ${results.length} declared acceptance command(s) exited 0.`,
+      unmet: [],
+      evidence,
+    };
+  }
+  return {
+    status: "fail",
+    pass: false,
+    reasoning: `${failed.length} of ${results.length} declared acceptance command(s) did not exit 0.`,
+    unmet: failed.map((r) => (r.timedOut ? `${r.command} (timed out)` : `${r.command} (exit ${r.exitCode})`)),
+    evidence,
+  };
+}
 
 async function verifyGoalCompletion(
   completionSummary: string,
@@ -1203,7 +1319,12 @@ async function verifyGoalCompletion(
   verificationInFlight = verification;
   let verdict: VerifierVerdict;
   try {
-    verdict = await runVerifier(goalSnapshot, completionSummary, ctx, workflowSnapshot);
+    // Acceptance-command-first: when the Goal declares acceptance commands, verify
+    // deterministically by running them (fast, no agent). Otherwise fall back to the
+    // independent agent verifier.
+    verdict = goalSnapshot.acceptance && goalSnapshot.acceptance.length > 0
+      ? await verifyByAcceptanceCommands(goalSnapshot, ctx)
+      : await runVerifier(goalSnapshot, completionSummary, ctx, workflowSnapshot);
   } finally {
     if (verificationInFlight === verification) verificationInFlight = undefined;
   }
@@ -1219,7 +1340,18 @@ async function verifyGoalCompletion(
     };
   }
 
-  if (verdict.status === "inconclusive" || verdict.status === "error") {
+  if (verdict.status === "error") {
+    // Verifier infrastructure fault (non-zero exit, missing structured output,
+    // evidence collection failure). This is not the Goal's fault, so it must not
+    // consume the failure budget; continue and let the model re-request completion.
+    updateUsage(activeGoal, ctx);
+    persistGoal(activeGoal);
+    updateStatusLine(ctx, activeGoal);
+    ctx.ui.notify("Goal verifier hit an infrastructure error; the attempt was not counted. Re-request completion to retry.", "warning");
+    return { status: "continue", reason: verdict.reasoning };
+  }
+
+  if (verdict.status === "inconclusive") {
     const verificationFailures = (activeGoal.verificationFailures ?? 0) + 1;
     if (verificationFailures >= MAX_VERIFICATION_FAILURES) {
       activeGoal = pauseGoal({ ...activeGoal, verificationFailures });
@@ -1244,7 +1376,10 @@ async function verifyGoalCompletion(
     const next = verdict.unmet?.[0] ? ` Next: ${verdict.unmet[0]}` : "";
     ctx.ui.notify(`Goal is not complete.${next}`, "info");
     const unmet = verdict.unmet?.length ? ` Unmet: ${verdict.unmet.join("; ")}.` : "";
-    return { status: "continue", reason: `${verdict.reasoning}${unmet}` };
+    const acceptanceHint = activeGoal.acceptance?.length
+      ? ` Run the declared acceptance commands (${activeGoal.acceptance.join("; ")}) and include their fresh output as evidence before re-requesting completion.`
+      : " Provide concrete verification evidence (run the relevant checks and include their output) before re-requesting completion.";
+    return { status: "continue", reason: `${verdict.reasoning}${unmet}${acceptanceHint}` };
   }
 
   const goalText = activeGoal.text;
@@ -1417,6 +1552,7 @@ function createGoal(
   tokenBudget: number | undefined,
   baseline: number,
   planHandoffKey?: string,
+  acceptance?: string[],
 ): ActiveGoal {
   const now = Date.now();
   return {
@@ -1424,6 +1560,7 @@ function createGoal(
     startedAt: now, updatedAt: now, iteration: 0,
     tokenBudget, tokensUsed: 0, timeUsedSeconds: 0, baselineTokens: baseline,
     ...(planHandoffKey ? { planHandoffKey } : {}),
+    ...(acceptance && acceptance.length > 0 ? { acceptance } : {}),
   };
 }
 
@@ -1573,6 +1710,7 @@ function isGoal(v: unknown): v is ActiveGoal {
     (g.workflowSessionId === undefined || typeof g.workflowSessionId === "string") &&
     (g.workflowSessionGeneration === undefined || typeof g.workflowSessionGeneration === "string")
     && (g.verificationFailures === undefined || (typeof g.verificationFailures === "number" && g.verificationFailures >= 0))
+    && (g.acceptance === undefined || (Array.isArray(g.acceptance) && g.acceptance.every((item) => typeof item === "string")))
   );
 }
 
@@ -1834,27 +1972,33 @@ function currentTokenTotal(ctx: GoalContext): number | undefined {
 // Status line
 // ---------------------------------------------------------------------------
 
+export function currentGoalPhase(): GoalWidgetPhase {
+  const goal = activeGoal;
+  if (!goal) return "normal";
+  if (goal.status === "active" && verificationInFlight?.goalId === goal.id) return "verifying";
+  if (goalRecovery?.goalId === goal.id && goalRecovery.kind === "provider_retry") return "retrying";
+  if (goal.status === "active"
+    && (goalLoopOwner?.goalId !== goal.id || goalLoopOwner.epoch !== goalLifecycleEpoch)) return "waiting";
+  return "normal";
+}
+
 function updateStatusLine(ctx: GoalContext, goal: ActiveGoal) {
   clearCompletionTimer();
   if (goal.status === "active") ensureElapsedTimer(ctx, goal.id);
   else clearElapsedTimer();
-  const verifying = goal.status === "active" && verificationInFlight?.goalId === goal.id;
-  const waiting = goal.status === "active"
-    && (goalLoopOwner?.goalId !== goal.id || goalLoopOwner.epoch !== goalLifecycleEpoch);
-  const retry = goalRecovery?.goalId === goal.id && goalRecovery.kind === "provider_retry"
-    ? goalRecovery
-    : undefined;
+  const phase = currentGoalPhase();
+  const retry = phase === "retrying" ? goalRecovery : undefined;
   ctx.ui.setStatus(
     STATUS_KEY,
-    verifying
+    phase === "verifying"
       ? "verifying"
       : retry
         ? `retrying ${retry.attempt}/${retry.maxRetries}`
-        : waiting
+        : phase === "waiting"
           ? "waiting"
           : fmtStatusLine(goal),
   );
-  updateGoalWidget(ctx, goal, verifying ? "verifying" : retry ? "retrying" : waiting ? "waiting" : "normal");
+  updateGoalWidget(ctx, goal, phase);
 }
 
 function showCompletionStatus(ctx: GoalContext, goal: ActiveGoal) {
@@ -1868,13 +2012,9 @@ function showCompletionStatus(ctx: GoalContext, goal: ActiveGoal) {
 }
 
 function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetPhase): void {
-  const todoByGoal = new Map<string, string>();
-  for (const task of getVisibleTasks()) {
-    if (task.goalId && !todoByGoal.has(task.goalId)) todoByGoal.set(task.goalId, task.subject);
-  }
-  const entries = getGoalList().map((entry) => toPanelEntry(entry, todoByGoal.get(entry.id)));
+  const entries = getGoalPanelEntries();
   if (!entries.some((entry) => entry.id === goal.id)) {
-    entries.push(toPanelEntry(goal, todoByGoal.get(goal.id)));
+    entries.push(toDetailEntry(goal, undefined));
   }
   const currentGoalId = goal.id;
   ctx.ui.setWidget?.(GOAL_WIDGET_KEY, (_tui, theme) => ({
@@ -1885,7 +2025,15 @@ function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetP
   }), { placement: "belowEditor" });
 }
 
-function toPanelEntry(goal: ActiveGoal, todoSubject: string | undefined): GoalPanelEntry {
+export function getGoalPanelEntries(): GoalDetailEntry[] {
+  const todoByGoal = new Map<string, string>();
+  for (const task of getVisibleTasks()) {
+    if (task.goalId && !todoByGoal.has(task.goalId)) todoByGoal.set(task.goalId, task.subject);
+  }
+  return getGoalList().map((entry) => toDetailEntry(entry, todoByGoal.get(entry.id)));
+}
+
+function toDetailEntry(goal: ActiveGoal, todoSubject: string | undefined): GoalDetailEntry {
   return {
     id: goal.id,
     objective: goal.text,
@@ -1895,6 +2043,11 @@ function toPanelEntry(goal: ActiveGoal, todoSubject: string | undefined): GoalPa
     tokensUsed: goal.tokensUsed,
     tokenBudget: goal.tokenBudget,
     timeUsedSeconds: goal.timeUsedSeconds,
+    startedAt: goal.startedAt,
+    updatedAt: goal.updatedAt,
+    verificationFailures: goal.verificationFailures,
+    acceptance: goal.acceptance,
+    workflowSessionId: goal.workflowSessionId,
     retryAttempt: goalRecovery?.goalId === goal.id && goalRecovery.kind === "provider_retry"
       ? goalRecovery.attempt
       : undefined,

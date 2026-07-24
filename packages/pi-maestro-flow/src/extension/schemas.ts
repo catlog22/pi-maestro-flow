@@ -117,6 +117,12 @@ export const GoalToolParams = Type.Object({
   planHandoffKey: Type.Optional(
     Type.String({ description: "Internal approved-Plan handoff binding; injected by the Plan gate" }),
   ),
+  acceptance: Type.Optional(
+    Type.Array(Type.String(), {
+      maxItems: 5,
+      description: "Optional acceptance commands (max 5); the harness runs these commands during verification and supplies their results to the independent verifier as primary functional evidence of completion. create only",
+    }),
+  ),
 }, { additionalProperties: false });
 
 // === Ask User Question Schema ===

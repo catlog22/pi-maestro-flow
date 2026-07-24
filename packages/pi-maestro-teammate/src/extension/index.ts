@@ -3784,6 +3784,21 @@ export async function handleChildInteractionRequest(
     return;
   }
 
+  // structured_output is the teammate's result-return channel: it only writes the
+  // parent-provided schema output file and terminates (no code edit, no command, no
+  // arbitrary path). Auto-approve it regardless of approval mode or UI availability —
+  // a headless child has no UI to approve it interactively, and every outputSchema
+  // teammate (e.g. the Goal verifier) depends on it to return a verdict.
+  if (interaction === "permission" && payload.toolName === "structured_output") {
+    if (agent) {
+      agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ◀ permission allow_once (structured_output)`);
+      trimAgentBuffers(agent);
+      agent.lastActivityAt = Date.now();
+    }
+    replyInteraction(reply, requestId, { action: "allow_once", updatedInput: payload.input });
+    return;
+  }
+
   const record: TeammateInteractionRecord = {
     requestId,
     interaction,
