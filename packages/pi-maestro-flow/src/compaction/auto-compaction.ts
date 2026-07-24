@@ -127,6 +127,10 @@ interface AutoCompactionState {
   settingsSnapshot?: CompactionSettings;
   settingsCwd?: string;
   velocityTracker: VelocityTracker;
+  consecutiveFailures: number;
+  breakerTrippedAtTurn?: number;
+  breakerNotified: boolean;
+  turnCount: number;
 }
 
 interface AutoCompactionDependencies {
@@ -161,6 +165,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     pruneManifest: new Map(),
     restoredPruneIds: new Set(),
     velocityTracker: EMPTY_VELOCITY_TRACKER,
+    consecutiveFailures: 0,
+    breakerNotified: false,
+    turnCount: 0,
   };
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
@@ -182,6 +189,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.persistedPruneKey = pruneKey(state.restoredPruneIds);
       state.settingsSnapshot = undefined;
       state.velocityTracker = EMPTY_VELOCITY_TRACKER;
+      state.consecutiveFailures = 0;
+      state.breakerTrippedAtTurn = undefined;
+      state.breakerNotified = false;
+      state.turnCount = 0;
       publishIdleStatus(ctx, settingsFor(ctx).enabled);
     },
     async evaluate(messages, ctx) {
@@ -227,6 +238,22 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
 
       const triggerKey = `${estimate.tokens}:${thresholdTokens}:${messages.length}`;
       if (state.lastTriggerKey === triggerKey) return pressure.messages;
+      const breakerCheck = compactionBreakerAllows(
+        { consecutiveFailures: state.consecutiveFailures, trippedAtTurn: state.breakerTrippedAtTurn },
+        state.turnCount,
+      );
+      state.consecutiveFailures = breakerCheck.breaker.consecutiveFailures;
+      state.breakerTrippedAtTurn = breakerCheck.breaker.trippedAtTurn;
+      if (!breakerCheck.allowed) {
+        if (!state.breakerNotified) {
+          state.breakerNotified = true;
+          ctx.ui.notify(
+            `Mid-turn compaction paused after ${state.consecutiveFailures} consecutive failures; retrying after ${COMPACTION_BREAKER_COOLDOWN_TURNS} turns.`,
+            "warning",
+          );
+        }
+        return pressure.messages;
+      }
       let internals: PiCompactionInternals;
       try {
         internals = await loadInternals();
@@ -277,6 +304,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       ctx.ui.setStatus(COMPACTION_STATUS_KEY, `COMPACT ${estimate.tokens}/${thresholdTokens}`);
       const failCompaction = (error: unknown) => {
         if (state.generation !== generation || state.activeOwner !== owner) return;
+        const failed = recordCompactionFailure(
+          { consecutiveFailures: state.consecutiveFailures, trippedAtTurn: state.breakerTrippedAtTurn },
+          state.turnCount,
+        );
+        state.consecutiveFailures = failed.consecutiveFailures;
+        state.breakerTrippedAtTurn = failed.trippedAtTurn;
         state.running = false;
         state.activeOwner = undefined;
         state.lastTriggerKey = undefined;
@@ -295,6 +328,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           customInstructions: state.activeLease?.tagInstructions(instructions) ?? instructions,
           onComplete: () => {
             if (state.generation !== generation || state.activeOwner !== owner) return;
+            state.consecutiveFailures = 0;
+            state.breakerTrippedAtTurn = undefined;
+            state.breakerNotified = false;
             state.running = false;
             state.activeOwner = undefined;
             state.lastTriggerKey = undefined;
@@ -317,6 +353,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       return pressure.messages;
     },
     onAgentEnd(ctx) {
+      state.turnCount += 1;
       if (!state.running) {
         // Turn boundary: refresh so settings edited during the turn are reflected.
         state.settingsSnapshot = undefined;
@@ -331,6 +368,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.lastTriggerKey = undefined;
       state.lastNoCompactableKey = undefined;
       state.velocityTracker = EMPTY_VELOCITY_TRACKER;
+      state.consecutiveFailures = 0;
+      state.breakerTrippedAtTurn = undefined;
+      state.breakerNotified = false;
     },
     reset(ctx) {
       state.generation += 1;
@@ -347,6 +387,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.settingsSnapshot = undefined;
       state.settingsCwd = undefined;
       state.velocityTracker = EMPTY_VELOCITY_TRACKER;
+      state.consecutiveFailures = 0;
+      state.breakerTrippedAtTurn = undefined;
+      state.breakerNotified = false;
+      state.turnCount = 0;
       persistPruneManifest(pi, state);
       if (ctx) {
         clearPressureStatus(ctx);
@@ -739,6 +783,46 @@ function latestCacheHitRatio(messages: AgentMessage[]): number | undefined {
     return denominator > 0 ? usage.cacheRead / denominator : undefined;
   }
   return undefined;
+}
+
+export const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
+export const COMPACTION_BREAKER_COOLDOWN_TURNS = 5;
+
+export interface CompactionBreakerState {
+  consecutiveFailures: number;
+  trippedAtTurn?: number;
+}
+
+export function resetCompactionBreaker(): CompactionBreakerState {
+  return { consecutiveFailures: 0 };
+}
+
+/** Record a failed compaction; trip the breaker once failures reach the cap. */
+export function recordCompactionFailure(
+  breaker: CompactionBreakerState,
+  turnCount: number,
+): CompactionBreakerState {
+  const consecutiveFailures = breaker.consecutiveFailures + 1;
+  const trippedAtTurn = consecutiveFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES
+    ? breaker.trippedAtTurn ?? turnCount
+    : breaker.trippedAtTurn;
+  return { consecutiveFailures, trippedAtTurn };
+}
+
+/**
+ * Report whether a compaction attempt is allowed. While the breaker is open
+ * (tripped within the cooldown window) attempts are skipped; once the cooldown
+ * elapses the breaker resets and the next attempt proceeds.
+ */
+export function compactionBreakerAllows(
+  breaker: CompactionBreakerState,
+  turnCount: number,
+): { allowed: boolean; breaker: CompactionBreakerState } {
+  if (breaker.trippedAtTurn === undefined) return { allowed: true, breaker };
+  if (turnCount - breaker.trippedAtTurn >= COMPACTION_BREAKER_COOLDOWN_TURNS) {
+    return { allowed: true, breaker: resetCompactionBreaker() };
+  }
+  return { allowed: false, breaker };
 }
 
 const VELOCITY_SAMPLE_CAP = 4;
