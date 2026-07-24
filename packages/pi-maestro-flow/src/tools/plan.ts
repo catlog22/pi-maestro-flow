@@ -775,6 +775,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       const blocked = requirePlanMode("confirm");
       if (blocked) return blocked;
       const outcome = await reviewPlan(ctx, true, "tool-result");
+      onPlanModeChanged?.(ctx);
       const summary = outcome.approved
         ? `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context).`
         : outcome.exited
@@ -1227,6 +1228,7 @@ export function registerPlanCommand(pi: ExtensionAPI): void {
           return;
         }
         await reviewPlan(ctx, true);
+        onPlanModeChanged?.(ctx);
         return;
       }
       if (command === "clear") {

@@ -16,6 +16,7 @@ import {
   onToolCallPlan,
   registerPlanCommand,
   registerPlanTools,
+  setPlanModeChangeListener,
 } from "../src/tools/plan.ts";
 import { PlanStore } from "../src/tools/plan-store.ts";
 import {
@@ -336,6 +337,47 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.equal(getPlanHandoffStatus(), "ready");
     assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
   } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("plan-confirm execute fires the mode-change listener so the approval statusline re-syncs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-listener-"));
+  const harness = createHarness(root, true);
+  harness.ctx.isIdle = () => false;
+  let listenerCalls = 0;
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Approved\n\nSync statusline" });
+    setPlanModeChangeListener(() => { listenerCalls++; });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(getMode(), "act");
+    assert.ok(listenerCalls >= 1, "mode-change listener must fire on confirm-execute so approval-mode status is restored");
+  } finally {
+    setPlanModeChangeListener(undefined);
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/plan approve fires the mode-change listener so the approval statusline re-syncs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-approve-listener-"));
+  const harness = createHarness(root, true);
+  harness.ctx.isIdle = () => false;
+  let listenerCalls = 0;
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Approved\n\nSync statusline" });
+    setPlanModeChangeListener(() => { listenerCalls++; });
+    await executeCommand(harness, "plan", "approve");
+    assert.equal(getMode(), "act");
+    assert.ok(listenerCalls >= 1, "mode-change listener must fire on /plan approve so approval-mode status is restored");
+  } finally {
+    setPlanModeChangeListener(undefined);
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
   }
