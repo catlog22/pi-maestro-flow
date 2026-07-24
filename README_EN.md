@@ -85,22 +85,70 @@ Per-task reasoning depth: `off` → `minimal` → `low` → `medium` → `high` 
 
 ---
 
+## Installation
+
+pi-maestro-flow is a **Pi plugin** (Pi extension). It is installed into the Pi Coding Agent via `pi install`, not as a regular npm dependency.
+
+### 1. Prerequisites
+
+| Component | Version | Notes |
+|-----------|---------|-------|
+| [Node.js](https://nodejs.org) | ≥ 22.19.0 | Runtime |
+| [Pi Coding Agent](https://github.com/earendil-works/pi) | ≥ 0.74.0 | Host runtime (required) |
+| [Maestro CLI](https://github.com/catlog22/maestro2) | ≥ 1.0.0 | Knowledge system features (optional) |
+
+```bash
+# Check Node.js version
+node --version
+
+# Install Pi Coding Agent globally (host runtime)
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+# Install Maestro CLI globally (knowledge system features, optional)
+npm install -g maestro-flow
+
+# Authenticate Pi (pick one)
+export ANTHROPIC_API_KEY=sk-ant-...   # Option A: environment variable
+pi                                     # Option B: run /login after startup to pick a provider
+```
+
+### 2. Install the Plugin
+
+```bash
+# From npm (pi-maestro-teammate is auto-installed as a dependency)
+pi install npm:pi-maestro-flow
+
+# Or from a local path (development mode)
+pi install ./packages/pi-maestro-flow
+```
+
+### 3. Verify Installation
+
+```bash
+pi list
+# Expected: pi-maestro-flow@0.4.x, pi-maestro-teammate@0.4.x
+```
+
+Pi now has 17 registered tools, 27 agents, 20 prompt templates, and a full knowledge system.
+
+> **Note:** Full LSP support requires the corresponding language servers (e.g. `typescript-language-server`, `pyright`). See [packages/pi-maestro-flow/README.md](packages/pi-maestro-flow/README.md) for details.
+
+---
+
 ## Quick Start
 
 ```bash
-# 1. Install (Pi Coding Agent + Node.js ≥ 22.19 required)
-pi install npm:pi-maestro-flow
-
-# 2. Start Pi
+# Start Pi (trust the project when prompted on first run)
 pi
+```
 
-# 3. Go — describe your task in natural language, or use skills directly
+Describe your task in natural language, or use skills directly:
+
+```bash
 /skill:maestro-help          # Browse all commands
 /skill:maestro-analyze       # Analyze a problem before planning
 /skill:team-review           # Multi-role code review
 ```
-
-Pi now has 17 registered tools, 27 agents, 20 prompt templates, and a full knowledge system.
 
 ---
 
@@ -207,3 +255,9 @@ See the **[Maestro Flow](https://github.com/catlog22/maestro-flow)** project for
 ## License
 
 [MIT](LICENSE) © 2026 catlog22
+
+---
+
+## Friendly Links
+
+- **[Linux DO](https://linux.do/)** — Learn AI on Linux DO!

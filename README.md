@@ -85,22 +85,70 @@ explorer、reviewer、debugger、planner、verifier、roadmapper… 在结构化
 
 ---
 
+## 安装
+
+pi-maestro-flow 是一个 **Pi 插件**（Pi extension），通过 `pi install` 安装到 Pi Coding Agent 中，而非普通的 npm 依赖。
+
+### 1. 前置条件
+
+| 组件 | 版本要求 | 说明 |
+|------|---------|------|
+| [Node.js](https://nodejs.org) | ≥ 22.19.0 | 运行时 |
+| [Pi Coding Agent](https://github.com/earendil-works/pi) | ≥ 0.74.0 | 宿主运行时（必装） |
+| [Maestro CLI](https://github.com/catlog22/maestro2) | ≥ 1.0.0 | 知识系统功能（可选） |
+
+```bash
+# 检查 Node.js 版本
+node --version
+
+# 全局安装 Pi Coding Agent（宿主运行时）
+npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+
+# 全局安装 Maestro CLI（知识系统功能，可选）
+npm install -g maestro-flow
+
+# 认证 Pi（二选一）
+export ANTHROPIC_API_KEY=sk-ant-...   # 方式 A：环境变量
+pi                                     # 方式 B：启动后运行 /login 选择提供商
+```
+
+### 2. 安装插件
+
+```bash
+# 从 npm 安装（pi-maestro-teammate 作为依赖自动安装）
+pi install npm:pi-maestro-flow
+
+# 或从本地路径安装（开发模式）
+pi install ./packages/pi-maestro-flow
+```
+
+### 3. 验证安装
+
+```bash
+pi list
+# 预期输出: pi-maestro-flow@0.4.x, pi-maestro-teammate@0.4.x
+```
+
+安装后 Pi 即拥有 17 个注册工具、27 个 Agent、20 个 Prompt 模板和完整知识系统。
+
+> **提示：** 完整的 LSP 功能需要对应语言服务器（如 `typescript-language-server`、`pyright` 等），详见 [packages/pi-maestro-flow/README.md](packages/pi-maestro-flow/README.md)。
+
+---
+
 ## 快速开始
 
 ```bash
-# 1. 安装（需要 Pi Coding Agent + Node.js ≥ 22.19）
-pi install npm:pi-maestro-flow
-
-# 2. 启动 Pi
+# 启动 Pi（首次启动时按提示信任项目）
 pi
+```
 
-# 3. 开始 — 用自然语言描述任务，或直接使用技能
+用自然语言描述任务，或直接使用技能：
+
+```bash
 /skill:maestro-help          # 浏览所有命令
 /skill:maestro-analyze       # 分析问题再规划
 /skill:team-review           # 多角色代码审查
 ```
-
-安装后 Pi 即拥有 17 个注册工具、27 个 Agent、20 个 Prompt 模板和完整知识系统。
 
 ---
 
@@ -207,3 +255,9 @@ pi
 ## 许可证
 
 [MIT](LICENSE) © 2026 catlog22
+
+---
+
+## 友情链接
+
+- **[Linux DO](https://linux.do/)** — Linux DO：学AI，上L站！
