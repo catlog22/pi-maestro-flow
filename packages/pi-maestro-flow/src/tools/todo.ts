@@ -4,7 +4,7 @@ import type {
   ExtensionAPI,
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
-import { getActiveGoal } from "./goal.ts";
+import { getActiveGoal, getGoalById, switchCurrentGoal } from "./goal.ts";
 import {
   TodoSkillLoader,
   type TodoSkillConfig,
@@ -60,6 +60,7 @@ export interface TodoTask {
   summary?: string;
   origin?: TodoTaskOrigin;
   planHandoffKey?: string;
+  goalId?: string;
   createdBy: TodoActorRef;
   assignee: TodoActorRef;
   createdAt: number;
@@ -73,6 +74,7 @@ export interface TodoBatchSpec {
   skills?: TodoSkillBinding[];
   assignee?: string;
   blockedBy?: string[];
+  goalId?: string;
 }
 
 export interface TodoParams {
@@ -89,6 +91,7 @@ export interface TodoParams {
   tasks?: TodoBatchSpec[];
   filter?: { status?: TaskStatus; memberId?: string };
   planHandoffKey?: string;
+  goalId?: string;
 }
 
 type TodoParamsInput = TodoParams & {
@@ -497,7 +500,7 @@ async function executeTodoAction(
 // ---------------------------------------------------------------------------
 
 function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActorRef): AgentToolResult {
-  if (params.tasks && params.tasks.length > 0) return handleBatchCreate(params.tasks, actor);
+  if (params.tasks && params.tasks.length > 0) return handleBatchCreate(params.tasks, actor, params.planHandoffKey);
   if (!params.subject) return err("subject is required for create", "create");
 
   const id = randomUUID().slice(0, 8);
@@ -518,6 +521,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
     skills: params.skills ?? [],
     ...(params.context ? { context: params.context } : {}),
     ...(params.planHandoffKey ? { planHandoffKey: params.planHandoffKey } : {}),
+    ...(params.goalId ? { goalId: params.goalId } : {}),
     createdBy: cloneActor(actor),
     assignee: assignee.actor,
     createdAt: now,
@@ -539,7 +543,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
  * task in this same batch. The whole batch commits atomically — any invalid
  * spec aborts the create without touching existing state.
  */
-function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef): AgentToolResult {
+function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHandoffKey?: string): AgentToolResult {
   const nextTasks = cloneTaskMap();
 
   const ids: string[] = [];
@@ -600,6 +604,8 @@ function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef): AgentTo
       blockedBy,
       skills,
       ...(spec.context ? { context: spec.context } : {}),
+      ...(planHandoffKey ? { planHandoffKey } : {}),
+      ...(spec.goalId ? { goalId: spec.goalId } : {}),
       createdBy: cloneActor(actor),
       assignee: assignee.actor,
       createdAt: clock,
@@ -633,6 +639,10 @@ async function handleUpdate(
   if (params.subject !== undefined) draft.subject = params.subject;
   if (params.description !== undefined) draft.description = params.description;
   if (params.summary !== undefined) draft.summary = params.summary;
+  if (params.goalId !== undefined) {
+    if (params.goalId === "") delete draft.goalId;
+    else draft.goalId = params.goalId;
+  }
 
   if (params.assignee !== undefined) {
     const assignee = resolveAssignee(params.assignee, actor);
@@ -681,6 +691,16 @@ async function handleUpdate(
 
   if (draft.status !== before.status && !isValidTransition(before.status, draft.status)) {
     return err(`Invalid status transition: ${before.status} → ${draft.status}`, "update");
+  }
+
+  if (draft.status === "completed" && before.status !== "completed" && draft.goalId) {
+    const gate = getGoalById(draft.goalId);
+    if (!gate) {
+      return err(`Quality gate Goal ${draft.goalId} for task #${draft.id} was not found; cannot verify completion.`, "update");
+    }
+    if (gate.status !== "done") {
+      return err(`Quality gate Goal not verified for task #${draft.id}: "${gate.text}". Complete the Goal (goal complete) to verify it before completing this task.`, "update");
+    }
   }
 
   const activationInputsChanged = before.context !== draft.context
@@ -869,6 +889,12 @@ async function handleNext(
   }
 
   const task = pending[0];
+  if (task.goalId) {
+    const current = getActiveGoal();
+    if (current?.id !== task.goalId || current?.status === "paused") {
+      switchCurrentGoal(task.goalId, ctx, { resume: true });
+    }
+  }
   const draft = cloneTodoTask(task);
   const allTasks = getVisibleTasks();
   const taskIndex = allTasks.findIndex((t) => t.id === task.id);
@@ -1194,6 +1220,7 @@ function taskChanged(before: TodoTask, after: TodoTask): boolean {
     before.summary !== after.summary ||
     JSON.stringify(before.blockedBy) !== JSON.stringify(after.blockedBy) ||
     before.context !== after.context ||
+    before.goalId !== after.goalId ||
     JSON.stringify(before.skills) !== JSON.stringify(after.skills) ||
     JSON.stringify(before.origin) !== JSON.stringify(after.origin) ||
     JSON.stringify(before.createdBy) !== JSON.stringify(after.createdBy) ||
@@ -1580,6 +1607,7 @@ function normalizeLoadedTask(id: string, raw: unknown): TodoTask {
     ...(summary ? { summary } : {}),
     ...(origin ? { origin } : {}),
     ...(typeof task.planHandoffKey === "string" ? { planHandoffKey: task.planHandoffKey } : {}),
+    ...(typeof task.goalId === "string" ? { goalId: task.goalId } : {}),
     createdBy,
     assignee,
     createdAt: typeof task.createdAt === "number" ? task.createdAt : now,

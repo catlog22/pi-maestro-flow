@@ -21,6 +21,18 @@ import {
 } from "../src/tools/todo.ts";
 import { TodoToolParams } from "../src/extension/schemas.ts";
 import { renderTodoWidget } from "../src/extension/index.ts";
+import {
+  addGoal,
+  executeGoal,
+  executeGoalCommand,
+  getActiveGoal,
+  initGoal,
+  onSessionShutdown as goalSessionShutdown,
+  onSessionStart as goalSessionStart,
+  setGoalVerifierRunnerForTest,
+  switchCurrentGoal,
+  type GoalContext,
+} from "../src/tools/goal.ts";
 
 function makeExtensionContext() {
   return {
@@ -131,6 +143,185 @@ test("Todo creation and reload preserve the approved Plan handoff binding", asyn
     todoContext = startTodo(root, loader, [entry]);
     assert.equal(getVisibleTasks()[0].planHandoffKey, handoffKey);
   } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Batch Todo creation binds every task to the approved Plan handoff key", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-batch-handoff-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const handoffKey = "c".repeat(64);
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  try {
+    await executeTodo({
+      action: "create",
+      planHandoffKey: handoffKey,
+      tasks: [
+        { subject: "Step 1" },
+        { subject: "Step 2", blockedBy: ["#0"] },
+      ],
+    }, ctx);
+    const visible = getVisibleTasks();
+    assert.equal(visible.length, 2);
+    for (const task of visible) assert.equal(task.planHandoffKey, handoffKey);
+    const executable = visible.filter((t) => t.status === "pending" && t.blockedBy.length === 0);
+    assert.equal(executable.length, 1);
+    assert.equal(executable[0].planHandoffKey, handoffKey);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Todo goalId binding persists across create, update, and reload", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-goalid-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  let todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  try {
+    await executeTodo({ action: "create", subject: "Guarded task", goalId: "goal-1" }, ctx);
+    const id = getVisibleTasks()[0].id;
+    assert.equal(getVisibleTasks()[0].goalId, "goal-1");
+
+    await executeTodo({ action: "update", id, goalId: "goal-2" }, ctx);
+    assert.equal(getVisibleTasks()[0].goalId, "goal-2");
+
+    await executeTodo({ action: "update", id, goalId: "" }, ctx);
+    assert.equal(getVisibleTasks()[0].goalId, undefined);
+
+    await executeTodo({ action: "update", id, goalId: "goal-3" }, ctx);
+    const persisted = getVisibleTasks()[0];
+    onSessionShutdown(todoContext);
+    const entry = {
+      type: "custom",
+      customType: "todo-state",
+      data: { version: 4, tasks: { [persisted.id]: persisted } },
+    };
+    todoContext = startTodo(root, loader, [entry]);
+    assert.equal(getVisibleTasks()[0].goalId, "goal-3");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Batch Todo creation stamps per-spec goalId on each task", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-batch-goalid-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  try {
+    await executeTodo({
+      action: "create",
+      tasks: [
+        { subject: "S1", goalId: "g1" },
+        { subject: "S2", goalId: "g2", blockedBy: ["#0"] },
+        { subject: "S3" },
+      ],
+    }, ctx);
+    const bySubject = new Map(getVisibleTasks().map((t) => [t.subject, t]));
+    assert.equal(bySubject.get("S1")?.goalId, "g1");
+    assert.equal(bySubject.get("S2")?.goalId, "g2");
+    assert.equal(bySubject.get("S3")?.goalId, undefined);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo next switches to the task's quality-gate Goal and auto-resumes it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-next-goal-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  initGoal({ appendEntry() {} } as never);
+  const goalCtx: GoalContext = {
+    cwd: root,
+    ui: { notify() {}, setStatus() {} },
+    abort() {},
+  };
+  goalSessionStart(goalCtx, { reason: "new" });
+  try {
+    const goalA = addGoal("Gate A", goalCtx);
+    const goalB = addGoal("Gate B", goalCtx);
+    await executeGoalCommand({ action: "stop" }, goalCtx);
+    assert.equal(getActiveGoal()?.status, "paused");
+    switchCurrentGoal(goalA.id, goalCtx);
+    assert.equal(getActiveGoal()?.id, goalA.id);
+
+    await executeTodo({ action: "create", subject: "Work B", goalId: goalB.id }, ctx);
+    await executeTodo({ action: "next" }, ctx);
+
+    assert.equal(getActiveGoal()?.id, goalB.id);
+    assert.equal(getActiveGoal()?.status, "active");
+  } finally {
+    await executeGoalCommand({ action: "clear" }, goalCtx);
+    goalSessionShutdown(goalCtx);
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo with a quality-gate Goal blocks completion until the Goal verifies", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-quality-gate-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  setGoalVerifierRunnerForTest(() => Promise.resolve({
+    exitCode: 0,
+    messages: [{ role: "assistant", content: "ok" }],
+    structuredOutput: { pass: true, reasoning: "verified", unmet: [], evidence: ["Gate verified by test"] },
+  }));
+  initGoal({ appendEntry() {} } as never);
+  const goalCtx: GoalContext = {
+    cwd: root,
+    ui: { notify() {}, setStatus() {} },
+    isIdle: () => false,
+    abort() {},
+  };
+  goalSessionStart(goalCtx, { reason: "new" });
+  try {
+    const gate = addGoal("Quality gate", goalCtx);
+    await executeTodo({ action: "create", subject: "Guarded", goalId: gate.id }, ctx);
+    const id = getVisibleTasks()[0].id;
+
+    const blocked = await executeTodo({ action: "update", id, status: "completed" }, ctx);
+    assert.equal((blocked as { isError?: boolean }).isError, true);
+    assert.match((blocked.content[0] as { text: string }).text, /Quality gate Goal not verified/);
+    assert.equal(getVisibleTasks()[0].status, "pending");
+
+    const completion = await executeGoal({ action: "complete", summary: "Gate satisfied" }, goalCtx);
+    assert.match(completion.text, /done/i);
+
+    const done = await executeTodo({ action: "update", id, status: "completed" }, ctx);
+    assert.notEqual((done as { isError?: boolean }).isError, true);
+    assert.equal(getVisibleTasks()[0].status, "completed");
+  } finally {
+    setGoalVerifierRunnerForTest(undefined);
+    await executeGoalCommand({ action: "clear" }, goalCtx);
+    goalSessionShutdown(goalCtx);
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });
   }
@@ -412,37 +603,10 @@ test("todo widget bounds expanded rows and keeps actionable work first", () => {
   assert.match(lines.at(-1) ?? "", /92 more/);
 });
 
-test("todo widget hides the todo section and shows a standalone goal line when there are no tasks", () => {
-  const lines = renderTodoWidget([], false, 120, {
-    objective: "Ship the feature",
-    status: "running",
-    tokensUsed: 12_000,
-    tokenBudget: 50_000,
-  });
-  assert.equal(lines.length, 1);
-  assert.match(lines[0], /Ship the feature/);
-  assert.match(lines[0], /12k\/50k/);
-  assert.ok(!lines[0].startsWith(" "), "standalone goal line must be top-level, not indented");
-  assert.doesNotMatch(lines.join("\n"), /Todo/);
-});
-
-test("todo widget renders nothing when there are no tasks, goal, or runs", () => {
+test("todo widget renders nothing when there are no tasks or runs", () => {
   assert.deepEqual(renderTodoWidget([], false, 120), []);
   assert.deepEqual(renderTodoWidget([], true, 120), []);
-  assert.deepEqual(renderTodoWidget([], true, 120, null, []), []);
-});
-
-test("todo widget keeps the goal line indented under the todo summary when tasks exist", () => {
-  const lines = renderTodoWidget([{
-    id: "1",
-    subject: "Work",
-    status: "pending",
-    blockedBy: [],
-    skills: [],
-  }], false, 120, { objective: "Goal text", status: "running" });
-  assert.equal(lines.length, 2);
-  assert.match(lines[0], /Todo/);
-  assert.ok(lines[1].startsWith("  "), "goal line stays a sub-line while the todo summary is visible");
+  assert.deepEqual(renderTodoWidget([], true, 120, []), []);
 });
 
 test("todo state version is 5", () => {

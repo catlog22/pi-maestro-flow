@@ -4,11 +4,12 @@ import { NETWORK_RETRY_POLICY, isRetryableProviderError } from "pi-maestro-teamm
 import type { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSession, type WorkflowSnapshot } from "../session/types.ts";
 import {
-  renderGoalWidget,
-  type GoalWidgetModel,
+  renderGoalPanel,
+  type GoalPanelEntry,
   type GoalWidgetPhase,
 } from "../tui/goal-widget.ts";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
+import { getVisibleTasks } from "./todo.ts";
 
 // Lazy-loaded sibling: dynamic import + isModuleNotFound fallback (docs pattern 4)
 interface RunTeammateParams {
@@ -150,6 +151,7 @@ const RETRYABLE_RE =
 // ---------------------------------------------------------------------------
 
 let activeGoal: ActiveGoal | undefined;
+let goalRegistry: ActiveGoal[] = [];
 let extensionApi: ExtensionAPI | undefined;
 let onGoalStateChanged: (() => void) | undefined;
 let baseCwd = "";
@@ -376,9 +378,12 @@ export async function onSessionStart(
   clearRecovery();
   baseCwd = ctx.cwd;
   goalSessionId = currentSessionId(ctx);
-  activeGoal = event.reason === "new" || event.reason === "fork"
-    ? undefined
-    : loadGoalFromSession(ctx, goalSessionId);
+  if (event.reason === "new" || event.reason === "fork") {
+    goalRegistry = [];
+    activeGoal = undefined;
+  } else {
+    activeGoal = loadGoalFromSession(ctx, goalSessionId);
+  }
   if (!activeGoal) {
     clearGoalDisplay(ctx);
     return;
@@ -505,6 +510,52 @@ export async function onAgentEnd(event: { messages: unknown[] }, ctx: GoalContex
 
 export function getActiveGoal(): ActiveGoal | undefined {
   return activeGoal ? { ...activeGoal } : undefined;
+}
+
+export function getCurrentGoal(): ActiveGoal | undefined {
+  return activeGoal ? { ...activeGoal } : undefined;
+}
+
+export function getGoalList(): ActiveGoal[] {
+  if (activeGoal) upsertGoalRegistry(activeGoal);
+  return [...goalRegistry]
+    .sort((a, b) => a.startedAt - b.startedAt)
+    .map((goal) => ({ ...goal }));
+}
+
+export function getGoalById(goalId: string): ActiveGoal | undefined {
+  if (activeGoal?.id === goalId) return { ...activeGoal };
+  const found = goalRegistry.find((goal) => goal.id === goalId);
+  return found ? { ...found } : undefined;
+}
+
+export function switchCurrentGoal(
+  goalId: string,
+  ctx?: GoalContext,
+  opts: { resume?: boolean } = {},
+): ActiveGoal | undefined {
+  if (activeGoal) upsertGoalRegistry(activeGoal);
+  const target = goalRegistry.find((goal) => goal.id === goalId);
+  if (!target) return undefined;
+  activeGoal = opts.resume && target.status === "paused"
+    ? { ...target, status: "active", pauseReason: undefined, verificationFailures: 0, updatedAt: Date.now() }
+    : target;
+  persistGoal(activeGoal);
+  if (ctx) updateStatusLine(ctx, activeGoal);
+  return { ...activeGoal };
+}
+
+export function addGoal(
+  objective: string,
+  ctx: GoalContext,
+  opts: { tokenBudget?: number; planHandoffKey?: string } = {},
+): ActiveGoal {
+  const goal = createGoal(objective, opts.tokenBudget, currentTokenTotal(ctx) ?? 0, opts.planHandoffKey);
+  upsertGoalRegistry(goal);
+  activeGoal = goal;
+  persistGoal(activeGoal);
+  updateStatusLine(ctx, activeGoal);
+  return { ...goal };
 }
 
 // ---------------------------------------------------------------------------
@@ -1201,7 +1252,7 @@ async function verifyGoalCompletion(
   updateUsage(activeGoal, ctx);
   persistGoal(activeGoal);
   const completedGoal = { ...activeGoal };
-  clearActive(ctx);
+  clearActive(ctx, true);
   showCompletionStatus(ctx, completedGoal);
   ctx.ui.notify(`Goal done (verified): ${goalText}`, "info");
   return { status: "done" };
@@ -1421,9 +1472,10 @@ function updateUsage(goal: ActiveGoal, ctx: GoalContext) {
   goal.updatedAt = Date.now();
 }
 
-function clearActive(ctx: GoalContext) {
+function clearActive(ctx: GoalContext, keepInRegistry = false) {
   cancelContinuation();
   clearRecovery();
+  if (activeGoal && !keepInRegistry) removeFromGoalRegistry(activeGoal.id);
   activeGoal = undefined;
   goalLoopOwner = undefined;
   clearElapsedTimer();
@@ -1435,13 +1487,28 @@ function clearActive(ctx: GoalContext) {
 // Persistence
 // ---------------------------------------------------------------------------
 
+function upsertGoalRegistry(goal: ActiveGoal): void {
+  const index = goalRegistry.findIndex((entry) => entry.id === goal.id);
+  if (index >= 0) goalRegistry[index] = goal;
+  else goalRegistry.push(goal);
+}
+
+function removeFromGoalRegistry(id: string): void {
+  goalRegistry = goalRegistry.filter((entry) => entry.id !== id);
+}
+
 function persistGoal(goal: ActiveGoal) {
-  extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, { sessionId: goalSessionId, goal });
+  upsertGoalRegistry(goal);
+  extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, {
+    version: 2, sessionId: goalSessionId, goal, goals: goalRegistry, currentGoalId: goal.id,
+  });
   onGoalStateChanged?.();
 }
 
 function clearPersistedGoal() {
-  extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, { sessionId: goalSessionId, goal: null });
+  extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, {
+    version: 2, sessionId: goalSessionId, goal: null, goals: goalRegistry, currentGoalId: undefined,
+  });
   onGoalStateChanged?.();
 }
 
@@ -1457,9 +1524,24 @@ function loadGoalFromSession(ctx: GoalContext, sessionId: string | undefined): A
   } | undefined;
   const entries = sm?.getBranch?.() ?? sm?.getEntries?.() ?? [];
   const entry = entries.filter((e) => e.type === "custom" && e.customType === GOAL_STATE_ENTRY_TYPE).pop();
-  const data = entry?.data as { sessionId?: string; goal?: ActiveGoal | null } | undefined;
-  if (data?.sessionId && sessionId && data.sessionId !== sessionId) return undefined;
-  return isGoal(data?.goal) && data.goal.status !== "done" ? normalizeLoadedGoal(data.goal) : undefined;
+  const data = entry?.data as {
+    sessionId?: string;
+    goal?: ActiveGoal | null;
+    goals?: unknown;
+    currentGoalId?: string;
+  } | undefined;
+  if (data?.sessionId && sessionId && data.sessionId !== sessionId) {
+    goalRegistry = [];
+    return undefined;
+  }
+  if (Array.isArray(data?.goals)) {
+    goalRegistry = data.goals.filter(isGoal).map(normalizeLoadedGoal);
+    const current = goalRegistry.find((goal) => goal.id === data.currentGoalId);
+    return current && current.status !== "done" ? current : undefined;
+  }
+  const legacy = isGoal(data?.goal) ? normalizeLoadedGoal(data.goal) : undefined;
+  goalRegistry = legacy ? [legacy] : [];
+  return legacy && legacy.status !== "done" ? legacy : undefined;
 }
 
 function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
@@ -1786,7 +1868,26 @@ function showCompletionStatus(ctx: GoalContext, goal: ActiveGoal) {
 }
 
 function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetPhase): void {
-  const model: GoalWidgetModel = {
+  const todoByGoal = new Map<string, string>();
+  for (const task of getVisibleTasks()) {
+    if (task.goalId && !todoByGoal.has(task.goalId)) todoByGoal.set(task.goalId, task.subject);
+  }
+  const entries = getGoalList().map((entry) => toPanelEntry(entry, todoByGoal.get(entry.id)));
+  if (!entries.some((entry) => entry.id === goal.id)) {
+    entries.push(toPanelEntry(goal, todoByGoal.get(goal.id)));
+  }
+  const currentGoalId = goal.id;
+  ctx.ui.setWidget?.(GOAL_WIDGET_KEY, (_tui, theme) => ({
+    render(width: number): string[] {
+      return renderGoalPanel(entries, currentGoalId, phase, width, theme);
+    },
+    invalidate() {},
+  }), { placement: "belowEditor" });
+}
+
+function toPanelEntry(goal: ActiveGoal, todoSubject: string | undefined): GoalPanelEntry {
+  return {
+    id: goal.id,
     objective: goal.text,
     status: goal.status,
     pauseReason: goal.pauseReason,
@@ -1800,13 +1901,8 @@ function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetP
     retryMaxRetries: goalRecovery?.goalId === goal.id && goalRecovery.kind === "provider_retry"
       ? goalRecovery.maxRetries
       : undefined,
+    ...(todoSubject ? { todoSubject } : {}),
   };
-  ctx.ui.setWidget?.(GOAL_WIDGET_KEY, (_tui, theme) => ({
-    render(width: number): string[] {
-      return renderGoalWidget(model, phase, width, theme);
-    },
-    invalidate() {},
-  }), { placement: "belowEditor" });
 }
 
 function clearGoalDisplay(ctx: GoalContext): void {

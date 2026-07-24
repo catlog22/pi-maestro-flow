@@ -14,6 +14,11 @@ export interface GoalWidgetModel {
   retryMaxRetries?: number;
 }
 
+export interface GoalPanelEntry extends GoalWidgetModel {
+  id: string;
+  todoSubject?: string;
+}
+
 export interface GoalWidgetTheme {
   fg(color: "accent" | "success" | "warning" | "error" | "dim", text: string): string;
   bold(text: string): string;
@@ -45,6 +50,44 @@ export function renderGoalWidget(
   const lines = [truncateToWidth(header, safeWidth, "…")];
   const objectivePrefix = theme.fg("dim", "↳ ");
   lines.push(truncateToWidth(`${objectivePrefix}${goal.objective}`, safeWidth, "…"));
+  return lines;
+}
+
+export function renderGoalPanel(
+  goals: GoalPanelEntry[],
+  currentGoalId: string | undefined,
+  phase: GoalWidgetPhase,
+  width: number,
+  theme: GoalWidgetTheme,
+): string[] {
+  const safeWidth = Math.max(1, width);
+  if (goals.length === 0) return [];
+  const total = goals.length;
+  const lines: string[] = [];
+  goals.forEach((goal, index) => {
+    const order = `${index + 1}/${total}`;
+    if (goal.id === currentGoalId) {
+      const state = visualState(goal, phase);
+      const title = theme.fg(state.color, theme.bold(`${state.glyph} Goal ${order}`));
+      if (safeWidth < 20) {
+        lines.push(truncateToWidth(`${title} ${state.label}`, safeWidth, "…"));
+        return;
+      }
+      const metrics = metricText(goal, safeWidth);
+      const hint = state.hint ? ` · ${theme.fg("dim", state.hint)}` : "";
+      const header = `${title} · ${state.label}${metrics ? ` · ${metrics}` : ""}${hint}`;
+      lines.push(truncateToWidth(header, safeWidth, "…"));
+      if (safeWidth >= 44) {
+        lines.push(truncateToWidth(`${theme.fg("dim", "↳ ")}${goal.objective}`, safeWidth, "…"));
+      }
+      return;
+    }
+    const state = visualState(goal, "normal");
+    const glyph = theme.fg(state.color, state.glyph);
+    const label = theme.fg("dim", state.label.toLowerCase());
+    const todoRef = goal.todoSubject ? theme.fg("dim", ` · ${goal.todoSubject}`) : "";
+    lines.push(truncateToWidth(`${glyph} ${order} ${goal.objective} ${label}${todoRef}`, safeWidth, "…"));
+  });
   return lines;
 }
 

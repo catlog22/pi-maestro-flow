@@ -2,12 +2,15 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import {
+  addGoal,
   buildCanonicalEvidence,
   canonicalCompletionBlockers,
   collectVerifierEvidence,
   executeGoal,
   executeGoalCommand,
   getActiveGoal,
+  getCurrentGoal,
+  getGoalList,
   goalArgumentCompletions,
   initGoal,
   isRetryableGoalFailure,
@@ -19,13 +22,14 @@ import {
   reconcileWorkflowGoal,
   setGoalVerifierRunnerForTest,
   setWorkflowCoordinator,
+  switchCurrentGoal,
   onSessionShutdown,
   onSessionStart,
   type GoalContext,
 } from "../src/tools/goal.ts";
 import { buildTodoMirrorSpecs } from "../src/session/bridge.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
-import { renderGoalWidget, type GoalWidgetModel } from "../src/tui/goal-widget.ts";
+import { renderGoalWidget, renderGoalPanel, type GoalWidgetModel, type GoalPanelEntry } from "../src/tui/goal-widget.ts";
 
 function createContext(overrides: Partial<GoalContext> = {}): GoalContext {
   return {
@@ -66,6 +70,72 @@ test("Goal creation persists the approved Plan handoff binding", async () => {
   }
 });
 
+function makeGoalRecord(id: string, text: string, status: "active" | "paused" | "done" = "active", startedAt = Date.now()) {
+  return {
+    id, text, status, startedAt, updatedAt: startedAt,
+    iteration: 0, tokensUsed: 0, timeUsedSeconds: 0, baselineTokens: 0,
+  };
+}
+
+test("goal-state load normalizes legacy single-goal, null, and v2 multi-goal entries", () => {
+  initGoal({ appendEntry() {} } as never);
+  const g1 = makeGoalRecord("g1", "First", "paused", 1000);
+  const g2 = makeGoalRecord("g2", "Second", "active", 2000);
+
+  const legacyCtx = createContext({
+    sessionManager: { getSessionId: () => "s1", getEntries: () => [
+      { type: "custom", customType: "goal-state", data: { sessionId: "s1", goal: g1 } },
+    ] },
+  });
+  onSessionStart(legacyCtx, { reason: "startup" });
+  assert.equal(getActiveGoal()?.id, "g1");
+  assert.deepEqual(getGoalList().map((g) => g.id), ["g1"]);
+  onSessionShutdown(legacyCtx);
+
+  const nullCtx = createContext({
+    sessionManager: { getSessionId: () => "s1", getEntries: () => [
+      { type: "custom", customType: "goal-state", data: { sessionId: "s1", goal: null } },
+    ] },
+  });
+  onSessionStart(nullCtx, { reason: "startup" });
+  assert.equal(getActiveGoal(), undefined);
+  assert.deepEqual(getGoalList(), []);
+  onSessionShutdown(nullCtx);
+
+  const v2Ctx = createContext({
+    sessionManager: { getSessionId: () => "s1", getEntries: () => [
+      { type: "custom", customType: "goal-state", data: { version: 2, sessionId: "s1", goal: g2, goals: [g1, g2], currentGoalId: "g2" } },
+    ] },
+  });
+  onSessionStart(v2Ctx, { reason: "startup" });
+  assert.equal(getActiveGoal()?.id, "g2");
+  assert.deepEqual(getGoalList().map((g) => g.id), ["g1", "g2"]);
+  onSessionShutdown(v2Ctx);
+});
+
+test("addGoal builds a flat time-ordered goal list and switchCurrentGoal changes the current goal", () => {
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext();
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    const a = addGoal("Goal A", ctx);
+    const b = addGoal("Goal B", ctx);
+    assert.equal(getActiveGoal()?.id, b.id);
+    assert.deepEqual(getGoalList().map((g) => g.text), ["Goal A", "Goal B"]);
+
+    const switched = switchCurrentGoal(a.id, ctx);
+    assert.equal(switched?.id, a.id);
+    assert.equal(getActiveGoal()?.id, a.id);
+    assert.equal(getCurrentGoal()?.id, a.id);
+    assert.deepEqual(getGoalList().map((g) => g.text), ["Goal A", "Goal B"]);
+
+    assert.equal(switchCurrentGoal("nonexistent", ctx), undefined);
+    assert.equal(getActiveGoal()?.id, a.id);
+  } finally {
+    onSessionShutdown(ctx);
+  }
+});
+
 const goalWidgetTheme = {
   fg: (_color: "accent" | "success" | "warning" | "error" | "dim", text: string) => text,
   bold: (text: string) => text,
@@ -102,6 +172,28 @@ test("goal widget renders explicit lifecycle states within widths 1 through 120"
       assert.ok(lines.length <= 2);
     }
   }
+});
+
+test("goal panel renders flat time-ordered goals with the current goal highlighted", () => {
+  const goals: GoalPanelEntry[] = [
+    { id: "g1", objective: "First gate", status: "done", iteration: 0, tokensUsed: 0, timeUsedSeconds: 5, todoSubject: "Task A" },
+    { id: "g2", objective: "Second gate", status: "active", iteration: 1, tokensUsed: 12_000, tokenBudget: 50_000, timeUsedSeconds: 60, todoSubject: "Task B" },
+    { id: "g3", objective: "Final acceptance", status: "paused", pauseReason: "user", iteration: 0, tokensUsed: 0, timeUsedSeconds: 0, todoSubject: "Task C" },
+  ];
+  const lines = renderGoalPanel(goals, "g2", "normal", 120, goalWidgetTheme);
+  const text = lines.join("\n");
+  assert.match(text, /Goal 2\/3/);
+  assert.match(text, /ACTIVE/);
+  assert.match(text, /Second gate/);
+  assert.match(text, /1\/3 First gate/);
+  assert.match(text, /3\/3 Final acceptance/);
+  assert.match(text, /Task A/);
+  assert.match(text, /Task C/);
+
+  const narrow = renderGoalPanel(goals, "g2", "normal", 15, goalWidgetTheme);
+  assert.equal(narrow.length, 3);
+
+  assert.deepEqual(renderGoalPanel([], "g2", "normal", 120, goalWidgetTheme), []);
 });
 
 test("goal widget omits Token metrics when no budget was explicitly set", () => {

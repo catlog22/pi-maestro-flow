@@ -197,6 +197,9 @@ const TodoBatchTaskSchema = Type.Object({
       description: "Existing task IDs, or \"#N\" to depend on the Nth task in this same batch (0-based, e.g. \"#0\")",
     }),
   ),
+  goalId: Type.Optional(
+    Type.String({ description: "Id of the Goal acting as this task's quality gate. Bind only key tasks with verifiable acceptance criteria — do not create a Goal for every task; the task completes only after this Goal verifies" }),
+  ),
 });
 
 export const TodoToolParams = Type.Object({
@@ -249,5 +252,8 @@ export const TodoToolParams = Type.Object({
   filter: Type.Optional(TodoFilterSchema),
   planHandoffKey: Type.Optional(
     Type.String({ description: "Internal approved-Plan handoff binding; injected by the Plan gate" }),
+  ),
+  goalId: Type.Optional(
+    Type.String({ description: "Id of the Goal acting as this task's quality gate (bind sparingly, only for tasks with verifiable acceptance); empty string clears it on update" }),
   ),
 });
