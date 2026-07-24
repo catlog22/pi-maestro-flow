@@ -14,6 +14,8 @@ export interface RunCliResult {
 
 export interface RunCliCapabilities {
   commands: ReadonlySet<string>;
+  /** Commands parsed from `session --help`; empty when the CLI has no session subcommand. */
+  sessionCommands: ReadonlySet<string>;
 }
 
 export type RunCompletionVerdict = "done" | "done-with-concerns" | "needs-retry" | "blocked";
@@ -62,14 +64,20 @@ export class RunCliAdapter {
     // Detect run-level commands (brief, check, prepare, create, ...)
     const runHelp = await this.invoke(["run", "--help"]);
     for (const match of runHelp.stdout.matchAll(/^\s{2}([a-z][a-z-]*)\b/gm)) commands.add(match[1]);
-    // Detect session-level commands (next, done, decide, seal, ...)
+    // Detect session-level commands (next, done, decide, seal, ...). Recorded
+    // separately so next/done can route to whichever subcommand family the
+    // installed CLI exposes them under (see next/done below).
+    const sessionCommands = new Set<string>();
     try {
       const sessionHelp = await this.invoke(["session", "--help"]);
-      for (const match of sessionHelp.stdout.matchAll(/^\s{2}([a-z][a-z-]*)\b/gm)) commands.add(match[1]);
+      for (const match of sessionHelp.stdout.matchAll(/^\s{2}([a-z][a-z-]*)\b/gm)) {
+        sessionCommands.add(match[1]);
+        commands.add(match[1]);
+      }
     } catch {
-      // Older maestro without session command — fall back to run aliases
+      // No session subcommand on this CLI — next/done route via the run family
     }
-    this.detected = { commands };
+    this.detected = { commands, sessionCommands };
     return this.detected;
   }
 
@@ -98,11 +106,17 @@ export class RunCliAdapter {
   }
 
   async next(sessionId: string, pick?: string): Promise<RunCliResult> {
+    // Chain advancement is exposed as `session next` on some CLIs and as the
+    // run-family `run next` on others; route by what --help actually advertises.
+    // --inline-brief inlines the birth brief into the next response (saving a
+    // separate `run brief` round-trip) and is declared only on `session next`,
+    // so emit it solely on that branch — `run next` rejects the unknown option.
+    const useSession = (await this.capabilities()).sessionCommands.has("next");
     await this.requireCommand("next");
     return this.invoke([
-      "session", "next",
+      useSession ? "session" : "run", "next",
       "--session", required(sessionId, "sessionId"),
-      "--inline-brief",
+      ...(useSession ? ["--inline-brief"] : []),
       ...(pick ? ["--pick", pick] : []),
       "--json",
       "--workflow-root", this.workflowRoot,
@@ -110,9 +124,12 @@ export class RunCliAdapter {
   }
 
   async done(runId: string, sessionId: string, options: RunDoneOptions = {}): Promise<RunCliResult> {
-    await this.requireCommand("done");
+    // Run sealing is exposed as `session done` on some CLIs and as the
+    // run-family `run complete` on others; route by what --help advertises.
+    const useSession = (await this.capabilities()).sessionCommands.has("done");
+    await this.requireCommand("done", "complete");
     return this.invoke([
-      "session", "done", required(runId, "runId"),
+      useSession ? "session" : "run", useSession ? "done" : "complete", required(runId, "runId"),
       "--session", required(sessionId, "sessionId"),
       "--verdict", options.verdict ?? "done",
       ...(options.summary ? ["--summary", options.summary] : []),
@@ -145,8 +162,10 @@ export class RunCliAdapter {
     ]);
   }
 
-  private async requireCommand(command: string): Promise<void> {
-    if (!(await this.capabilities()).commands.has(command)) throw new UnsupportedRunCapabilityError(command);
+  private async requireCommand(command: string, ...fallbacks: string[]): Promise<void> {
+    const commands = (await this.capabilities()).commands;
+    if (commands.has(command) || fallbacks.some((fallback) => commands.has(fallback))) return;
+    throw new UnsupportedRunCapabilityError(command);
   }
 
   private async invoke(args: readonly string[]): Promise<RunCliResult> {

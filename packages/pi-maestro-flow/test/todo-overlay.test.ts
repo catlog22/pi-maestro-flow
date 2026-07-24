@@ -1,8 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { TodoOverlay } from "../src/tui/todo-overlay.ts";
 import type { TodoActorRef, TodoTask } from "../src/tools/todo.ts";
+
+const identity = (_color: string, text: string): string => text;
+const mockTheme = {
+  fg: identity,
+  bg: identity,
+  bold: (text: string) => text,
+  italic: (text: string) => text,
+  underline: (text: string) => text,
+  inverse: (text: string) => text,
+  strikethrough: (text: string) => text,
+} as unknown as Theme;
 
 const root: TodoActorRef = { kind: "root", id: "root", label: "root" };
 const api: TodoActorRef = { kind: "teammate", id: "api-1111", label: "api", agentType: "worker" };
@@ -38,6 +50,7 @@ test("Todo overlay renders shared member scopes width-safely and distinguishes c
     ],
     requestRender: () => { renders++; },
     close() {},
+    theme: mockTheme,
   });
 
   for (let width = 1; width <= 120; width++) {
@@ -71,6 +84,7 @@ test("Todo overlay filters by printable paste and keeps narrow recovery controls
     ],
     requestRender() {},
     close() {},
+    theme: mockTheme,
   });
 
   overlay.handleInput("retry");

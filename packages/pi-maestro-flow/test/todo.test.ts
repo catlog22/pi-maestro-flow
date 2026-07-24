@@ -412,6 +412,39 @@ test("todo widget bounds expanded rows and keeps actionable work first", () => {
   assert.match(lines.at(-1) ?? "", /92 more/);
 });
 
+test("todo widget hides the todo section and shows a standalone goal line when there are no tasks", () => {
+  const lines = renderTodoWidget([], false, 120, {
+    objective: "Ship the feature",
+    status: "running",
+    tokensUsed: 12_000,
+    tokenBudget: 50_000,
+  });
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /Ship the feature/);
+  assert.match(lines[0], /12k\/50k/);
+  assert.ok(!lines[0].startsWith(" "), "standalone goal line must be top-level, not indented");
+  assert.doesNotMatch(lines.join("\n"), /Todo/);
+});
+
+test("todo widget renders nothing when there are no tasks, goal, or runs", () => {
+  assert.deepEqual(renderTodoWidget([], false, 120), []);
+  assert.deepEqual(renderTodoWidget([], true, 120), []);
+  assert.deepEqual(renderTodoWidget([], true, 120, null, []), []);
+});
+
+test("todo widget keeps the goal line indented under the todo summary when tasks exist", () => {
+  const lines = renderTodoWidget([{
+    id: "1",
+    subject: "Work",
+    status: "pending",
+    blockedBy: [],
+    skills: [],
+  }], false, 120, { objective: "Goal text", status: "running" });
+  assert.equal(lines.length, 2);
+  assert.match(lines[0], /Todo/);
+  assert.ok(lines[1].startsWith("  "), "goal line stays a sub-line while the todo summary is visible");
+});
+
 test("todo state version is 5", () => {
   assert.equal(getTodoCompactionSnapshot().stateVersion, 5);
 });

@@ -87,7 +87,7 @@ import { loadLatestTeamSwarmProjection } from "../swarm/projection.ts";
 import { RunCliAdapter } from "../session/cli-adapter.ts";
 import { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
-import { deriveWorkflowViewModel, type WorkflowSnapshotLike } from "../session/view-model.ts";
+import { deriveWorkflowViewModel, workflowStatusLabel, type WorkflowSnapshotLike } from "../session/view-model.ts";
 import { createRunEventComponent, type RunEventDetails } from "../session/run-event.ts";
 import {
   executeRunControl,
@@ -95,11 +95,6 @@ import {
   RunControlParams,
   type RunControlInput,
 } from "../tools/run-control.ts";
-import {
-  renderMaestroPanel,
-  shouldShowMaestroPanel,
-  type MaestroPanelMode,
-} from "../tui/maestro-panel.ts";
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
 import { TodoOverlay } from "../tui/todo-overlay.ts";
 import {
@@ -110,6 +105,7 @@ import {
   registerPlanTools,
   isPlanMode,
   toggleMode as planToggleMode,
+  exitMode as planExitMode,
   onSessionStartPlan,
   onSessionShutdownPlan,
   onCompactPlan,
@@ -133,6 +129,11 @@ import {
   type WorkflowRecoveryIdentity,
 } from "../compaction/maestro-compaction.ts";
 import { createMidTurnAutoCompaction } from "../compaction/auto-compaction.ts";
+import {
+  CompactionArbiter,
+  compactionRequestFromInstructions,
+} from "../compaction/compaction-arbiter.ts";
+import { registerCompactionSettingsCommand } from "../tui/compaction-settings.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
 import { registerSkillManager } from "../skills/skill-manager.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
@@ -158,6 +159,10 @@ interface MaestroState {
 }
 
 export const APPROVAL_MODE_CYCLE_KEY = "shift+tab";
+// Keep Plan in the same manual mode carousel as the other permission modes.
+// permissionController.setMode() owns the transition side effects so every
+// entry path (Shift+Tab, settings reload, and explicit mode changes) activates
+// or exits the durable Plan lifecycle consistently.
 export const APPROVAL_MODES: readonly PermissionMode[] = PERMISSION_MODES;
 
 export function nextApprovalMode(
@@ -287,7 +292,6 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   };
   setTodoStateChangeListener(updateTodoWidget);
   setGoalStateChangeListener(emitGoalChanged);
-  setPlanModeChangeListener(updateTodoWidget);
   let childTodoMutationQueue: Promise<void> = Promise.resolve();
   let teammateRegistrationGeneration = 0;
   let teammateRegistrationDisposers: Array<() => void> = [];
@@ -321,7 +325,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     return result;
   };
 
-  const midTurnAutoCompaction = createMidTurnAutoCompaction(pi);
+  const compactionArbiter = new CompactionArbiter();
+  const midTurnAutoCompaction = createMidTurnAutoCompaction(pi, { arbiter: compactionArbiter });
   const state: MaestroState = {
     baseCwd: "",
     activeToolCalls: new Map(),
@@ -354,6 +359,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 
   registerMaestroPackageResources(pi);
   registerSkillManager(pi);
+  registerCompactionSettingsCommand(pi);
 
   // === Main Tool: maestro ===
   const maestroTool: ToolDefinition<typeof MaestroParams> = {
@@ -714,7 +720,7 @@ When NOT to use:
   });
 
   // === Plan Mode ===
-  initPlan(pi);
+  initPlan(pi, { compactionArbiter });
   registerPlanTools(pi);
   registerPlanCommand(pi);
   registerSwarmDisplay(pi);
@@ -732,10 +738,14 @@ When NOT to use:
   });
 
   let approvalMode: PermissionMode = "default";
+  setPlanModeChangeListener((ctx) => {
+    updateTodoWidget();
+    syncApprovalModeStatus(ctx, approvalMode);
+  });
   const permissionController = createPermissionController({
     async setMode(mode, ctx) {
       if (mode === "plan" && !isPlanMode()) await planToggleMode(ctx);
-      if (mode !== "plan" && isPlanMode()) await planToggleMode(ctx);
+      if (mode !== "plan" && isPlanMode()) planExitMode(ctx);
       approvalMode = mode;
       syncApprovalModeStatus(ctx, approvalMode);
     },
@@ -756,6 +766,7 @@ When NOT to use:
       if (action === "reload") {
         const configuredMode = await permissionController.reload(ctx);
         if (configuredMode === "plan" && !isPlanMode()) await planToggleMode(ctx);
+        if (configuredMode && configuredMode !== "plan" && isPlanMode()) planExitMode(ctx);
         if (configuredMode) approvalMode = configuredMode;
         syncApprovalModeStatus(ctx, approvalMode);
         ctx.ui.notify("权限配置已重新加载。", "info");
@@ -767,7 +778,11 @@ When NOT to use:
   pi.registerShortcut(APPROVAL_MODE_CYCLE_KEY, {
     description: "Cycle approval mode",
     async handler(ctx: ExtensionContext) {
-      const current: PermissionMode = isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode;
+      const current: PermissionMode = isPlanMode()
+        ? "plan"
+        : approvalMode === "plan"
+          ? "default"
+          : approvalMode;
       const disabled = permissionController.bypassDisabled()
         ? new Set<PermissionMode>(["bypassPermissions"])
         : new Set<PermissionMode>();
@@ -978,11 +993,12 @@ When NOT to use:
       ctx.ui.notify("No local or teammate Todo tasks to display.", "info");
       return;
     }
-    await ctx.ui.custom<void>((tui, _theme, _keybindings, done) =>
+    await ctx.ui.custom<void>((tui, theme, _keybindings, done) =>
       new TodoOverlay({
         getTasks: () => getVisibleTasks(),
         requestRender: () => tui.requestRender(),
         close: () => done(undefined),
+        theme,
       }), {
       overlay: true,
       overlayOptions: { anchor: "center", width: "94%", maxHeight: "90%" },
@@ -1031,7 +1047,7 @@ When NOT to use:
 
   // === Maestro Panel (above editor) ===
   let widgetCtx: ExtensionContext | undefined;
-  let panelMode: MaestroPanelMode = "collapsed";
+  let panelMode: "collapsed" | "expanded" = "collapsed";
 
   function updateTodoWidget(): void {
     const tasks = getVisibleTasks();
@@ -1043,25 +1059,25 @@ When NOT to use:
     }
     if (!widgetCtx) return;
     const view = deriveWorkflowViewModel(workflowSnapshotForUi());
-    const showMaestroPanel = view !== undefined && shouldShowMaestroPanel(view, panelMode);
-    if (!showMaestroPanel && tasks.length === 0) {
+    const goal = view?.goal;
+    const runs = view?.runs;
+    if (tasks.length === 0 && !goal && !(runs && runs.length > 0)) {
       widgetCtx.ui.setWidget("todo-panel", undefined);
       return;
     }
     widgetCtx.ui.setWidget("todo-panel", () => ({
       render(width: number): string[] {
-        return showMaestroPanel
-          ? renderMaestroPanel(view, panelMode, width)
-          : renderTodoWidget(tasks, panelMode !== "collapsed", width);
+        return renderTodoWidget(tasks, panelMode !== "collapsed", width, goal, runs);
       },
       invalidate() {},
     }), { placement: "aboveEditor" });
   }
 
   pi.registerShortcut(TODO_TOGGLE_KEY, {
-    description: "Open the shared root and teammate Todo center",
-    async handler(ctx: ExtensionContext) {
-      await openTodoOverlay(ctx);
+    description: "Toggle the inline Todo panel (collapsed ↔ expanded); use /maestro-todo for the full center",
+    async handler(_ctx: ExtensionContext) {
+      panelMode = panelMode === "collapsed" ? "expanded" : "collapsed";
+      updateTodoWidget();
     },
   });
 
@@ -1069,6 +1085,7 @@ When NOT to use:
   pi.on("session_start", async (event, ctx) => {
     disposeTeammateSessionRegistrations();
     state.baseCwd = ctx.cwd;
+    compactionArbiter.reset();
     midTurnAutoCompaction.onSessionStart(ctx);
     todoRootContext = ctx;
     widgetCtx = ctx;
@@ -1147,7 +1164,7 @@ When NOT to use:
             return (result.details as { agents?: unknown } | undefined)?.agents ?? null;
           },
           swarm: () => loadLatestTeamSwarmProjection(ctx.cwd) ?? null,
-          approvalMode: () => (isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode),
+          approvalMode: () => (approvalMode === "plan" ? "default" : approvalMode),
           sessionId: () => guiSessionId,
         },
       });
@@ -1158,6 +1175,7 @@ When NOT to use:
   pi.on("session_shutdown", async (_event, ctx) => {
     disposeTeammateSessionRegistrations();
     midTurnAutoCompaction.reset(ctx);
+    compactionArbiter.reset();
     state.activeToolCalls.clear();
     widgetCtx?.ui.setWidget("todo-panel", undefined);
     widgetCtx = undefined;
@@ -1181,14 +1199,25 @@ When NOT to use:
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
+    const observed = compactionArbiter.observeStart(
+      compactionRequestFromInstructions(event.customInstructions),
+      event.signal,
+    );
+    if (!observed.allowed) return { cancel: true };
     goalBeforeCompact(ctx);
-    return runWithCompactionStatus(event, ctx, () =>
-      createMaestroCompaction(event, ctx, {
-        getWorkflowIdentity: () => workflowRecoveryIdentity(),
-      }));
+    try {
+      return await runWithCompactionStatus(event, ctx, () =>
+        createMaestroCompaction(event, ctx, {
+          getWorkflowIdentity: () => workflowRecoveryIdentity(),
+        }));
+    } catch (error) {
+      observed.releaseIfNative();
+      throw error;
+    }
   });
 
   pi.on("session_compact", async (event, ctx) => {
+    compactionArbiter.complete();
     midTurnAutoCompaction.onCompact();
     try {
       await persistMaestroCompactionKnowhow(event, ctx);
@@ -1492,6 +1521,7 @@ const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
 const green = (s: string) => `\x1b[32m${s}\x1b[39m`;
 const yellow = (s: string) => `\x1b[33m${s}\x1b[39m`;
 const red = (s: string) => `\x1b[31m${s}\x1b[39m`;
+const strikethrough = (s: string) => `\x1b[9m${s}\x1b[29m`;
 
 interface TodoTaskLike {
   id: string;
@@ -1501,6 +1531,7 @@ interface TodoTaskLike {
   skills?: Array<{ name: string; role?: string }>;
   createdBy?: { id: string; label: string };
   assignee?: { id: string; label: string };
+  updatedAt?: number;
 }
 
 const WICON: Record<string, string> = {
@@ -1517,18 +1548,46 @@ const WCOLOR: Record<string, (s: string) => string> = {
   pending: dim,
 };
 
+interface WidgetGoalLike {
+  objective: string;
+  status: string;
+  tokensUsed?: number;
+  tokenBudget?: number;
+}
+
+interface WidgetRunLike {
+  id: string;
+  sequence?: number;
+  command: string;
+  status: string;
+  attempt?: number;
+  gate?: string;
+  verdict?: string;
+  artifactsCount?: number;
+}
+
 export function renderTodoWidget(
   tasks: TodoTaskLike[],
   expanded = false,
   width = 120,
+  goal?: WidgetGoalLike | null,
+  runs?: readonly WidgetRunLike[] | null,
 ): string[] {
   const safeWidth = Math.max(1, width);
-  const lines = [renderTodoSummary(tasks, expanded, safeWidth)];
+  const hasTasks = tasks.length > 0;
+  const lines: string[] = [];
+  if (hasTasks) lines.push(renderTodoSummary(tasks, expanded, safeWidth));
+  if (goal) lines.push(truncateToWidth(widgetGoalLine(goal, lines.length === 0), safeWidth, "…"));
+  if (runs && runs.length > 0) lines.push(truncateToWidth(widgetRunsCountLine(runs, lines.length === 0), safeWidth, "…"));
   if (!expanded) return lines;
+  if (runs && runs.length > 0) {
+    for (const line of widgetRunsFocusLines(runs, safeWidth)) lines.push(line);
+  }
+  if (!hasTasks) return lines;
 
-  const priority: Record<string, number> = { in_progress: 0, blocked: 1, pending: 2, completed: 3 };
+  const now = Date.now();
   const ordered = [...tasks].sort((left, right) =>
-    (priority[left.status] ?? 2) - (priority[right.status] ?? 2)
+    todoDisplayRank(left, now) - todoDisplayRank(right, now)
   );
   const visible = ordered.slice(0, 8);
   for (const task of visible) {
@@ -1540,12 +1599,28 @@ export function renderTodoWidget(
   return lines;
 }
 
-function renderTodoSummary(tasks: TodoTaskLike[], _expanded: boolean, width: number): string {
+const RECENT_COMPLETED_WINDOW_MS = 30_000;
+
+/** Recently completed first (a la Claude Code), then running, blocked, pending, older completed. */
+function todoDisplayRank(task: TodoTaskLike, now: number): number {
+  if (task.status === "completed") {
+    const recent = task.updatedAt !== undefined && now - task.updatedAt < RECENT_COMPLETED_WINDOW_MS;
+    return recent ? 0 : 4;
+  }
+  if (task.status === "in_progress") return 1;
+  if (task.status === "blocked") return 2;
+  return 3;
+}
+
+function renderTodoSummary(tasks: TodoTaskLike[], expanded: boolean, width: number): string {
   const done = tasks.filter((t) => t.status === "completed").length;
+  const running = tasks.filter((t) => t.status === "in_progress").length;
+  const blocked = tasks.filter((t) => t.status === "blocked").length;
   const memberCount = new Set(tasks.flatMap((task) => [task.createdBy?.id, task.assignee?.id]).filter(Boolean)).size;
   const memberMeta = memberCount > 0 ? ` · ${memberCount} member${memberCount === 1 ? "" : "s"}` : "";
-  const fullMeta = `${done}/${tasks.length} completed${memberMeta}  (${TODO_TOGGLE_LABEL} center)`;
-  const compactMeta = `${done}/${tasks.length}  (${TODO_TOGGLE_LABEL})`;
+  const toggleHint = expanded ? "collapse" : "expand";
+  const fullMeta = `${bold(String(tasks.length))} tasks · ${bold(String(done))} done · ${bold(String(running))} running${blocked ? ` · ${bold(String(blocked))} blocked` : ""}${memberMeta}  (${TODO_TOGGLE_LABEL} ${toggleHint})`;
+  const compactMeta = `${bold(String(done))}/${bold(String(tasks.length))} · ${bold(String(running))} running  (${TODO_TOGGLE_LABEL} ${toggleHint})`;
   const minimalMeta = `${done}/${tasks.length}`;
   const next = findNextTodoTask(tasks);
 
@@ -1570,6 +1645,56 @@ function renderTodoSummary(tasks: TodoTaskLike[], _expanded: boolean, width: num
   return truncateToWidth(`${bold("Todo")}  ${dim(meta)}  ${nextText}`, width, "…");
 }
 
+function workflowStatusColor(status: string): (s: string) => string {
+  if (status === "running" || status === "retrying") return yellow;
+  if (status === "failed") return red;
+  if (status === "sealed" || status === "completed" || status === "ready") return green;
+  return dim;
+}
+
+function widgetGoalLine(goal: WidgetGoalLike, topLevel: boolean): string {
+  const budget = goal.tokensUsed != null && goal.tokenBudget != null
+    ? dim(`  ${formatWidgetTokens(goal.tokensUsed)}/${formatWidgetTokens(goal.tokenBudget)}`)
+    : "";
+  const prefix = topLevel ? "" : "  ";
+  return `${prefix}${workflowStatusColor(goal.status)(workflowStatusLabel(goal.status as never))} ${goal.objective}${budget}`;
+}
+
+function widgetRunsCountLine(runs: readonly WidgetRunLike[], topLevel: boolean): string {
+  const total = runs.length;
+  const done = runs.filter((run) => run.status === "sealed" || run.status === "completed").length;
+  const running = runs.filter((run) => run.status === "running" || run.status === "retrying").length;
+  const failed = runs.filter((run) => run.status === "failed").length;
+  const failedPart = failed > 0 ? ` · ${red(bold(String(failed)))} failed` : "";
+  const prefix = topLevel ? "" : "  ";
+  return `${prefix}${dim("Runs")}  ${bold(String(total))} · ${bold(String(done))} done · ${bold(String(running))} running${failedPart}`;
+}
+
+function widgetRunsFocusLines(runs: readonly WidgetRunLike[], width: number): string[] {
+  const focus = [...runs]
+    .sort((left, right) => widgetRunRank(left.status) - widgetRunRank(right.status))
+    .filter((run) => widgetRunRank(run.status) < 5)
+    .slice(0, 3);
+  return focus.map((run) => truncateToWidth(widgetRunLine(run), width, "…"));
+}
+
+function widgetRunLine(run: WidgetRunLike): string {
+  const seq = run.sequence != null ? String(run.sequence).padStart(3, "0") : run.id.slice(0, 6);
+  const details = [run.gate, run.verdict, run.artifactsCount ? `${run.artifactsCount} art` : ""]
+    .filter(Boolean)
+    .join(" · ");
+  const tail = details ? dim(` · ${details}`) : "";
+  return `    ${workflowStatusColor(run.status)(workflowStatusLabel(run.status as never, run.attempt))} ${dim(`${seq}/`)}${run.command}${tail}`;
+}
+
+function widgetRunRank(status: string): number {
+  return ({ failed: 0, blocked: 1, waiting_user: 2, retrying: 3, running: 4 } as Record<string, number>)[status] ?? 5;
+}
+
+function formatWidgetTokens(value: number): string {
+  return value < 1_000 ? String(value) : `${Math.round(value / 1_000)}k`;
+}
+
 function findNextTodoTask(tasks: TodoTaskLike[]): TodoTaskLike | undefined {
   return tasks.find((t) => t.status === "in_progress")
     ?? tasks.find((t) => t.status === "pending" && t.blockedBy.length === 0)
@@ -1579,7 +1704,11 @@ function findNextTodoTask(tasks: TodoTaskLike[]): TodoTaskLike | undefined {
 function widgetTaskLine(task: TodoTaskLike, allTasks: TodoTaskLike[]): string {
   const colorFn = WCOLOR[task.status] ?? dim;
   const icon = colorFn(WICON[task.status] ?? "?");
-  const subject = task.status === "completed" ? dim(task.subject) : task.subject;
+  const subject = task.status === "completed"
+    ? strikethrough(colorFn(task.subject))
+    : task.status === "in_progress"
+      ? bold(colorFn(task.subject))
+      : colorFn(task.subject);
   const actor = task.assignee
     ? task.createdBy && task.createdBy.id !== task.assignee.id
       ? `@${widgetActorLabel(task.createdBy, allTasks)}→@${widgetActorLabel(task.assignee, allTasks)}`

@@ -1,10 +1,12 @@
 import { type Component, type Focusable, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import { formatTodoActorSelector, type TodoActorRef, type TodoTask } from "../tools/todo.ts";
 
 export interface TodoOverlayParams {
   getTasks: () => readonly TodoTask[];
   requestRender: () => void;
   close: () => void;
+  theme: Theme;
 }
 
 type TodoOverlayMode = "list" | "detail";
@@ -82,26 +84,31 @@ export class TodoOverlay implements Component, Focusable {
   }
 
   private renderCompact(width: number): string {
+    const theme = this.params.theme;
     const task = this.selectedTask() ?? this.filteredTasks()[0];
-    return truncateToWidth(task
-      ? `Esc · ${statusLabel(task.status)} · ${actorTag(task, this.tasks())} · ${task.subject}`
-      : "Esc · Todo · no matching tasks", width, "…");
+    const text = task
+      ? `Esc · ${this.statusLabel(task.status)} · ${actorTag(task, this.tasks())} · ${task.subject}`
+      : "Esc · Todo · no matching tasks";
+    return theme.bg("customMessageBg", pad(truncateToWidth(text, width, "…"), width));
   }
 
   private renderList(width: number): string[] {
     const inner = width - 2;
     const tasks = this.filteredTasks();
-    const rows = [this.header(inner), rule(inner)];
-    if (tasks.length === 0) rows.push(fitLine("○ pending · no matching Todo tasks", inner));
-    else {
+    const rows: string[] = [this.header(inner), this.separator(inner)];
+    const selectedRows = new Set<number>();
+    if (tasks.length === 0) {
+      rows.push(fitLine(`${this.statusLabel("pending")} · no matching Todo tasks`, inner));
+    } else {
       const start = visibleStart(this.selected, tasks.length, 8);
       for (let index = start; index < Math.min(tasks.length, start + 8); index++) {
+        if (index === this.selected) selectedRows.add(rows.length);
         rows.push(this.taskRow(tasks[index], index === this.selected, inner));
       }
     }
     rows.push(this.filterLine(inner, tasks.length));
-    rows.push(fitSegments(inner, ["Esc close", "Enter detail", "←→ scope", "↑↓ task", "type filter"]));
-    return frame(rows, width);
+    rows.push(this.helpLine(inner));
+    return this.card(rows, width, selectedRows);
   }
 
   private renderWide(width: number): string[] {
@@ -112,34 +119,36 @@ export class TodoOverlay implements Component, Focusable {
     const selected = this.selectedTask();
     const start = visibleStart(this.selected, tasks.length, 8);
     const left = tasks.length === 0
-      ? ["○ pending · no matching Todo tasks"]
+      ? [fitLine(`${this.statusLabel("pending")} · no matching Todo tasks`, leftWidth)]
       : tasks.slice(start, start + 8).map((task, offset) =>
           this.taskRow(task, start + offset === this.selected, leftWidth)
         );
     const right = this.detailLines(selected, rightWidth);
     const rowCount = Math.max(left.length, right.length, 1);
-    const rows = [this.header(inner), rule(inner)];
+    const rows: string[] = [this.header(inner), this.separator(inner)];
+    const selectedRows = new Set<number>();
     for (let index = 0; index < rowCount; index++) {
+      if (tasks.length > 0 && start + index === this.selected) selectedRows.add(rows.length);
       rows.push(`${pad(left[index] ?? "", leftWidth)} │ ${pad(right[index] ?? "", rightWidth)}`);
     }
     rows.push(this.filterLine(inner, tasks.length));
-    rows.push(fitSegments(inner, ["Esc close", "Enter detail", "←→ scope", "↑↓ task", "type filter"]));
-    return frame(rows, width);
+    rows.push(this.helpLine(inner));
+    return this.card(rows, width, selectedRows);
   }
 
   private renderDetail(width: number): string[] {
     const inner = width - 2;
     const task = this.selectedTask();
-    const rows = [fitLine(`Todo · ${this.currentScope().label} · task detail`, inner), rule(inner)];
+    const rows: string[] = [fitLine(`Todo · ${this.currentScope().label} · task detail`, inner), this.separator(inner)];
     rows.push(...this.detailLines(task, inner));
-    rows.push(fitSegments(inner, ["Esc back", "←→ scope", "↑↓ task"]));
-    return frame(rows, width);
+    rows.push(this.helpLine(inner, ["Esc back", "←→ scope", "↑↓ task"]));
+    return this.card(rows, width);
   }
 
   private detailLines(task: TodoTask | undefined, width: number): string[] {
-    if (!task) return [fitLine("○ pending · no task selected", width)];
+    if (!task) return [fitLine(`${this.statusLabel("pending")} · no task selected`, width)];
     const lines = [
-      fitLine(`#${task.id} · ${statusLabel(task.status)}`, width),
+      fitLine(`#${task.id} · ${this.statusLabel(task.status)}`, width),
       fitLine(task.subject, width),
       fitLine(`Created @${actorLabel(task.createdBy, this.tasks())}`, width),
       fitLine(`Assigned @${actorLabel(task.assignee, this.tasks())}`, width),
@@ -151,12 +160,13 @@ export class TodoOverlay implements Component, Focusable {
   }
 
   private header(width: number): string {
+    const theme = this.params.theme;
     const tasks = this.tasks();
     const completed = tasks.filter((task) => task.status === "completed").length;
     const running = tasks.filter((task) => task.status === "in_progress").length;
     const scopes = this.scopes();
-    const scopeText = scopes.map((scope, index) => index === this.scopeIndex ? `[${scope.label}]` : scope.label).join(" ");
-    return fitLine(`Todo ${completed}/${tasks.length} done · ${running} active · Scope: ${scopeText}`, width);
+    const scopeText = scopes.map((scope, index) => index === this.scopeIndex ? theme.bold(`[${scope.label}]`) : scope.label).join(" ");
+    return fitLine(`Todo ${theme.fg("success", String(completed))}/${tasks.length} done · ${theme.fg("warning", String(running))} active · Scope: ${scopeText}`, width);
   }
 
   private filterLine(width: number, count: number): string {
@@ -164,8 +174,40 @@ export class TodoOverlay implements Component, Focusable {
     return fitLine(`Filter: ${query} · ${count} task${count === 1 ? "" : "s"}`, width);
   }
 
+  private helpLine(width: number, segments?: string[]): string {
+    return fitSegments(width, segments ?? ["Esc close", "Enter detail", "←→ scope", "↑↓ task", "type filter"]);
+  }
+
+  private statusLabel(status: TodoTask["status"]): string {
+    const theme = this.params.theme;
+    if (status === "in_progress") return theme.fg("warning", "▶ running");
+    if (status === "blocked") return theme.fg("error", "! blocked");
+    if (status === "completed") return theme.fg("success", "✓ completed");
+    if (status === "deleted") return theme.fg("dim", "⊘ deleted");
+    return theme.fg("dim", "○ pending");
+  }
+
+  private separator(width: number): string {
+    return this.params.theme.fg("borderMuted", "─".repeat(Math.max(1, width)));
+  }
+
+  /** Rounded card filled with a subtle panel background; the selected row is highlighted. */
+  private card(rows: string[], width: number, selectedRows: ReadonlySet<number> = new Set()): string[] {
+    const theme = this.params.theme;
+    const edge = "─".repeat(Math.max(0, width - 2));
+    const border = (glyph: string) => theme.bg("customMessageBg", theme.fg("borderMuted", glyph));
+    const out: string[] = [border(`╭${edge}╮`)];
+    rows.forEach((row, index) => {
+      const bg = selectedRows.has(index) ? "selectedBg" : "customMessageBg";
+      out.push(theme.bg(bg, pad(` ${row}`, width)));
+    });
+    out.push(border(`╰${edge}╯`));
+    return out;
+  }
+
   private taskRow(task: TodoTask, selected: boolean, width: number): string {
-    return fitLine(`${selected ? "›" : " "} ${statusLabel(task.status)} · ${actorTag(task, this.tasks())} · ${task.subject}`, width);
+    const subject = task.status === "in_progress" ? this.params.theme.bold(task.subject) : task.subject;
+    return fitLine(`${selected ? "›" : " "} ${this.statusLabel(task.status)} · ${actorTag(task, this.tasks())} · ${subject}`, width);
   }
 
   private moveScope(delta: number): void {
@@ -245,14 +287,6 @@ function actorLabel(actor: TodoActorRef, tasks: readonly TodoTask[]): string {
   return formatTodoActorSelector(actor, tasks.flatMap((task) => [task.createdBy, task.assignee]));
 }
 
-function statusLabel(status: TodoTask["status"]): string {
-  if (status === "in_progress") return "▶ running";
-  if (status === "blocked") return "! blocked";
-  if (status === "completed") return "✓ completed";
-  if (status === "deleted") return "⊘ deleted";
-  return "○ pending";
-}
-
 function isPrintableInput(data: string): boolean {
   return data.length > 0 && !data.includes("\x1b") && [...data].every((char) => char >= " " && char !== "\x7f");
 }
@@ -288,16 +322,4 @@ function pad(value: string, width: number): string {
   return `${fitted}${" ".repeat(Math.max(0, width - visibleWidth(fitted)))}`;
 }
 
-function rule(width: number): string {
-  return "─".repeat(Math.max(1, width));
-}
 
-function frame(rows: readonly string[], width: number): string[] {
-  if (width < 3) return rows.map((row) => fitLine(row, width));
-  const inner = width - 2;
-  return [
-    `╭${"─".repeat(inner)}╮`,
-    ...rows.map((row) => `│${pad(row, inner)}│`),
-    `╰${"─".repeat(inner)}╯`,
-  ];
-}

@@ -6,12 +6,6 @@ import {
   deriveWorkflowViewModel,
   type WorkflowSnapshotLike,
 } from "../src/session/view-model.ts";
-import {
-  nextMaestroPanelMode,
-  renderMaestroPanel,
-  shouldShowMaestroPanel,
-  type MaestroPanelMode,
-} from "../src/tui/maestro-panel.ts";
 import { SessionOverlay } from "../src/tui/session-overlay.ts";
 
 const snapshot: WorkflowSnapshotLike = {
@@ -122,7 +116,6 @@ test("WorkflowViewModel treats an explicit null Goal as session-scoped absence",
   const view = deriveWorkflowViewModel(withoutGoal);
   assert.ok(view);
   assert.equal(view.goal, undefined);
-  assert.doesNotMatch(renderMaestroPanel(view, "panorama", 120).join("\n"), /─ Goal/);
 });
 
 test("WorkflowViewModel hides terminal-success gates and displays unresolved blocking gates", () => {
@@ -136,57 +129,10 @@ test("WorkflowViewModel hides terminal-success gates and displays unresolved blo
   const terminalView = deriveWorkflowViewModel(terminal);
   assert.ok(terminalView);
   assert.equal(terminalView.activeRun?.gate, undefined);
-  assert.doesNotMatch(renderMaestroPanel(terminalView, "panorama", 120).join("\n"), /GATE-(?:PASSED|WAIVED|SKIPPED)/);
 
   active.gates.push({ id: "GATE-BLOCKED", blocking: true, status: "blocked" });
   const blockedView = deriveWorkflowViewModel(terminal);
   assert.equal(blockedView?.activeRun?.gate, "GATE-BLOCKED");
-});
-
-test("Maestro Panel cycles collapsed, todo and panorama with a 1..120 width matrix", () => {
-  const view = deriveWorkflowViewModel(snapshot);
-  assert.ok(view);
-  let mode: MaestroPanelMode = "collapsed";
-  mode = nextMaestroPanelMode(mode);
-  assert.equal(mode, "todo");
-  mode = nextMaestroPanelMode(mode);
-  assert.equal(mode, "panorama");
-  assert.equal(nextMaestroPanelMode(mode), "collapsed");
-
-  for (const current of ["collapsed", "todo", "panorama"] as const) {
-    for (let width = 1; width <= 120; width++) {
-      for (const line of renderMaestroPanel(view, current, width)) {
-        assert.ok(visibleWidth(line) <= width, `${current} width ${width}: ${line}`);
-      }
-    }
-  }
-
-  assert.deepEqual(renderMaestroPanel(view, "collapsed", 80), []);
-  const panorama = renderMaestroPanel(view, "panorama", 120).join("\n");
-  assert.match(panorama, /! blocked/);
-  assert.match(panorama, /\? waiting user/);
-  assert.match(panorama, /↻ retry 2/);
-  assert.match(panorama, /Update README/);
-  assert.doesNotMatch(panorama, /Mirror active run/);
-});
-
-test("collapsed Maestro Panel stays hidden because the statusline owns Workflow and recovery status", () => {
-  const view = deriveWorkflowViewModel(snapshot);
-  assert.ok(view);
-  const passive = {
-    ...view,
-    status: "running" as const,
-    recoveryAction: undefined,
-    nextAction: undefined,
-  };
-
-  assert.equal(shouldShowMaestroPanel(passive, "collapsed"), false);
-  assert.deepEqual(renderMaestroPanel(passive, "collapsed", 80), []);
-  assert.equal(shouldShowMaestroPanel(passive, "todo"), true);
-  assert.ok(renderMaestroPanel(passive, "todo", 80).length > 0);
-  assert.equal(shouldShowMaestroPanel(view, "collapsed"), false);
-  assert.deepEqual(renderMaestroPanel(view, "collapsed", 80), []);
-  assert.match(renderMaestroPanel(view, "todo", 120).join("\n"), /» Next: Resume from gate/);
 });
 
 test("run-event renderer keeps the recovery action first and fits every width", () => {

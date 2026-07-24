@@ -426,6 +426,32 @@ test("CLI adapter maps canonical check, next, done, and edit commands", async ()
   ]);
 });
 
+test("CLI adapter uses session next/done when the session subcommand is detected", async () => {
+  const calls: string[][] = [];
+  const adapter = new RunCliAdapter("D:/workspace", async (args) => {
+    calls.push([...args]);
+    if (args.join(" ") === "run --help") {
+      return result(args, "Commands:\n  prepare <step>\n  brief <run-id>\n  check <run-id>\n  edit [commands...]\n");
+    }
+    if (args.join(" ") === "session --help") {
+      return result(args, "Commands:\n  next\n  done <run-id>\n  decide\n  seal\n");
+    }
+    return result(args, "ok");
+  });
+
+  const capabilities = await adapter.capabilities();
+  assert.deepEqual([...capabilities.sessionCommands], ["next", "done", "decide", "seal"]);
+  await adapter.next("session-1", "step-2");
+  assert.deepEqual(calls.at(-1), [
+    "session", "next", "--session", "session-1", "--inline-brief", "--pick", "step-2", "--json", "--workflow-root", "D:/workspace",
+  ]);
+  assert.equal(calls.at(-1)!.includes("--inline-brief"), true, "session next must carry --inline-brief to inline the birth brief");
+  await adapter.done("run-1", "session-1", { verdict: "done" });
+  assert.deepEqual(calls.at(-1), [
+    "session", "done", "run-1", "--session", "session-1", "--verdict", "done", "--json", "--workflow-root", "D:/workspace",
+  ]);
+});
+
 test("run-control forwards canonical lifecycle inputs without legacy action aliases", async () => {
   const calls: Array<[string, ...unknown[]]> = [];
   const command = result([], "ok");
