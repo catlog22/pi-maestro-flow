@@ -249,8 +249,17 @@ See the **[Maestro Flow](https://github.com/catlog22/maestro-flow)** project for
 
 ## Credits
 
+**Frameworks & Runtime**
+
 - **[Maestro-Flow](https://github.com/catlog22/maestro-flow)** — intent-driven workflow orchestration by [@catlog22](https://github.com/catlog22)
-- **[Pi Coding Agent](https://github.com/earendil-works/pi)** — terminal coding harness by [@earendil-works](https://github.com/earendil-works)
+- **[Pi Coding Agent](https://github.com/earendil-works/pi)** — terminal coding harness (host runtime) by [@earendil-works](https://github.com/earendil-works)
+
+**Upstream Libraries Powering Built-in Tools**
+
+- **[@modelcontextprotocol/sdk](https://modelcontextprotocol.io)** — Model Context Protocol implementation for TypeScript, powering the `mcp` tool
+- **[Puppeteer](https://github.com/puppeteer/puppeteer)** — control Chromium over the DevTools Protocol, powering the `browser` tool
+- **[@ff-labs/fff-node](https://github.com/dmtrKovalenko/fff)** — high-performance fuzzy file finder, powering the `ffgrep` / `fffind` tools
+- **[@konbakuyomu/smart-search](https://www.npmjs.com/package/@konbakuyomu/smart-search)** — multi-source web search & deep research powering the `smart_search` tool ([GitHub](https://github.com/konbakuyomu/smartsearch))
 
 ## License
 

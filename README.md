@@ -249,8 +249,17 @@ pi
 
 ## 致谢
 
+**框架与运行时**
+
 - **[Maestro-Flow](https://github.com/catlog22/maestro-flow)** — 意图驱动工作流编排框架 by [@catlog22](https://github.com/catlog22)
-- **[Pi Coding Agent](https://github.com/earendil-works/pi)** — 终端编码智能体 by [@earendil-works](https://github.com/earendil-works)
+- **[Pi Coding Agent](https://github.com/earendil-works/pi)** — 终端编码智能体（宿主运行时） by [@earendil-works](https://github.com/earendil-works)
+
+**驱动内置工具的上游库**
+
+- **[@modelcontextprotocol/sdk](https://modelcontextprotocol.io)** — Model Context Protocol 的 TypeScript 实现，驱动 `mcp` 工具
+- **[Puppeteer](https://github.com/puppeteer/puppeteer)** — 通过 DevTools 协议控制 Chromium，驱动 `browser` 工具
+- **[@ff-labs/fff-node](https://github.com/dmtrKovalenko/fff)** — 高性能模糊文件查找，驱动 `ffgrep` / `fffind` 工具
+- **[@konbakuyomu/smart-search](https://www.npmjs.com/package/@konbakuyomu/smart-search)** — 多源网络搜索与深度研究，驱动 `smart_search` 工具（[GitHub](https://github.com/konbakuyomu/smartsearch)）
 
 ## 许可证
 
