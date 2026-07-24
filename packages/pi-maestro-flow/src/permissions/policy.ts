@@ -32,6 +32,8 @@ const ALWAYS_ALLOWED_TOOLS = new Set([
   "Glob",
   "Ls",
   "Find",
+  "ffgrep",
+  "fffind",
   "ask-user-question",
   "teammate",
   "teammate-send",

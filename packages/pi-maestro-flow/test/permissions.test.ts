@@ -62,6 +62,8 @@ test("permission modes enforce real default behavior", () => {
   assert.equal(evaluatePermission(read, "dontAsk", empty).behavior, "allow");
   assert.equal(evaluatePermission({ toolName: "ls", input: { path: "." } }, "dontAsk", empty).behavior, "allow");
   assert.equal(evaluatePermission({ toolName: "find", input: { pattern: "*.ts" } }, "dontAsk", empty).behavior, "allow");
+  assert.equal(evaluatePermission({ toolName: "ffgrep", input: { pattern: "Todo" } }, "dontAsk", empty).behavior, "allow");
+  assert.equal(evaluatePermission({ toolName: "fffind", input: { pattern: "todo" } }, "dontAsk", empty).behavior, "allow");
   assert.equal(evaluatePermission({ toolName: "teammate", input: { agent: "explorer" } }, "dontAsk", empty).behavior, "allow");
   assert.equal(
     suggestedAllowRule({ toolName: "deploy", input: { action: "release", environment: "prod" } }),

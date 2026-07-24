@@ -229,7 +229,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
     },
   } as any, { modelsPath });
 
-  const inputAnswers = ["https://proxy.example.com/v1/", "gpt-5.4", "openai-secret"];
+  const inputAnswers = ["https://proxy.example.com/v1/", "gpt-5.4", "400000", "openai-secret"];
   const selectAnswers = [
     "启用：minimal / low / medium / high / xhigh / max",
     "max",
@@ -267,6 +267,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(saved.providers["maestro-openai"].baseUrl, "https://proxy.example.com/v1");
   assert.equal(saved.providers["maestro-openai"].models[0].id, "gpt-5.4");
   assert.equal(saved.providers["maestro-openai"].models[0].reasoning, true);
+  assert.equal(saved.providers["maestro-openai"].models[0].contextWindow, 400_000);
   assert.equal(saved.providers["maestro-openai"].models[0].thinkingLevelMap.xhigh, "max");
   assert.equal("max" in saved.providers["maestro-openai"].models[0].thinkingLevelMap, false);
   assert.equal(saved.providers["maestro-openai"].apiKey, "openai-secret");
@@ -310,6 +311,7 @@ test("/api-manager qwen creates an OpenAI-compatible provider and default model"
   const inputAnswers = [
     "https://dashscope.aliyuncs.com/compatible-mode/v1/",
     "qwen3.8-max-preview",
+    "1000000",
     "qwen-secret",
   ];
   const selectAnswers = [
@@ -348,6 +350,7 @@ test("/api-manager qwen creates an OpenAI-compatible provider and default model"
     thinkingFormat: "qwen",
   });
   assert.equal(saved.providers["maestro-qwen"].models[0].id, "qwen3.8-max-preview");
+  assert.equal(saved.providers["maestro-qwen"].models[0].contextWindow, 1_000_000);
   assert.equal(saved.providers["maestro-qwen"].models[0].thinkingLevelMap.xhigh, "max");
   assert.equal("max" in saved.providers["maestro-qwen"].models[0].thinkingLevelMap, false);
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
@@ -360,7 +363,7 @@ test("/api-manager qwen creates an OpenAI-compatible provider and default model"
   assert.equal(registrations.at(-1)?.config.models[0].id, "qwen3.8-max-preview");
 });
 
-test("/api-manager rejects empty URL and API key instead of reusing current values", async (t) => {
+test("/api-manager rejects invalid URL, context window, and API key", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-explicit-input-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
@@ -427,8 +430,18 @@ test("/api-manager rejects empty URL and API key instead of reusing current valu
   assert.equal(emptyUrl.confirms, 0);
   assert.match(emptyUrl.notifications.at(-1)?.message ?? "", /Base URL cannot be empty/);
 
+  const invalidContext = makeContext(
+    ["https://new.example.com/v1", "gpt-new", "0"],
+    ["启用：minimal / low / medium / high / xhigh / max", "medium"],
+  );
+  await command.handler("set openai", invalidContext.ctx);
+  saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.equal(saved.providers["maestro-openai"].models[0].id, "gpt-old");
+  assert.equal(invalidContext.confirms, 0);
+  assert.match(invalidContext.notifications.at(-1)?.message ?? "", /Context window must be a positive integer/);
+
   const emptyKey = makeContext(
-    ["https://new.example.com/v1", "gpt-new", ""],
+    ["https://new.example.com/v1", "gpt-new", "400000", ""],
     ["启用：minimal / low / medium / high / xhigh / max", "medium"],
   );
   await command.handler("set openai", emptyKey.ctx);

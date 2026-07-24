@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import type { WorkflowSnapshotLike } from "../src/session/view-model.ts";
-import { installStatusline } from "../src/statusline/statusline.ts";
+import { deriveWorkflowViewModel, type WorkflowSnapshotLike } from "../src/session/view-model.ts";
+import { installStatusline, renderWorkflowStatusline } from "../src/statusline/statusline.ts";
 import { ansiFg, ANSI_BOLD, COLORS } from "../src/statusline/constants.ts";
 
 type EventHandler = (event: unknown, ctx: ExtensionContext) => unknown;
@@ -327,6 +327,68 @@ test("statusline accumulates message usage incrementally and rebuilds only at br
   }
 });
 
+test("statusline surfaces prompt cache hit rate from usage cacheRead/cacheWrite", () => {
+  const harness = createHarness({
+    branchEntries: [{
+      type: "message",
+      message: { role: "assistant", usage: { input: 100, output: 50, cacheRead: 300, cacheWrite: 0 } },
+    }],
+  });
+  try {
+    // hitRate = 300 / (100 + 300 + 0) = 75%
+    assert.match(stripAnsi(harness.render(120)[0]), /↑100 ↓50.*⚡75%/);
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("statusline omits cache segment when no cache activity is present", () => {
+  const harness = createHarness({
+    branchEntries: [{
+      type: "message",
+      message: { role: "assistant", usage: { input: 100, output: 50 } },
+    }],
+  });
+  try {
+    assert.doesNotMatch(stripAnsi(harness.render(120)[0]), /⚡/);
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("statusline renders cache hit rate even when only cached input is present", () => {
+  const harness = createHarness({
+    branchEntries: [{
+      type: "message",
+      message: { role: "assistant", usage: { input: 0, output: 0, cacheRead: 500, cacheWrite: 0 } },
+    }],
+  });
+  try {
+    // hitRate = 500 / (0 + 500) = 100%; token line renders because cacheRead > 0
+    assert.match(stripAnsi(harness.render(120)[0]), /⚡100%/);
+  } finally {
+    harness.dispose();
+  }
+});
+
+test("statusline accumulates cache usage incrementally across message_end events", () => {
+  const harness = createHarness();
+  try {
+    harness.emit("message_end", {
+      type: "message_end",
+      message: { role: "assistant", usage: { input: 10, output: 5, cacheRead: 30, cacheWrite: 0 } },
+    });
+    harness.emit("message_end", {
+      type: "message_end",
+      message: { role: "assistant", usage: { input: 10, output: 5, cacheRead: 50, cacheWrite: 0 } },
+    });
+    // totals: input=20, cacheRead=80 -> hitRate = 80 / (20 + 80) = 80%
+    assert.match(stripAnsi(harness.render(120)[0]), /⚡80%/);
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("statusline links approval mode with ACT, PLAN and READY using width-aware labels", () => {
   const harness = createHarness();
   try {
@@ -568,7 +630,9 @@ test("statusline renders canonical Session/Run separately from active tool calls
     assert.match(full[1], /! blocked/);
     assert.match(full[1], /003\/plan/);
     assert.doesNotMatch(full.join("\n"), /milestone|phase/i);
-    assert.match(stripAnsi(harness.render(40)[1]), /^» Resume from gate/);
+    const narrow = stripAnsi(harness.render(40)[1]);
+    assert.match(narrow, /^⚑ auth-m1/, "session label leads the narrow workflow line");
+    assert.match(narrow, /» Resume from gate/, "recovery action stays visible after the label");
 
     for (let width = 1; width <= 120; width++) {
       for (const line of harness.render(width)) {
@@ -578,4 +642,50 @@ test("statusline renders canonical Session/Run separately from active tool calls
   } finally {
     harness.dispose();
   }
+});
+
+test("workflow statusline leads with the session label at every width so concurrent sessions stay identifiable", () => {
+  const snapshot: WorkflowSnapshotLike = {
+    source: "canonical",
+    projectRoot: "D:\\pi-maestro-flow",
+    loadedAt: "2026-07-24T00:00:00.000Z",
+    revision: { sessionRevision: 1, fingerprint: "concurrent" },
+    diagnostics: [],
+    session: {
+      sessionId: "20260724-companion-goal-final-fixes",
+      intent: "Fix goal",
+      status: "running",
+      revision: 1,
+      activeRunId: "003",
+      definitionOfDone: "done",
+      gates: [],
+      chain: [
+        { step: "analyze", command: "analyze", status: "completed", runId: "001" },
+        { step: "execute", command: "execute", status: "running", runId: "003" },
+        { step: "verify", command: "verify", status: "pending", runId: null },
+      ],
+      runs: [
+        { runId: "001", parentRunId: null, command: "analyze", status: "sealed", goal: null, args: [], gates: [], primaryArtifactId: null, handoff: null, startedAt: "", endedAt: "" },
+        { runId: "003", parentRunId: null, command: "execute", status: "running", goal: null, args: [], gates: [], primaryArtifactId: null, handoff: null, startedAt: "", endedAt: null },
+      ],
+      artifacts: [],
+      aliases: {},
+    },
+    recoveryAction: "Resume from gate",
+    goal: { objective: "Fix goal", status: "running", tokensUsed: 45_000, tokenBudget: 300_000 },
+  };
+  const view = deriveWorkflowViewModel(snapshot);
+  assert.ok(view);
+  assert.equal(view.sessionLabel, "20260724-companion-goal-final-fixes");
+
+  for (let width = 1; width <= 120; width++) {
+    const line = renderWorkflowStatusline(view, width);
+    assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+    if (width >= 3) {
+      assert.ok(stripAnsi(line).startsWith("⚑ "), `width ${width} must lead with the session label: ${stripAnsi(line)}`);
+    }
+  }
+
+  const narrow = stripAnsi(renderWorkflowStatusline(view, 47));
+  assert.match(narrow, /^⚑ 20260724-companion-goal-final-fixes/);
 });

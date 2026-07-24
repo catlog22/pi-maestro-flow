@@ -32,6 +32,7 @@ export interface ApiProviderSettings {
   provider: ApiProviderId;
   baseUrl: string;
   modelId: string;
+  contextWindow?: number;
   reasoning: boolean;
   apiKey: string;
   maxThinking?: boolean;
@@ -201,6 +202,7 @@ export async function loadApiProviderSettings(
     provider,
     baseUrl: typeof config.baseUrl === "string" ? config.baseUrl : defaults.baseUrl,
     modelId: typeof model?.id === "string" ? model.id : defaults.modelId,
+    contextWindow: typeof model?.contextWindow === "number" ? model.contextWindow : defaults.contextWindow,
     reasoning: typeof model?.reasoning === "boolean" ? model.reasoning : true,
     apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
     maxThinking: thinkingLevelMap.xhigh === "max" || thinkingLevelMap.max === "max",
@@ -215,6 +217,9 @@ export async function saveApiProviderSettings(
     provider: settings.provider,
     baseUrl: normalizeBaseUrl(settings.baseUrl),
     modelId: required(settings.modelId, "Model ID"),
+    contextWindow: settings.contextWindow === undefined
+      ? undefined
+      : positiveInteger(settings.contextWindow, "Context window"),
     reasoning: settings.reasoning,
     apiKey: required(settings.apiKey ?? "", "API key config"),
     maxThinking: settings.maxThinking === true,
@@ -352,6 +357,13 @@ async function configureProvider(
   );
   if (!defaultThinkingLevel) return;
 
+  const contextWindowInput = await ctx.ui.input(
+    `${provider.name} context window（Token）`,
+    String(current.contextWindow ?? provider.contextWindow),
+  );
+  if (contextWindowInput === undefined) return;
+  const contextWindow = positiveInteger(contextWindowInput, "Context window");
+
   const keyInput = await ctx.ui.input(`${provider.name} API key`, "");
   if (keyInput === undefined) return;
   const apiKey = required(keyInput, "API key");
@@ -360,6 +372,7 @@ async function configureProvider(
     provider: provider.id,
     baseUrl,
     modelId,
+    contextWindow,
     reasoning: reasoningChoice === enabledLabel,
     apiKey,
     maxThinking,
@@ -369,6 +382,7 @@ async function configureProvider(
     [
       `Base URL：${next.baseUrl}`,
       `Model：${next.modelId}`,
+      `Context window：${next.contextWindow?.toLocaleString("en-US")} Token`,
       `Reasoning：${next.reasoning ? "enabled" : "disabled"}`,
       `Default thinking（Pi 全局）：${defaultThinkingLevel}`,
       "Auth：stored API key",
@@ -542,9 +556,8 @@ async function writeApiProviderSettings(
     name: typeof existingModel.name === "string" ? existingModel.name : settings.modelId,
     reasoning: settings.reasoning,
     input: Array.isArray(existingModel.input) ? existingModel.input : ["text", "image"],
-    contextWindow: typeof existingModel.contextWindow === "number"
-      ? existingModel.contextWindow
-      : defaults.contextWindow,
+    contextWindow: settings.contextWindow
+      ?? (typeof existingModel.contextWindow === "number" ? existingModel.contextWindow : defaults.contextWindow),
     maxTokens: typeof existingModel.maxTokens === "number"
       ? existingModel.maxTokens
       : defaults.maxTokens,
@@ -1017,6 +1030,14 @@ function required(value: string, label: string): string {
   const trimmed = value.trim();
   if (!trimmed) throw new Error(`${label} cannot be empty`);
   return trimmed;
+}
+
+function positiveInteger(value: string | number, label: string): number {
+  const parsed = typeof value === "number" ? value : Number(value.trim());
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return parsed;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

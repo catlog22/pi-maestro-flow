@@ -50,11 +50,13 @@ interface GitInfo {
 interface TokenTotals {
 	input: number;
 	output: number;
+	cacheRead: number;
+	cacheWrite: number;
 }
 
 interface MessageWithUsage {
 	role?: string;
-	usage?: { input?: number; output?: number };
+	usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
 }
 
 interface RuntimeState {
@@ -76,6 +78,14 @@ function formatTokens(n: number): string {
 	if (n < 1000) return String(n);
 	if (n < 10000) return (n / 1000).toFixed(1) + "k";
 	return Math.round(n / 1000) + "k";
+}
+
+function cacheSegment(tokens: TokenTotals): string {
+	const cacheTotal = tokens.cacheRead + tokens.cacheWrite;
+	if (cacheTotal <= 0) return "";
+	const denom = tokens.input + cacheTotal;
+	const hitRate = denom > 0 ? Math.round((tokens.cacheRead / denom) * 100) : 0;
+	return ` ⚡${hitRate}%`;
 }
 
 function buildContextBar(usedPct: number, compact = false): string {
@@ -270,8 +280,8 @@ function renderLine1(
 	const dirText = colored("dir", `${ICONS.dir} ${basename(dir)}`);
 	const dirGitText = rs.git ? `${dirText}  ${formatGit(rs.git)}` : dirText;
 	let tokenText = "";
-	if (rs.tokens.input > 0 || rs.tokens.output > 0) {
-		const value = `↑${formatTokens(rs.tokens.input)} ↓${formatTokens(rs.tokens.output)} ${ICONS.tokens}${formatTokens(rs.tokens.input + rs.tokens.output)}`;
+	if (rs.tokens.input > 0 || rs.tokens.output > 0 || rs.tokens.cacheRead > 0 || rs.tokens.cacheWrite > 0) {
+		const value = `↑${formatTokens(rs.tokens.input)} ↓${formatTokens(rs.tokens.output)} ${ICONS.tokens}${formatTokens(rs.tokens.input + rs.tokens.output)}${cacheSegment(rs.tokens)}`;
 		tokenText = colored("tokens", value);
 	}
 	let contextFull = "";
@@ -308,11 +318,6 @@ function renderLine1(
 
 export function renderWorkflowStatusline(view: WorkflowViewModel, width: number): string {
 	const safeWidth = Math.max(1, width);
-	const action = view.recoveryAction ?? view.nextAction;
-	if (safeWidth < 20) {
-		return truncateToWidth(action ? `» ${action}` : workflowStatusLabel(view.status), safeWidth, "…");
-	}
-
 	const run = view.activeRun;
 	const runText = run
 		? `${run.sequence != null ? String(run.sequence).padStart(3, "0") : run.id}/${run.command}`
@@ -320,19 +325,24 @@ export function renderWorkflowStatusline(view: WorkflowViewModel, width: number)
 	const status = run ? workflowStatusLabel(run.status, run.attempt) : workflowStatusLabel(view.status);
 	const chain = `✓${view.chain.completed} ▶${view.chain.running} ○${view.chain.pending}`;
 	const session = `⚑ ${view.sessionLabel}`;
+	const action = view.recoveryAction ?? view.nextAction;
 	const recovery = action ? `» ${action}` : "";
 
+	// Session label leads every layout so concurrent sessions stay identifiable
+	// even when the line is truncated to a narrow terminal.
+	if (safeWidth < 20) {
+		return truncateToWidth(session, safeWidth, "…");
+	}
+
 	let parts: string[];
-	if (safeWidth < 48) {
-		parts = [recovery, status, runText, chain];
-	} else if (safeWidth < 80) {
-		parts = [recovery, session, status, runText, chain];
+	if (safeWidth < 80) {
+		parts = [session, recovery, status, runText, chain];
 	} else {
 		const gates = view.gates ? `gate ${view.gates.passed}/${view.gates.total}` : "";
 		const budget = view.goal?.tokensUsed != null && view.goal.tokenBudget != null
 			? `goal ${formatTokens(view.goal.tokensUsed)}/${formatTokens(view.goal.tokenBudget)}`
 			: "";
-		parts = [recovery, session, status, runText, chain, gates, budget];
+		parts = [session, recovery, status, runText, chain, gates, budget];
 	}
 	return truncateToWidth(parts.filter(Boolean).join(SEP), safeWidth, "…");
 }
@@ -358,7 +368,7 @@ export function installStatusline(
 		model: "Claude",
 		git: null,
 		contextPercent: null,
-		tokens: { input: 0, output: 0 },
+		tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		turnCount: 0,
 		isAgentRunning: false,
 	};
@@ -379,10 +389,12 @@ export function installStatusline(
 		if (message?.role !== "assistant") return;
 		rs.tokens.input += message.usage?.input ?? 0;
 		rs.tokens.output += message.usage?.output ?? 0;
+		rs.tokens.cacheRead += message.usage?.cacheRead ?? 0;
+		rs.tokens.cacheWrite += message.usage?.cacheWrite ?? 0;
 	}
 
 	function rebuildTokenUsage(ctx: ExtensionContext): void {
-		const totals: TokenTotals = { input: 0, output: 0 };
+		const totals: TokenTotals = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
 		try {
 			for (const entry of ctx.sessionManager?.getBranch?.() ?? []) {
 				if (entry.type !== "message") continue;
@@ -390,6 +402,8 @@ export function installStatusline(
 				if (message?.role !== "assistant") continue;
 				totals.input += message.usage?.input ?? 0;
 				totals.output += message.usage?.output ?? 0;
+				totals.cacheRead += message.usage?.cacheRead ?? 0;
+				totals.cacheWrite += message.usage?.cacheWrite ?? 0;
 			}
 		} catch {
 			// Token tracking is best-effort.
