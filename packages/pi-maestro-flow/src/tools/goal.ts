@@ -422,7 +422,11 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
 
   const wasPiRetry = isPiRetry(event, activeGoal.id);
   if (!wasPiRetry) clearRecoveryFor(activeGoal.id);
-  if (workflowCoordinator?.status()?.session?.activeRunId) {
+  const workflowSnapshot = workflowCoordinator?.status();
+  if (
+    hasMatchingWorkflowBinding(activeGoal, workflowSnapshot)
+    && workflowSnapshot?.session?.activeRunId
+  ) {
     try {
       await workflowCoordinator.brief();
     } catch (error) {
@@ -968,7 +972,7 @@ export function canonicalCompletionBlockers(snapshot: WorkflowSnapshot | undefin
   const blockers: string[] = [];
   if (["paused", "failed"].includes(session.status)) blockers.push(`Session is ${session.status}`);
   for (const step of session.chain) {
-    if (!["completed", "sealed"].includes(step.status)) {
+    if (!["completed", "sealed", "skipped"].includes(step.status)) {
       blockers.push(`Step ${step.step} (${step.command}) is ${step.status}`);
     }
   }
@@ -988,13 +992,27 @@ function hasMatchingWorkflowBinding(
   goal: Pick<ActiveGoal, "workflowSessionId" | "workflowSessionGeneration">,
   snapshot: WorkflowSnapshot | undefined,
 ): boolean {
-  if (!goal.workflowSessionId || !snapshot) return false;
-  if (snapshot.canonicalClaim?.status === "invalid") {
-    return snapshot.canonicalClaim.activeSessionId === goal.workflowSessionId;
-  }
-  return goal.workflowSessionGeneration !== undefined
+  return Boolean(
+    goal.workflowSessionId
+    && goal.workflowSessionGeneration !== undefined
+    && snapshot?.source === "canonical"
+    && snapshot.canonicalClaim?.status === "valid"
+    && snapshot.canonicalClaim.activeSessionId === goal.workflowSessionId
     && goal.workflowSessionId === snapshot.session?.sessionId
-    && goal.workflowSessionGeneration === snapshot.sessionGeneration;
+    && goal.workflowSessionGeneration === snapshot.sessionGeneration
+  );
+}
+
+function shouldApplyCompletionBlockers(
+  goal: Pick<ActiveGoal, "workflowSessionId" | "workflowSessionGeneration">,
+  snapshot: WorkflowSnapshot | undefined,
+): boolean {
+  if (hasMatchingWorkflowBinding(goal, snapshot)) return true;
+  return Boolean(
+    goal.workflowSessionId
+    && snapshot?.source === "canonical"
+    && snapshot.canonicalClaim?.status === "invalid"
+  );
 }
 
 export function buildCanonicalEvidence(snapshot: WorkflowSnapshot | undefined): string {
@@ -1111,7 +1129,7 @@ async function verifyGoalCompletion(
   }
 
   const workflowSnapshot = workflowCoordinator?.status();
-  const canonicalBlockers = hasMatchingWorkflowBinding(activeGoal, workflowSnapshot)
+  const canonicalBlockers = shouldApplyCompletionBlockers(activeGoal, workflowSnapshot)
     ? canonicalCompletionBlockers(workflowSnapshot)
     : [];
   if (canonicalBlockers.length > 0) {
@@ -1254,7 +1272,13 @@ async function handleResume(
   }
 
   clearRecovery();
-  activeGoal = { ...activeGoal, status: "active", pauseReason: undefined, updatedAt: Date.now() };
+  activeGoal = {
+    ...activeGoal,
+    status: "active",
+    pauseReason: undefined,
+    verificationFailures: 0,
+    updatedAt: Date.now(),
+  };
   persistGoal(activeGoal);
   updateStatusLine(ctx, activeGoal);
   ctx.ui.notify(`Goal resumed: ${activeGoal.text}`, "info");
@@ -1482,9 +1506,14 @@ function buildResumePrompt(goal: ActiveGoal): string {
   return `The goal was resumed. Continue:\n\n${goalBlock(goal)}${budgetLine}\n\n${rules("this goal")}`;
 }
 
-function buildContinuePrompt(goal: ActiveGoal, marker: string): string {
-  const workflowSnapshot = workflowCoordinator?.status();
-  const activeRun = workflowSnapshot ? activeWorkflowRun(workflowSnapshot) : undefined;
+function buildContinuePrompt(
+  goal: ActiveGoal,
+  marker: string,
+  workflowSnapshot: WorkflowSnapshot | undefined,
+): string {
+  const activeRun = workflowSnapshot && hasMatchingWorkflowBinding(goal, workflowSnapshot)
+    ? activeWorkflowRun(workflowSnapshot)
+    : undefined;
   const runAnchor = activeRun
     ? `\n\n<active_run id="${escapeXml(activeRun.runId)}">Run \`maestro run brief ${activeRun.runId}\` before the next execution action.</active_run>`
     : "";
@@ -1526,7 +1555,8 @@ async function sendContinuation(ctx: GoalContext, goal: ActiveGoal) {
   if (hasPending(ctx)) return false;
   let marker = `${goal.id}:${goal.iteration}:${randomUUID()}`;
   let genericMarker = true;
-  if (goal.workflowSessionId && workflowCoordinator?.status()?.session) {
+  const workflowSnapshot = workflowCoordinator?.status();
+  if (hasMatchingWorkflowBinding(goal, workflowSnapshot)) {
     try {
       marker = workflowCoordinator.continuationMarker(goal.iteration);
       genericMarker = false;
@@ -1542,15 +1572,21 @@ async function sendContinuation(ctx: GoalContext, goal: ActiveGoal) {
   continuationPending = { goalId: goal.id, iteration: goal.iteration, marker };
   if (!genericMarker && (!workflowCoordinator || !workflowCoordinator.acceptsContinuation(marker))) {
     if (continuationPending?.marker === marker) continuationPending = undefined;
+    activeGoal = pauseGoal(goal, "gate");
+    persistGoal(activeGoal);
+    updateStatusLine(ctx, activeGoal);
     ctx.ui.notify("Goal continuation was fenced by the Workflow Coordinator.", "warning");
     return false;
   }
   armGoalLoop(goal);
-  const sent = await sendPrompt(ctx, buildContinuePrompt(goal, marker));
+  const sent = await sendPrompt(ctx, buildContinuePrompt(goal, marker, workflowSnapshot));
   if (!sent) {
     disarmGoalLoop(goal.id);
     issuedGoalMarkers.delete(marker);
     if (continuationPending?.marker === marker) continuationPending = undefined;
+    activeGoal = pauseGoal(goal);
+    persistGoal(activeGoal);
+    updateStatusLine(ctx, activeGoal);
   }
   if (activeGoal?.id === goal.id && activeGoal.status === "active") updateStatusLine(ctx, activeGoal);
   return sent;
@@ -1681,7 +1717,8 @@ function markGoalRecovery(goalId: string, kind: "compaction_retry" | "provider_r
 function clearRecovery() { goalRecovery = undefined; }
 function clearRecoveryFor(id: string) { if (goalRecovery?.goalId === id) goalRecovery = undefined; }
 async function fenceWorkflowContinuation(): Promise<void> {
-  if (!workflowCoordinator?.status()?.session) return;
+  const workflowSnapshot = workflowCoordinator?.status();
+  if (!activeGoal || !hasMatchingWorkflowBinding(activeGoal, workflowSnapshot)) return;
   try { await workflowCoordinator.fenceContinuation(); } catch { /* no owned lease means no live marker can be accepted */ }
 }
 function abortTurn(ctx: GoalContext) { try { ctx.abort?.(); } catch { /* best effort */ } }

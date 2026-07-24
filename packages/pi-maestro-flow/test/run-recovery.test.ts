@@ -13,8 +13,10 @@ import { TodoSkillLoadError, TodoSkillLoader } from "../src/skills/skill-loader.
 import { SkillRuntime } from "../src/skills/skill-runtime.ts";
 import {
   executeGoal,
+  executeGoalCommand,
   initGoal,
   onCompact as onGoalCompact,
+  reconcileWorkflowGoal,
   onSessionShutdown as onGoalSessionShutdown,
   onSessionStart as onGoalSessionStart,
   setWorkflowCoordinator,
@@ -143,7 +145,7 @@ test("checkpoint v2 preserves Workflow recovery identity across compactions", as
   assert.equal(clearedDetails.workflow, undefined);
 });
 
-test("compaction recovery fetches the Run brief before continuation without duplicating the same Skill stack", async () => {
+test("compaction recovery reads only the Run bound to the current Goal", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-run-recovery-order-"));
   const skillDir = join(root, ".pi", "skills", "demo");
   const skillPath = join(skillDir, "SKILL.md");
@@ -176,6 +178,7 @@ test("compaction recovery fetches the Run brief before continuation without dupl
   const stackRevision = getVisibleTasks()[0]?.skillActivation?.stackRevision;
 
   const events: string[] = [];
+  const continuationPrompts: string[] = [];
   let hasPendingMessages = false;
   initGoal({
     appendEntry() {},
@@ -183,6 +186,7 @@ test("compaction recovery fetches the Run brief before continuation without dupl
       assert.match(message.content, /^Continue the active goal:/);
       assert.equal(message.display, false);
       events.push("continuation");
+      continuationPrompts.push(message.content);
     },
   } as never);
   const goalContext: GoalContext = {
@@ -193,7 +197,6 @@ test("compaction recovery fetches the Run brief before continuation without dupl
     hasPendingMessages: () => hasPendingMessages,
   };
   onGoalSessionStart(goalContext);
-  await executeGoal({ action: "create", objective: "Recover the active Run" }, goalContext);
   const snapshot = recoverySnapshot();
   setWorkflowCoordinator({
     status: () => snapshot,
@@ -206,8 +209,18 @@ test("compaction recovery fetches the Run brief before continuation without dupl
   } as never);
 
   try {
+    await executeGoal({ action: "create", objective: "Independent compaction recovery" }, goalContext);
+    await onGoalCompact({}, goalContext);
+    assert.deepEqual(events, ["continuation"]);
+    assert.doesNotMatch(continuationPrompts[0] ?? "", /<active_run/);
+
+    await executeGoalCommand({ action: "clear" }, goalContext);
+    events.length = 0;
+    continuationPrompts.length = 0;
+    reconcileWorkflowGoal(snapshot, goalContext);
     await onGoalCompact({}, goalContext);
     assert.deepEqual(events, ["brief", "continuation"]);
+    assert.match(continuationPrompts[0] ?? "", /<active_run id="run-003">/);
 
     events.length = 0;
     await onGoalCompact({ willRetry: true }, goalContext);
@@ -225,7 +238,7 @@ test("compaction recovery fetches the Run brief before continuation without dupl
     assert.equal(await onContextTodo([]), undefined);
   } finally {
     setWorkflowCoordinator(undefined);
-    await executeGoal({ action: "clear" }, goalContext);
+    await executeGoalCommand({ action: "clear" }, goalContext);
     onGoalSessionShutdown(goalContext);
     onTodoSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });
@@ -238,6 +251,8 @@ function recoverySnapshot(): WorkflowSnapshot {
     projectRoot: "D:/workspace",
     loadedAt: "2026-07-15T00:00:00.000Z",
     revision: { sessionRevision: 1, fingerprint: "recovery" },
+    sessionGeneration: "canonical:valid:workflow-session-1:1",
+    canonicalClaim: { activeSessionId: "workflow-session-1", status: "valid" },
     diagnostics: [],
     session: {
       sessionId: "workflow-session-1",

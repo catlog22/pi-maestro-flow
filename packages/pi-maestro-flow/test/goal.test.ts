@@ -669,6 +669,15 @@ test("Goal pauses after three inconclusive explicit completion attempts", async 
     }
     assert.equal(getActiveGoal()?.status, "paused");
     assert.equal(getActiveGoal()?.verificationFailures, 3);
+    await executeGoalCommand({ action: "resume" }, ctx);
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.verificationFailures, 0);
+    await executeGoal({
+      action: "complete",
+      summary: "First completion attempt in a new verifier retry cycle.",
+    }, ctx);
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.verificationFailures, 1);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
@@ -746,9 +755,7 @@ test("unbound and mismatched Goals exclude unrelated canonical Workflow evidence
   onSessionStart(ctx);
 
   try {
-    assert.deepEqual(canonicalCompletionBlockers(unrelatedLegacy), [
-      "Step execute (execute) is skipped",
-    ]);
+    assert.deepEqual(canonicalCompletionBlockers(unrelatedLegacy), []);
     await executeGoal({ action: "create", objective: "Independent user Goal" }, ctx);
     const independentResult = await executeGoal({
       action: "complete",
@@ -774,6 +781,58 @@ test("unbound and mismatched Goals exclude unrelated canonical Workflow evidence
       /"relatedCanonicalWorkflowEvidence": "\(Unavailable: the current canonical Workflow Session identity does not match this Goal's binding\.\)"/,
     );
     assert.doesNotMatch(tasks[1] ?? "", /Session session-[12]: running/);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setWorkflowCoordinator(undefined);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("skipped canonical steps are terminal and legacy snapshots never gate Goal completion", async () => {
+  let verifierCalls = 0;
+  setGoalVerifierRunnerForTest(async () => {
+    verifierCalls++;
+    return {
+      exitCode: 0,
+      messages: [{ role: "assistant", content: "Structured output saved." }],
+      structuredOutput: {
+        pass: true,
+        reasoning: "The Goal evidence is complete.",
+        unmet: [],
+        evidence: ["Focused verification passed"],
+      },
+    };
+  });
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  let currentSnapshot = completionReadyWorkflowSnapshot("legacy-a", "legacy:legacy-a:1");
+  currentSnapshot.source = "legacy";
+  currentSnapshot.canonicalClaim = undefined;
+  currentSnapshot.session!.activeRunId = null;
+  currentSnapshot.session!.chain[0]!.status = "pending";
+  setWorkflowCoordinator({ status: () => currentSnapshot } as never);
+  onSessionStart(ctx);
+
+  try {
+    assert.match(canonicalCompletionBlockers(currentSnapshot).join("\n"), /is pending/);
+    reconcileWorkflowGoal(currentSnapshot, ctx);
+    await executeGoal({
+      action: "complete",
+      summary: "Legacy projection is unrelated to current completion authority.",
+    }, ctx);
+    assert.equal(getActiveGoal(), undefined);
+
+    currentSnapshot = completionReadyWorkflowSnapshot();
+    currentSnapshot.session!.chain[0]!.status = "skipped";
+    assert.deepEqual(canonicalCompletionBlockers(currentSnapshot), []);
+    reconcileWorkflowGoal(currentSnapshot, ctx);
+    await executeGoal({
+      action: "complete",
+      summary: "The intentionally skipped chain step is terminal.",
+    }, ctx);
+    assert.equal(getActiveGoal(), undefined);
+    assert.equal(verifierCalls, 2);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
@@ -1599,6 +1658,85 @@ test("goal create is exclusive and user stop/resume controls the active agent lo
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
     setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("Workflow continuation and fence side effects require the current Goal binding", async () => {
+  const snapshot = workflowSnapshot();
+  let fences = 0;
+  let markers = 0;
+  let sent = 0;
+  setWorkflowCoordinator({
+    status: () => snapshot,
+    async fenceContinuation() { fences++; },
+    continuationMarker() {
+      markers++;
+      return "maestro-workflow-continuation:rejected";
+    },
+    acceptsContinuation: () => false,
+  } as never);
+  initGoal({
+    appendEntry() {},
+    sendMessage() { sent++; },
+  } as never);
+  const ctx = createContext({
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+  });
+  onSessionStart(ctx);
+
+  try {
+    await executeGoal({ action: "create", objective: "Independent Goal" }, ctx);
+    await executeGoalCommand({ action: "stop" }, ctx);
+    await executeGoalCommand({ action: "clear" }, ctx);
+    assert.equal(fences, 0);
+    assert.equal(markers, 0);
+
+    reconcileWorkflowGoal(snapshot, ctx);
+    await executeGoalCommand({ action: "resume" }, ctx);
+    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    assert.equal(markers, 1);
+    assert.equal(sent, 0);
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, "gate");
+
+    await executeGoalCommand({ action: "resume" }, ctx);
+    await executeGoalCommand({ action: "stop" }, ctx);
+    assert.equal(fences, 1);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setWorkflowCoordinator(undefined);
+  }
+});
+
+test("continuation delivery failure pauses the Goal instead of leaving it waiting", async () => {
+  const notifications: string[] = [];
+  initGoal({
+    appendEntry() {},
+    sendMessage() {
+      throw new Error("delivery unavailable");
+    },
+  } as never);
+  const ctx = createContext({
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+    ui: {
+      notify(message) { notifications.push(message); },
+      setStatus() {},
+    },
+  });
+  onSessionStart(ctx);
+
+  try {
+    await executeGoal({ action: "create", objective: "Recover failed continuation delivery" }, ctx);
+    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, undefined);
+    assert.match(notifications.join("\n"), /Goal prompt failed: delivery unavailable/);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
   }
 });
 
