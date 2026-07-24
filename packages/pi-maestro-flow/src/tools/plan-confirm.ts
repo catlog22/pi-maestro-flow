@@ -14,6 +14,7 @@ export type PlanConfirmationAction =
   | "execute-compact"
   | "modify"
   | "continue"
+  | "exit-plan"
   | "close";
 
 export interface PlanConfirmationOptions {
@@ -51,10 +52,12 @@ export async function openPlanConfirmation(
         contextItem,
         { action: "modify", label: "View / modify Plan", description: "Open the full-screen Markdown editor", enabled: true },
         { action: "continue", label: "Continue discussion", description: "Enter feedback or a question", enabled: true },
+        { action: "exit-plan", label: "Exit Plan mode", description: "Keep the draft and return to Act mode without approval", enabled: true },
       ];
       const markdown = new Markdown(options.markdown, 0, 0, markdownTheme(theme));
       let selected = 0;
       let previewOffset = 0;
+      let previewMaxOffset = 0;
       let status = "";
       let lastWidth = 80;
 
@@ -95,6 +98,7 @@ export async function openPlanConfirmation(
           const previewHeight = Math.max(4, Math.min(16, terminalRows - 10));
           const renderedPlan = markdown.render(Math.max(1, innerWidth - 2));
           const maxOffset = Math.max(0, renderedPlan.length - previewHeight);
+          previewMaxOffset = maxOffset;
           previewOffset = Math.min(previewOffset, maxOffset);
           const preview = renderedPlan.slice(previewOffset, previewOffset + previewHeight);
           const range = renderedPlan.length > previewHeight
@@ -103,8 +107,8 @@ export async function openPlanConfirmation(
           const footer = status || actionFooter(innerWidth, [
             "Esc close",
             "Enter choose",
-            "1-4 choose",
-            "↑↓ plan",
+            "1-5 choose",
+            "↑↓ plan / options at end",
             "Ctrl+Enter execute",
             "PgUp/PgDn plan",
           ]);
@@ -136,14 +140,26 @@ export async function openPlanConfirmation(
             return;
           }
           if (matchesKey(data, Key.up)) {
-            previewOffset = Math.max(0, previewOffset - 1);
+            if (previewOffset >= previewMaxOffset) {
+              if (selected > 0) {
+                selected -= 1;
+              } else {
+                previewOffset = Math.max(0, previewMaxOffset - 1);
+              }
+            } else {
+              previewOffset = Math.max(0, previewOffset - 1);
+            }
           } else if (matchesKey(data, Key.down)) {
-            previewOffset += 1;
+            if (previewOffset >= previewMaxOffset) {
+              selected = Math.min(items.length - 1, selected + 1);
+            } else {
+              previewOffset = Math.min(previewMaxOffset, previewOffset + 1);
+            }
           } else if (matchesKey(data, Key.pageUp)) {
             previewOffset = Math.max(0, previewOffset - 5);
           } else if (matchesKey(data, Key.pageDown)) {
-            previewOffset += 5;
-          } else if (/^[1-4]$/.test(data)) {
+            previewOffset = Math.min(previewMaxOffset, previewOffset + 5);
+          } else if (/^[1-5]$/.test(data)) {
             selected = Number(data) - 1;
             choose();
             return;

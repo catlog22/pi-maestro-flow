@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { CompactionArbiter } from "../src/compaction/compaction-arbiter.ts";
 import {
   getMode,
   getPlanHandoffStatus,
@@ -17,6 +18,15 @@ import {
   registerPlanTools,
 } from "../src/tools/plan.ts";
 import { PlanStore } from "../src/tools/plan-store.ts";
+import {
+  addGoal,
+  executeGoal,
+  initGoal,
+  onSessionShutdown as goalOnSessionShutdown,
+  onSessionStart as goalOnSessionStart,
+  setGoalVerifierRunnerForTest,
+  type GoalContext,
+} from "../src/tools/goal.ts";
 
 interface ToolLike {
   execute(id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext): Promise<any>;
@@ -35,9 +45,15 @@ function createHarness(
   sessionId = "session-main",
   confirmationInputs?: string[],
   supportsNewSession = false,
-  handoff: { goalKey?: string; todoKeys: string[] } = { todoKeys: [] },
+  handoff: { goalKey?: string; pausedGoalKey?: string; todoKeys: string[] } = { todoKeys: [] },
   replacementFailure?: "approval" | "send",
-  runtime: { contextPercent?: number; discussionInput?: string; idle?: boolean } = {},
+  runtime: {
+    contextPercent?: number;
+    discussionInput?: string;
+    idle?: boolean;
+    arbiter?: CompactionArbiter;
+  } = {},
+  realGoalBinding = false,
 ) {
   let active = ["Read", "Write", "Bash", "todo", "custom-tool"];
   const tools = new Map<string, ToolLike>();
@@ -161,8 +177,10 @@ function createHarness(
         : {}),
       });
     },
-    activeGoalHandoffKey: () => handoff.goalKey,
+    activeGoalHandoffKey: realGoalBinding ? undefined : () => handoff.goalKey,
+    pausedGoalHandoffKey: realGoalBinding ? undefined : () => handoff.pausedGoalKey,
     hasExecutableTodo: (handoffKey) => handoff.todoKeys.includes(handoffKey),
+    compactionArbiter: runtime.arbiter,
   });
   registerPlanTools(pi);
   registerPlanCommand(pi);
@@ -281,11 +299,12 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.deepEqual(harness.active, actSnapshot);
     assert.equal(harness.messages.length, 0);
     const toolText = confirmed.content[0]?.text ?? "";
+    assert.match(toolText, /Prefer the teammate tool/);
     assert.doesNotMatch(toolText, /# Approved/);
     assert.match(toolText, /already in the current context/);
     assert.match(toolText, /Todo dependency graph/);
-    assert.match(toolText, /one active Goal/);
-    assert.match(toolText, /locked boundaries and acceptance checks/);
+    assert.match(toolText, /quality gate/);
+    assert.match(toolText, /acceptance criteria/);
 
     const store = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
@@ -316,6 +335,48 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     harness.handoff.todoKeys.push(loaded.manifest.handoffKey!);
     assert.equal(getPlanHandoffStatus(), "ready");
     assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Approved Plan handoff lets goal update resume a paused bound Goal", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-handoff-resume-"));
+  const harness = createHarness(root, true);
+  harness.ctx.isIdle = () => false;
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Approved\n\nResume safely" });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, true);
+
+    const store = new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: harness.ctx.sessionManager.getSessionId() },
+    });
+    const loaded = await store.load();
+    const handoffKey = loaded.manifest.handoffKey!;
+    assert.ok(handoffKey);
+
+    harness.handoff.goalKey = undefined;
+    harness.handoff.pausedGoalKey = handoffKey;
+    assert.equal(getPlanHandoffStatus(), "goal-required");
+
+    assert.equal(onToolCallPlan({ toolName: "goal", input: { action: "update", objective: "Resume" } }), undefined);
+    assert.match(
+      onToolCallPlan({ toolName: "todo", input: { action: "next" } })?.reason ?? "",
+      /active Goal/,
+    );
+    assert.match(
+      onToolCallPlan({ toolName: "goal", input: { action: "create", objective: "Other" } })?.reason ?? "",
+      /paused|handoff/i,
+    );
+
+    harness.handoff.goalKey = handoffKey;
+    harness.handoff.pausedGoalKey = undefined;
+    assert.equal(getPlanHandoffStatus(), "todo-required");
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -469,6 +530,89 @@ test("Esc closes Plan confirmation, interrupts the turn, and preserves Plan mode
   }
 });
 
+test("plan handoff yields to an in-flight native or mid-turn compaction", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-arbitration-"));
+  const arbiter = new CompactionArbiter();
+  const native = arbiter.observeStart();
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "compact-race-chat",
+    ["2"],
+    false,
+    { todoKeys: [] },
+    undefined,
+    { contextPercent: 75, arbiter },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Arbitrated Plan" });
+    await executeCommand(harness, "plan", "approve");
+    assert.equal(harness.compactions.length, 0);
+    assert.equal(harness.messages.length, 1);
+    assert.ok(harness.notifications.some((message) => /already in progress/.test(message)));
+  } finally {
+    native.releaseIfNative();
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Plan confirmation exits intentionally and injects the Act transition once at the next agent start", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-exit-"));
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "exit-chat",
+    ["5"],
+    false,
+    { todoKeys: [] },
+    undefined,
+    { idle: false },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    const actSnapshot = [...harness.active];
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Preserved Draft" });
+    const confirmed = await execute(harness, "plan-confirm");
+    assert.equal(confirmed.details.approved, false);
+    assert.equal(confirmed.details.mode, "act");
+    assert.equal(getMode(), "act");
+    assert.deepEqual(harness.active, actSnapshot);
+    assert.match(confirmed.content[0]?.text ?? "", /intentionally exited Plan mode without approving/);
+    assert.match(confirmed.content[0]?.text ?? "", /Act mode is now active/);
+    assert.equal(harness.messages.length, 0);
+    assert.equal(harness.aborts, 0);
+    const exitPrompt = onBeforeAgentStartPlan({ systemPrompt: "base" })?.systemPrompt ?? "";
+    assert.match(exitPrompt, /^base/);
+    assert.match(exitPrompt, /## Exited Plan Mode/);
+    assert.match(exitPrompt, /intentionally exited Plan mode without approving/);
+    assert.match(exitPrompt, /Act mode is now active/);
+    assert.match(exitPrompt, /not an approval failure/);
+    assert.equal(onBeforeAgentStartPlan({ systemPrompt: "base" }), undefined);
+    assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
+
+    const store = new PlanStore(harness.ctx.cwd, {
+      rootDir: join(root, "global"),
+      session: { id: harness.ctx.sessionManager.getSessionId() },
+    });
+    const loaded = await store.load();
+    assert.equal(loaded.manifest.status, "draft");
+    assert.equal(loaded.markdown, "# Preserved Draft");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Continue discussion opens text input, queues the response, and interrupts the turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-discuss-"));
   const harness = createHarness(
@@ -537,7 +681,7 @@ test("Plan hooks keep compatibility capture, block editing tools, and allow shel
     assert.match(planPrompt, /Use ask-user-question for every user question/);
     assert.match(planPrompt, /Ask 2-4 related questions per call/);
     assert.match(planPrompt, /scope, boundaries, non-goals/);
-    assert.match(planPrompt, /one active Goal/);
+    assert.match(planPrompt, /quality gates to key Todos/);
     assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /blocks/);
     assert.match(onToolCallPlan({ toolName: "Edit", input: {} })?.reason ?? "", /blocks/);
     assert.match(onToolCallPlan({ toolName: "NotebookEdit", input: {} })?.reason ?? "", /blocks/);

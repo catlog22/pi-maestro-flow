@@ -6,13 +6,17 @@ import {
   nextApprovalMode,
 } from "../src/extension/index.ts";
 
-test("approval modes cycle through plan and wrap to default", () => {
+test("approval modes include the Plan lifecycle state and wrap to default", () => {
   assert.deepEqual(APPROVAL_MODES, ["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"]);
   assert.equal(nextApprovalMode("default"), "acceptEdits");
   assert.equal(nextApprovalMode("acceptEdits"), "plan");
   assert.equal(nextApprovalMode("plan"), "dontAsk");
   assert.equal(nextApprovalMode("dontAsk"), "bypassPermissions");
   assert.equal(nextApprovalMode("bypassPermissions"), "default");
+  assert.equal(
+    nextApprovalMode("acceptEdits", new Set(["plan"])),
+    "dontAsk",
+  );
   assert.equal(
     nextApprovalMode("dontAsk", new Set(["bypassPermissions"])),
     "default",

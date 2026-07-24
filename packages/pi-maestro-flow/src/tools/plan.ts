@@ -20,8 +20,11 @@ import { openPlanEditor } from "./plan-editor.ts";
 import { PlanStore, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
 import { blockIntelligenceToolCallInPlan } from "./intelligence-safety.ts";
 import { RUN_CONTROL_READ_ACTIONS } from "./run-control.ts";
-import { getActiveGoal } from "./goal.ts";
+import { getActiveGoal, getGoalList } from "./goal.ts";
 import { getVisibleTasks } from "./todo.ts";
+import {
+  type CompactionArbiter,
+} from "../compaction/compaction-arbiter.ts";
 
 type Mode = "act" | "plan";
 type PlanExecutionMode = "current" | "clear" | "compact";
@@ -57,7 +60,9 @@ export interface PlanToolDetails {
 interface PlanRuntimeOptions {
   storeFactory?: (cwd: string, session: PlanSessionIdentity) => PlanStore;
   activeGoalHandoffKey?: () => string | undefined;
+  pausedGoalHandoffKey?: () => string | undefined;
   hasExecutableTodo?: (handoffKey: string) => boolean;
+  compactionArbiter?: CompactionArbiter;
 }
 
 const STATUS_KEY = "mode";
@@ -87,7 +92,7 @@ const EmptyPlanParams = Type.Object({});
 
 let mode: Mode = "act";
 let extensionApi: ExtensionAPI | undefined;
-let onPlanModeChanged: (() => void) | undefined;
+let onPlanModeChanged: ((ctx: PlanContext) => void) | undefined;
 let storeFactory: (cwd: string, session: PlanSessionIdentity) => PlanStore = (cwd, session) => new PlanStore(cwd, { session });
 let currentStore: PlanStore | undefined;
 let currentStoreKey = "";
@@ -97,9 +102,17 @@ let latestStatus: PlanToolDetails["status"] = "empty";
 let latestHandoffKey: string | undefined;
 let awaitingAction = false;
 let activeToolsSnapshot: string[] | undefined;
+let pendingPlanExitReminder: string | undefined;
+let compactionArbiter: CompactionArbiter | undefined;
 let activeGoalHandoffKey = () => {
+  const current = getActiveGoal();
+  if (current?.status === "active" && current.planHandoffKey) return current.planHandoffKey;
+  const bound = getGoalList().find((goal) => goal.planHandoffKey && goal.status !== "paused");
+  return bound?.planHandoffKey;
+};
+let pausedGoalHandoffKey = () => {
   const goal = getActiveGoal();
-  return goal?.status === "active" ? goal.planHandoffKey : undefined;
+  return goal?.status === "paused" ? goal.planHandoffKey : undefined;
 };
 let hasExecutableTodoForHandoff = (handoffKey: string) => getVisibleTasks().some((task) =>
   task.planHandoffKey === handoffKey
@@ -117,14 +130,21 @@ export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): vo
   extensionApi = pi;
   storeFactory = options.storeFactory ?? ((cwd, session) => new PlanStore(cwd, { session }));
   activeGoalHandoffKey = options.activeGoalHandoffKey ?? (() => {
+    const current = getActiveGoal();
+    if (current?.status === "active" && current.planHandoffKey) return current.planHandoffKey;
+    const bound = getGoalList().find((goal) => goal.planHandoffKey && goal.status !== "paused");
+    return bound?.planHandoffKey;
+  });
+  pausedGoalHandoffKey = options.pausedGoalHandoffKey ?? (() => {
     const goal = getActiveGoal();
-    return goal?.status === "active" ? goal.planHandoffKey : undefined;
+    return goal?.status === "paused" ? goal.planHandoffKey : undefined;
   });
   hasExecutableTodoForHandoff = options.hasExecutableTodo ?? ((handoffKey) => getVisibleTasks().some((task) =>
     task.planHandoffKey === handoffKey
     && (task.status === "pending" || task.status === "in_progress")
     && task.blockedBy.length === 0
   ));
+  compactionArbiter = options.compactionArbiter;
 }
 
 export function isPlanMode(): boolean {
@@ -209,6 +229,7 @@ function restoreActToolSurface(): void {
 async function enterPlanMode(ctx: PlanContext): Promise<void> {
   const store = await ensureStore(ctx);
   applyLoadedPlan(await store.load());
+  pendingPlanExitReminder = undefined;
   mode = "plan";
   activatePlanToolSurface();
   syncModeStatus(ctx);
@@ -221,26 +242,34 @@ function exitPlanMode(ctx: PlanContext): void {
   syncModeStatus(ctx);
 }
 
+/** Leave Plan mode without approving or discarding the current draft. */
+export function exitMode(ctx: PlanContext): Mode {
+  if (mode === "plan") {
+    exitPlanMode(ctx);
+    ctx.ui.notify("Act mode · draft preserved", "info");
+    pendingPlanExitReminder = buildPlanExitReminder();
+    onPlanModeChanged?.(ctx);
+  }
+  return mode;
+}
+
 export async function toggleMode(ctx: PlanContext): Promise<Mode> {
   if (mode === "act") {
     await enterPlanMode(ctx);
-    onPlanModeChanged?.();
+    onPlanModeChanged?.(ctx);
     return mode;
   }
   if (hasPlan() && ctx.hasUI !== false) {
     const outcome = await reviewPlan(ctx, true);
     if (!outcome.approved && !outcome.exited) ctx.ui.notify("Staying in Plan mode", "info");
-    onPlanModeChanged?.();
+    onPlanModeChanged?.(ctx);
     return mode;
   }
-  exitPlanMode(ctx);
-  ctx.ui.notify("Act mode · draft preserved", "info");
-  onPlanModeChanged?.();
-  return mode;
+  return exitMode(ctx);
 }
 
 /** Bind the root UI/UCL to Plan/Act mode transitions. */
-export function setPlanModeChangeListener(listener: (() => void) | undefined): void {
+export function setPlanModeChangeListener(listener: ((ctx: PlanContext) => void) | undefined): void {
   onPlanModeChanged = listener;
 }
 
@@ -276,6 +305,7 @@ function resetRuntimeState(): void {
   latestHandoffKey = undefined;
   awaitingAction = false;
   activeToolsSnapshot = undefined;
+  pendingPlanExitReminder = undefined;
 }
 
 export function onCompactPlan(ctx: PlanContext): void {
@@ -283,8 +313,13 @@ export function onCompactPlan(ctx: PlanContext): void {
 }
 
 export function onBeforeAgentStartPlan(event: { systemPrompt: string }): { systemPrompt: string } | undefined {
-  if (mode !== "plan") return;
-  return { systemPrompt: `${event.systemPrompt}\n\n${buildPlanModePrompt()}` };
+  if (mode === "plan") {
+    return { systemPrompt: `${event.systemPrompt}\n\n${buildPlanModePrompt()}` };
+  }
+  if (!pendingPlanExitReminder) return;
+  const reminder = pendingPlanExitReminder;
+  pendingPlanExitReminder = undefined;
+  return { systemPrompt: `${event.systemPrompt}\n\n${reminder}` };
 }
 
 export function onToolCallPlan(event: {
@@ -308,6 +343,15 @@ function blockApprovedHandoffWrite(event: {
   const action = typeof event.input?.action === "string" ? event.input.action : "";
   if (event.toolName === "goal") {
     if (action === "get") return;
+    const pausedBound = handoffStatus === "goal-required"
+      && !!latestHandoffKey && pausedGoalHandoffKey() === latestHandoffKey;
+    if (pausedBound) {
+      if (action === "update") return;
+      return {
+        block: true,
+        reason: "Approved Plan handoff Goal is paused. Call goal update with its objective to resume the bound Goal before other mutations.",
+      };
+    }
     if (action === "create" && handoffStatus === "goal-required" && latestHandoffKey) {
       event.input.planHandoffKey = latestHandoffKey;
       return;
@@ -422,6 +466,10 @@ async function reviewPlan(
       abortPlanTurn(ctx);
       return { approved: false, exited: false };
     }
+    if (action === "exit-plan") {
+      exitMode(ctx);
+      return { approved: false, exited: true };
+    }
 
     const markdown = latestPlan ?? "";
     try {
@@ -452,6 +500,20 @@ function queuePlanDiscussion(ctx: PlanContext, discussion: string): void {
     busy ? { deliverAs: "followUp" } : undefined,
   );
   if (busy) abortPlanTurn(ctx);
+}
+
+function buildPlanExitMessage(): string {
+  const path = currentStore?.currentPath ?? "the persisted Plan draft";
+  return [
+    "## Exited Plan Mode",
+    "The user intentionally exited Plan mode without approving the draft.",
+    `Act mode is now active, and the draft remains preserved at ${path}.`,
+    "This is not an approval failure. Do not call Plan-only tools unless the user explicitly re-enters Plan mode.",
+  ].join("\n");
+}
+
+function buildPlanExitReminder(): string {
+  return `<system-reminder>\n${buildPlanExitMessage()}\n</system-reminder>`;
 }
 
 function abortPlanTurn(ctx: PlanContext): void {
@@ -499,9 +561,10 @@ async function startImplementation(
     `Plan source: ${planPath}`,
     "Before modifying the project:",
     "1. Reconcile the Plan with every user requirement; do not shrink or reinterpret the approved scope.",
-    "2. Convert the approved Plan into one active Goal with a concise objective that preserves its locked boundaries and acceptance checks.",
-    "3. Decompose that Goal into an ordered Todo dependency graph before implementation.",
-    "4. Execute the Todo sequence under the active Goal, verifying each outcome before proceeding.",
+    "2. Decompose the Plan into an ordered Todo dependency graph before implementation.",
+    "3. Attach a Goal as the quality gate only to key Todos that carry verifiable acceptance criteria; do NOT create a Goal for every Todo. Goals are flat and time-ordered — put the overall acceptance Goal on the last Todo when an overall sign-off is needed.",
+    "4. Prefer the teammate tool to delegate independent Todo work; use direct execution only when delegation would not help.",
+    "5. Execute the Todo sequence; activating a Todo auto-switches to its quality-gate Goal, and a Todo completes only after its Goal verifies.",
   ].join("\n");
   const portableMessage = [
     "Execute this approved Plan in the new session:",
@@ -574,20 +637,37 @@ async function startImplementation(
       delivered = true;
       sendImplementationMessage(ctx, executionMessage);
     };
+    const lease = compactionArbiter?.request("plan-handoff");
+    if (compactionArbiter && !lease) {
+      ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
+      deliver();
+      return;
+    }
+    const compactionInstructions = [
+      "Treat the following approved Plan as the authoritative execution contract.",
+      `Preserve its source path, locked boundaries, risks, acceptance checks, and current execution position: ${planPath}`,
+      "",
+      markdown,
+    ].join("\n");
     ctx.ui.notify("Compacting context with the approved Plan preserved…", "info");
-    ctx.compact({
-      customInstructions: [
-        "Treat the following approved Plan as the authoritative execution contract.",
-        `Preserve its source path, locked boundaries, risks, acceptance checks, and current execution position: ${planPath}`,
-        "",
-        markdown,
-      ].join("\n"),
-      onComplete: deliver,
-      onError(error) {
-        ctx.ui.notify(`Compaction failed; executing with the current context: ${error.message}`, "warning");
-        deliver();
-      },
-    });
+    try {
+      ctx.compact({
+        customInstructions: lease?.tagInstructions(compactionInstructions) ?? compactionInstructions,
+        onComplete() {
+          lease?.release();
+          deliver();
+        },
+        onError(error) {
+          lease?.release();
+          ctx.ui.notify(`Compaction failed; executing with the current context: ${error.message}`, "warning");
+          deliver();
+        },
+      });
+    } catch (error) {
+      lease?.release();
+      ctx.ui.notify(`Compaction failed; executing with the current context: ${errorMessage(error)}`, "warning");
+      deliver();
+    }
     return;
   }
 
@@ -697,6 +777,8 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       const outcome = await reviewPlan(ctx, true, "tool-result");
       const summary = outcome.approved
         ? `Plan approved; Act mode restored (${outcome.executionMode ?? "current"} context).`
+        : outcome.exited
+          ? buildPlanExitMessage()
         : "Plan not approved; Plan mode remains active.";
       const text = outcome.executionMessage
         ? `${summary}\n\n${outcome.executionMessage}`
@@ -716,9 +798,8 @@ export function registerPlanTools(pi: ExtensionAPI): void {
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const blocked = requirePlanMode("exit");
       if (blocked) return blocked;
-      exitPlanMode(ctx);
-      ctx.ui.notify("Act mode · draft preserved", "info");
-      return result("Plan mode exited; draft preserved.", currentDetails("exit"));
+      exitMode(ctx);
+      return result(buildPlanExitMessage(), currentDetails("exit"));
     },
   };
 
@@ -1101,7 +1182,7 @@ You are in durable Plan Mode. Read and reason only. Produce concise, decision-co
 - Align every user requirement with a planned outcome and a verifiable acceptance check.
 - Keep the final Markdown to locked scope, boundaries, decisions, ordered outcomes, risks, and acceptance checks; omit interview logs and boilerplate.
 - Confirm only after the pressure review is complete and no material decision remains open.
-- Approval converts the locked Plan into one active Goal, then decomposes that Goal into Todo before implementation.
+- Approval decomposes the locked Plan into an ordered Todo graph; attach Goals as quality gates to key Todos (overall acceptance Goal last) before implementation.
 - Use plan-update to persist the complete draft, plan-review to edit, plan-confirm to approve, or plan-exit to leave while preserving current.md.
 - Do not use write tools, mutating shell commands, or write-mode delegation.
 - The legacy <proposed_plan> block is accepted only as a compatibility path; prefer plan-update.
@@ -1127,8 +1208,11 @@ export function registerPlanCommand(pi: ExtensionAPI): void {
       const trimmed = args.trim();
       const command = trimmed.toLowerCase();
       if (command === "exit" || command === "off") {
-        if (isPlanMode()) exitPlanMode(ctx);
-        ctx.ui.notify("Act mode · draft preserved", "info");
+        if (isPlanMode()) {
+          exitMode(ctx);
+        } else {
+          ctx.ui.notify("Act mode · draft preserved", "info");
+        }
         return;
       }
       if (command === "show") {

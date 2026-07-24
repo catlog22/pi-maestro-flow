@@ -101,7 +101,7 @@ test("Plan confirmation renders Markdown and selects compact execution", async (
       assert.match(lines.join("\n"), /2\. Compact then execute/);
       assert.match(lines.join("\n"), /3\. View \/ modify Plan/);
       assert.match(lines.join("\n"), /4\. Continue discussion/);
-      assert.doesNotMatch(lines.join("\n"), /Exit Plan mode/);
+      assert.match(lines.join("\n"), /5\. Exit Plan mode/);
       assert.ok(lines.length <= 28);
     }
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
@@ -162,6 +162,45 @@ test("Plan confirmation number keys match the numbered actions", async () => {
   assert.equal(await pending, "modify");
 });
 
+test("Plan confirmation uses arrow keys to select actions after the Plan reaches the bottom", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: Array.from({ length: 40 }, (_, index) => `Plan line ${index + 1}`).join("\n\n"),
+    canClearContext: true,
+  });
+  assert.ok(harness.component);
+  harness.component.render(80);
+  for (let index = 0; index < 20; index++) {
+    harness.component.handleInput("\x1b[6~");
+  }
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[A");
+  harness.component.handleInput("\r");
+  assert.equal(await pending, "execute-clear");
+});
+
+test("Plan confirmation returns to Plan scrolling when Up leaves the first action", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: Array.from({ length: 40 }, (_, index) => `Plan line ${index + 1}`).join("\n\n"),
+    canClearContext: true,
+  });
+  assert.ok(harness.component);
+  harness.component.render(80);
+  for (let index = 0; index < 20; index++) {
+    harness.component.handleInput("\x1b[6~");
+  }
+  harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[A");
+  harness.component.handleInput("\x1b[A");
+  const range = harness.component.render(80).join("\n").match(/Plan \d+-(\d+)\/(\d+)/);
+  assert.ok(range);
+  assert.ok(Number(range[1]) < Number(range[2]));
+  harness.component.handleInput("\x1b");
+  assert.equal(await pending, "close");
+});
+
 test("Plan confirmation exposes continue discussion as the fourth action", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
@@ -171,6 +210,17 @@ test("Plan confirmation exposes continue discussion as the fourth action", async
   assert.ok(harness.component);
   harness.component.handleInput("4");
   assert.equal(await pending, "continue");
+});
+
+test("Plan confirmation exposes exiting Plan mode as the fifth action", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan",
+    canClearContext: true,
+  });
+  assert.ok(harness.component);
+  harness.component.handleInput("5");
+  assert.equal(await pending, "exit-plan");
 });
 
 test("Plan confirmation blocks invisible actions below 20 columns", async () => {
