@@ -4,17 +4,20 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import {
+  createDefaultSoftCompaction,
   DEFAULT_KEEP_RECENT_TOKENS,
   DEFAULT_RESERVE_TOKENS,
   DEFAULT_SOFT_COMPACTION,
   readEffectiveCompactionSettings,
   readScopeCompaction,
+  resolveEffectiveCompactionSettings,
   resolveProjectSettingsPath,
   resolveUserSettingsPath,
   saveCompactionPatch,
   saveCompactionScope,
   unsetCompactionField,
   validateCompactionPatch,
+  validateEffectiveCompactionSettings,
 } from "../src/compaction/compaction-settings.ts";
 
 test("compaction settings use the Pi default user path when the agent directory is unset", () => {
@@ -242,7 +245,12 @@ test("compaction settings read nested hard and soft groups with soft sourced per
     const effective = readEffectiveCompactionSettings(fixture.projectDir);
     assert.equal(effective.reserveTokens, 22_000);
     assert.equal(effective.keepRecentTokens, 17_000);
-    assert.deepEqual(effective.soft, { enabled: true, nudgeRatio: 0.6, pruneRatio: 0.75, pruneTargetRatio: 0.55 });
+    assert.deepEqual(effective.soft, {
+      ...DEFAULT_SOFT_COMPACTION,
+      nudgeRatio: 0.6,
+      pruneRatio: 0.75,
+      pruneTargetRatio: 0.55,
+    });
     assert.equal(effective.source.soft, "project");
   } finally {
     await fixture.dispose();
@@ -291,6 +299,59 @@ test("compaction validation rejects invalid soft ratios and ordering", () => {
   const valid = validateCompactionPatch({
     soft: { nudgeRatio: 0.6, pruneRatio: 0.8, pruneTargetRatio: 0.6 },
   }, 100_000, 20_000);
+  assert.equal(valid.errors.length, 0);
+});
+
+test("soft signal criteria default to disabled so unresolved settings keep ratio-only behavior", () => {
+  const effective = resolveEffectiveCompactionSettings({}, {});
+  assert.deepEqual(effective.soft.velocity, { enabled: false, epochsToCritical: 3, minFullness: 0.7 });
+  assert.deepEqual(effective.soft.cache, { enabled: false });
+});
+
+test("soft signal criteria deep-merge across user and project scopes field by field", () => {
+  const effective = resolveEffectiveCompactionSettings(
+    { soft: { velocity: { enabled: true } } },
+    { soft: { velocity: { minFullness: 0.5 }, cache: { enabled: true } } },
+  );
+  // project minFullness must not clobber user-level enabled
+  assert.deepEqual(effective.soft.velocity, { enabled: true, epochsToCritical: 3, minFullness: 0.5 });
+  assert.deepEqual(effective.soft.cache, { enabled: true });
+});
+
+test("createDefaultSoftCompaction returns independent nested objects", () => {
+  const a = createDefaultSoftCompaction();
+  a.velocity.enabled = true;
+  a.velocity.minFullness = 0.99;
+  a.cache.enabled = true;
+  const b = createDefaultSoftCompaction();
+  assert.equal(b.velocity.enabled, false);
+  assert.equal(b.velocity.minFullness, 0.7);
+  assert.equal(b.cache.enabled, false);
+  assert.equal(DEFAULT_SOFT_COMPACTION.velocity.enabled, false);
+});
+
+test("validateEffectiveCompactionSettings accepts defaults and rejects invalid merged invariants", () => {
+  const ok = resolveEffectiveCompactionSettings({}, {});
+  assert.equal(validateEffectiveCompactionSettings(ok).errors.length, 0);
+
+  const bad = resolveEffectiveCompactionSettings(
+    { soft: { nudgeRatio: 0.9, pruneRatio: 0.8 } },
+    {},
+  );
+  const errors = validateEffectiveCompactionSettings(bad).errors;
+  assert.ok(errors.includes("soft.nudgeRatio (0.9) must be less than soft.pruneRatio (0.8)"));
+});
+
+test("compaction validation rejects invalid velocity signal fields", () => {
+  const invalid = validateCompactionPatch({
+    soft: { velocity: { epochsToCritical: 0, minFullness: 1.5 } },
+  });
+  assert.ok(invalid.errors.includes("soft.velocity.epochsToCritical must be a positive safe integer"));
+  assert.ok(invalid.errors.includes("soft.velocity.minFullness must be a number in (0, 1)"));
+
+  const valid = validateCompactionPatch({
+    soft: { velocity: { enabled: true, epochsToCritical: 3, minFullness: 0.7 } },
+  });
   assert.equal(valid.errors.length, 0);
 });
 

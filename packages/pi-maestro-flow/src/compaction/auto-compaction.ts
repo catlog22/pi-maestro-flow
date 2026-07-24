@@ -4,6 +4,7 @@ import {
   DEFAULT_SOFT_COMPACTION,
   readEffectiveCompactionSettings,
   type EffectiveCompactionSettings,
+  type SoftCompactionSettings,
 } from "./compaction-settings.ts";
 import {
   type CompactionArbiter,
@@ -51,6 +52,45 @@ export type PruneManifest = Set<string> | Map<string, PruneManifestEntry>;
 
 export type ContextPressureBand = "normal" | "nudge" | "auto-prune" | "critical";
 
+/** What the pressure policy actually does, separated from the band label. */
+export type ContextAction = "none" | "prune" | "compact";
+
+export interface ContextDecision {
+  band: ContextPressureBand;
+  action: ContextAction;
+  reasons: string[];
+}
+
+/**
+ * Telemetry signals derived from the current context. velocity is added once a
+ * tracker lands; cacheHitRatio is undefined when no usable provider usage exists.
+ */
+export interface ContextSignals {
+  fullnessRatio: number;
+  criticalGap: number;
+  prunableFraction: number;
+  cacheHitRatio: number | undefined;
+}
+
+export interface VelocitySample {
+  epoch: string;
+  tokens: number;
+}
+
+/** Short-lived ring buffer of per-epoch context-size samples; owned by evaluate(). */
+export interface VelocityTracker {
+  samples: VelocitySample[];
+}
+
+export interface VelocityInfo {
+  /** Median tokens-per-epoch slope; undefined until >=3 samples exist. */
+  slope: number | undefined;
+  /** True when the recent window shows >=2 consecutive positive diffs. */
+  robustGrowth: boolean;
+  /** Estimated epochs until the critical threshold at the current slope. */
+  epochsToCritical: number | undefined;
+}
+
 export interface ContextPressureResult {
   messages: AgentMessage[];
   band: ContextPressureBand;
@@ -58,6 +98,10 @@ export interface ContextPressureResult {
   thresholdTokens: number;
   prunedToolResults: number;
   savedTokens: number;
+  action: ContextAction;
+  reasons: string[];
+  velocityTracker: VelocityTracker;
+  velocity: VelocityInfo;
 }
 
 interface AutoCompactionState {
@@ -75,6 +119,7 @@ interface AutoCompactionState {
   persistedPruneKey?: string;
   settingsSnapshot?: CompactionSettings;
   settingsCwd?: string;
+  velocityTracker: VelocityTracker;
 }
 
 interface AutoCompactionDependencies {
@@ -108,6 +153,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     internalsWarningShown: false,
     pruneManifest: new Map(),
     restoredPruneIds: new Set(),
+    velocityTracker: EMPTY_VELOCITY_TRACKER,
   };
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
@@ -128,6 +174,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.restoredPruneIds = loadPersistedPruneIds(ctx, state.sessionId);
       state.persistedPruneKey = pruneKey(state.restoredPruneIds);
       state.settingsSnapshot = undefined;
+      state.velocityTracker = EMPTY_VELOCITY_TRACKER;
       publishIdleStatus(ctx, settingsFor(ctx).enabled);
     },
     async evaluate(messages, ctx) {
@@ -159,10 +206,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ctx.model.contextWindow,
         settings,
         state.pruneManifest,
+        state.velocityTracker,
       );
+      state.velocityTracker = pressure.velocityTracker;
       updatePressureStatus(ctx, pressure);
       persistPruneManifest(pi, state);
-      if (pressure.band !== "critical") {
+      if (pressure.action !== "compact") {
         state.lastNoCompactableKey = undefined;
         return pressure.prunedToolResults > 0 ? pressure.messages : undefined;
       }
@@ -274,6 +323,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.persistedPruneKey = undefined;
       state.lastTriggerKey = undefined;
       state.lastNoCompactableKey = undefined;
+      state.velocityTracker = EMPTY_VELOCITY_TRACKER;
     },
     reset(ctx) {
       state.generation += 1;
@@ -289,6 +339,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.persistedPruneKey = undefined;
       state.settingsSnapshot = undefined;
       state.settingsCwd = undefined;
+      state.velocityTracker = EMPTY_VELOCITY_TRACKER;
       persistPruneManifest(pi, state);
       if (ctx) {
         clearPressureStatus(ctx);
@@ -306,6 +357,7 @@ export function applyContextPressurePolicy(
   contextWindow: number,
   settings: CompactionSettings,
   pruneManifest: PruneManifest = new Map(),
+  velocityTracker: VelocityTracker = EMPTY_VELOCITY_TRACKER,
 ): ContextPressureResult {
   const thresholdTokens = contextWindow - settings.reserveTokens;
   const applied = applyRecordedPrunes(messages, pruneManifest);
@@ -321,11 +373,25 @@ export function applyContextPressurePolicy(
   const criticalRatio = thresholdTokens / contextWindow;
   const initialRatio = initial / contextWindow;
   const initiallyCritical = initial > thresholdTokens;
-  if (!settings.enabled || (!initiallyCritical && (!soft.enabled || initialRatio < soft.nudgeRatio))) {
-    return pressureResult(transformed, "normal", initial, thresholdTokens, prunedToolResults, savedTokens);
+
+  // Velocity is sampled on the pre-new-prune effective estimate so recorded
+  // prunes stay accounted for and pruning does not create false slopes. Off by
+  // default: the tracker is untouched and escalation never fires when disabled.
+  let nextTracker = velocityTracker;
+  let velocity: VelocityInfo = { slope: undefined, robustGrowth: false, epochsToCritical: undefined };
+  let velocityEscalate = false;
+  if (settings.enabled && soft.velocity?.enabled) {
+    const observed = observeVelocity(velocityTracker, { epoch: latestProviderUsageEpoch(messages), tokens: initial });
+    nextTracker = observed.tracker;
+    velocity = buildVelocityInfo(observed, thresholdTokens - initial);
+    velocityEscalate = shouldVelocityEscalate(velocity, soft, initialRatio);
   }
-  if (soft.enabled && !initiallyCritical && initialRatio < soft.pruneRatio) {
-    return pressureResult(transformed, "nudge", initial, thresholdTokens, prunedToolResults, savedTokens);
+
+  if (!settings.enabled || (!initiallyCritical && !velocityEscalate && (!soft.enabled || initialRatio < soft.nudgeRatio))) {
+    return pressureResult({ messages: transformed, band: "normal", estimatedTokens: initial, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
+  }
+  if (soft.enabled && !initiallyCritical && !velocityEscalate && initialRatio < soft.pruneRatio) {
+    return pressureResult({ messages: transformed, band: "nudge", estimatedTokens: initial, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
   }
 
   // The soft layer gates only NEW pruning. Recorded prunes above stay applied so
@@ -357,16 +423,8 @@ export function applyContextPressurePolicy(
   }
   const estimatedTokens = Math.max(0, initial - newlySavedTokens);
   const ratio = estimatedTokens / contextWindow;
-  const band: ContextPressureBand = ratio > criticalRatio
-    ? "critical"
-    : prunedToolResults > 0
-      ? "auto-prune"
-    : ratio >= soft.pruneRatio
-      ? "auto-prune"
-      : ratio >= soft.nudgeRatio
-        ? "nudge"
-        : "normal";
-  return pressureResult(transformed, band, estimatedTokens, thresholdTokens, prunedToolResults, savedTokens);
+  const band = derivePressureBand({ ratio, criticalRatio, prunedToolResults, soft });
+  return pressureResult({ messages: transformed, band, estimatedTokens, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
 }
 
 function applyRecordedPrunes(messages: AgentMessage[], pruneManifest: PruneManifest): AppliedPrunes {
@@ -571,15 +629,164 @@ function replaceableToolResult(message: AgentMessage): AgentMessage | undefined 
   } as AgentMessage;
 }
 
-function pressureResult(
-  messages: AgentMessage[],
-  band: ContextPressureBand,
-  estimatedTokens: number,
-  thresholdTokens: number,
-  prunedToolResults: number,
-  savedTokens: number,
-): ContextPressureResult {
-  return { messages, band, estimatedTokens, thresholdTokens, prunedToolResults, savedTokens };
+interface PressureResultInput {
+  messages: AgentMessage[];
+  band: ContextPressureBand;
+  estimatedTokens: number;
+  contextWindow: number;
+  thresholdTokens: number;
+  prunedToolResults: number;
+  savedTokens: number;
+  velocityTracker: VelocityTracker;
+  velocity: VelocityInfo;
+}
+
+function pressureResult(input: PressureResultInput): ContextPressureResult {
+  const { messages, band, estimatedTokens, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker, velocity } = input;
+  // The common low-pressure path skips the telemetry scan entirely.
+  const decision: ContextDecision = band === "normal"
+    ? { band, action: "none", reasons: [] }
+    : decideContextAction(band, computeContextSignals({ messages, estimatedTokens, contextWindow, thresholdTokens }));
+  const reasons = [...decision.reasons];
+  if (band !== "normal" && velocity.slope !== undefined) {
+    const epochs = velocity.epochsToCritical !== undefined ? `,${velocity.epochsToCritical.toFixed(1)}ep` : "";
+    reasons.push(`velocity:${Math.round(velocity.slope)}/ep${epochs}`);
+  }
+  return {
+    messages,
+    band,
+    estimatedTokens,
+    thresholdTokens,
+    prunedToolResults,
+    savedTokens,
+    action: decision.action,
+    reasons,
+    velocityTracker,
+    velocity,
+  };
+}
+
+/** Final band derivation, extracted verbatim so it can be unit-tested in isolation. */
+export function derivePressureBand(input: {
+  ratio: number;
+  criticalRatio: number;
+  prunedToolResults: number;
+  soft: SoftCompactionSettings;
+}): ContextPressureBand {
+  const { ratio, criticalRatio, prunedToolResults, soft } = input;
+  if (ratio > criticalRatio) return "critical";
+  if (prunedToolResults > 0) return "auto-prune";
+  if (ratio >= soft.pruneRatio) return "auto-prune";
+  if (ratio >= soft.nudgeRatio) return "nudge";
+  return "normal";
+}
+
+export function computeContextSignals(input: {
+  messages: AgentMessage[];
+  estimatedTokens: number;
+  contextWindow: number;
+  thresholdTokens: number;
+}): ContextSignals {
+  const { messages, estimatedTokens, contextWindow, thresholdTokens } = input;
+  const fullnessRatio = contextWindow > 0 ? estimatedTokens / contextWindow : 0;
+  const criticalGap = thresholdTokens - estimatedTokens;
+  let prunableTokens = 0;
+  for (const message of messages) {
+    if (!replaceableToolResult(message)) continue;
+    prunableTokens += estimateMessageTokens(message);
+  }
+  const prunableFraction = estimatedTokens > 0 ? Math.min(1, prunableTokens / estimatedTokens) : 0;
+  return { fullnessRatio, criticalGap, prunableFraction, cacheHitRatio: latestCacheHitRatio(messages) };
+}
+
+/**
+ * Maps a band to its action and telemetry reasons. Phase 2 velocity escalation
+ * will live here; with velocity disabled this is a pure band→action projection.
+ */
+export function decideContextAction(band: ContextPressureBand, signals: ContextSignals): ContextDecision {
+  const action: ContextAction = band === "critical" ? "compact" : band === "auto-prune" ? "prune" : "none";
+  const reasons: string[] = [];
+  if (signals.prunableFraction > 0) reasons.push(`prunable:${Math.round(signals.prunableFraction * 100)}%`);
+  if (signals.cacheHitRatio !== undefined) reasons.push(`cache:${Math.round(signals.cacheHitRatio * 100)}%`);
+  return { band, action, reasons };
+}
+
+function latestCacheHitRatio(messages: AgentMessage[]): number | undefined {
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const usage = assistantUsage(messages[index]);
+    if (!usage) continue;
+    const denominator = usage.cacheRead + usage.input;
+    return denominator > 0 ? usage.cacheRead / denominator : undefined;
+  }
+  return undefined;
+}
+
+const VELOCITY_SAMPLE_CAP = 4;
+export const EMPTY_VELOCITY_TRACKER: VelocityTracker = { samples: [] };
+
+/**
+ * Append a per-epoch context-size sample (deduped by epoch, capped) and report
+ * the resulting trend. Pure: returns a new tracker, never mutates the input.
+ */
+export function observeVelocity(
+  tracker: VelocityTracker,
+  observation: { epoch: string | undefined; tokens: number },
+): { tracker: VelocityTracker; slope: number | undefined; robustGrowth: boolean } {
+  const samples = tracker.samples;
+  if (observation.epoch === undefined
+    || (samples.length > 0 && samples[samples.length - 1].epoch === observation.epoch)) {
+    return { tracker, slope: medianSlope(samples), robustGrowth: hasRobustGrowth(samples) };
+  }
+  const next = [...samples, { epoch: observation.epoch, tokens: observation.tokens }];
+  while (next.length > VELOCITY_SAMPLE_CAP) next.shift();
+  const updated = { samples: next };
+  return { tracker: updated, slope: medianSlope(next), robustGrowth: hasRobustGrowth(next) };
+}
+
+export function buildVelocityInfo(
+  observed: { slope: number | undefined; robustGrowth: boolean },
+  criticalGap: number,
+): VelocityInfo {
+  const epochsToCritical = observed.slope !== undefined && observed.slope > 0
+    ? Math.max(0, criticalGap) / observed.slope
+    : undefined;
+  return { slope: observed.slope, robustGrowth: observed.robustGrowth, epochsToCritical };
+}
+
+export function shouldVelocityEscalate(
+  info: VelocityInfo,
+  soft: SoftCompactionSettings,
+  fullnessRatio: number,
+): boolean {
+  const velocity = soft.velocity;
+  if (!velocity?.enabled) return false;
+  if (fullnessRatio < velocity.minFullness) return false;
+  if (!info.robustGrowth) return false;
+  if (info.epochsToCritical === undefined) return false;
+  return info.epochsToCritical <= velocity.epochsToCritical;
+}
+
+function medianSlope(samples: VelocitySample[]): number | undefined {
+  if (samples.length < 3) return undefined;
+  const diffs: number[] = [];
+  for (let index = 1; index < samples.length; index++) {
+    diffs.push(samples[index].tokens - samples[index - 1].tokens);
+  }
+  const sorted = [...diffs].sort((a, b) => a - b);
+  return sorted[Math.floor(sorted.length / 2)];
+}
+
+function hasRobustGrowth(samples: VelocitySample[]): boolean {
+  let consecutive = 0;
+  for (let index = 1; index < samples.length; index++) {
+    if (samples[index].tokens > samples[index - 1].tokens) {
+      consecutive += 1;
+      if (consecutive >= 2) return true;
+    } else {
+      consecutive = 0;
+    }
+  }
+  return false;
 }
 
 function updatePressureStatus(ctx: ExtensionContext, pressure: ContextPressureResult): void {
@@ -588,9 +795,10 @@ function updatePressureStatus(ctx: ExtensionContext, pressure: ContextPressureRe
     return;
   }
   const pruned = pressure.prunedToolResults > 0 ? ` -${pressure.prunedToolResults}` : "";
+  const reasons = pressure.reasons.length > 0 ? ` ${pressure.reasons.join(" ")}` : "";
   ctx.ui.setStatus(
     COMPACTION_STATUS_KEY,
-    `CTX ${pressure.band.toUpperCase()} ${pressure.estimatedTokens}/${pressure.thresholdTokens}${pruned}`,
+    `CTX ${pressure.band.toUpperCase()} ${pressure.estimatedTokens}/${pressure.thresholdTokens}${pruned}${reasons}`,
   );
 }
 

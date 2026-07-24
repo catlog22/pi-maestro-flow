@@ -6,11 +6,33 @@ import { dirname, join } from "node:path";
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 
+export interface VelocityCompactionConfigPatch {
+  enabled?: boolean;
+  epochsToCritical?: number;
+  minFullness?: number;
+}
+
+export interface VelocityCompactionSettings {
+  enabled: boolean;
+  epochsToCritical: number;
+  minFullness: number;
+}
+
+export interface CacheCompactionConfigPatch {
+  enabled?: boolean;
+}
+
+export interface CacheCompactionSettings {
+  enabled: boolean;
+}
+
 export interface SoftCompactionConfigPatch {
   enabled?: boolean;
   nudgeRatio?: number;
   pruneRatio?: number;
   pruneTargetRatio?: number;
+  velocity?: VelocityCompactionConfigPatch;
+  cache?: CacheCompactionConfigPatch;
 }
 
 export interface SoftCompactionSettings {
@@ -18,15 +40,27 @@ export interface SoftCompactionSettings {
   nudgeRatio: number;
   pruneRatio: number;
   pruneTargetRatio: number;
+  velocity: VelocityCompactionSettings;
+  cache: CacheCompactionSettings;
 }
 
-/** Balanced soft-layer conditions; equivalent to the historical hardcoded ratios. */
-export const DEFAULT_SOFT_COMPACTION: SoftCompactionSettings = {
-  enabled: true,
-  nudgeRatio: 0.7,
-  pruneRatio: 0.8,
-  pruneTargetRatio: 0.7,
-};
+/**
+ * Balanced soft-layer conditions; equivalent to the historical hardcoded ratios.
+ * Signal criteria (velocity/cache) default to disabled so unresolved settings
+ * preserve the historical token-ratio-only behavior.
+ */
+export function createDefaultSoftCompaction(): SoftCompactionSettings {
+  return {
+    enabled: true,
+    nudgeRatio: 0.7,
+    pruneRatio: 0.8,
+    pruneTargetRatio: 0.7,
+    velocity: { enabled: false, epochsToCritical: 3, minFullness: 0.7 },
+    cache: { enabled: false },
+  };
+}
+
+export const DEFAULT_SOFT_COMPACTION: SoftCompactionSettings = createDefaultSoftCompaction();
 
 export interface CompactionConfigPatch {
   enabled?: boolean;
@@ -103,7 +137,30 @@ function readRawSoft(value: unknown): SoftCompactionConfigPatch | undefined {
   if (pruneRatio !== undefined) soft.pruneRatio = pruneRatio;
   const pruneTargetRatio = ratioNumber(value.pruneTargetRatio);
   if (pruneTargetRatio !== undefined) soft.pruneTargetRatio = pruneTargetRatio;
+  const velocity = readRawVelocity(value.velocity);
+  if (velocity) soft.velocity = velocity;
+  const cache = readRawCache(value.cache);
+  if (cache) soft.cache = cache;
   return Object.keys(soft).length > 0 ? soft : undefined;
+}
+
+function readRawVelocity(value: unknown): VelocityCompactionConfigPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const velocity: VelocityCompactionConfigPatch = {};
+  if (typeof value.enabled === "boolean") velocity.enabled = value.enabled;
+  if (typeof value.epochsToCritical === "number" && Number.isSafeInteger(value.epochsToCritical) && value.epochsToCritical >= 1) {
+    velocity.epochsToCritical = value.epochsToCritical;
+  }
+  const minFullness = ratioNumber(value.minFullness);
+  if (minFullness !== undefined) velocity.minFullness = minFullness;
+  return Object.keys(velocity).length > 0 ? velocity : undefined;
+}
+
+function readRawCache(value: unknown): CacheCompactionConfigPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const cache: CacheCompactionConfigPatch = {};
+  if (typeof value.enabled === "boolean") cache.enabled = value.enabled;
+  return Object.keys(cache).length > 0 ? cache : undefined;
 }
 
 function ratioNumber(value: unknown): number | undefined {
@@ -143,7 +200,7 @@ export function resolveEffectiveCompactionSettings(
   let enabled = true;
   let reserveTokens = DEFAULT_RESERVE_TOKENS;
   let keepRecentTokens = DEFAULT_KEEP_RECENT_TOKENS;
-  const soft: SoftCompactionSettings = { ...DEFAULT_SOFT_COMPACTION };
+  const soft: SoftCompactionSettings = createDefaultSoftCompaction();
 
   for (const [patch, src] of [[userPatch, "user"], [projectPatch, "project"]] as const) {
     if (patch.enabled !== undefined) { enabled = patch.enabled; source.enabled = src; }
@@ -154,6 +211,14 @@ export function resolveEffectiveCompactionSettings(
       if (patch.soft.nudgeRatio !== undefined) soft.nudgeRatio = patch.soft.nudgeRatio;
       if (patch.soft.pruneRatio !== undefined) soft.pruneRatio = patch.soft.pruneRatio;
       if (patch.soft.pruneTargetRatio !== undefined) soft.pruneTargetRatio = patch.soft.pruneTargetRatio;
+      if (patch.soft.velocity !== undefined) {
+        if (patch.soft.velocity.enabled !== undefined) soft.velocity.enabled = patch.soft.velocity.enabled;
+        if (patch.soft.velocity.epochsToCritical !== undefined) soft.velocity.epochsToCritical = patch.soft.velocity.epochsToCritical;
+        if (patch.soft.velocity.minFullness !== undefined) soft.velocity.minFullness = patch.soft.velocity.minFullness;
+      }
+      if (patch.soft.cache !== undefined) {
+        if (patch.soft.cache.enabled !== undefined) soft.cache.enabled = patch.soft.cache.enabled;
+      }
       source.soft = src;
     }
   }
@@ -209,6 +274,18 @@ export function validateCompactionPatch(
     if (soft.pruneTargetRatio !== undefined && soft.pruneRatio !== undefined && soft.pruneTargetRatio >= soft.pruneRatio) {
       errors.push(`soft.pruneTargetRatio (${soft.pruneTargetRatio}) must be less than soft.pruneRatio (${soft.pruneRatio})`);
     }
+    const velocity = soft.velocity;
+    if (velocity !== undefined) {
+      if (velocity.epochsToCritical !== undefined
+        && (!Number.isSafeInteger(velocity.epochsToCritical) || velocity.epochsToCritical < 1)) {
+        errors.push(`soft.velocity.epochsToCritical must be a positive safe integer`);
+      }
+      if (velocity.minFullness !== undefined
+        && (typeof velocity.minFullness !== "number" || !Number.isFinite(velocity.minFullness)
+          || velocity.minFullness <= 0 || velocity.minFullness >= 1)) {
+        errors.push(`soft.velocity.minFullness must be a number in (0, 1)`);
+      }
+    }
   }
 
   if (contextWindow === undefined) {
@@ -216,6 +293,42 @@ export function validateCompactionPatch(
   }
 
   return { errors, warnings };
+}
+
+/**
+ * Full invariant check on a resolved effective settings object. Per-patch
+ * validation cannot catch invalid combinations produced by layering user and
+ * project scopes; callers (TUI, tests) use this to validate the merged result.
+ */
+export function validateEffectiveCompactionSettings(settings: EffectiveCompactionSettings): CompactionValidation {
+  const errors: string[] = [];
+  const soft = settings.soft;
+  for (const field of ["nudgeRatio", "pruneRatio", "pruneTargetRatio"] as const) {
+    const value = soft[field];
+    if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value >= 1) {
+      errors.push(`soft.${field} must be a number in (0, 1)`);
+    }
+  }
+  if (soft.nudgeRatio >= soft.pruneRatio) {
+    errors.push(`soft.nudgeRatio (${soft.nudgeRatio}) must be less than soft.pruneRatio (${soft.pruneRatio})`);
+  }
+  if (soft.pruneTargetRatio >= soft.pruneRatio) {
+    errors.push(`soft.pruneTargetRatio (${soft.pruneTargetRatio}) must be less than soft.pruneRatio (${soft.pruneRatio})`);
+  }
+  if (!Number.isSafeInteger(soft.velocity.epochsToCritical) || soft.velocity.epochsToCritical < 1) {
+    errors.push(`soft.velocity.epochsToCritical must be a positive safe integer`);
+  }
+  if (typeof soft.velocity.minFullness !== "number" || !Number.isFinite(soft.velocity.minFullness)
+    || soft.velocity.minFullness <= 0 || soft.velocity.minFullness >= 1) {
+    errors.push(`soft.velocity.minFullness must be a number in (0, 1)`);
+  }
+  if (!Number.isSafeInteger(settings.reserveTokens) || settings.reserveTokens <= 0) {
+    errors.push(`reserveTokens must be a positive safe integer`);
+  }
+  if (!Number.isSafeInteger(settings.keepRecentTokens) || settings.keepRecentTokens <= 0) {
+    errors.push(`keepRecentTokens must be a positive safe integer`);
+  }
+  return { errors, warnings: [] };
 }
 
 const writeQueues = new Map<string, Promise<void>>();

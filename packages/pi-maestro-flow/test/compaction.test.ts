@@ -17,7 +17,10 @@ import {
 } from "../src/compaction/maestro-compaction.ts";
 import {
   applyContextPressurePolicy,
+  computeContextSignals,
   createMidTurnAutoCompaction,
+  decideContextAction,
+  derivePressureBand,
   endsWithCompleteToolResultBatch,
   estimateContextTokens,
   shouldCompactMidTurn,
@@ -26,6 +29,7 @@ import {
   CompactionArbiter,
   compactionRequestFromInstructions,
 } from "../src/compaction/compaction-arbiter.ts";
+import { DEFAULT_SOFT_COMPACTION } from "../src/compaction/compaction-settings.ts";
 import {
   initTodo,
   onSessionShutdown,
@@ -1091,3 +1095,105 @@ function pressureToolBatch() {
     isError: false,
   }] as never;
 }
+
+test("derivePressureBand reproduces the historical band classification", () => {
+  const soft = DEFAULT_SOFT_COMPACTION; // nudgeRatio 0.7, pruneRatio 0.8
+  const criticalRatio = 0.9;
+  assert.equal(derivePressureBand({ ratio: 0.95, criticalRatio, prunedToolResults: 0, soft }), "critical");
+  assert.equal(derivePressureBand({ ratio: 0.5, criticalRatio, prunedToolResults: 1, soft }), "auto-prune");
+  assert.equal(derivePressureBand({ ratio: 0.8, criticalRatio, prunedToolResults: 0, soft }), "auto-prune");
+  assert.equal(derivePressureBand({ ratio: 0.7, criticalRatio, prunedToolResults: 0, soft }), "nudge");
+  assert.equal(derivePressureBand({ ratio: 0.5, criticalRatio, prunedToolResults: 0, soft }), "normal");
+});
+
+test("computeContextSignals derives fullness, gap, prunable fraction and cache hit ratio", () => {
+  const assistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 300, cacheWrite: 0, cost: { total: 0 } },
+  };
+  const bigResult = {
+    role: "toolResult",
+    toolCallId: "call",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(8_000) }],
+    isError: false,
+  };
+  const messages = [assistant, bigResult] as never;
+  const signals = computeContextSignals({
+    messages,
+    estimatedTokens: 1_000,
+    contextWindow: 2_000,
+    thresholdTokens: 1_600,
+  });
+  assert.equal(signals.fullnessRatio, 0.5);
+  assert.equal(signals.criticalGap, 600);
+  assert.ok(signals.prunableFraction > 0);
+  assert.equal(signals.cacheHitRatio, 0.75); // cacheRead / (cacheRead + input)
+});
+
+test("computeContextSignals reports unknown cache hit ratio without usable usage", () => {
+  const messages = [{ role: "user", content: [{ type: "text", text: "hi" }] }] as never;
+  const signals = computeContextSignals({
+    messages,
+    estimatedTokens: 10,
+    contextWindow: 1_000,
+    thresholdTokens: 900,
+  });
+  assert.equal(signals.cacheHitRatio, undefined);
+  assert.equal(signals.prunableFraction, 0);
+});
+
+test("decideContextAction maps bands to actions and telemetry reasons", () => {
+  const signals = { fullnessRatio: 0.85, criticalGap: 100, prunableFraction: 0.6, cacheHitRatio: 0.5 };
+  assert.equal(decideContextAction("critical", signals).action, "compact");
+  assert.equal(decideContextAction("auto-prune", signals).action, "prune");
+  assert.equal(decideContextAction("nudge", signals).action, "none");
+  assert.equal(decideContextAction("normal", signals).action, "none");
+  const reasons = decideContextAction("auto-prune", signals).reasons;
+  assert.ok(reasons.includes("prunable:60%"));
+  assert.ok(reasons.includes("cache:50%"));
+});
+
+test("pressure policy exposes action consistent with band", () => {
+  const oldAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }],
+    usage: { input: 700, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  };
+  const oldResult = {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "read",
+    content: [{ type: "text", text: "o".repeat(8_000) }],
+    isError: false,
+  };
+  const recentAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "recent", name: "read", arguments: {} }],
+  };
+  const recentResult = {
+    role: "toolResult",
+    toolCallId: "recent",
+    toolName: "read",
+    content: [{ type: "text", text: "r".repeat(8_000) }],
+    isError: false,
+  };
+  const settings = { enabled: true, reserveTokens: 400, keepRecentTokens: 2_000 };
+
+  const autoPrune = applyContextPressurePolicy(
+    [oldAssistant, oldResult, recentAssistant, recentResult],
+    4_000,
+    settings,
+  );
+  assert.equal(autoPrune.band, "auto-prune");
+  assert.equal(autoPrune.action, "prune");
+
+  const critical = applyContextPressurePolicy(
+    [oldAssistant, oldResult, recentAssistant, recentResult],
+    2_000,
+    settings,
+  );
+  assert.equal(critical.band, "critical");
+  assert.equal(critical.action, "compact");
+});
