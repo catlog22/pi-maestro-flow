@@ -66,6 +66,15 @@ export interface TodoTask {
   updatedAt: number;
 }
 
+export interface TodoBatchSpec {
+  subject: string;
+  description?: string;
+  context?: string;
+  skills?: TodoSkillBinding[];
+  assignee?: string;
+  blockedBy?: string[];
+}
+
 export interface TodoParams {
   action: "create" | "update" | "list" | "get" | "delete" | "clear" | "next";
   subject?: string;
@@ -77,6 +86,7 @@ export interface TodoParams {
   summary?: string;
   id?: string;
   assignee?: string;
+  tasks?: TodoBatchSpec[];
   filter?: { status?: TaskStatus; memberId?: string };
   planHandoffKey?: string;
 }
@@ -135,6 +145,7 @@ const TODO_STATE_VERSION = 5;
 let tasks: Map<string, TodoTask> = new Map();
 let knownActors: Map<string, TodoActorRef> = new Map([[ROOT_TODO_ACTOR.id, ROOT_TODO_ACTOR]]);
 let extensionApi: ExtensionAPI | undefined;
+let onTodoStateChanged: (() => void) | undefined;
 let skillLoader: TodoSkillLoader | undefined;
 let skillRuntime: SkillRuntime | undefined;
 let activeSkillSnapshots: Map<string, SkillActivation> = new Map();
@@ -486,6 +497,7 @@ async function executeTodoAction(
 // ---------------------------------------------------------------------------
 
 function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActorRef): AgentToolResult {
+  if (params.tasks && params.tasks.length > 0) return handleBatchCreate(params.tasks, actor);
   if (!params.subject) return err("subject is required for create", "create");
 
   const id = randomUUID().slice(0, 8);
@@ -519,6 +531,88 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
   commitTodoState(nextTasks);
 
   return ok(`Created #${id}: ${task.subject} (${task.status})`, "create");
+}
+
+/**
+ * Create an entire multi-step plan in one call. Array order is the execution
+ * order (monotonic createdAt); a blockedBy entry of "#N" depends on the Nth
+ * task in this same batch. The whole batch commits atomically — any invalid
+ * spec aborts the create without touching existing state.
+ */
+function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef): AgentToolResult {
+  const nextTasks = cloneTaskMap();
+
+  const ids: string[] = [];
+  const reserved = new Set<string>(nextTasks.keys());
+  for (let i = 0; i < specs.length; i++) {
+    let id = randomUUID().slice(0, 8);
+    while (reserved.has(id)) id = randomUUID().slice(0, 8);
+    reserved.add(id);
+    ids.push(id);
+  }
+
+  const resolvedDeps: string[][] = [];
+  for (let i = 0; i < specs.length; i++) {
+    const deps: string[] = [];
+    for (const dep of specs[i].blockedBy ?? []) {
+      const match = /^#(\d+)$/.exec(dep.trim());
+      if (!match) {
+        deps.push(dep);
+        continue;
+      }
+      const index = Number(match[1]);
+      if (index >= specs.length) {
+        return err(`tasks[${i}].blockedBy references out-of-range batch index: ${dep}`, "create");
+      }
+      if (index === i) return err(`tasks[${i}] cannot block itself`, "create");
+      deps.push(ids[index]);
+    }
+    resolvedDeps.push(deps);
+  }
+
+  const created: TodoTask[] = [];
+  let clock = Date.now();
+  for (let i = 0; i < specs.length; i++) {
+    const spec = specs[i];
+    const subject = spec.subject?.trim();
+    if (!subject) return err(`tasks[${i}].subject is required`, "create");
+
+    const blockerResolution = resolveBlockedBy(ids[i], resolvedDeps[i], nextTasks);
+    if (blockerResolution.error) return err(`tasks[${i}]: ${blockerResolution.error}`, "create");
+    const blockedBy = blockerResolution.blockedBy;
+
+    const assignee = resolveAssignee(spec.assignee, actor);
+    if ("error" in assignee) return err(`tasks[${i}]: ${assignee.error}`, "create");
+
+    let skills: TodoSkillBinding[];
+    try {
+      skills = spec.skills ? normalizeSkillBindings(spec.skills) : [];
+    } catch (e) {
+      return err(`tasks[${i}]: ${e instanceof Error ? e.message : String(e)}`, "create");
+    }
+
+    clock += 1;
+    const task: TodoTask = {
+      id: ids[i],
+      subject,
+      description: spec.description,
+      status: blockedBy.length > 0 ? "blocked" : "pending",
+      blockedBy,
+      skills,
+      ...(spec.context ? { context: spec.context } : {}),
+      createdBy: cloneActor(actor),
+      assignee: assignee.actor,
+      createdAt: clock,
+      updatedAt: clock,
+    };
+    nextTasks.set(ids[i], task);
+    created.push(task);
+  }
+
+  commitTodoState(nextTasks);
+
+  const lines = created.map((t) => `#${t.id} ${t.subject} (${t.status})`);
+  return ok(`Created ${created.length} tasks:\n${lines.join("\n")}`, "create");
 }
 
 async function handleUpdate(
@@ -888,6 +982,7 @@ function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
 function resolveBlockedBy(
   taskId: string,
   proposedDeps: readonly string[],
+  state: Map<string, TodoTask> = tasks,
 ): { blockedBy: string[]; error?: string } {
   const blockedBy: string[] = [];
   const seen = new Set<string>();
@@ -895,7 +990,7 @@ function resolveBlockedBy(
     if (seen.has(depId)) continue;
     seen.add(depId);
     if (depId === taskId) return { blockedBy: [], error: "Task cannot block itself" };
-    const dependency = tasks.get(depId);
+    const dependency = state.get(depId);
     if (!dependency) {
       return { blockedBy: [], error: `blockedBy references unknown task: ${depId}` };
     }
@@ -905,7 +1000,7 @@ function resolveBlockedBy(
     if (dependency.status === "completed") continue;
     blockedBy.push(depId);
   }
-  if (hasCycle(taskId, blockedBy)) {
+  if (hasCycle(taskId, blockedBy, state)) {
     return { blockedBy: [], error: "blockedBy would create a dependency cycle" };
   }
   return { blockedBy };
@@ -915,7 +1010,11 @@ function deriveDependencyStatus(blockedBy: readonly string[]): "blocked" | "pend
   return blockedBy.length > 0 ? "blocked" : "pending";
 }
 
-function hasCycle(taskId: string, proposedDeps: string[]): boolean {
+function hasCycle(
+  taskId: string,
+  proposedDeps: string[],
+  state: Map<string, TodoTask> = tasks,
+): boolean {
   const visited = new Set<string>();
   const stack = [...proposedDeps];
   while (stack.length > 0) {
@@ -923,7 +1022,7 @@ function hasCycle(taskId: string, proposedDeps: string[]): boolean {
     if (current === taskId) return true;
     if (visited.has(current)) continue;
     visited.add(current);
-    const dep = tasks.get(current);
+    const dep = state.get(current);
     if (dep) stack.push(...dep.blockedBy);
   }
   return false;
@@ -975,6 +1074,12 @@ function commitTodoState(
   persist(nextTasks);
   tasks = nextTasks;
   markTodoChanged();
+  onTodoStateChanged?.();
+}
+
+/** Bind the root UI/UCL to durable Todo state changes. */
+export function setTodoStateChangeListener(listener: (() => void) | undefined): void {
+  onTodoStateChanged = listener;
 }
 
 function loadTasksFromSession(ctx: TodoContext): Map<string, TodoTask> {

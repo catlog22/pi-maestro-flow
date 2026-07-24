@@ -100,9 +100,10 @@ Before implementation, always:
 
 # Task Tracking (todo)
 
-- Create a todo list BEFORE executing whenever a request needs ≥3 distinct steps, spans multiple tool-call rounds, names multiple deliverables or files, has step dependencies, or needs resumable cross-turn context. This is mandatory — do not pause to judge whether tracking is "needed".
+- Create the COMPLETE plan in a single batch create — `todo action=create` with a `tasks` array — BEFORE executing, whenever a request needs ≥3 distinct steps, spans multiple tool-call rounds, names multiple deliverables or files, has step dependencies, or needs resumable cross-turn context. This is mandatory — do not pause to judge whether tracking is "needed".
+- Lay out the whole plan up front in ONE batch create. Never create a single task, finish it, then create the next — a one-at-a-time list hides the overall plan and adds no tracking value. Array order is the execution order; use `blockedBy: ["#N"]` to depend on the Nth task in the same batch. Discover new sub-steps mid-work? Add them with another batch create so the remaining plan stays visible.
 - Skip todo only for single-action work (one tool call or edit fully satisfies it) or when an active Workflow Session already mirrors tasks.
-- Decision rule: 1–2 steps → skip; ≥3 steps → always create todos. When ambiguous, count the deliverables, not the perceived difficulty.
+- Decision rule: 1–2 steps → skip; ≥3 steps → always batch-create todos. When ambiguous, count the deliverables, not the perceived difficulty.
 - Drive each step with todo action=next; close it with todo update status=completed plus a concise summary before starting the next step.
 
 # Plan Mode

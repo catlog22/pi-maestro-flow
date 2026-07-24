@@ -1257,3 +1257,81 @@ test("todo next reports legacy dependency deadlocks and normalizes completed blo
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("todo batch create lays out a whole plan in one call with ordered execution and #N dependencies", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-batch-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    const created = await executeTodo({
+      action: "create",
+      tasks: [
+        { subject: "Design schema" },
+        { subject: "Implement handler", blockedBy: ["#0"] },
+        { subject: "Write tests", blockedBy: ["#1"] },
+      ],
+    }, ctx);
+
+    assert.equal((created as { isError?: boolean }).isError, undefined);
+    assert.match((created.content[0] as { text: string }).text, /Created 3 tasks/);
+
+    const visible = getVisibleTasks();
+    assert.deepEqual(visible.map((t) => t.subject), ["Design schema", "Implement handler", "Write tests"]);
+    assert.deepEqual(visible.map((t) => t.status), ["pending", "blocked", "blocked"]);
+
+    const [first, second, third] = visible;
+    assert.deepEqual(second.blockedBy, [first.id]);
+    assert.deepEqual(third.blockedBy, [second.id]);
+
+    const next = await executeTodo({ action: "next" }, ctx);
+    assert.match((next.content[0] as { text: string }).text, /Design schema/);
+    assert.deepEqual(getVisibleTasks().map((t) => t.status), ["in_progress", "blocked", "blocked"]);
+
+    await executeTodo({ action: "update", id: first.id, status: "completed", summary: "done" }, ctx);
+    const after = getVisibleTasks();
+    assert.equal(after[1].status, "pending");
+    assert.deepEqual(after[1].blockedBy, []);
+    assert.equal(after[2].status, "blocked");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo batch create is atomic — an invalid spec aborts without creating any task", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-batch-atomic-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    const outOfRange = await executeTodo({
+      action: "create",
+      tasks: [{ subject: "A" }, { subject: "B", blockedBy: ["#5"] }],
+    }, ctx);
+    assert.equal((outOfRange as { isError?: boolean }).isError, true);
+    assert.match((outOfRange.content[0] as { text: string }).text, /out-of-range batch index/);
+    assert.equal(getVisibleTasks().length, 0);
+
+    const missingSubject = await executeTodo({
+      action: "create",
+      tasks: [{ subject: "A" }, { subject: "   " }],
+    }, ctx);
+    assert.equal((missingSubject as { isError?: boolean }).isError, true);
+    assert.match((missingSubject.content[0] as { text: string }).text, /tasks\[1\]\.subject is required/);
+    assert.equal(getVisibleTasks().length, 0);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});

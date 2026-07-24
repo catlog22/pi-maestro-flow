@@ -175,6 +175,30 @@ const TodoFilterSchema = Type.Object({
   ),
 });
 
+const TodoBatchTaskSchema = Type.Object({
+  subject: Type.String({
+    minLength: 1,
+    description: "Task title",
+  }),
+  description: Type.Optional(
+    Type.String({ description: "Long-form task detail" }),
+  ),
+  context: Type.Optional(
+    Type.String({ description: "Plain-text execution context for this step" }),
+  ),
+  skills: Type.Optional(
+    Type.Array(TodoSkillBindingSchema, { description: "Ordered Pi skill bindings; exactly one primary when present" }),
+  ),
+  assignee: Type.Optional(
+    Type.String({ description: "Assignee selector; defaults to the calling actor" }),
+  ),
+  blockedBy: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Existing task IDs, or \"#N\" to depend on the Nth task in this same batch (0-based, e.g. \"#0\")",
+    }),
+  ),
+});
+
 export const TodoToolParams = Type.Object({
   action: StringEnum([
     "create",
@@ -211,6 +235,12 @@ export const TodoToolParams = Type.Object({
   ),
   assignee: Type.Optional(
     Type.String({ description: "Assignee selector: self, root, a known teammate id or unique id prefix, label, @label, or label#id-prefix" }),
+  ),
+
+  tasks: Type.Optional(
+    Type.Array(TodoBatchTaskSchema, {
+      description: "Batch-create an entire multi-step plan in ONE create call instead of creating tasks one by one. Array order is the execution order; use blockedBy \"#N\" for intra-plan dependencies",
+    }),
   ),
 
   id: Type.Optional(
