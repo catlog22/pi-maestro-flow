@@ -18,6 +18,8 @@ import {
 import {
   applyContextPressurePolicy,
   buildVelocityInfo,
+  compactionBreakerAllows,
+  COMPACTION_BREAKER_COOLDOWN_TURNS,
   computeContextSignals,
   createMidTurnAutoCompaction,
   decideContextAction,
@@ -25,9 +27,14 @@ import {
   EMPTY_VELOCITY_TRACKER,
   endsWithCompleteToolResultBatch,
   estimateContextTokens,
+  MAX_CONSECUTIVE_COMPACTION_FAILURES,
   observeVelocity,
+  recordCompactionFailure,
+  redundantToolResultCallIds,
+  resetCompactionBreaker,
   shouldCompactMidTurn,
   shouldVelocityEscalate,
+  toolResultPatternKey,
 } from "../src/compaction/auto-compaction.ts";
 import {
   CompactionArbiter,
@@ -1344,4 +1351,190 @@ test("pressure policy threads the velocity tracker and dedupes the current epoch
   assert.equal(first.velocityTracker.samples.length, 4, "current epoch appended");
   const second = applyContextPressurePolicy(messages, 10_000, settings, new Map(), first.velocityTracker);
   assert.equal(second.velocityTracker.samples.length, 4, "same epoch not re-added");
+});
+
+// --- F1: content-aware token estimation ---
+
+test("token estimate is content-aware: code denser and whitespace-heavy sparser than plain content", () => {
+  const LEN = 4_000;
+  const mk = (text: string) => [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "c", name: "read", arguments: {} }],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "c",
+    toolName: "read",
+    content: [{ type: "text", text }],
+    isError: false,
+  }] as never;
+  const codeTokens = estimateContextTokens(mk("```ts\n" + "z".repeat(LEN - 6))).trailingTokens;
+  const plainTokens = estimateContextTokens(mk("z".repeat(LEN))).trailingTokens;
+  const whitespaceTokens = estimateContextTokens(mk(" ".repeat(LEN))).trailingTokens;
+  assert.ok(codeTokens > plainTokens, "fenced code (~3.5 chars/tok) must estimate more tokens than same-length plain content");
+  assert.ok(plainTokens > whitespaceTokens, "whitespace-heavy content (~6 chars/tok) must estimate fewer tokens than same-length plain content");
+});
+
+// --- F2: compaction failure circuit breaker ---
+
+test("compaction breaker trips after MAX consecutive failures and resets after the cooldown", () => {
+  let breaker = resetCompactionBreaker();
+  for (let i = 0; i < MAX_CONSECUTIVE_COMPACTION_FAILURES - 1; i++) {
+    breaker = recordCompactionFailure(breaker, 0);
+    assert.equal(compactionBreakerAllows(breaker, 0).allowed, true, "below the failure cap stays allowed");
+  }
+  breaker = recordCompactionFailure(breaker, 0);
+  assert.equal(breaker.consecutiveFailures, MAX_CONSECUTIVE_COMPACTION_FAILURES);
+  assert.equal(compactionBreakerAllows(breaker, 0).allowed, false, "breaker opens at the cap");
+  assert.equal(compactionBreakerAllows(breaker, COMPACTION_BREAKER_COOLDOWN_TURNS - 1).allowed, false, "still open before cooldown elapses");
+  const after = compactionBreakerAllows(breaker, COMPACTION_BREAKER_COOLDOWN_TURNS);
+  assert.equal(after.allowed, true, "cooldown elapsed re-allows compaction");
+  assert.equal(after.breaker.consecutiveFailures, 0, "breaker resets on cooldown");
+});
+
+// --- F3: graduated eviction of bulk tool outputs ---
+
+test("graduated eviction prunes a stale non-error bulk (bash) output outside the recent frontier", () => {
+  const oldAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "bash", arguments: {} }],
+    usage: { input: 700, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const oldBash = {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "bash",
+    content: [{ type: "text", text: "b".repeat(8_000) }],
+    isError: false,
+  } as never;
+  const recentAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "recent", name: "read", arguments: {} }],
+  } as never;
+  const recentResult = {
+    role: "toolResult",
+    toolCallId: "recent",
+    toolName: "read",
+    content: [{ type: "text", text: "r".repeat(8_000) }],
+    isError: false,
+  } as never;
+  const pressure = applyContextPressurePolicy(
+    [oldAssistant, oldBash, recentAssistant, recentResult],
+    4_000,
+    { enabled: true, reserveTokens: 400, keepRecentTokens: 2_000 },
+  );
+  assert.equal(pressure.prunedToolResults, 1);
+  assert.match(JSON.stringify(pressure.messages[1]), /evicted to reclaim context/);
+  assert.equal(pressure.messages[3], recentResult, "recent frontier preserved");
+  assert.ok(pressure.savedTokens > 1_000);
+});
+
+test("graduated eviction skips error and control-tool outputs even when outside the frontier", () => {
+  const oldAssistant = {
+    role: "assistant",
+    content: [
+      { type: "toolCall", id: "err", name: "bash", arguments: {} },
+      { type: "toolCall", id: "ctl", name: "todo", arguments: {} },
+    ],
+    usage: { input: 500, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const bashError = {
+    role: "toolResult",
+    toolCallId: "err",
+    toolName: "bash",
+    content: [{ type: "text", text: "e".repeat(8_000) }],
+    isError: true,
+  } as never;
+  const todoResult = {
+    role: "toolResult",
+    toolCallId: "ctl",
+    toolName: "todo",
+    content: [{ type: "text", text: "t".repeat(8_000) }],
+    isError: false,
+  } as never;
+  const recentAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "recent", name: "read", arguments: {} }],
+  } as never;
+  const recentResult = {
+    role: "toolResult",
+    toolCallId: "recent",
+    toolName: "read",
+    content: [{ type: "text", text: "r".repeat(8_000) }],
+    isError: false,
+  } as never;
+  const pressure = applyContextPressurePolicy(
+    [oldAssistant, bashError, todoResult, recentAssistant, recentResult],
+    4_000,
+    { enabled: true, reserveTokens: 400, keepRecentTokens: 2_000 },
+  );
+  assert.equal(pressure.prunedToolResults, 0, "error + control outputs are not evictable");
+  assert.equal(pressure.messages[1], bashError);
+  assert.equal(pressure.messages[2], todoResult);
+  assert.equal(pressure.messages[4], recentResult);
+});
+
+// --- F4: redundancy detection ---
+
+test("redundantToolResultCallIds flags older duplicates and keeps the newest occurrence", () => {
+  const mk = (id: string, text: string) => ({
+    role: "toolResult",
+    toolCallId: id,
+    toolName: "read",
+    content: [{ type: "text", text }],
+    isError: false,
+  }) as never;
+  const messages = [
+    mk("a", "same-content-prefix-".repeat(20)),
+    mk("b", "unique-other-".repeat(20)),
+    mk("c", "same-content-prefix-".repeat(20)),
+  ];
+  const redundant = redundantToolResultCallIds(messages as never);
+  assert.equal(redundant.has("a"), true, "older duplicate is redundant");
+  assert.equal(redundant.has("c"), false, "newest occurrence is kept");
+  assert.equal(redundant.has("b"), false, "unique content is not redundant");
+});
+
+test("toolResultPatternKey ignores error results and content-less results", () => {
+  const errorResult = {
+    role: "toolResult",
+    toolCallId: "e",
+    toolName: "read",
+    content: [{ type: "text", text: "data" }],
+    isError: true,
+  } as never;
+  const emptyResult = {
+    role: "toolResult",
+    toolCallId: "x",
+    toolName: "read",
+    content: [],
+    isError: false,
+  } as never;
+  assert.equal(toolResultPatternKey(errorResult), undefined);
+  assert.equal(toolResultPatternKey(emptyResult), undefined);
+});
+
+test("computeContextSignals reports a redundant fraction for duplicate tool outputs", () => {
+  const mk = (id: string, text: string) => ({
+    role: "toolResult",
+    toolCallId: id,
+    toolName: "read",
+    content: [{ type: "text", text }],
+    isError: false,
+  });
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "a", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  },
+  mk("a", "dup-".repeat(2_000)),
+  mk("c", "dup-".repeat(2_000)),
+  ] as never;
+  const signals = computeContextSignals({
+    messages,
+    estimatedTokens: 1_000,
+    contextWindow: 2_000,
+    thresholdTokens: 1_600,
+  });
+  assert.ok((signals.redundantFraction ?? 0) > 0, "duplicate tool output should register redundancy");
 });
