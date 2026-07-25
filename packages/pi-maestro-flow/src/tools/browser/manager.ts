@@ -14,6 +14,7 @@ export interface BrowserOpenOptions {
   cdpUrl?: string;
   args?: string[];
   target?: string;
+  visible?: boolean;
   viewport?: { width: number; height: number; scale?: number };
   waitUntil?: WaitUntil;
   dialogs?: "accept" | "dismiss";
@@ -23,7 +24,7 @@ export interface BrowserOpenOptions {
 
 export interface BrowserTabInfo {
   name: string;
-  kind: "headless" | "connected";
+  kind: "headless" | "headed" | "connected";
   url: string;
   title: string;
   reused: boolean;
@@ -47,7 +48,7 @@ export interface BrowserManagerLike {
 interface TabEntry {
   name: string;
   key: string;
-  kind: "headless" | "connected";
+  kind: "headless" | "headed" | "connected";
   browser: Browser;
   page: Page;
   owned: boolean;
@@ -274,6 +275,9 @@ function createTabApi(
     signal,
     url: () => page.url(),
     title: () => page.title(),
+    async setViewport(viewport: { width: number; height: number; scale?: number }) {
+      return page.setViewport({ width: viewport.width, height: viewport.height, deviceScaleFactor: viewport.scale });
+    },
     async goto(url: string, options?: { waitUntil?: WaitUntil }) {
       entry.elementSelectors.clear();
       return raceAbort(page.goto(url, { waitUntil: options?.waitUntil ?? "load", timeout: deadline() }), signal, deadline());
@@ -396,7 +400,7 @@ function createTabApi(
   return api;
 }
 
-async function connectBrowser(options: BrowserOpenOptions): Promise<{ browser: Browser; owned: boolean; kind: "headless" | "connected" }> {
+async function connectBrowser(options: BrowserOpenOptions): Promise<{ browser: Browser; owned: boolean; kind: "headless" | "headed" | "connected" }> {
   if (options.cdpUrl) {
     const pending = puppeteer.connect({ browserURL: options.cdpUrl.replace(/\/$/, "") });
     const browser = await acquireResource(pending, options.signal, options.timeoutMs, (late) => late.disconnect());
@@ -406,13 +410,13 @@ async function connectBrowser(options: BrowserOpenOptions): Promise<{ browser: B
   if (!executablePath) throw new Error("No Chromium browser found. Set app.path, app.cdp_url, PUPPETEER_EXECUTABLE_PATH, or CHROME_PATH.");
   const pending = puppeteer.launch({
     executablePath,
-    headless: true,
+    headless: !options.visible,
     timeout: options.timeoutMs,
     args: ["--no-first-run", "--no-default-browser-check", ...(options.args ?? [])],
     defaultViewport: options.viewport ? { width: options.viewport.width, height: options.viewport.height, deviceScaleFactor: options.viewport.scale } : undefined,
   });
   const browser = await acquireResource(pending, options.signal, options.timeoutMs, async (late) => { await closeWithin(late); });
-  return { browser, owned: true, kind: "headless" };
+  return { browser, owned: true, kind: options.visible ? "headed" : "headless" };
 }
 
 async function pickPage(browser: Browser, target?: string): Promise<Page | undefined> {
@@ -450,7 +454,7 @@ async function closeWithin(browser: Browser): Promise<void> {
 
 function browserKey(options: BrowserOpenOptions): string {
   if (options.cdpUrl) return `cdp:${options.cdpUrl.replace(/\/$/, "")}`;
-  return `headless:${path.resolve(options.cwd, options.executablePath ?? "auto")}:${JSON.stringify(options.args ?? [])}`;
+  return `launched:${options.visible ? "headed" : "headless"}:${path.resolve(options.cwd, options.executablePath ?? "auto")}:${JSON.stringify(options.args ?? [])}`;
 }
 
 function browserOpenRequestKey(options: BrowserOpenOptions, browser: string): string {
@@ -461,6 +465,7 @@ function browserOpenRequestKey(options: BrowserOpenOptions, browser: string): st
     viewport: options.viewport ?? null,
     waitUntil: options.waitUntil ?? "load",
     dialogs: options.dialogs ?? "accept",
+    visible: options.cdpUrl ? null : (options.visible ?? false),
   });
 }
 

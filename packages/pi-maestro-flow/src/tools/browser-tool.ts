@@ -20,6 +20,7 @@ export const BrowserParams = Type.Object({
     args: Type.Optional(Type.Array(Type.String(), { description: "Extra browser launch arguments" })),
     target: Type.Optional(Type.String({ description: "Existing page URL/title substring" })),
   })),
+  visible: Type.Optional(Type.Boolean({ description: "Launch a headed (visible) browser window; default is headless. Ignored when attaching via app.cdp_url." })),
   viewport: Type.Optional(Type.Object({
     width: Type.Number({ minimum: 1 }),
     height: Type.Number({ minimum: 1 }),
@@ -30,14 +31,14 @@ export const BrowserParams = Type.Object({
   code: Type.Optional(Type.String({ description: "Async JavaScript function body executed with page/browser/tab helpers" })),
   timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 300, description: "Timeout in seconds" })),
   all: Type.Optional(Type.Boolean({ description: "Close all named tabs" })),
-  kill: Type.Optional(Type.Boolean({ description: "Compatibility flag; owned headless browsers are always closed" })),
+  kill: Type.Optional(Type.Boolean({ description: "Compatibility flag; owned browsers (headless or headed) are always closed" })),
 });
 
 export interface BrowserToolDetails {
   action: "open" | "close" | "run";
   name?: string;
   url?: string;
-  browser?: "headless" | "connected";
+  browser?: "headless" | "headed" | "connected";
   viewport?: { width: number; height: number; deviceScaleFactor?: number };
   screenshots?: Array<{ path?: string; mimeType: string; bytes: number }>;
   result?: string;
@@ -47,11 +48,15 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
   return {
     name: "browser",
     label: "Browser",
-    description: "Control Chromium through named tabs. Open or attach a browser, run trusted host-level JavaScript with page/browser/tab helpers, capture screenshots, and close one or all tabs. The run action is shell-equivalent and is blocked in Plan mode.",
-    promptSnippet: "Use browser for interactive web navigation, DOM observation, form input, and screenshots.",
+    description: "Control Chromium through named tabs. Open or attach a browser, run trusted host-level JavaScript with page/browser/tab helpers, capture screenshots, and close one or all tabs. The run action is shell-equivalent and is blocked in Plan mode. In run code, page is a puppeteer-core Page (page.setViewport({width,height}), page.goto, page.evaluate, page.screenshot — Puppeteer, not Playwright, so there is no page.setViewportSize), browser is a puppeteer Browser, and tab is a high-level helper (tab.setViewport, tab.observe, tab.click, tab.screenshot). Pass visible: true to open a headed (visible) browser window; the default is headless.",
+    promptSnippet: "Use browser for interactive web navigation, DOM observation, form input, and screenshots. In run code page is a puppeteer-core Page (page.setViewport/page.goto/page.evaluate); tab offers tab.setViewport/tab.observe/tab.click/tab.screenshot. Pass visible:true on open for a headed (visible) window.",
     promptGuidelines: [
       "Call browser open before run, and reuse a stable tab name across related steps.",
-      "Prefer tab.observe() and numeric element ids before clicking or typing.",
+      "run code receives page (puppeteer-core Page), browser (puppeteer Browser), and tab (high-level helper). This is Puppeteer, not Playwright.",
+      "Set the viewport with tab.setViewport({ width, height }) or page.setViewport({ width, height }); there is no page.setViewportSize.",
+      "Pass visible: true on open to launch a headed (visible) browser window for debugging or interaction; omit it for the default headless mode.",
+      "Prefer tab.observe() and numeric element ids before clicking or typing; use tab.click/type/fill with those ids.",
+      "Capture screenshots with tab.screenshot({ save? }) — it saves the PNG and displays it inline; page.screenshot works too but does not surface the image.",
       "Close tabs when browser work is complete.",
       "Treat run code as trusted host code: it executes with the Pi process permissions, not in a security sandbox.",
     ],
@@ -70,6 +75,7 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
             cdpUrl: params.app?.cdp_url,
             args: params.app?.args,
             target: params.app?.target,
+            visible: params.visible,
             viewport: params.viewport,
             waitUntil: params.wait_until,
             dialogs: params.dialogs,

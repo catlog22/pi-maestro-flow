@@ -14,7 +14,7 @@ class FakeBrowserManager implements BrowserManagerLike {
 
   async open(options: BrowserOpenOptions): Promise<BrowserTabInfo> {
     this.opened = options;
-    return { name: options.name, kind: options.cdpUrl ? "connected" : "headless", url: options.url ?? "about:blank", title: "Example", reused: false, viewport: { width: 1000, height: 700 } };
+    return { name: options.name, kind: options.cdpUrl ? "connected" : options.visible ? "headed" : "headless", url: options.url ?? "about:blank", title: "Example", reused: false, viewport: { width: 1000, height: 700 } };
   }
   async run(name: string, code: string, cwd: string, signal: AbortSignal | undefined, timeoutMs: number): Promise<BrowserRunOutput> {
     if (this.abortRun || signal?.aborted) {
@@ -35,7 +35,7 @@ class FakeBrowserManager implements BrowserManagerLike {
 test("browser schema preserves open/run/close and full control inputs", () => {
   assert.deepEqual((BrowserParams.properties.action as { enum: string[] }).enum, ["open", "close", "run"]);
   assert.deepEqual(Object.keys(BrowserParams.properties).sort(), [
-    "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "url", "viewport", "wait_until",
+    "action", "all", "app", "code", "dialogs", "kill", "name", "timeout", "url", "viewport", "visible", "wait_until",
   ]);
 });
 
@@ -56,6 +56,17 @@ test("browser tool forwards named-tab open options and returns run displays, ima
   assert.equal(run.content.some((item) => item.type === "image"), true);
   assert.deepEqual(run.details?.screenshots, [{ path: "shot.png", mimeType: "image/png", bytes: 3 }]);
   assert.equal(manager.runs[0]?.timeoutMs, 5_000);
+});
+
+test("browser open forwards visible for a headed launch and reports the kind", async () => {
+  const manager = new FakeBrowserManager();
+  const tool = createBrowserTool(manager);
+  const ctx = { cwd: "D:/workspace" } as never;
+  const opened = await tool.execute("open", {
+    action: "open", name: "ui", url: "https://example.com", visible: true,
+  }, undefined, undefined, ctx);
+  assert.equal(manager.opened?.visible, true);
+  assert.equal(opened.details?.browser, "headed");
 });
 
 test("browser close supports one tab and all tabs, while run validates code and propagates abort", async () => {
