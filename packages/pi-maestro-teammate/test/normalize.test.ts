@@ -7,6 +7,7 @@ import {
   taskDependencyNames,
   validateTaskReferences,
   type NormalizedTask,
+  type RunTeammateParams,
 } from "../src/runs/execution.ts";
 
 // ---------------------------------------------------------------------------
@@ -221,4 +222,27 @@ test("context flows through normalization for every task", () => {
   } as never);
   assert.equal(result.error, undefined);
   assert.ok(result.tasks!.every((t) => t.context === "fork"));
+});
+
+// ---------------------------------------------------------------------------
+// background default resolution (foreground/blocking is the default)
+// ---------------------------------------------------------------------------
+
+test("background defaults to false (foreground) when omitted", () => {
+  const params: RunTeammateParams = { agent: "delegate", task: "inspect" };
+  const result = normalizeTeammateParams(params);
+  assert.equal(result.error, undefined);
+  assert.equal(params.background, false);
+});
+
+test("background: true is preserved for detached work", () => {
+  const params: RunTeammateParams = { agent: "delegate", task: "inspect", background: true };
+  normalizeTeammateParams(params);
+  assert.equal(params.background, true);
+});
+
+test("background: false stays false", () => {
+  const params: RunTeammateParams = { agent: "delegate", task: "inspect", background: false };
+  normalizeTeammateParams(params);
+  assert.equal(params.background, false);
 });

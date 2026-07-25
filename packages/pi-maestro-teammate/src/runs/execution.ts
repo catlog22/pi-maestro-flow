@@ -638,6 +638,9 @@ export interface NormalizeTeammateResult {
 export function normalizeTeammateParams(
   params: RunTeammateParams,
 ): NormalizeTeammateResult {
+  // background defaults to false (foreground/blocking); resolve once here so both
+  // dispatch paths (root execute + child proxy) share the same default.
+  params.background = params.background === true;
   const warnings: string[] = [];
   const hasTasks = !!params.tasks?.length;
   const hasChain = !!params.chain?.length;

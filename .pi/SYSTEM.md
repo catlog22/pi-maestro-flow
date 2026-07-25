@@ -258,7 +258,7 @@ teammate({
 })
 ```
 
-`background` defaults to `true`: a task launched without it runs in the background — the call returns an acknowledgement immediately and a `teammate-complete` notification arrives later. Set `background: false` to block until completion and receive the result directly. The examples above pass `background: false` because the next step needs their results.
+`background` defaults to `false` (foreground/blocking): a task launched without it blocks until completion and returns the result directly. Set `background: true` only for genuinely independent or detached work — the call then returns an acknowledgement immediately and a `teammate-complete` notification arrives later. The examples above pass `background: false` explicitly, which is also the default, because the next step needs their results.
 
 Parallel tasks preserve the same prompt shape inside every task:
 
@@ -385,9 +385,8 @@ teammate({ agent: "delegate", taskType: "development", prompt: "development-impl
 
 ## Execution Rules
 
-- `background` defaults to `true` for both single and multi-task — omitting it runs the work in the background (ack now, `teammate-complete` notification later).
-- Set `background: false` whenever the next step needs the result; the call then blocks and returns it directly. All the examples above do this.
-- Reserve `background: true` (or omit) for genuinely independent parallel, deliberately detached, or after-turn work.
+- `background` defaults to `false` (foreground/blocking) for both single and multi-task — omitting it blocks until completion and returns the result directly. The examples above rely on this default (some pass `background: false` explicitly, which is equivalent).
+- Set `background: true` only for genuinely independent parallel, deliberately detached, or after-turn work; the call then returns an ack now and a `teammate-complete` notification arrives later.
 - Background teammate completion sends a `teammate-complete` notification with `triggerTurn: true`. Stop issuing dependent calls until that notification arrives.
 - A task-level `model` overrides the top-level model default.
 - Name tasks that need follow-up or downstream references. `{name}` / `{name.field}` references and `dependsOn` both build DAG edges (their union); unknown names fail pre-dispatch, so add `dependsOn` for order-only edges and mistype-prone references.

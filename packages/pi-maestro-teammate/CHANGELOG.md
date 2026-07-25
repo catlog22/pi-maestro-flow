@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.5.0 (2026-07-25)
+
+### 行为变化（Breaking）
+
+- **`background` 默认值由 `true` 翻转为 `false`（前台/阻塞）**：此前省略 `background` 时单任务与多任务均在后台运行（先回 ack，稍后 teammate-complete 通知）；现在默认前台阻塞直到完成并直接返回结果。需要后台运行必须显式传 `background: true`。
+  - 动机：多数调用方需要子结果后才能继续，后台默认导致"省略 background 却拿到 ack 而非结果"的脚枪。翻转后与系统提示词中所有示例（均传 `background: false`）的语义一致。
+  - 实现：默认在共享的 `normalizeTeammateParams()` 单点解析（`params.background = params.background === true`），root execute 与子进程 proxy 两条派发路径共享同一默认；所有 `=== false` / `!== false` 分支逻辑与源匹配测试保持不变。
+  - 同步更新：schema `default: false` 及描述、TUI 渲染（`isBg = args.background === true`，省略时显示为前台 "Alt+B to detach"）、`TEAMMATE_PROMPT_GUIDELINES` 指引、`.pi/SYSTEM.md` 散文。
+
+### 测试
+
+- `test/normalize.test.ts` 新增 3 个用例：`background` 省略解析为 `false`、`true` 保留、`false` 保留。
+
 ## 0.4.4 (2026-07-15)
 
 Teammate 工具审计修复（详见 `docs/teammate-tool-fix-plan.md`）。

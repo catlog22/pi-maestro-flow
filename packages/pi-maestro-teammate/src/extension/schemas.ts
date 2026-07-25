@@ -223,9 +223,9 @@ export const TeammateParams = Type.Object({
 
   background: Type.Optional(
     Type.Boolean({
-      default: true,
+      default: false,
       description:
-        "Run in background (default: true). Background work sends an automatic teammate-complete notification; do not poll teammate-watch or teammate-list. Set false when this tool call must return the child results directly.",
+        "Run in background (default: false — foreground/blocking). By default the call blocks until the teammate completes and returns the result directly. Set true only for genuinely independent or detached work: the call then returns an acknowledgement and an automatic teammate-complete notification arrives later — do not poll teammate-watch or teammate-list.",
     }),
   ),
 

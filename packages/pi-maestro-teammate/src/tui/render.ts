@@ -87,7 +87,7 @@ export function renderTeammateCall(
   context?: { expanded?: boolean },
 ): Component {
   const tasks = args.tasks as TaskArg[] | undefined;
-  const isBg = args.background !== false;
+  const isBg = args.background === true;
 
   // Multi-task: tree with dependency topology
   if (tasks?.length) {
