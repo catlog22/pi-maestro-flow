@@ -3,7 +3,7 @@ import test from "node:test";
 import * as fs from "node:fs/promises";
 import * as http from "node:http";
 import { BrowserParams, createBrowserTool } from "../src/tools/browser-tool.ts";
-import { BrowserManager, type BrowserManagerLike, type BrowserOpenOptions, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
+import { BrowserManager, compileRunCode, type BrowserManagerLike, type BrowserOpenOptions, type BrowserRunOutput, type BrowserTabInfo } from "../src/tools/browser/manager.ts";
 
 class FakeBrowserManager implements BrowserManagerLike {
   opened?: BrowserOpenOptions;
@@ -117,6 +117,15 @@ test("browser manager drives a real local Chromium tab when an executable is ava
     `, process.cwd(), undefined, 15_000);
     assert.equal((output.returnValue as { value: string }).value, "Ada");
     assert.equal(output.screenshots.length, 1);
+    const collision = await manager.run("live", `
+      const wait = "w"; const page = "p"; const assert = "a"; const display = "d";
+      const print = "pr"; const signal = "s"; const console = "c"; const browser = "b";
+      return { shadowed: [wait, page, assert, display, print, signal, console, browser].join(","), tabName: tab.name, ok: (await tab.observe()).elements.length >= 0 };
+    `, process.cwd(), undefined, 15_000);
+    const cv = collision.returnValue as { shadowed: string; tabName: string; ok: boolean };
+    assert.equal(cv.shadowed, "w,p,a,d,pr,s,c,b");
+    assert.equal(cv.tabName, "live");
+    assert.equal(cv.ok, true);
     const screenshotPath = output.screenshots[0]?.path;
     assert.ok(screenshotPath);
     const screenshotStat = await fs.stat(screenshotPath);
@@ -208,4 +217,46 @@ test("browser closeAll cancels an in-flight open before it can register a tab", 
     server.closeAllConnections();
     await new Promise<void>((resolve) => server.close(() => resolve()));
   }
+});
+
+test("browser run wrapper lets top-level declarations reuse helper names without a redeclaration error", async () => {
+  const displays: string[] = [];
+  const mockTab = { name: "main", observe: async () => ({ n: 1 }) };
+  const mockAssert = (condition: unknown, message?: string) => { if (!condition) throw new Error(message ?? "assert"); };
+  const mockWait = async () => { displays.push("helper-wait-called"); };
+  const mockDisplay = (value: unknown) => { displays.push(`display:${String(value)}`); };
+  const fn = compileRunCode(`
+    const wait = "user-wait";
+    const page = "user-page";
+    const assert = "user-assert";
+    const display = "user-display";
+    return { shadowed: [wait, page, assert, display].join("|"), tabName: tab.name, observed: (await tab.observe()).n, browserType: typeof browser };
+  `);
+  const returnValue = await fn({ tag: "PAGE" }, {}, mockTab, mockAssert, mockWait, mockDisplay, () => {}, undefined, console) as { shadowed: string; tabName: string; observed: number; browserType: string };
+  assert.equal(returnValue.shadowed, "user-wait|user-page|user-assert|user-display");
+  assert.equal(returnValue.tabName, "main");
+  assert.equal(returnValue.observed, 1);
+  assert.equal(returnValue.browserType, "object");
+  assert.deepEqual(displays, []);
+});
+
+test("browser run wrapper exposes every helper when the user does not shadow it", async () => {
+  const displays: string[] = [];
+  let waited = false;
+  const mockTab = { name: "t" };
+  const mockAssert = (condition: unknown, message?: string) => { if (!condition) throw new Error(message ?? "assert"); };
+  const mockWait = async () => { waited = true; };
+  const mockDisplay = (value: unknown) => { displays.push(String(value)); };
+  const mockPrint = (...values: unknown[]) => { displays.push(values.join(" ")); };
+  const fn = compileRunCode(`
+    assert(1 + 1 === 2, "math");
+    await wait(0);
+    display(page.tag);
+    print("hello", tab.name);
+    return signal === undefined ? "no-signal" : "has-signal";
+  `);
+  const returnValue = await fn({ tag: "P" }, {}, mockTab, mockAssert, mockWait, mockDisplay, mockPrint, undefined, console);
+  assert.equal(waited, true);
+  assert.deepEqual(displays, ["P", "hello t"]);
+  assert.equal(returnValue, "no-signal");
 });

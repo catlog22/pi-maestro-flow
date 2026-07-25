@@ -166,8 +166,7 @@ export class BrowserManager implements BrowserManagerLike {
       const display = (value: unknown) => displays.push({ type: "text", text: formatDisplay(value) });
       const print = (...values: unknown[]) => displays.push({ type: "text", text: values.map(formatDisplay).join(" ") });
       const capturedConsole = { log: print, info: print, warn: print, error: print, debug: print };
-      const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (...values: unknown[]) => Promise<unknown>;
-      const execute = new AsyncFunction("page", "browser", "tab", "assert", "wait", "display", "print", "signal", "console", `"use strict";\n${code}`);
+      const execute = compileRunCode(code);
       const returnValue = await raceAbort(execute(entry.page, entry.browser, tab, assert, wait, display, print, signal, capturedConsole), signal, timeoutMs);
       return { displays, returnValue, screenshots, url: entry.page.isClosed() ? "" : entry.page.url() };
     } catch (error) {
@@ -575,6 +574,22 @@ function formatDisplay(value: unknown): string {
 
 function isInterruptError(error: unknown): boolean {
   return error instanceof Error && (error.name === "AbortError" || /timed out/i.test(error.message));
+}
+
+const RUN_HELPER_NAMES = ["page", "browser", "tab", "assert", "wait", "display", "print", "signal", "console"] as const;
+const RUN_PARAM_NAMES = RUN_HELPER_NAMES.map((name) => `__pi_${name}`);
+
+// Wraps user run code so the injected helpers (page, browser, tab, ...) never
+// collide with a top-level const/let/class/function the user declares. Helpers
+// are bound to collision-resistant parameters and re-exposed as var aliases in
+// an outer scope; user code runs in an async IIFE, so its top-level bindings
+// live in their own scope (shadowing a helper if reused) while top-level
+// return/await keep working.
+export function compileRunCode(code: string): (...values: unknown[]) => Promise<unknown> {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor as new (...args: string[]) => (...values: unknown[]) => Promise<unknown>;
+  const aliases = RUN_HELPER_NAMES.map((name, index) => `${name} = ${RUN_PARAM_NAMES[index]}`).join(", ");
+  const body = `"use strict";\nvar ${aliases};\nreturn await (async () => {\n${code}\n})();`;
+  return new AsyncFunction(...RUN_PARAM_NAMES, body);
 }
 
 export const browserManager = new BrowserManager();
