@@ -12,7 +12,7 @@ import {
   truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { AgentProgressSnapshot, Details, SingleResult } from "../shared/types.ts";
+import type { AgentProgressSnapshot, ChildAgentCallSnapshot, Details, SingleResult } from "../shared/types.ts";
 import { extractDependencies } from "../runs/execution.ts";
 import {
   buildProgressTree,
@@ -20,8 +20,6 @@ import {
   progressIcon,
   progressLabel,
   progressDurationMs,
-  selectPriorityProgressRows,
-  selectProgressWindow,
   type ProgressPalette,
 } from "./progress-tree.ts";
 
@@ -133,20 +131,24 @@ function renderMultiTaskCall(
     topoLabel = allLinear ? " result chain" : " result graph";
   }
 
+  const indexByName = new Map<string, number>();
+  tasks.forEach((task, index) => {
+    if (task.name) indexByName.set(task.name, index);
+  });
+  const dependenciesByIndex = tasks.map((task) =>
+    extractDependencies(task.task, taskNames)
+      .map((name) => indexByName.get(name))
+      .filter((dependency): dependency is number => dependency !== undefined)
+  );
+
   const header = `${theme.fg("success", "■")} ${theme.bold(`${tasks.length}${topoLabel} ${modeWord} agents launched`)}${hint}`;
   if (expanded) {
-    const indexByName = new Map<string, number>();
-    tasks.forEach((task, index) => {
-      if (task.name) indexByName.set(task.name, index);
-    });
     const progress: AgentProgressSnapshot[] = tasks.map((task, index) => ({
       agent: task.agent,
       ...(task.name ? { name: task.name } : {}),
       correlationId: `preview-${index + 1}`,
       taskIndex: index,
-      dependencies: extractDependencies(task.task, taskNames)
-        .map((name) => indexByName.get(name))
-        .filter((dependency): dependency is number => dependency !== undefined),
+      dependencies: dependenciesByIndex[index],
       status: "pending",
     }));
     const palette: ProgressPalette = {
@@ -161,7 +163,20 @@ function renderMultiTaskCall(
     return dynamicComponent((w) => [header, ...tree.map((row) => row.text)]
       .map((line) => truncateToWidth(line, Math.max(1, w), "…")));
   }
-  return dynamicComponent((w) => [truncateToWidth(header, Math.max(1, w), "…")]);
+  // Collapsed: list every agent with its dependency edges so the DAG stays visible.
+  const agentLines = tasks.map((task, index) => {
+    const label = task.name
+      ? `${theme.fg("accent", `@${task.name}`)} ${theme.fg("dim", `(${task.agent})`)}`
+      : theme.fg("accent", task.agent);
+    const deps = dependenciesByIndex[index];
+    const flowMarker = deps.length > 0 ? "→" : "•";
+    const dependencyHint = deps.length > 0
+      ? theme.fg("dim", ` ← result${deps.length === 1 ? "" : "s"} ${deps.map((d) => `#${d + 1}`).join(", ")}`)
+      : "";
+    return `${theme.fg("dim", flowMarker)} ${theme.fg("accent", String(index + 1))} ${theme.fg("dim", "□")} ${label}${dependencyHint}`;
+  });
+  return dynamicComponent((w) => [header, ...agentLines]
+    .map((line) => truncateToWidth(line, Math.max(1, w), "…")));
 }
 
 function isLinearChain(tasks: TaskArg[], taskNames: Set<string>): boolean {
@@ -201,6 +216,53 @@ export function renderTeammateResult(
 // ---------------------------------------------------------------------------
 // Streaming progress (foreground real-time display)
 // ---------------------------------------------------------------------------
+
+function childStateText(child: ChildAgentCallSnapshot): string {
+  const activityAt = child.lastActivityAt ?? child.startedAt;
+  const idleMs = activityAt ? Math.max(0, Date.now() - activityAt) : 0;
+  return child.status === "running" && child.resultReadyAt !== undefined
+    ? "result ready; confirming terminal"
+    : child.status === "running" && idleMs >= 30_000
+      ? `stalled ${Math.floor(idleMs / 1000)}s`
+      : child.status;
+}
+
+function formatChildLine(child: ChildAgentCallSnapshot, theme: Theme): string {
+  const icon = child.status === "running"
+    ? theme.fg("warning", "■")
+    : child.status === "failed"
+      ? theme.fg("error", "✗")
+      : theme.fg("success", "✓");
+  const activeTool = child.recentTools?.find((tool) => tool.status === "running");
+  const activity = activeTool ? ` · using ${activeTool.name}` : child.lastMessage ? " · streaming" : "";
+  const tokens = child.inputTokens !== undefined || child.outputTokens !== undefined
+    ? ` · in ${child.inputTokens ?? 0} · out ${child.outputTokens ?? 0}`
+    : "";
+  const durationMs = child.status === "running" && child.startedAt
+    ? Math.max(child.durationMs ?? 0, Date.now() - child.startedAt)
+    : child.durationMs;
+  const duration = durationMs !== undefined
+    ? ` · ${elapsed(Math.max(0, Math.floor(durationMs / 1000)))}`
+    : "";
+  return `${icon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `child agent · ${childStateText(child)}${duration}${activity}${tokens}`)}`;
+}
+
+function renderChildSubtree(
+  children: ChildAgentCallSnapshot[],
+  childrenByParent: Map<string, ChildAgentCallSnapshot[]>,
+  prefix: string,
+  theme: Theme,
+  out: string[],
+): void {
+  children.forEach((child, index) => {
+    const isLast = index === children.length - 1;
+    out.push(`${prefix}${theme.fg("dim", isLast ? "└─ " : "├─ ")}${formatChildLine(child, theme)}`);
+    const grandchildren = childrenByParent.get(child.correlationId);
+    if (grandchildren?.length) {
+      renderChildSubtree(grandchildren, childrenByParent, prefix + theme.fg("dim", isLast ? "   " : "│  "), theme, out);
+    }
+  });
+}
 
 function renderProgress(
   result: AgentToolResult<Details>,
@@ -273,16 +335,17 @@ function renderProgress(
         ? `${formatTokens(focused.tokens)} tokens`
         : "";
     const treeRows = buildProgressTree(entries, palette);
-    const maxTreeRows = options.expanded ? 8 : 5;
-    const failedIndexes = entries.filter((entry) => entry.status === "failed").map((entry) => entry.taskIndex);
-    const treeWindow = failedIndexes.length > 0
-      ? selectPriorityProgressRows(treeRows, maxTreeRows, focus, failedIndexes)
-      : selectProgressWindow(treeRows, maxTreeRows, focus);
-    const range = "hidden" in treeWindow && treeWindow.hidden > 0
-      ? `${treeWindow.rows.length}/${treeWindow.total} shown`
-      : "start" in treeWindow && treeWindow.total > treeWindow.rows.length
-        ? `${treeWindow.start + 1}-${treeWindow.start + treeWindow.rows.length}/${treeWindow.total}`
-        : `${treeWindow.total}`;
+    const entryByTaskIndex = new Map<number, AgentProgressSnapshot>();
+    for (const entry of entries) entryByTaskIndex.set(entry.taskIndex, entry);
+    const childrenByParent = new Map<string, ChildAgentCallSnapshot[]>();
+    for (const child of childCalls) {
+      const key = child.parentCorrelationId ?? "";
+      const bucket = childrenByParent.get(key);
+      if (bucket) bucket.push(child);
+      else childrenByParent.set(key, [child]);
+    }
+    const taskCids = new Set(entries.map((entry) => entry.correlationId).filter(Boolean));
+    const childCids = new Set(childCalls.map((child) => child.correlationId));
     const mode = details?.mode ?? "single";
     const stateText = entries.length === 0
       ? `${runningChildren || childCalls.length} child agent${childCalls.length === 1 ? "" : "s"}`
@@ -296,49 +359,39 @@ function renderProgress(
       : running > 0 || runningChildren > 0
         ? theme.fg("warning", "■")
         : theme.fg("success", "✓");
+    // The header (line 0) carries only transition-based fields. Per-second metrics
+    // (duration/tokens/stalled) are rendered near the bottom so a tall component does
+    // not change a line above the viewport and force a full redraw (page jump) each tick.
     const lines: string[] = [
-      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, focusedDurationMs !== undefined ? formatDuration(focusedDurationMs) : "", focusedTokens, pending ? `${pending} pending` : "", entries.length ? `agents ${range}` : "", runningChildren ? `${runningChildren} delegated` : "", resultReady ? theme.fg("success", "result ready; confirming terminal") : stalled ? theme.fg("error", `stalled ${Math.floor(idleMs / 1000)}s`) : ""], theme)}`,
-      ...treeWindow.rows.map((row) => row.text),
+      `${headerIcon} ${theme.bold(stateText)}  ${statusMeta([mode, pending ? `${pending} pending` : "", entries.length ? `agents ${treeRows.length}` : "", runningChildren ? `${runningChildren} delegated` : "", resultReady ? theme.fg("success", "result ready; confirming terminal") : ""], theme)}`,
     ];
-
-    for (const child of childCalls.slice(0, options.expanded ? 4 : 2)) {
-      const childIcon = child.status === "running"
-        ? theme.fg("warning", "■")
-        : child.status === "failed"
-          ? theme.fg("error", "✗")
-          : theme.fg("success", "✓");
-      const parent = child.parentName ? ` · called by @${child.parentName}` : "";
-      const activeTool = child.recentTools?.find((tool) => tool.status === "running");
-      const activity = activeTool ? ` · using ${activeTool.name}` : child.lastMessage ? " · streaming" : "";
-      const tokens = child.inputTokens !== undefined || child.outputTokens !== undefined
-        ? ` · in ${child.inputTokens ?? 0} · out ${child.outputTokens ?? 0}`
-        : "";
-      const childDurationMs = child.status === "running" && child.startedAt
-        ? Math.max(child.durationMs ?? 0, Date.now() - child.startedAt)
-        : child.durationMs;
-      const duration = childDurationMs !== undefined
-        ? ` · ${elapsed(Math.max(0, Math.floor(childDurationMs / 1000)))}`
-        : "";
-      const childActivityAt = child.lastActivityAt ?? child.startedAt;
-      const childIdleMs = childActivityAt ? Math.max(0, Date.now() - childActivityAt) : 0;
-      const childState = child.status === "running" && child.resultReadyAt !== undefined
-        ? "result ready; confirming terminal"
-        : child.status === "running" && childIdleMs >= 30_000
-          ? `stalled ${Math.floor(childIdleMs / 1000)}s`
-        : child.status;
-      lines.push(`${theme.fg("dim", "↳")} ${childIcon} ${theme.fg("accent", `@${child.name ?? child.agent}`)} ${theme.fg("dim", `child agent · ${childState}${duration}${activity}${tokens}${parent}`)}`);
+    // Nest each child agent under its parent task row, recursively, with no folding.
+    for (const row of treeRows) {
+      lines.push(row.text);
+      const cid = entryByTaskIndex.get(row.taskIndex)?.correlationId;
+      if (cid) renderChildSubtree(childrenByParent.get(cid) ?? [], childrenByParent, "  ", theme, lines);
     }
-    if (childCalls.length > (options.expanded ? 4 : 2)) {
-      lines.push(theme.fg("dim", `↳ … ${childCalls.length - (options.expanded ? 4 : 2)} more child agents`));
-    }
+    // Child agents whose parent is outside this view render as top-level roots.
+    const rootOrphans = childCalls.filter((child) => {
+      const parent = child.parentCorrelationId;
+      return !parent || (!taskCids.has(parent) && !childCids.has(parent));
+    });
+    renderChildSubtree(rootOrphans, childrenByParent, "", theme, lines);
 
     if (focused) {
       const recentTools = focused.recentTools ?? [];
       const activeTool = recentTools.find((tool) => tool.status === "running")
         ?? recentTools[recentTools.length - 1];
+      const liveMeta = statusMeta([
+        focusedDurationMs !== undefined ? formatDuration(focusedDurationMs) : "",
+        focusedTokens,
+        stalled ? theme.fg("error", `stalled ${Math.floor(idleMs / 1000)}s`) : "",
+      ], theme);
       if (activeTool) {
         const toolIcon = activeTool.status === "running" ? theme.fg("warning", "■") : theme.fg("dim", "✓");
-        lines.push(`${theme.fg("dim", "»")} ${theme.fg("accent", String(focused.taskIndex + 1))} ${toolIcon} ${activeTool.name}`);
+        lines.push(`${theme.fg("dim", "»")} ${theme.fg("accent", String(focused.taskIndex + 1))} ${toolIcon} ${activeTool.name}${liveMeta ? `  ${liveMeta}` : ""}`);
+      } else if (liveMeta) {
+        lines.push(`${theme.fg("dim", "»")} ${theme.fg("accent", String(focused.taskIndex + 1))}  ${liveMeta}`);
       }
       const maxStreamLines = options.expanded ? 12 : 6;
       const tail = focused.lastMessage?.split("\n").filter((line) => line.trim()).slice(-maxStreamLines) ?? [];

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { buildProgressTree, selectPriorityProgressRows } from "../src/tui/progress-tree.ts";
-import { renderTeammateResult } from "../src/tui/render.ts";
+import { renderTeammateCall, renderTeammateResult } from "../src/tui/render.ts";
 import type { SingleResult } from "../src/shared/types.ts";
 
 const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
@@ -18,6 +18,37 @@ function makeResult(): SingleResult {
     durationMs: 1000,
   };
 }
+
+test("collapsed multi-task call lists every dispatched agent", () => {
+  const rendered = renderTeammateCall({
+    tasks: [
+      { agent: "explorer", name: "scan", task: "find auth" },
+      { agent: "delegate", name: "review", task: "review {scan}" },
+      { agent: "delegate", task: "summarize" },
+    ],
+    background: true,
+  }, theme as never, { expanded: false }).render(80);
+
+  assert.match(rendered[0], /3 result chain background agents launched/);
+  assert.equal(rendered[1], "• 1 □ @scan (explorer)");
+  assert.equal(rendered[2], "→ 2 □ @review (delegate) ← result #1");
+  assert.equal(rendered[3], "• 3 □ delegate");
+  assert.equal(rendered.length, 4);
+});
+
+test("collapsed multi-task call shows a non-linear DAG with multi-result edges", () => {
+  const rendered = renderTeammateCall({
+    tasks: [
+      { agent: "explorer", name: "a", task: "find auth" },
+      { agent: "explorer", name: "b", task: "find db" },
+      { agent: "delegate", name: "merge", task: "combine {a} and {b}" },
+    ],
+    background: true,
+  }, theme as never, { expanded: false }).render(80);
+
+  assert.match(rendered[0], /3 result graph background agents launched/);
+  assert.equal(rendered[3], "→ 3 □ @merge (delegate) ← results #1, #2");
+});
 
 test("completed teammate results expose the expand affordance", () => {
   const result = makeResult();
@@ -134,6 +165,42 @@ test("streaming progress shows live duration and split token usage", () => {
   assert.match(rendered, /stalled 4[45]s/);
 });
 
+test("streaming progress keeps per-second metrics off the header line", () => {
+  const now = Date.now();
+  const lines = renderTeammateResult({
+    content: [{ type: "text", text: "working" }],
+    details: {
+      mode: "single",
+      results: [],
+      progress: [{
+        agent: "delegate",
+        name: "metrics",
+        correlationId: "metrics-agent",
+        taskIndex: 0,
+        dependencies: [],
+        status: "running",
+        startedAt: new Date(now - 65_000).toISOString(),
+        lastActivityAt: now - 45_000,
+        durationMs: 60_000,
+        inputTokens: 1_234,
+        outputTokens: 56,
+        tokens: 1_290,
+      }],
+    },
+  }, { expanded: false }, theme as never).render(120);
+
+  // Header (line 0) must not carry the ticking duration/tokens/stalled, so a tall
+  // component's top line stays stable across per-second refreshes (avoids full redraw).
+  assert.doesNotMatch(lines[0], /1m5s/);
+  assert.doesNotMatch(lines[0], /stalled/);
+  assert.doesNotMatch(lines[0], /in 1\.2k/);
+  // The metrics are still rendered, just on a lower always-visible line.
+  const rest = lines.slice(1).join("\n");
+  assert.match(rest, /1m5s/);
+  assert.match(rest, /stalled 4[45]s/);
+  assert.match(rest, /in 1\.2k · out 56/);
+});
+
 test("streaming progress shows a Pi result-ready turn instead of stalled", () => {
   const now = Date.now();
   const rendered = renderTeammateResult({
@@ -178,7 +245,52 @@ test("streaming teammate result shows child agent lifecycle separately from task
   }, { expanded: false }, theme as never).render(100).join("\n");
 
   assert.match(rendered, /1 child agent/);
-  assert.match(rendered, /@review child agent · running · using teammate · called by @planner/);
+  assert.match(rendered, /└─ ■ @review child agent · running · using teammate/);
+  assert.doesNotMatch(rendered, /called by/);
+});
+
+test("streaming teammate result nests child agents under their parent as a tree", () => {
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "delegating" }],
+    details: {
+      mode: "single",
+      results: [],
+      progress: [{
+        agent: "delegate",
+        name: "planner",
+        correlationId: "task-1",
+        taskIndex: 0,
+        dependencies: [],
+        status: "pending",
+      }],
+      childCalls: [
+        {
+          agent: "reviewer",
+          name: "review",
+          correlationId: "child-1",
+          parentCorrelationId: "task-1",
+          parentName: "planner",
+          status: "running",
+        },
+        {
+          agent: "scanner",
+          name: "deep",
+          correlationId: "child-2",
+          parentCorrelationId: "child-1",
+          parentName: "review",
+          status: "running",
+        },
+      ],
+    },
+  }, { expanded: false }, theme as never).render(100).join("\n");
+
+  const lines = rendered.split("\n");
+  assert.match(rendered, /• 1 □ pending @planner \(delegate\)/);
+  const reviewLine = lines.find((line) => line.includes("@review"));
+  const deepLine = lines.find((line) => line.includes("@deep"));
+  assert.ok(reviewLine?.startsWith("  └─ "), `review should nest under task: ${reviewLine}`);
+  assert.ok(deepLine?.startsWith("     └─ "), `deep should nest under review: ${deepLine}`);
+  assert.doesNotMatch(rendered, /called by/);
 });
 
 test("streaming child agent shows stalled state, duration, and split tokens", () => {
