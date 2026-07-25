@@ -334,8 +334,8 @@ export function onBeforeAgentStartPlan(event: { systemPrompt: string }): { syste
 export function onToolCallPlan(event: {
   toolName: string;
   input: Record<string, unknown>;
-}): { block: true; reason: string } | undefined {
-  if (mode !== "plan") return blockApprovedHandoffWrite(event);
+}, bypassHandoff = false): { block: true; reason: string } | undefined {
+  if (mode !== "plan") return bypassHandoff ? undefined : blockApprovedHandoffWrite(event);
   return blockMutatingToolCall(event, "Plan mode");
 }
 
@@ -372,15 +372,14 @@ function blockApprovedHandoffWrite(event: {
   }
   if (event.toolName === "todo") {
     if (action === "list" || action === "get") return;
-    if (action === "create" && handoffStatus === "todo-required" && latestHandoffKey) {
-      event.input.planHandoffKey = latestHandoffKey;
+    if (action === "create") {
+      if (latestHandoffKey) event.input.planHandoffKey = latestHandoffKey;
       return;
     }
+    if (handoffStatus === "goal-required") return;
     return {
       block: true,
-      reason: handoffStatus === "goal-required"
-        ? "Approved Plan handoff requires one active Goal before creating its Todo dependency graph."
-        : "Approved Plan handoff requires at least one executable Todo before other Todo mutations.",
+      reason: "Approved Plan handoff requires at least one executable Todo before other Todo mutations.",
     };
   }
   return blockMutatingToolCall(event, "Approved Plan handoff");

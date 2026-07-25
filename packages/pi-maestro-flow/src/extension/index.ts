@@ -150,6 +150,7 @@ import {
   registerTeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
 import { TEAMMATE_STARTED_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_COMPLETE_EVENT } from "pi-maestro-teammate/v1/types";
+import cockpit from "pi-cockpit";
 
 interface MaestroState {
   baseCwd: string;
@@ -278,6 +279,8 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     registerMaestroChildSurface(pi);
     return;
   }
+  // Activate pi-cockpit TUI extension (bundled dependency)
+  cockpit(pi);
 
   // UCL: capture only the locked extension-tool surface. pi.getAllTools() exposes
   // schemas but not execute(), so the registry is the invocation source for the
@@ -1003,7 +1006,7 @@ When NOT to use:
         close: () => done(undefined),
         onAction: async (action: SessionOverlayAction, runId?: string) => {
           if (action !== "decision") {
-            const planBlock = onToolCallPlan({ toolName: "run-control", input: { action } });
+            const planBlock = onToolCallPlan({ toolName: "run-control", input: { action } }, approvalMode === "bypassPermissions");
             if (planBlock) throw new Error(planBlock.reason);
           }
           if (action === "pause" || action === "resume") {
@@ -1332,8 +1335,8 @@ When NOT to use:
     return goalInput(event);
   });
 
-  // Plan mode is a hard boundary and must run before hook or configurable permissions.
-  pi.on("tool_call", (event) => onToolCallPlan(event));
+  // Plan mode is a hard boundary; the approved-handoff gate is bypassed in YOLO mode.
+  pi.on("tool_call", (event) => onToolCallPlan(event, approvalMode === "bypassPermissions"));
 
   pi.on("before_agent_start", async (event) => {
     // Pick up compaction settings edited while idle; cached again within the turn.
@@ -1387,7 +1390,7 @@ When NOT to use:
     getPermissionMode: () => isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
   });
   const teammatePermissionBroker = async (call: Parameters<Parameters<typeof registerTeammatePermissionBroker>[0]>[0], ctx: ExtensionContext) => {
-    const planBlock = onToolCallPlan(call);
+    const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
     if (planBlock) return { action: "deny", reason: planBlock.reason };
     const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
     if (hookBlock) return { action: "deny", reason: hookBlock.reason };
@@ -1411,7 +1414,7 @@ When NOT to use:
       mode,
       authorize: async (toolName, input) => {
         const call = { toolName, input };
-        const planBlock = onToolCallPlan(call);
+        const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
         if (planBlock) return { block: true, reason: planBlock.reason };
         const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
         if (hookBlock) return { block: true, reason: hookBlock.reason };
