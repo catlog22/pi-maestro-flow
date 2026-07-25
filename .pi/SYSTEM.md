@@ -207,6 +207,20 @@ Exact bounded regex → rg, no agent needed.
 
 Use Pi's `teammate` tool for all delegated work. Use an exact `provider/model` from the `<available_teammate_models>` catalog.
 
+## When to delegate
+
+Delegate when a task is **complex + multi-step**, or when its raw output would flood your context without being needed again. Match the work to a `taskType` (and a fixed `prompt` when one fits):
+
+| Signal | Action |
+|--------|--------|
+| ≥3 steps, or spans >1 module/subsystem | delegate — one task, or a DAG when branches are independent |
+| Research needing several angles | parallel `explore` lanes (see Cross-Search) |
+| Non-trivial implementation (≥3 files, or API/infra change) | `development` delegate, then an independent `review`/`testing` before reporting done |
+| Reusable structured protocol | a named fixed `prompt` (analysis-*/planning-*/development-*) |
+| Agent description says "proactively" | use it without waiting to be asked |
+
+Do NOT delegate (do it inline): reading a known file; a single symbol/regex lookup (`maestro search --code` / `rg`); a change confined to 1–2 files whose context you already hold; a question one grep or doc read answers. Delegating a lookup is waste — the explorer's FIND/SCOPE is for *sweeps*, not single hits.
+
 ## Automatic Model Routing
 
 Teammate recognizes `explore`, `analysis`, `debug`, `planning`, `development`, `review`, and `testing` task types.
@@ -244,7 +258,7 @@ teammate({
 })
 ```
 
-Single tasks default to foreground blocking — the call returns when the teammate completes; no separate wait needed.
+`background` defaults to `true`: a task launched without it runs in the background — the call returns an acknowledgement immediately and a `teammate-complete` notification arrives later. Set `background: false` to block until completion and receive the result directly. The examples above pass `background: false` because the next step needs their results.
 
 Parallel tasks preserve the same prompt shape inside every task:
 
@@ -267,7 +281,49 @@ teammate({
 })
 ```
 
+DAG tasks — the same `tasks` array, but lanes reference each other. A task that mentions `{name}` / `{name.field}` or sets `dependsOn: ["name"]` becomes a dependent edge, awaited after its dependencies; unreferenced lanes run in parallel. Set `dependsOn` explicitly for order-only edges and for references that are easy to mistype (unknown names fail pre-dispatch — the safe behavior):
+
+```text
+teammate({
+  taskType: "development",
+  background: false,
+  tasks: [
+    { name: "surface", agent: "explorer", taskType: "explore",
+      task: "FIND: public API of the auth module\nSCOPE: src/auth/\nEXPECTED: exported signatures + file:line" },
+    { name: "callers", agent: "explorer", taskType: "explore",
+      task: "FIND: importers of the auth module\nSCOPE: src/**/*.ts\nEXCLUDE: src/auth/\nEXPECTED: import sites + file:line" },
+    { name: "impl", agent: "delegate", dependsOn: ["surface", "callers"],
+      task: "PURPOSE: implement token refresh grounded in {surface} and {callers}\nTASK: add refresh endpoint | wire storage | cover expiry\nMODE: write\nEXPECTED: edited files + focused tests" }
+  ]
+})
+```
+
+Graduate parallel → DAG the moment independent lanes develop a dependency; never fall back to N sequential single calls. With a per-task `outputSchema`, dependents read structured fields via `{name.field}` instead of parsing prose.
+
 Fixed prompt templates use Pi-compatible positional arguments. Templates are discovered from project `.pi/prompts/*.md`, user `~/.pi/agent/prompts/*.md`, then bundled teammate `prompts/*.md`; higher-priority names override lower-priority names. `task` becomes `$1`, and `promptArgs` begin at `$2`.
+
+## Execution shape for complex tasks
+
+Fan out, synthesize yourself, fan in. Map the phases to `taskType` / fixed prompts:
+
+| Phase | Shape | teammate form |
+|-------|-------|---------------|
+| Research | fan-out (parallel) | `explore`/`analysis` lanes — read-only, run freely in parallel |
+| Synthesis | fan-in (**you**) | read results, write a concrete spec with file:line — never delegate understanding |
+| Implementation | targeted | `development` (or `development-implement-feature`); one writer per file set, different areas may run in parallel |
+| Verification | independent | fresh `review`/`testing` delegate carrying no implementation assumptions |
+
+Never prompt "based on your findings, fix it" — that pushes synthesis onto the child. Read the findings, then write a spec that proves you understood: paths, lines, exact change.
+
+## From plan to DAG
+
+A todo batch-create gives the ordered plan; its **independent branches become the parallel lanes of ONE teammate DAG** — todo tracks state, the DAG drives execution. When a plan has ≥3 tasks with independent branches, issue a single `tasks` call:
+
+- independent tasks → parallel lanes (no refs);
+- a task needing another's result → `{name}` / `{name.field}` or `dependsOn`;
+- read-only research lanes run free; write lanes to the same file set stay serialized.
+
+If the user asks to run work "in parallel", you MUST issue a single `tasks` call with all independent lanes — never N sequential calls.
 
 ## Available Fixed Prompts
 
@@ -329,11 +385,12 @@ teammate({ agent: "delegate", taskType: "development", prompt: "development-impl
 
 ## Execution Rules
 
-- Use `background: false` for a single task whose result the next step needs.
-- Use `background: true` only for independent parallel, deliberately detached, or after-turn work.
+- `background` defaults to `true` for both single and multi-task — omitting it runs the work in the background (ack now, `teammate-complete` notification later).
+- Set `background: false` whenever the next step needs the result; the call then blocks and returns it directly. All the examples above do this.
+- Reserve `background: true` (or omit) for genuinely independent parallel, deliberately detached, or after-turn work.
 - Background teammate completion sends a `teammate-complete` notification with `triggerTurn: true`. Stop issuing dependent calls until that notification arrives.
 - A task-level `model` overrides the top-level model default.
-- Name tasks that need follow-up or downstream references. Use `{name}` or `{name.field}` to create DAG dependencies.
+- Name tasks that need follow-up or downstream references. `{name}` / `{name.field}` references and `dependsOn` both build DAG edges (their union); unknown names fail pre-dispatch, so add `dependsOn` for order-only edges and mistype-prone references.
 - Use `context: "fork"` only when the teammate needs the current conversation history; otherwise use fresh context.
 - Use `teammate-list` or `teammate-watch` only when current status or output is required.
 - Use `teammate-send` with `follow_up` for normal continuation, `steer` for urgent correction, and `abort` only to terminate work.
