@@ -126,10 +126,10 @@ pi install ./packages/pi-maestro-flow
 
 ```bash
 pi list
-# 预期输出: pi-maestro-flow@0.4.x, pi-maestro-teammate@0.4.x
+# 预期输出: pi-maestro-flow@0.5.x, pi-maestro-teammate@0.4.x
 ```
 
-安装后 Pi 即拥有 17 个注册工具、27 个 Agent、20 个 Prompt 模板和完整知识系统。
+安装后 Pi 即拥有 17 个注册工具、68 个技能、27 个 Agent、23 个 Prompt 模板和完整知识系统。
 
 > **提示：** 完整的 LSP 功能需要对应语言服务器（如 `typescript-language-server`、`pyright` 等），详见 [packages/pi-maestro-flow/README.md](packages/pi-maestro-flow/README.md)。
 
@@ -138,17 +138,16 @@ pi list
 ## 快速开始
 
 ```bash
-# 启动 Pi（首次启动时按提示信任项目）
-pi
+pi   # 启动 Pi（首次启动时按提示信任项目）
 ```
 
-用自然语言描述任务，或直接使用技能：
+用自然语言描述任务即可。Maestro Flow 会自动分类意图、评估复杂度，并路由到最合适的执行通道：
 
-```bash
-/skill:maestro-help          # 浏览所有命令
-/skill:maestro-analyze       # 分析问题再规划
-/skill:team-review           # 多角色代码审查
-```
+- **简单任务** — 直接执行，最小化生命周期开销
+- **多步工程** — 自动分解为链式计划，逐步执行并验证
+- **长周期目标** — 设定目标和预算，跨多轮自主循环，独立验证完成度
+
+也可以使用 `/maestro-help` 浏览所有可用命令和工作流推荐。
 
 ---
 
@@ -169,7 +168,7 @@ pi
 │  └─────────┬──────────┘       └───────────┬───────────┘   │
 │            │                               │               │
 │  ┌─────────▼───────────────────────────────▼───────────┐   │
-│  │  .pi/skills/ (104)   .pi/agents/ (27)   prompts (20) │   │
+│  │  .pi/skills/ (68)    .pi/agents/ (27)   prompts (23) │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                                                            │
 │  运行时: 自动压缩 · GUI sidecar (UCL) · TUI 面板           │
@@ -211,16 +210,18 @@ pi
 
 ## 技能与 Agent
 
-104 个技能覆盖编排、质量、UI 设计、团队协作、学术写作、知识管理等领域。
+68 个技能覆盖编排执行、代码质量、团队协作、UI 设计、学术写作、知识管理等领域。
 完整技能列表和工作流定义请参阅 **[Maestro Flow](https://github.com/catlog22/maestro-flow)** 项目。
 
-| 领域 | 示例技能 |
-|------|---------|
-| 编排 | `maestro-plan`, `maestro-execute`, `maestro-ralph` |
-| 质量 | `quality-refactor`, `security-audit`, `team-review` |
-| 团队 | `team-coordinate`, `team-lifecycle-v4`, `team-swarm` |
-| 学术 | `scholar-writing`, `scholar-review`, `scholar-citation-verify` |
-| UI | `maestro-impeccable`, `team-uidesign`, `team-visual-a11y` |
+| 领域 | 能力 | 核心技能 |
+|------|------|----------|
+| 编排执行 | 意图分类与路由、轻量快速执行、多步链式编排、闭环自主执行 | `maestro-next`, `maestro-companion`, `maestro`, `maestro-ralph` |
+| 代码质量 | 技术债务治理、OWASP/STRIDE 安全审计、多角色代码审查 | `quality-refactor`, `security-audit`, `team-review` |
+| 迭代改进 | 长周期五模式迭代（debug / improve / planex / review / ui） | `odyssey` |
+| 团队协作 | 多角色协调、生命周期管理、群体智能 | `team-coordinate`, `team-lifecycle-v4`, `team-swarm` |
+| 学术写作 | 论文写作、同行评审模拟、引用验证 | `scholar-writing`, `scholar-review`, `scholar-citation-verify` |
+| UI 设计 | 设计令牌管理、无障碍验证、视觉打磨 | `maestro-impeccable`, `team-uidesign`, `team-visual-a11y` |
+| 知识管理 | 规范约束、经验沉淀、知识审计、项目状态 | `spec`, `manage`, `learn` |
 
 27 个 Agent 角色：`explorer` · `delegate` · `workflow-planner` · `workflow-executor` · `workflow-reviewer` · `workflow-debugger` · `workflow-verifier` · `goal-verifier` · `ui-design-agent` · `impeccable-agent` 等。
 

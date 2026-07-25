@@ -126,10 +126,10 @@ pi install ./packages/pi-maestro-flow
 
 ```bash
 pi list
-# Expected: pi-maestro-flow@0.4.x, pi-maestro-teammate@0.4.x
+# Expected: pi-maestro-flow@0.5.x, pi-maestro-teammate@0.4.x
 ```
 
-Pi now has 17 registered tools, 27 agents, 20 prompt templates, and a full knowledge system.
+Pi now has 17 registered tools, 68 skills, 27 agents, 23 prompt templates, and a full knowledge system.
 
 > **Note:** Full LSP support requires the corresponding language servers (e.g. `typescript-language-server`, `pyright`). See [packages/pi-maestro-flow/README.md](packages/pi-maestro-flow/README.md) for details.
 
@@ -138,17 +138,16 @@ Pi now has 17 registered tools, 27 agents, 20 prompt templates, and a full knowl
 ## Quick Start
 
 ```bash
-# Start Pi (trust the project when prompted on first run)
-pi
+pi   # Start Pi (trust the project when prompted on first run)
 ```
 
-Describe your task in natural language, or use skills directly:
+Just describe your task in natural language. Maestro Flow automatically classifies intent, assesses complexity, and routes to the right execution channel:
 
-```bash
-/skill:maestro-help          # Browse all commands
-/skill:maestro-analyze       # Analyze a problem before planning
-/skill:team-review           # Multi-role code review
-```
+- **Simple tasks** — direct execution with minimal lifecycle overhead
+- **Multi-step engineering** — auto-decomposed into chained plans, executed and verified step by step
+- **Long-running objectives** — set a goal with budget, autonomous loops across turns, independent completion verification
+
+Use `/maestro-help` to browse all available commands and workflow recommendations.
 
 ---
 
@@ -169,7 +168,7 @@ Describe your task in natural language, or use skills directly:
 │  └─────────┬──────────┘       └───────────┬───────────┘   │
 │            │                               │               │
 │  ┌─────────▼───────────────────────────────▼───────────┐   │
-│  │  .pi/skills/ (104)   .pi/agents/ (27)   prompts (20) │   │
+│  │  .pi/skills/ (68)    .pi/agents/ (27)   prompts (23) │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                                                            │
 │  Runtime: auto-compaction · GUI sidecar (UCL) · TUI panels │
@@ -211,16 +210,18 @@ Describe your task in natural language, or use skills directly:
 
 ## Skills & Agents
 
-104 skills covering orchestration, quality, UI design, team coordination, academic writing, knowledge management, and more.
+68 skills covering orchestration, code quality, team coordination, UI design, academic writing, knowledge management, and more.
 See the **[Maestro Flow](https://github.com/catlog22/maestro-flow)** project for the full skill catalog and workflow definitions.
 
-| Domain | Example Skills |
-|--------|---------------|
-| Orchestration | `maestro-plan`, `maestro-execute`, `maestro-ralph` |
-| Quality | `quality-refactor`, `security-audit`, `team-review` |
-| Team | `team-coordinate`, `team-lifecycle-v4`, `team-swarm` |
-| Academic | `scholar-writing`, `scholar-review`, `scholar-citation-verify` |
-| UI | `maestro-impeccable`, `team-uidesign`, `team-visual-a11y` |
+| Domain | Capabilities | Core Skills |
+|--------|-------------|-------------|
+| Orchestration | Intent classification & routing, lightweight quick execution, multi-step chain planning, closed-loop autonomous execution | `maestro-next`, `maestro-companion`, `maestro`, `maestro-ralph` |
+| Code Quality | Tech debt reduction, OWASP/STRIDE security auditing, multi-role code review | `quality-refactor`, `security-audit`, `team-review` |
+| Iterative Improvement | Long-running five-mode cycles (debug / improve / planex / review / ui) | `odyssey` |
+| Team Coordination | Multi-role coordination, lifecycle management, swarm intelligence | `team-coordinate`, `team-lifecycle-v4`, `team-swarm` |
+| Academic Writing | Paper writing, peer review simulation, citation verification | `scholar-writing`, `scholar-review`, `scholar-citation-verify` |
+| UI Design | Design token management, accessibility validation, visual polish | `maestro-impeccable`, `team-uidesign`, `team-visual-a11y` |
+| Knowledge Management | Spec constraints, knowhow capture, knowledge audit, project status | `spec`, `manage`, `learn` |
 
 27 agent roles: `explorer` · `delegate` · `workflow-planner` · `workflow-executor` · `workflow-reviewer` · `workflow-debugger` · `workflow-verifier` · `goal-verifier` · `ui-design-agent` · `impeccable-agent` and more.
 
