@@ -81,6 +81,15 @@ function sleepingAgent(id: string, lastActivityAt: number, name?: string): Activ
   return agent;
 }
 
+function pendingAgent(id: string, lastActivityAt: number): ActiveAgent {
+  const agent = activeAgent();
+  agent.correlationId = id;
+  delete agent.name;
+  agent.status = "pending";
+  agent.lastActivityAt = lastActivityAt;
+  return agent;
+}
+
 function teammateState(agents: ActiveAgent[]): TeammateState {
   return {
     baseCwd: process.cwd(),
@@ -210,6 +219,18 @@ test("widget work ignores sleeping agents after the visible grace period", () =>
   assert.equal(hasTeammateWidgetWork(state, now), true);
   oldSleeping.status = "running";
   oldSleeping.sleptAt = now - 120_000;
+  assert.equal(hasTeammateWidgetWork(state, now), true);
+});
+
+test("widget work ignores pending agents after the grace period measured from last work", () => {
+  const now = Date.now();
+  const stalePending = pendingAgent("pending-old", now - 60_001);
+  const state = teammateState([stalePending]);
+  assert.equal(hasTeammateWidgetWork(state, now), false);
+  stalePending.lastActivityAt = now - 59_999;
+  assert.equal(hasTeammateWidgetWork(state, now), true);
+  stalePending.status = "running";
+  stalePending.lastActivityAt = now - 120_000;
   assert.equal(hasTeammateWidgetWork(state, now), true);
 });
 

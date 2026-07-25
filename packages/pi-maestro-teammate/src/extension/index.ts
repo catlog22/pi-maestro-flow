@@ -205,7 +205,7 @@ export const WAKEABLE_AGENT_BUDGET = Object.freeze({
   namedTtlMs: 60 * 60_000,
 });
 
-const AGENT_WIDGET_SLEEP_HIDE_MS = 60_000;
+const AGENT_WIDGET_IDLE_HIDE_MS = 60_000;
 
 function trimAgentBuffers(agent: ActiveAgent, sleeping = false): void {
   const inboxLimit = sleeping
@@ -2769,7 +2769,10 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     const now = Date.now();
     const visible = Array.from(state.activeRuns.entries()).filter(([, a]) => {
       if (a.status === "completed") return false;
-      if (a.status === "sleeping" && a.sleptAt && now - a.sleptAt > AGENT_WIDGET_SLEEP_HIDE_MS) return false;
+      if (a.status === "sleeping" && a.sleptAt && now - a.sleptAt > AGENT_WIDGET_IDLE_HIDE_MS) return false;
+      // Pending hides after the grace period measured from the last real work,
+      // not from when the agent entered pending.
+      if (a.status === "pending" && now - a.lastActivityAt > AGENT_WIDGET_IDLE_HIDE_MS) return false;
       return true;
     });
     if (visible.length === 0) {
@@ -3616,9 +3619,10 @@ export function hasTeammateWidgetWork(
 ): boolean {
   return [...state.activeRuns.values()].some((agent) =>
     agent.status === "running"
-      || agent.status === "pending"
+      || (agent.status === "pending"
+        && now - agent.lastActivityAt <= AGENT_WIDGET_IDLE_HIDE_MS)
       || (agent.status === "sleeping"
-        && (!agent.sleptAt || now - agent.sleptAt <= AGENT_WIDGET_SLEEP_HIDE_MS))
+        && (!agent.sleptAt || now - agent.sleptAt <= AGENT_WIDGET_IDLE_HIDE_MS))
   );
 }
 
