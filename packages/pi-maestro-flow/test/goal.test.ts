@@ -1000,7 +1000,10 @@ test("a failing acceptance command fails completion with the command as unmet an
     const result = await executeGoal({ action: "complete", summary: "Done." }, ctx);
     assert.match(result.text, /completion was not verified/i);
     assert.match(result.text, /npm test \(exit 1\)/);
+    assert.match(result.text, /test failed/, "failed command output must appear in the reason");
     assert.equal(getActiveGoal()?.status, "active");
+    assert.ok(getActiveGoal()?.lastVerificationFailure, "lastVerificationFailure must be persisted");
+    assert.match(getActiveGoal()!.lastVerificationFailure!, /npm test \(exit 1\)/);
     assert.equal(agentCalls, 0);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
@@ -1074,7 +1077,7 @@ test("agent_end continues without verification and an explicit valid fail keeps 
     await executeGoal({ action: "create", objective: "Exercise four lifecycle requirements" }, ctx);
     await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
     assert.equal(sent.length, 1);
-    assert.match(sent[0] ?? "", /^Continue the active goal:/);
+    assert.match(sent[0] ?? "", /^Continue the active goal/);
     assert.equal(verifierCalls, 0);
 
     await executeGoal({
@@ -1789,6 +1792,8 @@ test("completion summary accepts 4000 characters and rejects 4001 before verifie
       "id", "text", "status", "pauseReason", "startedAt", "updatedAt", "iteration",
       "tokenBudget", "tokensUsed", "timeUsedSeconds", "baselineTokens", "workflowSessionId",
       "planHandoffKey", "workflowSessionGeneration", "verificationFailures",
+      "lastVerificationFailure", "acceptance",
+      "prevTokensUsed", "lowProgressCount",
     ]);
     assert.ok(Object.keys(getActiveGoal() ?? {}).every((key) => allowedGoalFields.has(key)));
   } finally {
@@ -2006,7 +2011,7 @@ test("goal create is exclusive and user stop/resume controls the active agent lo
 
     await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
     assert.equal(sent.length, 1);
-    assert.match(sent[0]?.message.content ?? "", /^Continue the active goal:/);
+    assert.match(sent[0]?.message.content ?? "", /^Continue the active goal/);
     assert.equal(sent[0]?.message.customType, "maestro-goal-internal");
     assert.equal(sent[0]?.message.display, false);
     assert.equal(sent[0]?.options?.deliverAs, "followUp");
@@ -2133,7 +2138,7 @@ test("goal update replaces a paused objective and resumes its agent loop", async
 
     await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
     assert.equal(sent.length, 1);
-    assert.match(sent[0] ?? "", /^Continue the active goal:/);
+    assert.match(sent[0] ?? "", /^Continue the active goal/);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);

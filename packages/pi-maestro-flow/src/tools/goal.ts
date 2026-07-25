@@ -69,7 +69,7 @@ function isModuleNotFound(err: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 type GoalStatus = "active" | "paused" | "done";
-export type PauseReason = "user" | "budget" | "gate";
+export type PauseReason = "user" | "budget" | "gate" | "stalled";
 type AgentStopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 
 export interface ActiveGoal {
@@ -88,7 +88,10 @@ export interface ActiveGoal {
   planHandoffKey?: string;
   workflowSessionGeneration?: string;
   verificationFailures?: number;
+  lastVerificationFailure?: string;
   acceptance?: string[];
+  prevTokensUsed?: number;
+  lowProgressCount?: number;
 }
 
 interface AssistantMessageLike {
@@ -139,6 +142,8 @@ const MAX_COMPLETION_SUMMARY_CHARS = 4_000;
 const CONTINUATION_MARKER_PREFIX = "maestro-goal-continuation:";
 const VERIFIER_TIMEOUT_MS = 180_000;
 const MAX_VERIFICATION_FAILURES = 3;
+const LOW_PROGRESS_TOKEN_DELTA = 500;
+const MAX_LOW_PROGRESS_CONTINUATIONS = 3;
 const MAX_VERIFIER_EVIDENCE_ITEMS = 24;
 const MAX_VERIFIER_EVIDENCE_ITEM_CHARS = 1_200;
 const MAX_VERIFIER_EVIDENCE_CHARS = 12_000;
@@ -513,6 +518,22 @@ export async function onAgentEnd(event: { messages: unknown[] }, ctx: GoalContex
 
   if (!activeGoal || activeGoal.id !== goalId || activeGoal.status !== "active") return;
   if (hasPending(ctx)) return;
+
+  const tokenDelta = activeGoal.tokensUsed - (activeGoal.prevTokensUsed ?? 0);
+  const lowProgressCount = tokenDelta < LOW_PROGRESS_TOKEN_DELTA
+    ? (activeGoal.lowProgressCount ?? 0) + 1
+    : 0;
+  if (lowProgressCount >= MAX_LOW_PROGRESS_CONTINUATIONS) {
+    cancelContinuation();
+    activeGoal = pauseGoal(activeGoal, "stalled");
+    persistGoal(activeGoal);
+    updateStatusLine(ctx, activeGoal);
+    ctx.ui.notify(`Goal paused: ${MAX_LOW_PROGRESS_CONTINUATIONS} consecutive continuations with minimal progress (<${LOW_PROGRESS_TOKEN_DELTA} tokens each). Use /goal resume to retry.`, "warning");
+    return;
+  }
+  activeGoal = { ...activeGoal, prevTokensUsed: activeGoal.tokensUsed, lowProgressCount };
+  persistGoal(activeGoal);
+
   await sendContinuation(ctx, activeGoal);
 }
 
@@ -1228,7 +1249,7 @@ async function handleCreate(
   ctx.ui.notify(`Goal started: ${objective}`, "info");
   await sendGoalPrompt(ctx, activeGoal);
   updateStatusLine(ctx, activeGoal);
-  return { text: `Goal started: ${objective}`, isError: false };
+  return { text: `Goal started (id: ${activeGoal.id}): ${objective}`, isError: false };
 }
 
 async function handleUpdate(
@@ -1254,7 +1275,7 @@ async function handleUpdate(
   if (resumed.isError) {
     return { text: `Goal updated but could not resume: ${resumed.text}`, isError: true };
   }
-  return { text: `Goal updated and resumed: ${activeGoal?.text ?? objective.trim()}`, isError: false };
+  return { text: `Goal updated and resumed (id: ${activeGoal?.id}): ${activeGoal?.text ?? objective.trim()}`, isError: false };
 }
 
 type VerificationOutcome =
@@ -1369,21 +1390,25 @@ async function verifyGoalCompletion(
   }
 
   if (verdict.status === "fail" || !verdict.pass) {
-    activeGoal = { ...activeGoal, verificationFailures: 0 };
+    activeGoal = { ...activeGoal, verificationFailures: 0, lastVerificationFailure: boundedSecretText(verdict.reasoning + (verdict.unmet?.length ? ` Unmet: ${verdict.unmet.join("; ")}` : ""), 1_000) };
     updateUsage(activeGoal, ctx);
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
     const next = verdict.unmet?.[0] ? ` Next: ${verdict.unmet[0]}` : "";
     ctx.ui.notify(`Goal is not complete.${next}`, "info");
     const unmet = verdict.unmet?.length ? ` Unmet: ${verdict.unmet.join("; ")}.` : "";
+    const failedEvidence = verdict.evidence?.filter((e) => !e.startsWith("[exit 0]"));
+    const evidenceDetail = failedEvidence?.length
+      ? `\n\nFailed command output:\n${failedEvidence.join("\n---\n")}`
+      : "";
     const acceptanceHint = activeGoal.acceptance?.length
-      ? ` Run the declared acceptance commands (${activeGoal.acceptance.join("; ")}) and include their fresh output as evidence before re-requesting completion.`
+      ? ""
       : " Provide concrete verification evidence (run the relevant checks and include their output) before re-requesting completion.";
-    return { status: "continue", reason: `${verdict.reasoning}${unmet}${acceptanceHint}` };
+    return { status: "continue", reason: `${verdict.reasoning}${unmet}${evidenceDetail}${acceptanceHint}` };
   }
 
   const goalText = activeGoal.text;
-  activeGoal = { ...activeGoal, status: "done", pauseReason: undefined, updatedAt: Date.now() };
+  activeGoal = { ...activeGoal, status: "done", pauseReason: undefined, lastVerificationFailure: undefined, updatedAt: Date.now() };
   updateUsage(activeGoal, ctx);
   persistGoal(activeGoal);
   const completedGoal = { ...activeGoal };
@@ -1465,6 +1490,8 @@ async function handleResume(
     status: "active",
     pauseReason: undefined,
     verificationFailures: 0,
+    lowProgressCount: 0,
+    prevTokensUsed: activeGoal.tokensUsed,
     updatedAt: Date.now(),
   };
   persistGoal(activeGoal);
@@ -1705,12 +1732,15 @@ function isGoal(v: unknown): v is ActiveGoal {
     typeof g.startedAt === "number" && typeof g.updatedAt === "number" &&
     typeof g.iteration === "number" &&
     typeof g.tokensUsed === "number" && typeof g.baselineTokens === "number" &&
-    (g.pauseReason === undefined || ["user", "budget", "gate", "error"].includes(String(g.pauseReason))) &&
+    (g.pauseReason === undefined || ["user", "budget", "gate", "error", "stalled"].includes(String(g.pauseReason))) &&
     (g.planHandoffKey === undefined || typeof g.planHandoffKey === "string") &&
     (g.workflowSessionId === undefined || typeof g.workflowSessionId === "string") &&
     (g.workflowSessionGeneration === undefined || typeof g.workflowSessionGeneration === "string")
     && (g.verificationFailures === undefined || (typeof g.verificationFailures === "number" && g.verificationFailures >= 0))
     && (g.acceptance === undefined || (Array.isArray(g.acceptance) && g.acceptance.every((item) => typeof item === "string")))
+    && (g.lastVerificationFailure === undefined || typeof g.lastVerificationFailure === "string")
+    && (g.prevTokensUsed === undefined || typeof g.prevTokensUsed === "number")
+    && (g.lowProgressCount === undefined || (typeof g.lowProgressCount === "number" && g.lowProgressCount >= 0))
   );
 }
 
@@ -1739,7 +1769,13 @@ function buildContinuePrompt(
   const runAnchor = activeRun
     ? `\n\n<active_run id="${escapeXml(activeRun.runId)}">Run \`maestro run brief ${activeRun.runId}\` before the next execution action.</active_run>`
     : "";
-  return `Continue the active goal:\n\n${goalBlock(goal)}${runAnchor}\n\nAuto-continuation #${goal.iteration}. Re-check current state as needed. ${rules("this goal")}\n\n${markerComment(marker)}`;
+  const failureContext = goal.lastVerificationFailure
+    ? `\n\n<last_verification_failure>\n${escapeXml(goal.lastVerificationFailure)}\n</last_verification_failure>`
+    : "";
+  const progress = goal.tokenBudget !== undefined
+    ? ` Progress: ${fmtTokens(goal.tokensUsed)}/${fmtTokens(goal.tokenBudget)} tokens, iteration #${goal.iteration}.`
+    : ` Iteration #${goal.iteration}, ${fmtTokens(goal.tokensUsed)} tokens used.`;
+  return `Continue the active goal — keep working, do not summarize or re-plan:\n\n${goalBlock(goal)}${failureContext}${runAnchor}\n\n${progress} ${rules("this goal")}\n\n${markerComment(marker)}`;
 }
 
 function goalBlock(goal: ActiveGoal): string {
@@ -2084,7 +2120,7 @@ function ensureElapsedTimer(ctx: GoalContext, goalId: string): void {
 export function fmtStatusLine(goal: ActiveGoal | undefined): string | undefined {
   if (!goal) return undefined;
   if (goal.status === "done") return "done";
-  if (goal.status === "paused") return goal.pauseReason === "budget" ? `budget ${fmtBudget(goal)}` : goal.pauseReason === "gate" ? "gate blocked" : "paused";
+  if (goal.status === "paused") return goal.pauseReason === "budget" ? `budget ${fmtBudget(goal)}` : goal.pauseReason === "gate" ? "gate blocked" : goal.pauseReason === "stalled" ? "stalled" : "paused";
   if (goal.tokenBudget !== undefined) return `active ${fmtBudget(goal)}`;
   return `active ${fmtDuration(goal.timeUsedSeconds)}`;
 }
@@ -2098,7 +2134,7 @@ function fmtBudget(goal: ActiveGoal): string { return `${fmtTokens(goal.tokensUs
 function goalSummary(goal: ActiveGoal): string {
   const pauseInfo = goal.pauseReason ? ` (${goal.pauseReason})` : "";
   return [
-    `Goal: ${goal.text}`,
+    `Goal [${goal.id}]: ${goal.text}`,
     `Status: ${goal.status}${pauseInfo}`,
     `Iteration: ${goal.iteration}`,
     `Elapsed: ${fmtDuration(goal.timeUsedSeconds)}`,
