@@ -169,6 +169,20 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
         throw error instanceof Error ? error : new Error(String(error));
       }
     },
+    renderCall(args, theme) {
+      const mode = String(args.mode ?? "search");
+      const query = String(args.query ?? "").slice(0, 60);
+      return singleLine(`${theme.fg("toolTitle", theme.bold("smart_search "))}${mode} ${theme.fg("accent", `"${query}"`)}`);
+    },
+    renderResult(result, _opts, theme) {
+      const details = result.details as { mode?: string; query?: string } | undefined;
+      const isError = (result as { isError?: boolean }).isError === true;
+      if (isError) {
+        const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
+        return singleLine(theme.fg("error", `✗ ${text.split("\n")[0]?.slice(0, 120) ?? "SmartSearch failed"}`));
+      }
+      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", `${details?.mode ?? "search"}: "${(details?.query ?? "").slice(0, 60)}"`)}`);
+    },
   };
 }
 

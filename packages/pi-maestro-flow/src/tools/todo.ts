@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type {
   ExtensionAPI,
@@ -146,6 +146,7 @@ const TODO_STATE_ENTRY_TYPE = "todo-state";
 const TODO_STATE_VERSION = 5;
 
 let tasks: Map<string, TodoTask> = new Map();
+let nextTaskId = 1;
 let knownActors: Map<string, TodoActorRef> = new Map([[ROOT_TODO_ACTOR.id, ROOT_TODO_ACTOR]]);
 let extensionApi: ExtensionAPI | undefined;
 let onTodoStateChanged: (() => void) | undefined;
@@ -190,6 +191,7 @@ export function onSessionStart(ctx: TodoContext): void {
   activeSkillSnapshots = new Map();
   runSkillInjection = undefined;
   tasks = loadTasksFromSession(ctx);
+  syncTaskIdCounter();
   knownActors = new Map([[ROOT_TODO_ACTOR.id, cloneActor(ROOT_TODO_ACTOR)]]);
   for (const task of tasks.values()) {
     rememberActor(task.createdBy);
@@ -203,6 +205,7 @@ export function onSessionShutdown(ctx: TodoContext): void {
   todoGeneration++;
   todoMutationQueue = Promise.resolve();
   tasks.clear();
+  nextTaskId = 1;
   knownActors = new Map([[ROOT_TODO_ACTOR.id, cloneActor(ROOT_TODO_ACTOR)]]);
   skillLoader = undefined;
   skillRuntime = undefined;
@@ -503,7 +506,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
   if (params.tasks && params.tasks.length > 0) return handleBatchCreate(params.tasks, actor, params.planHandoffKey);
   if (!params.subject) return err("subject is required for create", "create");
 
-  const id = randomUUID().slice(0, 8);
+  const id = allocateTaskId();
   const now = Date.now();
 
   const blockerResolution = resolveBlockedBy(id, params.blockedBy ?? []);
@@ -549,8 +552,7 @@ function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHand
   const ids: string[] = [];
   const reserved = new Set<string>(nextTasks.keys());
   for (let i = 0; i < specs.length; i++) {
-    let id = randomUUID().slice(0, 8);
-    while (reserved.has(id)) id = randomUUID().slice(0, 8);
+    const id = allocateTaskId();
     reserved.add(id);
     ids.push(id);
   }
@@ -685,7 +687,7 @@ async function handleUpdate(
   ) {
     const active = findActiveTask(draft.assignee.id, draft.id);
     if (active) {
-      return err(`Task #${active.id} is already in progress for @${draft.assignee.label}; complete or pause it before activating another task`, "update");
+      return err(`Task #${active.id} is already in progress for @${draft.assignee.label} (one in_progress per actor). For parallel work, dispatch teammates without changing todo status; update each task when its agent completes.`, "update");
     }
   }
 
@@ -854,7 +856,7 @@ async function handleNext(
 ): Promise<AgentToolResult> {
   const active = findActiveTask(actor.id);
   if (active) {
-    return err(`Task #${active.id} is already in progress for @${actor.label}; complete or pause it before activating another task`, "next");
+    return err(`Task #${active.id} is already in progress for @${actor.label} (one in_progress per actor). Complete or pause it first, or dispatch parallel work via teammates without changing todo status.`, "next");
   }
 
   const pending = [...tasks.values()]
@@ -978,6 +980,19 @@ function cloneTaskMap(state: Map<string, TodoTask> = tasks): Map<string, TodoTas
   return new Map([...state].map(([id, task]) => [id, cloneTodoTask(task)]));
 }
 
+function allocateTaskId(): string {
+  return String(nextTaskId++);
+}
+
+function syncTaskIdCounter(state: Map<string, TodoTask> = tasks): void {
+  let max = 0;
+  for (const id of state.keys()) {
+    const n = Number(id);
+    if (Number.isInteger(n) && n > max) max = n;
+  }
+  nextTaskId = max + 1;
+}
+
 function cloneSkillActivation(activation: SkillActivationMetadata): SkillActivationMetadata {
   return {
     ...activation,
@@ -1012,7 +1027,8 @@ function resolveBlockedBy(
 ): { blockedBy: string[]; error?: string } {
   const blockedBy: string[] = [];
   const seen = new Set<string>();
-  for (const depId of proposedDeps) {
+  for (const rawDepId of proposedDeps) {
+    const depId = rawDepId.replace(/^#+/, "");
     if (seen.has(depId)) continue;
     seen.add(depId);
     if (depId === taskId) return { blockedBy: [], error: "Task cannot block itself" };
@@ -1185,7 +1201,7 @@ function revalidateAsyncTodoMutation(check: AsyncTodoMutationCheck): TodoTask {
     const active = findActiveTask(check.draft.assignee.id, check.draft.id);
     if (active) {
       throw new Error(
-        `Task #${active.id} is already in progress for @${check.draft.assignee.label}; complete or pause it before activating another task`,
+        `Task #${active.id} is already in progress for @${check.draft.assignee.label} (one in_progress per actor). For parallel work, dispatch teammates without changing todo status; update each task when its agent completes.`,
       );
     }
   }
@@ -1406,6 +1422,7 @@ function normalizeSkillBindings(skills: readonly TodoSkillBinding[]): TodoSkillB
 
 function normalizeTodoParams(input: TodoParamsInput): TodoParams {
   const { skill: legacySkill, ...params } = input;
+  if (params.id) params.id = params.id.replace(/^#+/, "");
   if (params.skills !== undefined) {
     return {
       ...params,

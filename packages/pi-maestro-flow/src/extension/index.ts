@@ -498,6 +498,19 @@ When NOT to use:
         `${theme.fg("toolTitle", theme.bold("maestro "))}${action}${detail}`,
       );
     },
+    renderResult(result, _opts, theme) {
+      const text = result.content.find((item) => item.type === "text");
+      const message = text && "text" in text ? text.text : "";
+      const isError = (result as { isError?: boolean }).isError === true;
+      if (isError) {
+        const firstLine = message.split("\n")[0] ?? message;
+        return singleLine(theme.fg("error", `✗ ${firstLine}`));
+      }
+      const lines = message.split("\n").filter(Boolean);
+      const header = lines[0] ?? "";
+      const extra = lines.length > 1 ? theme.fg("dim", ` · ${lines.length - 1} more lines`) : "";
+      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", header.slice(0, 120))}${extra}`);
+    },
   };
 
   pi.registerTool(maestroTool);
@@ -567,13 +580,9 @@ Only request completion after all work is done; the extension verifies it indepe
       if (options.expanded) return textBlock(text);
 
       const isError = (result as { isError?: boolean }).isError === true;
-      let label: string;
-      if (/^Goal started:/.test(text)) label = "goal created";
-      else if (/^A Goal already exists/.test(text)) label = "goal already exists";
-      else if (/^No goal set\./.test(text)) label = "no goal";
-      else label = "goal status updated";
       const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-      return singleLine(`${icon} ${label}${text.includes("\n") ? theme.fg("dim", " · Alt+R details") : ""}`);
+      const firstLine = text.split("\n")[0] ?? text;
+      return singleLine(`${icon} ${theme.fg("muted", firstLine)}`);
     },
   };
 
@@ -614,10 +623,11 @@ Rules:
 
     promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then drive it step by step with resolved context and optional skill guidance.",
     promptGuidelines: [
-      "Use todo for multi-step work: create the COMPLETE plan in a single batch create (action=create with a tasks array) BEFORE executing, whenever a request needs ≥3 distinct steps, spans multiple tool-call rounds, names multiple deliverables or files, has step dependencies, or needs resumable cross-turn context. This trigger is mandatory — do not pause to judge whether tracking is needed.",
+      "Use todo for multi-step work: create the COMPLETE plan in a single batch create (action=create with a tasks array) BEFORE executing, whenever a request needs ≥3 distinct logical phases, spans multiple tool-call rounds, has step dependencies, or needs resumable cross-turn context. This trigger is mandatory — do not pause to judge whether tracking is needed.",
+      "A todo task is a meaningful unit of work — a feature, a logical phase, a component, or an independently verifiable outcome — not a single edit or command. Multiple related edits that serve one logical change belong in ONE task (e.g. \"Implement JWT middleware\" touching 3 files = 1 task, not 3). Use description and context to make each task rich: affected files, expected changes, verification criteria.",
       "Always lay out the full plan up front with one batch create. Do NOT create a single task, finish it, then create the next — a one-at-a-time list hides the overall plan and provides no tracking value. Discover new sub-steps mid-work? Add them with another batch create so the whole remaining plan stays visible.",
       "Skip todo only for single-action work (one tool call or edit fully satisfies the request) or when an active Workflow Session already mirrors tasks.",
-      "Decision rule: 1–2 steps → skip; ≥3 steps → always batch-create todos. When ambiguous, count the deliverables, not the perceived difficulty.",
+      "Decision rule: 1–2 logical phases → skip; ≥3 → always batch-create todos. Count logical phases and independently verifiable outcomes, not individual file edits or commands.",
       "Drive each step with todo action=next, and close it with todo update status=completed plus a concise summary before starting the next step.",
     ],
 
@@ -653,37 +663,46 @@ Rules:
 
     renderResult(result, _opts, theme) {
       const details = result.details as TodoResultDetails | undefined;
-      if (!details?.tasks) {
-        const text = result.content[0];
-        const fallback = text && "text" in text ? text.text : "";
-        return singleLine(details?.error ? theme.fg("error", fallback) : theme.fg("dim", fallback));
-      }
+      const rawText = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
 
+      if (!details?.tasks) {
+        return singleLine(details?.error ? theme.fg("error", rawText) : theme.fg("dim", rawText));
+      }
       if (details.error) {
         return singleLine(theme.fg("error", `Error: ${details.error}`));
       }
 
-      // Brief inline summary — full list shown in footer panel
       const allTasks = details.tasks;
       const done = allTasks.filter((t: TodoTask) => t.status === "completed").length;
       const running = allTasks.filter((t: TodoTask) => t.status === "in_progress").length;
       const open = allTasks.filter((t: TodoTask) => t.status === "pending" || t.status === "blocked").length;
-
       const counts: string[] = [];
       if (done > 0) counts.push(`${done} done`);
       if (running > 0) counts.push(`${running} in progress`);
       if (open > 0) counts.push(`${open} open`);
-      const summary = `${allTasks.length} tasks (${counts.join(", ")})`;
+      const progress = `${allTasks.length} tasks (${counts.join(", ")})`;
 
-      const actionText = details.action === "create" ? "Created"
-        : details.action === "update" ? "Updated"
-        : details.action === "delete" ? "Deleted"
-        : details.action === "clear" ? "Cleared"
-        : details.action === "next" ? "Next"
-        : "";
+      const action = details.action;
+      if (action === "get") {
+        const firstLine = rawText.split("\n")[0]?.replace(/^# /, "") ?? "";
+        return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", firstLine)}`);
+      }
+      if (action === "list") {
+        const lines = rawText.split("\n").filter(Boolean);
+        const body = lines.length <= 6
+          ? lines.join("\n")
+          : [...lines.slice(0, 5), `… and ${lines.length - 5} more`].join("\n");
+        return { content: [{ type: "text" as const, text: body }], details };
+      }
+      if (action === "create" && rawText.includes("\n")) {
+        const [header, ...taskLines] = rawText.split("\n");
+        const compact = taskLines.map((l) => l.replace(/^\s*/, "")).join(" · ");
+        return singleLine(`${theme.fg("success", "✓")} ${header}: ${theme.fg("muted", compact)}`);
+      }
 
-      const prefix = actionText ? `${theme.fg("success", "✓")} ${actionText} — ` : "";
-      return singleLine(`${prefix}${theme.fg("muted", summary)}`);
+      const firstLine = rawText.split("\n")[0] ?? "";
+      const prefix = theme.fg("success", "✓");
+      return singleLine(`${prefix} ${theme.fg("muted", firstLine)} ${theme.fg("dim", `— ${progress}`)}`);
     },
   };
 
@@ -738,6 +757,16 @@ When NOT to use:
     },
     renderCall(args, theme) {
       return singleLine(`${theme.fg("toolTitle", theme.bold("run-control "))}${String(args.action ?? "?")}`);
+    },
+    renderResult(result, _opts, theme) {
+      const details = result.details as { ok?: boolean; action?: string; message?: string } | undefined;
+      const text = result.content.find((item) => item.type === "text");
+      const message = text && "text" in text ? text.text : "";
+      const firstLine = message.split("\n")[0] ?? message;
+      if (!details?.ok) {
+        return singleLine(theme.fg("error", `✗ ${firstLine}`));
+      }
+      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", `${details.action}: ${firstLine}`)}`);
     },
   };
   pi.registerTool(runControlTool);

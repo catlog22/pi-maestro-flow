@@ -111,6 +111,19 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
         throw error instanceof Error ? error : new Error(String(error));
       }
     },
+    renderCall(args, theme) {
+      const action = String(args.action ?? "?");
+      const name = args.name ? ` [${String(args.name)}]` : "";
+      const url = args.url ? ` ${String(args.url).slice(0, 60)}` : "";
+      return singleLine(`${theme.fg("toolTitle", theme.bold("browser "))}${action}${name}${theme.fg("accent", url)}`);
+    },
+    renderResult(result, _opts, theme) {
+      const text = result.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
+      const isError = (result as { isError?: boolean }).isError === true;
+      const firstLine = text.split("\n")[0]?.slice(0, 120) ?? "";
+      if (isError) return singleLine(theme.fg("error", `✗ ${firstLine}`));
+      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", firstLine)}`);
+    },
   };
 }
 

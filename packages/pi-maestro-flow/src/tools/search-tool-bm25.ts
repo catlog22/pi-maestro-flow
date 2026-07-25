@@ -84,6 +84,16 @@ export function createSearchToolBm25(pi: Pick<ExtensionAPI, "getAllTools" | "get
         throw error instanceof Error ? error : new Error(String(error));
       }
     },
+    renderCall(args, theme) {
+      return singleLine(`${theme.fg("toolTitle", theme.bold("search_tools "))}${theme.fg("accent", `"${String(args.query ?? "").slice(0, 50)}"`)}`);
+    },
+    renderResult(result, _opts, theme) {
+      const details = result.details as { tools?: Array<{ name: string }>; activated_tools?: string[]; total_tools?: number } | undefined;
+      const count = details?.tools?.length ?? 0;
+      const activated = details?.activated_tools?.length ?? 0;
+      const activatedNote = activated > 0 ? theme.fg("accent", ` · ${activated} activated`) : "";
+      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", `${count} matches / ${details?.total_tools ?? "?"} tools`)}${activatedNote}`);
+    },
   };
 }
 

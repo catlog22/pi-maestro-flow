@@ -84,6 +84,22 @@ export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinit
         timeout.dispose();
       }
     },
+    renderCall(args, theme) {
+      const action = String(args.action ?? "?");
+      const file = args.file ? ` ${String(args.file)}` : "";
+      const line = args.line ? `:${args.line}` : "";
+      return singleLine(`${theme.fg("toolTitle", theme.bold("lsp "))}${action}${theme.fg("accent", `${file}${line}`)}`);
+    },
+    renderResult(result, _opts, theme) {
+      const text = result.content.find((item) => item.type === "text");
+      const message = text && "text" in text ? text.text : "";
+      const isError = (result as { isError?: boolean }).isError === true;
+      const firstLine = message.split("\n")[0]?.slice(0, 120) ?? "";
+      const lineCount = message.split("\n").filter(Boolean).length;
+      if (isError) return singleLine(theme.fg("error", `✗ ${firstLine}`));
+      const extra = lineCount > 1 ? theme.fg("dim", ` · ${lineCount} lines`) : "";
+      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", firstLine)}${extra}`);
+    },
   };
 }
 

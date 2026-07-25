@@ -100,11 +100,42 @@ Before implementation, always:
 
 # Task Tracking (todo)
 
-- Create the COMPLETE plan in a single batch create — `todo action=create` with a `tasks` array — BEFORE executing, whenever a request needs ≥3 distinct steps, spans multiple tool-call rounds, names multiple deliverables or files, has step dependencies, or needs resumable cross-turn context. This is mandatory — do not pause to judge whether tracking is "needed".
+- Create the COMPLETE plan in a single batch create — `todo action=create` with a `tasks` array — BEFORE executing, whenever a request needs ≥3 distinct steps, spans multiple tool-call rounds, has step dependencies, or needs resumable cross-turn context. This is mandatory — do not pause to judge whether tracking is "needed".
 - Lay out the whole plan up front in ONE batch create. Never create a single task, finish it, then create the next — a one-at-a-time list hides the overall plan and adds no tracking value. Array order is the execution order; use `blockedBy: ["#N"]` to depend on the Nth task in the same batch. Discover new sub-steps mid-work? Add them with another batch create so the remaining plan stays visible.
 - Skip todo only for single-action work (one tool call or edit fully satisfies it) or when an active Workflow Session already mirrors tasks.
 - Decision rule: 1–2 steps → skip; ≥3 steps → always batch-create todos. When ambiguous, count the deliverables, not the perceived difficulty.
 - Drive each step with todo action=next; close it with todo update status=completed plus a concise summary before starting the next step.
+
+## Task granularity
+
+A todo task is a **meaningful unit of work** — a feature, a logical phase, a component, or an independently verifiable outcome — not a single mechanical operation. Multiple related edits that serve one logical change belong in ONE task.
+
+Use `description` and `context` to make each task rich: list the affected files, the expected changes, and how to verify. A well-described task lets `todo next` provide enough context to execute without re-reading the whole plan.
+
+<example>
+User: Add dark mode toggle to the settings page, with state management and CSS theme switching. Run tests when done.
+Todo: 3 tasks — ① "Implement dark mode toggle + state management" (component, store, 3 files) ② "Apply theme switching to existing components" (CSS-in-JS, ~5 files) ③ "Run tests and fix failures" (acceptance)
+NOT: 8 tasks, one per file.
+<reasoning>Each task is a verifiable outcome spanning multiple files. Per-file tasks add tracking overhead with no organizational benefit.</reasoning>
+</example>
+
+<example>
+User: Rename getCwd to getCurrentWorkingDirectory across the project.
+Todo: 1 task — "Rename getCwd → getCurrentWorkingDirectory across all call sites" (description lists the 8 files found by grep).
+NOT: 8 tasks, one per file.
+<reasoning>One logical change, one grep, one verification pass. The file list goes in description, not in separate tasks.</reasoning>
+</example>
+
+<example>
+User: Fix the auth bug, add rate limiting, and update the API docs.
+Todo: 3 tasks — ① "Fix auth token validation bug" ② "Add rate limiting middleware" ③ "Update API documentation" — each independently verifiable.
+<reasoning>Three unrelated deliverables, each a meaningful unit of work.</reasoning>
+</example>
+
+<example>
+User: Add a comment to the calculateTotal function.
+Todo: none — single trivial edit, just do it.
+</example>
 
 # Plan Mode
 
