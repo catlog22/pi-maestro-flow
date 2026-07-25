@@ -28,7 +28,7 @@ import {
 
 type Mode = "act" | "plan";
 type PlanExecutionMode = "current" | "clear" | "compact";
-export type PlanHandoffStatus = "none" | "goal-required" | "todo-required" | "ready";
+export type PlanHandoffStatus = "none" | "todo-required" | "ready";
 export type PlanContext = Pick<
   ExtensionContext,
   "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager" | "compact"
@@ -350,33 +350,12 @@ function blockApprovedHandoffWrite(event: {
     return;
   }
   const action = typeof event.input?.action === "string" ? event.input.action : "";
-  if (event.toolName === "goal") {
-    if (action === "get") return;
-    const pausedBound = handoffStatus === "goal-required"
-      && !!latestHandoffKey && pausedGoalHandoffKey() === latestHandoffKey;
-    if (pausedBound) {
-      if (action === "update") return;
-      return {
-        block: true,
-        reason: "Approved Plan handoff Goal is paused. Call goal update with its objective to resume the bound Goal before other mutations.",
-      };
-    }
-    if (action === "create" && handoffStatus === "goal-required" && latestHandoffKey) {
-      event.input.planHandoffKey = latestHandoffKey;
-      return;
-    }
-    return {
-      block: true,
-      reason: `Approved Plan handoff is ${handoffStatus}. Read the Goal or create the one active Goal before other Goal mutations.`,
-    };
-  }
   if (event.toolName === "todo") {
     if (action === "list" || action === "get") return;
     if (action === "create") {
       if (latestHandoffKey) event.input.planHandoffKey = latestHandoffKey;
       return;
     }
-    if (handoffStatus === "goal-required") return;
     return {
       block: true,
       reason: "Approved Plan handoff requires at least one executable Todo before other Todo mutations.",
@@ -703,8 +682,7 @@ function currentDetails(action: PlanToolDetails["action"]): PlanToolDetails {
 
 export function getPlanHandoffStatus(): PlanHandoffStatus {
   if (!awaitingAction) return latestStatus === "approved" ? "ready" : "none";
-  if (!latestHandoffKey || activeGoalHandoffKey() !== latestHandoffKey) return "goal-required";
-  if (!hasExecutableTodoForHandoff(latestHandoffKey)) return "todo-required";
+  if (!latestHandoffKey || !hasExecutableTodoForHandoff(latestHandoffKey)) return "todo-required";
   return "ready";
 }
 
