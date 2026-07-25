@@ -169,6 +169,23 @@ export class PlanStore {
     return this.withWorkspaceLock((token) => this.loadUnlocked(token));
   }
 
+  /** Lock-free fast path for display/entry: reads current.md + manifest.json only.
+   *  Falls back to the full locked load() when the manifest is missing or stale. */
+  async loadQuick(): Promise<LoadedPlan> {
+    const markdown = await readOptionalText(this.currentPath);
+    const manifest = await this.readManifest();
+    if (manifest && manifest.draftChecksum === checksumText(markdown)) {
+      return {
+        markdown,
+        manifest,
+        currentPath: this.currentPath,
+        manifestPath: this.manifestPath,
+        plansDir: this.plansDir,
+      };
+    }
+    return this.load();
+  }
+
   async saveDraft(markdown: string, expectedRevision?: number): Promise<LoadedPlan> {
     return this.withWorkspaceLock((token) => this.saveDraftUnlocked(markdown, expectedRevision, token));
   }
@@ -967,6 +984,11 @@ function processIdentity(pid: number): Promise<string | null> {
     return identity;
   });
   return ownProcessIdentity;
+}
+
+/** Fire-and-forget: warm the own-PID identity cache so later lock acquisitions don't pay the subprocess cost. */
+export function prewarmProcessIdentity(): void {
+  processIdentity(process.pid).catch(() => {});
 }
 
 async function readProcessIdentity(pid: number): Promise<string | null> {

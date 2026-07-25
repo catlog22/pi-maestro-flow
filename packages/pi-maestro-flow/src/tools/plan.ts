@@ -17,7 +17,7 @@ import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
-import { PlanStore, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
+import { PlanStore, prewarmProcessIdentity, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
 import { blockIntelligenceToolCallInPlan } from "./intelligence-safety.ts";
 import { RUN_CONTROL_READ_ACTIONS } from "./run-control.ts";
 import { getActiveGoal, getGoalList } from "./goal.ts";
@@ -103,6 +103,7 @@ let latestHandoffKey: string | undefined;
 let awaitingAction = false;
 let activeToolsSnapshot: string[] | undefined;
 let pendingPlanExitReminder: string | undefined;
+let pendingPlanEnterNote: string | undefined;
 let compactionArbiter: CompactionArbiter | undefined;
 let activeGoalHandoffKey = () => {
   const current = getActiveGoal();
@@ -228,8 +229,9 @@ function restoreActToolSurface(): void {
 
 async function enterPlanMode(ctx: PlanContext): Promise<void> {
   const store = await ensureStore(ctx);
-  applyLoadedPlan(await store.load());
+  applyLoadedPlan(await store.loadQuick());
   pendingPlanExitReminder = undefined;
+  pendingPlanEnterNote = buildPlanEnterNote();
   mode = "plan";
   activatePlanToolSurface();
   syncModeStatus(ctx);
@@ -278,6 +280,7 @@ export async function onSessionStartPlan(ctx: PlanContext): Promise<void> {
   resetRuntimeState();
   ensureActToolSurface();
   syncModeStatus(ctx);
+  prewarmProcessIdentity();
   try {
     const store = await ensureStore(ctx);
     applyLoadedPlan(await store.load());
@@ -306,6 +309,7 @@ function resetRuntimeState(): void {
   awaitingAction = false;
   activeToolsSnapshot = undefined;
   pendingPlanExitReminder = undefined;
+  pendingPlanEnterNote = undefined;
 }
 
 export function onCompactPlan(ctx: PlanContext): void {
@@ -314,7 +318,12 @@ export function onCompactPlan(ctx: PlanContext): void {
 
 export function onBeforeAgentStartPlan(event: { systemPrompt: string }): { systemPrompt: string } | undefined {
   if (mode === "plan") {
-    return { systemPrompt: `${event.systemPrompt}\n\n${buildPlanModePrompt()}` };
+    let prompt = `${event.systemPrompt}\n\n${buildPlanModePrompt()}`;
+    if (pendingPlanEnterNote) {
+      prompt += `\n\n${pendingPlanEnterNote}`;
+      pendingPlanEnterNote = undefined;
+    }
+    return { systemPrompt: prompt };
   }
   if (!pendingPlanExitReminder) return;
   const reminder = pendingPlanExitReminder;
@@ -768,8 +777,8 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-confirm",
     label: "Plan Confirm",
-    description: "Render the Markdown Plan and choose how to execute, review, or continue discussing it. Approval commits the archive before Act mode.",
-    promptSnippet: "Use plan-confirm only after plan-update has produced a decision-complete draft.",
+    description: "Present the Markdown Plan to the user with choices: execute, modify, discuss, or exit. Does not force execution — the user always decides. Call in the same turn as plan-update when the draft is decision-complete.",
+    promptSnippet: "Standard presentation step after plan-update. Renders the plan and gives the user full control over next steps.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const blocked = requirePlanMode("confirm");
@@ -1174,21 +1183,49 @@ function buildPlanModePrompt(): string {
   return `[PLAN MODE ACTIVE]
 # Plan Mode
 
-You are in durable Plan Mode. Read and reason only. Produce concise, decision-complete Markdown.
+Plan mode is now active. This block is dynamically injected each turn while Plan mode is on — it is not a residual or static artifact.
 
+## Tool surface (enforced at runtime, not advisory)
+- REMOVED from your active tool set: Edit, Write, NotebookEdit, mutating shell commands, write-mode delegation. Calling them will fail.
+- AVAILABLE: read/search/explore/analysis tools, plan-update, plan-review, plan-confirm, plan-exit, plan-status, ask-user-question.
+
+## Mid-conversation transition
+Plan mode may have been activated mid-conversation (via Alt+P, /plan, or plan-enter). Earlier turns ran in Act mode with write tools — that is normal and does not contradict the current state. The conversation history reflects each turn's mode at that time; this prompt and the current tool list are the sole authority for the present turn. Do not spend reasoning cycles verifying whether Plan mode is real.
+
+## Workflow
+Read and reason only. Produce concise, decision-complete Markdown.
+
+Standard sequence — do not deliberate about turn structure or whether to call plan-confirm; just follow the sequence:
+1. Research: gather evidence with read/search/explore tools.
+2. Draft: call plan-update with the complete Markdown.
+3. Present: call plan-confirm in the same turn. plan-confirm renders the plan and gives the user a choice (execute, modify, discuss, or exit). It does NOT force execution — the user always decides. Calling it is the standard presentation step, never "pushy".
+4. Revise: if the user wants changes, plan-update again, then plan-confirm again.
+5. Exit: plan-exit leaves Plan mode without approving; the draft is preserved.
+
+Planning quality requirements:
 - Ground decisions in the current codebase and use its terminology.
 - Run a Socratic pressure review before confirmation: challenge assumptions, contradictions, boundaries, failure cases, and integration effects with concrete code evidence.
 - Use ask-user-question for every user question. Ask 2-4 related questions per call, grouped by one review branch; do not ask questions as plain assistant text.
 - Keep reviewing until scope, boundaries, non-goals, requirements, and acceptance checks are explicitly locked; unresolved risks must remain visible.
 - Align every user requirement with a planned outcome and a verifiable acceptance check.
 - Keep the final Markdown to locked scope, boundaries, decisions, ordered outcomes, risks, and acceptance checks; omit interview logs and boilerplate.
-- Confirm only after the pressure review is complete and no material decision remains open.
 - Approval decomposes the locked Plan into an ordered Todo graph; attach Goals as quality gates to key Todos (overall acceptance Goal last) before implementation.
-- Use plan-update to persist the complete draft, plan-review to edit, plan-confirm to approve, or plan-exit to leave while preserving current.md.
-- Do not use write tools, mutating shell commands, or write-mode delegation.
 - The legacy <proposed_plan> block is accepted only as a compatibility path; prefer plan-update.
 
 The public Plan contract is plain Markdown. Do not invent a parallel structured schema.`;
+}
+
+function buildPlanEnterNote(): string {
+  return [
+    "<system-reminder>",
+    "## Plan Mode Just Activated",
+    "Plan mode was activated (via user toggle or plan-enter). The tool surface has changed for this and subsequent turns:",
+    "- Write tools (Edit, Write, NotebookEdit) are removed and will fail if called.",
+    "- Plan tools (plan-update, plan-review, plan-confirm, plan-exit, plan-status) are now available.",
+    "- Read, search, and exploration tools remain fully available.",
+    "Previous conversation turns ran in Act mode — that is expected. Proceed with planning using the available tools.",
+    "</system-reminder>",
+  ].join("\n");
 }
 
 export function registerPlanCommand(pi: ExtensionAPI): void {

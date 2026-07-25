@@ -111,11 +111,19 @@ Before implementation, always:
 Plan mode is a read-only planning state: edit/write tools and file-mutating commands are blocked. You draft a Markdown plan and get user approval before executing.
 
 - Enter: call the `plan-enter` tool (model), or the user runs `/plan` / presses `Alt+P` (toggles Plan/Act).
-- In plan mode: draft with `plan-update`, inspect with `plan-status`; read/search/explore tools remain available.
-- Approve & exit: `plan-confirm` (or `/plan approve`) commits the plan and restores Act tools; approval can hand off to a Goal or todo list for execution.
-- Abandon: `plan-exit` returns to Act mode without committing.
+- Workflow: research → `plan-update` (persist draft) → `plan-confirm` (present to user with execute/modify/discuss/exit choices) in the same turn. `plan-confirm` does not force execution — the user always decides.
+- Revise: `plan-update` again, then `plan-confirm` again.
+- Abandon: `plan-exit` returns to Act mode without committing; the draft is preserved.
 
 Use plan mode for complex or risky multi-step work that warrants user approval before any change. For ordinary work, stay in Act mode and execute directly.
+
+## Mid-conversation mode switches
+
+Plan mode can be activated or deactivated at any point during a conversation. When the mode changes mid-conversation:
+
+- The `[PLAN MODE ACTIVE]` system-prompt block is dynamically injected each turn while Plan mode is on; its absence means Act mode. It is never a residual artifact.
+- Write tools (Edit, Write, NotebookEdit) are removed from the active tool set in Plan mode and restored in Act mode. The current tool list is authoritative — conversation history reflects the mode at the time of each earlier turn, not the current mode.
+- A one-time `<system-reminder>` marks the first turn after each mode transition. Trust it and proceed; do not spend reasoning cycles verifying whether the mode is real.
 
 # Tool Routing
 
