@@ -4456,7 +4456,7 @@ export async function handleChildInteractionRequest(
     interaction,
     requestId,
     action: result.action,
-    lastActivityAt: agent.lastActivityAt,
+    ...(agent ? { lastActivityAt: agent.lastActivityAt } : {}),
     isInteraction: true,
   });
   replyInteraction(reply, requestId, result);
