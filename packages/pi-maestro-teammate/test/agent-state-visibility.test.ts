@@ -195,7 +195,12 @@ test("a failed row is pinned past the visible limit", () => {
   // that got truncated away.
   const state = makeState();
   for (let i = 0; i < 10; i += 1) addAgent(state, `worker-${i}`);
-  addAgent(state, "broken", { status: "failed", failedAt: Date.now() });
+  const failedAt = Date.now() - 60_000;
+  addAgent(state, "broken", {
+    status: "failed",
+    failedAt,
+    lastActivityAt: failedAt,
+  });
 
   const lines = renderAgentStatusWidget([...state.activeRuns.values()], 80, plainTheme).join("\n");
   assert.match(lines, /broken/, "the failed row outranks the running ones");

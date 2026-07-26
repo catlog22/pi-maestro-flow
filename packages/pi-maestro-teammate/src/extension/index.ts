@@ -934,7 +934,17 @@ export function renderAgentStatusWidget(
   if (rows.length === 0) return [];
 
   const maxVisible = safeWidth < 20 ? 3 : safeWidth < 40 ? 4 : 6;
-  const visible = rows.slice(0, maxVisible);
+  const selected = new Set<string>();
+  const liveEdge = rows.find((row) => LIVE_AGENT_STATUSES.has(row.status));
+  if (liveEdge) selected.add(liveEdge.correlationId);
+  for (const row of rows) {
+    if (row.status === "failed" && selected.size < maxVisible) selected.add(row.correlationId);
+  }
+  for (const row of rows) {
+    if (selected.size >= maxVisible) break;
+    selected.add(row.correlationId);
+  }
+  const visible = rows.filter((row) => selected.has(row.correlationId));
   const hidden = rows.length - visible.length;
   const icon = (row: AgentWidgetRow): string => {
     if (row.status === "running") return theme.fg("success", "■");
