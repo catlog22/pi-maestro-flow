@@ -201,14 +201,6 @@ export default function (pi: ExtensionAPI): void {
 					const cu = ctx.getContextUsage();
 					const branch = footerData.getGitBranch();
 					const extensionStatuses = collectExtensionStatuses(footerData.getExtensionStatuses());
-					const agentSnap = agents.snapshot();
-					const agentFailed = agentSnap.filter((a) => a.status === "failed").length;
-					const agentRunning = agentSnap.filter((a) => a.status === "running" || a.status === "retrying").length;
-					const agentSummary = agentSnap.length > 0
-						? agentFailed > 0
-							? `${agentRunning} agents · ${agentFailed} failed`
-							: `${agentRunning} agents`
-						: undefined;
 					return renderFooter({
 						width,
 						model: ctx.model?.id ?? "no-model",
@@ -221,7 +213,9 @@ export default function (pi: ExtensionAPI): void {
 						totals: getUsageTotals(ctx.sessionManager.getEntries()),
 						git: branch ?? undefined,
 						elapsed: formatDuration(Date.now() - sessionStart),
-						agentSummary,
+						// The Agents header one line above already states the roster and
+						// the failure count. Repeating it here spent a footer segment to
+						// say nothing new, and the two could disagree mid-update.
 						workflowStatus: extensionStatuses.find((status) => status.key === WORKFLOW_STATUS_KEY)?.text,
 						extensionStatuses: extensionStatuses.filter((status) => status.key !== WORKFLOW_STATUS_KEY),
 						glyphs: resolveGlyphs(config.icons.mode),
