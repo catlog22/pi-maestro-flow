@@ -64,8 +64,6 @@ interface RuntimeState {
 	git: GitInfo | null;
 	contextPercent: number | null;
 	tokens: TokenTotals;
-	turnCount: number;
-	isAgentRunning: boolean;
 }
 
 type PlanModeStatus = "ACT" | "PLAN" | "READY";
@@ -372,8 +370,6 @@ export function installStatusline(
 		git: null,
 		contextPercent: null,
 		tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		turnCount: 0,
-		isAgentRunning: false,
 	};
 
 	let cwd = "";
@@ -570,18 +566,15 @@ export function installStatusline(
 	});
 
 	pi.on("agent_start", () => {
-		rs.isAgentRunning = true;
 		invalidate();
 	});
 
 	pi.on("agent_end", () => {
-		rs.isAgentRunning = false;
 		scheduleGitRefresh(footerGeneration);
 		invalidate();
 	});
 
 	pi.on("turn_start", () => {
-		rs.turnCount++;
 		invalidate();
 	});
 
