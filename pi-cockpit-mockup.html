@@ -1,0 +1,256 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>pi cockpit — terminal vision (integrated)</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,400;0,500;0,700;0,800;1,400&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#0b0b0d; --panel:#0e0e11; --panel2:#121216;
+    --userbg:#2b2e3b; --usertx:#e9e9ec;
+    --toolbg:#16231a; --toolbd:#27402d;
+    --fg:#f1f1f3; --text:#d2d2d5; --list:#9a9aa1; --muted:#6c6c74; --dim:#47474e; --faint:#26262c;
+    --hair:#1c1c22; --hair2:#2a2a31;
+    --cyan:#37c6da; --green:#46d274; --greendim:#6fbf73; --amber:#dca23a; --purple:#a77bd6;
+    --red:#ef5a52; --reddim:#e07a72; --brand:#46d274;
+    --mono:"JetBrains Mono",ui-monospace,"Cascadia Code","Fira Code",Consolas,Menlo,monospace;
+    --disp:"Space Grotesk","Segoe UI Variable Display",system-ui,sans-serif;
+    --cjk:"JetBrains Mono","Microsoft YaHei UI","PingFang SC","Hiragino Sans GB",sans-serif;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;height:100%}
+  body{background:var(--bg);color:var(--text);font-family:var(--mono);font-size:13.5px;line-height:1.6;-webkit-font-smoothing:antialiased;overflow:hidden}
+  body::before{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background-image:linear-gradient(var(--faint) 1px,transparent 1px),linear-gradient(90deg,var(--faint) 1px,transparent 1px);
+    background-size:52px 52px;opacity:.13;-webkit-mask-image:radial-gradient(140% 100% at 50% 0%,#000 20%,transparent 90%);mask-image:radial-gradient(140% 100% at 50% 0%,#000 20%,transparent 90%)}
+  body::after{content:"";position:fixed;inset:0;z-index:0;pointer-events:none;
+    background:repeating-linear-gradient(0deg,rgba(255,255,255,.014) 0 1px,transparent 1px 3px),
+      radial-gradient(120% 80% at 12% -8%,rgba(55,198,218,.05),transparent 55%),
+      radial-gradient(100% 70% at 100% 112%,rgba(70,210,116,.045),transparent 60%);mix-blend-mode:screen}
+  .wrap{position:relative;z-index:1;height:100vh;max-width:1180px;margin:0 auto;padding:0 30px 0;display:flex;flex-direction:column}
+  .disp{font-family:var(--disp)} .cjk{font-family:var(--cjk)}
+  .b{color:var(--fg);font-weight:700} .muted{color:var(--muted)} .dim{color:var(--dim)}
+  .cyan{color:var(--cyan)} .green{color:var(--green)} .amber{color:var(--amber)}
+  .purple{color:var(--purple)} .red{color:var(--red)} .reddim{color:var(--reddim)}
+  .tnum{font-variant-numeric:tabular-nums}
+  .stage{flex:1 1 auto;min-height:0;overflow-y:auto;padding:18px 2px 14px;scrollbar-width:thin;scrollbar-color:#26262c transparent}
+  .stage::-webkit-scrollbar{width:9px} .stage::-webkit-scrollbar-thumb{background:#222228;border-radius:5px}
+  .blk{margin:0 0 15px;animation:rise .4s ease both}
+  .blk:nth-child(2){animation-delay:.05s} .blk:nth-child(3){animation-delay:.1s}
+  .blk:nth-child(4){animation-delay:.15s} .blk:nth-child(5){animation-delay:.2s} .blk:nth-child(6){animation-delay:.25s}
+  @keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
+  .userblk{background:var(--userbg);color:var(--usertx);border-radius:7px;padding:11px 16px;display:inline-block;max-width:92%;font-weight:500}
+  .think{border-left:2px solid var(--dim);padding:1px 0 1px 13px;margin:2px 0 14px;color:var(--muted);font-style:italic;font-size:13px}
+  .think.live{border-left-color:var(--amber);animation:breathe 1.9s ease-in-out infinite}
+  @keyframes breathe{50%{border-left-color:#4a3a1c}}
+  .think .th{display:flex;align-items:center;gap:7px;cursor:pointer;user-select:none;font-style:normal;font-size:10px;letter-spacing:1.5px;text-transform:uppercase;color:var(--dim);font-family:var(--disp);margin-bottom:2px}
+  .think .th .c{transition:transform .2s;font-size:9px}
+  .think.shut .th .c{transform:rotate(-90deg)}
+  .think .tb{max-height:120px;overflow:hidden;transition:max-height .3s,opacity .25s,margin .3s}
+  .think.shut .tb{max-height:0;opacity:0;margin:0}
+  .think.live .th{color:var(--amber)}
+  .prose{color:var(--text);white-space:pre-wrap}
+  .caret{display:inline-block;width:8px;height:14px;background:var(--fg);vertical-align:-2px;margin-left:1px;animation:blink 1s steps(1) infinite}
+  @keyframes blink{50%{opacity:0}}
+  .tool{background:var(--toolbg);border:1px solid var(--toolbd);border-left:3px solid var(--greendim);border-radius:8px;overflow:hidden}
+  .tool .th{display:flex;align-items:center;gap:9px;padding:9px 14px;cursor:pointer;user-select:none}
+  .tool .th .c{color:var(--greendim);font-size:9px;transition:transform .2s;width:8px}
+  .tool.shut .th .c{transform:rotate(-90deg)}
+  .tool .th .nm{color:var(--fg);font-weight:700}
+  .tool .th .ar{color:var(--list)}
+  .tool .th .st{margin-left:auto;color:var(--greendim);font-size:10px;letter-spacing:1px;text-transform:uppercase;font-family:var(--disp)}
+  .tool .body{padding:0 14px 11px 31px;border-top:1px solid var(--toolbd);max-height:220px;overflow:hidden;transition:max-height .3s,padding .3s,opacity .25s}
+  .tool.shut .body{max-height:0;padding-top:0;padding-bottom:0;opacity:0;border-top-color:transparent}
+  .tool .ok{color:var(--greendim)}
+  .tool .inline{color:var(--list);font-size:12.5px;line-height:1.7}
+  .tool .inline .pend{color:var(--muted)} .tool .inline .blk2{color:var(--reddim)}
+  .tool .pbar{height:5px;background:#0c140e;border-radius:3px;overflow:hidden;margin:8px 0 3px}
+  .tool .pbar i{display:block;height:100%;width:62%;background:linear-gradient(90deg,var(--greendim),var(--green));animation:fill 2.4s ease-in-out infinite alternate}
+  @keyframes fill{from{width:34%}to{width:88%}}
+  .tool .cur{color:var(--green)}
+  .errline{color:var(--red);font-weight:500}
+  .stack{flex-shrink:0;position:relative;border:1px solid var(--hair2);border-radius:12px;background:linear-gradient(180deg,var(--panel),var(--panel2));padding:9px 14px 10px;transition:border-color .25s,box-shadow .25s}
+  .stack::before{content:"";position:absolute;top:-1px;left:14px;right:14px;height:2px;border-radius:2px;
+    background:linear-gradient(90deg,transparent,var(--brand),var(--cyan),transparent);opacity:0;transform:translateX(-100%);pointer-events:none}
+  .wrap:has(#cmd:focus) .stack{border-color:#2c4034;box-shadow:0 0 0 1px rgba(70,210,116,.12),0 0 26px -10px rgba(70,210,116,.45)}
+  .wrap:has(#cmd:focus) .stack::before{opacity:.9;animation:scanx 1.8s linear infinite}
+  @keyframes scanx{to{transform:translateX(100%)}}
+  .wrap:has(#cmd:focus) .console{box-shadow:0 -2px 0 0 var(--purple),0 0 26px -8px rgba(167,123,214,.4)}
+  .sblock{margin-top:10px} .sblock:first-child{margin-top:2px}
+  .sb-h{display:flex;align-items:center;gap:10px;margin-bottom:5px}
+  .sb-dot{width:7px;height:7px;border-radius:50%;background:var(--green);box-shadow:0 0 7px var(--green);animation:beat 1.5s ease-in-out infinite}
+  @keyframes beat{0%,100%{transform:scale(1);opacity:1}50%{transform:scale(.5);opacity:.4}}
+  .sb-l{font-family:var(--disp);font-size:9.5px;letter-spacing:2.5px;text-transform:uppercase;color:var(--muted);font-weight:600}
+  .sb-ct{font-family:var(--disp);font-weight:700;font-size:12px;color:var(--fg)}
+  .sb-ct span{color:var(--dim);font-weight:500}
+  .sb-r{margin-left:auto;display:flex;align-items:center;gap:8px}
+  .segctl{display:inline-flex;border:1px solid var(--hair);border-radius:5px;overflow:hidden}
+  .segctl button{background:transparent;border:none;color:var(--dim);font:inherit;font-size:11px;padding:1px 9px;cursor:pointer;line-height:1.5;transition:.15s}
+  .segctl button:hover{color:var(--muted)} .segctl button.on{color:var(--brand);background:rgba(70,210,116,.1)}
+  .arow{display:grid;grid-template-columns:15px 78px 64px minmax(0,1fr) minmax(0,240px) 38px;align-items:center;gap:10px;padding:3px 9px;border-left:2px solid transparent;border-radius:0 5px 5px 0;font-size:12px;transition:background .15s,border-color .15s}
+  .arow:hover{background:rgba(255,255,255,.028);border-left-color:var(--cyan)}
+  .arow .as{color:var(--cyan);text-align:center}
+  .arow .arl{font-family:var(--disp);font-weight:600;color:var(--cyan);font-size:11.5px}
+  .arow .aid{color:var(--dim);font-size:10px}
+  .arow .atk{color:var(--list);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .arow .atl{color:var(--dim);text-align:right;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .arow .atl .cur{color:var(--cyan);transition:opacity .18s}
+  .arow .atm{color:var(--muted);font-size:10px;text-align:right}
+  .acompact{font-size:11.5px;color:var(--list);padding:3px 9px;display:flex;align-items:center;gap:9px}
+  .acompact b{color:var(--fg);font-weight:600} .acompact .sep{color:var(--faint)}
+  .trow{display:grid;grid-template-columns:26px 16px minmax(0,1fr);align-items:center;gap:9px;padding:3px 9px;border-left:2px solid transparent;border-radius:0 5px 5px 0;font-size:12.5px;transition:background .15s,border-color .15s}
+  .trow:hover{background:rgba(255,255,255,.02)}
+  .trow .tn{color:var(--dim);font-size:10px;text-align:right}
+  .trow .tk{text-align:center}
+  .trow .tt{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .trow.pending .tk{color:var(--dim)} .trow.pending .tt{color:var(--muted)}
+  .trow.prog{background:rgba(55,198,218,.05);border-left-color:var(--cyan)} .trow.prog .tk{color:var(--cyan)} .trow.prog .tt{color:var(--fg);font-weight:600}
+  .trow.done .tk{color:var(--green)} .trow.done .tt{color:var(--dim);text-decoration:line-through;text-decoration-color:var(--faint)}
+  .trow.blocked{border-left-color:rgba(239,90,82,.4)} .trow.blocked .tk{color:var(--red);animation:warnpulse 2.4s ease-in-out infinite} .trow.blocked .tt{color:var(--reddim)}
+  @keyframes warnpulse{0%,100%{opacity:1}50%{opacity:.4}}
+  .tsummary{display:flex;align-items:center;gap:8px;padding:5px 9px 1px;font-size:11.5px;color:var(--muted);flex-wrap:wrap}
+  .tsummary .lab{font-family:var(--disp);font-weight:600;color:var(--list);letter-spacing:.5px}
+  .tsummary .sep{color:var(--faint)}
+  .tsummary .now{margin-left:auto;color:var(--green)} .tsummary .now .ar{color:var(--dim);margin-right:4px}
+  .tsummary .hint{color:var(--dim)}
+  .tcompact{display:flex;align-items:center;gap:11px;padding:4px 9px}
+  .tcompact .segbar{flex:1 1 auto;display:flex;gap:2px;height:6px;min-width:60px}
+  .tcompact .segbar i{flex:1;border-radius:2px;background:var(--faint)}
+  .tcompact .segbar i.done{background:var(--green)} .tcompact .segbar i.prog{background:rgba(55,198,218,.3)} .tcompact .segbar i.blocked{background:rgba(239,90,82,.55)}
+  .tcompact .now{color:var(--green);font-size:11.5px} .tcompact .now .ar{color:var(--dim);margin-right:4px}
+  .tcompact .pct{font-family:var(--disp);font-size:11px;color:var(--muted)}
+  .console{flex-shrink:0;display:flex;align-items:center;gap:12px;padding:13px 4px 13px;border-top:2px solid var(--purple);margin-top:11px;transition:box-shadow .25s}
+  .console .arrow{color:var(--purple);font-weight:700;font-size:15px}
+  .console .blkcur{width:9px;height:17px;background:#d8d8d8;animation:blink 1.05s steps(1) infinite;flex-shrink:0}
+  .console:focus-within .blkcur{display:none}
+  #cmd{flex:1;background:transparent;border:none;outline:none;color:var(--fg);font:inherit;font-size:14px;caret-color:var(--brand);font-family:var(--cjk)}
+  #cmd::placeholder{color:var(--muted)}
+  .footbar{flex-shrink:0;display:flex;align-items:center;gap:0;flex-wrap:wrap;font-size:12px;padding:11px 0 14px;border-top:1px solid var(--hair);color:var(--muted)}
+  .footbar .seg{display:flex;align-items:center;gap:7px;padding:0 13px;border-right:1px solid var(--hair)}
+  .footbar .seg:first-child{padding-left:0} .footbar .seg:last-child{border-right:none;padding-right:0;margin-left:auto}
+  .footbar .mode b{color:var(--green);font-weight:700} .footbar .mode span{color:var(--muted)}
+  .footbar .ic{color:var(--dim)}
+  .ctxbar{display:inline-block;width:74px;height:9px;vertical-align:-1px;border-radius:2px;background:#161618;overflow:hidden;position:relative}
+  .ctxbar i{position:absolute;inset:0;width:4%;background:var(--green);box-shadow:0 0 6px var(--green)}
+  .footbar .auto{color:var(--green)} .footbar .cwd .sq{color:var(--amber)} .footbar .cwd b{color:var(--fg);font-weight:600}
+  .footbar .tok .up{color:var(--cyan)} .footbar .tok .dn{color:var(--green)} .footbar .tok .sum{color:var(--text)} .footbar .tok .cache{color:var(--amber)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="stage" id="stage">
+    <div class="blk"><div class="userblk cjk">测试 todo</div></div>
+    <div class="blk think live" id="think1">
+      <div class="th"><span class="c">▾</span><span>thinking</span></div>
+      <div class="tb cjk">The user wants to test the todo functionality. Let me create a simple test todo list with a few tasks to demonstrate how it works.<span class="caret"></span></div>
+    </div>
+    <div class="blk prose cjk">我来创建一个测试用的 todo 计划，演示批量创建和逐步执行。</div>
+    <div class="blk tool" id="todotool">
+      <div class="th"><span class="c">▾</span><span class="nm">todo</span><span class="ar cjk">create 3 tasks</span><span class="st">streaming</span></div>
+      <div class="body">
+        <div class="ok">✓ Created 3 tasks</div>
+        <div class="inline cjk">:: <span class="dim">#1</span> 步骤1: 环境检查 <span class="pend">(pending)</span> <span class="dim">·</span> <span class="dim">#2</span> 步骤2: 创建测试文件 <span class="blk2">(blocked)</span> <span class="dim">·</span> <span class="dim">#3</span> 步骤3: 验证并清理 <span class="blk2">(blocked)</span></div>
+        <div class="pbar"><i></i></div>
+        <div class="cur">writing plan state…</div>
+      </div>
+    </div>
+    <div class="blk errline">Error: Request timed out.</div>
+    <div class="blk think" id="think2">
+      <div class="th"><span class="c">▾</span><span>thought · 1.4s</span></div>
+      <div class="tb cjk">Good, the todo plan was created. Now let me activate the first task with todo next.</div>
+    </div>
+    <div class="blk errline">Aborted after 1 retry attempt</div>
+  </div>
+  <div class="stack" id="stack">
+    <div class="sblock" id="agBlock">
+      <div class="sb-h">
+        <span class="sb-dot"></span><span class="sb-l">agents</span><span class="sb-ct tnum"><span id="agN">2</span> running</span>
+        <span class="sb-r"><div class="segctl" id="agCtl"><button data-m="list" class="on" title="list">≡</button><button data-m="cmp" title="compact">—</button></div></span>
+      </div>
+      <div id="agList">
+        <div class="arow"><span class="as" data-spin>⠋</span><span class="arl">explorer</span><span class="aid">#a1f3c2</span><span class="atk">map auth entrypoints &amp; routes</span><span class="atl"><span class="cur">read src/api/routes.ts</span></span><span class="atm tnum">3s</span></div>
+        <div class="arow"><span class="as" data-spin>⠙</span><span class="arl">explorer</span><span class="aid">#b9e014</span><span class="atk">trace jwt verify control flow</span><span class="atl"><span class="cur">read src/auth/jwt.ts</span></span><span class="atm tnum">3s</span></div>
+      </div>
+      <div id="agCompact" hidden><div class="acompact"><b>2</b> running<span class="sep">·</span><b>6</b> tools<span class="sep">·</span>pi: <span class="cyan">writing</span></div></div>
+    </div>
+    <div class="sblock" id="tdBlock">
+      <div class="sb-h">
+        <span class="sb-dot"></span><span class="sb-l">todo</span><span class="sb-ct tnum"><span id="tdDone">0</span><span>/</span><span id="tdTotal">3</span></span>
+        <span class="sb-r"><div class="segctl" id="tdCtl"><button data-m="list" class="on" title="list">≡</button><button data-m="cmp" title="compact">—</button></div></span>
+      </div>
+      <div id="tdList">
+        <div class="trow pending"><span class="tn">01</span><span class="tk">·</span><span class="tt cjk">步骤1: 环境检查</span></div>
+        <div class="trow blocked"><span class="tn">02</span><span class="tk">!</span><span class="tt cjk">步骤2: 创建测试文件</span></div>
+        <div class="trow blocked"><span class="tn">03</span><span class="tk">!</span><span class="tt cjk">步骤3: 验证并清理</span></div>
+        <div class="tsummary cjk">
+          <span class="lab">Todo</span><span class="tnum">3 tasks</span><span class="sep">·</span><span class="tnum">0 done</span><span class="sep">·</span><span class="tnum">0 running</span><span class="sep">·</span><span class="tnum" style="color:var(--reddim)">2 blocked</span><span class="sep">·</span><span class="tnum">1 member</span>
+          <span class="hint">(Alt+T expand)</span><span class="now"><span class="ar">»</span>步骤1: 环境检查</span>
+        </div>
+      </div>
+      <div id="tdCompact" hidden>
+        <div class="tcompact cjk">
+          <div class="segbar"><i></i><i class="blocked"></i><i class="blocked"></i></div>
+          <span class="now"><span class="ar">»</span>步骤1: 环境检查</span>
+          <span class="pct tnum">0%</span>
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="console">
+    <span class="arrow">›</span><span class="blkcur"></span>
+    <input id="cmd" autocomplete="off" spellcheck="false" placeholder="输入消息，或 @path/to/file …">
+  </div>
+  <div class="footbar tnum">
+    <span class="seg mode"><b>ACT</b><span>/default</span></span>
+    <span class="seg"><span class="ic">✎</span><span class="cyan">qwen3.8-max-preview</span></span>
+    <span class="seg"><span class="amber">high</span></span>
+    <span class="seg"><span class="ic">◐</span><span class="ctxbar"><i></i></span><span>4%</span></span>
+    <span class="seg"><span class="auto">AUTO ON</span></span>
+    <span class="seg cwd"><span class="sq">■</span><b>dyw</b></span>
+    <span class="seg tok"><span class="up">↑15k</span><span class="dn">↓294</span><span class="sum">Σ15k</span><span class="cache">⚡52%</span></span>
+  </div>
+</div>
+<script>
+"use strict";
+const $=(s,r=document)=>r.querySelector(s);
+const SPIN="⠋⠹⠸⠇";
+let f=0;
+setInterval(()=>{f++;document.querySelectorAll("[data-spin]").forEach(e=>{e.textContent=SPIN[f%SPIN.length];});},90);
+$("#think1").querySelector(".th").addEventListener("click",()=>$("#think1").classList.toggle("shut"));
+$("#think2").querySelector(".th").addEventListener("click",()=>$("#think2").classList.toggle("shut"));
+$("#todotool").querySelector(".th").addEventListener("click",function(){
+  const t=$("#todotool");t.classList.toggle("shut");
+  t.querySelector(".st").textContent=t.classList.contains("shut")?"done · 3 tasks":"streaming";
+});
+function wireCtl(ctlId,listId,cmpId){
+  $(ctlId).addEventListener("click",e=>{
+    const b=e.target.closest("button");if(!b)return;
+    const cmp=b.dataset.m==="cmp";
+    $(listId).hidden=cmp;$(cmpId).hidden=!cmp;
+    [...$(ctlId).children].forEach(x=>x.classList.toggle("on",x===b));
+  });
+}
+wireCtl("#agCtl","#agList","#agCompact");
+wireCtl("#tdCtl","#tdList","#tdCompact");
+const TAILS={
+  a1:["read src/api/routes.ts","lsp references authenticate","read src/middleware/auth.ts"],
+  b9:["read src/auth/jwt.ts","lsp definition verify()","grep rotate secret"]
+};
+const rows=[...document.querySelectorAll(".arow")];
+let ti=0;
+setInterval(()=>{
+  ti++;
+  rows.forEach(r=>{
+    const id=r.querySelector(".aid").textContent.replace("#","").slice(0,2);
+    const cur=r.querySelector(".atl .cur"); if(!cur)return;
+    const pool=TAILS[id]; if(!pool)return;
+    cur.style.opacity="0";
+    setTimeout(()=>{cur.textContent=pool[ti%pool.length];cur.style.opacity="1";},180);
+  });
+},1500);
+</script>
+</body>
+</html>

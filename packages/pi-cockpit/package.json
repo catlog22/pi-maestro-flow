@@ -1,0 +1,56 @@
+{
+  "name": "pi-cockpit",
+  "version": "0.1.0",
+  "description": "Agent cockpit for Pi: a list-mode status stack (live teammates + todo plan) pinned above the editor, plus a Starship-style footer. Renders only via public extension APIs (setWidget/setFooter).",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "tui",
+    "teammate",
+    "todo"
+  ],
+  "license": "MIT",
+  "files": [
+    "src/",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test --experimental-transform-types tests/agents-store.test.ts tests/todo-store.test.ts tests/render.test.ts tests/footer.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": ">=0.80",
+    "@earendil-works/pi-ai": ">=0.80",
+    "@earendil-works/pi-tui": ">=0.80"
+  },
+  "peerDependenciesMeta": {
+    "@earendil-works/pi-coding-agent": {
+      "optional": true
+    },
+    "@earendil-works/pi-ai": {
+      "optional": true
+    },
+    "@earendil-works/pi-tui": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-tui": "*",
+    "@types/node": "^22.0.0",
+    "typescript": "^5.5.0"
+  },
+  "main": "./src/index.ts",
+  "exports": {
+    ".": "./src/index.ts",
+    "./src/*": "./src/*"
+  }
+}

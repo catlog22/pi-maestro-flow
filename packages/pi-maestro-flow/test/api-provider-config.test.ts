@@ -1076,3 +1076,343 @@ test("/effort reports synchronous runtime apply errors after durable save", asyn
   assert.match(notifications.at(-1)?.message ?? "", /^思考强度应用失败：/);
   assert.equal(notifications.some((entry) => entry.message.startsWith("思考强度已设为")), false);
 });
+
+test("saveApiProviderSettings stores explicit api, compat, and name for a custom channel", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-custom-save-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+
+  await saveApiProviderSettings({
+    provider: "my-proxy",
+    baseUrl: "https://proxy.example.com/v1",
+    modelId: "my-model",
+    reasoning: true,
+    apiKey: "proxy-secret",
+    api: "openai-completions",
+    name: "My Proxy",
+    contextWindow: 200_000,
+    maxTokens: 32_768,
+    compat: { supportsDeveloperRole: false, thinkingFormat: "qwen" },
+  }, modelsPath);
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  const custom = saved.providers["my-proxy"];
+  assert.equal(custom.api, "openai-completions");
+  assert.equal(custom.name, "My Proxy");
+  assert.equal(custom.baseUrl, "https://proxy.example.com/v1");
+  assert.deepEqual(custom.compat, { supportsDeveloperRole: false, thinkingFormat: "qwen" });
+  assert.equal(custom.models[0].id, "my-model");
+  assert.equal(custom.models[0].contextWindow, 200_000);
+  assert.equal(custom.models[0].maxTokens, 32_768);
+
+  await assert.rejects(
+    () => saveApiProviderSettings({
+      provider: "no-protocol",
+      baseUrl: "https://proxy.example.com/v1",
+      modelId: "m",
+      reasoning: false,
+      apiKey: "k",
+    }, modelsPath),
+    /API type cannot be empty/,
+  );
+});
+
+test("/api-manager creates a custom channel with a free-form id and chosen protocol", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-custom-create-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const registrations: Array<{ name: string; config: any }> = [];
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider(name: string, config: any) {
+      registrations.push({ name, config });
+    },
+    registerCommand(name: string, command: any) {
+      commands.set(name, command);
+    },
+    setThinkingLevel() {},
+  } as any, { modelsPath });
+
+  const inputAnswers = [
+    "my-proxy",
+    "My Proxy",
+    "https://proxy.example.com/v1/",
+    "my-model",
+    "200000",
+    "X-Custom",
+    "custom-val",
+    "",
+    "proxy-secret",
+  ];
+  const selectAnswers = [
+    "openai-completions",
+    "启用：off / minimal / low / medium / high / xhigh / max",
+    "high",
+    "deepseek（thinking.type · 亦适用 api.z.ai 直连）",
+    "手动设置…",
+    "不支持（用 system）",
+    "支持",
+    "max_tokens",
+    "强制 Bearer（authHeader=true）",
+  ];
+  const notifications: Array<{ type: string; message: string }> = [];
+  const command = commands.get("api-manager");
+  assert.ok(command);
+  await command.handler("set my-proxy", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: {
+      refresh() {},
+      getAll() { return [{ thinkingLevelMap: { max: "max" } }]; },
+    },
+    ui: {
+      async input() { return inputAnswers.shift(); },
+      async select() { return selectAnswers.shift(); },
+      async confirm() { return true; },
+      notify(message: string, type: string) { notifications.push({ message, type }); },
+    },
+  });
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  const custom = saved.providers["my-proxy"];
+  assert.equal(custom.api, "openai-completions");
+  assert.equal(custom.name, "My Proxy");
+  assert.equal(custom.baseUrl, "https://proxy.example.com/v1");
+  assert.deepEqual(custom.compat, {
+    thinkingFormat: "deepseek",
+    supportsDeveloperRole: false,
+    supportsReasoningEffort: true,
+    maxTokensField: "max_tokens",
+  });
+  assert.deepEqual(custom.headers, { "X-Custom": "custom-val" });
+  assert.equal(custom.authHeader, true);
+  assert.equal(custom.models[0].id, "my-model");
+  assert.equal(custom.models[0].contextWindow, 200_000);
+  assert.equal(custom.models[0].reasoning, true);
+  assert.equal(custom.models[0].thinkingLevelMap.xhigh, "max");
+
+  const defaults = JSON.parse(readFileSync(join(tempDir, "api-manager.json"), "utf8"));
+  assert.deepEqual(defaults.managedChannels, ["my-proxy"]);
+  assert.equal(defaults.modelDefaults["my-proxy/my-model"], "high");
+
+  const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  assert.equal(settings.defaultProvider, "my-proxy");
+  assert.equal(settings.defaultModel, "my-model");
+
+  assert.equal(registrations.at(-1)?.name, "my-proxy");
+  assert.equal(registrations.at(-1)?.config.api, "openai-completions");
+  assert.equal(registrations.at(-1)?.config.name, "My Proxy");
+  assert.deepEqual(registrations.at(-1)?.config.headers, { "X-Custom": "custom-val" });
+  assert.equal(registrations.at(-1)?.config.authHeader, true);
+  assert.equal(registrations.at(-1)?.config.models[0].compat.thinkingFormat, "deepseek");
+  assert.equal(registrations.at(-1)?.config.models[0].id, "my-model");
+  assert.match(notifications.at(-1)?.message ?? "", /已保存自定义渠道；默认模型为 my-proxy\/my-model/);
+});
+
+test("startup registers managed custom channels alongside presets", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-custom-startup-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  writeFileSync(modelsPath, JSON.stringify({
+    providers: {
+      "my-proxy": {
+        name: "My Proxy",
+        baseUrl: "https://proxy.example.com/v1",
+        api: "openai-completions",
+        apiKey: "proxy-secret",
+        models: [{ id: "my-model", reasoning: true, contextWindow: 200_000, maxTokens: 32_768 }],
+      },
+    },
+  }));
+  writeFileSync(defaultsPath, JSON.stringify({ version: 1, managedChannels: ["my-proxy", "ghost"] }));
+
+  const registered: Array<{ name: string; config: any }> = [];
+  registerApiProviderConfigs({
+    registerProvider(name: string, config: any) { registered.push({ name, config }); },
+    registerCommand() {},
+  } as any, { modelsPath, defaultsPath });
+
+  assert.deepEqual(registered.map((entry) => entry.name), ["my-proxy"]);
+  assert.equal(registered[0].config.api, "openai-completions");
+  assert.equal(registered[0].config.name, "My Proxy");
+  assert.equal(registered[0].config.models[0].id, "my-model");
+});
+
+test("/api-manager list shows custom channels without leaking API keys", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-custom-list-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  await saveApiProviderSettings({
+    provider: "my-proxy",
+    baseUrl: "https://proxy.example.com/v1",
+    modelId: "my-model",
+    reasoning: true,
+    apiKey: "proxy-secret-must-not-be-shown",
+    api: "openai-completions",
+    name: "My Proxy",
+  }, modelsPath);
+  writeFileSync(defaultsPath, JSON.stringify({ version: 1, managedChannels: ["my-proxy"] }));
+
+  const commands = new Map<string, any>();
+  const notifications: string[] = [];
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+  } as any, { modelsPath, defaultsPath });
+
+  await commands.get("api-manager").handler("list", {
+    cwd: tempDir,
+    hasUI: false,
+    ui: { notify(message: string) { notifications.push(message); } },
+  });
+  const output = notifications.at(-1) ?? "";
+  assert.match(output, /自定义渠道：/);
+  assert.match(output, /My Proxy（自定义·openai-completions·1）：my-model/);
+  assert.doesNotMatch(output, /proxy-secret-must-not-be-shown/);
+});
+
+test("/api-manager delete removes a custom channel and its managed entry", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-custom-delete-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  await saveApiProviderSettings({
+    provider: "my-proxy",
+    baseUrl: "https://proxy.example.com/v1",
+    modelId: "my-model",
+    reasoning: true,
+    apiKey: "proxy-secret",
+    api: "openai-completions",
+    name: "My Proxy",
+  }, modelsPath);
+  writeFileSync(defaultsPath, JSON.stringify({
+    version: 1,
+    managedChannels: ["my-proxy", "other-kept"],
+    modelDefaults: { "my-proxy/my-model": "high" },
+  }));
+
+  const commands = new Map<string, any>();
+  const unregistered: string[] = [];
+  let refreshes = 0;
+  registerApiProviderConfigs({
+    registerProvider() {},
+    unregisterProvider(name: string) { unregistered.push(name); },
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+  } as any, { modelsPath, defaultsPath });
+
+  await commands.get("api-manager").handler("delete my-proxy", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: { refresh() { refreshes += 1; } },
+    ui: {
+      async confirm() { return true; },
+      notify() {},
+    },
+  });
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.equal(saved.providers["my-proxy"], undefined);
+  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
+  assert.deepEqual(defaults.managedChannels, ["other-kept"]);
+  assert.equal(defaults.modelDefaults["my-proxy/my-model"], undefined);
+  assert.deepEqual(unregistered, ["my-proxy"]);
+  assert.equal(refreshes, 1);
+});
+
+test("/api-manager leaves compat/headers unset on the auto path so pi detects xai from URL", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-custom-xai-auto-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const registrations: Array<{ name: string; config: any }> = [];
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider(name: string, config: any) { registrations.push({ name, config }); },
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    setThinkingLevel() {},
+  } as any, { modelsPath });
+
+  const inputAnswers = [
+    "grok-proxy",
+    "Grok Proxy",
+    "https://api.x.ai/v1",
+    "grok-3",
+    "131072",
+    "xai-secret",
+  ];
+  const selectAnswers = [
+    "openai-completions",
+    "启用：off / minimal / low / medium / high / xhigh",
+    "medium",
+    "自动（按 URL 识别，推荐）",
+    "自动（按 URL 识别）",
+    "自动（按 URL 识别）",
+  ];
+  const confirmAnswers = [false, true];
+  const command = commands.get("api-manager");
+  await command.handler("set grok-proxy", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: {
+      refresh() {},
+      getAll() { return []; },
+    },
+    ui: {
+      async input() { return inputAnswers.shift(); },
+      async select() { return selectAnswers.shift(); },
+      async confirm() { return confirmAnswers.shift(); },
+      notify() {},
+    },
+  });
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  const custom = saved.providers["grok-proxy"];
+  assert.equal(custom.api, "openai-completions");
+  assert.equal(custom.baseUrl, "https://api.x.ai/v1");
+  assert.equal("compat" in custom, false);
+  assert.equal("headers" in custom, false);
+  assert.equal("authHeader" in custom, false);
+  assert.equal(custom.models[0].thinkingLevelMap.xhigh, "xhigh");
+  assert.equal(registrations.at(-1)?.name, "grok-proxy");
+  assert.equal("compat" in (registrations.at(-1)?.config ?? {}), false);
+});
+
+test("saveApiProviderSettings writes headers and authHeader, and registration passes them through", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-custom-headers-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+
+  await saveApiProviderSettings({
+    provider: "hdr-chan",
+    baseUrl: "https://gateway.example.com/v1",
+    modelId: "hdr-model",
+    reasoning: false,
+    apiKey: "hdr-secret",
+    api: "openai-completions",
+    name: "Header Channel",
+    headers: { "X-Title": "pi", "HTTP-Referer": "https://pi.local" },
+    authHeader: false,
+    compat: { thinkingFormat: "zai" },
+  }, modelsPath);
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  const chan = saved.providers["hdr-chan"];
+  assert.deepEqual(chan.headers, { "X-Title": "pi", "HTTP-Referer": "https://pi.local" });
+  assert.equal(chan.authHeader, false);
+  assert.deepEqual(chan.compat, { thinkingFormat: "zai" });
+
+  writeFileSync(defaultsPath, JSON.stringify({ version: 1, managedChannels: ["hdr-chan"] }));
+  const registrations: Array<{ name: string; config: any }> = [];
+  registerApiProviderConfigs({
+    registerProvider(name: string, config: any) { registrations.push({ name, config }); },
+    registerCommand() {},
+  } as any, { modelsPath, defaultsPath });
+
+  const registration = registrations.find((entry) => entry.name === "hdr-chan")?.config;
+  assert.ok(registration);
+  assert.deepEqual(registration.headers, { "X-Title": "pi", "HTTP-Referer": "https://pi.local" });
+  assert.equal(registration.authHeader, false);
+  assert.equal(registration.models[0].compat.thinkingFormat, "zai");
+});
