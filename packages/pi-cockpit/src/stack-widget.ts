@@ -3,12 +3,15 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { renderAgents, renderTodos, type PaintTheme, type WidthUtils } from "./render.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
-import { resolveGlyphs } from "./icons.ts";
+import { fitLineByPriority, type PrioritizedSegment } from "./layout.ts";
+import { resolveGlyphs, spinFrame } from "./icons.ts";
 import type { AgentRow, BashBgJob, CockpitConfig, TodoItem } from "./types.ts";
 
 export interface TodoWidgetDeps {
 	getTodos: () => TodoItem[];
 	getConfig: () => CockpitConfig;
+	/** False when no redraw loop is running, so spinners must not freeze mid-cycle. */
+	isAnimating?: () => boolean;
 }
 
 export interface AgentWidgetDeps {
@@ -16,6 +19,7 @@ export interface AgentWidgetDeps {
 	getBashBgJobs: () => BashBgJob[];
 	getConfig: () => CockpitConfig;
 	isRunning: () => boolean;
+	isAnimating?: () => boolean;
 }
 
 const UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
@@ -30,8 +34,9 @@ export function makeTodoWidget(deps: TodoWidgetDeps) {
 				const todos = deps.getTodos();
 				if (todos.length === 0) return [];
 				const g = resolveGlyphs(cfg.icons.mode);
-				const spin = g.spinFrames[Math.floor(Date.now() / 120) % g.spinFrames.length];
-				const opts = { glyphs: g, spin, now: Date.now(), expanded: cfg.todoExpanded };
+				const now = Date.now();
+				const spin = spinFrame(g, now, deps.isAnimating?.() ?? true);
+				const opts = { glyphs: g, spin, now, expanded: cfg.todoExpanded };
 				return renderTodos(todos, cfg.todoExpanded ? "list" : cfg.todoMode, width, paint, UTILS, opts);
 			},
 			invalidate(): void {},
@@ -51,7 +56,8 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				const bashBgJobs = deps.getBashBgJobs();
 				const g = resolveGlyphs(cfg.icons.mode);
 				const now = Date.now();
-				const spin = g.spinFrames[Math.floor(now / 120) % g.spinFrames.length];
+				const animating = deps.isAnimating?.() ?? true;
+				const spin = spinFrame(g, now, animating);
 				const bashBgLines = renderBashBgSummary(bashBgJobs, width, paint, UTILS, {
 					glyphs: g,
 					spin,
@@ -65,15 +71,22 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				const runCount = agents.filter((a) => a.status === "running" || a.status === "retrying").length;
 				const pendingCount = agents.filter((a) => a.status === "pending").length;
 				const sleepingCount = agents.filter((a) => a.status === "sleeping").length;
-				const summaryParts = [
-					runCount ? `${runCount} running` : "",
-					pendingCount ? `${pendingCount} pending` : "",
-					sleepingCount ? `${sleepingCount} sleeping` : "",
-					failedCount ? theme.fg("error", `${failedCount} failed`) : "",
-				].filter(Boolean).join(theme.fg("dim", " · "));
+				// This header owns the roster summary, so compact mode must not print
+				// its own count line right underneath saying the same thing.
+				const headerSegs: PrioritizedSegment[] = [
+					{ text: dot, priority: 100, clippable: false },
+					{ text: theme.fg("muted", "Agents"), priority: 90, clippable: false },
+				];
+				if (failedCount) {
+					headerSegs.push({ text: theme.fg("error", `${failedCount} failed`), priority: 95, clippable: false });
+				}
+				if (runCount) headerSegs.push({ text: theme.fg("dim", `${runCount} running`), priority: 80, clippable: false });
+				if (pendingCount) headerSegs.push({ text: theme.fg("dim", `${pendingCount} pending`), priority: 60, clippable: false });
+				if (sleepingCount) headerSegs.push({ text: theme.fg("dim", `${sleepingCount} sleeping`), priority: 50, clippable: false });
 				const lines: string[] = [];
-				lines.push(`${dot} ${theme.fg("muted", "AGENTS")} ${theme.fg("dim", summaryParts)}`);
-				lines.push(...renderAgents(agents, cfg.agentsMode, width, paint, UTILS, opts));
+				// Was the one line in the package pushed without any width clipping.
+				lines.push(fitLineByPriority(headerSegs, width, UTILS, theme.fg("dim", g.separator), g.ellipsis));
+				lines.push(...renderAgents(agents, cfg.agentsMode, width, paint, UTILS, { ...opts, withHead: false }));
 				lines.push(...bashBgLines);
 				return lines;
 			},

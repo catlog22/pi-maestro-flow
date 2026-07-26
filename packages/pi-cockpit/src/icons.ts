@@ -113,3 +113,26 @@ export function resolveIconMode(mode: IconMode): "nerd" | "ascii" {
 export function resolveGlyphs(mode: IconMode): IconGlyphs {
 	return resolveIconMode(mode) === "nerd" ? NERD_GLYPHS : ASCII_GLYPHS;
 }
+
+/**
+ * One source of truth for animation cadence.
+ *
+ * The frame clock and the redraw tick must be the same number. When frames
+ * advanced every 120ms but the UI only repainted every 250ms, each repaint
+ * skipped ~2 frames: the 6-frame braille spinner ran at half speed and the
+ * 4-frame ASCII spinner degenerated into a two-glyph flip (| ↔ -), which reads
+ * as blinking rather than rotation.
+ */
+export const ANIMATION_PERIOD_MS = 250;
+
+/**
+ * The frame to draw at `now`, or a stable glyph when nothing is driving redraws.
+ *
+ * A frozen mid-cycle spinner claims "busy" while the UI has actually stopped
+ * repainting, so an idle surface gets a static marker instead.
+ */
+export function spinFrame(glyphs: IconGlyphs, now: number, animating = true): string {
+	if (!animating) return glyphs.dotRunning;
+	const frames = glyphs.spinFrames;
+	return frames[Math.floor(now / ANIMATION_PERIOD_MS) % frames.length];
+}

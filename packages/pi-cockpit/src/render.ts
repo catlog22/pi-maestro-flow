@@ -34,6 +34,12 @@ export interface RenderOpts {
 	 * owner overrides this with the always-available `/cockpit todo`.
 	 */
 	toggleHint?: string;
+	/**
+	 * Compact agent mode prints its own roster count. When the widget already
+	 * renders an "Agents N running" header, that would be the same sentence twice
+	 * on adjacent rows — a wasted row out of a very small vertical budget.
+	 */
+	withHead?: boolean;
 }
 
 export const DEFAULT_TOGGLE_HINT = "Alt+T";
@@ -81,19 +87,25 @@ export function formatDuration(ms: number): string {
 	return `${h}h ${m}m ${s}s`;
 }
 
-// Pi themes expose only semantic colors, so roles map onto them (no free cyan/green).
-const ROLE_COLOR: Record<string, ThemeColor> = {
-	explorer: "mdLink",
-	delegate: "mdLink",
-	executor: "success",
-	reviewer: "warning",
-	debugger: "error",
-	planner: "accent",
-	main: "success",
-};
+// Role is identity, status is state — they must not share a palette. Reusing
+// success/warning/error for roles meant a green row could mean "executor" or
+// "done", and every theme inherits that ambiguity. Roles therefore draw from the
+// theme's identity colors, which carry no success/failure meaning anywhere.
+const ROLE_PALETTE: readonly ThemeColor[] = [
+	"syntaxFunction",
+	"syntaxType",
+	"syntaxString",
+	"syntaxVariable",
+	"syntaxKeyword",
+	"mdLink",
+];
 
+// Stable per-name assignment so an unknown role still gets a consistent colour
+// instead of collapsing into undifferentiated body text.
 function roleColor(role: string): ThemeColor {
-	return ROLE_COLOR[role] ?? "text";
+	let hash = 0;
+	for (let i = 0; i < role.length; i++) hash = (hash * 31 + role.charCodeAt(i)) >>> 0;
+	return ROLE_PALETTE[hash % ROLE_PALETTE.length];
 }
 
 function agentStatusRank(status: AgentRow["status"]): number {
@@ -179,8 +191,9 @@ export function renderAgents(
 		const tails = rows
 			.filter((r) => r.tail)
 			.map((r) => `${theme.fg(roleColor(r.role), r.role)}${theme.fg("dim", ":")} ${theme.fg("dim", r.tail)}`);
-		const line = tails.length > 0 ? [head, ...tails].join(theme.fg("dim", g.separator)) : head;
-		return [utils.clip(line, width, ell)];
+		const parts = opts.withHead === false ? tails : [head, ...tails];
+		if (parts.length === 0) return [];
+		return [utils.clip(parts.join(theme.fg("dim", g.separator)), width, ell)];
 	}
 	const spin = opts.spin ?? "~";
 	const now = opts.now ?? Date.now();

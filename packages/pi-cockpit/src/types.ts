@@ -91,6 +91,11 @@ export interface CockpitConfig {
 	todoExpanded: boolean;
 	hideNativeAgents: boolean;
 	icons: { mode: IconMode };
+	/**
+	 * Theme to apply at session start. Empty means "leave whatever pi is using",
+	 * so cockpit never overrides a theme the user picked elsewhere.
+	 */
+	theme: string;
 }
 
 export const DEFAULT_CONFIG: CockpitConfig = {
@@ -100,4 +105,5 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	todoExpanded: false,
 	hideNativeAgents: true,
 	icons: { mode: "auto" },
+	theme: "",
 };

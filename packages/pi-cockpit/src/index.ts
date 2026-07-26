@@ -10,8 +10,9 @@ import { makeTodoWidget, makeAgentWidget } from "./stack-widget.ts";
 import { formatDuration } from "./render.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, type PaintTheme, type WidthUtils } from "./footer.ts";
 import { collectExtensionStatuses } from "./extension-status.ts";
-import { resolveGlyphs } from "./icons.ts";
+import { ANIMATION_PERIOD_MS, resolveGlyphs } from "./icons.ts";
 import { ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
+import { applyRow, buildRows, rowKeyForAccel, type SaveState } from "./settings-view.ts";
 import {
 	AGENT_WIDGET_KEY,
 	BASH_BG_QUERY_EVENT,
@@ -67,12 +68,19 @@ export default function (pi: ExtensionAPI): void {
 			// tui may be gone between sessions
 		}
 	};
+	// True only while a redraw loop is actually running; widgets use it to avoid
+	// painting a frozen spinner frame that reads as a hung UI.
+	const isAnimating = (): boolean => tick !== undefined && (running || bashBg.hasActive());
 	const startTick = (): void => {
 		if (tick) return;
 		tick = setInterval(() => {
 			if (running || bashBg.hasActive()) req();
-		}, 250);
+		}, ANIMATION_PERIOD_MS);
 		tick.unref?.();
+	};
+	const syncTick = (): void => {
+		if (running || bashBg.hasActive()) startTick();
+		else stopTick();
 	};
 	const stopTick = (): void => {
 		if (tick) {
@@ -116,6 +124,7 @@ export default function (pi: ExtensionAPI): void {
 				return makeTodoWidget({
 					getTodos: () => todos.snapshot(),
 					getConfig: () => config,
+					isAnimating,
 				})(tui, theme);
 			},
 			{ placement: "aboveEditor" },
@@ -129,10 +138,15 @@ export default function (pi: ExtensionAPI): void {
 					getBashBgJobs: () => bashBg.snapshot(),
 					getConfig: () => config,
 					isRunning: () => running,
+					isAnimating,
 				})(tui, theme);
 			},
 			{ placement: "belowEditor" },
 		);
+		// Re-enabling mid-run reinstalls the widgets but used to leave the ticker
+		// stopped, freezing every spinner and elapsed counter until some unrelated
+		// event happened to trigger a redraw.
+		syncTick();
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			capturedTui = tui;
 			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
@@ -193,8 +207,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 	pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {
 		if (!bashBg.applySnapshot(payload)) return;
-		if (bashBg.hasActive()) startTick();
-		else if (!running) stopTick();
+		syncTick();
 		req();
 	});
 	pi.events.on(COCKPIT_TODO_TOGGLE_EVENT, (payload) => {
@@ -226,6 +239,18 @@ export default function (pi: ExtensionAPI): void {
 			}
 		});
 		invalidateUsageCache();
+		// An explicitly chosen theme is restored here; an empty value deliberately
+		// leaves whatever theme pi is already using untouched.
+		if (config.theme) {
+			const applied = ctx.ui.setTheme(config.theme);
+			if (!applied.success) {
+				try {
+					ctx.ui.notify(`pi-cockpit: theme "${config.theme}" unavailable — ${applied.error ?? "not found"}`, "warning");
+				} catch {
+					// notify unavailable
+				}
+			}
+		}
 		todos.hydrateFromEntries(ctx.sessionManager.getEntries());
 		applyUi(ctx);
 		publishUiOwnership();
@@ -254,7 +279,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 	pi.on("agent_end", () => {
 		running = false;
-		if (!bashBg.hasActive()) stopTick();
+		syncTick();
 		req();
 	});
 
@@ -313,11 +338,26 @@ export default function (pi: ExtensionAPI): void {
 				return;
 			}
 			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-				let view: CockpitConfig = { ...config };
-				const commit = (): void => {
+				const themes = ctx.ui.getAllThemes().map((t) => t.name);
+				let cursor = 0;
+				let saveState: SaveState = { kind: "idle" };
+				const apply = (key: string): void => {
 					const wasEnabled = config.enabled;
-					config = view;
-					saveConfig(config);
+					const previousTheme = config.theme;
+					config = applyRow(config, key, themes);
+					saveState = { kind: "saving" };
+					const result = saveConfig(config);
+					// The panel now reports what actually happened instead of showing
+					// an optimistic value for a write that may never have landed.
+					saveState = result.ok
+						? { kind: "saved" }
+						: { kind: "failed", message: result.error ?? "unknown error" };
+					if (config.theme !== previousTheme && config.theme !== "") {
+						const applied = ctx.ui.setTheme(config.theme);
+						if (!applied.success) {
+							saveState = { kind: "failed", message: applied.error ?? `unknown theme ${config.theme}` };
+						}
+					}
 					if (wasEnabled !== config.enabled) {
 						if (config.enabled) applyUi(ctx);
 						else uninstallUi(ctx);
@@ -325,40 +365,56 @@ export default function (pi: ExtensionAPI): void {
 					publishUiOwnership();
 					req();
 				};
-				const cycle = (m: "list" | "compact"): "list" | "compact" => (m === "list" ? "compact" : "list");
 				const ui = {
 					render(width: number): string[] {
 						const paint: PaintTheme = theme;
-						const row = (k: string, v: string): string =>
-							`  ${paint.fg("muted", k.padEnd(13))} ${paint.fg("accent", v)}`;
-						const w = Math.min(width, 44);
-						return [
+						const rows = buildRows(config, themes);
+						cursor = Math.max(0, Math.min(cursor, rows.length - 1));
+						const w = Math.min(width, 52);
+						const labelWidth = Math.max(...rows.map((r) => visibleWidth(r.label)));
+						const lines = [
 							paint.fg("text", "pi-cockpit"),
-							paint.fg("dim", "─".repeat(w)),
-							row("enabled", view.enabled ? "on" : "off"),
-							row("agents", view.agentsMode),
-							row("todo", view.todoMode),
-							row("todo expand", view.todoExpanded ? "yes" : "no"),
-							row("hide native", view.hideNativeAgents ? "yes" : "no"),
-							"",
-							paint.fg("dim", "e enabled · a agents · t todo · x expand · n hide-native · Esc close"),
+							paint.fg("borderMuted", "─".repeat(w)),
 						];
+						rows.forEach((row, index) => {
+							const selected = index === cursor;
+							const marker = selected ? paint.fg("accent", "›") : " ";
+							const pad = " ".repeat(Math.max(0, labelWidth - visibleWidth(row.label)));
+							const label = paint.fg(selected ? "text" : "muted", row.label) + pad;
+							const value = paint.fg("accent", row.value);
+							// Showing the next value makes the cycle visible instead of
+							// something the user has to discover by pressing and watching.
+							const hint = selected ? paint.fg("dim", ` → ${row.next}`) : "";
+							lines.push(`${marker} ${paint.fg("dim", row.accel)} ${label}  ${value}${hint}`);
+						});
+						lines.push("");
+						if (saveState.kind === "saved") lines.push(paint.fg("success", "✓ saved"));
+						else if (saveState.kind === "saving") lines.push(paint.fg("dim", "· saving…"));
+						else if (saveState.kind === "failed") {
+							lines.push(paint.fg("error", `✗ save failed — ${saveState.message}`));
+							lines.push(paint.fg("dim", "settings apply for this session only"));
+						}
+						lines.push(paint.fg("dim", "↑↓ move · Enter change · letter jumps · Esc close"));
+						return lines.map((line) => truncateToWidth(line, width, "…"));
 					},
 					invalidate(): void {},
 					handleInput(data: string): void {
-						if (data === "e") view = { ...view, enabled: !view.enabled };
-						else if (data === "a") view = { ...view, agentsMode: cycle(view.agentsMode) };
-						else if (data === "t") view = { ...view, todoMode: cycle(view.todoMode) };
-						else if (data === "x") view = { ...view, todoExpanded: !view.todoExpanded };
-						else if (data === "n") view = { ...view, hideNativeAgents: !view.hideNativeAgents };
-						else if (matchesKey(data, Key.escape)) {
-							commit();
+						const rows = buildRows(config, themes);
+						if (matchesKey(data, Key.escape)) {
 							done(undefined);
 							return;
-						} else {
-							return;
 						}
-						commit();
+						if (data === "\x1b[A" || data === "\x1b[B") {
+							const delta = data === "\x1b[A" ? -1 : 1;
+							cursor = (cursor + delta + rows.length) % rows.length;
+						} else if (data === "\r" || data === "\n" || data === " ") {
+							apply(rows[cursor].key);
+						} else {
+							const key = rowKeyForAccel(rows, data);
+							if (!key) return;
+							cursor = rows.findIndex((row) => row.key === key);
+							apply(key);
+						}
 						tui.requestRender();
 					},
 					dispose(): void {},
