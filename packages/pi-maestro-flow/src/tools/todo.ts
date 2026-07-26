@@ -395,23 +395,13 @@ export async function getInjectableContent(taskId: string): Promise<InjectableCo
 }
 
 export async function onBeforeAgentStartTodo(
-  event: { systemPrompt: string },
+  _event: { systemPrompt: string },
 ): Promise<{ systemPrompt: string } | undefined> {
   const active = findActiveTask(ROOT_TODO_ACTOR.id);
   if (!active || active.skills.length === 0) {
     runSkillInjection = undefined;
-    return undefined;
   }
-  const activation = await ensureSkillActivation(active);
-  assertActiveSkillStack(active, activation);
-  runSkillInjection = {
-    taskId: active.id,
-    stackRevision: activation.stackRevision,
-    channel: "system",
-  };
-  return {
-    systemPrompt: `${event.systemPrompt}\n\n${renderActivationPrompt(active, activation)}`,
-  };
+  return undefined;
 }
 
 export async function onContextTodo(

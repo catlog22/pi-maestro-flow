@@ -989,10 +989,10 @@ test("active skills inject through system prompt and context fallback without du
     }, ctx);
     await executeTodo({ action: "next" }, ctx);
 
-    const system = await onBeforeAgentStartTodo({ systemPrompt: "base" });
-    assert.match(system?.systemPrompt ?? "", /<active_skill_stack>/);
-    assert.match(system?.systemPrompt ?? "", /# Injected demo/);
-    assert.equal(await onContextTodo([]), undefined);
+    assert.equal(await onBeforeAgentStartTodo({ systemPrompt: "base" }), undefined);
+    const injected = await onContextTodo([]);
+    assert.match(String((injected?.messages[0] as { content?: string }).content ?? ""), /<active_skill_stack>/);
+    assert.match(String((injected?.messages[0] as { content?: string }).content ?? ""), /# Injected demo/);
 
     onAgentEndTodo();
     const fallback = await onContextTodo([]);
@@ -1059,8 +1059,9 @@ test("multi-skill injection reuses duplicate required reading content", async ()
       ],
     }, ctx);
     await executeTodo({ action: "next" }, ctx);
-    const system = await onBeforeAgentStartTodo({ systemPrompt: "base" });
-    const prompt = system?.systemPrompt ?? "";
+    assert.equal(await onBeforeAgentStartTodo({ systemPrompt: "base" }), undefined);
+    const injected = await onContextTodo([]);
+    const prompt = String((injected?.messages[0] as { content?: string }).content ?? "");
     assert.equal(prompt.split("SHARED REQUIRED CONTENT").length - 1, 1);
     assert.match(prompt, /required reading reused from earlier skill/);
   } finally {
@@ -1115,7 +1116,7 @@ test("active skill metadata resumes and marks changed skill content stale", asyn
 
     onSessionShutdown(context());
     onSessionStart(context(entries));
-    await onBeforeAgentStartTodo({ systemPrompt: "base" });
+    await onContextTodo([]);
     assert.equal(getVisibleTasks()[0].skillActivation?.activationId, original?.activationId);
     assert.equal(getVisibleTasks()[0].skillActivation?.state, "active");
 
@@ -1123,7 +1124,7 @@ test("active skill metadata resumes and marks changed skill content stale", asyn
     await writeFile(skillPath, `---\nname: demo\ndescription: demo\n---\n# Changed content with a different size`);
     onSessionStart(context(entries));
     await assert.rejects(
-      onBeforeAgentStartTodo({ systemPrompt: "base" }),
+      onContextTodo([]),
       /skill activation is stale/,
     );
     assert.equal(getVisibleTasks()[0].skillActivation?.state, "stale");
@@ -1167,7 +1168,8 @@ test("todo update activates skills and leaves task and activation snapshots unch
     assert.equal((activated as { isError?: boolean }).isError, undefined);
     assert.equal(getVisibleTasks()[0].status, "in_progress");
     assert.match(getVisibleTasks()[0].skillActivation?.activationId ?? "", /^[0-9a-f-]{36}$/);
-    assert.match((await onBeforeAgentStartTodo({ systemPrompt: "base" }))?.systemPrompt ?? "", /# Atomic demo/);
+    const atomicCtx1 = await onContextTodo([]);
+    assert.match(String((atomicCtx1?.messages[0] as { content?: string }).content ?? ""), /# Atomic demo/);
 
     const beforeValidationError = getTodoCompactionSnapshot();
     const validationError = await executeTodo({
@@ -1189,7 +1191,8 @@ test("todo update activates skills and leaves task and activation snapshots unch
     assert.equal((persistError as { isError?: boolean }).isError, true);
     assert.match((persistError.content[0] as { text: string }).text, /persist failed/);
     assert.deepEqual(getTodoCompactionSnapshot(), beforePersistError);
-    assert.match((await onBeforeAgentStartTodo({ systemPrompt: "base" }))?.systemPrompt ?? "", /# Atomic demo/);
+    const atomicCtx2 = await onContextTodo([]);
+    assert.match(String((atomicCtx2?.messages[0] as { content?: string }).content ?? ""), /# Atomic demo/);
   } finally {
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });
@@ -1263,8 +1266,9 @@ test("todo create, next, delete, and clear publish no live state when persistenc
     assert.equal((deleteError as { isError?: boolean }).isError, true);
     assert.match((deleteError.content[0] as { text: string }).text, /persist failed/);
     assertLiveSnapshotUnchanged(beforeDelete);
+    const deleteCtx = await onContextTodo([]);
     assert.match(
-      (await onBeforeAgentStartTodo({ systemPrompt: "base" }))?.systemPrompt ?? "",
+      String((deleteCtx?.messages[0] as { content?: string }).content ?? ""),
       /# Atomic mutation skill/,
     );
 
@@ -1273,8 +1277,9 @@ test("todo create, next, delete, and clear publish no live state when persistenc
     assert.equal((clearError as { isError?: boolean }).isError, true);
     assert.match((clearError.content[0] as { text: string }).text, /persist failed/);
     assertLiveSnapshotUnchanged(beforeClear);
+    const clearCtx = await onContextTodo([]);
     assert.match(
-      (await onBeforeAgentStartTodo({ systemPrompt: "base" }))?.systemPrompt ?? "",
+      String((clearCtx?.messages[0] as { content?: string }).content ?? ""),
       /# Atomic mutation skill/,
     );
   } finally {
