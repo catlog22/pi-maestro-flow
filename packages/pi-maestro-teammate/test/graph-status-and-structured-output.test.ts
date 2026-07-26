@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -14,6 +16,7 @@ import registerTeammateExtension, {
   buildAgentSelectorRows,
   buildWatchOutput,
   correlationIdPrefix,
+  handleProxyRequest,
   handleChildLifecycleEvent,
   renderAgentSelectorPanel,
   renderAgentStatusWidget,
@@ -23,6 +26,7 @@ import registerTeammateExtension, {
   settleAgent,
   switchConversationSession,
   waitForTeammate,
+  type TeammateRuntimeOptions,
 } from "../src/extension/index.ts";
 import {
   appendDistinctAssistantMessage,
@@ -32,6 +36,7 @@ import {
   normalizeGraphConcurrency,
   resolveVariables,
   sendRpcMessage,
+  STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS,
 } from "../src/runs/execution.ts";
 import { registerTeammateChildExtension } from "../src/runs/child-extensions.ts";
 import {
@@ -60,7 +65,156 @@ import {
 import { buildProgressTree } from "../src/tui/progress-tree.ts";
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 import { renderTeammateResult } from "../src/tui/render.ts";
-import type { ActiveAgent, SingleResult, TeammateState } from "../src/shared/types.ts";
+import type {
+  ActiveAgent,
+  AgentProgress,
+  ChildAgentCallSnapshot,
+  SingleResult,
+  TeammateState,
+} from "../src/shared/types.ts";
+
+type PublicToolResult = {
+  content: Array<{ type: string; text: string }>;
+  isError?: boolean;
+  details?: {
+    results: SingleResult[];
+    progress?: Array<{ status: string }>;
+    childCalls?: ChildAgentCallSnapshot[];
+    structuredOutput?: unknown;
+  };
+};
+
+type RegisteredTeammateTool = {
+  execute(
+    id: string,
+    params: Record<string, unknown>,
+    signal: AbortSignal,
+    onUpdate: ((result: PublicToolResult) => void) | undefined,
+    ctx: Record<string, unknown>,
+  ): Promise<PublicToolResult>;
+};
+
+function createScriptedSpawn(
+  diagnostic: keyof typeof STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS,
+  providerCause: string,
+): NonNullable<TeammateRuntimeOptions["spawnChildProcess"]> {
+  return (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({ type: "error", error: providerCause })}\n`);
+      if (diagnostic === "agentEnd") {
+        stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+        return;
+      }
+      if (diagnostic === "close") {
+        stdout.end();
+        child.emit("close", 0, null);
+        return;
+      }
+      const message = {
+        role: "assistant",
+        stopReason: "stop",
+        content: [{ type: "text", text: "provider returned no usable structured value" }],
+      };
+      stdout.write(`${JSON.stringify({ type: "message_end", message })}\n`);
+      stdout.write(`${JSON.stringify({ type: "turn_end", message, toolResults: [] })}\n`);
+    });
+    return child;
+  }) as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+}
+
+function createStructuredSpawn(
+  values: readonly unknown[],
+): NonNullable<TeammateRuntimeOptions["spawnChildProcess"]> {
+  let index = 0;
+  return (() => {
+    const value = values[index++];
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({ type: "tool_execution_start", toolName: "read" })}\n`);
+      stdout.write(`${JSON.stringify({
+        type: "agent_end",
+        message: {
+          role: "assistant",
+          content: value === undefined
+            ? [{ type: "text", text: "plain result" }]
+            : [{ type: "toolCall", name: "structured_output", arguments: value }],
+        },
+      })}\n`);
+    });
+    return child;
+  }) as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+}
+
+function createRootTool(runtimeOptions: TeammateRuntimeOptions): RegisteredTeammateTool {
+  delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ];
+  let teammateTool: RegisteredTeammateTool | undefined;
+  const events = { on: () => () => {}, emit() {} };
+  const pi = new Proxy({
+    events,
+    registerTool(tool: RegisteredTeammateTool & { name: string }) {
+      if (tool.name === "teammate") teammateTool = tool;
+    },
+  }, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      return () => {};
+    },
+  });
+  registerTeammateExtension(pi as unknown as ExtensionAPI, runtimeOptions);
+  assert.ok(teammateTool);
+  return teammateTool;
+}
+
+function rootToolContext(): Record<string, unknown> {
+  return {
+    cwd: process.cwd(),
+    hasUI: false,
+    sessionManager: { getSessionFile: () => undefined },
+  };
+}
+
+function lateProgress(status: AgentProgress["status"] = "running"): AgentProgress {
+  const now = Date.now();
+  return {
+    agent: "delegate",
+    correlationId: "late-progress",
+    taskIndex: 0,
+    dependencies: [],
+    status,
+    recentTools: [{ name: "read", status: "running" }],
+    toolCount: 1,
+    tokens: 1,
+    durationMs: 1,
+    lastActivityAt: now,
+    startedAt: now,
+    lastMessage: "late callback",
+  };
+}
 
 test("UTF-8 line decoding preserves characters split across stdout chunks", () => {
   const decoder = createUtf8LineDecoder();
@@ -107,6 +261,195 @@ test("assistant structured_output calls provide a schema-validated settlement fa
     ...event,
     message: { content: [{ type: "toolCall", name: "structured_output", arguments: { ...verdict, pass: "no" } }] },
   }, schema), undefined);
+});
+
+test("root and proxy single/graph paths preserve provider cause before every schema settlement diagnostic", async () => {
+  const schema = {
+    type: "object",
+    properties: { value: { type: "string" } },
+    required: ["value"],
+    additionalProperties: false,
+  };
+  const scenarios = Object.entries(STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS) as Array<
+    [keyof typeof STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS, string]
+  >;
+
+  for (const [diagnostic, expectedSchemaText] of scenarios) {
+    for (const mode of ["single", "graph"] as const) {
+      for (const publicPath of ["root", "proxy"] as const) {
+        const providerCause = `Authentication failed in ${publicPath}/${mode}/${diagnostic}`;
+        const runtimeOptions = {
+          spawnChildProcess: createScriptedSpawn(diagnostic, providerCause),
+          resultReadyGraceMs: 1,
+        };
+        const params = mode === "single"
+          ? { agent: "delegate", task: "diagnose", background: false, outputSchema: schema }
+          : {
+              tasks: [{ agent: "delegate", name: "diagnose", task: "diagnose", outputSchema: schema }],
+              background: false,
+            };
+        let result: Awaited<ReturnType<RegisteredTeammateTool["execute"]>>;
+        const childStatuses: string[] = [];
+
+        if (publicPath === "root") {
+          result = await createRootTool(runtimeOptions).execute(
+            `root-${mode}-${diagnostic}`,
+            params,
+            new AbortController().signal,
+            undefined,
+            rootToolContext(),
+          );
+          delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+            Symbol.for("pi-maestro-teammate.root-registry")
+          ];
+        } else {
+          const state: TeammateState = {
+            baseCwd: process.cwd(),
+            currentSessionId: null,
+            activeRuns: new Map(),
+            namedAgents: new Map(),
+          };
+          let replyMessage: {
+            result: Awaited<ReturnType<RegisteredTeammateTool["execute"]>>;
+          } | undefined;
+          await handleProxyRequest(
+            new Proxy({ events: { on: () => () => {}, emit() {} }, sendMessage() {} }, {
+              get(target, property) {
+                if (property in target) return target[property as keyof typeof target];
+                return () => {};
+              },
+            }) as unknown as ExtensionAPI,
+            state,
+            { tool: "teammate", requestId: `proxy-${mode}-${diagnostic}`, params },
+            (message) => { replyMessage = message as typeof replyMessage; },
+            undefined,
+            [],
+            undefined,
+            (child) => childStatuses.push(child.status),
+            runtimeOptions,
+          );
+          assert.ok(replyMessage);
+          result = replyMessage.result;
+        }
+
+        const text = result.content.map((item) => item.text).join("\n");
+        assert.equal(result.isError, true, `${publicPath}/${mode}/${diagnostic} must fail closed`);
+        assert.ok(
+          text.indexOf(providerCause) >= 0 && text.indexOf(providerCause) < text.indexOf("Structured output:"),
+          `${publicPath}/${mode}/${diagnostic} must show the provider cause first`,
+        );
+        assert.match(
+          text,
+          new RegExp(`Structured output: ${expectedSchemaText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
+        );
+        assert.equal(result.details?.results.length, 1);
+        assert.equal(result.details?.results[0]?.exitCode, 1);
+        if (mode === "graph") assert.equal(result.details?.progress?.[0]?.status, "failed");
+        if (publicPath === "proxy") assert.equal(childStatuses.at(-1), "failed");
+      }
+    }
+  }
+});
+
+test("root and proxy expose identical validated structuredOutput projections", async () => {
+  const schema = {
+    type: "object",
+    properties: { value: { type: "string" } },
+    required: ["value"],
+    additionalProperties: false,
+  };
+  const execute = async (
+    publicPath: "root" | "proxy",
+    params: Record<string, unknown>,
+    values: readonly unknown[],
+  ) => {
+    const runtimeOptions = { spawnChildProcess: createStructuredSpawn(values) };
+    if (publicPath === "root") {
+      const result = await createRootTool(runtimeOptions).execute(
+        `structured-${publicPath}`,
+        params,
+        new AbortController().signal,
+        undefined,
+        rootToolContext(),
+      );
+      delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+        Symbol.for("pi-maestro-teammate.root-registry")
+      ];
+      return result;
+    }
+
+    const state: TeammateState = {
+      baseCwd: process.cwd(),
+      currentSessionId: null,
+      activeRuns: new Map(),
+      namedAgents: new Map(),
+    };
+    let replyMessage: {
+      result: Awaited<ReturnType<RegisteredTeammateTool["execute"]>>;
+    } | undefined;
+    await handleProxyRequest(
+      new Proxy({ events: { on: () => () => {}, emit() {} }, sendMessage() {} }, {
+        get(target, property) {
+          if (property in target) return target[property as keyof typeof target];
+          return () => {};
+        },
+      }) as unknown as ExtensionAPI,
+      state,
+      { tool: "teammate", requestId: `structured-${publicPath}`, params },
+      (message) => { replyMessage = message as typeof replyMessage; },
+      undefined,
+      [],
+      undefined,
+      undefined,
+      runtimeOptions,
+    );
+    assert.ok(replyMessage);
+    return replyMessage.result;
+  };
+
+  for (const publicPath of ["root", "proxy"] as const) {
+    const single = await execute(
+      publicPath,
+      { agent: "delegate", task: "single", background: false, outputSchema: schema },
+      [{ value: "single" }],
+    );
+    assert.deepEqual(single.details?.structuredOutput, { value: "single" });
+
+    const singleOmitted = await execute(
+      publicPath,
+      { agent: "delegate", task: "single omitted", background: false },
+      [undefined],
+    );
+    assert.equal(Object.hasOwn(singleOmitted.details ?? {}, "structuredOutput"), false);
+
+    const graph = await execute(
+      publicPath,
+      {
+        tasks: [
+          { agent: "delegate", name: "named", task: "named", outputSchema: schema },
+          { agent: "delegate", task: "indexed", outputSchema: schema },
+          { agent: "delegate", name: "omitted", task: "omitted" },
+        ],
+        concurrency: 1,
+        background: false,
+      },
+      [{ value: "named" }, { value: "indexed" }, undefined],
+    );
+    assert.deepEqual(graph.details?.structuredOutput, {
+      named: { value: "named" },
+      "1": { value: "indexed" },
+    });
+
+    const graphOmitted = await execute(
+      publicPath,
+      {
+        tasks: [{ agent: "delegate", name: "omitted", task: "omitted" }],
+        background: false,
+      },
+      [undefined],
+    );
+    assert.equal(Object.hasOwn(graphOmitted.details ?? {}, "structuredOutput"), false);
+  }
 });
 
 test("root and proxy teammate initialization use their own request params", () => {

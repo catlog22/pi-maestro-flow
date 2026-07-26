@@ -142,6 +142,20 @@ interface JsonLineEvent {
 // Utilities
 // ---------------------------------------------------------------------------
 
+export const STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS = {
+  agentEnd: "The teammate completed without calling structured_output with a schema-valid value.",
+  close: "The teammate exited without schema-valid structured_output.",
+  resultReadyGrace: "The teammate published a result but did not settle with schema-valid structured_output in time.",
+} as const;
+
+const STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTIC_SET = new Set<string>(
+  Object.values(STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS),
+);
+
+export function isStructuredOutputSettlementDiagnostic(content: string): boolean {
+  return STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTIC_SET.has(content);
+}
+
 /**
  * Correlation ids are protocol identities, not filesystem-safe names.
  * Keep the original id for IPC while deriving a deterministic portable
@@ -2142,8 +2156,7 @@ async function runSingleAttempt(
         if (structuredOutput === undefined) {
           appendBoundedTranscriptMessage(messages, {
             role: "system",
-            content:
-              "The teammate published a result but did not settle with schema-valid structured_output in time.",
+            content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.resultReadyGrace,
           });
         }
         completeTurn(structuredOutput, true, structuredOutput === undefined ? 1 : 0);
@@ -2325,7 +2338,7 @@ async function runSingleAttempt(
       if (params.outputSchema && structuredOutput === undefined) {
         appendBoundedTranscriptMessage(messages, {
           role: "system",
-          content: "The teammate completed without calling structured_output with a schema-valid value.",
+          content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.agentEnd,
         });
         completeTurn(undefined, true, 1);
         return;
@@ -2455,7 +2468,7 @@ async function runSingleAttempt(
       if (exitCode !== 0 && params.outputSchema && structuredOutput === undefined) {
         appendBoundedTranscriptMessage(messages, {
           role: "system",
-          content: "The teammate exited without schema-valid structured_output.",
+          content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.close,
         });
       }
 
