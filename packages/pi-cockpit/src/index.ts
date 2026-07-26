@@ -3,6 +3,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import type { TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
+import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { BashBgStore } from "./bash-bg-store.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { TodoStore } from "./todo-store.ts";
@@ -31,6 +32,7 @@ import {
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";
+const COCKPIT_STATUS_KEY = "cockpit";
 
 function isTuiContext(ctx: ExtensionContext): boolean {
 	try {
@@ -60,8 +62,39 @@ export default function (pi: ExtensionAPI): void {
 	let running = false;
 	let sessionStart = 0;
 	let tick: ReturnType<typeof setInterval> | undefined;
+	// Persisted rather than toasted: a config that failed to load silently downgrades
+	// the whole session to defaults, so it belongs in a slot that does not scroll away.
+	let configProblem: string | undefined;
+
+	// The streaming line, the tab title and the footer status slot are all fed from
+	// the same snapshots the widgets read, so they can never disagree with them.
+	const refreshAmbient = (): void => {
+		const ctx = lastCtx;
+		if (!ctx || !isTuiContext(ctx)) return;
+		const g = resolveGlyphs(config.icons.mode);
+		try {
+			if (!config.enabled) {
+				ctx.ui.setWorkingMessage(undefined);
+				ctx.ui.setStatus(COCKPIT_STATUS_KEY, undefined);
+				return;
+			}
+			const state: AmbientState = {
+				todos: todos.snapshot(),
+				agents: agents.snapshot(),
+				jobs: bashBg.snapshot(),
+				running,
+				cwd: formatCwd(ctx.sessionManager.getCwd()),
+			};
+			ctx.ui.setWorkingMessage(workingMessage(state));
+			ctx.ui.setTitle(titleFor(state, { ok: g.check, fail: g.cross }));
+			ctx.ui.setStatus(COCKPIT_STATUS_KEY, statusText(configProblem, g.blocked));
+		} catch {
+			// ambient surfaces are best-effort; never let them break a render
+		}
+	};
 
 	const req = (): void => {
+		refreshAmbient();
 		try {
 			capturedTui?.requestRender();
 		} catch {
@@ -107,6 +140,14 @@ export default function (pi: ExtensionAPI): void {
 		ctx.ui.setWidget(STACK_WIDGET_KEY, undefined);
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
 		ctx.ui.setFooter(undefined);
+		try {
+			// Leaving these set would strand a title and a status line owned by an
+			// extension that is no longer painting anything.
+			ctx.ui.setWorkingMessage(undefined);
+			ctx.ui.setStatus(COCKPIT_STATUS_KEY, undefined);
+		} catch {
+			// ambient surfaces are best-effort
+		}
 		stopTick();
 		capturedTui = undefined;
 	};
