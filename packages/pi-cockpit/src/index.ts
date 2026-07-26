@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
@@ -8,7 +8,7 @@ import { BashBgStore } from "./bash-bg-store.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { TodoStore } from "./todo-store.ts";
 import { makeTodoWidget, makeAgentWidget, terminalRows } from "./stack-widget.ts";
-import { ThemePicker } from "./theme-picker.ts";
+import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { formatDuration } from "./render.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, type PaintTheme, type WidthUtils } from "./footer.ts";
 import { collectExtensionStatuses } from "./extension-status.ts";
@@ -351,33 +351,47 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	// --- /theme: pi ships no command for this; themes live under /settings ---
+	const makeThemePicker = (
+		ctx: ExtensionContext,
+		tui: TUI,
+		theme: Theme,
+		close: () => void,
+	): ThemePicker => {
+		const active = activeThemeName(theme);
+		return new ThemePicker({
+			themes: ctx.ui.getAllThemes().map((t) => t.name),
+			// Cockpit's own record is only a fallback: pi's live theme is the truth,
+			// and /settings can have changed it since cockpit last wrote anything.
+			initial: active ?? config.theme,
+			// Resolve a real instance by name. Passing `theme` straight through would
+			// store the Proxy into the very slot the Proxy reads from, and the next
+			// colour lookup would recurse until the stack blew.
+			original: active ? ctx.ui.getTheme(active) : undefined,
+			loadTheme: (name) => ctx.ui.getTheme(name),
+			// Instance form: applies in memory without writing through to pi's
+			// settings, so scrolling the whole list costs the user nothing.
+			previewTheme: (instance) => { ctx.ui.setTheme(instance); },
+			// Name form: the one call that persists.
+			commitTheme: (name) => {
+				const applied = ctx.ui.setTheme(name);
+				if (applied.success) {
+					config = { ...config, theme: name };
+					saveConfig(config);
+				}
+				return applied;
+			},
+			close,
+			requestRender: () => tui.requestRender(),
+			getTerminalRows: () => terminalRows(tui),
+			theme,
+			glyphs: resolveGlyphs(config.icons.mode),
+		});
+	};
+
 	const openThemePicker = async (ctx: ExtensionContext): Promise<void> => {
 		if (!ctx.hasUI) return;
-		const themes = ctx.ui.getAllThemes().map((t) => t.name);
 		await ctx.ui.custom<void>((tui, theme, _kb, done) =>
-			new ThemePicker({
-				themes,
-				initial: config.theme,
-				original: theme,
-				loadTheme: (name) => ctx.ui.getTheme(name),
-				// Instance form: applies in memory without writing through to pi's
-				// settings, so scrolling the whole list costs the user nothing.
-				previewTheme: (instance) => { ctx.ui.setTheme(instance); },
-				// Name form: the one call that persists.
-				commitTheme: (name) => {
-					const applied = ctx.ui.setTheme(name);
-					if (applied.success) {
-						config = { ...config, theme: name };
-						saveConfig(config);
-					}
-					return applied;
-				},
-				close: () => done(undefined),
-				requestRender: () => tui.requestRender(),
-				getTerminalRows: () => terminalRows(tui),
-				theme,
-				glyphs: resolveGlyphs(config.icons.mode),
-			}), {
+			makeThemePicker(ctx, tui, theme, () => done(undefined)), {
 			overlay: true,
 			overlayOptions: { anchor: "center", width: "60%", maxHeight: "90%" },
 		});
@@ -441,35 +455,31 @@ export default function (pi: ExtensionAPI): void {
 				setTodoExpanded(action.endsWith("expand"));
 				return;
 			}
-			// The theme row hands off to /theme instead of cycling names itself, and
-			// the picker hands back — so the trip is reversible rather than a one-way
-			// exit out of settings.
-			let pending: "settings" | "theme" | undefined = "settings";
-			while (pending) {
-				if (pending === "theme") {
-					await openThemePicker(ctx);
-					pending = "settings";
-					continue;
-				}
-				pending = await openSettings(ctx);
-			}
+			await openSettings(ctx);
 		},
 	});
 
-	// Outlives one opening of the panel: the theme row closes it and reopens it
-	// around the picker, and coming back to a cursor parked on "enabled" would make
-	// that round trip feel like the panel had been dismissed and restarted.
-	let settingsCursor = 0;
-
-	const openSettings = async (ctx: ExtensionCommandContext): Promise<"theme" | undefined> =>
-		ctx.ui.custom<"theme" | undefined>((tui, theme, _kb, done) => {
+	const openSettings = async (ctx: ExtensionCommandContext): Promise<void> =>
+		ctx.ui.custom<void>((tui, theme, _kb, done) => {
+			let settingsCursor = 0;
 			let saveState: SaveState = { kind: "idle" };
+			// The theme row expands in place rather than closing the panel and opening
+			// a second overlay: pi's `theme` is a live Proxy, so both surfaces repaint
+			// in the previewed colours, and Esc lands back on the row it was invoked
+			// from instead of on a panel that looks freshly opened.
+			let sub: ThemePicker | undefined;
+			const closeSub = (): void => {
+				sub?.dispose();
+				sub = undefined;
+				tui.requestRender();
+			};
 			const apply = (key: string): void => {
 				const wasEnabled = config.enabled;
 				if (key === "theme") {
 					// Delegate: the picker previews live and reverts on Esc, neither of
 					// which a blind one-key cycle through the name list can do.
-					done("theme");
+					sub = makeThemePicker(ctx, tui, theme, closeSub);
+					tui.requestRender();
 					return;
 				}
 				config = applyRow(config, key);
@@ -489,6 +499,10 @@ export default function (pi: ExtensionAPI): void {
 			};
 			const ui = {
 				render(width: number): string[] {
+					// The sub-view takes the whole card. It carries its own title and
+					// key hints, so stacking the panel's chrome above it would spend two
+					// rows saying nothing the picker does not already say.
+					if (sub) return sub.render(width);
 					const paint: PaintTheme = theme;
 					const rows = buildRows(config);
 					settingsCursor = Math.max(0, Math.min(settingsCursor, rows.length - 1));
@@ -526,6 +540,13 @@ export default function (pi: ExtensionAPI): void {
 				},
 				invalidate(): void {},
 				handleInput(data: string): void {
+					// While expanded the sub-view owns every key, Esc included — that is
+					// what makes Esc step back to the panel instead of dismissing both.
+					if (sub) {
+						sub.handleInput(data);
+						tui.requestRender();
+						return;
+					}
 					const rows = buildRows(config);
 					if (matchesKey(data, Key.escape)) {
 						done(undefined);
@@ -544,7 +565,12 @@ export default function (pi: ExtensionAPI): void {
 					}
 					tui.requestRender();
 				},
-				dispose(): void {},
+				dispose(): void {
+					// Closing the panel while expanded must not strand a previewed theme
+					// with no way back, so route through the picker's own cancel path.
+					sub?.handleInput("\x1b");
+					sub?.dispose();
+				},
 			};
 			return ui;
 		}, { overlay: true });

@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { ThemePicker, initialIndex, type ThemePickerParams } from "../src/theme-picker.ts";
+import { ThemePicker, activeThemeName, initialIndex, type ThemePickerParams } from "../src/theme-picker.ts";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { resolveGlyphs } from "../src/icons.ts";
 
@@ -133,6 +133,58 @@ test("no rendered line smuggles a control character into the frame", () => {
 		// return would break the card open regardless of any width assertion.
 		assert.doesNotMatch(line, /[\n\r]/);
 	}
+});
+
+test("activeThemeName reads through a Proxy, which is what pi actually hands over", () => {
+	// pi exports `theme` as a Proxy onto globalThis, so .name is a live reading
+	// rather than a snapshot. This is the only reader of the current theme the
+	// extension API leaves us, so it has to survive that shape.
+	let current = { name: "nord" };
+	const proxy = new Proxy({}, { get: (_t, p) => (current as Record<string, unknown>)[p as string] });
+	assert.equal(activeThemeName(proxy as unknown as Theme), "nord");
+	current = { name: "gruvbox" };
+	assert.equal(activeThemeName(proxy as unknown as Theme), "gruvbox");
+});
+
+test("activeThemeName refuses anything it cannot hand back to getTheme", () => {
+	const as = (v: unknown) => activeThemeName(v as Theme);
+	assert.equal(as({}), undefined);
+	assert.equal(as({ name: "" }), undefined);
+	assert.equal(as({ name: 42 }), undefined);
+	// pi's Proxy throws outright before initTheme() has run.
+	const uninitialised = new Proxy({}, { get: () => { throw new Error("Theme not initialized"); } });
+	assert.equal(as(uninitialised), undefined);
+});
+
+test("without a real original instance the picker refuses to preview at all", () => {
+	// Regression: `original` used to be pi's exported `theme`, a Proxy that reads
+	// from the very global slot setThemeInstance writes to. Cancelling stored the
+	// Proxy into itself and the next colour lookup recursed until the stack blew.
+	// Rather than preview into a state it cannot leave, the picker does not start.
+	const h = harness({ original: undefined });
+	assert.deepEqual(h.previews, []);
+	h.picker.handleInput("\x1b[B");
+	assert.deepEqual(h.previews, [], "scrolling must not apply a theme it cannot undo");
+	h.picker.handleInput("\x1b");
+	assert.deepEqual(h.previews, [], "cancel has nothing to restore and must not invent one");
+	assert.equal(h.closed, 1);
+});
+
+test("with preview off the footer stops promising a preview and a revert", () => {
+	const lines = harness({ original: undefined }).picker.render(60);
+	const hints = lines.find((line) => /Enter/.test(line))!;
+	assert.match(hints, /↑↓ move · Enter apply · Esc close/);
+	// The whole point: no key here previews, and Esc reverts nothing.
+	assert.doesNotMatch(hints, /preview|revert/);
+	// Enter still persists, so the degradation is stated rather than left to guess.
+	assert.ok(lines.some((line) => /no preview/.test(line)));
+});
+
+test("Enter still persists when preview is unavailable", () => {
+	const h = harness({ original: undefined });
+	h.picker.handleInput("\x1b[B");
+	h.picker.handleInput("\r");
+	assert.deepEqual(h.commits, ["light"]);
 });
 
 test("the footer names the key that writes, not just the keys that move", () => {
