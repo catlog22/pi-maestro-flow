@@ -3,6 +3,7 @@ name: team-ultra-analyze
 description: "Deep collaborative analysis team skill. Multi-role investigation with coordinator-driven synthesis. Triggers on \"team ultra-analyze\", \"team analyze\"."
 allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>

@@ -127,14 +127,34 @@ function remapAgentTools(content) {
 // --- Body content transformations ---
 function insertAfter(content, anchor, block) {
   const trimmed = block.trim();
-  if (content.includes(trimmed) || !content.includes(anchor)) return content;
+  if (includesBlock(content, trimmed) || !content.includes(anchor)) return content;
   return content.replace(anchor, `${anchor}\n\n${trimmed}`);
 }
 
 function insertBefore(content, anchor, block) {
   const trimmed = block.trim();
-  if (content.includes(trimmed) || !content.includes(anchor)) return content;
+  if (includesBlock(content, trimmed) || !content.includes(anchor)) return content;
   return content.replace(anchor, `${trimmed}\n${anchor}`);
+}
+
+function includesBlock(content, block) {
+  return content.replaceAll('\r\n', '\n').includes(block.replaceAll('\r\n', '\n'));
+}
+
+function dedupeBlock(content, block) {
+  const normalizedBlock = block.trim().replaceAll('\r\n', '\n');
+  const source = normalizedBlock
+    .replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+    .replaceAll('\n', '\\r?\\n');
+  const matches = [...content.matchAll(new RegExp(source, 'g'))];
+  for (let index = matches.length - 1; index > 0; index--) {
+    const match = matches[index];
+    let start = match.index;
+    const precedingBlankLines = content.slice(0, start).match(/(?:\r?\n){2}$/)?.[0];
+    if (precedingBlankLines) start -= precedingBlankLines.length;
+    content = content.slice(0, start) + content.slice(match.index + match[0].length);
+  }
+  return content;
 }
 
 function replaceAll(content, replacements) {
@@ -155,6 +175,18 @@ function restoreFrontmatterToolAliases(content) {
   const parts = splitFrontmatter(content);
   if (!parts) return content;
   const frontmatter = parts.frontmatter.replace(/\buser prompt\b/g, 'AskUserQuestion');
+  return frontmatter + parts.body;
+}
+
+function ensureSkillSessionMode(content, filePath) {
+  const normalizedPath = normalizePath(filePath);
+  if (!normalizedPath.endsWith('/SKILL.md') || !normalizedPath.includes('/skills/')) return content;
+  const parts = splitFrontmatter(content);
+  if (!parts || /^session-mode\s*:/m.test(parts.frontmatter)) return content;
+  const frontmatter = parts.frontmatter.replace(
+    /(\r?\n)(---\r?\n?)$/,
+    '$1session-mode: none$1$2',
+  );
   return frontmatter + parts.body;
 }
 
@@ -226,6 +258,8 @@ const piCoordinatorContextBlock = `
 
 </pi_context_contract>`;
 
+const maestroNextInvariantBlock = '9. simple chain 只通过 `maestro run start --chain ... --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。\n10. 中途新增下一步用 `maestro run edit <cmd...>` 修改未来 chain，不调用新的 `run start` 制造第二个 Topic Session。';
+
 function normalizePath(filePath) {
   return filePath.replaceAll('\\', '/');
 }
@@ -261,6 +295,14 @@ export function transformSessionRunCli(body, filePath) {
       '- `ReuseAssessment=fresh`：通过 `maestro session create ... --engine ralph --chain-file -` 创建 Session。',
       '- `ReuseAssessment=fresh`：简单链使用 `maestro run start "<intent>" --chain <cmd...> --no-dispatch`；高级链使用 `maestro run start "<intent>" --chain-file - --id <session-slug> --no-dispatch`。',
     );
+    result = result.replace(
+      'Turn a user intent into the initial Skill chain, create one canonical topic Session through `maestro session create --chain-file`, then execute the shared Run loop.',
+      'Turn a user intent into the initial Skill chain, create one canonical topic Session through `maestro run start --chain-file`, then execute the shared Run loop.',
+    );
+    result = result.replace(
+      '`maestro session create "{intent}" --id maestro-{slug} --chain-file {path}`',
+      '`maestro run start "{intent}" --id maestro-{slug} --chain-file {path} --no-dispatch`',
+    );
   }
 
   if (path.endsWith('/skills/maestro-ralph/SKILL.md')) {
@@ -284,7 +326,15 @@ export function transformSessionRunCli(body, filePath) {
       '- **Standard** (single run): recommend a step → confirm → execute via `maestro run start --cmd`',
     );
     result = result.replace(
+      '- **Standard** (single run): recommend a step → confirm → execute via `maestro run prepare` + `maestro run start`',
+      '- **Standard** (single run): recommend a step → confirm → execute via `maestro run start --cmd`',
+    );
+    result = result.replace(
       'maestro run prepare --platform pi --workflow-root .   # check if prepare command works',
+      'maestro run status --workflow-root .   # read canonical Session/Run position',
+    );
+    result = result.replace(
+      'maestro run prepare   # check if prepare command works',
       'maestro run status --workflow-root .   # read canonical Session/Run position',
     );
     result = result.replace(
@@ -307,7 +357,7 @@ export function transformSessionRunCli(body, filePath) {
     result = insertBefore(
       result,
       '</invariants>',
-      '9. simple chain 只通过 `maestro run start --chain ... --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。\n10. 中途新增下一步用 `maestro run edit <cmd...>` 修改未来 chain，不调用新的 `run start` 制造第二个 Topic Session。',
+      maestroNextInvariantBlock,
     );
     result = result.replace(
       '1. `maestro run prepare --platform pi <step> --workflow-root .`。\n2. 使用已解析的 `argument_requirements` 创建当前 step 的 Run；不得用路径扫描补 upstream。\n3. 按 create result 的 `brief.command` 加载完整执行指南。\n4. 执行 workflow，写正式 deliverables，运行 gates。\n5. `maestro run complete <run_id> --verdict done --workflow-root .`。',
@@ -339,6 +389,13 @@ maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [-
 # Entry blocker degradation`,
     );
     result = result.replaceAll('maestro run complete <run_id>', 'maestro run done <run_id>');
+  }
+
+  if (path.endsWith('/skills/maestro-odyssey/SKILL.md')) {
+    result = result.replace(
+      'Compatibility: `maestro session start` is an alias for `maestro run create` (see companion.md). Both resolve the same lifecycle.',
+      'Use `maestro run start` as the only lifecycle entry; no compatibility alias is required.',
+    );
   }
 
   if (
@@ -438,6 +495,20 @@ maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [-
     result = result.replaceAll('maestro run complete <run_id>', 'maestro run done <run_id>');
   }
 
+  for (const block of [
+    piHostMirrorBlock,
+    piCoordinatorContextBlock,
+    maestroCliSurface,
+    ralphCliSurface,
+    maestroNextInvariantBlock,
+  ]) {
+    result = dedupeBlock(result, block);
+  }
+  result = result.replace(
+    /(10\. 中途新增下一步[^\r\n]*)(?:\r?\n){2}(?=<\/invariants>)/,
+    '$1\n',
+  );
+
   return result;
 }
 
@@ -482,6 +553,7 @@ export function transformPiContent(content, filePath) {
     modified = remapAgentTools(modified);
   }
 
+  modified = ensureSkillSessionMode(modified, filePath);
   modified = remapAllowedToolsInFrontmatter(modified);
 
   // Transform body content

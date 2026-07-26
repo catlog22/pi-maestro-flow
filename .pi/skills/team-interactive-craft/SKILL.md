@@ -3,6 +3,7 @@ name: team-interactive-craft
 description: "Unified team skill for interactive component crafting. Vanilla JS + CSS interactive components with zero dependencies. Research -> interaction design -> build -> a11y test. Uses team-worker agent architecture. Triggers on \"team interactive craft\", \"interactive component\"."
 allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>

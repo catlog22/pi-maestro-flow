@@ -3,6 +3,7 @@ name: maestro-guard
 description: "Manage editing boundary restrictions Arguments: on|off|status|allow|deny|remove|clear [path]"
 allowed-tools: Read Write Bash Glob maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <purpose>

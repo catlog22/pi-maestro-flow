@@ -3,6 +3,7 @@ name: team-motion-design
 description: "Unified team skill for motion design. Animation token systems, scroll choreography, GPU-accelerated transforms, reduced-motion fallback. Uses team-worker agent architecture. Triggers on \"team motion design\", \"animation system\"."
 allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__chrome-devtools__performance_start_trace mcp__chrome-devtools__performance_stop_trace mcp__chrome-devtools__performance_analyze_insight mcp__chrome-devtools__evaluate_script mcp__chrome-devtools__take_screenshot maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>

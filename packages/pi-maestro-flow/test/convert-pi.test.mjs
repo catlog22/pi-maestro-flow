@@ -23,6 +23,21 @@ allowed-tools: Agent AskUserQuestion
     },
   },
   {
+    name: "adds an explicit default session mode to skill frontmatter",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: `---
+name: example
+description: Example skill
+---
+
+# Example
+`,
+    verify(output) {
+      assert.match(output, /^session-mode: none$/m);
+      assert.equal(output.match(/^session-mode:/gm)?.length, 1);
+    },
+  },
+  {
     name: "rewrites the core coordinator toward simple chains and run edit",
     file: "D:/fixture/skills/maestro/SKILL.md",
     input: `<purpose>Coordinator</purpose>
@@ -50,6 +65,26 @@ allowed-tools: Agent AskUserQuestion
       assert.match(output, /maestro run done <run_id>/);
       assert.doesNotMatch(output, /maestro run prepare/);
       assert.doesNotMatch(output, /maestro run create/);
+    },
+  },
+  {
+    name: "rewrites current generated lifecycle leftovers",
+    file: "D:/fixture/skills/maestro-next/SKILL.md",
+    input: `- **Standard** (single run): recommend a step → confirm → execute via \`maestro run prepare\` + \`maestro run start\`
+maestro run prepare   # check if prepare command works
+`,
+    verify(output) {
+      assert.match(output, /maestro run start --cmd/);
+      assert.match(output, /maestro run status --workflow-root/);
+      assert.doesNotMatch(output, /maestro run prepare/);
+    },
+  },
+  {
+    name: "rewrites the session-start compatibility alias",
+    file: "D:/fixture/skills/maestro-odyssey/SKILL.md",
+    input: "Compatibility: `maestro session start` is an alias for `maestro run create` (see companion.md). Both resolve the same lifecycle.",
+    verify(output) {
+      assert.equal(output, "Use `maestro run start` as the only lifecycle entry; no compatibility alias is required.");
     },
   },
   {
@@ -113,3 +148,35 @@ for (const fixture of cases) {
     );
   });
 }
+
+test("convert-pi: preserves every explicit session mode", () => {
+  for (const mode of ["none", "brief", "run", "bootstrap"]) {
+    const input = `---
+name: example
+session-mode: ${mode}
+---
+
+# Example
+`;
+    assert.equal(
+      transformPiContent(input, "D:/fixture/skills/example/SKILL.md"),
+      input,
+    );
+  }
+});
+
+test("convert-pi: does not duplicate generated blocks across CRLF input", () => {
+  const file = "D:/fixture/skills/maestro/SKILL.md";
+  const first = transformPiContent(
+    `<required_reading>
+~/.maestro/workflows/run-mode.md
+</required_reading>
+<purpose>Coordinator</purpose>
+`,
+    file,
+  );
+  const second = transformPiContent(first.replaceAll("\n", "\r\n"), file);
+  assert.equal(second.match(/<host_mirror>/g)?.length, 1);
+  assert.equal(second.match(/<pi_context_contract>/g)?.length, 1);
+  assert.equal(second.match(/<cli_surface>/g)?.length, 1);
+});

@@ -3,6 +3,7 @@ name: maestro-ralph
 description: "Closed-loop policy over the canonical Session/Run chain Arguments: <intent> [-y] [-c] [--amend]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: false
+session-mode: none
 ---
 
 <required_reading>

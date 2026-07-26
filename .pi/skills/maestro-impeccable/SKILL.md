@@ -3,6 +3,7 @@ name: maestro-impeccable
 description: "Use when designing, auditing, polishing, improving, or codifying frontend UI — websites, dashboards, landing pages, components, design systems Arguments: build|redesign|improve|enhance|launch|harden|foundation|live [target] [--codify <path>]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>

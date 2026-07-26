@@ -3,6 +3,7 @@ name: maestro-learn
 description: "User-invoked learning toolkit — guided reading, investigation, pattern extraction, or second opinions. Manual `/maestro-learn` only; NEVER auto-invoke for code exploration or analysis — route those intents to the analyze step via /maestro-next Arguments: follow|investigate|decompose|consult [args...]"
 allowed-tools: Read Write Bash Glob Grep teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <purpose>

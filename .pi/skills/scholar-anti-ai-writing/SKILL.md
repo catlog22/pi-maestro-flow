@@ -3,6 +3,7 @@ name: scholar-anti-ai-writing
 description: "Remove AI writing patterns from academic prose. Detects and fixes inflated symbolism, promotional language, superficial analyses, vague attributions, AI vocabulary, and formulaic structures. Supports English and Chinese. Triggers on \"remove AI patterns\", \"humanize text\", \"anti-AI polish\", \"去除AI写作痕迹\", \"人性化处理\"."
 allowed-tools: Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 # Scholar Anti-AI Writing

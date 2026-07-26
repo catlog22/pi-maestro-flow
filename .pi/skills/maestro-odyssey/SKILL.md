@@ -3,6 +3,7 @@ name: maestro-odyssey
 description: "Long-running iterative cycle — one entry, six modes (debug|improve|planex|review|security|ui). Shared archaeology/audit → fix → verify → generalize → discover → persist skeleton with mode-specific dimensions. User-invoked campaign entry; single-step fixes route via /maestro-next Arguments: <intent> --mode debug|improve|planex|review|security|ui [--auto] [-y] [-c]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
@@ -95,7 +96,7 @@ maestro run start "<short goal phrase>" \
   [--arg "<flags...>"]
 ```
 
-Compatibility: `maestro session start` is an alias for `maestro run create` (see companion.md). Both resolve the same lifecycle.
+Use `maestro run start` as the only lifecycle entry; no compatibility alias is required.
 
 **Session**: `{run_dir}/outputs/`
 **Output**: `session.json` | `evidence.ndjson` | `understanding.md` | `explore.json` (debug/review only)

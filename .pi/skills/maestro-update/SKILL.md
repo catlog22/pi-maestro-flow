@@ -3,6 +3,7 @@ name: maestro-update
 description: "Detect version, preview changes, apply workflow upgrades Arguments: [--dry-run] [--force] [--setup-only]"
 allowed-tools: Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <purpose>

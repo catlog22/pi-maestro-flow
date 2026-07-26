@@ -3,6 +3,7 @@ name: team-uidesign
 description: "Unified team skill for UI design team. Research -> design tokens -> audit -> implementation. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates dual-track pipeline with GC loops and sync points. Triggers on \"team ui design\", \"ui design team\"."
 allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>

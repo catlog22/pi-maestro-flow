@@ -3,6 +3,7 @@ name: team-frontend
 description: "Unified team skill for frontend development. Pure router — all roles read this file. Beat model is coordinator-only in monitor.md. Built-in ui-ux-pro-max design intelligence. Triggers on \"team frontend\"."
 allowed-tools: teammate Read Write Edit Bash Glob Grep WebFetch WebSearch maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>

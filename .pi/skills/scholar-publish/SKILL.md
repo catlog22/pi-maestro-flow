@@ -3,6 +3,7 @@ name: scholar-publish
 description: "Post-acceptance conference preparation workflow covering presentation slides, academic posters, and promotion content. Triggers on \"scholar publish\", \"conference preparation\", \"prepare presentation\", \"create poster\", \"write promotion\", \"post-acceptance\"."
 allowed-tools: Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 # Scholar Publish

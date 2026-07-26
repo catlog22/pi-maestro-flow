@@ -3,6 +3,7 @@ name: maestro-next
 description: "Unified entry for all development intents — classify intent, assess complexity, route to the correct execution channel: /maestro-companion (lightweight), standard single run, or /maestro and /maestro-ralph (multi-step manual/orchestrated). Pure router, never runs execution loops itself Arguments: <intent> [-y]"
 allowed-tools: Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: false
+session-mode: none
 ---
 
 <required_reading>
@@ -22,7 +23,7 @@ Pi mirrors canonical Session/Run state automatically:
 <purpose>
 Unified interactive entry for all development intents. Pure router: parse intent + project state → classify → assess complexity → route to the appropriate channel:
 - **Companion** (lightweight): route to `/maestro-companion "<intent>"` — minimal run lifecycle, continuous evidence recording
-- **Standard** (single run): recommend a step → confirm → execute via `maestro run prepare` + `maestro run start`
+- **Standard** (single run): recommend a step → confirm → execute via `maestro run start --cmd`
 - **Multi-step**: route to `/maestro "<intent>"` (manual stepwise control) or `/maestro-ralph "<intent>"` (orchestrated closed-loop)
 
 This command is the single entry point. It classifies and routes. Multi-step execution loops live in `/maestro` (manual) and `/maestro-ralph` (orchestrated).
@@ -124,7 +125,7 @@ S_FALLBACK:
 Read project state to infer `lifecycle_position`:
 
 ```bash
-maestro run prepare   # check if prepare command works
+maestro run status --workflow-root .   # read canonical Session/Run position
 # Topic Session resolution and ReuseAssessment are injected read-only inputs
 ```
 

@@ -3,6 +3,7 @@ name: maestro-overlay
 description: "Create or edit command overlays from natural language, or auto-generate them from workflow deficiency signals Arguments: <intent> | --amend [--scan] [--dry-run] [-y]"
 allowed-tools: Read Write Bash Glob Grep maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <purpose>

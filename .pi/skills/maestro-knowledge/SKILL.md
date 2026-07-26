@@ -3,6 +3,7 @@ name: maestro-knowledge
 description: "Intent-driven knowledge-store management — describe what you want (审计一下知识库 / 从工件提取知识 / 检查 wiki 健康 / 连知识图谱 / 注册领域术语) and the command routes to the right step. Knowhow 的 capture 走 /maestro-knowhow；项目约束规则走 /maestro-spec add。Triggers on \"knowledge audit\", \"知识审计\", \"knowledge harvest\", \"提取知识\", \"wiki 管理\", \"wiki health\", \"domain term\", \"领域术语\", \"extractors\". Arguments: [intent — e.g. '审计知识库' | 'harvest 这个 session' | 'wiki health' | '注册术语 MVP' | 'extractors']"
 allowed-tools: Read Write Edit Bash Glob Grep teammate WebFetch maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <purpose>

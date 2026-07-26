@@ -3,6 +3,7 @@ name: maestro-fork
 description: "Create or sync session worktree for parallel dev Arguments: --session <session_id> [--base <ref>] [--sync]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>

@@ -3,6 +3,7 @@ name: maestro
 description: "Intent-to-chain planner over the canonical Session/Run lifecycle Arguments: <intent> [-y] [-c] [--amend] [--dry-run]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: false
+session-mode: none
 ---
 
 <required_reading>
@@ -26,7 +27,7 @@ Pi mirrors canonical Session/Run state automatically:
 </deferred_reading>
 
 <purpose>
-Turn a user intent into the initial Skill chain, create one canonical topic Session through `maestro session create --chain-file`, then execute the shared Run loop. Static versus dynamic is not a Session or command mode: each Skill contract decides whether it emits a typed chain proposal. For new intents, use this command. For policy-driven execution over existing Sessions, use `/maestro-ralph`.
+Turn a user intent into the initial Skill chain, create one canonical topic Session through `maestro run start --chain-file`, then execute the shared Run loop. Static versus dynamic is not a Session or command mode: each Skill contract decides whether it emits a typed chain proposal. For new intents, use this command. For policy-driven execution over existing Sessions, use `/maestro-ralph`.
 </purpose>
 
 <pi_context_contract>
@@ -166,7 +167,7 @@ Goals describe outcomes, not lifecycle stages.
 
 Build a chain definition with execution steps and formal decision nodes whenever the shared orchestration policy (see orchestrator-run-loop.md) requires quality/goal/scope or reground evaluation. Every created chain has at least one decision node before Session seal. For narrow/single-step chains, generate a minimal implicit boundary_contract: in_scope = [intent], out_of_scope = [], constraints = [], definition_of_done = 'step completed with passing gates'. Write it to a temporary JSON file and call:
 
-`maestro session create "{intent}" --id maestro-{slug} --chain-file {path}`
+`maestro run start "{intent}" --id maestro-{slug} --chain-file {path} --no-dispatch`
 
 Delete the temporary file after success. Do not inline unescaped JSON. Then enter the shared loop using the returned `session_id`.
 

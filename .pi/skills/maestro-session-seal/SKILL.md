@@ -3,6 +3,7 @@ name: maestro-session-seal
 description: "Seal current session with knowledge extraction and DAG progression Arguments: [--session <session_id>] [-y] [--skip-knowledge]"
 allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>

@@ -3,6 +3,7 @@ name: delegation-check
 description: "Check workflow delegation prompts against agent role definitions for content separation violations. Detects conflicts, duplication, boundary leaks, and missing contracts. Triggers on \"check delegation\", \"delegation conflict\", \"prompt vs role check\"."
 allowed-tools: Read Glob Grep Bash maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <purpose>

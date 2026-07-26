@@ -4,6 +4,7 @@ description: "Manifest-driven knowledge asset generator — converts any structu
 allowed-tools: Read Write Edit Bash Glob Grep maestro
 auto-continue: true
 disable-model-invocation: true
+session-mode: none
 ---
 
 # Codify to Knowhow

@@ -3,6 +3,7 @@ name: maestro-init
 description: "Initialize project with auto state detection Arguments: [-y] [--from <source>] [--from-brainstorm SESSION-ID]"
 allowed-tools: Read Write Bash Glob Grep teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <purpose>
