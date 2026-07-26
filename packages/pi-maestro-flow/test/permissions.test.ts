@@ -49,7 +49,7 @@ test("bypassPermissions is true YOLO and ignores explicit deny rules", () => {
   assert.match(decision.reason, /YOLO/);
 });
 
-test("permission modes enforce real default behavior", () => {
+test("permission modes each enforce their own behavior", () => {
   const edit = { toolName: "write", input: { path: "src/app.ts" } };
   const custom = { toolName: "deploy", input: { environment: "prod" } };
   const read = { toolName: "read", input: { path: "README.md" } };
@@ -58,7 +58,10 @@ test("permission modes enforce real default behavior", () => {
   assert.equal(evaluatePermission(edit, "acceptEdits", empty).behavior, "allow");
   assert.equal(evaluatePermission(custom, "dontAsk", empty).behavior, "deny");
   assert.equal(evaluatePermission(custom, "bypassPermissions", empty).behavior, "allow");
-  assert.equal(evaluatePermission(custom, "plan", empty).behavior, "allow");
+  // Plan mode is advisory at the tool_call layer, so the permission layer must still ask.
+  // This asserted "allow" while a Plan hard boundary pre-screened the call; that boundary was
+  // removed in a5b0d8b7 and the stale allow left Plan strictly weaker than default.
+  assert.equal(evaluatePermission(custom, "plan", empty).behavior, "ask");
   assert.equal(evaluatePermission(read, "dontAsk", empty).behavior, "allow");
   assert.equal(evaluatePermission({ toolName: "ls", input: { path: "." } }, "dontAsk", empty).behavior, "allow");
   assert.equal(evaluatePermission({ toolName: "find", input: { pattern: "*.ts" } }, "dontAsk", empty).behavior, "allow");
@@ -69,6 +72,38 @@ test("permission modes enforce real default behavior", () => {
     suggestedAllowRule({ toolName: "deploy", input: { action: "release", environment: "prod" } }),
     "deploy(action:release)",
   );
+});
+
+// Regression guard for the invariant that was actually violated: plan mode used to return
+// `allow` for mutating tools while `default` returned `ask`, so toggling into plan mode
+// silently switched the confirmation prompt off. Plan may be as strict as default or
+// stricter, never looser. Keep this assertion behaviour-shaped so re-arming a real plan-mode
+// block later (deny) still passes.
+test("plan mode is never more permissive than default", () => {
+  const looseness = { deny: 0, ask: 1, allow: 2 } as const;
+  const mutatingCalls = [
+    { toolName: "write", input: { path: "src/app.ts" } },
+    { toolName: "edit", input: { path: "src/app.ts" } },
+    { toolName: "bash", input: { command: "rm -rf build" } },
+    { toolName: "deploy", input: { environment: "prod" } },
+  ];
+
+  for (const call of mutatingCalls) {
+    const inDefault = evaluatePermission(call, "default", empty).behavior;
+    const inPlan = evaluatePermission(call, "plan", empty).behavior;
+    assert.ok(
+      looseness[inPlan] <= looseness[inDefault],
+      `plan mode returned "${inPlan}" for ${call.toolName} while default returned "${inDefault}"`,
+    );
+  }
+
+  // Explicit settings rules are evaluated before any mode branch, so plan must not bypass them.
+  const denied = evaluatePermission(
+    { toolName: "write", input: { path: "src/app.ts" } },
+    "plan",
+    { allow: [], ask: [], deny: ["Write(src/app.ts)"] },
+  );
+  assert.equal(denied.behavior, "deny");
 });
 
 test("file permission rules match cwd-relative, absolute, parent and Windows-style paths", async () => {

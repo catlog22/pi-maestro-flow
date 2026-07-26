@@ -103,6 +103,10 @@ import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overla
 import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
 import {
+  onSessionStart as inputHistorySessionStart,
+  onSessionShutdown as inputHistorySessionShutdown,
+} from "../tui/input-history.ts";
+import {
   initPlan,
   PLAN_TOGGLE_KEY,
   PLAN_TOGGLE_LABEL,
@@ -694,9 +698,9 @@ Rules:
       if (action === "list") {
         const lines = rawText.split("\n").filter(Boolean);
         const body = lines.length <= 6
-          ? lines.join("\n")
-          : [...lines.slice(0, 5), `… and ${lines.length - 5} more`].join("\n");
-        return { content: [{ type: "text" as const, text: body }], details };
+          ? lines
+          : [...lines.slice(0, 5), `… and ${lines.length - 5} more`];
+        return textBlock(body.map((line) => theme.fg("muted", line)).join("\n"));
       }
       if (action === "create" && rawText.includes("\n")) {
         const [header, ...taskLines] = rawText.split("\n");
@@ -1205,6 +1209,7 @@ When NOT to use:
   pi.on("session_start", async (event, ctx) => {
     disposeTeammateSessionRegistrations();
     state.baseCwd = ctx.cwd;
+    await inputHistorySessionStart(ctx);
     compactionArbiter.reset();
     midTurnAutoCompaction.onSessionStart(ctx);
     todoRootContext = ctx;
@@ -1294,6 +1299,7 @@ When NOT to use:
 
   pi.on("session_shutdown", async (_event, ctx) => {
     disposeTeammateSessionRegistrations();
+    await inputHistorySessionShutdown();
     midTurnAutoCompaction.reset(ctx);
     compactionArbiter.reset();
     state.activeToolCalls.clear();
@@ -1355,7 +1361,8 @@ When NOT to use:
     return goalInput(event);
   });
 
-  // Plan mode is a hard boundary; the approved-handoff gate is bypassed in YOLO mode.
+  // Plan mode is advisory (a5b0d8b7): onToolCallPlan blocks nothing, the editing constraint
+  // is carried by the plan-enter prompt, and the permission chain below still applies in full.
   pi.on("tool_call", (event) => onToolCallPlan(event, approvalMode === "bypassPermissions"));
 
   pi.on("before_agent_start", async (event) => {
@@ -1405,7 +1412,7 @@ When NOT to use:
     }
   });
 
-  // Hook denial runs after Plan's hard boundary and before the interactive permission prompt.
+  // Hook denial runs after Plan's advisory tool_call pass and before the interactive prompt.
   const hookAdapter = registerCodexHookAdapter(pi, {
     getPermissionMode: () => isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
   });
@@ -1425,7 +1432,7 @@ When NOT to use:
   };
 
   // UCL permission gateway: GUI tool invocation runs the exact same chain as the
-  // LLM tool-call path (plan hard boundary -> codex hooks -> authorize). The
+  // LLM tool-call path (advisory plan pass -> codex hooks -> authorize). The
   // interactive approval prompt (ctx.ui.select) surfaces over RPC as
   // extension_ui_request for the GUI to answer.
   function buildGuiPermissionGateway(ctx: ExtensionContext): GuiPermissionGateway {

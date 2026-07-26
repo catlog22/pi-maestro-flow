@@ -127,7 +127,7 @@ export function createPermissionController(options: {
       }
       if (hookDecision?.behavior === "allow") {
         if (updatedMode === "plan") {
-          return { block: true, reason: "Permission mode changed to plan; retry the tool under the Plan hard boundary." };
+          return { block: true, reason: "Permission mode changed to plan; retry the tool so it is re-evaluated under plan mode." };
         }
         if (!inputWasUpdated && !hookDecision.updatedPermissions?.length) return;
         const reevaluated = evaluatePermission(

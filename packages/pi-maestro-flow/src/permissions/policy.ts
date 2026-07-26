@@ -78,9 +78,11 @@ export function evaluatePermission(
   if (mode === "dontAsk") {
     return { behavior: "deny", reason: `${toolName} is not pre-approved in dontAsk mode.` };
   }
-  if (mode === "plan") {
-    return { behavior: "allow", reason: "The Plan hard boundary already accepted this tool call." };
-  }
+  // Plan mode deliberately carries no tool-level block (a5b0d8b7 made it advisory so the
+  // cached prompt prefix stays valid), so it must fall through to the same `ask` every other
+  // interactive mode gets. It previously returned `allow` on the premise that a Plan hard
+  // boundary had already screened the call; that boundary is gone, and the stale `allow` made
+  // Plan strictly weaker than `default`.
   return { behavior: "ask", reason: `${toolName} requires user approval in ${mode} mode.` };
 }
 
