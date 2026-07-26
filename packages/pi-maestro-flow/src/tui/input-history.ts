@@ -143,37 +143,68 @@ function capped(entries: string[], maxEntries: number): string[] {
   return entries.length > maxEntries ? entries.slice(0, maxEntries) : entries;
 }
 
-let store: InputHistoryStore | undefined;
-let installed = false;
-let errorReported = false;
+/** The subset of the extension context this feature touches. */
+export type InputHistoryContext = Pick<ExtensionContext, "cwd" | "hasUI"> & {
+  ui: Pick<ExtensionContext["ui"], "notify" | "getEditorComponent" | "setEditorComponent">;
+};
 
-/** Load this workspace's history and take over the editor slot on first interactive session. */
-export async function onSessionStart(ctx: ExtensionContext): Promise<void> {
-  if (!ctx.hasUI) return;
-  const next = new InputHistoryStore(ctx.cwd, {
-    onError: (error) => {
-      if (errorReported) return;
-      errorReported = true;
-      ctx.ui.notify(`Input history unavailable: ${errorMessage(error)}`, "warning");
-    },
-  });
-  await next.load();
-  store = next;
-  if (installed) return;
-  // Another extension already owns the editor; replacing it would drop its behaviour.
-  if (ctx.ui.getEditorComponent()) return;
-  ctx.ui.setEditorComponent((tui, theme, keybindings) =>
-    new HistoryEditor(tui, theme, keybindings, {
-      getEntries: () => store?.list() ?? [],
-      record: (text) => store?.record(text),
-    }),
-  );
-  installed = true;
+export interface InputHistory {
+  onSessionStart(ctx: InputHistoryContext): Promise<void>;
+  onSessionShutdown(): Promise<void>;
 }
 
-/** The editor stays installed across `/new`; only the pending write has to land. */
-export async function onSessionShutdown(): Promise<void> {
-  await store?.flush();
+/**
+ * One instance per extension load. `storeOptions` exists so tests can point the
+ * history somewhere other than the real `~/.pi/workspaces`.
+ */
+export function createInputHistory(storeOptions: InputHistoryStoreOptions = {}): InputHistory {
+  let store: InputHistoryStore | undefined;
+  let installed = false;
+  let errorReported = false;
+
+  return {
+    /** Load this workspace's history, and claim the editor slot on the first interactive session. */
+    async onSessionStart(ctx: InputHistoryContext): Promise<void> {
+      if (!ctx.hasUI) return;
+      const next = new InputHistoryStore(ctx.cwd, {
+        ...storeOptions,
+        onError: (error) => {
+          if (errorReported) return;
+          errorReported = true;
+          ctx.ui.notify(`Input history unavailable: ${errorMessage(error)}`, "warning");
+        },
+      });
+      await next.load();
+      // A later session in another cwd gets its own store behind the same editor.
+      store = next;
+      if (installed) return;
+      // Another extension already owns the editor; replacing it would drop its behaviour.
+      if (ctx.ui.getEditorComponent()) return;
+      ctx.ui.setEditorComponent((tui, theme, keybindings) =>
+        new HistoryEditor(tui, theme, keybindings, {
+          getEntries: () => store?.list() ?? [],
+          record: (text) => store?.record(text),
+        }),
+      );
+      installed = true;
+    },
+
+    /** The editor stays installed across `/new`; only the pending write has to land. */
+    async onSessionShutdown(): Promise<void> {
+      await store?.flush();
+    },
+  };
+}
+
+/** The instance the extension runs on; `createInputHistory` is the seam tests use. */
+const defaultInputHistory = createInputHistory();
+
+export function onSessionStart(ctx: InputHistoryContext): Promise<void> {
+  return defaultInputHistory.onSessionStart(ctx);
+}
+
+export function onSessionShutdown(): Promise<void> {
+  return defaultInputHistory.onSessionShutdown();
 }
 
 function errorMessage(error: unknown): string {

@@ -14,7 +14,11 @@ import type { KeybindingsManager as AppKeybindingsManager } from "@earendil-work
 
 import { workspaceStorageId } from "../src/tools/plan-store.ts";
 import { HistoryEditor, historyBanner } from "../src/tui/history-editor.ts";
-import { InputHistoryStore } from "../src/tui/input-history.ts";
+import {
+  InputHistoryStore,
+  createInputHistory,
+  type InputHistoryContext,
+} from "../src/tui/input-history.ts";
 
 const UP = "\x1b[A";
 const DOWN = "\x1b[B";
@@ -44,6 +48,124 @@ function editor(entries: string[]): { editor: HistoryEditor; recorded: string[] 
     recorded,
   };
 }
+
+type EditorFactory = Parameters<InputHistoryContext["ui"]["setEditorComponent"]>[0];
+
+function context(cwd: string, overrides: { hasUI?: boolean; existing?: EditorFactory } = {}) {
+  let factory: EditorFactory = overrides.existing;
+  const notifications: string[] = [];
+  const ctx: InputHistoryContext = {
+    cwd,
+    hasUI: overrides.hasUI ?? true,
+    ui: {
+      notify: (message: string) => notifications.push(message),
+      getEditorComponent: () => factory,
+      setEditorComponent: (next: EditorFactory) => {
+        factory = next;
+      },
+    },
+  };
+  return {
+    ctx,
+    notifications,
+    /** Build the editor pi would build from whatever factory is installed. */
+    build(): HistoryEditor | undefined {
+      const tui = { requestRender() {}, terminal: { rows: 40, columns: 100 } } as unknown as TUI;
+      const theme = { borderColor: (value: string) => value, selectList: {} } as unknown as EditorTheme;
+      const keybindings = new KeybindingsManager(TUI_KEYBINDINGS) as unknown as AppKeybindingsManager;
+      return factory?.(tui, theme, keybindings) as HistoryEditor | undefined;
+    },
+  };
+}
+
+test("the installed editor recalls history written by an earlier session", async () => {
+  const { cwd, rootDir, cleanup } = await workspace();
+  try {
+    const earlier = new InputHistoryStore(cwd, { rootDir, debounceMs: 0 });
+    await earlier.load();
+    earlier.record("from the session before");
+    await earlier.flush();
+
+    const history = createInputHistory({ rootDir, debounceMs: 0 });
+    const host = context(cwd);
+    await history.onSessionStart(host.ctx);
+
+    const instance = host.build();
+    assert.ok(instance);
+    instance.handleInput(UP);
+    assert.equal(instance.getText(), "from the session before");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a prompt submitted now is on disk after shutdown", async () => {
+  const { cwd, rootDir, file, cleanup } = await workspace();
+  try {
+    const history = createInputHistory({ rootDir });
+    const host = context(cwd);
+    await history.onSessionStart(host.ctx);
+
+    host.build()?.addToHistory("typed this session");
+    await history.onSessionShutdown();
+
+    assert.deepEqual(
+      (JSON.parse(await readFile(file, "utf8")) as { entries: string[] }).entries,
+      ["typed this session"],
+    );
+  } finally {
+    await cleanup();
+  }
+});
+
+test("nothing is installed without a UI", async () => {
+  const { cwd, rootDir, cleanup } = await workspace();
+  try {
+    const history = createInputHistory({ rootDir, debounceMs: 0 });
+    const host = context(cwd, { hasUI: false });
+    await history.onSessionStart(host.ctx);
+    assert.equal(host.build(), undefined);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("an editor another extension already owns is left alone", async () => {
+  const { cwd, rootDir, cleanup } = await workspace();
+  try {
+    const theirs = (() => ({ marker: "theirs" })) as unknown as EditorFactory;
+    const history = createInputHistory({ rootDir, debounceMs: 0 });
+    const host = context(cwd, { existing: theirs });
+    await history.onSessionStart(host.ctx);
+    assert.equal(host.ctx.ui.getEditorComponent(), theirs);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a second session in another workspace swaps the store behind the same editor", async () => {
+  const { cwd, rootDir, cleanup } = await workspace();
+  try {
+    const other = join(cwd, "nested");
+    const seeded = new InputHistoryStore(other, { rootDir, debounceMs: 0 });
+    await seeded.load();
+    seeded.record("nested workspace prompt");
+    await seeded.flush();
+
+    const history = createInputHistory({ rootDir, debounceMs: 0 });
+    const host = context(cwd);
+    await history.onSessionStart(host.ctx);
+    const instance = host.build();
+    assert.ok(instance);
+
+    // /new in a different cwd: same editor instance, different history behind it.
+    await history.onSessionStart({ ...host.ctx, cwd: other });
+    instance.handleInput(UP);
+    assert.equal(instance.getText(), "nested workspace prompt");
+  } finally {
+    await cleanup();
+  }
+});
 
 test("history survives the store that wrote it", async () => {
   const { cwd, rootDir, file, cleanup } = await workspace();
