@@ -27,6 +27,7 @@ import {
 import { effectiveReserveTokens, MIN_RESERVE_RATIO } from "../compaction/auto-compaction.ts";
 
 type CompactionField = typeof COMPACTION_FIELDS[number];
+type EditableCompactionField = Exclude<CompactionField, "enabled">;
 type MenuItem = "threshold" | "enabled" | "keepRecentTokens" | "softEnabled";
 type SaveState = "clean" | "dirty" | "saving" | "failed";
 
@@ -309,6 +310,11 @@ export class CompactionSettingsOverlay implements Component, Focusable {
         return;
       }
       const field = this.selectedConfigField();
+      if (!field) {
+        this.notice = "× 当前设置不可编辑";
+        this.requestRender();
+        return;
+      }
       if (item === "threshold" && this.params.contextWindow && this.params.contextWindow > 0) {
         const reserveTokens = this.params.contextWindow - numeric;
         if (!Number.isSafeInteger(reserveTokens) || reserveTokens <= 0) {
@@ -467,9 +473,10 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     return MENU_ITEMS[this.selected]!;
   }
 
-  private selectedConfigField(): CompactionField | undefined {
+  private selectedConfigField(): EditableCompactionField | undefined {
     const item = this.selectedItem();
-    return item === "softEnabled" ? undefined : configFieldForItem(item);
+    if (item === "enabled" || item === "softEnabled") return undefined;
+    return item === "threshold" ? "reserveTokens" : "keepRecentTokens";
   }
 
   private toggleEnabledItem(item: MenuItem): void {

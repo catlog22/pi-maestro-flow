@@ -18,6 +18,7 @@ const EFFORT_BARS: Record<ThinkingLevel, string> = {
   medium: "[███░░]",
   high: "[████░]",
   xhigh: "[█████]",
+  max: "[█████]",
 };
 
 export function isThinkingLevel(value: unknown): value is ThinkingLevel {

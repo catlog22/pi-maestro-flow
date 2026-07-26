@@ -8,6 +8,7 @@ import type {
   WorkflowChainStep,
   WorkflowGate,
   WorkflowRun,
+  WorkflowRunStatus,
   WorkflowSession,
   WorkflowSessionStatus,
   WorkflowSnapshot,
