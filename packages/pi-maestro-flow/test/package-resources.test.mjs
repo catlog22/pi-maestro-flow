@@ -11,7 +11,14 @@ import {
 
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const teammateRoot = join(root, "..", "pi-maestro-teammate");
+const cockpitRoot = join(root, "..", "pi-cockpit");
 const exactSemver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const piCoreSdkNames = [
+  "@earendil-works/pi-agent-core",
+  "@earendil-works/pi-ai",
+  "@earendil-works/pi-coding-agent",
+  "@earendil-works/pi-tui",
+];
 const teammatePublicExports = {
   ".": ["./types/index.d.ts", "./src/index.ts"],
   "./v1": ["./types/public/v1/index.d.ts", "./src/public/v1/index.ts"],
@@ -80,6 +87,22 @@ test("teammate package publishes a versioned API with a real root entry", () => 
         true,
         `${subpath} must target a packaged file: ${target}`,
       );
+    }
+  }
+});
+
+test("Pi extension manifests keep host SDKs as optional wildcard peers", () => {
+  for (const packageRoot of [root, teammateRoot, cockpitRoot]) {
+    const pkg = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+    for (const sdkName of piCoreSdkNames) {
+      assert.equal(pkg.dependencies?.[sdkName], undefined, `${pkg.name} must not own ${sdkName} at runtime`);
+      assert.equal(pkg.peerDependencies?.[sdkName], "*", `${pkg.name} must accept the host ${sdkName}`);
+      assert.equal(
+        pkg.peerDependenciesMeta?.[sdkName]?.optional,
+        true,
+        `${pkg.name} must make the ${sdkName} peer optional`,
+      );
+      assert.equal(pkg.devDependencies?.[sdkName], "0.82.1", `${pkg.name} must develop against ${sdkName}@0.82.1`);
     }
   }
 });
