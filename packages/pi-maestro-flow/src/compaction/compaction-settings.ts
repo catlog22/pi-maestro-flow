@@ -37,20 +37,6 @@ export interface CacheCompactionSettings {
   enabled: boolean;
 }
 
-export interface SpillCompactionConfigPatch {
-  enabled?: boolean;
-  thresholdChars?: number;
-  previewChars?: number;
-  protectedChars?: number;
-}
-
-export interface SpillCompactionSettings {
-  enabled: boolean;
-  thresholdChars: number;
-  previewChars: number;
-  protectedChars: number;
-}
-
 export interface SoftCompactionConfigPatch {
   enabled?: boolean;
   nudgeRatio?: number;
@@ -58,7 +44,6 @@ export interface SoftCompactionConfigPatch {
   pruneTargetRatio?: number;
   velocity?: VelocityCompactionConfigPatch;
   cache?: CacheCompactionConfigPatch;
-  spill?: SpillCompactionConfigPatch;
 }
 
 export interface SoftCompactionSettings {
@@ -68,7 +53,6 @@ export interface SoftCompactionSettings {
   pruneTargetRatio: number;
   velocity: VelocityCompactionSettings;
   cache: CacheCompactionSettings;
-  spill: SpillCompactionSettings;
 }
 
 /**
@@ -81,15 +65,6 @@ export interface SoftCompactionSettings {
  * cheap prefix" rather than "compacted unexpectedly". Measured worst case for
  * the ungated path was 2.2K tokens saved against 81K invalidated.
  */
-export function createDefaultSpillCompaction(): SpillCompactionSettings {
-  return {
-    enabled: true,
-    thresholdChars: 8_000,
-    previewChars: 1_500,
-    protectedChars: 500,
-  };
-}
-
 export function createDefaultSoftCompaction(): SoftCompactionSettings {
   return {
     enabled: true,
@@ -98,7 +73,6 @@ export function createDefaultSoftCompaction(): SoftCompactionSettings {
     pruneTargetRatio: 0.7,
     velocity: { enabled: false, epochsToCritical: 3, minFullness: 0.7 },
     cache: { enabled: true },
-    spill: createDefaultSpillCompaction(),
   };
 }
 
@@ -183,25 +157,7 @@ function readRawSoft(value: unknown): SoftCompactionConfigPatch | undefined {
   if (velocity) soft.velocity = velocity;
   const cache = readRawCache(value.cache);
   if (cache) soft.cache = cache;
-  const spill = readRawSpill(value.spill);
-  if (spill) soft.spill = spill;
   return Object.keys(soft).length > 0 ? soft : undefined;
-}
-
-function readRawSpill(value: unknown): SpillCompactionConfigPatch | undefined {
-  if (!isRecord(value)) return undefined;
-  const spill: SpillCompactionConfigPatch = {};
-  if (typeof value.enabled === "boolean") spill.enabled = value.enabled;
-  if (typeof value.thresholdChars === "number" && Number.isSafeInteger(value.thresholdChars) && value.thresholdChars > 0) {
-    spill.thresholdChars = value.thresholdChars;
-  }
-  if (typeof value.previewChars === "number" && Number.isSafeInteger(value.previewChars) && value.previewChars > 0) {
-    spill.previewChars = value.previewChars;
-  }
-  if (typeof value.protectedChars === "number" && Number.isSafeInteger(value.protectedChars) && value.protectedChars > 0) {
-    spill.protectedChars = value.protectedChars;
-  }
-  return Object.keys(spill).length > 0 ? spill : undefined;
 }
 
 function readRawVelocity(value: unknown): VelocityCompactionConfigPatch | undefined {
@@ -278,12 +234,6 @@ export function resolveEffectiveCompactionSettings(
       }
       if (patch.soft.cache !== undefined) {
         if (patch.soft.cache.enabled !== undefined) soft.cache.enabled = patch.soft.cache.enabled;
-      }
-      if (patch.soft.spill !== undefined) {
-        if (patch.soft.spill.enabled !== undefined) soft.spill.enabled = patch.soft.spill.enabled;
-        if (patch.soft.spill.thresholdChars !== undefined) soft.spill.thresholdChars = patch.soft.spill.thresholdChars;
-        if (patch.soft.spill.previewChars !== undefined) soft.spill.previewChars = patch.soft.spill.previewChars;
-        if (patch.soft.spill.protectedChars !== undefined) soft.spill.protectedChars = patch.soft.spill.protectedChars;
       }
       source.soft = src;
     }

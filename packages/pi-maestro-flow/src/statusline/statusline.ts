@@ -12,7 +12,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { basename } from "node:path";
-import { stripVTControlCharacters } from "node:util";
 import {
 	deriveWorkflowViewModel,
 	type WorkflowSnapshotLike,
@@ -363,7 +362,6 @@ export function renderSwarmStatusline(value: string | undefined, width: number):
 const GIT_REFRESH_INTERVAL = 30_000;
 const GIT_DEBOUNCE_MS = 500;
 const WIDTH_POLL_INTERVAL = 250;
-const WORKFLOW_STATUS_KEY = "maestro-workflow";
 export function installStatusline(
 	pi: ExtensionAPI,
 	getMaestroState: () => MaestroState,
@@ -388,14 +386,6 @@ export function installStatusline(
 
 	function invalidate(): void {
 		invalidateFn?.();
-	}
-
-	function publishWorkflowStatus(ctx: ExtensionContext): void {
-		const workflow = deriveWorkflowViewModel(getWorkflowSnapshot());
-		ctx.ui.setStatus(
-			WORKFLOW_STATUS_KEY,
-			workflow ? stripVTControlCharacters(renderWorkflowStatusline(workflow, 120)) : undefined,
-		);
 	}
 
 	function addTokenUsage(message: MessageWithUsage | undefined): void {
@@ -536,7 +526,6 @@ export function installStatusline(
 
 		// Footer must install synchronously — before any await
 		installFooter(ctx);
-		publishWorkflowStatus(ctx);
 
 		// Fire-and-forget async git refresh
 		refreshGit(pi, sessionCwd).then((git) => {
@@ -557,8 +546,7 @@ export function installStatusline(
 
 	});
 
-	pi.on("session_shutdown", (_event, ctx) => {
-		ctx.ui.setStatus(WORKFLOW_STATUS_KEY, undefined);
+	pi.on("session_shutdown", () => {
 		sessionGeneration += 1;
 		footerGeneration += 1;
 		disposed = true;
@@ -570,7 +558,6 @@ export function installStatusline(
 	pi.on("session_tree", (_event, ctx) => {
 		// Tree rewind/branch switch invalidates the incremental token baseline.
 		rebuildTokenUsage(ctx);
-		publishWorkflowStatus(ctx);
 		// Reinstall footer on session tree change
 		installFooter(ctx);
 	});
@@ -603,7 +590,6 @@ export function installStatusline(
 		if (usage?.percent != null) {
 			rs.contextPercent = usage.percent;
 		}
-		publishWorkflowStatus(ctx);
 		invalidate();
 	});
 
@@ -614,7 +600,6 @@ export function installStatusline(
 		}
 		// Debounced git refresh after tool completes (may have edited files)
 		scheduleGitRefresh(footerGeneration);
-		publishWorkflowStatus(ctx);
 		invalidate();
 	});
 
@@ -627,7 +612,6 @@ export function installStatusline(
 		if (usage?.percent != null) {
 			rs.contextPercent = usage.percent;
 		}
-		publishWorkflowStatus(ctx);
 		invalidate();
 	});
 }

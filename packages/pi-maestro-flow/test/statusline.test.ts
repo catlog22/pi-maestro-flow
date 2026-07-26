@@ -682,7 +682,6 @@ test("statusline renders canonical Session/Run separately from active tool calls
     assert.match(full[1], /⚑ auth-m1/);
     assert.match(full[1], /! blocked/);
     assert.match(full[1], /003\/plan/);
-    assert.match(harness.statuses.get("maestro-workflow") ?? "", /auth-m1.*003\/plan/);
     assert.doesNotMatch(full.join("\n"), /milestone|phase/i);
     const narrow = stripAnsi(harness.render(40)[1]);
     assert.match(narrow, /^⚑ auth-m1/, "session label leads the narrow workflow line");
