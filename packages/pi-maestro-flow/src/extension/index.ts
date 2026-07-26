@@ -150,7 +150,6 @@ import {
   registerTeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
 import { TEAMMATE_STARTED_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_COMPLETE_EVENT } from "pi-maestro-teammate/v1/types";
-import cockpit from "pi-cockpit";
 
 interface MaestroState {
   baseCwd: string;
@@ -279,8 +278,6 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     registerMaestroChildSurface(pi);
     return;
   }
-  // Activate pi-cockpit TUI extension (bundled dependency)
-  cockpit(pi);
 
   // UCL: capture only the locked extension-tool surface. pi.getAllTools() exposes
   // schemas but not execute(), so the registry is the invocation source for the

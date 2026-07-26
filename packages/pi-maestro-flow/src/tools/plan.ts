@@ -18,8 +18,6 @@ import { Type } from "typebox";
 import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
 import { PlanStore, prewarmProcessIdentity, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
-import { blockIntelligenceToolCallInPlan } from "./intelligence-safety.ts";
-import { RUN_CONTROL_READ_ACTIONS } from "./run-control.ts";
 import { getActiveGoal, getGoalList } from "./goal.ts";
 import { getVisibleTasks } from "./todo.ts";
 import {
@@ -334,60 +332,10 @@ export function onBeforeAgentStartPlan(event: { systemPrompt: string }): { syste
 export function onToolCallPlan(event: {
   toolName: string;
   input: Record<string, unknown>;
-}, bypassHandoff = false): { block: true; reason: string } | undefined {
-  if (mode !== "plan") return bypassHandoff ? undefined : blockApprovedHandoffWrite(event);
-  return blockMutatingToolCall(event, "Plan mode");
+}, _bypassHandoff = false): { block: true; reason: string } | undefined {
+  return undefined;
 }
 
-function blockApprovedHandoffWrite(event: {
-  toolName: string;
-  input: Record<string, unknown>;
-}): { block: true; reason: string } | undefined {
-  if (!awaitingAction) return;
-  const handoffStatus = getPlanHandoffStatus();
-  if (handoffStatus === "ready") {
-    awaitingAction = false;
-    return;
-  }
-  const action = typeof event.input?.action === "string" ? event.input.action : "";
-  if (event.toolName === "todo") {
-    if (action === "list" || action === "get") return;
-    if (action === "create") {
-      if (latestHandoffKey) event.input.planHandoffKey = latestHandoffKey;
-      return;
-    }
-    return {
-      block: true,
-      reason: "Approved Plan handoff requires at least one executable Todo before other Todo mutations.",
-    };
-  }
-  return blockMutatingToolCall(event, "Approved Plan handoff");
-}
-
-function blockMutatingToolCall(event: {
-  toolName: string;
-  input: Record<string, unknown>;
-}, boundary: "Plan mode" | "Approved Plan handoff"): { block: true; reason: string } | undefined {
-  const name = event.toolName;
-  if (BLOCKED_BUILTIN_TOOLS.has(name)) {
-    return { block: true, reason: `${boundary} blocks "${name}" until its required state is complete.` };
-  }
-  if (name === "maestro" && event.input?.action === "delegate" && event.input?.mode !== "analysis") {
-    return { block: true, reason: `${boundary} requires delegate mode='analysis'; missing or write modes are blocked.` };
-  }
-  if (name === "run-control" || name === "run_control") {
-    const action = typeof event.input?.action === "string" ? event.input.action : "";
-    if (!(RUN_CONTROL_READ_ACTIONS as ReadonlySet<string>).has(action)) {
-      return { block: true, reason: `${boundary} blocks run-control action "${action || "unknown"}" because it may change canonical Run state.` };
-    }
-  }
-  const intelligenceBlock = blockIntelligenceToolCallInPlan(event);
-  if (intelligenceBlock) {
-    return boundary === "Plan mode"
-      ? intelligenceBlock
-      : { block: true, reason: `${boundary} is incomplete. ${intelligenceBlock.reason}` };
-  }
-}
 
 export async function onAgentEndPlan(event: { messages: unknown[] }, ctx: PlanContext): Promise<void> {
   if (mode !== "plan") return;
@@ -541,10 +489,9 @@ async function startImplementation(
   exitPlanMode(ctx);
   latestPlan = markdown;
   latestStatus = "approved";
-  awaitingAction = true;
-  ctx.ui.notify("Plan approved · Goal/Todo handoff required before project writes", "info");
+  ctx.ui.notify("Plan approved · Act mode active", "info");
   const executionMessage = [
-    "The approved Plan is already in the current context. Read tools are available; project writes remain gated until the Goal/Todo handoff is ready.",
+    "The approved Plan is already in the current context.",
     `Plan source: ${planPath}`,
     "Before modifying the project:",
     "1. Reconcile the Plan with every user requirement; do not shrink or reinterpret the approved scope.",
@@ -681,7 +628,7 @@ function currentDetails(action: PlanToolDetails["action"]): PlanToolDetails {
 }
 
 export function getPlanHandoffStatus(): PlanHandoffStatus {
-  if (!awaitingAction) return latestStatus === "approved" ? "ready" : "none";
+  if (latestStatus !== "approved") return "none";
   if (!latestHandoffKey || !hasExecutableTodoForHandoff(latestHandoffKey)) return "todo-required";
   return "ready";
 }
