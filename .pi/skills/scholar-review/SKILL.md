@@ -1,19 +1,8 @@
 ---
 name: scholar-review
-disable-model-invocation: true
 description: "Systematic academic paper review workflow covering self-review before submission and rebuttal writing after receiving reviewer feedback. Triggers on \"review paper\", \"self-review\", \"write rebuttal\", \"respond to reviewers\", \"analyze review comments\", \"paper review\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - WebFetch
-  - WebSearch
-  - Write
-  - todo
-session-mode: none
+allowed-tools: Read Write Edit Bash Glob Grep WebFetch WebSearch maestro
+disable-model-invocation: true
 ---
 
 # Scholar Review
@@ -98,7 +87,7 @@ Store as workflowPreferences:
 
 ## Execution Flow
 
-> **COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
+> **COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
 > The phase currently marked `in_progress` is the active execution phase -- preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
@@ -109,7 +98,7 @@ Phase 1: Self-Review
   Ref: phases/01-self-review.md
   Input: paperPath, targetVenue
   Output: self-review-report.md
-  todo({ action: "update" }): Mark Phase 1 in_progress → completed
+  TodoWrite: Mark Phase 1 in_progress → completed
 ```
 
 ### Post-Review Mode
@@ -119,40 +108,40 @@ Phase 2: Review Analysis
   Ref: phases/02-review-analysis.md
   Input: reviewCommentsPath, paperPath
   Output: review-analysis.md (classified comments with priorities)
-  todo({ action: "update" }): Mark Phase 2 in_progress → completed
+  TodoWrite: Mark Phase 2 in_progress → completed
 
 Phase 3: Response Strategy
   Ref: phases/03-response-strategy.md
   Input: review-analysis.md, paperPath
   Output: response-strategy.md (strategy per comment)
-  todo({ action: "update" }): Mark Phase 3 in_progress → completed
+  TodoWrite: Mark Phase 3 in_progress → completed
 
 Phase 4: Rebuttal Writing
   Ref: phases/04-rebuttal-writing.md
   Input: response-strategy.md, paperPath, targetVenue
   Output: rebuttal-response.md
-  todo({ action: "update" }): Mark Phase 4 in_progress → completed
+  TodoWrite: Mark Phase 4 in_progress → completed
 
 Phase 5: Revision
   Ref: phases/05-revision.md
   Input: rebuttal-response.md, paperPath
   Output: revision-plan.md, tracked changes list
-  todo({ action: "update" }): Mark Phase 5 in_progress → completed
+  TodoWrite: Mark Phase 5 in_progress → completed
 ```
 
 **Phase Reference Documents** (read on-demand when phase executes):
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-self-review.md](phases/01-self-review.md) | Pre-submission quality check | todo({ action: "update" }) driven |
-| 2 | [phases/02-review-analysis.md](phases/02-review-analysis.md) | Parse and classify reviewer comments | todo({ action: "update" }) driven |
-| 3 | [phases/03-response-strategy.md](phases/03-response-strategy.md) | Plan rebuttal strategy per comment | todo({ action: "update" }) driven + sentinel |
-| 4 | [phases/04-rebuttal-writing.md](phases/04-rebuttal-writing.md) | Write structured rebuttal document | todo({ action: "update" }) driven + sentinel |
-| 5 | [phases/05-revision.md](phases/05-revision.md) | Plan and track paper revisions | todo({ action: "update" }) driven |
+| 1 | [phases/01-self-review.md](phases/01-self-review.md) | Pre-submission quality check | TodoWrite driven |
+| 2 | [phases/02-review-analysis.md](phases/02-review-analysis.md) | Parse and classify reviewer comments | TodoWrite driven |
+| 3 | [phases/03-response-strategy.md](phases/03-response-strategy.md) | Plan rebuttal strategy per comment | TodoWrite driven + sentinel |
+| 4 | [phases/04-rebuttal-writing.md](phases/04-rebuttal-writing.md) | Write structured rebuttal document | TodoWrite driven + sentinel |
+| 5 | [phases/05-revision.md](phases/05-revision.md) | Plan and track paper revisions | TodoWrite driven |
 
 **Compact Rules**:
-1. **todo({ action: "update" }) `in_progress`** -> Preserve full content, do not compress
-2. **todo({ action: "update" }) `completed`** -> May compress to summary
+1. **TodoWrite `in_progress`** -> Preserve full content, do not compress
+2. **TodoWrite `completed`** -> May compress to summary
 3. **Sentinel fallback** -> Phases marked with sentinel contain compact sentinels; if only sentinel remains without full Step protocol, immediately `Read()` to recover
 
 ## Core Rules
@@ -196,11 +185,11 @@ reviewCommentsPath ─── Phase 2: review-analysis.md ───────�
                     Phase 5: revision-plan.md ────── paperPath
 ```
 
-## todo({ action: "update" }) Pattern
+## TodoWrite Pattern
 
 ### Phase Attachment (entering phase)
 ```
-todo({ action: "update" })([
+TodoWrite([
   { id: "phase-N", task: "Phase N: [name]", status: "in_progress" },
   { id: "phase-N-step-1", task: "  Step N.1: [name]", status: "pending" },
   { id: "phase-N-step-2", task: "  Step N.2: [name]", status: "pending" }
@@ -209,7 +198,7 @@ todo({ action: "update" })([
 
 ### Phase Collapse (exiting phase)
 ```
-todo({ action: "update" })([
+TodoWrite([
   { id: "phase-N", task: "Phase N: [name] -- Done", status: "completed" },
   { id: "phase-N+1", task: "Phase N+1: [name]", status: "in_progress" }
 ])
@@ -226,12 +215,12 @@ todo({ action: "update" })([
 
 ### Before Each Phase
 - [ ] Confirm input files exist and are readable
-- [ ] todo({ action: "update" }) updated: current phase `in_progress`
+- [ ] TodoWrite updated: current phase `in_progress`
 - [ ] Read phase document via `Ref:` marker
 
 ### After Each Phase
 - [ ] Output file generated and saved
-- [ ] todo({ action: "update" }) updated: current phase `completed`
+- [ ] TodoWrite updated: current phase `completed`
 - [ ] If not autoYes, confirm with user before next phase
 
 ### Post-Workflow

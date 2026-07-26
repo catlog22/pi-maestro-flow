@@ -1,20 +1,8 @@
 ---
 name: team-coordinate
-disable-model-invocation: true
 description: "Universal team coordination skill with dynamic role generation. Uses team-worker agent architecture with role-spec files. Only coordinator is built-in -- all worker roles are generated at runtime as role-specs and spawned via team-worker agent. Beat/cadence model for orchestration. Triggers on \"Team Coordinate \"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - SendMessage
-  - Write
-  - mcp__maestro__team_msg
-  - teammate
-  - todo
-session-mode: run
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+disable-model-invocation: true
 ---
 
 <required_reading>
@@ -263,10 +251,10 @@ Coordinator supports `resume` / `continue` for interrupted sessions:
 
 1. Scan `{run_dir}/work/team/team-session.json` for active/paused sessions
 2. Multiple matches -> user prompt for selection
-3. Audit todo({ action: "list" }) -> reconcile session state <-> task status
+3. Audit TaskList -> reconcile session state <-> task status
 4. Reset in_progress -> pending (interrupted tasks)
 5. Rebuild team and spawn needed workers only
-6. Create missing tasks, set dependencies via todo({ action: "update", addBlockedBy })
+6. Create missing tasks, set dependencies via TaskUpdate({ addBlockedBy })
 7. Kick first executable task -> Phase 4 coordination loop
 
 ---

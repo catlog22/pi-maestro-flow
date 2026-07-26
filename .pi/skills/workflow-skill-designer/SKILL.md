@@ -1,18 +1,8 @@
 ---
 name: workflow-skill-designer
-disable-model-invocation: true
 description: "Meta-skill for designing orchestrator+phases structured workflow skills. Creates SKILL.md coordinator with progressive phase loading, TodoWrite patterns, and data flow. Triggers on \"design workflow skill\", \"create workflow skill\", \"workflow skill designer\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Write
-  - teammate
-  - todo
-session-mode: none
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+disable-model-invocation: true
 ---
 
 # Workflow Skill Designer
@@ -45,7 +35,7 @@ The skill this meta-skill produces follows this structure:
 
 ```
 .claude/skills/{skill-name}/
-├── SKILL.md                    # Orchestrator: coordination, data flow, todo({ action: "update" })
+├── SKILL.md                    # Orchestrator: coordination, data flow, TodoWrite
 ├── phases/
 │   ├── 01-{phase-name}.md      # Phase execution detail (full content)
 │   ├── 02-{phase-name}.md
@@ -76,11 +66,11 @@ Patterns extracted from successful workflow skill implementations (workflow-plan
 
 **Key Rule**: SKILL.md references phase docs via `Ref:` markers. Phase docs are read **only when that phase executes**, not all at once.
 
-### Pattern 2: todo({ action: "update" }) Attachment/Collapse
+### Pattern 2: TodoWrite Attachment/Collapse
 
 ```
 Phase starts:
-  → Sub-tasks ATTACHED to todo({ action: "update" }) (in_progress + pending)
+  → Sub-tasks ATTACHED to TodoWrite (in_progress + pending)
   → Orchestrator executes sub-tasks sequentially
 
 Phase ends:
@@ -168,27 +158,27 @@ Phase files are internal execution documents. They MUST NOT contain:
 
 ### Pattern 9: Compact Recovery (Phase Persistence)
 
-Multi-phase workflows span long conversations. Context compression (compact) will naturally summarize earlier phase documents. The strategy uses **双重保险**: todo({ action: "update" }) 跟踪 active phase 保护其不被压缩，sentinel 作为兜底在压缩发生时触发恢复。
+Multi-phase workflows span long conversations. Context compression (compact) will naturally summarize earlier phase documents. The strategy uses **双重保险**: TodoWrite 跟踪 active phase 保护其不被压缩，sentinel 作为兜底在压缩发生时触发恢复。
 
-**Design principle**: todo({ action: "update" }) `in_progress` = active phase → protect from compact | Sentinel = re-read fallback if protection fails.
+**Design principle**: TodoWrite `in_progress` = active phase → protect from compact | Sentinel = re-read fallback if protection fails.
 
 **Double insurance mechanism**:
 
 | Layer | Role | Mechanism |
 |-------|------|-----------|
-| **1. Active Phase Protection** | 预防 | todo({ action: "update" }) `in_progress` 标记当前 phase → compact 时保留该 phase 完整内容，不压缩 |
+| **1. Active Phase Protection** | 预防 | TodoWrite `in_progress` 标记当前 phase → compact 时保留该 phase 完整内容，不压缩 |
 | **2. Sentinel Re-read** | 恢复 | Phase 文件嵌入标识符 → 若仍被压缩，检测到 sentinel-only 状态时立即 re-read |
 
 **When to apply**: 任何通过 direct handoff (Pattern 7) 跨 phase 执行的场景，尤其是后续 phase 包含复杂执行协议（多 Step、agent 调度、CLI 编排）时。
 
 ---
 
-#### Layer 1: Active Phase Protection (todo({ action: "update" }) 联动)
+#### Layer 1: Active Phase Protection (TodoWrite 联动)
 
-todo({ action: "update" }) 已经跟踪每个 phase 的执行状态。利用此信息驱动 compact 策略：
+TodoWrite 已经跟踪每个 phase 的执行状态。利用此信息驱动 compact 策略：
 
 ```
-todo({ action: "update" }) status → Compact behavior:
+TodoWrite status → Compact behavior:
   ┌─ completed  → ✅ 可压缩（已完成，不再需要完整内容）
   ├─ in_progress → 🛡️ 禁止压缩（正在执行，必须保留完整协议）
   └─ pending    → ✅ 可压缩（尚未加载，无内容）
@@ -198,18 +188,18 @@ todo({ action: "update" }) status → Compact behavior:
 ```markdown
 ## Execution Flow
 
-> **⚠️ COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
+> **⚠️ COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
 > The phase currently marked `in_progress` is the active execution phase — preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
-Phase 1: Requirements Analysis    ← todo({ action: "update" }) tracks status
+Phase 1: Requirements Analysis    ← TodoWrite tracks status
    └─ Ref: phases/01-xxx.md
-Phase 2: Execution Engine         ← todo({ action: "update" }) tracks status
+Phase 2: Execution Engine         ← TodoWrite tracks status
    └─ Ref: phases/02-xxx.md
 ...
 ```
 
-**todo({ action: "update" }) 状态转换** 时自动更新 compact 保护范围:
+**TodoWrite 状态转换** 时自动更新 compact 保护范围:
 ```
 Phase 1: in_progress 🛡️  →  completed ✅   (compact 可压缩 Phase 1)
 Phase 2: pending ✅       →  in_progress 🛡️ (compact 保护 Phase 2)
@@ -241,12 +231,12 @@ Sentinel 设计特点：
 ```markdown
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | phases/01-xxx.md | Planning | todo({ action: "update" }) 驱动 |
-| 2 | phases/02-xxx.md | Execution | todo({ action: "update" }) 驱动 + 🔄 sentinel |
+| 1 | phases/01-xxx.md | Planning | TodoWrite 驱动 |
+| 2 | phases/02-xxx.md | Execution | TodoWrite 驱动 + 🔄 sentinel |
 
 **Compact Rules**:
-1. **todo({ action: "update" }) `in_progress`** → 保留完整内容，禁止压缩
-2. **todo({ action: "update" }) `completed`** → 可压缩为摘要
+1. **TodoWrite `in_progress`** → 保留完整内容，禁止压缩
+2. **TodoWrite `completed`** → 可压缩为摘要
 3. **🔄 sentinel fallback** → 带此标记的 phase 包含 compact sentinel；若 compact 后仅存 sentinel 而无完整 Step 协议，**必须立即 `Read("phases/0N-xxx.md")` 恢复后再继续**
 ```
 
@@ -256,7 +246,7 @@ Sentinel 设计特点：
 
 ```markdown
 > **⚠️ CHECKPOINT**: Before proceeding, verify:
-> 1. This phase is todo({ action: "update" }) `in_progress` (active phase protection)
+> 1. This phase is TodoWrite `in_progress` (active phase protection)
 > 2. Full protocol (Step N.X — N.{M}) is in active memory, not just sentinel
 > If only sentinel remains → `Read("phases/0N-xxx.md")` now.
 ```
@@ -264,7 +254,7 @@ Sentinel 设计特点：
 #### Handoff 注释
 
 ```javascript
-// Phase N is tracked by todo({ action: "update" }) — active phase protection applies.
+// Phase N is tracked by TodoWrite — active phase protection applies.
 // Sentinel fallback: if compressed despite protection, re-read triggers automatically.
 Read("phases/0N-xxx.md")
 ```
@@ -341,7 +331,7 @@ What goes into SKILL.md vs what goes into phase files:
 | Core Rules | Orchestration constraints | Command core rules |
 | Input Processing | Structured format conversion | Command input processing |
 | Data Flow | Inter-phase data passing | Command data flow |
-| todo({ action: "update" }) Pattern | Attachment/collapse lifecycle | Command todo({ action: "update" }) sections |
+| TodoWrite Pattern | Attachment/collapse lifecycle | Command TodoWrite sections |
 | Post-Phase Updates | Planning notes / state updates between phases | Command inter-phase update code |
 | Error Handling | Failure recovery | Command error handling |
 | Coordinator Checklist | Pre/post phase actions | Command coordinator checklist |
@@ -408,13 +398,13 @@ When `workflowPreferences.autoYes === true`: {auto-mode behavior}.
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-xxx.md](phases/01-xxx.md) | ... | todo({ action: "update" }) 驱动 |
-| N | [phases/0N-xxx.md](phases/0N-xxx.md) | ... | todo({ action: "update" }) 驱动 + 🔄 sentinel |
+| 1 | [phases/01-xxx.md](phases/01-xxx.md) | ... | TodoWrite 驱动 |
+| N | [phases/0N-xxx.md](phases/0N-xxx.md) | ... | TodoWrite 驱动 + 🔄 sentinel |
 ...
 
 **Compact Rules**:
-1. **todo({ action: "update" }) `in_progress`** → 保留完整内容，禁止压缩
-2. **todo({ action: "update" }) `completed`** → 可压缩为摘要
+1. **TodoWrite `in_progress`** → 保留完整内容，禁止压缩
+2. **TodoWrite `completed`** → 可压缩为摘要
 3. **🔄 sentinel fallback** → 带此标记的 phase 包含 compact sentinel；若 compact 后仅存 sentinel 而无完整 Step 协议，必须立即 `Read()` 恢复
 
 ## Core Rules
@@ -430,7 +420,7 @@ When `workflowPreferences.autoYes === true`: {auto-mode behavior}.
 
 {Inter-phase data passing diagram}
 
-## todo({ action: "update" }) Pattern
+## TodoWrite Pattern
 
 {Attachment/collapse lifecycle description with examples}
 
@@ -478,7 +468,7 @@ When `workflowPreferences.autoYes === true`: {auto-mode behavior}.
 ### Step N.2: {Step Name}
 
 > **⚠️ CHECKPOINT**: Before proceeding, verify:
-> 1. This phase is todo({ action: "update" }) `in_progress` (active phase protection)
+> 1. This phase is TodoWrite `in_progress` (active phase protection)
 > 2. Full protocol (Step N.X — N.{M}) is in active memory, not just sentinel
 > If only sentinel remains → `Read("phases/0N-xxx.md")` now.
 > _(Add checkpoints before critical execution steps: agent dispatch, CLI launch, review — see Pattern 9)_
@@ -489,7 +479,7 @@ When `workflowPreferences.autoYes === true`: {auto-mode behavior}.
 
 - **Variable**: `{variableName}` (e.g., `sessionId`)
 - **File**: `{run_dir}/outputs/{artifact}` — formal artifacts go under `{run_dir}/outputs/`; synthesis to `{run_dir}/report.md`, scratch to `{run_dir}/work/` (session-mode: run only). See run-mode.md.
-- **todo({ action: "update" })**: Mark Phase N completed, Phase N+1 in_progress
+- **TodoWrite**: Mark Phase N completed, Phase N+1 in_progress
 
 ## Next Phase
 
@@ -506,7 +496,7 @@ When designing a new workflow skill, answer these questions:
 | Which phases are conditional? | Orchestrator logic | "Phase 3 only if conflict_risk >= medium" |
 | What data flows between phases? | Data Flow section | sessionId, contextPath, configFlags |
 | Which phases use agents? | Phase file complexity | Agent prompts need verbatim preservation |
-| What's the todo({ action: "update" }) granularity? | todo({ action: "update" }) Pattern | Some phases have sub-tasks, others are atomic |
+| What's the TodoWrite granularity? | TodoWrite Pattern | Some phases have sub-tasks, others are atomic |
 | Is there a planning notes pattern? | Post-Phase Updates | Accumulated state document across phases |
 | What's the error recovery? | Error Handling | Retry once then report, vs rollback |
 | Does it need preference collection? | Interactive Preference Collection | Collect via user prompt in SKILL.md, pass as workflowPreferences |

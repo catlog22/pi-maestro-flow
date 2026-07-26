@@ -1,20 +1,8 @@
 ---
 name: team-executor
-disable-model-invocation: true
 description: "Lightweight session execution skill. Resumes existing team-coordinate sessions for pure execution via team-worker agents. No analysis, no role generation -- only loads and executes. Session path required. Triggers on \"Team Executor\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - SendMessage
-  - Write
-  - mcp__maestro__team_msg
-  - teammate
-  - todo
-session-mode: none
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+disable-model-invocation: true
 ---
 
 # Team Executor

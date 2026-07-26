@@ -1,19 +1,8 @@
 ---
 name: scholar-ideation
-disable-model-invocation: true
 description: "Research ideation workflow from literature search to research planning. Triggers on \"brainstorm research ideas\", \"identify research gaps\", \"conduct gap analysis\", \"start research project\", \"conduct literature review\", \"define research question\", \"select research method\", \"plan research\", \"research ideation\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - WebFetch
-  - WebSearch
-  - Write
-  - todo
-session-mode: none
+allowed-tools: WebSearch WebFetch Read Write Edit Bash Glob Grep maestro
+disable-model-invocation: true
 ---
 
 # Scholar Ideation
@@ -114,14 +103,14 @@ When `workflowPreferences.autoYes === true`: Execute all 5 phases sequentially w
 
 ## Execution Flow
 
-> **COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
+> **COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
 > The phase currently marked `in_progress` is the active execution phase — preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
-### todo({ action: "update" }) Initialization
+### TodoWrite Initialization
 
 ```
-todo({ action: "update" }):
+TodoWrite:
   - "Phase 1: Literature Search" (pending)
   - "Phase 2: Gap Analysis" (pending)
   - "Phase 3: Research Question Formulation" (pending)
@@ -133,51 +122,51 @@ todo({ action: "update" }):
 
 ```
 Phase 1: Literature Search
-   Mark todo({ action: "update" }) Phase 1 → in_progress
+   Mark TodoWrite Phase 1 → in_progress
    └─ Ref: phases/01-literature-search.md
       ├─ Input: workflowPreferences (topic, scope, useZotero)
       └─ Output: literatureResults (papers, trends, keyFindings)
 
 Phase 2: Gap Analysis
-   Mark todo({ action: "update" }) Phase 1 → completed, Phase 2 → in_progress
+   Mark TodoWrite Phase 1 → completed, Phase 2 → in_progress
    └─ Ref: phases/02-gap-analysis.md
       ├─ Input: literatureResults
       └─ Output: gapAnalysis (gaps, opportunities, priorities)
 
 Phase 3: Research Question Formulation
-   Mark todo({ action: "update" }) Phase 2 → completed, Phase 3 → in_progress
+   Mark TodoWrite Phase 2 → completed, Phase 3 → in_progress
    └─ Ref: phases/03-research-question.md
       ├─ Input: gapAnalysis + literatureResults
       └─ Output: researchQuestions (questions, hypotheses, objectives)
 
 Phase 4: Method Selection
-   Mark todo({ action: "update" }) Phase 3 → completed, Phase 4 → in_progress
+   Mark TodoWrite Phase 3 → completed, Phase 4 → in_progress
    └─ Ref: phases/04-method-selection.md
       ├─ Input: researchQuestions + gapAnalysis
       └─ Output: selectedMethods (methods, justification, resources)
 
 Phase 5: Research Planning
-   Mark todo({ action: "update" }) Phase 4 → completed, Phase 5 → in_progress
+   Mark TodoWrite Phase 4 → completed, Phase 5 → in_progress
    └─ Ref: phases/05-research-planning.md
       ├─ Input: ALL previous outputs
       └─ Output: research-plan.md (final deliverable)
 
-Mark todo({ action: "update" }) Phase 5 → completed
+Mark TodoWrite Phase 5 → completed
 ```
 
 **Phase Reference Documents** (read on-demand when phase executes):
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-literature-search.md](phases/01-literature-search.md) | Search, discover, and organize literature | todo({ action: "update" }) driven |
-| 2 | [phases/02-gap-analysis.md](phases/02-gap-analysis.md) | Identify research gaps and opportunities | todo({ action: "update" }) driven |
-| 3 | [phases/03-research-question.md](phases/03-research-question.md) | Formulate research questions and hypotheses | todo({ action: "update" }) driven |
-| 4 | [phases/04-method-selection.md](phases/04-method-selection.md) | Select and justify research methods | todo({ action: "update" }) driven + sentinel |
-| 5 | [phases/05-research-planning.md](phases/05-research-planning.md) | Create timeline, milestones, and final plan | todo({ action: "update" }) driven + sentinel |
+| 1 | [phases/01-literature-search.md](phases/01-literature-search.md) | Search, discover, and organize literature | TodoWrite driven |
+| 2 | [phases/02-gap-analysis.md](phases/02-gap-analysis.md) | Identify research gaps and opportunities | TodoWrite driven |
+| 3 | [phases/03-research-question.md](phases/03-research-question.md) | Formulate research questions and hypotheses | TodoWrite driven |
+| 4 | [phases/04-method-selection.md](phases/04-method-selection.md) | Select and justify research methods | TodoWrite driven + sentinel |
+| 5 | [phases/05-research-planning.md](phases/05-research-planning.md) | Create timeline, milestones, and final plan | TodoWrite driven + sentinel |
 
 **Compact Rules**:
-1. **todo({ action: "update" }) `in_progress`** — preserve full content, do not compress
-2. **todo({ action: "update" }) `completed`** — may compress to summary
+1. **TodoWrite `in_progress`** — preserve full content, do not compress
+2. **TodoWrite `completed`** — may compress to summary
 3. **sentinel fallback** — phases marked with sentinel: if compact leaves only sentinel without full Step protocol, immediately `Read()` to recover
 
 ## Core Rules
@@ -222,7 +211,7 @@ workflowPreferences
             └─→ research-plan.md (final structured document)
 ```
 
-## todo({ action: "update" }) Pattern
+## TodoWrite Pattern
 
 **Phase start — Attach sub-tasks**:
 ```
@@ -277,13 +266,13 @@ After each phase completes, update an accumulated research notes document:
 
 **Pre-phase**:
 - [ ] Verify previous phase outputs are available
-- [ ] Update todo({ action: "update" }) status
+- [ ] Update TodoWrite status
 - [ ] Read phase document (`Read("phases/0N-xxx.md")`)
 
 **Post-phase**:
 - [ ] Validate phase outputs (non-empty, well-structured)
 - [ ] Update accumulated research notes
-- [ ] Collapse todo({ action: "update" }) sub-tasks
+- [ ] Collapse TodoWrite sub-tasks
 - [ ] If not autoYes, confirm with user before proceeding
 
 ## Output Files

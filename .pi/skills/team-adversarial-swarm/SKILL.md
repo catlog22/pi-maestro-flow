@@ -1,18 +1,8 @@
 ---
 name: team-adversarial-swarm
-disable-model-invocation: true
 description: "ACO swarm intelligence with modular Workflow composition and adversarial decision gates. Coordinator drives iteration loop; 4 composable Workflow scripts handle exploration, scoring, convergence, and synthesis — each with built-in adversarial patterns."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Write
-  - maestro
-  - teammate
-session-mode: run
+allowed-tools: Read Write Edit Bash Glob Grep Workflow teammate maestro
+disable-model-invocation: true
 ---
 
 <required_reading>
@@ -256,7 +246,7 @@ synthesize(best, top_k) → best-solution.md
 Run lifecycle completion (before displaying results):
 - Read run_id from team-session.json.run.run_id
 - Write {run_dir}/report.md with frontmatter (verdict/summary/concerns)
-- Run `maestro run done <run_id>`
+- Run `maestro session done <run_id>`
 - If complete fails: fix the blocking gate and retry once; still failing -> do NOT archive/clean - keep the team active (status=paused) and report the blocking gate
 
 展示最终结果 + 交互选择:

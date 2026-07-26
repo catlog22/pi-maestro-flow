@@ -1,23 +1,8 @@
 ---
 name: team-ux-improve
-disable-model-invocation: true
 description: "Unified team skill for UX improvement. Systematically discovers and fixes UI/UX interaction issues including unresponsive buttons, missing feedback, and state refresh problems. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team ux improve\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - SendMessage
-  - Write
-  - mcp__maestro__edit_file
-  - mcp__maestro__read_file
-  - mcp__maestro__team_msg
-  - mcp__maestro__write_file
-  - teammate
-  - todo
-session-mode: run
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file maestro
+disable-model-invocation: true
 ---
 
 <required_reading>
@@ -63,7 +48,7 @@ Skill(skill="team-ux-improve", args="<project-path> [--framework react|vue]")
 
 ## Utility Member Registry
 
-**Coordinator-only**: Utility members can only be spawned by Coordinator. Workers CANNOT call teammate() to spawn utility members.
+**Coordinator-only**: Utility members can only be spawned by Coordinator. Workers CANNOT call Agent() to spawn utility members.
 
 | Utility Member | Path | Callable By | Purpose |
 |----------------|------|-------------|---------|

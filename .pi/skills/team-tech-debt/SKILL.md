@@ -1,23 +1,8 @@
 ---
 name: team-tech-debt
-disable-model-invocation: true
 description: "Unified team skill for tech debt identification and remediation. Scans codebase for tech debt, assesses severity, plans and executes fixes with validation. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates pipeline, workers are team-worker agents. Triggers on \"team tech debt\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - SendMessage
-  - Write
-  - mcp__maestro__edit_file
-  - mcp__maestro__read_file
-  - mcp__maestro__team_msg
-  - mcp__maestro__write_file
-  - teammate
-  - todo
-session-mode: run
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file maestro
+disable-model-invocation: true
 ---
 
 <required_reading>

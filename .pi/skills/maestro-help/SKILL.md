@@ -1,13 +1,8 @@
 ---
 name: maestro-help
-disable-model-invocation: true
 description: "Maestro Flow 命令帮助系统。搜索命令、浏览技能、工作流推荐、新手引导。Triggers on \"maestro-help\", \"帮助\", \"命令\", \"怎么用\", \"skill\", \"workflow\", \"maestro 怎么用\"."
-allowed-tools:
-  - AskUserQuestion
-  - Glob
-  - Grep
-  - Read
-session-mode: none
+allowed-tools: Read Grep Glob maestro
+disable-model-invocation: true
 ---
 
 # Maestro Help
@@ -222,16 +217,10 @@ $ARGUMENTS → Parse:
 
 | 命令 | 用途 |
 |------|------|
-| `/maestro-manage issue` | Issue 管理 |
-| `/maestro-manage issue discover` | Issue 发现 |
-| `/maestro-manage knowledge knowhow` | 知识管理 |
-| `/maestro-manage knowledge capture` | 知识捕获 |
-| `/maestro-manage status` | 状态查看 |
-| `/maestro-manage knowledge wiki` | Wiki 管理 |
-| `/maestro-manage knowledge harvest` | 收获 |
-| `/maestro-manage sync rebuild` | 代码库重建 |
-| `/maestro-manage knowledge extractors` | 知识图谱提取器管理 |
-| `/maestro-manage knowledge audit` | 知识审计 |
+| `/maestro-issue` | Issue 管理（意图驱动：报告/列出/关闭/关联） |
+| `/maestro-issue discover` | Issue 发现 |
+| `/maestro-knowledge` | 知识存储管理（意图驱动：audit/harvest/wiki/extractors/domain） |
+| `/maestro-knowhow` | KnowHow 沉淀（意图驱动：按类型捕获可复用知识） |
 
 ### Odyssey 长周期循环 (odyssey)
 
@@ -292,7 +281,7 @@ Odyssey 长周期循环（独立路径）
 | Path E | 纯规格文档 | `blueprint "project idea"` → (供人阅读) |
 | Path F | 纯探索 | `brainstorm "idea"` → (供人决策) |
 | 轻量修复 | 已知简单问题 | `/maestro-companion "修复描述"` |
-| Bug 追踪 | Issue 闭环 | `/maestro-manage issue discover` → `/maestro-manage issue create` → analyze/plan/execute → close |
+| Bug 追踪 | Issue 闭环 | `/maestro-issue discover` → `/maestro-issue create` → analyze/plan/execute → close |
 | 全自动 | /maestro 入口 | `/maestro -y "任务描述"` |
 | 代码审查 | 质量管线 | `review` → `auto-test` → `test` |
 | 多 CLI 交叉验证 | Collab step | `collab "需求描述"` |

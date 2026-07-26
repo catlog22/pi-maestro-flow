@@ -1,21 +1,8 @@
 ---
 name: team-frontend-debug
-disable-model-invocation: true
 description: "Frontend debugging team using Chrome DevTools MCP. Dual-mode — feature-list testing or bug-report debugging. Triggers on \"team-frontend-debug\", \"frontend debug\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - SendMessage
-  - Write
-  - mcp__chrome-devtools__*
-  - mcp__maestro__team_msg
-  - teammate
-  - todo
-session-mode: run
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__chrome-devtools__* maestro
+disable-model-invocation: true
 ---
 
 <required_reading>

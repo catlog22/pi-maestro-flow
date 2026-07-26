@@ -1,18 +1,8 @@
 ---
 name: maestro-next
+description: "Unified entry for all development intents — classify intent, assess complexity, route to the correct execution channel: /maestro-companion (lightweight), standard single run, or /maestro and /maestro-ralph (multi-step manual/orchestrated). Pure router, never runs execution loops itself Arguments: <intent> [-y]"
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: false
-description: "Unified entry for all development intents — classify intent, assess complexity, route to the correct execution channel: /maestro-companion (lightweight), standard single run, or /maestro (multi-step with manual/ralph engine). Pure router, never runs execution loops itself"
-argument-hint: "<intent>|--list|--suggest [-y] [--dry-run] [--lite] [--run]"
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Write
-session-mode: run
-contract:
 ---
 
 <required_reading>
@@ -32,10 +22,10 @@ Pi mirrors canonical Session/Run state automatically:
 <purpose>
 Unified interactive entry for all development intents. Pure router: parse intent + project state → classify → assess complexity → route to the appropriate channel:
 - **Companion** (lightweight): route to `/maestro-companion "<intent>"` — minimal run lifecycle, continuous evidence recording
-- **Standard** (single run): recommend a step → confirm → execute via `maestro run start --cmd`
-- **Multi-step**: route to `/maestro "<intent>"` with engine hint (manual for stepwise control, ralph for closed-loop orchestration)
+- **Standard** (single run): recommend a step → confirm → execute via `maestro run prepare` + `maestro run start`
+- **Multi-step**: route to `/maestro "<intent>"` (manual stepwise control) or `/maestro-ralph "<intent>"` (orchestrated closed-loop)
 
-This command is the single entry point. It classifies and routes. Multi-step execution loops (manual or orchestrated) live in `/maestro`.
+This command is the single entry point. It classifies and routes. Multi-step execution loops live in `/maestro` (manual) and `/maestro-ralph` (orchestrated).
 </purpose>
 
 <pi_context_contract>
@@ -55,35 +45,28 @@ $ARGUMENTS — intent text + optional flags.
 
 | Flag | Effect |
 |------|--------|
-| `-y` / `--yes` | Skip confirmation, execute/route top pick directly |
-| `--dry-run` | Show recommendation only, do not execute |
-| `--top N` | Show top N candidates (default 3) |
-| `--list` | List all available steps grouped by workflow cluster |
-| `--suggest` | Suggest-only mode: show recommendation + prepare content, NEVER auto-execute |
-| `--lite` | Force companion channel: route to `/maestro-companion "<intent>"` |
-| `--run` | Force standard channel (create a run even for simple tasks) |
+| `-y` / `--yes` | Skip confirmation. Auto-executes only the **standard** channel; for companion/multi-step it emits the target invocation (router semantics — the target command owns execution) |
 
 **Mode detection (priority order):**
-1. `--lite` → route to `/maestro-companion "<intent>"` (suggest invocation, execute if -y)
-2. `--suggest` → S_RANK → S_PRESENT (suggest only, never execute)
-3. `--list` → S_LIST
-4. Intent text present → S_STATE → S_RANK → route by complexity verdict
-5. No arguments → lifecycle inference for natural next step
+1. Intent text present → S_STATE → S_RANK → route by complexity verdict
+2. "continue"/"next"/"go" → lifecycle inference for natural next step
+3. No arguments at all → 1 clarify round
 
 **Candidate pool:** All 14 first-tier steps registered in `prepare/` + `workflows/`. Companion is a routing channel, not a first-tier step. Pipeline orchestrators (`maestro`, `maestro-ralph*`) are NEVER in the candidate pool.
 </context>
 
 <invariants>
-1. **Pure router for multi-step** — this command never runs execution loops (manual chain or orchestrated). All multi-step execution is delegated to `/maestro`
+1. **Pure router for multi-step** — this command never runs execution loops (manual chain or orchestrated). Multi-step execution is delegated to `/maestro` (manual) or `/maestro-ralph` (orchestrated)
 2. **Pipeline orchestrators excluded** — only recommend registered steps as single-run targets
-3. **Empty intent or "continue"/"next"** → lifecycle_position inference for natural next step
+3. **Lifecycle continuation** — "continue"/"next"/"go" are explicit continuation signals → lifecycle_position inference (S_STATE). Truly empty arguments (no text at all) → 1 clarify round via [@ask] user prompt; still empty → S_FALLBACK (E001)
 4. **Literal match priority** — keyword match takes precedence; lifecycle is tie-breaker
-5. **Argument pass-through** — `--intent` is Session metadata only; the selected step's domain payload becomes command input through repeatable `--arg <value>` or arguments after `--`. The user can modify command inputs at confirmation; `-y` only passes through when the user provided it
-6. **--suggest never executes** — show recommendation + prepare content only
-7. **Manual campaigns excluded** — `team-*` and `maestro-odyssey` are never candidates, recommendations, retained utilities, or handoff targets
-8. **Retained commands are suggest-only** — route retained commands to an exact slash command. Never execute them in this turn; `-y` applies only to first-tier steps
-9. **Companion routing is suggest-or-execute** — when complexity == lightweight, output `/maestro-companion "<intent>"` invocation. With `-y`, invoke it directly; otherwise present it as the recommended channel for user confirmation
-10. **Multi-step always routes to /maestro** — when intent spans ≥2 steps or needs orchestration, output `/maestro "<intent>"` with appropriate engine hint. This command never creates sessions or manages chains itself
+5. **Argument pass-through** — the intent phrase is Session metadata only (the positional phrase to `run start`); the selected step's domain payload becomes command input through repeatable `--arg <value>`. The user can modify command inputs at confirmation; `-y` only passes through when the user provided it
+6. **Manual campaigns excluded** — `team-*` and `maestro-odyssey` are never candidates, recommendations, retained utilities, or handoff targets
+7. **Retained commands are suggest-only** — route retained commands to an exact slash command. Never execute them in this turn; `-y` applies only to first-tier steps
+8. **Companion routing is suggest-or-execute** — when complexity == lightweight, output `/maestro-companion "<intent>"` invocation. With `-y`, emit the invocation directly (`/maestro-companion "<intent>" -y`); the companion command owns its own execution. Without `-y`, present it as the recommended channel for user confirmation
+9. **Multi-step routes to the orchestrators** — when intent spans ≥2 steps or needs orchestration, output `/maestro "<intent>"` (manual stepwise) or `/maestro-ralph "<intent>"` (orchestrated closed-loop). This command never creates sessions or manages chains itself
+10. **Cross-category keyword priority** — when an intent keyword matches both a first-tier step and a retained command, the first-tier step wins for candidate selection; complexity assessment still applies independently. Auxiliary clusters are advisory grouping for display, never routing overrides
+11. **`-y` means skip-confirmation, not auto-execute** — for standard channel, skipping confirmation proceeds to S_EXECUTE (this command runs the step). For companion/multi-step channels, this command is a router: skipping confirmation means outputting the target invocation text directly. The target command owns its own execution semantics
 9. simple chain 只通过 `maestro run start --chain ... --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。
 10. 中途新增下一步用 `maestro run edit <cmd...>` 修改未来 chain，不调用新的 `run start` 制造第二个 Topic Session。
 </invariants>
@@ -94,20 +77,18 @@ $ARGUMENTS — intent text + optional flags.
 S_PARSE    — Parse arguments, extract flags, detect mode
 S_STATE    — Read project state, infer lifecycle_position
 S_RANK     — Score candidates, assess complexity, determine channel
-S_LIST     — --list mode: grouped display of all steps
 S_PRESENT  — Show top pick + alternatives + reasoning + channel verdict
-S_CONFIRM  — user prompt for confirmation (skipped by -y)
-S_EXECUTE  — Run prepare + create for selected single step
+S_CONFIRM  — [@ask] user prompt for confirmation (skipped by -y)
+S_EXECUTE  — Run prepare + start for selected single step
 S_FALLBACK — Intent empty after clarification
 </states>
 
 <transitions>
 
 S_PARSE:
-  → S_LIST     WHEN: --list flag
-  → S_STATE    WHEN: intent present / "continue"/"next"/"go" / --lite / --run
-  → S_PARSE    WHEN: no intent (1 clarify round via user prompt)
-  → S_FALLBACK WHEN: clarification empty
+  → S_STATE    WHEN: intent present / "continue"/"next"/"go"
+  → S_PARSE    WHEN: no arguments at all (1 clarify round via [@ask] user prompt)
+  → S_FALLBACK WHEN: clarification still empty
 
 S_STATE:
   → S_RANK     DO: A_INFER_LIFECYCLE
@@ -115,21 +96,17 @@ S_STATE:
 S_RANK:
   → S_PRESENT  DO: A_SCORE_CANDIDATES (channel verdict embedded in presentation)
 
-S_LIST:
-  → END        DO: group steps by cluster, display with descriptions
-
 S_PRESENT:
   → END        WHEN: target_kind == retained-command    DO: display exact slash command; suggest only
-  → END        WHEN: --dry-run OR --suggest             DO: display recommendation + channel
   → S_EXECUTE  WHEN: -y AND channel == standard
   → END        WHEN: -y AND channel == companion        DO: output `/maestro-companion "<intent>" -y`
-  → END        WHEN: -y AND channel == multi-step       DO: output `/maestro "<intent>" -y`
+  → END        WHEN: -y AND channel == multi-step       DO: output the selected orchestrator: `/maestro "<intent>" -y` (manual) or `/maestro-ralph "<intent>" -y` (orchestrated)
   → S_CONFIRM  WHEN: interactive
 
 S_CONFIRM:
   → S_EXECUTE  WHEN: user confirms standard step / selects alternative / modifies args
   → END        WHEN: user picks companion → output `/maestro-companion "<intent>"`
-  → END        WHEN: user picks multi-step → output `/maestro "<intent>"`
+  → END        WHEN: user picks multi-step → output the selected orchestrator: `/maestro "<intent>"` (manual) or `/maestro-ralph "<intent>"` (orchestrated)
   → END        WHEN: user cancels
 
 S_EXECUTE:
@@ -147,7 +124,7 @@ S_FALLBACK:
 Read project state to infer `lifecycle_position`:
 
 ```bash
-maestro run status --workflow-root .   # read canonical Session/Run position
+maestro run prepare   # check if prepare command works
 # Topic Session resolution and ReuseAssessment are injected read-only inputs
 ```
 
@@ -175,6 +152,8 @@ init → {brainstorm | blueprint | analyze-macro} → roadmap
   → session-seal → next dep-ready session
 ```
 
+**Multi-session resolution:** "Latest artifact" refers to the `active_session_id` in state.json. If no active session is set, use the most recently modified session. If multiple sessions are active, lifecycle inference applies only to the active one; surface others as context in S_PRESENT.
+
 ### A_SCORE_CANDIDATES
 
 **Scoring signals (high → low):**
@@ -190,33 +169,42 @@ init → {brainstorm | blueprint | analyze-macro} → roadmap
 
 **Complexity assessment (determines channel):**
 
-| Complexity | Channel | Criteria | Engine hint |
-|-----------|---------|----------|-------------|
-| Lightweight | `/maestro-companion` | Mechanically clear intent, no design decisions, no artifact handoff, no gate value | — |
-| Standard | Single step (one run) | Produces typed artifacts, needs downstream handoff or gate checks | — |
-| Multi-step (manual) | `/maestro` | Intent spans ≥2 distinct steps, user wants stepwise control, no auto-retry needed | `--engine manual` |
-| Multi-step (orchestrated) | `/maestro` | Intent needs closed-loop: decision nodes, drift analysis, auto-retry, decomposition | `--engine ralph` (default) |
+| Complexity | Channel | Criteria |
+|-----------|---------|----------|
+| Lightweight | `/maestro-companion` | Mechanically clear intent, no design decisions, no artifact handoff, no gate value |
+| Standard | Single step (one run) | Produces typed artifacts, needs downstream handoff or gate checks |
+| Multi-step (manual) | `/maestro` | Intent spans ≥2 distinct steps, user wants stepwise control, no auto-retry needed |
+| Multi-step (orchestrated) | `/maestro-ralph` | Intent needs closed-loop: decision nodes, drift analysis, auto-retry, decomposition |
 
 **Routing preference: prefer the lightest channel that satisfies the task.** Default to Companion for anything that looks like a quick fix/lookup/exploration. Only upgrade to Standard when there is concrete evidence the task produces artifacts a downstream step will consume, or needs a gate/verdict for lifecycle tracking. Only route to /maestro when the intent genuinely spans ≥2 distinct lifecycle steps. When in doubt between Companion and Standard, ask the user via the confirmation menu rather than auto-upgrading.
 
 **Lightweight signals (all must hold):**
-- Intent is mechanically clear — user knows exactly what to change, no design decisions or multi-angle analysis needed (file count is irrelevant; a 20-file rename is still lightweight)
+- Intent specifies a concrete, bounded action — the user names what to change and where (file, function, error message). "Fix the login bug" is NOT lightweight (unbounded diagnosis); "change the timeout from 30s to 60s in auth.ts" IS lightweight. File count is irrelevant; a 20-file rename with a known pattern is still lightweight
 - No typed artifact needs to be consumed by a downstream step
 - No gate/verdict needs to be recorded for lifecycle tracking
 - Task does not require pre-task thinking (prepare) or structured brief to execute correctly
+- Single concern — intent does not span multiple lifecycle phases (e.g., analyze+plan, execute+review)
 
-**Multi-step detection:** intent matches keywords of ≥2 distinct steps in the routing table → set `multi_step`.
+**Multi-step detection:** intent matches keywords of ≥2 distinct steps in the routing table → classify the relationship before setting `multi_step`:
 
-**Engine hint logic (for /maestro routing):**
-- Manual: user explicitly asks for stepwise/per-step control, or intent is a simple sequential pipeline without quality gates
-- Ralph (default): intent implies closed-loop quality (broad refactoring, migration, "end-to-end", "full lifecycle"), or needs decision gates/drift analysis
+| Pattern | Classification | Channel |
+|---------|---------------|--------|
+| Sequential lifecycle steps ("analyze then plan", "review and fix") | Multi-step | `/maestro` or `/maestro-ralph` |
+| Single action with multiple aspects ("review and improve the auth module") | Single intent, pick dominant step | Standard or Companion |
+| Ambiguous compound ("test and deploy") | Present both as alternatives in S_CONFIRM | — |
+
+Dominant step = the step whose keyword appears first or carries the primary verb. When in doubt, present both as alternatives rather than auto-selecting.
+
+**Orchestrator selection (for multi-step routing):**
+- `/maestro` (manual): user explicitly asks for stepwise/per-step control ("one step at a time", "confirm each step"), or intent is a simple sequential pipeline of ≤3 steps without quality gates
+- `/maestro-ralph` (orchestrated, default): intent implies iterative quality convergence — broad refactoring (>5 files), migration, "end-to-end", "full lifecycle", or needs decision gates/drift analysis/auto-retry. When in doubt, default to `/maestro-ralph`
 
 **Override flags:**
-- `--lite` forces Companion channel regardless of complexity assessment
-- `--run` forces Standard channel (single run) regardless of complexity assessment
-- Neither flag: auto-detect from the signals above; verdict shown to user before routing
+- Channel is auto-detected from the signals above; the verdict is shown to the user before routing, and the user may override the channel at the confirmation menu (S_CONFIRM).
 
 **Intent routing table:** first-tier rows enter the executable candidate pool. Retained-command rows are advisory routes: show the exact slash command and stop.
+
+> **Cross-category priority:** first-tier step keywords take precedence over retained-command keywords when both match. Example: "security test" → `test` (first-tier) wins over `security/OWASP` (odyssey campaign), unless the intent explicitly says "security audit" or "OWASP". Auxiliary cluster triggers are the lowest priority — they group retained commands for display but never override individual keyword matches.
 
 > **Scope guard:** keyword match identifies the *candidate step*, but the complexity verdict still applies independently. A keyword hit does NOT override lightweight signals. Example: "rename this variable" matches `execute/implement` keywords → candidate = execute step, but complexity = lightweight (1 file, no handoff) → channel = `/maestro-companion`. The routing table answers "which step?", the complexity assessment answers "which channel?".
 
@@ -238,31 +226,29 @@ init → {brainstorm | blueprint | analyze-macro} → roadmap
 | grill / pressure test / stress test | grill | Socratic pressure-test of a plan/idea against codebase reality — adversarial questioning, terminology collision checks |
 | collab / cross-verify / multi-tool / second opinion | collab | Fan out one requirement to multiple CLI tools, cross-verify findings into a unified conclusion |
 | refactor / tech debt | `/maestro-odyssey "<scope>" --mode improve` (odyssey campaign) | Output invocation; user invokes it |
-| sync docs | `/maestro-manage sync codebase` (retained command) | Suggest exact slash command; user invokes it |
-| issue / defect | `/maestro-manage issue <subcommand> ...` (retained command) | Suggest exact slash command; user invokes it |
-| wiki / knowledge graph | `/maestro-manage knowledge wiki ...` (retained command) | Suggest exact slash command; user invokes it |
-| spec / rule / constraint | `/maestro-spec load ...` or `/maestro-spec add ...` (retained command) | Suggest exact slash command; user invokes it |
+| issue / defect | `/maestro-issue "<intent>"` (retained command) | Suggest exact slash command; user invokes it |
+| wiki / knowledge graph | `/maestro-knowledge "<intent>"` (retained command) | Suggest exact slash command; user invokes it |
+| spec / rule / constraint | `/maestro-spec "<intent>"` (retained command) | Suggest exact slash command; user invokes it |
 | init / project setup | `/maestro-init ...` (retained command) | Suggest exact slash command; user invokes it |
-| status / dashboard | `/maestro-manage status` (retained command) | Suggest exact slash command; user invokes it |
 | security / OWASP | `/maestro-odyssey "<scope>" --mode security` (odyssey campaign) | Output invocation; user invokes it |
 | learn / explore code / follow | `/maestro-learn follow|investigate|decompose|consult ...` (retained command) | Suggest exact slash command; user invokes it |
 | UI design / design system / polish / impeccable | `/maestro-impeccable "<intent>" ...` (retained command) | Suggest exact slash command; user invokes it |
-| harvest / extract knowledge | `/maestro-manage knowledge harvest ...` (retained command) | Suggest exact slash command; user invokes it |
+| harvest / extract knowledge | `/maestro-knowledge "<intent>"` (retained command) | Suggest exact slash command; user invokes it |
 | fork / parallel dev | `/maestro-fork ...` (retained command) | Suggest exact slash command; user invokes it |
-| note / record observation | `/maestro-companion --note "<text>"` (companion utility) | Route to companion note mode |
-| promote / distill insights | `/maestro-companion --promote` (companion utility) | Route to companion promote mode |
+| note / record observation | `/maestro-knowhow "<intent>"` (retained command) | Suggest exact slash command; user invokes it |
+| promote / distill insights | `/maestro-knowledge "<intent>"` (retained command) | Suggest exact slash command; user invokes it |
 
 **Auxiliary workflow clusters:**
 
 | Cluster | Trigger | Chain |
 |---------|---------|-------|
 | Learning | New code / unknown module | maestro-learn follow → maestro-learn decompose → maestro-learn consult |
-| Knowledge | Distill experience | maestro-manage knowledge harvest → maestro-manage knowledge capture → maestro-spec add |
-| Issue | Defect management | maestro-manage issue discover → maestro-manage issue |
+| Knowledge | Distill experience | maestro-knowledge harvest → maestro-knowhow capture → maestro-spec add |
+| Issue | Defect management | maestro-issue discover → maestro-issue |
 
 ### A_EXECUTE_STEP
 
-Single-run path only. Multi-step execution is handled by `/maestro`.
+Single-run path only. Multi-step execution is handled by `/maestro` (manual) and `/maestro-ralph` (orchestrated).
 
 For first-tier steps (those with prepare/ + workflows/ files):
 
@@ -281,17 +267,24 @@ maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [-
 #        - No alternative upstream → seal run as blocked, surface E001 + suggest /plan
 #      Do NOT proceed to step 4 with a blocked execute run.
 
-# 4. Load the execution manual (follow the `next` hint from create)
-maestro run brief --platform pi <run_id> --workflow-root .
+# 3b. Entry blocker handling (general, non-execute steps)
+#    IF step != execute AND entry_blockers is non-empty:
+#      Display each blocker with recovery suggestion:
+#        - Missing upstream artifact → suggest the producing step (e.g., "run analyze first")
+#        - Gate failure → suggest the gate step (review/verify/auto-test)
+#      Seal run as blocked. Do NOT proceed to step 4.
+
+# 4. Load the execution manual (follow the `next` hint from start)
+maestro run brief <run_id>
 #    Returns: workflow content, run-mode summary, goal, gate status
 
 # 5. LLM executes the workflow (core process)
 
 # 6. Complete the run
-maestro run done <run_id> --workflow-root .
+maestro run done <run_id>
 ```
 
-After `run complete`: re-infer lifecycle and surface the natural next step as a continuation hint — stepwise multi-step work proceeds by re-invoking `/maestro-next` or `/maestro -c`.
+After `run done`: re-infer lifecycle and surface the natural next step as a continuation hint — stepwise multi-step work proceeds by re-invoking `/maestro-next` or `/maestro -c`.
 
 For retained commands, output the exact slash command as a suggest-only result. Do not execute it, including under `-y`; the user invokes it explicitly in a subsequent message.
 
@@ -300,23 +293,6 @@ For retained commands, output the exact slash command as a suggest-only result. 
 </state_machine>
 
 <presentation>
-
-### --list mode
-
-Group all 14 first-tier steps by cluster + show channels and retained commands:
-
-```
-Core Chain:  analyze → plan → execute → verify
-Quality:     review, test, auto-test, debug, retrospective
-Discovery:   grill, collab, brainstorm, blueprint, roadmap
-
-Channels:
-  /maestro-companion       — lightweight tasks (≤1-2 files, no artifact handoff)
-  /maestro --engine manual — multi-step stepwise (per-step confirm, no gates)
-  /maestro                 — multi-step orchestrated (decision nodes, drift, auto-retry)
-
-Retained Commands (manual): /maestro-manage ..., /maestro-learn ..., /maestro-spec ..., /maestro-impeccable ...
-```
 
 ### Normal mode
 
@@ -327,11 +303,11 @@ Target: /<step-name>
 Kind: first-tier step | retained command | companion | multi-step
   <description>
   Reason: <match rule + lifecycle position>
-  Channel: /maestro-companion | single run | /maestro (manual) | /maestro (ralph)
+  Channel: /maestro-companion | single run | /maestro (manual) | /maestro-ralph (orchestrated)
   Invocation:
     companion       → /maestro-companion "<intent>"
     single run      → Confirm to execute through Maestro Run lifecycle
-    multi-step      → /maestro "<intent>" (stepwise or orchestrated)
+    multi-step      → /maestro "<intent>" (manual) or /maestro-ralph "<intent>" (orchestrated)
     retained        → Run manually: /<command> <subcommand> <args> (suggest only)
 
 Alternatives:
@@ -355,11 +331,10 @@ When `channel == standard`:
 - **Cancel**
 
 When `multi_step`:
-- **Hand off to /maestro** (Recommended) → `/maestro "<intent>"`
+- **Hand off to orchestrator** (Recommended) → `/maestro "<intent>"` (manual) or `/maestro-ralph "<intent>"` (orchestrated)
 - **Just this step** (execute only the top pick as single run)
 - **Cancel**
 
-`--dry-run` / `--suggest`: display and stop.
 `-y`: execute/route immediately per channel.
 
 </presentation>
@@ -368,10 +343,10 @@ When `multi_step`:
 
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
-| E001 | error | Intent empty after clarification | Provide intent or use --list |
+| E001 | error | Intent empty after clarification | Provide intent, or ask conversationally for available steps (e.g. run `maestro skills`). |
 | E002 | error | No steps found in registry | Check prepare/ and workflows/ directories |
 | E003 | error | Selected step has no prepare/workflow files | Verify step installation |
-| W001 | warning | Top-1 and top-2 scores too close | Force show top 3 for user decision |
+| W001 | warning | Top-1 and top-2 score difference < 15% of max score | Force show top 3 for user decision — yields to `-y`: with `-y`, route/execute the top pick directly |
 | W002 | warning | No good match for intent | Suggest /maestro for orchestration |
 
 </error_codes>

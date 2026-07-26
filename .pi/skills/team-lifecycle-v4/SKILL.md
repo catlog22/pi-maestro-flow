@@ -1,20 +1,8 @@
 ---
 name: team-lifecycle-v4
-disable-model-invocation: true
 description: "Full lifecycle team skill — plan, develop, test, review in one coordinated session. Role-based architecture with coordinator-driven beat model. Triggers on \"team lifecycle v4\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - SendMessage
-  - Write
-  - mcp__maestro__team_msg
-  - teammate
-  - todo
-session-mode: run
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+disable-model-invocation: true
 ---
 
 <required_reading>

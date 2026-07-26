@@ -1073,8 +1073,10 @@ Skills 是按需加载的能力包，通过 `/skill:name` 调用或由 Agent 自
 
 | Skill | 简介 |
 |-------|------|
-| `spec` / `maestro-spec` | Spec 条目管理（添加/加载/删除/初始化） |
-| `manage` / `maestro-manage` | 项目管理中枢（状态/Issue/知识/Drift） |
+| `maestro-spec` | Spec 沉淀（意图驱动录入项目约束规则） |
+| `maestro-knowhow` | KnowHow 沉淀（意图驱动按类型捕获可复用知识） |
+| `maestro-knowledge` | 知识存储管理（意图驱动：audit/harvest/wiki/extractors/domain） |
+| `maestro-issue` | Issue 管理（意图驱动：报告/列出/关闭/关联 + 自动发现） |
 | `codify-to-knowhow` | 清单驱动的知识资产生成器 |
 
 ### 学术写作（Scholar）

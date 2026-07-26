@@ -1,27 +1,8 @@
 ---
 name: team-ui-polish
-disable-model-invocation: true
 description: "Unified team skill for UI polish. Auto-discover and fix UI design issues using Impeccable design standards. Anti-AI-slop detection, color/typography/spacing quality, motion, interaction states, visual hierarchy. Uses team-worker agent architecture. Triggers on \"team ui polish\", \"ui polish\", \"design polish\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - SendMessage
-  - Write
-  - mcp__chrome-devtools__evaluate_script
-  - mcp__chrome-devtools__navigate_page
-  - mcp__chrome-devtools__resize_page
-  - mcp__chrome-devtools__take_screenshot
-  - mcp__maestro__edit_file
-  - mcp__maestro__read_file
-  - mcp__maestro__team_msg
-  - mcp__maestro__write_file
-  - teammate
-  - todo
-session-mode: run
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__chrome-devtools__evaluate_script mcp__chrome-devtools__take_screenshot mcp__chrome-devtools__navigate_page mcp__chrome-devtools__resize_page maestro
+disable-model-invocation: true
 ---
 
 <required_reading>

@@ -1,21 +1,8 @@
 ---
 name: maestro-impeccable
+description: "Use when designing, auditing, polishing, improving, or codifying frontend UI — websites, dashboards, landing pages, components, design systems Arguments: build|redesign|improve|enhance|launch|harden|foundation|live [target] [--codify <path>]"
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
-description: "Use when designing, auditing, polishing, improving, or codifying frontend UI — websites, dashboards, landing pages, components, design systems"
-argument-hint: "build|redesign|improve|enhance|launch|harden|foundation|live [target] [--codify <path>]"
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Skill
-  - Write
-  - teammate
-  - todo
-session-mode: run
-contract:
 ---
 
 <required_reading>
@@ -43,11 +30,13 @@ $ARGUMENTS first word determines mode:
 |------------|------|
 | `--codify` / `codify` | Codify — extract design system from existing code (see `<codify_mode>`) |
 | Known command (see routing table) | Direct |
+
+> Disambiguation for overlapping names (`harden`, `live`): bare keyword without target → Chain; keyword + explicit target/path → Direct. Override: `--chain` forces Chain, `--direct` forces Direct.
+
 | Chain name: build, redesign, improve, enhance, launch, harden, foundation, live | Chain |
 | continue / next / -c | Resume |
 | search | Search: `maestro impeccable search "$REST"` |
-| Free text (concrete task) | Direct craft — has specific target + specs/reference |
-| Free text (project intent) | Intent → classify → chain |
+| Free text (any) | Free Text Routing (3-layer system below) |
 | (empty) | Menu: show commands by category |
 
 ## Command Routing
@@ -105,7 +94,7 @@ Chain step names below reuse Command Routing names but resolve through the chain
 - `[refine]` = quality gate loop: gate fails → auto-select fix commands from findings → re-gate
 - `{cmd...}` = enhance supports multiple commands, comma-separated: `enhance colorize,typeset landing-page`
 
-Chain flags: --threshold <N> (default 26/40), --max-loops <N> (default 3), --skip-design, --styles <N>, -y
+Chain flags: --threshold <N> (default 26/40), --max-loops <N> (default 3), --skip-design, --styles <N>, -y (skip Layer 2 ambiguity user prompt — select first matching chain; skip chain session confirmation; skip quality gate refine confirmations. Does NOT skip prerequisite checks.)
 
 ## Free Text Routing
 
@@ -115,7 +104,7 @@ Three-layer priority matching. Stop on first match — do not continue to lower 
 
 Semantically match user description against the Command Routing table's Description column. Match the closest **single** command.
 
-**Skip condition**: If the prompt also contains a Layer 2 chain keyword AND does not focus on a single design dimension, skip this layer.
+**Skip condition**: If the prompt matches a Layer 2 chain keyword AND matches MORE THAN ONE row in the Layer 1 intent signal table, skip this layer.
 Example: `enhance colors and typography` — "enhance" is a chain keyword + multiple design dimensions → skip to Layer 2.
 
 | Intent signal | Command |
@@ -146,6 +135,8 @@ Example: `enhance colors and typography` — "enhance" is a chain keyword + mult
 
 ### Layer 2: Project intent → Chain
 
+Override: if the user explicitly uses a chain name as the primary verb (improve, enhance, redesign, build, launch), prefer Layer 2 chain even if Layer 1 matched a single command.
+
 Layer 1 did not match. Check for chain-level keywords — even if the prompt also contains a specific target/path, chain matching takes priority.
 
 | Pattern | Chain |
@@ -161,7 +152,7 @@ Layer 1 did not match. Check for chain-level keywords — even if the prompt als
 
 Ambiguous + no `-y`:
 
-AskUserQuestion (single-select, header: "意图确认"):
+[@ask] AskUserQuestion (single-select, header: "意图确认"):
 - Options: top 2-3 matched chains from Layer 2 table, each with label = chain name, description = matched keywords
 - Last option: **"直接构建"** — skip chain, route to Layer 3 craft
 
@@ -169,10 +160,12 @@ AskUserQuestion (single-select, header: "意图确认"):
 
 Layer 1+2 both did not match, but intent is to build/create a specific thing:
 - Contains a specific file path or target (`d:\path`, `src/pages/`, `index.html`)
-- Contains detailed visual specs (layout, style, color scheme)
+- Contains ≥2 specific visual attributes (e.g., exact color values, font names, spacing numbers, layout structure description)
 - Contains reference material (`based on...`, `like...`, `similar to...`)
 
 → Route to **craft** (Direct)
+
+If all three layers produce no match → E001 (No command or intent resolved). Before raising E001, attempt [@ask] user prompt with top 2-3 closest matches from Layer 1+2 tables.
 
 ## Prerequisites
 
@@ -192,7 +185,7 @@ Before reading any command workflow:
    ─────────────────────────────────────────
    ```
 3. Read `~/.maestro/workflows/impeccable/{command}.md`
-4. **todo({ action: "update" }) tracking**: create todo items for each major phase in the workflow file
+4. **TodoWrite tracking**: create todo items for each major phase in the workflow file
    - Format: `[{command}] {phase description}`
    - Mark each phase completed immediately upon finishing
 5. Follow workflow file instructions
@@ -219,28 +212,32 @@ Before reading any command workflow:
    - `↺` marks refine loop with max iteration count
    - Conditional steps show trigger condition
    - Skipped conditional steps marked `(skipped)`
-3. **Confirm chain session**: user prompt "Create chain session for '{chain_type}' targeting '{target}'?" — proceed only if user confirms. On decline, abort chain.
+3. **Confirm chain session**: [@ask] user prompt "Create chain session for '{chain_type}' targeting '{target}'?" — proceed only if user confirms. On decline, abort chain.
    Create session: `.workflow/.maestro/ui-craft-{YYYYMMDD-HHmmss}/status.json`
    ```json
    { "chain_type": "...", "target": "...", "steps": [...], "current_step": 0,
      "gate_history": [], "loop_count": 0, "status": "running" }
    ```
-4. **todo({ action: "update" }) init**: create todo items for all chain steps
+4. **TodoWrite init**: create todo items for all chain steps
    - One item per step, format: `[chain] step N: impeccable:{command} — {description}` (use `impeccable:` prefix to disambiguate from Direct command items)
    - If conditional step is skipped, immediately mark completed
    - Quality gate steps include threshold: `[chain] step 5: impeccable:critique ◆ gate ≥26/40`
 5. For each step:
    - Read `~/.maestro/workflows/impeccable/{command}.md` → execute
-   - **Step start**: todo({ action: "update" }) marks current step in_progress
-   - **Step done**: todo({ action: "update" }) marks completed + update status.json (`current_step`, step `status`)
-   - **Step failed**: todo({ action: "update" }) marks completed (with note) + record reason
+   - **Step start**: TodoWrite marks current step in_progress
+   - **Step done**: TodoWrite marks completed + update status.json (`current_step`, step `status`)
+   - **Step failed**: TodoWrite marks completed (with note) + record reason
+   - **Failure classification**:
+     - **Blocking** (chain stops): craft, shape, teach (if PRODUCT.md required)
+     - **Non-blocking** (chain continues with W003): polish, delight, animate, colorize, typeset, layout, clarify, adapt, optimize, bolder, quieter, distill, harden, onboard
+     - **Gate steps** (critique/audit): gate failure triggers refine loop, not step failure
 6. **Quality gate** (critique/audit steps):
    - Parse score: critique `**Total** | | **N/40**`, audit `**Total** | | **N/20**`
    - Count `[P0]` / `[P1]` tags
    - Pass: score ≥ threshold AND P0 == 0 → advance
    - Fail: collect suggested commands from findings → execute → re-gate
    - Max loops exceeded → force advance with warning
-   - todo({ action: "update" }): record gate result in current step notes (score, P0/P1 count, pass/fail)
+   - TodoWrite: record gate result in current step notes (score, P0/P1 count, pass/fail)
 7. Final report: scores + trend + commands executed
 
 ## Codify Execution
@@ -261,7 +258,7 @@ Extract a design system from existing source code into tokens, a reference packa
 ### Codify Invariants
 1. **Source read-only** — the source path being analyzed MUST NOT be modified; extraction is purely read-only
 2. **Phase-sequential loading** — workflow files (ui-codify-extract, ui-codify-package, ui-codify-knowhow) MUST be read only when their phase starts; NEVER load all phases eagerly
-3. **User confirmation before knowhow** — Phase 3→4 gate MUST present user prompt before generating knowledge assets; NEVER auto-proceed to knowhow generation
+3. **User confirmation before knowhow** — Phase 3→4 gate MUST present [@ask] user prompt before generating knowledge assets; NEVER auto-proceed to knowhow generation
 4. **Overwrite protection** — existing package directory MUST NOT be overwritten without `--overwrite` flag (E102)
 5. **Artifact completeness** — all 5 required artifacts MUST exist before reporting completion; NEVER skip artifact verification
 6. **Token-first extraction** — design-tokens.json MUST be generated before layout-templates.json; layout extraction depends on token foundation
@@ -288,7 +285,7 @@ Route to `~/.maestro/workflows/ui-codify.md` and follow completely. The workflow
 **GATE Phase 3 → Phase 4: Package → Knowhow**
 - REQUIRED: preview.html + preview.css generated as interactive showcase.
 - BLOCKED if missing: preview artifacts not generated — knowhow phase needs rendered reference for validation.
-- REQUIRED: user prompt confirmation before proceeding to knowhow generation:
+- REQUIRED: [@ask] user prompt confirmation before proceeding to knowhow generation:
   ```
   question: "Preview 生成完成。是否继续将设计系统持久化为 knowhow 知识资产？"
   options:
@@ -350,9 +347,10 @@ Never auto-select: teach, shape, craft, live, document, extract, overdrive, crit
 - REQUIRED: If gate fails, refine commands executed and re-gate attempted.
 - BLOCKED if: score not parsed from actual output, or P0 > 0 and max refine loops not exhausted — do not advance past gate.
 - Do NOT skip quality gate steps or mark as "passed" without parsing actual score.
+- If score unparseable from output: retry the gate step once. If still unparseable → treat as gate fail (enter refine loop). Emit W005.
 
 **GATE: Chain → Completion**
-- REQUIRED: All non-skipped steps executed (todo({ action: "update" }) all completed).
+- REQUIRED: All non-skipped steps executed (TodoWrite all completed).
 - REQUIRED: status.json updated with `status: "completed"` and final scores.
 - REQUIRED: If any step failed: documented in status.json with reason.
 - BLOCKED if missing: steps not all completed or status.json not updated — chain is incomplete.
@@ -364,12 +362,13 @@ Never auto-select: teach, shape, craft, live, document, extract, overdrive, crit
 | E002 | error | Source/target path not found | Verify path exists |
 | E003 | error | PRODUCT.md missing and teach step failed | Run `maestro impeccable teach` manually first |
 | E004 | error | Chain quality gate failed after max loops | Review findings manually, fix critical issues, then resume |
-| W001 | warning | UI specs not found via maestro-spec load | Continuing without specs — output may miss project conventions |
+| W001 | warning | UI specs not found via maestro run skill specs-load | Continuing without specs — output may miss project conventions |
 | W002 | warning | Quality gate score below threshold but P0 == 0 | Auto-refine loop triggered |
 | W003 | warning | Chain step failed but non-blocking | Step failure documented, chain continues |
 | E101 | error | Codify: source path not found or not a directory | Verify `--codify <source-path>` exists |
 | E102 | error | Codify: package directory exists without `--overwrite` | Re-run with `--overwrite` or a new `--output-dir` |
 | W004 | warning | Codify: animation-tokens.json not found (optional) | Extraction continues without animation tokens |
+| W005 | warning | Quality gate score unparseable from output | Retry gate step; if still fails, treat as gate fail |
 </error_codes>
 
 <success_criteria>
@@ -377,13 +376,13 @@ Direct mode:
 - [ ] Command resolved from input (routing table or free text matching)
 - [ ] Prerequisites satisfied (UI specs loaded, PRODUCT.md present)
 - [ ] Workflow file read and executed completely
-- [ ] todo({ action: "update" }) tracking created and all phases marked completed
+- [ ] TodoWrite tracking created and all phases marked completed
 - [ ] Next-step suggestion provided
 
 Chain mode:
 - [ ] Chain steps resolved and preview displayed
 - [ ] Session status.json created in `.workflow/.maestro/ui-craft-*/`
-- [ ] todo({ action: "update" }) items created for all chain steps
+- [ ] TodoWrite items created for all chain steps
 - [ ] Each step executed with workflow file read
 - [ ] Quality gates parsed with actual scores (not estimated)
 - [ ] Refine loops executed when gate fails (up to max-loops)
@@ -391,7 +390,7 @@ Chain mode:
 - [ ] Final report with scores, trend, and commands executed
 
 Codify mode:
-- [ ] UI specs loaded via `maestro-spec load --category ui` (if available)
+- [ ] UI specs loaded via `maestro run skill specs-load --category ui` (if available)
 - [ ] Source path validated and file discovery completed
 - [ ] design-tokens.json generated with color, typography, spacing tokens
 - [ ] layout-templates.json generated with component patterns (universal/specialized)

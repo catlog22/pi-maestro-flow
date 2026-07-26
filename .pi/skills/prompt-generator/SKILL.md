@@ -1,16 +1,8 @@
 ---
 name: prompt-generator
-disable-model-invocation: true
 description: "Generate or convert Claude Code prompt files — command orchestrators, skill files, agent role definitions, or style conversion of existing files. Follows GSD-style content separation with built-in quality gates. Triggers on \"create command\", \"new command\", \"create skill\", \"new skill\", \"create agent\", \"new agent\", \"convert command\", \"convert skill\", \"convert agent\", \"prompt generator\", \"优化\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Read
-  - Write
-  - teammate
-session-mode: none
+allowed-tools: Read Write Edit Bash Glob maestro
+disable-model-invocation: true
 ---
 
 <purpose>
@@ -195,14 +187,14 @@ Generate a complete command file with:
 3. **`<process>`** — numbered steps (GSD workflow style):
    - Step 1: Initialize / parse arguments
    - Steps 2-N: Domain-specific orchestration logic
-   - Each step: banner display, validation, agent spawning via `teammate()`, error handling
+   - Each step: banner display, validation, agent spawning via `Agent()`, error handling
    - Final step: status display + `<offer_next>` with next actions
 4. **`<success_criteria>`** — checkbox list of verifiable conditions
 
 **Command writing rules:**
 - Steps are **numbered** (`## 1.`, `## 2.`) — follow `plan-phase.md` and `new-project.md` style
 - Use banners for phase transitions: `━━━ SKILL ► ACTION ━━━`
-- Agent spawning uses `teammate({  })` pattern
+- Agent spawning uses `teammate({ subagent_type, prompt, description, run_in_background })` pattern
 - Prompt to agents uses `<objective>`, `<files_to_read>`, `<output>` blocks
 - Include `<offer_next>` block with formatted completion status
 - Handle agent return markers: `## TASK COMPLETE`, `## TASK BLOCKED`, `## CHECKPOINT REACHED`
@@ -222,7 +214,7 @@ Generate a complete skill file with:
 3. **`<process>`** — numbered steps (GSD workflow style):
    - Step 1: Initialize / parse arguments / set workflow preferences
    - Steps 2-N: Domain-specific orchestration logic with inline `Read("phases/...")` for phase files
-   - Each step: validation, agent spawning via `teammate()`, error handling
+   - Each step: validation, agent spawning via `Agent()`, error handling
    - Final step: completion status or handoff to next skill via `Skill()`
 4. **`<success_criteria>`** — checkbox list of verifiable conditions
 

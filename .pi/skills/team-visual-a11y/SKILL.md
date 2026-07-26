@@ -1,29 +1,8 @@
 ---
 name: team-visual-a11y
-disable-model-invocation: true
 description: "Unified team skill for visual accessibility QA. OKLCH color contrast, typography readability, focus management, WCAG AA/AAA audit at rendered level. Uses team-worker agent architecture. Triggers on \"team visual a11y\", \"accessibility audit\", \"visual a11y\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - SendMessage
-  - Write
-  - mcp__chrome-devtools__emulate
-  - mcp__chrome-devtools__evaluate_script
-  - mcp__chrome-devtools__lighthouse_audit
-  - mcp__chrome-devtools__navigate_page
-  - mcp__chrome-devtools__resize_page
-  - mcp__chrome-devtools__take_screenshot
-  - mcp__maestro__edit_file
-  - mcp__maestro__read_file
-  - mcp__maestro__team_msg
-  - mcp__maestro__write_file
-  - teammate
-  - todo
-session-mode: run
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__chrome-devtools__evaluate_script mcp__chrome-devtools__take_screenshot mcp__chrome-devtools__emulate mcp__chrome-devtools__lighthouse_audit mcp__chrome-devtools__navigate_page mcp__chrome-devtools__resize_page maestro
+disable-model-invocation: true
 ---
 
 <required_reading>

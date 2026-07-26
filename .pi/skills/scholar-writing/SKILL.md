@@ -1,20 +1,8 @@
 ---
 name: scholar-writing
-disable-model-invocation: true
 description: "End-to-end academic paper writing workflow. Takes a research repository and produces a publication-ready LaTeX manuscript for top ML/AI conferences (NeurIPS, ICML, ICLR, ACL, AAAI, COLM). Covers repo understanding, structure planning, section drafting, citation management, anti-AI polishing, and conference formatting. Triggers on \"write paper\", \"draft paper\", \"scholar writing\", \"paper writing workflow\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Task
-  - WebFetch
-  - WebSearch
-  - Write
-  - todo
-session-mode: run
+allowed-tools: Read Write Edit Bash Glob Grep WebSearch WebFetch Task maestro
+disable-model-invocation: true
 ---
 
 <required_reading>
@@ -118,11 +106,11 @@ When `workflowPreferences.autoYes === true`:
 
 ## Execution Flow
 
-> **COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
+> **COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
 > The phase currently marked `in_progress` is the active execution phase -- preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
-### todo({ action: "update" }) Setup
+### TodoWrite Setup
 
 ```
 Paper Writing Workflow:
@@ -172,16 +160,16 @@ Phase 6: Conference Formatting
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-repo-understanding.md](phases/01-repo-understanding.md) | Explore repo, identify contribution | todo({ action: "update" }) driven |
-| 2 | [phases/02-structure-planning.md](phases/02-structure-planning.md) | Plan outline, define narrative | todo({ action: "update" }) driven |
-| 3 | [phases/03-section-drafting.md](phases/03-section-drafting.md) | Write all paper sections | todo({ action: "update" }) driven + sentinel |
-| 4 | [phases/04-citation-management.md](phases/04-citation-management.md) | Find, verify, format citations | todo({ action: "update" }) driven + sentinel |
-| 5 | [phases/05-anti-ai-polish.md](phases/05-anti-ai-polish.md) | Remove AI patterns, humanize | todo({ action: "update" }) driven + sentinel |
-| 6 | [phases/06-conference-formatting.md](phases/06-conference-formatting.md) | Apply template, compile | todo({ action: "update" }) driven |
+| 1 | [phases/01-repo-understanding.md](phases/01-repo-understanding.md) | Explore repo, identify contribution | TodoWrite driven |
+| 2 | [phases/02-structure-planning.md](phases/02-structure-planning.md) | Plan outline, define narrative | TodoWrite driven |
+| 3 | [phases/03-section-drafting.md](phases/03-section-drafting.md) | Write all paper sections | TodoWrite driven + sentinel |
+| 4 | [phases/04-citation-management.md](phases/04-citation-management.md) | Find, verify, format citations | TodoWrite driven + sentinel |
+| 5 | [phases/05-anti-ai-polish.md](phases/05-anti-ai-polish.md) | Remove AI patterns, humanize | TodoWrite driven + sentinel |
+| 6 | [phases/06-conference-formatting.md](phases/06-conference-formatting.md) | Apply template, compile | TodoWrite driven |
 
 **Compact Rules**:
-1. **todo({ action: "update" }) `in_progress`** → preserve full content, do not compress
-2. **todo({ action: "update" }) `completed`** → may compress to summary
+1. **TodoWrite `in_progress`** → preserve full content, do not compress
+2. **TodoWrite `completed`** → may compress to summary
 3. **sentinel fallback** → phases marked with sentinel contain compact sentinel; if only sentinel remains after compression, **must immediately `Read()` to recover before continuing**
 
 ## Core Rules
@@ -246,12 +234,12 @@ synthesis + a delivery manifest (see Run Lifecycle above).
   {run_dir}/outputs/             (delivery-paths list pointing into outputDir/)
 ```
 
-## todo({ action: "update" }) Pattern
+## TodoWrite Pattern
 
 ### Phase Start (Attach)
 ```
 When Phase N begins:
-  → Mark Phase N as in_progress in todo({ action: "update" })
+  → Mark Phase N as in_progress in TodoWrite
   → Add sub-tasks for Phase N steps
   → Execute sub-tasks sequentially
 ```
@@ -304,13 +292,13 @@ Written to: `outputDir/.writing/paper-notes.md`
 
 ### Before Each Phase
 - [ ] Previous phase output exists and is valid
-- [ ] todo({ action: "update" }) updated (current phase in_progress)
+- [ ] TodoWrite updated (current phase in_progress)
 - [ ] Required inputs available
 
 ### After Each Phase
 - [ ] Output files written to outputDir/.writing/
 - [ ] paper-notes.md updated
-- [ ] todo({ action: "update" }) collapsed (phase completed)
+- [ ] TodoWrite collapsed (phase completed)
 - [ ] User notified of phase completion and key decisions made
 
 ### Final Checklist

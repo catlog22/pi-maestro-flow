@@ -1,18 +1,8 @@
 ---
 name: team-designer
-disable-model-invocation: true
 description: "Meta-skill for generating team skills following the v4 architecture pattern. Produces complete skill packages with SKILL.md router, coordinator, worker roles, specs, and templates. Triggers on \"team-designer\", \"design team\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Write
-  - mcp__maestro__team_msg
-  - teammate
-session-mode: none
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+disable-model-invocation: true
 ---
 
 # Team Skill Designer

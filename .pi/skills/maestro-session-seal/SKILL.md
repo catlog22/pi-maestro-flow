@@ -1,19 +1,8 @@
 ---
 name: maestro-session-seal
+description: "Seal current session with knowledge extraction and DAG progression Arguments: [--session <session_id>] [-y] [--skip-knowledge]"
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
-description: Seal current session with knowledge extraction and DAG progression
-argument-hint: "[--session <session_id>] [-y] [--skip-knowledge]"
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Write
-  - teammate
-session-mode: run
-contract:
 ---
 
 <required_reading>
@@ -51,22 +40,26 @@ $ARGUMENTS -- optional session ID and flags.
 
 ### Step 1: Session Readiness Check
 
+Note: maestro-next suggests session-seal when 'Tests green + active session'. This command additionally requires verify/review gates (or W002 if absent). Both conditions should be met for clean seal.
+
 1. Resolve target session from `--session` flag or `active_session_id`
 2. Read `session.json` — verify status is `running` or `paused`
 3. Verify no active runs (all runs completed or sealed)
-4. Verify critical gates passed (entry/exit gates from last verify/review run)
+4. Verify critical gates passed (entry/exit gates from last verify/review run). If no verify/review run exists in this session, treat gate check as not applicable (pass) but emit W002.
 5. If not ready → display blockers, suggest next action (e.g., "run the `review` step first")
 
 ### Step 2: Knowledge Extraction
 
+This step is a session-scoped lightweight knowledge extraction. For comprehensive artifact-based extraction, use `/maestro-knowledge harvest --session {session_id}`. `--skip-knowledge` can be compensated later via harvest.
+
 Skip if `--skip-knowledge`. Otherwise:
 
-1. **Scan session artifacts** — read all sealed run outputs across the session
+1. **Scan session artifacts** — read all sealed run outputs across the session. Per-run error handling: if a run's output files are missing or run.json is malformed, skip that run with W003 and continue extraction from remaining runs.
 2. **Extract candidates**:
    - Decisions with `status: accepted` from `runs/*/run.json.handoff.decisions[]` → spec candidates
    - Patterns/recipes discovered during execution → knowhow candidates
    - Risks that materialized or were mitigated → learning candidates
-3. **Present to user** via `user prompt`:
+3. **Present to user** via `[@ask] user prompt`:
    ```
    question: "以下知识候选项值得持久化吗？"
    options:
@@ -76,12 +69,12 @@ Skip if `--skip-knowledge`. Otherwise:
    ```
 4. **Persist** selected items:
    - Specs → recommend `/maestro-spec add ...`
-   - Knowhow → recommend `/maestro-manage knowledge capture ...`
+   - Knowhow → recommend `/maestro-knowledge harvest --session {session_id}` for extraction, then `/maestro-knowhow capture` for manual recording of extracted insights
    - Use the Runtime CLI to persist promoted IDs in `session.json.lifecycle.promoted[]`（前缀区分 spec:/knowhow:）
 
 ### Step 3: Seal Session
 
-1. Call `maestro run seal-session {session_id}`
+1. Call `maestro session seal {session_id}`
 2. CLI writes `session.json.lifecycle.sealed_at` and `seal_summary`
 3. CLI updates `state.json.sessions[].status` to `sealed`
 
@@ -115,8 +108,7 @@ Status: DONE
 | Condition | Suggestion |
 |-----------|-----------|
 | Next session activated | `maestro run start "{goal}" --cmd analyze --session {next-slug} --platform pi --workflow-root .` |
-| DAG complete (all sealed) | `/maestro-manage status` |
-| Knowledge review needed | `/maestro-manage knowledge audit` |
+| Knowledge review needed | `/maestro-knowledge audit` |
 </completion>
 
 <error_codes>
@@ -127,6 +119,8 @@ Status: DONE
 | E003 | error | Active runs exist | Complete or seal pending runs first |
 | E004 | error | Critical gates failed | Run verify/review to resolve |
 | W001 | warning | No knowledge candidates found | Proceed to seal |
+| W002 | warning | No verify/review run in session — gate check skipped | Consider running verify before seal |
+| W003 | warning | Some run outputs unreadable/malformed, skipped during extraction | Check run integrity |
 </error_codes>
 
 <success_criteria>

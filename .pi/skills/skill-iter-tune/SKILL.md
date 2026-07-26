@@ -1,19 +1,8 @@
 ---
 name: skill-iter-tune
-disable-model-invocation: true
 description: "Iterative skill tuning via execute-evaluate-improve feedback loop. Uses maestro delegate Claude to execute skill, Agy to evaluate quality, and Agent to apply improvements. Iterates until quality threshold or max iterations. Triggers on \"skill iter tune\", \"iterative skill tuning\", \"tune skill\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Skill
-  - Write
-  - teammate
-  - todo
-session-mode: run
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
+disable-model-invocation: true
 ---
 
 <required_reading>
@@ -141,7 +130,7 @@ $ARGUMENTS → Parse:
 
 ## Execution Flow
 
-> **⚠️ COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
+> **⚠️ COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
 > The phase currently marked `in_progress` is the active execution phase — preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
@@ -171,8 +160,8 @@ while (true) {
     improvement: null
   });
 
-  // Update todo({ action: "update" })
-  todo({ action: "update" })(iterationTask, {
+  // Update TodoWrite
+  TaskUpdate(iterationTask, {
     subject: `Iteration ${state.current_iteration}/${state.max_iterations}`,
     status: 'in_progress',
     activeForm: `Running iteration ${state.current_iteration}`
@@ -199,7 +188,7 @@ while (true) {
   // Read: phases/04-improve.md
   // Agent applies suggestions → write iteration-N-changes.md
 
-  // Update todo({ action: "update" }) with score
+  // Update TodoWrite with score
   // Continue loop
 }
 ```
@@ -244,15 +233,15 @@ Read and execute: `Ref: phases/05-report.md`
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-setup.md](phases/01-setup.md) | Initialize workspace and state | todo({ action: "update" }) 驱动 |
-| 2 | [phases/02-execute.md](phases/02-execute.md) | Execute skill via maestro delegate Claude | todo({ action: "update" }) 驱动 + 🔄 sentinel |
-| 3 | [phases/03-evaluate.md](phases/03-evaluate.md) | Evaluate via maestro delegate Agy | todo({ action: "update" }) 驱动 + 🔄 sentinel |
-| 4 | [phases/04-improve.md](phases/04-improve.md) | Apply improvements via Agent | todo({ action: "update" }) 驱动 + 🔄 sentinel |
-| 5 | [phases/05-report.md](phases/05-report.md) | Generate final report | todo({ action: "update" }) 驱动 |
+| 1 | [phases/01-setup.md](phases/01-setup.md) | Initialize workspace and state | TodoWrite 驱动 |
+| 2 | [phases/02-execute.md](phases/02-execute.md) | Execute skill via maestro delegate Claude | TodoWrite 驱动 + 🔄 sentinel |
+| 3 | [phases/03-evaluate.md](phases/03-evaluate.md) | Evaluate via maestro delegate Agy | TodoWrite 驱动 + 🔄 sentinel |
+| 4 | [phases/04-improve.md](phases/04-improve.md) | Apply improvements via Agent | TodoWrite 驱动 + 🔄 sentinel |
+| 5 | [phases/05-report.md](phases/05-report.md) | Generate final report | TodoWrite 驱动 |
 
 **Compact Rules**:
-1. **todo({ action: "update" }) `in_progress`** → 保留完整内容，禁止压缩
-2. **todo({ action: "update" }) `completed`** → 可压缩为摘要
+1. **TodoWrite `in_progress`** → 保留完整内容，禁止压缩
+2. **TodoWrite `completed`** → 可压缩为摘要
 3. **🔄 sentinel fallback** → 若 compact 后仅存 sentinel 而无完整 Step 协议，立即 `Read()` 恢复
 
 ## Core Rules
@@ -289,18 +278,18 @@ Phase 1: Setup
 └───┘ next iteration
 ```
 
-## todo({ action: "update" }) Pattern
+## TodoWrite Pattern
 
 ```javascript
 // Initial state
-todo({ action: "create", subject: "Phase 1: Setup workspace" })
-todo({ action: "create", subject: "Iteration Loop" })
-todo({ action: "create", subject: "Phase 5: Final Report" })
+TaskCreate({ subject: "Phase 1: Setup workspace", activeForm: "Setting up workspace" })
+TaskCreate({ subject: "Iteration Loop", activeForm: "Running iterations" })
+TaskCreate({ subject: "Phase 5: Final Report", activeForm: "Generating report" })
 
 // Chain mode: create per-skill tracking tasks
 if (state.execution_mode === 'chain') {
   for (const skillName of state.chain_order) {
-    todo({ action: "create" })({
+    TaskCreate({
       subject: `Chain: ${skillName}`,
       activeForm: `Tracking ${skillName}`,
       description: `Skill chain member position ${state.chain_order.indexOf(skillName) + 1}`
@@ -313,18 +302,18 @@ if (state.execution_mode === 'chain') {
 // Chain mode: per-skill status updates
 if (state.execution_mode === 'chain') {
   // After each skill executes in Phase 2:
-  todo({ action: "update" })(chainSkillTask, {
+  TaskUpdate(chainSkillTask, {
     subject: `Chain: ${skillName} — Iter ${N} executed`,
     activeForm: `${skillName} iteration ${N}`
   })
   // After Phase 3 evaluates:
-  todo({ action: "update" })(chainSkillTask, {
+  TaskUpdate(chainSkillTask, {
     subject: `Chain: ${skillName} — Score ${chainScores[skillName]}/100`,
     activeForm: `${skillName} scored`
   })
 } else {
   // Single mode (existing)
-  todo({ action: "create" })({
+  TaskCreate({
     subject: `Iteration ${N}: Score ${score}/100`,
     activeForm: `Iteration ${N} complete`,
     description: `Strengths: ... | Weaknesses: ... | Suggestions: ${count}`
@@ -332,7 +321,7 @@ if (state.execution_mode === 'chain') {
 }
 
 // Completed — collapse
-todo({ action: "update" })(iterLoop, {
+TaskUpdate(iterLoop, {
   subject: `Iteration Loop (${totalIters} iters, final: ${finalScore})`,
   status: 'completed'
 })
@@ -388,11 +377,11 @@ function shouldTerminate(state) {
 ### Per-Iteration Actions
 - [ ] Increment current_iteration in state
 - [ ] Create iteration-{N} subdirectory
-- [ ] Update todo({ action: "update" }) with iteration status
+- [ ] Update TodoWrite with iteration status
 - [ ] After Phase 3: check termination before Phase 4
 - [ ] After Phase 4: write state, proceed to next iteration
 
 ### Post-Workflow Actions
 - [ ] Execute Phase 5 (Report)
 - [ ] Display final summary to user
-- [ ] Update all todo({ action: "update" }) tasks to completed
+- [ ] Update all TodoWrite tasks to completed

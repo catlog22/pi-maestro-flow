@@ -1,16 +1,8 @@
 ---
 name: skill-simplify
-disable-model-invocation: true
 description: "SKILL.md simplification with functional integrity verification. Analyze redundancy, optimize content, check no functionality lost. Triggers on \"simplify skill\", \"optimize skill\", \"skill-simplify\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Write
-session-mode: none
+allowed-tools: Read Write Edit Bash Glob Grep maestro
+disable-model-invocation: true
 ---
 
 # Skill Simplify
@@ -41,10 +33,10 @@ const originalContent = Read(targetFile)
 const originalLineCount = originalContent.split('\n').length
 ```
 
-## todo({ action: "update" }) Pattern
+## TodoWrite Pattern
 
 ```javascript
-todo({ action: "update" })({ todos: [
+TodoWrite({ todos: [
   { content: `Phase 1: Analyzing ${targetFile}`, status: "in_progress", activeForm: "Extracting functional inventory" },
   { content: "Phase 2: Optimize", status: "pending" },
   { content: "Phase 3: Integrity Check", status: "pending" }

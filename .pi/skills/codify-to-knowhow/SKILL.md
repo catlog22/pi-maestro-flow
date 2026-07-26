@@ -1,17 +1,9 @@
 ---
 name: codify-to-knowhow
-disable-model-invocation: true
 description: "Manifest-driven knowledge asset generator — converts any structured package into maestro knowhow + spec entries with ref linking. Triggers on \"codify-to-knowhow\", \"style to knowhow\", \"知识固化\"."
-allowed-tools:
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Write
-  - todo
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 auto-continue: true
-session-mode: none
+disable-model-invocation: true
 ---
 
 # Codify to Knowhow
@@ -152,7 +144,7 @@ Phase 4 → verificationResult
 Completion report
 ```
 
-## todo({ action: "update" }) Pattern
+## TodoWrite Pattern
 
 ```json
 [

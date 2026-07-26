@@ -1,22 +1,8 @@
 ---
 name: scholar-rebuttal-pro
-disable-model-invocation: true
 description: "Enhanced academic paper review response workflow with Agy/CLI collaborative analysis and multi-perspective discussion. Produces structured rebuttal documents with evidence-based strategies. Triggers on \"rebuttal\", \"respond to reviewers\", \"review response\", \"审稿回复\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Skill
-  - Task
-  - Write
-  - mcp__ace-tool__search_context
-  - mcp__maestro__edit_file
-  - mcp__maestro__read_file
-  - todo
-session-mode: run
+allowed-tools: Task Read Write Edit Bash Glob Grep mcp__ace-tool__search_context mcp__maestro__read_file mcp__maestro__edit_file maestro
+disable-model-invocation: true
 ---
 
 <required_reading>
@@ -121,7 +107,7 @@ When `workflowPreferences.autoYes === true`:
 
 ## Execution Flow
 
-> **⚠️ COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
+> **⚠️ COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
 > The phase currently marked `in_progress` is the active execution phase — preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
@@ -129,7 +115,7 @@ When `workflowPreferences.autoYes === true`:
 Run Setup (see run-mode.md):
    └─ Birth packet injected run_id/run_dir? → use them, skip create.
       Else self-start: maestro run start "..." --cmd scholar-rebuttal-pro --session <YYYYMMDD-scholar-rebuttal-pro-{topic}> --platform pi
-      (Optional --resume <run_id> → maestro run brief --platform pi <run_id> to continue an existing Run.)
+      (Optional --resume <run_id> → maestro run brief <run_id> to continue an existing Run.)
    └─ output_base = {run_dir}/outputs
 
 Input Parsing:
@@ -161,8 +147,8 @@ Phase 5: Quality Validation
       └─ Output: qualityScore, improvements, ${output_base}/quality-report.md, ${output_base}/improvement-suggestions.json
 
 Run Closure (see run-mode.md):
-   └─ maestro run check {run_id} → repair any reported gate → maestro run complete {run_id}
-      (Report success only after run complete.)
+   └─ maestro run check {run_id} → repair any reported gate → maestro session done {run_id}
+      (Report success only after session done.)
 
 Return:
    └─ Summary with recommended next steps
@@ -172,24 +158,24 @@ Return:
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-review-parsing.md](phases/01-review-parsing.md) | Parse reviewer comments, classify by type (Major/Minor/Typo/Misunderstanding), extract key concerns using Agy CLI semantic analysis | todo({ action: "update" }) 驱动 |
-| 2 | [phases/02-multi-perspective-discussion.md](phases/02-multi-perspective-discussion.md) | Simulate discussion from author, reviewer, and domain expert perspectives to develop consensus strategies | todo({ action: "update" }) 驱动 + 🔄 sentinel |
-| 3 | [phases/03-strategy-formulation.md](phases/03-strategy-formulation.md) | Select response strategies (Accept/Defend/Clarify/Experiment) based on discussion, analyze paper content for supporting evidence using CLI | todo({ action: "update" }) 驱动 + 🔄 sentinel |
-| 4 | [phases/04-rebuttal-writing.md](phases/04-rebuttal-writing.md) | Generate structured rebuttal document using rebuttal-writer agent, apply conference-specific templates, optimize tone | todo({ action: "update" }) 驱动 + 🔄 sentinel |
-| 5 | [phases/05-quality-validation.md](phases/05-quality-validation.md) | Validate rebuttal quality using Agy CLI: completeness, professionalism, persuasiveness, generate improvement suggestions | todo({ action: "update" }) 驱动 |
+| 1 | [phases/01-review-parsing.md](phases/01-review-parsing.md) | Parse reviewer comments, classify by type (Major/Minor/Typo/Misunderstanding), extract key concerns using Agy CLI semantic analysis | TodoWrite 驱动 |
+| 2 | [phases/02-multi-perspective-discussion.md](phases/02-multi-perspective-discussion.md) | Simulate discussion from author, reviewer, and domain expert perspectives to develop consensus strategies | TodoWrite 驱动 + 🔄 sentinel |
+| 3 | [phases/03-strategy-formulation.md](phases/03-strategy-formulation.md) | Select response strategies (Accept/Defend/Clarify/Experiment) based on discussion, analyze paper content for supporting evidence using CLI | TodoWrite 驱动 + 🔄 sentinel |
+| 4 | [phases/04-rebuttal-writing.md](phases/04-rebuttal-writing.md) | Generate structured rebuttal document using rebuttal-writer agent, apply conference-specific templates, optimize tone | TodoWrite 驱动 + 🔄 sentinel |
+| 5 | [phases/05-quality-validation.md](phases/05-quality-validation.md) | Validate rebuttal quality using Agy CLI: completeness, professionalism, persuasiveness, generate improvement suggestions | TodoWrite 驱动 |
 
 **Compact Rules**:
-1. **todo({ action: "update" }) `in_progress`** → 保留完整内容，禁止压缩
-2. **todo({ action: "update" }) `completed`** → 可压缩为摘要
+1. **TodoWrite `in_progress`** → 保留完整内容，禁止压缩
+2. **TodoWrite `completed`** → 可压缩为摘要
 3. **🔄 sentinel fallback** → 带此标记的 phase 包含 compact sentinel；若 compact 后仅存 sentinel 而无完整 Step 协议，必须立即 `Read()` 恢复
 
 ## Core Rules
 
-1. **Start Immediately**: First action is todo({ action: "update" }) initialization, second action is Phase 1 execution
+1. **Start Immediately**: First action is TodoWrite initialization, second action is Phase 1 execution
 2. **No Preliminary Analysis**: Do not read files or gather context before Phase 1
 3. **Parse Every Output**: Extract required data from each phase for next phase
 4. **Auto-Continue**: Check TodoList status to execute next pending phase automatically
-5. **Track Progress**: Update todo({ action: "update" }) dynamically with task attachment/collapse pattern
+5. **Track Progress**: Update TodoWrite dynamically with task attachment/collapse pattern
 6. **Progressive Phase Loading**: Read phase docs ONLY when that phase is about to execute
 7. **DO NOT STOP**: Continuous multi-phase workflow until all phases complete
 8. **CLI Integration**: Use `maestro delegate --to agy --mode analysis` for semantic analysis tasks
@@ -211,7 +197,7 @@ The Run is the single source of truth (see run-mode.md). Resolve `run_dir`, then
 
 ```javascript
 // If the birth packet injected run_id/run_dir, use them (do NOT create).
-// Else if --resume <run_id>: maestro run brief --platform pi <run_id> → run_dir.
+// Else if --resume <run_id>: maestro run brief <run_id> → run_dir.
 // Else self-start: maestro run start "..." --cmd scholar-rebuttal-pro --session <slug> --platform pi
 //   (slug: YYYYMMDD-scholar-rebuttal-pro-{topic}, ASCII-only, ≤64 chars)
 
@@ -271,19 +257,19 @@ Phase 5: Quality Validation
     | Files: ${output_base}/quality-report.md, ${output_base}/improvement-suggestions.json
     |
 [Run Closure]  (see run-mode.md)
-    | maestro run check {run_id} → repair gates → maestro run complete {run_id}
+    | maestro run check {run_id} → repair gates → maestro session done {run_id}
     |
 Return summary to user
 ```
 
-## todo({ action: "update" }) Pattern
+## TodoWrite Pattern
 
 **Core Concept**: Dynamic task attachment and collapse for real-time visibility.
 
 ### Key Principles
 
 1. **Task Attachment** (when phase executed):
-   - Sub-tasks are **attached** to orchestrator's todo({ action: "update" })
+   - Sub-tasks are **attached** to orchestrator's TodoWrite
    - **Phase 1, 2, 3, 4, 5**: Multiple sub-tasks attached
 
 2. **Task Collapse** (after sub-tasks complete):
@@ -341,7 +327,7 @@ After each phase completes:
 ## Coordinator Checklist
 
 **Before Phase 1**:
-- [ ] todo({ action: "update" }) initialized with all 5 phases
+- [ ] TodoWrite initialized with all 5 phases
 - [ ] User preferences collected (autoMode, paperSource, conferenceType)
 - [ ] Review comments path validated
 - [ ] Paper path validated (if provided)
@@ -360,7 +346,7 @@ After each phase completes:
 
 **Run Closure**:
 - [ ] `maestro run check {run_id}` clean (repair any reported gate)
-- [ ] `maestro run complete {run_id}` succeeded before reporting success
+- [ ] `maestro session done {run_id}` succeeded before reporting success
 
 ## Run Closure
 
@@ -370,7 +356,7 @@ After Phase 5 completes:
 
 1. `maestro run check {run_id}` — repair any blocking artifact or exit gate it reports.
 2. Optionally write `{run_dir}/report.md` (verdict + summary of the rebuttal and quality score).
-3. `maestro run complete {run_id}`. Report success only once the Run is completed.
+3. `maestro session done {run_id}`. Report success only once the Run is completed.
 
 ## Related Commands
 

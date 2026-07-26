@@ -1,16 +1,8 @@
 ---
 name: skill-generator
-disable-model-invocation: true
 description: "Meta-skill for creating new Claude Code skills with configurable execution modes. Supports sequential (fixed order) and autonomous (stateless) phase patterns. Use for skill scaffolding, skill creation, or building new workflows. Triggers on \"create skill\", \"new skill\", \"skill generator\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Glob
-  - Grep
-  - Read
-  - Write
-  - teammate
-session-mode: run
+allowed-tools: teammate Read Bash Glob Grep Write maestro
+disable-model-invocation: true
 ---
 
 <required_reading>
@@ -87,7 +79,8 @@ Intelligent routing model, dynamically selects execution path based on context.
 
 ```
 ---------------------------------------------------
-                Orchestrator teammate(Read state -> Select Phase -> Execute -> Update)
+                Orchestrator Agent
+   (Read state -> Select Phase -> Execute -> Update)
 ---------------------------------------------------
                 |
     ---------+----------+----------
@@ -229,7 +222,7 @@ Phase 5: Validation & Documentation
    - Generate: README.md (usage instructions)
    - Generate: validation-report.json (completeness check)
    - Output: Final documentation
-   - Close the Run: `maestro run check {run_id}` → repair any reported gate → `maestro run complete {run_id}`. Report success only after completion.
+   - Close the Run: `maestro run check {run_id}` → repair any reported gate → `maestro session done {run_id}`. Report success only after completion.
 ```
 
 **Execution Protocol**:

@@ -1,19 +1,8 @@
 ---
 name: maestro-fork
+description: "Create or sync session worktree for parallel dev Arguments: --session <session_id> [--base <ref>] [--sync]"
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
-description: Create or sync session worktree for parallel dev
-argument-hint: "--session <session_id> [--base <branch>] [--sync]"
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Write
-  - teammate
-session-mode: run
-contract:
 ---
 
 <required_reading>
@@ -32,6 +21,10 @@ Supports `--sync` mode to pull latest main changes into an active worktree.
 
 <context>
 $ARGUMENTS -- session ID (or slug) and optional flags.
+
+Terminology: this command uses 'session' throughout. The underlying workflow file (fork.md) may use 'milestone' as a legacy alias for 'session'. Treat them as equivalent: `--session` maps to workflow's `-m`, `state.json.sessions[]` maps to `state.json.milestones[]`.
+
+`--base <ref>`: git ref (branch, tag, or commit hash) to fork from. Default: HEAD.
 
 Modes (`Fork` / `Sync`), flags (`--session`, `--base`, `--sync`), session resolution, worktree layout, and artifact scoping are defined in workflow `fork.md`.
 </context>
@@ -57,7 +50,7 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 - BLOCKED if missing: worktree creation failed or shared files not copied — do not proceed to artifact scoping.
 
 **GATE 3: Artifact Copy → Completion**
-- REQUIRED: user prompt confirmation before registry writes — show session scope, worktree path, and state entries to be written. User must confirm or abort.
+- REQUIRED: [@ask] user prompt confirmation before registry writes — show session scope, worktree path, and state entries to be written. User must confirm or abort.
 - REQUIRED: `worktree-scope.json` written with session scope (after confirmation).
 - REQUIRED: Scoped `state.json` written (only this session's data) (after confirmation).
 - REQUIRED: `worktrees.json` registry updated in main worktree (after confirmation).
@@ -79,7 +72,6 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 |-----------|-----------|
 | Fork complete | `cd {wt.path}` then `maestro run start "{goal}" --cmd analyze --topic "{topic}" --platform pi --workflow-root .` |
 | Fork + automated | `maestro delegate "run full lifecycle for session" --cd {wt.path} --mode write` |
-| Fork + status check | Recommend `/maestro-manage status` |
 | Sync complete | Resume work in worktree |
 | Sync conflicts found | Resolve manually, then retry |
 </completion>
@@ -102,11 +94,11 @@ Fork mode:
 - [ ] Session resolved from state.json.sessions[]
 - [ ] Git worktree created with branch (`session/{slug}`)
 - [ ] Shared `.workflow/` files copied (project.md, config.json, specs/)
-- [ ] Session Run artifacts copied (filtered from artifact registry)
+- [ ] Session artifacts copied (matched by session/milestone name from workflow)
 - [ ] `worktree-scope.json` written with session scope
 - [ ] Scoped `state.json` written (only this session's data)
 - [ ] `worktrees.json` registry updated in main worktree
-- [ ] Session lifecycle recorded (`session.json.lifecycle.forked_from`)
+- [ ] Session lifecycle recorded in worktrees.json registry (fork_sessions entry)
 - [ ] Summary displayed with next-step commands
 
 Sync mode:

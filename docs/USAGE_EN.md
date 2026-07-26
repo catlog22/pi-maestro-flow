@@ -1073,8 +1073,10 @@ See [Maestro Flow](https://github.com/catlog22/maestro-flow) for full skill defi
 
 | Skill | Description |
 |-------|-------------|
-| `spec` / `maestro-spec` | Spec entry management (add/load/remove/init) |
-| `manage` / `maestro-manage` | Project management hub (status/issues/knowledge/drift) |
+| `maestro-spec` | Spec precipitation (intent-driven capture of project constraints) |
+| `maestro-knowhow` | KnowHow precipitation (intent-driven capture of reusable knowledge by type) |
+| `maestro-knowledge` | Knowledge-store management (intent-driven: audit/harvest/wiki/extractors/domain) |
+| `maestro-issue` | Issue management (intent-driven: report/list/close/link + auto-discovery) |
 | `codify-to-knowhow` | Manifest-driven knowledge asset generator |
 
 ### Academic Writing (Scholar)

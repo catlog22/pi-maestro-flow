@@ -1,17 +1,8 @@
 ---
 name: scholar-publish
-disable-model-invocation: true
 description: "Post-acceptance conference preparation workflow covering presentation slides, academic posters, and promotion content. Triggers on \"scholar publish\", \"conference preparation\", \"prepare presentation\", \"create poster\", \"write promotion\", \"post-acceptance\"."
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Write
-  - todo
-session-mode: none
+allowed-tools: Read Write Edit Bash Glob Grep maestro
+disable-model-invocation: true
 ---
 
 # Scholar Publish
@@ -100,7 +91,7 @@ Step 3: Conditional preferences (based on selection)
 
 ## Execution Flow
 
-> **COMPACT DIRECTIVE**: Context compression MUST check todo({ action: "update" }) phase status.
+> **COMPACT DIRECTIVE**: Context compression MUST check TodoWrite phase status.
 > The phase currently marked `in_progress` is the active execution phase - preserve its FULL content.
 > Only compress phases marked `completed` or `pending`.
 
@@ -150,13 +141,13 @@ Generate platform-specific promotion content: Twitter/X thread, LinkedIn post, a
 
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
-| 1 | [phases/01-presentation.md](phases/01-presentation.md) | Slide outline creation | todo({ action: "update" }) driven |
-| 2 | [phases/02-poster.md](phases/02-poster.md) | Poster layout design | todo({ action: "update" }) driven |
-| 3 | [phases/03-promotion.md](phases/03-promotion.md) | Multi-platform promotion | todo({ action: "update" }) driven |
+| 1 | [phases/01-presentation.md](phases/01-presentation.md) | Slide outline creation | TodoWrite driven |
+| 2 | [phases/02-poster.md](phases/02-poster.md) | Poster layout design | TodoWrite driven |
+| 3 | [phases/03-promotion.md](phases/03-promotion.md) | Multi-platform promotion | TodoWrite driven |
 
 **Compact Rules**:
-1. **todo({ action: "update" }) `in_progress`** -> preserve full content, do not compress
-2. **todo({ action: "update" }) `completed`** -> can compress to summary
+1. **TodoWrite `in_progress`** -> preserve full content, do not compress
+2. **TodoWrite `completed`** -> can compress to summary
 3. Phases are independent - only load the phase being executed
 
 ## Core Rules
@@ -183,11 +174,11 @@ paperContext (from user input)
         └─ Twitter thread, LinkedIn post, blog draft
 ```
 
-## todo({ action: "update" }) Pattern
+## TodoWrite Pattern
 
 ```
 Phase starts:
-  → Sub-tasks ATTACHED to todo({ action: "update" }) (in_progress + pending)
+  → Sub-tasks ATTACHED to TodoWrite (in_progress + pending)
   → Execute sub-tasks sequentially within the phase
 
 Phase ends:
@@ -195,7 +186,7 @@ Phase ends:
   → Next selected phase begins (or workflow completes)
 ```
 
-Example todo({ action: "update" }) lifecycle:
+Example TodoWrite lifecycle:
 ```
 [in_progress] Generate presentation outline
   [in_progress] Extract key messages from paper
@@ -222,7 +213,7 @@ Example todo({ action: "update" }) lifecycle:
 
 **After each phase**:
 - [ ] Output file written and verified
-- [ ] todo({ action: "update" }) updated (phase marked completed)
+- [ ] TodoWrite updated (phase marked completed)
 - [ ] Next phase dispatched (if selected)
 
 **After all phases**:

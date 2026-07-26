@@ -1,18 +1,13 @@
 ---
 name: maestro-guard
+description: "Manage editing boundary restrictions Arguments: on|off|status|allow|deny|remove|clear [path]"
+allowed-tools: Read Write Bash Glob maestro
 disable-model-invocation: true
-description: Manage editing boundary restrictions
-argument-hint: "on|off|status|allow|deny [path]"
-allowed-tools:
-  - Bash
-  - Glob
-  - Read
-  - Write
-session-mode: none
 ---
+
 <purpose>
 Configure directory-level write boundaries enforced by the workflow-guard PreToolUse hook.
-Subcommands: on, off, status, allow `<path>`, deny `<path>`.
+Subcommands: on, off, status, allow `<path>`, deny `<path>`, remove `<path>`, clear.
 </purpose>
 
 <context>
@@ -39,7 +34,7 @@ and blocks operations targeting files outside boundaries. Requires hooks level >
 <invariants>
 1. **Config-only mutation** — guard MUST only modify the `guard` section of `.workflow/config.json`; NEVER touch other config sections or files
 2. **Non-destructive** — `off` MUST preserve existing paths and mode; NEVER clear the path list when disabling
-3. **Mode switch confirmation** — switching between allow/deny mode MUST require user prompt confirmation when existing paths will be cleared
+3. **Mode switch confirmation** — switching between allow/deny mode MUST require [@ask] user prompt confirmation when existing paths will be cleared
 4. **Hook dependency** — guard MUST warn when enabled but `workflow-guard` hook is not active (hooks level < full)
 5. **Path normalization** — all paths MUST use forward slashes with trailing slash for directories; NEVER store raw backslash paths
 </invariants>
@@ -49,7 +44,7 @@ and blocks operations targeting files outside boundaries. Requires hooks level >
 ### Phase Gates (MANDATORY, BLOCKING)
 
 **GATE 1: Parse → Config Read**
-- REQUIRED: Subcommand parsed (on/off/status/allow/deny) or defaulted to `status`.
+- REQUIRED: Subcommand parsed (on/off/status/allow/deny/remove/clear) or defaulted to `status`.
 - BLOCKED if: invalid subcommand provided.
 
 **GATE 2: Config Read → Execute**
@@ -58,7 +53,7 @@ and blocks operations targeting files outside boundaries. Requires hooks level >
 
 **GATE 3: Execute → Confirm**
 - REQUIRED: Config mutation applied (for on/off/allow/deny) or status displayed (for status).
-- REQUIRED: Mode-switch user prompt answered (for allow↔deny transitions with existing paths).
+- REQUIRED: Mode-switch [@ask] user prompt answered (for allow↔deny transitions with existing paths).
 - BLOCKED if: user declines mode switch.
 
 **Step 1: Parse subcommand**
@@ -91,17 +86,27 @@ Read `.workflow/config.json`. If file missing, initialize with empty guard secti
 
 **`allow <path>`:**
 - Normalize path to forward slashes, ensure trailing slash for directories
-- If `guard.mode` is `deny`, user prompt: "Switching from deny to allow mode will clear existing paths ({N} paths). Continue?" — abort if user declines.
+- If `guard.mode` is `deny`, [@ask] user prompt: "Switching from deny to allow mode will clear existing paths ({N} paths). Continue?" — abort if user declines. Clear `guard.paths` (mode switch invalidates previous path list).
+- Set `guard.mode = "allow"`
 - Add path to `guard.paths` (deduplicate)
 - Set `guard.enabled = true` if not already
 - Write config
 
 **`deny <path>`:**
 - Normalize path to forward slashes, ensure trailing slash for directories
-- If `guard.mode` is `allow`, user prompt: "Switching from allow to deny mode will clear existing paths ({N} paths). Continue?" — abort if user declines.
+- If `guard.mode` is `allow`, [@ask] user prompt: "Switching from allow to deny mode will clear existing paths ({N} paths). Continue?" — abort if user declines. Clear `guard.paths` (mode switch invalidates previous path list).
 - Set `guard.mode = "deny"`
 - Add path to `guard.paths` (deduplicate)
 - Set `guard.enabled = true` if not already (symmetric with `allow`: adding a deny path auto-enables the guard)
+- Write config
+
+**`remove <path>`:**
+- Normalize path
+- Remove from `guard.paths` (if present)
+- Write config
+
+**`clear`:**
+- Set `guard.paths = []`
 - Write config
 
 **Step 4: Confirm**

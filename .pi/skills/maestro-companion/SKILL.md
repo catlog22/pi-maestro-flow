@@ -1,19 +1,8 @@
 ---
 name: maestro-companion
+description: "Quick execution for small tasks — minimal run lifecycle (start + done) with evidence recording. Full LLM capability, scoped to mechanically clear tasks. Arguments: <intent> [-y]"
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: false
-description: "Quick execution for small tasks — minimal run lifecycle (start + done) with evidence recording. Full LLM capability, scoped to mechanically clear tasks."
-argument-hint: "<intent> [--note <text>] [--log <run_id>] [--promote] [-y]"
-allowed-tools:
-  - AskUserQuestion
-  - Bash
-  - Edit
-  - Glob
-  - Grep
-  - Read
-  - Write
-  - teammate
-session-mode: run
-contract:
 ---
 
 <required_reading>
@@ -21,12 +10,19 @@ contract:
 </required_reading>
 
 <purpose>
-Minimal-run execution channel. Full LLM capability with minimal protocol: one `run start` + one `run done`, evidence appended to `{run_dir}/evidence/companion-log.md`.
+Minimal-run execution channel. Full LLM capability with minimal protocol: one `session start` + one `session done`, evidence appended to `{run_dir}/evidence/companion-log.md`.
 
 Use when:
 - Intent is mechanically clear (no design decisions needed; file count irrelevant)
 - No typed artifact consumed by downstream steps
 - No gate/verdict needed for lifecycle tracking
+
+Lightweight self-check (all must hold):
+- Intent specifies a concrete, bounded action with named target (file, function, error message)
+- No typed artifact consumed by downstream steps
+- No gate/verdict for lifecycle tracking
+- Single concern, no multi-phase span
+If self-check fails mid-execution, stop and suggest `/maestro-next` for re-routing.
 </purpose>
 
 <context>
@@ -35,18 +31,16 @@ $ARGUMENTS — intent text + optional flags.
 | Flag | Effect |
 |------|--------|
 | `-y` | Skip confirmation, execute directly |
-| `--note <text>` | Append note to active run's evidence log |
-| `--log <run_id>` | View evidence log for a specific run |
-| `--promote` | Promote run insights to spec/knowhow |
 
-Mode detection: `--note` → note | `--log` → log | `--promote` → promote | intent → execute | empty → ask
+Mode detection: intent → execute | empty → [@ask] user prompt: request intent text; if still empty → display usage hint and exit
+
+Knowledge utilities (note/log/promote) are available via `/maestro-knowledge`.
 </context>
 
 <invariants>
-1. Only `run start` + `run done` — no prepare/brief/check/gates
+1. Execute mode uses only `session start` + `session done`.
 2. Evidence is append-only, non-formal (never enters gates or artifact registry)
-3. `--promote` delegates to `maestro-spec add` / knowhow capture, never writes directly
-4. No auto-orchestration — executes directly, never creates chains
+3. No auto-orchestration — executes directly, never creates chains
 </invariants>
 
 <flow>
@@ -58,7 +52,7 @@ Linear: create → explore → confirm → do → seal.
 ### 1. Create
 
 ```bash
-maestro run start "<intent>" --cmd companion --session YYYYMMDD-companion-<topic> --arg "<intent>" --workflow-root .
+maestro session start "<intent>" --chain companion --session YYYYMMDD-companion-<topic> --arg "<intent>" --workflow-root .
 ```
 
 Compatibility spelling for older callers: `maestro run start "<intent>" --cmd companion --session YYYYMMDD-companion-<topic> --platform pi --arg "<intent>" --workflow-root .`. The intent is Session metadata only; pass the same text with `--arg` because it is the required command arguments payload.
@@ -77,7 +71,7 @@ Locate targets and gather evidence before touching anything. Methods (pick what 
 
 - `maestro explore "FIND: ...\nSCOPE: ..."` — codebase search
 - `maestro search "<keywords>" --type spec --type knowhow` — knowledge recall
-- teammate(subagent) — multi-file analysis, cross-reference, pattern discovery
+- Agent (subagent) — multi-file analysis, cross-reference, pattern discovery
 - Direct Read/Grep/Glob — known targets, quick lookups
 
 Record findings under `## Evidence`:
@@ -95,7 +89,7 @@ Before executing, verify evidence is sufficient:
 - Change scope clear (what to modify, what to leave alone)?
 - No ambiguity requiring design decisions?
 
-If insufficient → continue exploring or ask user. If `-y` → skip confirmation, proceed directly.
+If insufficient → continue exploring or ask user. If `-y` → skip user confirmation interaction, but still perform evidence sufficiency self-check. If critical targets are unlocated, continue exploring (without asking user); only the 'ask user' branch is skipped.
 
 ### 4. Do
 
@@ -119,7 +113,7 @@ Append outcome:
 ```
 
 ```bash
-maestro run done <run_id> --verdict done --workflow-root .
+maestro session done <run_id> --verdict done --workflow-root .
 ```
 
 Display: `Companion done. Run: {run_id} | Evidence: {path}`
@@ -127,26 +121,14 @@ Display: `Companion done. Run: {run_id} | Evidence: {path}`
 If reusable insights emerged, suggest (never auto-execute):
 `/maestro-spec add ...` or `/manage-knowhow-capture`
 
+If execution revealed the task requires multi-phase audit/diagnosis (e.g., root cause unknown, >3 files need coordinated changes), suggest: `/maestro-odyssey "<scope>" --mode debug|improve` for re-planning.
+
 </flow>
 
-<utilities>
-
-## --note
-
-1. `maestro run recall companion --json` → get active run_dir (if none, create with intent="note recording")
-2. Append `### {HH:MM} — Note\n{text}` to evidence log
-3. Confirm path
-
-## --log <run_id>
-
-Required: run_id. Read `{run_dir}/evidence/companion-log.md` for that run and display.
-If run_id not found, error: "Run not found. Use `maestro run list --command companion` to find ids."
-
-## --promote
-
-1. `maestro run recall companion --json` → read latest evidence log
-2. Identify promotable insights (patterns, decisions, pitfalls)
-3. For each, ask user: promote to spec / knowhow / skip
-4. Delegate to appropriate command, never write directly
-
-</utilities>
+<error_codes>
+| Code | Severity | Condition | Recovery |
+|------|----------|-----------|----------|
+| E001 | error | `session start` failed (CLI unavailable, invalid args) | Check maestro CLI installation |
+| E003 | error | Evidence log creation failed | Check run_dir permissions |
+| W001 | warning | Explore tools unavailable (maestro explore/search) | Degrade to direct Read/Grep |
+</error_codes>
