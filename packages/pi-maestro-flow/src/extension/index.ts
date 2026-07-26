@@ -187,6 +187,8 @@ export function nextApprovalMode(
 
 const TODO_TOGGLE_KEY = "alt+t";
 const TODO_TOGGLE_LABEL = altKey("T");
+const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
+const COCKPIT_TODO_TOGGLE_EVENT = "cockpit:toggle-todo";
 const GOAL_OVERLAY_KEY = "alt+g";
 const GOAL_OVERLAY_LABEL = altKey("G");
 
@@ -1142,6 +1144,7 @@ When NOT to use:
   // === Maestro Panel (above editor) ===
   let widgetCtx: ExtensionContext | undefined;
   let panelMode: "collapsed" | "expanded" = "collapsed";
+  let cockpitOwnsTodo = false;
 
   function updateTodoWidget(): void {
     const tasks = getVisibleTasks();
@@ -1152,6 +1155,10 @@ When NOT to use:
       guiEvents.emitDeduped(GUI_EVENTS.planMode, effectiveMode, { mode: effectiveMode, isPlanMode: isPlanMode() });
     }
     if (!widgetCtx) return;
+    if (cockpitOwnsTodo) {
+      widgetCtx.ui.setWidget("todo-panel", undefined);
+      return;
+    }
     const view = deriveWorkflowViewModel(workflowSnapshotForUi());
     const runs = view?.runs;
     if (tasks.length === 0 && !(runs && runs.length > 0)) {
@@ -1166,10 +1173,23 @@ When NOT to use:
     }), { placement: "aboveEditor" });
   }
 
+  pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
+    if (!payload || typeof payload !== "object") return;
+    const ownership = payload as { todo?: unknown; todoExpanded?: unknown };
+    cockpitOwnsTodo = ownership.todo === true;
+    if (typeof ownership.todoExpanded === "boolean") {
+      panelMode = ownership.todoExpanded ? "expanded" : "collapsed";
+    }
+    updateTodoWidget();
+  });
+
   pi.registerShortcut(TODO_TOGGLE_KEY, {
     description: "Toggle the inline Todo panel (collapsed ↔ expanded); use /maestro-todo for the full center",
     async handler(_ctx: ExtensionContext) {
       panelMode = panelMode === "collapsed" ? "expanded" : "collapsed";
+      if (cockpitOwnsTodo) {
+        pi.events.emit(COCKPIT_TODO_TOGGLE_EVENT, { expanded: panelMode === "expanded" });
+      }
       updateTodoWidget();
     },
   });
