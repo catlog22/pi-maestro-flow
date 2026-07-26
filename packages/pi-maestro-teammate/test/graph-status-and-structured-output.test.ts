@@ -859,6 +859,11 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   assert.match(source, /Do not poll teammate-watch or teammate-list/);
   assert.match(source, /call teammate-wait exactly once/);
   assert.match(source, /handleProxyRequest\([\s\S]*?publishChildCallStatus/);
+  // A graph task must not inherit the parent's aggregate log: that showed every
+  // sibling's output under whichever task the reader had selected.
+  assert.doesNotMatch(source, /outputLog = \[\.\.\.activeAgent\.outputLog\]/);
+  assert.match(source, /childStreamingLineIdx/);
+  assert.match(source, /childToolLines/);
   assert.match(source, /reportChildStatus\("running"\)[\s\S]*?reportChildStatus\(completed\.exitCode === 0 \? "completed" : "failed"\)/);
   assert.match(source, /progress: currentProgress,[\s\S]*?childCalls: \[\.\.\.childCalls\.values\(\)\]/);
   assert.doesNotMatch(source, /spawned @\$\{p\.name \?\? p\.agent\}/);

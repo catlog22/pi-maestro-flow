@@ -632,6 +632,9 @@ export function renderAgentSelectorPanel(
     if (row.status === "sleeping") return { icon: yellow("◉"), text: yellow("Sleeping") };
     if (row.status === "failed") return { icon: red("✗"), text: red("Failed") };
     if (row.status === "pending") return { icon: dim("□"), text: dim("Pending") };
+    // Retrying fell through to the default and read as a healthy green
+    // "Running" — the one state where the agent is not making progress.
+    if (row.status === "retrying") return { icon: yellow("↻"), text: yellow("Retrying") };
     return { icon: green("■"), text: green("Running") };
   };
 
@@ -1703,10 +1706,16 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         },
         onProgress: (() => {
           const UPDATE_INTERVAL = 300; // ms — throttle TUI updates
+          // Two cursors per task: one into the parent's aggregate log, one into
+          // the task's own. The task used to receive a copy of the whole
+          // aggregate instead, so `teammate-watch` on one task showed every
+          // sibling's output as if it were that task's own.
           const logStates = new Map<string, {
             loggedToolCount: number;
             streamingLineIdx: number;
             loggedToolLines: Map<number, number>;
+            childStreamingLineIdx: number;
+            childToolLines: Map<number, number>;
           }>();
           const pendingByTask = new Map<number, AgentProgress>();
           let latestPendingProgress: AgentProgress | undefined;
@@ -1753,8 +1762,6 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               childAgent.lastActivityAt = Date.now();
               childAgent.status = entry.status === "completed" ? "sleeping" : entry.status;
               if (entry.status === "running") childAgent.retry = undefined;
-              childAgent.outputLog = [...activeAgent.outputLog];
-              trimAgentBuffers(childAgent, childAgent.status === "sleeping");
             }
 
             const shortId = entry.correlationId.slice(0, 8);
@@ -1763,46 +1770,75 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               loggedToolCount: 0,
               streamingLineIdx: -1,
               loggedToolLines: new Map<number, number>(),
+              childStreamingLineIdx: -1,
+              childToolLines: new Map<number, number>(),
             };
             logStates.set(logKey, logState);
             const logLabel = data.name
               ? `@${data.name}#${shortId}`
               : `${data.agent}#${shortId}`;
 
-            // Record a bounded aggregate history while keeping per-agent cursors independent.
+            // Record a bounded aggregate history while keeping per-agent cursors
+            // independent. Each line is written twice: labelled into the
+            // parent's aggregate, and unlabelled into the task's own log (where
+            // the label would only repeat what the reader already selected).
+            const ownLog = childAgent && childAgent !== activeAgent ? childAgent : undefined;
+            const appendBoth = (parentLine: string, ownLine: string): { parent: number; own: number } => {
+              const parent = activeAgent.outputLog.length;
+              activeAgent.outputLog.push(parentLine);
+              let own = -1;
+              if (ownLog) {
+                own = ownLog.outputLog.length;
+                ownLog.outputLog.push(ownLine);
+              }
+              return { parent, own };
+            };
+            const markToolDone = (lines: string[], index: number | undefined): void => {
+              if (index === undefined || index < 0) return;
+              if (lines[index]?.includes("~ ")) lines[index] = lines[index].replace("~ ", "✓ ");
+            };
+
             if (data.recentTools?.length) {
               for (let ti = logState.loggedToolCount; ti < data.recentTools.length; ti++) {
                 const tool = data.recentTools[ti];
-                logState.loggedToolLines.set(ti, activeAgent.outputLog.length);
-                activeAgent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ${logLabel} ~ ${tool.name}`);
+                const stamp = new Date().toISOString().slice(11, 19);
+                const at = appendBoth(`[${stamp}] ${logLabel} ~ ${tool.name}`, `[${stamp}] ~ ${tool.name}`);
+                logState.loggedToolLines.set(ti, at.parent);
+                logState.childToolLines.set(ti, at.own);
                 logState.streamingLineIdx = -1;
+                logState.childStreamingLineIdx = -1;
               }
               for (let ti = 0; ti < data.recentTools.length; ti++) {
-                const tool = data.recentTools[ti];
-                if (tool.status !== "running") {
-                  const lineIndex = logState.loggedToolLines.get(ti);
-                  if (lineIndex !== undefined && activeAgent.outputLog[lineIndex]?.includes("~ ")) {
-                    activeAgent.outputLog[lineIndex] = activeAgent.outputLog[lineIndex].replace("~ ", "✓ ");
-                  }
-                }
+                if (data.recentTools[ti].status === "running") continue;
+                markToolDone(activeAgent.outputLog, logState.loggedToolLines.get(ti));
+                if (ownLog) markToolDone(ownLog.outputLog, logState.childToolLines.get(ti));
               }
               logState.loggedToolCount = data.recentTools.length;
             }
             if (data.lastMessage) {
               const lastLine = data.lastMessage.split("\n").pop()?.trim();
               if (lastLine) {
-                const streamLine = `${logLabel} │ ${lastLine}`;
                 if (logState.streamingLineIdx >= 0) {
-                  activeAgent.outputLog[logState.streamingLineIdx] = streamLine;
+                  activeAgent.outputLog[logState.streamingLineIdx] = `${logLabel} │ ${lastLine}`;
+                  if (ownLog && logState.childStreamingLineIdx >= 0) {
+                    ownLog.outputLog[logState.childStreamingLineIdx] = `│ ${lastLine}`;
+                  }
                 } else {
-                  logState.streamingLineIdx = activeAgent.outputLog.length;
-                  activeAgent.outputLog.push(streamLine);
+                  const at = appendBoth(`${logLabel} │ ${lastLine}`, `│ ${lastLine}`);
+                  logState.streamingLineIdx = at.parent;
+                  logState.childStreamingLineIdx = at.own;
                 }
               }
             }
             const logLengthBeforeTrim = activeAgent.outputLog.length;
+            const ownLengthBeforeTrim = ownLog?.outputLog.length;
             trimAgentBuffers(activeAgent);
-            if (activeAgent.outputLog.length !== logLengthBeforeTrim) logStates.clear();
+            if (ownLog) trimAgentBuffers(ownLog, ownLog.status === "sleeping");
+            // Trimming shifts every recorded index, in either log.
+            if (activeAgent.outputLog.length !== logLengthBeforeTrim
+              || (ownLog && ownLog.outputLog.length !== ownLengthBeforeTrim)) {
+              logStates.clear();
+            }
           };
 
           const publishProgress = (data: AgentProgress) => {

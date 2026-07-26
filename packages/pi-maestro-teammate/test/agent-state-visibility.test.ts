@@ -8,6 +8,7 @@ import {
   findSettledAgent,
   handleProxyRequest,
   hasTeammateWidgetWork,
+  renderAgentSelectorPanel,
   renderAgentStatusWidget,
   recordSettledAgent,
   reclaimResultReadyAgents,
@@ -357,4 +358,24 @@ test("a nested dispatch publishes the completion event root dispatches publish",
   assert.equal(typeof events[0].correlationId, "string");
   assert.notEqual(events[0].correlationId, parent.correlationId, "the event names the nested agent");
   assert.equal(typeof events[0].durationMs, "number");
+});
+
+// --- ARCH-8: retrying read as a healthy green "Running" in the selector ----
+
+test("the Alt+R selector distinguishes retrying from running", () => {
+  const rows = (["running", "retrying"] as const).map((status, index) => ({
+    correlationId: `cid-${index}`,
+    agent: "worker",
+    label: `w${index}`,
+    status,
+    startedAt: Date.now(),
+    depth: 0,
+    treePrefix: "",
+    recentTools: [],
+  }));
+
+  const panel = renderAgentSelectorPanel(rows, 0, "", 80).join("\n");
+  assert.match(panel, /Retrying/);
+  // Green is reserved for an agent that is actually making progress.
+  assert.doesNotMatch(panel, /\x1b\[32mRetrying/);
 });
