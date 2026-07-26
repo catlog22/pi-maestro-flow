@@ -3,6 +3,7 @@ import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after, before } from "node:test";
+import ts from "typescript";
 import {
   cleanPackagedSkills,
   preparePackagedSkills,
@@ -87,9 +88,34 @@ test("Flow production imports use the versioned teammate API", () => {
   const privateImports = collectTypeScriptFiles(join(root, "src"))
     .flatMap((filePath) => {
       const source = readFileSync(filePath, "utf8");
-      return source.includes("pi-maestro-teammate/src/") ? [filePath] : [];
+      return collectModuleSpecifiers(source)
+        .some((specifier) => specifier.startsWith("pi-maestro-teammate/src/"))
+        ? [filePath]
+        : [];
     });
   assert.deepEqual(privateImports, []);
+});
+
+test("production import scan ignores comments and detects private teammate imports", () => {
+  const commentOnly = `
+    /**
+     * See pi-maestro-teammate/src/shared/types.ts for the runtime contract.
+     */
+    export const publicSpecifier = "pi-maestro-teammate/v1/types";
+  `;
+  assert.deepEqual(collectModuleSpecifiers(commentOnly), []);
+
+  const privateSpecifier = "pi-maestro-teammate/src/shared/types.ts";
+  const realImports = `
+    import "${privateSpecifier}";
+    export { value } from "${privateSpecifier}";
+    void import("${privateSpecifier}");
+  `;
+  assert.deepEqual(collectModuleSpecifiers(realImports), [
+    privateSpecifier,
+    privateSpecifier,
+    privateSpecifier,
+  ]);
 });
 
 test("package contains the canonical workflow skill set", () => {
@@ -116,4 +142,9 @@ function collectTypeScriptFiles(directory) {
     if (entry.isDirectory()) return collectTypeScriptFiles(filePath);
     return entry.isFile() && entry.name.endsWith(".ts") ? [filePath] : [];
   });
+}
+
+function collectModuleSpecifiers(source) {
+  return ts.preProcessFile(source, true, true).importedFiles
+    .map((reference) => reference.fileName);
 }
