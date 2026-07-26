@@ -107,3 +107,35 @@ test("snapshot preserves insertion order", () => {
 	s.hydrateFromEntries([todoEntry({ b: { subject: "B", status: "pending" }, a: { subject: "A", status: "pending" } })]);
 	assert.deepEqual(s.snapshot().map((t) => t.id), ["b", "a"]);
 });
+
+// The todo snapshot is LLM-authored; same zero-width injection risk as teammate events.
+test("todo snapshot strings are stripped of control characters on hydrate", () => {
+	const store = new TodoStore();
+	store.hydrateFromEntries([{
+		type: "custom",
+		customType: "todo-state",
+		data: {
+			tasks: {
+				t1: {
+					subject: "ship\nit\x1b[2J",
+					status: "in_progress",
+					assignee: { id: "u1", label: "dev\x1b[31m" },
+					createdBy: { id: "u2", label: "lead\nx" },
+					skills: [{ name: "review\nfast", role: "primary\x1b[0m" }],
+				},
+			},
+		},
+	}]);
+	const item = store.snapshot()[0];
+	const values = [
+		item.subject,
+		item.assignee?.label ?? "",
+		item.createdBy?.label ?? "",
+		item.skills[0]?.name ?? "",
+		item.skills[0]?.role ?? "",
+	];
+	for (const value of values) {
+		assert.doesNotMatch(value, /[\n\r\x1b]/, `control char survived in ${JSON.stringify(value)}`);
+	}
+	assert.equal(item.subject, "ship it");
+});

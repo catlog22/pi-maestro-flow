@@ -1,5 +1,13 @@
+import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { TodoActor, TodoItem, TodoSkill, TodoState } from "./types.ts";
 import { TODO_STATE_ENTRY_TYPE } from "./types.ts";
+
+// The todo snapshot is LLM-authored. A subject carrying a raw newline or an ANSI
+// escape measures zero columns, so it slips past every width guard and then splits
+// or repaints the terminal. Strip control characters where the data enters.
+function clean(raw: string): string {
+	return sanitizeExtensionStatusText(raw);
+}
 
 // Minimal structural view of a session entry — matches the shape todo.ts reads back
 // (type:"custom" + customType + data), without importing core session types.
@@ -23,7 +31,7 @@ function asStringArray(value: unknown): string[] {
 function asActor(value: unknown): TodoActor | undefined {
 	const actor = asRecord(value);
 	if (typeof actor?.id !== "string" || typeof actor.label !== "string") return undefined;
-	return { id: actor.id, label: actor.label };
+	return { id: clean(actor.id), label: clean(actor.label) };
 }
 
 function asSkills(value: unknown): TodoSkill[] {
@@ -33,8 +41,8 @@ function asSkills(value: unknown): TodoSkill[] {
 		const skill = asRecord(raw);
 		if (typeof skill?.name !== "string" || skill.name.length === 0) continue;
 		skills.push({
-			name: skill.name,
-			...(typeof skill.role === "string" ? { role: skill.role } : {}),
+			name: clean(skill.name),
+			...(typeof skill.role === "string" ? { role: clean(skill.role) } : {}),
 		});
 	}
 	return skills;
@@ -85,7 +93,7 @@ export class TodoStore {
 				if (status === "deleted") continue;
 				const item: TodoItem = {
 					id,
-					subject: typeof r?.subject === "string" ? r.subject : "",
+					subject: typeof r?.subject === "string" ? clean(r.subject) : "",
 					status,
 					blockedBy: asStringArray(r?.blockedBy),
 					skills: asSkills(r?.skills),

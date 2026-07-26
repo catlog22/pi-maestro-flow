@@ -190,3 +190,22 @@ test("mapAgentStatus covers teammate lifecycle states", () => {
 	assert.equal(mapAgentStatus("failed"), "failed");
 	assert.equal(mapAgentStatus("unknown"), "running");
 });
+
+// Teammate payloads are LLM-authored. A raw newline splits one widget row into
+// several physical rows and a raw escape repaints the terminal; both measure as
+// zero columns, so width assertions alone can never catch them.
+test("teammate strings are stripped of control characters on ingest", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "exec\x1b[31mutor", name: "build\nauth\x1b[2J" }, 1);
+	s.applyMessage({
+		correlationId: "c1",
+		message: "line one\nline two\x1b[2K",
+		recentTools: ["grep\x1b[1m"],
+	});
+	const row = s.snapshot()[0];
+	for (const value of [row.agent, row.role, row.task, row.tail, row.activeTool ?? ""]) {
+		assert.doesNotMatch(value, /[\n\r\x1b]/, `control char survived in ${JSON.stringify(value)}`);
+	}
+	assert.equal(row.role, "executor");
+	assert.equal(row.task, "build auth");
+});

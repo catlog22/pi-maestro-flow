@@ -1,9 +1,19 @@
+import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { AgentRow, AgentStatus } from "./types.ts";
 
 const TAIL_MAX = 48;
 
+// Every string here originates in an LLM-authored teammate event. A raw newline
+// would split one widget row into several physical terminal rows and a raw escape
+// (e.g. ESC[2J) would clear or recolor the whole screen — and neither is caught by
+// width checks, because both measure as zero columns. Sanitize on ingest so no
+// renderer has to remember to.
+function clean(raw: string | undefined): string {
+	return raw === undefined ? "" : sanitizeExtensionStatusText(raw);
+}
+
 function truncateTail(raw: string): string {
-	const flat = raw.replace(/\s+/g, " ").trim();
+	const flat = clean(raw);
 	if (flat.length === 0) return "";
 	return flat.length > TAIL_MAX ? flat.slice(0, TAIL_MAX - 1) + "…" : flat;
 }
@@ -48,8 +58,8 @@ export interface CompletePayload {
 }
 
 function deriveRole(agent: string | undefined, name: string | undefined): string {
-	if (agent && !agent.startsWith("graph(")) return agent;
-	return name ?? "agent";
+	if (agent && !agent.startsWith("graph(")) return clean(agent);
+	return clean(name) || "agent";
 }
 
 export function mapAgentStatus(status: unknown): AgentStatus {
@@ -105,10 +115,10 @@ export class AgentsStore {
 		this.roster.set(id, {
 			...prev,
 			correlationId: id,
-			agent: p.agent ?? prev?.agent ?? "",
-			name: p.name ?? prev?.name,
+			agent: clean(p.agent) || prev?.agent || "",
+			name: p.name === undefined ? prev?.name : clean(p.name),
 			role: deriveRole(p.agent, p.name),
-			task: prev?.task ?? p.name ?? "",
+			task: prev?.task ?? clean(p.name),
 			status: p.status === undefined ? prev?.status ?? "running" : mapAgentStatus(p.status),
 			tail: prev?.tail ?? "",
 			startedAt: prev?.startedAt ?? normalizeStartedAt(p.startedAt, now),
@@ -164,10 +174,10 @@ export class AgentsStore {
 		row.parentCorrelationId = parentCorrelationId === p.correlationId
 			? row.parentCorrelationId
 			: parentCorrelationId;
-		row.agent = p.agent || row.agent;
-		row.name = p.name ?? row.name;
+		row.agent = clean(p.agent) || row.agent;
+		row.name = p.name === undefined ? row.name : clean(p.name);
 		row.role = deriveRole(p.agent, p.name);
-		row.task = p.name ?? row.task;
+		row.task = p.name === undefined ? row.task : clean(p.name);
 		if (typeof p.status === "string") {
 			row.taskStatus = p.status;
 			row.status = mapAgentStatus(p.status);
