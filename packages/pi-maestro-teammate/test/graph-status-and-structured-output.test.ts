@@ -76,7 +76,7 @@ import type {
 type PublicToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
-  details?: {
+  details: {
     results: SingleResult[];
     progress?: Array<{ status: string }>;
     childCalls?: ChildAgentCallSnapshot[];
