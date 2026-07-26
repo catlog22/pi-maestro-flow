@@ -5,8 +5,11 @@ import {
   createTeammateDirectChildRequestHandler,
   handleChildInteractionRequest,
   handleChildRpcUiRequest,
+  checkActiveAgentBudget,
   resolveAgentCorrelationId,
   settleAgent,
+  sweepFailedAgents,
+  FAILED_AGENT_RETENTION_MS,
 } from "../src/extension/index.ts";
 import { dispatchChildIpcMessage } from "../src/runs/execution.ts";
 import {
@@ -376,9 +379,29 @@ test("official child RPC UI requests are answered through the parent dialog UI",
   assert.deepEqual(replies, [{ type: "extension_ui_response", id: "rpc-select-1", value: "B" }]);
 });
 
-test("terminal failures are removed while successful agents remain wakeable by correlation ID", () => {
+test("terminal failures stay visible for their retention window, then are swept", () => {
+  // Success used to be the only outcome that survived settling: failure was
+  // written to `completed` and deleted in the same frame, which is precisely
+  // the status the widget filter drops. The run that needed attention was the
+  // one that disappeared.
   const failed = createState();
-  settleAgent(failed.state, failed.agent.correlationId, 1, "failed");
+  settleAgent(failed.state, failed.agent.correlationId, 1, "boom");
+  assert.equal(failed.agent.status, "failed");
+  assert.equal(failed.state.activeRuns.size, 1, "the failure stays on screen");
+  assert.equal(typeof failed.agent.failedAt, "number");
+  assert.equal(
+    resolveAgentCorrelationId(failed.state, failed.agent.correlationId.slice(0, 8)),
+    failed.agent.correlationId,
+    "and stays addressable while it is shown",
+  );
+
+  // It holds no child process, so it must not consume the concurrency budget.
+  assert.equal(checkActiveAgentBudget(failed.state).active, 0);
+
+  assert.deepEqual(
+    sweepFailedAgents(failed.state, Date.now() + FAILED_AGENT_RETENTION_MS + 1),
+    [failed.agent.correlationId],
+  );
   assert.equal(failed.state.activeRuns.size, 0);
   assert.equal(failed.state.namedAgents.size, 0);
 
@@ -390,6 +413,18 @@ test("terminal failures are removed while successful agents remain wakeable by c
     resolveAgentCorrelationId(successful.state, successful.agent.correlationId.slice(0, 8)),
     successful.agent.correlationId,
   );
+});
+
+test("a fork that succeeded is not reported as a failure", () => {
+  // `settleAgent` folded "not wakeable" in with "failed", so a fork — which
+  // succeeds and then hands its session to the parent — settled as failed.
+  // Invisible while failures were deleted on sight; a red ✗ once they are not.
+  const { state, agent } = createState();
+  settleAgent(state, agent.correlationId, 0, "handed off", false);
+
+  assert.notEqual(agent.status, "failed");
+  assert.equal(state.activeRuns.size, 0, "a fork has no session left to wake");
+  assert.equal(state.recentlySettled?.get(agent.correlationId)?.status, "completed");
 });
 
 test("agent routing accepts displayed @name and name#id-prefix selectors", () => {

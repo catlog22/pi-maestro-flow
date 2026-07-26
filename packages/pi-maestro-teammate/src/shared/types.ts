@@ -160,6 +160,12 @@ export interface ActiveAgent {
   outputLog: string[];
   pendingResolve?: (result: SingleResult) => void;
   lastActivityAt: number;
+  /**
+   * When this agent failed. Set alongside `status: "failed"`, mirroring
+   * `sleptAt` for retired agents, and read by the retention sweep that
+   * eventually removes the tombstone.
+   */
+  failedAt?: number;
   replyTo?: string;
   spawnedBy?: string;
   /**
@@ -193,6 +199,23 @@ export interface TeammateState {
    * root extension; absent in states that never relay interactions.
    */
   cancelInteractions?: (correlationId: string, reason: string) => void;
+  /**
+   * Bounded, insertion-ordered record of agents that have left `activeRuns`.
+   * A settled agent is removed outright, so without this a lookup afterwards
+   * cannot tell "this agent failed" from "there is no such agent" — and the
+   * caller retries a name that will never come back. Oldest entries are
+   * dropped once the cap is reached.
+   */
+  recentlySettled?: Map<string, SettledAgentRecord>;
+}
+
+export interface SettledAgentRecord {
+  correlationId: string;
+  agent: string;
+  name?: string;
+  status: "completed" | "failed" | "terminated";
+  settledAt: number;
+  lastResult?: string;
 }
 
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";

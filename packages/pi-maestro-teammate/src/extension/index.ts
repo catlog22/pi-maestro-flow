@@ -79,6 +79,7 @@ import type {
   ActiveAgent,
   AgentStatus,
   MessageEnvelope,
+  SettledAgentRecord,
   SingleResult,
   TeammateInteractionRecord,
 } from "../shared/types.ts";
@@ -553,6 +554,9 @@ export function buildAgentSelectorRows(agents: ActiveAgent[]): AgentSelectorRow[
 
   const roots = visible.filter((agent) => !agent.spawnedBy || !byId.has(agent.spawnedBy));
   roots.forEach((root, index) => append(root, 0, "", index === roots.length - 1));
+  // Rescue pass: an agent can be unreachable from every root if its spawnedBy
+  // links form a cycle. `visited` makes this a no-op for everything the tree
+  // walk already emitted, so it only surfaces what would otherwise vanish.
   visible.forEach((agent, index) => append(agent, 0, "", index === visible.length - 1));
   return rows;
 }
@@ -1888,14 +1892,13 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
           // Background (default)
           const bgPromise = executeGraph();
 
-          bgPromise.then(({ results, summaries, progress }) => {
-            settleAgent(
-              state,
-              correlationId,
-              results.some((result) => result.exitCode !== 0) ? 1 : 0,
-              summaries,
-              params.context !== "fork",
-            );
+          bgPromise.then(({ results, summaries, progress, totalDur }) => {
+            const exitCode = results.some((result) => result.exitCode !== 0) ? 1 : 0;
+            settleAgent(state, correlationId, exitCode, summaries, params.context !== "fork");
+            // Subscribers use this to retire the row, stop the widget timer and
+            // run the wakeable budget. Only the foreground branch used to emit
+            // it, so a backgrounded graph stayed on screen for the session.
+            emitComplete(pi, id, graphMode, correlationId, exitCode, totalDur);
 
             pi.sendMessage(
               {
@@ -1907,7 +1910,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               { triggerTurn: true },
             );
           }).catch((error) => {
-            killAgent(state, correlationId);
+            killAgent(state, correlationId, undefined, "failed");
             notifyBackgroundFailure(pi, id, graphMode, correlationId, error);
           });
 
@@ -1980,7 +1983,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
               { triggerTurn: true },
             );
           }).catch((error) => {
-            killAgent(state, correlationId);
+            killAgent(state, correlationId, undefined, "failed");
             notifyBackgroundFailure(pi, id, params.agent, correlationId, error);
           });
           return {
@@ -2017,7 +2020,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             { triggerTurn: true },
           );
         }).catch((error) => {
-          killAgent(state, correlationId);
+          killAgent(state, correlationId, undefined, "failed");
           notifyBackgroundFailure(pi, id, params.agent, correlationId, error);
         });
 
@@ -2032,8 +2035,12 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
       } finally {
         if (params.background === false && !detached) {
           const agent = state.activeRuns.get(correlationId);
-          if (agent?.status === "running" && agent.resultReadyAt === undefined) {
-            killAgent(state, correlationId);
+          if (agent?.status === "running") {
+            // Its result already went back to the caller, so the run is over
+            // either way. Without the second branch a result-ready agent stayed
+            // `running` for the session: never evictable, never reported done.
+            if (agent.resultReadyAt === undefined) killAgent(state, correlationId, undefined, "failed");
+            else retireAgent(state, correlationId, agent.lastResult);
           }
         }
         signal.removeEventListener("abort", abortForward);
@@ -2911,6 +2918,10 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     if (widgetTimer) return;
     stopWakeableEvictionTimer();
     widgetTimer = setInterval(() => {
+      // A result-ready zombie keeps hasTeammateWidgetWork true, so this tick is
+      // exactly where it stays reachable until reclaimed.
+      reclaimResultReadyAgents(state);
+      sweepFailedAgents(state);
       enforceWakeableAgentBudget(state);
       if (!hasTeammateWidgetWork(state)) {
         stopWidgetTimer();
@@ -3039,6 +3050,10 @@ interface ListedAgent {
   dependencies?: number[];
   toolCount?: number;
   tokens?: number;
+  /** Set once a consumable result exists but the process has not settled. */
+  resultReadyAt?: number;
+  /** Relayed permission/question requests this agent is blocked on. */
+  pendingInteractions?: number;
 }
 
 export function buildRoleList(cwd: string): { entries: AgentSummary[]; text: string } {
@@ -3123,6 +3138,8 @@ export function buildAgentList(
       depth,
       treePrefix,
       status: entry.status,
+      ...(entry.resultReadyAt !== undefined ? { resultReadyAt: entry.resultReadyAt } : {}),
+      ...(entry.pendingInteractions?.size ? { pendingInteractions: entry.pendingInteractions.size } : {}),
     });
 
     const physicalChildren = (childrenOf.get(cid) ?? [])
@@ -3168,6 +3185,7 @@ export function buildAgentList(
         dependencies: progress.dependencies,
         toolCount: progress.toolCount,
         tokens: progress.tokens,
+        ...(progress.resultReadyAt !== undefined ? { resultReadyAt: progress.resultReadyAt } : {}),
       });
       childIndex++;
     }
@@ -3189,6 +3207,18 @@ export function buildAgentList(
         const identity = entry.name
           ? `[${entry.agent}] name="${entry.name}"`
           : `[${entry.agent}]`;
+        // This text is the model's whole picture of whether an agent is making
+        // progress. Duration alone cannot distinguish a long task from a hung
+        // one, so the derived state — result ready, blocked on a prompt, or
+        // silent past the stall ceiling — has to be on the line too.
+        const idleSeconds = Math.round(entry.idleMs / 1000);
+        const stalled = entry.status !== "completed"
+          && entry.status !== "failed"
+          && entry.resultReadyAt === undefined
+          && !entry.pendingInteractions
+          && entry.idleMs >= (entry.status === "pending"
+            ? TEAMMATE_PENDING_STALL_TIMEOUT_MS
+            : TEAMMATE_STALL_TIMEOUT_MS);
         const metadata = [
           `id=${correlationIdPrefix(entry.correlationId, listedCorrelationIds)}`,
           entry.taskIndex !== undefined ? `task=${entry.taskIndex + 1}` : "",
@@ -3196,6 +3226,11 @@ export function buildAgentList(
             ? `deps=${entry.dependencies.map((dependency) => dependency + 1).join(",")}`
             : "",
           `${Math.round(entry.durationMs / 1000)}s`,
+          entry.resultReadyAt !== undefined ? "result ready" : "",
+          entry.pendingInteractions
+            ? `awaiting ${entry.pendingInteractions} prompt${entry.pendingInteractions > 1 ? "s" : ""}`
+            : "",
+          stalled ? `STALLED idle ${idleSeconds}s` : idleSeconds >= 5 ? `idle ${idleSeconds}s` : "",
           entry.toolCount ? `${entry.toolCount} tools` : "",
           entry.tokens ? `${entry.tokens} tok` : "",
           entry.inboxSize ? `inbox=${entry.inboxSize}` : "",
@@ -3488,6 +3523,21 @@ export function waitForTeammate(
 
   const resolved = resolveWatchTarget(state, params.name);
   if (!resolved.match) {
+    // A settled agent is gone from activeRuns, so "not found" would read as a
+    // bad name and invite a retry that can never succeed. Report what actually
+    // happened to it instead.
+    const settledRecord = findSettledAgent(state, params.name);
+    if (settledRecord) {
+      const agoSeconds = Math.round((Date.now() - settledRecord.settledAt) / 1000);
+      const label = settledRecord.name ?? settledRecord.agent;
+      return Promise.resolve({
+        status: settledRecord.status === "failed" ? "failed" : "completed",
+        output: [
+          `@${label} already ${settledRecord.status} ${agoSeconds}s ago; it is no longer running.`,
+          ...(settledRecord.lastResult ? [settledRecord.lastResult] : []),
+        ],
+      });
+    }
     return Promise.resolve({ status: "not-found", output: [
       resolved.error ?? `Agent "${params.name}" not found.${resolved.available.length ? ` Available: ${resolved.available.join(", ")}` : ""}`,
     ] });
@@ -3690,6 +3740,7 @@ function terminateAndRemoveWakeableCohort(
   // Terminate first so lifecycle callbacks can still resolve the registry owner.
   cohort.controller.abort();
   for (const agent of cohort.agents) {
+    recordSettledAgent(state, agent, "terminated");
     releaseAgentMemory(agent);
     agent.status = "completed";
     settleTeammateWaiters(state, agent.correlationId, "terminated");
@@ -3699,6 +3750,37 @@ function terminateAndRemoveWakeableCohort(
     if (ids.has(id)) state.namedAgents.delete(name);
   }
   return [...ids];
+}
+
+/**
+ * Parent-side backstop for an agent that published a consumable result and
+ * never confirmed its lifecycle. The child arms its own deadline, so this only
+ * catches a process that can no longer speak at all — a wedged pipe, a SIGKILL.
+ * Deliberately well above the child's own grace so the child normally wins.
+ */
+export const RESULT_READY_RECLAIM_MS = 3 * 60_000;
+
+/**
+ * Retires agents stuck in `running` with a published result. Such an agent is
+ * neither live nor settled: it never reaches a `sleeping` cohort, so the
+ * wakeable budget cannot evict it, and it holds an active-agent slot forever.
+ */
+export function reclaimResultReadyAgents(
+  state: TeammateState,
+  now = Date.now(),
+): string[] {
+  const reclaimed: string[] = [];
+  for (const [correlationId, agent] of [...state.activeRuns]) {
+    if (agent.status !== "running" || agent.resultReadyAt === undefined) continue;
+    if (now - agent.resultReadyAt < RESULT_READY_RECLAIM_MS) continue;
+    agent.outputLog.push(
+      `[${new Date(now).toISOString().slice(11, 19)}] ◆ result published but agent_end never arrived after ` +
+      `${Math.round((now - agent.resultReadyAt) / 1000)}s; retiring.`,
+    );
+    retireAgent(state, correlationId, agent.lastResult);
+    reclaimed.push(correlationId);
+  }
+  return reclaimed;
 }
 
 export function enforceWakeableAgentBudget(
@@ -3752,6 +3834,10 @@ export function hasTeammateWidgetWork(
         && now - agent.lastActivityAt <= AGENT_WIDGET_IDLE_HIDE_MS)
       || (agent.status === "sleeping"
         && (!agent.sleptAt || now - agent.sleptAt <= AGENT_WIDGET_IDLE_HIDE_MS))
+      // A failed tombstone is work: the timer has to keep running to render it
+      // and, once its window closes, to sweep it.
+      || (agent.status === "failed"
+        && now - (agent.failedAt ?? agent.lastActivityAt) <= FAILED_AGENT_RETENTION_MS)
   );
 }
 
@@ -3763,8 +3849,19 @@ export function settleAgent(
   wakeable = true,
 ): void {
   clearAgentResultReadyState(state, correlationId);
-  if (exitCode === 0 && wakeable) retireAgent(state, correlationId, lastResult);
-  else killAgent(state, correlationId, undefined, "failed");
+  if (exitCode !== 0) {
+    killAgent(state, correlationId, undefined, "failed");
+    return;
+  }
+  if (wakeable) {
+    retireAgent(state, correlationId, lastResult);
+    return;
+  }
+  // Succeeded, but not wakeable — a fork hands its session to the parent and
+  // has nothing left to wake. It was folded into the failure branch, which
+  // resolved its waiters as `failed`; harmless while failure was invisible,
+  // and a red ✗ on a successful run now that it is not.
+  killAgent(state, correlationId, undefined, "completed");
 }
 
 export function resolveAgentCorrelationId(
@@ -3787,28 +3884,126 @@ export function resolveAgentCorrelationId(
   return matches.length === 1 ? matches[0][0] : undefined;
 }
 
+/** How many settled agents stay recallable after leaving `activeRuns`. */
+export const SETTLED_AGENT_MEMO_LIMIT = 32;
+
+export function recordSettledAgent(
+  state: TeammateState,
+  agent: ActiveAgent,
+  status: SettledAgentRecord["status"],
+): void {
+  const memo = state.recentlySettled ??= new Map<string, SettledAgentRecord>();
+  // Re-insert so a repeat settle moves to the back of the eviction order.
+  memo.delete(agent.correlationId);
+  memo.set(agent.correlationId, {
+    correlationId: agent.correlationId,
+    agent: agent.agent,
+    ...(agent.name ? { name: agent.name } : {}),
+    status,
+    settledAt: Date.now(),
+    ...(agent.lastResult ? { lastResult: agent.lastResult } : {}),
+  });
+  while (memo.size > SETTLED_AGENT_MEMO_LIMIT) {
+    const oldest = memo.keys().next();
+    if (oldest.done) break;
+    memo.delete(oldest.value);
+  }
+}
+
+/** Finds a settled agent by correlationId, name, or correlationId prefix. */
+export function findSettledAgent(
+  state: TeammateState,
+  target: string,
+): SettledAgentRecord | undefined {
+  const memo = state.recentlySettled;
+  if (!memo) return undefined;
+  const value = target.trim().replace(/^@/, "");
+  const bare = value.includes("#") ? value.slice(0, value.lastIndexOf("#")) : value;
+  const direct = memo.get(value);
+  if (direct) return direct;
+  let prefixMatch: SettledAgentRecord | undefined;
+  for (const record of memo.values()) {
+    if (record.name === bare) return record;
+    if (record.correlationId.startsWith(value)) prefixMatch ??= record;
+  }
+  return prefixMatch;
+}
+
+/**
+ * How long a failed agent stays visible before it is swept.
+ *
+ * Success is visible and failure was not: `retireAgent` leaves a successful
+ * agent in `activeRuns` as `sleeping`, but failure was written straight to
+ * `completed` and deleted in the same frame — the one status the widget filter
+ * discards. Every failure affordance downstream (the red ✗, the anchor that
+ * pins a failed row past `maxVisible`, the `N failed` summary) was therefore
+ * unreachable, and the run that needed attention was the one that vanished.
+ *
+ * A failed agent holds no child process, and `LIVE_AGENT_STATUSES` excludes
+ * `failed`, so a tombstone costs no concurrency or nesting budget.
+ */
+export const FAILED_AGENT_RETENTION_MS = 2 * 60_000;
+
 function killAgent(
   state: TeammateState,
   correlationId: string,
   name?: string,
-  waitStatus: Extract<TeammateWaitStatus, "failed" | "terminated"> = "terminated",
+  waitStatus: Extract<TeammateWaitStatus, "completed" | "failed" | "terminated"> = "terminated",
 ): void {
   const agent = state.activeRuns.get(correlationId);
   if (!agent) return;
+  recordSettledAgent(state, agent, waitStatus);
   clearAgentResultReadyState(state, correlationId);
   // Before the agent leaves activeRuns: anything it queued on the shared
   // interaction queue would otherwise hold that queue for a process that is
   // already gone, stalling every agent lined up behind it.
   state.cancelInteractions?.(correlationId, "The teammate was terminated before this was answered.");
   agent.abortController.abort();
+  settleTeammateWaiters(state, correlationId, waitStatus);
+
+  if (waitStatus === "failed") {
+    // Keep the failure on screen for its retention window. `sweepFailedAgents`
+    // removes it; an explicit terminate still deletes immediately below, since
+    // a user-initiated kill is not a failure to report back.
+    agent.status = "failed";
+    agent.retry = undefined;
+    agent.failedAt = Date.now();
+    agent.lastActivityAt = Date.now();
+    trimAgentBuffers(agent, true);
+    return;
+  }
+
   releaseAgentMemory(agent);
   agent.status = "completed";
-  settleTeammateWaiters(state, correlationId, waitStatus);
+  removeAgentFromRegistry(state, correlationId, name);
+}
+
+function removeAgentFromRegistry(
+  state: TeammateState,
+  correlationId: string,
+  name?: string,
+): void {
   state.activeRuns.delete(correlationId);
   if (name) state.namedAgents.delete(name);
   for (const [agentName, id] of state.namedAgents) {
     if (id === correlationId) state.namedAgents.delete(agentName);
   }
+}
+
+/** Drops failed tombstones past their retention window. */
+export function sweepFailedAgents(
+  state: TeammateState,
+  now = Date.now(),
+): string[] {
+  const swept: string[] = [];
+  for (const [correlationId, agent] of [...state.activeRuns]) {
+    if (agent.status !== "failed") continue;
+    if (now - (agent.failedAt ?? agent.lastActivityAt) < FAILED_AGENT_RETENTION_MS) continue;
+    releaseAgentMemory(agent);
+    removeAgentFromRegistry(state, correlationId, agent.name);
+    swept.push(correlationId);
+  }
+  return swept;
 }
 
 export function killAgentTree(
@@ -4631,6 +4826,16 @@ export async function handleProxyRequest(
           } : {}),
         });
       };
+
+      /**
+       * Publishes the same lifecycle event a root dispatch publishes. Nested
+       * dispatches never did, so the widget timer, the wakeable budget and the
+       * cockpit row all kept treating them as live for the rest of the session.
+       */
+      const emitNestedComplete = (exitCode: number): void => {
+        emitComplete(pi, requestId, activeAgent.agent, cid, exitCode, Date.now() - activeAgent.startedAt);
+      };
+
       reportChildStatus("running");
       normalizedTasks?.forEach((task, index) => {
         const childId = taskCorrelationIds[index];
@@ -4929,11 +5134,13 @@ export async function handleProxyRequest(
           if (!completed.lifecyclePending) {
             settleAgent(state, cid, completed.exitCode, completed.summary, p.context !== "fork");
             reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
+            emitNestedComplete(completed.exitCode);
           }
           reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
         } catch (error) {
-          killAgent(state, cid);
+          killAgent(state, cid, undefined, "failed");
           reportChildStatus("failed");
+          emitNestedComplete(1);
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{
               type: "text",
@@ -4950,6 +5157,7 @@ export async function handleProxyRequest(
         if (!completed.lifecyclePending) {
           settleAgent(state, cid, completed.exitCode, completed.summary, p.context !== "fork");
           reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
+          emitNestedComplete(completed.exitCode);
         }
         pi.sendMessage(
           {
@@ -4965,7 +5173,7 @@ export async function handleProxyRequest(
           { triggerTurn: true },
         );
       }).catch((error) => {
-        killAgent(state, cid);
+        killAgent(state, cid, undefined, "failed");
         reportChildStatus("failed");
         notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error);
       });
