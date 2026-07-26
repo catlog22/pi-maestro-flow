@@ -128,7 +128,7 @@ test("top-level, task, and legacy chain model overrides reach child Pi", () => {
   const tasks = normalizeChainToTasks([
     { agent: "delegate", model: "anthropic/claude-opus" },
     { agent: "reviewer", task: "Review {previous}", model: "google/gemini-pro" },
-  ]);
+  ], "");
   assert.equal(tasks[0].model, "anthropic/claude-opus");
   assert.equal(tasks[1].model, "google/gemini-pro");
 });

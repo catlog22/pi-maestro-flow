@@ -51,18 +51,18 @@ function addAgent(
 async function withTimerCount<T>(run: () => Promise<T>): Promise<{ result: T; scheduled: number }> {
   const original = globalThis.setTimeout;
   let scheduled = 0;
-  (globalThis as { setTimeout: typeof setTimeout }).setTimeout = ((
-    handler: TimerHandler,
-    timeout?: number,
-    ...args: unknown[]
-  ) => {
-    scheduled += 1;
-    return original(handler as never, timeout, ...(args as never[]));
-  }) as unknown as typeof setTimeout;
+  const countedSetTimeout: typeof setTimeout = Object.assign(
+    (...args: Parameters<typeof setTimeout>): ReturnType<typeof setTimeout> => {
+      scheduled += 1;
+      return original(...args);
+    },
+    { __promisify__: original.__promisify__ },
+  );
+  globalThis.setTimeout = countedSetTimeout;
   try {
     return { result: await run(), scheduled };
   } finally {
-    (globalThis as { setTimeout: typeof setTimeout }).setTimeout = original;
+    globalThis.setTimeout = original;
   }
 }
 

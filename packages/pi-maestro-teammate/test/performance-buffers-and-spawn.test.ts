@@ -3,7 +3,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import { PassThrough } from "node:stream";
 import test from "node:test";
-import type { ChildProcess } from "node:child_process";
+import { spawn as nodeSpawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
 import type { AgentConfig } from "../src/agents/agents.ts";
 import {
   AGENT_BUFFER_LIMITS,
@@ -53,6 +53,34 @@ const baseAgentConfig: AgentConfig = {
   source: "builtin",
   filePath: "delegate.md",
 };
+
+type SpawnChildProcess = NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+type MutableFakeProcess = Omit<ChildProcess, "exitCode"> & { exitCode: number | null };
+type FakeSpawn = (command: string, args: readonly string[], options: SpawnOptions) => MutableFakeProcess;
+
+function createFakeProcess(): MutableFakeProcess {
+  return new EventEmitter() as MutableFakeProcess;
+}
+
+function isArgumentList(value: readonly string[] | SpawnOptions): value is readonly string[] {
+  return Array.isArray(value);
+}
+
+function adaptFakeSpawn(factory: FakeSpawn): SpawnChildProcess {
+  function spawn(command: string, options: SpawnOptions): ChildProcess;
+  function spawn(command: string, args?: readonly string[], options?: SpawnOptions): ChildProcess;
+  function spawn(
+    command: string,
+    argsOrOptions: readonly string[] | SpawnOptions = [],
+    options: SpawnOptions = {},
+  ): ChildProcess {
+    return isArgumentList(argsOrOptions)
+      ? factory(command, argsOrOptions, options)
+      : factory(command, [], argsOrOptions);
+  }
+
+  return Object.assign(spawn, { spawn: nodeSpawn, sync: spawnSync });
+}
 
 function activeAgent(): ActiveAgent {
   const now = Date.now();
@@ -528,12 +556,13 @@ test("final turn_end publishes a wakeable result before agent_end settles lifecy
   const progress: AgentProgress[] = [];
   let stdout: PassThrough | undefined;
   let killed = false;
-  const spawnChildProcess = (() => {
-    const child = new EventEmitter() as ChildProcess;
-    stdout = new PassThrough();
+  const spawnChildProcess = adaptFakeSpawn(() => {
+    const child = createFakeProcess();
+    const childStdout = new PassThrough();
+    stdout = childStdout;
     Object.assign(child, {
       stdin: new PassThrough(),
-      stdout,
+      stdout: childStdout,
       stderr: new PassThrough(),
       connected: false,
       exitCode: null,
@@ -542,11 +571,11 @@ test("final turn_end publishes a wakeable result before agent_end settles lifecy
       kill() { killed = true; return true; },
     });
     queueMicrotask(() => {
-      stdout!.write(`${JSON.stringify({
+      childStdout.write(`${JSON.stringify({
         type: "message_end",
         message: { role: "assistant", content: [{ type: "text", text: "ready answer" }] },
       })}\n`);
-      stdout!.write(`${JSON.stringify({
+      childStdout.write(`${JSON.stringify({
         type: "turn_end",
         message: {
           role: "assistant",
@@ -557,7 +586,7 @@ test("final turn_end publishes a wakeable result before agent_end settles lifecy
       })}\n`);
     });
     return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  });
 
   const result = await Promise.race([
     runTeammate(
@@ -580,7 +609,8 @@ test("final turn_end publishes a wakeable result before agent_end settles lifecy
   assert.equal(progress.at(-1)?.status, "running");
   assert.notEqual(progress.at(-1)?.resultReadyAt, undefined);
 
-  stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  if (!stdout) throw new Error("fake child stdout was not initialized");
+  stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
   await new Promise((resolve) => setTimeout(resolve, 10));
 
   assert.deepEqual(completions, ["ready answer"]);
@@ -593,9 +623,9 @@ test("four parallel teammates return after final turn_end without waiting for ag
   const stdoutStreams: PassThrough[] = [];
   let killed = 0;
   let spawnIndex = 0;
-  const spawnChildProcess = (() => {
+  const spawnChildProcess = adaptFakeSpawn(() => {
     const index = spawnIndex++;
-    const child = new EventEmitter() as ChildProcess;
+    const child = createFakeProcess();
     const stdout = new PassThrough();
     stdoutStreams.push(stdout);
     Object.assign(child, {
@@ -625,7 +655,7 @@ test("four parallel teammates return after final turn_end without waiting for ag
       })}\n`);
     });
     return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  });
 
   const results = await Promise.race([
     runGraph(
@@ -658,9 +688,9 @@ test("four parallel teammates return after final turn_end without waiting for ag
 test("DAG dependencies advance on result publication instead of agent_end", async () => {
   const stdoutStreams: PassThrough[] = [];
   let spawnIndex = 0;
-  const spawnChildProcess = (() => {
+  const spawnChildProcess = adaptFakeSpawn(() => {
     const index = spawnIndex++;
-    const child = new EventEmitter() as ChildProcess;
+    const child = createFakeProcess();
     const stdout = new PassThrough();
     stdoutStreams.push(stdout);
     Object.assign(child, {
@@ -690,7 +720,7 @@ test("DAG dependencies advance on result publication instead of agent_end", asyn
       })}\n`);
     });
     return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  });
 
   const results = await Promise.race([
     runGraph(
@@ -718,14 +748,16 @@ test("DAG dependencies advance on result publication instead of agent_end", asyn
 
 test("process close after result publication confirms lifecycle exactly once", async () => {
   const completions: SingleResult[] = [];
-  let child: ChildProcess | undefined;
+  let child: MutableFakeProcess | undefined;
   let stdout: PassThrough | undefined;
-  const spawnChildProcess = (() => {
-    child = new EventEmitter() as ChildProcess;
-    stdout = new PassThrough();
+  const spawnChildProcess = adaptFakeSpawn(() => {
+    const spawnedChild = createFakeProcess();
+    const childStdout = new PassThrough();
+    child = spawnedChild;
+    stdout = childStdout;
     Object.assign(child, {
       stdin: new PassThrough(),
-      stdout,
+      stdout: childStdout,
       stderr: new PassThrough(),
       connected: false,
       exitCode: null,
@@ -734,7 +766,7 @@ test("process close after result publication confirms lifecycle exactly once", a
       kill() { return true; },
     });
     queueMicrotask(() => {
-      stdout!.write(`${JSON.stringify({
+      childStdout.write(`${JSON.stringify({
         type: "turn_end",
         message: {
           role: "assistant",
@@ -744,8 +776,8 @@ test("process close after result publication confirms lifecycle exactly once", a
         toolResults: [],
       })}\n`);
     });
-    return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+    return spawnedChild;
+  });
 
   const result = await Promise.race([
     runTeammate(
@@ -760,8 +792,9 @@ test("process close after result publication confirms lifecycle exactly once", a
   ]);
   assert.equal(result.lifecyclePending, true);
 
-  child!.exitCode = 0;
-  child!.emit("close", 0, null);
+  if (!child) throw new Error("fake child was not initialized");
+  child.exitCode = 0;
+  child.emit("close", 0, null);
   await new Promise((resolve) => setTimeout(resolve, 10));
 
   assert.equal(completions.length, 1);
@@ -771,11 +804,12 @@ test("process close after result publication confirms lifecycle exactly once", a
 
 test("process error after result publication fails lifecycle without retracting the result", async () => {
   const completions: SingleResult[] = [];
-  let child: ChildProcess | undefined;
-  const spawnChildProcess = (() => {
-    child = new EventEmitter() as ChildProcess;
+  let child: MutableFakeProcess | undefined;
+  const spawnChildProcess = adaptFakeSpawn(() => {
+    const spawnedChild = createFakeProcess();
+    child = spawnedChild;
     const stdout = new PassThrough();
-    Object.assign(child, {
+    Object.assign(spawnedChild, {
       stdin: new PassThrough(),
       stdout,
       stderr: new PassThrough(),
@@ -784,9 +818,9 @@ test("process error after result publication fails lifecycle without retracting 
       signalCode: null,
       pid: undefined,
       kill() {
-        child!.exitCode = 1;
-        child!.emit("exit", 1, null);
-        child!.emit("close", 1, null);
+        spawnedChild.exitCode = 1;
+        spawnedChild.emit("exit", 1, null);
+        spawnedChild.emit("close", 1, null);
         return true;
       },
     });
@@ -801,8 +835,8 @@ test("process error after result publication fails lifecycle without retracting 
         toolResults: [],
       })}\n`);
     });
-    return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+    return spawnedChild;
+  });
 
   const result = await Promise.race([
     runTeammate(
@@ -818,7 +852,8 @@ test("process error after result publication fails lifecycle without retracting 
   assert.equal(result.messages.at(-1)?.content, "result survives lifecycle error");
   assert.equal(result.lifecyclePending, true);
 
-  child!.emit("error", new Error("late transport failure"));
+  if (!child) throw new Error("fake child was not initialized");
+  child.emit("error", new Error("late transport failure"));
   await new Promise((resolve) => setTimeout(resolve, 10));
 
   assert.equal(completions.length, 1);
@@ -830,9 +865,9 @@ test("process error after result publication fails lifecycle without retracting 
 test("teammate retries a transient network failure before succeeding", async () => {
   let attempts = 0;
   const retryDelays: number[] = [];
-  const spawnChildProcess = ((_command: string, _args: readonly string[]) => {
+  const spawnChildProcess = adaptFakeSpawn(() => {
     attempts++;
-    const child = new EventEmitter() as ChildProcess;
+    const child = createFakeProcess();
     const stdout = new PassThrough();
     Object.assign(child, {
       stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
@@ -848,7 +883,7 @@ test("teammate retries a transient network failure before succeeding", async () 
       stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
     });
     return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  });
 
   const result = await runTeammate(
     { agent: "delegate", task: "Recover from a transient failure", context: "fork" },
@@ -869,9 +904,9 @@ test("teammate retries a transient network failure before succeeding", async () 
 test("teammate stops after the initial attempt and five transient retries", async () => {
   let attempts = 0;
   const retries: number[] = [];
-  const spawnChildProcess = ((_command: string, _args: readonly string[]) => {
+  const spawnChildProcess = adaptFakeSpawn(() => {
     attempts++;
-    const child = new EventEmitter() as ChildProcess;
+    const child = createFakeProcess();
     Object.assign(child, {
       stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), connected: false,
       exitCode: null, signalCode: null, pid: undefined,
@@ -879,7 +914,7 @@ test("teammate stops after the initial attempt and five transient retries", asyn
     });
     queueMicrotask(() => child.emit("error", new Error("fetch failed: ECONNRESET")));
     return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  });
 
   const result = await runTeammate(
     { agent: "delegate", task: "Bound transient retries", context: "fork" },
@@ -901,14 +936,15 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
   const progressUsage: Array<[number | undefined, number | undefined]> = [];
   let freshStdout: PassThrough | undefined;
   let freshKilled = false;
-  const spawnFresh = (() => {
-    const child = new EventEmitter() as ChildProcess;
+  const spawnFresh = adaptFakeSpawn(() => {
+    const child = createFakeProcess();
     const stdin = new PassThrough();
-    freshStdout = new PassThrough();
+    const childStdout = new PassThrough();
+    freshStdout = childStdout;
     const stderr = new PassThrough();
     Object.assign(child, {
       stdin,
-      stdout: freshStdout,
+      stdout: childStdout,
       stderr,
       connected: false,
       exitCode: null,
@@ -917,8 +953,8 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
       kill() { freshKilled = true; return true; },
     });
     setTimeout(() => {
-      freshStdout!.write(`${JSON.stringify({ type: "message_end", message: { role: "user", content: "original prompt" } })}\n`);
-      freshStdout!.write(`${JSON.stringify({
+      childStdout.write(`${JSON.stringify({ type: "message_end", message: { role: "user", content: "original prompt" } })}\n`);
+      childStdout.write(`${JSON.stringify({
         type: "message_end",
         message: {
           role: "assistant",
@@ -927,10 +963,10 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
           usage: { input: 12, output: 4, cacheRead: 2, cacheWrite: 1, cost: { total: 0.01 } },
         },
       })}\n`);
-      freshStdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      childStdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
     }, 0);
     return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  });
 
   const first = await runTeammate(
     { agent: "delegate", task: "original prompt", context: "fresh", timeoutMs: 2_000 },
@@ -952,10 +988,11 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
   assert.equal(first.wakeable, true);
   assert.equal(freshKilled, false);
 
-  freshStdout!.write(`${JSON.stringify({ type: "turn_start" })}\n`);
+  if (!freshStdout) throw new Error("fresh fake stdout was not initialized");
+  freshStdout.write(`${JSON.stringify({ type: "turn_start" })}\n`);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(progressUsage.at(-1), [12, 4]);
-  freshStdout!.write(`${JSON.stringify({
+  freshStdout.write(`${JSON.stringify({
     type: "message_end",
     message: {
       role: "assistant",
@@ -963,14 +1000,14 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
       usage: { input: 6, output: 3, cacheRead: 0, cacheWrite: 0, cost: { total: 0.005 } },
     },
   })}\n`);
-  freshStdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  freshStdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.deepEqual(completions, ["first answer", "follow-up answer"]);
   assert.deepEqual(progressUsage.at(-1), [18, 7]);
 
   let forkKilled = false;
-  const spawnFork = (() => {
-    const child = new EventEmitter() as ChildProcess;
+  const spawnFork = adaptFakeSpawn(() => {
+    const child = createFakeProcess();
     const stdout = new PassThrough();
     Object.assign(child, {
       stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
@@ -988,7 +1025,7 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
       stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
     }, 0);
     return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  });
   const fork = await runTeammate(
     { agent: "delegate", task: "fork once", context: "fork", timeoutMs: 2_000 },
     { baseCwd: process.cwd(), spawnChildProcess: spawnFork },
@@ -1047,8 +1084,8 @@ test("structured_output tool completion settles the child without waiting for ag
   const progress: AgentProgress[] = [];
   let killed = false;
   let completionObserverCalled = false;
-  const spawnChildProcess = (() => {
-    const child = new EventEmitter() as ChildProcess;
+  const spawnChildProcess = adaptFakeSpawn(() => {
+    const child = createFakeProcess();
     const stdin = new PassThrough();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -1083,7 +1120,7 @@ test("structured_output tool completion settles the child without waiting for ag
       stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
     }, 0);
     return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  });
 
   const result = await Promise.race([
     runTeammate(
@@ -1119,8 +1156,8 @@ test("parent rejects a schema-invalid structured output file", async () => {
     required: ["ok"],
     properties: { ok: { type: "boolean" } },
   };
-  const spawnChildProcess = ((_command: string, _args: readonly string[], options: Record<string, any>) => {
-    const child = new EventEmitter() as ChildProcess;
+  const spawnChildProcess = adaptFakeSpawn((_command, _args, options) => {
+    const child = createFakeProcess();
     const stdin = new PassThrough();
     const stdout = new PassThrough();
     const stderr = new PassThrough();
@@ -1134,13 +1171,16 @@ test("parent rejects a schema-invalid structured output file", async () => {
       pid: undefined,
       kill() { return true; },
     });
-    const outputFile = String(options.env.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH);
+    const outputFile = options.env?.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH;
+    if (typeof outputFile !== "string") {
+      throw new Error("structured output path was not provided to the fake child");
+    }
     setTimeout(() => {
       fs.writeFileSync(outputFile, JSON.stringify({ ok: "not-a-boolean" }));
       stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
     }, 0);
     return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  });
 
   const result = await runTeammate(
     { agent: "delegate", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
@@ -1157,9 +1197,9 @@ test("parent rejects a schema-invalid structured output file", async () => {
 function spawnScriptedChild(
   script: (stdout: PassThrough) => void,
   onKill?: () => void,
-): NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]> {
-  return (() => {
-    const child = new EventEmitter() as ChildProcess;
+): SpawnChildProcess {
+  return adaptFakeSpawn(() => {
+    const child = createFakeProcess();
     const stdout = new PassThrough();
     Object.assign(child, {
       stdin: new PassThrough(),
@@ -1177,7 +1217,7 @@ function spawnScriptedChild(
     });
     queueMicrotask(() => script(stdout));
     return child;
-  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+  });
 }
 
 test("outputSchema lane settles with its published result when agent_end never arrives", async () => {
@@ -1267,7 +1307,8 @@ test("background lane is exempt from the foreground ceiling", async () => {
   await new Promise((resolve) => setTimeout(resolve, 150));
   assert.equal(killed, 0, "foreground ceiling must not bound a background lane");
 
-  stdoutRef!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  if (!stdoutRef) throw new Error("background fake stdout was not initialized");
+  stdoutRef.write(`${JSON.stringify({ type: "agent_end" })}\n`);
   const result = await pending;
   assert.equal(result.exitCode, 0);
 });
