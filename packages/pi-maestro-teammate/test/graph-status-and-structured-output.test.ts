@@ -452,6 +452,256 @@ test("root and proxy expose identical validated structuredOutput projections", a
   }
 });
 
+test("foreground updates close before every public settlement and reject late callbacks", async () => {
+  const schema = {
+    type: "object",
+    properties: { value: { type: "string" } },
+    required: ["value"],
+    additionalProperties: false,
+  };
+  const cases = [
+    { name: "single success", mode: "single", outcome: "success", params: { agent: "delegate", task: "ok" } },
+    {
+      name: "single failed",
+      mode: "single",
+      outcome: "failed",
+      params: { agent: "delegate", task: "fail", background: false, outputSchema: schema },
+    },
+    { name: "single throw", mode: "single", outcome: "throw", params: { agent: "delegate", task: "throw" } },
+    {
+      name: "graph success",
+      mode: "graph",
+      outcome: "success",
+      params: { tasks: [{ agent: "delegate", name: "ok", task: "ok" }], background: false },
+    },
+    {
+      name: "graph failed",
+      mode: "graph",
+      outcome: "failed",
+      params: {
+        tasks: [{ agent: "delegate", name: "fail", task: "fail", outputSchema: schema }],
+        background: false,
+      },
+    },
+    {
+      name: "graph throw",
+      mode: "graph",
+      outcome: "throw",
+      params: { tasks: [{ agent: "delegate", name: "throw", task: "throw" }], background: false },
+    },
+  ] as const;
+
+  for (const entry of cases) {
+    let capturedOptions: Parameters<NonNullable<TeammateRuntimeOptions["onRunOptionsCreated"]>>[0] | undefined;
+    const updates: PublicToolResult[] = [];
+    const runtimeOptions: TeammateRuntimeOptions = {
+      spawnChildProcess: createStructuredSpawn([undefined, undefined]),
+      onRunOptionsCreated(options) {
+        capturedOptions ??= options;
+        if (entry.outcome === "throw") throw new Error(`forced ${entry.name}`);
+      },
+    };
+    const execution = createRootTool(runtimeOptions).execute(
+      `settlement-${entry.name}`,
+      entry.params,
+      new AbortController().signal,
+      (update) => updates.push(update),
+      rootToolContext(),
+    );
+
+    let result: PublicToolResult | undefined;
+    if (entry.outcome === "throw") {
+      await assert.rejects(execution, new RegExp(`forced ${entry.name}`));
+    } else {
+      result = await execution;
+      assert.ok(updates.length > 0, `${entry.name} must stream before settlement`);
+      assert.equal(result.isError, entry.outcome === "failed");
+      assert.equal(result.details?.results[0]?.exitCode, entry.outcome === "failed" ? 1 : 0);
+      if (entry.mode === "graph" && entry.outcome === "failed") {
+        assert.equal(result.details?.progress?.[0]?.status, "failed");
+      }
+    }
+
+    assert.ok(capturedOptions);
+    const settledUpdateCount = updates.length;
+    capturedOptions.onProgress?.(lateProgress());
+    capturedOptions.onChildRequest?.(
+      {
+        tool: "teammate",
+        requestId: `late-${entry.name}`,
+        params: { agent: "delegate", task: "late", background: true },
+      },
+      () => {},
+    );
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    assert.equal(updates.length, settledUpdateCount, `${entry.name} must ignore late callbacks`);
+    delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+      Symbol.for("pi-maestro-teammate.root-registry")
+    ];
+  }
+});
+
+test("detach and background acknowledgement never publish post-settlement updates", async () => {
+  let rootStdout: PassThrough | undefined;
+  const hangingSpawn = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    rootStdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout: rootStdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    return child;
+  }) as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  let capturedOptions: Parameters<NonNullable<TeammateRuntimeOptions["onRunOptionsCreated"]>>[0] | undefined;
+  let terminalInput: ((data: string) => void) | undefined;
+  const updates: PublicToolResult[] = [];
+  const tool = createRootTool({
+    spawnChildProcess: hangingSpawn,
+    onRunOptionsCreated: (options) => { capturedOptions = options; },
+  });
+  const execution = tool.execute(
+    "detach",
+    { agent: "delegate", task: "detach", background: false },
+    new AbortController().signal,
+    (update) => updates.push(update),
+    {
+      ...rootToolContext(),
+      hasUI: true,
+      ui: {
+        onTerminalInput(handler: (data: string) => void) {
+          terminalInput = handler;
+          return () => {};
+        },
+      },
+    },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(terminalInput);
+  terminalInput("\x1bb");
+  const detached = await execution;
+  assert.match(detached.content[0]?.text ?? "", /detached/);
+  assert.ok(capturedOptions);
+  const detachedCount = updates.length;
+  capturedOptions.onProgress?.(lateProgress());
+  assert.equal(updates.length, detachedCount);
+  rootStdout?.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ];
+
+  let backgroundOptions: Parameters<NonNullable<TeammateRuntimeOptions["onRunOptionsCreated"]>>[0] | undefined;
+  const backgroundUpdates: PublicToolResult[] = [];
+  const background = await createRootTool({
+    spawnChildProcess: createStructuredSpawn([undefined]),
+    onRunOptionsCreated: (options) => { backgroundOptions = options; },
+  }).execute(
+    "background",
+    { agent: "delegate", task: "background", background: true },
+    new AbortController().signal,
+    (update) => backgroundUpdates.push(update),
+    rootToolContext(),
+  );
+  assert.match(background.content[0]?.text ?? "", /running in background/);
+  assert.ok(backgroundOptions);
+  backgroundOptions.onProgress?.(lateProgress());
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(backgroundUpdates, []);
+  delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ];
+});
+
+test("foreground nested proxy updates preserve a renderable parent-child-grandchild tree", async () => {
+  let spawnIndex = 0;
+  let rootStdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    if (spawnIndex++ === 0) {
+      rootStdout = stdout;
+    } else {
+      queueMicrotask(() => stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`));
+    }
+    return child;
+  }) as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  let rootOptions: Parameters<NonNullable<TeammateRuntimeOptions["onRunOptionsCreated"]>>[0] | undefined;
+  const updates: PublicToolResult[] = [];
+  const execution = createRootTool({
+    spawnChildProcess,
+    onRunOptionsCreated: (options) => { rootOptions ??= options; },
+  }).execute(
+    "nested-tree",
+    { tasks: [{ agent: "delegate", name: "planner", task: "root" }], background: false },
+    new AbortController().signal,
+    (update) => updates.push(update),
+    rootToolContext(),
+  );
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.ok(rootOptions);
+  rootOptions.onProgress?.({
+    ...lateProgress(),
+    name: "planner",
+    correlationId: rootOptions.taskCorrelationIds?.[0],
+  });
+  rootOptions.onChildRequest?.(
+    {
+      tool: "teammate",
+      requestId: "child",
+      parentCid: rootOptions.taskCorrelationIds?.[0],
+      params: { agent: "delegate", name: "child", task: "child", background: false },
+    },
+    () => {},
+  );
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const child = updates.flatMap((update) => update.details?.childCalls ?? [])
+    .find((candidate) => candidate.name === "child");
+  assert.ok(child);
+  rootOptions.onChildRequest?.(
+    {
+      tool: "teammate",
+      requestId: "grandchild",
+      parentCid: child.correlationId,
+      params: { agent: "delegate", name: "grandchild", task: "grandchild", background: false },
+    },
+    () => {},
+  );
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const treeUpdate = updates.findLast((update) => (update.details?.childCalls?.length ?? 0) >= 2);
+  assert.ok(treeUpdate);
+  try {
+    const rendered = renderTeammateResult(
+      treeUpdate,
+      { expanded: false },
+      { fg: (_name: string, text: string) => text, bold: (text: string) => text } as never,
+    ).render(120).join("\n");
+    assert.match(rendered, /• 1 .*@planner/);
+    assert.match(rendered, /  └─ .*@child/);
+    assert.match(rendered, /     └─ .*@grandchild/);
+  } finally {
+    rootStdout?.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    await execution;
+    delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+      Symbol.for("pi-maestro-teammate.root-registry")
+    ];
+  }
+});
+
 test("root and proxy teammate initialization use their own request params", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
   const rootStart = source.indexOf("const activeAgent: ActiveAgent = {");

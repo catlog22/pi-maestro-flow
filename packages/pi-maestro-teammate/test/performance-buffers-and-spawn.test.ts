@@ -147,14 +147,14 @@ test("root graph progress wiring projects and broadcasts only after the batch is
   assert.equal(publishBody.match(/progressSnapshot\(\)/g)?.length, 1);
   assert.equal(publishBody.match(/TEAMMATE_MESSAGE_EVENT/g)?.length, 1);
   assert.equal(publishBody.match(/onUpdate\?\./g)?.length, 1);
-  assert.match(publishBody, /if \(params\.background !== false\) \{\s*onUpdate\?\./);
+  assert.match(publishBody, /if \(foregroundUpdateOpen\) \{\s*onUpdate\?\./);
 
   const childStatusStart = source.indexOf("const publishChildCallStatus");
   const childStatusEnd = source.indexOf("\n\n      if (isMultiTask) {\n        normalizedTasks.forEach", childStatusStart);
   assert.ok(childStatusStart >= 0 && childStatusEnd > childStatusStart);
   assert.match(
     source.slice(childStatusStart, childStatusEnd),
-    /if \(params\.background !== false\) \{\s*onUpdate\?\./,
+    /if \(foregroundUpdateOpen\) \{\s*onUpdate\?\./,
   );
 });
 
