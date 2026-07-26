@@ -146,6 +146,8 @@ teammate({
 
 All three run concurrently. Call blocks until all complete.
 
+> **Agent count limit:** A single dispatch allows at most **15** tasks by default. Exceeding the limit returns an error. Raise it per-call with `maxAgents` or globally via the `PI_TEAMMATE_MAX_AGENTS` environment variable. See [Configuration Reference](#13-configuration-reference).
+
 ### DAG Dependencies
 
 ```javascript
@@ -721,6 +723,16 @@ Use: `prompt: "db-review"` with `promptArgs`.
 
 Configure interactively via `Alt+M` or `/teammate-models`.
 
+### Agent Count Limit
+
+A single `teammate` multi-task dispatch (and `maestro explore`) is capped at **15** tasks by default.
+
+| Priority | Source | Example |
+|----------|--------|---------|
+| 1 (highest) | Per-call `maxAgents` parameter | `teammate({ tasks: [...], maxAgents: 20 })` |
+| 2 | Environment variable | `PI_TEAMMATE_MAX_AGENTS=20` |
+| 3 (lowest) | Built-in default | `15` |
+
 ### Key Pi Settings (`.pi/settings.json`)
 
 ```json
@@ -757,6 +769,17 @@ maestro: command not found
 Error: Model not found in authenticated catalog
 ```
 **Fix:** `/teammate-models` → check available models → `/login` to authenticate.
+
+### Too Many Tasks Rejected
+```
+Error: Too many tasks: 18 exceeds the maximum of 15.
+```
+**Fix:** Split into smaller batches, or raise the limit:
+```javascript
+teammate({ tasks: [/* 18 tasks */], maxAgents: 20 })
+// Or globally:
+// PI_TEAMMATE_MAX_AGENTS=20
+```
 
 ### Agent Hangs
 ```javascript

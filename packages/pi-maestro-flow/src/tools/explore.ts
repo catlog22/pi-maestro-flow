@@ -8,7 +8,7 @@
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { runTeammate } from "pi-maestro-teammate/v1/execution";
+import { resolveMaxAgents, runTeammate } from "pi-maestro-teammate/v1/execution";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
 
 export interface ExploreParams {
@@ -46,6 +46,14 @@ export async function executeExplore(
   if (prompts.length === 0) {
     return {
       content: [{ type: "text", text: "No prompts provided for explore action." }],
+      isError: true,
+    };
+  }
+
+  const maxAgents = resolveMaxAgents();
+  if (prompts.length > maxAgents) {
+    return {
+      content: [{ type: "text", text: `Too many prompts: ${prompts.length} exceeds the maximum of ${maxAgents}. Split into smaller batches or raise the limit via PI_TEAMMATE_MAX_AGENTS.` }],
       isError: true,
     };
   }
