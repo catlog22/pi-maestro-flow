@@ -1,12 +1,23 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { AgentRow, TodoItem, ViewMode } from "./types.ts";
 import type { IconGlyphs } from "./icons.ts";
+import { fitLineByPriority, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 
-// Width helpers are injected (see footer.ts rationale): pure functions stay hermetic,
-// the real widget injects pi-tui's visibleWidth / truncateToWidth.
-export interface WidthUtils {
-	measure: (text: string) => number;
-	clip: (text: string, width: number, ellipsis: string) => string;
+// Re-exported for existing importers; the shared implementation lives in layout.ts.
+export type { WidthUtils };
+
+// Below this the layout must degrade to an action-first single column
+// (terminal control-center spec).
+export const NARROW_WIDTH = 40;
+
+// Dependencies are result-flow edges, never hierarchy, so they stay in their own
+// segment. Long chains collapse to a count instead of pushing the task off the row.
+const MAX_LISTED_DEPENDENCIES = 3;
+
+function formatDependencies(dependencies: readonly number[], glyphs: IconGlyphs): string {
+	const listed = dependencies.slice(0, MAX_LISTED_DEPENDENCIES).map((d) => `#${d + 1}`).join(",");
+	const rest = dependencies.length - MAX_LISTED_DEPENDENCIES;
+	return `${glyphs.depArrow} ${listed}${rest > 0 ? `,+${rest}` : ""}`;
 }
 
 export type PaintTheme = Pick<Theme, "fg">;
@@ -16,6 +27,47 @@ export interface RenderOpts {
 	spin?: string;
 	now?: number;
 	expanded?: boolean;
+	/**
+	 * How the user actually toggles the todo panel. `alt+t` is registered by
+	 * pi-maestro-flow, which forwards to cockpit through COCKPIT_TODO_TOGGLE_EVENT,
+	 * so it is accurate in the shipped pairing. A standalone install without that
+	 * owner overrides this with the always-available `/cockpit todo`.
+	 */
+	toggleHint?: string;
+}
+
+export const DEFAULT_TOGGLE_HINT = "Alt+T";
+
+// One cell per task stops scaling once the plan outgrows the terminal, so beyond
+// that the bar switches to a proportional summary instead of eating the whole line.
+function renderTodoBar(
+	items: readonly TodoItem[],
+	width: number,
+	theme: PaintTheme,
+	g: IconGlyphs,
+): string {
+	const cell = (st: TodoItem["status"]): string => {
+		if (st === "completed") return theme.fg("success", g.barDone);
+		if (st === "in_progress") return theme.fg("accent", g.barActive);
+		if (st === "blocked") return theme.fg("error", g.blocked);
+		return theme.fg("dim", g.barPending);
+	};
+	const budget = Math.max(4, Math.floor(width * 0.3));
+	if (items.length <= budget) return items.map((i) => cell(i.status)).join("");
+
+	const order: TodoItem["status"][] = ["completed", "in_progress", "blocked", "pending"];
+	const counts = order.map((st) => items.filter((i) => i.status === st).length);
+	// Largest-remainder allocation so a non-empty bucket never rounds away to zero.
+	const exact = counts.map((n) => (n / items.length) * budget);
+	const cells = exact.map(Math.floor);
+	for (let i = 0; i < cells.length; i++) if (counts[i] > 0 && cells[i] === 0) cells[i] = 1;
+	let overflow = cells.reduce((a, b) => a + b, 0) - budget;
+	for (let i = cells.length - 1; i >= 0 && overflow > 0; i--) {
+		const spare = Math.min(overflow, Math.max(0, cells[i] - 1));
+		cells[i] -= spare;
+		overflow -= spare;
+	}
+	return order.map((st, i) => cell(st).repeat(cells[i])).join("");
 }
 
 export function formatDuration(ms: number): string {
@@ -58,7 +110,7 @@ interface AgentTreeEntry {
 	prefix: string;
 }
 
-function buildAgentTree(rows: readonly AgentRow[]): AgentTreeEntry[] {
+function buildAgentTree(rows: readonly AgentRow[], glyphs: IconGlyphs): AgentTreeEntry[] {
 	const sorted = [...rows].sort((a, b) =>
 		agentStatusRank(a.status) - agentStatusRank(b.status)
 		|| a.startedAt - b.startedAt
@@ -82,9 +134,9 @@ function buildAgentTree(rows: readonly AgentRow[]): AgentTreeEntry[] {
 	const append = (row: AgentRow, ancestors: string, isLast: boolean): void => {
 		if (visited.has(row.correlationId)) return;
 		visited.add(row.correlationId);
-		entries.push({ row, prefix: `${ancestors}${isLast ? "└─" : "├─"}` });
+		entries.push({ row, prefix: `${ancestors}${isLast ? glyphs.treeLast : glyphs.treeBranch}` });
 		const descendants = children.get(row.correlationId) ?? [];
-		const nextAncestors = `${ancestors}${isLast ? "  " : "│ "}`;
+		const nextAncestors = `${ancestors}${isLast ? glyphs.treeSpace : glyphs.treeVertical}`;
 		descendants.forEach((child, index) => append(child, nextAncestors, index === descendants.length - 1));
 	};
 
@@ -132,29 +184,36 @@ export function renderAgents(
 	}
 	const spin = opts.spin ?? "~";
 	const now = opts.now ?? Date.now();
-	const tree = buildAgentTree(rows);
-	const maxVisible = width < 40 ? 3 : 6;
+	const tree = buildAgentTree(rows, g);
+	const maxVisible = width < NARROW_WIDTH ? 3 : 6;
 	const visible = tree.slice(0, maxVisible);
 	const hidden = tree.length - visible.length;
 
+	// Priorities, not concatenation order, decide what survives a narrow terminal.
+	// Identity (tree position, state, role, task) outranks telemetry (tool, tail,
+	// counts) so the row still answers "who is doing what" at 40 columns.
 	const lines = visible.map(({ row: r, prefix }) => {
 		const status = agentGlyph(r.status, g, spin);
 		const rc = roleColor(r.role);
-		const segs = [theme.fg("dim", prefix), theme.fg(status.color, status.glyph), theme.fg(rc, r.role)];
-		if (status.label) segs.push(theme.fg(status.color, status.label));
-		if (r.task) segs.push(r.task);
+		const segs: PrioritizedSegment[] = [
+			{ text: theme.fg("dim", prefix), priority: 100, clippable: false },
+			{ text: theme.fg(status.color, status.glyph), priority: 99, clippable: false },
+		];
+		if (status.label) segs.push({ text: theme.fg(status.color, status.label), priority: 95, clippable: false });
+		segs.push({ text: theme.fg(rc, r.role), priority: 90 });
+		if (r.task) segs.push({ text: r.task, priority: 80, minWidth: 6 });
+		segs.push({ text: theme.fg("muted", formatDuration(now - r.startedAt)), priority: 70, clippable: false });
 		if (r.dependencies?.length) {
-			segs.push(theme.fg("dim", `← #${r.dependencies.map((dependency) => dependency + 1).join(",#")}`));
+			segs.push({ text: theme.fg("dim", formatDependencies(r.dependencies, g)), priority: 60, clippable: false });
 		}
-		if (r.activeTool) segs.push(theme.fg("accent", `tool ${r.activeTool}`));
-		if (r.tail) segs.push(theme.fg("dim", r.tail));
-		if (r.toolCount !== undefined) segs.push(theme.fg("muted", `${r.toolCount} tools`));
-		if (r.tokens !== undefined) segs.push(theme.fg("muted", `${r.tokens} tok`));
-		segs.push(theme.fg("muted", formatDuration(now - r.startedAt)));
-		return utils.clip(segs.join(" "), width, ell);
+		if (r.activeTool) segs.push({ text: theme.fg("accent", `tool ${r.activeTool}`), priority: 50, minWidth: 8 });
+		if (r.tail) segs.push({ text: theme.fg("dim", r.tail), priority: 40, minWidth: 8 });
+		if (r.toolCount !== undefined) segs.push({ text: theme.fg("muted", `${r.toolCount} tools`), priority: 20, clippable: false });
+		if (r.tokens !== undefined) segs.push({ text: theme.fg("muted", `${r.tokens} tok`), priority: 10, clippable: false });
+		return fitLineByPriority(segs, width, utils, " ", g.ellipsis);
 	});
 	if (hidden > 0) {
-		lines.push(utils.clip(theme.fg("dim", `└─ ${g.ellipsis} ${hidden} more`), width, ell));
+		lines.push(utils.clip(theme.fg("dim", `${g.treeLast} ${g.ellipsis} ${hidden} more`), width, ell));
 	}
 	return lines;
 }
@@ -247,26 +306,26 @@ export function renderTodos(
 	const spin = opts.spin ?? "~";
 	const now = opts.now ?? Date.now();
 	const expanded = opts.expanded !== false;
+	const toggleHint = opts.toggleHint ?? DEFAULT_TOGGLE_HINT;
 
 	if (mode === "compact") {
 		const total = items.length;
 		const done = items.filter((i) => i.status === "completed").length;
+		const blocked = items.filter((i) => i.status === "blocked").length;
 		const pct = total ? Math.round((done / total) * 100) : 0;
-		const cell = (st: TodoItem["status"]): string => {
-			if (st === "completed") return theme.fg("success", g.barDone);
-			if (st === "in_progress") return theme.fg("accent", g.barActive);
-			if (st === "blocked") return theme.fg("error", g.blocked);
-			return theme.fg("dim", g.barPending);
-		};
-		const bar = items.map((i) => cell(i.status)).join("");
 		const nxt = findNextTodo(items);
 		const label = nxt
 			? `${theme.fg("dim", g.arrow)} ${todoNextLabel(nxt, items, g, spin, theme)}`
-			: done === total ? theme.fg("success", "all done") : "";
-		const tail = ` ${theme.fg("muted", `${pct}%`)}` + (label ? ` ${label}` : "");
-		const summary = bar + tail;
-		const hint = theme.fg("dim", " (Alt+T expand)");
-		return [utils.clip(utils.measure(summary + hint) <= width ? summary + hint : summary, width, ell)];
+			: done === total ? theme.fg("success", `${g.check} all done`) : "";
+		const segs: PrioritizedSegment[] = [
+			{ text: renderTodoBar(items, width, theme, g), priority: 60, clippable: false },
+			{ text: theme.fg("muted", `${pct}%`), priority: 90, clippable: false },
+		];
+		// A glyph run is opaque to a screen reader, so the blocked count is spelled out.
+		if (blocked > 0) segs.push({ text: theme.fg("error", `${blocked} blocked`), priority: 95, clippable: false });
+		if (label) segs.push({ text: label, priority: 100, minWidth: 8 });
+		segs.push({ text: theme.fg("dim", `(${toggleHint} expand)`), priority: 10, clippable: false });
+		return [fitLineByPriority(segs, width, utils, " ", g.ellipsis)];
 	}
 
 	// summary line (always rendered, width-adaptive: full → compact → minimal)
@@ -281,30 +340,28 @@ export function renderTodos(
 		? `${theme.fg(nxt.status === "blocked" ? "error" : "dim", g.arrow)} ${todoNextLabel(nxt, items, g, spin, theme)}`
 		: theme.fg("success", `${g.check} all done`);
 
-	const fullMeta = [
-		`${total} tasks`,
-		`${done} done`,
-		running ? `${running} running` : "",
-		members ? `${members} members` : "",
-		blocked ? `${blocked} blocked` : "",
-	].filter(Boolean).join(` ${sep} `);
-	const compactMeta = `${done}/${total}${sep} ${running} running`;
-	const minimalMeta = `${done}/${total}`;
-
-	let meta = minimalMeta;
-	for (const candidate of [fullMeta, compactMeta]) {
-		const prefix = `${theme.fg("muted", "Todo")} ${theme.fg("dim", candidate)} `;
-		if (utils.measure(prefix) + Math.min(18, utils.measure(nextText)) <= width) {
-			meta = candidate;
-			break;
-		}
+	// The next actionable task outranks the counts: it is the one token that tells
+	// the user what to do, so it must survive when the terminal is narrow.
+	const summarySegs: PrioritizedSegment[] = [
+		{ text: theme.fg("muted", "Todo"), priority: 40, clippable: false },
+		{ text: theme.fg("dim", `${done}/${total}`), priority: 80, clippable: false },
+		{ text: nextText, priority: 100, minWidth: 8 },
+	];
+	if (blocked > 0) {
+		summarySegs.push({ text: theme.fg("error", `${blocked} blocked`), priority: 90, clippable: false });
 	}
-	const summaryText = `${theme.fg("muted", "Todo")} ${theme.fg("dim", meta)} ${nextText}`;
-	const toggleHint = theme.fg("dim", `(Alt+T ${expanded ? "collapse" : "expand"})`);
-	const summaryWithHint = `${summaryText} ${toggleHint}`;
-	const summaryLine = utils.measure(summaryWithHint) <= width
-		? summaryWithHint
-		: utils.clip(summaryText, width, ell);
+	if (running > 0) {
+		summarySegs.push({ text: theme.fg("dim", `${running} running`), priority: 50, clippable: false });
+	}
+	if (members > 0) {
+		summarySegs.push({ text: theme.fg("dim", `${members} members`), priority: 30, clippable: false });
+	}
+	summarySegs.push({
+		text: theme.fg("dim", `(${toggleHint} ${expanded ? "collapse" : "expand"})`),
+		priority: 10,
+		clippable: false,
+	});
+	const summaryLine = fitLineByPriority(summarySegs, width, utils, ` ${sep} `, g.ellipsis);
 
 	if (!expanded) return [summaryLine];
 

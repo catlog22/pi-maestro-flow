@@ -1,14 +1,11 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { ExtensionStatusSegment } from "./extension-status.ts";
 import type { IconGlyphs } from "./icons.ts";
+import { fitSegmentsByPriority, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 
-// Width helpers are injected so this module has zero runtime dependency on pi-tui
-// (keeps the pure-function unit tests hermetic). The real wiring in index.ts passes
-// pi-tui's visibleWidth / truncateToWidth so east-asian widths are correct on a terminal.
-export interface WidthUtils {
-	measure: (text: string) => number;
-	clip: (text: string, width: number, ellipsis: string) => string;
-}
+// Re-exported so existing importers keep working; the implementations now live in
+// layout.ts because the widgets need the same priority-collapse behaviour.
+export { fitSegmentsByPriority, type WidthUtils };
 
 export type PaintTheme = Pick<Theme, "fg">;
 
@@ -123,11 +120,6 @@ export function renderBar(pct: number, barWidth: number, glyphs: IconGlyphs, the
 	return theme.fg("dim", "[") + theme.fg(contextColor(pct), glyphs.barDone.repeat(filled)) + theme.fg("dim", glyphs.barPending.repeat(empty)) + theme.fg("dim", "]");
 }
 
-interface PrioritizedSegment {
-	text: string;
-	priority: number;
-}
-
 function contextColor(pct: number): ThemeColor {
 	if (pct >= 90) return "error";
 	if (pct >= 70) return "warning";
@@ -151,43 +143,6 @@ function extensionStatusColor(status: ExtensionStatusSegment): ThemeColor {
 	return "text";
 }
 
-export function fitSegmentsByPriority(
-	segs: readonly PrioritizedSegment[],
-	maxW: number,
-	measure: WidthUtils["measure"],
-	clip: WidthUtils["clip"],
-	ellipsis = "...",
-	separatorWidth = 1,
-): string[] {
-	const items = segs.map((s) => ({ text: s.text, priority: s.priority, w: measure(s.text) }));
-	const totalW = (): number => {
-		const active = items.filter((it) => it.text !== "");
-		return active.reduce((a, it) => a + it.w, 0) + Math.max(0, active.length - 1) * separatorWidth;
-	};
-	while (totalW() > maxW) {
-		let target = -1;
-		for (let i = 0; i < items.length; i++) {
-			if (items[i].text !== "" && (target === -1 || items[i].priority < items[target].priority)) {
-				target = i;
-			}
-		}
-		if (target === -1) break;
-		const others = items.filter((_, i) => i !== target && items[i].text !== "");
-		const otherW = others.reduce((a, it) => a + it.w, 0) + Math.max(0, others.length - 1) * separatorWidth;
-		const avail = maxW - otherW - (others.length > 0 ? separatorWidth : 0);
-		if (avail <= measure(ellipsis)) {
-			items[target].text = "";
-			items[target].w = 0;
-		} else if (avail < items[target].w) {
-			items[target].text = clip(items[target].text, avail, ellipsis);
-			items[target].w = measure(items[target].text);
-		} else {
-			break;
-		}
-	}
-	return items.filter((it) => it.text !== "").map((it) => it.text);
-}
-
 function alignRight(left: string, right: string, width: number, measure: WidthUtils["measure"]): string {
 	if (right === "") return left;
 	if (left === "") return right;
@@ -204,9 +159,16 @@ export function renderFooter(p: FooterParts): string[] {
 	const sep = theme.fg("dim", g.separator.trim());
 
 	// line 1: prioritized left segments · context gauge (right)
+	// minWidth keeps a glyph-prefixed segment from decaying into "{icon}…", which
+	// costs columns and tells the user nothing about the path or branch.
+	const labelled = (glyph: string, value: string, priority: number): PrioritizedSegment => ({
+		text: `${theme.fg("mdLink", glyph)} ${theme.fg("accent", value)}`,
+		priority,
+		minWidth: utils.measure(glyph) + 1 + utils.measure(g.ellipsis) + 3,
+	});
 	const leftParts: PrioritizedSegment[] = [];
-	if (p.cwd) leftParts.push({ text: `${theme.fg("mdLink", g.workspace)} ${theme.fg("accent", p.cwd)}`, priority: 0 });
-	if (p.git) leftParts.push({ text: `${theme.fg("mdLink", g.git)} ${theme.fg("accent", p.git)}`, priority: 3 });
+	if (p.cwd) leftParts.push(labelled(g.workspace, p.cwd, 0));
+	if (p.git) leftParts.push(labelled(g.git, p.git, 3));
 
 	let right1 = "";
 	if (p.ctxWindow > 0) {
@@ -226,11 +188,18 @@ export function renderFooter(p: FooterParts): string[] {
 	const line1 = alignRight(fittedLeft.join(" "), right1, width, utils.measure);
 
 	// line 2: model + thinking (left) · in/out/cache/cost/elapsed (right)
-	const modelParts: string[] = [];
-	if (p.provider) modelParts.push(theme.fg("muted", p.provider));
-	modelParts.push(theme.fg("text", p.model));
-	if (p.thinking && p.thinking !== "off") modelParts.push(theme.fg("accent", `${p.thinking}`));
-	const modelLeft = modelParts.join(theme.fg("dim", " · "));
+	// The model id outranks the provider: clipping the pair as one blob used to
+	// keep "anthropic …" and destroy the model name, which is the token that
+	// actually answers "what am I talking to?".
+	const modelSeparator = theme.fg("dim", " · ");
+	const modelSegs: PrioritizedSegment[] = [
+		{ text: theme.fg("text", p.model), priority: 3 },
+	];
+	if (p.thinking && p.thinking !== "off") {
+		modelSegs.push({ text: theme.fg("accent", `${p.thinking}`), priority: 2, clippable: false });
+	}
+	if (p.provider) modelSegs.unshift({ text: theme.fg("muted", p.provider), priority: 1 });
+	const modelLeft = modelSegs.map((seg) => seg.text).join(modelSeparator);
 
 	const t = p.totals;
 	const stats: PrioritizedSegment[] = [
@@ -256,7 +225,16 @@ export function renderFooter(p: FooterParts): string[] {
 	const right2 = fittedStats.join(statSeparator);
 	const right2Width = utils.measure(right2);
 	const modelWidth = Math.max(0, width - right2Width - (right2 ? 1 : 0));
-	const fittedModel = modelWidth > 0 ? utils.clip(modelLeft, modelWidth, ell) : "";
+	const fittedModel = modelWidth > 0
+		? fitSegmentsByPriority(
+			modelSegs,
+			modelWidth,
+			utils.measure,
+			utils.clip,
+			g.ellipsis,
+			utils.measure(modelSeparator),
+		).join(modelSeparator)
+		: "";
 	const line2 = alignRight(fittedModel, right2, width, utils.measure);
 
 	const lines = [utils.clip(line1, width, ell), utils.clip(line2, width, ell)];

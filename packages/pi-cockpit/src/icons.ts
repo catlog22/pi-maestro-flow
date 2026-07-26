@@ -12,6 +12,13 @@ export interface IconGlyphs {
 	barActive: string;
 	barPending: string;
 	arrow: string;
+	/** Points at a dependency/upstream ("blocked by", "waits on"). */
+	depArrow: string;
+	/** Tree connectors. Routed through the glyph set so ascii mode stays ascii. */
+	treeBranch: string;
+	treeLast: string;
+	treeVertical: string;
+	treeSpace: string;
 	ellipsis: string;
 	separator: string;
 	workspace: string;
@@ -34,6 +41,11 @@ const NERD_GLYPHS: IconGlyphs = {
 	barActive: "▓",
 	barPending: "░",
 	arrow: "»",
+	depArrow: "←",
+	treeBranch: "├─",
+	treeLast: "└─",
+	treeVertical: "│ ",
+	treeSpace: "  ",
 	ellipsis: "…",
 	separator: " · ",
 	workspace: "",
@@ -56,6 +68,11 @@ const ASCII_GLYPHS: IconGlyphs = {
 	barActive: "+",
 	barPending: "-",
 	arrow: ">",
+	depArrow: "<-",
+	treeBranch: "|-",
+	treeLast: "`-",
+	treeVertical: "| ",
+	treeSpace: "  ",
 	ellipsis: "...",
 	separator: " | ",
 	workspace: "dir",

@@ -1,13 +1,19 @@
 import type { ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { IconGlyphs } from "./icons.ts";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
+import { fitLineByPriority, type PrioritizedSegment } from "./layout.ts";
 import { formatDuration, type PaintTheme, type WidthUtils } from "./render.ts";
 import type { BashBgJob } from "./types.ts";
+
+// Registered by cockpit itself (index.ts), so this hint is always accurate.
+export const DEFAULT_BASH_BG_HINT = "Alt+J";
 
 export interface BashBgRenderOptions {
 	glyphs: IconGlyphs;
 	spin: string;
 	now: number;
+	/** Overrides the advertised overlay shortcut when the binding differs. */
+	hint?: string;
 }
 
 export function renderBashBgSummary(
@@ -30,17 +36,24 @@ export function renderBashBgSummary(
 	const statusColor: ThemeColor = stopping > 0 ? "warning" : "accent";
 	const elapsed = formatDuration(options.now - current.startedAt);
 	const preview = lastOutputLine(current.outputTail);
-	const segments = [
-		theme.fg(statusColor, current.status === "stopping" ? options.glyphs.blocked : options.spin),
-		theme.fg("muted", "BG"),
-		theme.fg(statusColor, counts),
-		theme.fg("dim", elapsed),
-		theme.fg("mdLink", current.id),
-		theme.fg("text", oneLine(current.command)),
+	const g = options.glyphs;
+	// The Alt+J hint is the only advertised route into the job detail overlay, so
+	// it outranks the command preview instead of being the first thing clipped.
+	const segments: PrioritizedSegment[] = [
+		{
+			text: theme.fg(statusColor, current.status === "stopping" ? g.blocked : options.spin),
+			priority: 100,
+			clippable: false,
+		},
+		{ text: theme.fg("muted", "BG"), priority: 95, clippable: false },
+		{ text: theme.fg(statusColor, counts), priority: 90, clippable: false },
+		{ text: theme.fg("text", oneLine(current.command)), priority: 70, minWidth: 8 },
+		{ text: theme.fg("dim", `${options.hint ?? DEFAULT_BASH_BG_HINT} details`), priority: 60, clippable: false },
+		{ text: theme.fg("dim", elapsed), priority: 50, clippable: false },
+		{ text: theme.fg("mdLink", current.id), priority: 30, clippable: false },
 	];
-	if (preview) segments.push(theme.fg("dim", `› ${preview}`));
-	segments.push(theme.fg("dim", "Alt+J details"));
-	return [utils.clip(segments.join(theme.fg("dim", " · ")), width, "…")];
+	if (preview) segments.push({ text: theme.fg("dim", `${g.arrow} ${preview}`), priority: 20, minWidth: 8 });
+	return [fitLineByPriority(segments, width, utils, theme.fg("dim", g.separator), g.ellipsis)];
 }
 
 function lastOutputLine(output: string): string {
