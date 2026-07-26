@@ -8,7 +8,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { IconGlyphs } from "./icons.ts";
-import { fitLineByPriority, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
+import { fitLineByPriority, visibleStart, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 import { formatDuration } from "./render.ts";
 import type { BashBgJob, BashBgStatus } from "./types.ts";
 import { overlayListRows } from "./viewport.ts";
@@ -341,10 +341,6 @@ function wrapIndex(index: number, length: number): number {
 
 function clampIndex(index: number, length: number): number {
 	return length === 0 ? 0 : Math.max(0, Math.min(index, length - 1));
-}
-
-function visibleStart(selected: number, length: number, size: number): number {
-	return Math.max(0, Math.min(selected - Math.floor(size / 2), Math.max(0, length - size)));
 }
 
 function fitLine(value: string, width: number): string {

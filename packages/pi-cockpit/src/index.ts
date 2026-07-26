@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
@@ -7,7 +7,8 @@ import { statusText, titleFor, workingMessage, type AmbientState } from "./ambie
 import { BashBgStore } from "./bash-bg-store.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { TodoStore } from "./todo-store.ts";
-import { makeTodoWidget, makeAgentWidget } from "./stack-widget.ts";
+import { makeTodoWidget, makeAgentWidget, terminalRows } from "./stack-widget.ts";
+import { ThemePicker } from "./theme-picker.ts";
 import { formatDuration } from "./render.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, type PaintTheme, type WidthUtils } from "./footer.ts";
 import { collectExtensionStatuses } from "./extension-status.ts";
@@ -342,19 +343,77 @@ export default function (pi: ExtensionAPI): void {
 				close: () => done(undefined),
 				theme,
 				glyphs: resolveGlyphs(config.icons.mode),
-				getTerminalRows: () => {
-					try {
-						const rows = tui.terminal?.rows;
-						return typeof rows === "number" && rows > 0 ? rows : undefined;
-					} catch {
-						return undefined;
-					}
-				},
+				getTerminalRows: () => terminalRows(tui),
 			}), {
 			overlay: true,
 			overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
 		});
 	};
+
+	// --- /theme: pi ships no command for this; themes live under /settings ---
+	const openThemePicker = async (ctx: ExtensionContext): Promise<void> => {
+		if (!ctx.hasUI) return;
+		const themes = ctx.ui.getAllThemes().map((t) => t.name);
+		await ctx.ui.custom<void>((tui, theme, _kb, done) =>
+			new ThemePicker({
+				themes,
+				initial: config.theme,
+				original: theme,
+				loadTheme: (name) => ctx.ui.getTheme(name),
+				// Instance form: applies in memory without writing through to pi's
+				// settings, so scrolling the whole list costs the user nothing.
+				previewTheme: (instance) => { ctx.ui.setTheme(instance); },
+				// Name form: the one call that persists.
+				commitTheme: (name) => {
+					const applied = ctx.ui.setTheme(name);
+					if (applied.success) {
+						config = { ...config, theme: name };
+						saveConfig(config);
+					}
+					return applied;
+				},
+				close: () => done(undefined),
+				requestRender: () => tui.requestRender(),
+				getTerminalRows: () => terminalRows(tui),
+				theme,
+				glyphs: resolveGlyphs(config.icons.mode),
+			}), {
+			overlay: true,
+			overlayOptions: { anchor: "center", width: "60%", maxHeight: "90%" },
+		});
+	};
+
+	// pi has no /theme command — the built-in picker is a submenu of /settings.
+	// This is the shortcut, not a replacement: /settings still owns the automatic
+	// light/dark pairing, which a flat list of names cannot express.
+	pi.registerCommand("theme", {
+		description: "Switch theme — /theme picks with live preview, /theme <name> applies directly",
+		getArgumentCompletions: (prefix) => {
+			const query = prefix.trim().toLowerCase();
+			const ctx = lastCtx;
+			if (!ctx || !ctx.hasUI) return null;
+			const matches = ctx.ui.getAllThemes()
+				.map((t) => t.name)
+				.filter((name) => name.toLowerCase().includes(query));
+			return matches.length > 0 ? matches.map((name) => ({ value: name, label: name })) : null;
+		},
+		handler: async (args, ctx) => {
+			if (!ctx.hasUI) return;
+			const name = args.trim();
+			if (name === "") {
+				await openThemePicker(ctx);
+				return;
+			}
+			const applied = ctx.ui.setTheme(name);
+			if (!applied.success) {
+				ctx.ui.notify(`theme "${name}" unavailable — ${applied.error ?? "not found"}`, "warning");
+				return;
+			}
+			config = { ...config, theme: name };
+			saveConfig(config);
+			ctx.ui.notify(`theme: ${name}`, "info");
+		},
+	});
 
 	pi.registerShortcut(BASH_BG_OVERLAY_KEY, {
 		description: "Open background Bash jobs — live status, command, cwd, duration and output tail",
@@ -382,105 +441,107 @@ export default function (pi: ExtensionAPI): void {
 				setTodoExpanded(action.endsWith("expand"));
 				return;
 			}
-			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
-				const themes = ctx.ui.getAllThemes().map((t) => t.name);
-				let cursor = 0;
-				let saveState: SaveState = { kind: "idle" };
-				let themeTouched = false;
-				const apply = (key: string): void => {
-					const wasEnabled = config.enabled;
-					const previousTheme = config.theme;
-					config = applyRow(config, key, themes);
-					saveState = { kind: "saving" };
-					const result = saveConfig(config);
-					// The panel now reports what actually happened instead of showing
-					// an optimistic value for a write that may never have landed.
-					saveState = result.ok
-						? { kind: "saved" }
-						: { kind: "failed", message: result.error ?? "unknown error" };
-					if (config.theme !== previousTheme && config.theme !== "") {
-						const applied = ctx.ui.setTheme(config.theme);
-						if (!applied.success) {
-							saveState = { kind: "failed", message: applied.error ?? `unknown theme ${config.theme}` };
-						} else {
-							// setTheme writes through to pi's own settings. The extension API
-							// exposes no reader for the current setting, so cockpit cannot tell
-							// whether it just replaced an automatic light/dark pair — it says so
-							// plainly rather than guessing.
-							themeTouched = true;
-						}
-					}
-					if (wasEnabled !== config.enabled) {
-						if (config.enabled) applyUi(ctx);
-						else uninstallUi(ctx);
-					}
-					publishUiOwnership();
-					req();
-				};
-				const ui = {
-					render(width: number): string[] {
-						const paint: PaintTheme = theme;
-						const rows = buildRows(config, themes);
-						cursor = Math.max(0, Math.min(cursor, rows.length - 1));
-						const w = Math.min(width, 52);
-						const labelWidth = Math.max(...rows.map((r) => visibleWidth(r.label)));
-						const lines = [
-							paint.fg("text", "pi-cockpit"),
-							paint.fg("borderMuted", "─".repeat(w)),
-						];
-						rows.forEach((row, index) => {
-							const selected = index === cursor;
-							const marker = selected ? paint.fg("accent", "›") : " ";
-							const pad = " ".repeat(Math.max(0, labelWidth - visibleWidth(row.label)));
-							const label = paint.fg(selected ? "text" : "muted", row.label) + pad;
-							const value = paint.fg("accent", row.value);
-							// Showing the next value makes the cycle visible instead of
-							// something the user has to discover by pressing and watching.
-							const hint = selected ? paint.fg("dim", ` → ${row.next}`) : "";
-							lines.push(`${marker} ${paint.fg("dim", row.accel)} ${label}  ${value}${hint}`);
-						});
-						lines.push("");
-						if (saveState.kind === "saved") lines.push(paint.fg("success", "✓ saved"));
-						else if (saveState.kind === "saving") lines.push(paint.fg("dim", "· saving…"));
-						else if (saveState.kind === "failed") {
-							lines.push(paint.fg("error", `✗ save failed — ${saveState.message}`));
-							// Scoped to cockpit's own rows: the theme is applied through pi,
-							// which persists it regardless of whether this file was written.
-							lines.push(paint.fg("dim", "cockpit rows apply for this session only"));
-						}
-						if (themeTouched) {
-							lines.push(paint.fg("dim", "theme is stored by pi, not by cockpit"));
-						}
-						// The built-in picker previews live, restores on cancel, and can pair
-						// a light and a dark theme — none of which this one-key cycle does.
-						lines.push(paint.fg("dim", "/settings · theme preview + auto light/dark"));
-						lines.push(paint.fg("dim", "↑↓ move · Enter change · letter jumps · Esc close"));
-						return lines.map((line) => truncateToWidth(line, width, "…"));
-					},
-					invalidate(): void {},
-					handleInput(data: string): void {
-						const rows = buildRows(config, themes);
-						if (matchesKey(data, Key.escape)) {
-							done(undefined);
-							return;
-						}
-						if (data === "\x1b[A" || data === "\x1b[B") {
-							const delta = data === "\x1b[A" ? -1 : 1;
-							cursor = (cursor + delta + rows.length) % rows.length;
-						} else if (data === "\r" || data === "\n" || data === " ") {
-							apply(rows[cursor].key);
-						} else {
-							const key = rowKeyForAccel(rows, data);
-							if (!key) return;
-							cursor = rows.findIndex((row) => row.key === key);
-							apply(key);
-						}
-						tui.requestRender();
-					},
-					dispose(): void {},
-				};
-				return ui;
-			}, { overlay: true });
+			// The theme row hands off to /theme instead of cycling names itself, and
+			// the picker hands back — so the trip is reversible rather than a one-way
+			// exit out of settings.
+			let pending: "settings" | "theme" | undefined = "settings";
+			while (pending) {
+				if (pending === "theme") {
+					await openThemePicker(ctx);
+					pending = "settings";
+					continue;
+				}
+				pending = await openSettings(ctx);
+			}
 		},
 	});
+
+	const openSettings = async (ctx: ExtensionCommandContext): Promise<"theme" | undefined> =>
+		ctx.ui.custom<"theme" | undefined>((tui, theme, _kb, done) => {
+			let cursor = 0;
+			let saveState: SaveState = { kind: "idle" };
+			const apply = (key: string): void => {
+				const wasEnabled = config.enabled;
+				if (key === "theme") {
+					// Delegate: the picker previews live and reverts on Esc, neither of
+					// which a blind one-key cycle through the name list can do.
+					done("theme");
+					return;
+				}
+				config = applyRow(config, key);
+				saveState = { kind: "saving" };
+				const result = saveConfig(config);
+				// The panel now reports what actually happened instead of showing
+				// an optimistic value for a write that may never have landed.
+				saveState = result.ok
+					? { kind: "saved" }
+					: { kind: "failed", message: result.error ?? "unknown error" };
+				if (wasEnabled !== config.enabled) {
+					if (config.enabled) applyUi(ctx);
+					else uninstallUi(ctx);
+				}
+				publishUiOwnership();
+				req();
+			};
+			const ui = {
+				render(width: number): string[] {
+					const paint: PaintTheme = theme;
+					const rows = buildRows(config);
+					cursor = Math.max(0, Math.min(cursor, rows.length - 1));
+					const w = Math.min(width, 52);
+					const labelWidth = Math.max(...rows.map((r) => visibleWidth(r.label)));
+					const lines = [
+						paint.fg("text", "pi-cockpit"),
+						paint.fg("borderMuted", "─".repeat(w)),
+					];
+					rows.forEach((row, index) => {
+						const selected = index === cursor;
+						const marker = selected ? paint.fg("accent", "›") : " ";
+						const pad = " ".repeat(Math.max(0, labelWidth - visibleWidth(row.label)));
+						const label = paint.fg(selected ? "text" : "muted", row.label) + pad;
+						const value = paint.fg("accent", row.value);
+						// Showing the next value makes the cycle visible instead of
+						// something the user has to discover by pressing and watching.
+						const hint = selected ? paint.fg("dim", ` → ${row.next}`) : "";
+						lines.push(`${marker} ${paint.fg("dim", row.accel)} ${label}  ${value}${hint}`);
+					});
+					lines.push("");
+					if (saveState.kind === "saved") lines.push(paint.fg("success", "✓ saved"));
+					else if (saveState.kind === "saving") lines.push(paint.fg("dim", "· saving…"));
+					else if (saveState.kind === "failed") {
+						lines.push(paint.fg("error", `✗ save failed — ${saveState.message}`));
+						// Scoped to cockpit's own rows: the theme is applied through pi,
+						// which persists it regardless of whether this file was written.
+						lines.push(paint.fg("dim", "cockpit rows apply for this session only"));
+					}
+					// The theme row opens /theme; /settings additionally pairs a light
+					// and a dark theme, which neither of cockpit's surfaces can express.
+					lines.push(paint.fg("dim", "theme is stored by pi · /settings pairs light+dark"));
+					lines.push(paint.fg("dim", "↑↓ move · Enter change · letter jumps · Esc close"));
+					return lines.map((line) => truncateToWidth(line, width, "…"));
+				},
+				invalidate(): void {},
+				handleInput(data: string): void {
+					const rows = buildRows(config);
+					if (matchesKey(data, Key.escape)) {
+						done(undefined);
+						return;
+					}
+					if (data === "\x1b[A" || data === "\x1b[B") {
+						const delta = data === "\x1b[A" ? -1 : 1;
+						cursor = (cursor + delta + rows.length) % rows.length;
+					} else if (data === "\r" || data === "\n" || data === " ") {
+						apply(rows[cursor].key);
+					} else {
+						const key = rowKeyForAccel(rows, data);
+						if (!key) return;
+						cursor = rows.findIndex((row) => row.key === key);
+						apply(key);
+					}
+					tui.requestRender();
+				},
+				dispose(): void {},
+			};
+			return ui;
+		}, { overlay: true });
 }

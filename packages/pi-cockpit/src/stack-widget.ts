@@ -27,7 +27,7 @@ const UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 
 // The TUI exposes the live terminal size, but a widget must never fail to render
 // because a host handed it a stub without one.
-function terminalRows(tui: TUI): number | undefined {
+export function terminalRows(tui: TUI): number | undefined {
 	try {
 		const rows = tui.terminal?.rows;
 		return typeof rows === "number" && rows > 0 ? rows : undefined;

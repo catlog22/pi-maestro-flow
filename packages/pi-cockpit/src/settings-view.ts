@@ -41,22 +41,7 @@ function themeLabel(theme: string): string {
 	return theme === "" ? NO_THEME_LABEL : theme;
 }
 
-/**
- * Themes cycle through the host's list plus an explicit "leave it alone" entry.
- *
- * A pi theme setting may also be an automatic `light/dark` pair, which this ring
- * cannot build. Such a value is simply not in the ring, so it falls through to
- * the restart branch and lands on "" — "leave it alone" — rather than being
- * flattened into whichever single theme happened to come next.
- */
-export function nextTheme(current: string, available: readonly string[]): string {
-	const ring = ["", ...available.filter((name) => name !== "")];
-	const index = ring.indexOf(current);
-    // An unknown current theme (e.g. removed from disk) restarts the ring.
-	return ring[(index === -1 ? 0 : index + 1) % ring.length];
-}
-
-export function buildRows(config: CockpitConfig, themes: readonly string[]): SettingsRow[] {
+export function buildRows(config: CockpitConfig): SettingsRow[] {
 	return [
 		{
 			key: "enabled",
@@ -105,17 +90,15 @@ export function buildRows(config: CockpitConfig, themes: readonly string[]): Set
 			accel: "h",
 			label: "theme",
 			value: themeLabel(config.theme),
-			next: themeLabel(nextTheme(config.theme, themes)),
+			// Not a cycle: this row opens the /theme picker, which previews live and
+			// reverts on Esc. Blind-cycling a name list could not do either.
+			next: "open /theme",
 		},
 	];
 }
 
 /** Apply the row's cycle to the config, returning a new config object. */
-export function applyRow(
-	config: CockpitConfig,
-	key: string,
-	themes: readonly string[],
-): CockpitConfig {
+export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
 	switch (key) {
 		case "enabled":
 			return { ...config, enabled: !config.enabled };
@@ -129,8 +112,8 @@ export function applyRow(
 			return { ...config, hideNativeAgents: !config.hideNativeAgents };
 		case "icons":
 			return { ...config, icons: { mode: cycle(ICON_MODES, config.icons.mode) } };
-		case "theme":
-			return { ...config, theme: nextTheme(config.theme, themes) };
+		// "theme" is intentionally absent: the row hands off to the /theme picker,
+		// which owns both the preview and the write-through to pi's settings.
 		default:
 			return config;
 	}

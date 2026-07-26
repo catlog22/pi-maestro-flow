@@ -1,62 +1,54 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { applyRow, buildRows, nextTheme, rowKeyForAccel } from "../src/settings-view.ts";
+import { applyRow, buildRows, rowKeyForAccel } from "../src/settings-view.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";
 
-const THEMES = ["dark", "light", "solarized"];
+// The theme row is a hand-off to the /theme picker, not a cycle: it has no "next
+// value" to advertise and applyRow deliberately ignores it.
+const CYCLING_ROWS = (key: string): boolean => key !== "theme";
 
-test("every row advertises the value its next press produces", () => {
-	const rows = buildRows(DEFAULT_CONFIG, THEMES);
+test("every cycling row advertises the value its next press produces", () => {
+	const rows = buildRows(DEFAULT_CONFIG).filter((row) => CYCLING_ROWS(row.key));
 	for (const row of rows) {
-		const after = buildRows(applyRow(DEFAULT_CONFIG, row.key, THEMES), THEMES)
+		const after = buildRows(applyRow(DEFAULT_CONFIG, row.key))
 			.find((candidate) => candidate.key === row.key);
 		assert.equal(after?.value, row.next, `row ${row.key} mis-advertises its next value`);
 	}
 });
 
 test("accelerators are unique and resolve to their row", () => {
-	const rows = buildRows(DEFAULT_CONFIG, THEMES);
+	const rows = buildRows(DEFAULT_CONFIG);
 	assert.equal(new Set(rows.map((r) => r.accel)).size, rows.length);
 	for (const row of rows) assert.equal(rowKeyForAccel(rows, row.accel), row.key);
 });
 
-test("theme cycles through the host list and back to the pi default", () => {
-	assert.equal(nextTheme("", THEMES), "dark");
-	assert.equal(nextTheme("dark", THEMES), "light");
-	assert.equal(nextTheme("solarized", THEMES), "");
-	// Empty means "do not override", so it must survive when no themes exist.
-	assert.equal(nextTheme("", []), "");
-});
-
-test("a theme that no longer exists restarts the cycle instead of sticking", () => {
-	assert.equal(nextTheme("deleted-theme", THEMES), "");
-});
-
 test("icon mode is reachable from the panel so a tofu terminal can escape to ascii", () => {
-	const rows = buildRows(DEFAULT_CONFIG, THEMES);
+	const rows = buildRows(DEFAULT_CONFIG);
 	assert.ok(rows.some((row) => row.key === "icons"));
 	let config = DEFAULT_CONFIG;
 	const seen = new Set<string>();
 	for (let i = 0; i < 3; i++) {
-		config = applyRow(config, "icons", THEMES);
+		config = applyRow(config, "icons");
 		seen.add(config.icons.mode);
 	}
 	assert.deepEqual([...seen].sort(), ["ascii", "auto", "nerd"]);
 });
 
 test("applyRow leaves the config untouched for an unknown key", () => {
-	assert.deepEqual(applyRow(DEFAULT_CONFIG, "nope", THEMES), DEFAULT_CONFIG);
+	assert.deepEqual(applyRow(DEFAULT_CONFIG, "nope"), DEFAULT_CONFIG);
 });
 
-test("an automatic light/dark pair is not flattened into a single theme", () => {
-	// pi stores automatic mode as "light/dark"; cockpit's ring cannot build that,
-	// so cycling from it must land on "leave it alone", never on a single theme.
-	assert.equal(nextTheme("one-light/one-dark", ["nord", "gruvbox"]), "");
+test("applyRow never writes the theme — /theme owns that, including the pi settings write", () => {
+	// Guards the regression this replaced: a blind name cycle here would silently
+	// flatten an automatic "light/dark" pair that cockpit cannot rebuild.
+	const paired = { ...DEFAULT_CONFIG, theme: "one-light/one-dark" };
+	assert.deepEqual(applyRow(paired, "theme"), paired);
 });
 
-test("the theme row names pi as the owner, not cockpit", () => {
-	const rows = buildRows({ ...DEFAULT_CONFIG, theme: "" }, ["nord"]);
+test("the theme row names pi as the owner and advertises the hand-off", () => {
+	const rows = buildRows({ ...DEFAULT_CONFIG, theme: "" });
 	const themeRow = rows.find((r) => r.key === "theme")!;
 	assert.equal(themeRow.value, "(pi settings)");
+	assert.equal(themeRow.next, "open /theme");
 	assert.doesNotMatch(themeRow.value, /default/);
 });

@@ -119,3 +119,11 @@ export function fitLineByPriority(
 	);
 	return fitted.join(separator);
 }
+
+/**
+ * First visible index of a scrolling window that keeps `selected` centred where
+ * it can, and flush against either end where it cannot.
+ */
+export function visibleStart(selected: number, length: number, size: number): number {
+	return Math.max(0, Math.min(selected - Math.floor(size / 2), Math.max(0, length - size)));
+}
