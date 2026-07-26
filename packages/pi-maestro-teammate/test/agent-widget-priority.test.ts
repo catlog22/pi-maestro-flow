@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { renderAgentStatusWidget } from "../src/extension/index.ts";
 
-test("agent widget keeps failed work and the live edge visible in the compact budget", () => {
+test("agent widget keeps recent failed work and the latest live edge visible in the compact budget", () => {
   const now = Date.now();
   const progress = Array.from({ length: 8 }, (_, taskIndex) => ({
     agent: "worker",
@@ -11,6 +11,7 @@ test("agent widget keeps failed work and the live edge visible in the compact bu
     taskIndex,
     dependencies: [],
     status: taskIndex === 7 ? "running" as const : "failed" as const,
+    lastActivityAt: taskIndex === 7 ? now + 1 : now - taskIndex,
   }));
   const parent = {
     agent: "graph",
