@@ -2,6 +2,7 @@ import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { AgentRow, TodoItem, ViewMode } from "./types.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { fitLineByPriority, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
+import { fitRows } from "./viewport.ts";
 
 // Re-exported for existing importers; the shared implementation lives in layout.ts.
 export type { WidthUtils };
@@ -40,6 +41,12 @@ export interface RenderOpts {
 	 * on adjacent rows — a wasted row out of a very small vertical budget.
 	 */
 	withHead?: boolean;
+	/**
+	 * Total rows this call may return, including its own summary and overflow
+	 * marker. Undefined means the terminal height is unknown, so the historical
+	 * fixed caps apply.
+	 */
+	maxRows?: number;
 }
 
 export const DEFAULT_TOGGLE_HINT = "Alt+T";
@@ -198,9 +205,13 @@ export function renderAgents(
 	const spin = opts.spin ?? "~";
 	const now = opts.now ?? Date.now();
 	const tree = buildAgentTree(rows, g);
-	const maxVisible = width < NARROW_WIDTH ? 3 : 6;
-	const visible = tree.slice(0, maxVisible);
-	const hidden = tree.length - visible.length;
+	// Width decides how much a row can say; height decides how many rows exist.
+	// The width cap counts roster rows and lets the overflow marker sit on top of
+	// it; maxRows is a hard ceiling on everything this call emits, marker included.
+	const widthCap = width < NARROW_WIDTH ? 3 : 6;
+	const budget = Math.min(widthCap + 1, opts.maxRows ?? Number.POSITIVE_INFINITY);
+	const { visible: visibleCount, hidden } = fitRows(tree.length, budget);
+	const visible = tree.slice(0, visibleCount);
 
 	// Priorities, not concatenation order, decide what survives a narrow terminal.
 	// Identity (tree position, state, role, task) outranks telemetry (tool, tail,
@@ -380,7 +391,13 @@ export function renderTodos(
 
 	// sorted + capped task rows
 	const ordered = [...items].sort((a, b) => todoDisplayRank(a, now) - todoDisplayRank(b, now));
-	const visible = ordered.slice(0, TODO_MAX_VISIBLE);
+	// The summary line is already spent, so the task rows compete for what is left.
+	const budget = Math.min(
+		TODO_MAX_VISIBLE + 1,
+		opts.maxRows !== undefined ? opts.maxRows - 1 : Number.POSITIVE_INFINITY,
+	);
+	const { visible: visibleCount, hidden } = fitRows(ordered.length, budget);
+	const visible = ordered.slice(0, visibleCount);
 	const rows: string[] = [summaryLine];
 	for (const it of visible) {
 		let glyph: string;
@@ -432,7 +449,6 @@ export function renderTodos(
 		}
 		rows.push(utils.clip(segments.join(" "), width, ell));
 	}
-	const hidden = ordered.length - visible.length;
 	if (hidden > 0) rows.push(utils.clip(theme.fg("dim", `  ${g.ellipsis} ${hidden} more`), width, ell));
 	return rows;
 }

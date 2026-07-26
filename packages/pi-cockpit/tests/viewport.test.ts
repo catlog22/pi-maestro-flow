@@ -1,0 +1,81 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { CHROME_SHARE, MAX_PANEL_ROWS, MIN_PANEL_ROWS, fitRows, panelRows } from "../src/viewport.ts";
+import { renderAgents, renderTodos } from "../src/render.ts";
+import { resolveGlyphs } from "../src/icons.ts";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import type { AgentRow, TodoItem } from "../src/types.ts";
+import type { WidthUtils } from "../src/layout.ts";
+
+const theme: Pick<Theme, "fg"> = { fg: (_c, t) => t };
+const utils: WidthUtils = {
+	measure: (s) => s.length,
+	clip: (s, w, e) => (s.length <= w ? s : s.slice(0, Math.max(0, w - e.length)) + e),
+};
+const glyphs = resolveGlyphs("nerd");
+
+test("panelRows scales with the terminal and stays inside its bounds", () => {
+	assert.equal(panelRows(100), MAX_PANEL_ROWS);
+	assert.equal(panelRows(5), MIN_PANEL_ROWS);
+	assert.equal(panelRows(30), Math.floor(30 * CHROME_SHARE));
+});
+
+test("panelRows is undefined when the height is unknown or nonsensical", () => {
+	assert.equal(panelRows(undefined), undefined);
+	assert.equal(panelRows(0), undefined);
+	assert.equal(panelRows(-4), undefined);
+	assert.equal(panelRows(Number.NaN), undefined);
+});
+
+test("fitRows pays for the overflow marker out of the budget", () => {
+	assert.deepEqual(fitRows(3, 5), { visible: 3, hidden: 0 });
+	assert.deepEqual(fitRows(5, 5), { visible: 5, hidden: 0 });
+	assert.deepEqual(fitRows(10, 5), { visible: 4, hidden: 6 });
+	assert.deepEqual(fitRows(10, 1), { visible: 0, hidden: 10 });
+	assert.deepEqual(fitRows(10, 0), { visible: 0, hidden: 10 });
+});
+
+function agentRow(i: number): AgentRow {
+	return {
+		agent: `a${i}`,
+		correlationId: `c${i}`,
+		name: `a${i}`,
+		role: "executor",
+		task: `task ${i}`,
+		status: "running",
+		startedAt: 0,
+		toolCount: 0,
+	} as AgentRow;
+}
+
+function todoItem(i: number): TodoItem {
+	return { id: `t${i}`, subject: `task ${i}`, status: "pending", blockedBy: [], skills: [] } as unknown as TodoItem;
+}
+
+test("a short terminal shrinks the agent roster instead of overrunning the screen", () => {
+	const rows = Array.from({ length: 20 }, (_, i) => agentRow(i));
+	const opts = { glyphs, spin: "*", now: 0, withHead: false };
+	const tall = renderAgents(rows, "list", 100, theme, utils, opts);
+	const short = renderAgents(rows, "list", 100, theme, utils, { ...opts, maxRows: 3 });
+	assert.equal(tall.length, 7, "unbounded height keeps the historical 6 rows + overflow");
+	assert.equal(short.length, 3, "a 3-row budget is a hard ceiling");
+	assert.match(short.at(-1)!, /18 more/);
+});
+
+test("a short terminal shrinks the todo panel, summary line included in the budget", () => {
+	const items = Array.from({ length: 20 }, (_, i) => todoItem(i));
+	const opts = { glyphs, spin: "*", now: 0, expanded: true };
+	const tall = renderTodos(items, "list", 100, theme, utils, opts);
+	const short = renderTodos(items, "list", 100, theme, utils, { ...opts, maxRows: 4 });
+	assert.equal(tall.length, 10, "unbounded height keeps summary + 8 rows + overflow");
+	assert.equal(short.length, 4, "summary + 2 tasks + overflow marker");
+	assert.match(short.at(-1)!, /18 more/);
+});
+
+test("a generous budget never inflates a panel beyond what it has to say", () => {
+	const rows = [agentRow(0), agentRow(1)];
+	const lines = renderAgents(rows, "list", 100, theme, utils, {
+		glyphs, spin: "*", now: 0, withHead: false, maxRows: MAX_PANEL_ROWS,
+	});
+	assert.equal(lines.length, 2);
+});

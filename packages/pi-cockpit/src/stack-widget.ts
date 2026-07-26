@@ -5,6 +5,7 @@ import { renderAgents, renderTodos, type PaintTheme, type WidthUtils } from "./r
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { fitLineByPriority, type PrioritizedSegment } from "./layout.ts";
 import { resolveGlyphs, spinFrame } from "./icons.ts";
+import { panelRows } from "./viewport.ts";
 import type { AgentRow, BashBgJob, CockpitConfig, TodoItem } from "./types.ts";
 
 export interface TodoWidgetDeps {
@@ -24,9 +25,20 @@ export interface AgentWidgetDeps {
 
 const UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 
+// The TUI exposes the live terminal size, but a widget must never fail to render
+// because a host handed it a stub without one.
+function terminalRows(tui: TUI): number | undefined {
+	try {
+		const rows = tui.terminal?.rows;
+		return typeof rows === "number" && rows > 0 ? rows : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 // Todo widget: pinned above the editor (setWidget "cockpit-stack", aboveEditor).
 export function makeTodoWidget(deps: TodoWidgetDeps) {
-	return (_tui: TUI, theme: Theme) => {
+	return (tui: TUI, theme: Theme) => {
 		const paint: PaintTheme = theme;
 		return {
 			render(width: number): string[] {
@@ -36,7 +48,13 @@ export function makeTodoWidget(deps: TodoWidgetDeps) {
 				const g = resolveGlyphs(cfg.icons.mode);
 				const now = Date.now();
 				const spin = spinFrame(g, now, deps.isAnimating?.() ?? true);
-				const opts = { glyphs: g, spin, now, expanded: cfg.todoExpanded };
+				const opts = {
+					glyphs: g,
+					spin,
+					now,
+					expanded: cfg.todoExpanded,
+					maxRows: panelRows(terminalRows(tui)),
+				};
 				return renderTodos(todos, cfg.todoExpanded ? "list" : cfg.todoMode, width, paint, UTILS, opts);
 			},
 			invalidate(): void {},
@@ -47,7 +65,7 @@ export function makeTodoWidget(deps: TodoWidgetDeps) {
 
 // Agent widget: pinned below the editor, near the input box (setWidget "cockpit-agents", belowEditor).
 export function makeAgentWidget(deps: AgentWidgetDeps) {
-	return (_tui: TUI, theme: Theme) => {
+	return (tui: TUI, theme: Theme) => {
 		const paint: PaintTheme = theme;
 		return {
 			render(width: number): string[] {
@@ -65,7 +83,13 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				});
 				if (agents.length === 0) return bashBgLines;
 				const running = deps.isRunning();
-				const opts = { glyphs: g, spin, now };
+				// The panel budget covers everything this widget prints, so the header
+				// and the background strip are charged to it before the roster is.
+				const panel = panelRows(terminalRows(tui));
+				const rosterRows = panel === undefined
+					? undefined
+					: Math.max(1, panel - 1 - bashBgLines.length);
+				const opts = { glyphs: g, spin, now, maxRows: rosterRows };
 				const dot = theme.fg(running ? "success" : "muted", running ? g.dotRunning : g.dotIdle);
 				const failedCount = agents.filter((a) => a.status === "failed").length;
 				const runCount = agents.filter((a) => a.status === "running" || a.status === "retrying").length;
