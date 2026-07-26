@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync, readdirSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after, before } from "node:test";
@@ -67,6 +67,32 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   assert.equal(pkg.peerDependencies?.["pi-maestro-teammate"], undefined);
   assert.equal(pkg.peerDependenciesMeta?.["pi-maestro-teammate"], undefined);
   assert.doesNotMatch(JSON.stringify(pkg), /file:D:|D:\\\\maestro2|link:/i);
+});
+
+test("the teammate dependency resolves to the workspace, not a nested copy", () => {
+  // pi-maestro-teammate ships raw .ts (main is ./src/index.ts, there is no build step),
+  // so it is only loadable because the workspace link resolves to a realpath *outside*
+  // node_modules — node refuses to strip types for anything under node_modules.
+  //
+  // A nested real directory here shadows that link and takes every suite that reaches
+  // teammate code down with ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING. It appears when
+  // the declared range stops matching the workspace version, and npm installs a registry
+  // copy; re-aligning the versions afterwards does not remove the copy it left behind.
+  // The manifest check above prevents the drift — this one catches the leftover.
+  const nested = join(root, "node_modules", "pi-maestro-teammate");
+  assert.equal(
+    existsSync(nested),
+    false,
+    `${nested} shadows the workspace link; remove it (or re-run npm install from the repo root)`,
+  );
+
+  const linked = join(root, "..", "..", "node_modules", "pi-maestro-teammate");
+  assert.equal(existsSync(linked), true, "the workspace link is missing; run npm install from the repo root");
+  assert.equal(
+    realpathSync(linked),
+    realpathSync(teammateRoot),
+    "the hoisted teammate entry must resolve to packages/pi-maestro-teammate",
+  );
 });
 
 test("teammate package publishes a versioned API with a real root entry", () => {
