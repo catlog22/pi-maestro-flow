@@ -11,6 +11,20 @@ import {
 const root = join(dirname(fileURLToPath(import.meta.url)), "..");
 const teammateRoot = join(root, "..", "pi-maestro-teammate");
 const exactSemver = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/;
+const teammatePublicExports = {
+  ".": ["./types/index.d.ts", "./src/index.ts"],
+  "./v1": ["./types/public/v1/index.d.ts", "./src/public/v1/index.ts"],
+  "./v1/agents": ["./types/public/v1/agents.d.ts", "./src/public/v1/agents.ts"],
+  "./v1/child-extensions": ["./types/public/v1/child-extensions.d.ts", "./src/public/v1/child-extensions.ts"],
+  "./v1/events": ["./types/public/v1/events.d.ts", "./src/public/v1/events.ts"],
+  "./v1/execution": ["./types/public/v1/execution.d.ts", "./src/public/v1/execution.ts"],
+  "./v1/extension": ["./types/public/v1/extension.d.ts", "./src/public/v1/extension.ts"],
+  "./v1/model-routing": ["./types/public/v1/model-routing.d.ts", "./src/public/v1/model-routing.ts"],
+  "./v1/prompts": ["./types/public/v1/prompts.d.ts", "./src/public/v1/prompts.ts"],
+  "./v1/progress-tree": ["./types/public/v1/progress-tree.d.ts", "./src/public/v1/progress-tree.ts"],
+  "./v1/retry": ["./types/public/v1/retry.d.ts", "./src/public/v1/retry.ts"],
+  "./v1/types": ["./types/public/v1/types.d.ts", "./src/public/v1/types.ts"],
+};
 
 before(() => preparePackagedSkills());
 after(() => cleanPackagedSkills());
@@ -51,19 +65,21 @@ test("teammate package publishes a versioned API with a real root entry", () => 
   const pkg = JSON.parse(readFileSync(join(teammateRoot, "package.json"), "utf8"));
   assert.match(pkg.version, exactSemver);
   assert.equal(pkg.main, "./src/index.ts");
-  assert.equal(pkg.types, "./src/index.ts");
-  assert.equal(pkg.exports["."], pkg.main);
+  assert.equal(pkg.types, "./types/index.d.ts");
+  assert.equal(pkg.files.includes("types/**/*.d.ts"), true);
   assert.equal(pkg.dependencies["cross-spawn"], "7.0.6");
   assert.equal(pkg.exports["./src/*"], "./src/*");
   assert.match(pkg.deprecatedSubpaths["./src/*"], /Compatibility only/);
 
-  for (const [subpath, target] of Object.entries(pkg.exports)) {
-    if (subpath.includes("*") || typeof target !== "string") continue;
-    assert.equal(
-      existsSync(join(teammateRoot, target)),
-      true,
-      `${subpath} must target a packaged source file: ${target}`,
-    );
+  for (const [subpath, [types, defaultTarget]] of Object.entries(teammatePublicExports)) {
+    assert.deepEqual(pkg.exports[subpath], { types, default: defaultTarget });
+    for (const target of [types, defaultTarget]) {
+      assert.equal(
+        existsSync(join(teammateRoot, target)),
+        true,
+        `${subpath} must target a packaged file: ${target}`,
+      );
+    }
   }
 });
 

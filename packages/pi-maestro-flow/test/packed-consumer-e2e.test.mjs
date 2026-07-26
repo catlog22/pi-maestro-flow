@@ -16,6 +16,27 @@ import test from "node:test";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localTeammateRoot = resolve(packageRoot, "..", "pi-maestro-teammate");
+const localFlowPackage = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+const localTeammatePackage = JSON.parse(readFileSync(join(localTeammateRoot, "package.json"), "utf8"));
+const piSdkVersion = localFlowPackage.devDependencies["@earendil-works/pi-coding-agent"];
+const piCodingAgentPackage = JSON.parse(readFileSync(
+  join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"),
+  "utf8",
+));
+const teammatePublicSpecifiers = [
+  "pi-maestro-teammate",
+  "pi-maestro-teammate/v1",
+  "pi-maestro-teammate/v1/agents",
+  "pi-maestro-teammate/v1/child-extensions",
+  "pi-maestro-teammate/v1/events",
+  "pi-maestro-teammate/v1/execution",
+  "pi-maestro-teammate/v1/extension",
+  "pi-maestro-teammate/v1/model-routing",
+  "pi-maestro-teammate/v1/prompts",
+  "pi-maestro-teammate/v1/progress-tree",
+  "pi-maestro-teammate/v1/retry",
+  "pi-maestro-teammate/v1/types",
+];
 const require = createRequire(import.meta.url);
 const npmCommand = [process.execPath, process.env.npm_execpath ?? require.resolve("npm/bin/npm-cli.js")];
 const packTimeout = 360_000;
@@ -55,10 +76,12 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
     const flowTarball = join(root, flowPacked[0].filename);
     assert.equal(existsSync(teammateTarball), true);
     assert.equal(existsSync(flowTarball), true);
-    assert.equal(teammatePacked[0].version, "0.4.5");
-    assert.equal(flowPacked[0].version, "0.4.10");
+    assert.equal(teammatePacked[0].version, localTeammatePackage.version);
+    assert.equal(flowPacked[0].version, localFlowPackage.version);
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/index.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/public/v1/execution.ts"));
+    assert.ok(teammatePacked[0].files.some(({ path }) => path === "types/index.d.ts"));
+    assert.ok(teammatePacked[0].files.some(({ path }) => path === "types/public/v1/execution.d.ts"));
 
     writeFileSync(join(consumer, "package.json"), `${JSON.stringify({ private: true }, null, 2)}\n`);
     const installEnv = {
@@ -74,7 +97,13 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
         "install",
         teammateTarball,
         flowTarball,
-        "@earendil-works/pi-coding-agent@0.74.0",
+        `@earendil-works/pi-agent-core@${piSdkVersion}`,
+        `@earendil-works/pi-ai@${piSdkVersion}`,
+        `@earendil-works/pi-coding-agent@${piSdkVersion}`,
+        `@earendil-works/pi-tui@${piSdkVersion}`,
+        `@types/cross-spawn@${localFlowPackage.devDependencies["@types/cross-spawn"]}`,
+        `@types/node@${piCodingAgentPackage.devDependencies["@types/node"]}`,
+        `typescript@${piCodingAgentPackage.devDependencies.typescript}`,
         "--no-audit",
         "--no-fund",
       ],
@@ -85,22 +114,64 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
 
     const installed = join(consumer, "node_modules", "pi-maestro-flow");
     const installedPackage = JSON.parse(readFileSync(join(installed, "package.json"), "utf8"));
-    assert.equal(installedPackage.version, "0.4.10");
+    assert.equal(installedPackage.version, localFlowPackage.version);
     assert.equal(
       installedPackage.dependencies["maestro-flow"],
-      "0.5.51",
+      localFlowPackage.dependencies["maestro-flow"],
     );
-    assert.equal(installedPackage.dependencies["pi-maestro-teammate"], "0.4.5");
+    assert.equal(installedPackage.dependencies["pi-maestro-teammate"], localTeammatePackage.version);
     const installedMaestro = join(consumer, "node_modules", "maestro-flow");
     const installedTeammate = join(consumer, "node_modules", "pi-maestro-teammate");
     assert.equal(lstatSync(installed).isSymbolicLink(), false);
     assert.equal(lstatSync(installedMaestro).isSymbolicLink(), false);
     assert.equal(lstatSync(installedTeammate).isSymbolicLink(), false);
     const installedTeammatePackage = JSON.parse(readFileSync(join(installedTeammate, "package.json"), "utf8"));
-    assert.equal(installedTeammatePackage.version, "0.4.5");
+    assert.equal(installedTeammatePackage.version, localTeammatePackage.version);
     assert.equal(installedTeammatePackage.dependencies["cross-spawn"], "7.0.6");
+    assert.equal(installedTeammatePackage.types, "./types/index.d.ts");
     assert.equal(existsSync(join(installed, ".pi", "skills", "workflow-skill-designer", "SKILL.md")), true);
     assert.equal(existsSync(join(installed, "src", "extension", "index.ts")), true);
+    const extensionPath = join(installed, "src", "extension", "index.ts");
+    const piCommand = [
+      process.execPath,
+      join(consumer, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
+    ];
+    const runtimeEnv = {
+      ...installEnv,
+      PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
+    };
+    const runtimeProbePath = join(consumer, "teammate-runtime-probe.json");
+    const runtimeVerifierPath = join(consumer, "verify-teammate-runtime.ts");
+    writeFileSync(
+      runtimeVerifierPath,
+      `${teammatePublicSpecifiers
+        .map((specifier, index) => `import * as publicApi${index} from ${JSON.stringify(specifier)};`)
+        .join("\n")}
+import { writeFileSync } from "node:fs";
+const specifiers = ${JSON.stringify(teammatePublicSpecifiers)};
+const loaded = [${teammatePublicSpecifiers.map((_, index) => `publicApi${index}`).join(", ")}]
+  .map((publicApi) => Object.keys(publicApi).length);
+export default function register(pi) {
+  pi.on("session_start", () => {
+    writeFileSync(${JSON.stringify(runtimeProbePath)}, JSON.stringify({ specifiers, loaded }));
+  });
+}
+`,
+    );
+    run(
+      piCommand,
+      [
+        "--offline", "--mode", "rpc", "--no-session", "--no-extensions", "--no-skills",
+        "--no-context-files", "--extension", runtimeVerifierPath,
+      ],
+      workflowRoot,
+      runtimeEnv,
+      45_000,
+      `${JSON.stringify({ id: "state", type: "get_state" })}\n`,
+    );
+    const runtimeProbe = JSON.parse(readFileSync(runtimeProbePath, "utf8"));
+    assert.deepEqual(runtimeProbe.specifiers, teammatePublicSpecifiers);
+    assert.equal(runtimeProbe.loaded.length, teammatePublicSpecifiers.length);
     assert.match(
       run(
         [process.execPath],
@@ -115,15 +186,50 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       /pi-maestro-teammate[\\/]src[\\/]public[\\/]v1[\\/]execution\.ts$/,
     );
 
-    const extensionPath = join(installed, "src", "extension", "index.ts");
-    const piCommand = [
-      process.execPath,
-      join(consumer, "node_modules", "@earendil-works", "pi-coding-agent", "dist", "cli.js"),
-    ];
-    const runtimeEnv = {
-      ...installEnv,
-      PATH: `${join(consumer, "node_modules", ".bin")}${delimiter}${process.env.PATH ?? ""}`,
-    };
+    const typeFixture = join(consumer, "teammate-public-api.mts");
+    writeFileSync(
+      typeFixture,
+      `${teammatePublicSpecifiers
+        .map((specifier, index) => `import * as publicApi${index} from ${JSON.stringify(specifier)};`)
+        .join("\n")}
+void [${teammatePublicSpecifiers.map((_, index) => `publicApi${index}`).join(", ")}];
+`,
+    );
+    writeFileSync(
+      join(consumer, "tsconfig.json"),
+      `${JSON.stringify({
+        compilerOptions: {
+          strict: true,
+          target: "ESNext",
+          lib: ["ESNext", "DOM", "DOM.Iterable"],
+          module: "ESNext",
+          moduleResolution: "Bundler",
+          noEmit: true,
+          resolveJsonModule: true,
+          types: ["node"],
+        },
+        files: ["teammate-public-api.mts"],
+      }, null, 2)}\n`,
+    );
+    const typeResolution = run(
+      [process.execPath],
+      [
+        join(consumer, "node_modules", "typescript", "bin", "tsc"),
+        "-p",
+        "tsconfig.json",
+        "--noEmit",
+        "--traceResolution",
+        "--listFilesOnly",
+        "--pretty",
+        "false",
+      ],
+      consumer,
+      installEnv,
+    );
+    const normalizedTypeResolution = typeResolution.stdout.replaceAll("\\", "/").toLowerCase();
+    assert.match(normalizedTypeResolution, /pi-maestro-teammate\/types\/public\/v1\/execution\.d\.ts/);
+    assert.doesNotMatch(normalizedTypeResolution, /pi-maestro-teammate\/src\/.*\.ts/);
+
     const childToolsPath = join(consumer, "child-tools.json");
     const childVerifierPath = join(consumer, "verify-child-tools.mjs");
     writeFileSync(childVerifierPath, `import { writeFileSync } from "node:fs";
@@ -222,12 +328,11 @@ export default function register(pi) {
     assert.ok(messages.some((message) => message.id === "state" && message.type === "response"), rpc.stdout);
     const messageResponse = messages.find((message) => message.id === "messages" && message.type === "response");
     assert.ok(messageResponse, rpc.stdout);
-    const attachEvidence = JSON.stringify(messageResponse);
-    assert.match(attachEvidence, /workflow-attach/);
-    assert.match(attachEvidence, new RegExp(sessionId));
-    assert.match(attachEvidence, new RegExp(executeRun.run_id));
-    assert.match(attachEvidence, /"todoId":"[^"]+"/);
-    assert.match(attachEvidence, /"nextAction":"[^"]+"/);
+    assert.doesNotMatch(
+      JSON.stringify(messageResponse),
+      /workflow-attach/,
+      "a fresh packed Pi session must not implicitly opt into an active Workflow",
+    );
 
     completeStage("execute", executeRun);
     completeStage("verify", createStage("verify"));
@@ -266,6 +371,7 @@ function run(command, args, cwd, env = process.env, timeout = 60_000, input) {
     timeout,
     windowsHide: true,
     shell: false,
+    maxBuffer: 32 * 1024 * 1024,
   });
   assert.equal(
     result.status,

@@ -4,6 +4,8 @@
     "target": "ESNext",
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
+    "allowImportingTsExtensions": true,
+    "noEmit": true,
     "declaration": true,
     "declarationMap": true,
     "sourceMap": true,

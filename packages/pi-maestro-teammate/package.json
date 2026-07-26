@@ -12,23 +12,62 @@
   ],
   "scripts": {
     "test": "node --experimental-transform-types --test \"test/*.test.ts\"",
-    "typecheck": "tsc -p tsconfig.build.json"
+    "typecheck": "tsc -p tsconfig.build.json",
+    "build:declarations": "tsc -p tsconfig.declarations.json",
+    "check:declarations": "node scripts/check-declarations.mjs",
+    "prepack": "npm run build:declarations"
   },
   "main": "./src/index.ts",
-  "types": "./src/index.ts",
+  "types": "./types/index.d.ts",
   "exports": {
-    ".": "./src/index.ts",
-    "./v1": "./src/public/v1/index.ts",
-    "./v1/agents": "./src/public/v1/agents.ts",
-    "./v1/child-extensions": "./src/public/v1/child-extensions.ts",
-    "./v1/events": "./src/public/v1/events.ts",
-    "./v1/execution": "./src/public/v1/execution.ts",
-    "./v1/extension": "./src/public/v1/extension.ts",
-    "./v1/model-routing": "./src/public/v1/model-routing.ts",
-    "./v1/prompts": "./src/public/v1/prompts.ts",
-    "./v1/progress-tree": "./src/public/v1/progress-tree.ts",
-    "./v1/retry": "./src/public/v1/retry.ts",
-    "./v1/types": "./src/public/v1/types.ts",
+    ".": {
+      "types": "./types/index.d.ts",
+      "default": "./src/index.ts"
+    },
+    "./v1": {
+      "types": "./types/public/v1/index.d.ts",
+      "default": "./src/public/v1/index.ts"
+    },
+    "./v1/agents": {
+      "types": "./types/public/v1/agents.d.ts",
+      "default": "./src/public/v1/agents.ts"
+    },
+    "./v1/child-extensions": {
+      "types": "./types/public/v1/child-extensions.d.ts",
+      "default": "./src/public/v1/child-extensions.ts"
+    },
+    "./v1/events": {
+      "types": "./types/public/v1/events.d.ts",
+      "default": "./src/public/v1/events.ts"
+    },
+    "./v1/execution": {
+      "types": "./types/public/v1/execution.d.ts",
+      "default": "./src/public/v1/execution.ts"
+    },
+    "./v1/extension": {
+      "types": "./types/public/v1/extension.d.ts",
+      "default": "./src/public/v1/extension.ts"
+    },
+    "./v1/model-routing": {
+      "types": "./types/public/v1/model-routing.d.ts",
+      "default": "./src/public/v1/model-routing.ts"
+    },
+    "./v1/prompts": {
+      "types": "./types/public/v1/prompts.d.ts",
+      "default": "./src/public/v1/prompts.ts"
+    },
+    "./v1/progress-tree": {
+      "types": "./types/public/v1/progress-tree.d.ts",
+      "default": "./src/public/v1/progress-tree.ts"
+    },
+    "./v1/retry": {
+      "types": "./types/public/v1/retry.d.ts",
+      "default": "./src/public/v1/retry.ts"
+    },
+    "./v1/types": {
+      "types": "./types/public/v1/types.d.ts",
+      "default": "./src/public/v1/types.ts"
+    },
     "./src/*": "./src/*"
   },
   "deprecatedSubpaths": {
@@ -36,6 +75,7 @@
   },
   "files": [
     "src/**/*.ts",
+    "types/**/*.d.ts",
     "agents/",
     "prompts/",
     "README.md"
@@ -70,10 +110,10 @@
     "typebox": "^1.1.24"
   },
   "devDependencies": {
-    "@earendil-works/pi-agent-core": "0.80.3",
-    "@earendil-works/pi-ai": "0.80.3",
-    "@earendil-works/pi-coding-agent": "0.80.3",
-    "@earendil-works/pi-tui": "0.80.3"
+    "@earendil-works/pi-agent-core": "0.82.1",
+    "@earendil-works/pi-ai": "0.82.1",
+    "@earendil-works/pi-coding-agent": "0.82.1",
+    "@earendil-works/pi-tui": "0.82.1"
   },
   "directories": {
     "test": "test"
