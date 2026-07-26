@@ -57,6 +57,14 @@ export interface CompletePayload {
 	correlationId: string;
 }
 
+/**
+ * How long a failed agent stays on screen after it completes.
+ *
+ * Long enough to read the role and the tail that explains it; short enough that
+ * the panel still empties itself without the user clearing anything.
+ */
+export const FAILED_LINGER_MS = 30_000;
+
 function deriveRole(agent: string | undefined, name: string | undefined): string {
 	if (agent && !agent.startsWith("graph(")) return clean(agent);
 	return clean(name) || "agent";
@@ -154,7 +162,7 @@ export class AgentsStore {
 		if (Array.isArray(p.dependencies)) row.dependencies = [...p.dependencies];
 	}
 
-	applyComplete(p: CompletePayload): void {
+	applyComplete(p: CompletePayload, now = Date.now()): void {
 		const pending = [p.correlationId];
 		const visited = new Set<string>();
 		while (pending.length > 0) {
@@ -164,8 +172,37 @@ export class AgentsStore {
 			for (const row of this.roster.values()) {
 				if (row.parentCorrelationId === id) pending.push(row.correlationId);
 			}
-			this.roster.delete(id);
+			// A failed agent used to be deleted the moment its result arrived, so the
+			// only evidence of the failure disappeared in the same frame it appeared.
+			// Successes still vanish immediately — the work has simply moved on.
+			const row = this.roster.get(id);
+			if (row?.status === "failed") {
+				row.failedAt = now;
+				delete row.activeTool;
+			} else {
+				this.roster.delete(id);
+			}
 		}
+	}
+
+	/** Drop failed rows that have had their time on screen. Returns true if any went. */
+	prune(now = Date.now()): boolean {
+		let changed = false;
+		for (const [id, row] of this.roster) {
+			if (row.failedAt !== undefined && now - row.failedAt >= FAILED_LINGER_MS) {
+				this.roster.delete(id);
+				changed = true;
+			}
+		}
+		return changed;
+	}
+
+	/** True while a failed row is still counting down, so the redraw loop must run. */
+	hasLingering(): boolean {
+		for (const row of this.roster.values()) {
+			if (row.failedAt !== undefined) return true;
+		}
+		return false;
 	}
 
 	private applyProgress(parentCorrelationId: string, p: ProgressPayload): void {
@@ -197,7 +234,10 @@ export class AgentsStore {
 		}
 	}
 
-	snapshot(): AgentRow[] {
+	snapshot(now = Date.now()): AgentRow[] {
+		// Expiry is driven by reads rather than a dedicated timer: the panel is
+		// already redrawn while anything is lingering, and nothing else has to know.
+		this.prune(now);
 		return [...this.roster.values()].sort((a, b) => {
 			const ar = a.status === "running" ? 0 : 1;
 			const br = b.status === "running" ? 0 : 1;

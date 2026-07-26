@@ -38,6 +38,8 @@ export interface AgentRow {
 	activeTool?: string;
 	taskIndex?: number;
 	dependencies?: number[];
+	/** Set only on a failed row that outlived its completion, so it can be pruned. */
+	failedAt?: number;
 }
 
 export type BashBgStatus = "running" | "stopping" | "completed" | "failed" | "killed";

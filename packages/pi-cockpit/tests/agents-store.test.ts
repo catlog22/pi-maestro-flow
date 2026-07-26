@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AgentsStore, mapAgentStatus } from "../src/agents-store.ts";
+import { AgentsStore, FAILED_LINGER_MS, mapAgentStatus } from "../src/agents-store.ts";
 
 test("started adds a running row with derived role and label", () => {
 	const s = new AgentsStore();
@@ -208,4 +208,39 @@ test("teammate strings are stripped of control characters on ingest", () => {
 	}
 	assert.equal(row.role, "executor");
 	assert.equal(row.task, "build auth");
+});
+
+test("a failed agent survives its own completion so the failure can be read", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyMessage({ correlationId: "c1", status: "failed", lastMessage: "build broke" });
+	s.applyComplete({ correlationId: "c1" }, 1_000);
+	const row = s.snapshot(1_000)[0];
+	assert.equal(row.status, "failed");
+	assert.equal(row.tail, "build broke");
+	assert.ok(s.hasLingering());
+});
+
+test("a lingering failure expires on its own without anyone clearing it", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyMessage({ correlationId: "c1", status: "failed" });
+	s.applyComplete({ correlationId: "c1" }, 1_000);
+	assert.equal(s.prune(1_000 + FAILED_LINGER_MS - 1), false, "not yet");
+	assert.equal(s.size, 1);
+	assert.equal(s.prune(1_000 + FAILED_LINGER_MS), true);
+	assert.equal(s.size, 0);
+	assert.equal(s.hasLingering(), false);
+});
+
+test("a lingering failure drops its active tool, which is no longer running", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyMessage({
+		correlationId: "c1",
+		status: "failed",
+		recentTools: [{ name: "grep", status: "running" }],
+	});
+	s.applyComplete({ correlationId: "c1" }, 1_000);
+	assert.equal(s.snapshot(1_000)[0].activeTool, undefined);
 });

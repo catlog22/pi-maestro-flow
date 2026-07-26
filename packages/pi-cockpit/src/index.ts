@@ -104,15 +104,20 @@ export default function (pi: ExtensionAPI): void {
 	// True only while a redraw loop is actually running; widgets use it to avoid
 	// painting a frozen spinner frame that reads as a hung UI.
 	const isAnimating = (): boolean => tick !== undefined && (running || bashBg.hasActive());
+	// A failed agent lingers for a while after it completes, and the loop has to
+	// outlive the session that produced it — otherwise the row would sit there
+	// until some unrelated event happened to expire it.
+	const needsTick = (): boolean => running || bashBg.hasActive() || agents.hasLingering();
 	const startTick = (): void => {
 		if (tick) return;
 		tick = setInterval(() => {
-			if (running || bashBg.hasActive()) req();
+			if (needsTick()) req();
+			else syncTick();
 		}, ANIMATION_PERIOD_MS);
 		tick.unref?.();
 	};
 	const syncTick = (): void => {
-		if (running || bashBg.hasActive()) startTick();
+		if (needsTick()) startTick();
 		else stopTick();
 	};
 	const stopTick = (): void => {
@@ -244,6 +249,9 @@ export default function (pi: ExtensionAPI): void {
 	});
 	pi.events.on(TEAMMATE_COMPLETE_EVENT, (d) => {
 		agents.applyComplete(d as CompletePayload);
+		// A failure that arrives after the session went idle still needs a loop to
+		// expire it, so the tick is re-evaluated rather than assumed to be running.
+		syncTick();
 		req();
 	});
 	pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {

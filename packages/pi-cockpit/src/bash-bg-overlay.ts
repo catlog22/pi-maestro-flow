@@ -309,7 +309,9 @@ function outputSlice(output: string, width: number, max: number, theme: Theme): 
 }
 
 function field(label: string, value: string, width: number): string {
-	return fitLine(`${label.padEnd(10)} ${sanitizeExtensionStatusText(value)}`, width);
+	// pad, not padEnd: the label column must align by display width, so this does
+	// not quietly break the day a label stops being pure ASCII.
+	return fitLine(`${pad(label, 10)} ${sanitizeExtensionStatusText(value)}`, width);
 }
 
 function formatBytes(bytes: number): string {
