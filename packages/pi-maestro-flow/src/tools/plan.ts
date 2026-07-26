@@ -15,6 +15,7 @@ import type {
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
+import { altKey } from "../key-labels.ts";
 import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
 import { PlanStore, prewarmProcessIdentity, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
@@ -65,7 +66,7 @@ interface PlanRuntimeOptions {
 
 const STATUS_KEY = "mode";
 export const PLAN_TOGGLE_KEY = "alt+p";
-export const PLAN_TOGGLE_LABEL = "Alt+P";
+export const PLAN_TOGGLE_LABEL = altKey("P");
 const PROPOSED_PLAN_PATTERN = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
 
 const PLAN_ENTER_TOOL = "plan-enter";

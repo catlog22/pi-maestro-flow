@@ -60,6 +60,8 @@ Enter a read-only planning state: draft a Markdown plan, get explicit user appro
 
 **How it works:** enter plan mode (edit tools blocked) → draft plan → user approval → commit & restore / abandon without committing. Ideal for complex or risky multi-step work.
 
+> 💡 **macOS note:** `Alt+P` (and `Alt+T` / `Alt+G`) show as `Option+P/T/G` on macOS. If they don't fire, enable "Use Option as Meta key" in your terminal (iTerm2: *Settings → Profiles → Keys → Option Key → Esc+*; Terminal.app: *Settings → Profiles → Keyboard → Use Option as Meta key*). Kitty / WezTerm / Ghostty work out of the box; `Shift+Tab` and `Ctrl+` shortcuts are unaffected.
+
 ### 🧠 Persistent Knowledge System
 Semantic search, spec management, knowhow capture — survives across sessions. Supports supersession and conflict lifecycle.
 

@@ -33,6 +33,7 @@ import {
   AskUserQuestionParams,
   TodoToolParams,
 } from "./schemas.ts";
+import { altKey } from "../key-labels.ts";
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
 import { executeMoa, type MoaParams } from "../tools/moa.ts";
@@ -185,9 +186,9 @@ export function nextApprovalMode(
 }
 
 const TODO_TOGGLE_KEY = "alt+t";
-const TODO_TOGGLE_LABEL = "Alt+T";
+const TODO_TOGGLE_LABEL = altKey("T");
 const GOAL_OVERLAY_KEY = "alt+g";
-const GOAL_OVERLAY_LABEL = "Alt+G";
+const GOAL_OVERLAY_LABEL = altKey("G");
 
 function singleLine(text: string): Component {
   return {

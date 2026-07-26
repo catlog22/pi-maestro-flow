@@ -60,6 +60,8 @@ goal({ action: "create", objective: "实现 JWT 认证模块", tokenBudget: "100
 
 **工作流程：** 进入计划模式（编辑工具被阻止）→ 起草计划 → 用户审批 → 提交并恢复 / 放弃不提交。适合复杂或高风险的多步骤工作。
 
+> 💡 **macOS 提示：** `Alt+P`（及 `Alt+T` / `Alt+G`）在 mac 上显示为 `Option+P/T/G`。若按下无效，请在终端开启「将 Option 键用作 Meta 键」（iTerm2：*Settings → Profiles → Keys → Option Key → Esc+*；Terminal.app：*设置 → 描述文件 → 键盘 → 将 Option 键用作 Meta 键*）。Kitty / WezTerm / Ghostty 开箱即用；`Shift+Tab` 与 `Ctrl+` 系列不受影响。
+
 ### 🧠 持久化知识系统
 语义搜索、规范（Spec）管理、经验（Knowhow）沉淀，跨会话存活。支持替代/冲突生命周期。
 

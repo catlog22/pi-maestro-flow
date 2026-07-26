@@ -1,4 +1,5 @@
 import { truncateToWidth } from "@earendil-works/pi-tui";
+import { altKey } from "../key-labels.ts";
 
 export type GoalWidgetPhase = "normal" | "waiting" | "retrying" | "verifying" | "verified";
 
@@ -89,7 +90,7 @@ export function renderGoalPanel(
       }
       const metrics = metricText(goal, safeWidth);
       const hint = state.hint ? ` · ${theme.fg("dim", state.hint)}` : "";
-      const detail = ` · ${theme.fg("dim", "Alt+G details")}`;
+      const detail = ` · ${theme.fg("dim", `${altKey("G")} details`)}`;
       const header = `${title} · ${state.label}${metrics ? ` · ${metrics}` : ""}${hint}${detail}`;
       lines.push(truncateToWidth(header, safeWidth, "…"));
       return;
