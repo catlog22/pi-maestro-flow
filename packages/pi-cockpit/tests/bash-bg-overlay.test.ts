@@ -4,6 +4,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import { BashBgOverlay } from "../src/bash-bg-overlay.ts";
 import type { BashBgJob, BashBgStatus } from "../src/types.ts";
+import { resolveGlyphs } from "../src/icons.ts";
 
 const theme = {
 	fg: (_color: string, text: string) => text,
@@ -39,6 +40,7 @@ function overlay(jobs: BashBgJob[]) {
 		requestRefresh: () => { refreshes++; },
 		close: () => { closes++; },
 		theme,
+		glyphs: resolveGlyphs("nerd"),
 	});
 	return { component, counts: () => ({ renders, refreshes, closes }) };
 }
@@ -85,20 +87,34 @@ test("Enter opens detailed output tail and Esc returns before closing", () => {
 
 test("keyboard navigation wraps and refresh requests a new authoritative snapshot", () => {
 	const { component, counts } = overlay([job("first", "running"), job("second", "completed")]);
-	component.handleInput("k");
+	component.handleInput("\x1b[A");
 	assert.match(component.render(60).join("\n"), /› ✓ 2\/2/);
-	component.handleInput("r");
+	component.handleInput("\x12");
 	assert.equal(counts().refreshes, 1);
 	assert.ok(counts().renders >= 2);
+	// The snapshot arrives asynchronously, so the keypress must be acknowledged now.
+	assert.match(component.render(60).join("\n"), /refreshing/);
 });
 
 test("selection follows job identity when live status reorders the list", () => {
 	const jobs = [job("first", "running"), job("second", "running")];
 	const { component } = overlay(jobs);
 	component.render(60);
-	component.handleInput("j");
+	component.handleInput("\x1b[B");
 	jobs.splice(0, jobs.length, jobs[1], job("failed", "failed"), jobs[0]);
-	assert.match(component.render(60).join("\n"), /› ▶ 1\/3 · running .* second/);
+	assert.match(component.render(60).join("\n"), /› ● 1\/3 · running .* second/);
+});
+
+// Letters stay reserved for a future filter/command mode per the terminal
+// keybinding spec, so none of them may act as a global accelerator.
+test("plain letters are inert so they stay available for a filter mode", () => {
+	const { component, counts } = overlay([job("first", "running"), job("second", "completed")]);
+	component.render(60);
+	const before = component.render(60).join("\n");
+	for (const letter of ["j", "k", "r", "q", "/"]) component.handleInput(letter);
+	assert.equal(counts().refreshes, 0);
+	assert.equal(counts().closes, 0);
+	assert.equal(component.render(60).join("\n"), before);
 });
 
 test("empty and narrow overlays stay width-bounded", () => {

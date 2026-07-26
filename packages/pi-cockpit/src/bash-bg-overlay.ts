@@ -7,8 +7,12 @@ import {
 	wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
+import type { IconGlyphs } from "./icons.ts";
+import { fitLineByPriority, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 import { formatDuration } from "./render.ts";
 import type { BashBgJob, BashBgStatus } from "./types.ts";
+
+const WIDTH_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 
 export interface BashBgOverlayParams {
 	getJobs: () => readonly BashBgJob[];
@@ -16,7 +20,12 @@ export interface BashBgOverlayParams {
 	requestRefresh: () => void;
 	close: () => void;
 	theme: Theme;
+	glyphs: IconGlyphs;
 }
+
+// How long the header keeps acknowledging a manual refresh. The snapshot arrives
+// asynchronously, so without this the keypress looks like it did nothing.
+const REFRESH_ACK_MS = 1_500;
 
 type BashBgOverlayMode = "list" | "detail";
 
@@ -25,6 +34,7 @@ export class BashBgOverlay implements Component, Focusable {
 	private mode: BashBgOverlayMode = "list";
 	private selected = 0;
 	private selectedId: string | undefined;
+	private refreshedAt = 0;
 
 	constructor(private readonly params: BashBgOverlayParams) {}
 
@@ -38,11 +48,13 @@ export class BashBgOverlay implements Component, Focusable {
 			this.params.requestRender();
 			return;
 		}
-		if (data === "\x1b[A" || data === "k") {
+		// Plain letters stay reserved for future filter/command modes, so navigation
+		// and refresh use arrows and a non-letter key only.
+		if (data === "\x1b[A") {
 			this.move(-1);
 			return;
 		}
-		if (data === "\x1b[B" || data === "j") {
+		if (data === "\x1b[B") {
 			this.move(1);
 			return;
 		}
@@ -51,7 +63,10 @@ export class BashBgOverlay implements Component, Focusable {
 			this.params.requestRender();
 			return;
 		}
-		if (data === "r") {
+		if (data === "\x12" || data === "\x1b[15~") {
+			// Ctrl+R / F5 — refresh is acknowledged immediately even though the
+			// authoritative snapshot only arrives later.
+			this.refreshedAt = Date.now();
 			this.params.requestRefresh();
 			this.params.requestRender();
 		}
@@ -68,7 +83,7 @@ export class BashBgOverlay implements Component, Focusable {
 
 	private renderCompact(width: number): string {
 		const job = this.selectedJob();
-		const text = job ? `${jobVisual(job.status).glyph} ${this.orderOf(job)} ${job.status} · Esc` : "BG · none · Esc";
+		const text = job ? `${jobVisual(job.status, this.params.glyphs).glyph} ${this.orderOf(job)} ${job.status}${this.params.glyphs.separator}Esc` : `BG${this.params.glyphs.separator}none${this.params.glyphs.separator}Esc`;
 		return this.params.theme.bg("customMessageBg", pad(text, width));
 	}
 
@@ -78,7 +93,7 @@ export class BashBgOverlay implements Component, Focusable {
 		const rows = [this.header(inner), this.separator(inner)];
 		const selectedRows = new Set<number>();
 		if (jobs.length === 0) {
-			rows.push(fitLine("○ no background jobs · use bash_bg action=start", inner));
+			rows.push(fitLine(this.emptyState(), inner));
 		} else {
 			const start = visibleStart(this.selected, jobs.length, 8);
 			for (let index = start; index < Math.min(jobs.length, start + 8); index++) {
@@ -104,7 +119,7 @@ export class BashBgOverlay implements Component, Focusable {
 		const selectedRows = new Set<number>();
 		for (let index = 0; index < rowCount; index++) {
 			if (jobs.length > 0 && start + index === this.selected) selectedRows.add(rows.length);
-			rows.push(`${pad(left[index] ?? "", leftWidth)} │ ${pad(right[index] ?? "", rightWidth)}`);
+			rows.push(`${pad(left[index] ?? "", leftWidth)} ${this.params.glyphs.box.vertical} ${pad(right[index] ?? "", rightWidth)}`);
 		}
 		rows.push(this.helpLine(inner));
 		return this.card(rows, width, selectedRows);
@@ -116,33 +131,34 @@ export class BashBgOverlay implements Component, Focusable {
 			this.header(inner),
 			this.separator(inner),
 			...this.detailLines(this.selectedJob(), inner, 8, 18),
-			this.helpLine(inner, ["Esc back", "↑↓ job", "r refresh"]),
+			this.helpLine(inner, ["Esc back", `${this.params.glyphs.upDown} job`, "Ctrl+R refresh"]),
 		];
 		return this.card(rows, width);
 	}
 
 	private jobRow(job: BashBgJob, selected: boolean, width: number): string {
-		const visual = jobVisual(job.status);
+		const visual = jobVisual(job.status, this.params.glyphs);
 		const duration = formatDuration((job.finishedAt ?? Date.now()) - job.startedAt);
-		const exit = job.exitCode === null ? "" : ` · exit ${job.exitCode}`;
+		const sep = this.params.glyphs.separator;
+		const exit = job.exitCode === null ? "" : `${sep}exit ${job.exitCode}`;
 		return fitLine(
-			`${selected ? "›" : " "} ${this.params.theme.fg(visual.color, visual.glyph)} `
-			+ `${this.orderOf(job)} · ${job.status} · ${duration}${exit} · ${oneLine(job.command)}`,
+			`${selected ? this.params.glyphs.selectMarker : " "} ${this.params.theme.fg(visual.color, visual.glyph)} `
+			+ `${this.orderOf(job)}${sep}${job.status}${sep}${duration}${exit}${sep}${oneLine(job.command)}`,
 			width,
 		);
 	}
 
 	private detailLines(job: BashBgJob | undefined, width: number, commandMax: number, outputMax: number): string[] {
-		if (!job) return [fitLine("○ no background jobs · use bash_bg action=start", width)];
-		const visual = jobVisual(job.status);
+		if (!job) return [fitLine(this.emptyState(), width)];
+		const visual = jobVisual(job.status, this.params.glyphs);
 		const theme = this.params.theme;
 		const lines: string[] = [
-			fitLine(`${theme.fg(visual.color, theme.bold(`${visual.glyph} ${job.id}`))} · ${job.status}`, width),
+			fitLine(`${theme.fg(visual.color, theme.bold(`${visual.glyph} ${job.id}`))}${this.params.glyphs.separator}${job.status}`, width),
 			field("PID", String(job.pid), width),
 			field("Duration", formatDuration((job.finishedAt ?? Date.now()) - job.startedAt), width),
-			field("Started", new Date(job.startedAt).toISOString(), width),
-			field("Updated", new Date(job.updatedAt).toISOString(), width),
-			field("Exit", job.exitCode === null ? "—" : String(job.exitCode), width),
+			field("Started", formatTimestamp(job.startedAt), width),
+			field("Updated", formatTimestamp(job.updatedAt), width),
+			field("Exit", job.exitCode === null ? this.params.glyphs.dotIdle : String(job.exitCode), width),
 			field("Output", formatBytes(job.outputBytes), width),
 			field("CWD", job.cwd, width),
 			field("Log", job.logPath, width),
@@ -154,6 +170,11 @@ export class BashBgOverlay implements Component, Focusable {
 		return lines;
 	}
 
+	private emptyState(): string {
+		const g = this.params.glyphs;
+		return `${g.emptyMark} no background jobs${g.separator}use bash_bg action=start`;
+	}
+
 	private header(width: number): string {
 		const jobs = this.jobs();
 		const running = jobs.filter((job) => job.status === "running").length;
@@ -161,31 +182,49 @@ export class BashBgOverlay implements Component, Focusable {
 		const failed = jobs.filter((job) => job.status === "failed").length;
 		const done = jobs.length - running - stopping - failed;
 		const theme = this.params.theme;
-		return fitLine(
-			`Background jobs · ${jobs.length} total · ${theme.fg("accent", `${running} running`)} · `
-			+ `${theme.fg("warning", `${stopping} stopping`)} · ${theme.fg("error", `${failed} failed`)} · `
-			+ `${theme.fg("success", `${done} finished`)}`,
+		const g = this.params.glyphs;
+		// Zero-valued states are suppressed ("0 stopping · 0 failed" is filler), but
+		// total stays — it is the denominator that gives the other counts meaning.
+		// Priorities keep the refresh acknowledgement and the failure count alive on
+		// a narrow overlay; without that the ack was clipped off the end and the
+		// keypress looked like it did nothing.
+		const segs: PrioritizedSegment[] = [
+			{ text: "Background jobs", priority: 60, minWidth: 6 },
+			{ text: theme.fg("dim", `${jobs.length} total`), priority: 50, clippable: false },
+		];
+		if (Date.now() - this.refreshedAt < REFRESH_ACK_MS) {
+			segs.push({ text: theme.fg("dim", "refreshing…"), priority: 100, clippable: false });
+		}
+		if (failed) segs.push({ text: theme.fg("error", `${failed} failed`), priority: 90, clippable: false });
+		if (stopping) segs.push({ text: theme.fg("warning", `${stopping} stopping`), priority: 80, clippable: false });
+		if (running) segs.push({ text: theme.fg("accent", `${running} running`), priority: 70, clippable: false });
+		if (done) segs.push({ text: theme.fg("success", `${done} finished`), priority: 40, clippable: false });
+		return fitLineByPriority(segs, width, WIDTH_UTILS, g.separator, g.ellipsis);
+	}
+
+	private helpLine(width: number, segments?: readonly string[]): string {
+		const g = this.params.glyphs;
+		return fitSegments(
 			width,
+			segments ?? ["Esc close", "Enter detail", `${g.upDown} job`, "Ctrl+R refresh"],
+			g.separator,
 		);
 	}
 
-	private helpLine(width: number, segments = ["Esc close", "Enter detail", "↑↓ job", "r refresh"]): string {
-		return fitSegments(width, segments);
-	}
-
 	private separator(width: number): string {
-		return this.params.theme.fg("borderMuted", "─".repeat(Math.max(1, width)));
+		return this.params.theme.fg("borderMuted", this.params.glyphs.box.horizontal.repeat(Math.max(1, width)));
 	}
 
 	private card(rows: string[], width: number, selectedRows: ReadonlySet<number> = new Set()): string[] {
 		const theme = this.params.theme;
-		const edge = "─".repeat(Math.max(0, width - 2));
+		const box = this.params.glyphs.box;
+		const edge = box.horizontal.repeat(Math.max(0, width - 2));
 		const border = (glyph: string) => theme.bg("customMessageBg", theme.fg("borderMuted", glyph));
-		const out = [border(`╭${edge}╮`)];
+		const out = [border(`${box.topLeft}${edge}${box.topRight}`)];
 		rows.forEach((row, index) => {
 			out.push(theme.bg(selectedRows.has(index) ? "selectedBg" : "customMessageBg", pad(` ${row}`, width)));
 		});
-		out.push(border(`╰${edge}╯`));
+		out.push(border(`${box.bottomLeft}${edge}${box.bottomRight}`));
 		return out;
 	}
 
@@ -218,12 +257,22 @@ export class BashBgOverlay implements Component, Focusable {
 	}
 }
 
-function jobVisual(status: BashBgStatus): { glyph: string; color: ThemeColor } {
-	if (status === "running") return { glyph: "▶", color: "accent" };
-	if (status === "stopping") return { glyph: "◐", color: "warning" };
-	if (status === "completed") return { glyph: "✓", color: "success" };
-	if (status === "failed") return { glyph: "✗", color: "error" };
-	return { glyph: "■", color: "warning" };
+// Routed through the resolved glyph set so an ascii-only terminal shows ascii
+// rather than tofu. Status text always accompanies the glyph at the call sites,
+// so colour never carries the state on its own.
+function jobVisual(status: BashBgStatus, g: IconGlyphs): { glyph: string; color: ThemeColor } {
+	if (status === "running") return { glyph: g.dotRunning, color: "accent" };
+	if (status === "stopping") return { glyph: g.blocked, color: "warning" };
+	if (status === "completed") return { glyph: g.check, color: "success" };
+	if (status === "failed") return { glyph: g.cross, color: "error" };
+	return { glyph: g.dotIdle, color: "warning" };
+}
+
+function formatTimestamp(ms: number): string {
+	const date = new Date(ms);
+	// parseJob only checks Number.isFinite, so an out-of-range timestamp reaches
+	// here and would throw RangeError out of the render path.
+	return Number.isNaN(date.getTime()) ? "unknown" : date.toISOString();
 }
 
 function wrappedSlice(value: string, width: number, max: number, theme: Theme): string[] {
@@ -249,9 +298,16 @@ function field(label: string, value: string, width: number): string {
 }
 
 function formatBytes(bytes: number): string {
-	if (bytes < 1024) return `${bytes} B`;
-	if (bytes < 1024 * 1024) return `${trimDecimal(bytes / 1024)} KiB`;
-	return `${trimDecimal(bytes / (1024 * 1024))} MiB`;
+	// A long-running job can emit gigabytes; without these tiers 5 GiB rendered
+	// as "5120 MiB".
+	const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+	let value = bytes;
+	let unit = 0;
+	while (value >= 1024 && unit < units.length - 1) {
+		value /= 1024;
+		unit++;
+	}
+	return unit === 0 ? `${value} B` : `${trimDecimal(value)} ${units[unit]}`;
 }
 
 function trimDecimal(value: number): string {
@@ -278,13 +334,13 @@ function fitLine(value: string, width: number): string {
 	return truncateToWidth(value, Math.max(1, width), "…");
 }
 
-function fitSegments(width: number, segments: readonly string[]): string {
+function fitSegments(width: number, segments: readonly string[], separator: string): string {
 	const kept: string[] = [];
 	for (const segment of segments) {
-		if (visibleWidth([...kept, segment].join(" · ")) > width) break;
+		if (visibleWidth([...kept, segment].join(separator)) > width) break;
 		kept.push(segment);
 	}
-	return kept.length ? kept.join(" · ") : fitLine(segments[0] ?? "", width);
+	return kept.length ? kept.join(separator) : fitLine(segments[0] ?? "", width);
 }
 
 function pad(value: string, width: number): string {

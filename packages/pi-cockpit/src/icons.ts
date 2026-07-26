@@ -21,6 +21,21 @@ export interface IconGlyphs {
 	treeSpace: string;
 	ellipsis: string;
 	separator: string;
+	/** Overlay chrome. Kept in the glyph table so ascii mode draws a real ascii box. */
+	box: {
+		topLeft: string;
+		topRight: string;
+		bottomLeft: string;
+		bottomRight: string;
+		horizontal: string;
+		vertical: string;
+	};
+	/** Marks the focused row. Must survive without the selected background colour. */
+	selectMarker: string;
+	/** Marks an empty collection. */
+	emptyMark: string;
+	/** Vertical navigation affordance shown in help lines. */
+	upDown: string;
 	workspace: string;
 	git: string;
 	tokensIn: string;
@@ -48,6 +63,10 @@ const NERD_GLYPHS: IconGlyphs = {
 	treeSpace: "  ",
 	ellipsis: "…",
 	separator: " · ",
+	box: { topLeft: "╭", topRight: "╮", bottomLeft: "╰", bottomRight: "╯", horizontal: "─", vertical: "│" },
+	selectMarker: "›",
+	emptyMark: "○",
+	upDown: "↑↓",
 	workspace: "",
 	git: "⎇",
 	tokensIn: "↑",
@@ -75,6 +94,10 @@ const ASCII_GLYPHS: IconGlyphs = {
 	treeSpace: "  ",
 	ellipsis: "...",
 	separator: " | ",
+	box: { topLeft: "+", topRight: "+", bottomLeft: "+", bottomRight: "+", horizontal: "-", vertical: "|" },
+	selectMarker: ">",
+	emptyMark: "o",
+	upDown: "up/dn",
 	workspace: "dir",
 	git: "*",
 	tokensIn: "^",

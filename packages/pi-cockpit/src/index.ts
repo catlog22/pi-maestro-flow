@@ -305,6 +305,7 @@ export default function (pi: ExtensionAPI): void {
 				requestRefresh: () => pi.events.emit(BASH_BG_QUERY_EVENT, undefined),
 				close: () => done(undefined),
 				theme,
+				glyphs: resolveGlyphs(config.icons.mode),
 			}), {
 			overlay: true,
 			overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
