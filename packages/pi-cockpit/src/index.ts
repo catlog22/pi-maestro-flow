@@ -282,18 +282,11 @@ export default function (pi: ExtensionAPI): void {
 			}
 		});
 		invalidateUsageCache();
-		// An explicitly chosen theme is restored here; an empty value deliberately
-		// leaves whatever theme pi is already using untouched.
-		if (config.theme) {
-			const applied = ctx.ui.setTheme(config.theme);
-			if (!applied.success) {
-				try {
-					ctx.ui.notify(`pi-cockpit: theme "${config.theme}" unavailable — ${applied.error ?? "not found"}`, "warning");
-				} catch {
-					// notify unavailable
-				}
-			}
-		}
+		// The theme is deliberately NOT re-applied here. ctx.ui.setTheme writes
+		// through to pi's own settings, so pi already restores the user's choice on
+		// its own. Replaying cockpit's copy would overwrite whatever the user set
+		// through /settings since — including an automatic "light/dark" pair, which
+		// cockpit cannot represent and would silently flatten to a single theme.
 		todos.hydrateFromEntries(ctx.sessionManager.getEntries());
 		applyUi(ctx);
 		publishUiOwnership();
@@ -393,6 +386,7 @@ export default function (pi: ExtensionAPI): void {
 				const themes = ctx.ui.getAllThemes().map((t) => t.name);
 				let cursor = 0;
 				let saveState: SaveState = { kind: "idle" };
+				let themeTouched = false;
 				const apply = (key: string): void => {
 					const wasEnabled = config.enabled;
 					const previousTheme = config.theme;
@@ -408,6 +402,12 @@ export default function (pi: ExtensionAPI): void {
 						const applied = ctx.ui.setTheme(config.theme);
 						if (!applied.success) {
 							saveState = { kind: "failed", message: applied.error ?? `unknown theme ${config.theme}` };
+						} else {
+							// setTheme writes through to pi's own settings. The extension API
+							// exposes no reader for the current setting, so cockpit cannot tell
+							// whether it just replaced an automatic light/dark pair — it says so
+							// plainly rather than guessing.
+							themeTouched = true;
 						}
 					}
 					if (wasEnabled !== config.enabled) {
@@ -444,8 +444,16 @@ export default function (pi: ExtensionAPI): void {
 						else if (saveState.kind === "saving") lines.push(paint.fg("dim", "· saving…"));
 						else if (saveState.kind === "failed") {
 							lines.push(paint.fg("error", `✗ save failed — ${saveState.message}`));
-							lines.push(paint.fg("dim", "settings apply for this session only"));
+							// Scoped to cockpit's own rows: the theme is applied through pi,
+							// which persists it regardless of whether this file was written.
+							lines.push(paint.fg("dim", "cockpit rows apply for this session only"));
 						}
+						if (themeTouched) {
+							lines.push(paint.fg("dim", "theme is stored by pi, not by cockpit"));
+						}
+						// The built-in picker previews live, restores on cancel, and can pair
+						// a light and a dark theme — none of which this one-key cycle does.
+						lines.push(paint.fg("dim", "/settings · theme preview + auto light/dark"));
 						lines.push(paint.fg("dim", "↑↓ move · Enter change · letter jumps · Esc close"));
 						return lines.map((line) => truncateToWidth(line, width, "…"));
 					},

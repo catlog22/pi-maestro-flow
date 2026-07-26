@@ -47,3 +47,16 @@ test("icon mode is reachable from the panel so a tofu terminal can escape to asc
 test("applyRow leaves the config untouched for an unknown key", () => {
 	assert.deepEqual(applyRow(DEFAULT_CONFIG, "nope", THEMES), DEFAULT_CONFIG);
 });
+
+test("an automatic light/dark pair is not flattened into a single theme", () => {
+	// pi stores automatic mode as "light/dark"; cockpit's ring cannot build that,
+	// so cycling from it must land on "leave it alone", never on a single theme.
+	assert.equal(nextTheme("one-light/one-dark", ["nord", "gruvbox"]), "");
+});
+
+test("the theme row names pi as the owner, not cockpit", () => {
+	const rows = buildRows({ ...DEFAULT_CONFIG, theme: "" }, ["nord"]);
+	const themeRow = rows.find((r) => r.key === "theme")!;
+	assert.equal(themeRow.value, "(pi settings)");
+	assert.doesNotMatch(themeRow.value, /default/);
+});

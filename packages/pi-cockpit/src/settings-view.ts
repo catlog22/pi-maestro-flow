@@ -32,13 +32,23 @@ function cycle<T>(values: readonly T[], current: T): T {
 	return values[(index + 1) % values.length];
 }
 
-const NO_THEME_LABEL = "(pi default)";
+// Empty means cockpit has not set a theme, so whatever /settings holds is live.
+// It is deliberately not called "default": pi's setting is the authority here,
+// and cockpit only ever nudges it.
+const NO_THEME_LABEL = "(pi settings)";
 
 function themeLabel(theme: string): string {
 	return theme === "" ? NO_THEME_LABEL : theme;
 }
 
-/** Themes cycle through the host's list plus an explicit "don't override" entry. */
+/**
+ * Themes cycle through the host's list plus an explicit "leave it alone" entry.
+ *
+ * A pi theme setting may also be an automatic `light/dark` pair, which this ring
+ * cannot build. Such a value is simply not in the ring, so it falls through to
+ * the restart branch and lands on "" — "leave it alone" — rather than being
+ * flattened into whichever single theme happened to come next.
+ */
 export function nextTheme(current: string, available: readonly string[]): string {
 	const ring = ["", ...available.filter((name) => name !== "")];
 	const index = ring.indexOf(current);
