@@ -59,6 +59,7 @@ export interface RunTeammateParams {
   tasks?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; name?: string; dependsOn?: string[]; context?: "fresh" | "fork"; model?: string; thinking?: TeammateThinkingInput; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }>;
   chain?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; model?: string; thinking?: TeammateThinkingInput }>;
   concurrency?: number;
+  maxAgents?: number;
 }
 
 export interface RunTeammateOptions {
@@ -66,6 +67,12 @@ export interface RunTeammateOptions {
   modelCapabilities?: readonly TeammateModelCapability[];
   correlationId?: string;
   taskCorrelationIds?: string[];
+  /**
+   * Nesting depth of the dispatch being run. Callers that own the agent tree
+   * (the teammate extension) always pass this; direct callers may omit it and
+   * fall back to the process environment.
+   */
+  depth?: number;
   signal?: AbortSignal;
   onProgress?: (data: AgentProgress) => void;
   onRetry?: (retry: {
@@ -732,6 +739,16 @@ export function normalizeTeammateParams(
     }
   }
 
+  const maxAgents = resolveMaxAgents(params.maxAgents);
+  if (normalized.length > maxAgents) {
+    return {
+      tasks: normalized,
+      isMultiTask: true,
+      warnings,
+      error: `Too many tasks: ${normalized.length} exceeds the maximum of ${maxAgents}. Split into smaller batches or raise the limit via maxAgents / PI_TEAMMATE_MAX_AGENTS.`,
+    };
+  }
+
   const refCheck = validateTaskReferences(normalized);
   warnings.push(...refCheck.warnings);
   if (refCheck.errors.length > 0) {
@@ -822,16 +839,44 @@ export function getPiSpawnCommand(
 // AC4: Nesting depth guard
 // ---------------------------------------------------------------------------
 
-const MAX_DEFAULT_DEPTH = 3;
+export const MAX_DEFAULT_DEPTH = 3;
 
-function getTeammateDepth(): number {
-  return parseInt(process.env.PI_TEAMMATE_DEPTH ?? "0", 10);
+export const DEFAULT_MAX_AGENTS = 15;
+
+/**
+ * Ceiling on concurrently live agents across the whole dispatch tree. The
+ * per-call `maxAgents` limit only bounds a single dispatch, so without this a
+ * depth-3 tree of 15-task graphs could reach 15^3 child processes.
+ */
+export const DEFAULT_MAX_ACTIVE_AGENTS = 32;
+
+export function resolveMaxAgents(explicit?: number): number {
+  if (explicit !== undefined && Number.isFinite(explicit)) return Math.max(1, Math.floor(explicit));
+  const env = parseInt(process.env.PI_TEAMMATE_MAX_AGENTS ?? "", 10);
+  if (Number.isFinite(env) && env > 0) return env;
+  return DEFAULT_MAX_AGENTS;
 }
 
-function checkDepthGuard(maxDepth?: number): { allowed: boolean; current: number; max: number } {
-  const current = getTeammateDepth();
-  const max = maxDepth ?? MAX_DEFAULT_DEPTH;
-  return { allowed: current < max, current, max };
+export function resolveMaxActiveAgents(): number {
+  const env = parseInt(process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS ?? "", 10);
+  if (Number.isFinite(env) && env > 0) return env;
+  return DEFAULT_MAX_ACTIVE_AGENTS;
+}
+
+/**
+ * Fallback depth for dispatches that do not carry an explicit one — i.e. direct
+ * `runTeammate` callers outside the extension (delegate/explore/moa). Nested
+ * teammate calls never reach this: their child process only proxies the request
+ * back to the root process, so the root's own environment would always read 0.
+ * Those paths pass `RunTeammateOptions.depth` instead.
+ */
+export function getTeammateDepth(): number {
+  const parsed = parseInt(process.env.PI_TEAMMATE_DEPTH ?? "0", 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export function checkDepthGuard(depth: number): { allowed: boolean; current: number; max: number } {
+  return { allowed: depth < MAX_DEFAULT_DEPTH, current: depth, max: MAX_DEFAULT_DEPTH };
 }
 
 // ---------------------------------------------------------------------------
@@ -1324,7 +1369,7 @@ export async function runTeammate(
   if (params.prompt) params = { ...params, task: promptResolution.task };
 
   // AC4: Depth guard
-  const depthCheck = checkDepthGuard();
+  const depthCheck = checkDepthGuard(options.depth ?? getTeammateDepth());
   if (!depthCheck.allowed) {
     return {
       agent: params.agent,
@@ -1524,7 +1569,10 @@ async function runSingleAttempt(
     const spawnEnv: Record<string, string | undefined> = {
       ...process.env,
       PI_TEAMMATE_CHILD: "1",
-      PI_TEAMMATE_DEPTH: String(getTeammateDepth() + 1),
+      // Diagnostic only. The child never spawns grandchildren itself — it
+      // proxies nested dispatches back to this process — so the guard reads
+      // RunTeammateOptions.depth rather than this variable.
+      PI_TEAMMATE_DEPTH: String((options.depth ?? getTeammateDepth()) + 1),
       PI_TEAMMATE_CORRELATION_ID: correlationId,
       PI_TEAMMATE_REPLY_TO: replyTo,
     };

@@ -21,6 +21,7 @@ test("agent widget keeps failed work and the live edge visible in the compact bu
     outputLog: [],
     lastActivityAt: now,
     status: "running" as const,
+    depth: 0,
     sleepMs: 0,
     progress,
   };
@@ -42,6 +43,7 @@ test("agent widget keeps duration, split tokens, and stalled state visible", () 
     outputLog: [],
     lastActivityAt: now - 45_000,
     status: "running" as const,
+    depth: 0,
     sleepMs: 0,
     progress: [{
       agent: "worker",
@@ -74,6 +76,7 @@ test("agent widget distinguishes a Pi result-ready turn from a stalled agent", (
     outputLog: [],
     lastActivityAt: now - 45_000,
     status: "running" as const,
+    depth: 0,
     sleepMs: 0,
     progress: [{
       agent: "explorer",
@@ -106,6 +109,7 @@ test("agent widget freezes duration while an agent is sleeping", () => {
     lastActivityAt: now - 60_000,
     status: "sleeping" as const,
     sleptAt: now - 60_000,
+    depth: 0,
     sleepMs: 0,
   };
   const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };

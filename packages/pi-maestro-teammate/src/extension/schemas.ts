@@ -208,6 +208,14 @@ export const TeammateParams = Type.Object({
     }),
   ),
 
+  maxAgents: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      description:
+        "Maximum number of tasks allowed in a single dispatch (default: 15). Override globally via PI_TEAMMATE_MAX_AGENTS.",
+    }),
+  ),
+
   // === Structured Output (default for tasks without their own) ===
 
   outputSchema: Type.Optional(

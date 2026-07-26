@@ -212,7 +212,7 @@ test("attach overlay accepts pasted messages and keeps a focused tab visible", a
   const first = {
     agent: "worker", name: "agent-1", correlationId: "agent-1", startedAt: now,
     abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-    status: "running" as const, sleepMs: 0,
+    status: "running" as const, depth: 0, sleepMs: 0,
   };
   const runs = new Map<string, typeof first>();
   for (let index = 1; index <= 12; index++) {
@@ -255,7 +255,7 @@ test("attach overlay keeps the composer and recovery footer visible across heigh
   const parent = {
     agent: "graph", name: "parent", correlationId: "parent", startedAt: now,
     abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-    status: "running" as const, sleepMs: 0, progress,
+    status: "running" as const, depth: 0, sleepMs: 0, progress,
   };
   const runs = new Map([[parent.correlationId, parent]]);
   const overlay = new AttachOverlay(
@@ -294,7 +294,7 @@ test("attach overlay preserves manual scroll position while new logs arrive", ()
   const parent = {
     agent: "worker", name: "parent", correlationId: "parent", startedAt: now,
     abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-    status: "running" as const, sleepMs: 0,
+    status: "running" as const, depth: 0, sleepMs: 0,
   };
   const runs = new Map([[parent.correlationId, parent]]);
   const overlay = new AttachOverlay(parent, () => {}, () => runs);

@@ -25,6 +25,8 @@ import {
   taskDependencyNames,
   sendRpcMessage,
   truncateUtf8Tail,
+  checkDepthGuard,
+  resolveMaxActiveAgents,
 } from "../runs/execution.ts";
 import {
   confirmChildReloaded,
@@ -75,6 +77,7 @@ import type {
   AgentProgressSnapshot,
   ChildAgentCallSnapshot,
   ActiveAgent,
+  AgentStatus,
   MessageEnvelope,
   SingleResult,
   TeammateInteractionRecord,
@@ -206,6 +209,32 @@ export const WAKEABLE_AGENT_BUDGET = Object.freeze({
 });
 
 const AGENT_WIDGET_IDLE_HIDE_MS = 60_000;
+const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
+
+/** Agents that still hold (or are about to hold) a child process. */
+const LIVE_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set<AgentStatus>([
+  "pending",
+  "running",
+  "retrying",
+  "sleeping",
+]);
+
+/**
+ * Bounds the whole dispatch tree, not a single call. `maxAgents` caps one
+ * dispatch's task count, so nesting multiplies rather than adds: without this
+ * gate a depth-3 tree of 15-task graphs reaches 15^3 child processes.
+ */
+export function checkActiveAgentBudget(
+  state: TeammateState,
+  additional = 1,
+): { allowed: boolean; active: number; max: number } {
+  let active = 0;
+  for (const agent of state.activeRuns.values()) {
+    if (LIVE_AGENT_STATUSES.has(agent.status)) active += 1;
+  }
+  const max = resolveMaxActiveAgents();
+  return { allowed: active + additional <= max, active, max };
+}
 
 function trimAgentBuffers(agent: ActiveAgent, sleeping = false): void {
   const inboxLimit = sleeping
@@ -381,6 +410,8 @@ function emitTeammateStarted(
     agent: agent.agent,
     name: agent.name,
     spawnedBy: agent.spawnedBy,
+    startedAt: agent.startedAt,
+    status: agent.status,
   });
 }
 
@@ -1411,6 +1442,8 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         outputLog: [],
         lastActivityAt: Date.now(),
         replyTo: params.reply_to,
+        // Root-tool dispatches start the tree.
+        depth: 0,
         status: "running",
         sleepMs: 0,
         lease: createChildLease(),
@@ -1457,6 +1490,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             outputLog: [],
             lastActivityAt: Date.now(),
             spawnedBy: correlationId,
+            // Graph tasks belong to their dispatch, so they share its depth;
+            // a teammate call made *by* one of them is what advances it.
+            depth: activeAgent.depth,
             status: "pending",
             sleepMs: 0,
             lease: createChildLease(),
@@ -1485,6 +1521,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         modelCapabilities: refreshModelCatalog(ctx).models,
         ...(isSingle ? { correlationId } : {}),
         ...(isMultiTask ? { taskCorrelationIds } : {}),
+        depth: activeAgent.depth,
         signal: abortController.signal,
         parentSessionFile,
         initialLeaseToken: (childId: string) => {
@@ -2759,10 +2796,11 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   });
 
   let widgetCtx: ExtensionContext | null = null;
+  let cockpitOwnsAgents = false;
 
   function updateAgentWidget(): void {
     if (!widgetCtx) return;
-    if (interactivePanelActive) {
+    if (cockpitOwnsAgents || interactivePanelActive) {
       widgetCtx.ui.setWidget("teammate-agents", undefined);
       return;
     }
@@ -2842,6 +2880,11 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
   }
 
   if (!isChild) {
+  pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
+    if (!payload || typeof payload !== "object") return;
+    cockpitOwnsAgents = (payload as { agents?: unknown }).agents === true;
+    updateAgentWidget();
+  });
   pi.events.on(TEAMMATE_STARTED_EVENT, () => {
     updateAgentWidget();
     startWidgetTimer();
@@ -4091,10 +4134,17 @@ async function showRelayedQuestions(
       ? await selectMultiple(ctx, title, normalizedOptions)
       : await selectOne(ctx, title, normalizedOptions);
     if (!selected) return { action: "cancel" };
+    let text: string | undefined;
+    if (selected.includes("None of the above")) {
+      const custom = await ctx.ui.input(title, "What would you like instead? (optional)");
+      if (custom === undefined) return { action: "cancel" };
+      text = custom.trim() || undefined;
+    }
     answers.push({
       question: question.question,
       ...(question.header ? { header: question.header } : {}),
       selected,
+      ...(text ? { text } : {}),
     });
   }
   return { action: "answer", answers };
@@ -4228,7 +4278,7 @@ async function dispatchRegisteredChildTool(
   return true;
 }
 
-async function handleProxyRequest(
+export async function handleProxyRequest(
   pi: ExtensionAPI,
   state: TeammateState,
   event: Record<string, unknown>,
@@ -4253,6 +4303,28 @@ async function handleProxyRequest(
     case "teammate": {
       const p = params as RunTeammateParams;
       const cid = randomUUID();
+
+      // Nested dispatches execute inside this process, so PI_TEAMMATE_DEPTH
+      // would always read 0 here. The spawner's recorded depth is the only
+      // authority for how deep the tree already is.
+      const dispatchDepth = (parentCid ? state.activeRuns.get(parentCid)?.depth ?? 0 : 0) + 1;
+      const depthCheck = checkDepthGuard(dispatchDepth);
+      if (!depthCheck.allowed) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Teammate nesting depth exceeded: current=${depthCheck.current}, max=${depthCheck.max}. Prevent recursive fork-bomb.` }],
+          isError: true, details: { mode: "single", results: [] },
+        }});
+        return;
+      }
+
+      const budget = checkActiveAgentBudget(state);
+      if (!budget.allowed) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Teammate agent budget exhausted: ${budget.active} agents are already live (max ${budget.max}). Wait for running agents to settle, or raise the limit via PI_TEAMMATE_MAX_ACTIVE_AGENTS.` }],
+          isError: true, details: { mode: "single", results: [] },
+        }});
+        return;
+      }
 
       // Normalize (shared with the root tool execute path)
       const normalization = normalizeTeammateParams(p);
@@ -4302,6 +4374,7 @@ async function handleProxyRequest(
         outputLog: [],
         lastActivityAt: Date.now(),
         spawnedBy: parentCid,
+        depth: dispatchDepth,
         status: "running",
         sleepMs: 0,
         lease: createChildLease(),
@@ -4348,6 +4421,7 @@ async function handleProxyRequest(
           outputLog: [],
           lastActivityAt: Date.now(),
           spawnedBy: cid,
+          depth: dispatchDepth,
           status: "pending",
           sleepMs: 0,
           lease: createChildLease(),
@@ -4445,6 +4519,7 @@ async function handleProxyRequest(
         baseCwd: state.baseCwd,
         modelCapabilities,
         ...(normalizedTasks ? { taskCorrelationIds } : { correlationId: cid }),
+        depth: dispatchDepth,
         signal: abortCtrl.signal,
         parentSessionFile: spawnerAgent?.sessionFile ?? state.mainSessionFile,
         initialLeaseToken: (childId: string) => {

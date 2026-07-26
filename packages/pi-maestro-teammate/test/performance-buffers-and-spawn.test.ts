@@ -66,6 +66,7 @@ function activeAgent(): ActiveAgent {
     outputLog: [],
     lastActivityAt: now,
     status: "running",
+    depth: 0,
     sleepMs: 0,
   };
 }

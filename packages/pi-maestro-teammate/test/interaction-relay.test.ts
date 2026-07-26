@@ -30,6 +30,7 @@ function createState(): { state: TeammateState; agent: ActiveAgent } {
     outputLog: [],
     lastActivityAt: Date.now(),
     status: "running",
+    depth: 0,
     sleepMs: 0,
   };
   return {

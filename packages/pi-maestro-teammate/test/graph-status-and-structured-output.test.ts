@@ -130,6 +130,12 @@ test("root and proxy teammate initialization use their own request params", () =
   assert.equal(proxyInitialization.match(/lease:\s*createChildLease\(\)/g)?.length, 1);
 });
 
+test("native teammate status widget yields when Cockpit owns agent display", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  assert.match(source, /pi\.events\.on\(COCKPIT_UI_OWNERSHIP_EVENT[\s\S]*?cockpitOwnsAgents = .*?\.agents === true/);
+  assert.match(source, /if \(cockpitOwnsAgents \|\| interactivePanelActive\) \{[\s\S]*?setWidget\("teammate-agents", undefined\)/);
+});
+
 test("root and proxy graph normalization share one implementation that preserves thinking", () => {
   const indexSource = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
   const executionSource = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8");
@@ -206,6 +212,7 @@ test("child lifecycle commit wins over a later handback failure recovery", () =>
       outputLog: [],
       lastActivityAt: Date.now(),
       status: "sleeping",
+      depth: 0,
       sleepMs: 0,
     }]]),
   };
@@ -548,13 +555,13 @@ test("agent list prefers attachable physical chain children over duplicate progr
       [parentId, {
         agent: "graph(1)", correlationId: parentId, startedAt: now,
         abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-        status: "running", sleepMs: 0,
+        status: "running", depth: 0, sleepMs: 0,
         progress: [{ agent: "scout", name: "scan", correlationId: childId, taskIndex: 0, dependencies: [], status: "running" }],
       }],
       [childId, {
         agent: "scout", name: "scan", correlationId: childId, startedAt: now,
         abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-        spawnedBy: parentId, status: "running", sleepMs: 0, stdin: childStdin,
+        spawnedBy: parentId, status: "running", depth: 0, sleepMs: 0, stdin: childStdin,
       }],
     ]),
   };
@@ -587,6 +594,7 @@ test("teammate-list expands graph tasks and watch keeps sleeping messages visibl
       lastActivityAt: now - 1000,
       status: "sleeping",
       sleptAt: now - 1000,
+      depth: 0,
       sleepMs: 0,
       progress: [{
         agent: "scout",
@@ -627,6 +635,7 @@ test("teammate-list expands colliding short IDs until watch targets are unambigu
     outputLog: [],
     lastActivityAt: now,
     status: "running" as const,
+    depth: 0,
     sleepMs: 0,
   });
   const state: TeammateState = {
@@ -667,6 +676,7 @@ test("teammate-watch explains provider queueing before first activity", () => {
       outputLog: [],
       lastActivityAt: now,
       status: "running",
+      depth: 0,
       sleepMs: 0,
     }]]),
   };
@@ -693,6 +703,7 @@ test("teammate-wait settles from lifecycle events without polling teammate-watch
       outputLog: [],
       lastActivityAt: now,
       status: "running",
+      depth: 0,
       sleepMs: 0,
     }]]),
   };
@@ -722,6 +733,7 @@ test("teammate-wait returns result-ready when Pi has a final answer but agent_en
       outputLog: ["## Summary\nA useful result was already returned."],
       lastActivityAt: now - 5_000,
       status: "running",
+      depth: 0,
       sleepMs: 0,
     }]]),
   };
@@ -766,6 +778,7 @@ test("teammate-wait returns captured output for an agent that has stalled", asyn
       outputLog: ["## Summary\nA useful result was already returned."],
       lastActivityAt: now - 30_000,
       status: "running",
+      depth: 0,
       sleepMs: 0,
     }]]),
   };
@@ -789,6 +802,7 @@ test("retrying agents remain distinct from sleeping and expose retry metadata", 
     outputLog: [],
     lastActivityAt: now,
     status: "running" as const,
+    depth: 0,
     sleepMs: 0,
   };
   const state: TeammateState = {
@@ -834,6 +848,7 @@ test("agent selector explains unnamed recursive agents with hierarchy and live d
     inbox: [],
     outputLog: [],
     lastActivityAt: now,
+    depth: 0,
     sleepMs: 0,
   };
   const rootId = "aaaaaaaa-root";
@@ -902,6 +917,7 @@ test("agent conversation expands in overlay and sends composed messages", async 
     outputLog: [],
     lastActivityAt: now,
     status: "running" as const,
+    depth: 0,
     sleepMs: 0,
     progress: [
       {
@@ -981,12 +997,12 @@ test("agent overlay renders compact horizontal tabs and switches with left/right
   const first = {
     agent: "scout", name: "api", correlationId: "aaaaaaaa-api", startedAt: now,
     abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-    status: "running" as const, sleepMs: 0,
+    status: "running" as const, depth: 0, sleepMs: 0,
   };
   const second = {
     agent: "builder", name: "ui", correlationId: "bbbbbbbb-ui", startedAt: now,
     abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-    status: "sleeping" as const, sleepMs: 0,
+    status: "sleeping" as const, depth: 0, sleepMs: 0,
   };
   const activeRuns = new Map([[first.correlationId, first], [second.correlationId, second]]);
   const overlay = new AttachOverlay(first, () => {}, () => activeRuns);
@@ -1022,6 +1038,7 @@ test("persistent agent widget renders a bounded below-editor style status list",
     outputLog: [],
     lastActivityAt: now,
     status: "running" as const,
+    depth: 0,
     sleepMs: 0,
     progress: [
       {
@@ -1105,6 +1122,7 @@ test("persistent agent widget deduplicates graph progress and direct child rows"
     inbox: [],
     outputLog: [],
     lastActivityAt: now,
+    depth: 0,
     sleepMs: 0,
   };
   const parent = {
@@ -1150,6 +1168,7 @@ test("persistent agent widget distinguishes child agents from result dependencie
     inbox: [],
     outputLog: [],
     lastActivityAt: now,
+    depth: 0,
     sleepMs: 0,
   };
   const parent = {
@@ -1257,6 +1276,7 @@ test("teammate-watch can recover a sleeping agent's complete last result", () =>
       status: "sleeping",
       lastResult,
       sleptAt: now - 1000,
+      depth: 0,
       sleepMs: 0,
     }]]),
   };

@@ -25,7 +25,7 @@ test("attach overlay dispatches decoded input without feeding it twice", async (
   const first = {
     agent: "worker", name: "agent-1", correlationId: "agent-1", startedAt: now,
     abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-    status: "running" as const, sleepMs: 0,
+    status: "running" as const, depth: 0, sleepMs: 0,
   };
   const sent: string[] = [];
   const overlay = new AttachOverlay(first, () => {}, () => new Map([[first.correlationId, first]]), async (_id, message) => {
@@ -50,7 +50,7 @@ test("attach overlay preserves a grapheme-safe draft when send fails", async () 
   const first = {
     agent: "worker", name: "agent-1", correlationId: "agent-1", startedAt: now,
     abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-    status: "running" as const, sleepMs: 0,
+    status: "running" as const, depth: 0, sleepMs: 0,
   };
   const overlay = new AttachOverlay(
     first,
@@ -81,7 +81,7 @@ test("attach overlay does not send the same draft twice while pending", async ()
   const first = {
     agent: "worker", name: "agent-1", correlationId: "agent-1", startedAt: now,
     abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-    status: "running" as const, sleepMs: 0,
+    status: "running" as const, depth: 0, sleepMs: 0,
   };
   let calls = 0;
   let release: ((result: { ok: boolean; message: string }) => void) | undefined;
@@ -107,7 +107,7 @@ test("attach overlay blocks invisible composing in ultra-narrow mode", () => {
   const first = {
     agent: "worker", name: "agent-1", correlationId: "agent-1", startedAt: now,
     abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
-    status: "running" as const, sleepMs: 0,
+    status: "running" as const, depth: 0, sleepMs: 0,
   };
   const sent: string[] = [];
   const overlay = new AttachOverlay(first, () => {}, () => new Map([[first.correlationId, first]]), async (_id, message) => {

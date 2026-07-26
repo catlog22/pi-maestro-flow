@@ -162,6 +162,13 @@ export interface ActiveAgent {
   lastActivityAt: number;
   replyTo?: string;
   spawnedBy?: string;
+  /**
+   * Nesting depth of this agent within the dispatch tree. Root-tool dispatches
+   * are 0; every proxied dispatch is its spawner's depth plus one. This is the
+   * authoritative depth: nested dispatches execute inside the root process, so
+   * a process-scoped environment variable cannot carry it.
+   */
+  depth: number;
   status: AgentStatus;
   retry?: AgentRetryState;
   /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
