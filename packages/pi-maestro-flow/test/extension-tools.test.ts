@@ -246,7 +246,11 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   const expandedGoalComponent = renderGoalResult(goalResult, { expanded: true, isPartial: false }, goalTheme);
   const collapsedGoal = collapsedGoalComponent.render(120);
   const expandedGoal = expandedGoalComponent.render(120);
-  assert.deepEqual(collapsedGoal, ["✓ goal created"]);
+  // Collapsed is "success icon + the result's first line". Pinning a literal
+  // string here is exactly what let this assertion rot when the goal message
+  // text changed — it asserted a stale sample instead of the contract.
+  const goalFirstLine = goalResult.content[0].text.split("\n")[0];
+  assert.deepEqual(collapsedGoal, [`✓ ${goalFirstLine}`]);
   assert.equal(expandedGoal.filter((line) => /完成 Git 仓库配置整理/.test(line)).length, 1);
   for (let width = 1; width <= 120; width++) {
     for (const component of [goalCallComponent, collapsedGoalComponent, expandedGoalComponent]) {
