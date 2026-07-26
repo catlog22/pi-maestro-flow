@@ -14,6 +14,7 @@ import type {
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool } from "../shared/gui-registry.ts";
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams } from "./schemas.ts";
@@ -84,6 +85,16 @@ import type {
   SingleResult,
   TeammateInteractionRecord,
 } from "../shared/types.ts";
+
+type TeammateToolResult<T> = AgentToolResult<T> & { isError?: boolean };
+
+function isTeammateToolResult(value: unknown): value is TeammateToolResult<unknown> {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return Array.isArray(record.content)
+    && Object.prototype.hasOwnProperty.call(record, "details")
+    && (record.isError === undefined || typeof record.isError === "boolean");
+}
 import {
   TEAMMATE_COMPLETE_EVENT,
   TEAMMATE_STARTED_EVENT,
@@ -106,7 +117,9 @@ import {
 import {
   applyModelRouting,
   formatModelRoutingConfig,
+  type TeammateTaskType,
 } from "../models/model-routing.ts";
+import type { TeammateThinkingInput } from "../shared/thinking.ts";
 import {
   getTeammateChildToolBroker,
   getTeammatePermissionBroker,
@@ -1048,12 +1061,15 @@ export function handleChildLifecycleEvent(
     agent.status = "running";
     return;
   }
+  const lease = agent.lease;
+  const pendingCancel = agent.pendingCancel;
   if (event.type === "teammate_handoff_cancelled"
-    && agent.lease?.state === "fenced"
-    && agent.pendingCancel?.nonce === event.nonce
-    && agent.pendingCancel.fencedEpoch === agent.lease.epoch
+    && lease?.state === "fenced"
+    && pendingCancel
+    && pendingCancel?.nonce === event.nonce
+    && pendingCancel.fencedEpoch === lease.epoch
   ) {
-    agent.lease = recoverChild(agent.lease);
+    agent.lease = recoverChild(lease);
     agent.sendControl?.({ type: "teammate_lease_update", token: leaseToken(agent.lease) });
     agent.pendingCancel = undefined;
   }
@@ -1402,6 +1418,8 @@ export default function registerTeammateExtension(
             if (!bridge.parking || bridge.completedPromptSeq < bridge.requiredPromptSeq) return;
             bridge.idleStableTicks = bridge.ctx?.isIdle() ? bridge.idleStableTicks + 1 : 0;
             if (!handoffBarrierReached(bridge.requiredPromptSeq, bridge.completedPromptSeq, bridge.idleStableTicks)) return;
+            const ctx = bridge.ctx;
+            if (!ctx) return;
             if (bridge.pollTimer) clearInterval(bridge.pollTimer);
             bridge.pollTimer = undefined;
             bridge.parking = false;
@@ -1410,8 +1428,8 @@ export default function registerTeammateExtension(
               type: "teammate_handoff_ready",
               correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
               nonce: bridge.nonce,
-              sessionId: bridge.ctx.sessionManager.getSessionId(),
-              sessionFile: bridge.ctx.sessionManager.getSessionFile(),
+              sessionId: ctx.sessionManager.getSessionId(),
+              sessionFile: ctx.sessionManager.getSessionFile(),
             });
           }, 50);
         } else if (m?.type === "teammate_lease_update") {
@@ -1450,12 +1468,10 @@ export default function registerTeammateExtension(
       tool: string,
       params: unknown,
       signal?: AbortSignal,
-    ): Promise<AgentToolResult<T>> {
-      if (typeof process.send !== "function" || process.connected === false) {
-        return {
-          content: [{ type: "text", text: "IPC not available. Teammate proxy requires IPC channel." }],
-          isError: true,
-        } as AgentToolResult<T>;
+    ): Promise<TeammateToolResult<T>> {
+      const send = process.send;
+      if (typeof send !== "function" || process.connected === false) {
+        throw new Error("IPC not available. Teammate proxy requires IPC channel.");
       }
       const requestId = randomUUID();
       const result = await createChildProxyRequest(
@@ -1468,11 +1484,14 @@ export default function registerTeammateExtension(
           params,
           correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
         },
-        (message, callback) => process.send!(message, callback),
+        (message, callback) => send(message, callback),
         CHILD_PROXY_TIMEOUT_MS,
         signal,
       );
-      return result as AgentToolResult<T>;
+      if (!isTeammateToolResult(result)) {
+        throw new Error(`Teammate proxy "${tool}" returned an invalid result envelope.`);
+      }
+      return result as TeammateToolResult<T>;
     }
 
     function installChildProxyCaller(): void {
@@ -1603,10 +1622,10 @@ export default function registerTeammateExtension(
       params: RunTeammateParams,
       signal: AbortSignal,
       onUpdate:
-        | ((result: AgentToolResult<Details>) => void)
+        | ((result: TeammateToolResult<Details>) => void)
         | undefined,
       ctx: ExtensionContext,
-    ): Promise<AgentToolResult<Details>> {
+    ): Promise<TeammateToolResult<Details>> {
       params = applyModelRouting(
         params,
         (params.cwd ?? state.baseCwd) || ctx.cwd,
@@ -2023,6 +2042,7 @@ export default function registerTeammateExtension(
       try {
         // --- MULTI-TASK MODE (parallel / chain / graph) ---
         if (isMultiTask) {
+          const activeGraphMode = inferGraphMode(normalizedTasks);
           const executeGraph = async () => {
             const options = makeOptions();
             const results = await runWithProgressFlushCleanup(
@@ -2031,7 +2051,7 @@ export default function registerTeammateExtension(
             );
 
             const hasError = results.some((r) => r.exitCode !== 0);
-            const totalDur = graphMode === "chain"
+            const totalDur = activeGraphMode === "chain"
               ? results.reduce((s, r) => s + r.durationMs, 0)
               : Math.max(...results.map((r) => r.durationMs), 0);
 
@@ -2073,14 +2093,14 @@ export default function registerTeammateExtension(
             // Foreground: block until completion
             const { results, hasError, totalDur, summaries, structuredOutput, progress } = await executeGraph();
 
-            emitComplete(pi, id, graphMode, correlationId, hasError ? 1 : 0, totalDur);
+            emitComplete(pi, id, activeGraphMode, correlationId, hasError ? 1 : 0, totalDur);
             settleAgent(state, correlationId, hasError ? 1 : 0, summaries, params.context !== "fork");
 
             return {
               content: [{ type: "text", text: warningPrefix + summaries }],
               isError: hasError,
               details: {
-                mode: graphMode as Details["mode"],
+                mode: activeGraphMode,
                 results,
                 progress,
                 ...(structuredOutput !== undefined ? { structuredOutput } : {}),
@@ -2097,7 +2117,7 @@ export default function registerTeammateExtension(
             // Subscribers use this to retire the row, stop the widget timer and
             // run the wakeable budget. Only the foreground branch used to emit
             // it, so a backgrounded graph stayed on screen for the session.
-            emitComplete(pi, id, graphMode, correlationId, exitCode, totalDur);
+            emitComplete(pi, id, activeGraphMode, correlationId, exitCode, totalDur);
 
             pi.sendMessage(
               {
@@ -2110,16 +2130,16 @@ export default function registerTeammateExtension(
             );
           }).catch((error) => {
             killAgent(state, correlationId, undefined, "failed");
-            notifyBackgroundFailure(pi, id, graphMode, correlationId, error);
+            notifyBackgroundFailure(pi, id, activeGraphMode, correlationId, error);
           });
 
           return {
             content: [{
               type: "text",
-              text: `${warningPrefix}${normalizedTasks.length} tasks (${graphMode}) running in background. ${backgroundWaitGuidance(correlationId)}`,
+              text: `${warningPrefix}${normalizedTasks.length} tasks (${activeGraphMode}) running in background. ${backgroundWaitGuidance(correlationId)}`,
             }],
             isError: false,
-            details: { mode: graphMode as Details["mode"], results: [], progress: progressSnapshot() },
+            details: { mode: activeGraphMode, results: [], progress: progressSnapshot() },
           };
         }
 
@@ -2130,7 +2150,9 @@ export default function registerTeammateExtension(
 
           const removeListener = ctx.hasUI
             ? ctx.ui.onTerminalInput((data: string) => {
-                if (data === "\x1bb") detachResolve?.(); // Alt+B
+                if (data !== "\x1bb") return undefined;
+                detachResolve?.(); // Alt+B
+                return { consume: true };
               })
             : null;
 
@@ -2147,21 +2169,22 @@ export default function registerTeammateExtension(
           removeListener?.();
 
           if (race.done) {
-            const result = race.result!;
+            const result = race.result;
+            if (!result) throw new Error("Foreground teammate finished without a result.");
             emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
             const lastMessage = displayMessageForResult(result);
             if (!result.lifecyclePending) {
               settleAgent(state, correlationId, result.exitCode, lastMessage, result.wakeable !== false);
             }
-            const toolResult: AgentToolResult<Details> = {
+            const details: Details = { mode: "single", results: [result] };
+            if (result.structuredOutput !== undefined) {
+              details.structuredOutput = result.structuredOutput;
+            }
+            return {
               content: [{ type: "text", text: warningPrefix + lastMessage }],
               isError: result.exitCode !== 0,
-              details: { mode: "single", results: [result] },
+              details,
             };
-            if (result.structuredOutput !== undefined) {
-              toolResult.details!.structuredOutput = result.structuredOutput;
-            }
-            return toolResult;
           }
 
           // Alt+B: detach to background
@@ -2272,7 +2295,7 @@ export default function registerTeammateExtension(
     async execute(
       _id: string,
       params: { to: string; message?: string; mode?: RpcMessageMode },
-    ): Promise<AgentToolResult<{ delivered: boolean }>> {
+    ): Promise<TeammateToolResult<{ delivered: boolean }>> {
       const requestedMode = params.mode ?? "follow_up";
       const message = params.message ?? "";
       if (!message && requestedMode !== "abort") {
@@ -2329,9 +2352,13 @@ export default function registerTeammateExtension(
         };
       }
 
-      if (!canChildWrite(agent.lease)) {
+      const writableLease = agent.lease;
+      if (!writableLease || !canChildWrite(writableLease)) {
+        const ownership = writableLease
+          ? `${writableLease.owner} (${writableLease.state})`
+          : "an unavailable lease";
         return {
-          content: [{ type: "text", text: `Agent "${params.to}" is currently owned by ${agent.lease.owner} (${agent.lease.state}).` }],
+          content: [{ type: "text", text: `Agent "${params.to}" is currently owned by ${ownership}.` }],
           isError: true,
           details: { delivered: false },
         };
@@ -2403,7 +2430,7 @@ export default function registerTeammateExtension(
       _signal: AbortSignal,
       _onUpdate: unknown,
       ctx: ExtensionContext,
-    ): Promise<AgentToolResult<{ agents: unknown[] }>> {
+    ): Promise<TeammateToolResult<{ agents: unknown[] }>> {
       const view = params.view ?? "active";
       if (view === "roles") {
         const { entries, text } = buildRoleList(ctx.cwd);
@@ -2439,7 +2466,7 @@ export default function registerTeammateExtension(
     async execute(
       _id: string,
       params: { name: string; lines?: number },
-    ): Promise<AgentToolResult<{ output: string[] }>> {
+    ): Promise<TeammateToolResult<{ output: string[] }>> {
       const lines = params.lines ?? 20;
       const resolved = resolveWatchTarget(state, params.name);
       if (!resolved.match) {
@@ -2474,7 +2501,7 @@ export default function registerTeammateExtension(
       _id: string,
       params: { name?: string; timeoutMs?: number; waitMs?: number },
       signal: AbortSignal,
-    ): Promise<AgentToolResult<{ status: TeammateWaitStatus; output: string[] }>> {
+    ): Promise<TeammateToolResult<{ status: TeammateWaitStatus; output: string[] }>> {
       const result = await waitForTeammate(state, params, signal);
       return {
         content: [{ type: "text", text: result.output.join("\n") }],
@@ -2590,8 +2617,12 @@ export default function registerTeammateExtension(
             if (!target?.stdin?.writable) {
               return { ok: false, message: "Agent is no longer writable" };
             }
-            if (!canChildWrite(target.lease)) {
-              return { ok: false, message: `Session owned by ${target.lease.owner} (${target.lease.state})` };
+            const writableLease = target.lease;
+            if (!writableLease || !canChildWrite(writableLease)) {
+              const ownership = writableLease
+                ? `${writableLease.owner} (${writableLease.state})`
+                : "an unavailable lease";
+              return { ok: false, message: `Session owned by ${ownership}` };
             }
             const sendMode: RpcMessageMode = target.status === "sleeping" ? "prompt" : "follow_up";
             const sent = sendRpcMessage(target.stdin, message, sendMode, target.lease ? leaseToken(target.lease) : undefined);
@@ -4993,6 +5024,67 @@ function trackProxyDispatch(state: TeammateState, requestId: string, correlation
   (state.proxyDispatchByRequest ??= new Map()).set(requestId, correlationId);
 }
 
+/** Parse untrusted child IPC parameters before they enter shared normalization. */
+export function parseProxyTeammateParams(
+  params: Record<string, unknown>,
+): RunTeammateParams | undefined {
+  if (!Check(TeammateParams, params)) return undefined;
+  return {
+    ...params,
+    agent: typeof params.agent === "string" ? params.agent : "",
+    taskType: parseTaskType(params.taskType),
+    thinking: parseThinkingInput(params.thinking),
+    outputSchema: parseOutputSchema(params.outputSchema),
+    tasks: params.tasks?.map((task) => ({
+      ...task,
+      taskType: parseTaskType(task.taskType),
+      thinking: parseThinkingInput(task.thinking),
+      outputSchema: parseOutputSchema(task.outputSchema),
+    })),
+    chain: params.chain?.map((task) => ({
+      ...task,
+      taskType: parseTaskType(task.taskType),
+      thinking: parseThinkingInput(task.thinking),
+    })),
+  };
+}
+
+function parseTaskType(value: unknown): TeammateTaskType | undefined {
+  if (
+    value === "explore"
+    || value === "analysis"
+    || value === "debug"
+    || value === "planning"
+    || value === "development"
+    || value === "review"
+    || value === "testing"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function parseThinkingInput(value: unknown): TeammateThinkingInput | undefined {
+  if (
+    value === "off"
+    || value === "minimal"
+    || value === "low"
+    || value === "medium"
+    || value === "high"
+    || value === "xhigh"
+    || value === "max"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function parseOutputSchema(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
 export async function handleProxyRequest(
   pi: ExtensionAPI,
   state: TeammateState,
@@ -5017,7 +5109,15 @@ export async function handleProxyRequest(
 
   switch (tool) {
     case "teammate": {
-      const p = params as RunTeammateParams;
+      const p = parseProxyTeammateParams(params);
+      if (!p) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: "Invalid teammate parameters received from child IPC." }],
+          isError: true,
+          details: { mode: "single", results: [] },
+        }});
+        return;
+      }
       const cid = randomUUID();
 
       // Nested dispatches execute inside this process, so PI_TEAMMATE_DEPTH
@@ -5598,9 +5698,13 @@ export async function handleProxyRequest(
         }});
         return;
       }
-      if (!canChildWrite(agent.lease)) {
+      const writableLease = agent.lease;
+      if (!writableLease || !canChildWrite(writableLease)) {
+        const ownership = writableLease
+          ? `${writableLease.owner} (${writableLease.state})`
+          : "an unavailable lease";
         reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: `Agent "${to}" is currently owned by ${agent.lease.owner} (${agent.lease.state}).` }],
+          content: [{ type: "text", text: `Agent "${to}" is currently owned by ${ownership}.` }],
           isError: true, details: { delivered: false },
         }});
         return;

@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
+import { parseProxyTeammateParams } from "../src/extension/index.ts";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../src/public/v1/", import.meta.url));
 const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
@@ -126,4 +127,19 @@ test("the v1 barrel re-exports every v1 module", () => {
       `src/public/v1/index.ts must re-export ./${file} — the barrel is the package root's public API`,
     );
   }
+});
+
+test("child IPC teammate parameters are parsed before shared normalization", () => {
+  const parsed = parseProxyTeammateParams({
+    tasks: [{ agent: "explorer", task: "inspect", taskType: "explore", thinking: "max" }],
+    background: false,
+    outputSchema: { type: "object" },
+  });
+  assert.equal(parsed?.agent, "");
+  assert.equal(parsed?.tasks?.[0]?.taskType, "explore");
+  assert.equal(parsed?.tasks?.[0]?.thinking, "max");
+  assert.deepEqual(parsed?.outputSchema, { type: "object" });
+
+  assert.equal(parseProxyTeammateParams({ agent: "delegate", task: "inspect", taskType: "invalid" }), undefined);
+  assert.equal(parseProxyTeammateParams({ tasks: [{ agent: 42, task: "inspect" }] }), undefined);
 });
