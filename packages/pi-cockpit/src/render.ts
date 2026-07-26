@@ -115,29 +115,18 @@ function roleColor(role: string): ThemeColor {
 	return ROLE_PALETTE[hash % ROLE_PALETTE.length];
 }
 
-function agentStatusRank(status: AgentRow["status"]): number {
-	if (status === "failed") return 0;
-	if (status === "retrying") return 1;
-	if (status === "running") return 2;
-	if (status === "pending") return 3;
-	if (status === "sleeping") return 4;
-	return 5;
-}
-
 interface AgentTreeEntry {
 	row: AgentRow;
 	prefix: string;
 }
 
 function buildAgentTree(rows: readonly AgentRow[], glyphs: IconGlyphs): AgentTreeEntry[] {
-	const sorted = [...rows].sort((a, b) =>
-		agentStatusRank(a.status) - agentStatusRank(b.status)
-		|| a.startedAt - b.startedAt
-		|| a.correlationId.localeCompare(b.correlationId));
-	const byId = new Map(sorted.map((row) => [row.correlationId, row]));
+	const activityOrder = (a: AgentRow, b: AgentRow): number =>
+		b.lastActivityAt - a.lastActivityAt || a.correlationId.localeCompare(b.correlationId);
+	const byId = new Map(rows.map((row) => [row.correlationId, row]));
 	const children = new Map<string, AgentRow[]>();
 	const roots: AgentRow[] = [];
-	for (const row of sorted) {
+	for (const row of rows) {
 		const parent = row.parentCorrelationId;
 		if (!parent || parent === row.correlationId || !byId.has(parent)) {
 			roots.push(row);
@@ -147,6 +136,8 @@ function buildAgentTree(rows: readonly AgentRow[], glyphs: IconGlyphs): AgentTre
 		siblings.push(row);
 		children.set(parent, siblings);
 	}
+	roots.sort(activityOrder);
+	for (const siblings of children.values()) siblings.sort(activityOrder);
 
 	const entries: AgentTreeEntry[] = [];
 	const visited = new Set<string>();
@@ -161,7 +152,7 @@ function buildAgentTree(rows: readonly AgentRow[], glyphs: IconGlyphs): AgentTre
 
 	roots.forEach((root, index) => append(root, "", index === roots.length - 1));
 	// Broken or cyclic parent references must never hide rows or recurse forever.
-	for (const row of sorted) {
+	for (const row of [...rows].sort(activityOrder)) {
 		if (!visited.has(row.correlationId)) append(row, "", true);
 	}
 	return entries;

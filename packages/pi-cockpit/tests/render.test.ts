@@ -14,7 +14,18 @@ const glyphs = resolveGlyphs("nerd");
 const opts = { glyphs, spin: "⠋" };
 
 function agent(over: Partial<AgentRow> = {}): AgentRow {
-	return { correlationId: "abcdef12", agent: "explorer", name: "scan", role: "explorer", task: "map auth", status: "running", tail: "read x.ts", startedAt: 1, ...over };
+	return {
+		correlationId: "abcdef12",
+		agent: "explorer",
+		name: "scan",
+		role: "explorer",
+		task: "map auth",
+		status: "running",
+		tail: "read x.ts",
+		startedAt: 1,
+		lastActivityAt: 1,
+		...over,
+	};
 }
 function todo(id: string, status: TodoItem["status"], subject = `task ${id}`): TodoItem {
 	return { id, subject, status, blockedBy: [], skills: [] };
@@ -48,6 +59,30 @@ test("renderAgents list follows spawnedBy parent-child hierarchy", () => {
 	assert.match(lines[1], /^  ├─ .*executor.*child a/);
 	assert.match(lines[2], /^  │ └─ .*reviewer.*grandchild/);
 	assert.match(lines[3], /^  └─ .*explorer.*child b/);
+});
+
+test("renderAgents orders roots and siblings by latest activity while keeping subtrees contiguous", () => {
+	const lines = renderAgents([
+		agent({ correlationId: "root-old", role: "planner", task: "older active root", lastActivityAt: 500 }),
+		agent({ correlationId: "root-new", role: "planner", task: "newer idle root", lastActivityAt: 400 }),
+		agent({ correlationId: "child-old", parentCorrelationId: "root-old", task: "older sibling", lastActivityAt: 100 }),
+		agent({ correlationId: "child-new", parentCorrelationId: "root-old", task: "newer sibling", lastActivityAt: 300 }),
+		agent({ correlationId: "grandchild", parentCorrelationId: "child-new", task: "grandchild", lastActivityAt: 900 }),
+	], "list", 120, theme, utils, opts);
+	assert.match(lines[0], /older active root/);
+	assert.match(lines[1], /newer sibling/);
+	assert.match(lines[2], /grandchild/);
+	assert.match(lines[3], /older sibling/);
+	assert.match(lines[4], /newer idle root/);
+});
+
+test("renderAgents uses correlationId as deterministic activity tie-breaker", () => {
+	const lines = renderAgents([
+		agent({ correlationId: "b", task: "second", lastActivityAt: 10 }),
+		agent({ correlationId: "a", task: "first", lastActivityAt: 10 }),
+	], "list", 120, theme, utils, opts);
+	assert.match(lines[0], /first/);
+	assert.match(lines[1], /second/);
 });
 
 test("renderAgents treats missing parents as roots and survives cycles", () => {
