@@ -1572,13 +1572,13 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             promptSeq: task.task ? 1 : 0,
           };
           state.activeRuns.set(childId, childAgent);
-          if (task.name) state.namedAgents.set(task.name, childId);
+          if (task.name) bindAgentName(state, task.name, childId);
           emitTeammateStarted(pi, childAgent);
         });
       }
 
       if (params.name) {
-        state.namedAgents.set(params.name, correlationId);
+        bindAgentName(state, params.name, correlationId);
       }
 
       emitTeammateStarted(pi, activeAgent, { id });
@@ -2952,6 +2952,10 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     if (delay === undefined) return;
     wakeableEvictionTimer = setTimeout(() => {
       wakeableEvictionTimer = null;
+      // Also swept here: once the widget timer stops, this is the only tick
+      // left, and a tombstone that outlives its window would otherwise sit in
+      // activeRuns forever — blocking its whole cohort from ever retiring.
+      sweepFailedAgents(state);
       enforceWakeableAgentBudget(state);
       updateAgentWidget();
       scheduleWakeableEvictionTimer();
@@ -3459,15 +3463,33 @@ function settleTeammateWaiters(
   }
 }
 
+/**
+ * Marks a target's `result-ready` as delivered and reports whether this call
+ * was the one that delivered it. `result-ready` is an edge, not a level: the
+ * result becomes consumable once, and the agent then keeps running until its
+ * lifecycle confirms. Reporting it on every subsequent wait meant a caller
+ * that waited again — to observe the real terminal state — got `result-ready`
+ * back immediately, forever, and could never reach `completed`.
+ */
+function claimResultReadyNotice(state: TeammateState | undefined, correlationId: string): boolean {
+  if (!state) return true;
+  const notified = state.resultReadyNotified ??= new Set<string>();
+  if (notified.has(correlationId)) return false;
+  notified.add(correlationId);
+  return true;
+}
+
 function statusForWatchTarget(
   target: WatchTarget,
   now = Date.now(),
+  state?: TeammateState,
 ): Extract<TeammateWaitStatus, "completed" | "failed" | "result-ready" | "stalled"> | undefined {
   const status = target.kind === "agent" ? target.agent.status : target.progress.status;
   if (status === "sleeping" || status === "completed") return "completed";
   if (status === "failed") return "failed";
   const resultReadyAt = target.kind === "agent" ? target.agent.resultReadyAt : target.progress.resultReadyAt;
-  if (resultReadyAt !== undefined) return "result-ready";
+  const targetCid = target.kind === "agent" ? target.agent.correlationId : target.progress.correlationId;
+  if (resultReadyAt !== undefined && claimResultReadyNotice(state, targetCid)) return "result-ready";
   // An agent blocked on a relayed permission or question is waiting on a human,
   // not stalled. Reporting it as stalled told callers to terminate a healthy
   // agent; the wait's own timeout remains the backstop.
@@ -3542,7 +3564,7 @@ export function waitForTeammate(
       resolved.error ?? `Agent "${params.name}" not found.${resolved.available.length ? ` Available: ${resolved.available.join(", ")}` : ""}`,
     ] });
   }
-  const settled = statusForWatchTarget(resolved.match);
+  const settled = statusForWatchTarget(resolved.match, Date.now(), state);
   if (settled) {
     return Promise.resolve({
       status: settled,
@@ -3573,7 +3595,7 @@ export function waitForTeammate(
     // hanging for the rest of the session.
     const timeoutAt = Date.now() + (params.timeoutMs || TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS);
     const check = () => {
-      const currentStatus = statusForWatchTarget(resolved.match!);
+      const currentStatus = statusForWatchTarget(resolved.match!, Date.now(), state);
       if (currentStatus) return finish(currentStatus);
       if (timeoutAt !== undefined && Date.now() >= timeoutAt) return finish("timeout");
       waiter.timer = setTimeout(check, waitDelayForWatchTarget(resolved.match!, timeoutAt));
@@ -3705,6 +3727,8 @@ function clearAgentResultReadyState(state: TeammateState, correlationId: string)
     const progress = parent.progress?.find((item) => item.correlationId === correlationId);
     if (progress) progress.resultReadyAt = undefined;
   }
+  // Clearing the flag re-arms the edge: a later result becomes reportable again.
+  state.resultReadyNotified?.delete(correlationId);
 }
 
 interface WakeableAgentCohort {
@@ -3976,6 +4000,33 @@ function killAgent(
   releaseAgentMemory(agent);
   agent.status = "completed";
   removeAgentFromRegistry(state, correlationId, name);
+}
+
+/**
+ * Binds a display name to an agent, surfacing the collision when one occurs.
+ *
+ * Names are last-wins by design, but the displacement used to be silent: the
+ * previous holder stayed alive and reachable only through its `name#id-prefix`
+ * form, while `teammate-wait @name` and `teammate-send @name` quietly retargeted
+ * to the newcomer. Both logs now say so, so a misrouted message is traceable.
+ */
+export function bindAgentName(state: TeammateState, name: string, correlationId: string): void {
+  const previousId = state.namedAgents.get(name);
+  state.namedAgents.set(name, correlationId);
+  if (!previousId || previousId === correlationId) return;
+  const previous = state.activeRuns.get(previousId);
+  if (!previous || !LIVE_AGENT_STATUSES.has(previous.status)) return;
+
+  const stamp = new Date().toISOString().slice(11, 19);
+  const shortPrevious = previousId.slice(0, 8);
+  const shortNext = correlationId.slice(0, 8);
+  previous.outputLog.push(
+    `[${stamp}] ! name "@${name}" taken over by #${shortNext}; reach this agent as "${name}#${shortPrevious}".`,
+  );
+  trimAgentBuffers(previous);
+  state.activeRuns.get(correlationId)?.outputLog.push(
+    `[${stamp}] ! name "@${name}" was already held by #${shortPrevious}, which is still running.`,
+  );
 }
 
 function removeAgentFromRegistry(
@@ -4800,7 +4851,7 @@ export async function handleProxyRequest(
         ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(cid, activeAgent);
-      if (p.name) state.namedAgents.set(p.name, cid);
+      if (p.name) bindAgentName(state, p.name, cid);
 
       const parentAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
       const reportChildStatus = (
@@ -4856,7 +4907,7 @@ export async function handleProxyRequest(
           promptSeq: task.task ? 1 : 0,
         };
         state.activeRuns.set(childId, childAgent);
-        if (task.name) state.namedAgents.set(task.name, childId);
+        if (task.name) bindAgentName(state, task.name, childId);
         emitTeammateStarted(pi, childAgent);
       });
 

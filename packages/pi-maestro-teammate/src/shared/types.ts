@@ -207,6 +207,13 @@ export interface TeammateState {
    * dropped once the cap is reached.
    */
   recentlySettled?: Map<string, SettledAgentRecord>;
+  /**
+   * Agents whose `result-ready` edge has already been reported to a waiter.
+   * The flag itself stays set until the lifecycle settles, so without this a
+   * caller waiting again for the true terminal state would be handed
+   * `result-ready` back immediately, every time.
+   */
+  resultReadyNotified?: Set<string>;
 }
 
 export interface SettledAgentRecord {

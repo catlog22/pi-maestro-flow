@@ -3,6 +3,8 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
   buildAgentList,
+  bindAgentName,
+  enforceWakeableAgentBudget,
   findSettledAgent,
   handleProxyRequest,
   hasTeammateWidgetWork,
@@ -16,6 +18,7 @@ import {
   waitForTeammate,
   SETTLED_AGENT_MEMO_LIMIT,
   TEAMMATE_STALL_TIMEOUT_MS,
+  WAKEABLE_AGENT_BUDGET,
 } from "../src/extension/index.ts";
 import { TEAMMATE_COMPLETE_EVENT } from "../src/shared/types.ts";
 import type { ActiveAgent, TeammateInteractionRecord, TeammateState } from "../src/shared/types.ts";
@@ -233,6 +236,89 @@ test("an agent whose result was just published is left alone", () => {
   const other = makeState();
   addAgent(other, "plain");
   assert.deepEqual(reclaimResultReadyAgents(other), []);
+});
+
+// --- REL-8: result-ready is an edge, not a level ---------------------------
+
+test("result-ready is reported once, then the wait waits for the real terminal state", async () => {
+  const state = makeState();
+  const agent = addAgent(state, "worker", { resultReadyAt: Date.now() });
+
+  const first = await waitForTeammate(state, { name: "worker" });
+  assert.equal(first.status, "result-ready");
+
+  // Waiting again is how a caller asks for the terminal state. Handing back
+  // `result-ready` forever meant `completed` was unreachable.
+  const second = await waitForTeammate(state, { name: "worker", timeoutMs: 120 });
+  assert.equal(second.status, "timeout");
+
+  agent.status = "sleeping";
+  assert.equal((await waitForTeammate(state, { name: "worker" })).status, "completed");
+});
+
+test("a cleared result-ready re-arms the notice for the next result", async () => {
+  const state = makeState();
+  const agent = addAgent(state, "worker", { resultReadyAt: Date.now() });
+  assert.equal((await waitForTeammate(state, { name: "worker" })).status, "result-ready");
+
+  settleAgent(state, agent.correlationId, 0);
+  assert.equal(state.resultReadyNotified?.has(agent.correlationId), false);
+});
+
+// --- REL-7: a stolen name used to be silent --------------------------------
+
+test("taking over a live agent's name is recorded on both agents", () => {
+  const state = makeState();
+  const first = addAgent(state, "reviewer");
+  const second = addAgent(state, undefined);
+  bindAgentName(state, "reviewer", second.correlationId);
+
+  assert.equal(state.namedAgents.get("reviewer"), second.correlationId, "names stay last-wins");
+  assert.match(first.outputLog.join("\n"), /taken over/);
+  assert.match(first.outputLog.join("\n"), new RegExp(`reviewer#${first.correlationId.slice(0, 8)}`));
+  assert.match(second.outputLog.join("\n"), /already held/);
+});
+
+test("a retired agent still owns its name, because it is still wakeable", () => {
+  const state = makeState();
+  const first = addAgent(state, "reviewer");
+  settleAgent(state, first.correlationId, 0);
+  assert.equal(first.status, "sleeping");
+
+  const second = addAgent(state, undefined);
+  bindAgentName(state, "reviewer", second.correlationId);
+  assert.match(second.outputLog.join("\n"), /already held/, "a sleeping agent can still be messaged by name");
+});
+
+test("rebinding a name whose holder is gone is not a collision", () => {
+  const state = makeState();
+  const first = addAgent(state, "reviewer");
+  settleAgent(state, first.correlationId, 1);
+  sweepFailedAgents(state, Date.now() + FAILED_AGENT_RETENTION_MS + 1);
+
+  const second = addAgent(state, undefined);
+  bindAgentName(state, "reviewer", second.correlationId);
+  assert.doesNotMatch(second.outputLog.join("\n"), /already held/);
+});
+
+// --- REL-6: a failed cohort member blocked every sibling from retiring -----
+
+test("a failed graph task stops blocking its cohort once swept", () => {
+  const state = makeState();
+  const controller = new AbortController();
+  const ok = addAgent(state, "task-a", { abortController: controller, status: "sleeping", sleptAt: Date.now() });
+  const bad = addAgent(state, "task-b", { abortController: controller, status: "failed", failedAt: Date.now() });
+
+  // Cohorts retire only when every member is sleeping, so one never-spawned
+  // task pinned the whole graph in activeRuns for the session.
+  assert.equal(enforceWakeableAgentBudget(state, Date.now() + WAKEABLE_AGENT_BUDGET.namedTtlMs + 1).length, 0);
+
+  const now = Date.now() + FAILED_AGENT_RETENTION_MS + 1;
+  assert.deepEqual(sweepFailedAgents(state, now), [bad.correlationId]);
+  assert.ok(
+    enforceWakeableAgentBudget(state, now + WAKEABLE_AGENT_BUDGET.namedTtlMs).includes(ok.correlationId),
+    "the surviving sibling can now retire",
+  );
 });
 
 // --- ARCH-3: nested dispatches never published their lifecycle -------------

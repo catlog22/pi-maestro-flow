@@ -848,7 +848,9 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   // Without a trusted spawner there is nothing to check the claim against.
   assert.equal(resolveProxyParentCorrelationId({ parentCid: "explicit-parent" }, undefined, graphState), "explicit-parent");
   assert.equal(resolveProxyParentCorrelationId({}, "root-graph", graphState), "root-graph");
-  assert.match(source, /spawnedBy: cid,[\s\S]*if \(task\.name\) state\.namedAgents\.set\(task\.name, childId\)/);
+  assert.match(source, /spawnedBy: cid,[\s\S]*if \(task\.name\) bindAgentName\(state, task\.name, childId\)/);
+  // Every name binding goes through the one helper that reports collisions.
+  assert.equal(source.match(/state\.namedAgents\.set\(/g)?.length, 1, "only bindAgentName may write the name map");
   assert.match(source, /normalizedTasks \? \{ taskCorrelationIds \} : \{ correlationId: cid \}/);
   assert.match(source, /if \(p\.background === false\) \{[\s\S]*await executeNested\(\)/);
   assert.match(source, /running in background\. \$\{backgroundWaitGuidance\(cid\)\}/);
