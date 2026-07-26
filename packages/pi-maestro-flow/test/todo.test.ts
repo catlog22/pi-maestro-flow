@@ -470,6 +470,67 @@ test("todo next loads context and skills before transitioning", async () => {
   }
 });
 
+test("skill re-activation failure degrades the turn instead of throwing into the context hook", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-skill-degrade-"));
+  const agentDir = join(root, "agent");
+  const skillDir = join(agentDir, "skills", "demo");
+  await mkdir(skillDir, { recursive: true });
+  const skillPath = join(skillDir, "SKILL.md");
+  await writeFile(skillPath, "---\nname: demo\ndescription: demo\n---\n# Demo instructions\n");
+  const skill = {
+    name: "demo",
+    description: "demo",
+    filePath: skillPath,
+    baseDir: skillDir,
+    sourceInfo: {} as Skill["sourceInfo"],
+    disableModelInvocation: false,
+  } satisfies Skill;
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir,
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [skill], diagnostics: [] }) },
+  });
+  let todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    await executeTodo({
+      action: "create",
+      subject: "Run demo",
+      skills: [{ name: "demo", role: "primary" }],
+    }, ctx);
+    await executeTodo({ action: "next" }, ctx);
+    const persisted = getVisibleTasks()[0];
+    assert.equal(persisted.status, "in_progress");
+
+    // Restart: the in-memory activation snapshot is gone (persist only writes tasks),
+    // so the next context hook is forced to re-run the real load — and the skill file
+    // is no longer loadable.
+    onSessionShutdown(todoContext);
+    await rm(skillPath, { force: true });
+    todoContext = startTodo(root, loader, [{
+      type: "custom",
+      customType: "todo-state",
+      data: { version: 5, tasks: { [persisted.id]: persisted } },
+    }]);
+
+    const result = await onContextTodo([]);
+    const injected = result?.messages[0] as { content: string; display: boolean } | undefined;
+    assert.ok(injected, "expected the degraded activation to still be injected");
+    assert.match(injected.content, /<active_skill_stack_unavailable>/);
+    assert.match(injected.content, /Their instructions are NOT in effect/);
+    assert.match(injected.content, /demo/);
+    // The user has to be able to see it; skill prompts are otherwise hidden.
+    assert.equal(injected.display, true);
+
+    // Still degrades on the following turn, and still does not throw.
+    await onContextTodo([]);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("todo next keeps task pending when skill loading fails", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-next-error-"));
   const loader = new TodoSkillLoader({

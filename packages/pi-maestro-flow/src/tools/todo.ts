@@ -18,6 +18,8 @@ import {
 } from "../skills/skill-composer.ts";
 import {
   SkillRuntime,
+  type AnySkillActivation,
+  type DegradedSkillActivation,
   type SkillActivation,
   type SkillActivationBindingMetadata,
   type SkillActivationMetadata,
@@ -1330,7 +1332,7 @@ function activationMetadata(activation: SkillActivation): SkillActivationMetadat
   };
 }
 
-async function ensureSkillActivation(task: TodoTask): Promise<SkillActivation> {
+async function ensureSkillActivation(task: TodoTask): Promise<AnySkillActivation> {
   const cached = activeSkillSnapshots.get(task.id);
   // Without the `cached &&` guard, a task with no cached snapshot and no
   // skillActivation compares undefined === undefined and returns undefined
@@ -1341,11 +1343,27 @@ async function ensureSkillActivation(task: TodoTask): Promise<SkillActivation> {
   const generation = todoGeneration;
   const revisionBeforeActivation = todoRevision;
   const before = cloneTodoTask(task);
-  const activation = await requireSkillRuntime().activate(
-    task.skills,
-    task.context ?? "",
-    task.skillActivation,
-  );
+  let activation: SkillActivation;
+  try {
+    activation = await requireSkillRuntime().activate(
+      task.skills,
+      task.context ?? "",
+      task.skillActivation,
+    );
+  } catch (error) {
+    // onContextTodo is wired to pi.on("context"), so a throw here escapes into the
+    // host on *every* turn and wedges the session. Re-activation is guaranteed to be
+    // attempted after a restart (snapshots live in memory, persist only writes tasks),
+    // so a skill file that has gone missing or invalid since activation would do
+    // exactly that.
+    //
+    // Degrade instead: prefer the last snapshot that did load, otherwise synthesize an
+    // empty activation whose prompt is a warning block. Neither is cached and neither is
+    // persisted, so the next turn retries the real load and recovers on its own.
+    const stale = activeSkillSnapshots.get(task.id);
+    if (stale) return stale;
+    return degradedActivation(task, error);
+  }
   const current = revalidateAsyncTodoMutation({
     generation,
     revision: revisionBeforeActivation,
@@ -1386,12 +1404,15 @@ function clearCommittedSkillSnapshots(taskIds: ReadonlySet<string>): void {
   if (runSkillInjection && taskIds.has(runSkillInjection.taskId)) runSkillInjection = undefined;
 }
 
-function createActiveSkillMessage(task: TodoTask, activation: SkillActivation): AgentMessage {
+function createActiveSkillMessage(task: TodoTask, activation: AnySkillActivation): AgentMessage {
   return {
     role: "custom",
     customType: "todo-active-skill",
     content: renderActivationPrompt(task, activation),
-    display: false,
+    // Skill prompts are injection noise, but a degraded stack is a failure the user
+    // needs to see — todo.ts has no notify channel of its own (TodoContext.ui only
+    // carries setStatus), and this message is already on its way to the transcript.
+    display: activation.state === "degraded",
     details: {
       taskId: task.id,
       activationId: activation.activationId,
@@ -1427,8 +1448,49 @@ function contextMessageFingerprint(message: AgentMessage): string {
   return createHash("sha256").update(JSON.stringify(message)).digest("hex");
 }
 
-function renderActivationPrompt(task: TodoTask, activation: SkillActivation): string {
-  if (activation.state === "active") return activation.prompt;
+/**
+ * Stand-in activation for a task whose skills can no longer be loaded.
+ *
+ * Fail-open, because the only caller that matters runs inside the `context` hook on
+ * every turn — failing closed there wedges the session. But fail-open silently would
+ * drop the skill's constraints without the model ever knowing, so the whole payload is
+ * a warning block telling it exactly that.
+ *
+ * Deliberately not cached and not persisted: `stackRevision` is per-task and constant,
+ * so it never collides with a real revision, and the next turn re-attempts the real
+ * load.
+ */
+function degradedActivation(task: TodoTask, error: unknown): DegradedSkillActivation {
+  const now = Date.now();
+  return {
+    activationId: task.skillActivation?.activationId ?? `degraded-${task.id}`,
+    stackRevision: `degraded:${task.id}`,
+    activatedAt: now,
+    validatedAt: now,
+    state: "degraded",
+    bindings: [],
+    skills: [],
+    prompt: renderDegradedPrompt(task, error),
+  };
+}
+
+function renderDegradedPrompt(task: TodoTask, error: unknown): string {
+  const names = task.skills.map((binding) => binding.name).join(", ") || "(none)";
+  return [
+    "<active_skill_stack_unavailable>",
+    `Todo task #${task.id} declares skills (${names}) but they could not be loaded: ${errorText(error)}`,
+    "Their instructions are NOT in effect. Do not assume any skill constraint, checklist, or workflow applies.",
+    "Fix the skill files, or move the task back to pending and re-activate it, before relying on skill-scoped behavior.",
+    "</active_skill_stack_unavailable>",
+  ].join("\n");
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function renderActivationPrompt(task: TodoTask, activation: AnySkillActivation): string {
+  if (activation.state === "active" || activation.state === "degraded") return activation.prompt;
   return [
     "<active_skill_stack_stale>",
     `Todo task #${task.id} skill files changed after activation.`,
@@ -1437,8 +1499,11 @@ function renderActivationPrompt(task: TodoTask, activation: SkillActivation): st
   ].join("\n");
 }
 
-function assertActiveSkillStack(task: TodoTask, activation: SkillActivation): void {
+function assertActiveSkillStack(task: TodoTask, activation: AnySkillActivation): void {
   if (activation.state === "active") return;
+  // A degraded stack already carries its own warning block in the injected content.
+  // Throwing here would defeat the fallback that produced it.
+  if (activation.state === "degraded") return;
   throw new Error(
     `Todo task #${task.id} skill activation is stale. Move the task back to pending and reactivate it before continuing the Run.`,
   );

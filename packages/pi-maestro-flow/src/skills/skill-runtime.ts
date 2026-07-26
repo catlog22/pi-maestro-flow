@@ -38,6 +38,22 @@ export interface SkillActivation extends SkillActivationMetadata {
   prompt: string;
 }
 
+/**
+ * Stand-in for an activation that could not be produced, synthesized by the Todo layer
+ * when re-activation throws so a broken skill file degrades the turn instead of killing
+ * it. See `ensureSkillActivation`.
+ *
+ * It is a separate type on purpose: `state: "degraded"` is not a
+ * {@link SkillActivationState}, so it cannot be written into the persisted
+ * {@link SkillActivationMetadata} or cached alongside real activations without the
+ * compiler objecting.
+ */
+export interface DegradedSkillActivation extends Omit<SkillActivation, "state"> {
+  state: "degraded";
+}
+
+export type AnySkillActivation = SkillActivation | DegradedSkillActivation;
+
 export class SkillRuntime {
   constructor(private readonly loader: TodoSkillLoader) {}
 
