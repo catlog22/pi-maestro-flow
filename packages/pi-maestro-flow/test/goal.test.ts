@@ -16,6 +16,7 @@ import {
   isRetryableGoalFailure,
   onAgentEnd,
   onBeforeAgentStart,
+  onCompact,
   onInput,
   parseVerifierOutput,
   parseGoalCommand,
@@ -410,6 +411,62 @@ test("Goal state is session-scoped and ordinary inputs do not acquire Goal loop 
     if (getActiveGoal()) await executeGoalCommand({ action: "clear" }, sessionA);
     onSessionShutdown(sessionA);
     setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
+test("compaction continuation is isolated across consecutive Goal session lifecycles", async () => {
+  const entries: Array<{ type: "custom"; customType: string; data: unknown }> = [];
+  const sent: string[] = [];
+  initGoal({
+    appendEntry(customType: string, data: unknown) {
+      entries.push({ type: "custom", customType, data });
+    },
+    sendMessage(message: { content: string }) {
+      sent.push(message.content);
+    },
+  } as never);
+
+  const first = createContext({
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+    sessionManager: {
+      getSessionId: () => "session-compaction-a",
+      getEntries: () => entries,
+    },
+  });
+  await onSessionStart(first, { reason: "new" });
+
+  try {
+    const created = await executeGoal({ action: "create", objective: "First lifecycle Goal" }, first);
+    assert.equal(created.isError, false, created.text);
+    assert.equal(getActiveGoal()?.status, "active");
+    await onCompact({}, first);
+    assert.equal(sent.length, 1);
+    assert.match(sent[0] ?? "", /First lifecycle Goal/);
+  } finally {
+    onSessionShutdown(first);
+  }
+
+  const second = createContext({
+    isIdle: () => false,
+    hasPendingMessages: () => false,
+    sessionManager: {
+      getSessionId: () => "session-compaction-b",
+      getEntries: () => entries,
+    },
+  });
+  await onSessionStart(second, { reason: "startup" });
+
+  try {
+    assert.equal(getActiveGoal(), undefined, "a new Session must not inherit the previous continuation owner");
+    const created = await executeGoal({ action: "create", objective: "Second lifecycle Goal" }, second);
+    assert.equal(created.isError, false, created.text);
+    await onCompact({}, second);
+    assert.equal(sent.length, 2);
+    assert.match(sent[1] ?? "", /Second lifecycle Goal/);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, second);
+    onSessionShutdown(second);
   }
 });
 

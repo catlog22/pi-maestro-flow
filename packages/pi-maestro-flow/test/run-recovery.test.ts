@@ -14,6 +14,7 @@ import { SkillRuntime } from "../src/skills/skill-runtime.ts";
 import {
   executeGoal,
   executeGoalCommand,
+  getActiveGoal,
   initGoal,
   onCompact as onGoalCompact,
   reconcileWorkflowGoal,
@@ -180,10 +181,11 @@ test("compaction recovery reads only the Run bound to the current Goal", async (
   const events: string[] = [];
   const continuationPrompts: string[] = [];
   let hasPendingMessages = false;
+  let markerCalls = 0;
   initGoal({
     appendEntry() {},
     sendMessage(message: { content: string; display: boolean }) {
-      assert.match(message.content, /^Continue the active goal:/);
+      assert.match(message.content, /^Continue the active goal —/);
       assert.equal(message.display, false);
       events.push("continuation");
       continuationPrompts.push(message.content);
@@ -196,7 +198,7 @@ test("compaction recovery reads only the Run bound to the current Goal", async (
     isIdle: () => false,
     hasPendingMessages: () => hasPendingMessages,
   };
-  onGoalSessionStart(goalContext);
+  await onGoalSessionStart(goalContext);
   const snapshot = recoverySnapshot();
   setWorkflowCoordinator({
     status: () => snapshot,
@@ -204,13 +206,19 @@ test("compaction recovery reads only the Run bound to the current Goal", async (
       events.push("brief");
       return {};
     },
-    continuationMarker: () => "workflow-session-1:run-003:1:1",
+    continuationMarker: () => {
+      markerCalls++;
+      return "workflow-session-1:run-003:1:1";
+    },
     acceptsContinuation: () => true,
   } as never);
 
   try {
-    await executeGoal({ action: "create", objective: "Independent compaction recovery" }, goalContext);
+    const created = await executeGoal({ action: "create", objective: "Independent compaction recovery" }, goalContext);
+    assert.equal(created.isError, false, created.text);
+    assert.equal(getActiveGoal()?.status, "active");
     await onGoalCompact({}, goalContext);
+    assert.equal(markerCalls, 0);
     assert.deepEqual(events, ["continuation"]);
     assert.doesNotMatch(continuationPrompts[0] ?? "", /<active_run/);
 
@@ -219,6 +227,7 @@ test("compaction recovery reads only the Run bound to the current Goal", async (
     continuationPrompts.length = 0;
     reconcileWorkflowGoal(snapshot, goalContext);
     await onGoalCompact({}, goalContext);
+    assert.equal(markerCalls, 1);
     assert.deepEqual(events, ["brief", "continuation"]);
     assert.match(continuationPrompts[0] ?? "", /<active_run id="run-003">/);
 
@@ -232,10 +241,11 @@ test("compaction recovery reads only the Run bound to the current Goal", async (
     assert.deepEqual(events, ["brief"], "queued continuation must still be fenced by a fresh Run brief");
     hasPendingMessages = false;
 
-    const injected = await onBeforeAgentStartTodo({ systemPrompt: "base" });
-    assert.equal(injected?.systemPrompt.match(/<active_skill_stack>/g)?.length, 1);
+    assert.equal(await onBeforeAgentStartTodo({ systemPrompt: "base" }), undefined);
+    const injected = await onContextTodo([]);
+    const injectedContent = String((injected?.messages[0] as { content?: string } | undefined)?.content ?? "");
+    assert.equal(injectedContent.match(/<active_skill_stack>/g)?.length, 1);
     assert.equal(getVisibleTasks()[0]?.skillActivation?.stackRevision, stackRevision);
-    assert.equal(await onContextTodo([]), undefined);
   } finally {
     setWorkflowCoordinator(undefined);
     await executeGoalCommand({ action: "clear" }, goalContext);
