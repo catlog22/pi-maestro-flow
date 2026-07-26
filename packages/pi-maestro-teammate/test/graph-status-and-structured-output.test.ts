@@ -74,7 +74,7 @@ import type {
 } from "../src/shared/types.ts";
 
 type PublicToolResult = {
-  content: Array<{ type: string; text: string }>;
+  content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
   details?: {
     results: SingleResult[];
@@ -131,7 +131,7 @@ function createScriptedSpawn(
       stdout.write(`${JSON.stringify({ type: "turn_end", message, toolResults: [] })}\n`);
     });
     return child;
-  }) as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
 }
 
 function createStructuredSpawn(
@@ -165,7 +165,7 @@ function createStructuredSpawn(
       })}\n`);
     });
     return child;
-  }) as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
 }
 
 function createRootTool(runtimeOptions: TeammateRuntimeOptions): RegisteredTeammateTool {
@@ -557,7 +557,7 @@ test("detach and background acknowledgement never publish post-settlement update
       kill() { return true; },
     });
     return child;
-  }) as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
   let capturedOptions: Parameters<NonNullable<TeammateRuntimeOptions["onRunOptionsCreated"]>>[0] | undefined;
   let terminalInput: ((data: string) => void) | undefined;
   const updates: PublicToolResult[] = [];
@@ -639,7 +639,7 @@ test("foreground nested proxy updates preserve a renderable parent-child-grandch
       queueMicrotask(() => stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`));
     }
     return child;
-  }) as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
   let rootOptions: Parameters<NonNullable<TeammateRuntimeOptions["onRunOptionsCreated"]>>[0] | undefined;
   const updates: PublicToolResult[] = [];
   const execution = createRootTool({
