@@ -1,3 +1,4 @@
+import { STATUS_PRESENTATION, type StatusTone } from "../shared/agent-status.ts";
 import type { AgentProgressSnapshot } from "../shared/types.ts";
 
 export interface ProgressPalette {
@@ -35,14 +36,23 @@ export function progressDurationMs(entry: AgentProgressSnapshot, now = Date.now(
   return Math.max(reported ?? 0, now - startedAt);
 }
 
+/** Resolve a semantic tone against the ANSI palette used by progress rows. */
+export function toneText(palette: ProgressPalette, tone: StatusTone, text: string): string {
+  switch (tone) {
+    case "dim": return palette.dim(text);
+    case "accent": return palette.accent(text);
+    case "warning": return palette.running(text);
+    case "success": return palette.success(text);
+    case "error": return palette.error(text);
+  }
+}
+
 export function progressIcon(
   status: AgentProgressSnapshot["status"],
   palette: ProgressPalette,
 ): string {
-  if (status === "running") return palette.running("■");
-  if (status === "completed") return palette.success("✓");
-  if (status === "failed") return palette.error("✗");
-  return palette.dim("□");
+  const presentation = STATUS_PRESENTATION[status];
+  return toneText(palette, presentation.tone, presentation.icon);
 }
 
 export function progressLabel(entry: AgentProgressSnapshot): string {
@@ -50,10 +60,8 @@ export function progressLabel(entry: AgentProgressSnapshot): string {
 }
 
 function statusText(status: AgentProgressSnapshot["status"], palette: ProgressPalette): string {
-  if (status === "running") return palette.running("running");
-  if (status === "completed") return palette.success("completed");
-  if (status === "failed") return palette.error("failed");
-  return palette.dim("pending");
+  const presentation = STATUS_PRESENTATION[status];
+  return toneText(palette, presentation.tone, presentation.text);
 }
 
 export function buildProgressTree(

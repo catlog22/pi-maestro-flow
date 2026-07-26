@@ -13,13 +13,19 @@ import {
   visibleWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
-import type { ActiveAgent, AgentProgressSnapshot } from "../shared/types.ts";
+import {
+  STATUS_PRESENTATION,
+  effectiveDisplayStatus,
+  idleSeconds,
+} from "../shared/agent-status.ts";
+import type { ActiveAgent, AgentProgressSnapshot, MessageEnvelope } from "../shared/types.ts";
 import {
   buildProgressTree,
   focusTaskIndex,
   progressIcon,
   progressLabel,
   selectProgressWindow,
+  toneText,
   type ProgressPalette,
 } from "./progress-tree.ts";
 import {
@@ -32,6 +38,9 @@ import {
 
 const MAX_LOG_LINES = 500;
 const STREAMING_MAX_LINES = 8;
+/** Inbox payloads are bounded by bytes, not by display size — preview only. */
+const INBOX_PREVIEW_CHARS = 400;
+const INBOX_PREVIEW_LINES = 4;
 const GRAPH_LIST_MAX_ROWS = 7;
 const SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const SPINNER_MS = 120;
@@ -49,6 +58,15 @@ export interface OverlayProgressUpdate {
   lines?: Array<{ text: string; kind: "info" | "tool" | "output" | "system" }>;
 }
 
+interface LogRenderCache {
+  width: number;
+  lineCount: number;
+  lastLine: AgentLog["lines"][number] | undefined;
+  inboxCount: number;
+  lastInbox: MessageEnvelope | undefined;
+  rendered: string[];
+}
+
 interface AgentLog {
   agent: ActiveAgent;
   lines: Array<{ text: string; kind: "info" | "tool" | "output" | "system" }>;
@@ -59,6 +77,7 @@ interface AgentLog {
   activeTools: ToolEntry[];
   progress: AgentProgressSnapshot[];
   selectedTaskIndex?: number;
+  logCache?: LogRenderCache;
 }
 
 const dim = (s: string) => `\x1b[2m${s}\x1b[22m`;
@@ -98,14 +117,27 @@ function frameRule(innerWidth: number): string {
   return dim("─".repeat(Math.max(0, innerWidth - 1)));
 }
 
-function progressStatusText(entry: AgentProgressSnapshot): string {
-  const status = entry.status === "running"
-    ? yellow("Running")
-    : entry.status === "completed"
-      ? green("Done")
-      : entry.status === "failed"
-        ? red("Failed")
-        : dim("Pending");
+function titleCase(text: string): string {
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** An idle tool row must say how long it has been idle, not just "idle". */
+function idleLabel(lastActivityAt: number | undefined, now = Date.now()): string {
+  const seconds = idleSeconds(lastActivityAt, now);
+  return seconds > 0 ? `Tools · idle ${seconds}s` : "Tools · idle";
+}
+
+/**
+ * Status of one graph task. Derived states win: a running task that has gone
+ * quiet reads `stalled 42s` instead of an indistinguishable `Running`.
+ */
+function progressStatusText(entry: AgentProgressSnapshot, now = Date.now()): string {
+  const display = effectiveDisplayStatus(entry.status, entry.resultReadyAt, entry.lastActivityAt, now);
+  const status = display === "stalled"
+    ? red(`stalled ${idleSeconds(entry.lastActivityAt, now)}s`)
+    : display === "result-ready"
+      ? green("Result ready")
+      : toneText(progressPalette, STATUS_PRESENTATION[display].tone, titleCase(STATUS_PRESENTATION[display].text));
   const parts = [
     status,
     entry.toolCount ? dim(`${entry.toolCount} tools`) : "",
@@ -114,9 +146,25 @@ function progressStatusText(entry: AgentProgressSnapshot): string {
   return parts.join(dim(" · "));
 }
 
+/**
+ * Status of the attached agent itself. This is the screen a user opens after
+ * the widget flagged something odd, so it must expose the same derived states
+ * the widget does — a 10-minute-idle agent cannot look like a fresh one.
+ */
+function agentStatusText(agent: ActiveAgent, now = Date.now()): string {
+  const display = effectiveDisplayStatus(agent.status, agent.resultReadyAt, agent.lastActivityAt, now);
+  if (display === "stalled") return red(`stalled ${idleSeconds(agent.lastActivityAt, now)}s`);
+  if (display === "result-ready") return green("Result ready");
+  if (display === "completed") return dim("Done");
+  const presentation = STATUS_PRESENTATION[display];
+  return toneText(progressPalette, presentation.tone, titleCase(presentation.text));
+}
+
 export class AttachOverlay implements Component, Focusable {
   focused = false;
   private agents = new Map<string, AgentLog>();
+  /** Agents whose data changed while they were not the visible tab. */
+  private dirtyAgents = new Set<string>();
   private activeId: string;
   private order: string[] = [];
   private readonly onDone: () => void;
@@ -159,6 +207,21 @@ export class AttachOverlay implements Component, Focusable {
     this.requestRender = fn;
   }
 
+  /**
+   * The overlay only ever draws the active tab, but progress events arrive for
+   * every concurrent agent. Repainting on a background agent's event burns a
+   * full frame whose visible region is identical; mark it dirty instead and let
+   * the tab switch pick the data up.
+   */
+  private requestRenderFor(cid: string): void {
+    if (cid === this.activeId) {
+      this.dirtyAgents.delete(cid);
+      this.requestRender?.();
+      return;
+    }
+    this.dirtyAgents.add(cid);
+  }
+
   private addAgent(agent: ActiveAgent): void {
     if (this.agents.has(agent.correlationId)) return;
     this.agents.set(agent.correlationId, {
@@ -182,14 +245,14 @@ export class AttachOverlay implements Component, Focusable {
     const log = this.ensureLog(cid);
     if (!log) return;
     log.streamingText = text;
-    this.requestRender?.();
+    this.requestRenderFor(cid);
   }
 
   setActiveTools(cid: string, tools: ToolEntry[]): void {
     const log = this.ensureLog(cid);
     if (!log) return;
     log.activeTools = tools;
-    this.requestRender?.();
+    this.requestRenderFor(cid);
   }
 
   setProgress(cid: string, progress: AgentProgressSnapshot[]): void {
@@ -203,7 +266,7 @@ export class AttachOverlay implements Component, Focusable {
       log.selectedTaskIndex = undefined;
       log.followTail = true;
     }
-    this.requestRender?.();
+    this.requestRenderFor(cid);
   }
 
   applyProgressEvent(cid: string, update: OverlayProgressUpdate): void {
@@ -237,7 +300,7 @@ export class AttachOverlay implements Component, Focusable {
       }
       changed = true;
     }
-    if (changed) this.requestRender?.();
+    if (changed) this.requestRenderFor(cid);
   }
 
   appendLog(
@@ -252,7 +315,7 @@ export class AttachOverlay implements Component, Focusable {
       log.lines.shift();
       if (!log.followTail) log.scrollOffset = Math.max(0, log.scrollOffset - 1);
     }
-    this.requestRender?.();
+    this.requestRenderFor(cid);
   }
 
   private ensureLog(cid: string): AgentLog | undefined {
@@ -272,6 +335,7 @@ export class AttachOverlay implements Component, Focusable {
     if (this.order.length === 0) return;
     const index = Math.max(0, this.order.indexOf(this.activeId));
     this.activeId = this.order[(index + direction + this.order.length) % this.order.length];
+    this.dirtyAgents.delete(this.activeId);
     this.requestRender?.();
   }
 
@@ -445,13 +509,7 @@ export class AttachOverlay implements Component, Focusable {
       ? undefined
       : log.progress.find((entry) => entry.taskIndex === log.selectedTaskIndex);
     const uptime = Math.max(0, Math.round(activeMs(agent) / 1000));
-    const status = selected
-      ? progressStatusText(selected)
-      : agent.status === "sleeping"
-        ? yellow("Sleeping")
-        : agent.status === "completed"
-          ? dim("Done")
-          : green("Running");
+    const status = selected ? progressStatusText(selected) : agentStatusText(agent);
     const title = selected
       ? `${progressIcon(selected.status, progressPalette)} ${bold(progressLabel(selected))}${dim(` (${selected.agent})`)}`
       : `${bold(agent.agent)}/${bold(agent.name ?? agent.correlationId.slice(0, 8))}`;
@@ -558,13 +616,7 @@ export class AttachOverlay implements Component, Focusable {
     const selected = log.selectedTaskIndex === undefined
       ? undefined
       : log.progress.find((entry) => entry.taskIndex === log.selectedTaskIndex);
-    const status = selected
-      ? progressStatusText(selected)
-      : agent.status === "sleeping"
-        ? yellow("Sleeping")
-        : agent.status === "completed"
-          ? dim("Done")
-          : green("Running");
+    const status = selected ? progressStatusText(selected) : agentStatusText(agent);
     const title = selected
       ? `${progressIcon(selected.status, progressPalette)} ${bold(progressLabel(selected))} ${dim(`(${selected.agent})`)}`
       : `${bold(agent.agent)}/${bold(agent.name ?? agent.correlationId.slice(0, 8))}`;
@@ -651,7 +703,7 @@ export class AttachOverlay implements Component, Focusable {
 
   private renderSelectedTools(entry: AgentProgressSnapshot, width: number): string[] {
     const tools = entry.recentTools ?? [];
-    if (tools.length === 0) return [dim("Tools · idle")];
+    if (tools.length === 0) return [dim(idleLabel(entry.lastActivityAt))];
     const parts = tools.slice(-6).map((tool) => {
       if (tool.status === "running") return yellow(`${SPINNER[this.frame]} ${tool.name}`);
       if (tool.status === "failed") return red(`✗ ${tool.name}`);
@@ -727,7 +779,7 @@ export class AttachOverlay implements Component, Focusable {
   }
 
   private renderTools(log: AgentLog, width: number): string[] {
-    if (log.activeTools.length === 0) return [dim("Tools · idle")];
+    if (log.activeTools.length === 0) return [dim(idleLabel(log.agent.lastActivityAt))];
     const parts: string[] = [];
     const spinner = SPINNER[this.frame];
     for (const tool of log.activeTools.slice(-6)) {
@@ -754,7 +806,28 @@ export class AttachOverlay implements Component, Focusable {
     ];
   }
 
+  /**
+   * Wrapping the full 500-line backlog on every frame is ~96% wasted work: the
+   * caller slices a ~20-line window out of it. The backlog only changes when a
+   * line is appended (or evicted, which changes the tail identity), so memoize
+   * on (width, count, tail identity) for both the log and the inbox.
+   */
   private buildLog(log: AgentLog, width: number): string[] {
+    const inbox = log.agent.inbox;
+    const lastLine = log.lines[log.lines.length - 1];
+    const lastInbox = inbox[inbox.length - 1];
+    const cache = log.logCache;
+    if (
+      cache
+      && cache.width === width
+      && cache.lineCount === log.lines.length
+      && cache.lastLine === lastLine
+      && cache.inboxCount === inbox.length
+      && cache.lastInbox === lastInbox
+    ) {
+      return cache.rendered;
+    }
+
     const result: string[] = [];
     for (const entry of log.lines) {
       for (const line of wrapTextWithAnsi(entry.text, width)) {
@@ -764,15 +837,30 @@ export class AttachOverlay implements Component, Focusable {
         else result.push(`  ${line}`);
       }
     }
-    if (log.agent.inbox.length > 0) {
+    if (inbox.length > 0) {
       result.push(dim("Inbox"));
-      for (const message of log.agent.inbox.slice(-5)) {
+      for (const message of inbox.slice(-5)) {
         const time = new Date(message.timestamp).toISOString().slice(11, 19);
-        for (const line of wrapTextWithAnsi(`[${time}] ◀ ${message.from}: ${message.payload}`, width)) {
+        // Payloads are capped by bytes (256KB total), never by display size —
+        // truncate before wrapping instead of wrapping the whole payload.
+        const payload = message.payload.length > INBOX_PREVIEW_CHARS
+          ? `${message.payload.slice(0, INBOX_PREVIEW_CHARS)}…`
+          : message.payload;
+        const wrapped = wrapTextWithAnsi(`[${time}] ◀ ${message.from}: ${payload}`, width);
+        for (const line of wrapped.slice(0, INBOX_PREVIEW_LINES)) {
           result.push(`${yellow("◀")} ${line}`);
         }
+        if (wrapped.length > INBOX_PREVIEW_LINES) result.push(`${yellow("◀")} ${dim("…")}`);
       }
     }
+    log.logCache = {
+      width,
+      lineCount: log.lines.length,
+      lastLine,
+      inboxCount: inbox.length,
+      lastInbox,
+      rendered: result,
+    };
     return result;
   }
 

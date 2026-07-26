@@ -12,6 +12,11 @@ import {
   truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
+import {
+  STATUS_PRESENTATION,
+  effectiveDisplayStatus,
+  idleSeconds,
+} from "../shared/agent-status.ts";
 import type { AgentProgressSnapshot, ChildAgentCallSnapshot, Details, SingleResult } from "../shared/types.ts";
 import { extractDependencies } from "../runs/execution.ts";
 import {
@@ -38,22 +43,70 @@ function dynamicComponent(build: (width: number) => string[]): Component {
   return { render: (w: number) => build(w), invalidate() {} };
 }
 
+/**
+ * Result components live in the message stream forever, and every unrelated
+ * `requestRender` re-runs their build callback. Memoize per width so an
+ * unchanged result never re-wraps its body.
+ */
+function memoizedComponent(build: (width: number) => string[]): Component {
+  let cachedWidth: number | undefined;
+  let cached: string[] = [];
+  return {
+    render(w: number) {
+      if (cachedWidth !== w) {
+        cached = build(w);
+        cachedWidth = w;
+      }
+      return [...cached];
+    },
+    invalidate() {
+      cachedWidth = undefined;
+    },
+  };
+}
+
+/**
+ * Upper bound on wrapped lines emitted for a single result body. A message can
+ * be up to `transcriptMessageBytes` (64KB); wrapping all of it every frame is
+ * pure waste since the viewport shows a fraction of it.
+ */
+const MAX_MESSAGE_LINES = 200;
+
 function appendWrappedMessage(
   lines: string[],
   content: string,
   width: number,
   theme: Theme,
+  maxLines = MAX_MESSAGE_LINES,
 ): void {
+  const wrapWidth = Math.max(1, width);
+  let emitted = 0;
+  let truncated = false;
   for (const rawLine of content.split("\n")) {
-    const wrapped = wrapTextWithAnsi(rawLine, Math.max(1, width));
+    if (emitted >= maxLines) {
+      truncated = true;
+      break;
+    }
+    // Bound the wrap input too: one raw line can be the whole 64KB message.
+    const budget = (maxLines - emitted + 1) * wrapWidth * 2;
+    const source = rawLine.length > budget ? rawLine.slice(0, budget) : rawLine;
+    if (source.length < rawLine.length) truncated = true;
+    const wrapped = wrapTextWithAnsi(source, wrapWidth);
     if (wrapped.length === 0) {
       lines.push(theme.fg("dim", "│"));
+      emitted++;
       continue;
     }
     for (const line of wrapped) {
+      if (emitted >= maxLines) {
+        truncated = true;
+        break;
+      }
       lines.push(theme.fg("dim", `│ ${line}`));
+      emitted++;
     }
   }
+  if (truncated) lines.push(theme.fg("dim", "│ …"));
 }
 
 function formatDuration(ms: number): string {
@@ -219,20 +272,15 @@ export function renderTeammateResult(
 
 function childStateText(child: ChildAgentCallSnapshot): string {
   const activityAt = child.lastActivityAt ?? child.startedAt;
-  const idleMs = activityAt ? Math.max(0, Date.now() - activityAt) : 0;
-  return child.status === "running" && child.resultReadyAt !== undefined
-    ? "result ready; confirming terminal"
-    : child.status === "running" && idleMs >= 30_000
-      ? `stalled ${Math.floor(idleMs / 1000)}s`
-      : child.status;
+  const display = effectiveDisplayStatus(child.status, child.resultReadyAt, activityAt);
+  if (display === "result-ready") return "result ready; confirming terminal";
+  if (display === "stalled") return `stalled ${idleSeconds(activityAt)}s`;
+  return STATUS_PRESENTATION[display].text;
 }
 
 function formatChildLine(child: ChildAgentCallSnapshot, theme: Theme): string {
-  const icon = child.status === "running"
-    ? theme.fg("warning", "■")
-    : child.status === "failed"
-      ? theme.fg("error", "✗")
-      : theme.fg("success", "✓");
+  const presentation = STATUS_PRESENTATION[child.status];
+  const icon = theme.fg(presentation.tone, presentation.icon);
   const activeTool = child.recentTools?.find((tool) => tool.status === "running");
   const activity = activeTool ? ` · using ${activeTool.name}` : child.lastMessage ? " · streaming" : "";
   const tokens = child.inputTokens !== undefined || child.outputTokens !== undefined
@@ -290,9 +338,10 @@ function renderProgress(
   return dynamicComponent((w) => {
     const entries = progress ?? [];
     if (w < 20) {
-      const running = entries.filter((entry) => entry.status === "running").length;
+      // Retrying counts as in-flight: a backing-off agent is not a success.
+      const running = entries.filter((entry) => entry.status === "running" || entry.status === "retrying").length;
       const failed = entries.filter((entry) => entry.status === "failed").length;
-      const runningChildren = childCalls.filter((child) => child.status === "running").length;
+      const runningChildren = childCalls.filter((child) => child.status === "running" || child.status === "retrying").length;
       const failedChildren = childCalls.filter((child) => child.status === "failed").length;
       const icon = failed > 0 || failedChildren > 0
         ? theme.fg("error", "✗")
@@ -318,16 +367,21 @@ function renderProgress(
       bold: (text) => theme.bold(text),
     };
     const running = entries.filter((entry) => entry.status === "running").length;
+    const retrying = entries.filter((entry) => entry.status === "retrying").length;
     const pending = entries.filter((entry) => entry.status === "pending").length;
     const completed = entries.filter((entry) => entry.status === "completed").length;
     const failed = entries.filter((entry) => entry.status === "failed").length;
     const runningChildren = childCalls.filter((child) => child.status === "running").length;
+    const retryingChildren = childCalls.filter((child) => child.status === "retrying").length;
     const failedChildren = childCalls.filter((child) => child.status === "failed").length;
     const focus = focusTaskIndex(entries);
     const focused = entries.find((entry) => entry.taskIndex === focus) ?? entries[0];
     const idleMs = focused?.lastActivityAt ? Date.now() - focused.lastActivityAt : 0;
-    const resultReady = focused?.status === "running" && focused.resultReadyAt !== undefined;
-    const stalled = focused?.status === "running" && !resultReady && idleMs >= 30_000;
+    const focusedDisplay = focused
+      ? effectiveDisplayStatus(focused.status, focused.resultReadyAt, focused.lastActivityAt)
+      : undefined;
+    const resultReady = focusedDisplay === "result-ready";
+    const stalled = focusedDisplay === "stalled";
     const focusedDurationMs = focused ? progressDurationMs(focused) : undefined;
     const focusedTokens = focused && (focused.inputTokens !== undefined || focused.outputTokens !== undefined)
       ? `in ${formatTokens(focused.inputTokens ?? 0)} · out ${formatTokens(focused.outputTokens ?? 0)}`
@@ -353,10 +407,13 @@ function renderProgress(
       ? `${failed} failed`
       : running > 0
         ? `${running} running`
-        : `${completed}/${entries.length} completed`;
+        : retrying > 0
+          ? `${retrying} retrying`
+          : `${completed}/${entries.length} completed`;
+    // A retrying agent is still in flight; it must never read as a green success.
     const headerIcon = failed > 0 || failedChildren > 0
       ? theme.fg("error", "!")
-      : running > 0 || runningChildren > 0
+      : running > 0 || runningChildren > 0 || retrying > 0 || retryingChildren > 0
         ? theme.fg("warning", "■")
         : theme.fg("success", "✓");
     // The header (line 0) carries only transition-based fields. Per-second metrics
@@ -432,7 +489,8 @@ function renderSingleResult(
   const box = new Box(1, 0);
   box.addChild(proxy);
 
-  return dynamicComponent((w) => {
+  // Completed results never change; memoize so unrelated redraws cost nothing.
+  return memoizedComponent((w) => {
     const contentWidth = Math.max(1, w - 2);
     const messageWidth = Math.max(1, contentWidth - 2);
     const lines: string[] = [truncateToWidth(header, contentWidth, "…")];
@@ -477,7 +535,8 @@ function renderMultiResult(
   const box = new Box(1, 0);
   box.addChild(proxy);
 
-  return dynamicComponent((w) => {
+  // Completed results never change; memoize so unrelated redraws cost nothing.
+  return memoizedComponent((w) => {
     const contentWidth = Math.max(1, w - 2);
     const previewWidth = Math.max(1, contentWidth - 3);
     const messageWidth = Math.max(1, previewWidth - 2);
