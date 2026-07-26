@@ -824,8 +824,30 @@ test("retrying agents remain distinct from sleeping and expose retry metadata", 
 test("nested proxy preserves parentage, graph children, and explicit background semantics", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
   assert.equal(source.match(/emitTeammateStarted\(pi, childAgent\)/g)?.length, 2);
-  assert.equal(resolveProxyParentCorrelationId({ correlationId: "actual-child" }, "root-graph"), "actual-child");
-  assert.equal(resolveProxyParentCorrelationId({ parentCid: "explicit-parent", correlationId: "actual-child" }, "root-graph"), "explicit-parent");
+  // A graph task child names itself so its siblings stay distinguishable, and
+  // that claim is honoured because it resolves inside the spawner's subtree.
+  const graphState: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    activeRuns: new Map<string, ActiveAgent>([
+      ["actual-child", { spawnedBy: "root-graph" } as ActiveAgent],
+      ["explicit-parent", { spawnedBy: "actual-child" } as ActiveAgent],
+      ["stranger", {} as ActiveAgent],
+    ]),
+    namedAgents: new Map(),
+  };
+  assert.equal(resolveProxyParentCorrelationId({ correlationId: "actual-child" }, "root-graph", graphState), "actual-child");
+  assert.equal(
+    resolveProxyParentCorrelationId({ parentCid: "explicit-parent", correlationId: "actual-child" }, "root-graph", graphState),
+    "explicit-parent",
+  );
+  // A claim outside that subtree is a re-parent attempt: it would reset the
+  // depth the child's own dispatches are measured against.
+  assert.equal(resolveProxyParentCorrelationId({ parentCid: "stranger" }, "root-graph", graphState), "root-graph");
+  assert.equal(resolveProxyParentCorrelationId({ parentCid: "never-seen" }, "root-graph", graphState), "root-graph");
+  // Without a trusted spawner there is nothing to check the claim against.
+  assert.equal(resolveProxyParentCorrelationId({ parentCid: "explicit-parent" }, undefined, graphState), "explicit-parent");
+  assert.equal(resolveProxyParentCorrelationId({}, "root-graph", graphState), "root-graph");
   assert.match(source, /spawnedBy: cid,[\s\S]*if \(task\.name\) state\.namedAgents\.set\(task\.name, childId\)/);
   assert.match(source, /normalizedTasks \? \{ taskCorrelationIds \} : \{ correlationId: cid \}/);
   assert.match(source, /if \(p\.background === false\) \{[\s\S]*await executeNested\(\)/);

@@ -37,12 +37,22 @@ const stubPi = {
 } as never;
 
 /** Drives one nested dispatch and returns the reply payload. */
-async function dispatchNested(state: TeammateState, parentCid: string): Promise<Record<string, unknown>> {
+async function dispatchNested(
+  state: TeammateState,
+  parentCid: string,
+  claimed?: Record<string, unknown>,
+): Promise<Record<string, unknown>> {
   let captured: Record<string, unknown> | undefined;
   await handleProxyRequest(
     stubPi,
     state,
-    { type: "teammate_proxy_request", tool: "teammate", requestId: randomUUID(), params: { agent: "worker", task: "noop" } },
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId: randomUUID(),
+      params: { agent: "worker", task: "noop" },
+      ...claimed,
+    },
     (msg) => { captured = msg as Record<string, unknown>; },
     parentCid,
   );
@@ -99,6 +109,38 @@ test("a proxied dispatch below the ceiling is not rejected by the depth guard", 
   if (result.isError) {
     assert.doesNotMatch(result.content[0].text, /nesting depth exceeded/i);
   }
+});
+
+test("a child cannot escape the ceiling by claiming a shallower parent", async () => {
+  // The depth a dispatch is measured against comes from its spawner's record,
+  // so a child that could name any correlationId could re-parent itself onto a
+  // depth-0 agent and keep nesting forever.
+  const state = makeState();
+  const deepCid = randomUUID();
+  const shallowCid = randomUUID();
+  state.activeRuns.set(deepCid, makeAgent(deepCid, MAX_DEFAULT_DEPTH - 1));
+  state.activeRuns.set(shallowCid, makeAgent(shallowCid, 0));
+
+  for (const claim of [{ parentCid: shallowCid }, { correlationId: shallowCid }]) {
+    const reply = await dispatchNested(state, deepCid, claim);
+    const result = reply.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(result.isError, true, `claim ${JSON.stringify(claim)} must not be honoured`);
+    assert.match(result.content[0].text, /nesting depth exceeded/i);
+  }
+});
+
+test("a claim inside the spawner's own subtree is still honoured", async () => {
+  // Graph task children legitimately identify themselves this way.
+  const state = makeState();
+  const graphCid = randomUUID();
+  const taskCid = randomUUID();
+  state.activeRuns.set(graphCid, makeAgent(graphCid, MAX_DEFAULT_DEPTH - 2));
+  state.activeRuns.set(taskCid, makeAgent(taskCid, MAX_DEFAULT_DEPTH - 1, { spawnedBy: graphCid }));
+
+  const reply = await dispatchNested(state, graphCid, { correlationId: taskCid });
+  const result = reply.result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(result.isError, true, "the task child's own depth must govern");
+  assert.match(result.content[0].text, /nesting depth exceeded/i);
 });
 
 test("the active-agent budget counts live agents across the whole tree", () => {

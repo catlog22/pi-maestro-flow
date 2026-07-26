@@ -438,13 +438,48 @@ export interface AgentSelectorRow {
   lastMessage?: string;
 }
 
+/** Walks `spawnedBy` links up from `descendant`, looking for `ancestor`. */
+function isAgentDescendantOf(
+  state: TeammateState,
+  descendant: string,
+  ancestor: string,
+): boolean {
+  const seen = new Set<string>();
+  let cursor: string | undefined = descendant;
+  while (cursor && !seen.has(cursor)) {
+    if (cursor === ancestor) return true;
+    seen.add(cursor);
+    cursor = state.activeRuns.get(cursor)?.spawnedBy;
+  }
+  return false;
+}
+
+/**
+ * Resolves which agent a proxied request belongs to.
+ *
+ * A child may legitimately name an id other than the one this process bound to
+ * its transport: a graph runs several task children behind a single request
+ * handler, so `event.correlationId` is how they tell each other apart. But the
+ * id arrives over the wire from the child, and taking it on faith let a child
+ * re-parent itself onto any agent it could name — including a shallower one,
+ * which resets the depth its own dispatches are measured against and reopens
+ * unbounded nesting. So a claim is honoured only when it resolves to an agent
+ * inside the spawner's own subtree; otherwise the request is attributed to the
+ * spawner this process actually launched.
+ */
 export function resolveProxyParentCorrelationId(
   event: Record<string, unknown>,
   spawnedBy?: string,
+  state?: TeammateState,
 ): string | undefined {
-  return (event.parentCid as string | undefined)
-    ?? (event.correlationId as string | undefined)
-    ?? spawnedBy;
+  const claimed = typeof event.parentCid === "string" ? event.parentCid
+    : typeof event.correlationId === "string" ? event.correlationId
+      : undefined;
+  if (!claimed) return spawnedBy;
+  if (!spawnedBy) return claimed;
+  if (claimed === spawnedBy) return spawnedBy;
+  if (state && isAgentDescendantOf(state, claimed, spawnedBy)) return claimed;
+  return spawnedBy;
 }
 
 function selectorAgentLabel(agent: ActiveAgent): string {
@@ -4437,15 +4472,16 @@ async function dispatchRegisteredChildTool(
   event: Record<string, unknown>,
   reply: (message: unknown) => void,
   state?: TeammateState,
+  verifiedCorrelationId?: string,
 ): Promise<boolean> {
   const toolName = typeof event.tool === "string" ? event.tool : "";
   const broker = getTeammateChildToolBroker(toolName);
   if (!broker) return false;
-  const correlationId = typeof event.correlationId === "string"
-    ? event.correlationId
-    : typeof event.parentCid === "string"
-      ? event.parentCid
-      : "unknown";
+  // Brokers act on `actor`, so it must be the identity this process verified,
+  // not the one the child asked to be seen as.
+  const correlationId = verifiedCorrelationId
+    ?? resolveProxyParentCorrelationId(event, undefined, state)
+    ?? "unknown";
   const active = state?.activeRuns.get(correlationId);
   const input = isRecord(event.params) ? event.params : {};
   const result = await broker({
@@ -4482,9 +4518,9 @@ export async function handleProxyRequest(
   const tool = event.tool as string;
   const requestId = event.requestId as string;
   const params = event.params as Record<string, unknown>;
-  const parentCid = resolveProxyParentCorrelationId(event, spawnedBy);
+  const parentCid = resolveProxyParentCorrelationId(event, spawnedBy, state);
 
-  if (await dispatchRegisteredChildTool(event, reply, state)) return;
+  if (await dispatchRegisteredChildTool(event, reply, state, parentCid)) return;
 
   switch (tool) {
     case "teammate": {
