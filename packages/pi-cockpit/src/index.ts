@@ -456,9 +456,13 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
+	// Outlives one opening of the panel: the theme row closes it and reopens it
+	// around the picker, and coming back to a cursor parked on "enabled" would make
+	// that round trip feel like the panel had been dismissed and restarted.
+	let settingsCursor = 0;
+
 	const openSettings = async (ctx: ExtensionCommandContext): Promise<"theme" | undefined> =>
 		ctx.ui.custom<"theme" | undefined>((tui, theme, _kb, done) => {
-			let cursor = 0;
 			let saveState: SaveState = { kind: "idle" };
 			const apply = (key: string): void => {
 				const wasEnabled = config.enabled;
@@ -487,7 +491,7 @@ export default function (pi: ExtensionAPI): void {
 				render(width: number): string[] {
 					const paint: PaintTheme = theme;
 					const rows = buildRows(config);
-					cursor = Math.max(0, Math.min(cursor, rows.length - 1));
+					settingsCursor = Math.max(0, Math.min(settingsCursor, rows.length - 1));
 					const w = Math.min(width, 52);
 					const labelWidth = Math.max(...rows.map((r) => visibleWidth(r.label)));
 					const lines = [
@@ -495,7 +499,7 @@ export default function (pi: ExtensionAPI): void {
 						paint.fg("borderMuted", "─".repeat(w)),
 					];
 					rows.forEach((row, index) => {
-						const selected = index === cursor;
+						const selected = index === settingsCursor;
 						const marker = selected ? paint.fg("accent", "›") : " ";
 						const pad = " ".repeat(Math.max(0, labelWidth - visibleWidth(row.label)));
 						const label = paint.fg(selected ? "text" : "muted", row.label) + pad;
@@ -529,13 +533,13 @@ export default function (pi: ExtensionAPI): void {
 					}
 					if (data === "\x1b[A" || data === "\x1b[B") {
 						const delta = data === "\x1b[A" ? -1 : 1;
-						cursor = (cursor + delta + rows.length) % rows.length;
+						settingsCursor = (settingsCursor + delta + rows.length) % rows.length;
 					} else if (data === "\r" || data === "\n" || data === " ") {
-						apply(rows[cursor].key);
+						apply(rows[settingsCursor].key);
 					} else {
 						const key = rowKeyForAccel(rows, data);
 						if (!key) return;
-						cursor = rows.findIndex((row) => row.key === key);
+						settingsCursor = rows.findIndex((row) => row.key === key);
 						apply(key);
 					}
 					tui.requestRender();

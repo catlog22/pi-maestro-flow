@@ -92,7 +92,12 @@ export function buildRows(config: CockpitConfig): SettingsRow[] {
 			value: themeLabel(config.theme),
 			// Not a cycle: this row opens the /theme picker, which previews live and
 			// reverts on Esc. Blind-cycling a name list could not do either.
-			next: "open /theme",
+			//
+			// Worded as an affordance, not as a command to go type: every other row's
+			// `next` is the value Enter produces, and "open /theme" read as "leave this
+			// panel and run something else" when Enter opens it right here. The ellipsis
+			// is the usual terminal signal for "this one opens a dialog".
+			next: "picker…",
 		},
 	];
 }

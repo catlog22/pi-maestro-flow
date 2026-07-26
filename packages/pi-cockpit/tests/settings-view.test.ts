@@ -49,6 +49,14 @@ test("the theme row names pi as the owner and advertises the hand-off", () => {
 	const rows = buildRows({ ...DEFAULT_CONFIG, theme: "" });
 	const themeRow = rows.find((r) => r.key === "theme")!;
 	assert.equal(themeRow.value, "(pi settings)");
-	assert.equal(themeRow.next, "open /theme");
+	assert.equal(themeRow.next, "picker…");
 	assert.doesNotMatch(themeRow.value, /default/);
+	// Enter opens the picker inside the panel. Naming a slash command here read as
+	// "go run something else", which is the one thing this row does not require.
+	assert.doesNotMatch(themeRow.next, /\//);
+});
+
+test("a committed theme shows up on the row, so the round trip is visible", () => {
+	const rows = buildRows({ ...DEFAULT_CONFIG, theme: "nord" });
+	assert.equal(rows.find((r) => r.key === "theme")!.value, "nord");
 });
