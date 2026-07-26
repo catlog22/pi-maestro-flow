@@ -238,6 +238,7 @@ async function enterPlanMode(ctx: PlanContext): Promise<void> {
 
 function exitPlanMode(ctx: PlanContext): void {
   mode = "act";
+  pendingPlanEnterNote = undefined;
   restoreActToolSurface();
   syncModeStatus(ctx);
 }
@@ -315,13 +316,10 @@ export function onCompactPlan(ctx: PlanContext): void {
 }
 
 export function onBeforeAgentStartPlan(event: { systemPrompt: string }): { systemPrompt: string } | undefined {
-  if (mode === "plan") {
-    let prompt = `${event.systemPrompt}\n\n${buildPlanModePrompt()}`;
-    if (pendingPlanEnterNote) {
-      prompt += `\n\n${pendingPlanEnterNote}`;
-      pendingPlanEnterNote = undefined;
-    }
-    return { systemPrompt: prompt };
+  if (pendingPlanEnterNote) {
+    const note = pendingPlanEnterNote;
+    pendingPlanEnterNote = undefined;
+    return { systemPrompt: `${event.systemPrompt}\n\n${note}` };
   }
   if (!pendingPlanExitReminder) return;
   const reminder = pendingPlanExitReminder;
@@ -1103,51 +1101,26 @@ function contentText(content: unknown): string {
   }).filter(Boolean).join("\n");
 }
 
-function buildPlanModePrompt(): string {
-  return `[PLAN MODE ACTIVE]
-# Plan Mode
-
-Plan mode is now active. This block is dynamically injected each turn while Plan mode is on — it is not a residual or static artifact.
-
-## Tool surface (enforced at runtime, not advisory)
-- REMOVED from your active tool set: Edit, Write, NotebookEdit, mutating shell commands, write-mode delegation. Calling them will fail.
-- AVAILABLE: read/search/explore/analysis tools, plan-update, plan-review, plan-confirm, plan-exit, plan-status, ask-user-question.
-
-## Mid-conversation transition
-Plan mode may have been activated mid-conversation (via Alt+P, /plan, or plan-enter). Earlier turns ran in Act mode with write tools — that is normal and does not contradict the current state. The conversation history reflects each turn's mode at that time; this prompt and the current tool list are the sole authority for the present turn. Do not spend reasoning cycles verifying whether Plan mode is real.
-
-## Workflow
-Read and reason only. Produce concise, decision-complete Markdown.
-
-Standard sequence — do not deliberate about turn structure or whether to call plan-confirm; just follow the sequence:
-1. Research: gather evidence with read/search/explore tools.
-2. Draft: call plan-update with the complete Markdown.
-3. Present: call plan-confirm in the same turn. plan-confirm renders the plan and gives the user a choice (execute, modify, discuss, or exit). It does NOT force execution — the user always decides. Calling it is the standard presentation step, never "pushy".
-4. Revise: if the user wants changes, plan-update again, then plan-confirm again.
-5. Exit: plan-exit leaves Plan mode without approving; the draft is preserved.
-
-Planning quality requirements:
-- Ground decisions in the current codebase and use its terminology.
-- Run a Socratic pressure review before confirmation: challenge assumptions, contradictions, boundaries, failure cases, and integration effects with concrete code evidence.
-- Use ask-user-question for every user question. Ask 2-4 related questions per call, grouped by one review branch; do not ask questions as plain assistant text.
-- Keep reviewing until scope, boundaries, non-goals, requirements, and acceptance checks are explicitly locked; unresolved risks must remain visible.
-- Align every user requirement with a planned outcome and a verifiable acceptance check.
-- Keep the final Markdown to locked scope, boundaries, decisions, ordered outcomes, risks, and acceptance checks; omit interview logs and boilerplate.
-- Approval decomposes the locked Plan into an ordered Todo graph; attach Goals as quality gates to key Todos (overall acceptance Goal last) before implementation.
-- The legacy <proposed_plan> block is accepted only as a compatibility path; prefer plan-update.
-
-The public Plan contract is plain Markdown. Do not invent a parallel structured schema.`;
-}
-
 function buildPlanEnterNote(): string {
   return [
     "<system-reminder>",
     "## Plan Mode Just Activated",
-    "Plan mode was activated (via user toggle or plan-enter). The tool surface has changed for this and subsequent turns:",
-    "- Write tools (Edit, Write, NotebookEdit) are removed and will fail if called.",
+    "Plan mode was activated (via user toggle or plan-enter). The tool surface has changed:",
+    "- Write tools (Edit, Write, NotebookEdit) are removed from the active tool set.",
     "- Plan tools (plan-update, plan-review, plan-confirm, plan-exit, plan-status) are now available.",
     "- Read, search, and exploration tools remain fully available.",
-    "Previous conversation turns ran in Act mode — that is expected. Proceed with planning using the available tools.",
+    "",
+    "Workflow: research → plan-update (persist draft) → plan-confirm (present to user) in the same turn.",
+    "plan-confirm gives the user a choice (execute, modify, discuss, or exit) — it does NOT force execution.",
+    "If the user wants changes: plan-update again, then plan-confirm again.",
+    "plan-exit leaves Plan mode without approving; the draft is preserved.",
+    "",
+    "Planning quality: ground decisions in codebase evidence, pressure-test assumptions before confirming,",
+    "use ask-user-question for user questions, lock scope/boundaries/acceptance before plan-confirm.",
+    "Approval decomposes the Plan into an ordered Todo graph; attach Goals to key Todos as quality gates.",
+    "",
+    "This is a one-time notification. Subsequent turns will not modify the system prompt for plan mode.",
+    "The tool surface (write tools removed) is the authoritative signal that plan mode is active.",
     "</system-reminder>",
   ].join("\n");
 }
