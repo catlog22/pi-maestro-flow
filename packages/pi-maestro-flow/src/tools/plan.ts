@@ -78,10 +78,6 @@ const PLAN_MODE_TOOL_NAMES = [
 ] as const;
 const ALL_PLAN_TOOL_NAMES = new Set([PLAN_ENTER_TOOL, ...PLAN_MODE_TOOL_NAMES]);
 
-const BLOCKED_BUILTIN_TOOLS = new Set([
-  "Edit", "Write", "NotebookEdit", "edit", "write", "notebook_edit",
-]);
-
 const PlanUpdateParams = Type.Object({
   markdown: Type.String({ description: "Complete Markdown text for current.md" }),
   expectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),
@@ -99,7 +95,6 @@ let latestRevision = 0;
 let latestStatus: PlanToolDetails["status"] = "empty";
 let latestHandoffKey: string | undefined;
 let awaitingAction = false;
-let activeToolsSnapshot: string[] | undefined;
 let pendingPlanExitReminder: string | undefined;
 let pendingPlanEnterNote: string | undefined;
 let compactionArbiter: CompactionArbiter | undefined;
@@ -124,7 +119,6 @@ function syncModeStatus(ctx: PlanContext): void {
 }
 
 export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): void {
-  if (extensionApi && activeToolsSnapshot) extensionApi.setActiveTools(activeToolsSnapshot);
   resetRuntimeState();
   extensionApi = pi;
   storeFactory = options.storeFactory ?? ((cwd, session) => new PlanStore(cwd, { session }));
@@ -203,27 +197,13 @@ function applyLoadedPlan(loaded: LoadedPlan): void {
 function ensureActToolSurface(): void {
   if (!extensionApi) return;
   const active = extensionApi.getActiveTools();
-  const next = active.filter((name) => !ALL_PLAN_TOOL_NAMES.has(name));
-  if (!next.includes(PLAN_ENTER_TOOL)) next.push(PLAN_ENTER_TOOL);
-  extensionApi.setActiveTools(next);
+  const missing = [...ALL_PLAN_TOOL_NAMES].filter((name) => !active.includes(name));
+  if (missing.length > 0) extensionApi.setActiveTools([...active, ...missing]);
 }
 
-function activatePlanToolSurface(): void {
-  if (!extensionApi) return;
-  if (!activeToolsSnapshot) activeToolsSnapshot = [...extensionApi.getActiveTools()];
-  const nonEditing = activeToolsSnapshot.filter((name) => !BLOCKED_BUILTIN_TOOLS.has(name) && name !== PLAN_ENTER_TOOL);
-  extensionApi.setActiveTools([...new Set([...nonEditing, ...PLAN_MODE_TOOL_NAMES])]);
-}
+function activatePlanToolSurface(): void {}
 
-function restoreActToolSurface(): void {
-  if (!extensionApi) return;
-  if (activeToolsSnapshot) {
-    extensionApi.setActiveTools(activeToolsSnapshot);
-    activeToolsSnapshot = undefined;
-    return;
-  }
-  ensureActToolSurface();
-}
+function restoreActToolSurface(): void {}
 
 async function enterPlanMode(ctx: PlanContext): Promise<void> {
   const store = await ensureStore(ctx);
@@ -306,7 +286,6 @@ function resetRuntimeState(): void {
   latestStatus = "empty";
   latestHandoffKey = undefined;
   awaitingAction = false;
-  activeToolsSnapshot = undefined;
   pendingPlanExitReminder = undefined;
   pendingPlanEnterNote = undefined;
 }
