@@ -11,6 +11,7 @@
     "src/tools/intelligence.ts",
     "src/tools/intelligence-safety.ts",
     "src/tools/fff.ts",
+    "src/tools/bash-bg.ts",
     "src/tools/search-tool-bm25.ts",
     "src/tools/smart-search.ts",
     "src/tools/smart-search-config.ts",

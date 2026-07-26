@@ -178,6 +178,7 @@ Use `teammate` for all delegated work.
 | Cross-turn execution with budget control | `goal` |
 | Web search / deep research / URL fetch | `smart_search` |
 | Read-only code discovery | `teammate` + `agent: "explorer"` |
+| Run a long shell command without blocking the turn | `bash_bg` |
 
 ## maestro CLI (knowledge & workflow only)
 
@@ -231,6 +232,15 @@ Need: find an exact string or regex in specific files.
 Right: `rg "pattern" src/` (bash).
 <reasoning>
 Exact bounded regex → rg, no agent needed.
+</reasoning>
+</example>
+
+<example>
+Need: run a build+test suite that might take minutes, and keep working if it drags on.
+Right: `bash_bg({ action: "run", command: "npm run build && npm test" })` — if it finishes within the timeout you get the output inline; otherwise it auto-backgrounds and the `bash-bg-complete` notification wakes you later.
+Wrong: `bash({ command: "npm run build && npm test" })` — blocks the whole turn for the entire duration with no escape hatch.
+<reasoning>
+Uncertain or long command → bash_bg run adapts: inline result when fast, background + notification when slow. Plain bash blocks unconditionally; keep it for known-quick commands (tens of seconds of blocking is fine there).
 </reasoning>
 </example>
 
@@ -586,6 +596,43 @@ smart_search({ mode: "fetch", query: "https://docs.example.com/api/auth" })
 ```
 
 Use `validation: "strict"` for security/compliance queries. Results are unverified — cross-check against project code or authoritative sources before acting. Config: `Alt+S` or `/smart-search-config`.
+
+# Background Bash
+
+Adaptive shell execution — `bash_bg` runs a command in the foreground like `bash`, and if it outlives a timeout it **automatically moves to the background** and notifies you on completion (a new turn). It **complements** the built-in `bash` tool; it never replaces it.
+
+**Use when**: a command is **unbounded** (dev server, watcher, `tail -f`), expected to run for **minutes**, you want to **keep working concurrently**, or you are **unsure how long** it will take.
+**Skip when**: an ordinary command you need the output of to proceed — use `bash`; blocking for tens of seconds there is perfectly fine. Multi-step *agent* work rather than one shell command — use `teammate` with `background: true`.
+
+## Choosing the right tool
+
+| Situation | Tool |
+|-----------|------|
+| Ordinary command, need output now (grep, git, ls, single test, install) — even ~30s of blocking is fine | `bash` |
+| Unsure how long it will take; want inline output if fast, auto-background if slow | `bash_bg` `run` |
+| Know it is long/unbounded; background immediately, keep working | `bash_bg` `start` |
+| Already backgrounded; need its result before continuing | `bash_bg` `wait` (one call) |
+| Delegated multi-step agent task running async | `teammate` `background: true` |
+
+Rule of thumb: certain and quick → `bash`; uncertain or long → `bash_bg run` (it decides for you — inline result if it finishes within `timeout`, otherwise backgrounds and notifies). Reserve `start` for when you want zero blocking up front.
+
+| Action | Purpose | Key params |
+|--------|---------|------------|
+| `run` | Block up to `timeout`; inline output if fast, else auto-background (recommended) | `command`, `timeout`, `cwd` |
+| `start` | Background immediately, return jobId ack now | `command`, `cwd` |
+| `status` | Live snapshot + output tail | `jobId`, `tail` |
+| `wait` | Block an existing job until done or timeout | `jobId`, `timeout` |
+| `kill` | Terminate the job's process tree | `jobId` |
+| `list` | Show all jobs | — |
+
+```text
+bash_bg({ action: "run", command: "npm test" })                       # inline if ≤30s, else auto-background
+bash_bg({ action: "run", command: "npm run build", timeout: 10 })     # block only 10s, then background
+bash_bg({ action: "start", command: "npm run dev" })                  # server: background immediately
+bash_bg({ action: "wait", jobId: "bg-1-...", timeout: 60 })           # block up to 60s
+```
+
+When a job backgrounds, pi auto-injects a `bash-bg-complete` notification that triggers a new turn — do not poll; wait for the notification (or call `wait` once). Output is captured to `%TEMP%/pi-bash-bg/<jobId>.log`.
 
 # Knowledge System
 

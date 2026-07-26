@@ -142,6 +142,7 @@ import { registerMaestroPackageResources } from "../resources/maestro-package.ts
 import { registerSkillManager } from "../skills/skill-manager.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
 import { registerFff } from "../tools/fff.ts";
+import { registerBashBg } from "../tools/bash-bg.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
 import {
   proxyTeammateChildTool,
@@ -785,6 +786,7 @@ When NOT to use:
   // === Language intelligence, browser control, and tool discovery ===
   registerIntelligenceTools(pi);
   registerFff(pi);
+  registerBashBg(pi);
   registerModelAvailability(pi);
 
   pi.registerShortcut(PLAN_TOGGLE_KEY, {
