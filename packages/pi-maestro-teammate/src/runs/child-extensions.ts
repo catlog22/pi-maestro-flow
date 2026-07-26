@@ -1,3 +1,17 @@
+/**
+ * Cross-package registry for teammate child extensions and the authorities
+ * (permission broker, child tool brokers, IPC proxy caller) that the parent
+ * session contributes to child processes.
+ *
+ * Ownership model — read before adding an authority: the `owner` on
+ * {@link RegisterTeammateAuthorityOptions} is a *collaboration convention*, not
+ * a security boundary. It is a self-declared string that the registry cannot
+ * authenticate: any module sharing this globalThis registry may claim any owner
+ * key. Its purpose is to let one package replace its own prior generation on
+ * reload while making an unrelated package's collision a loud error instead of
+ * a silent takeover. Do not treat a matching owner as proof of identity; the
+ * real trust boundary is which modules get loaded into the process at all.
+ */
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 
@@ -12,12 +26,18 @@ interface ChildExtensionRegistry {
   permissionBrokerOwners: Map<symbol, RegistrationOwner>;
   toolBrokers: Map<symbol, { toolName: string; broker: TeammateChildToolBroker }>;
   toolBrokerOwners: Map<symbol, RegistrationOwner>;
+  proxyCallers: Map<symbol, TeammateChildProxyCaller>;
+  proxyCallerOwners: Map<symbol, RegistrationOwner>;
+  /** Legacy single-slot mirror kept readable for older package generations. */
   proxyCaller?: TeammateChildProxyCaller;
 }
 
 type RegistrationOwner = string | symbol;
 
 const registryKey = Symbol.for("pi-maestro-teammate.child-extensions");
+
+/** Owner slot used when an IPC proxy caller is registered without an explicit owner. */
+const DEFAULT_PROXY_CALLER_OWNER = "pi-maestro-teammate.child-proxy-caller";
 
 export interface RegisterTeammateChildExtensionOptions {
   tools?: readonly string[];
@@ -26,6 +46,23 @@ export interface RegisterTeammateChildExtensionOptions {
 export interface RegisterTeammateAuthorityOptions {
   /** Stable package/session authority key. Re-registering the same key replaces its prior generation. */
   owner?: string;
+}
+
+/** Why an authority lookup produced (or failed to produce) a broker. */
+export type TeammateAuthorityStatus = "resolved" | "unregistered" | "conflict";
+
+/**
+ * Diagnostic result of an authority lookup. `broker` is populated only for
+ * `status: "resolved"`; `unregistered` and `conflict` both leave it undefined
+ * but stay distinguishable so callers can log why they fell back.
+ */
+export interface TeammateAuthorityResolution<TBroker> {
+  status: TeammateAuthorityStatus;
+  broker?: TBroker;
+  /** Human-readable explanation, present whenever `broker` is undefined. */
+  reason?: string;
+  /** Owner labels of every registration considered, in registration order. */
+  owners?: string[];
 }
 
 export interface TeammatePermissionBrokerRequest {
@@ -142,8 +179,23 @@ export function registerTeammatePermissionBroker(
 }
 
 export function getTeammatePermissionBroker(): TeammatePermissionBroker | undefined {
-  const brokers = [...getRegistry().permissionBrokers.values()];
-  return brokers.length === 1 ? brokers[0] : undefined;
+  return resolveTeammatePermissionBroker().broker;
+}
+
+/**
+ * Diagnostic form of {@link getTeammatePermissionBroker}: separates "nobody
+ * registered" from "two generations are registered", which the plain getter
+ * collapses into the same silent `undefined`.
+ */
+export function resolveTeammatePermissionBroker(): TeammateAuthorityResolution<TeammatePermissionBroker> {
+  const registry = getRegistry();
+  return resolveOwnedAuthority(
+    [...registry.permissionBrokers].map(([token, broker]) => ({
+      broker,
+      owner: registry.permissionBrokerOwners.get(token),
+    })),
+    "teammate permission broker",
+  );
 }
 
 /** Registers a root-session handler for a tool exposed by an inherited child extension. */
@@ -173,16 +225,59 @@ export function registerTeammateChildToolBroker(
 }
 
 export function getTeammateChildToolBroker(toolName: string): TeammateChildToolBroker | undefined {
-  const brokers = [...getRegistry().toolBrokers.values()]
-    .filter((registration) => registration.toolName === toolName);
-  return brokers.length === 1 ? brokers[0].broker : undefined;
+  return resolveTeammateChildToolBroker(toolName).broker;
 }
 
-/** Installs the child-process IPC caller owned by the teammate extension. */
-export function registerTeammateChildProxyCaller(caller: TeammateChildProxyCaller): () => void {
+/**
+ * Diagnostic form of {@link getTeammateChildToolBroker}: an unhandled tool and
+ * a contested tool are different failures and must be reportable as such.
+ */
+export function resolveTeammateChildToolBroker(
+  toolName: string,
+): TeammateAuthorityResolution<TeammateChildToolBroker> {
   const registry = getRegistry();
+  return resolveOwnedAuthority(
+    [...registry.toolBrokers]
+      .filter(([, registration]) => registration.toolName === toolName)
+      .map(([token, registration]) => ({
+        broker: registration.broker,
+        owner: registry.toolBrokerOwners.get(token),
+      })),
+    `teammate child tool broker "${toolName}"`,
+  );
+}
+
+/**
+ * Installs the child-process IPC caller owned by the teammate extension.
+ *
+ * Shares the owner semantics of the broker registries: a foreign owner cannot
+ * silently take over the channel (which would expose every proxied tool call),
+ * and a stale disposer can no longer clear a newer generation. Callers that
+ * pass no owner share the default teammate slot, preserving the historical
+ * last-registration-wins behaviour for the package's own reload path.
+ */
+export function registerTeammateChildProxyCaller(
+  caller: TeammateChildProxyCaller,
+  options: RegisterTeammateAuthorityOptions = {},
+): () => void {
+  const registry = getRegistry();
+  const token = Symbol("teammate-child-proxy-caller");
+  const owner = options.owner === undefined
+    ? DEFAULT_PROXY_CALLER_OWNER
+    : registrationOwner(options.owner, token);
+  replaceOwnedAuthority(
+    registry.proxyCallers,
+    registry.proxyCallerOwners,
+    owner,
+    "teammate child proxy caller",
+  );
+  registry.proxyCallers.set(token, caller);
+  registry.proxyCallerOwners.set(token, owner);
   registry.proxyCaller = caller;
   return () => {
+    registry.proxyCallerOwners.delete(token);
+    // A superseded generation must not unset the caller that replaced it.
+    if (!registry.proxyCallers.delete(token)) return;
     if (registry.proxyCaller === caller) registry.proxyCaller = undefined;
   };
 }
@@ -192,7 +287,10 @@ export async function proxyTeammateChildTool<T = unknown>(
   input: Record<string, unknown>,
   signal?: AbortSignal,
 ): Promise<AgentToolResult<T>> {
-  const caller = getRegistry().proxyCaller;
+  const registry = getRegistry();
+  // Prefer the owned registration; fall back to the legacy single slot so a
+  // caller installed by an older package generation keeps working.
+  const caller = [...registry.proxyCallers.values()].at(-1) ?? registry.proxyCaller;
   if (caller) return caller<T>(toolName, input, signal);
   return {
     content: [{ type: "text", text: `Parent IPC proxy is unavailable for child tool "${toolName}".` }],
@@ -209,11 +307,16 @@ function getRegistry(): ChildExtensionRegistry {
     existing.permissionBrokerOwners ??= new Map();
     existing.toolBrokers ??= new Map();
     existing.toolBrokerOwners ??= new Map();
+    existing.proxyCallers ??= new Map();
+    existing.proxyCallerOwners ??= new Map();
     for (const token of existing.permissionBrokers.keys()) {
       if (!existing.permissionBrokerOwners.has(token)) existing.permissionBrokerOwners.set(token, token);
     }
     for (const token of existing.toolBrokers.keys()) {
       if (!existing.toolBrokerOwners.has(token)) existing.toolBrokerOwners.set(token, token);
+    }
+    for (const token of existing.proxyCallers.keys()) {
+      if (!existing.proxyCallerOwners.has(token)) existing.proxyCallerOwners.set(token, token);
     }
     return existing;
   }
@@ -223,6 +326,8 @@ function getRegistry(): ChildExtensionRegistry {
     permissionBrokerOwners: new Map(),
     toolBrokers: new Map(),
     toolBrokerOwners: new Map(),
+    proxyCallers: new Map(),
+    proxyCallerOwners: new Map(),
   };
   globals[registryKey] = created;
   return created;
@@ -230,6 +335,33 @@ function getRegistry(): ChildExtensionRegistry {
 
 function pathKey(value: string): string {
   return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
+function resolveOwnedAuthority<TBroker>(
+  candidates: readonly { broker: TBroker; owner?: RegistrationOwner }[],
+  label: string,
+): TeammateAuthorityResolution<TBroker> {
+  if (candidates.length === 1) return { status: "resolved", broker: candidates[0].broker };
+  if (candidates.length === 0) {
+    return { status: "unregistered", reason: `No ${label} is registered.`, owners: [] };
+  }
+  const owners = candidates.map((candidate) => describeOwner(candidate.owner));
+  return {
+    status: "conflict",
+    reason: `Ambiguous ${label}: ${candidates.length} conflicting registrations by ${formatOwners(owners)}.`,
+    owners,
+  };
+}
+
+function describeOwner(owner: RegistrationOwner | undefined): string {
+  if (typeof owner === "string") return owner;
+  if (owner === undefined) return "<unknown>";
+  return owner.description ? `<anonymous:${owner.description}>` : "<anonymous>";
+}
+
+function formatOwners(owners: readonly string[]): string {
+  const quoted = owners.map((owner) => `"${owner}"`).join(", ");
+  return owners.length === 1 ? `owner ${quoted}` : `owners ${quoted}`;
 }
 
 function registrationOwner(owner: string | undefined, fallback: symbol): RegistrationOwner {
@@ -253,7 +385,13 @@ function replaceOwnedAuthority<T>(
   const sameOwner = typeof owner === "string"
     && tokens.every((token) => owners.get(token) === owner);
   if (!sameOwner) {
-    throw new Error(`Conflicting ${label} authority is already registered.`);
+    // Name the incumbent: replacement is refused, and the operator needs to
+    // know which package already holds the slot to resolve it.
+    const incumbents = tokens.map((token) => describeOwner(owners.get(token)));
+    throw new Error(
+      `Conflicting ${label} authority is already registered by ${formatOwners(incumbents)}.`
+        + ` Dispose that registration first, or re-register with the same owner.`,
+    );
   }
   for (const token of tokens) {
     registrations.delete(token);
