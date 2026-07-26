@@ -291,6 +291,22 @@ export function checkActiveAgentBudget(
   return { allowed: active + additional <= max, active, max };
 }
 
+/**
+ * Whether a log is provably within every limit, using a byte upper bound rather
+ * than encoding. False means "trim to be sure", never "definitely over".
+ */
+function logNeedsNoTrim(lines: readonly string[], lineLimit: number): boolean {
+  if (lines.length > lineLimit) return false;
+  let upperBound = 0;
+  for (const line of lines) {
+    const lineUpperBound = line.length * 3;
+    if (lineUpperBound > AGENT_BUFFER_LIMITS.logLineBytes) return false;
+    upperBound += lineUpperBound;
+    if (upperBound > AGENT_BUFFER_LIMITS.logBytes) return false;
+  }
+  return true;
+}
+
 function trimAgentBuffers(agent: ActiveAgent, sleeping = false): void {
   const inboxLimit = sleeping
     ? AGENT_BUFFER_LIMITS.sleepingInboxItems
@@ -310,6 +326,16 @@ function trimAgentBuffers(agent: ActiveAgent, sleeping = false): void {
   const lineLimit = sleeping
     ? AGENT_BUFFER_LIMITS.sleepingLogLines
     : AGENT_BUFFER_LIMITS.logLines;
+  // This runs on every progress flush, and almost every call has nothing to
+  // trim — yet it rebuilt the array and re-encoded every retained line to find
+  // that out. A UTF-16 unit encodes to at most 3 UTF-8 bytes, so `length * 3`
+  // is a sound upper bound that costs O(1) per line instead of a full scan.
+  if (logNeedsNoTrim(agent.outputLog, lineLimit)) {
+    if (agent.lastResult !== undefined) {
+      agent.lastResult = truncateUtf8Tail(agent.lastResult, AGENT_BUFFER_LIMITS.lastResultBytes);
+    }
+    return;
+  }
   let logBytes = 0;
   const retainedLog: string[] = [];
   for (let index = agent.outputLog.length - 1; index >= 0 && retainedLog.length < lineLimit; index -= 1) {

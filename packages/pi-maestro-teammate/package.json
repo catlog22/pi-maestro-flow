@@ -11,7 +11,8 @@
     "agents"
   ],
   "scripts": {
-    "test": "node --experimental-transform-types --test \"test/*.test.ts\""
+    "test": "node --experimental-transform-types --test \"test/*.test.ts\"",
+    "typecheck": "tsc -p tsconfig.build.json"
   },
   "main": "./src/index.ts",
   "types": "./src/index.ts",
