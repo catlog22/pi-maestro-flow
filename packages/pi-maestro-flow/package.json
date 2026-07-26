@@ -14,7 +14,7 @@
     "test:package": "node scripts/verify-maestro-run-capabilities.mjs && node --experimental-transform-types --test test/prepare-package-skills.test.mjs test/package-resources.test.mjs test/package-resources-runtime.test.ts",
     "test:conversion": "node --experimental-transform-types --test test/convert-pi.test.mjs test/maestro-run-capabilities.test.mjs test/skill-contract-lint.test.ts",
     "check:maestro-run-cli": "node scripts/verify-maestro-run-capabilities.mjs",
-    "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/skill-manager.test.ts test/todo.test.ts test/todo-overlay.test.ts",
+    "test:todo": "node --experimental-transform-types --test test/skill-loader.test.ts test/skill-manager.test.ts test/todo.test.ts test/todo-overlay.test.ts test/cockpit-ownership.test.ts",
     "test:compaction": "node --experimental-transform-types --test test/compaction.test.ts test/compaction-settings.test.ts test/compaction-tui.test.ts test/tool-result-spill.test.ts",
     "test:gui": "node --experimental-transform-types --test test/gui-server.test.ts test/gui-state.test.ts test/gui-events.test.ts test/gui-tools.test.ts test/gui-invoke.test.ts test/gui-e2e.test.ts",
     "test:hooks": "node --experimental-transform-types --test test/hooks.test.ts",
@@ -22,6 +22,7 @@
     "test:providers": "node --experimental-transform-types --test test/api-provider-config.test.ts",
     "test:mcp": "node --experimental-transform-types --test test/mcp-config.test.ts test/mcp-manager.test.ts",
     "test:goal": "node --experimental-transform-types --test test/goal.test.ts",
+    "test:bash-bg": "node --experimental-transform-types --test test/bash-bg.test.ts",
     "test:plan": "node --experimental-transform-types --test test/plan-store.test.ts test/plan-editor.test.ts test/plan-lifecycle.test.ts test/statusline.test.ts",
     "test:session": "node --experimental-transform-types --test test/session-bridge.test.ts test/todo-projection.test.ts test/workflow-coordinator.test.ts test/run-recovery.test.ts test/session-tui.test.ts test/skill-contract-lint.test.ts",
     "test:swarm": "node --experimental-transform-types --test test/swarm-projection.test.ts test/swarm-tui.test.ts",
@@ -112,7 +113,8 @@
     "@earendil-works/pi-ai": "0.74.0",
     "@earendil-works/pi-coding-agent": "0.74.0",
     "@types/cross-spawn": "6.0.6",
-    "typescript": "5.7.3"
+    "typescript": "5.7.3",
+    "vitest": "^4.1.10"
   },
   "maestro": {
     "required": true,

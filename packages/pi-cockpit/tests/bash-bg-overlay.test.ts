@@ -1,0 +1,112 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import type { Theme } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { BashBgOverlay } from "../src/bash-bg-overlay.ts";
+import type { BashBgJob, BashBgStatus } from "../src/types.ts";
+
+const theme = {
+	fg: (_color: string, text: string) => text,
+	bg: (_color: string, text: string) => text,
+	bold: (text: string) => text,
+} as Theme;
+
+function job(id: string, status: BashBgStatus, overrides: Partial<BashBgJob> = {}): BashBgJob {
+	return {
+		id,
+		command: `node ${id}.js --watch`,
+		cwd: "/workspace/project",
+		pid: 123,
+		status,
+		startedAt: Date.now() - 10_000,
+		updatedAt: Date.now() - 1_000,
+		...(status === "running" || status === "stopping" ? {} : { finishedAt: Date.now() - 500 }),
+		exitCode: status === "completed" ? 0 : status === "failed" ? 1 : null,
+		outputTail: "starting\nready",
+		outputBytes: 2_048,
+		logPath: `/tmp/${id}.log`,
+		...overrides,
+	};
+}
+
+function overlay(jobs: BashBgJob[]) {
+	let renders = 0;
+	let refreshes = 0;
+	let closes = 0;
+	const component = new BashBgOverlay({
+		getJobs: () => jobs,
+		requestRender: () => { renders++; },
+		requestRefresh: () => { refreshes++; },
+		close: () => { closes++; },
+		theme,
+	});
+	return { component, counts: () => ({ renders, refreshes, closes }) };
+}
+
+test("wide center shows concurrent lifecycle counts and selected job details", () => {
+	const { component } = overlay([
+		job("run", "running"),
+		job("stop", "stopping"),
+		job("fail", "failed"),
+		job("done", "completed"),
+		job("kill", "killed"),
+	]);
+	const text = component.render(120).join("\n");
+	assert.match(text, /Background jobs · 5 total/);
+	assert.match(text, /1 running/);
+	assert.match(text, /1 stopping/);
+	assert.match(text, /1 failed/);
+	assert.match(text, /2 finished/);
+	assert.match(text, /run/);
+	assert.match(text, /PID/);
+	assert.match(text, /\/tmp\/run\.log/);
+});
+
+test("Enter opens detailed output tail and Esc returns before closing", () => {
+	const longOutput = Array.from({ length: 40 }, (_, index) => `line-${index}`).join("\n");
+	const { component, counts } = overlay([
+		job("run", "running", { outputTail: longOutput, command: `node -e "${"x".repeat(300)}"` }),
+	]);
+	component.handleInput("\r");
+	const detail = component.render(80);
+	const text = detail.join("\n");
+	assert.match(text, /Command/);
+	assert.match(text, /Output tail/);
+	assert.match(text, /earlier line/);
+	assert.match(text, /line-39/);
+	assert.ok((text.match(/line-\d+/g) ?? []).length <= 18, "long output is capped inside the overlay");
+
+	component.handleInput("\x1b");
+	assert.equal(counts().closes, 0);
+	assert.match(component.render(80).join("\n"), /Enter detail/);
+	component.handleInput("\x1b");
+	assert.equal(counts().closes, 1);
+});
+
+test("keyboard navigation wraps and refresh requests a new authoritative snapshot", () => {
+	const { component, counts } = overlay([job("first", "running"), job("second", "completed")]);
+	component.handleInput("k");
+	assert.match(component.render(60).join("\n"), /› ✓ 2\/2/);
+	component.handleInput("r");
+	assert.equal(counts().refreshes, 1);
+	assert.ok(counts().renders >= 2);
+});
+
+test("selection follows job identity when live status reorders the list", () => {
+	const jobs = [job("first", "running"), job("second", "running")];
+	const { component } = overlay(jobs);
+	component.render(60);
+	component.handleInput("j");
+	jobs.splice(0, jobs.length, jobs[1], job("failed", "failed"), jobs[0]);
+	assert.match(component.render(60).join("\n"), /› ▶ 1\/3 · running .* second/);
+});
+
+test("empty and narrow overlays stay width-bounded", () => {
+	const { component } = overlay([]);
+	assert.match(component.render(80).join("\n"), /no background jobs/);
+	for (const width of [1, 8, 16, 19]) {
+		const lines = component.render(width);
+		assert.equal(lines.length, 1);
+		assert.ok(visibleWidth(lines[0]) <= width);
+	}
+});

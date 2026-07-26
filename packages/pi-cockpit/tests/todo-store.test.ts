@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { TodoStore, mapStatus } from "../src/todo-store.ts";
 
-function todoEntry(tasks: Record<string, { subject?: string; status?: string }>) {
+function todoEntry(tasks: Record<string, Record<string, unknown>>) {
 	return { type: "custom", customType: "todo-state", data: { version: 1, tasks } };
 }
 
@@ -16,10 +16,37 @@ test("hydrate rebuilds items from a custom todo-state entry (object form)", () =
 		}),
 	]);
 	assert.deepEqual(s.snapshot(), [
-		{ id: "#0", subject: "map auth", status: "completed" },
-		{ id: "#1", subject: "implement", status: "in_progress" },
-		{ id: "#2", subject: "test", status: "pending" },
+		{ id: "#0", subject: "map auth", status: "completed", blockedBy: [], skills: [] },
+		{ id: "#1", subject: "implement", status: "in_progress", blockedBy: [], skills: [] },
+		{ id: "#2", subject: "test", status: "pending", blockedBy: [], skills: [] },
 	]);
+});
+
+test("hydrate preserves blocked dependencies, actors and skill bindings", () => {
+	const s = new TodoStore();
+	s.hydrateFromEntries([todoEntry({
+		"#1": {
+			subject: "verify",
+			status: "blocked",
+			blockedBy: ["#0", "#0", "", 12],
+			createdBy: { id: "root", label: "root", kind: "root" },
+			assignee: { id: "worker-1", label: "executor", kind: "teammate" },
+			skills: [
+				{ name: "team-testing", role: "primary", args: "unit" },
+				{ role: "guard" },
+				"invalid",
+			],
+		},
+	})]);
+	assert.deepEqual(s.snapshot()[0], {
+		id: "#1",
+		subject: "verify",
+		status: "blocked",
+		blockedBy: ["#0"],
+		createdBy: { id: "root", label: "root" },
+		assignee: { id: "worker-1", label: "executor" },
+		skills: [{ name: "team-testing", role: "primary" }],
+	});
 });
 
 test("hydrate uses the LAST todo-state entry when several exist", () => {

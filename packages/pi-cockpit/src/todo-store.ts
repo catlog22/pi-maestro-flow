@@ -1,4 +1,4 @@
-import type { TodoItem, TodoState } from "./types.ts";
+import type { TodoActor, TodoItem, TodoSkill, TodoState } from "./types.ts";
 import { TODO_STATE_ENTRY_TYPE } from "./types.ts";
 
 // Minimal structural view of a session entry — matches the shape todo.ts reads back
@@ -13,6 +13,31 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" && !Array.isArray(value)
 		? (value as Record<string, unknown>)
 		: undefined;
+}
+
+function asStringArray(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return [...new Set(value.filter((item): item is string => typeof item === "string" && item.length > 0))];
+}
+
+function asActor(value: unknown): TodoActor | undefined {
+	const actor = asRecord(value);
+	if (typeof actor?.id !== "string" || typeof actor.label !== "string") return undefined;
+	return { id: actor.id, label: actor.label };
+}
+
+function asSkills(value: unknown): TodoSkill[] {
+	if (!Array.isArray(value)) return [];
+	const skills: TodoSkill[] = [];
+	for (const raw of value) {
+		const skill = asRecord(raw);
+		if (typeof skill?.name !== "string" || skill.name.length === 0) continue;
+		skills.push({
+			name: skill.name,
+			...(typeof skill.role === "string" ? { role: skill.role } : {}),
+		});
+	}
+	return skills;
 }
 
 // Map the todo tool's status strings onto our four display states.
@@ -58,11 +83,19 @@ export class TodoStore {
 				const r = asRecord(raw);
 				const status = mapStatus(r?.status);
 				if (status === "deleted") continue;
-				next.set(id, {
+				const item: TodoItem = {
 					id,
 					subject: typeof r?.subject === "string" ? r.subject : "",
 					status,
-				});
+					blockedBy: asStringArray(r?.blockedBy),
+					skills: asSkills(r?.skills),
+				};
+				const createdBy = asActor(r?.createdBy);
+				const assignee = asActor(r?.assignee);
+				if (createdBy) item.createdBy = createdBy;
+				if (assignee) item.assignee = assignee;
+				if (typeof r?.updatedAt === "number") item.updatedAt = r.updatedAt;
+				next.set(id, item);
 			}
 		}
 		this.items = next;

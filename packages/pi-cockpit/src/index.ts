@@ -1,23 +1,35 @@
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
+import { BashBgStore } from "./bash-bg-store.ts";
+import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { TodoStore } from "./todo-store.ts";
-import { makeStackWidget } from "./stack-widget.ts";
-import { getUsageTotals, renderFooter, type PaintTheme, type WidthUtils } from "./footer.ts";
+import { makeTodoWidget, makeAgentWidget } from "./stack-widget.ts";
+import { formatDuration } from "./render.ts";
+import { getUsageTotals, invalidateUsageCache, renderFooter, type PaintTheme, type WidthUtils } from "./footer.ts";
+import { collectExtensionStatuses } from "./extension-status.ts";
+import { resolveGlyphs } from "./icons.ts";
 import { ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
 import {
+	AGENT_WIDGET_KEY,
+	BASH_BG_QUERY_EVENT,
+	BASH_BG_UPDATE_EVENT,
+	COCKPIT_TODO_TOGGLE_EVENT,
+	COCKPIT_UI_OWNERSHIP_EVENT,
 	DEFAULT_CONFIG,
-	NATIVE_AGENTS_WIDGET_KEY,
 	STACK_WIDGET_KEY,
 	TEAMMATE_COMPLETE_EVENT,
 	TEAMMATE_MESSAGE_EVENT,
 	TEAMMATE_STARTED_EVENT,
 	TODO_TOOL_NAME,
+	WORKFLOW_STATUS_KEY,
 	type CockpitConfig,
 } from "./types.ts";
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
+const BASH_BG_OVERLAY_KEY = "alt+j";
 
 function isTuiContext(ctx: ExtensionContext): boolean {
 	try {
@@ -28,14 +40,18 @@ function isTuiContext(ctx: ExtensionContext): boolean {
 	}
 }
 
-function fmtElapsed(ms: number): string {
-	const s = Math.max(0, Math.floor(ms / 1000));
-	if (s < 60) return `0:${String(s).padStart(2, "0")}`;
-	return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+function formatCwd(cwd: string): string {
+	const home = process.env.HOME || process.env.USERPROFILE;
+	if (!home) return cwd;
+	const rel = relative(resolve(home), resolve(cwd));
+	const insideHome = rel === "" || (rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+	if (!insideHome) return cwd;
+	return rel === "" ? "~" : `~${sep}${rel}`;
 }
 
 export default function (pi: ExtensionAPI): void {
 	const agents = new AgentsStore();
+	const bashBg = new BashBgStore();
 	const todos = new TodoStore();
 	let config: CockpitConfig = structuredClone(DEFAULT_CONFIG);
 	let lastCtx: ExtensionContext | undefined;
@@ -54,7 +70,7 @@ export default function (pi: ExtensionAPI): void {
 	const startTick = (): void => {
 		if (tick) return;
 		tick = setInterval(() => {
-			if (running) req();
+			if (running || bashBg.hasActive()) req();
 		}, 250);
 		tick.unref?.();
 	};
@@ -64,9 +80,24 @@ export default function (pi: ExtensionAPI): void {
 			tick = undefined;
 		}
 	};
+	const publishUiOwnership = (): void => {
+		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, {
+			todo: config.enabled,
+			agents: config.enabled && config.hideNativeAgents,
+			todoExpanded: config.todoExpanded,
+		});
+	};
+	const setTodoExpanded = (expanded: boolean): void => {
+		if (config.todoExpanded === expanded) return;
+		config = { ...config, todoExpanded: expanded };
+		saveConfig(config);
+		publishUiOwnership();
+		req();
+	};
 
 	const uninstallUi = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(STACK_WIDGET_KEY, undefined);
+		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
 		ctx.ui.setFooter(undefined);
 		stopTick();
 		capturedTui = undefined;
@@ -82,38 +113,66 @@ export default function (pi: ExtensionAPI): void {
 			STACK_WIDGET_KEY,
 			(tui, theme) => {
 				capturedTui = tui;
-				return makeStackWidget({
-					getAgents: () => agents.snapshot(),
+				return makeTodoWidget({
 					getTodos: () => todos.snapshot(),
 					getConfig: () => config,
-					isRunning: () => running,
 				})(tui, theme);
 			},
 			{ placement: "aboveEditor" },
 		);
+		ctx.ui.setWidget(
+			AGENT_WIDGET_KEY,
+			(tui, theme) => {
+				capturedTui = tui;
+				return makeAgentWidget({
+					getAgents: () => agents.snapshot(),
+					getBashBgJobs: () => bashBg.snapshot(),
+					getConfig: () => config,
+					isRunning: () => running,
+				})(tui, theme);
+			},
+			{ placement: "belowEditor" },
+		);
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			capturedTui = tui;
+			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
 			const component = {
 				render(width: number): string[] {
 					const cu = ctx.getContextUsage();
 					const branch = footerData.getGitBranch();
+					const extensionStatuses = collectExtensionStatuses(footerData.getExtensionStatuses());
+					const agentSnap = agents.snapshot();
+					const agentFailed = agentSnap.filter((a) => a.status === "failed").length;
+					const agentRunning = agentSnap.filter((a) => a.status === "running" || a.status === "retrying").length;
+					const agentSummary = agentSnap.length > 0
+						? agentFailed > 0
+							? `${agentRunning} agents · ${agentFailed} failed`
+							: `${agentRunning} agents`
+						: undefined;
 					return renderFooter({
 						width,
 						model: ctx.model?.id ?? "no-model",
 						provider: ctx.model?.provider,
+						thinking: pi.getThinkingLevel(),
+						cwd: formatCwd(ctx.sessionManager.getCwd()),
 						ctxPct: cu?.percent ?? 0,
 						ctxTokens: cu?.tokens ?? 0,
 						ctxWindow: cu?.contextWindow ?? ctx.model?.contextWindow ?? 0,
 						totals: getUsageTotals(ctx.sessionManager.getEntries()),
 						git: branch ?? undefined,
-						elapsed: fmtElapsed(Date.now() - sessionStart),
-						ascii: false,
+						elapsed: formatDuration(Date.now() - sessionStart),
+						agentSummary,
+						workflowStatus: extensionStatuses.find((status) => status.key === WORKFLOW_STATUS_KEY)?.text,
+						extensionStatuses: extensionStatuses.filter((status) => status.key !== WORKFLOW_STATUS_KEY),
+						glyphs: resolveGlyphs(config.icons.mode),
 						theme,
 						utils: FOOTER_UTILS,
 					});
 				},
 				invalidate(): void {},
-				dispose(): void {},
+				dispose(): void {
+					unsubscribeBranch();
+				},
 			};
 			return component;
 		});
@@ -131,6 +190,19 @@ export default function (pi: ExtensionAPI): void {
 	pi.events.on(TEAMMATE_COMPLETE_EVENT, (d) => {
 		agents.applyComplete(d as CompletePayload);
 		req();
+	});
+	pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {
+		if (!bashBg.applySnapshot(payload)) return;
+		if (bashBg.hasActive()) startTick();
+		else if (!running) stopTick();
+		req();
+	});
+	pi.events.on(COCKPIT_TODO_TOGGLE_EVENT, (payload) => {
+		if (!config.enabled) return;
+		const requested = payload && typeof payload === "object"
+			? (payload as { expanded?: unknown }).expanded
+			: undefined;
+		setTodoExpanded(typeof requested === "boolean" ? requested : !config.todoExpanded);
 	});
 
 	// --- todo changes: re-hydrate from the durable snapshot the todo tool persists ---
@@ -153,23 +225,26 @@ export default function (pi: ExtensionAPI): void {
 				// notify unavailable
 			}
 		});
+		invalidateUsageCache();
 		todos.hydrateFromEntries(ctx.sessionManager.getEntries());
 		applyUi(ctx);
-		if (config.hideNativeAgents) {
-			try {
-				ctx.ui.setWidget(NATIVE_AGENTS_WIDGET_KEY, undefined);
-			} catch {
-				// native widget absent on bare pi
-			}
-		}
+		publishUiOwnership();
+		pi.events.emit(BASH_BG_QUERY_EVENT, undefined);
 		req();
 	});
 
 	pi.on("session_shutdown", (_e, ctx) => {
 		if (lastCtx) uninstallUi(lastCtx);
+		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, {
+			todo: false,
+			agents: false,
+			todoExpanded: config.todoExpanded,
+		});
 		lastCtx = undefined;
 		running = false;
+		invalidateUsageCache();
 		agents.clear();
+		bashBg.clear();
 	});
 
 	pi.on("agent_start", () => {
@@ -179,26 +254,64 @@ export default function (pi: ExtensionAPI): void {
 	});
 	pi.on("agent_end", () => {
 		running = false;
-		stopTick();
+		if (!bashBg.hasActive()) stopTick();
 		req();
 	});
 
 	// --- redraw triggers for the footer's live data ---
 	pi.on("message_end", (_e, ctx) => {
+		invalidateUsageCache();
 		if (isTuiContext(ctx)) req();
 	});
 	pi.on("model_select", (_e, ctx) => {
 		if (isTuiContext(ctx)) req();
 	});
 	pi.on("session_compact", (_e, ctx) => {
+		invalidateUsageCache();
 		if (isTuiContext(ctx)) req();
+	});
+
+	const openBashBgOverlay = async (ctx: ExtensionContext): Promise<void> => {
+		if (!ctx.hasUI) return;
+		await ctx.ui.custom<void>((tui, theme, _kb, done) =>
+			new BashBgOverlay({
+				getJobs: () => bashBg.snapshot(),
+				requestRender: () => tui.requestRender(),
+				requestRefresh: () => pi.events.emit(BASH_BG_QUERY_EVENT, undefined),
+				close: () => done(undefined),
+				theme,
+			}), {
+			overlay: true,
+			overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
+		});
+	};
+
+	pi.registerShortcut(BASH_BG_OVERLAY_KEY, {
+		description: "Open background Bash jobs — live status, command, cwd, duration and output tail",
+		async handler(ctx) {
+			await openBashBgOverlay(ctx);
+		},
 	});
 
 	// --- /cockpit: toggle list/compact + enabled + hide-native ---
 	pi.registerCommand("cockpit", {
-		description: "Open pi-cockpit settings (list/compact modes, enabled, hide native agents)",
-		handler: async (_args, ctx) => {
+		description: "Open pi-cockpit settings; use /cockpit bg for background Bash job details",
+		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
+			const action = args.trim().toLowerCase();
+			if (action === "bg" || action === "jobs") {
+				await openBashBgOverlay(ctx);
+				return;
+			}
+			if (action === "todo" || action === "todo toggle") {
+				setTodoExpanded(!config.todoExpanded);
+				ctx.ui.notify(`TODO ${config.todoExpanded ? "expanded" : "collapsed"}`, "info");
+				return;
+			}
+			if (action === "todo expand" || action === "todo collapse") {
+				setTodoExpanded(action.endsWith("expand"));
+				return;
+			}
 			await ctx.ui.custom<void>((tui, theme, _kb, done) => {
 				let view: CockpitConfig = { ...config };
 				const commit = (): void => {
@@ -209,13 +322,7 @@ export default function (pi: ExtensionAPI): void {
 						if (config.enabled) applyUi(ctx);
 						else uninstallUi(ctx);
 					}
-					if (config.hideNativeAgents) {
-						try {
-							ctx.ui.setWidget(NATIVE_AGENTS_WIDGET_KEY, undefined);
-						} catch {
-							// ignore
-						}
-					}
+					publishUiOwnership();
 					req();
 				};
 				const cycle = (m: "list" | "compact"): "list" | "compact" => (m === "list" ? "compact" : "list");
@@ -231,9 +338,10 @@ export default function (pi: ExtensionAPI): void {
 							row("enabled", view.enabled ? "on" : "off"),
 							row("agents", view.agentsMode),
 							row("todo", view.todoMode),
+							row("todo expand", view.todoExpanded ? "yes" : "no"),
 							row("hide native", view.hideNativeAgents ? "yes" : "no"),
 							"",
-							paint.fg("dim", "e enabled · a agents · t todo · n hide-native · Esc close"),
+							paint.fg("dim", "e enabled · a agents · t todo · x expand · n hide-native · Esc close"),
 						];
 					},
 					invalidate(): void {},
@@ -241,6 +349,7 @@ export default function (pi: ExtensionAPI): void {
 						if (data === "e") view = { ...view, enabled: !view.enabled };
 						else if (data === "a") view = { ...view, agentsMode: cycle(view.agentsMode) };
 						else if (data === "t") view = { ...view, todoMode: cycle(view.todoMode) };
+						else if (data === "x") view = { ...view, todoExpanded: !view.todoExpanded };
 						else if (data === "n") view = { ...view, hideNativeAgents: !view.hideNativeAgents };
 						else if (matchesKey(data, Key.escape)) {
 							commit();

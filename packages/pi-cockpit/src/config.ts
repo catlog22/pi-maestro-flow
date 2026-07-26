@@ -12,11 +12,17 @@ function deepMerge(base: CockpitConfig, over: unknown): CockpitConfig {
 	if (!over || typeof over !== "object" || Array.isArray(over)) return base;
 	const o = over as Record<string, unknown>;
 	const isMode = (v: unknown): v is "list" | "compact" => v === "list" || v === "compact";
+	const isIconMode = (v: unknown): v is "auto" | "nerd" | "ascii" => v === "auto" || v === "nerd" || v === "ascii";
+	const iconsRaw = o.icons && typeof o.icons === "object" && !Array.isArray(o.icons)
+		? (o.icons as Record<string, unknown>)
+		: undefined;
 	return {
 		enabled: typeof o.enabled === "boolean" ? o.enabled : base.enabled,
 		agentsMode: isMode(o.agentsMode) ? o.agentsMode : base.agentsMode,
 		todoMode: isMode(o.todoMode) ? o.todoMode : base.todoMode,
+		todoExpanded: typeof o.todoExpanded === "boolean" ? o.todoExpanded : base.todoExpanded,
 		hideNativeAgents: typeof o.hideNativeAgents === "boolean" ? o.hideNativeAgents : base.hideNativeAgents,
+		icons: { mode: iconsRaw && isIconMode(iconsRaw.mode) ? iconsRaw.mode : base.icons.mode },
 	};
 }
 

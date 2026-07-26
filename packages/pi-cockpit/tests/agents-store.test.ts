@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AgentsStore } from "../src/agents-store.ts";
+import { AgentsStore, mapAgentStatus } from "../src/agents-store.ts";
 
 test("started adds a running row with derived role and label", () => {
 	const s = new AgentsStore();
@@ -12,6 +12,22 @@ test("started adds a running row with derived role and label", () => {
 	assert.equal(row.task, "scan auth");
 	assert.equal(row.status, "running");
 	assert.equal(row.startedAt, 1000);
+});
+
+test("started preserves parent, source status and source start time", () => {
+	const s = new AgentsStore();
+	s.applyStarted({
+		correlationId: "child",
+		agent: "executor",
+		name: "implement",
+		spawnedBy: "parent",
+		status: "pending",
+		startedAt: "2026-07-26T00:00:00.000Z",
+	}, 999);
+	const row = s.snapshot()[0];
+	assert.equal(row.parentCorrelationId, "parent");
+	assert.equal(row.status, "pending");
+	assert.equal(row.startedAt, Date.parse("2026-07-26T00:00:00.000Z"));
 });
 
 test("message updates tail of a known row, truncated to bound", () => {
@@ -30,16 +46,96 @@ test("message flattens whitespace", () => {
 	assert.equal(s.snapshot()[0].tail, "read src/x.ts");
 });
 
+test("progress message projects teammate tools, tokens, status and last message", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyMessage({
+		correlationId: "c1",
+		lastMessage: "implementing footer",
+		recentTools: [
+			{ name: "read", status: "completed" },
+			{ name: "apply_patch", status: "running" },
+		],
+		toolCount: 4,
+		tokens: 1200,
+		status: "running",
+	});
+	const row = s.snapshot()[0];
+	assert.equal(row.tail, "implementing footer");
+	assert.equal(row.activeTool, "apply_patch (running)");
+	assert.equal(row.toolCount, 4);
+	assert.equal(row.tokens, 1200);
+	assert.equal(row.taskStatus, "running");
+});
+
+test("graph progress updates the task row instead of flattening child state onto parent", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "child", agent: "executor", name: "implement", spawnedBy: "root", status: "pending" }, 2);
+	s.applyStarted({ correlationId: "root", agent: "graph(1)", name: "plan" }, 1);
+	s.applyMessage({
+		correlationId: "root",
+		taskCorrelationId: "child",
+		taskIndex: 0,
+		dependencies: [],
+		status: "running",
+		lastMessage: "writing code",
+		toolCount: 2,
+		tokens: 300,
+		progress: [{
+			correlationId: "child",
+			agent: "executor",
+			name: "implement",
+			taskIndex: 0,
+			dependencies: [],
+			status: "running",
+			lastMessage: "writing code",
+			toolCount: 2,
+			tokens: 300,
+		}],
+	});
+	const [root, child] = ["root", "child"].map((id) => s.snapshot().find((row) => row.correlationId === id)!);
+	assert.equal(root.status, "running");
+	assert.equal(root.tail, "");
+	assert.equal(child.status, "running");
+	assert.equal(child.tail, "writing code");
+	assert.equal(child.parentCorrelationId, "root");
+	assert.equal(child.toolCount, 2);
+	assert.equal(child.tokens, 300);
+});
+
 test("message for unknown correlationId is ignored", () => {
 	const s = new AgentsStore();
 	s.applyMessage({ correlationId: "nope", message: "hi" });
 	assert.equal(s.size, 0);
 });
 
+test("missing graph task row never flattens child progress onto the parent", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "root", agent: "graph(1)", name: "plan" }, 1);
+	s.applyMessage({
+		correlationId: "root",
+		taskCorrelationId: "missing-child",
+		status: "failed",
+		lastMessage: "child failed",
+	});
+	const row = s.snapshot()[0];
+	assert.equal(row.status, "running");
+	assert.equal(row.tail, "");
+});
+
 test("complete removes the row", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "explorer" }, 1);
 	s.applyComplete({ correlationId: "c1" });
+	assert.equal(s.size, 0);
+});
+
+test("complete removes the full descendant tree", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "grandchild", agent: "reviewer", spawnedBy: "child" }, 3);
+	s.applyStarted({ correlationId: "child", agent: "executor", spawnedBy: "root" }, 2);
+	s.applyStarted({ correlationId: "root", agent: "planner" }, 1);
+	s.applyComplete({ correlationId: "root" });
 	assert.equal(s.size, 0);
 });
 
@@ -73,4 +169,24 @@ test("re-start of same correlationId preserves startedAt", () => {
 	s.applyStarted({ correlationId: "c1", agent: "explorer" }, 100);
 	s.applyStarted({ correlationId: "c1", agent: "explorer" }, 999);
 	assert.equal(s.snapshot()[0].startedAt, 100);
+});
+
+test("re-start preserves previously projected metrics", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 100);
+	s.applyMessage({ correlationId: "c1", toolCount: 2, tokens: 90, lastMessage: "working" });
+	s.applyStarted({ correlationId: "c1", agent: "executor", status: "running" }, 999);
+	const row = s.snapshot()[0];
+	assert.equal(row.toolCount, 2);
+	assert.equal(row.tokens, 90);
+	assert.equal(row.tail, "working");
+});
+
+test("mapAgentStatus covers teammate lifecycle states", () => {
+	assert.equal(mapAgentStatus("pending"), "pending");
+	assert.equal(mapAgentStatus("retrying"), "retrying");
+	assert.equal(mapAgentStatus("sleeping"), "sleeping");
+	assert.equal(mapAgentStatus("completed"), "done");
+	assert.equal(mapAgentStatus("failed"), "failed");
+	assert.equal(mapAgentStatus("unknown"), "running");
 });

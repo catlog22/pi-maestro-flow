@@ -137,3 +137,27 @@ teammate 子进程的网络/Provider 重试由 teammate 执行器负责；Pi 主
 pi-maestro-flow 压缩剪除必须保持：(1) isError 的 tool result 永不剪除；(2) 控制类工具(如 todo)输出永不驱逐——驱逐集合用 allowlist(REPLAYABLE + EVICTABLE_BULK)而非'所有非可重放'；(3) 剪除顺序保持 latest-first（先剪靠近 frontier 的安全输出）以保留更长的 prompt cache 前缀。recent keepRecentTokens 窗口受保护。冗余惩罚不能用作剪除排序（与 latest-first 缓存不变量冲突），只能作为遥测/重要性信号。
 
 </spec-entry>
+
+<spec-entry category="arch" keywords="cockpit ownership todo teammate shortcut" date="2026-07-26" sid="S-20260726-4t37" title="Cockpit 跨扩展 UI 所有权协议" description="Cockpit 完全替换原生 Todo 与 teammate 状态面板的单所有者事件协议" source="master@69b23ebf">
+
+### Cockpit 跨扩展 UI 所有权协议
+
+当 pi-cockpit 启用时，必须通过 cockpit:ui-ownership 事件让 pi-maestro-flow 与 pi-maestro-teammate 主动撤下原生 todo-panel 和 teammate-agents；不得由 Cockpit 跨扩展强删。Alt+T 仍由 Flow 唯一注册，并通过 cockpit:toggle-todo 将展开态同步给 Cockpit。Cockpit 禁用时原生面板必须恢复。
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="cockpit,projection,spawnedby,blockedby,dependencies" date="2026-07-26" sid="S-20260726-t8pi" title="Cockpit 关系投影不得压平" description="Cockpit Todo 与 teammate 树投影的关系语义和降级规则" source="master@69b23ebf">
+
+### Cockpit 关系投影不得压平
+
+跨扩展 UI 投影必须保留源事件中的关系与生命周期字段。Agent 父子结构只由 spawnedBy/parentCorrelationId 建立；graph dependencies 只表示结果流，必须单独用依赖箭头显示，不能伪装成父子层级。Todo 投影必须保留 blockedBy、createdBy、assignee、skills；缺失或循环父引用必须降级为可见 root 且禁止无限递归；父 agent 完成时递归清理所有后代行。
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="background,snapshot,event,cockpit" date="2026-07-26" sid="S-20260726-wdwp" title="后台工具状态通过权威快照事件投影" description="后台工具与 Cockpit 之间采用全量快照和 query 事件的解耦模式" source="master@69b23ebf">
+
+### 后台工具状态通过权威快照事件投影
+
+长生命周期工具由进程所有者维护唯一状态机，并通过稳定事件发布完整不可变快照；UI 插件只校验、排序和渲染快照，启动或手动刷新时发送 query 事件，不直接 import 工具内部注册表，也不通过轮询工具调用复制状态。终态必须保留 status、exitCode、finishedAt、输出尾部和完整日志路径；消费者按 id 保持选中项，避免实时重排导致详情跳转。
+
+</spec-entry>
