@@ -253,6 +253,13 @@ export const EXECUTION_BUFFER_LIMITS = Object.freeze({
 
 export function truncateUtf8Tail(value: string, maxBytes: number): string {
   if (maxBytes <= 0) return "";
+  // Streaming appenders call this once per token, so the common "still well
+  // under the cap" case must not re-encode the whole accumulated string.
+  // A UTF-16 code unit never expands past 3 UTF-8 bytes (a surrogate pair is
+  // 2 units -> 4 bytes), so this bound is safe and O(1).
+  if (value.length * 3 <= maxBytes) return value;
+  // Still cheaper than Buffer.from: measures without allocating a copy.
+  if (Buffer.byteLength(value, "utf8") <= maxBytes) return value;
   const encoded = Buffer.from(value, "utf8");
   if (encoded.length <= maxBytes) return value;
   let start = encoded.length - maxBytes;
@@ -264,23 +271,52 @@ function appendUtf8Tail(current: string, addition: string, maxBytes: number): st
   return truncateUtf8Tail(current + addition, maxBytes);
 }
 
+type TranscriptEntry = { role: string; content: string };
+
+// Byte accounting is memoized per entry and per transcript so appending a tool
+// result does not rescan up to 1MB of retained history on every call. Both maps
+// are keyed by object identity, so nothing leaks into the returned messages.
+const transcriptEntryBytes = new WeakMap<TranscriptEntry, number>();
+const transcriptTotals = new WeakMap<object, { length: number; bytes: number }>();
+
+function entryBytes(entry: TranscriptEntry): number {
+  let bytes = transcriptEntryBytes.get(entry);
+  if (bytes === undefined) {
+    bytes = Buffer.byteLength(entry.content, "utf8");
+    transcriptEntryBytes.set(entry, bytes);
+  }
+  return bytes;
+}
+
+function transcriptTotalBytes(messages: TranscriptEntry[]): number {
+  const cached = transcriptTotals.get(messages);
+  // A stale length means the array was reset or mutated elsewhere; recompute
+  // from the memoized per-entry sizes rather than trusting the running total.
+  if (cached && cached.length === messages.length) return cached.bytes;
+  let bytes = 0;
+  for (const entry of messages) bytes += entryBytes(entry);
+  return bytes;
+}
+
 export function appendBoundedTranscriptMessage(
   messages: Array<{ role: string; content: string }>,
   message: { role: string; content: string },
 ): void {
-  messages.push({
+  const entry: TranscriptEntry = {
     ...message,
     content: truncateUtf8Tail(message.content, EXECUTION_BUFFER_LIMITS.transcriptMessageBytes),
-  });
-  let totalBytes = messages.reduce((total, entry) => total + Buffer.byteLength(entry.content, "utf8"), 0);
+  };
+  let totalBytes = transcriptTotalBytes(messages) + entryBytes(entry);
+  messages.push(entry);
   while (
     messages.length > EXECUTION_BUFFER_LIMITS.transcriptMessages
     || totalBytes > EXECUTION_BUFFER_LIMITS.transcriptBytes
   ) {
     const removed = messages.shift();
     if (!removed) break;
-    totalBytes -= Buffer.byteLength(removed.content, "utf8");
+    totalBytes -= entryBytes(removed);
   }
+  transcriptTotals.set(messages, { length: messages.length, bytes: totalBytes });
 }
 
 export function createUtf8LineDecoder(
@@ -1094,6 +1130,22 @@ function shouldEnforcePosixMode(): boolean {
   return process.platform !== "win32";
 }
 
+/**
+ * Root for prompt/schema/result scratch files, whose contents include the full
+ * agent system prompt.
+ *
+ * POSIX gets its privacy from chmod(0o700). Windows ignores mkdir modes and has
+ * no fchmod, so the only lever left is location: %LOCALAPPDATA% is already a
+ * per-user tree, unlike the shared %TEMP% fallback.
+ */
+export function teammateTempRoot(): string {
+  if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA;
+    if (localAppData) return path.join(localAppData, "pi-teammate", "tmp");
+  }
+  return path.join(os.tmpdir(), "pi-teammate");
+}
+
 export function ensurePrivateDirectory(directoryPath: string): void {
   fs.mkdirSync(directoryPath, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
   const stat = fs.lstatSync(directoryPath);
@@ -1182,7 +1234,7 @@ export function writeSystemPromptFile(
   correlationId: string,
   outputSchema?: Record<string, unknown>,
 ): string {
-  const tmpDir = path.join(os.tmpdir(), "pi-teammate");
+  const tmpDir = teammateTempRoot();
   ensurePrivateDirectory(tmpDir);
   const promptFile = path.join(tmpDir, `prompt-${correlationSessionDirectoryName(correlationId)}.md`);
   const structuredOutputInstruction = outputSchema
@@ -1193,7 +1245,7 @@ export function writeSystemPromptFile(
 }
 
 export function writeSchemaFile(schema: Record<string, unknown>, correlationId: string): { schemaFile: string; outputFile: string } {
-  const tmpDir = path.join(os.tmpdir(), "pi-teammate");
+  const tmpDir = teammateTempRoot();
   ensurePrivateDirectory(tmpDir);
   const fileId = correlationSessionDirectoryName(correlationId);
   const schemaFile = path.join(tmpDir, `schema-${fileId}.json`);
@@ -1239,6 +1291,116 @@ const RESULT_READY_GRACE_MS = 60_000;
 // child stuck mid-tool cannot wedge the caller forever. Background agents keep
 // their session-end lifetime. Overridable via params.timeoutMs.
 const DEFAULT_FOREGROUND_LANE_MAX_RUN_MS = 30 * 60 * 1000;
+
+// ---------------------------------------------------------------------------
+// Working-directory containment
+// ---------------------------------------------------------------------------
+
+/**
+ * `params.cwd` is a free-form, model-authored string that decides where the
+ * child looks for `.pi/agents` and `.pi/prompts` — i.e. which files define the
+ * sub-agent's persona and tool surface. Confine it to the project root.
+ *
+ * Symlinks are resolved on both sides so a link inside the project cannot point
+ * the child at an external tree. Non-existent paths keep their lexical form so
+ * the caller still gets the ordinary "directory does not exist" spawn failure.
+ */
+function canonicalDirectoryPath(candidate: string): string {
+  const resolved = path.resolve(candidate);
+  try {
+    return fs.realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+}
+
+export function resolveContainedCwd(
+  requested: string | undefined,
+  baseCwd: string,
+): { cwd: string } | { error: string } {
+  if (requested === undefined) return { cwd: baseCwd };
+  const base = canonicalDirectoryPath(baseCwd);
+  const candidate = canonicalDirectoryPath(path.resolve(base, requested));
+  const relative = path.relative(base, candidate);
+  if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) {
+    return {
+      error:
+        `Teammate cwd "${requested}" resolves to "${candidate}", which is outside the project root `
+        + `"${base}". Choose a directory inside the project.`,
+    };
+  }
+  return { cwd: candidate };
+}
+
+// ---------------------------------------------------------------------------
+// Structured-output schema safety
+// ---------------------------------------------------------------------------
+
+export const STRUCTURED_OUTPUT_SCHEMA_LIMITS = Object.freeze({
+  maxBytes: 64 * 1024,
+  maxDepth: 20,
+  maxPatternLength: 200,
+});
+
+// A quantifier applied to a group that already contains one — the classic
+// catastrophic-backtracking shape, e.g. /^(a+)+$/ or /(\w*\s?)*$/.
+const NESTED_QUANTIFIER = /\([^()]*[*+}][^()]*\)\s*[*+{]/;
+
+function isRiskyRegexSource(source: string): boolean {
+  return source.length > STRUCTURED_OUTPUT_SCHEMA_LIMITS.maxPatternLength
+    || NESTED_QUANTIFIER.test(source);
+}
+
+/**
+ * The model may submit any JSON Schema, and TypeBox compiles its `pattern`
+ * keywords into RegExp objects that then run on this process's main thread on
+ * every assistant event. Reject the hazardous shapes up front instead of
+ * silently dropping keywords, so a valid schema still validates exactly as before.
+ */
+export function findStructuredOutputSchemaHazard(
+  schema: Record<string, unknown>,
+): string | undefined {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(schema) ?? "";
+  } catch {
+    return "outputSchema is not serializable JSON.";
+  }
+  if (Buffer.byteLength(serialized, "utf8") > STRUCTURED_OUTPUT_SCHEMA_LIMITS.maxBytes) {
+    return `outputSchema exceeds ${STRUCTURED_OUTPUT_SCHEMA_LIMITS.maxBytes} bytes.`;
+  }
+
+  const visit = (node: unknown, depth: number): string | undefined => {
+    if (depth > STRUCTURED_OUTPUT_SCHEMA_LIMITS.maxDepth) {
+      return `outputSchema nests deeper than ${STRUCTURED_OUTPUT_SCHEMA_LIMITS.maxDepth} levels.`;
+    }
+    if (Array.isArray(node)) {
+      for (const item of node) {
+        const hazard = visit(item, depth + 1);
+        if (hazard) return hazard;
+      }
+      return undefined;
+    }
+    if (!node || typeof node !== "object") return undefined;
+    for (const [key, value] of Object.entries(node as Record<string, unknown>)) {
+      if (key === "pattern" && typeof value === "string" && isRiskyRegexSource(value)) {
+        return `outputSchema contains a pattern that risks catastrophic backtracking: ${value}`;
+      }
+      if (key === "patternProperties" && value && typeof value === "object") {
+        for (const source of Object.keys(value as Record<string, unknown>)) {
+          if (isRiskyRegexSource(source)) {
+            return `outputSchema contains a patternProperties key that risks catastrophic backtracking: ${source}`;
+          }
+        }
+      }
+      const hazard = visit(value, depth + 1);
+      if (hazard) return hazard;
+    }
+    return undefined;
+  };
+
+  return visit(schema, 0);
+}
 
 export interface ChildTerminationController {
   terminate(): void;
@@ -1351,7 +1513,26 @@ export async function runTeammate(
 ): Promise<SingleResult> {
   const startTime = Date.now();
   const correlationId = options.correlationId ?? randomUUID();
-  const cwd = params.cwd ?? options.baseCwd;
+
+  const rejectWith = (content: string): SingleResult => ({
+    agent: params.agent,
+    task: params.task ?? "",
+    exitCode: 1,
+    messages: [{ role: "system", content }],
+    usage: emptyUsage(),
+    model: params.model ?? "unknown",
+    correlationId,
+    durationMs: Date.now() - startTime,
+  });
+
+  const containedCwd = resolveContainedCwd(params.cwd, options.baseCwd);
+  if ("error" in containedCwd) return rejectWith(containedCwd.error);
+  const cwd = containedCwd.cwd;
+
+  if (params.outputSchema) {
+    const schemaHazard = findStructuredOutputSchemaHazard(params.outputSchema);
+    if (schemaHazard) return rejectWith(schemaHazard);
+  }
 
   const promptResolution = resolvePromptTask(cwd, params.prompt, params.task, params.promptArgs);
   if (promptResolution.error) {
@@ -1479,6 +1660,11 @@ export async function runTeammate(
     // Model error and more candidates — try next
   }
 
+  // Unreachable: the loop always returns on its final iteration. Kept so the
+  // declared Promise<SingleResult> holds without an implicit undefined.
+  return rejectWith(
+    `Teammate exhausted every model candidate without producing a result (agent=${params.agent}).`,
+  );
 }
 
 async function runSingleAttempt(
@@ -1551,6 +1737,10 @@ async function runSingleAttempt(
   // the lifetime of a wakeable agent.
   let completedInputTokens = 0;
   let completedOutputTokens = 0;
+  // progress.toolCount stays cumulative for the lifetime of a wakeable agent so
+  // it reads on the same scale as the cumulative token counters. The per-turn
+  // count lives here and only feeds diagnostics.
+  let turnToolCount = 0;
 
   const updateProgressUsage = (): void => {
     const inputTokens = completedInputTokens + usage.inputTokens + pendingMessageUsage.inputTokens;
@@ -1686,7 +1876,21 @@ async function runSingleAttempt(
         ? undefined
         : (options.foregroundMaxRunMs ?? DEFAULT_FOREGROUND_LANE_MAX_RUN_MS));
     if (effectiveRunTimeout) {
-      timeoutTimer = setTimeout(() => termination.terminate(), effectiveRunTimeout);
+      timeoutTimer = setTimeout(() => {
+        // A silent kill made a truncated run indistinguishable from a clean
+        // one. Record the reason before the child stops producing evidence.
+        const elapsedMs = Date.now() - startTime;
+        const message =
+          `Teammate run exceeded its ${effectiveRunTimeout}ms limit `
+          + `(agent=${params.agent}, correlationId=${correlationId}, elapsed=${elapsedMs}ms, `
+          + `tools=${progress.toolCount}, turnTools=${turnToolCount}); the child process was terminated.`;
+        appendBoundedTranscriptMessage(messages, { role: "system", content: message });
+        progress.status = "failed";
+        progress.durationMs = elapsedMs;
+        progress.lastMessage = message;
+        options.onProgress?.(progress);
+        termination.terminate();
+      }, effectiveRunTimeout);
       // The implicit ceiling must never hold the event loop open on its own;
       // a live child's stdio keeps the loop alive so the timer still fires.
       if (params.timeoutMs === undefined) timeoutTimer.unref?.();
@@ -1818,6 +2022,33 @@ async function runSingleAttempt(
       });
     }
 
+    /**
+     * A published result never confirms its own lifecycle. Without this
+     * deadline, a child that goes silent after its final tool-free turn keeps
+     * the agent `running` forever: publishResultReady() has already cleared the
+     * absolute run ceiling, and no later event can settle the turn.
+     *
+     * Publication semantics stay untouched — the result was already handed to
+     * the caller; this only bounds how long we wait for agent_end/close.
+     */
+    function armLifecycleConfirmationDeadline(): void {
+      if (terminal || turnLifecycleSettled || resultReadyGraceTimer) return;
+      const deadlineMs = options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS;
+      resultReadyGraceTimer = setTimeout(() => {
+        resultReadyGraceTimer = undefined;
+        if (terminal || turnLifecycleSettled) return;
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content:
+            `Teammate published a result but never confirmed its lifecycle within ${deadlineMs}ms `
+            + `(agent=${params.agent}, correlationId=${correlationId}, tools=${progress.toolCount}, `
+            + `turnTools=${turnToolCount}); the child process was terminated.`,
+        });
+        completeTurn(readStructuredOutput(true), true, 0);
+      }, deadlineMs);
+      resultReadyGraceTimer.unref?.();
+    }
+
     function armResultReadyGrace(): void {
       if (resultReadyGraceTimer) return;
       resultReadyGraceTimer = setTimeout(() => {
@@ -1862,7 +2093,7 @@ async function runSingleAttempt(
           progress.status = "running";
           progress.resultReadyAt = undefined;
           progress.recentTools = [];
-          progress.toolCount = 0;
+          turnToolCount = 0;
           options.onProgress?.(progress);
           break;
         }
@@ -1966,6 +2197,7 @@ async function runSingleAttempt(
             appendBoundedTranscriptMessage(messages, { role: "tool", content: event.content });
           }
           progress.toolCount += 1;
+          turnToolCount += 1;
           const lastTool = progress.recentTools[progress.recentTools.length - 1];
           if (lastTool && lastTool.status === "running") {
             lastTool.status = "completed";
@@ -2004,8 +2236,12 @@ async function runSingleAttempt(
           if (isPiResultReadyTurn(event)) {
             progress.resultReadyAt = Date.now();
             options.onProgress?.(progress);
-            if (!params.outputSchema) publishResultReady();
-            else armResultReadyGrace();
+            if (!params.outputSchema) {
+              publishResultReady();
+              // Symmetric with the schema lane: the result is consumable, but
+              // the lifecycle still needs a bounded confirmation window.
+              armLifecycleConfirmationDeadline();
+            } else armResultReadyGrace();
           }
           break;
         }
@@ -2044,7 +2280,7 @@ async function runSingleAttempt(
       );
     });
 
-    child.on("close", (code) => {
+    child.on("close", (code, signal) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (firstActivityTimer) clearTimeout(firstActivityTimer);
       if (resultReadyGraceTimer) clearTimeout(resultReadyGraceTimer);
@@ -2064,10 +2300,26 @@ async function runSingleAttempt(
       // chunk, or terminal structured output may have initiated this close.
       if (turnLifecycleSettled) return;
 
+      const stderrTail = stderrBuffer.trim();
+      let stderrAlreadyReported = false;
       if (messages.length === 0) {
-        const content =
-          lastContent.trim() || stderrBuffer.trim() || "(no output)";
+        const content = lastContent.trim() || stderrTail || "(no output)";
+        stderrAlreadyReported = stderrTail.length > 0 && content === stderrTail;
         appendBoundedTranscriptMessage(messages, { role: "assistant", content });
+      }
+
+      // An abnormal exit used to be a bare number: stderr was dropped whenever
+      // the child had produced any assistant text, and the signal was ignored.
+      if ((code ?? 1) !== 0) {
+        const detail = stderrAlreadyReported ? "" : stderrTail;
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content:
+            `Teammate child process exited abnormally (agent=${params.agent}, `
+            + `correlationId=${correlationId}, exit=${code ?? "null"}, signal=${signal ?? "none"}, `
+            + `elapsed=${Date.now() - startTime}ms, tools=${progress.toolCount}).`
+            + (detail ? `\nstderr tail:\n${truncateUtf8Tail(detail, EXECUTION_BUFFER_LIMITS.stderrBytes)}` : ""),
+        });
       }
 
       const status = code === 0 ? "completed" : "failed";
