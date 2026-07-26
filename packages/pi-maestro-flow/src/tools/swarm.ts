@@ -8,9 +8,9 @@ let activeOverlay: SwarmOverlay | undefined;
 
 export function registerSwarmDisplay(pi: ExtensionAPI): void {
   const refresh = (ctx: ExtensionContext) => refreshSwarmDisplay(ctx);
-  pi.on("session_start", (_event, ctx) => refresh(ctx));
-  pi.on("turn_start", (_event, ctx) => refresh(ctx));
-  pi.on("tool_execution_end", (_event, ctx) => refresh(ctx));
+  pi.on("session_start", (_event, ctx) => { refresh(ctx); });
+  pi.on("turn_start", (_event, ctx) => { refresh(ctx); });
+  pi.on("tool_execution_end", (_event, ctx) => { refresh(ctx); });
   pi.on("input", async (event, ctx) => {
     const match = /^\/swarm(?:\s+(.*))?$/is.exec(event.text.trim());
     if (!match) return;

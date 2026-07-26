@@ -9,20 +9,26 @@ import { showSmartSearchConfigOverlay } from "../tui/smart-search-config.ts";
 const require = createRequire(import.meta.url);
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
 
-const SmartSearchMode = Type.Unsafe<"search" | "research" | "fetch" | "route">({
+type SmartSearchModeValue = "search" | "research" | "fetch" | "route";
+type ValidationValue = "fast" | "balanced" | "strict";
+type FallbackValue = "auto" | "off";
+type BudgetValue = "quick" | "standard" | "deep";
+type RouterModeValue = "hybrid" | "rules" | "off";
+
+const SmartSearchMode = Type.Unsafe<SmartSearchModeValue>({
   type: "string",
   enum: ["search", "research", "fetch", "route"],
 });
-const Validation = Type.Unsafe<"fast" | "balanced" | "strict">({
+const Validation = Type.Unsafe<ValidationValue>({
   type: "string",
   enum: ["fast", "balanced", "strict"],
 });
-const Fallback = Type.Unsafe<"auto" | "off">({ type: "string", enum: ["auto", "off"] });
-const Budget = Type.Unsafe<"quick" | "standard" | "deep">({
+const Fallback = Type.Unsafe<FallbackValue>({ type: "string", enum: ["auto", "off"] });
+const Budget = Type.Unsafe<BudgetValue>({
   type: "string",
   enum: ["quick", "standard", "deep"],
 });
-const RouterMode = Type.Unsafe<"hybrid" | "rules" | "off">({
+const RouterMode = Type.Unsafe<RouterModeValue>({
   type: "string",
   enum: ["hybrid", "rules", "off"],
 });
@@ -142,7 +148,16 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
       if (signal?.aborted) throw abortError();
       const query = params.query.trim();
       if (!query) throw new Error("SmartSearch query is required and must not be empty.");
-      const commandArgs = buildSmartSearchArgs({ ...params, query });
+      const mode = parseSmartSearchMode(params.mode);
+      const commandArgs = buildSmartSearchArgs({
+        ...params,
+        mode,
+        query,
+        validation: parseValidation(params.validation),
+        fallback: parseFallback(params.fallback),
+        budget: parseBudget(params.budget),
+        router_mode: parseRouterMode(params.router_mode),
+      });
       try {
         const execution = await runner.run(commandArgs, {
           cwd: ctx.cwd,
@@ -155,7 +170,7 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
         }
         const result = parseJsonOutput(execution.stdout);
         const details: SmartSearchDetails = {
-          mode: params.mode,
+          mode,
           query,
           command_args: commandArgs,
           result,
@@ -219,7 +234,13 @@ export function registerSmartSearch(
   });
 }
 
-type SmartSearchInput = Static<typeof SmartSearchParams>;
+interface SmartSearchInput extends Omit<Static<typeof SmartSearchParams>, "mode" | "validation" | "fallback" | "budget" | "router_mode"> {
+  mode: SmartSearchModeValue;
+  validation?: ValidationValue;
+  fallback?: FallbackValue;
+  budget?: BudgetValue;
+  router_mode?: RouterModeValue;
+}
 
 export function buildSmartSearchArgs(params: SmartSearchInput): string[] {
   const args = [params.mode, params.query, "--format", "json"];
@@ -244,6 +265,35 @@ export function buildSmartSearchArgs(params: SmartSearchInput): string[] {
 
 function appendOption(args: string[], flag: string, value: string | number | undefined): void {
   if (value !== undefined) args.push(flag, String(value));
+}
+
+function parseSmartSearchMode(value: unknown): SmartSearchModeValue {
+  if (value === "search" || value === "research" || value === "fetch" || value === "route") return value;
+  throw new Error("SmartSearch mode is invalid.");
+}
+
+function parseValidation(value: unknown): ValidationValue | undefined {
+  if (value === undefined) return undefined;
+  if (value === "fast" || value === "balanced" || value === "strict") return value;
+  throw new Error("SmartSearch validation mode is invalid.");
+}
+
+function parseFallback(value: unknown): FallbackValue | undefined {
+  if (value === undefined) return undefined;
+  if (value === "auto" || value === "off") return value;
+  throw new Error("SmartSearch fallback mode is invalid.");
+}
+
+function parseBudget(value: unknown): BudgetValue | undefined {
+  if (value === undefined) return undefined;
+  if (value === "quick" || value === "standard" || value === "deep") return value;
+  throw new Error("SmartSearch budget is invalid.");
+}
+
+function parseRouterMode(value: unknown): RouterModeValue | undefined {
+  if (value === undefined) return undefined;
+  if (value === "hybrid" || value === "rules" || value === "off") return value;
+  throw new Error("SmartSearch router mode is invalid.");
 }
 
 function parseJsonOutput(stdout: string): unknown {

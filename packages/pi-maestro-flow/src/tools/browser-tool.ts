@@ -4,12 +4,15 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { browserManager, type BrowserManagerLike } from "./browser/manager.ts";
 
+type BrowserWaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
+type BrowserDialogPolicy = "accept" | "dismiss";
+
 const BrowserAction = Type.Unsafe<"open" | "close" | "run">({ type: "string", enum: ["open", "close", "run"] });
-const WaitUntil = Type.Unsafe<"load" | "domcontentloaded" | "networkidle0" | "networkidle2">({
+const WaitUntil = Type.Unsafe<BrowserWaitUntil>({
   type: "string",
   enum: ["load", "domcontentloaded", "networkidle0", "networkidle2"],
 });
-const DialogPolicy = Type.Unsafe<"accept" | "dismiss">({ type: "string", enum: ["accept", "dismiss"] });
+const DialogPolicy = Type.Unsafe<BrowserDialogPolicy>({ type: "string", enum: ["accept", "dismiss"] });
 
 export const BrowserParams = Type.Object({
   action: BrowserAction,
@@ -79,8 +82,8 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
             target: params.app?.target,
             visible: params.visible,
             viewport: params.viewport,
-            waitUntil: params.wait_until,
-            dialogs: params.dialogs,
+            waitUntil: parseWaitUntil(params.wait_until),
+            dialogs: parseDialogPolicy(params.dialogs),
             signal,
             timeoutMs,
           });
@@ -142,4 +145,18 @@ function abortError(): Error {
   const error = new Error("Browser operation aborted.");
   error.name = "AbortError";
   return error;
+}
+
+function parseWaitUntil(value: unknown): BrowserWaitUntil | undefined {
+  if (value === undefined) return undefined;
+  if (value === "load" || value === "domcontentloaded" || value === "networkidle0" || value === "networkidle2") {
+    return value;
+  }
+  throw new Error("Browser wait_until is invalid.");
+}
+
+function parseDialogPolicy(value: unknown): BrowserDialogPolicy | undefined {
+  if (value === undefined) return undefined;
+  if (value === "accept" || value === "dismiss") return value;
+  throw new Error("Browser dialogs policy is invalid.");
 }

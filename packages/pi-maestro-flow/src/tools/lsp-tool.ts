@@ -31,12 +31,13 @@ export const LSP_ACTIONS = [
   "diagnostics", "definition", "references", "hover", "symbols", "rename", "rename_file",
   "code_actions", "type_definition", "implementation", "status", "reload", "capabilities", "request",
 ] as const;
+type LspAction = (typeof LSP_ACTIONS)[number];
 
 export const LSP_READ_ONLY_ACTIONS = new Set([
   "diagnostics", "definition", "references", "hover", "symbols", "type_definition", "implementation", "status", "capabilities",
 ]);
 
-const LspActionSchema = Type.Unsafe<(typeof LSP_ACTIONS)[number]>({ type: "string", enum: [...LSP_ACTIONS] });
+const LspActionSchema = Type.Unsafe<LspAction>({ type: "string", enum: [...LSP_ACTIONS] });
 
 export const LspParams = Type.Object({
   action: LspActionSchema,
@@ -77,7 +78,13 @@ export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinit
       const timeoutMs = Math.min(60, Math.max(5, params.timeout ?? 20)) * 1_000;
       const timeout = withTimeout(callerSignal, timeoutMs);
       try {
-        return await executeLspAction(manager, params, ctx.cwd, timeout.signal, timeoutMs);
+        return await executeLspAction(
+          manager,
+          { ...params, action: parseLspAction(params.action) },
+          ctx.cwd,
+          timeout.signal,
+          timeoutMs,
+        );
       } catch (error) {
         if (timeout.signal.aborted && (callerSignal?.aborted || isAbortError(error))) throw abortError();
         throw error instanceof Error ? error : new Error(String(error));
@@ -102,6 +109,28 @@ export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinit
       return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", firstLine)}${extra}`);
     },
   };
+}
+
+function parseLspAction(value: unknown): LspAction {
+  if (
+    value === "diagnostics"
+    || value === "definition"
+    || value === "references"
+    || value === "hover"
+    || value === "symbols"
+    || value === "rename"
+    || value === "rename_file"
+    || value === "code_actions"
+    || value === "type_definition"
+    || value === "implementation"
+    || value === "status"
+    || value === "reload"
+    || value === "capabilities"
+    || value === "request"
+  ) {
+    return value;
+  }
+  throw new Error("LSP action is invalid.");
 }
 
 async function executeLspAction(
