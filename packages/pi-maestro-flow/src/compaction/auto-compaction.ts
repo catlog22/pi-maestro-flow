@@ -1364,31 +1364,36 @@ export function toolResultPatternKey(message: AgentMessage): string | undefined 
 }
 
 /**
- * Call ids of stale duplicate tool results: for any content pattern that occurs
- * more than once, every occurrence except the newest is redundant. Prune ordering
- * stays latest-first for cache-prefix retention; this signal is used for telemetry
- * and future importance-aware eviction.
+ * Groups tool results by content pattern in one pass, oldest occurrence first.
+ *
+ * Sole definition of the redundancy rule: for any pattern occurring more than
+ * once, every occurrence except the LAST entry of its bucket is redundant. Both
+ * consumers below derive from this so the rule cannot drift between them.
+ */
+function bucketByPattern(messages: AgentMessage[]): Map<string, Array<{ callId: string; tokens: number }>> {
+  const byPattern = new Map<string, Array<{ callId: string; tokens: number }>>();
+  for (const message of messages) {
+    const callId = toolResultCallId(message);
+    if (!callId) continue;
+    const key = toolResultPatternKey(message);
+    if (!key) continue;
+    const entry = { callId, tokens: estimateMessageTokens(message) };
+    const bucket = byPattern.get(key);
+    if (bucket) bucket.push(entry);
+    else byPattern.set(key, [entry]);
+  }
+  return byPattern;
+}
+
+/**
+ * Call ids of stale duplicate tool results. Prune ordering stays latest-first
+ * for cache-prefix retention; this signal is telemetry and a hook for future
+ * importance-aware eviction, and must never drive prune order.
  */
 export function redundantToolResultCallIds(messages: AgentMessage[]): Set<string> {
-  const countByPattern = new Map<string, number>();
-  const newestByPattern = new Map<string, string>();
-  for (const message of messages) {
-    const callId = toolResultCallId(message);
-    if (!callId) continue;
-    const key = toolResultPatternKey(message);
-    if (!key) continue;
-    countByPattern.set(key, (countByPattern.get(key) ?? 0) + 1);
-    newestByPattern.set(key, callId);
-  }
   const redundant = new Set<string>();
-  for (const message of messages) {
-    const callId = toolResultCallId(message);
-    if (!callId) continue;
-    const key = toolResultPatternKey(message);
-    if (!key) continue;
-    if ((countByPattern.get(key) ?? 0) > 1 && newestByPattern.get(key) !== callId) {
-      redundant.add(callId);
-    }
+  for (const bucket of bucketByPattern(messages).values()) {
+    for (let index = 0; index < bucket.length - 1; index++) redundant.add(bucket[index].callId);
   }
   return redundant;
 }
@@ -1474,35 +1479,30 @@ export function derivePressureBand(input: {
 }
 
 /**
- * Single-pass scan of the message array for the two token aggregates the
- * telemetry needs. Everything here depends only on the messages, never on the
- * current estimate, so the pressure-dependent ratios stay in
- * computeContextSignals.
+ * The two token aggregates the telemetry needs. Everything here depends only on
+ * the messages, never on the current estimate, so the pressure-dependent ratios
+ * stay in computeContextSignals.
  *
  * This used to be four separate full traversals (prunable classification,
  * redundancy counting, redundancy marking, redundant-token summing), each
  * re-running extractTextContent 2-3x per tool result — all of it to render a
- * status string. One pass plus a map walk produces identical numbers.
+ * status string. Now two traversals that share one memoized token estimate.
+ *
+ * Deliberately NOT folded into a single loop: that would inline the redundancy
+ * rule here and leave redundantToolResultCallIds as a second, drifting copy of
+ * it. With estimateMessageTokens memoized the extra walk costs a pointer chase,
+ * not a re-serialization — the expensive part H5 removed is already gone.
  */
 function scanContextTokens(messages: AgentMessage[]): { prunableTokens: number; redundantTokens: number } {
   let prunableTokens = 0;
-  const byPattern = new Map<string, number[]>();
   for (const message of messages) {
-    const tokens = estimateMessageTokens(message);
     // pruneToolResult is replaceable ?? evictableBulk — one classification
     // instead of evaluating both selectors independently.
-    if (pruneToolResult(message)) prunableTokens += tokens;
-    if (!toolResultCallId(message)) continue;
-    const key = toolResultPatternKey(message);
-    if (!key) continue;
-    const bucket = byPattern.get(key);
-    if (bucket) bucket.push(tokens);
-    else byPattern.set(key, [tokens]);
+    if (pruneToolResult(message)) prunableTokens += estimateMessageTokens(message);
   }
-  // Every occurrence of a repeated pattern except the newest is redundant.
   let redundantTokens = 0;
-  for (const bucket of byPattern.values()) {
-    for (let index = 0; index < bucket.length - 1; index++) redundantTokens += bucket[index];
+  for (const bucket of bucketByPattern(messages).values()) {
+    for (let index = 0; index < bucket.length - 1; index++) redundantTokens += bucket[index].tokens;
   }
   return { prunableTokens, redundantTokens };
 }
