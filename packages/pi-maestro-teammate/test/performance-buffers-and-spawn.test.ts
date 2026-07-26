@@ -1150,3 +1150,123 @@ test("parent rejects a schema-invalid structured output file", async () => {
   assert.equal(result.structuredOutput, undefined);
   assert.match(result.messages.at(-1)?.content ?? "", /schema-valid value/);
 });
+
+// --- Lane safety-net regressions: a lane must never wedge the caller forever ---
+
+function spawnScriptedChild(
+  script: (stdout: PassThrough) => void,
+  onKill?: () => void,
+): NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]> {
+  return (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() {
+        onKill?.();
+        setImmediate(() => child.emit("close", null, "SIGTERM"));
+        return true;
+      },
+    });
+    queueMicrotask(() => script(stdout));
+    return child;
+  }) as NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+}
+
+test("outputSchema lane settles with its published result when agent_end never arrives", async () => {
+  let killed = 0;
+  const spawnChildProcess = spawnScriptedChild(
+    (stdout) => {
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "ready answer" }] },
+      })}\n`);
+      stdout.write(`${JSON.stringify({
+        type: "turn_end",
+        message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "ready answer" }] },
+        toolResults: [],
+      })}\n`);
+    },
+    () => { killed++; },
+  );
+
+  const result = await Promise.race([
+    runTeammate(
+      {
+        agent: "delegate",
+        task: "Return structured output",
+        context: "fresh",
+        outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
+      },
+      { baseCwd: process.cwd(), spawnChildProcess, resultReadyGraceMs: 40 },
+    ),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("outputSchema lane blocked past its grace period")), 1_000)),
+  ]);
+
+  assert.equal(result.lifecyclePending ?? false, false, "grace settlement must not leave the lane lifecycle-pending");
+  assert.equal(result.exitCode, 1, "missing schema-valid structured_output settles as failed");
+  assert.ok(result.messages.some((m) => m.content.includes("ready answer")), "published transcript is preserved");
+  assert.ok(result.messages.some((m) => m.role === "system" && m.content.includes("structured_output")), "schema miss is noted");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(killed, 1, "child is terminated after grace settlement");
+});
+
+test("foreground lane with no timeout is bounded by the default ceiling", async () => {
+  let killed = 0;
+  const spawnChildProcess = spawnScriptedChild(
+    (stdout) => {
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "started working" }] },
+      })}\n`);
+      // Silence afterwards: no turn_end, no agent_end, no close — a child stuck mid-tool.
+    },
+    () => { killed++; },
+  );
+
+  const result = await Promise.race([
+    runTeammate(
+      { agent: "delegate", task: "Runs forever", context: "fresh" },
+      { baseCwd: process.cwd(), spawnChildProcess, foregroundMaxRunMs: 60 },
+    ),
+    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("foreground lane was not bounded by the ceiling")), 1_000)),
+  ]);
+
+  assert.equal(killed, 1, "ceiling terminates the stuck child");
+  assert.notEqual(result.exitCode, 0, "bounded lane settles as failed");
+  assert.ok(result.messages.some((m) => m.content.includes("started working")), "captured output is returned");
+});
+
+test("background lane is exempt from the foreground ceiling", async () => {
+  let killed = 0;
+  let stdoutRef: PassThrough | undefined;
+  const spawnChildProcess = spawnScriptedChild(
+    (stdout) => {
+      stdoutRef = stdout;
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "working" }] },
+      })}\n`);
+    },
+    () => { killed++; },
+  );
+
+  const pending = runTeammate(
+    { agent: "delegate", task: "Background work", context: "fresh", background: true },
+    { baseCwd: process.cwd(), spawnChildProcess, foregroundMaxRunMs: 40 },
+  );
+
+  // Well past the 40ms ceiling: a background lane must NOT be terminated.
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  assert.equal(killed, 0, "foreground ceiling must not bound a background lane");
+
+  stdoutRef!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  const result = await pending;
+  assert.equal(result.exitCode, 0);
+});

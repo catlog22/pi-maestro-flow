@@ -91,6 +91,10 @@ export interface RunTeammateOptions {
   spawnChildProcess?: typeof crossSpawn;
   /** @internal Test seam for retry scheduling. */
   waitForRetry?: (delayMs: number, signal?: AbortSignal) => Promise<boolean>;
+  /** @internal Test seam for the result-ready grace period. */
+  resultReadyGraceMs?: number;
+  /** @internal Test seam for the foreground absolute run ceiling. */
+  foregroundMaxRunMs?: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -1181,6 +1185,16 @@ function createProgress(agent: string, startTime: number): AgentProgress {
 
 const CHILD_TERMINATION_GRACE_MS = 5_000;
 
+// A result-ready lane settles with its published result if the authoritative
+// lifecycle confirmation (agent_end/close) is this late, so aggregation never
+// blocks indefinitely on a missing terminal event.
+const RESULT_READY_GRACE_MS = 60_000;
+
+// Absolute ceiling for a foreground (blocking) lane that never settles, so a
+// child stuck mid-tool cannot wedge the caller forever. Background agents keep
+// their session-end lifetime. Overridable via params.timeoutMs.
+const DEFAULT_FOREGROUND_LANE_MAX_RUN_MS = 30 * 60 * 1000;
+
 export interface ChildTerminationController {
   terminate(): void;
   cleanup(): void;
@@ -1616,9 +1630,18 @@ async function runSingleAttempt(
     // Timeout handling
     let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
     let firstActivityTimer: ReturnType<typeof setTimeout> | undefined;
+    let resultReadyGraceTimer: ReturnType<typeof setTimeout> | undefined;
     let receivedFirstActivity = false;
-    if (params.timeoutMs) {
-      timeoutTimer = setTimeout(() => termination.terminate(), params.timeoutMs);
+    const effectiveRunTimeout =
+      params.timeoutMs ??
+      (params.background === true
+        ? undefined
+        : (options.foregroundMaxRunMs ?? DEFAULT_FOREGROUND_LANE_MAX_RUN_MS));
+    if (effectiveRunTimeout) {
+      timeoutTimer = setTimeout(() => termination.terminate(), effectiveRunTimeout);
+      // The implicit ceiling must never hold the event loop open on its own;
+      // a live child's stdio keeps the loop alive so the timer still fires.
+      if (params.timeoutMs === undefined) timeoutTimer.unref?.();
     }
     firstActivityTimer = setTimeout(() => {
       if (initialResultPublished || receivedFirstActivity) return;
@@ -1681,6 +1704,7 @@ async function runSingleAttempt(
       options.onProgress?.(progress);
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (firstActivityTimer) clearTimeout(firstActivityTimer);
+      if (resultReadyGraceTimer) clearTimeout(resultReadyGraceTimer);
       cleanupFile(systemPromptFile);
       if (schemaFile) cleanupFile(schemaFile);
       if (outputFile) cleanupFile(outputFile);
@@ -1730,6 +1754,7 @@ async function runSingleAttempt(
       }
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (firstActivityTimer) clearTimeout(firstActivityTimer);
+      if (resultReadyGraceTimer) clearTimeout(resultReadyGraceTimer);
       initialResultPublished = true;
       resolve({
         agent: params.agent,
@@ -1743,6 +1768,26 @@ async function runSingleAttempt(
         wakeable,
         lifecyclePending: true,
       });
+    }
+
+    function armResultReadyGrace(): void {
+      if (resultReadyGraceTimer) return;
+      resultReadyGraceTimer = setTimeout(() => {
+        resultReadyGraceTimer = undefined;
+        if (terminal || turnLifecycleSettled) return;
+        // The result is already consumable; settle with whatever structured
+        // output was captured instead of blocking on a missing agent_end/close.
+        const structuredOutput = readStructuredOutput(true);
+        if (structuredOutput === undefined) {
+          appendBoundedTranscriptMessage(messages, {
+            role: "system",
+            content:
+              "The teammate published a result but did not settle with schema-valid structured_output in time.",
+          });
+        }
+        completeTurn(structuredOutput, true, structuredOutput === undefined ? 1 : 0);
+      }, options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS);
+      resultReadyGraceTimer.unref?.();
     }
 
     function processEvent(event: JsonLineEvent): void {
@@ -1912,6 +1957,7 @@ async function runSingleAttempt(
             progress.resultReadyAt = Date.now();
             options.onProgress?.(progress);
             if (!params.outputSchema) publishResultReady();
+            else armResultReadyGrace();
           }
           break;
         }
@@ -1953,6 +1999,7 @@ async function runSingleAttempt(
     child.on("close", (code) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (firstActivityTimer) clearTimeout(firstActivityTimer);
+      if (resultReadyGraceTimer) clearTimeout(resultReadyGraceTimer);
       termination.cleanup();
       unbindTerminationSignal();
 
@@ -2021,6 +2068,7 @@ async function runSingleAttempt(
     child.on("error", (error) => {
       if (timeoutTimer) clearTimeout(timeoutTimer);
       if (firstActivityTimer) clearTimeout(firstActivityTimer);
+      if (resultReadyGraceTimer) clearTimeout(resultReadyGraceTimer);
       unbindTerminationSignal();
 
       cleanupFile(systemPromptFile);
