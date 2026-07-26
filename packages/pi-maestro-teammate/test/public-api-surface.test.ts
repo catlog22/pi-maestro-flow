@@ -88,8 +88,15 @@ test("the v1 event contract is a leaf that costs nothing beyond the type module"
 });
 
 test("every v1 module is reachable through a declared package export", () => {
-  const exports = JSON.parse(fs.readFileSync(PACKAGE_JSON, "utf8")).exports as Record<string, string>;
-  const declared = new Set(Object.values(exports));
+  const packageJson: {
+    exports?: Record<string, string | { default?: string }>;
+  } = JSON.parse(fs.readFileSync(PACKAGE_JSON, "utf8"));
+  const declared = new Set(
+    Object.values(packageJson.exports ?? {}).flatMap((entry) => {
+      const runtimeTarget = typeof entry === "string" ? entry : entry.default;
+      return runtimeTarget === undefined ? [] : [runtimeTarget];
+    }),
+  );
   for (const file of fs.readdirSync(PUBLIC_DIR)) {
     if (!file.endsWith(".ts")) continue;
     assert.ok(
