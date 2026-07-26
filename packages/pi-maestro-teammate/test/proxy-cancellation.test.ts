@@ -4,6 +4,7 @@ import { randomUUID } from "node:crypto";
 import {
   cancelProxyDispatch,
   createChildProxyRequest,
+  resolveChildProxyRequest,
   waitForTeammate,
   type ChildProxyPendingRequests,
 } from "../src/extension/index.ts";
@@ -97,10 +98,13 @@ test("a request answered in time announces nothing", async () => {
     (message, callback) => { sent.push(message); callback(null); return true; },
     60_000,
   );
-  pending.get(requestId)!.resolve({ ok: true });
+  // Through the real resolution path, which is also what clears the timer —
+  // calling the raw resolve leaves it armed and holds the process open.
+  assert.equal(resolveChildProxyRequest(pending, requestId, { ok: true }), true);
   await inFlight;
 
   assert.equal(sent.some((m) => m.type === "teammate_proxy_cancel"), false);
+  assert.equal(pending.size, 0);
 });
 
 // --- root side: the announcement must actually tear the agent down ---------

@@ -1667,6 +1667,152 @@ export async function runTeammate(
   );
 }
 
+/** AC5: session directory + fork context resolved once per attempt. */
+interface AttemptSessionContext {
+  /** Private per-correlation session directory, when the parent exposes one. */
+  sessionDir?: string;
+  /** Parent session file the child forks from. */
+  forkSessionFile?: string;
+  /** Transcript note emitted when an explicit fork could not be honoured. */
+  forkWarning?: string;
+}
+
+function resolveAttemptSessionContext(
+  params: RunTeammateParams,
+  agentConfig: AgentConfig,
+  correlationId: string,
+  options: RunTeammateOptions,
+): AttemptSessionContext {
+  const effectiveContext = params.context ?? agentConfig.defaultContext;
+  const parentSession = options.parentSessionFile ?? process.env.PI_TEAMMATE_PARENT_SESSION ?? null;
+  const hasParentSession = Boolean(parentSession) && fs.existsSync(parentSession as string);
+  const context: AttemptSessionContext = {};
+  if (hasParentSession) {
+    const sessionRoot = getTeammateSessionRoot(parentSession as string);
+    if (sessionRoot) {
+      context.sessionDir = path.join(sessionRoot, correlationSessionDirectoryName(correlationId));
+      ensurePrivateDirectory(context.sessionDir);
+    }
+  }
+  if (effectiveContext === "fork") {
+    if (hasParentSession) {
+      context.forkSessionFile = parentSession as string;
+    } else if (params.context === "fork") {
+      context.forkWarning = "Fork requested but parent session file not available. Starting with fresh context.";
+    }
+  }
+  return context;
+}
+
+/**
+ * Every value a running attempt mutates after setup. Collecting them here keeps
+ * the settlement invariants readable as one state machine instead of a dozen
+ * independent closure flags, and lets the per-event handlers below be named,
+ * self-contained functions.
+ */
+interface AttemptState {
+  // --- Turn-scoped: cleared by completeTurn() once a result is published. ---
+  lastContent: string;
+  streamingText: string;
+  stderrBuffer: string;
+  capturedStructuredOutput: unknown;
+  /**
+   * progress.toolCount stays cumulative for the lifetime of a wakeable agent so
+   * it reads on the same scale as the cumulative token counters. This per-turn
+   * count only feeds diagnostics.
+   */
+  turnToolCount: number;
+  /**
+   * Re-opened at every turn boundary, set by completeTurn(). Guards against a
+   * second settlement for the same turn.
+   */
+  turnLifecycleSettled: boolean;
+
+  // --- Attempt-scoped: survive turns for the lifetime of a wakeable child. ---
+  resolvedModel: string;
+  /**
+   * Result usage remains turn-scoped, while status usage stays cumulative for
+   * the lifetime of a wakeable agent.
+   */
+  completedInputTokens: number;
+  completedOutputTokens: number;
+  /** One-way latches; never reset. */
+  receivedFirstActivity: boolean;
+  initialResultPublished: boolean;
+  /** Absorbing state: once terminal, queued child lines must not reopen a turn. */
+  terminal: boolean;
+}
+
+/**
+ * The three deadlines an attempt can arm. Every settlement path clears all of
+ * them; cleared handles are deliberately left in place so `armResultReadyGrace`
+ * still recognises a grace window that has already been used.
+ */
+interface AttemptTimers {
+  run?: ReturnType<typeof setTimeout>;
+  firstActivity?: ReturnType<typeof setTimeout>;
+  resultReadyGrace?: ReturnType<typeof setTimeout>;
+}
+
+/** Environment handed to the pi child: identity, depth diagnostics and file seams. */
+function buildChildSpawnEnv(
+  correlationId: string,
+  replyTo: ReplyTarget,
+  options: RunTeammateOptions,
+  schemaFile: string | undefined,
+  outputFile: string | undefined,
+): Record<string, string | undefined> {
+  const spawnEnv: Record<string, string | undefined> = {
+    ...process.env,
+    PI_TEAMMATE_CHILD: "1",
+    // Diagnostic only. The child never spawns grandchildren itself — it
+    // proxies nested dispatches back to this process — so the guard reads
+    // RunTeammateOptions.depth rather than this variable.
+    PI_TEAMMATE_DEPTH: String((options.depth ?? getTeammateDepth()) + 1),
+    PI_TEAMMATE_CORRELATION_ID: correlationId,
+    PI_TEAMMATE_REPLY_TO: replyTo,
+  };
+  if (outputFile) {
+    spawnEnv.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH = outputFile;
+    spawnEnv.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH = schemaFile;
+  }
+  if (options.parentSessionFile) {
+    spawnEnv.PI_TEAMMATE_PARENT_SESSION = options.parentSessionFile;
+  }
+  return spawnEnv;
+}
+
+/** Proxy requests and lifecycle events raised by extensions inside the child. */
+function bindChildIpcRelay(
+  child: ChildProcess,
+  correlationId: string,
+  options: RunTeammateOptions,
+): void {
+  child.on("message", (msg: unknown) => {
+    const m = msg as Record<string, unknown>;
+    dispatchChildIpcMessage(
+      m,
+      options.onChildRequest
+        ? (request, reply) => options.onChildRequest?.({
+            ...request,
+            // The parent process owns this identity; never trust a child-supplied actor id.
+            correlationId,
+          }, reply)
+        : undefined,
+      options.onChildEvent
+        ? (event) => options.onChildEvent?.({
+            ...event,
+            // Lifecycle ownership is assigned by the spawning parent.
+            correlationId,
+          })
+        : undefined,
+      (reply) => {
+        try { child.send(reply as never); } catch { /* child disconnected */ }
+      },
+    );
+  });
+}
+
 async function runSingleAttempt(
   params: RunTeammateParams,
   agentConfig: AgentConfig,
@@ -1677,37 +1823,16 @@ async function runSingleAttempt(
   modelOverride: string | undefined,
   options: RunTeammateOptions,
 ): Promise<SingleResult> {
-  // AC5: Session directory + fork context
   const effectiveContext = params.context ?? agentConfig.defaultContext;
   const wakeable = effectiveContext !== "fork";
   const systemPromptFile = writeSystemPromptFile(agentConfig, correlationId, params.outputSchema);
-  let sessionDir: string | undefined;
-  let forkSessionFile: string | undefined;
-  let forkWarning: string | undefined;
-  const parentSession = options.parentSessionFile ?? process.env.PI_TEAMMATE_PARENT_SESSION ?? null;
-  if (parentSession && fs.existsSync(parentSession)) {
-    const sessionRoot = getTeammateSessionRoot(parentSession);
-    if (sessionRoot) {
-      sessionDir = path.join(sessionRoot, correlationSessionDirectoryName(correlationId));
-      ensurePrivateDirectory(sessionDir);
-    }
-  }
-  if (effectiveContext === "fork") {
-    if (parentSession && fs.existsSync(parentSession)) {
-      forkSessionFile = parentSession;
-    } else if (params.context === "fork") {
-      forkWarning = "Fork requested but parent session file not available. Starting with fresh context.";
-    }
-  }
+  const { sessionDir, forkSessionFile, forkWarning } =
+    resolveAttemptSessionContext(params, agentConfig, correlationId, options);
 
   // AC6: Structured output
-  let schemaFile: string | undefined;
-  let outputFile: string | undefined;
-  if (params.outputSchema) {
-    const files = writeSchemaFile(params.outputSchema, correlationId);
-    schemaFile = files.schemaFile;
-    outputFile = files.outputFile;
-  }
+  const { schemaFile, outputFile } = params.outputSchema
+    ? writeSchemaFile(params.outputSchema, correlationId)
+    : { schemaFile: undefined, outputFile: undefined };
 
   const piArgs = buildPiArgs(
     agentConfig,
@@ -1726,25 +1851,27 @@ async function runSingleAttempt(
   if (forkWarning) {
     appendBoundedTranscriptMessage(messages, { role: "system", content: forkWarning });
   }
-  let resolvedModel = modelOverride ?? params.model ?? agentConfig.model ?? "unknown";
-  let lastContent = "";
-  let streamingText = "";
-  let capturedStructuredOutput: unknown;
+  const state: AttemptState = {
+    lastContent: "",
+    streamingText: "",
+    stderrBuffer: "",
+    capturedStructuredOutput: undefined,
+    turnToolCount: 0,
+    turnLifecycleSettled: false,
+    resolvedModel: modelOverride ?? params.model ?? agentConfig.model ?? "unknown",
+    completedInputTokens: 0,
+    completedOutputTokens: 0,
+    receivedFirstActivity: false,
+    initialResultPublished: false,
+    terminal: false,
+  };
 
   // AC8: Rich progress tracking
   const progress = createProgress(params.agent, startTime);
-  // Result usage remains turn-scoped, while status usage stays cumulative for
-  // the lifetime of a wakeable agent.
-  let completedInputTokens = 0;
-  let completedOutputTokens = 0;
-  // progress.toolCount stays cumulative for the lifetime of a wakeable agent so
-  // it reads on the same scale as the cumulative token counters. The per-turn
-  // count lives here and only feeds diagnostics.
-  let turnToolCount = 0;
 
   const updateProgressUsage = (): void => {
-    const inputTokens = completedInputTokens + usage.inputTokens + pendingMessageUsage.inputTokens;
-    const outputTokens = completedOutputTokens + usage.outputTokens + pendingMessageUsage.outputTokens;
+    const inputTokens = state.completedInputTokens + usage.inputTokens + pendingMessageUsage.inputTokens;
+    const outputTokens = state.completedOutputTokens + usage.outputTokens + pendingMessageUsage.outputTokens;
     progress.inputTokens = Math.max(progress.inputTokens ?? 0, inputTokens);
     progress.outputTokens = Math.max(progress.outputTokens ?? 0, outputTokens);
     progress.tokens = progress.inputTokens + progress.outputTokens;
@@ -1752,29 +1879,8 @@ async function runSingleAttempt(
 
   return new Promise<SingleResult>((resolve) => {
     let child: ChildProcess;
-    let initialResultPublished = false;
-    let turnLifecycleSettled = false;
-    let terminal = false;
 
-    const spawnEnv: Record<string, string | undefined> = {
-      ...process.env,
-      PI_TEAMMATE_CHILD: "1",
-      // Diagnostic only. The child never spawns grandchildren itself — it
-      // proxies nested dispatches back to this process — so the guard reads
-      // RunTeammateOptions.depth rather than this variable.
-      PI_TEAMMATE_DEPTH: String((options.depth ?? getTeammateDepth()) + 1),
-      PI_TEAMMATE_CORRELATION_ID: correlationId,
-      PI_TEAMMATE_REPLY_TO: replyTo,
-    };
-
-    if (outputFile) {
-      spawnEnv.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH = outputFile;
-      spawnEnv.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH = schemaFile;
-    }
-
-    if (options.parentSessionFile) {
-      spawnEnv.PI_TEAMMATE_PARENT_SESSION = options.parentSessionFile;
-    }
+    const spawnEnv = buildChildSpawnEnv(correlationId, replyTo, options, schemaFile, outputFile);
 
     let useIpc = false;
     try {
@@ -1801,7 +1907,7 @@ async function runSingleAttempt(
           content: `Failed to spawn pi subprocess: ${error instanceof Error ? error.message : String(error)}`,
         }],
         usage: emptyUsage(),
-        model: resolvedModel,
+        model: state.resolvedModel,
         correlationId,
         durationMs: Date.now() - startTime,
       });
@@ -1831,31 +1937,7 @@ async function runSingleAttempt(
     }
 
     // IPC message listener — proxy requests from child extensions
-    if (useIpc) {
-      child.on("message", (msg: unknown) => {
-        const m = msg as Record<string, unknown>;
-        dispatchChildIpcMessage(
-          m,
-          options.onChildRequest
-            ? (request, reply) => options.onChildRequest?.({
-                ...request,
-                // The parent process owns this identity; never trust a child-supplied actor id.
-                correlationId,
-              }, reply)
-            : undefined,
-          options.onChildEvent
-            ? (event) => options.onChildEvent?.({
-                ...event,
-                // Lifecycle ownership is assigned by the spawning parent.
-                correlationId,
-              })
-            : undefined,
-          (reply) => {
-            try { child.send(reply as never); } catch { /* child disconnected */ }
-          },
-        );
-      });
-    }
+    if (useIpc) bindChildIpcRelay(child, correlationId, options);
 
     // Report initial progress
     options.onProgress?.(progress);
@@ -1866,24 +1948,28 @@ async function runSingleAttempt(
     const unbindTerminationSignal = bindChildTerminationSignal(termination, options.signal);
 
     // Timeout handling
-    let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
-    let firstActivityTimer: ReturnType<typeof setTimeout> | undefined;
-    let resultReadyGraceTimer: ReturnType<typeof setTimeout> | undefined;
-    let receivedFirstActivity = false;
+    const timers: AttemptTimers = {};
+    // Cleared handles are deliberately left assigned: armResultReadyGrace()
+    // treats a non-empty handle as "this window was already used".
+    const clearAllTimers = (): void => {
+      if (timers.run) clearTimeout(timers.run);
+      if (timers.firstActivity) clearTimeout(timers.firstActivity);
+      if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
+    };
     const effectiveRunTimeout =
       params.timeoutMs ??
       (params.background === true
         ? undefined
         : (options.foregroundMaxRunMs ?? DEFAULT_FOREGROUND_LANE_MAX_RUN_MS));
     if (effectiveRunTimeout) {
-      timeoutTimer = setTimeout(() => {
+      timers.run = setTimeout(() => {
         // A silent kill made a truncated run indistinguishable from a clean
         // one. Record the reason before the child stops producing evidence.
         const elapsedMs = Date.now() - startTime;
         const message =
           `Teammate run exceeded its ${effectiveRunTimeout}ms limit `
           + `(agent=${params.agent}, correlationId=${correlationId}, elapsed=${elapsedMs}ms, `
-          + `tools=${progress.toolCount}, turnTools=${turnToolCount}); the child process was terminated.`;
+          + `tools=${progress.toolCount}, turnTools=${state.turnToolCount}); the child process was terminated.`;
         appendBoundedTranscriptMessage(messages, { role: "system", content: message });
         progress.status = "failed";
         progress.durationMs = elapsedMs;
@@ -1893,12 +1979,12 @@ async function runSingleAttempt(
       }, effectiveRunTimeout);
       // The implicit ceiling must never hold the event loop open on its own;
       // a live child's stdio keeps the loop alive so the timer still fires.
-      if (params.timeoutMs === undefined) timeoutTimer.unref?.();
+      if (params.timeoutMs === undefined) timers.run.unref?.();
     }
-    firstActivityTimer = setTimeout(() => {
-      if (initialResultPublished || receivedFirstActivity) return;
+    timers.firstActivity = setTimeout(() => {
+      if (state.initialResultPublished || state.receivedFirstActivity) return;
       const message = "Timed out waiting for the first child agent event. The child process started but did not report model activity.";
-      lastContent = message;
+      state.lastContent = message;
       progress.status = "failed";
       progress.durationMs = Date.now() - startTime;
       progress.lastMessage = message;
@@ -1915,8 +2001,8 @@ async function runSingleAttempt(
         const event = JSON.parse(trimmed) as JsonLineEvent;
         processEvent(event);
       } catch {
-        lastContent = appendUtf8Tail(
-          lastContent,
+        state.lastContent = appendUtf8Tail(
+          state.lastContent,
           trimmed + "\n",
           EXECUTION_BUFFER_LIMITS.streamBytes,
         );
@@ -1937,7 +2023,7 @@ async function runSingleAttempt(
         } catch { /* output is absent or not complete */ }
         if (cleanup) cleanupFile(outputFile);
       }
-      return structuredOutput ?? capturedStructuredOutput;
+      return structuredOutput ?? state.capturedStructuredOutput;
     }
 
     function completeTurn(
@@ -1945,18 +2031,16 @@ async function runSingleAttempt(
       terminateChild: boolean,
       exitCode = 0,
     ): void {
-      if (terminal || turnLifecycleSettled) return;
-      turnLifecycleSettled = true;
+      if (state.terminal || state.turnLifecycleSettled) return;
+      state.turnLifecycleSettled = true;
       progress.status = exitCode === 0 ? "completed" : "failed";
       progress.resultReadyAt = undefined;
       progress.durationMs = Date.now() - startTime;
-      if (messages.length === 0 && lastContent) {
-        appendBoundedTranscriptMessage(messages, { role: "assistant", content: lastContent });
+      if (messages.length === 0 && state.lastContent) {
+        appendBoundedTranscriptMessage(messages, { role: "assistant", content: state.lastContent });
       }
       options.onProgress?.(progress);
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (firstActivityTimer) clearTimeout(firstActivityTimer);
-      if (resultReadyGraceTimer) clearTimeout(resultReadyGraceTimer);
+      clearAllTimers();
       cleanupFile(systemPromptFile);
       if (schemaFile) cleanupFile(schemaFile);
       if (outputFile) cleanupFile(outputFile);
@@ -1967,15 +2051,15 @@ async function runSingleAttempt(
         exitCode,
         messages: [...messages],
         usage: { ...usage },
-        model: resolvedModel,
+        model: state.resolvedModel,
         correlationId,
         durationMs: Date.now() - startTime,
         wakeable: !terminateChild,
         structuredOutput,
         attemptedModels: undefined,
       };
-      if (!initialResultPublished) {
-        initialResultPublished = true;
+      if (!state.initialResultPublished) {
+        state.initialResultPublished = true;
         resolve(turnResult);
       }
       try {
@@ -1984,37 +2068,35 @@ async function runSingleAttempt(
         // Completion observers must not strand a child after the result has
         // already been published to the caller.
       } finally {
-        completedInputTokens = Math.max(completedInputTokens, progress.inputTokens ?? 0);
-        completedOutputTokens = Math.max(completedOutputTokens, progress.outputTokens ?? 0);
+        state.completedInputTokens = Math.max(state.completedInputTokens, progress.inputTokens ?? 0);
+        state.completedOutputTokens = Math.max(state.completedOutputTokens, progress.outputTokens ?? 0);
         releasePublishedTurnHistory(messages, progress, usage);
-        lastContent = "";
-        streamingText = "";
-        stderrBuffer = "";
-        capturedStructuredOutput = undefined;
+        state.lastContent = "";
+        state.streamingText = "";
+        state.stderrBuffer = "";
+        state.capturedStructuredOutput = undefined;
         resetUsage(pendingMessageUsage);
         if (terminateChild) {
-          terminal = true;
+          state.terminal = true;
           termination.terminate();
         }
       }
     }
 
     function publishResultReady(): void {
-      if (initialResultPublished) return;
-      if (messages.length === 0 && lastContent) {
-        appendBoundedTranscriptMessage(messages, { role: "assistant", content: lastContent });
+      if (state.initialResultPublished) return;
+      if (messages.length === 0 && state.lastContent) {
+        appendBoundedTranscriptMessage(messages, { role: "assistant", content: state.lastContent });
       }
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (firstActivityTimer) clearTimeout(firstActivityTimer);
-      if (resultReadyGraceTimer) clearTimeout(resultReadyGraceTimer);
-      initialResultPublished = true;
+      clearAllTimers();
+      state.initialResultPublished = true;
       resolve({
         agent: params.agent,
         task: params.task ?? "",
         exitCode: 0,
         messages: [...messages],
         usage: { ...usage },
-        model: resolvedModel,
+        model: state.resolvedModel,
         correlationId,
         durationMs: Date.now() - startTime,
         wakeable,
@@ -2032,28 +2114,28 @@ async function runSingleAttempt(
      * the caller; this only bounds how long we wait for agent_end/close.
      */
     function armLifecycleConfirmationDeadline(): void {
-      if (terminal || turnLifecycleSettled || resultReadyGraceTimer) return;
+      if (state.terminal || state.turnLifecycleSettled || timers.resultReadyGrace) return;
       const deadlineMs = options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS;
-      resultReadyGraceTimer = setTimeout(() => {
-        resultReadyGraceTimer = undefined;
-        if (terminal || turnLifecycleSettled) return;
+      timers.resultReadyGrace = setTimeout(() => {
+        timers.resultReadyGrace = undefined;
+        if (state.terminal || state.turnLifecycleSettled) return;
         appendBoundedTranscriptMessage(messages, {
           role: "system",
           content:
             `Teammate published a result but never confirmed its lifecycle within ${deadlineMs}ms `
             + `(agent=${params.agent}, correlationId=${correlationId}, tools=${progress.toolCount}, `
-            + `turnTools=${turnToolCount}); the child process was terminated.`,
+            + `turnTools=${state.turnToolCount}); the child process was terminated.`,
         });
         completeTurn(readStructuredOutput(true), true, 0);
       }, deadlineMs);
-      resultReadyGraceTimer.unref?.();
+      timers.resultReadyGrace.unref?.();
     }
 
     function armResultReadyGrace(): void {
-      if (resultReadyGraceTimer) return;
-      resultReadyGraceTimer = setTimeout(() => {
-        resultReadyGraceTimer = undefined;
-        if (terminal || turnLifecycleSettled) return;
+      if (timers.resultReadyGrace) return;
+      timers.resultReadyGrace = setTimeout(() => {
+        timers.resultReadyGrace = undefined;
+        if (state.terminal || state.turnLifecycleSettled) return;
         // The result is already consumable; settle with whatever structured
         // output was captured instead of blocking on a missing agent_end/close.
         const structuredOutput = readStructuredOutput(true);
@@ -2066,244 +2148,278 @@ async function runSingleAttempt(
         }
         completeTurn(structuredOutput, true, structuredOutput === undefined ? 1 : 0);
       }, options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS);
-      resultReadyGraceTimer.unref?.();
+      timers.resultReadyGrace.unref?.();
     }
 
+    // --- Per-event handlers -------------------------------------------------
+    // Each handler owns exactly one event family and only mutates `state`,
+    // `progress`, `messages` and `usage`. processEvent() below routes to them
+    // through EVENT_HANDLERS after applying the shared pre-dispatch bookkeeping.
+
+    /** A new agent loop starts: the previous turn's settlement no longer applies. */
+    function onTurnBoundary(): void {
+      state.turnLifecycleSettled = false;
+      progress.status = "running";
+      progress.resultReadyAt = undefined;
+      progress.recentTools = [];
+      state.turnToolCount = 0;
+      options.onProgress?.(progress);
+    }
+
+    /** Relay a child extension's UI request, or decline it when nobody listens. */
+    function onExtensionUiRequest(event: JsonLineEvent): void {
+      const request = {
+        ...event,
+        type: "teammate_rpc_ui_request",
+        correlationId,
+      };
+      const respond = (response: unknown) => {
+        if (!child.stdin?.writable) return;
+        child.stdin.write(`${JSON.stringify(response)}\n`);
+      };
+      if (options.onChildRequest) options.onChildRequest(request, respond);
+      else if (typeof event.id === "string") {
+        respond({ type: "extension_ui_response", id: event.id, cancelled: true });
+      }
+    }
+
+    /** A completed assistant message: transcript, usage and resolved model. */
+    function onAssistantMessage(event: JsonLineEvent): void {
+      const msg = event.message as Record<string, unknown> | undefined;
+      if (event.type === "message_end" && msg?.role !== "assistant") return;
+      const text = extractTextContent(event) || state.streamingText || undefined;
+      if (text) {
+        state.lastContent = text;
+        state.streamingText = "";
+        appendDistinctAssistantMessage(messages, text);
+        progress.lastMessage = text;
+      }
+      const messageUsage = (msg?.usage as Record<string, unknown> | undefined)
+        ?? (event.usage as Record<string, unknown> | undefined);
+      if (messageUsage) {
+        addUsageSnapshot(usage, messageUsage);
+        resetUsage(pendingMessageUsage);
+        usage.turns += 1;
+        updateProgressUsage();
+      }
+      const messageModel = typeof msg?.model === "string" ? msg.model : event.model;
+      if (messageModel) {
+        state.resolvedModel = messageModel;
+      }
+      options.onProgress?.(progress);
+    }
+
+    /** Streaming deltas and in-flight usage snapshots. */
+    function onMessageUpdate(event: JsonLineEvent): void {
+      const ame = event.assistantMessageEvent as Record<string, unknown> | undefined;
+      const deltaType = ame?.type as string | undefined;
+      let progressChanged = false;
+
+      if (deltaType === "text_delta") {
+        const delta = ame?.delta as string | undefined;
+        if (delta) {
+          state.streamingText = appendUtf8Tail(
+            state.streamingText,
+            delta,
+            EXECUTION_BUFFER_LIMITS.streamBytes,
+          );
+          progress.lastMessage = state.streamingText;
+          progressChanged = true;
+        }
+      } else if (deltaType === "text_start") {
+        state.streamingText = "";
+      }
+      // Ignore thinking_delta, thinking_start, etc.
+
+      // Extract usage from message snapshot
+      const msg = event.message as Record<string, unknown> | undefined;
+      const msgUsage = msg?.usage as Record<string, unknown> | undefined;
+      if (msgUsage) {
+        setUsageSnapshot(pendingMessageUsage, msgUsage);
+        updateProgressUsage();
+        progressChanged = true;
+      }
+      if (progressChanged) options.onProgress?.(progress);
+    }
+
+    function onToolStart(event: JsonLineEvent): void {
+      const toolName = truncateUtf8Tail(
+        (event.toolName as string) ?? (event.name as string) ?? "unknown",
+        EXECUTION_BUFFER_LIMITS.toolNameBytes,
+      );
+      progress.recentTools.push({ name: toolName, status: "running" });
+      if (progress.recentTools.length > EXECUTION_BUFFER_LIMITS.toolItems) {
+        progress.recentTools.splice(
+          0,
+          progress.recentTools.length - EXECUTION_BUFFER_LIMITS.toolItems,
+        );
+      }
+      options.onProgress?.(progress);
+    }
+
+    /**
+     * A finished tool call. A successful `structured_output` call is itself a
+     * terminal result — settle the turn without waiting for agent_end.
+     */
+    function onToolCompleted(event: JsonLineEvent): void {
+      if (event.content) {
+        appendBoundedTranscriptMessage(messages, { role: "tool", content: event.content });
+      }
+      progress.toolCount += 1;
+      state.turnToolCount += 1;
+      const lastTool = progress.recentTools[progress.recentTools.length - 1];
+      if (lastTool && lastTool.status === "running") {
+        lastTool.status = "completed";
+      }
+      options.onProgress?.(progress);
+      const completedTool = (event.toolName as string | undefined)
+        ?? (event.name as string | undefined)
+        ?? lastTool?.name;
+      if (
+        event.type === "tool_execution_end"
+        && completedTool === "structured_output"
+        && event.isError !== true
+      ) {
+        const structuredOutput = readStructuredOutput(false);
+        if (structuredOutput !== undefined) completeTurn(structuredOutput, true);
+      }
+    }
+
+    function onUsageSnapshot(event: JsonLineEvent): void {
+      if (event.usage) {
+        setUsageSnapshot(pendingMessageUsage, event.usage as Record<string, unknown>);
+        updateProgressUsage();
+        options.onProgress?.(progress);
+      }
+    }
+
+    /**
+     * A result-ready turn publishes a consumable result but never settles the
+     * lifecycle here: the child is neither killed nor parked. Only agent_end,
+     * close, error or the armed deadline may converge the lifecycle.
+     */
+    function onTurnEnd(event: JsonLineEvent): void {
+      const msg = event.message as Record<string, unknown> | undefined;
+      if (msg?.role === "assistant") {
+        const text = extractTextContent({ type: "turn_end", message: msg });
+        if (text && appendDistinctAssistantMessage(messages, text)) {
+          state.lastContent = text;
+          progress.lastMessage = text;
+        }
+      }
+      if (isPiResultReadyTurn(event)) {
+        progress.resultReadyAt = Date.now();
+        options.onProgress?.(progress);
+        if (!params.outputSchema) {
+          publishResultReady();
+          // Symmetric with the schema lane: the result is consumable, but
+          // the lifecycle still needs a bounded confirmation window.
+          armLifecycleConfirmationDeadline();
+        } else armResultReadyGrace();
+      }
+    }
+
+    /** Pi's authoritative end-of-agent event — the lifecycle settles here. */
+    function onAgentEnd(): void {
+      const structuredOutput = readStructuredOutput(false);
+      if (params.outputSchema && structuredOutput === undefined) {
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content: "The teammate completed without calling structured_output with a schema-valid value.",
+        });
+        completeTurn(undefined, true, 1);
+        return;
+      }
+      completeTurn(structuredOutput, !wakeable);
+      // Process stays alive. Idle agents must be resumed with an RPC prompt;
+      // steer/follow_up only queue while an agent loop is already running.
+    }
+
+    function onErrorEvent(event: JsonLineEvent): void {
+      appendBoundedTranscriptMessage(messages, {
+        role: "system",
+        content: event.error ?? "Unknown error",
+      });
+    }
+
+    /**
+     * Event type -> handler. Unlisted types are intentionally inert; keeping the
+     * mapping as data makes the full set of recognised events readable at once.
+     *
+     * A Map, not an object literal: `event.type` is child-supplied, and a plain
+     * object would resolve `"toString"` or `"__proto__"` through the prototype
+     * chain instead of staying inert.
+     */
+    const eventHandlers = new Map<string, (event: JsonLineEvent) => void>([
+      ["agent_start", onTurnBoundary],
+      ["turn_start", onTurnBoundary],
+      ["extension_ui_request", onExtensionUiRequest],
+      ["message_end", onAssistantMessage],
+      ["assistant", onAssistantMessage],
+      ["message_update", onMessageUpdate],
+      // RPC acknowledgement — nothing to record.
+      ["response", () => {}],
+      ["tool_execution_start", onToolStart],
+      ["tool_execution_end", onToolCompleted],
+      ["tool_result_end", onToolCompleted],
+      ["tool_result", onToolCompleted],
+      ["usage", onUsageSnapshot],
+      ["turn_end", onTurnEnd],
+      ["agent_end", onAgentEnd],
+      ["error", onErrorEvent],
+    ]);
+
     function processEvent(event: JsonLineEvent): void {
-      if (!receivedFirstActivity) {
-        receivedFirstActivity = true;
-        if (firstActivityTimer) clearTimeout(firstActivityTimer);
+      if (!state.receivedFirstActivity) {
+        state.receivedFirstActivity = true;
+        if (timers.firstActivity) clearTimeout(timers.firstActivity);
       }
       // completeTurn() is the authoritative settlement boundary. A child may
       // already have queued tool_result, turn_start, or agent_end lines when
       // termination begins; treating the terminal state as absorbing prevents
       // those buffered lines from reawakening the published agent loop.
-      if (terminal) return;
-      if (capturedStructuredOutput === undefined && params.outputSchema) {
-        capturedStructuredOutput = extractValidatedStructuredOutput(event, params.outputSchema);
+      if (state.terminal) return;
+      if (state.capturedStructuredOutput === undefined && params.outputSchema) {
+        state.capturedStructuredOutput = extractValidatedStructuredOutput(event, params.outputSchema);
       }
       // AC8: Update lastActivityAt on every event
       progress.lastActivityAt = Date.now();
       progress.durationMs = Date.now() - startTime;
 
-      switch (event.type) {
-        case "agent_start":
-        case "turn_start": {
-          turnLifecycleSettled = false;
-          progress.status = "running";
-          progress.resultReadyAt = undefined;
-          progress.recentTools = [];
-          turnToolCount = 0;
-          options.onProgress?.(progress);
-          break;
-        }
-        case "extension_ui_request": {
-          const request = {
-            ...event,
-            type: "teammate_rpc_ui_request",
-            correlationId,
-          };
-          const respond = (response: unknown) => {
-            if (!child.stdin?.writable) return;
-            child.stdin.write(`${JSON.stringify(response)}\n`);
-          };
-          if (options.onChildRequest) options.onChildRequest(request, respond);
-          else if (typeof event.id === "string") {
-            respond({ type: "extension_ui_response", id: event.id, cancelled: true });
-          }
-          break;
-        }
-        case "message_end":
-        case "assistant": {
-          const msg = event.message as Record<string, unknown> | undefined;
-          if (event.type === "message_end" && msg?.role !== "assistant") break;
-          const text = extractTextContent(event) || streamingText || undefined;
-          if (text) {
-            lastContent = text;
-            streamingText = "";
-            appendDistinctAssistantMessage(messages, text);
-            progress.lastMessage = text;
-          }
-          const messageUsage = (msg?.usage as Record<string, unknown> | undefined)
-            ?? (event.usage as Record<string, unknown> | undefined);
-          if (messageUsage) {
-            addUsageSnapshot(usage, messageUsage);
-            resetUsage(pendingMessageUsage);
-            usage.turns += 1;
-            updateProgressUsage();
-          }
-          const messageModel = typeof msg?.model === "string" ? msg.model : event.model;
-          if (messageModel) {
-            resolvedModel = messageModel;
-          }
-          options.onProgress?.(progress);
-          break;
-        }
-        case "message_update": {
-          const ame = event.assistantMessageEvent as Record<string, unknown> | undefined;
-          const deltaType = ame?.type as string | undefined;
-          let progressChanged = false;
-
-          if (deltaType === "text_delta") {
-            const delta = ame?.delta as string | undefined;
-            if (delta) {
-              streamingText = appendUtf8Tail(
-                streamingText,
-                delta,
-                EXECUTION_BUFFER_LIMITS.streamBytes,
-              );
-              progress.lastMessage = streamingText;
-              progressChanged = true;
-            }
-          } else if (deltaType === "text_start") {
-            streamingText = "";
-          }
-          // Ignore thinking_delta, thinking_start, etc.
-
-          // Extract usage from message snapshot
-          const msg = event.message as Record<string, unknown> | undefined;
-          const msgUsage = msg?.usage as Record<string, unknown> | undefined;
-          if (msgUsage) {
-            setUsageSnapshot(pendingMessageUsage, msgUsage);
-            updateProgressUsage();
-            progressChanged = true;
-          }
-          if (progressChanged) options.onProgress?.(progress);
-          break;
-        }
-        case "response": {
-          // RPC acknowledgement — ignore
-          break;
-        }
-        case "tool_execution_start": {
-          const toolName = truncateUtf8Tail(
-            (event.toolName as string) ?? (event.name as string) ?? "unknown",
-            EXECUTION_BUFFER_LIMITS.toolNameBytes,
-          );
-          progress.recentTools.push({ name: toolName, status: "running" });
-          if (progress.recentTools.length > EXECUTION_BUFFER_LIMITS.toolItems) {
-            progress.recentTools.splice(
-              0,
-              progress.recentTools.length - EXECUTION_BUFFER_LIMITS.toolItems,
-            );
-          }
-          options.onProgress?.(progress);
-          break;
-        }
-        case "tool_execution_end":
-        case "tool_result_end":
-        case "tool_result": {
-          if (event.content) {
-            appendBoundedTranscriptMessage(messages, { role: "tool", content: event.content });
-          }
-          progress.toolCount += 1;
-          turnToolCount += 1;
-          const lastTool = progress.recentTools[progress.recentTools.length - 1];
-          if (lastTool && lastTool.status === "running") {
-            lastTool.status = "completed";
-          }
-          options.onProgress?.(progress);
-          const completedTool = (event.toolName as string | undefined)
-            ?? (event.name as string | undefined)
-            ?? lastTool?.name;
-          if (
-            event.type === "tool_execution_end"
-            && completedTool === "structured_output"
-            && event.isError !== true
-          ) {
-            const structuredOutput = readStructuredOutput(false);
-            if (structuredOutput !== undefined) completeTurn(structuredOutput, true);
-          }
-          break;
-        }
-        case "usage": {
-          if (event.usage) {
-            setUsageSnapshot(pendingMessageUsage, event.usage as Record<string, unknown>);
-            updateProgressUsage();
-            options.onProgress?.(progress);
-          }
-          break;
-        }
-        case "turn_end": {
-          const msg = event.message as Record<string, unknown> | undefined;
-          if (msg?.role === "assistant") {
-            const text = extractTextContent({ type: "turn_end", message: msg });
-            if (text && appendDistinctAssistantMessage(messages, text)) {
-              lastContent = text;
-              progress.lastMessage = text;
-            }
-          }
-          if (isPiResultReadyTurn(event)) {
-            progress.resultReadyAt = Date.now();
-            options.onProgress?.(progress);
-            if (!params.outputSchema) {
-              publishResultReady();
-              // Symmetric with the schema lane: the result is consumable, but
-              // the lifecycle still needs a bounded confirmation window.
-              armLifecycleConfirmationDeadline();
-            } else armResultReadyGrace();
-          }
-          break;
-        }
-        case "agent_end": {
-          const structuredOutput = readStructuredOutput(false);
-          if (params.outputSchema && structuredOutput === undefined) {
-            appendBoundedTranscriptMessage(messages, {
-              role: "system",
-              content: "The teammate completed without calling structured_output with a schema-valid value.",
-            });
-            completeTurn(undefined, true, 1);
-            break;
-          }
-          completeTurn(structuredOutput, !wakeable);
-          // Process stays alive. Idle agents must be resumed with an RPC prompt;
-          // steer/follow_up only queue while an agent loop is already running.
-          break;
-        }
-        case "error": {
-          appendBoundedTranscriptMessage(messages, {
-            role: "system",
-            content: event.error ?? "Unknown error",
-          });
-          break;
-        }
-      }
+      eventHandlers.get(event.type)?.(event);
     }
 
-    let stderrBuffer = "";
     const stderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
-      stderrBuffer = appendUtf8Tail(
-        stderrBuffer,
+      state.stderrBuffer = appendUtf8Tail(
+        state.stderrBuffer,
         stderrDecoder.write(chunk),
         EXECUTION_BUFFER_LIMITS.stderrBytes,
       );
     });
 
     child.on("close", (code, signal) => {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (firstActivityTimer) clearTimeout(firstActivityTimer);
-      if (resultReadyGraceTimer) clearTimeout(resultReadyGraceTimer);
+      clearAllTimers();
       termination.cleanup();
       unbindTerminationSignal();
 
       cleanupFile(systemPromptFile);
 
       for (const line of stdoutLines.end()) processStdoutLine(line);
-      stderrBuffer = appendUtf8Tail(
-        stderrBuffer,
+      state.stderrBuffer = appendUtf8Tail(
+        state.stderrBuffer,
         stderrDecoder.end(),
         EXECUTION_BUFFER_LIMITS.stderrBytes,
       );
 
       // A lifecycle event may have been present in the final decoded stdout
       // chunk, or terminal structured output may have initiated this close.
-      if (turnLifecycleSettled) return;
+      if (state.turnLifecycleSettled) return;
 
-      const stderrTail = stderrBuffer.trim();
+      const stderrTail = state.stderrBuffer.trim();
       let stderrAlreadyReported = false;
       if (messages.length === 0) {
-        const content = lastContent.trim() || stderrTail || "(no output)";
+        const content = state.lastContent.trim() || stderrTail || "(no output)";
         stderrAlreadyReported = stderrTail.length > 0 && content === stderrTail;
         appendBoundedTranscriptMessage(messages, { role: "assistant", content });
       }
@@ -2343,20 +2459,20 @@ async function runSingleAttempt(
         });
       }
 
-      if (initialResultPublished) {
+      if (state.initialResultPublished) {
         completeTurn(structuredOutput, true, exitCode);
         return;
       }
 
-      if (!initialResultPublished) {
-        initialResultPublished = true;
+      if (!state.initialResultPublished) {
+        state.initialResultPublished = true;
         resolve({
           agent: params.agent,
           task: params.task ?? "",
           exitCode,
           messages,
           usage,
-          model: resolvedModel,
+          model: state.resolvedModel,
           correlationId,
           durationMs: Date.now() - startTime,
           wakeable: false,
@@ -2366,9 +2482,7 @@ async function runSingleAttempt(
     });
 
     child.on("error", (error) => {
-      if (timeoutTimer) clearTimeout(timeoutTimer);
-      if (firstActivityTimer) clearTimeout(firstActivityTimer);
-      if (resultReadyGraceTimer) clearTimeout(resultReadyGraceTimer);
+      clearAllTimers();
       unbindTerminationSignal();
 
       cleanupFile(systemPromptFile);
@@ -2379,7 +2493,7 @@ async function runSingleAttempt(
       progress.durationMs = Date.now() - startTime;
       options.onProgress?.(progress);
 
-      if (initialResultPublished) {
+      if (state.initialResultPublished) {
         appendBoundedTranscriptMessage(messages, {
           role: "system",
           content: `Process error: ${error.message}`,
@@ -2388,8 +2502,8 @@ async function runSingleAttempt(
         return;
       }
 
-      if (!initialResultPublished) {
-        initialResultPublished = true;
+      if (!state.initialResultPublished) {
+        state.initialResultPublished = true;
         resolve({
           agent: params.agent,
           task: params.task ?? "",
@@ -2399,7 +2513,7 @@ async function runSingleAttempt(
             content: `Process error: ${error.message}`,
           }],
           usage: emptyUsage(),
-          model: resolvedModel,
+          model: state.resolvedModel,
           correlationId,
           durationMs: Date.now() - startTime,
           wakeable: false,
