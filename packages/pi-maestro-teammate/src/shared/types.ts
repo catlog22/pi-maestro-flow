@@ -214,6 +214,12 @@ export interface TeammateState {
    * `result-ready` back immediately, every time.
    */
   resultReadyNotified?: Set<string>;
+  /**
+   * Maps a child's proxy requestId to the agent this process created for it, so
+   * that a child which stops waiting can have that agent torn down instead of
+   * leaving it running with no consumer.
+   */
+  proxyDispatchByRequest?: Map<string, string>;
 }
 
 export interface SettledAgentRecord {

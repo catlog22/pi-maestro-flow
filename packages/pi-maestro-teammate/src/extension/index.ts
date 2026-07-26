@@ -1019,7 +1019,19 @@ export function createChildProxyRequest(
 ): Promise<unknown> {
   if (signal?.aborted) return Promise.reject(childProxyAbortError());
   return new Promise((resolve, reject) => {
+    // Giving up locally is not enough: the root already created an agent for
+    // this request and is running it. Without telling the root, that agent has
+    // no consumer and no one left to settle it — an orphan that outlives the
+    // child that asked for it. Best-effort; an older root simply ignores it.
+    const notifyRootGaveUp = (reason: "timeout" | "aborted") => {
+      try {
+        send({ type: "teammate_proxy_cancel", requestId, reason }, () => {});
+      } catch {
+        // The channel is already gone, which is itself the cancellation.
+      }
+    };
     const timer = setTimeout(() => {
+      notifyRootGaveUp("timeout");
       rejectChildProxyRequest(
         pendingRequests,
         requestId,
@@ -1027,7 +1039,10 @@ export function createChildProxyRequest(
       );
     }, timeoutMs);
     const abortHandler = signal
-      ? () => rejectChildProxyRequest(pendingRequests, requestId, childProxyAbortError())
+      ? () => {
+        notifyRootGaveUp("aborted");
+        rejectChildProxyRequest(pendingRequests, requestId, childProxyAbortError());
+      }
       : undefined;
     pendingRequests.set(requestId, { resolve, reject, timer, signal, abortHandler });
     if (signal && abortHandler) signal.addEventListener("abort", abortHandler, { once: true });
@@ -1791,6 +1806,10 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         onChildRequest: (event: Record<string, unknown>, reply: (msg: unknown) => void) => {
           if (event.type === "teammate_interaction_request" || event.type === "teammate_rpc_ui_request") {
             enqueueChildInteraction(event, reply, ctx, correlationId);
+            return;
+          }
+          if (event.type === "teammate_proxy_cancel" && typeof event.requestId === "string") {
+            cancelProxyDispatch(state, event.requestId);
             return;
           }
           handleProxyRequest(
@@ -4338,6 +4357,11 @@ export function createTeammateDirectChildRequestHandler(
       return;
     }
 
+    if (event.type === "teammate_proxy_cancel" && typeof event.requestId === "string") {
+      cancelProxyDispatch(state, event.requestId);
+      return;
+    }
+
     if (event.type === "teammate_proxy_request") {
       void dispatchRegisteredChildTool(event, reply, state).then((handled) => {
         if (!handled) replyUnavailableDirectProxy(event, reply);
@@ -4747,6 +4771,36 @@ async function dispatchRegisteredChildTool(
   return true;
 }
 
+/**
+ * Cancels the agent a proxy request created, once its requester gave up.
+ *
+ * The nested dispatch runs in this process while the child that asked for it
+ * waits over IPC. If that wait ends first — its 30-minute ceiling, or the child
+ * itself being aborted — nothing used to tell this side, and the agent kept
+ * running with no consumer and nobody left to settle it. Returns the ids of the
+ * agents torn down.
+ */
+export function cancelProxyDispatch(
+  state: TeammateState,
+  requestId: string,
+  reason = "the requesting teammate gave up waiting",
+): string[] {
+  const cid = state.proxyDispatchByRequest?.get(requestId);
+  if (!cid) return [];
+  state.proxyDispatchByRequest?.delete(requestId);
+  const agent = state.activeRuns.get(cid);
+  if (!agent) return [];
+  agent.outputLog.push(
+    `[${new Date().toISOString().slice(11, 19)}] ✗ cancelled: ${reason}.`,
+  );
+  return killAgentTree(state, cid);
+}
+
+/** Records which agent a proxy request created, so a later give-up can find it. */
+function trackProxyDispatch(state: TeammateState, requestId: string, correlationId: string): void {
+  (state.proxyDispatchByRequest ??= new Map()).set(requestId, correlationId);
+}
+
 export async function handleProxyRequest(
   pi: ExtensionAPI,
   state: TeammateState,
@@ -4851,6 +4905,7 @@ export async function handleProxyRequest(
         ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(cid, activeAgent);
+      trackProxyDispatch(state, requestId, cid);
       if (p.name) bindAgentName(state, p.name, cid);
 
       const parentAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
@@ -5179,9 +5234,15 @@ export async function handleProxyRequest(
         };
       };
 
+      // Once the dispatch reaches its own terminal handling, a late cancel must
+      // not tear down an agent that already settled (or, worse, an unrelated
+      // one that reused the id).
+      const untrackDispatch = () => state.proxyDispatchByRequest?.delete(requestId);
+
       if (p.background === false) {
         try {
           const completed = await executeNested();
+          untrackDispatch();
           if (!completed.lifecyclePending) {
             settleAgent(state, cid, completed.exitCode, completed.summary, p.context !== "fork");
             reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
@@ -5189,6 +5250,7 @@ export async function handleProxyRequest(
           }
           reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
         } catch (error) {
+          untrackDispatch();
           killAgent(state, cid, undefined, "failed");
           reportChildStatus("failed");
           emitNestedComplete(1);
@@ -5205,6 +5267,7 @@ export async function handleProxyRequest(
       }
 
       void executeNested().then((completed) => {
+        untrackDispatch();
         if (!completed.lifecyclePending) {
           settleAgent(state, cid, completed.exitCode, completed.summary, p.context !== "fork");
           reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
@@ -5224,6 +5287,7 @@ export async function handleProxyRequest(
           { triggerTurn: true },
         );
       }).catch((error) => {
+        untrackDispatch();
         killAgent(state, cid, undefined, "failed");
         reportChildStatus("failed");
         notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error);
@@ -5247,14 +5311,26 @@ export async function handleProxyRequest(
     }
 
     case "teammate-wait": {
-      const result = await waitForTeammate(state, {
-        name: typeof params.name === "string" ? params.name : undefined,
-        timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : undefined,
-        waitMs: typeof params.waitMs === "number" ? params.waitMs : undefined,
-      });
+      // Without the requester's signal this wait outlived the agent that
+      // issued it: cancelling that agent left the poll running to its full
+      // timeout with no way to interrupt it.
+      const result = await waitForTeammate(
+        state,
+        {
+          name: typeof params.name === "string" ? params.name : undefined,
+          timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : undefined,
+          waitMs: typeof params.waitMs === "number" ? params.waitMs : undefined,
+        },
+        parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined,
+      );
       reply({ type: "teammate_proxy_result", requestId, result: {
         content: [{ type: "text", text: result.output.join("\n") }],
-        isError: result.status === "not-found" || result.status === "timeout" || result.status === "aborted",
+        // `stalled` belongs here too: the target stopped reporting, which is
+        // the outcome the caller most needs to act on.
+        isError: result.status === "not-found"
+          || result.status === "timeout"
+          || result.status === "aborted"
+          || result.status === "stalled",
         details: { status: result.status, output: result.output },
       }});
       return;
