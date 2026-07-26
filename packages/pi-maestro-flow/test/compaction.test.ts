@@ -18,9 +18,13 @@ import {
 import {
   applyContextPressurePolicy,
   buildVelocityInfo,
+  cacheHitRatio,
+  CACHE_PRUNE_MIN_SAVINGS_RATIO,
+  cacheWorthwhileDepth,
   compactionBreakerAllows,
   COMPACTION_BREAKER_COOLDOWN_TURNS,
   computeContextSignals,
+  suffixTokenSums,
   createMidTurnAutoCompaction,
   decideContextAction,
   derivePressureBand,
@@ -784,11 +788,11 @@ test("pressure policy keeps prior tool-result prunes stable across provider usag
   };
   const messages = [oldAssistant, oldResult, frontier, latestAssistant, latestResult] as never;
   const settings = { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 };
-  const prunedToolCallIds = new Set<string>();
+  const prunedToolCallIds = new Map();
 
   const first = applyContextPressurePolicy(messages, 10_000, settings, prunedToolCallIds);
   assert.equal(first.prunedToolResults, 1);
-  assert.deepEqual([...prunedToolCallIds], ["old"]);
+  assert.deepEqual([...prunedToolCallIds.keys()], ["old"]);
   assert.match(JSON.stringify(first.messages[1]), /stale large output/);
 
   latestAssistant.usage.input = first.estimatedTokens;
@@ -1297,7 +1301,29 @@ test("computeContextSignals derives fullness, gap, prunable fraction and cache h
   assert.equal(signals.fullnessRatio, 0.5);
   assert.equal(signals.criticalGap, 600);
   assert.ok(signals.prunableFraction > 0);
-  assert.equal(signals.cacheHitRatio, 0.75); // cacheRead / (cacheRead + input)
+  assert.equal(signals.cacheHitRatio, 0.75); // cacheRead / (input + cacheRead + cacheWrite)
+});
+
+test("cache hit ratio counts cacheWrite as a miss, not as absent", () => {
+  // cacheWrite is cache CREATION — prompt tokens that missed and had to be
+  // written. Omitting it from the denominator overstates the hit rate exactly
+  // on the post-prune epoch, when the invalidated prefix is re-billed as
+  // cacheWrite. This case is the regression fence: with the old
+  // cacheRead/(cacheRead+input) formula it would read 0.75, not 0.3.
+  const assistant = {
+    role: "assistant",
+    content: [{ type: "text", text: "done" }],
+    usage: { input: 100, output: 0, cacheRead: 300, cacheWrite: 600, cost: { total: 0 } },
+  };
+  const signals = computeContextSignals({
+    messages: [assistant] as never,
+    estimatedTokens: 1_000,
+    contextWindow: 2_000,
+    thresholdTokens: 1_600,
+  });
+  assert.equal(signals.cacheHitRatio, 0.3);
+  assert.equal(cacheHitRatio({ input: 100, cacheRead: 300, cacheWrite: 600 }), 0.3);
+  assert.equal(cacheHitRatio({ input: 0, cacheRead: 0, cacheWrite: 0 }), undefined);
 });
 
 test("computeContextSignals reports unknown cache hit ratio without usable usage", () => {
@@ -1996,4 +2022,220 @@ test("L4 minimal replacement remains byte-identical across turns and restore", a
 
   guard.reset(ctx);
   restoredGuard.reset(restoredCtx);
+});
+
+// --- cache-prefix economics and stability (odyssey 20260726-compact-cache) ---
+
+function toolLoopTranscript(pairs: number, resultChars: number): unknown[] {
+  const messages: unknown[] = [];
+  for (let index = 0; index < pairs; index++) {
+    messages.push({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `call-${index}`, name: "read", arguments: { path: `${index}.txt` } }],
+      ...(index === 0
+        ? { usage: { input: 1_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1_000, cost: { total: 0 } } }
+        : {}),
+    });
+    messages.push({
+      role: "toolResult",
+      toolCallId: `call-${index}`,
+      toolName: "read",
+      content: [{ type: "text", text: String(index % 10).repeat(resultChars) }],
+      isError: false,
+    });
+  }
+  return messages;
+}
+
+function softWithCache(enabled: boolean) {
+  return { ...DEFAULT_SOFT_COMPACTION, cache: { enabled } };
+}
+
+/** Index where `next` first diverges from `base`, or -1 when it never does. */
+function firstDivergence(base: readonly unknown[], next: readonly unknown[]): number {
+  const shared = Math.min(base.length, next.length);
+  for (let index = 0; index < shared; index++) {
+    if (base[index] !== next[index]) return index;
+  }
+  return base.length === next.length ? -1 : shared;
+}
+
+test("cache prefix does not regress across turns within an epoch", () => {
+  // The invariant is structural: whatever prefix stabilized on turn 1 must still
+  // be intact on turn 2. Pinning a literal index (as the older stability tests
+  // do) would still pass if a regression newly pruned an EARLIER message.
+  const messages = toolLoopTranscript(60, 12_000);
+  const settings = { enabled: true, reserveTokens: 20_000, keepRecentTokens: 20_000, soft: softWithCache(false) };
+  const manifest = new Map();
+
+  const first = applyContextPressurePolicy(messages as never, 200_000, settings, manifest);
+  const firstBreak = firstDivergence(messages, first.messages);
+  assert.ok(firstBreak >= 0, "expected turn 1 to prune something");
+
+  const second = applyContextPressurePolicy(messages as never, 200_000, settings, manifest);
+  const secondBreak = firstDivergence(first.messages, second.messages);
+  assert.equal(secondBreak, -1, "turn 2 must reuse the exact turn-1 replacements");
+
+  // And every recorded replacement is the identical object, not an equal copy.
+  for (const [callId, entry] of manifest.entries()) {
+    const index = (second.messages as unknown[]).findIndex(
+      (m) => (m as { toolCallId?: string }).toolCallId === callId,
+    );
+    assert.equal(second.messages[index], entry.replacement);
+  }
+});
+
+test("recorded prunes are never re-recorded with a fresh replacement", () => {
+  // Re-recording would change the prefix every turn while leaving all the
+  // count-based assertions green — the exact regression this fence exists for.
+  const messages = toolLoopTranscript(60, 12_000);
+  const settings = { enabled: true, reserveTokens: 20_000, keepRecentTokens: 20_000, soft: softWithCache(false) };
+  const manifest = new Map();
+  const first = applyContextPressurePolicy(messages as never, 200_000, settings, manifest);
+  const snapshot = new Map([...manifest.entries()].map(([id, e]) => [id, e.replacement]));
+  assert.ok(snapshot.size > 0);
+
+  applyContextPressurePolicy(messages as never, 200_000, settings, manifest);
+  for (const [callId, replacement] of snapshot.entries()) {
+    assert.equal(manifest.get(callId).replacement, replacement);
+  }
+  assert.equal(first.prunedToolResults, snapshot.size);
+});
+
+test("cache gate declines a prune run that cannot pay for the prefix it invalidates", () => {
+  // One stale 9K read sitting behind a wall of unprunable conversation: pruning
+  // it reclaims ~2K tokens while invalidating ~80K of cached prefix (~0.03).
+  const messages: unknown[] = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }],
+    usage: { input: 1_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 1_000, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "read",
+    content: [{ type: "text", text: "a".repeat(9_000) }],
+    isError: false,
+  }];
+  for (let index = 0; index < 12; index++) {
+    messages.push({ role: "user", content: [{ type: "text", text: `u${index}`.repeat(6_000) }] });
+    messages.push({ role: "assistant", content: [{ type: "text", text: `a${index}`.repeat(6_000) }] });
+  }
+  messages.push({ role: "assistant", content: [{ type: "toolCall", id: "tail", name: "read", arguments: {} }] });
+  messages.push({
+    role: "toolResult", toolCallId: "tail", toolName: "read",
+    content: [{ type: "text", text: "z".repeat(2_000) }], isError: false,
+  });
+
+  const base = { enabled: true, reserveTokens: 10_000, keepRecentTokens: 8_000 };
+  const ungated = applyContextPressurePolicy(
+    messages as never, 100_000, { ...base, soft: softWithCache(false) }, new Map(),
+  );
+  const gated = applyContextPressurePolicy(
+    messages as never, 100_000, { ...base, soft: softWithCache(true) }, new Map(),
+  );
+
+  assert.ok(ungated.prunedToolResults > 0, "without the gate this prunes");
+  assert.equal(gated.prunedToolResults, 0, "the gate declines a ~0.03 payoff");
+  assert.equal(firstDivergence(messages, gated.messages), -1, "cached prefix left intact");
+});
+
+test("cache gate still prunes when the run pays for itself", () => {
+  // A dense tool loop reclaims ~0.66 tokens per invalidated token — well past
+  // the floor — so gating must not suppress it.
+  const messages = toolLoopTranscript(60, 12_000);
+  const base = { enabled: true, reserveTokens: 20_000, keepRecentTokens: 20_000 };
+  const ungated = applyContextPressurePolicy(
+    messages as never, 200_000, { ...base, soft: softWithCache(false) }, new Map(),
+  );
+  const gated = applyContextPressurePolicy(
+    messages as never, 200_000, { ...base, soft: softWithCache(true) }, new Map(),
+  );
+  assert.ok(gated.prunedToolResults > 0, "a profitable run must still prune");
+  assert.equal(gated.prunedToolResults, ungated.prunedToolResults);
+});
+
+test("cache gate is bypassed once pressure is already critical", () => {
+  // Past critical a full compaction would invalidate everything anyway and cost
+  // an LLM call, so relieving pressure outranks preserving the prefix.
+  const messages = toolLoopTranscript(40, 20_000);
+  const base = { enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 };
+  const gated = applyContextPressurePolicy(
+    messages as never, 10_000, { ...base, soft: softWithCache(true) }, new Map(),
+  );
+  assert.ok(gated.prunedToolResults > 0, "critical pressure must prune regardless of cache cost");
+});
+
+test("cacheWorthwhileDepth picks the deepest paying depth, not the first", () => {
+  // Cumulative economics: candidate 1 alone looks terrible (500/9500 = 0.05)
+  // but the run as a whole clears the floor. A greedy per-candidate test would
+  // reject the entire profitable run on its first element.
+  const suffix: number[] = [];
+  for (let index = 0; index <= 10; index++) suffix[index] = 10_000 - index * 500;
+  const candidates = [{ index: 9, saved: 500 }, { index: 7, saved: 3_000 }, { index: 5, saved: 4_000 }];
+  assert.equal(cacheWorthwhileDepth(candidates, suffix, CACHE_PRUNE_MIN_SAVINGS_RATIO), 3);
+  // Nothing pays at a punitive floor.
+  assert.equal(cacheWorthwhileDepth(candidates, suffix, 5), 0);
+});
+
+test("suffixTokenSums is monotonically non-increasing and ends at zero", () => {
+  const messages = toolLoopTranscript(5, 1_000);
+  const suffix = suffixTokenSums(messages as never);
+  assert.equal(suffix[messages.length], 0);
+  for (let index = 0; index < messages.length; index++) {
+    assert.ok(suffix[index] >= suffix[index + 1]);
+  }
+});
+
+test("a prune survives a tool result leaving and re-entering the window", async () => {
+  // retainVisiblePrunes used to delete the manifest entry the moment the tool
+  // result left the window, and hydrateRestoredPrunes had already consumed the
+  // persisted fallback — so navigating back resurrected the full original text
+  // and blew the cached prefix at that index.
+  const guard = createMidTurnAutoCompaction(
+    { appendEntry() {}, sendUserMessage() {} } as never,
+    { readSettings: () => ({ enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 }) },
+  );
+  const oldAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { total: 0 } },
+  };
+  const oldResult = {
+    role: "toolResult", toolCallId: "old", toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }], isError: false,
+  };
+  const frontier = { role: "user", content: [{ type: "text", text: "keep".repeat(1_500) }] };
+  const latestAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "latest", name: "read", arguments: {} }],
+    usage: { input: 8_700, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 8_700, cost: { total: 0 } },
+  };
+  const latestResult = {
+    role: "toolResult", toolCallId: "latest", toolName: "read",
+    content: [{ type: "text", text: "ok" }], isError: false,
+  };
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    sessionManager: { getSessionId: () => "session-branch", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  const branchA = [oldAssistant, oldResult, frontier, latestAssistant, latestResult] as never;
+  const onBranch = await guard.evaluate(branchA, ctx);
+  const stableReplacement = JSON.stringify(onBranch?.[1]);
+  // Level-agnostic: the pass may land on pruned, spill, or minimal depending on
+  // pressure — what matters is that the 16K payload is gone.
+  assert.match(stableReplacement, /stale large output|persisted-output/);
+  assert.ok(stableReplacement.length < 4_000, "the original payload must not survive");
+
+  // Switch to a sibling branch where "old" is absent. No lifecycle hook fires
+  // on a branch switch, so this is just the next context evaluation.
+  await guard.evaluate([frontier, latestAssistant, latestResult] as never, ctx);
+
+  // Navigate back. Pressure is unchanged, but the prune must be the SAME object
+  // content — not a freshly recomputed one, and certainly not the original text.
+  const back = await guard.evaluate(branchA, ctx);
+  assert.equal(JSON.stringify(back?.[1]), stableReplacement);
 });

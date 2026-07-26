@@ -8,6 +8,7 @@ import {
   DEFAULT_KEEP_RECENT_TOKENS,
   DEFAULT_RESERVE_TOKENS,
   DEFAULT_SOFT_COMPACTION,
+  MAX_RESERVE_TOKENS,
   readEffectiveCompactionSettings,
   readScopeCompaction,
   resolveEffectiveCompactionSettings,
@@ -233,6 +234,58 @@ test("compaction settings read legacy flat config without migration and default 
   }
 });
 
+test("compaction load rejects oversized reserveTokens so it cannot silently disable compaction", async () => {
+  const fixture = await createFixture();
+  try {
+    // A value above MAX_RESERVE_TOKENS would exceed every real model's context
+    // window and turn off all context management; it must fall back to default.
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: { reserveTokens: MAX_RESERVE_TOKENS + 1, keepRecentTokens: 15_000 },
+    });
+    const effective = readEffectiveCompactionSettings(fixture.projectDir);
+    assert.equal(effective.reserveTokens, DEFAULT_RESERVE_TOKENS);
+    assert.equal(effective.source.reserveTokens, "default");
+    // Sibling fields on the same patch are unaffected.
+    assert.equal(effective.keepRecentTokens, 15_000);
+    assert.equal(effective.source.keepRecentTokens, "project");
+
+    // The oversized value is dropped from the parsed patch entirely.
+    assert.deepEqual(readScopeCompaction("project", fixture.projectDir), { keepRecentTokens: 15_000 });
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("compaction load accepts a large-but-plausible reserveTokens unchanged", async () => {
+  const fixture = await createFixture();
+  try {
+    // Large-context models (~1M+) legitimately reserve six figures of tokens.
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: { reserveTokens: 500_000 },
+    });
+    const effective = readEffectiveCompactionSettings(fixture.projectDir);
+    assert.equal(effective.reserveTokens, 500_000);
+    assert.equal(effective.source.reserveTokens, "project");
+
+    // The ceiling itself is inclusive and still loads unchanged.
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: { reserveTokens: MAX_RESERVE_TOKENS },
+    });
+    assert.equal(readEffectiveCompactionSettings(fixture.projectDir).reserveTokens, MAX_RESERVE_TOKENS);
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("compaction validation flags reserveTokens above the absolute ceiling", () => {
+  const result = validateCompactionPatch({ reserveTokens: MAX_RESERVE_TOKENS + 1 });
+  assert.ok(result.errors.includes(`reserveTokens (${MAX_RESERVE_TOKENS + 1}) must be <= ${MAX_RESERVE_TOKENS}`));
+
+  // The ceiling is inclusive: exactly MAX_RESERVE_TOKENS is not flagged by the ceiling rule.
+  const atCeiling = validateCompactionPatch({ reserveTokens: MAX_RESERVE_TOKENS });
+  assert.ok(!atCeiling.errors.some((e) => e.includes("must be <=")));
+});
+
 test("compaction settings read nested hard and soft groups with soft sourced per scope", async () => {
   const fixture = await createFixture();
   try {
@@ -302,9 +355,21 @@ test("compaction validation rejects invalid soft ratios and ordering", () => {
   assert.equal(valid.errors.length, 0);
 });
 
-test("soft signal criteria default to disabled so unresolved settings keep ratio-only behavior", () => {
+test("velocity defaults off so unresolved settings never compact earlier than ratio-only", () => {
   const effective = resolveEffectiveCompactionSettings({}, {});
   assert.deepEqual(effective.soft.velocity, { enabled: false, epochsToCritical: 3, minFullness: 0.7 });
+});
+
+test("cache defaults on because it can only decline prunes, never trigger them", () => {
+  // Asymmetry with velocity: velocity escalates compaction (risk of surprise),
+  // the cache gate only skips prune runs whose savings cannot pay for the
+  // cached prefix they invalidate (risk of a slightly fuller context).
+  const effective = resolveEffectiveCompactionSettings({}, {});
+  assert.deepEqual(effective.soft.cache, { enabled: true });
+});
+
+test("cache gate remains explicitly disablable", () => {
+  const effective = resolveEffectiveCompactionSettings({}, { soft: { cache: { enabled: false } } });
   assert.deepEqual(effective.soft.cache, { enabled: false });
 });
 
@@ -322,11 +387,11 @@ test("createDefaultSoftCompaction returns independent nested objects", () => {
   const a = createDefaultSoftCompaction();
   a.velocity.enabled = true;
   a.velocity.minFullness = 0.99;
-  a.cache.enabled = true;
+  a.cache.enabled = false;
   const b = createDefaultSoftCompaction();
   assert.equal(b.velocity.enabled, false);
   assert.equal(b.velocity.minFullness, 0.7);
-  assert.equal(b.cache.enabled, false);
+  assert.equal(b.cache.enabled, true);
   assert.equal(DEFAULT_SOFT_COMPACTION.velocity.enabled, false);
 });
 

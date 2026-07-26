@@ -81,8 +81,18 @@ interface PersistedPruneEntry {
   introducedAtUsageEpoch?: string;
 }
 
-/** Set is retained for callers that used the original exported policy signature. */
-export type PruneManifest = Set<string> | Map<string, PruneManifestEntry>;
+/**
+ * The prune manifest owns the derived replacement, its token saving, and the
+ * usage epoch it was introduced at — that trio is what keeps the request prefix
+ * byte-identical within a compaction epoch.
+ *
+ * This was once `Set<string> | Map<...>` for a legacy signature. The Set arm
+ * could express none of the entry fields, so it silently degraded to
+ * recomputing replacements and could never mark savings pending; no production
+ * caller ever passed one. Narrowing it removes a path that looked equivalent
+ * but quietly broke the cache-stability guarantee.
+ */
+export type PruneManifest = Map<string, PruneManifestEntry>;
 
 export type ContextPressureBand = "normal" | "nudge" | "auto-prune" | "critical";
 
@@ -156,12 +166,21 @@ interface AutoCompactionState {
   settingsSnapshot?: CompactionSettings;
   settingsCwd?: string;
   velocityTracker: VelocityTracker;
-  consecutiveFailures: number;
-  breakerTrippedAtTurn?: number;
+  /** Held whole so the two fields can never be written back out of step. */
+  breaker: CompactionBreakerState;
   breakerNotified: boolean;
   turnCount: number;
   outputLimitCompactions: number;
   outputLimitBreakerNotified: boolean;
+  /** Provider usage epoch the cache ratio below was sampled at. */
+  cacheEpoch?: string;
+  cacheRatio?: number;
+  /** Epoch during which new prunes were introduced, pending its cache bill. */
+  prunedDuringEpoch?: string;
+  /** Cache-ratio movement attributed to the prunes of the previous epoch. */
+  cacheDelta?: number;
+  /** Serializes manifest mutation; `running` covers compaction, not this. */
+  evaluating: boolean;
 }
 
 interface AutoCompactionDependencies {
@@ -197,11 +216,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     pruneManifest: new Map(),
     restoredPrunes: new Map(),
     velocityTracker: EMPTY_VELOCITY_TRACKER,
-    consecutiveFailures: 0,
+    breaker: resetCompactionBreaker(),
     breakerNotified: false,
     turnCount: 0,
     outputLimitCompactions: 0,
     outputLimitBreakerNotified: false,
+    evaluating: false,
   };
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
@@ -215,27 +235,56 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     }
     return state.settingsSnapshot;
   }
-  return {
-    onSessionStart(ctx) {
-      if (state.sessionId) void cleanupSpillDir(state.sessionId);
-      state.pruneManifest.clear();
-      state.sessionId = sessionIdOf(ctx);
-      state.restoredPrunes = loadPersistedPrunes(ctx, state.sessionId);
-      state.persistedPruneKey = pruneKey(state.restoredPrunes.values());
-      state.settingsSnapshot = undefined;
-      state.velocityTracker = EMPTY_VELOCITY_TRACKER;
-      state.consecutiveFailures = 0;
-      state.breakerTrippedAtTurn = undefined;
-      state.breakerNotified = false;
-      state.turnCount = 0;
-      state.outputLimitCompactions = 0;
-      state.outputLimitBreakerNotified = false;
-      publishIdleStatus(ctx, settingsFor(ctx).enabled);
-    },
-    async evaluate(messages, ctx) {
-      const generation = state.generation;
-      if (state.running) return undefined;
-      const settings = settingsFor(ctx);
+  /**
+   * Every field a fresh lifecycle must start from. onSessionStart used to clear
+   * only 13 of these and never touched the concurrency trio, so a session
+   * switched in-process without a shutdown inherited `running: true` and
+   * silently disabled compaction for the whole new session while stranding the
+   * arbiter lease. Both entry points now clear the same set.
+   */
+  function releaseInFlight(): void {
+    state.running = false;
+    state.activeOwner = undefined;
+    state.activeLease?.release();
+    state.activeLease = undefined;
+    state.lastTriggerKey = undefined;
+    state.lastNoCompactableKey = undefined;
+    state.internalsWarningShown = false;
+    state.evaluating = false;
+  }
+  function resetCycleState(): void {
+    state.velocityTracker = EMPTY_VELOCITY_TRACKER;
+    state.breaker = resetCompactionBreaker();
+    state.breakerNotified = false;
+    state.outputLimitCompactions = 0;
+    state.outputLimitBreakerNotified = false;
+    state.cacheEpoch = undefined;
+    state.cacheRatio = undefined;
+    state.prunedDuringEpoch = undefined;
+    state.cacheDelta = undefined;
+  }
+  /**
+   * Phase 1 of a context hook: apply the stable prune transform and decide
+   * whether pressure warrants a full compaction. Returns the messages to send.
+   */
+  async function evaluateInner(
+    messages: AgentMessage[],
+    ctx: ExtensionContext,
+    generation: number,
+  ): Promise<AgentMessage[] | undefined> {
+    const settings = settingsFor(ctx);
+    return await runPressureCycle(messages, ctx, generation, settings);
+  }
+  /**
+   * The whole pressure cycle for one context hook: stable transform, new
+   * prunes, spill escalation, status, then the compaction trigger.
+   */
+  async function runPressureCycle(
+    messages: AgentMessage[],
+    ctx: ExtensionContext,
+    generation: number,
+    settings: CompactionSettings,
+  ): Promise<AgentMessage[] | undefined> {
       publishIdleStatus(ctx, settings.enabled);
       if (!ctx.model) {
         clearPressureStatus(ctx);
@@ -250,7 +299,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return undefined;
       }
       hydrateRestoredPrunes(state, messages);
-      retainVisiblePrunes(state.pruneManifest, messages);
+      retainVisiblePrunes(state.pruneManifest, messages, state.restoredPrunes);
       if (!endsWithCompleteToolResultBatch(messages)) {
         clearPressureStatus(ctx);
         const stable = applyRecordedPrunes(messages, state.pruneManifest);
@@ -261,6 +310,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ...settings,
         reserveTokens: effectiveReserveTokens(settings, ctx.model.contextWindow, ctx.model.maxTokens),
       };
+      const manifestSizeBefore = state.pruneManifest.size;
       let pressure = applyContextPressurePolicy(
         messages,
         ctx.model.contextWindow,
@@ -269,8 +319,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.velocityTracker,
       );
       state.velocityTracker = pressure.velocityTracker;
+      const newPrunes = state.pruneManifest.size - manifestSizeBefore;
       if (pressure.prunedToolResults > 0 && state.sessionId) {
         const upgraded = await upgradeNewPrunesWithSpill(messages, pressure.messages, state.pruneManifest, state.sessionId);
+        // reset()/onSessionStart may have run during that await, bumping the
+        // generation and clearing the manifest. Writing our stale view back
+        // would resurrect prunes for a session that no longer exists.
+        if (state.generation !== generation) return undefined;
         pressure = adjustPressureAfterReplacementChange(
           pressure,
           upgraded.tokenDelta,
@@ -287,7 +342,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           );
         }
       }
-      updatePressureStatus(ctx, pressure);
+      observeCacheAttribution(state, messages, newPrunes);
+      updatePressureStatus(ctx, pressure, state.cacheDelta);
       persistPruneManifest(pi, state);
       if (pressure.action !== "compact") {
         state.lastNoCompactableKey = undefined;
@@ -298,17 +354,18 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
 
       const triggerKey = `${estimate.tokens}:${thresholdTokens}:${messages.length}`;
       if (state.lastTriggerKey === triggerKey) return pressure.messages;
-      const breakerCheck = compactionBreakerAllows(
-        { consecutiveFailures: state.consecutiveFailures, trippedAtTurn: state.breakerTrippedAtTurn },
-        state.turnCount,
-      );
-      state.consecutiveFailures = breakerCheck.breaker.consecutiveFailures;
-      state.breakerTrippedAtTurn = breakerCheck.breaker.trippedAtTurn;
+      const breakerCheck = compactionBreakerAllows(state.breaker, state.turnCount);
+      // A cooldown that auto-resets clears the trip; without also clearing the
+      // notified flag the SECOND and later trips in a session stay silent.
+      if (state.breaker.trippedAtTurn !== undefined && breakerCheck.breaker.trippedAtTurn === undefined) {
+        state.breakerNotified = false;
+      }
+      state.breaker = breakerCheck.breaker;
       if (!breakerCheck.allowed) {
         if (!state.breakerNotified) {
           state.breakerNotified = true;
           ctx.ui.notify(
-            `Mid-turn compaction paused after ${state.consecutiveFailures} consecutive failures; retrying after ${COMPACTION_BREAKER_COOLDOWN_TURNS} turns.`,
+            `Mid-turn compaction paused after ${state.breaker.consecutiveFailures} consecutive failures; retrying after ${COMPACTION_BREAKER_COOLDOWN_TURNS} turns.`,
             "warning",
           );
         }
@@ -360,16 +417,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.activeLease = lease;
       const owner = ++state.nextOwner;
       state.activeOwner = owner;
-      ctx.abort();
-      ctx.ui.setStatus(COMPACTION_STATUS_KEY, `COMPACT ${estimate.tokens}/${thresholdTokens}`);
       const failCompaction = (error: unknown) => {
         if (state.generation !== generation || state.activeOwner !== owner) return;
-        const failed = recordCompactionFailure(
-          { consecutiveFailures: state.consecutiveFailures, trippedAtTurn: state.breakerTrippedAtTurn },
-          state.turnCount,
-        );
-        state.consecutiveFailures = failed.consecutiveFailures;
-        state.breakerTrippedAtTurn = failed.trippedAtTurn;
+        state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
         state.running = false;
         state.activeOwner = undefined;
         state.lastTriggerKey = undefined;
@@ -378,18 +428,22 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         clearPressureStatus(ctx);
         ctx.ui.notify(`Mid-turn compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
       };
-      const instructions = buildMidTurnInstructions(
-        estimate,
-        ctx.model.contextWindow,
-        effectiveSettings.reserveTokens,
-      );
+      // ctx.abort() and the status/instruction calls used to sit OUTSIDE this
+      // try. A throw there stranded the arbiter lease and pinned running=true
+      // forever, silently disabling compaction for the rest of the session.
       try {
+        ctx.abort();
+        ctx.ui.setStatus(COMPACTION_STATUS_KEY, `COMPACT ${estimate.tokens}/${thresholdTokens}`);
+        const instructions = buildMidTurnInstructions(
+          estimate,
+          ctx.model.contextWindow,
+          effectiveSettings.reserveTokens,
+        );
         ctx.compact({
           customInstructions: state.activeLease?.tagInstructions(instructions) ?? instructions,
           onComplete: () => {
             if (state.generation !== generation || state.activeOwner !== owner) return;
-            state.consecutiveFailures = 0;
-            state.breakerTrippedAtTurn = undefined;
+            state.breaker = resetCompactionBreaker();
             state.breakerNotified = false;
             state.running = false;
             state.activeOwner = undefined;
@@ -411,6 +465,36 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         failCompaction(error);
       }
       return pressure.messages;
+  }
+
+  return {
+    onSessionStart(ctx) {
+      if (state.sessionId) void cleanupSpillDir(state.sessionId);
+      releaseInFlight();
+      state.pruneManifest.clear();
+      state.sessionId = sessionIdOf(ctx);
+      state.restoredPrunes = loadPersistedPrunes(ctx, state.sessionId);
+      state.persistedPruneKey = pruneKey(state.restoredPrunes.values());
+      state.settingsSnapshot = undefined;
+      state.settingsCwd = undefined;
+      resetCycleState();
+      state.turnCount = 0;
+      publishIdleStatus(ctx, settingsFor(ctx).enabled);
+    },
+    async evaluate(messages, ctx) {
+      const generation = state.generation;
+      if (state.running) return undefined;
+      // The prune manifest is mutated across an await (spill upgrade), and
+      // `running` only covers compaction — it is not set until much later. A
+      // second context hook arriving mid-await would otherwise interleave writes
+      // into the same Map and persist a manifest reflecting neither run.
+      if (state.evaluating) return undefined;
+      state.evaluating = true;
+      try {
+        return await evaluateInner(messages, ctx, generation);
+      } finally {
+        state.evaluating = false;
+      }
     },
     onAgentEnd(ctx) {
       state.turnCount += 1;
@@ -444,20 +528,31 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
       if (ctx.hasPendingMessages?.()) return;
       if (dependencies.arbiter?.currentOwner()) return;
+      // These used to be fully swallowed, so a user whose response was cut off
+      // at the output limit saw no recovery and no reason. The structurally
+      // identical mid-turn path already notifies on all three.
       let internals: PiCompactionInternals;
       try {
         internals = await loadInternals();
-      } catch {
+      } catch (error) {
+        ctx.ui.notify(`Output-limit compaction disabled: ${error instanceof Error ? error.message : String(error)}`, "warning");
         return;
       }
       const branch = ctx.sessionManager.getBranch();
       let preparation: unknown;
       try {
         preparation = internals.prepareCompaction(branch, settings);
-      } catch {
+      } catch (error) {
+        ctx.ui.notify(`Output-limit compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
         return;
       }
-      if (!preparation) return;
+      if (!preparation) {
+        ctx.ui.notify(
+          "Output-limit compaction skipped: Pi has no compactable history; the response keeps hitting the output token limit inside the recent keep window.",
+          "warning",
+        );
+        return;
+      }
       const lease = dependencies.arbiter?.request("output-limit");
       if (dependencies.arbiter && !lease) return;
       state.outputLimitCompactions += 1;
@@ -491,35 +586,19 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.persistedPruneKey = undefined;
       state.lastTriggerKey = undefined;
       state.lastNoCompactableKey = undefined;
-      state.velocityTracker = EMPTY_VELOCITY_TRACKER;
-      state.consecutiveFailures = 0;
-      state.breakerTrippedAtTurn = undefined;
-      state.breakerNotified = false;
-      state.outputLimitCompactions = 0;
-      state.outputLimitBreakerNotified = false;
+      resetCycleState();
     },
     reset(ctx) {
       state.generation += 1;
-      state.running = false;
-      state.activeOwner = undefined;
-      state.activeLease?.release();
-      state.activeLease = undefined;
-      state.lastTriggerKey = undefined;
-      state.internalsWarningShown = false;
-      state.lastNoCompactableKey = undefined;
+      releaseInFlight();
       if (state.sessionId) void cleanupSpillDir(state.sessionId);
       state.pruneManifest.clear();
       state.restoredPrunes.clear();
       state.persistedPruneKey = undefined;
       state.settingsSnapshot = undefined;
       state.settingsCwd = undefined;
-      state.velocityTracker = EMPTY_VELOCITY_TRACKER;
-      state.consecutiveFailures = 0;
-      state.breakerTrippedAtTurn = undefined;
-      state.breakerNotified = false;
+      resetCycleState();
       state.turnCount = 0;
-      state.outputLimitCompactions = 0;
-      state.outputLimitBreakerNotified = false;
       persistPruneManifest(pi, state);
       if (ctx) {
         clearPressureStatus(ctx);
@@ -574,7 +653,10 @@ export function applyContextPressurePolicy(
 ): ContextPressureResult {
   const thresholdTokens = contextWindow - settings.reserveTokens;
   const applied = applyRecordedPrunes(messages, pruneManifest);
-  const transformed = applied.messages;
+  // applyRecordedPrunes hands back the caller's array untouched when nothing is
+  // recorded. New pruning writes elements in place, so it copies first (below)
+  // — the input array is never mutated.
+  let transformed = applied.messages;
   let savedTokens = applied.savedTokens;
   let prunedToolResults = applied.prunedToolResults;
 
@@ -609,19 +691,32 @@ export function applyContextPressurePolicy(
 
   // The soft layer gates only NEW pruning. Recorded prunes above stay applied so
   // the request prefix remains stable within the compaction epoch.
+  // Invariant: .workflow/specs/architecture-constraints.md S-20260724-cbhh
+  // (compaction prune invariants) and coding-conventions.md (same-epoch
+  // identical-replacement rule). Three prior sessions paid for this guarantee —
+  // see the prefix-stability tests before weakening it.
   let newlySavedTokens = 0;
   if (soft.enabled) {
+    if (transformed === messages) transformed = [...messages];
     const frontierStart = protectedFrontierStart(transformed, settings.keepRecentTokens);
     const pruneTarget = Math.min(thresholdTokens, Math.floor(contextWindow * soft.pruneTargetRatio));
     const usageEpoch = latestProviderUsageEpoch(messages);
+    // Cache gate: a prune kills the provider's cached prefix from its index to
+    // the end, so below the critical band a prune run must reclaim enough tokens
+    // to pay for the prefix it invalidates. Past critical, relieving pressure
+    // dominates — a full compaction would invalidate everything anyway plus cost
+    // an LLM call — so the gate is bypassed and every candidate is applied.
+    const suffixTokens = soft.cache.enabled && !initiallyCritical
+      ? suffixTokenSums(transformed)
+      : undefined;
     // Graduated eviction, cheapest/most-reversible first: pass 1 strips replayable
     // tools (re-runnable); pass 2 strips bulk data tools (bash/edit/write) only if
     // pressure persists. Control tools (e.g. todo) are in neither set and survive.
-    const replayable = runPrunePass({ transformed, pruneManifest, frontierStart, pruneTarget, effectiveTokens: initial, usageEpoch, selector: replaceableToolResult });
+    const replayable = runPrunePass({ transformed, pruneManifest, frontierStart, pruneTarget, effectiveTokens: initial, usageEpoch, selector: replaceableToolResult, suffixTokens });
     newlySavedTokens += replayable.savedTokens;
     savedTokens += replayable.savedTokens;
     prunedToolResults += replayable.prunedToolResults;
-    const bulk = runPrunePass({ transformed, pruneManifest, frontierStart, pruneTarget, effectiveTokens: replayable.effectiveTokens, usageEpoch, selector: evictableBulkToolResult });
+    const bulk = runPrunePass({ transformed, pruneManifest, frontierStart, pruneTarget, effectiveTokens: replayable.effectiveTokens, usageEpoch, selector: evictableBulkToolResult, suffixTokens });
     newlySavedTokens += bulk.savedTokens;
     savedTokens += bulk.savedTokens;
     prunedToolResults += bulk.prunedToolResults;
@@ -633,6 +728,12 @@ export function applyContextPressurePolicy(
 }
 
 function applyRecordedPrunes(messages: AgentMessage[], pruneManifest: PruneManifest): AppliedPrunes {
+  // Nothing recorded means nothing to replace; the copy would be identical and
+  // the caller discards it. This is the common path early in a session and
+  // immediately after every compaction or reset.
+  if (pruneManifest.size === 0) {
+    return { messages, prunedToolResults: 0, savedTokens: 0, pendingSavedTokens: 0 };
+  }
   const transformed = [...messages];
   let savedTokens = 0;
   let prunedToolResults = 0;
@@ -655,11 +756,42 @@ function applyRecordedPrunes(messages: AgentMessage[], pruneManifest: PruneManif
   return { messages: transformed, prunedToolResults, savedTokens, pendingSavedTokens };
 }
 
-function retainVisiblePrunes(pruneManifest: PruneManifest, messages: AgentMessage[]): void {
+/** Durable projection of a live manifest entry, shared by persist and parking. */
+function persistedEntryOf(callId: string, entry: PruneManifestEntry | undefined): PersistedPruneEntry {
+  return {
+    callId,
+    level: entry?.level ?? (entry?.spillPath !== undefined ? "spill" : "pruned"),
+    ...(entry?.spillPath !== undefined ? { spillPath: entry.spillPath } : {}),
+    ...(entry?.introducedAtUsageEpoch !== undefined ? { introducedAtUsageEpoch: entry.introducedAtUsageEpoch } : {}),
+  };
+}
+
+/**
+ * Drop manifest entries whose tool result is not in the current window, parking
+ * their identity in `parked` so the prune survives.
+ *
+ * A tool result can be invisible for one frame and come back — a branch switch,
+ * a rewind/fork, a resume that evaluates a partial window. Deleting outright
+ * made that permanent: the persisted fallback has already been consumed by
+ * hydrateRestoredPrunes, so applyRecordedPrunes finds nothing and re-emits the
+ * ORIGINAL full text. That both blows the context back up and invalidates the
+ * whole cached prefix at that index.
+ */
+function retainVisiblePrunes(
+  pruneManifest: PruneManifest,
+  messages: AgentMessage[],
+  parked?: Map<string, PersistedPruneEntry>,
+): void {
   if (pruneManifest.size === 0) return;
-  const visible = new Set(messages.map(toolResultCallId).filter((id): id is string => Boolean(id)));
+  const visible = new Set<string>();
+  for (const message of messages) {
+    const callId = toolResultCallId(message);
+    if (callId) visible.add(callId);
+  }
   for (const callId of pruneManifest.keys()) {
-    if (!visible.has(callId)) pruneManifest.delete(callId);
+    if (visible.has(callId)) continue;
+    parked?.set(callId, persistedEntryOf(callId, getRecordedPrune(pruneManifest, callId)));
+    pruneManifest.delete(callId);
   }
 }
 
@@ -668,16 +800,24 @@ function hasRecordedPrune(manifest: PruneManifest, callId: string): boolean {
 }
 
 function getRecordedPrune(manifest: PruneManifest, callId: string): PruneManifestEntry | undefined {
-  return manifest instanceof Map ? manifest.get(callId) : undefined;
+  return manifest.get(callId);
 }
 
 function isPruneLevel(value: unknown): value is PruneLevel {
   return value === "pruned" || value === "spill" || value === "minimal";
 }
 
+/**
+ * Record a NEW prune. Re-recording an existing callId is refused: the stored
+ * replacement is what applyRecordedPrunes re-applies on every request, so
+ * overwriting it with a freshly computed one would change the request prefix
+ * each turn and thrash the prompt cache — with every existing test still green.
+ * The two legitimate in-place escalations (spill, minimal) mutate the entry
+ * they already own rather than going through here.
+ */
 function recordPrune(manifest: PruneManifest, callId: string, entry: PruneManifestEntry): void {
-  if (manifest instanceof Map) manifest.set(callId, entry);
-  else manifest.add(callId);
+  if (manifest.has(callId)) return;
+  manifest.set(callId, entry);
 }
 
 function restorePruneReplacement(message: AgentMessage, persisted: PersistedPruneEntry): AgentMessage | undefined {
@@ -686,6 +826,10 @@ function restorePruneReplacement(message: AgentMessage, persisted: PersistedPrun
     if (!persisted.spillPath) return undefined;
     return minimalSpillReplacement(message, persisted.spillPath);
   }
+  // A spill entry whose file is gone (cleaned tmpdir, failed write persisted by
+  // an older build) degrades to the plain placeholder rather than the pathless
+  // spill text, which would carry a 1.5K preview for no recoverability.
+  if (!persisted.spillPath) return pruneToolResult(message);
   const text = extractTextContent(message);
   if (text.length < SPILL_THRESHOLD_CHARS) return undefined;
   const toolName = typeof (message as MessageRecord).toolName === "string"
@@ -697,7 +841,8 @@ function restorePruneReplacement(message: AgentMessage, persisted: PersistedPrun
     content: [{
       type: "text",
       text: buildSpillReplacementText({
-        path: persisted.spillPath ?? "",
+        ok: true,
+        path: persisted.spillPath,
         preview: preview.preview,
         originalChars: text.length,
         hasMore: preview.hasMore,
@@ -731,14 +876,14 @@ function hydrateRestoredPrunes(state: AutoCompactionState, messages: AgentMessag
 }
 
 function persistPruneManifest(pi: ExtensionAPI, state: AutoCompactionState): void {
-  const prunes = [...state.pruneManifest.entries()]
-    .map(([callId, entry]): PersistedPruneEntry => ({
-      callId,
-      level: entry.level ?? (entry.spillPath !== undefined ? "spill" : "pruned"),
-      ...(entry.spillPath !== undefined ? { spillPath: entry.spillPath } : {}),
-      ...(entry.introducedAtUsageEpoch !== undefined ? { introducedAtUsageEpoch: entry.introducedAtUsageEpoch } : {}),
-    }))
-    .sort((a, b) => a.callId.localeCompare(b.callId));
+  // Live entries plus everything still parked (not yet hydrated, or parked by
+  // retainVisiblePrunes while its message is off-branch). Persisting only the
+  // live half would make a one-frame absence permanent across a resume.
+  const byCallId = new Map<string, PersistedPruneEntry>(state.restoredPrunes);
+  for (const [callId, entry] of state.pruneManifest.entries()) {
+    byCallId.set(callId, persistedEntryOf(callId, entry));
+  }
+  const prunes = [...byCallId.values()].sort((a, b) => a.callId.localeCompare(b.callId));
   const nextKey = pruneKey(prunes);
   if (nextKey === state.persistedPruneKey) return;
   state.persistedPruneKey = nextKey;
@@ -890,9 +1035,24 @@ function finiteNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
+/**
+ * Token estimates are pure functions of an immutable message object, and the
+ * same array is estimate-scanned by up to five passes per request (context
+ * estimate, frontier, both prune passes, telemetry). Keying the memo on object
+ * identity is safe because prunes replace whole array elements — a message is
+ * never mutated in place — so a replacement is a new object and misses
+ * correctly.
+ */
+const messageTokenMemo = new WeakMap<object, number>();
+
 function estimateMessageTokens(message: AgentMessage): number {
+  const key = message as unknown as object;
+  const memoized = messageTokenMemo.get(key);
+  if (memoized !== undefined) return memoized;
   const serialized = JSON.stringify(message);
-  return Math.ceil(serialized.length / tokenCharsPerToken(serialized));
+  const tokens = Math.ceil(serialized.length / tokenCharsPerToken(serialized));
+  messageTokenMemo.set(key, tokens);
+  return tokens;
 }
 
 function tokenCharsPerToken(serialized: string): number {
@@ -918,6 +1078,22 @@ function protectedFrontierStart(messages: AgentMessage[], keepRecentTokens: numb
   return start;
 }
 
+/**
+ * Minimum ratio of reclaimed tokens to invalidated cached-prefix tokens for a
+ * prune depth to be worth taking.
+ *
+ * A prune replaces the message at index i, so the provider's cached prompt
+ * prefix dies from i to the end. Re-establishing that suffix costs roughly
+ * (cacheWrite - cacheRead) ≈ 1.15x base input per token one time, while the
+ * reclaimed tokens save ≈ 0.1x per later request. Break-even is therefore about
+ * 11.5 / ratio subsequent requests: 0.25 pays for itself within ~46 requests,
+ * while the pathological shapes this gate exists to stop sit near 0.03 (~400
+ * requests — never). The band is measured, not tuned: observed healthy prune
+ * shapes land at 0.66 and pathological ones at 0.027, so any cut in 0.1–0.4
+ * separates them.
+ */
+export const CACHE_PRUNE_MIN_SAVINGS_RATIO = 0.25;
+
 interface PrunePassInput {
   transformed: AgentMessage[];
   pruneManifest: PruneManifest;
@@ -926,14 +1102,68 @@ interface PrunePassInput {
   effectiveTokens: number;
   usageEpoch: string | undefined;
   selector: (message: AgentMessage) => AgentMessage | undefined;
+  /** Suffix token sums of the pre-prune array; index i holds tokens[i..end]. */
+  suffixTokens?: number[];
+}
+
+interface PruneCandidate {
+  index: number;
+  callId: string;
+  replacement: AgentMessage;
+  saved: number;
+}
+
+/**
+ * Suffix sums of per-message token estimates. suffix[i] is the cost of
+ * invalidating the cached prefix at index i — everything from i to the end must
+ * be reprocessed. Computed once per policy run; estimates are memoized.
+ */
+export function suffixTokenSums(messages: AgentMessage[]): number[] {
+  const suffix = new Array<number>(messages.length + 1);
+  suffix[messages.length] = 0;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    suffix[index] = suffix[index + 1] + estimateMessageTokens(messages[index]);
+  }
+  return suffix;
+}
+
+/**
+ * Deepest prune depth whose CUMULATIVE savings still justify the cached prefix
+ * it invalidates, or 0 to prune nothing.
+ *
+ * Selection must look at the whole candidate run, not each candidate in
+ * isolation: candidates are visited newest-first, and the first one always looks
+ * worst because it already pays for the entire suffix while contributing only
+ * its own savings. Measured on a uniform tool-loop transcript the ratio climbs
+ * 0.12 -> 0.66 across 15 candidates, so a greedy per-candidate test would reject
+ * the whole (profitable) run on its first element.
+ */
+export function cacheWorthwhileDepth(
+  candidates: Array<{ index: number; saved: number }>,
+  suffixTokens: number[],
+  minRatio: number = CACHE_PRUNE_MIN_SAVINGS_RATIO,
+): number {
+  let cumulative = 0;
+  let depth = 0;
+  for (let position = 0; position < candidates.length; position++) {
+    cumulative += candidates[position].saved;
+    const invalidated = suffixTokens[candidates[position].index] ?? 0;
+    if (invalidated <= 0) continue;
+    if (cumulative >= invalidated * minRatio) depth = position + 1;
+  }
+  return depth;
 }
 
 function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolResults: number; effectiveTokens: number } {
-  const { transformed, pruneManifest, frontierStart, pruneTarget, usageEpoch, selector } = input;
+  const { transformed, pruneManifest, frontierStart, pruneTarget, usageEpoch, selector, suffixTokens } = input;
   let effectiveTokens = input.effectiveTokens;
-  let savedTokens = 0;
-  let prunedToolResults = 0;
-  for (let index = frontierStart - 1; index >= 0 && effectiveTokens > pruneTarget; index--) {
+
+  // Phase 1 — collect candidates newest-first without mutating anything. The
+  // walk order is unchanged from the ungated path, so the candidate sequence is
+  // identical; only how many of them get applied can differ.
+  const candidates: PruneCandidate[] = [];
+  let projectedTokens = effectiveTokens;
+  for (let index = frontierStart - 1; index >= 0 && projectedTokens > pruneTarget; index--) {
     const callId = toolResultCallId(transformed[index]);
     if (!callId || hasRecordedPrune(pruneManifest, callId)) continue;
     const replacement = selector(transformed[index]);
@@ -941,17 +1171,30 @@ function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolR
     const before = estimateMessageTokens(transformed[index]);
     const after = estimateMessageTokens(replacement);
     if (after >= before) continue;
-    transformed[index] = replacement;
     const saved = before - after;
-    recordPrune(pruneManifest, callId, {
-      replacement,
-      savedTokens: saved,
+    candidates.push({ index, callId, replacement, saved });
+    projectedTokens -= saved;
+  }
+
+  // Phase 2 — when the cache gate is active, trim the run to the deepest depth
+  // that still pays for the prefix it invalidates. Without suffixTokens every
+  // candidate is applied, which is byte-for-byte the historical behavior.
+  const depth = suffixTokens ? cacheWorthwhileDepth(candidates, suffixTokens) : candidates.length;
+
+  let savedTokens = 0;
+  let prunedToolResults = 0;
+  for (let position = 0; position < depth; position++) {
+    const candidate = candidates[position];
+    transformed[candidate.index] = candidate.replacement;
+    recordPrune(pruneManifest, candidate.callId, {
+      replacement: candidate.replacement,
+      savedTokens: candidate.saved,
       introducedAtUsageEpoch: usageEpoch,
       level: "pruned",
     });
-    savedTokens += saved;
+    savedTokens += candidate.saved;
     prunedToolResults++;
-    effectiveTokens -= saved;
+    effectiveTokens -= candidate.saved;
   }
   return { savedTokens, prunedToolResults, effectiveTokens };
 }
@@ -1073,6 +1316,13 @@ async function upgradeNewPrunesWithSpill(
       ? (original as MessageRecord).toolName as string
       : "tool";
     const spill = await spillToolResult(sessionId, callId, text);
+    if (!spill.ok) {
+      // The write failed, so the payload is not recoverable from disk and the
+      // no-path replacement text is a 1.5K preview — strictly worse than the
+      // pruned placeholder already in place. Keep the placeholder and leave
+      // spillPath unset so a later pass retries once the disk cooperates.
+      continue;
+    }
     const replacementText = buildSpillReplacementText(spill, toolName);
     const upgraded: AgentMessage = {
       ...transformedMessages[index],
@@ -1081,7 +1331,7 @@ async function upgradeNewPrunesWithSpill(
     tokenDelta += estimateMessageTokens(upgraded) - estimateMessageTokens(transformedMessages[index]);
     transformedMessages[index] = upgraded;
     entry.replacement = upgraded;
-    entry.spillPath = spill.path || "";
+    entry.spillPath = spill.path;
     entry.savedTokens = estimateMessageTokens(original) - estimateMessageTokens(upgraded);
     entry.level = "spill";
     callIds.add(callId);
@@ -1223,6 +1473,40 @@ export function derivePressureBand(input: {
   return "normal";
 }
 
+/**
+ * Single-pass scan of the message array for the two token aggregates the
+ * telemetry needs. Everything here depends only on the messages, never on the
+ * current estimate, so the pressure-dependent ratios stay in
+ * computeContextSignals.
+ *
+ * This used to be four separate full traversals (prunable classification,
+ * redundancy counting, redundancy marking, redundant-token summing), each
+ * re-running extractTextContent 2-3x per tool result — all of it to render a
+ * status string. One pass plus a map walk produces identical numbers.
+ */
+function scanContextTokens(messages: AgentMessage[]): { prunableTokens: number; redundantTokens: number } {
+  let prunableTokens = 0;
+  const byPattern = new Map<string, number[]>();
+  for (const message of messages) {
+    const tokens = estimateMessageTokens(message);
+    // pruneToolResult is replaceable ?? evictableBulk — one classification
+    // instead of evaluating both selectors independently.
+    if (pruneToolResult(message)) prunableTokens += tokens;
+    if (!toolResultCallId(message)) continue;
+    const key = toolResultPatternKey(message);
+    if (!key) continue;
+    const bucket = byPattern.get(key);
+    if (bucket) bucket.push(tokens);
+    else byPattern.set(key, [tokens]);
+  }
+  // Every occurrence of a repeated pattern except the newest is redundant.
+  let redundantTokens = 0;
+  for (const bucket of byPattern.values()) {
+    for (let index = 0; index < bucket.length - 1; index++) redundantTokens += bucket[index];
+  }
+  return { prunableTokens, redundantTokens };
+}
+
 export function computeContextSignals(input: {
   messages: AgentMessage[];
   estimatedTokens: number;
@@ -1232,19 +1516,8 @@ export function computeContextSignals(input: {
   const { messages, estimatedTokens, contextWindow, thresholdTokens } = input;
   const fullnessRatio = contextWindow > 0 ? estimatedTokens / contextWindow : 0;
   const criticalGap = thresholdTokens - estimatedTokens;
-  let prunableTokens = 0;
-  for (const message of messages) {
-    if (!replaceableToolResult(message) && !evictableBulkToolResult(message)) continue;
-    prunableTokens += estimateMessageTokens(message);
-  }
+  const { prunableTokens, redundantTokens } = scanContextTokens(messages);
   const prunableFraction = estimatedTokens > 0 ? Math.min(1, prunableTokens / estimatedTokens) : 0;
-  const redundantIds = redundantToolResultCallIds(messages);
-  let redundantTokens = 0;
-  for (const message of messages) {
-    const callId = toolResultCallId(message);
-    if (!callId || !redundantIds.has(callId)) continue;
-    redundantTokens += estimateMessageTokens(message);
-  }
   const redundantFraction = estimatedTokens > 0 ? Math.min(1, redundantTokens / estimatedTokens) : 0;
   return { fullnessRatio, criticalGap, prunableFraction, redundantFraction, cacheHitRatio: latestCacheHitRatio(messages) };
 }
@@ -1262,12 +1535,26 @@ export function decideContextAction(band: ContextPressureBand, signals: ContextS
   return { band, action, reasons };
 }
 
+/**
+ * Prompt-cache hit ratio for one usage record.
+ *
+ * The denominator is every prompt token the provider billed: `input` (fresh,
+ * uncached), `cacheRead` (hit) and `cacheWrite` (cache creation — a MISS that
+ * had to be written). Omitting cacheWrite overstates the hit rate precisely on
+ * the epoch after a prune, when the invalidated prefix is re-billed as cache
+ * creation — i.e. it blinds the one metric meant to expose prune damage.
+ * Matches the statusline and cockpit denominators.
+ */
+export function cacheHitRatio(usage: { input: number; cacheRead: number; cacheWrite: number }): number | undefined {
+  const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
+  return promptTokens > 0 ? usage.cacheRead / promptTokens : undefined;
+}
+
 function latestCacheHitRatio(messages: AgentMessage[]): number | undefined {
   for (let index = messages.length - 1; index >= 0; index--) {
     const usage = assistantUsage(messages[index]);
     if (!usage) continue;
-    const denominator = usage.cacheRead + usage.input;
-    return denominator > 0 ? usage.cacheRead / denominator : undefined;
+    return cacheHitRatio(usage);
   }
   return undefined;
 }
@@ -1380,17 +1667,55 @@ function hasRobustGrowth(samples: VelocitySample[]): boolean {
   return false;
 }
 
-function updatePressureStatus(ctx: ExtensionContext, pressure: ContextPressureResult): void {
+/**
+ * Attribute cache-ratio movement to pruning.
+ *
+ * A prune's bill arrives one epoch late: it changes the request prefix now, and
+ * the provider reports the resulting cache miss on the NEXT usage record. So
+ * when a new epoch lands, if prunes were introduced during the epoch that just
+ * closed, the ratio delta is exactly what that pruning cost (or saved). This is
+ * the only longitudinal cache signal — the raw ratio alone cannot tell you
+ * whether a prune helped.
+ */
+function observeCacheAttribution(state: AutoCompactionState, messages: AgentMessage[], newPrunes: number): void {
+  const epoch = latestProviderUsageEpoch(messages);
+  const ratio = latestCacheHitRatio(messages);
+  if (epoch !== state.cacheEpoch) {
+    state.cacheDelta = state.prunedDuringEpoch !== undefined
+      && state.prunedDuringEpoch === state.cacheEpoch
+      && state.cacheRatio !== undefined
+      && ratio !== undefined
+      ? ratio - state.cacheRatio
+      : undefined;
+    state.cacheEpoch = epoch;
+    state.cacheRatio = ratio;
+    state.prunedDuringEpoch = undefined;
+  }
+  if (newPrunes > 0) state.prunedDuringEpoch = epoch;
+}
+
+function updatePressureStatus(ctx: ExtensionContext, pressure: ContextPressureResult, cacheDelta?: number): void {
   if (pressure.band === "normal") {
     clearPressureStatus(ctx);
     return;
   }
-  const pruned = pressure.prunedToolResults > 0 ? ` -${pressure.prunedToolResults}` : "";
-  const reasons = pressure.reasons.length > 0 ? ` ${pressure.reasons.join(" ")}` : "";
+  // Show what pruning actually reclaimed, not just how many results it touched.
+  const pruned = pressure.prunedToolResults > 0
+    ? ` -${pressure.prunedToolResults}${pressure.savedTokens > 0 ? `/-${formatTokens(pressure.savedTokens)}` : ""}`
+    : "";
+  const attribution = cacheDelta !== undefined && Math.abs(cacheDelta) >= 0.01
+    ? [`cacheD:${cacheDelta > 0 ? "+" : ""}${Math.round(cacheDelta * 100)}%`]
+    : [];
+  const allReasons = [...pressure.reasons, ...attribution];
+  const reasons = allReasons.length > 0 ? ` ${allReasons.join(" ")}` : "";
   ctx.ui.setStatus(
     COMPACTION_STATUS_KEY,
     `CTX ${pressure.band.toUpperCase()} ${pressure.estimatedTokens}/${pressure.thresholdTokens}${pruned}${reasons}`,
   );
+}
+
+function formatTokens(tokens: number): string {
+  return tokens < 1_000 ? String(tokens) : `${(tokens / 1_000).toFixed(1)}k`;
 }
 
 function publishIdleStatus(ctx: ExtensionContext, enabled: boolean): void {
@@ -1433,13 +1758,16 @@ function finalAssistantStopReason(messages: AgentMessage[]): string | undefined 
 }
 
 function buildOutputLimitInstructions(
-  usage: { percent: number; tokens: number | null; contextWindow: number },
+  usage: { percent: number | null; tokens: number | null; contextWindow: number },
   reserveTokens: number,
 ): string {
+  // Both figures are nullable on ContextUsage; percent used to be typed as a
+  // plain number here, which rendered "NaN%" whenever it was actually null.
+  const percent = usage.percent === null ? "unknown" : `${Math.round(usage.percent)}%`;
   return [
     "This compaction was triggered because the previous assistant response was truncated at the model output token limit while context pressure was high.",
     "Preserve the exact current objective, completed work, modified files, and the interrupted response's intent so execution can resume and complete the truncated output immediately.",
-    `Context usage: ${usage.tokens ?? "unknown"}/${usage.contextWindow} tokens (${Math.round(usage.percent)}%); reserve: ${reserveTokens}.`,
+    `Context usage: ${usage.tokens ?? "unknown"}/${usage.contextWindow} tokens (${percent}); reserve: ${reserveTokens}.`,
   ].join("\n");
 }
 

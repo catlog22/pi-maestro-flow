@@ -6,6 +6,17 @@ import { dirname, join } from "node:path";
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
 
+/**
+ * Absolute upper bound for `reserveTokens`, applied at load time where the
+ * model context window is unknown. `evaluate()` disables all context
+ * management when `contextWindow <= reserveTokens`, so a malformed/oversized
+ * value would silently turn compaction off. This ceiling sits above the
+ * largest real-world context windows (~1-2M tokens), so any plausibly valid
+ * configuration is unaffected while a value that could exceed every model's
+ * window is treated as invalid and falls back to the default.
+ */
+export const MAX_RESERVE_TOKENS = 2_000_000;
+
 export interface VelocityCompactionConfigPatch {
   enabled?: boolean;
   epochsToCritical?: number;
@@ -26,6 +37,20 @@ export interface CacheCompactionSettings {
   enabled: boolean;
 }
 
+export interface SpillCompactionConfigPatch {
+  enabled?: boolean;
+  thresholdChars?: number;
+  previewChars?: number;
+  protectedChars?: number;
+}
+
+export interface SpillCompactionSettings {
+  enabled: boolean;
+  thresholdChars: number;
+  previewChars: number;
+  protectedChars: number;
+}
+
 export interface SoftCompactionConfigPatch {
   enabled?: boolean;
   nudgeRatio?: number;
@@ -33,6 +58,7 @@ export interface SoftCompactionConfigPatch {
   pruneTargetRatio?: number;
   velocity?: VelocityCompactionConfigPatch;
   cache?: CacheCompactionConfigPatch;
+  spill?: SpillCompactionConfigPatch;
 }
 
 export interface SoftCompactionSettings {
@@ -42,13 +68,28 @@ export interface SoftCompactionSettings {
   pruneTargetRatio: number;
   velocity: VelocityCompactionSettings;
   cache: CacheCompactionSettings;
+  spill: SpillCompactionSettings;
 }
 
 /**
  * Balanced soft-layer conditions; equivalent to the historical hardcoded ratios.
- * Signal criteria (velocity/cache) default to disabled so unresolved settings
- * preserve the historical token-ratio-only behavior.
+ *
+ * `velocity` defaults off — it escalates compaction, so an unresolved setting
+ * must not compact earlier than the historical token-ratio-only behavior.
+ * `cache` defaults ON: it only ever *declines* prune runs whose savings cannot
+ * pay for the cached prefix they invalidate, so the failure mode is "kept a
+ * cheap prefix" rather than "compacted unexpectedly". Measured worst case for
+ * the ungated path was 2.2K tokens saved against 81K invalidated.
  */
+export function createDefaultSpillCompaction(): SpillCompactionSettings {
+  return {
+    enabled: true,
+    thresholdChars: 8_000,
+    previewChars: 1_500,
+    protectedChars: 500,
+  };
+}
+
 export function createDefaultSoftCompaction(): SoftCompactionSettings {
   return {
     enabled: true,
@@ -56,7 +97,8 @@ export function createDefaultSoftCompaction(): SoftCompactionSettings {
     pruneRatio: 0.8,
     pruneTargetRatio: 0.7,
     velocity: { enabled: false, epochsToCritical: 3, minFullness: 0.7 },
-    cache: { enabled: false },
+    cache: { enabled: true },
+    spill: createDefaultSpillCompaction(),
   };
 }
 
@@ -115,7 +157,7 @@ function readRawCompaction(path: string): CompactionConfigPatch {
     const patch: CompactionConfigPatch = {};
     if (typeof c.enabled === "boolean") patch.enabled = c.enabled;
     const hard = isRecord(c.hard) ? c.hard : undefined;
-    const rt = positiveNumber(hard?.reserveTokens) ?? positiveNumber(c.reserveTokens);
+    const rt = boundedReserveTokens(hard?.reserveTokens) ?? boundedReserveTokens(c.reserveTokens);
     if (rt !== undefined) patch.reserveTokens = rt;
     const kr = positiveNumber(hard?.keepRecentTokens) ?? positiveNumber(c.keepRecentTokens);
     if (kr !== undefined) patch.keepRecentTokens = kr;
@@ -141,7 +183,25 @@ function readRawSoft(value: unknown): SoftCompactionConfigPatch | undefined {
   if (velocity) soft.velocity = velocity;
   const cache = readRawCache(value.cache);
   if (cache) soft.cache = cache;
+  const spill = readRawSpill(value.spill);
+  if (spill) soft.spill = spill;
   return Object.keys(soft).length > 0 ? soft : undefined;
+}
+
+function readRawSpill(value: unknown): SpillCompactionConfigPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const spill: SpillCompactionConfigPatch = {};
+  if (typeof value.enabled === "boolean") spill.enabled = value.enabled;
+  if (typeof value.thresholdChars === "number" && Number.isSafeInteger(value.thresholdChars) && value.thresholdChars > 0) {
+    spill.thresholdChars = value.thresholdChars;
+  }
+  if (typeof value.previewChars === "number" && Number.isSafeInteger(value.previewChars) && value.previewChars > 0) {
+    spill.previewChars = value.previewChars;
+  }
+  if (typeof value.protectedChars === "number" && Number.isSafeInteger(value.protectedChars) && value.protectedChars > 0) {
+    spill.protectedChars = value.protectedChars;
+  }
+  return Object.keys(spill).length > 0 ? spill : undefined;
 }
 
 function readRawVelocity(value: unknown): VelocityCompactionConfigPatch | undefined {
@@ -219,6 +279,12 @@ export function resolveEffectiveCompactionSettings(
       if (patch.soft.cache !== undefined) {
         if (patch.soft.cache.enabled !== undefined) soft.cache.enabled = patch.soft.cache.enabled;
       }
+      if (patch.soft.spill !== undefined) {
+        if (patch.soft.spill.enabled !== undefined) soft.spill.enabled = patch.soft.spill.enabled;
+        if (patch.soft.spill.thresholdChars !== undefined) soft.spill.thresholdChars = patch.soft.spill.thresholdChars;
+        if (patch.soft.spill.previewChars !== undefined) soft.spill.previewChars = patch.soft.spill.previewChars;
+        if (patch.soft.spill.protectedChars !== undefined) soft.spill.protectedChars = patch.soft.spill.protectedChars;
+      }
       source.soft = src;
     }
   }
@@ -244,6 +310,9 @@ export function validateCompactionPatch(
 
   const rt = patch.reserveTokens;
   if (rt !== undefined && Number.isSafeInteger(rt) && rt > 0) {
+    if (rt > MAX_RESERVE_TOKENS) {
+      errors.push(`reserveTokens (${rt}) must be <= ${MAX_RESERVE_TOKENS}`);
+    }
     if (contextWindow !== undefined && rt >= contextWindow) {
       errors.push(`reserveTokens (${rt}) must be less than contextWindow (${contextWindow})`);
     }
@@ -478,6 +547,16 @@ async function atomicWriteJson(path: string, value: unknown): Promise<void> {
 
 function positiveNumber(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : undefined;
+}
+
+/**
+ * A positive `reserveTokens` capped by {@link MAX_RESERVE_TOKENS}. Oversized
+ * values return undefined so the caller falls back to the default instead of
+ * silently disabling compaction on every model.
+ */
+function boundedReserveTokens(value: unknown): number | undefined {
+  const rt = positiveNumber(value);
+  return rt !== undefined && rt <= MAX_RESERVE_TOKENS ? rt : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

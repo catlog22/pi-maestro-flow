@@ -12,6 +12,7 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { basename } from "node:path";
+import { stripVTControlCharacters } from "node:util";
 import {
 	deriveWorkflowViewModel,
 	type WorkflowSnapshotLike,
@@ -174,14 +175,17 @@ function renderAutoCompactionMode(value: string | undefined, width: number): str
 function renderContextPressure(value: string | undefined, width: number): string {
 	if (!value) return "";
 	const normalized = value.replace(/^CTX\s+/i, "").trim();
-	const match = /^(NUDGE|AUTO-PRUNE|CRITICAL|COMPACT)\s+(\d+)\/(\d+)(?:\s+-(\d+))?$/i.exec(normalized);
+	// Pruned count carries an optional /<amount> suffix (e.g. -3/-4.2k); trailing
+	// reasons (prunable:42% cache:88% …) are captured whole and appended where they fit.
+	const match = /^(NUDGE|AUTO-PRUNE|CRITICAL|COMPACT)\s+(\d+)\/(\d+)(?:\s+-(\d+)(?:\/(\S+))?)?(?:\s+(.+))?$/i.exec(normalized);
 	if (!match) return "";
 	const band = match[1].toUpperCase();
-	const pruned = match[4] ? ` -${match[4]}` : "";
+	const pruned = match[4] ? ` -${match[4]}${match[5] ? `/${match[5]}` : ""}` : "";
+	const reasons = match[6]?.trim() ? ` ${match[6].trim()}` : "";
 	const text = width >= 80
-		? `CTX ${band} ${match[2]}/${match[3]}${pruned}`
+		? `CTX ${band} ${match[2]}/${match[3]}${pruned}${reasons}`
 		: width >= 48
-			? `CTX ${band === "AUTO-PRUNE" ? "PRUNE" : band}${pruned}`
+			? `CTX ${band === "AUTO-PRUNE" ? "PRUNE" : band}${pruned}${reasons}`
 			: band === "AUTO-PRUNE" ? `CTX PRUNE${pruned}` : `CTX ${band}${pruned}`;
 	const color = band === "CRITICAL" || band === "COMPACT" ? COLORS.ctxCrit : band === "AUTO-PRUNE" ? COLORS.ctxAlert : COLORS.ctxWarn;
 	return `${ansiFg(color)}${text}${ANSI_RESET}`;
@@ -359,6 +363,7 @@ export function renderSwarmStatusline(value: string | undefined, width: number):
 const GIT_REFRESH_INTERVAL = 30_000;
 const GIT_DEBOUNCE_MS = 500;
 const WIDTH_POLL_INTERVAL = 250;
+const WORKFLOW_STATUS_KEY = "maestro-workflow";
 export function installStatusline(
 	pi: ExtensionAPI,
 	getMaestroState: () => MaestroState,
@@ -383,6 +388,14 @@ export function installStatusline(
 
 	function invalidate(): void {
 		invalidateFn?.();
+	}
+
+	function publishWorkflowStatus(ctx: ExtensionContext): void {
+		const workflow = deriveWorkflowViewModel(getWorkflowSnapshot());
+		ctx.ui.setStatus(
+			WORKFLOW_STATUS_KEY,
+			workflow ? stripVTControlCharacters(renderWorkflowStatusline(workflow, 120)) : undefined,
+		);
 	}
 
 	function addTokenUsage(message: MessageWithUsage | undefined): void {
@@ -523,6 +536,7 @@ export function installStatusline(
 
 		// Footer must install synchronously — before any await
 		installFooter(ctx);
+		publishWorkflowStatus(ctx);
 
 		// Fire-and-forget async git refresh
 		refreshGit(pi, sessionCwd).then((git) => {
@@ -543,7 +557,8 @@ export function installStatusline(
 
 	});
 
-	pi.on("session_shutdown", () => {
+	pi.on("session_shutdown", (_event, ctx) => {
+		ctx.ui.setStatus(WORKFLOW_STATUS_KEY, undefined);
 		sessionGeneration += 1;
 		footerGeneration += 1;
 		disposed = true;
@@ -555,6 +570,7 @@ export function installStatusline(
 	pi.on("session_tree", (_event, ctx) => {
 		// Tree rewind/branch switch invalidates the incremental token baseline.
 		rebuildTokenUsage(ctx);
+		publishWorkflowStatus(ctx);
 		// Reinstall footer on session tree change
 		installFooter(ctx);
 	});
@@ -587,6 +603,7 @@ export function installStatusline(
 		if (usage?.percent != null) {
 			rs.contextPercent = usage.percent;
 		}
+		publishWorkflowStatus(ctx);
 		invalidate();
 	});
 
@@ -597,6 +614,7 @@ export function installStatusline(
 		}
 		// Debounced git refresh after tool completes (may have edited files)
 		scheduleGitRefresh(footerGeneration);
+		publishWorkflowStatus(ctx);
 		invalidate();
 	});
 
@@ -609,6 +627,7 @@ export function installStatusline(
 		if (usage?.percent != null) {
 			rs.contextPercent = usage.percent;
 		}
+		publishWorkflowStatus(ctx);
 		invalidate();
 	});
 }

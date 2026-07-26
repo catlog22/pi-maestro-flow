@@ -74,6 +74,10 @@ function createHarness(options: {
       },
     },
     ui: {
+      setStatus(key: string, value: string | undefined) {
+        if (value === undefined) statuses.delete(key);
+        else statuses.set(key, value);
+      },
       setFooter(factory: Function) {
         component?.dispose?.();
         component = factory({
@@ -574,6 +578,55 @@ test("statusline renders context pressure across full compact and narrow widths"
   }
 });
 
+test("statusline renders reason-bearing context pressure without dropping the line", () => {
+  const harness = createHarness();
+  try {
+    harness.statuses.set("mode", "ACT");
+    harness.statuses.set("maestro-auto-compact-mode", "AUTO ON");
+
+    // Reason-bearing status: band + telemetry must be visible, not silently dropped.
+    harness.statuses.set("maestro-auto-compact", "CTX AUTO-PRUNE 140000/180000 -3 prunable:42% cache:88%");
+    assert.equal(harness.render(120).length, 2);
+    const wide = stripAnsi(harness.render(120)[1]);
+    assert.match(wide, /CTX AUTO-PRUNE 140000\/180000 -3/);
+    assert.match(wide, /prunable:42%/);
+    assert.match(wide, /cache:88%/);
+    // Mid tier keeps the band and appends reasons where they fit.
+    const mid = stripAnsi(harness.render(70)[1]);
+    assert.match(mid, /CTX PRUNE -3/);
+    assert.match(mid, /cache:88%/);
+    // Narrowest tier stays minimal — band only, no reasons.
+    const narrow = stripAnsi(harness.render(36)[1]);
+    assert.match(narrow, /CTX PRUNE -3/);
+    assert.doesNotMatch(narrow, /prunable|cache:/);
+
+    // NUDGE with reasons but no pruned count still renders.
+    harness.statuses.set("maestro-auto-compact", "CTX NUDGE 130000/180000 prunable:31%");
+    const nudge = stripAnsi(harness.render(120)[1]);
+    assert.match(nudge, /CTX NUDGE 130000\/180000/);
+    assert.match(nudge, /prunable:31%/);
+
+    // Reason-less status still renders exactly as before (no regression).
+    harness.statuses.set("maestro-auto-compact", "CTX AUTO-PRUNE 82000/90000 -3");
+    assert.equal(stripAnsi(harness.render(120)[1]), "CTX AUTO-PRUNE 82000/90000 -3");
+
+    // O7 forward-compat: pruned segment with /<amount> suffix must not break the parse.
+    harness.statuses.set("maestro-auto-compact", "CTX AUTO-PRUNE 140000/180000 -3/-4.2k prunable:42% cache:88%");
+    const withAmount = stripAnsi(harness.render(120)[1]);
+    assert.match(withAmount, /CTX AUTO-PRUNE 140000\/180000 -3\/-4.2k/);
+    assert.match(withAmount, /cache:88%/);
+
+    // Every reason-bearing tier must respect its width budget.
+    for (let width = 1; width <= 120; width++) {
+      for (const line of harness.render(width)) {
+        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+      }
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("statusline renders canonical Session/Run separately from active tool calls", () => {
   const harness = createHarness({
     activeToolCalls: 2,
@@ -629,6 +682,7 @@ test("statusline renders canonical Session/Run separately from active tool calls
     assert.match(full[1], /⚑ auth-m1/);
     assert.match(full[1], /! blocked/);
     assert.match(full[1], /003\/plan/);
+    assert.match(harness.statuses.get("maestro-workflow") ?? "", /auth-m1.*003\/plan/);
     assert.doesNotMatch(full.join("\n"), /milestone|phase/i);
     const narrow = stripAnsi(harness.render(40)[1]);
     assert.match(narrow, /^⚑ auth-m1/, "session label leads the narrow workflow line");
