@@ -69,6 +69,7 @@ import type {
   ActiveAgent,
   AgentProgress,
   ChildAgentCallSnapshot,
+  Details,
   SingleResult,
   TeammateState,
 } from "../src/shared/types.ts";
@@ -76,12 +77,7 @@ import type {
 type PublicToolResult = {
   content: Array<{ type: "text"; text: string }>;
   isError?: boolean;
-  details: {
-    results: SingleResult[];
-    progress?: Array<{ status: string }>;
-    childCalls?: ChildAgentCallSnapshot[];
-    structuredOutput?: unknown;
-  };
+  details: Details;
 };
 
 type RegisteredTeammateTool = {
