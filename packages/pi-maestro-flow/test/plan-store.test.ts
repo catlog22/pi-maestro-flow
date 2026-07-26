@@ -567,6 +567,11 @@ test("A stale former owner cannot remove a replacement owner's lock or pending a
       lockRetryMs: 2,
       lockTimeoutMs: 1_000,
       isProcessAlive: () => false,
+      // Every other lock test stubs this. Without it each acquisition resolves the
+      // real process identity, which on Windows is a PowerShell subprocess — seconds
+      // of wall clock against a 20ms staleness budget, so the handoff being tested
+      // races against subprocess latency instead of against the other owner.
+      getProcessIdentity: () => "test-process:current",
     };
     const oldStore = new PlanStore(cwd, {
       ...baseOptions,

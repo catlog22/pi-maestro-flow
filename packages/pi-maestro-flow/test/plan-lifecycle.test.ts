@@ -213,23 +213,28 @@ async function executeCommand(harness: ReturnType<typeof createHarness>, name: s
   await command.handler(args, harness.ctx);
 }
 
-test("Plan lifecycle keeps non-editing tools and restores the exact Act snapshot", async () => {
+test("Plan lifecycle leaves the tool surface untouched across every transition", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-lifecycle-"));
   const harness = createHarness(root);
   try {
     await onSessionStartPlan(harness.ctx);
     assert.equal(harness.statuses.at(-1), "ACT");
     const actSnapshot = [...harness.active];
-    assert.deepEqual(actSnapshot, ["Read", "Write", "Bash", "todo", "custom-tool", "plan-enter"]);
+    // Session start is the one point that touches the surface, and it only tops
+    // up the Plan tools so all six stay callable in both modes.
+    for (const tool of ["plan-enter", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status"]) {
+      assert.ok(actSnapshot.includes(tool), `expected ${tool} on the Act surface`);
+    }
+    assert.ok(actSnapshot.includes("Write"));
 
     await execute(harness, "plan-enter");
     assert.equal(getMode(), "plan");
     assert.equal(harness.statuses.at(-1), "PLAN");
-    assert.deepEqual(harness.active, [
-      "Read", "Bash", "todo", "custom-tool", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status",
-    ]);
-    assert.match(onToolCallPlan({ toolName: "maestro", input: { action: "delegate" } })?.reason ?? "", /requires delegate mode='analysis'/);
-    assert.equal(onToolCallPlan({ toolName: "maestro", input: { action: "delegate", mode: "analysis" } }), undefined);
+    // 2e7c19b2 made Plan mode prompt-only: swapping the surface here would
+    // invalidate the cached prompt prefix, so Write stays callable and the
+    // editing constraint is carried by the mode note instead of by a block.
+    assert.deepEqual(harness.active, actSnapshot);
+    assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
 
     const updated = await execute(harness, "plan-update", { markdown: "# Durable plan" });
     assert.equal(updated.details.revision, 1);
@@ -294,7 +299,7 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     await execute(harness, "plan-update", { markdown: "# Approved\n\nImplement safely" });
     const confirmed = await execute(harness, "plan-confirm");
     assert.equal(confirmed.details.approved, true);
-    assert.equal(confirmed.details.handoffStatus, "goal-required");
+    assert.equal(confirmed.details.handoffStatus, "todo-required");
     assert.equal(getMode(), "act");
     assert.equal(harness.statuses.at(-1), "ACT");
     assert.deepEqual(harness.active, actSnapshot);
@@ -317,25 +322,16 @@ test("Plan confirmation archives the exact draft before restoring Act and inject
     assert.ok(loaded.manifest.approvedPath);
     assert.equal(await readFile(join(store.plansDir, loaded.manifest.approvedPath!), "utf8"), "# Approved\n\nImplement safely");
 
-    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /Approved Plan handoff/);
-    assert.equal(onToolCallPlan({ toolName: "goal", input: { action: "get" } }), undefined);
-    const goalCreate = { action: "create", objective: "Execute approved plan" };
-    assert.equal(onToolCallPlan({ toolName: "goal", input: goalCreate }), undefined);
-    assert.equal(goalCreate.planHandoffKey, loaded.manifest.handoffKey);
-    assert.match(onToolCallPlan({ toolName: "todo", input: { action: "create", subject: "Implement" } })?.reason ?? "", /active Goal/);
-    harness.handoff.goalKey = "unrelated-goal";
-    harness.handoff.todoKeys.push("unrelated-goal");
-    assert.equal(getPlanHandoffStatus(), "goal-required");
-    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /Approved Plan handoff/);
-    harness.handoff.goalKey = loaded.manifest.handoffKey;
+    // The handoff gate reports readiness, it no longer enforces it: a5b0d8b7 made
+    // Plan mode advisory and onToolCallPlan blocks nothing. What survives is the
+    // discrimination itself — only a todo carrying this approval's handoff key
+    // satisfies the gate, and an unrelated one must not.
+    assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
     assert.equal(getPlanHandoffStatus(), "todo-required");
-    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /Approved Plan handoff/);
-    const todoCreate = { action: "create", subject: "Implement" };
-    assert.equal(onToolCallPlan({ toolName: "todo", input: todoCreate }), undefined);
-    assert.equal(todoCreate.planHandoffKey, loaded.manifest.handoffKey);
+    harness.handoff.todoKeys.push("unrelated-handoff");
+    assert.equal(getPlanHandoffStatus(), "todo-required");
     harness.handoff.todoKeys.push(loaded.manifest.handoffKey!);
     assert.equal(getPlanHandoffStatus(), "ready");
-    assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -383,7 +379,12 @@ test("/plan approve fires the mode-change listener so the approval statusline re
   }
 });
 
-test("Approved Plan handoff lets goal update resume a paused bound Goal", async () => {
+// Was "Approved Plan handoff lets goal update resume a paused bound Goal", which
+// 39a5f2dc invalidated by decoupling the gate from Goal state. Inverted rather than
+// deleted: the decoupling itself is worth pinning, since src/tools/plan.ts still
+// carries activeGoalHandoffKey and pausedGoalHandoffKey with no consumer left, and
+// a future reader could easily wire them back into the gate by mistake.
+test("Approved Plan handoff is decided by todos alone, not by Goal state", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-handoff-resume-"));
   const harness = createHarness(root, true);
   harness.ctx.isIdle = () => false;
@@ -402,23 +403,17 @@ test("Approved Plan handoff lets goal update resume a paused bound Goal", async 
     const handoffKey = loaded.manifest.handoffKey!;
     assert.ok(handoffKey);
 
+    // Neither a paused bound Goal nor an active one moves the gate any more.
     harness.handoff.goalKey = undefined;
     harness.handoff.pausedGoalKey = handoffKey;
-    assert.equal(getPlanHandoffStatus(), "goal-required");
-
-    assert.equal(onToolCallPlan({ toolName: "goal", input: { action: "update", objective: "Resume" } }), undefined);
-    assert.match(
-      onToolCallPlan({ toolName: "todo", input: { action: "next" } })?.reason ?? "",
-      /active Goal/,
-    );
-    assert.match(
-      onToolCallPlan({ toolName: "goal", input: { action: "create", objective: "Other" } })?.reason ?? "",
-      /paused|handoff/i,
-    );
-
+    assert.equal(getPlanHandoffStatus(), "todo-required");
     harness.handoff.goalKey = handoffKey;
     harness.handoff.pausedGoalKey = undefined;
     assert.equal(getPlanHandoffStatus(), "todo-required");
+
+    // Only an executable todo carrying the handoff key does.
+    harness.handoff.todoKeys.push(handoffKey);
+    assert.equal(getPlanHandoffStatus(), "ready");
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -491,8 +486,7 @@ test("Plan confirmation can execute in a new session from command-capable contex
     assert.equal(harness.newSessions, 1);
     assert.equal(harness.messages.length, 1);
     assert.match(harness.messages.at(-1) ?? "", /# Clean Context Plan/);
-    assert.equal(getPlanHandoffStatus(), "goal-required");
-    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /Approved Plan handoff/);
+    assert.equal(getPlanHandoffStatus(), "todo-required");
     const replacementStore = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
       session: { id: "clear-chat-replacement" },
@@ -536,10 +530,17 @@ for (const failure of ["approval", "send"] as const) {
       const confirmed = await execute(harness, "plan-confirm");
       assert.equal(confirmed.details.approved, true);
       assert.equal(harness.newSessions, 1);
-      assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /blocks|handoff/i);
+      // "Fails closed" no longer means a Write block — a5b0d8b7 removed those. For
+      // an approval failure it means the replacement lands back in Plan mode with no
+      // handoff key; for a send failure the approval stands but the gate cannot be
+      // satisfied, because no todo ever received the key the undelivered prompt carried.
+      assert.notEqual(getPlanHandoffStatus(), "ready");
+      assert.equal(getMode(), failure === "approval" ? "plan" : "act");
       assert.match(
         harness.notifications.join("\n"),
-        failure === "approval" ? /failed closed in Plan mode/ : /write-gated.*prompt could not be delivered/,
+        failure === "approval"
+          ? /failed closed in Plan mode/
+          : /holds the approved Plan.*prompt could not be delivered/,
       );
     } finally {
       onSessionShutdownPlan(harness.ctx);
@@ -698,7 +699,6 @@ test("Approval failure leaves Plan mode and Plan tools active", async () => {
     assert.equal(getMode(), "plan");
     assert.equal(harness.statuses.at(-1), "READY");
     assert.ok(harness.active.includes("plan-confirm"));
-    assert.ok(!harness.active.includes("Write"));
     const store = new PlanStore(harness.ctx.cwd, {
       rootDir: join(root, "global"),
       session: { id: harness.ctx.sessionManager.getSessionId() },
@@ -710,7 +710,7 @@ test("Approval failure leaves Plan mode and Plan tools active", async () => {
   }
 });
 
-test("Plan hooks keep compatibility capture, block editing tools, and allow shell commands", async () => {
+test("Plan hooks keep compatibility capture and gate nothing at the tool-call layer", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-hooks-"));
   const harness = createHarness(root);
   try {
@@ -724,25 +724,15 @@ test("Plan hooks keep compatibility capture, block editing tools, and allow shel
     assert.match(planPrompt, /Ask 2-4 related questions per call/);
     assert.match(planPrompt, /scope, boundaries, non-goals/);
     assert.match(planPrompt, /quality gates to key Todos/);
-    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /blocks/);
-    assert.match(onToolCallPlan({ toolName: "Edit", input: {} })?.reason ?? "", /blocks/);
-    assert.match(onToolCallPlan({ toolName: "NotebookEdit", input: {} })?.reason ?? "", /blocks/);
-    assert.equal(onToolCallPlan({ toolName: "custom-tool", input: {} }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "search_tool_bm25", input: { query: "browser" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "lsp", input: { action: "diagnostics", file: "src/app.ts" } }), undefined);
-    assert.equal(onToolCallPlan({ toolName: "lsp", input: { action: "code_actions", file: "src/app.ts", apply: false } }), undefined);
-    assert.match(onToolCallPlan({ toolName: "lsp", input: { action: "rename", file: "src/app.ts", new_name: "next" } })?.reason ?? "", /may modify files/);
-    assert.match(onToolCallPlan({ toolName: "lsp", input: { action: "code_actions", file: "src/app.ts", apply: true } })?.reason ?? "", /may modify files/);
-    assert.match(onToolCallPlan({ toolName: "browser", input: { action: "open", url: "https:\/\/example.com" } })?.reason ?? "", /blocks browser control/);
-    for (const toolName of ["bash", "Bash", "powershell", "PowerShell"]) {
+    // a5b0d8b7 removed every hard block: the editing constraint now lives only in
+    // the prompt above. The hook stays wired so the extension keeps a seam, but it
+    // must pass everything through — including the tools it used to reject, since a
+    // partial block would be worse than none (the model would learn the wrong rule).
+    for (const toolName of ["Write", "Edit", "NotebookEdit", "custom-tool", "bash", "Bash", "browser"]) {
       assert.equal(onToolCallPlan({ toolName, input: {} }), undefined, toolName);
-      assert.equal(onToolCallPlan({ toolName, input: { command: "touch src/app.ts" } }), undefined, toolName);
     }
-    for (const action of ["status", "brief", "prepare", "check"]) {
+    for (const action of ["status", "next", "done", "edit", "pause", "resume"]) {
       assert.equal(onToolCallPlan({ toolName: "run-control", input: { action } }), undefined, action);
-    }
-    for (const action of ["next", "done", "edit", "pause", "resume"]) {
-      assert.match(onToolCallPlan({ toolName: "run-control", input: { action } })?.reason ?? "", /blocks/, action);
     }
 
     await onAgentEndPlan({
@@ -766,20 +756,18 @@ test("Approved Plan handoff gate is restored from the manifest after restart", a
     await execute(first, "plan-enter");
     await execute(first, "plan-update", { markdown: "# Restart handoff" });
     const confirmed = await execute(first, "plan-confirm");
-    assert.equal(getPlanHandoffStatus(), "goal-required");
+    assert.equal(getPlanHandoffStatus(), "todo-required");
     const handoffKey = confirmed.details.handoffKey as string;
     onSessionShutdownPlan(first.ctx);
 
     const second = createHarness(root, false, false, false, false, "handoff-chat", undefined, false, binding);
     await onSessionStartPlan(second.ctx);
     assert.equal(getMode(), "act");
-    assert.equal(getPlanHandoffStatus(), "goal-required");
-    assert.match(onToolCallPlan({ toolName: "Write", input: {} })?.reason ?? "", /Approved Plan handoff/);
-    binding.goalKey = handoffKey;
+    // The point of the test: the restart recovers the handoff key from the manifest,
+    // so the gate is still unsatisfied afterwards rather than silently reset to "none".
     assert.equal(getPlanHandoffStatus(), "todo-required");
     binding.todoKeys.push(handoffKey);
     assert.equal(getPlanHandoffStatus(), "ready");
-    assert.equal(onToolCallPlan({ toolName: "Write", input: {} }), undefined);
     onSessionShutdownPlan(second.ctx);
   } finally {
     onSessionShutdownPlan(first.ctx);
@@ -863,7 +851,12 @@ test("Session restart stays in Act and resumes the persisted draft only after pl
     await onSessionStartPlan(second.ctx);
     assert.equal(getMode(), "act");
     assert.equal(second.statuses.at(-1), "ACT");
-    assert.deepEqual(second.active, ["Read", "Write", "todo", "custom-tool", "plan-enter"]);
+    // A restart tops the Plan tools up onto whatever surface the host declares; it
+    // never removes anything, so Write survives here exactly as it does in Plan mode.
+    assert.ok(second.active.includes("Write"));
+    for (const tool of ["plan-enter", "plan-update", "plan-review", "plan-confirm", "plan-exit", "plan-status"]) {
+      assert.ok(second.active.includes(tool), `expected ${tool} after restart`);
+    }
     await execute(second, "plan-enter");
     const status = await execute(second, "plan-status");
     assert.equal(status.details.status, "draft");

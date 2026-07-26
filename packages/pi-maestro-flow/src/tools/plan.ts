@@ -360,7 +360,9 @@ async function reviewPlan(
       pathLabel: store.currentPath,
       canClearContext: typeof ctx.newSession === "function",
       canCompactContext: handoffDelivery !== "tool-result",
-      contextPercent: ctx.getContextUsage?.()?.percent,
+      // ContextUsage.percent is number | null; the overlay treats "unknown" as
+      // absent, so collapse null into undefined rather than widening its type.
+      contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
     });
     if (action === "modify") {
       await editPlan(ctx, store.currentPath);
@@ -522,7 +524,7 @@ async function startImplementation(
             await newCtx.sendUserMessage(portableMessage);
           } catch (error) {
             replacementCtx.ui.notify(
-              `Replacement session is write-gated, but its execution prompt could not be delivered: ${errorMessage(error)}`,
+              `Replacement session holds the approved Plan, but its execution prompt could not be delivered: ${errorMessage(error)}`,
               "error",
             );
           }
@@ -733,329 +735,6 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   }
 }
 
-function readCommand(input: unknown): string {
-  if (!input || typeof input !== "object") return "";
-  const record = input as Record<string, unknown>;
-  if (typeof record.command === "string") return record.command;
-  if (typeof record.cmd === "string") return record.cmd;
-  return "";
-}
-
-function executableShellSyntax(
-  command: string,
-  dialect: "posix" | "powershell",
-): { syntax: string; balanced: boolean } {
-  const syntax = command.split("");
-  let quote: "'" | '"' | undefined;
-  for (let index = 0; index < command.length; index++) {
-    const char = command[index];
-    if (quote === "'") {
-      syntax[index] = " ";
-      if (char === "'") quote = undefined;
-      continue;
-    }
-    if (quote === '"') {
-      if (char === '"') {
-        syntax[index] = " ";
-        quote = undefined;
-        continue;
-      }
-      if (dialect === "posix" && char === "\\" && /[$`"\\\r\n]/.test(command[index + 1] ?? "")) {
-        syntax[index] = " ";
-        if (index + 1 < command.length) syntax[++index] = " ";
-        continue;
-      }
-      if (dialect === "powershell" && char === "`") {
-        syntax[index] = " ";
-        if (index + 1 < command.length) syntax[++index] = " ";
-        continue;
-      }
-      if (char === "$" && command[index + 1] === "(") {
-        syntax[index] = "$";
-        syntax[++index] = "(";
-        continue;
-      }
-      syntax[index] = dialect === "posix" && char === "`" ? "`" : " ";
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      quote = char;
-      syntax[index] = " ";
-      continue;
-    }
-    if (dialect === "posix" && char === "\\") {
-      syntax[index] = " ";
-      if (index + 1 < command.length) syntax[++index] = " ";
-      continue;
-    }
-    if (dialect === "powershell" && char === "`") {
-      syntax[index] = " ";
-      if (index + 1 < command.length) syntax[++index] = " ";
-    }
-  }
-  return { syntax: syntax.join(""), balanced: quote === undefined };
-}
-
-function tokenizeShellCommands(command: string, dialect: "posix" | "powershell"): string[][] {
-  const segments: string[][] = [];
-  let tokens: string[] = [];
-  let token = "";
-  let quote: "'" | '"' | undefined;
-  const flushToken = () => {
-    if (token) tokens.push(token);
-    token = "";
-  };
-  const flushSegment = () => {
-    flushToken();
-    if (tokens.length > 0) segments.push(tokens);
-    tokens = [];
-  };
-  for (let index = 0; index < command.length; index++) {
-    const char = command[index];
-    if (quote) {
-      if (char === quote) {
-        quote = undefined;
-        continue;
-      }
-      const escape = dialect === "posix" ? "\\" : "`";
-      if (char === escape && quote === '"' && index + 1 < command.length) {
-        token += command[++index];
-        continue;
-      }
-      token += char;
-      continue;
-    }
-    if (char === "'" || char === '"') {
-      quote = char;
-      continue;
-    }
-    const escape = dialect === "posix" ? "\\" : "`";
-    if (char === escape && index + 1 < command.length) {
-      token += command[++index];
-      continue;
-    }
-    if (/\s/.test(char)) {
-      flushToken();
-      continue;
-    }
-    if (";|&(){}".includes(char)) {
-      flushSegment();
-      if (command[index + 1] === char) index++;
-      continue;
-    }
-    token += char;
-  }
-  flushSegment();
-  return segments;
-}
-
-const DIRECT_MUTATING_EXECUTABLES = new Set([
-  "rm", "rmdir", "mv", "cp", "mkdir", "touch", "chmod", "chown", "ln", "tee", "truncate", "dd",
-  "set-content", "add-content", "clear-content", "out-file", "remove-item", "move-item", "copy-item", "new-item", "rename-item",
-  "eval", "source", ".", "invoke-expression", "iex",
-]);
-
-function executableBasename(token: string): string {
-  return token.replaceAll("\\", "/").split("/").at(-1)?.toLowerCase() ?? "";
-}
-
-function unwrapCommand(tokens: string[]): { executable: string; args: string[] } | undefined {
-  let index = 0;
-  for (let depth = 0; depth < 6 && index < tokens.length; depth++) {
-    const executable = executableBasename(tokens[index]);
-    if (executable === "env" || executable === "env.exe") {
-      index++;
-      while (index < tokens.length && (tokens[index].startsWith("-") || /^[A-Za-z_]\w*=/.test(tokens[index]))) index++;
-      continue;
-    }
-    if (executable === "command") {
-      index++;
-      if (["-v", "-V"].includes(tokens[index] ?? "")) return undefined;
-      while (["-p", "--"].includes(tokens[index] ?? "")) index++;
-      continue;
-    }
-    if (executable === "sudo" || executable === "sudo.exe") {
-      index++;
-      while (index < tokens.length && tokens[index].startsWith("-")) {
-        const option = tokens[index++].split("=", 1)[0].toLowerCase();
-        if (["-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt", "-c", "--close-from"].includes(option)
-          && index < tokens.length && !tokens[index - 1].includes("=")) index++;
-      }
-      continue;
-    }
-    return { executable, args: tokens.slice(index + 1) };
-  }
-  return undefined;
-}
-
-function hasUnsafeCommandLaunch(command: string, dialect: "posix" | "powershell"): boolean {
-  for (const segment of tokenizeShellCommands(command, dialect)) {
-    const launch = unwrapCommand(segment);
-    if (!launch) continue;
-    const { executable, args } = launch;
-    if (DIRECT_MUTATING_EXECUTABLES.has(executable)) return true;
-    if (/^(?:(?:ba|z|da|k)?sh)(?:\.exe)?$/.test(executable)
-      && args.some((arg) => /^-[A-Za-z]*c[A-Za-z]*$/.test(arg))) return true;
-    if (/^(?:powershell|pwsh)(?:\.exe)?$/.test(executable)
-      && args.some((arg) => /^-(?:c|command|encodedcommand)$/i.test(arg))) return true;
-    if (/^cmd(?:\.exe)?$/.test(executable)
-      && args.some((arg) => /^\/(?:c|k)$/i.test(arg))) return true;
-    if (/^(?:node|deno|bun)(?:\.exe)?$/.test(executable)
-      && args.some((arg) => /^(?:-e|--eval)(?:=|$)/i.test(arg))) return true;
-    if (/^(?:python\d*(?:\.\d+)?|perl|ruby)(?:\.exe)?$/.test(executable)
-      && args.some((arg) => /^-[A-Za-z]*[ce][A-Za-z]*$/.test(arg))) return true;
-    const subcommand = args.find((arg) => !arg.startsWith("-"))?.toLowerCase();
-    if (["npm", "yarn", "pnpm", "bun", "pip"].includes(executable)
-      && subcommand && ["install", "uninstall", "update", "ci", "link", "publish", "version", "add", "remove", "upgrade"].includes(subcommand)) return true;
-    if (executable === "git" && subcommand
-      && ["add", "apply", "clean", "commit", "push", "pull", "merge", "rebase", "reset", "restore", "checkout", "switch", "stash", "cherry-pick", "revert", "init", "clone"].includes(subcommand)) return true;
-    if (executable === "maestro" && subcommand && ["install", "uninstall", "update"].includes(subcommand)) return true;
-  }
-  return false;
-}
-
-const READ_ONLY_EXECUTABLES = new Set([
-  "cat", "cut", "date", "df", "dir", "du", "echo", "fd", "file", "find", "get-childitem",
-  "get-content", "get-item", "get-location", "grep", "head", "hostname", "jq", "kill", "ls",
-  "measure-object", "printf", "pwd", "readlink", "resolve-path", "rg", "select-string", "sleep",
-  "sort", "stat", "tail", "test", "test-path", "tr", "true", "false", "type", "uniq", "wc",
-  "where", "which", "whoami", "write-output", "[",
-]);
-
-const READ_ONLY_GIT_SUBCOMMANDS = new Set([
-  "blame", "cat-file", "describe", "diff", "grep", "log", "ls-files", "ls-tree", "merge-base",
-  "name-rev", "rev-list", "rev-parse", "shortlog", "show", "status",
-]);
-
-const READ_ONLY_SCRIPT_PREFIX = /^(?:test|check|lint|typecheck|verify|validate|audit)(?::|$)/i;
-const MUTATING_SCRIPT_NAME = /(?:^|:)(?:fix|update|write|generate|prepare|install|publish)(?::|$)/i;
-const SAFE_NODE_SCRIPT = /(?:^|[\\/])(?:check|test|lint|verify|validate|audit)[\w.-]*\.(?:[cm]?js|ts)$/i;
-
-function firstSubcommand(args: string[]): { subcommand?: string; rest: string[] } {
-  const index = args.findIndex((arg) => !arg.startsWith("-"));
-  if (index < 0) return { rest: [] };
-  return { subcommand: args[index].toLowerCase(), rest: args.slice(index + 1) };
-}
-
-function isReadOnlyGitCommand(args: string[]): boolean {
-  const { subcommand, rest } = firstSubcommand(args);
-  if (!subcommand) return args.every((arg) => ["--version", "-v", "--help", "-h"].includes(arg));
-  if (READ_ONLY_GIT_SUBCOMMANDS.has(subcommand)) return true;
-  if (subcommand === "branch") {
-    if (rest.length === 0) return true;
-    if (rest.length === 1 && ["--show-current", "-a", "-r", "-v", "-vv"].includes(rest[0])) return true;
-    return ["--list", "-l"].includes(rest[0])
-      && rest.slice(1).every((arg) => !arg.startsWith("-"));
-  }
-  if (subcommand === "remote") {
-    if (rest.length === 0 || (rest.length === 1 && rest[0] === "-v")) return true;
-    if (rest[0] === "show") return rest.length === 2 && !rest[1].startsWith("-");
-    if (rest[0] === "get-url") {
-      const names = rest.slice(1).filter((arg) => !["--all", "--push"].includes(arg));
-      return names.length === 1 && !names[0].startsWith("-");
-    }
-    return false;
-  }
-  if (subcommand === "config") {
-    return ["--get", "--get-all", "--get-regexp", "--list", "--show-origin", "--show-scope"]
-      .includes(rest[0] ?? "");
-  }
-  if (subcommand === "tag") {
-    return rest.length === 0
-      || (["--list", "-l"].includes(rest[0]) && rest.slice(1).every((arg) => !arg.startsWith("-")));
-  }
-  if (subcommand === "worktree") return rest[0] === "list";
-  return false;
-}
-
-function isReadOnlyMaestroCommand(args: string[]): boolean {
-  const { subcommand, rest } = firstSubcommand(args);
-  if (!subcommand) return args.every((arg) => ["--version", "-v", "--help", "-h"].includes(arg));
-  if (["search", "load", "explore", "help"].includes(subcommand)) return true;
-  if (subcommand === "run") return ["prepare", "brief", "recall", "skill", "mutations", "status", "help"].includes(rest[0] ?? "");
-  if (subcommand === "session") return ["list", "show", "status"].includes(rest[0] ?? "");
-  if (subcommand === "spec") return ["health", "history"].includes(rest[0] ?? "");
-  if (subcommand === "delegate-config") return rest[0] === "show";
-  return rest.includes("--help") || rest.includes("-h");
-}
-
-function isReadOnlyPackageCommand(executable: string, args: string[]): boolean {
-  const { subcommand, rest } = firstSubcommand(args);
-  if (!subcommand) return args.every((arg) => ["--version", "-v", "--help", "-h"].includes(arg));
-  if (subcommand === "test") return !args.some((arg) => /^(?:-u|--updateSnapshot|--write)$/i.test(arg));
-  if (subcommand === "run") {
-    const script = rest[0] ?? "";
-    return READ_ONLY_SCRIPT_PREFIX.test(script) && !MUTATING_SCRIPT_NAME.test(script);
-  }
-  if (subcommand === "audit") return !args.some((arg) => /^(?:--fix|--force)$/i.test(arg));
-  if (subcommand === "list" || subcommand === "ls" || subcommand === "why" || subcommand === "outdated") return true;
-  return executable === "npm" && ["view", "show", "explain", "query", "prefix", "root"].includes(subcommand);
-}
-
-function isReadOnlyNodeCommand(args: string[]): boolean {
-  if (args.length === 0) return false;
-  if (args.every((arg) => ["--version", "-v", "--help", "-h"].includes(arg))) return true;
-  if (args[0] === "--test" || args.includes("--test")) {
-    return !args.some((arg) => /^(?:-u|--update-snapshots?|--test-update-snapshots?)$/i.test(arg));
-  }
-  const script = args.find((arg) => !arg.startsWith("-"));
-  return Boolean(script && SAFE_NODE_SCRIPT.test(script));
-}
-
-function isReadOnlyFindCommand(args: string[]): boolean {
-  return !args.some((arg) => /^(?:-delete|-exec|-execdir|-ok|-okdir|-fprint0?|-fprintf|-fls)$/i.test(arg));
-}
-
-function isReadOnlyCommandLaunch(executable: string, args: string[]): boolean {
-  if (READ_ONLY_EXECUTABLES.has(executable)) {
-    if (executable === "find") return isReadOnlyFindCommand(args);
-    if (executable === "sort") return !args.some((arg) => arg === "-o" || arg.startsWith("--output"));
-    if (executable === "date") return !args.some((arg) => /^(?:-s|--set)(?:=|$)/i.test(arg));
-    if (executable === "hostname") return args.length === 0 || args.every((arg) => arg.startsWith("-"));
-    return true;
-  }
-  if (executable === "git") return isReadOnlyGitCommand(args);
-  if (executable === "maestro") return isReadOnlyMaestroCommand(args);
-  if (["npm", "yarn", "pnpm", "bun"].includes(executable)) {
-    return isReadOnlyPackageCommand(executable, args);
-  }
-  if (["node", "node.exe"].includes(executable)) return isReadOnlyNodeCommand(args);
-  if (/^python\d*(?:\.\d+)?(?:\.exe)?$/.test(executable)) {
-    return args.length > 0 && args.every((arg) => ["--version", "-V", "--help", "-h"].includes(arg));
-  }
-  if (executable === "tsc" || executable === "tsc.exe") return args.includes("--noEmit");
-  if (executable === "eslint" || executable === "eslint.exe") return !args.includes("--fix");
-  if (executable === "prettier" || executable === "prettier.exe") return args.includes("--check");
-  return false;
-}
-
-function hasOnlyReadOnlyCommandLaunches(command: string, dialect: "posix" | "powershell"): boolean {
-  const segments = tokenizeShellCommands(command, dialect);
-  if (segments.length === 0) return false;
-  return segments.every((segment) => {
-    const launch = unwrapCommand(segment);
-    if (!launch) {
-      const executable = executableBasename(segment[0] ?? "");
-      return executable === "command" && ["-v", "-V"].includes(segment[1] ?? "");
-    }
-    return isReadOnlyCommandLaunch(launch.executable, launch.args);
-  });
-}
-
-function isSafeCommand(command: string, dialect: "posix" | "powershell"): boolean {
-  const trimmed = command.trim();
-  if (!trimmed) return false;
-  const parsed = executableShellSyntax(trimmed, dialect);
-  if (!parsed.balanced) return false;
-  const shellSyntax = parsed.syntax;
-  if (/\$\(/.test(shellSyntax) || (dialect === "posix" && /`/.test(shellSyntax))) return false;
-  if (/[<>]/.test(shellSyntax)) return false;
-  if (hasUnsafeCommandLaunch(trimmed, dialect)) return false;
-  if (MUTATING_BASH_PATTERNS.some((pattern) => pattern.test(shellSyntax))) return false;
-  if (SHELL_SIDE_EFFECT_ARGUMENTS.test(shellSyntax)) return false;
-  return hasOnlyReadOnlyCommandLaunches(trimmed, dialect);
-}
-
 function extractProposedPlan(text: string): string | undefined {
   return PROPOSED_PLAN_PATTERN.exec(text)?.[1]?.trim() || undefined;
 }
@@ -1085,22 +764,39 @@ function buildPlanEnterNote(): string {
   return [
     "<system-reminder>",
     "## Plan Mode Just Activated",
-    "Plan mode was activated (via user toggle or plan-enter). The tool surface has changed:",
-    "- Write tools (Edit, Write, NotebookEdit) are removed from the active tool set.",
-    "- Plan tools (plan-update, plan-review, plan-confirm, plan-exit, plan-status) are now available.",
-    "- Read, search, and exploration tools remain fully available.",
+    "Plan mode was activated (via user toggle or plan-enter). The tool surface is UNCHANGED —",
+    "mutating it mid-session would invalidate the cached prompt prefix, so plan mode is advisory:",
+    "- Do NOT edit files. Edit, Write, and NotebookEdit are still callable but are off-limits until",
+    "  the plan is approved — treat a call to any of them as a mistake, not as permission.",
+    "- Read, search, and exploration tools are the intended tools for this mode.",
+    "- Plan tools: plan-update, plan-review, plan-confirm, plan-exit, plan-status.",
     "",
     "Workflow: research → plan-update (persist draft) → plan-confirm (present to user) in the same turn.",
     "plan-confirm gives the user a choice (execute, modify, discuss, or exit) — it does NOT force execution.",
     "If the user wants changes: plan-update again, then plan-confirm again.",
     "plan-exit leaves Plan mode without approving; the draft is preserved.",
     "",
-    "Planning quality: ground decisions in codebase evidence, pressure-test assumptions before confirming,",
-    "use ask-user-question for user questions, lock scope/boundaries/acceptance before plan-confirm.",
-    "Approval decomposes the Plan into an ordered Todo graph; attach Goals to key Todos as quality gates.",
+    // Restored in full rather than condensed: 896d036f thinned this guidance on the
+    // premise that the tool panel was "the authoritative signal" for Plan mode, and
+    // 2e7c19b2 then removed the panel change altogether. This note is now the only
+    // channel, and being one-time it extends the cached prefix once instead of
+    // invalidating it per turn — so there is no cache argument for keeping it terse.
+    "Planning quality:",
+    "- Ground every decision in codebase evidence, not assumption.",
+    "- Align every user requirement with a planned outcome and a verifiable acceptance check.",
+    "- Run a Socratic pressure review before confirmation: challenge assumptions, contradictions,",
+    "  boundaries, failure cases, and integration effects with concrete code evidence.",
+    "- Use ask-user-question for every user question. Ask 2-4 related questions per call, grouped by",
+    "  one review branch; do not ask questions as plain assistant text.",
+    "- Keep reviewing until scope, boundaries, non-goals, requirements, and acceptance checks are",
+    "  explicitly locked; unresolved risks must stay visible.",
+    "- Keep the final Markdown to locked scope, boundaries, decisions, ordered outcomes, risks, and",
+    "  acceptance checks; omit interview logs and boilerplate.",
+    "- Approval decomposes the locked Plan into an ordered Todo graph; attach Goals as",
+    "  quality gates to key Todos (overall acceptance Goal last) before implementation.",
     "",
-    "This is a one-time notification. Subsequent turns will not modify the system prompt for plan mode.",
-    "The tool surface (write tools removed) is the authoritative signal that plan mode is active.",
+    "This is a one-time notification. Subsequent turns will not modify the system prompt for plan mode,",
+    "and nothing else will re-announce the mode — this reminder is the only signal you get.",
     "</system-reminder>",
   ].join("\n");
 }
