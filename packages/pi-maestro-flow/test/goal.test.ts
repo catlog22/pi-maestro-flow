@@ -792,6 +792,64 @@ test("Goal pauses after three inconclusive explicit completion attempts", async 
   }
 });
 
+test("Goal pauses after three consecutive verifier infrastructure errors", async () => {
+  let exitCode = 1;
+  setGoalVerifierRunnerForTest(async () => ({
+    exitCode,
+    messages: [{ role: "assistant", content: "verifier crashed" }],
+  }));
+  const notices: string[] = [];
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({
+    isIdle: () => false,
+    sessionManager: { getEntries: () => [] },
+    ui: { notify(message: string) { notices.push(message); }, setStatus() {} },
+  });
+
+  try {
+    await executeGoal({ action: "create", objective: "Bound verifier infrastructure faults" }, ctx);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await executeGoal({
+        action: "complete",
+        summary: `Completion attempt ${attempt + 1} against a broken verifier.`,
+      }, ctx);
+      // An infra fault is still not the Goal's fault: it must not spend the
+      // inconclusive budget, and it must not pause before the bound is reached.
+      assert.equal(getActiveGoal()?.status, "active");
+      assert.equal(getActiveGoal()?.verificationFailures ?? 0, 0);
+      assert.equal(getActiveGoal()?.infraErrorStreak, attempt + 1);
+    }
+
+    await executeGoal({ action: "complete", summary: "Third attempt against a broken verifier." }, ctx);
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.infraErrorStreak, 3);
+    assert.equal(getActiveGoal()?.verificationFailures ?? 0, 0);
+    assert.ok(
+      notices.some((message) => /infrastructure error 3 times in a row/.test(message)),
+      `expected a distinct infra-failure notice, got ${JSON.stringify(notices)}`,
+    );
+    assert.ok(
+      !notices.some((message) => /inconclusive verification attempts/.test(message)),
+      "infra failures must not be reported as inconclusive verdicts",
+    );
+
+    await executeGoalCommand({ action: "resume" }, ctx);
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(getActiveGoal()?.infraErrorStreak, 0);
+
+    // A verdict that actually made it out of the verifier proves the infra is
+    // healthy again, so the streak restarts from zero rather than from 1.
+    exitCode = 0;
+    await executeGoal({ action: "complete", summary: "The verifier is reachable again." }, ctx);
+    assert.equal(getActiveGoal()?.infraErrorStreak, 0);
+    assert.equal(getActiveGoal()?.verificationFailures, 1);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalVerifierRunnerForTest(undefined);
+  }
+});
+
 test("contradictory verdict is normalized to an actionable fail that does not consume the failure budget", async () => {
   setGoalVerifierRunnerForTest(async () => ({
     exitCode: 0,
@@ -821,7 +879,7 @@ test("contradictory verdict is normalized to an actionable fail that does not co
   }
 });
 
-test("verifier infrastructure error does not consume the failure budget or pause the Goal", async () => {
+test("verifier infrastructure error does not consume the Goal's own failure budget", async () => {
   setGoalVerifierRunnerForTest(async () => ({
     exitCode: 1,
     messages: [{ role: "assistant", content: "Verifier crashed." }],
@@ -831,7 +889,12 @@ test("verifier infrastructure error does not consume the failure budget or pause
   onSessionStart(ctx);
   try {
     await executeGoal({ action: "create", objective: "Survive verifier infrastructure errors" }, ctx);
-    for (let attempt = 0; attempt < 4; attempt++) {
+    // Stays under the infra-error bound on purpose: this test owns the "not the
+    // Goal's fault" half of the contract. The bound itself is covered by
+    // "Goal pauses after three consecutive verifier infrastructure errors" —
+    // this loop used to run past it and assert the Goal never paused, which
+    // pinned the unbounded-retry defect in place.
+    for (let attempt = 0; attempt < 2; attempt++) {
       await executeGoal({ action: "complete", summary: `Attempt ${attempt + 1}.` }, ctx);
     }
     assert.equal(getActiveGoal()?.status, "active");
@@ -1679,7 +1742,10 @@ test("getBranch and getEntries evidence failures share UI recovery without consu
     try {
       await executeGoal({ action: "create", objective: `Recover ${method} collection failures` }, ctx);
       throwing = true;
-      for (let attempt = 1; attempt <= 3; attempt++) {
+      // Evidence-collection failure is an infra error, which is bounded; this test is
+      // about the shared recovery path (no runner start, no secret leak, no budget
+      // spend), so it deliberately stays under that bound.
+      for (let attempt = 1; attempt <= 2; attempt++) {
         const result = await executeGoal({
           action: "complete",
           summary: `Evidence collection attempt ${attempt}.`,
@@ -1792,7 +1858,7 @@ test("completion summary accepts 4000 characters and rejects 4001 before verifie
       "id", "text", "status", "pauseReason", "startedAt", "updatedAt", "iteration",
       "tokenBudget", "tokensUsed", "timeUsedSeconds", "baselineTokens", "workflowSessionId",
       "planHandoffKey", "workflowSessionGeneration", "verificationFailures",
-      "lastVerificationFailure", "acceptance",
+      "infraErrorStreak", "lastVerificationFailure", "acceptance",
       "prevTokensUsed", "lowProgressCount",
     ]);
     assert.ok(Object.keys(getActiveGoal() ?? {}).every((key) => allowedGoalFields.has(key)));

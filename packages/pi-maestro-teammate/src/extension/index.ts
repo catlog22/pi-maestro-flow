@@ -482,6 +482,7 @@ export async function switchConversationSession(
 
 interface AgentWidgetRow {
   correlationId: string;
+  parentCorrelationId?: string;
   label: string;
   agent: string;
   status: AgentProgressSnapshot["status"] | "sleeping";
@@ -628,6 +629,7 @@ function emitTeammateStarted(
     name: agent.name,
     spawnedBy: agent.spawnedBy,
     startedAt: agent.startedAt,
+    lastActivityAt: agent.lastActivityAt,
     status: agent.status,
   });
 }
@@ -842,12 +844,14 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
           status,
           action: status === "sleeping" ? "sleeping" : existing.action,
           startedAt: direct?.startedAt ?? existing.startedAt,
+          ...(direct?.spawnedBy ? { parentCorrelationId: direct.spawnedBy } : {}),
           ...(parent ? { parentLabel: labelFor(parent) } : {}),
         });
         continue;
       }
       rows.set(correlationId, {
         correlationId,
+        ...(direct?.spawnedBy ? { parentCorrelationId: direct.spawnedBy } : {}),
         label: progress?.name ?? direct?.name ?? active.name ?? correlationId.slice(0, 8),
         agent: progress?.agent ?? direct?.agent ?? active.agent,
         status,
@@ -886,31 +890,38 @@ export function renderAgentStatusWidget(
   theme: AgentWidgetTheme,
 ): string[] {
   const safeWidth = Math.max(1, width);
-  const rows = agentWidgetRows(agents);
-  if (rows.length === 0) return [];
-  const statusRank = (status: AgentWidgetRow["status"]): number => {
-    if (status === "failed") return 0;
-    if (status === "running") return 1;
-    if (status === "retrying") return 2;
-    if (status === "sleeping") return 3;
-    if (status === "pending") return 4;
-    return 5;
+  const activityOrder = (a: AgentWidgetRow, b: AgentWidgetRow): number =>
+    b.lastActivityAt - a.lastActivityAt || a.correlationId.localeCompare(b.correlationId);
+  const unorderedRows = agentWidgetRows(agents);
+  const byId = new Map(unorderedRows.map((row) => [row.correlationId, row]));
+  const children = new Map<string, AgentWidgetRow[]>();
+  const roots: AgentWidgetRow[] = [];
+  for (const row of unorderedRows) {
+    const parentId = row.parentCorrelationId;
+    if (!parentId || parentId === row.correlationId || !byId.has(parentId)) {
+      roots.push(row);
+      continue;
+    }
+    const siblings = children.get(parentId) ?? [];
+    siblings.push(row);
+    children.set(parentId, siblings);
+  }
+  roots.sort(activityOrder);
+  for (const siblings of children.values()) siblings.sort(activityOrder);
+  const rows: AgentWidgetRow[] = [];
+  const visited = new Set<string>();
+  const append = (row: AgentWidgetRow): void => {
+    if (visited.has(row.correlationId)) return;
+    visited.add(row.correlationId);
+    rows.push(row);
+    for (const child of children.get(row.correlationId) ?? []) append(child);
   };
-  rows.sort((a, b) => statusRank(a.status) - statusRank(b.status));
+  for (const root of roots) append(root);
+  for (const row of [...unorderedRows].sort(activityOrder)) append(row);
+  if (rows.length === 0) return [];
 
   const maxVisible = safeWidth < 20 ? 3 : safeWidth < 40 ? 4 : 6;
-  const required = new Set<AgentWidgetRow>();
-  const failedAnchor = rows.find((row) => row.status === "failed");
-  const running = rows.find((row) => row.status === "running");
-  const retrying = rows.find((row) => row.status === "retrying");
-  if (failedAnchor) required.add(failedAnchor);
-  if (running) required.add(running);
-  if (retrying) required.add(retrying);
-  for (const row of rows) {
-    if (required.size >= maxVisible) break;
-    required.add(row);
-  }
-  const visible = [...required].sort((a, b) => statusRank(a.status) - statusRank(b.status));
+  const visible = rows.slice(0, maxVisible);
   const hidden = rows.length - visible.length;
   const icon = (row: AgentWidgetRow): string => {
     if (row.status === "running") return theme.fg("success", "■");
@@ -2296,6 +2307,7 @@ export default function registerTeammateExtension(
           to: params.to,
           mode: "abort",
           message,
+          lastActivityAt: now,
           isSend: true,
         });
         const terminated = killAgentTree(state, cid);
@@ -2353,7 +2365,15 @@ export default function registerTeammateExtension(
       trimAgentBuffers(agent);
       agent.lastActivityAt = now;
 
-      pi.events.emit(TEAMMATE_MESSAGE_EVENT, { correlationId: cid, from: "caller", to: params.to, mode, message, isSend: true });
+      pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+        correlationId: cid,
+        from: "caller",
+        to: params.to,
+        mode,
+        message,
+        lastActivityAt: now,
+        isSend: true,
+      });
 
       const modeLabel = wasSleeping ? "woken up + prompt" : mode === "steer" ? "interrupted + injected" : "queued after current turn";
       return {
@@ -2604,6 +2624,7 @@ export default function registerTeammateExtension(
               to: label,
               mode: sendMode,
               message,
+              lastActivityAt: now,
               isSend: true,
             });
             return { ok: true, message: `Queued for ${label}` };
@@ -3082,13 +3103,6 @@ export default function registerTeammateExtension(
       widgetCtx.ui.setWidget("teammate-agents", undefined);
       return;
     }
-
-    // Sort: running first, sleeping last
-    visible.sort(([, a], [, b]) => {
-      if (a.status === "running" && b.status !== "running") return -1;
-      if (a.status !== "running" && b.status === "running") return 1;
-      return a.startedAt - b.startedAt;
-    });
 
     const agents = visible.map(([, agent]) => agent);
 
@@ -4442,6 +4456,7 @@ export async function handleChildInteractionRequest(
     interaction,
     requestId,
     action: result.action,
+    lastActivityAt: agent.lastActivityAt,
     isInteraction: true,
   });
   replyInteraction(reply, requestId, result);

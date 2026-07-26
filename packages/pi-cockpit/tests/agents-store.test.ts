@@ -12,6 +12,7 @@ test("started adds a running row with derived role and label", () => {
 	assert.equal(row.task, "scan auth");
 	assert.equal(row.status, "running");
 	assert.equal(row.startedAt, 1000);
+	assert.equal(row.lastActivityAt, 1000);
 });
 
 test("started preserves parent, source status and source start time", () => {
@@ -144,11 +145,42 @@ test("complete for unknown correlationId does not throw", () => {
 	assert.doesNotThrow(() => s.applyComplete({ correlationId: "nope" }));
 });
 
-test("snapshot orders running before others, then by startedAt", () => {
+test("snapshot orders by latest activity regardless of start time or status", () => {
 	const s = new AgentsStore();
-	s.applyStarted({ correlationId: "a", agent: "explorer" }, 300);
-	s.applyStarted({ correlationId: "b", agent: "executor" }, 100);
-	assert.deepEqual(s.snapshot().map((r) => r.correlationId), ["b", "a"]);
+	s.applyStarted({ correlationId: "older-active", agent: "explorer" }, 100);
+	s.applyStarted({ correlationId: "newer-idle", agent: "executor" }, 200);
+	s.applyMessage({ correlationId: "older-active", message: "new activity" }, 300);
+	assert.deepEqual(s.snapshot().map((r) => r.correlationId), ["older-active", "newer-idle"]);
+});
+
+test("activity timestamps prefer explicit values, fall back to receipt time, and tie-break by id", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "b", agent: "executor", lastActivityAt: 50 }, 1_000);
+	s.applyStarted({ correlationId: "a", agent: "executor", lastActivityAt: 50 }, 2_000);
+	s.applyStarted({ correlationId: "fallback", agent: "executor" }, 75);
+	assert.equal(s.snapshot().find((row) => row.correlationId === "b")?.lastActivityAt, 50);
+	assert.equal(s.snapshot().find((row) => row.correlationId === "fallback")?.lastActivityAt, 75);
+	assert.deepEqual(s.snapshot().map((row) => row.correlationId), ["fallback", "a", "b"]);
+});
+
+test("progress preserves explicit lastActivityAt and missing message timestamps use receipt time", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "root", agent: "graph(1)" }, 1);
+	s.applyStarted({ correlationId: "child", agent: "executor", spawnedBy: "root" }, 2);
+	s.applyMessage({
+		correlationId: "root",
+		taskCorrelationId: "child",
+		progress: [{
+			correlationId: "child",
+			agent: "executor",
+			taskIndex: 0,
+			status: "running",
+			lastActivityAt: 123,
+		}],
+	}, 999);
+	assert.equal(s.snapshot().find((row) => row.correlationId === "child")?.lastActivityAt, 123);
+	s.applyMessage({ correlationId: "root", message: "receipt fallback" }, 456);
+	assert.equal(s.snapshot().find((row) => row.correlationId === "root")?.lastActivityAt, 456);
 });
 
 test("parallel agents are both present", () => {
@@ -218,6 +250,7 @@ test("a failed agent survives its own completion so the failure can be read", ()
 	const row = s.snapshot(1_000)[0];
 	assert.equal(row.status, "failed");
 	assert.equal(row.tail, "build broke");
+	assert.equal(row.lastActivityAt, 1_000);
 	assert.ok(s.hasLingering());
 });
 

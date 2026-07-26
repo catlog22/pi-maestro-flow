@@ -25,6 +25,7 @@ export interface StartedPayload {
 	name?: string;
 	spawnedBy?: string;
 	startedAt?: number | string;
+	lastActivityAt?: number | string;
 	status?: string;
 }
 export interface ProgressPayload {
@@ -35,6 +36,7 @@ export interface ProgressPayload {
 	dependencies?: number[];
 	status?: string;
 	startedAt?: number | string;
+	lastActivityAt?: number | string;
 	recentTools?: Array<string | { name?: string; status?: string }>;
 	toolCount?: number;
 	tokens?: number;
@@ -51,6 +53,7 @@ export interface MessagePayload {
 	toolCount?: number;
 	tokens?: number;
 	status?: string;
+	lastActivityAt?: number | string;
 	progress?: ProgressPayload[];
 }
 export interface CompletePayload {
@@ -130,6 +133,7 @@ export class AgentsStore {
 			status: p.status === undefined ? prev?.status ?? "running" : mapAgentStatus(p.status),
 			tail: prev?.tail ?? "",
 			startedAt: prev?.startedAt ?? normalizeStartedAt(p.startedAt, now),
+			lastActivityAt: normalizeStartedAt(p.lastActivityAt, now),
 			...(p.spawnedBy && p.spawnedBy !== id
 				? { parentCorrelationId: p.spawnedBy }
 				: prev?.parentCorrelationId
@@ -138,13 +142,15 @@ export class AgentsStore {
 		});
 	}
 
-	applyMessage(p: MessagePayload): void {
+	applyMessage(p: MessagePayload, now = Date.now()): void {
 		if (p.progress) {
-			for (const progress of p.progress) this.applyProgress(p.correlationId, progress);
+			for (const progress of p.progress) this.applyProgress(p.correlationId, progress, now);
 		}
 		const targetId = p.taskCorrelationId ?? p.correlationId;
 		const row = this.roster.get(targetId);
 		if (!row) return;
+		const progressActivity = p.progress?.find((progress) => progress.correlationId === targetId)?.lastActivityAt;
+		row.lastActivityAt = normalizeStartedAt(p.lastActivityAt ?? progressActivity, now);
 		const tail = p.message ?? p.lastMessage;
 		if (typeof tail === "string" && tail.length > 0) row.tail = truncateTail(tail);
 		if (p.recentTools) {
@@ -178,6 +184,7 @@ export class AgentsStore {
 			const row = this.roster.get(id);
 			if (row?.status === "failed") {
 				row.failedAt = now;
+				row.lastActivityAt = now;
 				delete row.activeTool;
 			} else {
 				this.roster.delete(id);
@@ -205,7 +212,7 @@ export class AgentsStore {
 		return false;
 	}
 
-	private applyProgress(parentCorrelationId: string, p: ProgressPayload): void {
+	private applyProgress(parentCorrelationId: string, p: ProgressPayload, now: number): void {
 		const row = this.roster.get(p.correlationId);
 		if (!row) return;
 		row.parentCorrelationId = parentCorrelationId === p.correlationId
@@ -222,6 +229,7 @@ export class AgentsStore {
 		row.taskIndex = p.taskIndex;
 		row.dependencies = Array.isArray(p.dependencies) ? [...p.dependencies] : [];
 		if (p.startedAt !== undefined) row.startedAt = normalizeStartedAt(p.startedAt, row.startedAt);
+		row.lastActivityAt = normalizeStartedAt(p.lastActivityAt, now);
 		if (p.recentTools) {
 			const tool = latestTool(p.recentTools);
 			if (tool) row.activeTool = tool;
@@ -239,10 +247,8 @@ export class AgentsStore {
 		// already redrawn while anything is lingering, and nothing else has to know.
 		this.prune(now);
 		return [...this.roster.values()].sort((a, b) => {
-			const ar = a.status === "running" ? 0 : 1;
-			const br = b.status === "running" ? 0 : 1;
-			if (ar !== br) return ar - br;
-			return a.startedAt - b.startedAt;
+			const activity = b.lastActivityAt - a.lastActivityAt;
+			return activity || a.correlationId.localeCompare(b.correlationId);
 		});
 	}
 

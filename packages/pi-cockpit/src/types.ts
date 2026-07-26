@@ -32,6 +32,7 @@ export interface AgentRow {
 	status: AgentStatus;
 	tail: string;
 	startedAt: number;
+	lastActivityAt: number;
 	toolCount?: number;
 	tokens?: number;
 	taskStatus?: string;

@@ -89,6 +89,13 @@ export interface ActiveGoal {
   planHandoffKey?: string;
   workflowSessionGeneration?: string;
   verificationFailures?: number;
+  /**
+   * Consecutive verifier *infrastructure* errors, counted separately from
+   * verificationFailures so an unreachable verifier never spends the Goal's own
+   * failure budget — while still being bounded. Reset by any verdict that made it
+   * out of the verifier, and by resume.
+   */
+  infraErrorStreak?: number;
   lastVerificationFailure?: string;
   acceptance?: string[];
   prevTokensUsed?: number;
@@ -568,7 +575,7 @@ export function switchCurrentGoal(
   const target = goalRegistry.find((goal) => goal.id === goalId);
   if (!target) return undefined;
   activeGoal = opts.resume && target.status === "paused"
-    ? { ...target, status: "active", pauseReason: undefined, verificationFailures: 0, updatedAt: Date.now() }
+    ? { ...target, status: "active", pauseReason: undefined, verificationFailures: 0, infraErrorStreak: 0, updatedAt: Date.now() }
     : target;
   persistGoal(activeGoal);
   if (ctx) updateStatusLine(ctx, activeGoal);
@@ -1365,7 +1372,19 @@ async function verifyGoalCompletion(
   if (verdict.status === "error") {
     // Verifier infrastructure fault (non-zero exit, missing structured output,
     // evidence collection failure). This is not the Goal's fault, so it must not
-    // consume the failure budget; continue and let the model re-request completion.
+    // consume the failure budget — but it still needs a bound of its own. A
+    // persistent fault (teammate package absent, extension API uninitialized)
+    // otherwise leaves the Goal permanently un-completable, the Todo gate
+    // permanently closed, and the model retrying forever with no escalation.
+    const infraErrorStreak = (activeGoal.infraErrorStreak ?? 0) + 1;
+    if (infraErrorStreak >= MAX_VERIFICATION_FAILURES) {
+      activeGoal = pauseGoal({ ...activeGoal, infraErrorStreak });
+      persistGoal(activeGoal);
+      updateStatusLine(ctx, activeGoal);
+      ctx.ui.notify(`Goal paused: the verifier failed with an infrastructure error ${infraErrorStreak} times in a row, so completion cannot be checked. Fix the verifier, then use /goal resume.`, "warning");
+      return { status: "hold", reason: verdict.reasoning };
+    }
+    activeGoal = { ...activeGoal, infraErrorStreak };
     updateUsage(activeGoal, ctx);
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
@@ -1373,16 +1392,18 @@ async function verifyGoalCompletion(
     return { status: "continue", reason: verdict.reasoning };
   }
 
+  // Every branch below reached a real verdict, so the verifier is demonstrably
+  // healthy — the infra streak only bounds *consecutive* faults.
   if (verdict.status === "inconclusive") {
     const verificationFailures = (activeGoal.verificationFailures ?? 0) + 1;
     if (verificationFailures >= MAX_VERIFICATION_FAILURES) {
-      activeGoal = pauseGoal({ ...activeGoal, verificationFailures });
+      activeGoal = pauseGoal({ ...activeGoal, verificationFailures, infraErrorStreak: 0 });
       persistGoal(activeGoal);
       updateStatusLine(ctx, activeGoal);
       ctx.ui.notify(`Goal paused after ${verificationFailures} inconclusive verification attempts. Use /goal resume to retry.`, "warning");
       return { status: "hold", reason: verdict.reasoning };
     }
-    activeGoal = { ...activeGoal, verificationFailures };
+    activeGoal = { ...activeGoal, verificationFailures, infraErrorStreak: 0 };
     updateUsage(activeGoal, ctx);
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
@@ -1391,7 +1412,7 @@ async function verifyGoalCompletion(
   }
 
   if (verdict.status === "fail" || !verdict.pass) {
-    activeGoal = { ...activeGoal, verificationFailures: 0, lastVerificationFailure: boundedSecretText(verdict.reasoning + (verdict.unmet?.length ? ` Unmet: ${verdict.unmet.join("; ")}` : ""), 1_000) };
+    activeGoal = { ...activeGoal, verificationFailures: 0, infraErrorStreak: 0, lastVerificationFailure: boundedSecretText(verdict.reasoning + (verdict.unmet?.length ? ` Unmet: ${verdict.unmet.join("; ")}` : ""), 1_000) };
     updateUsage(activeGoal, ctx);
     persistGoal(activeGoal);
     updateStatusLine(ctx, activeGoal);
@@ -1409,7 +1430,7 @@ async function verifyGoalCompletion(
   }
 
   const goalText = activeGoal.text;
-  activeGoal = { ...activeGoal, status: "done", pauseReason: undefined, lastVerificationFailure: undefined, updatedAt: Date.now() };
+  activeGoal = { ...activeGoal, status: "done", pauseReason: undefined, infraErrorStreak: 0, lastVerificationFailure: undefined, updatedAt: Date.now() };
   updateUsage(activeGoal, ctx);
   persistGoal(activeGoal);
   const completedGoal = { ...activeGoal };
@@ -1491,6 +1512,7 @@ async function handleResume(
     status: "active",
     pauseReason: undefined,
     verificationFailures: 0,
+    infraErrorStreak: 0,
     lowProgressCount: 0,
     prevTokensUsed: activeGoal.tokensUsed,
     updatedAt: Date.now(),
@@ -1752,6 +1774,7 @@ function isGoal(v: unknown): v is ActiveGoal {
     (g.workflowSessionId === undefined || typeof g.workflowSessionId === "string") &&
     (g.workflowSessionGeneration === undefined || typeof g.workflowSessionGeneration === "string")
     && (g.verificationFailures === undefined || (typeof g.verificationFailures === "number" && g.verificationFailures >= 0))
+    && (g.infraErrorStreak === undefined || (typeof g.infraErrorStreak === "number" && g.infraErrorStreak >= 0))
     && (g.acceptance === undefined || (Array.isArray(g.acceptance) && g.acceptance.every((item) => typeof item === "string")))
     && (g.lastVerificationFailure === undefined || typeof g.lastVerificationFailure === "string")
     && (g.prevTokensUsed === undefined || typeof g.prevTokensUsed === "number")

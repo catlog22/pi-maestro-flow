@@ -1780,6 +1780,47 @@ test("persistent agent widget deduplicates graph progress and direct child rows"
   assert.match(output, /@pkg-info.*1 tools.*sleeping/);
 });
 
+test("persistent agent widget orders roots and siblings by latest activity without breaking parent-first traversal", () => {
+  const makeAgent = (
+    correlationId: string,
+    name: string,
+    lastActivityAt: number,
+    spawnedBy?: string,
+  ): ActiveAgent => ({
+    agent: "delegate",
+    name,
+    correlationId,
+    startedAt: 1,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt,
+    ...(spawnedBy ? { spawnedBy } : {}),
+    status: "running",
+    depth: 0,
+    sleepMs: 0,
+  });
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const output = renderAgentStatusWidget([
+    makeAgent("root-old", "root-old", 500),
+    makeAgent("root-new", "root-new", 400),
+    makeAgent("child-old", "child-old", 100, "root-old"),
+    makeAgent("child-new", "child-new", 300, "root-old"),
+    makeAgent("grandchild", "grandchild", 900, "child-new"),
+  ], 200, theme).join("\n");
+
+  assert.ok(output.indexOf("@root-old") < output.indexOf("@child-new"));
+  assert.ok(output.indexOf("@child-new") < output.indexOf("@grandchild"));
+  assert.ok(output.indexOf("@grandchild") < output.indexOf("@child-old"));
+  assert.ok(output.indexOf("@child-old") < output.indexOf("@root-new"));
+
+  const tied = renderAgentStatusWidget([
+    makeAgent("b", "tie-b", 50),
+    makeAgent("a", "tie-a", 50),
+  ], 200, theme).join("\n");
+  assert.ok(tied.indexOf("@tie-a") < tied.indexOf("@tie-b"));
+});
+
 test("persistent agent widget distinguishes child agents from result dependencies", () => {
   const now = Date.now();
   const parentId = "parent";

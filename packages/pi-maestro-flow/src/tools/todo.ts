@@ -692,7 +692,13 @@ async function handleUpdate(
       return err(`Quality gate Goal ${draft.goalId} for task #${draft.id} was not found; cannot verify completion.`, "update");
     }
     if (gate.status !== "done") {
-      return err(`Quality gate Goal not verified for task #${draft.id}: "${gate.text}". Complete the Goal (goal complete) to verify it before completing this task.`, "update");
+      // A paused Goal cannot be driven to done by `goal complete` — it has to be
+      // resumed first. Pointing at the wrong command is worst exactly when the
+      // Goal paused because its verifier kept erroring out.
+      const how = gate.status === "paused"
+        ? "Resume the Goal (/goal resume) and let it verify before completing this task."
+        : "Complete the Goal (goal complete) to verify it before completing this task.";
+      return err(`Quality gate Goal not verified for task #${draft.id}: "${gate.text}" (${gate.status}). ${how}`, "update");
     }
   }
 
