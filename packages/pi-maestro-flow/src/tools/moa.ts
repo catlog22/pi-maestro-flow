@@ -7,7 +7,7 @@
  *          context to synthesize a unified result.
  */
 
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { FlowToolResult } from "./tool-result.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { runTeammate } from "pi-maestro-teammate/v1/execution";
 import type { SingleResult } from "pi-maestro-teammate/v1/types";
@@ -50,7 +50,7 @@ export async function executeMoa(
   signal: AbortSignal,
   ctx: ExtensionContext,
   pi: ExtensionAPI,
-): Promise<AgentToolResult> {
+): Promise<FlowToolResult> {
   const prompts = params.prompts ?? [];
   const primaryPrompt = prompts[0];
 
@@ -60,6 +60,7 @@ export async function executeMoa(
         { type: "text", text: "No prompts provided for MOA action." },
       ],
       isError: true,
+      details: {},
     };
   }
 
@@ -81,8 +82,9 @@ export async function executeMoa(
             task: primaryPrompt,
             model,
             cwd: params.cwd,
+            background: false,
+            context: "fresh",
             reply_to: "caller",
-            lifecycle: "ephemeral",
           },
           createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
         );
@@ -116,6 +118,7 @@ export async function executeMoa(
     return {
       content: [{ type: "text", text: "MOA operation was aborted." }],
       isError: true,
+      details: {},
     };
   }
 
@@ -130,6 +133,7 @@ export async function executeMoa(
         },
       ],
       isError: true,
+      details: {},
     };
   }
 
@@ -147,8 +151,9 @@ export async function executeMoa(
         task: aggregationPrompt,
         model: params.model,
         cwd: params.cwd,
+        background: false,
+        context: "fresh",
         reply_to: "caller",
-        lifecycle: "ephemeral",
       },
       createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
     );
@@ -160,6 +165,7 @@ export async function executeMoa(
     return {
       content: [{ type: "text", text: lastMessage }],
       isError: aggregatorResult.exitCode !== 0,
+      details: {},
     };
   } catch (error) {
     // Fallback: return raw reference outputs if aggregation fails
@@ -175,6 +181,7 @@ export async function executeMoa(
         },
       ],
       isError: false,
+      details: {},
     };
   }
 }

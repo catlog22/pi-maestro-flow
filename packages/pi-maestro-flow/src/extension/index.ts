@@ -25,7 +25,8 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { FlowToolResult } from "../tools/tool-result.ts";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   MaestroParams,
@@ -154,6 +155,7 @@ import {
   registerTeammateChildExtension,
   registerTeammateChildToolBroker,
   registerTeammatePermissionBroker,
+  type TeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
 import { TEAMMATE_STARTED_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_COMPLETE_EVENT } from "pi-maestro-teammate/v1/types";
 
@@ -281,6 +283,44 @@ export function todoActorFromTeammateStarted(event: unknown): TodoActorRef | und
   };
 }
 
+function parseGoalActionParams(params: Record<string, unknown>): GoalActionParams | undefined {
+  const action = params.action;
+  if (action === "get") return { action };
+  if (action === "complete") {
+    return typeof params.summary === "string"
+      ? { action, summary: params.summary }
+      : undefined;
+  }
+  if (action !== "create" && action !== "update") return undefined;
+  if (typeof params.objective !== "string") return undefined;
+  const acceptance = params.acceptance;
+  if (acceptance !== undefined && (
+    !Array.isArray(acceptance)
+    || acceptance.some((command) => typeof command !== "string")
+  )) {
+    return undefined;
+  }
+  const validatedAcceptance = acceptance === undefined ? undefined : acceptance.filter(
+    (command): command is string => typeof command === "string",
+  );
+  if (action === "update") {
+    return {
+      action,
+      objective: params.objective,
+      acceptance: validatedAcceptance,
+    };
+  }
+  if (params.tokenBudget !== undefined && typeof params.tokenBudget !== "string") return undefined;
+  if (params.planHandoffKey !== undefined && typeof params.planHandoffKey !== "string") return undefined;
+  return {
+    action,
+    objective: params.objective,
+    tokenBudget: params.tokenBudget,
+    planHandoffKey: params.planHandoffKey,
+    acceptance: validatedAcceptance,
+  };
+}
+
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
   if (process.env.PI_TEAMMATE_CHILD === "1") {
     registerMaestroChildSurface(pi);
@@ -325,18 +365,20 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let teammateRegistrationGeneration = 0;
   let teammateRegistrationDisposers: Array<() => void> = [];
   const childTodoBroker = (request: Parameters<Parameters<typeof registerTeammateChildToolBroker>[1]>[0]) => {
-    const execute = async (): Promise<AgentToolResult> => {
+    const execute = async (): Promise<FlowToolResult> => {
       const ctx = todoRootContext;
       if (!ctx) {
         return {
           content: [{ type: "text", text: "Root Todo session is not available." }],
           isError: true,
+          details: {},
         };
       }
       if (!request.actor.correlationId || request.actor.correlationId === "unknown") {
         return {
           content: [{ type: "text", text: "Teammate Todo request has no trusted correlation id." }],
           isError: true,
+          details: {},
         };
       }
       const actor: TodoActorRef = {
@@ -432,10 +474,10 @@ When NOT to use:
       params: Record<string, unknown>,
       signal: AbortSignal,
       onUpdate:
-        | ((result: AgentToolResult) => void)
+        | ((result: FlowToolResult) => void)
         | undefined,
       ctx: ExtensionContext,
-    ): Promise<AgentToolResult> {
+    ): Promise<FlowToolResult> {
       const action = params.action as string;
 
       // Track run
@@ -480,6 +522,7 @@ When NOT to use:
                 },
               ],
               isError: true,
+              details: {},
             };
         }
       } finally {
@@ -562,13 +605,22 @@ Only request completion after all work is done; the extension verifies it indepe
       _id: string,
       params: Record<string, unknown>,
       _signal: AbortSignal,
-      _onUpdate: ((result: AgentToolResult) => void) | undefined,
+      _onUpdate: ((result: FlowToolResult) => void) | undefined,
       ctx: ExtensionContext,
-    ): Promise<AgentToolResult> {
-      const result = await executeGoal(params as GoalActionParams, ctx);
+    ): Promise<FlowToolResult> {
+      const goalParams = parseGoalActionParams(params);
+      if (!goalParams) {
+        return {
+          content: [{ type: "text", text: "Invalid Goal parameters for the requested action." }],
+          isError: true,
+          details: {},
+        };
+      }
+      const result = await executeGoal(goalParams, ctx);
       return {
         content: [{ type: "text", text: result.text }],
         isError: result.isError,
+        details: {},
       };
     },
 
@@ -645,9 +697,9 @@ Rules:
       _id: string,
       params: Record<string, unknown>,
       _signal: AbortSignal,
-      _onUpdate: ((result: AgentToolResult) => void) | undefined,
+      _onUpdate: ((result: FlowToolResult) => void) | undefined,
       ctx: ExtensionContext,
-    ): Promise<AgentToolResult> {
+    ): Promise<FlowToolResult> {
       return executeTodo(params as unknown as TodoParams, ctx);
     },
 
@@ -908,7 +960,7 @@ When NOT to use:
         failed: gates.filter((gate) => ["failed", "blocked"].includes(gate.status)).length,
       },
       artifactRefs: session.artifacts.map((artifact) => artifact.artifactId),
-      nextAction: handoffAction ?? snapshot.recovery?.message ?? `maestro run brief ${run.runId}`,
+      nextAction: handoffAction ?? `maestro run brief ${run.runId}`,
     };
   }
 
@@ -924,16 +976,15 @@ When NOT to use:
     }
 
     const activateWorkflowSession = shouldActivateWorkflowSession(next, workflowSessionOptedIn);
-    const nextAttachSessionId = activateWorkflowSession
-      ? next.session.sessionId
-      : undefined;
+    const nextSession = activateWorkflowSession ? next.session : undefined;
+    const nextAttachSessionId = nextSession?.sessionId;
     if (attachedWorkflowSessionId && attachedWorkflowSessionId !== nextAttachSessionId) {
       try { await workflowCoordinator?.fenceContinuation(); } catch { /* a lost lease is already fail-closed */ }
       await workflowCoordinator?.release();
       attachedWorkflowSessionId = undefined;
     }
-    if (emitEvents && activateWorkflowSession
-      && attachedWorkflowSessionId !== next.session!.sessionId) {
+    if (emitEvents && nextSession
+      && attachedWorkflowSessionId !== nextSession.sessionId) {
       await attachWorkflowSession(ctx, next);
     }
     reconcileMirrorTasks(
@@ -1416,7 +1467,7 @@ When NOT to use:
   const hookAdapter = registerCodexHookAdapter(pi, {
     getPermissionMode: () => isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
   });
-  const teammatePermissionBroker = async (call: Parameters<Parameters<typeof registerTeammatePermissionBroker>[0]>[0], ctx: ExtensionContext) => {
+  const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {
     const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
     if (planBlock) return { action: "deny", reason: planBlock.reason };
     const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
@@ -1436,7 +1487,7 @@ When NOT to use:
   // interactive approval prompt (ctx.ui.select) surfaces over RPC as
   // extension_ui_request for the GUI to answer.
   function buildGuiPermissionGateway(ctx: ExtensionContext): GuiPermissionGateway {
-    const mode = (): string => (isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode);
+    const mode = (): PermissionMode => (isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode);
     return {
       mode,
       authorize: async (toolName, input) => {
@@ -1467,16 +1518,21 @@ When NOT to use:
           return {
             content: [{ type: "text", text: "Root Todo authority belongs to a newer session generation." }],
             isError: true,
+            details: {},
           };
         }
         return childTodoBroker(request);
       }, { owner: `${teammateAuthorityOwner}:todo` }));
-      nextDisposers.push(registerTeammatePermissionBroker(async (call, requestCtx) => {
+      const sessionPermissionBroker: TeammatePermissionBroker = async (call, requestCtx) => {
         if (generation !== teammateRegistrationGeneration) {
           return { action: "deny", reason: "Root permission authority belongs to a newer session generation." };
         }
         return teammatePermissionBroker(call, requestCtx);
-      }, { owner: `${teammateAuthorityOwner}:permission` }));
+      };
+      nextDisposers.push(registerTeammatePermissionBroker(
+        sessionPermissionBroker,
+        { owner: `${teammateAuthorityOwner}:permission` },
+      ));
       teammateRegistrationDisposers = nextDisposers;
     } catch (error) {
       for (const dispose of nextDisposers.reverse()) dispose();
@@ -1579,9 +1635,9 @@ When NOT to use:
       _id: string,
       params: Record<string, unknown>,
       _signal: AbortSignal,
-      _onUpdate: ((result: AgentToolResult) => void) | undefined,
+      _onUpdate: ((result: FlowToolResult) => void) | undefined,
       ctx: ExtensionContext,
-    ): Promise<AgentToolResult> {
+    ): Promise<FlowToolResult> {
       return executeAsk(params as unknown as AskParams, ctx);
     },
 

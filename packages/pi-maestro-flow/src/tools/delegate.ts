@@ -6,7 +6,7 @@
  * with analysis or write mode.
  */
 
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { FlowToolResult } from "./tool-result.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { runTeammate } from "pi-maestro-teammate/v1/execution";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
@@ -30,13 +30,14 @@ export async function executeDelegate(
   signal: AbortSignal,
   ctx: ExtensionContext,
   pi: ExtensionAPI,
-): Promise<AgentToolResult> {
+): Promise<FlowToolResult> {
   if (!params.prompt) {
     return {
       content: [
         { type: "text", text: "No prompt provided for delegate action." },
       ],
       isError: true,
+      details: {},
     };
   }
 
@@ -62,8 +63,8 @@ export async function executeDelegate(
         cwd: params.cwd,
         timeoutMs: params.timeoutMs,
         background: false,
+        context: "fresh",
         reply_to: "caller",
-        lifecycle: "ephemeral",
       },
       createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
     );
@@ -74,6 +75,7 @@ export async function executeDelegate(
     return {
       content: [{ type: "text", text: lastMessage }],
       isError: result.exitCode !== 0,
+      details: {},
     };
   } catch (error) {
     return {
@@ -84,6 +86,7 @@ export async function executeDelegate(
         },
       ],
       isError: true,
+      details: {},
     };
   }
 }

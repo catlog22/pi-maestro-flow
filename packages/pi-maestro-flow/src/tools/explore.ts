@@ -6,7 +6,7 @@
  * Results are collected and merged into a unified exploration output.
  */
 
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { FlowToolResult } from "./tool-result.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { resolveMaxAgents, runTeammate } from "pi-maestro-teammate/v1/execution";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
@@ -40,13 +40,14 @@ export async function executeExplore(
   signal: AbortSignal,
   ctx: ExtensionContext,
   pi: ExtensionAPI,
-): Promise<AgentToolResult> {
+): Promise<FlowToolResult> {
   const prompts = params.prompts ?? [];
 
   if (prompts.length === 0) {
     return {
       content: [{ type: "text", text: "No prompts provided for explore action." }],
       isError: true,
+      details: {},
     };
   }
 
@@ -55,6 +56,7 @@ export async function executeExplore(
     return {
       content: [{ type: "text", text: `Too many prompts: ${prompts.length} exceeds the maximum of ${maxAgents}. Split into smaller batches or raise the limit via PI_TEAMMATE_MAX_AGENTS.` }],
       isError: true,
+      details: {},
     };
   }
 
@@ -76,8 +78,8 @@ export async function executeExplore(
           cwd: params.cwd,
           timeoutMs: params.timeoutMs,
           background: false,
+          context: "fresh",
           reply_to: "caller",
-          lifecycle: "ephemeral",
         },
         createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
       );
@@ -132,5 +134,6 @@ export async function executeExplore(
   return {
     content: [{ type: "text", text: outputParts.join("\n---\n\n") }],
     isError: completedResults.length === 0 && reportedErrors.length > 0,
+    details: {},
   };
 }

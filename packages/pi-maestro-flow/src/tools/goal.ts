@@ -350,13 +350,13 @@ export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalConte
     return activeGoal;
   }
 
-  const workflowIdentityChanged = activeGoal?.workflowSessionId && (
-    activeGoal.workflowSessionId !== session.sessionId
-    || activeGoal.workflowSessionGeneration !== snapshot.sessionGeneration
-  );
-  if (workflowIdentityChanged) {
+  const currentGoal = activeGoal;
+  if (currentGoal?.workflowSessionId && (
+    currentGoal.workflowSessionId !== session.sessionId
+    || currentGoal.workflowSessionGeneration !== snapshot.sessionGeneration
+  )) {
     fenceGoalLifecycle();
-    activeGoal = pauseGoal(activeGoal, "gate");
+    activeGoal = pauseGoal(currentGoal, "gate");
     persistGoal(activeGoal);
     if (session.status === "sealed" || session.status === "archived") {
       updateStatusLine(ctx, activeGoal);
@@ -441,7 +441,7 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
     clearRecovery();
     return;
   }
-  const restored = loadGoalFromSession(ctx);
+  const restored = loadGoalFromSession(ctx, goalSessionId);
   if (restored?.id === activeGoal.id) activeGoal = restored;
   updateUsage(activeGoal, ctx);
   persistGoal(activeGoal);
@@ -449,13 +449,16 @@ export async function onCompact(event: unknown, ctx: GoalContext) {
 
   const wasPiRetry = isPiRetry(event, activeGoal.id);
   if (!wasPiRetry) clearRecoveryFor(activeGoal.id);
-  const workflowSnapshot = workflowCoordinator?.status();
+  const coordinator = workflowCoordinator;
+  const workflowSnapshot = coordinator?.status();
   if (
+    coordinator
+    &&
     hasMatchingWorkflowBinding(activeGoal, workflowSnapshot)
     && workflowSnapshot?.session?.activeRunId
   ) {
     try {
-      await workflowCoordinator.brief();
+      await coordinator.brief();
     } catch (error) {
       activeGoal = pauseGoal(activeGoal, "gate");
       persistGoal(activeGoal);
@@ -1851,10 +1854,11 @@ async function sendContinuation(ctx: GoalContext, goal: ActiveGoal) {
   if (hasPending(ctx)) return false;
   let marker = `${goal.id}:${goal.iteration}:${randomUUID()}`;
   let genericMarker = true;
-  const workflowSnapshot = workflowCoordinator?.status();
-  if (hasMatchingWorkflowBinding(goal, workflowSnapshot)) {
+  const coordinator = workflowCoordinator;
+  const workflowSnapshot = coordinator?.status();
+  if (coordinator && hasMatchingWorkflowBinding(goal, workflowSnapshot)) {
     try {
-      marker = workflowCoordinator.continuationMarker(goal.iteration);
+      marker = coordinator.continuationMarker(goal.iteration);
       genericMarker = false;
     } catch (error) {
       activeGoal = pauseGoal(goal, "gate");
@@ -2013,9 +2017,10 @@ function markGoalRecovery(goalId: string, kind: "compaction_retry" | "provider_r
 function clearRecovery() { goalRecovery = undefined; }
 function clearRecoveryFor(id: string) { if (goalRecovery?.goalId === id) goalRecovery = undefined; }
 async function fenceWorkflowContinuation(): Promise<void> {
-  const workflowSnapshot = workflowCoordinator?.status();
-  if (!activeGoal || !hasMatchingWorkflowBinding(activeGoal, workflowSnapshot)) return;
-  try { await workflowCoordinator.fenceContinuation(); } catch { /* no owned lease means no live marker can be accepted */ }
+  const coordinator = workflowCoordinator;
+  const workflowSnapshot = coordinator?.status();
+  if (!coordinator || !activeGoal || !hasMatchingWorkflowBinding(activeGoal, workflowSnapshot)) return;
+  try { await coordinator.fenceContinuation(); } catch { /* no owned lease means no live marker can be accepted */ }
 }
 function abortTurn(ctx: GoalContext) { try { ctx.abort?.(); } catch { /* best effort */ } }
 function hasPending(ctx: GoalContext) { return ctx.hasPendingMessages?.() ?? false; }
