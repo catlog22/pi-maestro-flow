@@ -166,6 +166,14 @@ export interface ActiveAgent {
    * eventually removes the tombstone.
    */
   failedAt?: number;
+  /**
+   * Whether this dispatch carried an `outputSchema`. `structured_output` is
+   * auto-approved because a headless child has no UI to approve it with, and
+   * the permission request names its own tool — so without this the
+   * auto-approval was reachable by any child that claimed the name. Only an
+   * agent the parent actually granted a schema can use it.
+   */
+  expectsStructuredOutput?: boolean;
   replyTo?: string;
   spawnedBy?: string;
   /**

@@ -162,30 +162,47 @@ test("a full queue declines newcomers rather than growing without bound", async 
   assert.equal(queue.pendingCount(), TEAMMATE_INTERACTION_QUEUE_LIMIT);
 });
 
+function structuredOutputRequest(correlationId: string): Record<string, unknown> {
+  return {
+    type: "teammate_interaction_request",
+    requestId: randomUUID(),
+    interaction: "permission",
+    correlationId,
+    payload: { toolName: "structured_output", input: { path: "out.json" } },
+  };
+}
+
 test("an auto-approved request settles without consuming the queue", async () => {
   const state = makeState();
   const cid = addAgent(state, "asker");
+  state.activeRuns.get(cid)!.expectsStructuredOutput = true;
   const opened = { count: 0 };
   const queue = createTeammateInteractionQueue(stubPi, state, 60_000);
 
   const replies: Reply[] = [];
-  queue.enqueue(
-    {
-      type: "teammate_interaction_request",
-      requestId: randomUUID(),
-      interaction: "permission",
-      correlationId: cid,
-      payload: { toolName: "structured_output", input: { path: "out.json" } },
-    },
-    (msg) => replies.push(msg as Reply),
-    unansweredCtx(opened),
-    cid,
-  );
+  queue.enqueue(structuredOutputRequest(cid), (msg) => replies.push(msg as Reply), unansweredCtx(opened), cid);
 
   await delay(20);
   assert.equal(replies[0]?.result?.action, "allow_once");
   assert.equal(opened.count, 0);
   assert.equal(queue.pendingCount(), 0, "the queue must release the slot once answered");
+});
+
+test("an agent without a schema cannot reach the structured_output grant", async () => {
+  // The tool name is whatever the child says it is. The auto-approval exists
+  // because a headless child has no UI to approve with — not as a way for any
+  // child to skip approval by picking the right name.
+  const state = makeState();
+  const cid = addAgent(state, "asker");
+  const opened = { count: 0 };
+  const queue = createTeammateInteractionQueue(stubPi, state, 60);
+
+  const replies: Reply[] = [];
+  queue.enqueue(structuredOutputRequest(cid), (msg) => replies.push(msg as Reply), unansweredCtx(opened), cid);
+
+  await delay(200);
+  assert.notEqual(replies[0]?.result?.action, "allow_once");
+  assert.equal(opened.count, 1, "it goes to the human like any other permission");
 });
 
 test("the default interaction ceiling is bounded and generous", () => {

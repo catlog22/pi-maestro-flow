@@ -439,6 +439,59 @@ export interface AgentSelectorRow {
   lastMessage?: string;
 }
 
+/** Walks `spawnedBy` to the top of an agent's dispatch tree. */
+export function rootDispatchAncestor(state: TeammateState, correlationId: string): string {
+  const seen = new Set<string>();
+  let cursor = correlationId;
+  while (!seen.has(cursor)) {
+    seen.add(cursor);
+    const parent = state.activeRuns.get(cursor)?.spawnedBy;
+    if (!parent || parent === cursor) break;
+    cursor = parent;
+  }
+  return cursor;
+}
+
+/**
+ * Decides whether a proxied `teammate-send` may act on `targetCid`.
+ *
+ * A nested agent could name any agent in the process and act on it — including
+ * `abort`, which terminates the target's whole subtree. Nothing checked that
+ * the two were related, so a depth-2 worker could tear down an unrelated
+ * dispatch tree it had no business knowing about.
+ *
+ * The split is by blast radius. Messaging stays open within the requester's own
+ * dispatch tree, because peer coordination between siblings is the normal
+ * pattern. Terminating is limited to the requester's own descendants: an agent
+ * may dismantle what it built, not what built it or what runs beside it.
+ */
+export function canProxySendTo(
+  state: TeammateState,
+  requesterCid: string | undefined,
+  targetCid: string,
+  mode: RpcMessageMode,
+): { allowed: boolean; reason?: string } {
+  // No requester means the root tool itself, driven by the user's own model.
+  if (!requesterCid) return { allowed: true };
+  if (requesterCid === targetCid) return { allowed: true };
+
+  if (mode === "abort") {
+    if (isAgentDescendantOf(state, targetCid, requesterCid)) return { allowed: true };
+    return {
+      allowed: false,
+      reason: "only agents you dispatched may be aborted; this one is not in your subtree",
+    };
+  }
+
+  if (rootDispatchAncestor(state, requesterCid) === rootDispatchAncestor(state, targetCid)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: "that agent belongs to a different dispatch tree",
+  };
+}
+
 /** Walks `spawnedBy` links up from `descendant`, looking for `ancestor`. */
 function isAgentDescendantOf(
   state: TeammateState,
@@ -1536,6 +1589,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
         sleepMs: 0,
         lease: createChildLease(),
         promptSeq: params.task ? 1 : 0,
+        expectsStructuredOutput: params.outputSchema !== undefined,
         ...(isMultiTask ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(correlationId, activeAgent);
@@ -1585,6 +1639,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
             sleepMs: 0,
             lease: createChildLease(),
             promptSeq: task.task ? 1 : 0,
+            expectsStructuredOutput: (task.outputSchema ?? params.outputSchema) !== undefined,
           };
           state.activeRuns.set(childId, childAgent);
           if (task.name) bindAgentName(state, task.name, childId);
@@ -4191,7 +4246,14 @@ export async function handleChildInteractionRequest(
   // arbitrary path). Auto-approve it regardless of approval mode or UI availability —
   // a headless child has no UI to approve it interactively, and every outputSchema
   // teammate (e.g. the Goal verifier) depends on it to return a verdict.
-  if (interaction === "permission" && payload.toolName === "structured_output") {
+  //
+  // The tool name comes from the child, so the grant is scoped to agents the
+  // parent actually dispatched with a schema. Otherwise any child could reach
+  // the auto-approval simply by calling its tool `structured_output`. An agent
+  // we cannot identify at all gets no grant.
+  if (interaction === "permission"
+    && payload.toolName === "structured_output"
+    && agent?.expectsStructuredOutput === true) {
     if (agent) {
       agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ◀ permission allow_once (structured_output)`);
       trimAgentBuffers(agent);
@@ -4902,6 +4964,7 @@ export async function handleProxyRequest(
         sleepMs: 0,
         lease: createChildLease(),
         promptSeq: p.task ? 1 : 0,
+        expectsStructuredOutput: p.outputSchema !== undefined,
         ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(cid, activeAgent);
@@ -4960,6 +5023,7 @@ export async function handleProxyRequest(
           sleepMs: 0,
           lease: createChildLease(),
           promptSeq: task.task ? 1 : 0,
+          expectsStructuredOutput: (task.outputSchema ?? p.outputSchema) !== undefined,
         };
         state.activeRuns.set(childId, childAgent);
         if (task.name) bindAgentName(state, task.name, childId);
@@ -5354,6 +5418,18 @@ export async function handleProxyRequest(
         const available = Array.from(state.namedAgents.keys());
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: `Agent "${to}" not found. ${available.length > 0 ? `Available: ${available.join(", ")}` : "No named agents."}` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+
+      const authority = canProxySendTo(state, parentCid, cid, requestedMode);
+      if (!authority.allowed) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{
+            type: "text",
+            text: `Cannot ${requestedMode === "abort" ? "abort" : "message"} "${to}": ${authority.reason}.`,
+          }],
           isError: true, details: { delivered: false },
         }});
         return;
