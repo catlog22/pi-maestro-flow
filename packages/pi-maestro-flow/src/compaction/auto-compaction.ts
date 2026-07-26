@@ -16,13 +16,22 @@ import {
   COMPACTION_STATUS_KEY,
 } from "./maestro-compaction.ts";
 import { loadPiCompactionInternals, type PiCompactionInternals } from "./pi-internals.ts";
+import {
+  SPILL_THRESHOLD_CHARS,
+  SPILL_PREVIEW_CHARS,
+  spillToolResult,
+  generatePreview,
+  buildSpillReplacementText,
+  cleanupSpillDir,
+} from "./tool-result-spill.ts";
 
-const MIN_PRUNABLE_TOOL_RESULT_CHARS = 4_000;
+const PROTECTED_THRESHOLD_CHARS = 500;
 const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find"]);
 // Bulk data tools whose large non-error output is transient and safe to evict
 // under sustained pressure. Control tools (e.g. todo) are deliberately absent so
 // their state-bearing output is never pruned.
 const EVICTABLE_BULK_TOOL_NAMES = new Set(["bash", "shell", "edit", "write"]);
+const PROTECTED_TOOL_NAMES = new Set(["todo", "goal", "run-control", "ask-user-question", "plan-update", "plan-confirm"]);
 // Content-aware chars-per-token ratios: a flat /4 miscounts the two content
 // types that dominate coding sessions — fenced code is token-denser (~3.5) and
 // whitespace-heavy logs/tables are token-sparser (~6). Ordinary content keeps the
@@ -35,7 +44,7 @@ const OUTPUT_LIMIT_CONTINUE_PROMPT = "Your previous response was cut off at the 
 const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
 export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
-const PRUNE_STATE_VERSION = 1;
+const PRUNE_STATE_VERSION = 3;
 
 export type CompactionSettings = Pick<
   EffectiveCompactionSettings,
@@ -58,6 +67,17 @@ interface AppliedPrunes {
 export interface PruneManifestEntry {
   replacement: AgentMessage;
   savedTokens: number;
+  introducedAtUsageEpoch?: string;
+  spillPath?: string;
+  level?: PruneLevel;
+}
+
+export type PruneLevel = "pruned" | "spill" | "minimal";
+
+interface PersistedPruneEntry {
+  callId: string;
+  level: PruneLevel;
+  spillPath?: string;
   introducedAtUsageEpoch?: string;
 }
 
@@ -130,7 +150,7 @@ interface AutoCompactionState {
   internalsWarningShown: boolean;
   lastNoCompactableKey?: string;
   pruneManifest: Map<string, PruneManifestEntry>;
-  restoredPruneIds: Set<string>;
+  restoredPrunes: Map<string, PersistedPruneEntry>;
   sessionId?: string;
   persistedPruneKey?: string;
   settingsSnapshot?: CompactionSettings;
@@ -175,7 +195,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     nextOwner: 0,
     internalsWarningShown: false,
     pruneManifest: new Map(),
-    restoredPruneIds: new Set(),
+    restoredPrunes: new Map(),
     velocityTracker: EMPTY_VELOCITY_TRACKER,
     consecutiveFailures: 0,
     breakerNotified: false,
@@ -197,10 +217,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   }
   return {
     onSessionStart(ctx) {
+      if (state.sessionId) void cleanupSpillDir(state.sessionId);
       state.pruneManifest.clear();
       state.sessionId = sessionIdOf(ctx);
-      state.restoredPruneIds = loadPersistedPruneIds(ctx, state.sessionId);
-      state.persistedPruneKey = pruneKey(state.restoredPruneIds);
+      state.restoredPrunes = loadPersistedPrunes(ctx, state.sessionId);
+      state.persistedPruneKey = pruneKey(state.restoredPrunes.values());
       state.settingsSnapshot = undefined;
       state.velocityTracker = EMPTY_VELOCITY_TRACKER;
       state.consecutiveFailures = 0;
@@ -221,8 +242,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return undefined;
       }
       if (!settings.enabled || ctx.model.contextWindow <= settings.reserveTokens) {
+        if (state.sessionId) void cleanupSpillDir(state.sessionId);
         state.pruneManifest.clear();
-        state.restoredPruneIds.clear();
+        state.restoredPrunes.clear();
         persistPruneManifest(pi, state);
         clearPressureStatus(ctx);
         return undefined;
@@ -239,7 +261,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ...settings,
         reserveTokens: effectiveReserveTokens(settings, ctx.model.contextWindow, ctx.model.maxTokens),
       };
-      const pressure = applyContextPressurePolicy(
+      let pressure = applyContextPressurePolicy(
         messages,
         ctx.model.contextWindow,
         effectiveSettings,
@@ -247,6 +269,24 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.velocityTracker,
       );
       state.velocityTracker = pressure.velocityTracker;
+      if (pressure.prunedToolResults > 0 && state.sessionId) {
+        const upgraded = await upgradeNewPrunesWithSpill(messages, pressure.messages, state.pruneManifest, state.sessionId);
+        pressure = adjustPressureAfterReplacementChange(
+          pressure,
+          upgraded.tokenDelta,
+          ctx.model.contextWindow,
+          effectiveSettings,
+        );
+        if (pressure.band === "critical" && upgraded.callIds.size > 0) {
+          const minimized = compactNewSpilledPrunes(pressure.messages, state.pruneManifest, upgraded.callIds);
+          pressure = adjustPressureAfterReplacementChange(
+            pressure,
+            minimized.tokenDelta,
+            ctx.model.contextWindow,
+            effectiveSettings,
+          );
+        }
+      }
       updatePressureStatus(ctx, pressure);
       persistPruneManifest(pi, state);
       if (pressure.action !== "compact") {
@@ -445,8 +485,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
     },
     onCompact() {
+      if (state.sessionId) void cleanupSpillDir(state.sessionId);
       state.pruneManifest.clear();
-      state.restoredPruneIds.clear();
+      state.restoredPrunes.clear();
       state.persistedPruneKey = undefined;
       state.lastTriggerKey = undefined;
       state.lastNoCompactableKey = undefined;
@@ -466,8 +507,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.lastTriggerKey = undefined;
       state.internalsWarningShown = false;
       state.lastNoCompactableKey = undefined;
+      if (state.sessionId) void cleanupSpillDir(state.sessionId);
       state.pruneManifest.clear();
-      state.restoredPruneIds.clear();
+      state.restoredPrunes.clear();
       state.persistedPruneKey = undefined;
       state.settingsSnapshot = undefined;
       state.settingsCwd = undefined;
@@ -601,7 +643,7 @@ function applyRecordedPrunes(messages: AgentMessage[], pruneManifest: PruneManif
     if (!callId) continue;
     const recorded = getRecordedPrune(pruneManifest, callId);
     if (!recorded && !hasRecordedPrune(pruneManifest, callId)) continue;
-    const replacement = recorded?.replacement ?? replaceableToolResult(transformed[index]);
+    const replacement = recorded?.replacement ?? pruneToolResult(transformed[index]);
     if (!replacement) continue;
     const saved = recorded?.savedTokens ?? estimateMessageTokens(transformed[index]) - estimateMessageTokens(replacement);
     if (saved <= 0) continue;
@@ -629,52 +671,135 @@ function getRecordedPrune(manifest: PruneManifest, callId: string): PruneManifes
   return manifest instanceof Map ? manifest.get(callId) : undefined;
 }
 
+function isPruneLevel(value: unknown): value is PruneLevel {
+  return value === "pruned" || value === "spill" || value === "minimal";
+}
+
 function recordPrune(manifest: PruneManifest, callId: string, entry: PruneManifestEntry): void {
   if (manifest instanceof Map) manifest.set(callId, entry);
   else manifest.add(callId);
 }
 
+function restorePruneReplacement(message: AgentMessage, persisted: PersistedPruneEntry): AgentMessage | undefined {
+  if (persisted.level === "pruned") return pruneToolResult(message);
+  if (persisted.level === "minimal") {
+    if (!persisted.spillPath) return undefined;
+    return minimalSpillReplacement(message, persisted.spillPath);
+  }
+  const text = extractTextContent(message);
+  if (text.length < SPILL_THRESHOLD_CHARS) return undefined;
+  const toolName = typeof (message as MessageRecord).toolName === "string"
+    ? (message as MessageRecord).toolName as string
+    : "tool";
+  const preview = generatePreview(text, SPILL_PREVIEW_CHARS);
+  return {
+    ...message,
+    content: [{
+      type: "text",
+      text: buildSpillReplacementText({
+        path: persisted.spillPath ?? "",
+        preview: preview.preview,
+        originalChars: text.length,
+        hasMore: preview.hasMore,
+      }, toolName),
+    }],
+  } as AgentMessage;
+}
+
 function hydrateRestoredPrunes(state: AutoCompactionState, messages: AgentMessage[]): void {
-  if (state.restoredPruneIds.size === 0) return;
-  const usageEpoch = latestProviderUsageEpoch(messages);
+  if (state.restoredPrunes.size === 0) return;
   const visibleIds = new Set<string>();
   for (const message of messages) {
     const callId = toolResultCallId(message);
-    if (!callId || !state.restoredPruneIds.has(callId)) continue;
+    if (!callId) continue;
+    const persisted = state.restoredPrunes.get(callId);
+    if (!persisted) continue;
     visibleIds.add(callId);
-    const replacement = replaceableToolResult(message);
+    const replacement = restorePruneReplacement(message, persisted);
     if (!replacement) continue;
     const savedTokens = estimateMessageTokens(message) - estimateMessageTokens(replacement);
     if (savedTokens <= 0) continue;
-    state.pruneManifest.set(callId, { replacement, savedTokens, introducedAtUsageEpoch: usageEpoch });
+    state.pruneManifest.set(callId, {
+      replacement,
+      savedTokens,
+      introducedAtUsageEpoch: persisted.introducedAtUsageEpoch,
+      spillPath: persisted.spillPath,
+      level: persisted.level,
+    });
   }
-  state.restoredPruneIds = new Set([...state.restoredPruneIds].filter((id) => !visibleIds.has(id)));
+  for (const callId of visibleIds) state.restoredPrunes.delete(callId);
 }
 
 function persistPruneManifest(pi: ExtensionAPI, state: AutoCompactionState): void {
-  const toolCallIds = [...state.pruneManifest.keys()].sort();
-  const nextKey = pruneKey(toolCallIds);
+  const prunes = [...state.pruneManifest.entries()]
+    .map(([callId, entry]): PersistedPruneEntry => ({
+      callId,
+      level: entry.level ?? (entry.spillPath !== undefined ? "spill" : "pruned"),
+      ...(entry.spillPath !== undefined ? { spillPath: entry.spillPath } : {}),
+      ...(entry.introducedAtUsageEpoch !== undefined ? { introducedAtUsageEpoch: entry.introducedAtUsageEpoch } : {}),
+    }))
+    .sort((a, b) => a.callId.localeCompare(b.callId));
+  const nextKey = pruneKey(prunes);
   if (nextKey === state.persistedPruneKey) return;
   state.persistedPruneKey = nextKey;
   pi.appendEntry?.(PRUNE_STATE_ENTRY_TYPE, {
     version: PRUNE_STATE_VERSION,
     sessionId: state.sessionId,
-    toolCallIds,
+    prunes,
   });
 }
 
-function loadPersistedPruneIds(ctx: ExtensionContext, sessionId: string | undefined): Set<string> {
+function loadPersistedPrunes(ctx: ExtensionContext, sessionId: string | undefined): Map<string, PersistedPruneEntry> {
   const manager = ctx.sessionManager as {
     getBranch?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
     getEntries?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
   } | undefined;
   const entries = manager?.getBranch?.() ?? manager?.getEntries?.() ?? [];
   const entry = entries.filter((candidate) => candidate.type === "custom" && candidate.customType === PRUNE_STATE_ENTRY_TYPE).pop();
-  const data = entry?.data as { version?: unknown; sessionId?: unknown; toolCallIds?: unknown } | undefined;
-  if (data?.version !== PRUNE_STATE_VERSION || (sessionId && data.sessionId !== sessionId) || !Array.isArray(data?.toolCallIds)) {
-    return new Set();
+  const data = entry?.data as {
+    version?: unknown;
+    sessionId?: unknown;
+    toolCallIds?: unknown;
+    spillPaths?: unknown;
+    prunes?: unknown;
+  } | undefined;
+  if (!data || (sessionId && data.sessionId !== sessionId)) return new Map();
+  if (data.version === PRUNE_STATE_VERSION && Array.isArray(data.prunes)) {
+    const restored = new Map<string, PersistedPruneEntry>();
+    for (const value of data.prunes) {
+      if (!value || typeof value !== "object") continue;
+      const record = value as Record<string, unknown>;
+      if (typeof record.callId !== "string" || !isPruneLevel(record.level)) continue;
+      restored.set(record.callId, {
+        callId: record.callId,
+        level: record.level,
+        ...(typeof record.spillPath === "string" ? { spillPath: record.spillPath } : {}),
+        ...(typeof record.introducedAtUsageEpoch === "string" ? { introducedAtUsageEpoch: record.introducedAtUsageEpoch } : {}),
+      });
+    }
+    return restored;
   }
-  return new Set(data.toolCallIds.filter((value): value is string => typeof value === "string"));
+  if ((data.version !== 1 && data.version !== 2) || !Array.isArray(data.toolCallIds)) return new Map();
+  const spillPaths = new Map<string, string>();
+  if (data.version === 2 && Array.isArray(data.spillPaths)) {
+    for (const value of data.spillPaths) {
+      if (!value || typeof value !== "object") continue;
+      const record = value as Record<string, unknown>;
+      if (typeof record.callId === "string" && typeof record.path === "string") {
+        spillPaths.set(record.callId, record.path);
+      }
+    }
+  }
+  return new Map(data.toolCallIds
+    .filter((value): value is string => typeof value === "string")
+    .map((callId) => {
+      const spillPath = spillPaths.get(callId);
+      return [callId, {
+        callId,
+        level: spillPath !== undefined ? "spill" : "pruned",
+        ...(spillPath !== undefined ? { spillPath } : {}),
+      }];
+    }));
 }
 
 function sessionIdOf(ctx: ExtensionContext): string | undefined {
@@ -682,8 +807,10 @@ function sessionIdOf(ctx: ExtensionContext): string | undefined {
   return manager?.getSessionId?.();
 }
 
-function pruneKey(toolCallIds: Iterable<string>): string {
-  return [...toolCallIds].sort().join("\u0000");
+function pruneKey(entries: Iterable<PersistedPruneEntry>): string {
+  return JSON.stringify([...entries]
+    .map((entry) => [entry.callId, entry.level, entry.spillPath ?? null, entry.introducedAtUsageEpoch ?? null])
+    .sort(([a], [b]) => String(a).localeCompare(String(b))));
 }
 
 export function shouldCompactMidTurn(input: {
@@ -816,7 +943,12 @@ function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolR
     if (after >= before) continue;
     transformed[index] = replacement;
     const saved = before - after;
-    recordPrune(pruneManifest, callId, { replacement, savedTokens: saved, introducedAtUsageEpoch: usageEpoch });
+    recordPrune(pruneManifest, callId, {
+      replacement,
+      savedTokens: saved,
+      introducedAtUsageEpoch: usageEpoch,
+      level: "pruned",
+    });
     savedTokens += saved;
     prunedToolResults++;
     effectiveTokens -= saved;
@@ -824,12 +956,20 @@ function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolR
   return { savedTokens, prunedToolResults, effectiveTokens };
 }
 
+function isProtectedToolResult(message: AgentMessage): boolean {
+  const record = message as MessageRecord;
+  if (record.role !== "toolResult") return false;
+  if (record.isError === true) return true;
+  if (typeof record.toolName === "string" && PROTECTED_TOOL_NAMES.has(record.toolName.toLowerCase())) return true;
+  return extractTextContent(message).length < PROTECTED_THRESHOLD_CHARS;
+}
+
 function replaceableToolResult(message: AgentMessage): AgentMessage | undefined {
+  if (isProtectedToolResult(message)) return undefined;
   const record = message as MessageRecord;
   if (record.role !== "toolResult" || record.isError === true) return undefined;
   if (typeof record.toolName !== "string" || !REPLAYABLE_TOOL_NAMES.has(record.toolName.toLowerCase())) return undefined;
-  const serialized = JSON.stringify(record.content);
-  if (serialized.length < MIN_PRUNABLE_TOOL_RESULT_CHARS) return undefined;
+  if (extractTextContent(message).length < SPILL_THRESHOLD_CHARS) return undefined;
   const toolName = typeof record.toolName === "string" ? record.toolName : "tool";
   return {
     ...message,
@@ -841,11 +981,11 @@ function replaceableToolResult(message: AgentMessage): AgentMessage | undefined 
 }
 
 function evictableBulkToolResult(message: AgentMessage): AgentMessage | undefined {
+  if (isProtectedToolResult(message)) return undefined;
   const record = message as MessageRecord;
   if (record.role !== "toolResult" || record.isError === true) return undefined;
   if (typeof record.toolName !== "string" || !EVICTABLE_BULK_TOOL_NAMES.has(record.toolName.toLowerCase())) return undefined;
-  const serialized = JSON.stringify(record.content);
-  if (serialized.length < MIN_PRUNABLE_TOOL_RESULT_CHARS) return undefined;
+  if (extractTextContent(message).length < SPILL_THRESHOLD_CHARS) return undefined;
   const toolName = record.toolName;
   return {
     ...message,
@@ -854,6 +994,99 @@ function evictableBulkToolResult(message: AgentMessage): AgentMessage | undefine
       text: `[Maestro context pressure: stale large output from ${toolName} was evicted to reclaim context. The original payload is no longer available; re-derive it from the affected files or commands if still needed.]`,
     }],
   } as AgentMessage;
+}
+
+function pruneToolResult(message: AgentMessage): AgentMessage | undefined {
+  return replaceableToolResult(message) ?? evictableBulkToolResult(message);
+}
+
+const PERSISTED_OUTPUT_TAG = "<persisted-output>";
+
+function minimalSpillReplacement(message: AgentMessage, spillPath: string): AgentMessage {
+  return {
+    ...message,
+    content: [{ type: "text", text: `[Maestro context pressure: pruned. File: ${spillPath}. Use read to reload.]` }],
+  } as AgentMessage;
+}
+
+function compactNewSpilledPrunes(
+  transformed: AgentMessage[],
+  pruneManifest: Map<string, PruneManifestEntry>,
+  newSpillCallIds: Set<string>,
+): { tokenDelta: number } {
+  let tokenDelta = 0;
+  for (let index = 0; index < transformed.length; index++) {
+    const callId = toolResultCallId(transformed[index]);
+    if (!callId || !newSpillCallIds.has(callId)) continue;
+    const entry = pruneManifest.get(callId);
+    if (!entry?.spillPath || (entry.level ?? "spill") !== "spill") continue;
+    const text = extractTextContent(transformed[index]);
+    if (!text.startsWith(PERSISTED_OUTPUT_TAG)) continue;
+    const minimal = minimalSpillReplacement(transformed[index], entry.spillPath);
+    const delta = estimateMessageTokens(minimal) - estimateMessageTokens(transformed[index]);
+    if (delta >= 0) continue;
+    transformed[index] = minimal;
+    entry.replacement = minimal;
+    entry.savedTokens -= delta;
+    entry.level = "minimal";
+    tokenDelta += delta;
+  }
+  return { tokenDelta };
+}
+
+function extractTextContent(message: AgentMessage): string {
+  const content = (message as MessageRecord).content;
+  if (typeof content === "string") return content;
+  if (!Array.isArray(content)) return "";
+  let text = "";
+  for (const block of content) {
+    const blockText = (block as { text?: unknown } | null)?.text;
+    if (typeof blockText === "string") text += blockText;
+  }
+  return text;
+}
+
+async function upgradeNewPrunesWithSpill(
+  originalMessages: AgentMessage[],
+  transformedMessages: AgentMessage[],
+  pruneManifest: PruneManifest,
+  sessionId: string,
+): Promise<{ tokenDelta: number; callIds: Set<string> }> {
+  const callIds = new Set<string>();
+  let tokenDelta = 0;
+  if (!(pruneManifest instanceof Map)) return { tokenDelta, callIds };
+  const originalsByCallId = new Map<string, AgentMessage>();
+  for (const msg of originalMessages) {
+    const callId = toolResultCallId(msg);
+    if (callId) originalsByCallId.set(callId, msg);
+  }
+  for (let index = 0; index < transformedMessages.length; index++) {
+    const callId = toolResultCallId(transformedMessages[index]);
+    if (!callId) continue;
+    const entry = pruneManifest.get(callId);
+    if (!entry || entry.spillPath !== undefined) continue;
+    const original = originalsByCallId.get(callId);
+    if (!original) continue;
+    const text = extractTextContent(original);
+    if (text.length < SPILL_THRESHOLD_CHARS) continue;
+    const toolName = typeof (original as MessageRecord).toolName === "string"
+      ? (original as MessageRecord).toolName as string
+      : "tool";
+    const spill = await spillToolResult(sessionId, callId, text);
+    const replacementText = buildSpillReplacementText(spill, toolName);
+    const upgraded: AgentMessage = {
+      ...transformedMessages[index],
+      content: [{ type: "text", text: replacementText }],
+    } as AgentMessage;
+    tokenDelta += estimateMessageTokens(upgraded) - estimateMessageTokens(transformedMessages[index]);
+    transformedMessages[index] = upgraded;
+    entry.replacement = upgraded;
+    entry.spillPath = spill.path || "";
+    entry.savedTokens = estimateMessageTokens(original) - estimateMessageTokens(upgraded);
+    entry.level = "spill";
+    callIds.add(callId);
+  }
+  return { tokenDelta, callIds };
 }
 
 const REDUNDANCY_PATTERN_PREFIX_CHARS = 120;
@@ -945,6 +1178,34 @@ function pressureResult(input: PressureResultInput): ContextPressureResult {
     velocityTracker,
     velocity,
   };
+}
+
+function adjustPressureAfterReplacementChange(
+  pressure: ContextPressureResult,
+  tokenDelta: number,
+  contextWindow: number,
+  settings: CompactionSettings,
+): ContextPressureResult {
+  if (tokenDelta === 0) return pressure;
+  const estimatedTokens = Math.max(0, pressure.estimatedTokens + tokenDelta);
+  const soft = settings.soft ?? DEFAULT_SOFT_COMPACTION;
+  const band = derivePressureBand({
+    ratio: estimatedTokens / contextWindow,
+    criticalRatio: pressure.thresholdTokens / contextWindow,
+    prunedToolResults: pressure.prunedToolResults,
+    soft,
+  });
+  return pressureResult({
+    messages: pressure.messages,
+    band,
+    estimatedTokens,
+    contextWindow,
+    thresholdTokens: pressure.thresholdTokens,
+    prunedToolResults: pressure.prunedToolResults,
+    savedTokens: Math.max(0, pressure.savedTokens - tokenDelta),
+    velocityTracker: pressure.velocityTracker,
+    velocity: pressure.velocity,
+  });
 }
 
 /** Final band derivation, extracted verbatim so it can be unit-tested in isolation. */

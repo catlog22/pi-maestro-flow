@@ -66,16 +66,17 @@ test("compaction lifecycle publishes active status and always clears it", async 
     },
   } as never;
 
-  await assert.rejects(
-    runWithCompactionStatus(event, ctx, async () => {
+  let rejectedError: unknown;
+  try {
+    await runWithCompactionStatus(event, ctx, async () => {
       assert.deepEqual(statuses.at(-1), {
         key: COMPACTION_STATUS_KEY,
         value: "COMPACT 91000/90000",
       });
       throw new Error("summary failed");
-    }),
-    /summary failed/,
-  );
+    });
+  } catch (err) { rejectedError = err; }
+  assert.ok(rejectedError instanceof Error && /summary failed/.test(rejectedError.message));
   assert.deepEqual(statuses.at(-1), {
     key: COMPACTION_STATUS_KEY,
     value: undefined,
@@ -157,7 +158,7 @@ test("compaction input keeps operator focus as non-privileged structured data", 
   assert.match(prompt, /"activeTaskId": "todo-1"/);
   assert.match(prompt, /"name": "maestro-execute"/);
   assert.match(prompt, /D:\\\\repo\\\\plan\.md/);
-  assert.doesNotMatch(prompt, /## Compaction Lineage/);
+  assert.ok(!/## Compaction Lineage/.test(prompt));
   assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /untrusted serialized input data/);
   assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /## Compaction Lineage/);
 });
@@ -751,7 +752,7 @@ test("pressure policy prunes the latest safe output first to retain a longer cac
     { enabled: true, reserveTokens: 1_000, keepRecentTokens: 100 },
   );
 
-  assert.doesNotMatch(JSON.stringify(pressure.messages[1]), /stale large output/);
+  assert.ok(!/stale large output/.test(JSON.stringify(pressure.messages[1])));
   assert.match(JSON.stringify(pressure.messages[3]), /stale large output/);
 });
 
@@ -1693,4 +1694,306 @@ test("computeContextSignals reports a redundant fraction for duplicate tool outp
     thresholdTokens: 1_600,
   });
   assert.ok((signals.redundantFraction ?? 0) > 0, "duplicate tool output should register redundancy");
+});
+
+test("L0 protection: small tool results are never pruned", () => {
+  const assistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "small", name: "read", arguments: {} }],
+    usage: { input: 900, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const smallResult = {
+    role: "toolResult",
+    toolCallId: "small",
+    toolName: "read",
+    content: [{ type: "text", text: "tiny" }],
+    isError: false,
+  } as never;
+  const pressure = applyContextPressurePolicy(
+    [assistant, smallResult],
+    1_000,
+    { enabled: true, reserveTokens: 100, keepRecentTokens: 50 },
+  );
+  assert.equal(pressure.prunedToolResults, 0);
+  assert.equal(pressure.messages[1], smallResult);
+});
+
+test("L0 protection: control tool results are never pruned even when large", () => {
+  const assistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "ctrl", name: "todo", arguments: {} }],
+    usage: { input: 900, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const controlResult = {
+    role: "toolResult",
+    toolCallId: "ctrl",
+    toolName: "todo",
+    content: [{ type: "text", text: "t".repeat(10_000) }],
+    isError: false,
+  } as never;
+  const pressure = applyContextPressurePolicy(
+    [assistant, controlResult],
+    2_000,
+    { enabled: true, reserveTokens: 200, keepRecentTokens: 100 },
+  );
+  assert.equal(pressure.prunedToolResults, 0);
+  assert.equal(pressure.messages[1], controlResult);
+});
+
+test("L0 protection: error results are never pruned", () => {
+  const assistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "err", name: "bash", arguments: {} }],
+    usage: { input: 900, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const errorResult = {
+    role: "toolResult",
+    toolCallId: "err",
+    toolName: "bash",
+    content: [{ type: "text", text: "e".repeat(10_000) }],
+    isError: true,
+  } as never;
+  const pressure = applyContextPressurePolicy(
+    [assistant, errorResult],
+    2_000,
+    { enabled: true, reserveTokens: 200, keepRecentTokens: 100 },
+  );
+  assert.equal(pressure.prunedToolResults, 0);
+  assert.equal(pressure.messages[1], errorResult);
+});
+
+test("L1 inline: tool results below 8K remain unchanged under pressure", () => {
+  const oldAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "inline", name: "read", arguments: {} }],
+    usage: { input: 10_000, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const inlineResult = {
+    role: "toolResult",
+    toolCallId: "inline",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(7_999) }],
+    isError: false,
+  } as never;
+  const pressure = applyContextPressurePolicy(
+    [oldAssistant, inlineResult, { role: "user", content: [{ type: "text", text: "frontier" }] }] as never,
+    4_000,
+    { enabled: true, reserveTokens: 400, keepRecentTokens: 1 },
+  );
+  assert.equal(pressure.prunedToolResults, 0);
+  assert.equal(pressure.messages[1], inlineResult);
+});
+
+test("cache stability: prune manifest replays identical replacement across turns", () => {
+  const oldAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old-stable", name: "grep", arguments: {} }],
+  } as never;
+  const oldResult = {
+    role: "toolResult",
+    toolCallId: "old-stable",
+    toolName: "grep",
+    content: [{ type: "text", text: "g".repeat(10_000) }],
+    isError: false,
+  } as never;
+  const recentAssistant = {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "recent-stable", name: "read", arguments: {} }],
+    usage: { input: 900, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  } as never;
+  const recentResult = {
+    role: "toolResult",
+    toolCallId: "recent-stable",
+    toolName: "read",
+    content: [{ type: "text", text: "r".repeat(8_000) }],
+    isError: false,
+  } as never;
+  const messages = [oldAssistant, oldResult, recentAssistant, recentResult];
+  const manifest = new Map();
+  const settings = { enabled: true, reserveTokens: 400, keepRecentTokens: 2_000 };
+  const first = applyContextPressurePolicy(messages, 3_000, settings, manifest);
+  assert.ok(first.prunedToolResults >= 1, `expected pruning, got ${first.prunedToolResults} (band=${first.band})`);
+  const firstReplacement = JSON.stringify(first.messages[1]);
+  const second = applyContextPressurePolicy(messages, 3_000, settings, manifest);
+  const secondReplacement = JSON.stringify(second.messages[1]);
+  assert.equal(firstReplacement, secondReplacement, "replacement must be byte-identical across turns");
+});
+
+test("L2 spill replacement is byte-identical after a session-state restore", async () => {
+  const appended: Array<{ type: string; data: unknown }> = [];
+  const settings = { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 };
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old-spill", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "old-spill",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: "keep".repeat(1_500) }],
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "latest-spill", name: "read", arguments: {} }],
+    usage: { input: 8_700, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 8_700, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "latest-spill",
+    toolName: "read",
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
+  }] as never;
+  const baseCtx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    sessionManager: { getSessionId: () => "stable-spill-session", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const firstGuard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { appended.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, { readSettings: () => settings });
+
+  firstGuard.onSessionStart(baseCtx);
+  const first = await firstGuard.evaluate(messages, baseCtx);
+  const firstReplacement = JSON.stringify(first?.[1]);
+  assert.match(firstReplacement, /<persisted-output>/);
+  const persisted = appended.at(-1);
+  assert.equal((persisted?.data as { version?: number }).version, 3);
+
+  const resumedGuard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
+    readSettings: () => settings,
+  });
+  const resumedCtx = {
+    ...baseCtx,
+    sessionManager: {
+      getSessionId: () => "stable-spill-session",
+      getBranch: () => [{ type: "custom", customType: persisted?.type, data: persisted?.data }],
+    },
+  } as never;
+  resumedGuard.onSessionStart(resumedCtx);
+  const resumed = await resumedGuard.evaluate([
+    ...messages,
+    { role: "user", content: [{ type: "text", text: "resume" }] },
+  ] as never, resumedCtx);
+  assert.equal(JSON.stringify(resumed?.[1]), firstReplacement);
+
+  firstGuard.reset(baseCtx);
+  resumedGuard.reset(resumedCtx);
+});
+
+test("L2 token growth is re-accounted before choosing the critical L4 replacement", async () => {
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 1_000, keepRecentTokens: 100 }),
+    loadInternals: async () => { throw new Error("not needed"); },
+  });
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "boundary-spill", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "boundary-spill",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: "frontier".repeat(50) }],
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "boundary-latest", name: "read", arguments: {} }],
+    usage: { input: 8_700, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 8_700, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "boundary-latest",
+    toolName: "read",
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
+  }] as never;
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 6_000 },
+    sessionManager: { getSessionId: () => "boundary-spill-session", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  const transformed = await guard.evaluate(messages, ctx);
+  assert.match(JSON.stringify(transformed?.[1]), /context pressure: pruned\. File:/);
+  assert.ok(!JSON.stringify(transformed?.[1]).includes("<persisted-output>"));
+  guard.reset(ctx);
+});
+
+test("L4 minimal replacement remains byte-identical across turns and restore", async () => {
+  const appended: Array<{ type: string; data: unknown }> = [];
+  const dependencies = {
+    readSettings: () => ({ enabled: true, reserveTokens: 400, keepRecentTokens: 100 }),
+    loadInternals: async () => { throw new Error("stop after transform"); },
+  };
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "critical-spill", name: "read", arguments: {} }],
+    usage: { input: 10_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 10_000, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "critical-spill",
+    toolName: "read",
+    content: [{ type: "text", text: "z".repeat(16_000) }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: "frontier".repeat(50) }],
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "critical-latest", name: "read", arguments: {} }],
+  }, {
+    role: "toolResult",
+    toolCallId: "critical-latest",
+    toolName: "read",
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
+  }] as never;
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 4_000 },
+    sessionManager: { getSessionId: () => "critical-spill-session", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { appended.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, dependencies);
+
+  guard.onSessionStart(ctx);
+  const first = await guard.evaluate(messages, ctx);
+  const firstReplacement = JSON.stringify(first?.[1]);
+  assert.match(firstReplacement, /context pressure: pruned\. File:/);
+  const second = await guard.evaluate([
+    ...messages,
+    { role: "user", content: [{ type: "text", text: "continue" }] },
+  ] as never, ctx);
+  assert.equal(JSON.stringify(second?.[1]), firstReplacement);
+
+  const persisted = appended.at(-1);
+  const restoredGuard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, dependencies);
+  const restoredCtx = {
+    ...ctx,
+    sessionManager: {
+      getSessionId: () => "critical-spill-session",
+      getBranch: () => [{ type: "custom", customType: persisted?.type, data: persisted?.data }],
+    },
+  } as never;
+  restoredGuard.onSessionStart(restoredCtx);
+  const restored = await restoredGuard.evaluate([
+    ...messages,
+    { role: "user", content: [{ type: "text", text: "resume" }] },
+  ] as never, restoredCtx);
+  assert.equal(JSON.stringify(restored?.[1]), firstReplacement);
+
+  guard.reset(ctx);
+  restoredGuard.reset(restoredCtx);
 });
