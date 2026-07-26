@@ -31,6 +31,9 @@ export interface AskAnswer {
   question: string;
   header?: string;
   selected: string[];
+  /** Per-option supplementary details keyed by option label. */
+  details?: Record<string, string>;
+  /** Free-form response: open-ended questions or a "None of the above" custom answer. */
   text?: string;
 }
 
@@ -118,10 +121,17 @@ async function showAskDialogs(
       ? await selectMultipleDialog(ctx, title, options)
       : await selectOneDialog(ctx, title, options);
     if (!selected) return undefined;
+    let text: string | undefined;
+    if (selected.includes(NONE_OPTION_LABEL)) {
+      const custom = await ctx.ui.input(title, "What would you like instead? (optional)");
+      if (custom === undefined) return undefined;
+      text = custom.trim() || undefined;
+    }
     answers.push({
       question: question.question,
       ...(question.header ? { header: question.header } : {}),
       selected,
+      ...(text ? { text } : {}),
     });
   }
   return answers;
@@ -177,7 +187,11 @@ function askSuccess(answers: AskAnswer[]): AskToolResult {
       text: [
         `Collected ${answers.length} answer${answers.length === 1 ? "" : "s"}.`,
         ...answers.flatMap((answer, index) => {
-          const finalChoice = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(" — ");
+          const chosen = answer.selected.map((label) => {
+            const detail = answer.details?.[label];
+            return detail ? `${label} (${detail})` : label;
+          });
+          const finalChoice = [...chosen, ...(answer.text ? [answer.text] : [])].join(" — ");
           return [`${index + 1}. ${answer.question}`, `   ${finalChoice}`];
         }),
         JSON.stringify({ answers }, null, 2),
@@ -221,27 +235,29 @@ async function showAskWizard(
     ctx.ui.setWidget(
       widgetKey,
       (tui, theme) => {
+      const optionsList = questions.map((q) => {
+        const options = q.options ?? [];
+        if (options.length === 0 || options.some((option) => option.label === NONE_OPTION_LABEL)) {
+          return options;
+        }
+        return [...options, { label: NONE_OPTION_LABEL }];
+      });
       const selected = questions.map(() => new Set<number>());
-      const textValues = questions.map(() => "");
+      const optionDetails = optionsList.map((options) => options.map(() => ""));
+      const freeText = questions.map(() => "");
       const cursors = questions.map(() => 0);
+      const nonePrompted = questions.map(() => false);
       let step = 0;
-      let typing = (questions[0].options?.length ?? 0) === 0;
+      let typing = optionsList[0].length === 0;
+      let detailCursor = -1;
       let input = "";
       let feedback = "";
       let lastWidth = 80;
       const pasteDecoder = new BracketedPasteDecoder();
       let pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
-      function questionOptions(q: QuestionSpec): QuestionOption[] {
-        const options = q.options ?? [];
-        if (options.length === 0 || options.some((option) => option.label === NONE_OPTION_LABEL)) {
-          return options;
-        }
-        return [...options, { label: NONE_OPTION_LABEL }];
-      }
-
-      function noneOptionIndex(q: QuestionSpec): number {
-        return questionOptions(q).findIndex((option) => option.label === NONE_OPTION_LABEL);
+      function noneOptionIndex(index: number): number {
+        return optionsList[index].findIndex((option) => option.label === NONE_OPTION_LABEL);
       }
 
       function questionLabel(index: number): string {
@@ -253,16 +269,17 @@ async function showAskWizard(
       }
 
       function hasAnswer(index: number): boolean {
-        return selected[index].size > 0 || textValues[index].trim().length > 0;
+        if (selected[index].size > 0) return true;
+        return optionsList[index].length === 0 && freeText[index].trim().length > 0;
       }
 
       function enterStep(nextStep: number): void {
         step = Math.max(0, Math.min(nextStep, questions.length));
         feedback = "";
+        detailCursor = -1;
         if (step < questions.length) {
-          const q = currentQuestion();
-          typing = questionOptions(q).length === 0;
-          input = textValues[step];
+          typing = optionsList[step].length === 0;
+          input = typing ? freeText[step] : "";
         } else {
           typing = false;
           input = "";
@@ -285,15 +302,30 @@ async function showAskWizard(
 
       function collectAnswers(): AskAnswer[] {
         return questions.map((q, index) => {
+          const options = optionsList[index];
+          const noneIndex = noneOptionIndex(index);
           const values = [...selected[index]]
             .sort((a, b) => a - b)
-            .map((optionIndex) => questionOptions(q)[optionIndex]?.label)
+            .map((optionIndex) => options[optionIndex]?.label)
             .filter((label): label is string => Boolean(label));
-          const text = textValues[index].trim();
+          const details: Record<string, string> = {};
+          for (const optionIndex of selected[index]) {
+            if (optionIndex === noneIndex) continue;
+            const label = options[optionIndex]?.label;
+            const detail = optionDetails[index][optionIndex]?.trim();
+            if (label && detail) details[label] = detail;
+          }
+          const noneSelected = noneIndex >= 0 && selected[index].has(noneIndex);
+          const text = noneSelected
+            ? optionDetails[index][noneIndex]?.trim() ?? ""
+            : options.length === 0
+              ? freeText[index].trim()
+              : "";
           return {
             question: q.question,
             ...(q.header ? { header: q.header } : {}),
             selected: values,
+            ...(Object.keys(details).length > 0 ? { details } : {}),
             ...(text ? { text } : {}),
           };
         });
@@ -346,7 +378,7 @@ async function showAskWizard(
 
       function renderQuestion(width: number): string[] {
         const q = currentQuestion();
-        const options = questionOptions(q);
+        const options = optionsList[step];
         const questionLines = wrapTextWithAnsi(theme.bold(q.question), width).slice(0, 2);
         const lines: string[] = [breadcrumb(width), ...questionLines];
         const modeLabel = q.multiSelect
@@ -357,8 +389,14 @@ async function showAskWizard(
         lines.push(truncateToWidth(theme.fg("dim", modeLabel), width, "…"));
 
         if (typing) {
-          const value = input || theme.fg("dim", "Type your answer…");
-          lines.push(truncateToWidth(`${theme.fg("success", "›")} ${value}`, width, "…"));
+          const editingLabel = options.length > 0 && detailCursor >= 0
+            ? theme.fg("muted", `${options[detailCursor].label} › `)
+            : "";
+          const placeholder = options.length > 0
+            ? "Add supplementary details…"
+            : "Type your answer…";
+          const value = input || theme.fg("dim", placeholder);
+          lines.push(truncateToWidth(`${theme.fg("success", "›")} ${editingLabel}${value}`, width, "…"));
         } else {
           const cursor = cursors[step];
           const choiceGroups: Array<{ cursorIndex: number; lines: string[] }> = [];
@@ -383,11 +421,13 @@ async function showAskWizard(
               "…",
             )];
             if (checked) {
-              const custom = textValues[step]
-                ? `: ${textValues[step]}`
-                : " (press d to add)";
+              const detail = optionDetails[step][i]?.trim();
+              const prompt = i === noneOptionIndex(step)
+                ? "Describe what you'd like instead"
+                : "Add details";
+              const custom = detail ? `: ${detail}` : " (press d to add)";
               optionLines.push(truncateToWidth(
-                `     ${theme.fg("muted", `Add details${custom}`)}`,
+                `     ${theme.fg("muted", `${prompt}${custom}`)}`,
                 width,
                 "…",
               ));
@@ -397,7 +437,7 @@ async function showAskWizard(
 
           let specialIndex = options.length;
           if (q.multiSelect && options.length > 1) {
-            const noneIndex = noneOptionIndex(q);
+            const noneIndex = noneOptionIndex(step);
             const selectableCount = options.length - (noneIndex >= 0 ? 1 : 0);
             const allSelected = selected[step].size === selectableCount && !selected[step].has(noneIndex);
             const marker = cursor === specialIndex ? theme.fg("success", "›") : " ";
@@ -432,7 +472,11 @@ async function showAskWizard(
         ];
         for (let i = 0; i < questions.length; i++) {
           const answer = collectAnswers()[i];
-          const values = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(" — ");
+          const chosen = answer.selected.map((label) => {
+            const detail = answer.details?.[label];
+            return detail ? `${label} (${detail})` : label;
+          });
+          const values = [...chosen, ...(answer.text ? [answer.text] : [])].join(" — ");
           lines.push(truncateToWidth(
             `${theme.bold(`${i + 1}. ${answer.question}`)}  ${theme.fg("muted", values)}`,
             width,
@@ -444,33 +488,39 @@ async function showAskWizard(
         return lines.slice(0, 10);
       }
 
-      function maxCursor(q: QuestionSpec): number {
-        const optionCount = questionOptions(q).length;
-        const selectAllRows = q.multiSelect && optionCount > 1 ? 1 : 0;
+      function maxCursor(index: number): number {
+        const optionCount = optionsList[index].length;
+        const selectAllRows = questions[index].multiSelect && optionCount > 1 ? 1 : 0;
         return optionCount + selectAllRows - 1;
       }
 
       function handleTyping(data: string): void {
-        const q = currentQuestion();
-        const hasOptions = questionOptions(q).length > 0;
+        const hasOptions = optionsList[step].length > 0;
         if (data === "\r" || data === "\n") {
           const value = input.trim();
-          if (!value) {
-            feedback = "Enter a response before continuing.";
-            tui.requestRender();
+          if (!hasOptions) {
+            if (!value) {
+              feedback = "Enter a response before continuing.";
+              tui.requestRender();
+              return;
+            }
+            freeText[step] = value;
+            feedback = "";
+            typing = false;
+            advance();
             return;
           }
-          textValues[step] = value;
+          if (detailCursor >= 0) optionDetails[step][detailCursor] = value;
           feedback = "";
           typing = false;
-          if (!hasOptions) advance();
-          else tui.requestRender();
+          detailCursor = -1;
+          tui.requestRender();
           return;
         }
         if (data === "\x1b") {
           if (hasOptions) {
             typing = false;
-            input = textValues[step];
+            detailCursor = -1;
             feedback = "";
             tui.requestRender();
           } else if (step > 0) {
@@ -496,8 +546,8 @@ async function showAskWizard(
 
       function handleChoice(data: string): void {
         const q = currentQuestion();
-        const options = questionOptions(q);
-        const noneIndex = noneOptionIndex(q);
+        const options = optionsList[step];
+        const noneIndex = noneOptionIndex(step);
         const cursor = cursors[step];
         const allIndex = q.multiSelect && options.length > 1 ? options.length : -1;
 
@@ -508,14 +558,14 @@ async function showAskWizard(
           return;
         }
         if (data === "\x1b[B" || data === "\x1bOB" || data === "j" || data === "\t") {
-          cursors[step] = Math.min(maxCursor(q), cursor + 1);
+          cursors[step] = Math.min(maxCursor(step), cursor + 1);
           feedback = "";
           tui.requestRender();
           return;
         }
         if (/^[1-9]$/.test(data)) {
           const requested = Number(data) - 1;
-          if (requested <= maxCursor(q)) {
+          if (requested <= maxCursor(step)) {
             cursors[step] = requested;
             feedback = "";
             if (requested < options.length) {
@@ -538,9 +588,11 @@ async function showAskWizard(
           }
           return;
         }
-        if (data === "d" && selected[step].size > 0) {
+        if (data === "d" && cursor < options.length && selected[step].has(cursor)) {
+          detailCursor = cursor;
+          if (cursor === noneIndex) nonePrompted[step] = true;
           typing = true;
-          input = textValues[step];
+          input = optionDetails[step][cursor];
           feedback = "";
           tui.requestRender();
           return;
@@ -568,8 +620,17 @@ async function showAskWizard(
             selected[step].clear();
             selected[step].add(cursor);
             feedback = "";
-            if (data === " ") tui.requestRender();
-            else advance();
+            if (data === " ") {
+              tui.requestRender();
+            } else if (cursor === noneIndex && !nonePrompted[step]) {
+              nonePrompted[step] = true;
+              detailCursor = cursor;
+              typing = true;
+              input = optionDetails[step][cursor];
+              tui.requestRender();
+            } else {
+              advance();
+            }
           }
           return;
         }
@@ -594,7 +655,12 @@ async function showAskWizard(
         if (token.kind === "paste") {
           if (step < questions.length && !typing) {
             typing = true;
-            input = textValues[step];
+            if (optionsList[step].length === 0) {
+              input = freeText[step];
+            } else {
+              detailCursor = cursors[step];
+              input = optionDetails[step][cursors[step]] ?? "";
+            }
           }
           if (step < questions.length) handleTyping(token.text);
           return;

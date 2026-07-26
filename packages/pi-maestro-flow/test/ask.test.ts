@@ -77,9 +77,75 @@ test("single select uses color-block selection, numeric shortcuts, default none,
 
   const result = await pending;
   assert.deepEqual(result.details.answers[0].selected, ["Preset"]);
-  assert.equal(result.details.answers[0].text, "Prefer the nearest region");
+  assert.deepEqual(result.details.answers[0].details, { Preset: "Prefer the nearest region" });
+  assert.equal(result.details.answers[0].text, undefined);
   assert.equal(harness.cleared, true);
   assert.equal(harness.unsubscribed, true);
+});
+
+test("single select none-of-the-above captures a custom answer", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [{
+      question: "Pick a region",
+      options: [{ label: "East" }, { label: "West" }],
+    }],
+  }, harness.ctx);
+
+  // Options: East(0), West(1), None of the above(2).
+  harness.handler?.("3"); // select None of the above
+  harness.handler?.("\r"); // Enter on none auto-opens the custom input once
+  harness.handler?.("I want the nearest region");
+  harness.handler?.("\r"); // save custom text, return to choices
+  harness.handler?.("\r"); // finish
+
+  const result = await pending;
+  assert.deepEqual(result.details.answers[0].selected, ["None of the above"]);
+  assert.equal(result.details.answers[0].text, "I want the nearest region");
+});
+
+test("single select none-of-the-above can be confirmed without an explanation", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [{
+      question: "Pick a region",
+      options: [{ label: "East" }, { label: "West" }],
+    }],
+  }, harness.ctx);
+
+  harness.handler?.("3"); // select None of the above
+  harness.handler?.("\r"); // auto-opens custom input
+  harness.handler?.("\r"); // empty input saves nothing, back to choices
+  harness.handler?.("\r"); // finish without looping back into the input
+
+  const result = await pending;
+  assert.deepEqual(result.details.answers[0].selected, ["None of the above"]);
+  assert.equal(result.details.answers[0].text, undefined);
+});
+
+test("multi-select captures independent details per option", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [{
+      question: "Choose checks",
+      multiSelect: true,
+      options: [{ label: "Tests" }, { label: "Lint" }],
+    }],
+  }, harness.ctx);
+
+  harness.handler?.("1"); // toggle Tests
+  harness.handler?.("d"); // detail for Tests
+  harness.handler?.("unit only");
+  harness.handler?.("\r"); // save detail
+  harness.handler?.("2"); // toggle Lint
+  harness.handler?.("d"); // detail for Lint
+  harness.handler?.("strict");
+  harness.handler?.("\r"); // save detail
+  harness.handler?.("\r"); // finish
+
+  const result = await pending;
+  assert.deepEqual(result.details.answers[0].selected, ["Tests", "Lint"]);
+  assert.deepEqual(result.details.answers[0].details, { Tests: "unit only", Lint: "strict" });
 });
 
 test("multi-select keeps checkbox affordances", async () => {

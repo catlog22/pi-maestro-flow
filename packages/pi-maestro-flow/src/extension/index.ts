@@ -1550,6 +1550,8 @@ function registerAskUserQuestionTool(pi: ExtensionAPI): void {
 - Multi-select: { questions: [{ question: "Which features?", multiSelect: true, options: [...] }] }
 - Open-ended: { questions: [{ question: "What should the name be?" }] }
 
+Users may add supplementary details to any option (including a free-form answer for "None of the above"); these come back in each answer's details map and text field.
+
 The tool returns structured answers only. Plan mode owns proposed-plan Markdown; /plan approve is the explicit confirmation command.
 
 When to use:
@@ -1597,7 +1599,11 @@ When NOT to use:
       const count = details.answers.length;
       const header = `${theme.fg("success", "✓")} Collected ${count} answer${count === 1 ? "" : "s"}`;
       const answerLines = details.answers.map((answer, index) => {
-        const value = [...answer.selected, ...(answer.text ? [answer.text] : [])].join(" — ") || "No answer";
+        const chosen = answer.selected.map((label) => {
+          const detail = answer.details?.[label];
+          return detail ? `${label} (${detail})` : label;
+        });
+        const value = [...chosen, ...(answer.text ? [answer.text] : [])].join(" — ") || "No answer";
         return `${index + 1}. ${answer.question} → ${value}`;
       });
       return {
