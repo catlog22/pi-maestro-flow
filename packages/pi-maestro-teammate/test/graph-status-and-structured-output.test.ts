@@ -1622,7 +1622,10 @@ test("agent overlay renders compact horizontal tabs and switches with left/right
     abortController: new AbortController(), inbox: [], outputLog: [], lastActivityAt: now,
     status: "sleeping" as const, depth: 0, sleepMs: 0,
   };
-  const activeRuns = new Map([[first.correlationId, first], [second.correlationId, second]]);
+  const activeRuns = new Map<string, ActiveAgent>([
+    [first.correlationId, first],
+    [second.correlationId, second],
+  ]);
   const overlay = new AttachOverlay(first, () => {}, () => activeRuns);
   try {
     const initial = overlay.render(100, 16).join("\n");
