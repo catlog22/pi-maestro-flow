@@ -3,10 +3,17 @@ import { altKey } from "../key-labels.ts";
 
 export type GoalWidgetPhase = "normal" | "waiting" | "retrying" | "verifying" | "verified";
 
+/**
+ * Single source of truth for pause reasons. Re-exported by tools/goal.ts as
+ * PauseReason; keeping one literal list here stops the widget model from
+ * silently narrowing what the domain can actually produce.
+ */
+export type GoalPauseReason = "user" | "budget" | "gate" | "stalled";
+
 export interface GoalWidgetModel {
   objective: string;
   status: "active" | "paused" | "done";
-  pauseReason?: "user" | "budget" | "gate";
+  pauseReason?: GoalPauseReason;
   iteration: number;
   tokensUsed: number;
   tokenBudget?: number;

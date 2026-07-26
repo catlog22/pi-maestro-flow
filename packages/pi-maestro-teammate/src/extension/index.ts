@@ -1613,6 +1613,7 @@ export default function registerTeammateExtension(
       }
       const { isMultiTask } = normalization;
       const normalizedTasks: NormalizedTask[] = normalization.tasks ?? [];
+      let foregroundUpdateOpen = params.background === false;
       const warningPrefix = normalization.warnings.length
         ? normalization.warnings.map((w) => `[warn] ${w}`).join("\n") + "\n\n"
         : "";
@@ -1683,7 +1684,7 @@ export default function registerTeammateExtension(
         const currentProgress = progressSnapshot();
         if (isMultiTask) activeAgent.progress = currentProgress;
         const childLabel = child.name ?? child.agent;
-        if (params.background !== false) {
+        if (foregroundUpdateOpen) {
           onUpdate?.({
             content: [{
               type: "text",
@@ -1939,10 +1940,11 @@ export default function registerTeammateExtension(
               tokens: data.tokens,
               recentTools: data.recentTools,
               lastMessage: data.lastMessage,
+              lastActivityAt: data.lastActivityAt,
               progress: currentProgress,
             });
 
-            if (params.background !== false) {
+            if (foregroundUpdateOpen) {
               onUpdate?.({
                 content: [{
                   type: "text",
@@ -2219,6 +2221,7 @@ export default function registerTeammateExtension(
           details: { mode: "single", results: [] },
         };
       } finally {
+        foregroundUpdateOpen = false;
         if (params.background === false && !detached) {
           const agent = state.activeRuns.get(correlationId);
           if (agent?.status === "running") {

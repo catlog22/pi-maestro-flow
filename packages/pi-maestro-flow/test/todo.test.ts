@@ -188,6 +188,13 @@ test("Todo goalId binding persists across create, update, and reload", async () 
   });
   let todoContext = startTodo(root, loader);
   const ctx = makeExtensionContext();
+  initGoal({ appendEntry() {} } as never);
+  const goalCtx: GoalContext = {
+    cwd: root,
+    ui: { notify() {}, setStatus() {} },
+    abort() {},
+  };
+  goalSessionStart(goalCtx, { reason: "new" });
   try {
     await executeTodo({ action: "create", subject: "Guarded task", goalId: "goal-1" }, ctx);
     const id = getVisibleTasks()[0].id;
@@ -199,7 +206,11 @@ test("Todo goalId binding persists across create, update, and reload", async () 
     await executeTodo({ action: "update", id, goalId: "" }, ctx);
     assert.equal(getVisibleTasks()[0].goalId, undefined);
 
-    await executeTodo({ action: "update", id, goalId: "goal-3" }, ctx);
+    // The reload leg needs a Goal that actually exists: the load boundary now drops bindings
+    // whose Goal is gone, so a phantom id would be scrubbed rather than persisted. The
+    // scrubbing branch has its own test below.
+    const gate = addGoal("Reload gate", goalCtx);
+    await executeTodo({ action: "update", id, goalId: gate.id }, ctx);
     const persisted = getVisibleTasks()[0];
     onSessionShutdown(todoContext);
     const entry = {
@@ -208,8 +219,10 @@ test("Todo goalId binding persists across create, update, and reload", async () 
       data: { version: 4, tasks: { [persisted.id]: persisted } },
     };
     todoContext = startTodo(root, loader, [entry]);
-    assert.equal(getVisibleTasks()[0].goalId, "goal-3");
+    assert.equal(getVisibleTasks()[0].goalId, gate.id);
   } finally {
+    await executeGoalCommand({ action: "clear" }, goalCtx);
+    goalSessionShutdown(goalCtx);
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });
   }
@@ -274,6 +287,92 @@ test("todo next switches to the task's quality-gate Goal and auto-resumes it", a
     assert.equal(getActiveGoal()?.status, "active");
   } finally {
     await executeGoalCommand({ action: "clear" }, goalCtx);
+    goalSessionShutdown(goalCtx);
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("clearing a Goal unbinds its tasks instead of stranding them at the gate", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-goal-clear-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const notices: string[] = [];
+  initGoal({ appendEntry() {} } as never);
+  const goalCtx: GoalContext = {
+    cwd: root,
+    ui: { notify(message: string) { notices.push(message); }, setStatus() {} },
+    abort() {},
+  };
+  goalSessionStart(goalCtx, { reason: "new" });
+  try {
+    const gate = addGoal("Disposable gate", goalCtx);
+    await executeTodo({ action: "create", subject: "Guarded", goalId: gate.id }, ctx);
+    const id = getVisibleTasks()[0].id;
+
+    await executeGoalCommand({ action: "clear" }, goalCtx);
+
+    // The Goal is gone from the registry, so leaving the binding in place would make the
+    // completion gate reject this task forever.
+    assert.equal(getVisibleTasks()[0].goalId, undefined);
+    assert.ok(
+      notices.some((message) => /unbound 1 task\b/.test(message)),
+      `expected an unbind notice, got ${JSON.stringify(notices)}`,
+    );
+
+    const done = await executeTodo({ action: "update", id, status: "completed" }, ctx);
+    assert.notEqual((done as { isError?: boolean }).isError, true);
+    assert.equal(getVisibleTasks()[0].status, "completed");
+  } finally {
+    goalSessionShutdown(goalCtx);
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("reloading tasks drops bindings to Goals that no longer exist", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-goal-rebind-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const ctx = makeExtensionContext();
+  initGoal({ appendEntry() {} } as never);
+  const goalCtx: GoalContext = {
+    cwd: root,
+    ui: { notify() {}, setStatus() {} },
+    abort() {},
+  };
+  // Goal state is session-scoped and starts empty on a new/forked session; Todo state is not,
+  // so a persisted task can come back pointing at a Goal this session never had.
+  goalSessionStart(goalCtx, { reason: "new" });
+  let todoContext = startTodo(root, loader);
+  try {
+    await executeTodo({ action: "create", subject: "Survivor", goalId: "goal-from-a-past-life" }, ctx);
+    const persisted = getVisibleTasks()[0];
+    onSessionShutdown(todoContext);
+
+    const entry = {
+      type: "custom",
+      customType: "todo-state",
+      data: { version: 5, tasks: { [persisted.id]: persisted } },
+    };
+    todoContext = startTodo(root, loader, [entry]);
+
+    assert.equal(getVisibleTasks()[0].goalId, undefined);
+    const done = await executeTodo({
+      action: "update",
+      id: getVisibleTasks()[0].id,
+      status: "completed",
+    }, ctx);
+    assert.notEqual((done as { isError?: boolean }).isError, true);
+  } finally {
     goalSessionShutdown(goalCtx);
     onSessionShutdown(todoContext);
     await rm(root, { recursive: true, force: true });

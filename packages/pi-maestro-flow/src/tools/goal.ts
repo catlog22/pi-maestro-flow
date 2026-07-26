@@ -7,10 +7,11 @@ import { activeWorkflowRun, type WorkflowSession, type WorkflowSnapshot } from "
 import {
   renderGoalPanel,
   type GoalDetailEntry,
+  type GoalPauseReason,
   type GoalWidgetPhase,
 } from "../tui/goal-widget.ts";
 import { createDirectTeammateRunOptions } from "./direct-teammate.ts";
-import { getVisibleTasks } from "./todo.ts";
+import { detachTasksFromGoal, getVisibleTasks } from "./todo.ts";
 
 // Lazy-loaded sibling: dynamic import + isModuleNotFound fallback (docs pattern 4)
 interface RunTeammateParams {
@@ -69,7 +70,7 @@ function isModuleNotFound(err: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 type GoalStatus = "active" | "paused" | "done";
-export type PauseReason = "user" | "budget" | "gate" | "stalled";
+export type PauseReason = GoalPauseReason;
 type AgentStopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 
 export interface ActiveGoal {
@@ -1639,7 +1640,19 @@ function updateUsage(goal: ActiveGoal, ctx: GoalContext) {
 function clearActive(ctx: GoalContext, keepInRegistry = false) {
   cancelContinuation();
   clearRecovery();
-  if (activeGoal && !keepInRegistry) removeFromGoalRegistry(activeGoal.id);
+  if (activeGoal && !keepInRegistry) {
+    removeFromGoalRegistry(activeGoal.id);
+    // The Goal is gone for good, so the Todo completion gate would reject every task still
+    // bound to it ("was not found; cannot verify completion") with no automatic way back.
+    // Completion takes the keepInRegistry branch instead, so bindings survive there.
+    const detached = detachTasksFromGoal(activeGoal.id);
+    if (detached > 0) {
+      ctx.ui.notify(
+        `Goal cleared; unbound ${detached} task${detached === 1 ? "" : "s"} from its quality gate.`,
+        "info",
+      );
+    }
+  }
   activeGoal = undefined;
   goalLoopOwner = undefined;
   clearElapsedTimer();
@@ -1709,7 +1722,9 @@ function loadGoalFromSession(ctx: GoalContext, sessionId: string | undefined): A
 }
 
 function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
-  const rawGoal = goal as ActiveGoal & { pauseReason?: unknown };
+  // Goals persisted before "error" was dropped from the union still carry it;
+  // Omit is required because intersecting keeps the narrower declared type.
+  const rawGoal = goal as Omit<ActiveGoal, "pauseReason"> & { pauseReason?: unknown };
   if (rawGoal.pauseReason !== "error") return goal;
   const { pauseReason: _pauseReason, ...normalized } = rawGoal;
   return normalized;

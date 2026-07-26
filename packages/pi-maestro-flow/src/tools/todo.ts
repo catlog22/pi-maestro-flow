@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { FlowToolResult } from "./tool-result.ts";
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -444,7 +445,7 @@ export async function executeTodo(
   input: TodoParamsInput,
   ctx: ExtensionContext,
   actor: TodoActorRef = ROOT_TODO_ACTOR,
-): Promise<AgentToolResult> {
+): Promise<FlowToolResult> {
   const generation = todoGeneration;
   const execute = () => executeTodoAction(input, ctx, actor, generation);
   if (!isTodoMutation(input.action)) return execute();
@@ -459,7 +460,7 @@ async function executeTodoAction(
   ctx: ExtensionContext,
   actor: TodoActorRef,
   generation: number,
-): Promise<AgentToolResult> {
+): Promise<FlowToolResult> {
   const { action } = input;
   try {
     assertTodoGeneration(generation);
@@ -492,7 +493,7 @@ async function executeTodoAction(
 // Action Handlers
 // ---------------------------------------------------------------------------
 
-function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActorRef): AgentToolResult {
+function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActorRef): FlowToolResult {
   if (params.tasks && params.tasks.length > 0) return handleBatchCreate(params.tasks, actor, params.planHandoffKey);
   if (!params.subject) return err("subject is required for create", "create");
 
@@ -536,7 +537,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
  * task in this same batch. The whole batch commits atomically — any invalid
  * spec aborts the create without touching existing state.
  */
-function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHandoffKey?: string): AgentToolResult {
+function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHandoffKey?: string): FlowToolResult {
   const nextTasks = cloneTaskMap();
 
   const ids: string[] = [];
@@ -618,7 +619,7 @@ async function handleUpdate(
   ctx: ExtensionContext,
   actor: TodoActorRef,
   generation: number,
-): Promise<AgentToolResult> {
+): Promise<FlowToolResult> {
   if (!params.id) return err("id is required for update", "update");
   const task = tasks.get(params.id);
   if (!task) return err(`Task not found: ${params.id}`, "update");
@@ -739,7 +740,7 @@ async function handleUpdate(
   return ok(`Updated #${draft.id}: ${draft.subject}${statusNote}`, "update");
 }
 
-function handleList(params: TodoParams, actor: TodoActorRef): AgentToolResult {
+function handleList(params: TodoParams, actor: TodoActorRef): FlowToolResult {
   let filtered = getVisibleTasks();
 
   if (params.filter?.status) {
@@ -769,7 +770,7 @@ function handleList(params: TodoParams, actor: TodoActorRef): AgentToolResult {
   return ok(lines.join("\n"), "list");
 }
 
-function handleGet(params: TodoParams): AgentToolResult {
+function handleGet(params: TodoParams): FlowToolResult {
   if (!params.id) return err("id is required for get", "get");
   const task = tasks.get(params.id);
   if (!task) return err(`Task not found: ${params.id}`, "get");
@@ -804,7 +805,7 @@ function handleGet(params: TodoParams): AgentToolResult {
   return ok(lines.join("\n"), "get");
 }
 
-function handleDelete(params: TodoParams, ctx: ExtensionContext, actor: TodoActorRef): AgentToolResult {
+function handleDelete(params: TodoParams, ctx: ExtensionContext, actor: TodoActorRef): FlowToolResult {
   if (!params.id) return err("id is required for delete", "delete");
   const task = tasks.get(params.id);
   if (!task) return err(`Task not found: ${params.id}`, "delete");
@@ -830,7 +831,7 @@ function handleDelete(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
   return ok(`Deleted #${deleted.id}: ${deleted.subject}`, "delete");
 }
 
-function handleClear(ctx: ExtensionContext, actor: TodoActorRef): AgentToolResult {
+function handleClear(ctx: ExtensionContext, actor: TodoActorRef): FlowToolResult {
   if (actor.kind !== "root") return err("Only root can clear the shared Todo list.", "clear");
   const count = [...tasks.values()].filter((t) => t.status !== "deleted").length;
   const nextTasks = new Map<string, TodoTask>();
@@ -843,7 +844,7 @@ async function handleNext(
   ctx: ExtensionContext,
   actor: TodoActorRef,
   generation: number,
-): Promise<AgentToolResult> {
+): Promise<FlowToolResult> {
   const active = findActiveTask(actor.id);
   if (active) {
     return err(`Task #${active.id} is already in progress for @${actor.label} (one in_progress per actor). Complete or pause it first, or dispatch parallel work via teammates without changing todo status.`, "next");
@@ -1074,6 +1075,53 @@ function autoUnblock(state: Map<string, TodoTask>, completedId: string): void {
   }
 }
 
+/**
+ * Drop the quality-gate binding from every task pointing at `goalId`.
+ *
+ * Mirrors {@link autoUnblock}: when an entity is destroyed, the references to it must go with
+ * it. Without this, clearing a Goal leaves its bound tasks stuck at the completion gate
+ * (`getGoalById` returns undefined) with no path to completion short of a manual
+ * `update goalId: ""`.
+ *
+ * Returns the number of tasks detached so callers can surface it instead of failing silently.
+ */
+export function detachTasksFromGoal(goalId: string): number {
+  if (!goalId) return 0;
+  const next = new Map(tasks);
+  let detached = 0;
+  for (const [id, task] of next) {
+    if (task.status === "deleted" || task.goalId !== goalId) continue;
+    const draft = cloneTodoTask(task);
+    delete draft.goalId;
+    draft.updatedAt = Date.now();
+    next.set(id, draft);
+    detached += 1;
+  }
+  if (detached === 0) return 0;
+  commitTodoState(next);
+  return detached;
+}
+
+/**
+ * Drop bindings to Goals that no longer exist, at the session-load boundary.
+ *
+ * Mirrors {@link normalizeLoadedDependencies}, which does the same for `blockedBy`. Goal state
+ * is session-scoped (it clears its registry when the persisted sessionId does not match, and on
+ * new/fork), while Todo state is not, so a fork or resume can bring every task back carrying a
+ * goalId whose Goal is gone. Nothing validates goalId on the write path either, so a task can
+ * also be created against an id that never existed.
+ *
+ * Safe to resolve Goals here: goalSessionStart runs before todoSessionStart (extension/index.ts),
+ * so the registry is already populated.
+ */
+function normalizeLoadedGoalBindings(state: Map<string, TodoTask>): void {
+  for (const task of state.values()) {
+    if (!task.goalId) continue;
+    if (getGoalById(task.goalId)) continue;
+    delete task.goalId;
+  }
+}
+
 function normalizeLoadedDependencies(state: Map<string, TodoTask>): void {
   for (const task of state.values()) {
     const seen = new Set<string>();
@@ -1131,6 +1179,7 @@ function loadTasksFromSession(ctx: TodoContext): Map<string, TodoTask> {
     loaded.set(id, normalizeLoadedTask(id, rawTask));
   }
   normalizeLoadedDependencies(loaded);
+  normalizeLoadedGoalBindings(loaded);
   return loaded;
 }
 
@@ -1277,7 +1326,10 @@ function activationMetadata(activation: SkillActivation): SkillActivationMetadat
 
 async function ensureSkillActivation(task: TodoTask): Promise<SkillActivation> {
   const cached = activeSkillSnapshots.get(task.id);
-  if (cached?.stackRevision === task.skillActivation?.stackRevision) {
+  // Without the `cached &&` guard, a task with no cached snapshot and no
+  // skillActivation compares undefined === undefined and returns undefined
+  // from a function declared to yield a SkillActivation.
+  if (cached && cached.stackRevision === task.skillActivation?.stackRevision) {
     return cached;
   }
   const generation = todoGeneration;
@@ -1798,10 +1850,10 @@ function snapshotDetails(action: string, error?: string): TodoResultDetails {
   return { action, tasks: visible, ...(error ? { error } : {}) };
 }
 
-function ok(text: string, action = "unknown"): AgentToolResult {
+function ok(text: string, action = "unknown"): FlowToolResult {
   return { content: [{ type: "text", text }], details: snapshotDetails(action) };
 }
 
-function err(text: string, action = "unknown"): AgentToolResult {
+function err(text: string, action = "unknown"): FlowToolResult {
   return { content: [{ type: "text", text: `Error: ${text}` }], isError: true, details: snapshotDetails(action, text) };
 }
