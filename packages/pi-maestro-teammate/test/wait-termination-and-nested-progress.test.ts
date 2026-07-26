@@ -1,0 +1,143 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
+import {
+  waitForTeammate,
+  TEAMMATE_STALL_TIMEOUT_MS,
+  TEAMMATE_PENDING_STALL_TIMEOUT_MS,
+  TEAMMATE_WAIT_POLL_FLOOR_MS,
+  TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS,
+} from "../src/extension/index.ts";
+import type { ActiveAgent, AgentStatus, TeammateState, TeammateInteractionRecord } from "../src/shared/types.ts";
+
+function makeState(): TeammateState {
+  return {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    activeRuns: new Map<string, ActiveAgent>(),
+    namedAgents: new Map<string, string>(),
+  };
+}
+
+function addAgent(
+  state: TeammateState,
+  name: string,
+  status: AgentStatus,
+  idleMs: number,
+  overrides: Partial<ActiveAgent> = {},
+): ActiveAgent {
+  const cid = randomUUID();
+  const now = Date.now();
+  const agent: ActiveAgent = {
+    agent: "worker",
+    name,
+    correlationId: cid,
+    startedAt: now - idleMs,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now - idleMs,
+    depth: 0,
+    status,
+    sleepMs: 0,
+    ...overrides,
+  };
+  state.activeRuns.set(cid, agent);
+  state.namedAgents.set(name, cid);
+  return agent;
+}
+
+/** Counts timer scheduling so a busy-poll regression fails loudly. */
+async function withTimerCount<T>(run: () => Promise<T>): Promise<{ result: T; scheduled: number }> {
+  const original = globalThis.setTimeout;
+  let scheduled = 0;
+  (globalThis as { setTimeout: typeof setTimeout }).setTimeout = ((
+    handler: TimerHandler,
+    timeout?: number,
+    ...args: unknown[]
+  ) => {
+    scheduled += 1;
+    return original(handler as never, timeout, ...(args as never[]));
+  }) as unknown as typeof setTimeout;
+  try {
+    return { result: await run(), scheduled };
+  } finally {
+    (globalThis as { setTimeout: typeof setTimeout }).setTimeout = original;
+  }
+}
+
+test("a long-idle pending graph task terminates the wait instead of polling forever", async () => {
+  // `pending` tasks stop refreshing lastActivityAt while queued. A stall check
+  // scoped to `running` left them with no terminating condition, and the
+  // already-elapsed deadline clamped the re-poll delay to 1ms.
+  const state = makeState();
+  addAgent(state, "queued", "pending", TEAMMATE_PENDING_STALL_TIMEOUT_MS + 1_000);
+
+  const { result, scheduled } = await withTimerCount(() =>
+    waitForTeammate(state, { name: "queued" }),
+  );
+
+  assert.equal(result.status, "stalled");
+  assert.ok(scheduled <= 2, `expected the fast path, saw ${scheduled} timers scheduled`);
+});
+
+test("a pending task inside its grace window is not yet called stalled", async () => {
+  const state = makeState();
+  addAgent(state, "queued", "pending", TEAMMATE_STALL_TIMEOUT_MS + 1_000);
+
+  // Past the running-agent ceiling but well inside the queued-work ceiling:
+  // waiting on a dependency is expected, so it must not resolve immediately.
+  const result = await waitForTeammate(state, { name: "queued", timeoutMs: 120 });
+  assert.equal(result.status, "timeout");
+});
+
+test("a retrying agent that stopped reporting is treated as stalled", async () => {
+  const state = makeState();
+  addAgent(state, "flaky", "retrying", TEAMMATE_STALL_TIMEOUT_MS + 1_000);
+
+  const result = await waitForTeammate(state, { name: "flaky" });
+  assert.equal(result.status, "stalled");
+});
+
+test("an agent awaiting a relayed permission is never reported as stalled", async () => {
+  const state = makeState();
+  const pendingInteractions = new Map<string, TeammateInteractionRecord>([
+    ["req-1", {
+      requestId: "req-1",
+      interaction: "permission",
+      createdAt: Date.now() - 90_000,
+      payload: { toolName: "bash" },
+    }],
+  ]);
+  addAgent(state, "asker", "running", TEAMMATE_STALL_TIMEOUT_MS + 60_000, { pendingInteractions });
+
+  // Blocked on a human, not stopped reporting. Calling it stalled told the
+  // model to terminate a healthy agent.
+  const result = await waitForTeammate(state, { name: "asker", timeoutMs: 120 });
+  assert.equal(result.status, "timeout");
+});
+
+test("an omitted timeoutMs still yields a bounded wait", async () => {
+  assert.ok(TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS > 0);
+  assert.ok(TEAMMATE_WAIT_POLL_FLOOR_MS >= 100, "the re-poll floor must exclude busy looping");
+
+  const state = makeState();
+  addAgent(state, "fresh", "running", 0);
+
+  // Resolves via the stall ceiling rather than hanging for the session.
+  const started = Date.now();
+  const result = await waitForTeammate(state, { name: "fresh", timeoutMs: 100 });
+  assert.equal(result.status, "timeout");
+  assert.ok(Date.now() - started >= 90);
+});
+
+test("waiting on a settled agent short-circuits without scheduling a timer", async () => {
+  const state = makeState();
+  addAgent(state, "done", "sleeping", 0);
+
+  const { result, scheduled } = await withTimerCount(() =>
+    waitForTeammate(state, { name: "done" }),
+  );
+  assert.equal(result.status, "completed");
+  assert.equal(scheduled, 0);
+});

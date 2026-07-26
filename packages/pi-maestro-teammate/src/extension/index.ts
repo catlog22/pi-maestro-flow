@@ -202,6 +202,39 @@ export const AGENT_BUFFER_LIMITS = Object.freeze({
 });
 export const TEAMMATE_STALL_TIMEOUT_MS = 30_000;
 
+/**
+ * Stall ceiling for queued work. A `pending` graph task is waiting on a
+ * dependency or a concurrency slot, which is expected — it just must not wait
+ * without any ceiling at all.
+ */
+export const TEAMMATE_PENDING_STALL_TIMEOUT_MS = 5 * 60_000;
+
+/** Lower bound on teammate-wait re-poll spacing. */
+export const TEAMMATE_WAIT_POLL_FLOOR_MS = 250;
+
+/**
+ * Backstop for `teammate-wait` calls that omit `timeoutMs`. The tool's own
+ * description tells callers to pass a bounded timeout, but an unbounded wait
+ * must still terminate on its own.
+ */
+export const TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Ceiling on how long one relayed permission/question may hold a child agent
+ * before it is answered on the child's behalf. The terminal is a single shared
+ * resource, so these requests are answered one at a time; without a ceiling one
+ * unattended prompt stalls every other agent queued behind it, and any parent
+ * waiting on those agents stalls with them.
+ */
+export const TEAMMATE_INTERACTION_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Ceiling on queued relayed interactions. Past this the queue is answering
+ * slower than agents are asking, so newcomers are declined immediately rather
+ * than joining a line they would time out in anyway.
+ */
+export const TEAMMATE_INTERACTION_QUEUE_LIMIT = 16;
+
 export const WAKEABLE_AGENT_BUDGET = Object.freeze({
   maxSleepingAgents: 12,
   anonymousTtlMs: 15 * 60_000,
@@ -210,6 +243,27 @@ export const WAKEABLE_AGENT_BUDGET = Object.freeze({
 
 const AGENT_WIDGET_IDLE_HIDE_MS = 60_000;
 const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
+
+/**
+ * Appends one marker-prefixed activity line to an agent's log. Shared so the
+ * single-task and graph proxy paths record the same shape; the single-task path
+ * previously recorded nothing, leaving `teammate-watch` on a nested agent with
+ * only "Waiting for model capacity or first activity…".
+ */
+function appendAgentProgressLine(
+  agent: ActiveAgent,
+  data: AgentProgress,
+  correlationId: string,
+): void {
+  const lastLine = data.lastMessage?.split("\n").pop()?.trim();
+  if (!lastLine) return;
+  const shortId = correlationId.slice(0, 8);
+  const marker = data.name ? `@${data.name}#${shortId}` : `${data.agent}#${shortId}`;
+  agent.outputLog.push(
+    truncateUtf8Tail(`${marker} │ ${lastLine}`, AGENT_BUFFER_LIMITS.logLineBytes),
+  );
+  trimAgentBuffers(agent);
+}
 
 /** Agents that still hold (or are about to hold) a child process. */
 const LIVE_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set<AgentStatus>([
@@ -1320,7 +1374,9 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     namedAgents: new Map(),
   };
   rootGlobals[registryKey] = state;
-  let interactionQueue: Promise<void> = Promise.resolve();
+  const interactionQueue = createTeammateInteractionQueue(pi, state);
+  state.cancelInteractions = (correlationId, reason) =>
+    void interactionQueue.cancelForAgent(correlationId, reason);
 
   const enqueueChildInteraction = (
     event: Record<string, unknown>,
@@ -1328,29 +1384,7 @@ export default function registerTeammateExtension(pi: ExtensionAPI): void {
     ctx: ExtensionContext | null | undefined,
     fallbackCorrelationId?: string,
   ): void => {
-    interactionQueue = interactionQueue
-      .then(() => event.type === "teammate_rpc_ui_request"
-        ? handleChildRpcUiRequest(event, reply, ctx)
-        : handleChildInteractionRequest(
-            pi,
-            state,
-            event,
-            reply,
-            ctx,
-            fallbackCorrelationId,
-          ))
-      .catch((error) => {
-        const requestId = typeof event.requestId === "string" ? event.requestId : "unknown";
-        if (event.type === "teammate_rpc_ui_request" && typeof event.id === "string") {
-          reply({ type: "extension_ui_response", id: event.id, cancelled: true });
-        } else {
-          reply({
-            type: "teammate_interaction_response",
-            requestId,
-            result: { action: "cancel", error: error instanceof Error ? error.message : String(error) },
-          });
-        }
-      });
+    interactionQueue.enqueue(event, reply, ctx, fallbackCorrelationId);
   };
 
   // =========================================================================
@@ -3364,10 +3398,22 @@ function statusForWatchTarget(
   if (status === "failed") return "failed";
   const resultReadyAt = target.kind === "agent" ? target.agent.resultReadyAt : target.progress.resultReadyAt;
   if (resultReadyAt !== undefined) return "result-ready";
+  // An agent blocked on a relayed permission or question is waiting on a human,
+  // not stalled. Reporting it as stalled told callers to terminate a healthy
+  // agent; the wait's own timeout remains the backstop.
+  if (target.kind === "agent" && (target.agent.pendingInteractions?.size ?? 0) > 0) return undefined;
   const lastActivityAt = target.kind === "agent"
     ? target.agent.lastActivityAt
     : target.progress.lastActivityAt ?? target.agent.lastActivityAt;
-  if (status === "running" && now - lastActivityAt >= TEAMMATE_STALL_TIMEOUT_MS) return "stalled";
+  // Every non-terminal status needs a stall ceiling, not just `running`. Graph
+  // tasks sit in `pending` until a concurrency slot frees up and stop
+  // refreshing lastActivityAt, so a `running`-only check left them with no
+  // terminating condition at all — the waiter then rescheduled forever.
+  // Queued work gets a longer ceiling: waiting on a dependency is expected.
+  const idleCeiling = status === "pending"
+    ? TEAMMATE_PENDING_STALL_TIMEOUT_MS
+    : TEAMMATE_STALL_TIMEOUT_MS;
+  if (now - lastActivityAt >= idleCeiling) return "stalled";
   return undefined;
 }
 
@@ -3377,7 +3423,9 @@ function waitDelayForWatchTarget(target: WatchTarget, timeoutAt: number | undefi
     : target.progress.lastActivityAt ?? target.agent.lastActivityAt;
   const stalledAt = lastActivityAt + TEAMMATE_STALL_TIMEOUT_MS;
   const nextAt = Math.min(stalledAt, timeoutAt ?? Number.POSITIVE_INFINITY);
-  return Math.max(1, nextAt - Date.now());
+  // A floor, not just a positive value: an already-elapsed deadline used to
+  // clamp to 1ms, turning the waiter into a ~100Hz busy loop.
+  return Math.max(TEAMMATE_WAIT_POLL_FLOOR_MS, nextAt - Date.now());
 }
 
 export function waitForTeammate(
@@ -3435,7 +3483,10 @@ export function waitForTeammate(
         : waitOutput(status, params.name);
       resolve({ status, output });
     };
-    const timeoutAt = params.timeoutMs ? Date.now() + params.timeoutMs : undefined;
+    // Never unbounded: an omitted timeoutMs previously meant "wait forever",
+    // and a target that never reaches a terminal status left the tool call
+    // hanging for the rest of the session.
+    const timeoutAt = Date.now() + (params.timeoutMs || TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS);
     const check = () => {
       const currentStatus = statusForWatchTarget(resolved.match!);
       if (currentStatus) return finish(currentStatus);
@@ -3710,6 +3761,10 @@ function killAgent(
   const agent = state.activeRuns.get(correlationId);
   if (!agent) return;
   clearAgentResultReadyState(state, correlationId);
+  // Before the agent leaves activeRuns: anything it queued on the shared
+  // interaction queue would otherwise hold that queue for a process that is
+  // already gone, stalling every agent lined up behind it.
+  state.cancelInteractions?.(correlationId, "The teammate was terminated before this was answered.");
   agent.abortController.abort();
   releaseAgentMemory(agent);
   agent.status = "completed";
@@ -3994,22 +4049,11 @@ export function createTeammateDirectChildRequestHandler(
     activeRuns: new Map(),
     namedAgents: new Map(),
   };
-  let interactionQueue: Promise<void> = Promise.resolve();
+  const interactionQueue = createTeammateInteractionQueue(pi, state);
 
   return (event, reply) => {
     if (event.type === "teammate_rpc_ui_request" || event.type === "teammate_interaction_request") {
-      interactionQueue = interactionQueue
-        .then(() => event.type === "teammate_rpc_ui_request"
-          ? handleChildRpcUiRequest(event, reply, ctx)
-          : handleChildInteractionRequest(
-              pi,
-              state,
-              event,
-              reply,
-              ctx,
-              options.fallbackCorrelationId,
-            ))
-        .catch((error) => replyChildRequestFailure(event, reply, error));
+      interactionQueue.enqueue(event, reply, ctx, options.fallbackCorrelationId);
       return;
     }
 
@@ -4053,6 +4097,149 @@ function replyProxyFailure(
       isError: true,
     },
   });
+}
+
+export interface TeammateInteractionQueue {
+  /** Serializes one relayed child request behind any already in flight. */
+  enqueue(
+    event: Record<string, unknown>,
+    reply: (msg: unknown) => void,
+    ctx: ExtensionContext | null | undefined,
+    fallbackCorrelationId?: string,
+  ): void;
+  /** Settles every request belonging to a gone agent. Returns how many. */
+  cancelForAgent(correlationId: string, reason: string): number;
+  /** Requests still waiting for an answer, in flight or queued. */
+  pendingCount(): number;
+}
+
+/**
+ * Builds the serial queue that relays child permission/question requests to the
+ * human. Serialization is deliberate — `ctx.ui.select` owns the terminal, so two
+ * concurrent prompts would fight over it — but every entry is bounded and
+ * cancellable, because the failure it guards against is a nested one: a parent
+ * agent waits on a child, that child waits on a prompt, and that prompt waits
+ * behind an unattended prompt belonging to an unrelated agent. Answering on the
+ * child's behalf after a timeout keeps that chain from becoming permanent.
+ */
+export function createTeammateInteractionQueue(
+  pi: ExtensionAPI,
+  state: TeammateState,
+  timeoutMs: number = TEAMMATE_INTERACTION_TIMEOUT_MS,
+): TeammateInteractionQueue {
+  interface Waiter {
+    correlationId?: string;
+    settle: (reason: string) => void;
+  }
+  let tail: Promise<void> = Promise.resolve();
+  const waiting = new Map<string, Waiter>();
+
+  const keyFor = (event: Record<string, unknown>): string => {
+    if (typeof event.requestId === "string") return event.requestId;
+    if (typeof event.id === "string") return event.id;
+    return randomUUID();
+  };
+
+  const correlationFor = (
+    event: Record<string, unknown>,
+    fallbackCorrelationId?: string,
+  ): string | undefined => (
+    typeof event.correlationId === "string" ? event.correlationId : fallbackCorrelationId
+  );
+
+  const enqueue: TeammateInteractionQueue["enqueue"] = (
+    event,
+    reply,
+    ctx,
+    fallbackCorrelationId,
+  ) => {
+    const key = keyFor(event);
+    if (waiting.size >= TEAMMATE_INTERACTION_QUEUE_LIMIT) {
+      replyChildRequestFailure(
+        event,
+        reply,
+        new Error(
+          `Too many teammate interactions are already waiting for an answer (${waiting.size}). ` +
+          `Answer the pending prompts, then retry.`,
+        ),
+      );
+      return;
+    }
+
+    let settled = false;
+    // The handler keeps the terminal until the human dismisses it, so a timeout
+    // cannot revoke the prompt — it only stops the child from waiting on it.
+    // Hence reply-once rather than abort.
+    const guardedReply = (msg: unknown): void => {
+      if (settled) return;
+      settled = true;
+      waiting.delete(key);
+      reply(msg);
+    };
+    const settle = (reason: string): void => {
+      if (settled) return;
+      const correlationId = correlationFor(event, fallbackCorrelationId);
+      const agent = correlationId ? state.activeRuns.get(correlationId) : undefined;
+      agent?.pendingInteractions?.delete(key);
+      settled = true;
+      waiting.delete(key);
+      replyChildRequestFailure(event, reply, new Error(reason));
+    };
+    waiting.set(key, { correlationId: correlationFor(event, fallbackCorrelationId), settle });
+
+    // Armed on arrival, not on reaching the front of the queue: a request stuck
+    // behind an unanswered prompt is exactly the case that must stay bounded,
+    // and a timer that only starts at the front would never fire for it.
+    const timer = setTimeout(
+      () => settle(
+        `No answer within ${Math.round(timeoutMs / 1000)}s; the teammate was told to cancel. ` +
+        `The prompt may still be open if you want to answer it.`,
+      ),
+      timeoutMs,
+    );
+    timer.unref?.();
+
+    tail = tail.then(async () => {
+      // Settled while queued — cancelled or timed out, so do not seize the
+      // terminal on its behalf.
+      if (settled) return;
+      try {
+        if (event.type === "teammate_rpc_ui_request") {
+          await handleChildRpcUiRequest(event, guardedReply, ctx);
+        } else {
+          await handleChildInteractionRequest(
+            pi,
+            state,
+            event,
+            guardedReply,
+            ctx,
+            fallbackCorrelationId,
+          );
+        }
+      } catch (error) {
+        if (!settled) replyChildRequestFailure(event, guardedReply, error);
+      } finally {
+        clearTimeout(timer);
+        // A handler that returned without replying would otherwise leave the
+        // child waiting forever on a request nothing will ever answer.
+        settle("The interaction handler returned without an answer.");
+      }
+    });
+  };
+
+  return {
+    enqueue,
+    cancelForAgent(correlationId, reason) {
+      let cancelled = 0;
+      for (const waiter of [...waiting.values()]) {
+        if (waiter.correlationId !== correlationId) continue;
+        waiter.settle(reason);
+        cancelled += 1;
+      }
+      return cancelled;
+    },
+    pendingCount: () => waiting.size,
+  };
 }
 
 function replyChildRequestFailure(
@@ -4506,14 +4693,53 @@ export async function handleProxyRequest(
           }
         }
       };
-      const proxyProgressFlushGate = normalizedTasks
-        ? createProgressFlushGate(() => {
-            const pending = [...pendingProgressByTask.values()];
-            pendingProgressByTask.clear();
-            for (const data of pending) processProxyProgress(data);
-            activeAgent.progress = progressSnapshot();
-          })
-        : undefined;
+      // Aggregate the graph's task progress into one childCall snapshot so the
+      // parent sees advancing activity. Without this the parent's record stayed
+      // frozen at its initial "running" and every nested graph rendered as
+      // stalled 30s after launch.
+      const aggregateTaskProgress = (): AgentProgress | undefined => {
+        const entries = [...progressState.values()];
+        if (entries.length === 0) return undefined;
+        const running = entries.find((entry) => entry.status === "running");
+        return {
+          agent: activeAgent.agent,
+          ...(p.name ? { name: p.name } : {}),
+          correlationId: cid,
+          status: "running",
+          recentTools: running?.recentTools ?? [],
+          toolCount: entries.reduce((total, entry) => total + (entry.toolCount ?? 0), 0),
+          tokens: entries.reduce((total, entry) => total + (entry.tokens ?? 0), 0),
+          inputTokens: entries.reduce((total, entry) => total + (entry.inputTokens ?? 0), 0),
+          outputTokens: entries.reduce((total, entry) => total + (entry.outputTokens ?? 0), 0),
+          durationMs: Date.now() - activeAgent.startedAt,
+          lastActivityAt: entries.reduce(
+            (latest, entry) => Math.max(latest, entry.lastActivityAt ?? 0),
+            activeAgent.startedAt,
+          ),
+          startedAt: activeAgent.startedAt,
+          ...(running?.lastMessage ? { lastMessage: running.lastMessage } : {}),
+        };
+      };
+
+      // Created unconditionally. The single-task branch used to bypass the gate
+      // and publish on every streaming token, which drove a full parent-side
+      // re-render per delta — the dominant cost of nested dispatches.
+      const proxyProgressFlushGate = createProgressFlushGate(() => {
+        const pending = [...pendingProgressByTask.values()];
+        pendingProgressByTask.clear();
+        if (normalizedTasks) {
+          for (const data of pending) processProxyProgress(data);
+          activeAgent.progress = progressSnapshot();
+          reportChildStatus("running", aggregateTaskProgress());
+          return;
+        }
+        const latest = pending[pending.length - 1];
+        if (!latest) return;
+        reportChildStatus(
+          latest.status === "completed" ? "completed" : latest.status === "failed" ? "failed" : "running",
+          latest,
+        );
+      });
 
       const runOpts: RunTeammateOptions = {
         baseCwd: state.baseCwd,
@@ -4558,24 +4784,28 @@ export async function handleProxyRequest(
           }
         },
         onProgress: (data) => {
-            if (!normalizedTasks) {
-              if (data.resultReadyAt !== undefined) {
-                applyAgentResultReadyState(state, { correlationId: cid, resultReadyAt: data.resultReadyAt });
-              } else {
-                clearAgentResultReadyState(state, cid);
-              }
-              reportChildStatus(
-                data.status === "completed" ? "completed" : data.status === "failed" ? "failed" : "running",
-                data,
-              );
-              return;
+          // Refreshed on every branch. This is the only input to every stall
+          // verdict (the status widget, teammate-wait, teammate-list), and the
+          // single-task path never wrote it — so the most common nested shape
+          // reported itself stalled after 30s of healthy work.
+          activeAgent.lastActivityAt = Date.now();
+
+          if (!normalizedTasks) {
+            if (data.resultReadyAt !== undefined) {
+              applyAgentResultReadyState(state, { correlationId: cid, resultReadyAt: data.resultReadyAt });
+            } else {
+              clearAgentResultReadyState(state, cid);
             }
-              const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
-              if (taskIndex < 0) return;
-              activeAgent.lastActivityAt = Date.now();
-              pendingProgressByTask.set(taskIndex, data);
-              proxyProgressFlushGate!.mark(data.status === "completed" || data.status === "failed");
-            },
+            if (data.lastMessage) appendAgentProgressLine(activeAgent, data, cid);
+            pendingProgressByTask.set(0, data);
+            proxyProgressFlushGate.mark(data.status === "completed" || data.status === "failed");
+            return;
+          }
+          const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
+          if (taskIndex < 0) return;
+          pendingProgressByTask.set(taskIndex, data);
+          proxyProgressFlushGate.mark(data.status === "completed" || data.status === "failed");
+        },
         onChildRequest: (evt, rep) => {
           if (evt.type === "teammate_interaction_request" || evt.type === "teammate_rpc_ui_request") {
             onInteraction?.(evt, rep, cid);

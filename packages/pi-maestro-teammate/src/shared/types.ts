@@ -186,6 +186,13 @@ export interface TeammateState {
   handoffSwitching?: boolean;
   activeRuns: Map<string, ActiveAgent>;
   namedAgents: Map<string, string>;
+  /**
+   * Settles relayed permission/question requests belonging to an agent that is
+   * going away, so a killed agent's queued prompt never keeps the shared
+   * interaction queue — and every agent behind it — waiting. Installed by the
+   * root extension; absent in states that never relay interactions.
+   */
+  cancelInteractions?: (correlationId: string, reason: string) => void;
 }
 
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
