@@ -169,3 +169,55 @@ Skill 管理 TUI 必须从 Pi DefaultPackageManager 的完整 ResolvedResource �
 对话压缩的 token 估算不应使用扁平 length/4：fenced code 约 3.5 chars/token（token 密集），whitespace 占比>0.3 的日志/表格约 6 chars/token（token 稀疏），普通内容保持 /4 默认。驱逐应分级（cheapest-first）：先剪可重放工具(read/grep/glob/search/find)，压力持续再剪 bulk 数据工具(bash/shell/edit/write)；两级都走缓存稳定 prune manifest。
 
 </spec-entry>
+
+<spec-entry category="coding" keywords="sanitize,truncation,storage-key,collision,injective,hash-suffix,safetoken" date="2026-07-26" sid="S-20260726-gx3p" title="截断式净化函数不能直接当存储键：熵必须活过截断" description="safeToken 类净化+截断用作文件名/映射键时的碰撞判据，以及共同字面前缀的陷阱" source="odyssey:20260726-odyssey-improve-compact-cache">
+
+### 截断式净化函数不能直接当存储键：熵必须活过截断
+
+`value.replace(/[^a-zA-Z0-9_-]+/g,'-').slice(0, 16)` 这类净化函数是**有损**的。用作人类可读的展示文件名无妨，用作**键控存储**则可能是正确性缺陷——尤其当写入路径把"文件已存在"当作"内容已持久化"处理时（`flag:'wx'` + 吞掉 EEXIST，或 `if (exists) return path`）：碰撞不会报错，而是把**另一个调用的数据**当作本次结果交回。
+
+判据不是"有没有截断"，而是**熵有没有活过截断**：
+- 安全：maestro-compaction.ts 的 buildKnowhowPath —— 键里含 randomUUID()，截断后仍留约 56 bit，且文件名另带秒级时间戳。
+- 致命：tool-result-spill.ts 曾用裸 callId —— provider 的 callId 带**共同字面前缀**（如 `toolu_01…`），16 字符窗口大半花在固定前缀上，随机部分还没开始就被砍掉，且无时间戳兜底。
+
+同一个函数、同样的写入语义，结论相反，取决于**输入的形状**而不是代码的形状。
+
+本仓库已有两种正确做法，优先复用而不要另发明：
+- packages/pi-maestro-teammate/src/runs/execution.ts:160 —— 截断后追加 `-${sha256(raw).slice(0,8)}` 恢复单射
+- packages/pi-maestro-flow/src/tools/todo.ts:1238 —— uniqueMirrorId() 在键被占用时重导
+
+教训（比规则本身更重要）：这个缺陷是安全加固动作**自己引入**的——任务写的是"镜像兄弟模块的 safeToken"，而那个兄弟恰好是仓库里的异类。**镜像一个兄弟模块，不等于镜像一个正确的兄弟模块**；照抄之前先确认被抄的那份在你的输入形状下也成立。
+
+</spec-entry>
+
+<spec-entry category="coding" keywords="队列,超时,入队武装,head-of-line,交互,reply-once" date="2026-07-26" sid="S-20260726-xlt2" title="有界等待的超时必须在入队时武装，不是出队时" description="串行队列的超时在入队武装而非出队；配 queue limit + reply-once + 按发起方取消；根侧超时须短于子侧兜底" source="run:20260726-001-odyssey-improve">
+
+### 有界等待的超时必须在入队时武装，不是出队时
+
+@
+串行队列上的请求若在**出队**（轮到队首）时才武装超时，则"排在一个挂死请求后面"这一恰恰最需要有界的场景永远不会触发超时 —— 队首不动，后面的定时器就永远不开始。
+
+规则：
+- 超时 MUST 在**入队**时武装（`setTimeout` + `timer.unref?.()`），与它在队列中的位置无关。
+- 队列 MUST 有长度上限（`TEAMMATE_INTERACTION_QUEUE_LIMIT = 16`），超限立即拒绝而非无限堆积。
+- 结算 MUST 是 reply-once：超时、取消、正常应答三条路径共用一个 `guardedReply`/`settled` 守卫，任一先到即封口；`tail = tail.then(async () => { if (settled) return; ... })` 保证已结算项不再执行处理器。
+- 队列 SHOULD 支持按发起方批量取消（agent 被终止时一次清掉它所有在途请求），取消理由要能回到调用方。
+
+跨进程配对方向：根侧队列超时 MUST 严格短于子侧兜底超时（本仓库 5min < 10min），否则会出现"子侧已放弃、根侧的应答被丢弃"。
+@
+
+</spec-entry>
+
+<spec-entry category="coding" keywords="派发表,map,原型污染,__proto__,事件,不可信输入" date="2026-07-26" sid="S-20260726-nynn" title="以外部可控字符串索引的派发表必须用 Map" description="事件/命令派发表以不可信字符串索引时必须用 Map，对象字面量会命中 Object.prototype" source="run:20260726-001-odyssey-improve">
+
+### 以外部可控字符串索引的派发表必须用 Map
+
+@
+用对象字面量做事件/命令派发表，再以外部可控的字符串索引它，会命中 `Object.prototype`：`table["__proto__"]`、`["constructor"]`、`["toString"]` 都返回真值并被当成处理器。子进程发来的 `event.type`、模型给出的工具名、配置文件里的键都算"外部可控"。
+
+规则：派发表 MUST 是 `Map`（或 `Object.create(null)`，但 Map 更明确）。`Map.get(untrusted)` 对原型链上的名字返回 `undefined`，落到正常的"未知类型"分支。
+
+本轮实例：`runSingleAttempt` 的 14 分支事件 switch 重构为派发表时首版用了对象字面量，键来自子进程 stdout 的 `event.type`。
+@
+
+</spec-entry>

@@ -161,3 +161,108 @@ pi-maestro-flow 压缩剪除必须保持：(1) isError 的 tool result 永不剪
 长生命周期工具由进程所有者维护唯一状态机，并通过稳定事件发布完整不可变快照；UI 插件只校验、排序和渲染快照，启动或手动刷新时发送 query 事件，不直接 import 工具内部注册表，也不通过轮询工具调用复制状态。终态必须保留 status、exitCode、finishedAt、输出尾部和完整日志路径；消费者按 id 保持选中项，避免实时重排导致详情跳转。
 
 </spec-entry>
+
+<spec-entry category="arch" keywords="prompt-cache,context-transform,prune,compaction,cache-invalidation,cost-model" date="2026-07-26" sid="S-20260726-8laz" title="Context transform 改写消息前必须核算 prompt cache 作废代价" description="剪枝/改写类 context transform 的收益门控：算清作废前缀的一次性成本，且必须两阶段而非贪心" source="odyssey:20260726-odyssey-improve-compact-cache">
+
+### Context transform 改写消息前必须核算 prompt cache 作废代价
+
+任何在"每次 provider 请求前应用、但不写回 session"的 context transform（剪枝、重写、注入位置变更），替换索引 N 处的消息会让 provider 的缓存前缀从 N 到结尾全部失效。只算"省了多少 token"是错的。
+
+定价（Anthropic）：cache read ≈ 0.1× input，cache write ≈ 1.25× input。作废 T 个 token 一次性花 ~1.15T，省下 S 个 token 每轮回收 ~0.1S，因此盈亏平衡约在 11.5·T/S 轮之后。实测最坏形态（一次旧文件读取 + 12 轮大对话）省 2.2K / 作废 81K = 0.027，净亏约 37:1，而且剪完压力根本没解除。
+
+关键：门控不能贪心。单条候选的边际收益是**递增**的——第一条候选独自承担整条后缀的作废成本，得分永远最差（实测 0.122），整段跑完才转正（0.664）。逐条判断会在第一条上就否掉整段本来盈利的操作。
+
+正确形状是两阶段：
+1. collect —— 按原有顺序只收集候选、不改写（遍历顺序保持与历史一致，便于证明等价）
+2. trim —— 用后缀和一次 O(n) 求出 suffixTokens，取**累计**收益首次覆盖 `suffix[index] × minRatio` 的**最深**位置，只应用到该深度
+
+实现见 packages/pi-maestro-flow/src/compaction/auto-compaction.ts 的 cacheWorthwhileDepth / suffixTokenSums / runPrunePass。门控关闭或压力已 critical 时跳过阶段 2，输出与历史逐字节一致——这条退化路径是安全边界，务必保留并测试。
+
+推论：此类门控默认可以开，因为它只会**拒绝**操作、不会**触发**操作，失败模式是"上下文略满"而不是"意外压缩"。这与"提前触发压缩"类信号（如 velocity）的默认值取向相反。
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="扩展,主题,settheme,所有权,pi,settings" date="2026-07-26" sid="S-20260726-sqp1" title="扩展 setTheme 写穿宿主设置，主题所有权归 pi" description="setTheme 写穿宿主设置，扩展不得自行持久化与重放主题" source="master@25cd8ea1" status="deprecated" superseded-by="S-20260726-cztp">
+
+### 扩展 setTheme 写穿宿主设置，主题所有权归 pi
+
+扩展 MUST NOT 自行持久化主题并在 session_start 重放。ctx.ui.setTheme(name) 不是会话级的——实现里在成功后调用 settingsManager.setTheme(name) 写回 pi 自己的设置，因此 pi 下次启动会自行恢复；扩展再放一次只会覆盖用户此后通过 /settings 做的修改。
+
+pi 的主题设置有两种形态：单个主题名，或 Automatic 模式下的 "light/dark" 配对字符串（settings-selector.js getAutomaticThemeSetting）。扩展写入单个名字会把配对整体替换掉，而 ExtensionUIContext 只有 getAllThemes / getTheme / setTheme，**没有读取当前主题设置的方法**，因此扩展无法判断自己是否正在破坏一个配对，也无法把配对还给用户。
+
+结论：主题的权威是 pi 的 settings，扩展至多提供一个快捷入口，并且 MUST 指向 /settings（内置选择器有实时预览、取消回滚 originalThemeSetting、明暗自动配对，扩展侧单键循环三样都没有）。内置斜杠命令中没有 /theme，主题在 /settings 子菜单下。
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="嵌套,代理路径,handleproxyrequest,双实现,状态维护,teammate" date="2026-07-26" sid="S-20260726-5e59" title="嵌套派发的代理路径必须与 root execute 共享状态维护" description="嵌套 teammate 走 IPC 回根由 handleProxyRequest 执行，execute 里的状态维护必须在两处都做" source="run:20260726-001-odyssey-improve">
+
+### 嵌套派发的代理路径必须与 root execute 共享状态维护
+
+@
+pi-maestro-teammate 的嵌套 teammate 调用**不是**"再走一遍 tool.execute"：子进程只注册 proxy 工具，嵌套调用经 IPC 回根进程，由 `handleProxyRequest` 执行。两条路径是两份独立的调度/状态实现。
+
+因此：凡是在 root `execute` 里对 `ActiveAgent` 做的状态维护，MUST 同时在代理路径做，否则只在嵌套场景暴露。已实测的 4 类漂移后果：
+
+- 不刷新 `lastActivityAt` → 嵌套 agent 30s 后被误判 stalled（ARCH-2）
+- 不发 `TEAMMATE_COMPLETE_EVENT` → 跨扩展留永久幽灵行（ARCH-3）
+- 不更新 `childCall` 快照 → 父级 TUI 恒显示 stalled（OBS-8）
+- 不校验自报身份 → 子进程可伪造 parentCid、越权 send/abort（SEC-1/SEC-5）
+
+新增任何"派发一个 agent 时要做的事"时，MUST 检查两处；只改一处即为缺陷。合并两份实现前，此约束是唯一防线（ISS-20260726-012）。
+@
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="env,子进程,pi_teammate_depth,深度守卫,身份,准入闸门" date="2026-07-26" sid="S-20260726-nqlg" title="读子进程作用域的 env 前必须先门控进程身份" description="根子进程共用同一份代码时，读子进程作用域 env 必须先门控进程身份；层级预算沿派发链传递而非读 env" source="run:20260726-001-odyssey-improve">
+
+### 读子进程作用域的 env 前必须先门控进程身份
+
+@
+把身份或预算寄存在环境变量（`PI_TEAMMATE_DEPTH`、`PI_TEAMMATE_CORRELATION_ID`），而扩展代码在**根进程与子进程都会加载同一份**时，无条件读取该 env 是失效的：根进程里它根本不存在。
+
+`checkDepthGuard()` 曾在根进程读 `PI_TEAMMATE_DEPTH`（未定义 → 0），而每次 spawn 都写 `DEPTH = current + 1` = 恒为 1，于是 `MAX_DEFAULT_DEPTH = 3` **从未生效**；叠加"并发上限只按单次调用的任务数计"，最坏 15³ = 3375 个 Pi 进程。
+
+规则：
+- 读子进程作用域 env 的代码 MUST 先证明自己就是那个进程 —— `if (isChild)`（`PI_TEAMMATE_CHILD === "1"`）或 `isTeammateChild()`（并检 `typeof process.send === "function"`）。
+- 层级/预算这类**由派发者决定**的量，SHOULD 沿派发链在进程内数据结构上传递（`ActiveAgent.depth = parent.depth + 1`），env 只作为子进程的初始值，不作为守卫的读取源。
+- 准入闸门 MUST 同时约束深度与跨层级总量，只有其中之一等于没有。
+
+仓库现状（已扫描确认）：`PI_TEAMMATE_CORRELATION_ID` 的 6 个读取点全部被显式门控，深度守卫是唯一违例且已修。
+@
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="准入,并发闸门,live_agent_statuses,墓碑,失败保留,预算" date="2026-07-26" sid="S-20260726-r8dg" title="准入闸门的存活集合按持有活资源定义，墓碑不占预算" description="并发/嵌套预算按存活状态集合计数，终端态墓碑不占槽位，故无需为可见性另建侧表" source="run:20260726-001-odyssey-improve">
+
+### 准入闸门的存活集合按持有活资源定义，墓碑不占预算
+
+@
+终端状态需要保留一段可见期（见 `ui-conventions` 的"失败状态不得与产生它的事件同帧消失"，那条管**渲染**），本条管**准入**：保留期内的墓碑 MUST NOT 消耗并发/嵌套预算。
+
+做法：闸门计数不遍历整个注册表，而是按一个显式的存活状态集合过滤 —— `LIVE_AGENT_STATUSES = {pending, running, retrying, sleeping}`。`failed` 墓碑不在其中，因为它不持有子进程。
+
+由此，"保留失败记录"与"占用槽位"这两件事解耦，不需要为可见性另建侧表（`recentFailures` 之类）。ISS-20260726-008 原本建议侧表，理由是"留在 activeRuns 会占槽位"——在存活集合已收窄的前提下该顾虑不成立，真实 `status: "failed"` 墓碑是更简单且让既有失败渲染分支真正生效的做法。
+
+推论：任何新增的"注册表里存在即计入"式闸门都是缺陷；预算的语义 MUST 是"持有活资源",不是"在表里"。
+@
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="settheme,主题,预览,扩展,持久化,setthemeinstance,pi" date="2026-07-26" sid="S-20260726-cztp" title="扩展 setTheme 双形态：名字持久化，实例仅内存" description="setTheme 字符串形态写穿 settings，实例形态仅内存——扩展做预览/取消的前提" source="master@02a0c507" supersedes="S-20260726-sqp1">
+
+### 扩展 setTheme 双形态：名字持久化，实例仅内存
+
+ctx.ui.setTheme 的两个重载走不同代码路径，持久化语义相反，这是扩展能否做主题预览的唯一决定因素：
+
+- setTheme(name: string) -> setThemeName：成功后扩展包装层额外调用 settingsManager.setTheme(name)，**写回 pi 自己的设置**（持久）。
+- setTheme(theme: Theme) -> setThemeInstance：仅内存生效，activeThemeName 置为 "<in-memory>"，**不写 settings**（会话级）。
+
+由此推出扩展侧主题选择器的正确形状：用 getTheme(name) 取实例、用实例形态预览，滚多少个主题都不碰用户已存设置；取消时把打开选择器那一刻的 Theme 实例再 set 回去即可还原；只有确认键走字符串形态落盘。参考实现 packages/pi-cockpit/src/theme-picker.ts。
+
+两个无法回避的限制，按「是否造成用户可见的永久损失」分级处理：
+1. ExtensionUIContext 只有 getAllThemes/getTheme/setTheme，**没有读取当前主题设置的方法**，所以显式确认写入单个名字时，无法判断自己是否正在把 Automatic 模式的 "light/dark" 配对压平成单名，也无法把配对还回去。这是永久损失且扩展无法补救，MUST 在 UI 上写明并指向 /settings，MUST NOT 猜测或静默。
+2. setThemeInstance 会调用 setAutoSync(false)，预览一旦发生，本会话不再跟随终端明暗（OSC 11）；重启后由 applyFromSettings 自愈。会话级且自愈，记录在此即可，不必占用 UI 行。
+
+仍然成立：扩展 MUST NOT 自行持久化主题并在 session_start 重放（会覆盖用户此后经 /settings 做的修改）。pi 内置斜杠命令中没有 /theme，主题在 /settings 子菜单下。
+
+</spec-entry>

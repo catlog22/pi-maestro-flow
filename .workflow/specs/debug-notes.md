@@ -33,7 +33,7 @@ PlanStore 在清理 approval archive 前必须严格验证 manifest 的 revision
 
 </spec-entry>
 
-<spec-entry category="debug" keywords="teammate background wait watch prompt" date="2026-07-23" sid="S-20260723-1qsb" title="Teammate 异步等待提示约束" description="避免异步 teammate 完成后持续轮询和界面回弹" source="master@945d3f37">
+<spec-entry category="debug" keywords="teammate background wait watch prompt" date="2026-07-23" sid="S-20260723-1qsb" title="Teammate 异步等待提示约束" description="避免异步 teammate 完成后持续轮询和界面回弹" source="master@945d3f37" confidence="contested" conflict-marker="CMK-20260726-i5ys" conflict-note="末句『result-ready 已可返回结果，不应只为等待 agent_end 继续阻塞』与本轮 REL-8 修复（spec S-20260726-1qz4：result-ready 是边沿通知）存在张力，两侧均可辩护。1qsb 侧：结果可消费即应释放，DAG 依赖以结果发布为边界（另见 debug-notes-002）。1qz4 侧：若 result-ready 按电平读取，该 agent 之后每次 teammate-wait 都立即返回，模型永远观测不到 completed/failed 真实终态。本轮取边沿语义：首次投递后落回终态等待——这恰好使 1qsb 所反对的『为 agent_end 阻塞』在第二次及以后的 wait 上重新可能（而 1qsb 本身已规定只调一次）。留待 knowledge audit 裁定末句是否应收窄为『首次 wait 不应为 agent_end 阻塞』。" conflict-date="2026-07-26">
 
 ### Teammate 异步等待提示约束
 
@@ -54,5 +54,22 @@ teammate background acknowledgement 必须引导调用方结束当前 turn 并�
 ### 压缩失败需熔断器防止无限重试
 
 mid-turn 自动压缩若持续失败（模型鉴权/summary 过大/provider 错误），不能每轮无限重试浪费 API。应加连续失败计数（MAX=3）+ 冷却退避（5 turns）+ 成功后重置。Claude Code 真实数据：1279 个 session 出现 50+ 连续失败，每天浪费约 250K API 调用。熔断逻辑抽成纯函数(recordCompactionFailure/compactionBreakerAllows)便于单测。
+
+</spec-entry>
+
+<spec-entry category="debug" keywords="result-ready,边沿触发,electrical-level,teammate-wait,resultreadyat,状态派生" date="2026-07-26" sid="S-20260726-1qz4" title="result-ready 是边沿通知，不是电平状态" description="resultReadyAt 是持久标志，但 result-ready 通知必须每目标只投递一次，否则模型永远等不到终态" source="run:20260726-001-odyssey-improve">
+
+### result-ready 是边沿通知，不是电平状态
+
+@
+补充 `debug-notes` 的"Teammate 结果发布与生命周期确认必须解耦"（那条管**发布时机**），本条管**通知语义**。
+
+`resultReadyAt` 一旦置位就一直为真。若状态派生把它当电平读（`if (resultReadyAt) return "result-ready"`），则该 agent 之后的每一次 `teammate-wait` 都立即返回 `result-ready`，模型再也**等不到真正的终态**（completed / failed）——表现为"等待立刻返回但工作没做完"，且模型会退化成连续调用 wait。
+
+规则：
+- `result-ready` MUST 边沿触发：每个 correlationId 只投递一次，用 `resultReadyNotified: Set<string>` 认领（`claimResultReadyNotice()`）。认领之后同一目标的 wait 落回正常的终态等待。
+- 认领 SHOULD 由消费方（状态派生/wait）执行，而不是发布方清除 `resultReadyAt` —— `resultReadyAt` 本身仍要保留给 TUI 展示与生命周期判定。
+- 同类判断：凡"某标志置位后所有等待立即返回"的派生，都要问一次它该是边沿还是电平。
+@
 
 </spec-entry>
