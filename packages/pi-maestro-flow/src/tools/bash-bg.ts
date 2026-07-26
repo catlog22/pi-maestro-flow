@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { type Component, truncateToWidth } from "@earendil-works/pi-tui";
+import { singleLine } from "../tui/components.ts";
 import { Type } from "typebox";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
@@ -72,13 +72,6 @@ interface Job {
   child: ChildProcess;
   tail: string;
   outputBytes: number;
-}
-
-function singleLine(text: string): Component {
-  return {
-    render: (width: number) => [truncateToWidth(text, Math.max(1, width), "…")],
-    invalidate() {},
-  };
 }
 
 function tailLines(job: Job, lines: number): string {
