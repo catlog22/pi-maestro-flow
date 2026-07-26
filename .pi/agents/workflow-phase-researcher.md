@@ -1,11 +1,11 @@
 ---
 name: workflow-phase-researcher
-description: Researches implementation approach for a specific roadmap phase
-allowed-tools:
+description: "Researches implementation approach for a specific roadmap phase"
+tools:
+  - Read
   - Bash
   - Glob
   - Grep
-  - Read
   - WebFetch
   - Write
 ---

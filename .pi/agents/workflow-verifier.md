@@ -1,11 +1,11 @@
 ---
 name: workflow-verifier
 description: "Goal-backward verification across three layers (existence, substance, connection)"
-allowed-tools:
-  - Bash
+tools:
+  - Read
   - Glob
   - Grep
-  - Read
+  - Bash
 ---
 
 # Workflow Verifier

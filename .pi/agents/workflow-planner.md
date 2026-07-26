@@ -1,12 +1,12 @@
 ---
 name: workflow-planner
 description: "Creates execution plans with task decomposition, waves, and dependencies"
-allowed-tools:
-  - Bash
-  - Glob
-  - Grep
+tools:
   - Read
   - Write
+  - Glob
+  - Grep
+  - Bash
 ---
 
 # Workflow Planner

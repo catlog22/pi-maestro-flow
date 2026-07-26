@@ -1,11 +1,11 @@
 ---
 name: workflow-project-researcher
 description: "Domain research for project initialization, spawned with different focus angles"
-allowed-tools:
+tools:
+  - Read
   - Bash
   - Glob
   - Grep
-  - Read
   - WebFetch
   - Write
 ---

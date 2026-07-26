@@ -1,11 +1,11 @@
 ---
 name: workflow-codebase-mapper
 description: "Analyzes existing codebase from a specific focus area, spawned in parallel"
-allowed-tools:
+tools:
+  - Read
   - Bash
   - Glob
   - Grep
-  - Read
   - Write
 ---
 

@@ -1,14 +1,14 @@
 ---
 name: workflow-analyzer
 description: "Evaluates technical topics, proposals, or decisions across multiple dimensions with evidence-based scoring and recommendations."
-allowed-tools:
-  - Bash
+tools:
+  - Read
+  - Write
   - Glob
   - Grep
-  - Read
-  - WebFetch
+  - Bash
   - WebSearch
-  - Write
+  - WebFetch
 ---
 
 # Workflow Analyzer

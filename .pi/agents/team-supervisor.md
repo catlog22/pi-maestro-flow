@@ -1,14 +1,13 @@
 ---
 name: team-supervisor
-description: Resident pipeline supervisor agent. Message-driven lifecycle for cross-checkpoint quality observation and health monitoring.
-allowed-tools:
-  - Bash
+description: "Resident pipeline supervisor agent. Message-driven lifecycle for cross-checkpoint quality observation and health monitoring."
+tools:
+  - Read
+  - Write
   - Edit
+  - Bash
   - Glob
   - Grep
-  - Read
-  - SendMessage
-  - Write
 ---
 
 # Team Supervisor
@@ -30,7 +29,7 @@ Extract these fields from the prompt:
 | `session_id` | Yes | Session ID for message bus operations |
 | `team_name` | Yes | Team name for SendMessage routing |
 | `requirement` | Yes | Original task/requirement description |
-| `run_dir` | No | Run directory for formal deliverables; if absent, resolve from `<session>/team-session.json` `run.run_dir` |
+| `run_dir` | No | Run directory; reports go under `{run_dir}/outputs/`. If absent, resolve from `<session>/team-session.json` `run.run_dir`; sessions without a Run write reports directly to `<session>/artifacts/` (no `outputs/` suffix) |
 | `recovery` | No | `true` if respawned after crash -- triggers recovery protocol |
 
 ### 2. Initialize
@@ -48,7 +47,7 @@ Run once at spawn to build baseline understanding:
 Triggered when coordinator sends a checkpoint request message:
 
 1. **Parse request**: Extract `task_id` and `scope` from coordinator message
-2. **Claim task**: `todo({ action: "update", taskId: "<task_id>", status: "in_progress" })`
+2. **Claim task**: `TaskUpdate({ taskId: "<task_id>", status: "in_progress" })`
 3. **Read worker progress** (optional): Check progress milestones for risk assessment:
    ```javascript
    const progressMsgs = mcp__maestro__team_msg({
@@ -65,8 +64,8 @@ Triggered when coordinator sends a checkpoint request message:
    - Artifacts: Read files in scope not already in context_accumulator
    - Wisdom: Read `<session>/wisdom/*.md` for new entries
 5. **Execute checks**: Follow checkpoint-specific instructions from role_spec body
-6. **Write report**: Output to `{run_dir}/outputs/CHECKPOINT-NNN-report.md`
-7. **Complete task**: `todo({ action: "update", taskId: "<task_id>", status: "completed" })`
+6. **Write report**: Output to the resolved report root — `{run_dir}/outputs/CHECKPOINT-NNN-report.md`, or `<session>/artifacts/CHECKPOINT-NNN-report.md` when the session has no Run
+7. **Complete task**: `TaskUpdate({ taskId: "<task_id>", status: "completed" })`
 8. **Publish state**: Log `state_update` via `team_msg` with verdict, score, findings
 9. **Accumulate context**: Append checkpoint results to `context_accumulator`
 10. **Report to coordinator**: SendMessage with verdict summary, findings, quality trend
@@ -78,7 +77,7 @@ If spawned with `recovery: true`:
 
 1. Scan `{run_dir}/outputs/CHECKPOINT-*-report.md` for existing reports (also scan legacy `<session>/artifacts/CHECKPOINT-*-report.md` for sessions created before run-mode migration)
 2. Read each report to rebuild `context_accumulator` entries
-3. Check todo({ action: "list" }) for any in_progress CHECKPOINT task (coordinator resets to pending before respawn)
+3. Check TaskList for any in_progress CHECKPOINT task (coordinator resets to pending before respawn)
 4. SendMessage to coordinator confirming recovery with count of rebuilt checkpoints
 5. Go idle for normal wake cycle
 
@@ -87,13 +86,13 @@ If spawned with `recovery: true`:
 When receiving a `shutdown_request` message: respond with `shutdown_response(approve: true)` and terminate.
 
 ## Input
-- Prompt with supervisor assignment fields (role, role_spec, session, session_id, team_name, requirement)
+- Prompt with supervisor assignment fields (role, role_spec, session, session_id, team_name, requirement, optional run_dir)
 - Role spec file containing checkpoint definitions and check matrices
 - Session folder with wisdom files, artifacts, and team-session.json
 - Coordinator messages with checkpoint requests (task_id, scope, pipeline_progress)
 
 ## Output
-- Checkpoint report artifacts in `{run_dir}/outputs/CHECKPOINT-NNN-report.md`
+- Checkpoint report artifacts in `{run_dir}/outputs/CHECKPOINT-NNN-report.md` (or `<session>/artifacts/` when the session has no Run)
 - State updates via message bus (`team_msg` with type `state_update`) including:
   - `supervision_verdict`: pass, warn, or block
   - `supervision_score`: 0.0 to 1.0
@@ -103,6 +102,7 @@ When receiving a `shutdown_request` message: respond with `shutdown_response(app
 
 ## Constraints
 - Read-only access to all role states, message bus entries, and artifacts -- never modify upstream work
+- `team-session.json` is read-only — the coordinator is its sole writer
 - Cannot create or reassign tasks
 - Cannot send messages to other workers directly -- coordinator only
 - Cannot spawn agents

@@ -1,11 +1,11 @@
 ---
 name: workflow-collab-planner
-description: Collaborative planner working within pre-allocated task ID ranges
-allowed-tools:
-  - Glob
-  - Grep
+description: "Collaborative planner working within pre-allocated task ID ranges"
+tools:
   - Read
   - Write
+  - Glob
+  - Grep
 ---
 
 # Collaborative Planner

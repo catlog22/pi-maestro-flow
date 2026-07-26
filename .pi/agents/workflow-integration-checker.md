@@ -1,11 +1,11 @@
 ---
 name: workflow-integration-checker
-description: Cross-phase integration validation for milestone audits
-allowed-tools:
-  - Bash
+description: "Cross-phase integration validation for milestone audits"
+tools:
+  - Read
   - Glob
   - Grep
-  - Read
+  - Bash
 ---
 
 # Integration Checker

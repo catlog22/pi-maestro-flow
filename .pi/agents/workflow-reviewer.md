@@ -1,11 +1,11 @@
 ---
 name: workflow-reviewer
-description: Multi-dimensional code review agent — analyzes changed files for a single review dimension
-allowed-tools:
-  - Bash
+description: "Multi-dimensional code review agent — analyzes changed files for a single review dimension"
+tools:
+  - Read
   - Glob
   - Grep
-  - Read
+  - Bash
 ---
 
 # Workflow Reviewer

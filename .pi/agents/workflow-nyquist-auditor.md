@@ -1,12 +1,12 @@
 ---
 name: workflow-nyquist-auditor
-description: Test coverage audit with gap detection and test stub generation
-allowed-tools:
-  - Bash
-  - Glob
-  - Grep
+description: "Test coverage audit with gap detection and test stub generation"
+tools:
   - Read
   - Write
+  - Glob
+  - Grep
+  - Bash
 ---
 
 # Nyquist Auditor

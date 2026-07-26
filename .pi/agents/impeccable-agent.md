@@ -1,14 +1,13 @@
 ---
 name: impeccable-agent
 description: "Autonomous executor for non-interactive impeccable commands. Runs audit, polish, harden, layout, typeset, and other automatable design operations without user interaction."
-allowed-tools:
-  - Bash
+tools:
+  - Read
+  - Write
   - Edit
   - Glob
   - Grep
-  - Read
-  - Skill
-  - Write
+  - Bash
 ---
 
 # Impeccable Agent

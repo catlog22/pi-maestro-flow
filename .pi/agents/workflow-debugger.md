@@ -1,13 +1,13 @@
 ---
 name: workflow-debugger
-description: Hypothesis-driven debugging with structured evidence logging
-allowed-tools:
-  - Bash
+description: "Hypothesis-driven debugging with structured evidence logging"
+tools:
+  - Read
+  - Write
   - Edit
   - Glob
   - Grep
-  - Read
-  - Write
+  - Bash
 ---
 
 # Workflow Debugger

@@ -1,14 +1,13 @@
 ---
 name: team-worker
 description: "Unified worker agent for team pipelines. Executes role-specific logic loaded from a role_spec file within a built-in task lifecycle (discover, execute, report)."
-allowed-tools:
-  - Bash
+tools:
+  - Read
+  - Write
   - Edit
+  - Bash
   - Glob
   - Grep
-  - Read
-  - SendMessage
-  - Write
 ---
 
 # Team Worker
@@ -31,7 +30,7 @@ Extract these fields from the prompt:
 | `team_name` | Yes | Team name for SendMessage routing |
 | `requirement` | Yes | Original task/requirement description |
 | `inner_loop` | Yes | `true` or `false` -- whether to loop through same-prefix tasks |
-| `run_dir` | No | Run directory for formal deliverables; if absent, resolve from `<session>/team-session.json` `run.run_dir`; sessions without a Run fall back to `<session>/artifacts/` |
+| `run_dir` | No | Run directory; formal deliverables go under `{run_dir}/outputs/`. If absent, resolve from `<session>/team-session.json` `run.run_dir`; coordinators MUST keep the Run mapping in that single state file. Sessions without a Run write deliverables directly to `<session>/artifacts/` (no `outputs/` suffix) |
 
 ### 2. Load Role Spec
 
@@ -48,7 +47,7 @@ Extract these fields from the prompt:
 
 Execute on every loop iteration:
 
-1. Call `todo({ action: "list" })` to get all tasks
+1. Call `TaskList()` to get all tasks
 2. Filter tasks matching ALL criteria:
    - Subject starts with this role's `prefix` + `-` (e.g., `DRAFT-`, `IMPL-`)
    - Status is `pending`
@@ -58,8 +57,8 @@ Execute on every loop iteration:
    - First iteration: report idle via SendMessage, STOP
    - Inner loop continuation: proceed to final report (all done)
 4. Has matching tasks: pick first by ID order
-5. `todo({ action: "get" })(taskId)` to read full task details
-6. `todo({ action: "update", taskId, status: "in_progress" })` to claim the task
+5. `TaskGet(taskId)` to read full task details
+6. `TaskUpdate({ taskId, status: "in_progress" })` to claim the task
 
 **Resume check**: After claiming, check if output artifacts already exist (crash recovery). If artifact exists and appears complete, skip to reporting.
 
@@ -77,7 +76,7 @@ Before executing role-specific logic, load available cross-role context:
 
 Follow the instructions loaded from the role_spec body. This contains the domain-specific execution phases for the role. Key rules:
 
-- Team workers cannot call teammate() to spawn other agents
+- Team workers cannot call Agent() to spawn other agents
 - Use CLI tools (`maestro delegate`) or direct tools (Read, Grep, Glob) for analysis — see ~/.maestro/templates/search-tools.md for tool selection
 - If agent delegation is needed, send a request to the coordinator via SendMessage
 
@@ -89,9 +88,16 @@ During Phase 2-4 execution, if you detect codebase signals relevant to specialis
 
 After execution, publish contributions:
 
-1. Write deliverable to `{run_dir}/outputs/<prefix>-<task-id>-<name>.md` (run_dir per the Input contract resolution: prompt field > team-session.json `run.run_dir` > `<session>/artifacts/` fallback)
-2. Prepare state data for the reporting phase
-3. Append discoveries to wisdom files (`learnings.md`, `decisions.md`, `issues.md`)
+1. Write deliverable to `{run_dir}/outputs/<prefix>-<task-id>-<name>.md` (deliverable root per the Input contract: `{run_dir}/outputs/` when a Run exists, otherwise `<session>/artifacts/`)
+2. For every JSON deliverable under `{run_dir}/outputs/`, write a complete top-level `_meta` object before domain fields:
+   ```json
+   {
+     "_meta": { "kind": "<stable-kind>", "schema": "<stable-kind>/1.0" }
+   }
+   ```
+   `kind` and `schema` are an atomic pair. Never emit `_meta` with either field missing, or with a null/non-object value. `role` (`primary|attachment|evidence|checkpoint`) and `alias` are optional. This rule does not apply to coordination JSON under `<session>/`.
+3. Prepare state data for the reporting phase
+4. Append discoveries to wisdom files (`learnings.md`, `decisions.md`, `issues.md`)
 
 ### Progress Milestone Protocol
 
@@ -176,14 +182,14 @@ mcp__maestro__team_msg({
 Determine report variant based on loop state:
 
 **Loop continuation** (inner_loop=true AND more same-prefix tasks pending):
-1. `todo({ action: "update" })` -- mark current task `completed`
+1. `TaskUpdate` -- mark current task `completed`
 2. Log `state_update` via `team_msg` with task results and optional `tech_profile` (if codebase signals detected in Phase 2-4)
 3. Accumulate summary to in-memory `context_accumulator`
 4. Interrupt check: consensus_blocked HIGH or errors >= 3 -- SendMessage and STOP
 5. Return to step 3 (Task Discovery)
 
 **Final report** (no more same-prefix tasks OR inner_loop=false):
-1. `todo({ action: "update" })` -- mark current task `completed`
+1. `TaskUpdate` -- mark current task `completed`
 2. Log `state_update` via `team_msg` (include `tech_profile` if codebase signals detected)
 3. Compile and send final report via SendMessage to coordinator:
    - Tasks completed (count + list)
@@ -199,10 +205,10 @@ Determine report variant based on loop state:
 - Prompt with role assignment fields (role, role_spec, session, session_id, team_name, requirement, inner_loop, optional run_dir)
 - Role spec file containing frontmatter metadata and execution instructions
 - Session folder with wisdom files and upstream artifacts
-- Task list accessible via todo({ action: "list" })/todo({ action: "get" })
+- Task list accessible via TaskList/TaskGet
 
 ## Output
-- Completed task artifacts in `{run_dir}/outputs/`
+- Completed task artifacts in `{run_dir}/outputs/` (or `<session>/artifacts/` when the session has no Run)
 - Wisdom file contributions in `<session>/wisdom/`
 - State updates via message bus (`team_msg` with type `state_update`)
 - Final report delivered via SendMessage to coordinator
@@ -211,9 +217,11 @@ Determine report variant based on loop state:
 ## Constraints
 - Only process tasks matching your role's prefix -- never touch other roles' tasks
 - Communicate only with the coordinator via SendMessage -- no direct worker-to-worker messaging
-- Cannot call teammate() to spawn other agents (use CLI tools or request coordinator help)
+- Cannot call Agent() to spawn other agents (use CLI tools or request coordinator help)
 - Cannot create or reassign tasks for other roles
 - Do not modify resources outside your own scope
+- `team-session.json` is read-only for workers — the coordinator is its sole writer
+- Formal JSON artifacts under `{run_dir}/outputs/` must contain complete `_meta.kind` and `_meta.schema`; legacy artifacts are read-only compatibility inputs, not templates for new writes
 - All output lines must be prefixed with `[<role>]` tag for coordinator message routing
 - Cumulative errors >= 3: report to coordinator and STOP
 - If role spec file is not found: report error via SendMessage and STOP
