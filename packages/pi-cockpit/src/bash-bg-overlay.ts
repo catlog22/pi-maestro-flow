@@ -11,6 +11,7 @@ import type { IconGlyphs } from "./icons.ts";
 import { fitLineByPriority, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 import { formatDuration } from "./render.ts";
 import type { BashBgJob, BashBgStatus } from "./types.ts";
+import { overlayListRows } from "./viewport.ts";
 
 const WIDTH_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 
@@ -21,7 +22,12 @@ export interface BashBgOverlayParams {
 	close: () => void;
 	theme: Theme;
 	glyphs: IconGlyphs;
+	/** Live terminal height, so the card can use the space it already reserves. */
+	getTerminalRows?: () => number | undefined;
 }
+
+// Rows the card spends on itself: two borders, header, separator, help line.
+const CARD_CHROME_ROWS = 5;
 
 // How long the header keeps acknowledging a manual refresh. The snapshot arrives
 // asynchronously, so without this the keypress looks like it did nothing.
@@ -87,6 +93,11 @@ export class BashBgOverlay implements Component, Focusable {
 		return this.params.theme.bg("customMessageBg", pad(text, width));
 	}
 
+	// How many job rows the card can show before it has to start paging.
+	private listRows(): number {
+		return overlayListRows(this.params.getTerminalRows?.(), CARD_CHROME_ROWS);
+	}
+
 	private renderList(width: number): string[] {
 		const inner = width - 2;
 		const jobs = this.jobs();
@@ -95,8 +106,9 @@ export class BashBgOverlay implements Component, Focusable {
 		if (jobs.length === 0) {
 			rows.push(fitLine(this.emptyState(), inner));
 		} else {
-			const start = visibleStart(this.selected, jobs.length, 8);
-			for (let index = start; index < Math.min(jobs.length, start + 8); index++) {
+			const page = this.listRows();
+			const start = visibleStart(this.selected, jobs.length, page);
+			for (let index = start; index < Math.min(jobs.length, start + page); index++) {
 				if (index === this.selected) selectedRows.add(rows.length);
 				rows.push(this.jobRow(jobs[index], index === this.selected, inner));
 			}
@@ -110,10 +122,13 @@ export class BashBgOverlay implements Component, Focusable {
 		const leftWidth = Math.max(32, Math.floor((inner - 3) * 0.42));
 		const rightWidth = inner - leftWidth - 3;
 		const jobs = this.jobs();
-		const start = visibleStart(this.selected, jobs.length, 8);
-		const left = jobs.slice(start, start + 8).map((job, offset) =>
+		const page = this.listRows();
+		const start = visibleStart(this.selected, jobs.length, page);
+		const left = jobs.slice(start, start + page).map((job, offset) =>
 			this.jobRow(job, start + offset === this.selected, leftWidth));
-		const right = this.detailLines(this.selectedJob(), rightWidth, 2, 5);
+		// The detail pane grows with the list so a tall card is not half empty, but
+		// the output tail keeps the larger share — that is what the pane is for.
+		const right = this.detailLines(this.selectedJob(), rightWidth, 2, Math.max(5, page - 3));
 		const rowCount = Math.max(left.length, right.length, 1);
 		const rows = [this.header(inner), this.separator(inner)];
 		const selectedRows = new Set<number>();

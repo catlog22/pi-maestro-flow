@@ -24,6 +24,29 @@ export function panelRows(terminalRows: number | undefined): number | undefined 
 	return Math.max(MIN_PANEL_ROWS, Math.min(MAX_PANEL_ROWS, Math.floor(terminalRows * CHROME_SHARE)));
 }
 
+/** Rows an overlay list falls back to when the terminal height is unknown. */
+export const DEFAULT_OVERLAY_ROWS = 8;
+/** Share of the terminal an overlay card occupies — mirrors its maxHeight option. */
+export const OVERLAY_SHARE = 0.9;
+export const MIN_OVERLAY_ROWS = 4;
+export const MAX_OVERLAY_ROWS = 24;
+
+/**
+ * List rows an overlay may show, given the chrome (borders, header, separator,
+ * help line) it must also draw.
+ *
+ * A widget's problem is claiming too much height; an overlay's is claiming too
+ * little. The background-jobs card asked for 90% of the screen and then paged
+ * eight jobs at a time through it, however tall the terminal was.
+ */
+export function overlayListRows(terminalRows: number | undefined, chromeRows: number): number {
+	if (terminalRows === undefined || !Number.isFinite(terminalRows) || terminalRows <= 0) {
+		return DEFAULT_OVERLAY_ROWS;
+	}
+	const available = Math.floor(terminalRows * OVERLAY_SHARE) - chromeRows;
+	return Math.max(MIN_OVERLAY_ROWS, Math.min(MAX_OVERLAY_ROWS, available));
+}
+
 /**
  * Split `total` items into what fits and what is hidden.
  *

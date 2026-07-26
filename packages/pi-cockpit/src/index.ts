@@ -347,6 +347,14 @@ export default function (pi: ExtensionAPI): void {
 				close: () => done(undefined),
 				theme,
 				glyphs: resolveGlyphs(config.icons.mode),
+				getTerminalRows: () => {
+					try {
+						const rows = tui.terminal?.rows;
+						return typeof rows === "number" && rows > 0 ? rows : undefined;
+					} catch {
+						return undefined;
+					}
+				},
 			}), {
 			overlay: true,
 			overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },

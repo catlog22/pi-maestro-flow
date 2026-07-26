@@ -1,6 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CHROME_SHARE, MAX_PANEL_ROWS, MIN_PANEL_ROWS, fitRows, panelRows } from "../src/viewport.ts";
+import {
+	CHROME_SHARE,
+	DEFAULT_OVERLAY_ROWS,
+	MAX_OVERLAY_ROWS,
+	MAX_PANEL_ROWS,
+	MIN_OVERLAY_ROWS,
+	MIN_PANEL_ROWS,
+	fitRows,
+	overlayListRows,
+	panelRows,
+} from "../src/viewport.ts";
 import { renderAgents, renderTodos } from "../src/render.ts";
 import { resolveGlyphs } from "../src/icons.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
@@ -78,4 +88,17 @@ test("a generous budget never inflates a panel beyond what it has to say", () =>
 		glyphs, spin: "*", now: 0, withHead: false, maxRows: MAX_PANEL_ROWS,
 	});
 	assert.equal(lines.length, 2);
+});
+
+test("overlayListRows falls back to the historical page when height is unknown", () => {
+	assert.equal(overlayListRows(undefined, 5), DEFAULT_OVERLAY_ROWS);
+	assert.equal(overlayListRows(0, 5), DEFAULT_OVERLAY_ROWS);
+});
+
+test("overlayListRows spends the height the card already reserves", () => {
+	// 24-row terminal: 90% is 21 rows, minus 5 rows of card chrome.
+	assert.equal(overlayListRows(24, 5), 16);
+	assert.equal(overlayListRows(50, 5), MAX_OVERLAY_ROWS);
+	// A tiny terminal still offers a usable page rather than collapsing to nothing.
+	assert.equal(overlayListRows(6, 5), MIN_OVERLAY_ROWS);
 });
