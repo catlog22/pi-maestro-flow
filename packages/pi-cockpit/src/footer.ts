@@ -120,10 +120,27 @@ export function renderBar(pct: number, barWidth: number, glyphs: IconGlyphs, the
 	return theme.fg("dim", "[") + theme.fg(contextColor(pct), glyphs.barDone.repeat(filled)) + theme.fg("dim", glyphs.barPending.repeat(empty)) + theme.fg("dim", "]");
 }
 
+const CONTEXT_WARN_PCT = 70;
+const CONTEXT_CRITICAL_PCT = 90;
+
 function contextColor(pct: number): ThemeColor {
-	if (pct >= 90) return "error";
-	if (pct >= 70) return "warning";
+	if (pct >= CONTEXT_CRITICAL_PCT) return "error";
+	if (pct >= CONTEXT_WARN_PCT) return "warning";
 	return "accent";
+}
+
+// Crossing a context threshold used to be signalled by hue alone. The glyph makes
+// the escalation readable without colour, per the non-colour-accessibility rule.
+function contextMark(pct: number, glyphs: IconGlyphs): string {
+	return pct >= CONTEXT_WARN_PCT ? `${glyphs.blocked} ` : "";
+}
+
+// yolo / bypassPermissions disable approval prompts entirely. Red text alone is
+// not enough for a safety-relevant state.
+const UNSAFE_APPROVAL_MODES = new Set(["yolo", "bypasspermissions"]);
+
+function approvalMode(status: ExtensionStatusSegment): string {
+	return status.text.replace(/^APPROVAL\s+/i, "").trim().toLowerCase();
 }
 
 function extensionStatusColor(status: ExtensionStatusSegment): ThemeColor {
@@ -135,8 +152,8 @@ function extensionStatusColor(status: ExtensionStatusSegment): ThemeColor {
 		return "muted";
 	}
 	if (status.key !== "approval-mode") return "muted";
-	const mode = status.text.replace(/^APPROVAL\s+/i, "").trim().toLowerCase();
-	if (mode === "yolo" || mode === "bypasspermissions") return "error";
+	const mode = approvalMode(status);
+	if (UNSAFE_APPROVAL_MODES.has(mode)) return "error";
 	if (mode === "dontask") return "warning";
 	if (mode === "acceptedits") return "success";
 	if (mode === "plan") return "accent";
@@ -172,7 +189,13 @@ export function renderFooter(p: FooterParts): string[] {
 
 	let right1 = "";
 	if (p.ctxWindow > 0) {
-		const pctText = theme.fg(contextColor(p.ctxPct), `${Math.round(p.ctxPct)}%`);
+		// A contextWindow that under-reports the live token count (custom providers
+		// do this) previously printed e.g. "137%" beside a bar clamped at full.
+		const shownPct = Math.min(100, Math.round(p.ctxPct));
+		const pctText = theme.fg(
+			contextColor(p.ctxPct),
+			`${contextMark(p.ctxPct, g)}${shownPct}%`,
+		);
 		const tokText = `${theme.fg("text", fmtTokens(p.ctxTokens))}${theme.fg("dim", "/")}${theme.fg("text", fmtTokens(p.ctxWindow))}`;
 		const candidates = [
 			`${renderBar(p.ctxPct, 10, g, theme)} ${pctText} ${sep} ${tokText}`,
@@ -247,10 +270,15 @@ export function renderFooter(p: FooterParts): string[] {
 	if (statuses.length > 0) {
 		const statusSeparator = ` ${sep} `;
 		const fittedStatuses = fitSegmentsByPriority(
-			statuses.map((status, index) => ({
-				text: theme.fg(extensionStatusColor(status), status.text),
-				priority: statuses.length - index,
-			})),
+			statuses.map((status, index) => {
+				const unsafe = status.key === "approval-mode" && UNSAFE_APPROVAL_MODES.has(approvalMode(status));
+				return {
+					text: theme.fg(extensionStatusColor(status), `${unsafe ? `${g.blocked} ` : ""}${status.text}`),
+					// An unsafe approval mode must never be the segment that gets dropped.
+					priority: unsafe ? statuses.length + 1 : statuses.length - index,
+					clippable: !unsafe,
+				};
+			}),
 			width,
 			utils.measure,
 			utils.clip,

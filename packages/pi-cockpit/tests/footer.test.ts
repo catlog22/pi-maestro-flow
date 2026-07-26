@@ -139,7 +139,22 @@ test("approval modes use distinct semantic colors", () => {
 	assert.match(renderMode("APPROVAL acceptEdits"), /\[success\]APPROVAL acceptEdits/);
 	assert.match(renderMode("APPROVAL dontAsk"), /\[warning\]APPROVAL dontAsk/);
 	assert.match(renderMode("APPROVAL plan"), /\[accent\]APPROVAL plan/);
-	assert.match(renderMode("APPROVAL YOLO"), /\[error\]APPROVAL YOLO/);
+	// Disabling approval prompts is safety-relevant, so it carries a glyph as well
+	// as the error colour — colour alone must never encode this state.
+	assert.match(renderMode("APPROVAL YOLO"), /\[error\]! APPROVAL YOLO/);
+	assert.match(renderMode("APPROVAL bypassPermissions"), /\[error\]! APPROVAL bypassPermissions/);
+	// The safe modes must not gain the danger marker.
+	assert.doesNotMatch(renderMode("APPROVAL acceptEdits"), /!/);
+});
+
+test("an unsafe approval mode survives when the status row must be truncated", () => {
+	const statuses = [
+		{ key: "a-noise", text: "some long informational status" },
+		{ key: "approval-mode", text: "APPROVAL yolo" },
+		{ key: "z-noise", text: "another long informational status" },
+	];
+	const line = renderFooter(parts({ width: 30, extensionStatuses: statuses })).at(-1)!;
+	assert.match(line, /APPROVAL yolo/);
 });
 
 test("ACT, PLAN and READY execution modes use distinct semantic colors", () => {
