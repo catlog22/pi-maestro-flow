@@ -20,6 +20,7 @@
     "./v1": "./src/public/v1/index.ts",
     "./v1/agents": "./src/public/v1/agents.ts",
     "./v1/child-extensions": "./src/public/v1/child-extensions.ts",
+    "./v1/events": "./src/public/v1/events.ts",
     "./v1/execution": "./src/public/v1/execution.ts",
     "./v1/extension": "./src/public/v1/extension.ts",
     "./v1/model-routing": "./src/public/v1/model-routing.ts",
