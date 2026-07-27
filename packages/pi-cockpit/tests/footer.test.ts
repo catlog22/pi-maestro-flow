@@ -127,16 +127,17 @@ test("narrow footer keeps high-priority token totals instead of dropping the rig
 	assert.ok(lines[1].includes("↓3.4k"));
 });
 
-test("approval mode moves to line two while usage remains right aligned", () => {
+test("approval mode leads line one while usage remains on line two", () => {
 	const lines = renderFooter(parts({
 		width: 80,
 		extensionStatuses: [{ key: "approval-mode", text: "APPROVAL YOLO" }],
 	}));
 	assert.equal(lines.length, 2);
-	assert.match(lines[1], /^APPROVAL YOLO\s+↑12k · ↓3\.4k · 01:23$/);
+	assert.match(lines[0], /^APPROVAL YOLO · ⚡ stream-70b/);
+	assert.match(lines[1], /^↑12k · ↓3\.4k · 01:23$/);
 });
 
-test("auto compact joins approval on line two", () => {
+test("auto compact joins approval at the start of line one", () => {
 	const lines = renderFooter(parts({
 		width: 100,
 		extensionStatuses: [
@@ -145,7 +146,8 @@ test("auto compact joins approval on line two", () => {
 		],
 	}));
 	assert.equal(lines.length, 2);
-	assert.match(lines[1], /^APPROVAL default · AUTO COMPACT ON\s+↑12k · ↓3\.4k · 01:23$/);
+	assert.match(lines[0], /^APPROVAL default · AUTO COMPACT ON · ⚡ stream-70b/);
+	assert.match(lines[1], /^↑12k · ↓3\.4k · 01:23$/);
 });
 
 test("footer uses a workspace icon and omits monetary cost while keeping token usage", () => {
@@ -171,7 +173,7 @@ test("approval modes use distinct semantic colors", () => {
 	const renderMode = (text: string): string => renderFooter(parts({
 		theme: colorTheme,
 		extensionStatuses: [{ key: "approval-mode", text }],
-	})).at(-1)!;
+	}))[0];
 	assert.match(renderMode("APPROVAL default"), /\[text\]APPROVAL default/);
 	assert.match(renderMode("APPROVAL acceptEdits"), /\[success\]APPROVAL acceptEdits/);
 	assert.match(renderMode("APPROVAL dontAsk"), /\[warning\]APPROVAL dontAsk/);
@@ -188,7 +190,7 @@ test("an unsafe approval mode survives when the status row must be truncated", (
 		{ key: "z-noise", text: "another long informational status" },
 	];
 	const lines = renderFooter(parts({ width: 30, extensionStatuses: statuses }));
-	assert.match(lines[1], /APPROVAL yolo/);
+	assert.match(lines[0], /APPROVAL yolo/);
 });
 
 test("ACT is omitted while PLAN and READY retain distinct semantic colors", () => {

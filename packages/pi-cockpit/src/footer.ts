@@ -195,6 +195,19 @@ export function renderFooter(p: FooterParts): string[] {
 	if (width <= 0) return [""];
 	const ell = theme.fg("dim", g.ellipsis);
 	const sep = theme.fg("dim", g.separator.trim());
+	const identitySeparator = ` ${sep} `;
+	const visibleStatuses = (p.extensionStatuses ?? []).filter(
+		(status) => isVisibleExtensionStatus(status, p.thinking),
+	);
+	const controlStatuses = visibleStatuses.filter(
+		(status) => status.key === "approval-mode" || status.key === "maestro-auto-compact-mode",
+	);
+	const controlText = controlStatuses
+		.map((status) => paintExtensionStatus(status, theme))
+		.join(identitySeparator);
+	const reservedControlWidth = controlText
+		? Math.min(width, utils.measure(controlText) + 1)
+		: 0;
 
 	// line 1: prioritized left segments · context gauge (right)
 	// minWidth keeps a glyph-prefixed segment from decaying into "{icon}…", which
@@ -204,11 +217,16 @@ export function renderFooter(p: FooterParts): string[] {
 		priority,
 		minWidth: utils.measure(glyph) + 1 + utils.measure(g.ellipsis) + 3,
 	});
-	const leftParts: PrioritizedSegment[] = [{
+	const leftParts: PrioritizedSegment[] = controlStatuses.map((status, index) => ({
+		text: paintExtensionStatus(status, theme),
+		priority: 8 - index,
+		clippable: false,
+	}));
+	leftParts.push({
 		text: `${theme.fg("accent", g.model)} ${theme.fg("accent", p.model)}`,
 		priority: 5,
 		minWidth: utils.measure(g.model) + 1 + utils.measure(g.ellipsis) + 3,
-	}];
+	});
 	if (p.thinking && p.thinking !== "off") {
 		leftParts.push({ text: theme.fg("muted", p.thinking), priority: 4, clippable: false });
 	}
@@ -230,12 +248,12 @@ export function renderFooter(p: FooterParts): string[] {
 			`${pctText} ${sep} ${tokText}`,
 			pctText,
 		];
-		right1 = candidates.find((candidate) => utils.measure(candidate) <= width)
-			?? utils.clip(pctText, width, ell);
+		const rightBudget = Math.max(0, width - reservedControlWidth);
+		right1 = candidates.find((candidate) => utils.measure(candidate) <= rightBudget)
+			?? (rightBudget > 0 ? utils.clip(pctText, rightBudget, ell) : "");
 	}
 	const rightW = utils.measure(right1);
 	const availLeft = Math.max(0, width - rightW - (right1 ? 1 : 0));
-	const identitySeparator = ` ${sep} `;
 	const fittedLeft = fitSegmentsByPriority(
 		leftParts,
 		availLeft,
@@ -247,16 +265,6 @@ export function renderFooter(p: FooterParts): string[] {
 	const line1 = alignRight(fittedLeft.join(identitySeparator), right1, width, utils.measure);
 
 	const t = p.totals;
-	const visibleStatuses = (p.extensionStatuses ?? []).filter(
-		(status) => isVisibleExtensionStatus(status, p.thinking),
-	);
-	const controlStatuses = visibleStatuses.filter(
-		(status) => status.key === "approval-mode" || status.key === "maestro-auto-compact-mode",
-	);
-	const controlSeparator = ` ${sep} `;
-	const controlText = controlStatuses.map((status) => paintExtensionStatus(status, theme)).join(controlSeparator);
-	const controlWidth = utils.measure(controlText);
-	const statsWidth = Math.max(0, width - controlWidth - (controlText ? 1 : 0));
 	const stats: PrioritizedSegment[] = [
 		{ text: `${theme.fg("accent", g.tokensIn)}${fmtTokens(t.input)}`, priority: 5 },
 		{ text: `${theme.fg("success", g.tokensOut)}${fmtTokens(t.output)}`, priority: 4 },
@@ -270,14 +278,14 @@ export function renderFooter(p: FooterParts): string[] {
 	const statSeparator = ` ${sep} `;
 	const fittedStats = fitSegmentsByPriority(
 		stats,
-		statsWidth,
+		width,
 		utils.measure,
 		utils.clip,
 		g.ellipsis,
 		utils.measure(statSeparator),
 	);
 	const right2 = fittedStats.join(statSeparator);
-	const line2 = alignRight(controlText, right2, width, utils.measure);
+	const line2 = alignRight("", right2, width, utils.measure);
 
 	const lines = [utils.clip(line1, width, ell), utils.clip(line2, width, ell)];
 	if (p.workflowStatus) {
