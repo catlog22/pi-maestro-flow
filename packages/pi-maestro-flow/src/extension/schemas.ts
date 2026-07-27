@@ -115,7 +115,7 @@ export const GoalToolParams = Type.Object({
     Type.String({ description: "Optional explicit Token budget; omit for no budget. Accepts plain, k, or m values, e.g. '100000', '100k', or '1.5m'; create only" }),
   ),
   planHandoffKey: Type.Optional(
-    Type.String({ description: "Internal approved-Plan handoff binding; injected by the Plan gate" }),
+    Type.String({ description: "Handoff key of the approved Plan this item implements. There is no injector: pass the key that the Plan approval message gave you, or omit it" }),
   ),
   acceptance: Type.Optional(
     Type.Array(Type.String(), {
@@ -257,7 +257,7 @@ export const TodoToolParams = Type.Object({
   ),
   filter: Type.Optional(TodoFilterSchema),
   planHandoffKey: Type.Optional(
-    Type.String({ description: "Internal approved-Plan handoff binding; injected by the Plan gate" }),
+    Type.String({ description: "Handoff key of the approved Plan this item implements. There is no injector: pass the key that the Plan approval message gave you, or omit it" }),
   ),
   goalId: Type.Optional(
     Type.String({ description: "Id of the Goal acting as this task's quality gate (bind sparingly, only for tasks with verifiable acceptance); empty string clears it on update" }),

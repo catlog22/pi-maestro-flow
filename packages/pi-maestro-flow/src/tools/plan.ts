@@ -455,6 +455,13 @@ async function startImplementation(
     "Before modifying the project:",
     "1. Reconcile the Plan with every user requirement; do not shrink or reinterpret the approved scope.",
     "2. Decompose the Plan into an ordered Todo dependency graph before implementation.",
+    // The handoff key only ever arrives through the model: nothing injects it into the
+    // todo/goal tool inputs. Telling the model the key here is what makes
+    // getPlanHandoffStatus report on real work instead of sitting at "todo-required"
+    // forever.
+    ...(latestHandoffKey
+      ? [`   Pass planHandoffKey: "${latestHandoffKey}" on those todo create calls so they are bound to this approval.`]
+      : []),
     "3. Attach a Goal as the quality gate only to key Todos that carry verifiable acceptance criteria; do NOT create a Goal for every Todo. Goals are flat and time-ordered — put the overall acceptance Goal on the last Todo when an overall sign-off is needed.",
     "4. Prefer the teammate tool to delegate independent Todo work; use direct execution only when delegation would not help.",
     "5. Execute the Todo sequence; activating a Todo auto-switches to its quality-gate Goal, and a Todo completes only after its Goal verifies.",

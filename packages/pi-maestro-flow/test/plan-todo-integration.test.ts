@@ -171,6 +171,42 @@ test("an approved Plan is only handed off by a Todo carrying its own handoff key
   }
 });
 
+test("the approval message hands the model the key the todo tool needs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-todo-key-"));
+  const harness = createPlanHarness(root);
+  const todoContext = startTodoModule(root);
+  const ctx = todoToolContext(root);
+
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await runPlanTool(harness, "plan-enter");
+    await runPlanTool(harness, "plan-update", { markdown: "# Wire it\n\nBind the handoff" });
+    const confirmed = await runPlanTool(harness, "plan-confirm");
+    const handoffKey = confirmed.details.handoffKey;
+    assert.ok(handoffKey);
+
+    // Nothing injects planHandoffKey into the todo tool input — the model supplies it.
+    // So the approval message is the only place it can come from; without it the key is
+    // unknowable and the handoff status can never leave "todo-required".
+    const approvalText = confirmed.content[0]?.text ?? "";
+    assert.match(approvalText, /planHandoffKey/);
+    assert.ok(
+      approvalText.includes(handoffKey),
+      "the approval message must contain the literal handoff key",
+    );
+
+    // Round-trip: the key as published is the key the gate accepts.
+    const published = approvalText.match(/planHandoffKey: "([^"]+)"/)?.[1];
+    assert.equal(published, handoffKey);
+    await executeTodo({ action: "create", subject: "Bound work", planHandoffKey: published }, ctx);
+    assert.equal(getPlanHandoffStatus(), "ready");
+  } finally {
+    todoSessionShutdown(todoContext);
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a blocked Todo does not satisfy the Plan handoff until its dependency clears", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-todo-blocked-"));
   const harness = createPlanHarness(root);
