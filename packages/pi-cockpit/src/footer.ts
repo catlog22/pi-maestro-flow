@@ -218,10 +218,9 @@ export function renderFooter(p: FooterParts): string[] {
 	const fittedLeft = fitSegmentsByPriority(leftParts, availLeft, utils.measure, utils.clip, g.ellipsis);
 	const line1 = alignRight(fittedLeft.join(" "), right1, width, utils.measure);
 
-	// line 2: model + thinking (left) · in/out/cache/cost/elapsed (right)
-	// The model id outranks the provider: clipping the pair as one blob used to
-	// keep "anthropic …" and destroy the model name, which is the token that
-	// actually answers "what am I talking to?".
+	// line 2: model + thinking (left) · in/out/cache/cost/elapsed (right).
+	// Provider is configuration detail; the model already identifies the active
+	// runtime and keeps this high-frequency surface compact.
 	const modelSeparator = theme.fg("dim", " · ");
 	const modelSegs: PrioritizedSegment[] = [
 		{ text: theme.fg("syntaxFunction", p.model), priority: 3 },
@@ -229,7 +228,6 @@ export function renderFooter(p: FooterParts): string[] {
 	if (p.thinking && p.thinking !== "off") {
 		modelSegs.push({ text: theme.fg("syntaxKeyword", `${p.thinking}`), priority: 2, clippable: false });
 	}
-	if (p.provider) modelSegs.unshift({ text: theme.fg("muted", p.provider), priority: 1 });
 	const modelLeft = modelSegs.map((seg) => seg.text).join(modelSeparator);
 
 	const t = p.totals;

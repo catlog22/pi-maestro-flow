@@ -115,6 +115,12 @@ test("overlong model is clipped within width", () => {
 	for (const l of lines) assert.ok(utils.measure(l) <= 30);
 });
 
+test("footer omits provider while retaining the active model", () => {
+	const lines = renderFooter(parts({ width: 100, model: "qwen3-coder", provider: "maestro-qwen" }));
+	assert.match(lines[1], /qwen3-coder/);
+	assert.doesNotMatch(lines.join("\n"), /maestro-qwen/);
+});
+
 test("narrow footer keeps high-priority token totals instead of dropping the right side", () => {
 	const lines = renderFooter(parts({ width: 20 }));
 	assert.ok(lines[1].includes("↑12k"));
