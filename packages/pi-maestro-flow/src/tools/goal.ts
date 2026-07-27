@@ -2091,13 +2091,20 @@ function showCompletionStatus(ctx: GoalContext, goal: ActiveGoal) {
 }
 
 function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetPhase): void {
-  const entries = getGoalPanelEntries();
-  if (!entries.some((entry) => entry.id === goal.id)) {
-    entries.push(toDetailEntry(goal, undefined));
-  }
   const currentGoalId = goal.id;
   ctx.ui.setWidget?.(GOAL_WIDGET_KEY, (_tui, theme) => ({
     render(width: number): string[] {
+      // Read the entries per frame, not once at set-widget time. A snapshot taken here
+      // freezes the whole panel — the n/N counter and every other goal's status chip —
+      // until some goal mutation happens to re-set the widget. The Goal overlay already
+      // reads live (index.ts wires getEntries as a thunk); this makes the belowEditor
+      // strip agree with it. `phase` stays captured on purpose: it is the caller's
+      // explicit intent for this update (e.g. the transient "verified"), not something
+      // derivable from current state.
+      const entries = getGoalPanelEntries();
+      if (!entries.some((entry) => entry.id === currentGoalId)) {
+        entries.push(toDetailEntry(goal, undefined));
+      }
       return renderGoalPanel(entries, currentGoalId, phase, width, theme);
     },
     invalidate() {},

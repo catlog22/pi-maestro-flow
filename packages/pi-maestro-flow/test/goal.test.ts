@@ -271,6 +271,42 @@ test("goal lifecycle keeps a below-editor widget synchronized without displacing
   }
 });
 
+test("a mounted goal panel frame renders current state, not the state it was mounted with", async () => {
+  let widgetContent: unknown;
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext({
+    ui: {
+      notify() {},
+      setStatus() {},
+      setWidget(_key: string, content: unknown) { widgetContent = content; },
+    },
+  });
+  const renderWith = (component: unknown) => (component as (
+    tui: unknown,
+    theme: typeof goalWidgetTheme,
+  ) => { render(width: number): string[] })(undefined, goalWidgetTheme).render(100).join("\n");
+
+  onSessionStart(ctx);
+  try {
+    await executeGoal({ action: "create", objective: "First objective" }, ctx);
+    // Hold on to the frame the host already mounted. The host keeps calling render()
+    // on this one; it only picks up a new component when setWidget fires again.
+    const mounted = widgetContent;
+    assert.match(renderWith(mounted), /Goal 1\/1/);
+
+    // addGoal is the multi-goal entry point (the `create` action refuses while a Goal
+    // is live); todo and plan both reach the registry through it.
+    addGoal("Second objective", ctx);
+    // The panel's n/N counter and the other goals' status chips come from the registry.
+    // Reading it once at setWidget time froze both until the next goal mutation; the
+    // already-mounted frame has to see the second goal.
+    assert.match(renderWith(mounted), /Goal 1\/2/);
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
 test("goal widget transitions through verifying and verified states", async () => {
   let widgetContent: unknown;
   const statuses: string[] = [];
