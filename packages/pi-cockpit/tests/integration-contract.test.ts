@@ -35,7 +35,7 @@ test("Cockpit loads through the standard extension path without changing its pub
 });
 
 test("Cockpit packages complete selectable color themes", () => {
-	for (const name of ["cockpit-notion", "cockpit-ocean", "cockpit-amber"]) {
+	for (const name of ["cockpit-notion", "cockpit-ocean", "cockpit-amber", "cockpit-minimal"]) {
 		const theme = JSON.parse(
 			readFileSync(new URL(`../themes/${name}.json`, import.meta.url), "utf8"),
 		) as { name?: string; colors?: Record<string, string> };
