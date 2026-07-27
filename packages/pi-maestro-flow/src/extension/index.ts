@@ -1439,6 +1439,9 @@ When NOT to use:
     return pressureMessages ? { messages: pressureMessages } : todoResult;
   });
 
+  pi.on("before_provider_request", (event, ctx) =>
+    midTurnAutoCompaction.beforeProviderRequest(event.payload, ctx));
+
   // Eight independent end-of-turn side effects across five subsystems. Chained bare, the
   // first throw skips every step after it — so a Goal failure would silently leave the
   // Todo widget stale and mid-turn compaction bookkeeping unrun, with no clue which

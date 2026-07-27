@@ -28,6 +28,7 @@ import {
   createMidTurnAutoCompaction,
   decideContextAction,
   derivePressureBand,
+  disableInvalidBudgetThinking,
   EMPTY_VELOCITY_TRACKER,
   endsWithCompleteToolResultBatch,
   effectiveReserveTokens,
@@ -408,7 +409,7 @@ test("pressure policy honors custom soft nudgeRatio when classifying bands", () 
   assert.equal(raised.band, "normal");
 });
 
-test("mid-turn guard does not abort when Pi reports no compactable history", async () => {
+test("mid-turn guard preserves a no-compactable request while it remains below the model window", async () => {
   let aborted = 0;
   let compacted = 0;
   const notifications: string[] = [];
@@ -442,6 +443,96 @@ test("mid-turn guard does not abort when Pi reports no compactable history", asy
   assert.equal(compacted, 0);
   assert.equal(notifications.length, 1);
   assert.match(statuses.get("maestro-auto-compact") ?? "", /CRITICAL/);
+});
+
+test("mid-turn guard aborts when no compactable history remains after exhausting the model window", async () => {
+  let aborted = 0;
+  let compacted = 0;
+  const notifications: Array<{ message: string; level: string | undefined }> = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => undefined }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+
+  const result = await guard.evaluate(highUsageToolBatch(1_100), {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { aborted++; },
+    compact() { compacted++; },
+    sessionManager: { getBranch: () => [] },
+    ui: {
+      setStatus() {},
+      notify(message: string, level: string | undefined) { notifications.push({ message, level }); },
+    },
+  } as never);
+
+  assert.ok(result);
+  assert.equal(aborted, 1);
+  assert.equal(compacted, 0);
+  assert.equal(notifications.length, 1);
+  assert.equal(notifications[0]?.level, "error");
+  assert.match(notifications[0]?.message ?? "", /context is already .* no compactable history/);
+});
+
+test("provider payload guard disables only invalid Anthropic budget thinking", () => {
+  const valid = {
+    model: "claude",
+    max_tokens: 1_025,
+    thinking: { type: "enabled", budget_tokens: 1_024, display: "summarized" },
+  };
+  assert.equal(disableInvalidBudgetThinking(valid), valid, "valid payload stays byte-stable");
+
+  for (const [maxTokens, budget] of [
+    [1, 1_024],
+    [1_024, 1_024],
+    [1_025, 1_023],
+    [16_384, 0],
+  ]) {
+    const payload = {
+      model: "claude",
+      max_tokens: maxTokens,
+      thinking: { type: "enabled", budget_tokens: budget, display: "summarized" },
+      messages: [],
+    };
+    assert.deepEqual(disableInvalidBudgetThinking(payload), {
+      ...payload,
+      thinking: { type: "disabled" },
+    });
+  }
+
+  const adaptive = {
+    max_tokens: 1,
+    thinking: { type: "adaptive" },
+  };
+  const openAi = {
+    max_output_tokens: 1,
+    reasoning: { effort: "high" },
+  };
+  assert.equal(disableInvalidBudgetThinking(adaptive), adaptive);
+  assert.equal(disableInvalidBudgetThinking(openAi), openAi);
+});
+
+test("provider request hook returns the guarded payload and explains the degradation", () => {
+  const notifications: Array<{ message: string; level: string | undefined }> = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never);
+  const payload = {
+    max_tokens: 1,
+    thinking: { type: "enabled", budget_tokens: 1_024 },
+  };
+  const result = guard.beforeProviderRequest(payload, {
+    ui: {
+      notify(message: string, level: string | undefined) { notifications.push({ message, level }); },
+    },
+  } as never);
+
+  assert.deepEqual(result, {
+    max_tokens: 1,
+    thinking: { type: "disabled" },
+  });
+  assert.deepEqual(notifications, [{
+    message: "Extended thinking was disabled for this request because context pressure left too little output room for a valid thinking budget.",
+    level: "warning",
+  }]);
 });
 
 test("mid-turn compaction yields when native or plan compaction owns the arbiter", async () => {

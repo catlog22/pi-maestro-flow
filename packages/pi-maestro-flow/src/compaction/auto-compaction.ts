@@ -150,6 +150,46 @@ export interface ContextPressureResult {
   velocity: VelocityInfo;
 }
 
+/**
+ * Anthropic budget-based thinking has two hard request invariants:
+ * the budget is at least 1024 tokens and remains below max_tokens.
+ *
+ * Pi 0.82.x can clamp max_tokens after it derives the thinking budget. Its
+ * payload builder then revives a clamped zero budget through a `|| 1024`
+ * fallback. Guard the final payload seam so context pressure degrades to
+ * thinking-off instead of a deterministic provider 400.
+ */
+export function disableInvalidBudgetThinking(payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return payload;
+  const record = payload as Record<string, unknown>;
+  const maxTokens = record.max_tokens;
+  const thinking = record.thinking;
+  if (
+    typeof maxTokens !== "number"
+    || !Number.isSafeInteger(maxTokens)
+    || typeof thinking !== "object"
+    || thinking === null
+    || Array.isArray(thinking)
+  ) {
+    return payload;
+  }
+  const thinkingRecord = thinking as Record<string, unknown>;
+  if (thinkingRecord.type !== "enabled") return payload;
+  const budget = thinkingRecord.budget_tokens;
+  if (
+    typeof budget === "number"
+    && Number.isSafeInteger(budget)
+    && budget >= 1_024
+    && budget < maxTokens
+  ) {
+    return payload;
+  }
+  return {
+    ...record,
+    thinking: { type: "disabled" },
+  };
+}
+
 interface AutoCompactionState {
   running: boolean;
   generation: number;
@@ -202,6 +242,7 @@ interface MessageRecord {
 export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: AutoCompactionDependencies = {}): {
   onSessionStart(ctx: ExtensionContext): void;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
+  beforeProviderRequest(payload: unknown, ctx: ExtensionContext): unknown | undefined;
   onAgentEnd(ctx: ExtensionContext): void;
   onOutputLimit(messages: AgentMessage[], ctx: ExtensionContext): Promise<void>;
   onCompact(): void;
@@ -399,13 +440,24 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
       if (!preparation) {
         ctx.ui.setStatus(COMPACTION_STATUS_KEY, `CTX CRITICAL ${pressure.estimatedTokens}/${thresholdTokens}`);
-        const noCompactableKey = `${thresholdTokens}:${settings.keepRecentTokens}:${branch.length}`;
+        const contextExhausted = pressure.estimatedTokens >= ctx.model.contextWindow;
+        const noCompactableKey = `${contextExhausted ? "exhausted" : "critical"}:${thresholdTokens}:${settings.keepRecentTokens}:${branch.length}`;
         if (state.lastNoCompactableKey !== noCompactableKey) {
           state.lastNoCompactableKey = noCompactableKey;
-          ctx.ui.notify(
-            "Mid-turn compaction skipped: Pi has no compactable history; context pressure is inside the recent keep window or static prompt overhead.",
-            "warning",
-          );
+          if (contextExhausted) {
+            ctx.ui.notify(
+              `Mid-turn request stopped: context is already ${pressure.estimatedTokens}/${ctx.model.contextWindow} tokens and Pi has no compactable history. Start a new session or reduce static prompt/tool scope.`,
+              "error",
+            );
+          } else {
+            ctx.ui.notify(
+              "Mid-turn compaction skipped: Pi has no compactable history; context pressure is inside the recent keep window or static prompt overhead.",
+              "warning",
+            );
+          }
+        }
+        if (contextExhausted) {
+          ctx.abort();
         }
         return pressure.messages;
       }
@@ -495,6 +547,15 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       } finally {
         state.evaluating = false;
       }
+    },
+    beforeProviderRequest(payload, ctx) {
+      const guarded = disableInvalidBudgetThinking(payload);
+      if (guarded === payload) return undefined;
+      ctx.ui.notify(
+        "Extended thinking was disabled for this request because context pressure left too little output room for a valid thinking budget.",
+        "warning",
+      );
+      return guarded;
     },
     onAgentEnd(ctx) {
       state.turnCount += 1;
