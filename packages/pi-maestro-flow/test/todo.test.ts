@@ -256,7 +256,7 @@ test("Batch Todo creation stamps per-spec goalId on each task", async () => {
   }
 });
 
-test("todo next switches to the task's quality-gate Goal and auto-resumes it", async () => {
+test("todo next switches to the task's quality-gate Goal but leaves a user-stopped one stopped", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-next-goal-"));
   const loader = new TodoSkillLoader({
     cwd: root,
@@ -281,11 +281,39 @@ test("todo next switches to the task's quality-gate Goal and auto-resumes it", a
     assert.equal(getActiveGoal()?.id, goalA.id);
 
     await executeTodo({ action: "create", subject: "Work B", goalId: goalB.id }, ctx);
-    await executeTodo({ action: "next" }, ctx);
+    const stoppedNext = await executeTodo({ action: "next" }, ctx);
 
+    // The switch still happens — the task's gate is the Goal that matters now.
+    assert.equal(getActiveGoal()?.id, goalB.id);
+    // But `/goal stop` is the user speaking, and advancing a task is not consent to
+    // restart a Goal they deliberately halted. This asserted "active" while todo next
+    // resumed unconditionally, which silently overrode the user's stop.
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, "user");
+    assert.match((stoppedNext.content[0] as { text: string }).text, /<goal_stopped_by_user>/);
+    assert.match((stoppedNext.content[0] as { text: string }).text, /\/goal resume/);
+
+    // A system-internal pause carries no such intent, so it is still auto-resumed.
+    // Drive a real one: three inconclusive verdicts pause the Goal with no pauseReason.
+    await executeGoalCommand({ action: "resume" }, goalCtx);
+    setGoalVerifierRunnerForTest(async () => ({
+      exitCode: 0,
+      messages: [{ role: "assistant", content: "No structured verdict." }],
+    }));
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await executeGoal({ action: "complete", summary: `Attempt ${attempt + 1} at the gate.` }, goalCtx);
+    }
+    assert.equal(getActiveGoal()?.status, "paused");
+    assert.equal(getActiveGoal()?.pauseReason, undefined);
+
+    await executeTodo({ action: "update", id: getVisibleTasks()[0].id, status: "pending" }, ctx);
+    switchCurrentGoal(goalA.id, goalCtx);
+    const resumedNext = await executeTodo({ action: "next" }, ctx);
     assert.equal(getActiveGoal()?.id, goalB.id);
     assert.equal(getActiveGoal()?.status, "active");
+    assert.doesNotMatch((resumedNext.content[0] as { text: string }).text, /<goal_stopped_by_user>/);
   } finally {
+    setGoalVerifierRunnerForTest(undefined);
     await executeGoalCommand({ action: "clear" }, goalCtx);
     goalSessionShutdown(goalCtx);
     onSessionShutdown(todoContext);

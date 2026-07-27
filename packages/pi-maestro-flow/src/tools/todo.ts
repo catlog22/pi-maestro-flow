@@ -890,10 +890,18 @@ async function handleNext(
   }
 
   const task = pending[0];
+  // Set when the task's quality gate is a Goal the user stopped by hand, so the notice
+  // below can be appended after the header is built.
+  let userStoppedGate: string | undefined;
   if (task.goalId) {
     const current = getActiveGoal();
     if (current?.id !== task.goalId || current?.status === "paused") {
-      switchCurrentGoal(task.goalId, ctx, { resume: true });
+      const gate = getGoalById(task.goalId);
+      // `/goal stop` is the user speaking. Auto-resuming here would silently undo it,
+      // and advancing a task is not consent to restart a Goal that was deliberately
+      // halted. Every other pause reason is system-internal, so resuming is right there.
+      if (gate?.status === "paused" && gate.pauseReason === "user") userStoppedGate = gate.text;
+      switchCurrentGoal(task.goalId, ctx, { resume: !userStoppedGate });
     }
   }
   const draft = cloneTodoTask(task);
@@ -913,6 +921,14 @@ async function handleNext(
   const goalText = getActiveGoal()?.text;
   if (goalText) {
     parts.push(`\n<goal_context>\n${goalText}\n</goal_context>`);
+  }
+
+  if (userStoppedGate) {
+    parts.push(
+      `\n<goal_stopped_by_user>\nThe quality-gate Goal "${userStoppedGate}" was stopped by the user and has been left stopped.`
+      + `\nYou can work on this task, but completing it is blocked until the user runs /goal resume. Do not resume the Goal yourself.`
+      + `\n</goal_stopped_by_user>`,
+    );
   }
 
   if (task.context) {
