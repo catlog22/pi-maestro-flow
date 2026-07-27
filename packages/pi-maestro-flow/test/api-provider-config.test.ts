@@ -1,11 +1,24 @@
 import assert from "node:assert/strict";
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
-import { getModels } from "@earendil-works/pi-ai";
-import { AuthStorage } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/auth-storage.js";
-import { ModelRegistry } from "../../../node_modules/@earendil-works/pi-coding-agent/dist/core/model-registry.js";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { getModels } from "@earendil-works/pi-ai/compat";
+
+// pi-coding-agent's exports map blocks deep subpath specifiers and declares only
+// an "import" condition, and npm may place the package in the workspace root or
+// in this package's node_modules. Resolve its dist directory from the public ESM
+// entry instead of hardcoding a hoist layout.
+const piDist = dirname(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")));
+const { AuthStorage } = await import(pathToFileURL(join(piDist, "core/auth-storage.js")).href);
+const { ModelRegistry } = await import(pathToFileURL(join(piDist, "core/model-registry.js")).href);
+const { ModelRuntime } = await import(pathToFileURL(join(piDist, "core/model-runtime.js")).href);
+
+/** pi 0.80+ replaced ModelRegistry.create(auth, path) with an injected ModelRuntime. */
+async function createModelRegistry(credentials: unknown, modelsPath: string) {
+  return new ModelRegistry(await ModelRuntime.create({ credentials, modelsPath }));
+}
 import {
   deleteApiProviderModelSettings,
   loadApiProviderSettings,
@@ -615,7 +628,7 @@ test("/api-manager lists and deletes one provider without changing DeepSeek", as
   assert.match(notifications.at(-1) ?? "", /已删除/);
 });
 
-test("models.json custom API settings preserve DeepSeek models", (t) => {
+test("models.json custom API settings preserve DeepSeek models", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-config-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
@@ -642,7 +655,7 @@ test("models.json custom API settings preserve DeepSeek models", (t) => {
     "maestro-openai": { type: "api_key", key: "openai-test-key" },
     deepseek: { type: "api_key", key: "deepseek-test-key" },
   });
-  const registry = ModelRegistry.create(authStorage, modelsPath);
+  const registry = await createModelRegistry(authStorage, modelsPath);
   const deepseekBefore = registry.getAll()
     .filter((model) => model.provider === "deepseek")
     .map((model) => ({ id: model.id, name: model.name }));
@@ -835,7 +848,7 @@ test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live
       other: otherProvider,
     },
   }, null, 2));
-  const registry = ModelRegistry.create(AuthStorage.inMemory({
+  const registry = await createModelRegistry(AuthStorage.inMemory({
     "maestro-qwen": { type: "api_key", key: "qwen-secret" },
   }), modelsPath);
   const captured: Array<{ name: string; config: any }> = [];

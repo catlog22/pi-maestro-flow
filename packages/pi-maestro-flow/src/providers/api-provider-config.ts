@@ -241,8 +241,11 @@ export async function loadApiProviderSettings(
   const preset = findPreset(provider);
   const root = await readModelsRoot(modelsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
-  const configured = isRecord(providers[provider]);
-  const config = configured ? providers[provider] : {};
+  // Bind before guarding: narrowing only flows through an aliased condition
+  // when the guarded value is itself a const, not a repeated index expression.
+  const candidate = providers[provider];
+  const configured = isRecord(candidate);
+  const config = configured ? candidate : {};
   const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
   const model = models[0];
   const thinkingLevelMap = isRecord(model?.thinkingLevelMap) ? model.thinkingLevelMap : {};
@@ -736,22 +739,21 @@ async function listProviders(
   const root = await readModelsRoot(modelsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
   const presetLines = PROVIDERS.map((provider) => {
-    const configured = isRecord(providers[provider.id]);
-    if (!configured) return `- ${provider.name}：未配置`;
     const config = providers[provider.id];
+    if (!isRecord(config)) return `- ${provider.name}：未配置`;
     const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
     const modelIds = models.map((model) => model.id).filter((id): id is string => typeof id === "string");
     return `- ${provider.name}（${modelIds.length}）：${modelIds.join(", ")} · ${authSource(config.apiKey)}`;
   });
   const customLines = managedChannelIdsSync(defaultsPath)
-    .filter((id) => !findPreset(id) && isRecord(providers[id]))
-    .map((id) => {
+    .flatMap((id) => {
       const config = providers[id];
+      if (findPreset(id) || !isRecord(config)) return [];
       const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
       const modelIds = models.map((model) => model.id).filter((mid): mid is string => typeof mid === "string");
       const name = typeof config.name === "string" && config.name ? config.name : id;
       const api = typeof config.api === "string" ? config.api : "?";
-      return `- ${name}（自定义·${api}·${modelIds.length}）：${modelIds.join(", ")} · ${authSource(config.apiKey)}`;
+      return [`- ${name}（自定义·${api}·${modelIds.length}）：${modelIds.join(", ")} · ${authSource(config.apiKey)}`];
     });
   ctx.ui.notify([
     "API 渠道配置：",
@@ -806,9 +808,8 @@ async function writeApiProviderSettings(
   const exists = await fileExists(modelsPath);
   const root = await readModelsRoot(modelsPath);
   const providers = isRecord(root.providers) ? { ...root.providers } : {};
-  const currentProvider = isRecord(providers[settings.provider])
-    ? { ...providers[settings.provider] }
-    : {};
+  const currentEntry = providers[settings.provider];
+  const currentProvider = isRecord(currentEntry) ? { ...currentEntry } : {};
   const currentModels = Array.isArray(currentProvider.models)
     ? currentProvider.models.filter(isRecord)
     : [];
@@ -946,9 +947,12 @@ function resolveWriteDefaults(settings: ApiProviderSettings): ChannelWriteDefaul
 function configuredProviderIds(modelsPath: string): Set<ApiProviderId> {
   try {
     const parsed = JSON.parse(readFileSync(modelsPath, "utf8")) as unknown;
-    if (!isRecord(parsed) || !isRecord(parsed.providers)) return new Set();
+    if (!isRecord(parsed)) return new Set();
+    // Hoisted: TypeScript drops property narrowing inside the filter callback.
+    const providers = parsed.providers;
+    if (!isRecord(providers)) return new Set();
     return new Set(PROVIDERS
-      .filter((provider) => isRecord(parsed.providers[provider.id]))
+      .filter((provider) => isRecord(providers[provider.id]))
       .map((provider) => provider.id));
   } catch {
     return new Set();
@@ -1230,7 +1234,8 @@ async function saveDefaultThinkingLevel(
 async function saveDefaultModelAndThinking(
   ctx: ExtensionCommandContext,
   modelsPath: string,
-  provider: ApiProviderId,
+  // Custom channels are not preset ids, and they save defaults through here too.
+  provider: string,
   modelId: string,
   level: ApiThinkingLevel,
 ): Promise<void> {

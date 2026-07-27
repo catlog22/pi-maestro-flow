@@ -9,6 +9,7 @@ session-mode: none
 <required_reading>
 ~/.maestro/workflows/run-mode.md
 ~/.maestro/workflows/orchestrator-run-loop.md
+~/.maestro/prepare/maestro.md
 </required_reading>
 
 <host_mirror>
@@ -165,19 +166,19 @@ Goals describe outcomes, not lifecycle stages.
 
 ### A_CREATE
 
-Build a chain definition with execution steps and formal decision nodes whenever the shared orchestration policy (see orchestrator-run-loop.md) requires quality/goal/scope or reground evaluation. Every created chain has at least one decision node before Session seal. For narrow/single-step chains, generate a minimal implicit boundary_contract: in_scope = [intent], out_of_scope = [], constraints = [], definition_of_done = 'step completed with passing gates'. Write it to a temporary JSON file and call:
+Assemble and create per `prepare/maestro.md` §3–§4. Maestro-specific policy:
 
-`maestro run start "{intent}" --id maestro-{slug} --chain-file {path} --no-dispatch`
-
-Delete the temporary file after success. Do not inline unescaped JSON. Then enter the shared loop using the returned `session_id`.
+- Maestro does not emit formal decision nodes; new chains express quality/goal/scope checks as Skill steps that own a Run and may return a proposal. (The closed-loop policy that mandates decision nodes before seal belongs to `/maestro-ralph`; route there when the work needs it.)
+- For narrow/single-step chains, generate a minimal implicit boundary_contract: in_scope = [intent], out_of_scope = [], constraints = [], definition_of_done = 'step completed with passing gates'.
+- Do not inline unescaped JSON.
 
 ### A_CONTINUE
 
-Use read-only `run recall` plus `session status`. A paused Session follows shared `run recover`; sealed/archived Sessions are terminal. Multiple live candidates require explicit selection.
+Use read-only `run recall` plus `session status {session_id}`. A paused Session is out of scope here — report it and route to `/maestro-ralph -c` for audited recovery (S_FALLBACK); sealed/archived Sessions are terminal. Multiple live candidates require explicit selection.
 
 ### A_AMEND
 
-Read `ralph-amend-goal.md`, use `session status` for the snapshot, perform read-only impact analysis, confirm, then commit the whole decomposition with `session chain edit --decomposition-file -`. Any pending-tail change must come from a planning Skill proposal.
+Read `ralph-amend-goal.md`, use `session status {session_id}` for the snapshot, perform read-only impact analysis, confirm, then commit the whole decomposition with `session meta update --session {session_id} --decomposition-file -` (the decomposition object must carry all three of `execution_criteria`, `goals`, `changelog` — the schema is strict). Any pending-tail change must come from a planning Skill proposal.
 
 </actions>
 

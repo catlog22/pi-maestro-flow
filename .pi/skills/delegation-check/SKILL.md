@@ -12,9 +12,9 @@ Validate that command delegation prompts (Agent() calls) and agent role definiti
 Invoked when user requests "check delegation", "delegation conflict", "prompt vs role check", or when reviewing workflow skill quality.
 </purpose>
 
-<required_reading>
-- @.claude/skills/delegation-check/specs/separation-rules.md
-</required_reading>
+<deferred_reading>
+- [separation-rules.md](specs/separation-rules.md) — read before running conflict checks
+</deferred_reading>
 
 <process>
 

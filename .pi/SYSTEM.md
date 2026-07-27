@@ -636,9 +636,13 @@ When a job backgrounds, pi auto-injects a `bash-bg-complete` notification that t
 
 # Knowledge System
 
-## Mandatory Gate
+## Mandatory Gate (Knowledge-First)
 
-Run `maestro search` and `maestro load` before reading code, dispatching an explorer, dispatching another teammate, or editing files. Empty results do not exempt the gate: when the response includes a hint (e.g. `code index not initialized`), execute the hinted command and retry before proceeding.
+Run `maestro search "<task keywords>"` as the FIRST action for any non-trivial task — before reading code, dispatching an explorer, dispatching a teammate, editing files, OR executing any multi-step process. The knowledge base may contain recipes, decisions, and conventions that shortcut the entire task.
+
+This gate covers ALL task types: code changes, process/ops tasks (install, sync, release, conversion), debugging, architecture decisions, and reviews. File system exploration (ls/grep/find) is a fallback when knowledge search returns nothing — not the first resort.
+
+Empty results do not exempt the gate: when the response includes a hint (e.g. `code index not initialized`), execute the hinted command and retry before proceeding.
 
 ```bash
 maestro search "<query>" [--type <type>] [--category <category>] [--kind <kind>] [--code] [--kg]

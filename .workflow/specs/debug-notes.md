@@ -73,3 +73,11 @@ mid-turn 自动压缩若持续失败（模型鉴权/summary 过大/provider 错�
 @
 
 </spec-entry>
+
+<spec-entry category="debug" keywords="renderresult,rendercall,component,pi-tui,uncaughtexception" date="2026-07-26" sid="S-20260726-bhms" title="工具渲染器必须返回 TUI Component" description="渲染器返回非 Component 会直接崩溃 pi TUI" source="master@e34880f5">
+
+### 工具渲染器必须返回 TUI Component
+
+Pi 宿主 ToolExecutionComponent.updateDisplay() 把 renderCall/renderResult 的返回值直接 addChild 进 pi-tui Box，Box.render() 逐个调用 child.render(width)。宿主只 try/catch 渲染器抛出的异常，返回值类型错误不会被捕获，会逃逸成 uncaughtException 直接杀掉 pi（TypeError: child.render is not a function）。因此渲染器所有分支都必须返回带 render(width): string[] 的 Component（用 singleLine/textBlock/dynamicComponent 等 helper），禁止返回 AgentToolResult 形状的对象、字符串、数组或 Promise。src/extension/index.ts 不在任何 tsconfig 覆盖范围内（运行时靠 --experimental-transform-types 剥类型），类型系统拦不住这类错误，只能靠测试断言 typeof component.render === 'function'。
+
+</spec-entry>

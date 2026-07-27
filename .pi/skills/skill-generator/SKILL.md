@@ -101,7 +101,7 @@ Intelligent routing model, dynamically selects execution path based on context.
 
 1. **Mode Awareness**: Automatically recommend execution mode based on task characteristics
 2. **Skeleton Generation**: Generate complete directory structure and file skeletons
-3. **Standards Compliance**: Strictly follow `_shared/SKILL-DESIGN-SPEC.md`
+3. **Standards Compliance**: Strictly follow `specs/skill-requirements.md`
 4. **Extensibility**: Generated Skills are easy to extend and modify
 
 ---
@@ -114,7 +114,7 @@ IMPORTANT: Before any generation operation, read the following specification doc
 
 | Document | Purpose | Priority |
 |----------|---------|----------|
-| [../_shared/SKILL-DESIGN-SPEC.md](../_shared/SKILL-DESIGN-SPEC.md) | Universal design spec - defines structure, naming, quality standards for all Skills | **P0 - Critical** |
+| [specs/skill-requirements.md](specs/skill-requirements.md) | Skill design spec - defines structure, naming, quality standards | **P0 - Critical** |
 | [specs/reference-docs-spec.md](specs/reference-docs-spec.md) | Reference document generation spec - ensures generated Skills have proper phase-based Reference Documents with usage timing guidance | **P0 - Critical** |
 
 ### Template Files (Read Before Generation)
@@ -158,7 +158,7 @@ Input Parsing:
 
 Phase 0: Specification Study (MANDATORY - Must complete before proceeding)
    - Read specification documents
-   - Load: ../_shared/SKILL-DESIGN-SPEC.md
+   - Load: specs/skill-requirements.md
    - Load: All templates/*.md files
    - Understand: Structure rules, naming conventions, quality standards
    - Output: Internalized requirements (in-memory, no file output)
@@ -230,7 +230,7 @@ Phase 5: Validation & Documentation
 
 ```javascript
 // Phase 0: Read specifications (in-memory)
-Read('.claude/skills/_shared/SKILL-DESIGN-SPEC.md');
+Read('.claude/skills/skill-generator/specs/skill-requirements.md');
 Read('.claude/skills/skill-generator/templates/*.md'); // All templates
 
 // Phase 1: Gather requirements
@@ -289,7 +289,7 @@ Specification documents that must be read before any generation operation
 
 | Document | Purpose | When to Use |
 |----------|---------|-------------|
-| [../_shared/SKILL-DESIGN-SPEC.md](../_shared/SKILL-DESIGN-SPEC.md) | Universal Skill design specification | Understand Skill structure and naming conventions - **REQUIRED** |
+| [specs/skill-requirements.md](specs/skill-requirements.md) | Skill design specification | Understand Skill structure and naming conventions - **REQUIRED** |
 | [specs/reference-docs-spec.md](specs/reference-docs-spec.md) | Reference document generation specification | Ensure Reference Documents have proper phase-based organization - **REQUIRED** |
 
 ### Phase 1: Requirements Discovery
@@ -346,7 +346,7 @@ Reference documents when encountering issues
 |-------|------------------|
 | Generated Skill missing Reference Documents | [specs/reference-docs-spec.md](specs/reference-docs-spec.md) - verify phase-based organization is followed |
 | Reference document organization unclear | [specs/reference-docs-spec.md](specs/reference-docs-spec.md) - Core Principles section |
-| Generated documentation does not meet quality standards | [../_shared/SKILL-DESIGN-SPEC.md](../_shared/SKILL-DESIGN-SPEC.md) |
+| Generated documentation does not meet quality standards | [specs/skill-requirements.md](specs/skill-requirements.md) |
 
 ### Reference & Background
 
@@ -418,7 +418,7 @@ Specification documents that must be read before any generation operation
 
 | Document | Purpose | When to Use |
 |----------|---------|-------------|
-| [../_shared/SKILL-DESIGN-SPEC.md](../_shared/SKILL-DESIGN-SPEC.md) | Universal Skill design specification | Understand Skill structure and naming conventions - **REQUIRED** |
+| [specs/skill-requirements.md](specs/skill-requirements.md) | Skill design specification | Understand Skill structure and naming conventions - **REQUIRED** |
 | [specs/reference-docs-spec.md](specs/reference-docs-spec.md) | Reference document generation specification | Ensure Reference Documents have proper phase-based organization - **REQUIRED** |
 
 ### Phase 1: Requirements Discovery
@@ -475,7 +475,7 @@ Reference documents when encountering issues
 |-------|------------------|
 | Generated Skill missing Reference Documents | [specs/reference-docs-spec.md](specs/reference-docs-spec.md) - verify phase-based organization is followed |
 | Reference document organization unclear | [specs/reference-docs-spec.md](specs/reference-docs-spec.md) - Core Principles section |
-| Generated documentation does not meet quality standards | [../_shared/SKILL-DESIGN-SPEC.md](../_shared/SKILL-DESIGN-SPEC.md) |
+| Generated documentation does not meet quality standards | [specs/skill-requirements.md](specs/skill-requirements.md) |
 
 ### Reference & Background
 

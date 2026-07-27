@@ -406,9 +406,10 @@ EXPECTED: Quality report with improvement suggestions" --to agy --mode analysis
 
 ## Conference Template System
 
-Templates are loaded from:
-- **Custom**: `templates/` under the skill directory (user-provided, `{templateId}-template.md`)
-- **Fallback**: `templates/discussion.md`, then the built-in generic template in Phase 4
+Templates are loaded from (first match wins):
+1. **Custom**: `templates/{templateId}-template.md` under the skill directory (user-provided)
+2. **Custom generic**: `templates/discussion.md` under the skill directory (user-provided)
+3. **Built-in**: Generic rebuttal template hardcoded in Phase 4 (always available, no files needed)
 
 Template selection based on `workflowPreferences.conferenceType`:
 - **ML Conferences**: NeurIPS/ICML/ICLR strategies (novelty, theory, experiments)

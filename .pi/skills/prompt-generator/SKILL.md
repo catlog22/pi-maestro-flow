@@ -19,13 +19,13 @@ Content separation principle (from GSD): commands/skills own orchestration flow;
 Invoked when user requests "create command", "new command", "create skill", "new skill", "create agent", "new agent", "convert command", "convert skill", "convert agent", "prompt generator", or "优化".
 </purpose>
 
-<required_reading>
-- @.claude/skills/prompt-generator/specs/command-design-spec.md
-- @.claude/skills/prompt-generator/specs/agent-design-spec.md
-- @.claude/skills/prompt-generator/specs/conversion-spec.md
-- @.claude/skills/prompt-generator/templates/command-md.md
-- @.claude/skills/prompt-generator/templates/agent-md.md
-</required_reading>
+<deferred_reading>
+- [command-design-spec.md](specs/command-design-spec.md) — read when generating command files
+- [agent-design-spec.md](specs/agent-design-spec.md) — read when generating agent files
+- [conversion-spec.md](specs/conversion-spec.md) — read when converting between formats
+- [command-md.md](templates/command-md.md) — read when generating command files
+- [agent-md.md](templates/agent-md.md) — read when generating agent files
+</deferred_reading>
 
 <process>
 

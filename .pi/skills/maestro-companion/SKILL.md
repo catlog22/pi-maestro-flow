@@ -120,7 +120,7 @@ maestro session done <run_id> --verdict done --workflow-root .
 Display: `Companion done. Run: {run_id} | Evidence: {path}`
 
 If reusable insights emerged, suggest (never auto-execute):
-`/maestro-spec add ...` or `/manage-knowhow-capture`
+`/maestro-spec add ...` or `/maestro-knowhow`
 
 If execution revealed the task requires multi-phase audit/diagnosis (e.g., root cause unknown, >3 files need coordinated changes), suggest: `/maestro-odyssey "<scope>" --mode debug|improve` for re-planning.
 

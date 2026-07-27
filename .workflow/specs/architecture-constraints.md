@@ -248,7 +248,7 @@ pi-maestro-teammate 的嵌套 teammate 调用**不是**"再走一遍 tool.execut
 
 </spec-entry>
 
-<spec-entry category="arch" keywords="settheme,主题,预览,扩展,持久化,setthemeinstance,pi" date="2026-07-26" sid="S-20260726-cztp" title="扩展 setTheme 双形态：名字持久化，实例仅内存" description="setTheme 字符串形态写穿 settings，实例形态仅内存——扩展做预览/取消的前提" source="master@02a0c507" supersedes="S-20260726-sqp1">
+<spec-entry category="arch" keywords="settheme,主题,预览,扩展,持久化,setthemeinstance,pi" date="2026-07-26" sid="S-20260726-cztp" title="扩展 setTheme 双形态：名字持久化，实例仅内存" description="setTheme 字符串形态写穿 settings，实例形态仅内存——扩展做预览/取消的前提" source="master@02a0c507" supersedes="S-20260726-sqp1" status="deprecated" superseded-by="S-20260726-n05d">
 
 ### 扩展 setTheme 双形态：名字持久化，实例仅内存
 
@@ -264,5 +264,44 @@ ctx.ui.setTheme 的两个重载走不同代码路径，持久化语义相反，�
 2. setThemeInstance 会调用 setAutoSync(false)，预览一旦发生，本会话不再跟随终端明暗（OSC 11）；重启后由 applyFromSettings 自愈。会话级且自愈，记录在此即可，不必占用 UI 行。
 
 仍然成立：扩展 MUST NOT 自行持久化主题并在 session_start 重放（会覆盖用户此后经 /settings 做的修改）。pi 内置斜杠命令中没有 /theme，主题在 /settings 子菜单下。
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="theme,proxy,settheme,setthemeinstance,预览,扩展,爆栈,pi" date="2026-07-26" sid="S-20260726-n05d" title="pi theme 是 Proxy：读取靠 .name，回写禁止传 Proxy" description="pi theme 是 Proxy：.name 可读当前主题，回传 Proxy 会自引用爆栈" source="master@3ad8ce24" supersedes="S-20260726-cztp">
+
+### pi theme 是 Proxy：读取靠 .name，回写禁止传 Proxy
+
+pi 导出的 theme 不是快照，是常驻 Proxy（modes/interactive/theme/theme.js）：
+
+    export const theme = new Proxy({}, { get: (_t, prop) => globalThis[THEME_KEY][prop] })
+
+三条推论，扩展写主题相关 UI 时全部适用：
+
+一、setTheme 的两个重载持久化语义相反
+- setTheme(name: string) -> setThemeName：成功后扩展包装层额外调用 settingsManager.setTheme(name)，**写回 pi 设置**（持久）。
+- setTheme(theme: Theme) -> setThemeInstance：仅 setGlobalTheme，currentThemeName 置 "<in-memory>"，**不写 settings**（会话级）。
+因此预览用实例形态、确认才用字符串形态，是扩展侧做「可预览可取消」选择器的唯一正确形状。参考 packages/pi-cockpit/src/theme-picker.ts。
+
+二、**MUST NOT 把 theme 本身当快照回传给 setTheme**
+setThemeInstance(proxy) 会执行 globalThis[THEME_KEY] = proxy，proxy 从此读自己，下一次取色无限递归爆栈。取消目标 MUST 是 getTheme(name) 解析出的真实 Theme 实例。拿不到实例时 MUST 完全不预览（预览了就回不去，唯一回退路径是会落盘的字符串形态），并把 UI 提示词一并降级——承诺一个做不到的 revert 比缺这个功能更糟。
+
+三、当前主题**可以**读：`theme.name`
+Theme 类有 name 字段，createTheme 从 themeJson.name 赋值，内置 dark.json/light.json 也带 name。透过 Proxy 读 .name 即当前生效主题名，这是扩展 API 唯一的当前主题读取口（getAllThemes/getTheme/setTheme 之外）。读取 MUST 包 try：initTheme() 之前 Proxy 直接抛错；并校验为非空字符串。
+
+仍然成立的限制：
+- 可读的是当前生效主题，不是**存储的设置**。Automatic 模式下设置是 "light/dark" 配对字符串（settings-selector.js getAutomaticThemeSetting），扩展写入单名会把配对压平且无法还原 —— 这是永久损失，MUST 在 UI 上写明并指向 /settings。
+- setThemeInstance 会调用 stopThemeWatcher/setAutoSync(false)，预览一旦发生本会话不再跟随终端明暗（OSC 11），重启由 applyFromSettings 自愈；会话级且自愈，不必占用 UI 行。
+- 扩展 MUST NOT 自行持久化主题并在 session_start 重放。
+- pi 内置斜杠命令中没有 /theme，主题在 /settings 子菜单下。
+
+副产物：theme 是活 Proxy 意味着任何已捕获 theme 的组件都会随主题变化自动重绘，预览对宿主全部 UI 同时生效——嵌套子视图无需自行传递主题。
+
+</spec-entry>
+
+<spec-entry category="arch" keywords="teammate graph abortcontroller settlement cohort" date="2026-07-27" sid="S-20260727-wrad" title="Graph task 自然结算不得取消共享 cohort" description="约束 graph task settlement 与 cohort cancellation 的 controller ownership" source="fix/tpg-critical-high-gaps@95f57a0c">
+
+### Graph task 自然结算不得取消共享 cohort
+
+graph task 与 graph 容器共享 AbortController 时，task 的自然成功、non-wakeable 结算或失败状态收敛不得 abort 共享 controller；cohort cancellation 只能由 graph 容器结算或显式 killAgentTree 发起。root execute 与 handleProxyRequest 两条调度路径必须同步遵守，并以能响应 abort 的公开路径行为测试覆盖依赖 task。
 
 </spec-entry>

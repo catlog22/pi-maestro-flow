@@ -62,7 +62,7 @@ $ARGUMENTS — intent text + optional flags.
 3. **Lifecycle continuation** — "continue"/"next"/"go" are explicit continuation signals → lifecycle_position inference (S_STATE). Truly empty arguments (no text at all) → 1 clarify round via [@ask] user prompt; still empty → S_FALLBACK (E001)
 4. **Literal match priority** — keyword match takes precedence; lifecycle is tie-breaker
 5. **Argument pass-through** — the intent phrase is Session metadata only (the positional phrase to `run start`); the selected step's domain payload becomes command input through repeatable `--arg <value>`. The user can modify command inputs at confirmation; `-y` only passes through when the user provided it
-6. **Manual campaigns excluded** — `team-*` and `maestro-odyssey` are never candidates, recommendations, retained utilities, or handoff targets
+6. **Manual campaigns excluded** — `team-*` and `maestro-odyssey` never enter the executable candidate pool and are never executed in this turn; they may only be emitted as suggest-only invocations (see the odyssey campaign rows in the intent routing table)
 7. **Retained commands are suggest-only** — route retained commands to an exact slash command. Never execute them in this turn; `-y` applies only to first-tier steps
 8. **Companion routing is suggest-or-execute** — when complexity == lightweight, output `/maestro-companion "<intent>"` invocation. With `-y`, emit the invocation directly (`/maestro-companion "<intent>" -y`); the companion command owns its own execution. Without `-y`, present it as the recommended channel for user confirmation
 9. **Multi-step routes to the orchestrators** — when intent spans ≥2 steps or needs orchestration, output `/maestro "<intent>"` (manual stepwise) or `/maestro-ralph "<intent>"` (orchestrated closed-loop). This command never creates sessions or manages chains itself
@@ -276,7 +276,7 @@ maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [-
 #      Seal run as blocked. Do NOT proceed to step 4.
 
 # 4. Load the execution manual (follow the `next` hint from start)
-maestro run brief <run_id>
+#    Execute the `next` hint returned by step 3's start verbatim — append no flag.
 #    Returns: workflow content, run-mode summary, goal, gate status
 
 # 5. LLM executes the workflow (core process)

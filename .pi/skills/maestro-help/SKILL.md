@@ -211,7 +211,6 @@ $ARGUMENTS → Parse:
 | `auto-test` | 自动测试 |
 | `test` | 业务测试 |
 | `debug` | 质量调试 |
-| `/quality-refactor` | 重构 |
 | `retrospective` | 复盘 |
 
 ### 管理命令 (manage)

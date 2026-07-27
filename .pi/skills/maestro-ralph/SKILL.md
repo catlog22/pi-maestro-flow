@@ -9,6 +9,7 @@ session-mode: none
 <required_reading>
 ~/.maestro/workflows/run-mode.md
 ~/.maestro/workflows/orchestrator-run-loop.md
+~/.maestro/prepare/ralph.md
 </required_reading>
 
 <host_mirror>
@@ -84,6 +85,7 @@ All remaining text is intent. No engine, roadmap, script, depth, role, tier, pla
 <states>
 S_PARSE — parse intent and the three public flags
 S_RESOLVE — locate or create a compatible Session
+S_INFER — infer lifecycle position and roadmap need
 S_DECOMPOSE — derive boundary and observable goals for a new Session
 S_BUILD — build initial Skill chain
 S_CREATE — `session create --chain-file`
@@ -105,11 +107,11 @@ S_PARSE:
 S_RESOLVE:
   → S_RECOVER WHEN: exact compatible Session is paused and `-c`
   → S_RUN_LOOP WHEN: exact compatible Session is running with a chain
-  → S_DECOMPOSE WHEN: only paused Session exists and no `-c` (treat as new intent; paused Session remains untouched)
-  → S_DECOMPOSE WHEN: no live Session and intent present
+  → S_INFER WHEN: only paused Session exists and no `-c` (treat as new intent; paused Session remains untouched)
+  → S_INFER WHEN: no live Session and intent present
   → S_FAIL WHEN: multiple candidates or incompatible terminal Session
 
-S_DECOMPOSE → S_BUILD → S_CREATE
+S_INFER → S_DECOMPOSE → S_BUILD → S_CREATE
 S_CREATE → S_RUN_LOOP WHEN: `-y` AND risk ≠ high AND confidence ≥ 60
 S_CREATE → S_CONFIRM WHEN: `-y` AND (risk == high OR confidence < 60)
 S_CREATE → S_CONFIRM OTHERWISE
@@ -129,6 +131,16 @@ S_EVALUATE:
   → S_RUN_LOOP WHEN: proceed or accepted fix proposal
   → S_RECOVER WHEN: escalate pauses Session
   → S_FAIL WHEN: escalate but Session not paused (user declined pause)
+  → S_RUN_LOOP WHEN: post-goal-audit AND has_unmet (fix loop; insert repair step at `target_stage`)
+  → S_DONE WHEN: post-goal-audit AND all_met AND INTENT_ALIGNED
+  → END WHEN: post-goal-audit AND all_met AND NOT INTENT_ALIGNED (REGROUND_HALT)
+  → S_RUN_LOOP WHEN: post-analyze-scope (apply `scope_verdict` to the chain path)
+  → S_DONE WHEN: post-session AND preflight passed (decide then seal)
+  → S_RUN_LOOP WHEN: post-session AND preflight failed (fix loop)
+  → END WHEN: post-debug-escalate (always pauses)
+  → END WHEN: post-reground AND drifted AND confidence ≥ 60 (REGROUND_HALT; `-y` does not bypass)
+  → S_RUN_LOOP WHEN: post-reground AND aligned
+  → S_RUN_LOOP WHEN: post-reground AND drifted AND confidence < 60 (proceed, mark LOW CONFIDENCE)
 
 S_FAIL:
   → S_RUN_LOOP WHEN: retry budget remains
@@ -163,25 +175,13 @@ Follow `orchestrator-run-loop.md` exactly. Display identity may use stage prefix
 
 ### A_EVALUATE
 
-Dispatch one read-only generic evaluator. Expected result:
+Follow `orchestrator-run-loop.md` §6 Decision step; the VERDICT format is defined in `prepare/ralph.md`. Ralph policy thresholds:
 
-```text
----VERDICT---
-STATUS: proceed|fix|escalate
-REASON: <one line>
-CONFIDENCE: high|medium|low
----END---
-```
-
-Ralph policy thresholds:
-- Parse failure → `fix`, low confidence, `parse_failed=true`.
 - Confidence mapping: low = <60, medium = 60-79, high = ≥80.
 - Confidence below 60 → cannot proceed.
 - Retry budget exhaustion → escalate.
 - Goal audit: compare every pending goal's `done_when` against evidence; missing evidence means unmet.
 - Reground: compare cumulative handoffs against intent and boundary; confident drift halts even under `-y`. drift = cumulative handoffs deviate from ≥2 boundary_contract.in_scope items or introduce ≥1 out_of_scope item; confident drift = drift detected with confidence ≥80%.
-
-Apply through `session decide --json` and follow the Continuation Router in `orchestrator-run-loop.md`.
 
 ### A_FAIL
 

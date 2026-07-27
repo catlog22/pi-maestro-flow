@@ -258,6 +258,36 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     }
   }
 
+  // The host adds a renderer's return value straight into a pi-tui Box, and only
+  // guards against renderers that throw. Returning a non-Component therefore
+  // escapes as an uncaughtException and kills the TUI.
+  const todoTool = tools.find((tool) => tool.name === "todo");
+  assert.ok(todoTool?.renderResult);
+  const renderTodoResult = todoTool.renderResult as unknown as (
+    result: unknown,
+    options: { expanded: boolean; isPartial: boolean },
+    theme: { fg(name: string, text: string): string; bold(text: string): string },
+  ) => { render(width: number): string[] };
+  const todoTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const todoTasks = Array.from({ length: 9 }, (_, index) => ({ id: `t${index}`, status: "pending" }));
+  const todoListComponent = renderTodoResult({
+    content: [{ type: "text", text: todoTasks.map((_, index) => `- [ ] Task ${index + 1}`).join("\n") }],
+    details: { action: "list", tasks: todoTasks },
+  }, { expanded: false, isPartial: false }, todoTheme);
+  assert.equal(typeof todoListComponent.render, "function", "todo list result must be a TUI Component");
+  const todoListLines = todoListComponent.render(80);
+  assert.deepEqual(todoListLines, [
+    "- [ ] Task 1",
+    "- [ ] Task 2",
+    "- [ ] Task 3",
+    "- [ ] Task 4",
+    "- [ ] Task 5",
+    "… and 4 more",
+  ]);
+  for (let width = 1; width <= 120; width++) {
+    for (const line of todoListComponent.render(width)) assert.ok(visibleWidth(line) <= width, `width ${width}: ${line}`);
+  }
+
   let permissionPrompts = 0;
   const ctx = {
     cwd: "D:/workspace",

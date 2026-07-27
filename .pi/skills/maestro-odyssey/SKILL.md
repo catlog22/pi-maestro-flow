@@ -117,7 +117,7 @@ Each mode extends the core — see the mode's workflow file for **session fields
 </context>
 
 <invariants>
-All base invariants apply (evidence append-only, session-as-state, phase goal tracking, auto-commit per action, zero-residual). Additionally:
+All base invariants apply (evidence append-only, session-as-state, phase goal tracking, auto-commit per action). Additionally:
 
 1. **Evidence append-only** — never delete or overwrite evidence.ndjson entries.
 2. **Phase goal tracking** — mark each goal done/failed before transition; no silent skips.

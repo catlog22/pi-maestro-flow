@@ -14,6 +14,17 @@ import {
 } from "./cli-tools-loader.ts";
 
 /**
+ * pi requires cost/contextWindow/maxTokens on every registered model. CLI-backed
+ * providers are metered and billed by the delegate tool itself, so pi never
+ * prices their usage — zeroed rates state that instead of inventing numbers.
+ * The window mirrors the 128k default that custom channels get in
+ * api-provider-config, since cli-tools.json carries no per-tool window.
+ */
+const CLI_PROVIDER_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
+const CLI_PROVIDER_CONTEXT_WINDOW = 128_000;
+const CLI_PROVIDER_MAX_TOKENS = 32_000;
+
+/**
  * Map a CLI tool type to its pi provider configuration.
  */
 function mapToolToProviderConfig(
@@ -118,6 +129,9 @@ export function registerMaestroProviders(pi: ExtensionAPI): void {
               name: toolConfig.primaryModel,
               reasoning: false,
               input: ["text"],
+              cost: CLI_PROVIDER_COST,
+              contextWindow: CLI_PROVIDER_CONTEXT_WINDOW,
+              maxTokens: CLI_PROVIDER_MAX_TOKENS,
             },
           ],
           ...(cliConfig.proxy?.enabled && cliConfig.proxy.httpProxy
