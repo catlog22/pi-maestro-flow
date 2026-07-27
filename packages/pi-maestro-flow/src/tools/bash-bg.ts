@@ -74,6 +74,7 @@ interface Job {
   stopRequested: boolean;
   child: ChildProcess;
   tail: string;
+  tailTruncated: boolean;
   outputBytes: number;
   background: boolean;
   completionNotified: boolean;
@@ -81,18 +82,27 @@ interface Job {
   outputDrainTimer?: ReturnType<typeof setTimeout>;
 }
 
-function tailLines(job: Job, lines: number): string {
+interface TailOutput {
+  text: string;
+  truncated: boolean;
+}
+
+function tailOutput(job: Job, lines: number): TailOutput {
   let content = job.tail;
   if (!content) {
     try {
       content = fs.readFileSync(job.outFile, "utf8");
     } catch {
-      return "";
+      return { text: "", truncated: false };
     }
   }
   content = content.replace(/\r?\n$/, "");
-  if (!content) return "";
-  return content.split("\n").slice(-lines).join("\n");
+  if (!content) return { text: "", truncated: false };
+  const allLines = content.split("\n");
+  return {
+    text: allLines.slice(-lines).join("\n"),
+    truncated: job.tailTruncated || allLines.length > lines,
+  };
 }
 
 function jobStatus(job: Job): BashBgJobStatus {
@@ -112,7 +122,7 @@ function jobSnapshot(job: Job): BashBgJobSnapshot {
     updatedAt: job.updatedAt,
     ...(job.finishedAt === undefined ? {} : { finishedAt: job.finishedAt }),
     exitCode: job.exitCode,
-    outputTail: tailLines(job, MAX_SNAPSHOT_TAIL_LINES),
+    outputTail: tailOutput(job, MAX_SNAPSHOT_TAIL_LINES).text,
     outputBytes: job.outputBytes,
     logPath: job.outFile,
   };
@@ -135,7 +145,11 @@ function logAccess(job: Job): string {
   return `log: ${job.outFile}\nview: ${viewLogCommand(job)}`;
 }
 
-function jobDetails(job: Job, action: string): BashBgDetails {
+function appendLogAccess(text: string, job: Job, truncated: boolean): string {
+  return truncated ? `${text}\n${logAccess(job)}` : text;
+}
+
+function jobDetails(job: Job, action: string, truncated = false): BashBgDetails {
   return {
     action,
     jobId: job.id,
@@ -143,8 +157,7 @@ function jobDetails(job: Job, action: string): BashBgDetails {
     running: !job.done,
     exitCode: job.exitCode,
     command: job.command,
-    logPath: job.outFile,
-    viewCommand: viewLogCommand(job),
+    ...(truncated ? { logPath: job.outFile, viewCommand: viewLogCommand(job) } : {}),
   };
 }
 
@@ -201,16 +214,25 @@ export function registerBashBg(pi: ExtensionAPI): void {
   const notifyComplete = (job: Job): void => {
     if (!job.background || job.completionNotified) return;
     job.completionNotified = true;
-    const tail = tailLines(job, 20);
+    const tail = tailOutput(job, 20);
     const status = jobStatus(job);
     const body = [
       `Background bash job ${job.id} ${status} (exit ${job.exitCode}).`,
       `command: ${job.command}`,
-      tail ? `output (tail):\n${tail}` : "output: (empty)",
-      logAccess(job),
+      tail.text ? `output (tail):\n${tail.text}` : "output: (empty)",
+      ...(tail.truncated ? [logAccess(job)] : []),
     ].join("\n");
     pi.sendMessage(
-      { customType: "bash-bg-complete", content: body, display: true, details: { jobId: job.id, exitCode: job.exitCode } },
+      {
+        customType: "bash-bg-complete",
+        content: body,
+        display: true,
+        details: {
+          jobId: job.id,
+          exitCode: job.exitCode,
+          ...(tail.truncated ? { logPath: job.outFile, viewCommand: viewLogCommand(job) } : {}),
+        },
+      },
       { triggerTurn: true },
     );
   };
@@ -239,6 +261,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
       stopRequested: false,
       child,
       tail: "",
+      tailTruncated: false,
       outputBytes: 0,
       background,
       completionNotified: false,
@@ -250,7 +273,10 @@ export function registerBashBg(pi: ExtensionAPI): void {
     const append = (d: Buffer): void => {
       ws.write(d);
       job.tail += d.toString("utf8");
-      if (job.tail.length > MAX_TAIL_BYTES) job.tail = job.tail.slice(-MAX_TAIL_BYTES);
+      if (job.tail.length > MAX_TAIL_BYTES) {
+        job.tail = job.tail.slice(-MAX_TAIL_BYTES);
+        job.tailTruncated = true;
+      }
       job.outputBytes += d.byteLength;
       job.updatedAt = Date.now();
       publishSnapshotSoon();
@@ -329,8 +355,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
             text:
               `Started background job ${job.id} (pid ${job.pid}).\ncommand: ${job.command}\n` +
               `You will receive a bash-bg-complete notification when it finishes. ` +
-              `Use bash_bg action=status jobId=${job.id} to peek, or action=wait to block.\n` +
-              logAccess(job),
+              `Use bash_bg action=status jobId=${job.id} to peek, or action=wait to block.`,
           }],
           details: jobDetails(job, "start"),
         };
@@ -349,10 +374,13 @@ export function registerBashBg(pi: ExtensionAPI): void {
           await new Promise((resolve) => setTimeout(resolve, 200));
         }
         if (job.done) {
-          const out = tailLines(job, params.tail ?? 200);
+          const out = tailOutput(job, params.tail ?? 200);
           return {
-            content: [{ type: "text", text: `${out || "(no output)"}\n(exit ${job.exitCode})\n${logAccess(job)}` }],
-            details: jobDetails(job, "run"),
+            content: [{
+              type: "text",
+              text: appendLogAccess(`${out.text || "(no output)"}\n(exit ${job.exitCode})`, job, out.truncated),
+            }],
+            details: jobDetails(job, "run", out.truncated),
           };
         }
         job.background = true;
@@ -362,8 +390,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
             text:
               `Still running after ${Math.round(windowMs / 1000)}s — moved to background as job ${job.id} (pid ${job.pid}).\ncommand: ${job.command}\n` +
               `You will receive a bash-bg-complete notification when it finishes. ` +
-              `Use bash_bg action=status jobId=${job.id} to peek, or action=wait to block.\n` +
-              logAccess(job),
+              `Use bash_bg action=status jobId=${job.id} to peek, or action=wait to block.`,
           }],
           details: jobDetails(job, "run"),
         };
@@ -372,7 +399,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
       if (params.action === "list") {
         if (jobs.size === 0) return { content: [{ type: "text", text: "No background jobs." }], details: { action: "list" } };
         const lines = [...jobs.values()].map(
-          (j) => `${j.id}\t${jobStatus(j)}${j.done ? `(exit ${j.exitCode})` : ""}\tpid ${j.pid}\t${j.command}\t${j.outFile}`,
+          (j) => `${j.id}\t${jobStatus(j)}${j.done ? `(exit ${j.exitCode})` : ""}\tpid ${j.pid}\t${j.command}`,
         );
         return { content: [{ type: "text", text: lines.join("\n") }], details: { action: "list" } };
       }
@@ -383,9 +410,11 @@ export function registerBashBg(pi: ExtensionAPI): void {
 
       if (params.action === "status") {
         const state = job.done ? `${jobStatus(job)} (exit ${job.exitCode})` : jobStatus(job);
+        const out = tailOutput(job, tailCount);
+        const text = `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${out.text || "(empty)"}`;
         return {
-          content: [{ type: "text", text: `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${tailLines(job, tailCount) || "(empty)"}\n${logAccess(job)}` }],
-          details: jobDetails(job, "status"),
+          content: [{ type: "text", text: appendLogAccess(text, job, out.truncated) }],
+          details: jobDetails(job, "status", out.truncated),
         };
       }
 
@@ -397,7 +426,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
           killTree(job.pid);
         }
         return {
-          content: [{ type: "text", text: `${job.done ? "Job already finished" : "Stopping job"} ${job.id} (pid ${job.pid}).\n${logAccess(job)}` }],
+          content: [{ type: "text", text: `${job.done ? "Job already finished" : "Stopping job"} ${job.id} (pid ${job.pid}).` }],
           details: jobDetails(job, "kill"),
         };
       }
@@ -411,9 +440,11 @@ export function registerBashBg(pi: ExtensionAPI): void {
       const state = job.done
         ? `${jobStatus(job)} (exit ${job.exitCode})`
         : `${jobStatus(job)} after ${Math.round(timeoutMs / 1000)}s`;
+      const out = tailOutput(job, tailCount);
+      const text = `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${out.text || "(empty)"}`;
       return {
-        content: [{ type: "text", text: `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${tailLines(job, tailCount) || "(empty)"}\n${logAccess(job)}` }],
-        details: jobDetails(job, "wait"),
+        content: [{ type: "text", text: appendLogAccess(text, job, out.truncated) }],
+        details: jobDetails(job, "wait", out.truncated),
       };
     },
     renderCall(args, theme) {

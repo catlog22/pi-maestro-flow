@@ -94,15 +94,38 @@ test("bash_bg run completes inline without queueing a redundant turn", async () 
 		assert.equal(result.details?.exitCode, 0);
 		const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
 		assert.match(text, /done/);
-		assert.match(text, /\nlog: .+\.log\nview: /);
-		assert.equal(result.details?.logPath?.endsWith(".log"), true);
-		assert.equal(result.details?.viewCommand?.includes(result.details.logPath ?? ""), true);
+		assert.doesNotMatch(text, /\nlog: |\nview: /);
+		assert.equal(result.details?.logPath, undefined);
+		assert.equal(result.details?.viewCommand, undefined);
 		const theme = { fg: (_color: string, value: string) => value } as Theme;
 		const collapsed = harness.tool.renderResult(result, { expanded: false }, theme).render(200);
 		const expanded = harness.tool.renderResult(result, { expanded: true }, theme).render(200);
 		assert.equal(collapsed.length, 1);
-		assert.match(expanded.join("\n"), /done[\s\S]*log: [\s\S]*view: /);
+		assert.match(expanded.join("\n"), /done/);
+		assert.doesNotMatch(expanded.join("\n"), /log: |view: /);
 		assert.deepEqual(harness.messages, []);
+	} finally {
+		harness.shutdown();
+	}
+});
+
+test("bash_bg exposes log access only when the returned tail is truncated", async () => {
+	const harness = createHarness();
+	try {
+		const result = await harness.tool.execute("truncated", {
+			action: "run",
+			command: 'node -e "for(let i=1;i<=6;i++)console.log(\'line \'+i)"',
+			timeout: 2,
+			tail: 2,
+		});
+		const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
+		assert.doesNotMatch(text, /line 1/);
+		assert.match(text, /line 5[\s\S]*line 6[\s\S]*\nlog: .+\.log\nview: /);
+		assert.equal(result.details?.logPath?.endsWith(".log"), true);
+		assert.equal(result.details?.viewCommand?.includes(result.details.logPath ?? ""), true);
+		const theme = { fg: (_color: string, value: string) => value } as Theme;
+		const expanded = harness.tool.renderResult(result, { expanded: true }, theme).render(200).join("\n");
+		assert.match(expanded, /line 5[\s\S]*line 6[\s\S]*log: [\s\S]*view: /);
 	} finally {
 		harness.shutdown();
 	}
@@ -144,6 +167,25 @@ test("bash_bg start queues one completion turn after returning control", async (
 		assert.equal(harness.messages.length, 1);
 		assert.equal(harness.messages[0]?.options?.triggerTurn, true);
 		assert.equal(harness.messages[0]?.options?.deliverAs, undefined);
+		assert.doesNotMatch(harness.messages[0]?.message.content ?? "", /\nlog: |\nview: /);
+	} finally {
+		harness.shutdown();
+	}
+});
+
+test("bash_bg completion includes log access when its notification tail is truncated", async () => {
+	const harness = createHarness();
+	try {
+		const result = await harness.tool.execute("background-truncated", {
+			action: "start",
+			command: 'node -e "for(let i=1;i<=25;i++)console.log(\'line \'+i)"',
+		});
+		const jobId = result.details?.jobId;
+		assert.ok(jobId);
+		await waitForMessage(harness.messages, "bash-bg-complete");
+		const content = harness.messages[0]?.message.content ?? "";
+		assert.doesNotMatch(content, /(?:^|\n)line 1(?:\n|$)/);
+		assert.match(content, /line 6[\s\S]*line 25[\s\S]*\nlog: .+\.log\nview: /);
 	} finally {
 		harness.shutdown();
 	}
