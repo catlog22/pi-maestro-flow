@@ -2,6 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
+	ActivityTimer,
 	renderFooter,
 	getUsageTotals,
 	invalidateUsageCache,
@@ -138,7 +139,7 @@ test("approval mode leads line one while usage remains on line two", () => {
 	assert.match(lines[1], /↑12k · ↓3\.4k · 01:23$/);
 });
 
-test("auto compact joins approval at the start of line one", () => {
+test("auto compact stays hidden while approval remains at the start of line one", () => {
 	const lines = renderFooter(parts({
 		width: 100,
 		extensionStatuses: [
@@ -147,7 +148,8 @@ test("auto compact joins approval at the start of line one", () => {
 		],
 	}));
 	assert.equal(lines.length, 2);
-	assert.match(lines[0], /^APPROVAL default · AUTO COMPACT ON · ⚡ stream-70b/);
+	assert.match(lines[0], /^APPROVAL default · ⚡ stream-70b/);
+	assert.doesNotMatch(lines.join("\n"), /AUTO COMPACT|AUTO ON/);
 	assert.equal(lines[1].length, 100);
 	assert.match(lines[1], /↑12k · ↓3\.4k · 01:23$/);
 });
@@ -219,6 +221,18 @@ test("internal swarm projection statuses stay out of the footer", () => {
 	assert.match(line, /APPROVAL YOLO/);
 });
 
+test("ambient MCP and auto compact statuses stay out of the footer", () => {
+	const line = renderFooter(parts({
+		extensionStatuses: [
+			{ key: "mcp", text: "MCP: 0/3 servers" },
+			{ key: "maestro-auto-compact-mode", text: "AUTO ON" },
+			{ key: "mode", text: "PLAN" },
+		],
+	})).join("\n");
+	assert.doesNotMatch(line, /MCP:|AUTO COMPACT|AUTO ON/);
+	assert.match(line, /PLAN/);
+});
+
 test("extension statuses render on a dedicated line and duplicate thinking is omitted", () => {
 	const lines = renderFooter(parts({
 		thinking: "high",
@@ -249,4 +263,22 @@ test("fmtTokens formats k and m", () => {
 	assert.equal(fmtTokens(1500), "1.5k");
 	assert.equal(fmtTokens(2000), "2k");
 	assert.equal(fmtTokens(2_500_000), "2.5m");
+});
+
+test("activity timer starts on activity, freezes on stop and restarts for the next turn", () => {
+	const timer = new ActivityTimer();
+	assert.equal(timer.elapsed(5_000), 0);
+
+	timer.start(1_000);
+	assert.equal(timer.elapsed(3_500), 2_500);
+	timer.start(4_000);
+	assert.equal(timer.elapsed(4_500), 3_500);
+
+	timer.stop(5_000);
+	assert.equal(timer.elapsed(9_000), 4_000);
+
+	timer.restart(10_000);
+	assert.equal(timer.elapsed(10_750), 750);
+	timer.reset();
+	assert.equal(timer.elapsed(20_000), 0);
 });

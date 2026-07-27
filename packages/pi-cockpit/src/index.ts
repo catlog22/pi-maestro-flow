@@ -10,7 +10,7 @@ import { TodoStore } from "./todo-store.ts";
 import { makeTodoWidget, makeAgentWidget, terminalRows } from "./stack-widget.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { formatDuration } from "./render.ts";
-import { getUsageTotals, invalidateUsageCache, renderFooter, type PaintTheme, type WidthUtils } from "./footer.ts";
+import { ActivityTimer, getUsageTotals, invalidateUsageCache, renderFooter, type PaintTheme, type WidthUtils } from "./footer.ts";
 import { collectExtensionStatuses } from "./extension-status.ts";
 import { ANIMATION_PERIOD_MS, resolveGlyphs } from "./icons.ts";
 import { ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
@@ -34,6 +34,7 @@ import {
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";
 const COCKPIT_STATUS_KEY = "cockpit";
+const WIDTH_POLL_INTERVAL_MS = 250;
 
 function isTuiContext(ctx: ExtensionContext): boolean {
 	try {
@@ -61,7 +62,7 @@ export default function (pi: ExtensionAPI): void {
 	let lastCtx: ExtensionContext | undefined;
 	let capturedTui: TUI | undefined;
 	let running = false;
-	let sessionStart = 0;
+	const activityTimer = new ActivityTimer();
 	let tick: ReturnType<typeof setInterval> | undefined;
 	// Persisted rather than toasted: a config that failed to load silently downgrades
 	// the whole session to defaults, so it belongs in a slot that does not scroll away.
@@ -196,9 +197,19 @@ export default function (pi: ExtensionAPI): void {
 		syncTick();
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			capturedTui = tui;
+			let observedWidth = tui.terminal.columns;
+			const widthTimer = setInterval(() => {
+				const nextWidth = tui.terminal.columns;
+				if (!Number.isFinite(nextWidth) || nextWidth <= 0 || nextWidth === observedWidth) return;
+				observedWidth = nextWidth;
+				tui.invalidate();
+				tui.requestRender(true);
+			}, WIDTH_POLL_INTERVAL_MS);
+			widthTimer.unref?.();
 			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());
 			const component = {
 				render(width: number): string[] {
+					if (Number.isFinite(width) && width > 0) observedWidth = width;
 					const cu = ctx.getContextUsage();
 					const branch = footerData.getGitBranch();
 					const extensionStatuses = collectExtensionStatuses(footerData.getExtensionStatuses());
@@ -213,7 +224,7 @@ export default function (pi: ExtensionAPI): void {
 						ctxWindow: cu?.contextWindow ?? ctx.model?.contextWindow ?? 0,
 						totals: getUsageTotals(ctx.sessionManager.getEntries()),
 						git: branch ?? undefined,
-						elapsed: formatDuration(Date.now() - sessionStart),
+						elapsed: formatDuration(activityTimer.elapsed()),
 						// The Agents header one line above already states the roster and
 						// the failure count. Repeating it here spent a footer segment to
 						// say nothing new, and the two could disagree mid-update.
@@ -226,6 +237,7 @@ export default function (pi: ExtensionAPI): void {
 				},
 				invalidate(): void {},
 				dispose(): void {
+					clearInterval(widthTimer);
 					unsubscribeBranch();
 				},
 			};
@@ -273,7 +285,7 @@ export default function (pi: ExtensionAPI): void {
 	// --- session + agent lifecycle ---
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
-		sessionStart = Date.now();
+		activityTimer.reset();
 		ensureConfigExists();
 		config = loadConfig((m, l) => {
 			try {
@@ -304,11 +316,17 @@ export default function (pi: ExtensionAPI): void {
 		});
 		lastCtx = undefined;
 		running = false;
+		activityTimer.reset();
 		invalidateUsageCache();
 		agents.clear();
 		bashBg.clear();
 	});
 
+	pi.on("before_agent_start", (event) => {
+		if (event.prompt.trim() !== "" || (event.images?.length ?? 0) > 0) {
+			activityTimer.restart();
+		}
+	});
 	pi.on("agent_start", () => {
 		running = true;
 		startTick();
@@ -316,11 +334,16 @@ export default function (pi: ExtensionAPI): void {
 	});
 	pi.on("agent_end", () => {
 		running = false;
+		activityTimer.stop();
 		syncTick();
 		req();
 	});
 
 	// --- redraw triggers for the footer's live data ---
+	pi.on("message_start", (event) => {
+		const role = event.message.role;
+		if (role === "user" || role === "assistant") activityTimer.start();
+	});
 	pi.on("message_end", (_e, ctx) => {
 		invalidateUsageCache();
 		if (isTuiContext(ctx)) req();

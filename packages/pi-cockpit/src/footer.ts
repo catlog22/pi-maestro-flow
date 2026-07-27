@@ -42,6 +42,35 @@ export function emptyTotals(): UsageTotals {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, latestCacheHitRate: undefined };
 }
 
+export class ActivityTimer {
+	private startedAt: number | undefined;
+	private stoppedAt: number | undefined;
+
+	restart(now: number = Date.now()): void {
+		this.startedAt = now;
+		this.stoppedAt = undefined;
+	}
+
+	start(now: number = Date.now()): void {
+		if (this.startedAt === undefined || this.stoppedAt !== undefined) this.restart(now);
+	}
+
+	stop(now: number = Date.now()): void {
+		if (this.startedAt === undefined || this.stoppedAt !== undefined) return;
+		this.stoppedAt = Math.max(this.startedAt, now);
+	}
+
+	reset(): void {
+		this.startedAt = undefined;
+		this.stoppedAt = undefined;
+	}
+
+	elapsed(now: number = Date.now()): number {
+		if (this.startedAt === undefined) return 0;
+		return Math.max(0, (this.stoppedAt ?? now) - this.startedAt);
+	}
+}
+
 let usageCache: { key: string; totals: UsageTotals } | undefined;
 
 function entryIdentity(entry: unknown): string {
@@ -163,7 +192,12 @@ function extensionStatusColor(status: ExtensionStatusSegment): ThemeColor {
 	return "text";
 }
 
-const HIDDEN_EXTENSION_STATUS_KEYS = new Set(["team-swarm", "swarm-best"]);
+const HIDDEN_EXTENSION_STATUS_KEYS = new Set([
+	"maestro-auto-compact-mode",
+	"mcp",
+	"swarm-best",
+	"team-swarm",
+]);
 
 function isVisibleExtensionStatus(status: ExtensionStatusSegment, thinking?: string): boolean {
 	if (status.text === "" || status.text === thinking) return false;

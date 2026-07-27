@@ -73,3 +73,11 @@ test("Flow publishes authoritative bash_bg snapshots and Cockpit can request a r
 	assert.match(cockpitSource, /pi\.events\.emit\(BASH_BG_QUERY_EVENT/);
 	assert.match(cockpitSource, /registerShortcut\(BASH_BG_OVERLAY_KEY/);
 });
+
+test("Cockpit follows terminal width changes while the footer is idle", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(source, /tui\.terminal\.columns/);
+	assert.match(source, /tui\.invalidate\(\)/);
+	assert.match(source, /tui\.requestRender\(true\)/);
+	assert.match(source, /clearInterval\(widthTimer\)/);
+});
