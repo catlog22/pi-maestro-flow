@@ -134,7 +134,8 @@ test("approval mode leads line one while usage remains on line two", () => {
 	}));
 	assert.equal(lines.length, 2);
 	assert.match(lines[0], /^APPROVAL YOLO · ⚡ stream-70b/);
-	assert.match(lines[1], /^↑12k · ↓3\.4k · 01:23$/);
+	assert.equal(lines[1].length, 80);
+	assert.match(lines[1], /↑12k · ↓3\.4k · 01:23$/);
 });
 
 test("auto compact joins approval at the start of line one", () => {
@@ -147,7 +148,8 @@ test("auto compact joins approval at the start of line one", () => {
 	}));
 	assert.equal(lines.length, 2);
 	assert.match(lines[0], /^APPROVAL default · AUTO COMPACT ON · ⚡ stream-70b/);
-	assert.match(lines[1], /^↑12k · ↓3\.4k · 01:23$/);
+	assert.equal(lines[1].length, 100);
+	assert.match(lines[1], /↑12k · ↓3\.4k · 01:23$/);
 });
 
 test("footer uses a workspace icon and omits monetary cost while keeping token usage", () => {

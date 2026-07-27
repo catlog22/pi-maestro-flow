@@ -183,9 +183,9 @@ function paintExtensionStatus(
 
 function alignRight(left: string, right: string, width: number, measure: WidthUtils["measure"]): string {
 	if (right === "") return left;
-	if (left === "") return right;
-	const lw = measure(left);
 	const rw = measure(right);
+	if (left === "") return " ".repeat(Math.max(0, width - rw)) + right;
+	const lw = measure(left);
 	if (lw + rw + 1 > width) return left;
 	return left + " ".repeat(width - lw - rw) + right;
 }
