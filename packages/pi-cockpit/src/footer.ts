@@ -206,14 +206,8 @@ export function renderFooter(p: FooterParts): string[] {
 	const controlStatuses = visibleStatuses.filter(
 		(status) => status.key === "approval-mode" || status.key === "maestro-auto-compact-mode",
 	);
-	const controlText = controlStatuses
-		.map((status) => paintExtensionStatus(status, theme))
-		.join(identitySeparator);
-	const reservedControlWidth = controlText
-		? Math.min(width, utils.measure(controlText) + 1)
-		: 0;
 
-	// line 1: prioritized left segments · context gauge (right)
+	// line 1: prioritized identity and control segments
 	// minWidth keeps a glyph-prefixed segment from decaying into "{icon}…", which
 	// costs columns and tells the user nothing about the path or branch.
 	const labelled = (glyph: string, value: string, priority: number, color: ThemeColor): PrioritizedSegment => ({
@@ -237,7 +231,20 @@ export function renderFooter(p: FooterParts): string[] {
 	if (p.cwd) leftParts.push(labelled(g.workspace, p.cwd, 0, "syntaxFunction"));
 	if (p.git) leftParts.push(labelled(g.git, p.git, 3, "syntaxFunction"));
 
-	let right1 = "";
+	const fittedLeft = fitSegmentsByPriority(
+		leftParts,
+		width,
+		utils.measure,
+		utils.clip,
+		g.ellipsis,
+		utils.measure(identitySeparator),
+	);
+	const line1 = fittedLeft.join(identitySeparator);
+
+	// line 2: one right-aligned resource group. Context progressively contracts
+	// before disappearing, while cumulative input/output remain the narrow-screen
+	// baseline so the existing usage contract is preserved.
+	const contextCandidates: string[] = [];
 	if (p.ctxWindow > 0) {
 		// A contextWindow that under-reports the live token count (custom providers
 		// do this) previously printed e.g. "137%" beside a bar clamped at full.
@@ -247,46 +254,40 @@ export function renderFooter(p: FooterParts): string[] {
 			`${contextMark(p.ctxPct, g)}${shownPct}%`,
 		);
 		const tokText = `${theme.fg("text", fmtTokens(p.ctxTokens))}${theme.fg("dim", "/")}${theme.fg("text", fmtTokens(p.ctxWindow))}`;
-		const candidates = [
+		contextCandidates.push(
 			`${renderBar(p.ctxPct, 10, g, theme)} ${pctText} ${sep} ${tokText}`,
 			`${pctText} ${sep} ${tokText}`,
 			pctText,
-		];
-		const rightBudget = Math.max(0, width - reservedControlWidth);
-		right1 = candidates.find((candidate) => utils.measure(candidate) <= rightBudget)
-			?? (rightBudget > 0 ? utils.clip(pctText, rightBudget, ell) : "");
+		);
 	}
-	const rightW = utils.measure(right1);
-	const availLeft = Math.max(0, width - rightW - (right1 ? 1 : 0));
-	const fittedLeft = fitSegmentsByPriority(
-		leftParts,
-		availLeft,
-		utils.measure,
-		utils.clip,
-		g.ellipsis,
-		utils.measure(identitySeparator),
-	);
-	const line1 = alignRight(fittedLeft.join(identitySeparator), right1, width, utils.measure);
 
 	const t = p.totals;
 	const stats: PrioritizedSegment[] = [
-		{ text: `${theme.fg("accent", g.tokensIn)}${fmtTokens(t.input)}`, priority: 5 },
-		{ text: `${theme.fg("success", g.tokensOut)}${fmtTokens(t.output)}`, priority: 4 },
+		{ text: `${theme.fg("accent", g.tokensIn)}${fmtTokens(t.input)}`, priority: 7 },
+		{ text: `${theme.fg("success", g.tokensOut)}${fmtTokens(t.output)}`, priority: 6 },
 	];
 	const hasCache = t.cacheRead > 0 || t.cacheWrite > 0;
 	if (hasCache && t.latestCacheHitRate !== undefined) {
-		stats.push({ text: `${theme.fg("success", g.cacheHit)}${t.latestCacheHitRate.toFixed(0)}%`, priority: 3 });
+		stats.push({ text: `${theme.fg("success", g.cacheHit)}${t.latestCacheHitRate.toFixed(0)}%`, priority: 4 });
 	}
 	if (p.agentSummary) stats.push({ text: theme.fg("accent", p.agentSummary), priority: 0 });
 	const statSeparator = ` ${sep} `;
-	const fittedStats = fitSegmentsByPriority(
-		stats,
-		width,
-		utils.measure,
-		utils.clip,
-		g.ellipsis,
-		utils.measure(statSeparator),
-	);
+	let fittedStats: string[] = [];
+	const candidates = contextCandidates.length > 0 ? contextCandidates : [undefined];
+	for (const context of candidates) {
+		const segments = context
+			? [{ text: context, priority: 5, clippable: false }, ...stats]
+			: stats;
+		fittedStats = fitSegmentsByPriority(
+			segments,
+			width,
+			utils.measure,
+			utils.clip,
+			g.ellipsis,
+			utils.measure(statSeparator),
+		);
+		if (!context || fittedStats.includes(context)) break;
+	}
 	const right2 = fittedStats.join(statSeparator);
 	const line2 = alignRight("", right2, width, utils.measure);
 

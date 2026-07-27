@@ -104,9 +104,31 @@ test("ascii vs nerd bar uses different glyphs", () => {
 	assert.ok(ascii.includes("#") && ascii.includes("-"));
 });
 
-test("no context window omits the gauge on line 1", () => {
+test("no context window omits the gauge from the resource line", () => {
 	const lines = renderFooter(parts({ ctxWindow: 0 }));
-	assert.ok(!lines[0].includes("%"));
+	assert.ok(!lines[1].includes("%"));
+});
+
+test("context and token usage form one right-aligned resource group", () => {
+	const lines = renderFooter(parts({
+		width: 100,
+		ctxPct: 20,
+		ctxTokens: 80600,
+		ctxWindow: 400000,
+		totals: {
+			input: 84800,
+			output: 21000,
+			cacheRead: 99,
+			cacheWrite: 0,
+			cost: 0,
+			latestCacheHitRate: 99,
+		},
+	}));
+	assert.doesNotMatch(lines[0], /\[██/);
+	assert.equal(
+		lines[1].trimStart(),
+		"[██░░░░░░░░] 20% · 80.6k/400k · ↑84.8k · ↓21k · ⚡99%",
+	);
 });
 
 test("overlong model is clipped within width", () => {
