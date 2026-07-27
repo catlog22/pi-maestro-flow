@@ -54,6 +54,23 @@ npm view <dep-pkg> version
 
 若依赖包有已提交未发布变更，且主包 release note 描述了这些特性，则**必须先发布依赖包**（bump + publish），再把主包的依赖版本升上去，否则已发布产物会缺少 release note 宣称的特性。
 
+### Step 1.6: 检查外部核心依赖（maestro-flow）版本（必做）
+
+`pi-maestro-flow` 精确 pin 外部核心引擎 `maestro-flow`（源码位于 `D:\maestro2`）。精确 pin **不会**自动跟进上游发布，发布前必须核对 pin 是否落后于最新：
+
+```bash
+# 1) 上游最新发布版本
+npm view maestro-flow version --prefer-online
+
+# 2) 上游源码当前版本（maestro-flow 仓库）
+node -e "console.log(require('D:/maestro2/package.json').version)"
+
+# 3) 主包当前 pin
+node -e "console.log(require('./packages/pi-maestro-flow/package.json').dependencies['maestro-flow'])"
+```
+
+若 pin 落后于最新，发布前必须显式决策：升 pin（改 `dependencies['maestro-flow']` + `npm install` 刷 lock）再发布，或明确接受落后。不要无意识照搬上一版 pin。详见 `TIP-20260727-exact-pin-stale-upstream-dep`。
+
 ### Step 2: 撰写 RELEASE.md
 
 基于 commit 分析结果撰写 release note，必须覆盖：
@@ -126,8 +143,10 @@ gh release create vX.Y.Z \
 | monorepo 包间版本依赖不一致 | 手改漏掉某个包 | 检查所有 `peerDependencies` 中的版本引用 |
 | 主包 release note 宣称的特性实际不在产物里 | workspace 依赖包有已提交未发布变更，主包仍 pin 旧版 | 发布前执行 Step 1.5；先发布依赖包再升主包依赖 |
 | npm 无法重发同一版本修正依赖 | 同版本号不允许 republish | bump 主包 patch（如 0.4.12→0.4.13）重发，并在 RELEASE.md 注明 supersedes |
+| 主包携带落后的外部核心引擎 | 外部依赖（maestro-flow）精确 pin，上游发新版不自动跟进 | 发布前执行 Step 1.6；升 pin + 刷 lock 再发布 |
 
 ## 参考
 
 - 本次执行记录：`https://github.com/catlog22/pi-maestro-flow/releases/tag/v0.4.2`
 - npm workspace publish 文档：`https://docs.npmjs.com/cli/v10/using-npm/workspaces`
+- 外部核心依赖版本陷阱：`TIP-20260727-exact-pin-stale-upstream-dep`（maestro-flow 源码 `D:\maestro2`）
