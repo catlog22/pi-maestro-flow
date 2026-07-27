@@ -1,8 +1,12 @@
-# pi-teammate
+# pi-maestro-teammate
 
 > Teammate dispatch tool for [Pi](https://github.com/earendil-works/pi) — unified TaskSpec with DAG variable referencing + resident agent model
 
 Pi extension implementing teammate dispatch with **unified TaskSpec model**. Single agent, parallel fan-out, sequential chains, and arbitrary DAGs all use the same schema — execution order is determined by `{name}` variable references between tasks.
+
+It is the **core execution engine** of the `pi-maestro-flow` project: the `pi-maestro-flow` orchestration layer dispatches all its parallel and delegated work through this package's `teammate` tool, and the `pi-cockpit` status UI observes running agents through the events this package broadcasts. It also installs and runs standalone.
+
+> ⚠️ **Breaking in v0.6.0:** `background` now defaults to `false` (foreground/blocking). Callers that relied on the old background-by-default behavior must pass `background: true` explicitly. Teammate nesting is capped at two layers; deeper chains are rejected.
 
 ## Automatic Model Routing
 
@@ -204,7 +208,7 @@ interface TeammateParams extends TaskSpec {
   concurrency?: number;   // Max concurrent tasks (default: 4)
 
   // Execution control (applies to ALL modes)
-  background?: boolean;   // Run in background (default: true)
+  background?: boolean;   // Run in background (default: false — foreground/blocking since v0.6.0)
   context?: "fresh" | "fork";
 
   // P0 three-axis
@@ -287,6 +291,17 @@ When a child needs user input, it sends a reply-capable `teammate_interaction_re
 
 The response uses `teammate_interaction_response` with the original `requestId`, so late or duplicate responses cannot resolve a different child request.
 
+## Runtime State & Event Contract (v0.6.0)
+
+The v0.6.0 state rebuild reconstructs the runtime around a single source of truth with hardened lifecycle edges:
+
+- **Single TUI state table** — status presentation is unified onto one state table; failed agents no longer vanish in the same frame as the event that produced them.
+- **Real concurrency guards** — the nested-depth guard is now enforced (capped at two layers) alongside a global concurrency gate.
+- **Lifecycle edge semantics** — result-ready edges, cohort reclamation, name-conflict handling, and execution-layer backstops with bounded buffer overhead; foreground-lane results publish with a grace period plus an absolute ceiling to prevent caller deadlocks.
+- **Ownership & authorization** — a `parentCid` claim must land within the dispatcher subtree; cross-subtree send/abort and `structured_output` access are authorized.
+- **`public/v1` event contract** — the cross-extension event surface is promoted to a stable `public/v1` contract (`teammate:started` / `teammate:message` / `teammate:complete`), and a Flow↔Teammate type boundary is established. This is the contract `pi-cockpit` consumes to render its AGENTS block — cockpit listens to these broadcasts and never reaches into teammate internals.
+- **Breaking default flip** — `background` defaults to `false` (foreground/blocking).
+
 ## Reliability
 
 - **Model fallback chain** — primary model → `fallbackModels[]` from agent config → automatic retry
@@ -337,7 +352,7 @@ You are a specialized agent. Your system prompt goes here.
 ```bash
 pi install npm:pi-maestro-teammate
 # or from local path
-pi install ./pi-teammate
+pi install ./pi-maestro-teammate
 ```
 
 ## Environment Variables

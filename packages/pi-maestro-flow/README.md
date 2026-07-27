@@ -2,7 +2,7 @@
 
 > Maestro workflow orchestration for [Pi](https://github.com/earendil-works/pi) — tools, workflows, and templates
 
-Pi extension providing Maestro's workflow tools. Built on [pi-maestro-teammate](../pi-maestro-teammate/) for the execution engine. Skills and agents live in project-level `.pi/` directory (see root README).
+Pi extension providing Maestro's workflow tools — the top-level entry of the three-plugin suite. Built on [pi-maestro-teammate](../pi-maestro-teammate/) for the execution engine and paired with [pi-cockpit](../pi-cockpit/) for the status UI (both are dependencies since v0.6.1 and are auto-registered on postinstall). Skills and agents live in project-level `.pi/` directory (see root README).
 
 ## Contents
 
@@ -10,6 +10,7 @@ Pi extension providing Maestro's workflow tools. Built on [pi-maestro-teammate](
 |----------|-------|-------------|
 | **Maestro tool** | 1 | `maestro` |
 | **Goal tool** | 1 | `goal` (`get` / `create`; user-owned lifecycle commands) |
+| **Shell tool** | 1 | `bash_bg` (adaptive foreground/background execution, new in v0.6.0) |
 | **Intelligence tools** | 3 | `lsp`, `browser`, `search_tool_bm25` |
 | **Workflow docs** | 82 | Installed from `maestro-flow` to `~/.maestro/workflows` |
 | **Templates** | 23 | Bundled template files |
@@ -20,8 +21,8 @@ Skills (113) and agents (29) are in the project root `.pi/` directory, not in th
 
 - **Pi coding agent** — the host runtime
 - **Maestro CLI** — `maestro search` and `maestro load` for the project knowledge system
-- **pi-maestro-teammate** — exploration, analysis, planning, development, review, and testing dispatch
-- **pi-maestro-teammate** — peer dependency (optional)
+- **pi-maestro-teammate** — the execution engine for exploration, analysis, planning, development, review, and testing dispatch (dependency, auto-installed and auto-registered)
+- **pi-cockpit** — the status-stack / footer UI (dependency since v0.6.1, auto-installed and auto-registered; optional at runtime)
 
 ## Install
 
@@ -36,7 +37,9 @@ pi install ./packages/pi-maestro-flow
 After installation:
 - Maestro dispatch is available through the single `maestro` tool
 - Autonomous Goal state is available through `goal`; use `/goal stop`, `/goal resume`, and `/goal clear` for lifecycle control
+- Adaptive foreground/background shell is available through `bash_bg` (auto-backgrounds on timeout, notifies on completion)
 - LSP navigation/refactoring, named-tab browser control, and BM25 tool discovery are available through `lsp`, `browser`, and `search_tool_bm25`
+- Companion extensions `pi-maestro-teammate` and `pi-cockpit` are pulled as dependencies and auto-registered into `settings.packages` on postinstall (best-effort; a failure only warns)
 - Maestro workflow docs installed at `~/.maestro/workflows/`
 
 ## Pi Skill Conversion
@@ -350,7 +353,7 @@ file from the installed package and appends it to Pi's system prompt through the
 `before_agent_start` event. This keeps the instructions available after npm installation
 without requiring a repository-root `AGENTS.md`, which other coding agents may discover.
 
-`pi-maestro-flow` pins `maestro-flow@0.5.53` as an associated workflow resource package.
+`pi-maestro-flow` pins `maestro-flow@0.5.57` as an associated workflow resource package.
 During postinstall it calls Maestro's workflows-only installer from the prepared registry
 artifact, which includes the complete runtime `dist` tree and canonical workflow documents.
 The installer writes to `~/.maestro/workflows`. The active Maestro CLI remains an environment
@@ -415,17 +418,23 @@ Repository commands require review before first execution. Run `/hooks` to inspe
 ```
 ┌──────────────────────────────────────────┐
 │  pi-maestro-flow (extension package)     │
+│  —— top-level entry of the suite ——       │
 │                                          │
 │  Extension tools:                        │
-│    maestro                               │
-│    lsp · browser · search_tool_bm25      │
+│    maestro · goal · todo · run-control   │
+│    bash_bg · lsp · browser · mcp         │
+│    smart_search · ffgrep/fffind          │
+│    search_tool_bm25 · plan-*             │
 │                                          │
 │  Runtime assets:                         │
 │    Maestro workflows + Templates (23)    │
 │                                          │
 │  Dispatch via ──► pi-maestro-teammate    │
+│  Status UI   ──► pi-cockpit              │
 └──────────────────────────────────────────┘
 
+pi-maestro-teammate (execution engine) and pi-cockpit (status UI)
+are dependencies since v0.6.1 and auto-register on postinstall.
 Skills (113) and agents (29) are in .pi/ at project root.
 ```
 
