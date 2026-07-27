@@ -9,6 +9,7 @@ import {
   executeGoal,
   executeGoalCommand,
   getActiveGoal,
+  getGoalCompactionSnapshot,
   getCurrentGoal,
   getGoalList,
   goalArgumentCompletions,
@@ -68,6 +69,41 @@ test("Goal creation persists the approved Plan handoff binding", async () => {
     assert.equal(persisted?.goal?.planHandoffKey, handoffKey);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("Goal compaction snapshot preserves detached recovery state", () => {
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext();
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    const goal = addGoal("Ship the approved Plan", ctx, {
+      tokenBudget: 25_000,
+      planHandoffKey: "b".repeat(64),
+      acceptance: ["Focused tests pass", "The handoff remains recoverable"],
+    });
+
+    const snapshot = getGoalCompactionSnapshot();
+    assert.equal(snapshot.stateVersion, 2);
+    assert.equal(snapshot.currentGoalId, goal.id);
+    assert.deepEqual(snapshot.goals, [{
+      id: goal.id,
+      objective: "Ship the approved Plan",
+      status: "active",
+      iteration: 0,
+      tokensUsed: 0,
+      tokenBudget: 25_000,
+      acceptance: ["Focused tests pass", "The handoff remains recoverable"],
+      planHandoffKey: "b".repeat(64),
+    }]);
+
+    snapshot.goals[0]?.acceptance?.push("mutated");
+    assert.deepEqual(
+      getGoalCompactionSnapshot().goals[0]?.acceptance,
+      ["Focused tests pass", "The handoff remains recoverable"],
+    );
+  } finally {
     onSessionShutdown(ctx);
   }
 });

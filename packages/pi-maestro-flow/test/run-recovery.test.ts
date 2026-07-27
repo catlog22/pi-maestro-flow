@@ -75,7 +75,7 @@ test("session-mode flows from skill frontmatter into compiled and activation met
   }
 });
 
-test("checkpoint v2 preserves Workflow recovery identity across compactions", async () => {
+test("checkpoint v3 preserves Workflow recovery identity across compactions", async () => {
   const workflow: WorkflowRecoveryIdentity = {
     sessionId: "workflow-session-1",
     runId: "run-003",
@@ -97,7 +97,7 @@ test("checkpoint v2 preserves Workflow recovery identity across compactions", as
     },
   );
   const firstDetails = first?.compaction?.details as MaestroCompactionDetails;
-  assert.equal(firstDetails.schemaVersion, 2);
+  assert.equal(firstDetails.schemaVersion, 3);
   assert.deepEqual(firstDetails.workflow, workflow);
   assert.notEqual(firstDetails.workflow?.artifactRefs, workflow.artifactRefs);
 

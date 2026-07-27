@@ -55,6 +55,15 @@ export interface PlanToolDetails {
   error?: string;
 }
 
+export interface PlanCompactionSnapshot {
+  mode: Mode;
+  status: PlanToolDetails["status"];
+  revision: number;
+  handoffStatus: PlanHandoffStatus;
+  handoffKey?: string;
+  path?: string;
+}
+
 interface PlanRuntimeOptions {
   storeFactory?: (cwd: string, session: PlanSessionIdentity) => PlanStore;
   hasExecutableTodo?: (handoffKey: string) => boolean;
@@ -596,6 +605,28 @@ function currentDetails(action: PlanToolDetails["action"]): PlanToolDetails {
     status: latestStatus,
     handoffStatus: getPlanHandoffStatus(),
     ...(latestHandoffKey ? { handoffKey: latestHandoffKey } : {}),
+  };
+}
+
+/**
+ * Detached Plan state for compaction metadata and prompts, mirroring
+ * getTodoCompactionSnapshot.
+ *
+ * Only one-shot notes reach the per-turn prompt (onBeforeAgentStartPlan), so after a
+ * compaction the model's only trace of an approved Plan is whatever prose survived the
+ * summary — including the handoff key, which nothing injects and which the todo tool
+ * needs verbatim. The plan body is deliberately left out: it lives at `path` and is
+ * reloaded from the store, so this carries identity and reload metadata, the same way
+ * the checkpoint treats skills.
+ */
+export function getPlanCompactionSnapshot(): PlanCompactionSnapshot {
+  return {
+    mode,
+    status: latestStatus,
+    revision: latestRevision,
+    handoffStatus: getPlanHandoffStatus(),
+    ...(latestHandoffKey ? { handoffKey: latestHandoffKey } : {}),
+    ...(currentStore?.currentPath ? { path: currentStore.currentPath } : {}),
   };
 }
 

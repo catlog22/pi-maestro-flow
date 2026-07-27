@@ -164,6 +164,10 @@ test("compaction input keeps operator focus as non-privileged structured data", 
   assert.match(prompt, /D:\\\\repo\\\\plan\.md/);
   assert.ok(!/## Compaction Lineage/.test(prompt));
   assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /untrusted serialized input data/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /## Goal State/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /Acceptance Criteria/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /## Plan State/);
+  assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /Reload Path/);
   assert.match(MAESTRO_COMPACTION_SYSTEM_PROMPT, /## Compaction Lineage/);
 });
 
@@ -971,6 +975,8 @@ test("custom compaction captures the persisted active Todo skill", async () => {
   onSessionStart(todoContext);
 
   try {
+    const previousDetails = details();
+    previousDetails.schemaVersion = 2;
     const result = await createMaestroCompaction(
       {
         preparation: {
@@ -994,7 +1000,7 @@ test("custom compaction captures the persisted active Todo skill", async () => {
           summary: "previous summary",
           firstKeptEntryId: "previous-kept",
           tokensBefore: 900,
-          details: details(),
+          details: previousDetails,
         }],
         signal: new AbortController().signal,
         type: "session_before_compact",
@@ -1014,7 +1020,15 @@ test("custom compaction captures the persisted active Todo skill", async () => {
       },
     );
     const captured = result?.compaction?.details as MaestroCompactionDetails;
+    assert.equal(captured.schemaVersion, 3);
     assert.equal(captured.todo.activeTaskId, "active");
+    assert.deepEqual(captured.goal, { stateVersion: 2, goals: [] });
+    assert.deepEqual(captured.plan, {
+      mode: "act",
+      status: "empty",
+      revision: 0,
+      handoffStatus: "none",
+    });
     assert.equal(captured.activeSkills[0]?.name, "maestro-execute");
     assert.equal(captured.activeSkills[0]?.role, "primary");
     assert.equal(captured.activeSkills[0]?.deferredFiles[0], "D:\\repo\\plan.md");

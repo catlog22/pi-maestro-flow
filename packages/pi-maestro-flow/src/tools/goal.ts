@@ -73,6 +73,28 @@ type GoalStatus = "active" | "paused" | "done";
 export type PauseReason = GoalPauseReason;
 type AgentStopReason = "stop" | "length" | "toolUse" | "error" | "aborted";
 
+export interface GoalCompactionEntry {
+  id: string;
+  objective: string;
+  status: GoalStatus;
+  pauseReason?: PauseReason;
+  iteration: number;
+  tokensUsed: number;
+  tokenBudget?: number;
+  verificationFailures?: number;
+  infraErrorStreak?: number;
+  lastVerificationFailure?: string;
+  acceptance?: string[];
+  planHandoffKey?: string;
+  workflowSessionId?: string;
+}
+
+export interface GoalCompactionSnapshot {
+  stateVersion: number;
+  currentGoalId?: string;
+  goals: GoalCompactionEntry[];
+}
+
 export interface ActiveGoal {
   id: string;
   text: string;
@@ -145,6 +167,8 @@ export interface VerifierVerdict {
 const STATUS_KEY = "goal";
 const GOAL_WIDGET_KEY = "goal-panel";
 const GOAL_STATE_ENTRY_TYPE = "goal-state";
+/** Schema version of the persisted `goal-state` entry, mirrored into compaction metadata. */
+const GOAL_STATE_VERSION = 2;
 const MAX_OBJECTIVE_LENGTH = 4_000;
 const MAX_COMPLETION_SUMMARY_CHARS = 4_000;
 const CONTINUATION_MARKER_PREFIX = "maestro-goal-continuation:";
@@ -1702,14 +1726,14 @@ function removeFromGoalRegistry(id: string): void {
 function persistGoal(goal: ActiveGoal) {
   upsertGoalRegistry(goal);
   extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, {
-    version: 2, sessionId: goalSessionId, goal, goals: goalRegistry, currentGoalId: goal.id,
+    version: GOAL_STATE_VERSION, sessionId: goalSessionId, goal, goals: goalRegistry, currentGoalId: goal.id,
   });
   onGoalStateChanged?.();
 }
 
 function clearPersistedGoal() {
   extensionApi?.appendEntry?.(GOAL_STATE_ENTRY_TYPE, {
-    version: 2, sessionId: goalSessionId, goal: null, goals: goalRegistry, currentGoalId: undefined,
+    version: GOAL_STATE_VERSION, sessionId: goalSessionId, goal: null, goals: goalRegistry, currentGoalId: undefined,
   });
   onGoalStateChanged?.();
 }
@@ -2109,6 +2133,38 @@ function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetP
     },
     invalidate() {},
   }), { placement: "belowEditor" });
+}
+
+/**
+ * Detached Goal state for compaction metadata and prompts, mirroring
+ * getTodoCompactionSnapshot.
+ *
+ * Goal deliberately does not re-inject its objective into the per-turn prompt (that
+ * would invalidate the cached prefix), so the objective and its acceptance criteria
+ * reach the model only through the messages sendGoalPrompt/sendContinuation post — the
+ * exact messages compaction summarizes away. Without this the summarizer has to
+ * re-derive "Current Objective" from prose, and the acceptance list is simply gone.
+ */
+export function getGoalCompactionSnapshot(): GoalCompactionSnapshot {
+  return {
+    stateVersion: GOAL_STATE_VERSION,
+    ...(activeGoal ? { currentGoalId: activeGoal.id } : {}),
+    goals: getGoalList().map((goal) => ({
+      id: goal.id,
+      objective: goal.text,
+      status: goal.status,
+      ...(goal.pauseReason ? { pauseReason: goal.pauseReason } : {}),
+      iteration: goal.iteration,
+      tokensUsed: goal.tokensUsed,
+      ...(goal.tokenBudget === undefined ? {} : { tokenBudget: goal.tokenBudget }),
+      ...(goal.verificationFailures ? { verificationFailures: goal.verificationFailures } : {}),
+      ...(goal.infraErrorStreak ? { infraErrorStreak: goal.infraErrorStreak } : {}),
+      ...(goal.lastVerificationFailure ? { lastVerificationFailure: goal.lastVerificationFailure } : {}),
+      ...(goal.acceptance?.length ? { acceptance: [...goal.acceptance] } : {}),
+      ...(goal.planHandoffKey ? { planHandoffKey: goal.planHandoffKey } : {}),
+      ...(goal.workflowSessionId ? { workflowSessionId: goal.workflowSessionId } : {}),
+    })),
+  };
 }
 
 export function getGoalPanelEntries(): GoalDetailEntry[] {

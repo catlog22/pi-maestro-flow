@@ -15,6 +15,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { evaluatePermission } from "../src/permissions/policy.ts";
 import { TodoSkillLoader } from "../src/skills/skill-loader.ts";
 import {
+  getPlanCompactionSnapshot,
   getPlanHandoffStatus,
   initPlan,
   onSessionShutdownPlan,
@@ -142,6 +143,13 @@ test("an approved Plan is only handed off by a Todo carrying its own handoff key
 
     const handoffKey = confirmed.details.handoffKey;
     assert.ok(handoffKey, "an approved Plan must publish a handoff key");
+    const snapshot = getPlanCompactionSnapshot();
+    assert.equal(snapshot.mode, "act");
+    assert.equal(snapshot.status, "approved");
+    assert.equal(snapshot.revision, confirmed.details.revision);
+    assert.equal(snapshot.handoffStatus, "todo-required");
+    assert.equal(snapshot.handoffKey, handoffKey);
+    assert.equal(snapshot.path, confirmed.details.path);
 
     // Approved, but nothing to execute yet.
     assert.equal(getPlanHandoffStatus(), "todo-required");
