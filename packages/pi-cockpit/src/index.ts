@@ -6,12 +6,13 @@ import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPay
 import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { BashBgStore } from "./bash-bg-store.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
+import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { TodoStore } from "./todo-store.ts";
 import { makeTodoWidget, makeAgentWidget, terminalRows } from "./stack-widget.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
 import { getUsageTotals, invalidateUsageCache, renderFooter, type PaintTheme, type WidthUtils } from "./footer.ts";
 import { collectExtensionStatuses } from "./extension-status.ts";
-import { ANIMATION_PERIOD_MS, resolveGlyphs } from "./icons.ts";
+import { ANIMATION_PERIOD_MS, resolveGlyphs, spinFrame } from "./icons.ts";
 import { ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
 import { applyRow, buildRows, rowKeyForAccel, type SaveState } from "./settings-view.ts";
 import {
@@ -183,7 +184,6 @@ export default function (pi: ExtensionAPI): void {
 				capturedTui = tui;
 				return makeAgentWidget({
 					getAgents: () => agents.snapshot(),
-					getBashBgJobs: () => bashBg.snapshot(),
 					getConfig: () => config,
 					isRunning: () => running,
 					isAnimating,
@@ -213,6 +213,19 @@ export default function (pi: ExtensionAPI): void {
 					const cu = ctx.getContextUsage();
 					const branch = footerData.getGitBranch();
 					const extensionStatuses = collectExtensionStatuses(footerData.getExtensionStatuses());
+					const glyphs = resolveGlyphs(config.icons.mode);
+					const now = Date.now();
+					const bashBgStatus = renderBashBgSummary(
+						bashBg.snapshot(),
+						width,
+						theme,
+						FOOTER_UTILS,
+						{
+							glyphs,
+							spin: spinFrame(glyphs, now, isAnimating()),
+							now,
+						},
+					)[0];
 					return renderFooter({
 						width,
 						model: ctx.model?.id ?? "no-model",
@@ -224,12 +237,10 @@ export default function (pi: ExtensionAPI): void {
 						ctxWindow: cu?.contextWindow ?? ctx.model?.contextWindow ?? 0,
 						totals: getUsageTotals(ctx.sessionManager.getEntries()),
 						git: branch ?? undefined,
-						// The Agents header one line above already states the roster and
-						// the failure count. Repeating it here spent a footer segment to
-						// say nothing new, and the two could disagree mid-update.
+						bashBgStatus,
 						workflowStatus: extensionStatuses.find((status) => status.key === WORKFLOW_STATUS_KEY)?.text,
 						extensionStatuses: extensionStatuses.filter((status) => status.key !== WORKFLOW_STATUS_KEY),
-						glyphs: resolveGlyphs(config.icons.mode),
+						glyphs,
 						theme,
 						utils: FOOTER_UTILS,
 					});

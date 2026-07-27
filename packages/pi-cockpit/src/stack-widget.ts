@@ -2,11 +2,10 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { renderAgents, renderTodos, type PaintTheme, type WidthUtils } from "./render.ts";
-import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { fitLineByPriority, type PrioritizedSegment } from "./layout.ts";
 import { resolveGlyphs, spinFrame } from "./icons.ts";
 import { panelRows } from "./viewport.ts";
-import type { AgentRow, BashBgJob, CockpitConfig, TodoItem } from "./types.ts";
+import type { AgentRow, CockpitConfig, TodoItem } from "./types.ts";
 
 export interface TodoWidgetDeps {
 	getTodos: () => TodoItem[];
@@ -17,7 +16,6 @@ export interface TodoWidgetDeps {
 
 export interface AgentWidgetDeps {
 	getAgents: () => AgentRow[];
-	getBashBgJobs: () => BashBgJob[];
 	getConfig: () => CockpitConfig;
 	isRunning: () => boolean;
 	isAnimating?: () => boolean;
@@ -71,24 +69,17 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 			render(width: number): string[] {
 				const cfg = deps.getConfig();
 				const agents = deps.getAgents();
-				const bashBgJobs = deps.getBashBgJobs();
+				if (agents.length === 0) return [];
 				const g = resolveGlyphs(cfg.icons.mode);
 				const now = Date.now();
 				const animating = deps.isAnimating?.() ?? true;
 				const spin = spinFrame(g, now, animating);
-				const bashBgLines = renderBashBgSummary(bashBgJobs, width, paint, UTILS, {
-					glyphs: g,
-					spin,
-					now,
-				});
-				if (agents.length === 0) return bashBgLines;
 				const running = deps.isRunning();
-				// The panel budget covers everything this widget prints, so the header
-				// and the background strip are charged to it before the roster is.
+				// The panel budget covers the roster header and its rows.
 				const panel = panelRows(terminalRows(tui));
 				const rosterRows = panel === undefined
 					? undefined
-					: Math.max(1, panel - 1 - bashBgLines.length);
+					: Math.max(1, panel - 1);
 				const opts = { glyphs: g, spin, now, maxRows: rosterRows };
 				const dot = theme.fg(running ? "success" : "muted", running ? g.dotRunning : g.dotIdle);
 				const failedCount = agents.filter((a) => a.status === "failed").length;
@@ -111,7 +102,6 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				// Was the one line in the package pushed without any width clipping.
 				lines.push(fitLineByPriority(headerSegs, width, UTILS, theme.fg("dim", g.separator), g.ellipsis));
 				lines.push(...renderAgents(agents, cfg.agentsMode, width, paint, UTILS, { ...opts, withHead: false }));
-				lines.push(...bashBgLines);
 				return lines;
 			},
 			invalidate(): void {},

@@ -274,14 +274,36 @@ test("extension statuses render on a dedicated line and duplicate thinking is om
 	assert.ok(!lines[1].includes("high"));
 });
 
+test("active bash_bg status renders left-aligned on line two", () => {
+	const lines = renderFooter(parts({
+		width: 100,
+		bashBgStatus: "⠴ · BG · 1 running · npm run dev · Alt+J details",
+	}));
+	assert.equal(lines.length, 2);
+	assert.equal(lines[1], "⠴ · BG · 1 running · npm run dev · Alt+J details");
+	assert.doesNotMatch(lines[0], /BG|npm run dev/);
+});
+
+test("bash_bg status is clipped to the footer width", () => {
+	const lines = renderFooter(parts({
+		width: 24,
+		bashBgStatus: `BG 1 running ${"long-command ".repeat(5)}`,
+	}));
+	assert.equal(lines.length, 2);
+	assert.ok(utils.measure(lines[1]) <= 24);
+	assert.match(lines[1], /…$/);
+});
+
 test("workflow status renders before generic extension statuses", () => {
 	const lines = renderFooter(parts({
+		bashBgStatus: "BG · 1 running",
 		workflowStatus: "⚑ session · running · 003/execute",
 		extensionStatuses: [{ key: "mode", text: "PLAN" }],
 	}));
-	assert.equal(lines.length, 3);
-	assert.match(lines[1], /^⚑ session/);
-	assert.match(lines[2], /PLAN/);
+	assert.equal(lines.length, 4);
+	assert.match(lines[1], /^BG/);
+	assert.match(lines[2], /^⚑ session/);
+	assert.match(lines[3], /PLAN/);
 });
 
 test("fmtTokens formats k and m", () => {

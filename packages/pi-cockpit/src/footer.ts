@@ -29,6 +29,7 @@ export interface FooterParts {
 	totals: UsageTotals;
 	git?: string;
 	agentSummary?: string;
+	bashBgStatus?: string;
 	workflowStatus?: string;
 	extensionStatuses?: readonly ExtensionStatusSegment[];
 	width: number;
@@ -324,6 +325,9 @@ export function renderFooter(p: FooterParts): string[] {
 
 	const line1 = alignRight(fittedLeft.join(identitySeparator), right1, width, utils.measure);
 	const lines = [utils.clip(line1, width, ell)];
+	if (p.bashBgStatus) {
+		lines.push(utils.clip(p.bashBgStatus, width, ell));
+	}
 	if (p.workflowStatus) {
 		lines.push(utils.clip(theme.fg("muted", p.workflowStatus), width, ell));
 	}
