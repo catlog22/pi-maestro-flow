@@ -127,6 +127,15 @@ test("narrow footer keeps high-priority token totals instead of dropping the rig
 	assert.ok(lines[1].includes("↓3.4k"));
 });
 
+test("approval mode moves to line two while usage remains right aligned", () => {
+	const lines = renderFooter(parts({
+		width: 80,
+		extensionStatuses: [{ key: "approval-mode", text: "APPROVAL YOLO" }],
+	}));
+	assert.equal(lines.length, 2);
+	assert.match(lines[1], /^! APPROVAL YOLO\s+↑12k · ↓3\.4k · 01:23$/);
+});
+
 test("footer uses a workspace icon and omits monetary cost while keeping token usage", () => {
 	const lines = renderFooter(parts({ cwd: "~/work/project", width: 100 }));
 	assert.match(lines[0], /^⚡ stream-70b ·  ~\/work\/project/);
@@ -169,8 +178,8 @@ test("an unsafe approval mode survives when the status row must be truncated", (
 		{ key: "approval-mode", text: "APPROVAL yolo" },
 		{ key: "z-noise", text: "another long informational status" },
 	];
-	const line = renderFooter(parts({ width: 30, extensionStatuses: statuses })).at(-1)!;
-	assert.match(line, /APPROVAL yolo/);
+	const lines = renderFooter(parts({ width: 30, extensionStatuses: statuses }));
+	assert.match(lines[1], /APPROVAL yolo/);
 });
 
 test("ACT is omitted while PLAN and READY retain distinct semantic colors", () => {
