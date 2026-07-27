@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { singleLine } from "../tui/components.ts";
+import { singleLine, textBlock } from "../tui/components.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { browserManager, type BrowserManagerLike } from "./browser/manager.ts";
@@ -121,12 +121,15 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
       const url = args.url ? ` ${String(args.url).slice(0, 60)}` : "";
       return singleLine(`${theme.fg("toolTitle", theme.bold("browser "))}${action}${name}${theme.fg("accent", url)}`);
     },
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const text = result.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
       const isError = (result as { isError?: boolean }).isError === true;
+      if (opts.expanded) return textBlock(text);
       const firstLine = text.split("\n")[0]?.slice(0, 120) ?? "";
+      const lineCount = text.split("\n").filter(Boolean).length;
+      const extra = lineCount > 1 ? theme.fg("dim", ` · ${lineCount} lines`) : "";
       if (isError) return singleLine(theme.fg("error", `✗ ${firstLine}`));
-      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", firstLine)}`);
+      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", firstLine)}${extra}`);
     },
   };
 }

@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { singleLine } from "../tui/components.ts";
+import { singleLine, textBlock } from "../tui/components.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -98,10 +98,11 @@ export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinit
       const line = args.line ? `:${args.line}` : "";
       return singleLine(`${theme.fg("toolTitle", theme.bold("lsp "))}${action}${theme.fg("accent", `${file}${line}`)}`);
     },
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
       const isError = (result as { isError?: boolean }).isError === true;
+      if (opts.expanded) return textBlock(message);
       const firstLine = message.split("\n")[0]?.slice(0, 120) ?? "";
       const lineCount = message.split("\n").filter(Boolean).length;
       if (isError) return singleLine(theme.fg("error", `✗ ${firstLine}`));

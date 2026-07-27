@@ -1,6 +1,6 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { singleLine } from "../tui/components.ts";
+import { singleLine, textBlock } from "../tui/components.ts";
 import { FileFinder, type FileFinderApi } from "@ff-labs/fff-node";
 import { Type } from "typebox";
 
@@ -77,10 +77,11 @@ export function registerFff(pi: ExtensionAPI): void {
     renderCall(args, theme) {
       return singleLine(`${theme.fg("toolTitle", theme.bold("ffgrep "))}${theme.fg("accent", `"${String(args.pattern ?? "")}"`)}`);
     },
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
       const lines = text.split("\n").filter(Boolean);
       if (lines.length === 0 || text === "No matches") return singleLine(theme.fg("dim", "No matches"));
+      if (opts.expanded) return textBlock(text);
       const header = lines[0].slice(0, 100);
       const extra = lines.length > 1 ? theme.fg("dim", ` · ${lines.length} lines`) : "";
       return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", header)}${extra}`);
@@ -107,10 +108,11 @@ export function registerFff(pi: ExtensionAPI): void {
     renderCall(args, theme) {
       return singleLine(`${theme.fg("toolTitle", theme.bold("fffind "))}${theme.fg("accent", `"${String(args.pattern ?? "")}"`)}`);
     },
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
       if (text === "No files found") return singleLine(theme.fg("dim", "No files found"));
       const lines = text.split("\n").filter(Boolean);
+      if (opts.expanded) return textBlock(text);
       const header = lines[0]?.slice(0, 100) ?? "";
       const extra = lines.length > 1 ? theme.fg("dim", ` · ${lines.length} files`) : "";
       return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", header)}${extra}`);

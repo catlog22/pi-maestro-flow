@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { singleLine } from "../tui/components.ts";
+import { singleLine, textBlock } from "../tui/components.ts";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
@@ -88,11 +88,16 @@ export function createSearchToolBm25(pi: Pick<ExtensionAPI, "getAllTools" | "get
     renderCall(args, theme) {
       return singleLine(`${theme.fg("toolTitle", theme.bold("search_tools "))}${theme.fg("accent", `"${String(args.query ?? "").slice(0, 50)}"`)}`);
     },
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const details = result.details as { tools?: Array<{ name: string }>; activated_tools?: string[]; total_tools?: number } | undefined;
       const count = details?.tools?.length ?? 0;
       const activated = details?.activated_tools?.length ?? 0;
       const activatedNote = activated > 0 ? theme.fg("accent", ` · ${activated} activated`) : "";
+      if (opts.expanded) {
+        const block = result.content.find((item) => item.type === "text");
+        const text = block && "text" in block ? block.text : "";
+        return textBlock(text);
+      }
       return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", `${count} matches / ${details?.total_tools ?? "?"} tools`)}${activatedNote}`);
     },
   };

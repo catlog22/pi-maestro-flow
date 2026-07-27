@@ -560,10 +560,11 @@ When NOT to use:
         `${theme.fg("toolTitle", theme.bold("maestro "))}${action}${detail}`,
       );
     },
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
       const isError = (result as { isError?: boolean }).isError === true;
+      if (opts.expanded) return textBlock(message);
       if (isError) {
         const firstLine = message.split("\n")[0] ?? message;
         return singleLine(theme.fg("error", `✗ ${firstLine}`));
@@ -732,11 +733,12 @@ Rules:
       return singleLine(`${theme.fg("toolTitle", theme.bold("todo "))}${action}${detail}`);
     },
 
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const details = result.details as TodoResultDetails | undefined;
       const rawText = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
 
       if (!details?.tasks) {
+        if (opts.expanded) return textBlock(rawText);
         return singleLine(details?.error ? theme.fg("error", rawText) : theme.fg("dim", rawText));
       }
       if (details.error) {
@@ -752,6 +754,8 @@ Rules:
       if (running > 0) counts.push(`${running} in progress`);
       if (open > 0) counts.push(`${open} open`);
       const progress = `${allTasks.length} tasks (${counts.join(", ")})`;
+
+      if (opts.expanded) return textBlock(rawText);
 
       const action = details.action;
       if (action === "get") {
@@ -829,10 +833,11 @@ When NOT to use:
     renderCall(args, theme) {
       return singleLine(`${theme.fg("toolTitle", theme.bold("run-control "))}${String(args.action ?? "?")}`);
     },
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const details = result.details as { ok?: boolean; action?: string; message?: string } | undefined;
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
+      if (opts.expanded) return textBlock(message);
       const firstLine = message.split("\n")[0] ?? message;
       if (!details?.ok) {
         return singleLine(theme.fg("error", `✗ ${firstLine}`));
@@ -1613,9 +1618,10 @@ Use assignee="root" to hand work back to root. Teammates can update tasks they c
       const subject = action === "create" && args.subject ? ` ${String(args.subject).slice(0, 40)}` : "";
       return singleLine(`${theme.fg("toolTitle", theme.bold("todo "))}${action}${subject}`);
     },
-    renderResult(result, _options, theme) {
+    renderResult(result, options, theme) {
       const block = result.content.find((item) => item.type === "text");
       const text = block && "text" in block ? block.text : "Todo request completed.";
+      if (options.expanded) return textBlock(text);
       return singleLine((result as { isError?: boolean }).isError
         ? theme.fg("error", text)
         : theme.fg("muted", text));

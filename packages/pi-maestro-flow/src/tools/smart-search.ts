@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { singleLine } from "../tui/components.ts";
+import { singleLine, textBlock } from "../tui/components.ts";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { showSmartSearchConfigOverlay } from "../tui/smart-search-config.ts";
@@ -190,12 +190,18 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
       const query = String(args.query ?? "").slice(0, 60);
       return singleLine(`${theme.fg("toolTitle", theme.bold("smart_search "))}${mode} ${theme.fg("accent", `"${query}"`)}`);
     },
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const details = result.details as { mode?: string; query?: string } | undefined;
       const isError = (result as { isError?: boolean }).isError === true;
       if (isError) {
         const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
+        if (opts.expanded) return textBlock(text);
         return singleLine(theme.fg("error", `✗ ${text.split("\n")[0]?.slice(0, 120) ?? "SmartSearch failed"}`));
+      }
+      if (opts.expanded) {
+        const block = result.content.find((item) => item.type === "text");
+        const text = block && "text" in block ? block.text : "";
+        return textBlock(text);
       }
       return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", `${details?.mode ?? "search"}: "${(details?.query ?? "").slice(0, 60)}"`)}`);
     },

@@ -2,7 +2,7 @@ import type { AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/p
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { getEnabledTools, loadCliToolsConfig } from "../providers/cli-tools-loader.ts";
-import { singleLine } from "../tui/components.ts";
+import { singleLine, textBlock } from "../tui/components.ts";
 
 export const ModelAvailabilityParams = Type.Object({
   filter: Type.Optional(Type.String({ description: "Optional substring to filter model/tool names" })),
@@ -173,12 +173,17 @@ Pitfall: the \`--to <tool>\` flag is mandatory to target a delegate tool. A bare
       const filter = args.filter ? ` ${theme.fg("accent", `"${String(args.filter)}"`)}` : "";
       return singleLine(`${theme.fg("toolTitle", theme.bold("model-availability"))}${filter}`);
     },
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const details = result.details as ModelAvailabilityDetails | undefined;
       const tm = details?.teammate_models?.length ?? 0;
       const dt = details?.delegate_tools?.length ?? 0;
       const fb = details?.delegate_fallback?.length ?? 0;
       const fallbackNote = fb > 0 ? theme.fg("accent", ` · ${fb} delegate-only`) : "";
+      if (opts.expanded) {
+        const block = result.content.find((item) => item.type === "text");
+        const text = block && "text" in block ? block.text : "";
+        return textBlock(text);
+      }
       return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", `${tm} teammate models · ${dt} delegate tools`)}${fallbackNote}`);
     },
   };
