@@ -20,6 +20,8 @@
 
 import { fileURLToPath } from "node:url";
 
+import { registerCompanionPackages } from "../../scripts/register-companion-packages.mjs";
+
 import type {
   ExtensionAPI,
   ExtensionContext,
@@ -330,6 +332,11 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     registerMaestroChildSurface(pi);
     return;
   }
+
+  // pi install's SettingsManager overwrites postinstall's settings.json writes
+  // with its stale in-memory cache. Re-register companion packages at load time
+  // so the next pi startup picks them up.
+  try { registerCompanionPackages(); } catch { /* best-effort */ }
 
   // UCL: capture only the locked extension-tool surface. pi.getAllTools() exposes
   // schemas but not execute(), so the registry is the invocation source for the
@@ -1795,7 +1802,7 @@ export function renderTodoWidget(
   const ordered = [...tasks].sort((left, right) =>
     todoDisplayRank(left, now) - todoDisplayRank(right, now)
   );
-  const visible = ordered.slice(0, 8);
+  const visible = ordered.slice(0, 5);
   for (const task of visible) {
     lines.push(truncateToWidth(widgetTaskLine(task, tasks), safeWidth, "…"));
   }
@@ -1828,27 +1835,18 @@ function renderTodoSummary(tasks: TodoTaskLike[], expanded: boolean, width: numb
   const fullMeta = `${bold(String(tasks.length))} tasks · ${bold(String(done))} done · ${bold(String(running))} running${blocked ? ` · ${bold(String(blocked))} blocked` : ""}${memberMeta}  (${TODO_TOGGLE_LABEL} ${toggleHint})`;
   const compactMeta = `${bold(String(done))}/${bold(String(tasks.length))} · ${bold(String(running))} running  (${TODO_TOGGLE_LABEL} ${toggleHint})`;
   const minimalMeta = `${done}/${tasks.length}`;
-  const next = findNextTodoTask(tasks);
-
-  const nextText = next
-    ? next.status === "blocked"
-      ? `${red("»")} ${red(`Blocked: ${next.subject}`)}`
-      : `${green("»")} ${green(next.subject)}`
-    : green("✓ All tasks completed");
-
-  if (width < 20) return truncateToWidth(nextText, width, "…");
 
   const candidates = [fullMeta, compactMeta, minimalMeta];
   let meta = minimalMeta;
   for (const candidate of candidates) {
-    const prefix = `${bold("Todo")}  ${dim(candidate)}  `;
-    if (visibleWidth(prefix) + Math.min(18, visibleWidth(nextText)) <= width) {
+    const prefix = `${bold("Todo")}  ${dim(candidate)}`;
+    if (visibleWidth(prefix) <= width) {
       meta = candidate;
       break;
     }
   }
 
-  return truncateToWidth(`${bold("Todo")}  ${dim(meta)}  ${nextText}`, width, "…");
+  return truncateToWidth(`${bold("Todo")}  ${dim(meta)}`, width, "…");
 }
 
 function workflowStatusColor(status: string): (s: string) => string {
