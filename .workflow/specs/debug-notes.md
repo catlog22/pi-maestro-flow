@@ -90,10 +90,18 @@ bash_bg MUST 对齐 teammate 的前后台语义：action=run 在 foreground 窗�
 
 </spec-entry>
 
-<spec-entry category="debug" keywords="bash_bg,triggerturn,deliveras,completion,logpath,expanded" date="2026-07-27" sid="S-20260727-mhzq" title="bash_bg 完成必须即时唤醒并暴露日志" description="防止完成消息在用户下次输入时集中注入，并保证日志可追溯" source="master@d003b4c4" supersedes="S-20260727-iqhy">
+<spec-entry category="debug" keywords="bash_bg,triggerturn,deliveras,completion,logpath,expanded" date="2026-07-27" sid="S-20260727-mhzq" title="bash_bg 完成必须即时唤醒并暴露日志" description="防止完成消息在用户下次输入时集中注入，并保证日志可追溯" source="master@d003b4c4" supersedes="S-20260727-iqhy" status="deprecated" superseded-by="S-20260727-75a1">
 
 ### bash_bg 完成必须即时唤醒并暴露日志
 
 bash_bg MUST 对齐 teammate 的 foreground/background 契约：action=run 在前台完成时直接返回且不得发送 completion；action=start 或 run 超时后台化后先返回 acknowledgement，完成时使用 triggerTurn=true 立即注入独立 turn，MUST NOT 使用 deliverAs=nextTurn 延迟到用户下次输入。shell exit 是结果完成边界，stdio close 仅做有界排空。所有 job 结果 MUST 返回 logPath 与跨平台 viewCommand；TUI 折叠态显示摘要，展开态显示已返回 tail。
+
+</spec-entry>
+
+<spec-entry category="debug" keywords="bash_bg,truncation,logpath,viewcommand,triggerturn,expanded" date="2026-07-27" sid="S-20260727-75a1" title="bash_bg 日志入口按实际截断显示" description="仅在输出确实截断时暴露日志入口" source="master@5e0ee802" supersedes="S-20260727-mhzq">
+
+### bash_bg 日志入口按实际截断显示
+
+bash_bg MUST 对齐 teammate 的 foreground/background 契约：前台完成直接返回且不发送 completion；后台完成使用 triggerTurn=true 立即注入独立 turn，MUST NOT 使用 deliverAs=nextTurn。shell exit 是完成边界，stdio close 仅做有界排空。run/status/wait 与 bash-bg-complete MUST 通过统一 tail 结果判断截断；仅当行数限制或尾部缓存确实丢弃内容时返回 logPath、viewCommand 并显示 log:/view:，未截断结果及 start/list/kill MUST 保持简洁。TUI 折叠态显示摘要，展开态显示已返回 tail。
 
 </spec-entry>
