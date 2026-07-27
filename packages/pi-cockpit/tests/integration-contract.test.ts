@@ -16,9 +16,21 @@ import {
 	TEAMMATE_MESSAGE_EVENT,
 	TEAMMATE_STARTED_EVENT,
 } from "../src/types.ts";
+import cockpitEntry from "../src/index.ts";
+import extensionEntry from "../src/extension/index.ts";
 
 test("Cockpit defaults Todo to a one-line collapsed summary", () => {
 	assert.equal(DEFAULT_CONFIG.todoExpanded, false);
+});
+
+test("Cockpit loads through the standard extension path without changing its public entry", () => {
+	const packageJson = JSON.parse(
+		readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+	) as { main?: string; exports?: Record<string, string>; pi?: { extensions?: string[] } };
+	assert.deepEqual(packageJson.pi?.extensions, ["./src/extension/index.ts"]);
+	assert.equal(packageJson.main, "./src/index.ts");
+	assert.equal(packageJson.exports?.["."], "./src/index.ts");
+	assert.equal(extensionEntry, cockpitEntry);
 });
 
 test("Cockpit owns native UI through events instead of clearing foreign widget keys", () => {

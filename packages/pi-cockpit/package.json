@@ -22,7 +22,7 @@
   },
   "pi": {
     "extensions": [
-      "./src/index.ts"
+      "./src/extension/index.ts"
     ]
   },
   "peerDependencies": {
