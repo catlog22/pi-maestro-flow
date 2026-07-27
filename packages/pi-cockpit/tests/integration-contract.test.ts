@@ -35,13 +35,20 @@ test("Cockpit loads through the standard extension path without changing its pub
 });
 
 test("Cockpit packages complete selectable color themes", () => {
-	for (const name of ["cockpit-notion", "cockpit-ocean", "cockpit-amber", "cockpit-minimal"]) {
+	const minimalThemes = ["cockpit-minimal", "cockpit-minimal-green", "cockpit-minimal-purple"];
+	const minimalAccents: Record<string, string> = {
+		"cockpit-minimal": "#79b8ff",
+		"cockpit-minimal-green": "#79d49a",
+		"cockpit-minimal-purple": "#c3a6ff",
+	};
+	for (const name of ["cockpit-notion", "cockpit-ocean", "cockpit-amber", ...minimalThemes]) {
 		const theme = JSON.parse(
 			readFileSync(new URL(`../themes/${name}.json`, import.meta.url), "utf8"),
 		) as { name?: string; vars?: Record<string, string>; colors?: Record<string, string> };
 		assert.equal(theme.name, name);
 		assert.ok(Object.keys(theme.colors ?? {}).length >= 51);
-		if (name === "cockpit-minimal") {
+		if (minimalThemes.includes(name)) {
+			assert.equal(theme.vars?.accent, minimalAccents[name]);
 			assert.equal(theme.vars?.lightGray, "#b8c0ca");
 			for (const slot of [
 				"thinkingOff",
