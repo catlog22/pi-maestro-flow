@@ -28,7 +28,6 @@ export interface FooterParts {
 	ctxWindow: number;
 	totals: UsageTotals;
 	git?: string;
-	elapsed: string;
 	agentSummary?: string;
 	workflowStatus?: string;
 	extensionStatuses?: readonly ExtensionStatusSegment[];
@@ -40,35 +39,6 @@ export interface FooterParts {
 
 export function emptyTotals(): UsageTotals {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, latestCacheHitRate: undefined };
-}
-
-export class ActivityTimer {
-	private startedAt: number | undefined;
-	private stoppedAt: number | undefined;
-
-	restart(now: number = Date.now()): void {
-		this.startedAt = now;
-		this.stoppedAt = undefined;
-	}
-
-	start(now: number = Date.now()): void {
-		if (this.startedAt === undefined || this.stoppedAt !== undefined) this.restart(now);
-	}
-
-	stop(now: number = Date.now()): void {
-		if (this.startedAt === undefined || this.stoppedAt !== undefined) return;
-		this.stoppedAt = Math.max(this.startedAt, now);
-	}
-
-	reset(): void {
-		this.startedAt = undefined;
-		this.stoppedAt = undefined;
-	}
-
-	elapsed(now: number = Date.now()): number {
-		if (this.startedAt === undefined) return 0;
-		return Math.max(0, (this.stoppedAt ?? now) - this.startedAt);
-	}
 }
 
 let usageCache: { key: string; totals: UsageTotals } | undefined;
@@ -307,7 +277,6 @@ export function renderFooter(p: FooterParts): string[] {
 	if (hasCache && t.latestCacheHitRate !== undefined) {
 		stats.push({ text: `${theme.fg("success", g.cacheHit)}${t.latestCacheHitRate.toFixed(0)}%`, priority: 3 });
 	}
-	stats.push({ text: theme.fg("muted", p.elapsed), priority: 1 });
 	if (p.agentSummary) stats.push({ text: theme.fg("accent", p.agentSummary), priority: 0 });
 	const statSeparator = ` ${sep} `;
 	const fittedStats = fitSegmentsByPriority(

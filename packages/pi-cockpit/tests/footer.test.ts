@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
-	ActivityTimer,
 	renderFooter,
 	getUsageTotals,
 	invalidateUsageCache,
@@ -30,7 +29,6 @@ function parts(over: Partial<FooterParts> = {}): FooterParts {
 		ctxWindow: 200000,
 		totals: { input: 12000, output: 3400, cacheRead: 0, cacheWrite: 0, cost: 0.52, latestCacheHitRate: undefined },
 		git: "main",
-		elapsed: "01:23",
 		width: 80,
 		glyphs,
 		theme,
@@ -136,7 +134,7 @@ test("approval mode leads line one while usage remains on line two", () => {
 	assert.equal(lines.length, 2);
 	assert.match(lines[0], /^APPROVAL YOLO · ⚡ stream-70b/);
 	assert.equal(lines[1].length, 80);
-	assert.match(lines[1], /↑12k · ↓3\.4k · 01:23$/);
+	assert.match(lines[1], /↑12k · ↓3\.4k$/);
 });
 
 test("auto compact stays hidden while approval remains at the start of line one", () => {
@@ -151,7 +149,7 @@ test("auto compact stays hidden while approval remains at the start of line one"
 	assert.match(lines[0], /^APPROVAL default · ⚡ stream-70b/);
 	assert.doesNotMatch(lines.join("\n"), /AUTO COMPACT|AUTO ON/);
 	assert.equal(lines[1].length, 100);
-	assert.match(lines[1], /↑12k · ↓3\.4k · 01:23$/);
+	assert.match(lines[1], /↑12k · ↓3\.4k$/);
 });
 
 test("footer uses a workspace icon and omits monetary cost while keeping token usage", () => {
@@ -263,22 +261,4 @@ test("fmtTokens formats k and m", () => {
 	assert.equal(fmtTokens(1500), "1.5k");
 	assert.equal(fmtTokens(2000), "2k");
 	assert.equal(fmtTokens(2_500_000), "2.5m");
-});
-
-test("activity timer starts on activity, freezes on stop and restarts for the next turn", () => {
-	const timer = new ActivityTimer();
-	assert.equal(timer.elapsed(5_000), 0);
-
-	timer.start(1_000);
-	assert.equal(timer.elapsed(3_500), 2_500);
-	timer.start(4_000);
-	assert.equal(timer.elapsed(4_500), 3_500);
-
-	timer.stop(5_000);
-	assert.equal(timer.elapsed(9_000), 4_000);
-
-	timer.restart(10_000);
-	assert.equal(timer.elapsed(10_750), 750);
-	timer.reset();
-	assert.equal(timer.elapsed(20_000), 0);
 });
