@@ -7,10 +7,10 @@
     "node": ">=22.19.0"
   },
   "scripts": {
-    "postinstall": "node scripts/configure-keybindings.mjs && node scripts/install-workflows.mjs",
+    "postinstall": "node scripts/configure-keybindings.mjs && node scripts/install-workflows.mjs && node scripts/register-companion-packages.mjs",
     "prepack": "node scripts/prepare-package-skills.mjs",
     "postpack": "node scripts/prepare-package-skills.mjs --clean",
-    "test:install": "node --test test/configure-keybindings.test.mjs test/install-workflows.test.mjs",
+    "test:install": "node --test test/configure-keybindings.test.mjs test/install-workflows.test.mjs test/register-companion-packages.test.mjs",
     "test:package": "node scripts/verify-maestro-run-capabilities.mjs && node --experimental-transform-types --test test/prepare-package-skills.test.mjs test/package-resources.test.mjs test/package-resources-runtime.test.ts",
     "test:conversion": "node --experimental-transform-types --test test/convert-pi.test.mjs test/maestro-run-capabilities.test.mjs test/skill-contract-lint.test.ts",
     "check:maestro-run-cli": "node scripts/verify-maestro-run-capabilities.mjs",
@@ -86,6 +86,7 @@
     "cross-spawn": "7.0.6",
     "maestro-flow": "0.5.55",
     "open": "10.2.0",
+    "pi-cockpit": "0.1.0",
     "pi-maestro-teammate": "0.6.0",
     "puppeteer-core": "24.31.0",
     "recheck": "4.5.0",
