@@ -40,3 +40,19 @@ Plan lifecycle completion requires objective evidence for: exact active-tool sna
 Goal 的 done transition 必须由独立只读 verifier 基于真实工作区或外部状态证据确认；仅审查主 agent 的 completion summary 不构成完成验证。验证顺序固定为 canonical blockers 前置、聚焦只读检查、结构化 fail-closed verdict；失败或证据不足必须保持 Goal active。
 
 </spec-entry>
+
+<spec-entry category="review" keywords="footer,context,token,narrow-width,layout" date="2026-07-27" sid="S-20260727-libx" title="Footer 资源组第一行与窄屏降级" description="Footer 第一行资源组与渐进降级规则" source="session:20260727-impeccable-footer-first-line">
+
+### Footer 资源组第一行与窄屏降级
+
+Footer 的 Context、input/output 与 cache 资源组 MUST 位于第一行右侧。空间不足时 MUST 先按 10 格进度条、5 格进度条、无进度条、百分比逐级简化，再牺牲高优先级身份信息。本规则替代 20260727-impeccable-footer-usage 的第二行资源组决策。
+
+</spec-entry>
+
+<spec-entry category="review" keywords="working,todo,tool,status,cockpit" date="2026-07-27" sid="S-20260727-2i1v" title="Working 状态不得展示 Todo 内容" description="Working 默认文案与活动工具名边界" source="session:20260727-impeccable-footer-first-line">
+
+### Working 状态不得展示 Todo 内容
+
+Cockpit 的 Working 状态 MUST 保留宿主默认 Working、耗时与中断提示，不得展示 Todo、agent 或后台任务内容；仅当前台工具正在执行时以工具名称替换 Working 标签，工具结束后立即恢复。
+
+</spec-entry>
