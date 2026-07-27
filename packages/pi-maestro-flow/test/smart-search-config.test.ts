@@ -177,7 +177,7 @@ test("Smart Search TUI filters provider keys and saves Context7 configuration", 
 
   overlay.handleInput("context7");
   const filtered = overlay.render(100).join("\n");
-  assert.match(filtered, /Filter: context7 · 3\/61/);
+  assert.match(filtered, /Filter: context7 · 3\/88/);
   assert.match(filtered, /CONTEXT7_API_KEY/);
   assert.match(filtered, /CONTEXT7_BASE_URL/);
   assert.match(filtered, /CONTEXT7_TIMEOUT_SECONDS/);
@@ -193,7 +193,7 @@ test("Smart Search TUI filters provider keys and saves Context7 configuration", 
   overlay.handleInput("\x1b");
   await flushInput();
   assert.equal(closed, 0);
-  assert.match(overlay.render(100).join("\n"), /Filter: all keys · 61\/61/);
+  assert.match(overlay.render(100).join("\n"), /Filter: all keys · 88\/88/);
   overlay.handleInput("\x1b");
   await flushInput();
   assert.equal(closed, 1);
@@ -211,7 +211,7 @@ test("Smart Search TUI supports paging and safe no-match filters", async () => {
   overlay.handleInput("\x1b[6~");
   assert.doesNotMatch(overlay.render(100).join("\n"), /› XAI_API_URL/);
   overlay.handleInput("\x1b[F");
-  assert.match(overlay.render(100).join("\n"), /› \[Runtime\] SSL_VERIFY/);
+  assert.match(overlay.render(100).join("\n"), /›\s+\[Video Analysis\] YOUTUBE_PREFERRED_MODEL/);
 
   overlay.handleInput("definitely-missing-provider");
   assert.match(overlay.render(100).join("\n"), /No matching configuration keys/);

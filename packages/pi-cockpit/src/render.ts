@@ -246,22 +246,12 @@ export function renderAgents(
 }
 
 const TODO_MAX_VISIBLE = 8;
-const RECENT_COMPLETED_MS = 30_000;
 
-function todoDisplayRank(item: TodoItem, now: number): number {
-	if (item.status === "completed") {
-		const recent = item.updatedAt !== undefined && now - item.updatedAt < RECENT_COMPLETED_MS;
-		return recent ? 0 : 4;
-	}
-	if (item.status === "in_progress") return 1;
-	if (item.status === "blocked") return 2;
-	return 3;
-}
-
-function findNextTodo(items: readonly TodoItem[]): TodoItem | undefined {
-	return items.find((i) => i.status === "in_progress")
-		?? items.find((i) => i.status === "pending" && i.blockedBy.length === 0)
-		?? items.find((i) => i.status === "blocked" || i.status === "pending");
+// Tasks keep their creation order (the numeric id assigned at allocateTaskId).
+// Non-numeric ids (workflow mirrors) sort after numeric ones, then lexicographically.
+function todoIdOrder(id: string): number {
+	const n = Number(id);
+	return Number.isInteger(n) ? n : Number.POSITIVE_INFINITY;
 }
 
 function todoActorLabel(actor: NonNullable<TodoItem["assignee"]>, items: readonly TodoItem[]): string {
@@ -318,22 +308,6 @@ function todoSubject(paint: TodoPaint, subject: string, theme: PaintTheme): stri
 	return paint.bold ? bold(theme, text) : text;
 }
 
-function todoNextLabel(
-	item: TodoItem,
-	items: readonly TodoItem[],
-	glyphs: IconGlyphs,
-	spin: string,
-	theme: PaintTheme,
-): string {
-	const actor = todoActor(item, items);
-	const paint = todoPaint(item.status, glyphs, spin);
-	return [
-		theme.fg(paint.glyphColor, paint.glyph),
-		actor ? theme.fg("mdLink", actor) : "",
-		todoSubject(paint, item.subject, theme),
-	].filter(Boolean).join(" ");
-}
-
 export function renderTodos(
 	items: readonly TodoItem[],
 	mode: ViewMode,
@@ -346,7 +320,6 @@ export function renderTodos(
 	const g = opts.glyphs;
 	const ell = theme.fg("dim", g.ellipsis);
 	const spin = opts.spin ?? "~";
-	const now = opts.now ?? Date.now();
 	const expanded = opts.expanded !== false;
 	const toggleHint = opts.toggleHint ?? DEFAULT_TOGGLE_HINT;
 
@@ -355,17 +328,11 @@ export function renderTodos(
 		const done = items.filter((i) => i.status === "completed").length;
 		const blocked = items.filter((i) => i.status === "blocked").length;
 		const pct = total ? Math.round((done / total) * 100) : 0;
-		const nxt = findNextTodo(items);
-		const label = nxt
-			? `${theme.fg("dim", g.arrow)} ${todoNextLabel(nxt, items, g, spin, theme)}`
-			: done === total ? theme.fg("success", `${g.check} all done`) : "";
 		const segs: PrioritizedSegment[] = [
 			{ text: renderTodoBar(items, width, theme, g), priority: 60, clippable: false },
 			{ text: theme.fg("muted", `${pct}%`), priority: 90, clippable: false },
 		];
-		// A glyph run is opaque to a screen reader, so the blocked count is spelled out.
 		if (blocked > 0) segs.push({ text: theme.fg("error", `${blocked} blocked`), priority: 95, clippable: false });
-		if (label) segs.push({ text: label, priority: 100, minWidth: 8 });
 		segs.push({ text: theme.fg("dim", `(${toggleHint} expand)`), priority: 10, clippable: false });
 		return [fitLineByPriority(segs, width, utils, " ", g.ellipsis)];
 	}
@@ -377,17 +344,10 @@ export function renderTodos(
 	const blocked = items.filter((i) => i.status === "blocked").length;
 	const members = new Set(items.map((item) => item.assignee?.id).filter(Boolean)).size;
 	const sep = theme.fg("dim", g.separator.trim());
-	const nxt = findNextTodo(items);
-	const nextText = nxt
-		? `${theme.fg(nxt.status === "blocked" ? "error" : "dim", g.arrow)} ${todoNextLabel(nxt, items, g, spin, theme)}`
-		: theme.fg("success", `${g.check} all done`);
 
-	// The next actionable task outranks the counts: it is the one token that tells
-	// the user what to do, so it must survive when the terminal is narrow.
 	const summarySegs: PrioritizedSegment[] = [
 		{ text: theme.fg("syntaxFunction", "Todo"), priority: 40, clippable: false },
 		{ text: theme.fg("dim", `${done}/${total}`), priority: 80, clippable: false },
-		{ text: nextText, priority: 100, minWidth: 8 },
 	];
 	if (blocked > 0) {
 		summarySegs.push({ text: theme.fg("error", `${blocked} blocked`), priority: 90, clippable: false });
@@ -398,6 +358,17 @@ export function renderTodos(
 	if (members > 0) {
 		summarySegs.push({ text: theme.fg("dim", `${members} members`), priority: 30, clippable: false });
 	}
+	// Creation order drives both the next-task pointer and the expanded rows, so
+	// compute it once up front. The pointer is the first task the user can act on:
+	// not done, not blocked, and free of unresolved dependencies.
+	const ordered = [...items].sort((a, b) => todoIdOrder(a.id) - todoIdOrder(b.id) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+	const next = ordered.find((it) => it.status !== "completed" && it.status !== "blocked" && it.blockedBy.length === 0);
+	if (next) {
+		const np = todoPaint(next.status, g, spin);
+		const nactor = todoActor(next, items);
+		const ntext = `${g.arrow} ${theme.fg(np.glyphColor, np.glyph)}${nactor ? ` ${theme.fg("mdLink", nactor)}` : ""} ${todoSubject(np, next.subject, theme)}`;
+		summarySegs.push({ text: ntext, priority: 20, clippable: false });
+	}
 	summarySegs.push({
 		text: theme.fg("dim", `(${toggleHint} ${expanded ? "collapse" : "expand"})`),
 		priority: 10,
@@ -406,9 +377,6 @@ export function renderTodos(
 	const summaryLine = fitLineByPriority(summarySegs, width, utils, ` ${sep} `, g.ellipsis);
 
 	if (!expanded) return [summaryLine];
-
-	// sorted + capped task rows
-	const ordered = [...items].sort((a, b) => todoDisplayRank(a, now) - todoDisplayRank(b, now));
 	// The summary line is already spent, so the task rows compete for what is left.
 	const budget = Math.min(
 		TODO_MAX_VISIBLE + 1,

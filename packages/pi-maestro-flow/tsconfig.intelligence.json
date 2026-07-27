@@ -15,6 +15,7 @@
     "src/tools/search-tool-bm25.ts",
     "src/tools/smart-search.ts",
     "src/tools/smart-search-config.ts",
+    "src/tools/web-access/promise-try.d.ts",
     "src/tui/smart-search-config.ts",
     "src/tools/lsp-tool.ts",
     "src/tools/lsp/**/*.ts",

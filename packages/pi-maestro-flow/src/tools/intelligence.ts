@@ -7,6 +7,8 @@ import { lspManager } from "./lsp/manager.ts";
 import type { LspManagerLike } from "./lsp/types.ts";
 import { registerSearchToolBm25 } from "./search-tool-bm25.ts";
 import { registerSmartSearch } from "./smart-search.ts";
+import { createSourceCheckTool } from "./web-access/source-check-tool.ts";
+import { registerCuratorCommands } from "./web-access/curator.ts";
 
 export function registerIntelligenceTools(pi: ExtensionAPI): void {
   pi.registerTool(createLspTool());
@@ -14,6 +16,8 @@ export function registerIntelligenceTools(pi: ExtensionAPI): void {
   pi.registerTool(createBrowserTool());
   registerSearchToolBm25(pi);
   registerSmartSearch(pi);
+  pi.registerTool(createSourceCheckTool() as never);
+  registerCuratorCommands(pi);
 }
 
 export async function shutdownIntelligenceTools(

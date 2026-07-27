@@ -1,3 +1,6 @@
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, dirname } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   Key,
@@ -8,13 +11,18 @@ import {
   visibleWidth,
 } from "@earendil-works/pi-tui";
 import {
+  ALL_CONFIG_KEYS,
   SMART_SEARCH_CONFIG_KEYS,
   SmartSearchConfigStore,
+  WEB_ACCESS_SYNC_MAPPINGS,
+  configGroupForKey,
   displaySmartSearchConfigValue,
   isSmartSearchSecretKey,
   maskSmartSearchSecret,
   smartSearchConfigGroupForKey,
+  syncMappingForSmartSearchKey,
   type SmartSearchConfig,
+  type WebAccessSyncMapping,
 } from "../tools/smart-search-config.ts";
 interface SmartSearchConfigTheme {
   fg(role: string, text: string): string;
@@ -26,6 +34,123 @@ export interface SmartSearchConfigStoreLike {
   save(patch: Record<string, unknown | undefined>): Promise<SmartSearchConfig>;
 }
 
+// ---------------------------------------------------------------------------
+// Web Access config sync — bridges ~/.pi/web-search.json ↔ Smart Search config
+// ---------------------------------------------------------------------------
+
+export type SyncStatus = "synced" | "conflict" | "smart-only" | "web-only" | "unmapped";
+
+export interface WebAccessConfigSyncLike {
+  loadWebConfig(): Record<string, unknown>;
+  syncStatusForKey(smartSearchKey: string, smartSearchValue: unknown): SyncStatus;
+  webValueForKey(smartSearchKey: string): unknown;
+  pushToWebConfig(smartSearchConfig: SmartSearchConfig): void;
+}
+
+function resolveWebSearchJsonPath(): string {
+  const envDir = process.env.PI_CODING_AGENT_DIR;
+  const base = envDir
+    ?? (process.env.XDG_CONFIG_HOME ? join(process.env.XDG_CONFIG_HOME, "pi") : join(homedir(), ".pi"));
+  return join(base, "web-search.json");
+}
+
+function getNestedValue(obj: Record<string, unknown>, dottedPath: string): unknown {
+  const parts = dottedPath.split(".");
+  let current: unknown = obj;
+  for (const part of parts) {
+    if (current === null || current === undefined || typeof current !== "object") return undefined;
+    current = (current as Record<string, unknown>)[part];
+  }
+  return current;
+}
+
+function setNestedValue(obj: Record<string, unknown>, dottedPath: string, value: unknown): void {
+  const parts = dottedPath.split(".");
+  let current = obj;
+  for (let i = 0; i < parts.length - 1; i++) {
+    const part = parts[i];
+    if (current[part] === null || current[part] === undefined || typeof current[part] !== "object") {
+      current[part] = {};
+    }
+    current = current[part] as Record<string, unknown>;
+  }
+  current[parts[parts.length - 1]] = value;
+}
+
+export class WebAccessConfigSync implements WebAccessConfigSyncLike {
+  private webConfig: Record<string, unknown> | undefined;
+  private readonly webSearchJsonPath: string;
+
+  constructor(webSearchJsonPath?: string) {
+    this.webSearchJsonPath = webSearchJsonPath ?? resolveWebSearchJsonPath();
+  }
+
+  loadWebConfig(): Record<string, unknown> {
+    if (this.webConfig) return this.webConfig;
+    try {
+      if (!existsSync(this.webSearchJsonPath)) {
+        this.webConfig = {};
+        return this.webConfig;
+      }
+      const parsed: unknown = JSON.parse(readFileSync(this.webSearchJsonPath, "utf-8"));
+      this.webConfig = (parsed && typeof parsed === "object" && !Array.isArray(parsed))
+        ? parsed as Record<string, unknown>
+        : {};
+    } catch {
+      this.webConfig = {};
+    }
+    return this.webConfig;
+  }
+
+  syncStatusForKey(smartSearchKey: string, smartSearchValue: unknown): SyncStatus {
+    const mapping = syncMappingForSmartSearchKey(smartSearchKey);
+    if (!mapping) return "unmapped";
+    const webValue = getNestedValue(this.loadWebConfig(), mapping.webSearchJsonKey);
+    const smartEmpty = smartSearchValue === undefined || smartSearchValue === null || smartSearchValue === "";
+    const webEmpty = webValue === undefined || webValue === null || webValue === "";
+    if (smartEmpty && webEmpty) return "synced";
+    if (smartEmpty && !webEmpty) return "web-only";
+    if (!smartEmpty && webEmpty) return "smart-only";
+    return String(smartSearchValue) === String(webValue) ? "synced" : "conflict";
+  }
+
+  webValueForKey(smartSearchKey: string): unknown {
+    const mapping = syncMappingForSmartSearchKey(smartSearchKey);
+    if (!mapping) return undefined;
+    return getNestedValue(this.loadWebConfig(), mapping.webSearchJsonKey);
+  }
+
+  pushToWebConfig(smartSearchConfig: SmartSearchConfig): void {
+    const web = { ...this.loadWebConfig() };
+    for (const mapping of WEB_ACCESS_SYNC_MAPPINGS) {
+      const value = smartSearchConfig[mapping.smartSearchKey];
+      if (value !== undefined && value !== null && value !== "") {
+        setNestedValue(web, mapping.webSearchJsonKey, value);
+      }
+    }
+    const dir = dirname(this.webSearchJsonPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(this.webSearchJsonPath, JSON.stringify(web, null, 2) + "\n", "utf-8");
+    this.webConfig = web;
+  }
+}
+
+const SYNC_STATUS_SYMBOL: Record<SyncStatus, string> = {
+  synced: "✓",
+  conflict: "⚠",
+  "smart-only": "→",
+  "web-only": "←",
+  unmapped: " ",
+};
+
+const SYNC_STATUS_TONE: Record<SyncStatus, string> = {
+  synced: "success",
+  conflict: "warning",
+  "smart-only": "dim",
+  "web-only": "accent",
+  unmapped: "dim",
+};
+
 export interface SmartSearchConfigOverlayParams {
   config: SmartSearchConfig;
   store: SmartSearchConfigStoreLike;
@@ -33,13 +158,17 @@ export interface SmartSearchConfigOverlayParams {
   requestRender: () => void;
   close: () => void;
   initialKey?: string;
+  sync?: WebAccessConfigSyncLike;
 }
 
 type OverlayMode = "list" | "edit";
 type StatusTone = "dim" | "success" | "warning" | "error";
 
 const CTRL_U = "\x15";
+const CTRL_S = "\x13";
 const MAX_VISIBLE_ITEMS = 10;
+
+type ConfigSource = "smart-search" | "web-access";
 
 export class SmartSearchConfigOverlay implements Component, Focusable {
   focused = false;
@@ -56,12 +185,15 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
   private lastWidth = 80;
   private readonly pasteDecoder = new BracketedPasteDecoder();
   private pasteFlushTimer: ReturnType<typeof setTimeout> | undefined;
+  private configSource: ConfigSource = "smart-search";
+  private readonly sync: WebAccessConfigSyncLike | undefined;
 
   constructor(private readonly params: SmartSearchConfigOverlayParams) {
     this.config = { ...params.config };
-    const known = new Set<string>(SMART_SEARCH_CONFIG_KEYS);
+    this.sync = params.sync;
+    const known = new Set<string>(ALL_CONFIG_KEYS);
     const unknown = Object.keys(this.config).filter((key) => !known.has(key)).sort();
-    this.keys = [...SMART_SEARCH_CONFIG_KEYS, ...unknown];
+    this.keys = [...ALL_CONFIG_KEYS, ...unknown];
     if (params.initialKey) {
       const index = this.keys.indexOf(params.initialKey);
       if (index >= 0) this.selected = index;
@@ -89,9 +221,12 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
     ];
     if (this.mode === "edit") {
       const secret = isSmartSearchSecretKey(key);
+      const credentialHint = credentialSourceHint(this.draft);
       const renderedDraft = this.unsetDraft
         ? this.params.theme.fg("warning", "unset key on save")
-        : secret && this.draft ? maskSmartSearchSecret(this.draft) : this.draft;
+        : credentialHint
+          ? this.params.theme.fg("accent", this.draft) + " " + this.params.theme.fg("dim", credentialHint)
+          : secret && this.draft ? maskSmartSearchSecret(this.draft) : this.draft;
       rows.push(truncateToWidth(this.params.theme.fg("accent", key), inner, "…"));
       rows.push(truncateToWidth(`> ${renderedDraft || this.params.theme.fg("dim", secret ? "type replacement secret" : "empty value")}`, inner, "…"));
       rows.push(truncateToWidth(
@@ -103,8 +238,9 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
       const filteredKeys = this.filteredKeys();
       const start = Math.max(0, Math.min(this.selected - Math.floor(MAX_VISIBLE_ITEMS / 2), filteredKeys.length - MAX_VISIBLE_ITEMS));
       const visibleKeys = filteredKeys.slice(start, start + MAX_VISIBLE_ITEMS);
+      const sourceLabel = this.configSource === "smart-search" ? "Smart Search" : "web-access";
       rows.push(truncateToWidth(
-        this.params.theme.fg("dim", `Filter: ${this.query || "all keys"} · ${filteredKeys.length}/${this.keys.length}`),
+        this.params.theme.fg("dim", `Filter: ${this.query || "all keys"} · ${filteredKeys.length}/${this.keys.length} · ${sourceLabel}`),
         inner,
         "…",
       ));
@@ -114,9 +250,12 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
       for (let offset = 0; offset < visibleKeys.length; offset++) {
         const itemKey = visibleKeys[offset];
         const marker = start + offset === this.selected ? "›" : " ";
-        const value = displaySmartSearchConfigValue(itemKey, this.config[itemKey]);
-        const group = smartSearchConfigGroupForKey(itemKey);
-        const line = `${marker} [${group?.label ?? "Custom"}] ${itemKey} = ${value}`;
+        const group = configGroupForKey(itemKey);
+        const syncTag = this.renderSyncTag(itemKey);
+        const value = this.configSource === "web-access" && this.sync
+          ? displaySmartSearchConfigValue(itemKey, this.sync.webValueForKey(itemKey))
+          : displaySmartSearchConfigValue(itemKey, this.config[itemKey]);
+        const line = `${marker}${syncTag} [${group?.label ?? "Custom"}] ${itemKey} = ${value}`;
         rows.push(truncateToWidth(
           start + offset === this.selected ? this.params.theme.fg("accent", line) : line,
           inner,
@@ -124,7 +263,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
         ));
       }
       rows.push(truncateToWidth(
-        this.params.theme.fg("dim", "Type provider/capability/key · PgUp/PgDn · Enter edit · Esc clear/close"),
+        this.params.theme.fg("dim", "Type provider/capability/key · PgUp/PgDn · Enter edit · Tab source · Ctrl+S sync · Esc"),
         inner,
         "…",
       ));
@@ -181,6 +320,16 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
         return;
       }
       this.params.close();
+      return;
+    }
+    if (matchesKey(data, Key.tab)) {
+      this.configSource = this.configSource === "smart-search" ? "web-access" : "smart-search";
+      this.status = `Source: ${this.configSource === "smart-search" ? "Smart Search config" : "web-search.json"}`;
+      this.statusTone = "dim";
+      return;
+    }
+    if (data === CTRL_S) {
+      this.performSync();
       return;
     }
     const length = this.filteredKeys().length;
@@ -282,13 +431,36 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
     const terms = this.query.trim().toLocaleLowerCase().split(/\s+/).filter(Boolean);
     if (terms.length === 0) return this.keys;
     return this.keys.filter((key) => {
-      const group = smartSearchConfigGroupForKey(key);
+      const group = configGroupForKey(key);
       const haystack = [key, group?.id, group?.label, group?.capability, ...(group?.aliases ?? [])]
         .filter(Boolean)
         .join(" ")
         .toLocaleLowerCase();
       return terms.every((term) => haystack.includes(term));
     });
+  }
+
+  private renderSyncTag(key: string): string {
+    if (!this.sync) return " ";
+    const status = this.sync.syncStatusForKey(key, this.config[key]);
+    if (status === "unmapped") return " ";
+    return ` ${SYNC_STATUS_SYMBOL[status]}`;
+  }
+
+  private performSync(): void {
+    if (!this.sync) {
+      this.status = "Sync not available";
+      this.statusTone = "warning";
+      return;
+    }
+    try {
+      (this.sync as WebAccessConfigSync).pushToWebConfig(this.config);
+      this.status = "Synced Smart Search → web-search.json";
+      this.statusTone = "success";
+    } catch (error) {
+      this.status = `Sync failed · ${errorMessage(error)}`;
+      this.statusTone = "error";
+    }
   }
 
   private currentKey(): string | undefined {
@@ -311,9 +483,11 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
 export async function showSmartSearchConfigOverlay(
   ctx: Pick<ExtensionContext, "hasUI" | "ui">,
   store: SmartSearchConfigStoreLike = new SmartSearchConfigStore(),
+  sync?: WebAccessConfigSyncLike,
 ): Promise<void> {
   if (!ctx.hasUI) return;
   const config = await store.load();
+  const resolvedSync = sync ?? new WebAccessConfigSync();
   await ctx.ui.custom<void>((tui, theme, _keybindings, done) => {
     const overlay = new SmartSearchConfigOverlay({
       config,
@@ -321,6 +495,7 @@ export async function showSmartSearchConfigOverlay(
       theme,
       requestRender: () => tui.requestRender(),
       close: () => done(undefined),
+      sync: resolvedSync,
     });
     return overlay;
   }, {
@@ -456,4 +631,11 @@ function partialMarkerSuffix(value: string, marker: string): string {
     if (marker.startsWith(suffix)) return suffix;
   }
   return "";
+}
+
+function credentialSourceHint(value: string): string | undefined {
+  if (!value) return undefined;
+  if (/^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value)) return "(env var)";
+  if (value.startsWith("!")) return "(shell command)";
+  return undefined;
 }

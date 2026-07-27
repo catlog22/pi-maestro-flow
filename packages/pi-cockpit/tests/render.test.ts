@@ -172,11 +172,11 @@ test("renderTodos list: summary first + sorted rows + glyphs", () => {
 	const summary = lines[0];
 	assert.ok(summary.includes("Todo"));
 	assert.ok(summary.includes("»"));
-	// sorted: in_progress (rank 1) → blocked (rank 2) → pending (rank 3) → completed (rank 4)
-	assert.ok(lines[1].includes("⠋"));  // in_progress spinner
-	assert.ok(lines[2].includes("!"));  // blocked
-	assert.ok(lines[3].includes("○"));  // pending
-	assert.ok(lines[4].includes("✓"));  // completed
+	// ordered by task id (creation order) — status no longer reorders the list
+	assert.ok(lines[1].includes("✓"));  // #0 completed
+	assert.ok(lines[2].includes("⠋"));  // #1 in_progress
+	assert.ok(lines[3].includes("!"));  // #2 blocked
+	assert.ok(lines[4].includes("○"));  // #3 pending
 	for (const l of lines) assert.ok(utils.measure(l) <= 80);
 });
 
@@ -195,19 +195,20 @@ test("renderTodos paints status on hue, weight and strikethrough", () => {
 		wide,
 		opts,
 	);
+	// Rows follow task id order: #0 completed, #1 in_progress, #2 blocked, #3 pending.
 	// A completed subject is struck through and dimmed; the check glyph stays green.
-	assert.ok(lines[4].includes("<s>[dim]task 0[/]</s>"));
-	assert.ok(lines[4].includes("[success]✓[/]"));
+	assert.ok(lines[1].includes("<s>[dim]task 0[/]</s>"));
+	assert.ok(lines[1].includes("[success]✓[/]"));
 	// The running row is the only one carrying weight, and it owns warning — accent
 	// stays reserved for role identity.
-	assert.ok(lines[1].includes("<b>[text]task 1[/]</b>"));
-	assert.ok(lines[1].includes("[warning]⠋[/]"));
-	assert.ok(!lines[1].includes("[accent]"));
-	assert.ok(lines[2].includes("[error]!"));
-	assert.ok(lines[3].includes("[accent]○[/]"));
-	assert.ok(lines[3].includes("[text]task 3[/]"));
+	assert.ok(lines[2].includes("<b>[text]task 1[/]</b>"));
+	assert.ok(lines[2].includes("[warning]⠋[/]"));
+	assert.ok(!lines[2].includes("[accent]"));
+	assert.ok(lines[3].includes("[error]!"));
+	assert.ok(lines[4].includes("[accent]○[/]"));
+	assert.ok(lines[4].includes("[text]task 3[/]"));
 	// Nothing but the completed row is struck.
-	for (const line of [lines[1], lines[2], lines[3]]) assert.ok(!line.includes("<s>"));
+	for (const line of [lines[2], lines[3], lines[4]]) assert.ok(!line.includes("<s>"));
 });
 
 test("renderTodos degrades when the theme exposes no weight or strikethrough", () => {

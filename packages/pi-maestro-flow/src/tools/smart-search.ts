@@ -5,6 +5,8 @@ import { singleLine, textBlock } from "../tui/components.ts";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { showSmartSearchConfigOverlay } from "../tui/smart-search-config.ts";
+import { nativeSearch } from "./web-access/search-router.ts";
+import { nativeFetch } from "./web-access/fetch-router.ts";
 
 const require = createRequire(import.meta.url);
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
@@ -47,6 +49,7 @@ export const SmartSearchParams = Type.Object({
   evidence_dir: Type.Optional(Type.String({ minLength: 1 })),
   router_mode: Type.Optional(RouterMode),
   max_output_bytes: Type.Optional(Type.Integer({ minimum: 1_024, maximum: 10_000_000 })),
+  native: Type.Optional(Type.Boolean({ description: "Use native TS search providers instead of Python CLI" })),
 });
 
 export interface SmartSearchRunOptions {
@@ -149,15 +152,25 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
       const query = params.query.trim();
       if (!query) throw new Error("SmartSearch query is required and must not be empty.");
       const mode = parseSmartSearchMode(params.mode);
+
+      if (params.native && mode === "search") {
+        return executeNativeSearch(query, params, signal);
+      }
+
+      if (params.native && mode === "fetch") {
+        return executeNativeFetch(query, signal);
+      }
+
+      const { validation: rawValidation, fallback: rawFallback, budget: rawBudget, router_mode: rawRouterMode, native: _native, ...restParams } = params;
       const commandArgs = buildSmartSearchArgs({
-        ...params,
+        ...restParams,
         mode,
         query,
-        validation: parseValidation(params.validation),
-        fallback: parseFallback(params.fallback),
-        budget: parseBudget(params.budget),
-        router_mode: parseRouterMode(params.router_mode),
-      });
+        validation: parseValidation(rawValidation),
+        fallback: parseFallback(rawFallback),
+        budget: parseBudget(rawBudget),
+        router_mode: parseRouterMode(rawRouterMode),
+      } as SmartSearchInput);
       try {
         const execution = await runner.run(commandArgs, {
           cwd: ctx.cwd,
@@ -166,6 +179,11 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
         });
         if (execution.exitCode !== 0) {
           const reason = execution.stderr.trim() || execution.stdout.trim() || `exit code ${execution.exitCode}`;
+          if (isConfigError(reason) && (mode === "search" || mode === "fetch")) {
+            return mode === "search"
+              ? executeNativeSearch(query, params, signal)
+              : executeNativeFetch(query, signal);
+          }
           throw new Error(`SmartSearch failed with exit code ${execution.exitCode}: ${reason}`);
         }
         const result = parseJsonOutput(execution.stdout);
@@ -191,21 +209,99 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
       return singleLine(`${theme.fg("toolTitle", theme.bold("smart_search "))}${mode} ${theme.fg("accent", `"${query}"`)}`);
     },
     renderResult(result, opts, theme) {
-      const details = result.details as { mode?: string; query?: string } | undefined;
+      const details = result.details as SmartSearchDetails | undefined;
       const isError = (result as { isError?: boolean }).isError === true;
       if (isError) {
         const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
         if (opts.expanded) return textBlock(text);
         return singleLine(theme.fg("error", `✗ ${text.split("\n")[0]?.slice(0, 120) ?? "SmartSearch failed"}`));
       }
+      const parsed = parseSearchResultContent(result);
       if (opts.expanded) {
-        const block = result.content.find((item) => item.type === "text");
-        const text = block && "text" in block ? block.text : "";
-        return textBlock(text);
+        return textBlock(formatSearchExpanded(parsed, theme));
       }
-      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", `${details?.mode ?? "search"}: "${(details?.query ?? "").slice(0, 60)}"`)}`);
+      return singleLine(formatSearchCollapsed(parsed, details, theme));
     },
   };
+}
+
+interface ParsedSearchResult {
+  provider: string;
+  answer: string;
+  sources: Array<{ title: string; url: string; snippet: string }>;
+  mode: string;
+}
+
+function parseSearchResultContent(result: { content: Array<{ type: string; text?: string }>; details?: unknown }): ParsedSearchResult {
+  const details = result.details as { mode?: string } | undefined;
+  const block = result.content.find((item) => item.type === "text");
+  const text = block && "text" in block ? (block.text ?? "") : "";
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    // Native format: { answer, results, provider }
+    if (Array.isArray(parsed.results)) {
+      return {
+        provider: String(parsed.provider ?? "native"),
+        answer: String(parsed.answer ?? ""),
+        sources: (parsed.results as Array<Record<string, unknown>>).map((r) => ({
+          title: String(r.title ?? ""),
+          url: String(r.url ?? ""),
+          snippet: String(r.snippet ?? ""),
+        })),
+        mode: details?.mode ?? "search",
+      };
+    }
+    // Python CLI format: { content, sources, primary_sources, providers_used }
+    const sources = Array.isArray(parsed.sources) ? parsed.sources as Array<Record<string, unknown>> : [];
+    const primary = Array.isArray(parsed.primary_sources) ? parsed.primary_sources as Array<Record<string, unknown>> : [];
+    const all = [...primary, ...sources];
+    return {
+      provider: Array.isArray(parsed.providers_used) ? (parsed.providers_used as string[]).join(",") : "cli",
+      answer: String(parsed.content ?? ""),
+      sources: all.map((s) => ({
+        title: String(s.title ?? ""),
+        url: String(s.url ?? s.link ?? ""),
+        snippet: String(s.snippet ?? s.description ?? ""),
+      })),
+      mode: details?.mode ?? "search",
+    };
+  } catch {
+    return { provider: "", answer: text.slice(0, 500), sources: [], mode: details?.mode ?? "search" };
+  }
+}
+
+function formatSearchCollapsed(r: ParsedSearchResult, details: { mode?: string; query?: string } | undefined, theme: { fg(role: string, text: string): string }): string {
+  const mode = details?.mode ?? r.mode;
+  const query = (details?.query ?? "").slice(0, 50);
+  const count = r.sources.length;
+  const provider = r.provider ? ` · ${r.provider}` : "";
+  const sources = count > 0 ? ` · ${count} source${count === 1 ? "" : "s"}` : "";
+  return `${theme.fg("success", "✓")} ${theme.fg("muted", `${mode}: "${query}"`)}${theme.fg("dim", provider + sources)}`;
+}
+
+function formatSearchExpanded(r: ParsedSearchResult, theme: { fg(role: string, text: string): string }): string {
+  const lines: string[] = [];
+  const header = `${theme.fg("success", "✓")} ${r.mode}${r.provider ? ` · ${theme.fg("accent", r.provider)}` : ""} · ${r.sources.length} sources`;
+  lines.push(header);
+  lines.push("");
+  if (r.answer) {
+    lines.push(theme.fg("bold", "Answer"));
+    const answerLines = r.answer.split("\n").slice(0, 12);
+    for (const line of answerLines) {
+      lines.push(`  ${line}`);
+    }
+    if (r.answer.split("\n").length > 12) lines.push(theme.fg("dim", "  …"));
+    lines.push("");
+  }
+  if (r.sources.length > 0) {
+    lines.push(theme.fg("bold", "Sources"));
+    for (let i = 0; i < r.sources.length; i++) {
+      const s = r.sources[i];
+      lines.push(`  ${theme.fg("accent", `${i + 1}.`)} ${s.title || "(untitled)"}`);
+      if (s.url) lines.push(`     ${theme.fg("dim", s.url)}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 export function registerSmartSearchTool(pi: ExtensionAPI, runner?: SmartSearchRunner): void {
@@ -240,7 +336,58 @@ export function registerSmartSearch(
   });
 }
 
-interface SmartSearchInput extends Omit<Static<typeof SmartSearchParams>, "mode" | "validation" | "fallback" | "budget" | "router_mode"> {
+async function executeNativeFetch(
+  url: string,
+  signal?: AbortSignal,
+): Promise<AgentToolResult<SmartSearchDetails>> {
+  try {
+    const result = await nativeFetch({ urls: [url], signal });
+    const details: SmartSearchDetails = {
+      mode: "fetch",
+      query: url,
+      command_args: ["native-fetch", url],
+      result,
+    };
+    return {
+      content: [{ type: "text", text: JSON.stringify(result) }],
+      details,
+    } as AgentToolResult<SmartSearchDetails>;
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw abortError();
+    throw error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+async function executeNativeSearch(
+  query: string,
+  params: { providers?: string; extra_sources?: number },
+  signal?: AbortSignal,
+): Promise<AgentToolResult<SmartSearchDetails>> {
+  try {
+    const result = await nativeSearch({
+      query,
+      provider: params.providers?.split(",")[0]?.trim(),
+      numResults: params.extra_sources ? params.extra_sources + 5 : undefined,
+      includeContent: true,
+      signal,
+    });
+    const details: SmartSearchDetails = {
+      mode: "search",
+      query,
+      command_args: ["native", query],
+      result,
+    };
+    return {
+      content: [{ type: "text", text: JSON.stringify(result) }],
+      details,
+    } as AgentToolResult<SmartSearchDetails>;
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw abortError();
+    throw error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+interface SmartSearchInput extends Omit<Static<typeof SmartSearchParams>, "mode" | "validation" | "fallback" | "budget" | "router_mode" | "native"> {
   mode: SmartSearchModeValue;
   validation?: ValidationValue;
   fallback?: FallbackValue;
@@ -321,6 +468,15 @@ function abortError(): Error {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof Error && error.name === "AbortError";
+}
+
+function isConfigError(reason: string): boolean {
+  try {
+    const parsed = JSON.parse(reason) as { error_type?: string };
+    return parsed.error_type === "config_error";
+  } catch {
+    return reason.includes("config_error");
+  }
 }
 
 function terminateProcessTree(child: { pid?: number; kill(): boolean }): void {

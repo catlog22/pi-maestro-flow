@@ -37,7 +37,9 @@ function failedJobs(jobs: readonly BashBgJob[]): BashBgJob[] {
  * Only replace the label while a foreground tool is actively executing.
  */
 export function workingMessage(state: AmbientState): string | undefined {
-	return state.activeTool;
+	if (state.activeTool) return state.activeTool;
+	if (state.running) return "working";
+	return undefined;
 }
 
 /**

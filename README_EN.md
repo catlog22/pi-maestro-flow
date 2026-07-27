@@ -103,6 +103,7 @@ Full tool parameters, the skill catalog, and workflow definitions live in the **
 |----------|-------------|
 | **[Usage Guide](docs/USAGE_EN.md)** / **[中文](docs/USAGE.md)** | Complete feature documentation — all tools, MCP, permissions, thinking depth, agents, workflows |
 | **[User Guide](GUIDE.md)** | In-depth tutorial with examples for every subsystem |
+| **[Smart Search Provider Config](docs/smart-search-provider-config.md)** | Search provider setup — dual-path architecture, API keys, credential syntax, TUI config, sync |
 | **[Release Notes](RELEASE.md)** | Version history and changelog |
 | Per-plugin READMEs | [flow](packages/pi-maestro-flow/README.md) · [teammate](packages/pi-maestro-teammate/README.md) · [cockpit](packages/pi-cockpit/README.md) |
 
@@ -112,7 +113,7 @@ Full tool parameters, the skill catalog, and workflow definitions live in the **
 
 - **[Maestro-Flow](https://github.com/catlog22/maestro-flow)** — intent-driven workflow orchestration by [@catlog22](https://github.com/catlog22)
 - **[Pi Coding Agent](https://github.com/earendil-works/pi)** — terminal coding harness (host runtime) by [@earendil-works](https://github.com/earendil-works)
-- Upstream libraries powering built-in tools: [@modelcontextprotocol/sdk](https://modelcontextprotocol.io) (`mcp`) · [Puppeteer](https://github.com/puppeteer/puppeteer) (`browser`) · [@ff-labs/fff-node](https://github.com/dmtrKovalenko/fff) (`ffgrep`/`fffind`) · [@konbakuyomu/smart-search](https://github.com/konbakuyomu/smartsearch) (`smart_search`)
+- Upstream libraries powering built-in tools: [@modelcontextprotocol/sdk](https://modelcontextprotocol.io) (`mcp`) · [Puppeteer](https://github.com/puppeteer/puppeteer) (`browser`) · [@ff-labs/fff-node](https://github.com/dmtrKovalenko/fff) (`ffgrep`/`fffind`) · [@konbakuyomu/smart-search](https://github.com/konbakuyomu/smartsearch) (`smart_search`) · [pi-web-access](https://github.com/nicobailon/pi-web-access) (native web search/extraction/curator)
 
 ## License
 

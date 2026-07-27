@@ -1804,11 +1804,10 @@ export function renderTodoWidget(
   }
   if (!hasTasks) return lines;
 
-  const now = Date.now();
   const ordered = [...tasks].sort((left, right) =>
-    todoDisplayRank(left, now) - todoDisplayRank(right, now)
+    todoIdOrder(left.id) - todoIdOrder(right.id) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
   );
-  const visible = ordered.slice(0, 5);
+  const visible = ordered.slice(0, 8);
   for (const task of visible) {
     lines.push(truncateToWidth(widgetTaskLine(task, tasks), safeWidth, "…"));
   }
@@ -1818,17 +1817,11 @@ export function renderTodoWidget(
   return lines;
 }
 
-const RECENT_COMPLETED_WINDOW_MS = 30_000;
-
-/** Recently completed first (a la Claude Code), then running, blocked, pending, older completed. */
-function todoDisplayRank(task: TodoTaskLike, now: number): number {
-  if (task.status === "completed") {
-    const recent = task.updatedAt !== undefined && now - task.updatedAt < RECENT_COMPLETED_WINDOW_MS;
-    return recent ? 0 : 4;
-  }
-  if (task.status === "in_progress") return 1;
-  if (task.status === "blocked") return 2;
-  return 3;
+// Tasks keep their creation order (the numeric id assigned at allocation).
+// Non-numeric ids (workflow mirrors) sort after numeric ones, then lexicographically.
+function todoIdOrder(id: string): number {
+  const n = Number(id);
+  return Number.isInteger(n) ? n : Number.POSITIVE_INFINITY;
 }
 
 function renderTodoSummary(tasks: TodoTaskLike[], expanded: boolean, width: number): string {
@@ -1895,12 +1888,6 @@ function widgetRunRank(status: string): number {
 
 function formatWidgetTokens(value: number): string {
   return value < 1_000 ? String(value) : `${Math.round(value / 1_000)}k`;
-}
-
-function findNextTodoTask(tasks: TodoTaskLike[]): TodoTaskLike | undefined {
-  return tasks.find((t) => t.status === "in_progress")
-    ?? tasks.find((t) => t.status === "pending" && t.blockedBy.length === 0)
-    ?? tasks.find((t) => t.status === "blocked" || t.status === "pending");
 }
 
 function widgetTaskLine(task: TodoTaskLike, allTasks: TodoTaskLike[]): string {

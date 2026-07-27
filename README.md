@@ -103,6 +103,7 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
 |------|------|
 | **[使用指南](docs/USAGE.md)** / **[English](docs/USAGE_EN.md)** | 完整功能文档 — 全部工具、MCP、权限、思考深度、Agent、工作流 |
 | **[用户手册](GUIDE.md)** | 深入教程，每个子系统附示例 |
+| **[Smart Search Provider 配置指南](docs/smart-search-provider-config.md)** | 搜索引擎配置 — 双路径架构、Provider API Key、凭证源语法、TUI 操作、配置同步 |
 | **[发布说明](RELEASE.md)** | 版本历史与变更日志 |
 | 各插件 README | [flow](packages/pi-maestro-flow/README.md) · [teammate](packages/pi-maestro-teammate/README.md) · [cockpit](packages/pi-cockpit/README.md) |
 
@@ -112,7 +113,7 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
 
 - **[Maestro-Flow](https://github.com/catlog22/maestro-flow)** — 意图驱动工作流编排框架 by [@catlog22](https://github.com/catlog22)
 - **[Pi Coding Agent](https://github.com/earendil-works/pi)** — 终端编码智能体（宿主运行时）by [@earendil-works](https://github.com/earendil-works)
-- 驱动内置工具的上游库：[@modelcontextprotocol/sdk](https://modelcontextprotocol.io)（`mcp`）· [Puppeteer](https://github.com/puppeteer/puppeteer)（`browser`）· [@ff-labs/fff-node](https://github.com/dmtrKovalenko/fff)（`ffgrep`/`fffind`）· [@konbakuyomu/smart-search](https://github.com/konbakuyomu/smartsearch)（`smart_search`）
+- 驱动内置工具的上游库：[@modelcontextprotocol/sdk](https://modelcontextprotocol.io)（`mcp`）· [Puppeteer](https://github.com/puppeteer/puppeteer)（`browser`）· [@ff-labs/fff-node](https://github.com/dmtrKovalenko/fff)（`ffgrep`/`fffind`）· [@konbakuyomu/smart-search](https://github.com/konbakuyomu/smartsearch)（`smart_search`）· [pi-web-access](https://github.com/nicobailon/pi-web-access)（原生网络搜索/提取/curator）
 
 ## 许可证
 

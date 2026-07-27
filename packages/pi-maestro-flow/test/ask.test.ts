@@ -63,13 +63,13 @@ test("single select uses color-block selection, numeric shortcuts, default none,
     const lines = harness.component.render(width);
     assert.ok(lines.length <= 10);
     assert.doesNotMatch(lines.join("\n"), /\[[ x]\]|✓/);
-    if (width >= 40) assert.match(lines.join("\n"), /None of the above/);
+    if (width >= 40) assert.match(lines.join("\n"), /以上都不是/);
     for (const line of lines) assert.ok(visibleWidth(line) <= width);
   }
 
   assert.equal(harness.handler("1")?.consume, true); // Select Preset directly.
-  assert.match(harness.component.render(80).join("\n"), /Preset  selected/);
-  assert.match(harness.component.render(80).join("\n"), /Add details \(press d to add\)/);
+  assert.match(harness.component.render(80).join("\n"), /Preset  已选/);
+  assert.match(harness.component.render(80).join("\n"), /附加说明（按 d 添加）/);
   harness.handler("d");
   harness.handler("Prefer the nearest region");
   harness.handler("\r"); // Save details without replacing the option.
@@ -100,7 +100,7 @@ test("single select none-of-the-above captures a custom answer", async () => {
   harness.handler?.("\r"); // finish
 
   const result = await pending;
-  assert.deepEqual(result.details.answers[0].selected, ["None of the above"]);
+  assert.deepEqual(result.details.answers[0].selected, ["以上都不是"]);
   assert.equal(result.details.answers[0].text, "I want the nearest region");
 });
 
@@ -119,7 +119,7 @@ test("single select none-of-the-above can be confirmed without an explanation", 
   harness.handler?.("\r"); // finish without looping back into the input
 
   const result = await pending;
-  assert.deepEqual(result.details.answers[0].selected, ["None of the above"]);
+  assert.deepEqual(result.details.answers[0].selected, ["以上都不是"]);
   assert.equal(result.details.answers[0].text, undefined);
 });
 
@@ -160,7 +160,7 @@ test("multi-select keeps checkbox affordances", async () => {
 
   const rendered = harness.component?.render(80).join("\n") ?? "";
   assert.match(rendered, /\[ \]/);
-  assert.match(rendered, /None of the above/);
+  assert.match(rendered, /以上都不是/);
   harness.handler?.("3");
   harness.handler?.("1");
   harness.handler?.("\r");
@@ -182,7 +182,7 @@ test("multi-select none option remains exclusive", async () => {
   harness.handler?.("3");
   harness.handler?.("\r");
   const result = await pending;
-  assert.deepEqual(result.details.answers[0].selected, ["None of the above"]);
+  assert.deepEqual(result.details.answers[0].selected, ["以上都不是"]);
 });
 
 test("multi-question review includes each full question and final option", async () => {

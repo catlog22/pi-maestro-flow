@@ -150,6 +150,168 @@ export function smartSearchConfigGroupForKey(key: string): SmartSearchConfigGrou
   return SMART_SEARCH_CONFIG_GROUP_BY_KEY.get(key);
 }
 
+// ---------------------------------------------------------------------------
+// pi-web-access native provider config groups
+// ---------------------------------------------------------------------------
+
+export const WEB_ACCESS_CONFIG_GROUPS = [
+  {
+    id: "wa-perplexity",
+    label: "Perplexity (native)",
+    capability: "web_search",
+    aliases: ["pplx", "answer engine"],
+    keys: ["PERPLEXITY_API_KEY"],
+  },
+  {
+    id: "wa-openai",
+    label: "OpenAI Search (native)",
+    capability: "web_search",
+    aliases: ["openai web", "codex search"],
+    keys: ["OPENAI_API_KEY"],
+  },
+  {
+    id: "wa-brave",
+    label: "Brave Search (native)",
+    capability: "web_search",
+    aliases: ["brave"],
+    keys: ["BRAVE_API_KEY"],
+  },
+  {
+    id: "wa-parallel",
+    label: "Parallel AI (native)",
+    capability: "web_search web_fetch",
+    aliases: ["parallel"],
+    keys: ["PARALLEL_API_KEY"],
+  },
+  {
+    id: "wa-serpdive",
+    label: "SERPdive (native)",
+    capability: "web_search",
+    aliases: ["serpdive", "krill", "mako"],
+    keys: ["SERPDIVE_API_KEY", "SERPDIVE_MODEL"],
+  },
+  {
+    id: "wa-searxng",
+    label: "SearXNG (native)",
+    capability: "web_search",
+    aliases: ["searxng", "self-hosted"],
+    keys: ["SEARXNG_BASE_URL"],
+  },
+  {
+    id: "wa-gemini",
+    label: "Gemini Platform",
+    capability: "web_search web_fetch",
+    aliases: ["gemini", "google", "gemini web"],
+    keys: ["GEMINI_API_KEY", "GEMINI_BASE_URL", "CLOUDFLARE_API_KEY", "GEMINI_WEB_MODEL", "ALLOW_BROWSER_COOKIES", "CHROME_PROFILE"],
+  },
+  {
+    id: "wa-ssrf",
+    label: "SSRF Protection",
+    capability: "security",
+    aliases: ["ssrf", "domain policy", "network safety"],
+    keys: ["SSRF_ALLOW_RANGES", "SSRF_TRUST_ENV_PROXY", "FETCH_DOMAIN_ALLOW", "FETCH_DOMAIN_DENY"],
+  },
+  {
+    id: "wa-workflow",
+    label: "Curator & Workflow",
+    capability: "workflow",
+    aliases: ["curator", "summary", "websearch ui"],
+    keys: ["WEB_SEARCH_PROVIDER", "WEB_SEARCH_WORKFLOW", "CURATOR_TIMEOUT_SECONDS", "SUMMARY_MODEL", "WEB_SEARCH_ENABLED"],
+  },
+  {
+    id: "wa-video",
+    label: "Video Analysis",
+    capability: "media",
+    aliases: ["video", "youtube", "ffmpeg"],
+    keys: ["VIDEO_MAX_SIZE_MB", "VIDEO_ENABLED", "VIDEO_PREFERRED_MODEL", "YOUTUBE_ENABLED", "YOUTUBE_PREFERRED_MODEL"],
+  },
+] as const satisfies readonly SmartSearchConfigGroup[];
+
+export const WEB_ACCESS_CONFIG_KEYS: readonly string[] = WEB_ACCESS_CONFIG_GROUPS.flatMap((group) => group.keys);
+
+const WEB_ACCESS_CONFIG_GROUP_BY_KEY: ReadonlyMap<string, SmartSearchConfigGroup> = new Map<string, SmartSearchConfigGroup>(
+  WEB_ACCESS_CONFIG_GROUPS.flatMap((group) => group.keys.map((key) => [key, group] as const)),
+);
+
+export function webAccessConfigGroupForKey(key: string): SmartSearchConfigGroup | undefined {
+  return WEB_ACCESS_CONFIG_GROUP_BY_KEY.get(key);
+}
+
+// ---------------------------------------------------------------------------
+// Combined view: Python CLI groups + native web-access groups
+// ---------------------------------------------------------------------------
+
+export const ALL_CONFIG_GROUPS: readonly SmartSearchConfigGroup[] = [...SMART_SEARCH_CONFIG_GROUPS, ...WEB_ACCESS_CONFIG_GROUPS];
+
+export const ALL_CONFIG_KEYS: readonly string[] = [...SMART_SEARCH_CONFIG_KEYS, ...WEB_ACCESS_CONFIG_KEYS];
+
+const ALL_CONFIG_GROUP_BY_KEY: ReadonlyMap<string, SmartSearchConfigGroup> = new Map<string, SmartSearchConfigGroup>(
+  ALL_CONFIG_GROUPS.flatMap((group) => group.keys.map((key) => [key, group] as const)),
+);
+
+export function configGroupForKey(key: string): SmartSearchConfigGroup | undefined {
+  return ALL_CONFIG_GROUP_BY_KEY.get(key);
+}
+
+// ---------------------------------------------------------------------------
+// Config sync mapping: Smart Search key <-> web-search.json key
+// ---------------------------------------------------------------------------
+
+export interface WebAccessSyncMapping {
+  readonly smartSearchKey: string;
+  readonly webSearchJsonKey: string;
+}
+
+export const WEB_ACCESS_SYNC_MAPPINGS: readonly WebAccessSyncMapping[] = [
+  { smartSearchKey: "PERPLEXITY_API_KEY", webSearchJsonKey: "perplexityApiKey" },
+  { smartSearchKey: "OPENAI_API_KEY", webSearchJsonKey: "openaiApiKey" },
+  { smartSearchKey: "BRAVE_API_KEY", webSearchJsonKey: "braveApiKey" },
+  { smartSearchKey: "PARALLEL_API_KEY", webSearchJsonKey: "parallelApiKey" },
+  { smartSearchKey: "TAVILY_API_KEY", webSearchJsonKey: "tavilyApiKey" },
+  { smartSearchKey: "SERPDIVE_API_KEY", webSearchJsonKey: "serpdiveApiKey" },
+  { smartSearchKey: "SERPDIVE_MODEL", webSearchJsonKey: "serpdiveModel" },
+  { smartSearchKey: "EXA_API_KEY", webSearchJsonKey: "exaApiKey" },
+  { smartSearchKey: "FIRECRAWL_API_KEY", webSearchJsonKey: "firecrawlApiKey" },
+  { smartSearchKey: "FIRECRAWL_API_URL", webSearchJsonKey: "firecrawlBaseUrl" },
+  { smartSearchKey: "ANYSEARCH_API_KEY", webSearchJsonKey: "anysearchApiKey" },
+  { smartSearchKey: "SEARXNG_BASE_URL", webSearchJsonKey: "searxngBaseUrl" },
+  { smartSearchKey: "GEMINI_API_KEY", webSearchJsonKey: "geminiApiKey" },
+  { smartSearchKey: "GEMINI_BASE_URL", webSearchJsonKey: "geminiBaseUrl" },
+  { smartSearchKey: "CLOUDFLARE_API_KEY", webSearchJsonKey: "cloudflareApiKey" },
+  { smartSearchKey: "ALLOW_BROWSER_COOKIES", webSearchJsonKey: "allowBrowserCookies" },
+  { smartSearchKey: "CHROME_PROFILE", webSearchJsonKey: "chromeProfile" },
+  { smartSearchKey: "WEB_SEARCH_PROVIDER", webSearchJsonKey: "provider" },
+  { smartSearchKey: "WEB_SEARCH_WORKFLOW", webSearchJsonKey: "workflow" },
+  { smartSearchKey: "CURATOR_TIMEOUT_SECONDS", webSearchJsonKey: "curatorTimeoutSeconds" },
+  { smartSearchKey: "SUMMARY_MODEL", webSearchJsonKey: "summaryModel" },
+  { smartSearchKey: "WEB_SEARCH_ENABLED", webSearchJsonKey: "webSearch.enabled" },
+  { smartSearchKey: "SSRF_ALLOW_RANGES", webSearchJsonKey: "ssrf.allowRanges" },
+  { smartSearchKey: "SSRF_TRUST_ENV_PROXY", webSearchJsonKey: "ssrf.trustEnvProxy" },
+  { smartSearchKey: "FETCH_DOMAIN_ALLOW", webSearchJsonKey: "fetchContent.domainPolicy.allow" },
+  { smartSearchKey: "FETCH_DOMAIN_DENY", webSearchJsonKey: "fetchContent.domainPolicy.deny" },
+  { smartSearchKey: "VIDEO_MAX_SIZE_MB", webSearchJsonKey: "video.maxSizeMB" },
+  { smartSearchKey: "VIDEO_ENABLED", webSearchJsonKey: "video.enabled" },
+  { smartSearchKey: "VIDEO_PREFERRED_MODEL", webSearchJsonKey: "video.preferredModel" },
+  { smartSearchKey: "YOUTUBE_ENABLED", webSearchJsonKey: "youtube.enabled" },
+  { smartSearchKey: "YOUTUBE_PREFERRED_MODEL", webSearchJsonKey: "youtube.preferredModel" },
+];
+
+const SYNC_BY_SMART_SEARCH_KEY: ReadonlyMap<string, WebAccessSyncMapping> = new Map(
+  WEB_ACCESS_SYNC_MAPPINGS.map((m) => [m.smartSearchKey, m]),
+);
+
+const SYNC_BY_WEB_SEARCH_KEY: ReadonlyMap<string, WebAccessSyncMapping> = new Map(
+  WEB_ACCESS_SYNC_MAPPINGS.map((m) => [m.webSearchJsonKey, m]),
+);
+
+export function syncMappingForSmartSearchKey(key: string): WebAccessSyncMapping | undefined {
+  return SYNC_BY_SMART_SEARCH_KEY.get(key);
+}
+
+export function syncMappingForWebSearchKey(key: string): WebAccessSyncMapping | undefined {
+  return SYNC_BY_WEB_SEARCH_KEY.get(key);
+}
+
 export function resolveSmartSearchConfigPath(options: SmartSearchConfigPathOptions = {}): SmartSearchConfigPath {
   const env = options.env ?? process.env;
   const platform = options.platform ?? process.platform;
