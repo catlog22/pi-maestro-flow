@@ -46,7 +46,7 @@ function createHarness(
   sessionId = "session-main",
   confirmationInputs?: string[],
   supportsNewSession = false,
-  handoff: { goalKey?: string; pausedGoalKey?: string; todoKeys: string[] } = { todoKeys: [] },
+  handoff: { todoKeys: string[] } = { todoKeys: [] },
   replacementFailure?: "approval" | "send",
   runtime: {
     contextPercent?: number;
@@ -54,7 +54,6 @@ function createHarness(
     idle?: boolean;
     arbiter?: CompactionArbiter;
   } = {},
-  realGoalBinding = false,
 ) {
   let active = ["Read", "Write", "Bash", "todo", "custom-tool"];
   const tools = new Map<string, ToolLike>();
@@ -178,8 +177,6 @@ function createHarness(
         : {}),
       });
     },
-    activeGoalHandoffKey: realGoalBinding ? undefined : () => handoff.goalKey,
-    pausedGoalHandoffKey: realGoalBinding ? undefined : () => handoff.pausedGoalKey,
     hasExecutableTodo: (handoffKey) => handoff.todoKeys.includes(handoffKey),
     compactionArbiter: runtime.arbiter,
   });
@@ -381,9 +378,7 @@ test("/plan approve fires the mode-change listener so the approval statusline re
 
 // Was "Approved Plan handoff lets goal update resume a paused bound Goal", which
 // 39a5f2dc invalidated by decoupling the gate from Goal state. Inverted rather than
-// deleted: the decoupling itself is worth pinning, since src/tools/plan.ts still
-// carries activeGoalHandoffKey and pausedGoalHandoffKey with no consumer left, and
-// a future reader could easily wire them back into the gate by mistake.
+// deleted: the gate reads todos and nothing else, and that is worth pinning.
 test("Approved Plan handoff is decided by todos alone, not by Goal state", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-handoff-resume-"));
   const harness = createHarness(root, true);
@@ -403,12 +398,7 @@ test("Approved Plan handoff is decided by todos alone, not by Goal state", async
     const handoffKey = loaded.manifest.handoffKey!;
     assert.ok(handoffKey);
 
-    // Neither a paused bound Goal nor an active one moves the gate any more.
-    harness.handoff.goalKey = undefined;
-    harness.handoff.pausedGoalKey = handoffKey;
-    assert.equal(getPlanHandoffStatus(), "todo-required");
-    harness.handoff.goalKey = handoffKey;
-    harness.handoff.pausedGoalKey = undefined;
+    // Goal state cannot move the gate: plan.ts no longer has a hook that reads it.
     assert.equal(getPlanHandoffStatus(), "todo-required");
 
     // Only an executable todo carrying the handoff key does.
@@ -749,7 +739,7 @@ test("Plan hooks keep compatibility capture and gate nothing at the tool-call la
 
 test("Approved Plan handoff gate is restored from the manifest after restart", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-handoff-restart-"));
-  const binding: { goalKey?: string; todoKeys: string[] } = { todoKeys: [] };
+  const binding: { todoKeys: string[] } = { todoKeys: [] };
   const first = createHarness(root, true, false, false, false, "handoff-chat", undefined, false, binding);
   try {
     await onSessionStartPlan(first.ctx);

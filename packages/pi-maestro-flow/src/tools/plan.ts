@@ -19,7 +19,6 @@ import { altKey } from "../key-labels.ts";
 import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
 import { PlanStore, prewarmProcessIdentity, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
-import { getActiveGoal, getGoalList } from "./goal.ts";
 import { getVisibleTasks } from "./todo.ts";
 import {
   type CompactionArbiter,
@@ -58,8 +57,6 @@ export interface PlanToolDetails {
 
 interface PlanRuntimeOptions {
   storeFactory?: (cwd: string, session: PlanSessionIdentity) => PlanStore;
-  activeGoalHandoffKey?: () => string | undefined;
-  pausedGoalHandoffKey?: () => string | undefined;
   hasExecutableTodo?: (handoffKey: string) => boolean;
   compactionArbiter?: CompactionArbiter;
 }
@@ -99,16 +96,8 @@ let awaitingAction = false;
 let pendingPlanExitReminder: string | undefined;
 let pendingPlanEnterNote: string | undefined;
 let compactionArbiter: CompactionArbiter | undefined;
-let activeGoalHandoffKey = () => {
-  const current = getActiveGoal();
-  if (current?.status === "active" && current.planHandoffKey) return current.planHandoffKey;
-  const bound = getGoalList().find((goal) => goal.planHandoffKey && goal.status !== "paused");
-  return bound?.planHandoffKey;
-};
-let pausedGoalHandoffKey = () => {
-  const goal = getActiveGoal();
-  return goal?.status === "paused" ? goal.planHandoffKey : undefined;
-};
+// The handoff gate reads todos only. Goal state was decoupled from it in 39a5f2dc;
+// the getters that used to feed it are gone so they cannot be wired back by accident.
 let hasExecutableTodoForHandoff = (handoffKey: string) => getVisibleTasks().some((task) =>
   task.planHandoffKey === handoffKey
   && (task.status === "pending" || task.status === "in_progress")
@@ -123,16 +112,6 @@ export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): vo
   resetRuntimeState();
   extensionApi = pi;
   storeFactory = options.storeFactory ?? ((cwd, session) => new PlanStore(cwd, { session }));
-  activeGoalHandoffKey = options.activeGoalHandoffKey ?? (() => {
-    const current = getActiveGoal();
-    if (current?.status === "active" && current.planHandoffKey) return current.planHandoffKey;
-    const bound = getGoalList().find((goal) => goal.planHandoffKey && goal.status !== "paused");
-    return bound?.planHandoffKey;
-  });
-  pausedGoalHandoffKey = options.pausedGoalHandoffKey ?? (() => {
-    const goal = getActiveGoal();
-    return goal?.status === "paused" ? goal.planHandoffKey : undefined;
-  });
   hasExecutableTodoForHandoff = options.hasExecutableTodo ?? ((handoffKey) => getVisibleTasks().some((task) =>
     task.planHandoffKey === handoffKey
     && (task.status === "pending" || task.status === "in_progress")

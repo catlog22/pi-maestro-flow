@@ -1435,15 +1435,30 @@ When NOT to use:
     return pressureMessages ? { messages: pressureMessages } : todoResult;
   });
 
+  // Eight independent end-of-turn side effects across five subsystems. Chained bare, the
+  // first throw skips every step after it — so a Goal failure would silently leave the
+  // Todo widget stale and mid-turn compaction bookkeeping unrun, with no clue which
+  // subsystem broke. Isolate each step and name it in the warning instead.
   pi.on("agent_end", async (event, ctx) => {
-    await onAgentEndPlan(event, ctx);
-    await refreshWorkflow(ctx, true);
-    await goalAgentEnd(event, ctx);
-    emitGoalChanged();
-    onAgentEndTodo();
-    await midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx);
-    midTurnAutoCompaction.onAgentEnd(ctx);
-    updateTodoWidget();
+    const step = async (label: string, run: () => void | Promise<void>) => {
+      try {
+        await run();
+      } catch (error) {
+        ctx.ui.notify(
+          `${label} failed at the end of the turn: ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+      }
+    };
+    await step("Plan", () => onAgentEndPlan(event, ctx));
+    await step("Workflow refresh", () => refreshWorkflow(ctx, true));
+    await step("Goal", () => goalAgentEnd(event, ctx));
+    await step("Goal change event", () => emitGoalChanged());
+    await step("Todo", () => onAgentEndTodo());
+    await step("Output-limit compaction", () =>
+      midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx));
+    await step("Mid-turn compaction", () => midTurnAutoCompaction.onAgentEnd(ctx));
+    await step("Todo widget", () => updateTodoWidget());
   });
 
   pi.on("tool_execution_end", async (event, ctx) => {
