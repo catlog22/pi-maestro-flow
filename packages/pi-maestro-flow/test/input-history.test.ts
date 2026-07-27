@@ -6,9 +6,10 @@ import test from "node:test";
 
 import {
   KeybindingsManager,
+  TUI,
   TUI_KEYBINDINGS,
   type EditorTheme,
-  type TUI,
+  type Terminal,
 } from "@earendil-works/pi-tui";
 import type { KeybindingsManager as AppKeybindingsManager } from "@earendil-works/pi-coding-agent";
 
@@ -77,6 +78,104 @@ function context(cwd: string, overrides: { hasUI?: boolean; existing?: EditorFac
     },
   };
 }
+
+/**
+ * Terminal is pi-tui's own public interface, so faking it lets the real TUI —
+ * real render loop, real focus dispatch, real keybinding resolution — run
+ * headlessly. Everything the other tests reach with a stub editor, this one
+ * reaches through the pipeline pi actually renders with.
+ */
+class FakeTerminal implements Terminal {
+  frames: string[] = [];
+  columns = 72;
+  rows = 30;
+  kittyProtocolActive = false;
+  private onInput: ((data: string) => void) | undefined;
+
+  start(onInput: (data: string) => void): void {
+    this.onInput = onInput;
+  }
+  stop(): void {}
+  async drainInput(): Promise<void> {}
+  write(data: string): void {
+    this.frames.push(data);
+  }
+  moveBy(): void {}
+  hideCursor(): void {}
+  showCursor(): void {}
+  clearLine(): void {}
+  clearFromCursor(): void {}
+  clearScreen(): void {}
+  setTitle(): void {}
+  setProgress(): void {}
+
+  press(data: string): void {
+    if (!this.onInput) throw new Error("terminal not started");
+    this.onInput(data);
+  }
+}
+
+const editorTheme = {
+  borderColor: (text: string) => text,
+  selectList: {
+    selectedPrefix: (t: string) => t,
+    selectedText: (t: string) => t,
+    description: (t: string) => t,
+    scrollInfo: (t: string) => t,
+    noMatch: (t: string) => t,
+  },
+} as unknown as EditorTheme;
+
+test("the banner and recalled prompt survive pi's real render pipeline", async () => {
+  const { cwd, rootDir, cleanup } = await workspace();
+  try {
+    const seeded = new InputHistoryStore(cwd, { rootDir, debounceMs: 0 });
+    await seeded.load();
+    seeded.record("older prompt");
+    seeded.record("run the tests please");
+    await seeded.flush();
+
+    const host = context(cwd);
+    await createInputHistory({ rootDir, debounceMs: 0 }).onSessionStart(host.ctx);
+
+    const terminal = new FakeTerminal();
+    const tui = new TUI(terminal, false);
+    tui.start();
+    const factory = host.ctx.ui.getEditorComponent();
+    assert.ok(factory);
+    const instance = factory(
+      tui,
+      editorTheme,
+      new KeybindingsManager(TUI_KEYBINDINGS) as unknown as AppKeybindingsManager,
+    );
+    tui.addChild(instance as never);
+    tui.setFocus(instance as never);
+
+    // The render loop is debounced; let its timer fire before reading the frame.
+    const frame = async (): Promise<string> => {
+      terminal.frames.length = 0;
+      tui.requestRender(true);
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      return terminal.frames.join("").replace(/\x1b\[[0-9;?]*[a-zA-Z]/g, "");
+    };
+
+    assert.ok(!(await frame()).includes("History"), "no banner before browsing");
+
+    terminal.press(UP);
+    const first = await frame();
+    assert.match(first, /── History 1\/2 ─/);
+    assert.ok(first.includes("run the tests please"));
+
+    terminal.press(UP);
+    const second = await frame();
+    assert.match(second, /── History 2\/2 ─/);
+    assert.ok(second.includes("older prompt"));
+
+    tui.stop();
+  } finally {
+    await cleanup();
+  }
+});
 
 test("the installed editor recalls history written by an earlier session", async () => {
   const { cwd, rootDir, cleanup } = await workspace();
