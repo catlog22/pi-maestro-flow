@@ -11,6 +11,7 @@ import * as path from "node:path";
 const MAX_TAIL_BYTES = 64 * 1024;
 const MAX_SNAPSHOT_TAIL_LINES = 200;
 const SNAPSHOT_THROTTLE_MS = 100;
+const OUTPUT_DRAIN_GRACE_MS = 100;
 
 export const BASH_BG_UPDATE_EVENT = "bash-bg:update";
 export const BASH_BG_QUERY_EVENT = "bash-bg:query";
@@ -72,6 +73,10 @@ interface Job {
   child: ChildProcess;
   tail: string;
   outputBytes: number;
+  background: boolean;
+  completionNotified: boolean;
+  outputFinalized: boolean;
+  outputDrainTimer?: ReturnType<typeof setTimeout>;
 }
 
 function tailLines(job: Job, lines: number): string {
@@ -162,6 +167,8 @@ export function registerBashBg(pi: ExtensionAPI): void {
   };
 
   const notifyComplete = (job: Job): void => {
+    if (!job.background || job.completionNotified) return;
+    job.completionNotified = true;
     const tail = tailLines(job, 20);
     const status = jobStatus(job);
     const body = [
@@ -175,7 +182,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
     );
   };
 
-  const startJob = (command: string, workdir: string): Job => {
+  const startJob = (command: string, workdir: string, background: boolean): Job => {
     const id = `bg-${(++counter).toString(36)}-${Date.now().toString(36)}`;
     const outFile = path.join(baseDir, `${id}.log`);
     const shellConfig = getShellConfig();
@@ -200,6 +207,9 @@ export function registerBashBg(pi: ExtensionAPI): void {
       child,
       tail: "",
       outputBytes: 0,
+      background,
+      completionNotified: false,
+      outputFinalized: false,
     };
     jobs.set(id, job);
     publishSnapshot();
@@ -215,24 +225,45 @@ export function registerBashBg(pi: ExtensionAPI): void {
     child.stdout?.on("data", append);
     child.stderr?.on("data", append);
     let exitCode: number | null = null;
-    const finish = (code: number | null): void => {
+    const markDone = (code: number | null): void => {
       if (job.done) return;
       job.done = true;
       job.exitCode = code;
       job.updatedAt = Date.now();
       job.finishedAt = job.updatedAt;
+      publishSnapshot();
+    };
+    const finalizeOutput = (): void => {
+      if (job.outputFinalized) return;
+      job.outputFinalized = true;
+      if (job.outputDrainTimer) {
+        clearTimeout(job.outputDrainTimer);
+        job.outputDrainTimer = undefined;
+      }
+      child.stdout?.destroy();
+      child.stderr?.destroy();
       ws.end();
       publishSnapshot();
       notifyComplete(job);
     };
     child.on("exit", (code) => {
       exitCode = code;
+      // Process exit is the lifecycle boundary. Waiting indefinitely for close
+      // misclassifies a finished shell as running when a descendant inherited
+      // its stdout/stderr pipes.
+      markDone(code);
+      job.outputDrainTimer = setTimeout(finalizeOutput, OUTPUT_DRAIN_GRACE_MS);
+      job.outputDrainTimer.unref?.();
     });
-    // 'close' fires after stdio drains, so the captured tail is complete.
-    child.on("close", (code) => finish(code ?? exitCode));
+    // Prefer the natural close event when the pipes drain promptly.
+    child.on("close", (code) => {
+      markDone(code ?? exitCode);
+      finalizeOutput();
+    });
     child.on("error", (error) => {
       append(Buffer.from(`\n${error.message}\n`));
-      finish(exitCode ?? -1);
+      markDone(exitCode ?? -1);
+      finalizeOutput();
     });
     // Do not let the child keep pi's loop alive; close still fires while pi is interactive.
     child.unref();
@@ -258,7 +289,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
 
       if (params.action === "start") {
         if (!params.command) throw new Error("bash_bg start requires 'command'.");
-        const job = startJob(params.command, params.cwd || process.cwd());
+        const job = startJob(params.command, params.cwd || process.cwd(), true);
         return {
           content: [{
             type: "text",
@@ -273,11 +304,14 @@ export function registerBashBg(pi: ExtensionAPI): void {
 
       if (params.action === "run") {
         if (!params.command) throw new Error("bash_bg run requires 'command'.");
-        const job = startJob(params.command, params.cwd || process.cwd());
+        const job = startJob(params.command, params.cwd || process.cwd(), false);
         const windowMs = (params.timeout ?? 30) * 1000;
         const deadline = Date.now() + windowMs;
         while (!job.done && Date.now() < deadline) {
-          if (signal?.aborted) throw new Error("aborted");
+          if (signal?.aborted) {
+            job.background = true;
+            throw new Error("aborted");
+          }
           await new Promise((resolve) => setTimeout(resolve, 200));
         }
         if (job.done) {
@@ -287,6 +321,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
             details: { action: "run", jobId: job.id, pid: job.pid, running: false, exitCode: job.exitCode, command: job.command },
           };
         }
+        job.background = true;
         return {
           content: [{
             type: "text",
@@ -388,6 +423,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
       snapshotTimer = undefined;
     }
     for (const job of jobs.values()) {
+      job.background = false;
       if (job.done) continue;
       job.done = true; // suppress the kill-triggered 'close' notification
       job.stopRequested = true;
