@@ -1440,7 +1440,7 @@ When NOT to use:
   // Todo widget stale and mid-turn compaction bookkeeping unrun, with no clue which
   // subsystem broke. Isolate each step and name it in the warning instead.
   pi.on("agent_end", async (event, ctx) => {
-    const step = async (label: string, run: () => void | Promise<void>) => {
+    const step = async (label: string, run: () => unknown) => {
       try {
         await run();
       } catch (error) {
