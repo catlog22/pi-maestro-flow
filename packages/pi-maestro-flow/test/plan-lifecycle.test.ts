@@ -694,6 +694,11 @@ test("Approval failure leaves Plan mode and Plan tools active", async () => {
       session: { id: harness.ctx.sessionManager.getSessionId() },
     });
     assert.equal((await store.load()).markdown, "must survive");
+    // The draft demonstrably survived on disk, so the notice has to say so. A bare
+    // "approval failed" reads as "your plan is gone" and invites the user to retype it.
+    const failure = harness.notifications.find((message) => /Plan approval failed/.test(message));
+    assert.ok(failure, `expected an approval failure notice, got ${JSON.stringify(harness.notifications)}`);
+    assert.match(failure, /draft is intact at revision 2/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -780,7 +785,9 @@ test("Approved Plan handoff stays satisfied after execution switches to a qualit
     messages: [{ role: "assistant", content: "ok" }],
     structuredOutput: { pass: true, reasoning: "verified", unmet: [], evidence: ["gate evidence"] },
   }));
-  const harness = createHarness(root, true, false, false, false, "qgate-chat", undefined, false, { todoKeys: [] }, undefined, {}, true);
+  // The trailing `realGoalBinding` argument is gone: the gate no longer has a Goal hook
+  // to override, so the real (todo-only) binding is the only behavior there is.
+  const harness = createHarness(root, true, false, false, false, "qgate-chat", undefined, false, { todoKeys: [] }, undefined, {});
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");

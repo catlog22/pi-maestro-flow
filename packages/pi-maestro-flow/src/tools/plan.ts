@@ -18,7 +18,7 @@ import { Type } from "typebox";
 import { altKey } from "../key-labels.ts";
 import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
-import { PlanStore, prewarmProcessIdentity, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
+import { PlanApprovalError, PlanStore, prewarmProcessIdentity, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
 import { getVisibleTasks } from "./todo.ts";
 import {
   type CompactionArbiter,
@@ -371,7 +371,13 @@ async function reviewPlan(
       applyLoadedPlan(approved);
     } catch (error) {
       applyLoadedPlan(await store.load());
-      ctx.ui.notify(`Plan approval failed: ${errorMessage(error)}`, "warning");
+      // PlanApprovalError carries whether the draft survived the failed commit, and this
+      // was the only consumer that threw that away. A bare "approval failed" reads as
+      // "your plan is gone" — the user retypes work that is sitting safely on disk.
+      const draftNote = error instanceof PlanApprovalError && error.draftPersisted
+        ? ` Your draft is intact at revision ${error.revision}; retry the approval.`
+        : "";
+      ctx.ui.notify(`Plan approval failed: ${errorMessage(error)}${draftNote}`, "warning");
       return { approved: false, exited: false };
     }
 
