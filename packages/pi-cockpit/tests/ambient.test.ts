@@ -30,35 +30,21 @@ function state(over: Partial<AmbientState> = {}): AmbientState {
 	return { todos: [], agents: [], jobs: [], running: false, ...over };
 }
 
-test("workingMessage is undefined when cockpit knows nothing extra", () => {
+test("workingMessage preserves the host default when no foreground tool runs", () => {
 	assert.equal(workingMessage(state()), undefined);
-	assert.equal(workingMessage(state({ todos: [todo({ status: "completed" })] })), undefined);
-});
-
-test("workingMessage leads with the in-progress todo", () => {
-	const msg = workingMessage(state({ todos: [todo({ status: "in_progress", subject: "ship the widget" })] }));
-	assert.equal(msg, "ship the widget");
-});
-
-test("a single agent names its role and active tool; several are counted", () => {
-	assert.equal(
-		workingMessage(state({ agents: [agent({ role: "reviewer", activeTool: "grep" })] })),
-		"reviewer · grep",
-	);
-	assert.equal(workingMessage(state({ agents: [agent({ role: "reviewer" })] })), "reviewer");
-	assert.equal(
-		workingMessage(state({ agents: [agent({ agent: "a" }), agent({ agent: "b" })] })),
-		"2 agents",
-	);
-});
-
-test("failures and background jobs are appended after the live work", () => {
-	const msg = workingMessage(state({
-		todos: [todo({ status: "in_progress", subject: "migrate" })],
-		agents: [agent({ agent: "x", status: "failed" })],
+	assert.equal(workingMessage(state({
+		todos: [todo({ status: "in_progress", subject: "ship the widget" })],
+		agents: [agent({ role: "reviewer", activeTool: "grep" })],
 		jobs: [job()],
-	}));
-	assert.equal(msg, "migrate · 1 failed · 1 bg");
+	})), undefined);
+});
+
+test("workingMessage shows only the active foreground tool name", () => {
+	assert.equal(workingMessage(state({
+		activeTool: "apply_patch",
+		todos: [todo({ status: "in_progress", subject: "ship the widget" })],
+		agents: [agent({ role: "reviewer", activeTool: "grep" })],
+	})), "apply_patch");
 });
 
 test("title falls back to the bare workspace when nothing is happening", () => {

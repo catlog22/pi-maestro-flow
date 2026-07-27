@@ -15,10 +15,7 @@ export interface AmbientState {
 	jobs: readonly BashBgJob[];
 	running: boolean;
 	cwd?: string;
-}
-
-function activeTodo(todos: readonly TodoItem[]): TodoItem | undefined {
-	return todos.find((todo) => todo.status === "in_progress");
+	activeTool?: string;
 }
 
 function liveAgents(agents: readonly AgentRow[]): AgentRow[] {
@@ -36,29 +33,11 @@ function failedJobs(jobs: readonly BashBgJob[]): BashBgJob[] {
 /**
  * The streaming loader line.
  *
- * Returns undefined when cockpit knows nothing more than the host does, so the
- * default loader text is restored rather than replaced with something emptier.
+ * Keep the host's default "Working" label, elapsed time and interrupt hint.
+ * Only replace the label while a foreground tool is actively executing.
  */
 export function workingMessage(state: AmbientState): string | undefined {
-	const parts: string[] = [];
-	const todo = activeTodo(state.todos);
-	if (todo?.subject) parts.push(todo.subject);
-
-	const live = liveAgents(state.agents);
-	if (live.length === 1) {
-		const only = live[0];
-		parts.push(only.activeTool ? `${only.role} · ${only.activeTool}` : only.role);
-	} else if (live.length > 1) {
-		parts.push(`${live.length} agents`);
-	}
-
-	const failed = failedAgents(state.agents).length;
-	if (failed > 0) parts.push(`${failed} failed`);
-
-	const activeJobs = state.jobs.filter((job) => job.status === "running").length;
-	if (activeJobs > 0) parts.push(`${activeJobs} bg`);
-
-	return parts.length > 0 ? parts.join(" · ") : undefined;
+	return state.activeTool;
 }
 
 /**

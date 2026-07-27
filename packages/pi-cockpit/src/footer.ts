@@ -231,20 +231,29 @@ export function renderFooter(p: FooterParts): string[] {
 	if (p.cwd) leftParts.push(labelled(g.workspace, p.cwd, 0, "syntaxFunction"));
 	if (p.git) leftParts.push(labelled(g.git, p.git, 3, "syntaxFunction"));
 
-	const fittedLeft = fitSegmentsByPriority(
-		leftParts,
-		width,
-		utils.measure,
-		utils.clip,
-		g.ellipsis,
-		utils.measure(identitySeparator),
-	);
-	const line1 = fittedLeft.join(identitySeparator);
+	// line 1: a left identity group and one right-aligned resource group.
+	// The resource group progressively contracts before lower-priority identity
+	// segments are sacrificed: full bar → compact bar → percentage → token totals.
+	const resourceCandidates: string[] = [];
+	const statSeparator = ` ${sep} `;
+	const addResourceCandidate = (...parts: string[]): void => {
+		const candidate = parts.filter((part) => part !== "").join(statSeparator);
+		if (!resourceCandidates.includes(candidate)) resourceCandidates.push(candidate);
+	};
 
-	// line 2: one right-aligned resource group. Context progressively contracts
-	// before disappearing, while cumulative input/output remain the narrow-screen
-	// baseline so the existing usage contract is preserved.
-	const contextCandidates: string[] = [];
+	const t = p.totals;
+	const inputText = `${theme.fg("accent", g.tokensIn)}${fmtTokens(t.input)}`;
+	const outputText = `${theme.fg("success", g.tokensOut)}${fmtTokens(t.output)}`;
+	const tokenStats = [inputText, outputText];
+	const coreStats = [...tokenStats];
+	const hasCache = t.cacheRead > 0 || t.cacheWrite > 0;
+	if (hasCache && t.latestCacheHitRate !== undefined) {
+		coreStats.push(`${theme.fg("success", g.cacheHit)}${t.latestCacheHitRate.toFixed(0)}%`);
+	}
+	const fullStats = p.agentSummary
+		? [...coreStats, theme.fg("accent", p.agentSummary)]
+		: coreStats;
+
 	if (p.ctxWindow > 0) {
 		// A contextWindow that under-reports the live token count (custom providers
 		// do this) previously printed e.g. "137%" beside a bar clamped at full.
@@ -254,44 +263,65 @@ export function renderFooter(p: FooterParts): string[] {
 			`${contextMark(p.ctxPct, g)}${shownPct}%`,
 		);
 		const tokText = `${theme.fg("text", fmtTokens(p.ctxTokens))}${theme.fg("dim", "/")}${theme.fg("text", fmtTokens(p.ctxWindow))}`;
-		contextCandidates.push(
-			`${renderBar(p.ctxPct, 10, g, theme)} ${pctText} ${sep} ${tokText}`,
-			`${pctText} ${sep} ${tokText}`,
-			pctText,
-		);
+		const fullContext = `${renderBar(p.ctxPct, 10, g, theme)} ${pctText} ${sep} ${tokText}`;
+		const compactContext = `${renderBar(p.ctxPct, 5, g, theme)} ${pctText} ${sep} ${tokText}`;
+		const capacityContext = `${pctText} ${sep} ${tokText}`;
+		addResourceCandidate(fullContext, ...fullStats);
+		addResourceCandidate(fullContext, ...coreStats);
+		addResourceCandidate(compactContext, ...coreStats);
+		addResourceCandidate(compactContext, ...tokenStats);
+		addResourceCandidate(capacityContext, ...tokenStats);
+		addResourceCandidate(pctText, ...tokenStats);
+		addResourceCandidate(...tokenStats);
+		addResourceCandidate(pctText);
+	} else {
+		addResourceCandidate(...fullStats);
+		addResourceCandidate(...coreStats);
+		addResourceCandidate(...tokenStats);
 	}
+	resourceCandidates.push("");
 
-	const t = p.totals;
-	const stats: PrioritizedSegment[] = [
-		{ text: `${theme.fg("accent", g.tokensIn)}${fmtTokens(t.input)}`, priority: 7 },
-		{ text: `${theme.fg("success", g.tokensOut)}${fmtTokens(t.output)}`, priority: 6 },
-	];
-	const hasCache = t.cacheRead > 0 || t.cacheWrite > 0;
-	if (hasCache && t.latestCacheHitRate !== undefined) {
-		stats.push({ text: `${theme.fg("success", g.cacheHit)}${t.latestCacheHitRate.toFixed(0)}%`, priority: 4 });
-	}
-	if (p.agentSummary) stats.push({ text: theme.fg("accent", p.agentSummary), priority: 0 });
-	const statSeparator = ` ${sep} `;
-	let fittedStats: string[] = [];
-	const candidates = contextCandidates.length > 0 ? contextCandidates : [undefined];
-	for (const context of candidates) {
-		const segments = context
-			? [{ text: context, priority: 5, clippable: false }, ...stats]
-			: stats;
-		fittedStats = fitSegmentsByPriority(
-			segments,
-			width,
+	const fitLeftBeside = (right: string): string[] => {
+		const rightWidth = utils.measure(right);
+		const available = Math.max(0, width - rightWidth - (right ? 1 : 0));
+		return fitSegmentsByPriority(
+			leftParts,
+			available,
 			utils.measure,
 			utils.clip,
 			g.ellipsis,
-			utils.measure(statSeparator),
+			utils.measure(identitySeparator),
 		);
-		if (!context || fittedStats.includes(context)) break;
-	}
-	const right2 = fittedStats.join(statSeparator);
-	const line2 = alignRight("", right2, width, utils.measure);
+	};
 
-	const lines = [utils.clip(line1, width, ell), utils.clip(line2, width, ell)];
+	let right1 = "";
+	let fittedLeft: string[] = [];
+	let selected = false;
+	for (const candidate of resourceCandidates) {
+		const candidateLeft = fitLeftBeside(candidate);
+		if (candidateLeft.length !== leftParts.length) continue;
+		right1 = candidate;
+		fittedLeft = candidateLeft;
+		selected = true;
+		break;
+	}
+	if (!selected) {
+		// At extreme widths keep the highest-priority identity segment beside the
+		// smallest useful context summary. If even that cannot fit, identity wins.
+		for (let index = resourceCandidates.length - 2; index >= 0; index--) {
+			const candidate = resourceCandidates[index];
+			const candidateLeft = fitLeftBeside(candidate);
+			if (candidateLeft.length === 0) continue;
+			right1 = candidate;
+			fittedLeft = candidateLeft;
+			selected = true;
+			break;
+		}
+	}
+	if (!selected) fittedLeft = fitLeftBeside("");
+
+	const line1 = alignRight(fittedLeft.join(identitySeparator), right1, width, utils.measure);
+	const lines = [utils.clip(line1, width, ell)];
 	if (p.workflowStatus) {
 		lines.push(utils.clip(theme.fg("muted", p.workflowStatus), width, ell));
 	}

@@ -113,3 +113,11 @@ test("Cockpit follows terminal width changes while the footer is idle", () => {
 	assert.match(source, /tui\.requestRender\(true\)/);
 	assert.match(source, /clearInterval\(widthTimer\)/);
 });
+
+test("Cockpit working label follows the foreground tool lifecycle", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(source, /pi\.on\("tool_execution_start"/);
+	assert.match(source, /activeTools\.set\(e\.toolCallId, e\.toolName\)/);
+	assert.match(source, /activeTools\.delete\(e\.toolCallId\)/);
+	assert.match(source, /activeTool: \[\.\.\.activeTools\.values\(\)\]\.at\(-1\)/);
+});

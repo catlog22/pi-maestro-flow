@@ -82,7 +82,7 @@ test("renderFooter never exceeds width across many widths", () => {
 				{ key: "maestro-auto-compact", text: "CTX 72%" },
 			],
 		}));
-		assert.ok(lines.length === 2 || lines.length === 3);
+		assert.ok(lines.length === 1 || lines.length === 2);
 		for (const l of lines) assert.ok(utils.measure(l) <= width, `width ${width}: line too long (${utils.measure(l)}): ${l}`);
 	}
 });
@@ -106,10 +106,10 @@ test("ascii vs nerd bar uses different glyphs", () => {
 
 test("no context window omits the gauge from the resource line", () => {
 	const lines = renderFooter(parts({ ctxWindow: 0 }));
-	assert.ok(!lines[1].includes("%"));
+	assert.ok(!lines[0].includes("%"));
 });
 
-test("context and token usage form one right-aligned resource group", () => {
+test("context and token usage form one right-aligned resource group on line one", () => {
 	const lines = renderFooter(parts({
 		width: 100,
 		ctxPct: 20,
@@ -124,11 +124,16 @@ test("context and token usage form one right-aligned resource group", () => {
 			latestCacheHitRate: 99,
 		},
 	}));
-	assert.doesNotMatch(lines[0], /\[██/);
-	assert.equal(
-		lines[1].trimStart(),
-		"[██░░░░░░░░] 20% · 80.6k/400k · ↑84.8k · ↓21k · ⚡99%",
-	);
+	assert.equal(lines.length, 1);
+	assert.match(lines[0], /^⚡ stream-70b ·  main/);
+	assert.match(lines[0], /\[██░░░░░░░░\] 20% · 80\.6k\/400k · ↑84\.8k · ↓21k · ⚡99%$/);
+});
+
+test("medium footer uses the compact five-cell context bar", () => {
+	const lines = renderFooter(parts({ width: 60 }));
+	assert.equal(lines.length, 1);
+	assert.match(lines[0], /\[██░░░\] 42% · 84k\/200k · ↑12k · ↓3\.4k$/);
+	assert.doesNotMatch(lines[0], /\[████░░░░░░\]/);
 });
 
 test("overlong model is clipped within width", () => {
@@ -142,21 +147,23 @@ test("footer omits provider while retaining the active model", () => {
 	assert.doesNotMatch(lines.join("\n"), /maestro-qwen/);
 });
 
-test("narrow footer keeps high-priority token totals instead of dropping the right side", () => {
+test("narrow footer simplifies the resource group before dropping identity", () => {
 	const lines = renderFooter(parts({ width: 20 }));
-	assert.ok(lines[1].includes("↑12k"));
-	assert.ok(lines[1].includes("↓3.4k"));
+	assert.equal(lines.length, 1);
+	assert.match(lines[0], /^⚡ stream-70b/);
+	assert.match(lines[0], /42%$/);
+	assert.doesNotMatch(lines[0], /\[/);
 });
 
-test("approval mode leads line one while usage remains on line two", () => {
+test("approval mode leads line one while usage stays right aligned", () => {
 	const lines = renderFooter(parts({
 		width: 80,
 		extensionStatuses: [{ key: "approval-mode", text: "APPROVAL YOLO" }],
 	}));
-	assert.equal(lines.length, 2);
+	assert.equal(lines.length, 1);
 	assert.match(lines[0], /^APPROVAL YOLO · ⚡ stream-70b/);
-	assert.equal(lines[1].length, 80);
-	assert.match(lines[1], /↑12k · ↓3\.4k$/);
+	assert.equal(lines[0].length, 80);
+	assert.match(lines[0], /↑12k · ↓3\.4k$/);
 });
 
 test("auto compact stays hidden while approval remains at the start of line one", () => {
@@ -167,18 +174,18 @@ test("auto compact stays hidden while approval remains at the start of line one"
 			{ key: "maestro-auto-compact-mode", text: "AUTO ON" },
 		],
 	}));
-	assert.equal(lines.length, 2);
+	assert.equal(lines.length, 1);
 	assert.match(lines[0], /^APPROVAL default · ⚡ stream-70b/);
 	assert.doesNotMatch(lines.join("\n"), /AUTO COMPACT|AUTO ON/);
-	assert.equal(lines[1].length, 100);
-	assert.match(lines[1], /↑12k · ↓3\.4k$/);
+	assert.equal(lines[0].length, 100);
+	assert.match(lines[0], /↑12k · ↓3\.4k$/);
 });
 
 test("footer uses a workspace icon and omits monetary cost while keeping token usage", () => {
 	const lines = renderFooter(parts({ cwd: "~/work/project", width: 100 }));
 	assert.match(lines[0], /^⚡ stream-70b ·  ~\/work\/project/);
-	assert.match(lines[1], /↑12k/);
-	assert.match(lines[1], /↓3.4k/);
+	assert.match(lines[0], /↑12k/);
+	assert.match(lines[0], /↓3.4k/);
 	assert.doesNotMatch(lines.join("\n"), /\$0\.52/);
 });
 
@@ -261,10 +268,10 @@ test("extension statuses render on a dedicated line and duplicate thinking is om
 			{ key: "mode", text: "PLAN" },
 		],
 	}));
-	assert.equal(lines.length, 3);
-	assert.match(lines[2], /^PLAN/);
-	assert.ok(lines[2].includes("PLAN"));
-	assert.ok(!lines[2].includes("high"));
+	assert.equal(lines.length, 2);
+	assert.match(lines[1], /^PLAN/);
+	assert.ok(lines[1].includes("PLAN"));
+	assert.ok(!lines[1].includes("high"));
 });
 
 test("workflow status renders before generic extension statuses", () => {
@@ -272,9 +279,9 @@ test("workflow status renders before generic extension statuses", () => {
 		workflowStatus: "⚑ session · running · 003/execute",
 		extensionStatuses: [{ key: "mode", text: "PLAN" }],
 	}));
-	assert.equal(lines.length, 4);
-	assert.match(lines[2], /^⚑ session/);
-	assert.match(lines[3], /PLAN/);
+	assert.equal(lines.length, 3);
+	assert.match(lines[1], /^⚑ session/);
+	assert.match(lines[2], /PLAN/);
 });
 
 test("fmtTokens formats k and m", () => {

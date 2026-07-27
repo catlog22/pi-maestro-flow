@@ -61,6 +61,7 @@ export default function (pi: ExtensionAPI): void {
 	let lastCtx: ExtensionContext | undefined;
 	let capturedTui: TUI | undefined;
 	let running = false;
+	const activeTools = new Map<string, string>();
 	let tick: ReturnType<typeof setInterval> | undefined;
 	// Persisted rather than toasted: a config that failed to load silently downgrades
 	// the whole session to defaults, so it belongs in a slot that does not scroll away.
@@ -84,6 +85,7 @@ export default function (pi: ExtensionAPI): void {
 				jobs: bashBg.snapshot(),
 				running,
 				cwd: formatCwd(ctx.sessionManager.getCwd()),
+				activeTool: [...activeTools.values()].at(-1),
 			};
 			ctx.ui.setWorkingMessage(workingMessage(state));
 			ctx.ui.setTitle(titleFor(state, { ok: g.check, fail: g.cross }));
@@ -271,17 +273,23 @@ export default function (pi: ExtensionAPI): void {
 		setTodoExpanded(typeof requested === "boolean" ? requested : !config.todoExpanded);
 	});
 
-	// --- todo changes: re-hydrate from the durable snapshot the todo tool persists ---
+	// --- foreground tool label + todo changes ---
+	pi.on("tool_execution_start", (e) => {
+		activeTools.set(e.toolCallId, e.toolName);
+		req();
+	});
 	pi.on("tool_execution_end", (e, ctx) => {
+		activeTools.delete(e.toolCallId);
 		if (e.toolName === TODO_TOOL_NAME) {
 			todos.hydrateFromEntries(ctx.sessionManager.getEntries());
-			req();
 		}
+		req();
 	});
 
 	// --- session + agent lifecycle ---
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
+		activeTools.clear();
 		ensureConfigExists();
 		config = loadConfig((m, l) => {
 			try {
@@ -312,6 +320,7 @@ export default function (pi: ExtensionAPI): void {
 		});
 		lastCtx = undefined;
 		running = false;
+		activeTools.clear();
 		invalidateUsageCache();
 		agents.clear();
 		bashBg.clear();
@@ -324,6 +333,7 @@ export default function (pi: ExtensionAPI): void {
 	});
 	pi.on("agent_end", () => {
 		running = false;
+		activeTools.clear();
 		syncTick();
 		req();
 	});
