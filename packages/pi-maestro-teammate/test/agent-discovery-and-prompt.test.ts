@@ -474,7 +474,9 @@ Proxy specialist prompt.
   });
 
   const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const previousDepth = process.env.PI_TEAMMATE_DEPTH;
   process.env.PI_TEAMMATE_CHILD = "1";
+  process.env.PI_TEAMMATE_DEPTH = "1";
   try {
     registerTeammateExtension(pi as unknown as ExtensionAPI);
     const teammate = tools.get("teammate");
@@ -499,10 +501,66 @@ Proxy specialist prompt.
     const injected = beforeAgentStartHandlers[0]({ systemPrompt: "Base child prompt" }, context);
     assert.match(injected.systemPrompt, /- proxy-specialist: Specialist visible to child proxy tools/);
     assert.doesNotMatch(injected.systemPrompt, /Proxy specialist prompt/);
+    assert.match(injected.systemPrompt, /depth 1\/2/);
+    assert.match(injected.systemPrompt, /Remaining teammate depth: 1/);
   } finally {
     if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousDepth === undefined) delete process.env.PI_TEAMMATE_DEPTH;
+    else process.env.PI_TEAMMATE_DEPTH = previousDepth;
     fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("terminal depth child knows its level and has no teammate dispatch tool", () => {
+  const tools = new Map<string, Record<string, unknown>>();
+  const beforeAgentStartHandlers: Array<
+    (event: { systemPrompt: string }, ctx: unknown) => { systemPrompt: string }
+  > = [];
+  const pi = new Proxy({
+    events: { on: () => () => {}, emit() {} },
+    registerTool(tool: Record<string, unknown>) {
+      tools.set(tool.name as string, tool);
+    },
+    on(event: string, handler: (event: unknown, ctx: unknown) => void) {
+      if (event === "before_agent_start") {
+        beforeAgentStartHandlers.push(handler as typeof beforeAgentStartHandlers[number]);
+      }
+    },
+  }, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      return () => {};
+    },
+  });
+
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const previousDepth = process.env.PI_TEAMMATE_DEPTH;
+  process.env.PI_TEAMMATE_CHILD = "1";
+  process.env.PI_TEAMMATE_DEPTH = "2";
+  try {
+    registerTeammateExtension(pi as unknown as ExtensionAPI);
+    assert.equal(tools.has("teammate"), false);
+    assert.equal(tools.has("teammate-send"), true);
+    assert.equal(tools.has("teammate-list"), true);
+    assert.equal(tools.has("teammate-watch"), true);
+    assert.equal(tools.has("teammate-wait"), true);
+
+    assert.equal(beforeAgentStartHandlers.length, 1);
+    const context = {
+      cwd: process.cwd(),
+      modelRegistry: { getAvailable: () => [] },
+    };
+    const injected = beforeAgentStartHandlers[0]({ systemPrompt: "Base terminal prompt" }, context);
+    assert.match(injected.systemPrompt, /depth 2\/2/);
+    assert.match(injected.systemPrompt, /Remaining teammate depth: 0/);
+    assert.match(injected.systemPrompt, /terminal teammate level/i);
+    assert.match(injected.systemPrompt, /dispatch tool is intentionally unavailable/i);
+  } finally {
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+    if (previousDepth === undefined) delete process.env.PI_TEAMMATE_DEPTH;
+    else process.env.PI_TEAMMATE_DEPTH = previousDepth;
   }
 });
 

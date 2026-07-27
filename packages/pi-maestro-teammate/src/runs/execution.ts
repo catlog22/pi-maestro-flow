@@ -889,14 +889,15 @@ export function getPiSpawnCommand(
 // AC4: Nesting depth guard
 // ---------------------------------------------------------------------------
 
-export const MAX_DEFAULT_DEPTH = 3;
+/** Maximum number of teammate-agent levels below the main agent. */
+export const MAX_DEFAULT_DEPTH = 2;
 
 export const DEFAULT_MAX_AGENTS = 15;
 
 /**
  * Ceiling on concurrently live agents across the whole dispatch tree. The
  * per-call `maxAgents` limit only bounds a single dispatch, so without this a
- * depth-3 tree of 15-task graphs could reach 15^3 child processes.
+ * depth-2 tree of 15-task graphs could reach 15^2 child processes.
  */
 export const DEFAULT_MAX_ACTIVE_AGENTS = 32;
 

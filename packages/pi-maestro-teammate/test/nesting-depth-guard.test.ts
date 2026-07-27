@@ -61,6 +61,7 @@ async function dispatchNested(
 }
 
 test("checkDepthGuard rejects at the configured ceiling, not below it", () => {
+  assert.equal(MAX_DEFAULT_DEPTH, 2);
   assert.equal(checkDepthGuard(0).allowed, true);
   assert.equal(checkDepthGuard(MAX_DEFAULT_DEPTH - 1).allowed, true);
   assert.equal(checkDepthGuard(MAX_DEFAULT_DEPTH).allowed, false);

@@ -613,7 +613,7 @@ test("detach and background acknowledgement never publish post-settlement update
   ];
 });
 
-test("foreground nested proxy updates preserve a renderable parent-child-grandchild tree", async () => {
+test("foreground nested proxy updates preserve the two allowed teammate levels", async () => {
   let spawnIndex = 0;
   let rootStdout: PassThrough | undefined;
   const spawnChildProcess = (() => {
@@ -664,23 +664,10 @@ test("foreground nested proxy updates preserve a renderable parent-child-grandch
     },
     () => {},
   );
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  const child = updates.flatMap((update) => update.details?.childCalls ?? [])
-    .find((candidate) => candidate.name === "child");
-  assert.ok(child);
-  rootOptions.onChildRequest?.(
-    {
-      tool: "teammate",
-      requestId: "grandchild",
-      parentCid: child.correlationId,
-      params: { agent: "delegate", name: "grandchild", task: "grandchild", background: false },
-    },
-    () => {},
-  );
-  await new Promise((resolve) => setTimeout(resolve, 5));
-  const treeUpdate = updates.findLast((update) => (update.details?.childCalls?.length ?? 0) >= 2);
-  assert.ok(treeUpdate);
   try {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const treeUpdate = updates.findLast((update) => (update.details?.childCalls?.length ?? 0) >= 1);
+    assert.ok(treeUpdate);
     const rendered = renderTeammateResult(
       treeUpdate,
       { expanded: false },
@@ -688,7 +675,6 @@ test("foreground nested proxy updates preserve a renderable parent-child-grandch
     ).render(120).join("\n");
     assert.match(rendered, /• 1 .*@planner/);
     assert.match(rendered, /  └─ .*@child/);
-    assert.match(rendered, /     └─ .*@grandchild/);
   } finally {
     rootStdout?.write(`${JSON.stringify({ type: "agent_end" })}\n`);
     await execution;

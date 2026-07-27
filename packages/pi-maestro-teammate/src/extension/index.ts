@@ -27,6 +27,8 @@ import {
   sendRpcMessage,
   truncateUtf8Tail,
   checkDepthGuard,
+  getTeammateDepth,
+  MAX_DEFAULT_DEPTH,
   resolveMaxActiveAgents,
   isStructuredOutputSettlementDiagnostic,
 } from "../runs/execution.ts";
@@ -247,6 +249,31 @@ const TEAMMATE_WAIT_GUIDELINES = [
   "Call teammate-wait exactly once with a returned name or correlation ID and a bounded timeout instead of repeatedly calling teammate-watch.",
   "Treat result-ready as a usable teammate result; do not continue waiting only for agent_end lifecycle confirmation.",
 ];
+
+const TEAMMATE_DEPTH_START_MARKER = "<teammate_nesting_context>";
+const TEAMMATE_DEPTH_END_MARKER = "</teammate_nesting_context>";
+
+function appendTeammateDepthContext(systemPrompt: string, depth: number): string {
+  const current = Math.max(0, Math.min(MAX_DEFAULT_DEPTH, depth));
+  const remaining = Math.max(0, MAX_DEFAULT_DEPTH - current);
+  const role = current === 0 ? "main agent" : "teammate agent";
+  const dispatchGuidance = remaining === 0
+    ? "This is the terminal teammate level. The teammate dispatch tool is intentionally unavailable; complete the assigned work directly and do not attempt further delegation."
+    : `You may delegate through the teammate tool for ${remaining} more level${remaining === 1 ? "" : "s"}.`;
+  const depthContext = [
+    TEAMMATE_DEPTH_START_MARKER,
+    "# Teammate Nesting Context",
+    `You are the ${role} at depth ${current}/${MAX_DEFAULT_DEPTH}. Remaining teammate depth: ${remaining}.`,
+    dispatchGuidance,
+    TEAMMATE_DEPTH_END_MARKER,
+  ].join("\n");
+  const start = systemPrompt.indexOf(TEAMMATE_DEPTH_START_MARKER);
+  const end = systemPrompt.indexOf(TEAMMATE_DEPTH_END_MARKER);
+  if (start >= 0 && end >= start) {
+    return `${systemPrompt.slice(0, start)}${depthContext}${systemPrompt.slice(end + TEAMMATE_DEPTH_END_MARKER.length)}`;
+  }
+  return `${systemPrompt}\n\n${depthContext}`;
+}
 
 function backgroundWaitGuidance(correlationId: string): string {
   return `correlationId=${correlationId}. Automatic teammate-complete notification will trigger a new turn with the result. Do not poll teammate-watch or teammate-list. If this turn must consume the result, call teammate-wait exactly once with { name: "${correlationId}" }; otherwise end the turn now.`;
@@ -1257,6 +1284,8 @@ export default function registerTeammateExtension(
   );
 
   const isChild = process.env.PI_TEAMMATE_CHILD === "1";
+  const currentDepth = isChild ? getTeammateDepth() : 0;
+  const canDispatchNestedTeammate = !isChild || currentDepth < MAX_DEFAULT_DEPTH;
 
   // UCL: expose teammate tools to the GUI sidecar via the shared cross-extension
   // registry (globalThis symbol). Each extension owns a distinct registerTool, so
@@ -1288,7 +1317,8 @@ export default function registerTeammateExtension(
     ctx: ExtensionContext,
   ): { systemPrompt: string } => {
     const withModels = appendModelCatalog(event.systemPrompt, refreshModelCatalog(ctx));
-    return { systemPrompt: appendAgentCatalog(withModels, ctx.cwd) };
+    const withAgents = appendAgentCatalog(withModels, ctx.cwd);
+    return { systemPrompt: appendTeammateDepthContext(withAgents, currentDepth) };
   };
 
   // =========================================================================
@@ -1353,7 +1383,7 @@ export default function registerTeammateExtension(
       publishSessionIdentity(ctx);
       refreshModelCatalog(ctx);
       proxyTeammateTool.description = buildTeammateToolDescription(ctx.cwd);
-      pi.registerTool(proxyTeammateTool);
+      if (canDispatchNestedTeammate) pi.registerTool(proxyTeammateTool);
     });
     pi.on("before_agent_start", injectTeammateContext);
     pi.on("session_compact", (_event, ctx) => publishSessionIdentity(ctx));
@@ -1535,7 +1565,7 @@ export default function registerTeammateExtension(
         return proxyCall<Details>("teammate", routed, signal);
       },
     };
-    pi.registerTool(proxyTeammateTool);
+    if (canDispatchNestedTeammate) pi.registerTool(proxyTeammateTool);
 
     pi.registerTool({
       name: "teammate-send",
