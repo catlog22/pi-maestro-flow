@@ -157,15 +157,28 @@ test("an unsafe approval mode survives when the status row must be truncated", (
 	assert.match(line, /APPROVAL yolo/);
 });
 
-test("ACT, PLAN and READY execution modes use distinct semantic colors", () => {
+test("ACT is omitted while PLAN and READY retain distinct semantic colors", () => {
 	const colorTheme: Pick<Theme, "fg"> = { fg: (color, text) => `[${color}]${text}` };
 	const renderMode = (text: string): string => renderFooter(parts({
 		theme: colorTheme,
 		extensionStatuses: [{ key: "mode", text }],
 	})).at(-1)!;
-	assert.match(renderMode("ACT"), /\[success\]ACT/);
+	assert.doesNotMatch(renderMode("ACT"), /ACT/);
 	assert.match(renderMode("PLAN"), /\[warning\]PLAN/);
 	assert.match(renderMode("READY"), /\[accent\]READY/);
+});
+
+test("internal swarm projection statuses stay out of the footer", () => {
+	const line = renderFooter(parts({
+		extensionStatuses: [
+			{ key: "team-swarm", text: "TEAM SWARM 3/4" },
+			{ key: "swarm-best", text: "BEST 89%" },
+			{ key: "swarm-state", text: "COMPLETED" },
+			{ key: "approval-mode", text: "APPROVAL YOLO" },
+		],
+	})).join("\n");
+	assert.doesNotMatch(line, /TEAM SWARM|BEST|COMPLETED/);
+	assert.match(line, /APPROVAL YOLO/);
 });
 
 test("extension statuses render on a dedicated line and duplicate thinking is omitted", () => {

@@ -50,7 +50,9 @@ const NERD_GLYPHS: IconGlyphs = {
 	dotIdle: "·",
 	check: "✓",
 	cross: "✕",
-	pending: "·",
+	// A hollow ring, not the idle dot: "waiting to start" and "running but quiet"
+	// are different states and must not share a glyph.
+	pending: "○",
 	blocked: "!",
 	barDone: "█",
 	barActive: "▓",
@@ -81,7 +83,7 @@ const ASCII_GLYPHS: IconGlyphs = {
 	dotIdle: ".",
 	check: "+",
 	cross: "x",
-	pending: ".",
+	pending: "o",
 	blocked: "!",
 	barDone: "#",
 	barActive: "+",

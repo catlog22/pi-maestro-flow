@@ -160,6 +160,14 @@ function extensionStatusColor(status: ExtensionStatusSegment): ThemeColor {
 	return "text";
 }
 
+const HIDDEN_EXTENSION_STATUS_KEYS = new Set(["team-swarm", "swarm-best"]);
+
+function isVisibleExtensionStatus(status: ExtensionStatusSegment, thinking?: string): boolean {
+	if (status.text === "" || status.text === thinking) return false;
+	if (HIDDEN_EXTENSION_STATUS_KEYS.has(status.key)) return false;
+	return !/^(?:TEAM SWARM\b|BEST\b|COMPLETED$|ACT$)/i.test(status.text.trim());
+}
+
 function alignRight(left: string, right: string, width: number, measure: WidthUtils["measure"]): string {
 	if (right === "") return left;
 	if (left === "") return right;
@@ -178,14 +186,14 @@ export function renderFooter(p: FooterParts): string[] {
 	// line 1: prioritized left segments · context gauge (right)
 	// minWidth keeps a glyph-prefixed segment from decaying into "{icon}…", which
 	// costs columns and tells the user nothing about the path or branch.
-	const labelled = (glyph: string, value: string, priority: number): PrioritizedSegment => ({
-		text: `${theme.fg("mdLink", glyph)} ${theme.fg("accent", value)}`,
+	const labelled = (glyph: string, value: string, priority: number, color: ThemeColor): PrioritizedSegment => ({
+		text: `${theme.fg(color, glyph)} ${theme.fg(color, value)}`,
 		priority,
 		minWidth: utils.measure(glyph) + 1 + utils.measure(g.ellipsis) + 3,
 	});
 	const leftParts: PrioritizedSegment[] = [];
-	if (p.cwd) leftParts.push(labelled(g.workspace, p.cwd, 0));
-	if (p.git) leftParts.push(labelled(g.git, p.git, 3));
+	if (p.cwd) leftParts.push(labelled(g.workspace, p.cwd, 0, "syntaxString"));
+	if (p.git) leftParts.push(labelled(g.git, p.git, 3, "mdLink"));
 
 	let right1 = "";
 	if (p.ctxWindow > 0) {
@@ -216,10 +224,10 @@ export function renderFooter(p: FooterParts): string[] {
 	// actually answers "what am I talking to?".
 	const modelSeparator = theme.fg("dim", " · ");
 	const modelSegs: PrioritizedSegment[] = [
-		{ text: theme.fg("text", p.model), priority: 3 },
+		{ text: theme.fg("syntaxFunction", p.model), priority: 3 },
 	];
 	if (p.thinking && p.thinking !== "off") {
-		modelSegs.push({ text: theme.fg("accent", `${p.thinking}`), priority: 2, clippable: false });
+		modelSegs.push({ text: theme.fg("syntaxKeyword", `${p.thinking}`), priority: 2, clippable: false });
 	}
 	if (p.provider) modelSegs.unshift({ text: theme.fg("muted", p.provider), priority: 1 });
 	const modelLeft = modelSegs.map((seg) => seg.text).join(modelSeparator);
@@ -264,9 +272,7 @@ export function renderFooter(p: FooterParts): string[] {
 	if (p.workflowStatus) {
 		lines.push(utils.clip(theme.fg("muted", p.workflowStatus), width, ell));
 	}
-	const statuses = (p.extensionStatuses ?? []).filter(
-		(status) => status.text !== "" && status.text !== p.thinking,
-	);
+	const statuses = (p.extensionStatuses ?? []).filter((status) => isVisibleExtensionStatus(status, p.thinking));
 	if (statuses.length > 0) {
 		const statusSeparator = ` ${sep} `;
 		const fittedStatuses = fitSegmentsByPriority(

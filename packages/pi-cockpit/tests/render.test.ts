@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { renderAgents, renderTodos, type WidthUtils } from "../src/render.ts";
+import { renderAgents, renderTodos, type PaintTheme, type WidthUtils } from "../src/render.ts";
 import { resolveGlyphs } from "../src/icons.ts";
 import type { AgentRow, TodoItem } from "../src/types.ts";
 
@@ -175,9 +175,45 @@ test("renderTodos list: summary first + sorted rows + glyphs", () => {
 	// sorted: in_progress (rank 1) → blocked (rank 2) → pending (rank 3) → completed (rank 4)
 	assert.ok(lines[1].includes("⠋"));  // in_progress spinner
 	assert.ok(lines[2].includes("!"));  // blocked
-	assert.ok(lines[3].includes("·"));  // pending
+	assert.ok(lines[3].includes("○"));  // pending
 	assert.ok(lines[4].includes("✓"));  // completed
 	for (const l of lines) assert.ok(utils.measure(l) <= 80);
+});
+
+test("renderTodos paints status on hue, weight and strikethrough", () => {
+	const painted: PaintTheme = {
+		fg: (color, text) => `[${color}]${text}[/]`,
+		bold: (text) => `<b>${text}</b>`,
+		strikethrough: (text) => `<s>${text}</s>`,
+	};
+	const wide: WidthUtils = { measure: (s) => s.length, clip: (s) => s };
+	const lines = renderTodos(
+		[todo("0", "completed"), todo("1", "in_progress"), todo("2", "blocked"), todo("3", "pending")],
+		"list",
+		400,
+		painted,
+		wide,
+		opts,
+	);
+	// A completed subject is struck through and dimmed; the check glyph stays green.
+	assert.ok(lines[4].includes("<s>[dim]task 0[/]</s>"));
+	assert.ok(lines[4].includes("[success]✓[/]"));
+	// The running row is the only one carrying weight, and it owns warning — accent
+	// stays reserved for role identity.
+	assert.ok(lines[1].includes("<b>[text]task 1[/]</b>"));
+	assert.ok(lines[1].includes("[warning]⠋[/]"));
+	assert.ok(!lines[1].includes("[accent]"));
+	assert.ok(lines[2].includes("[error]!"));
+	assert.ok(lines[3].includes("[accent]○[/]"));
+	assert.ok(lines[3].includes("[text]task 3[/]"));
+	// Nothing but the completed row is struck.
+	for (const line of [lines[1], lines[2], lines[3]]) assert.ok(!line.includes("<s>"));
+});
+
+test("renderTodos degrades when the theme exposes no weight or strikethrough", () => {
+	const lines = renderTodos([todo("0", "completed"), todo("1", "in_progress")], "list", 200, theme, utils, opts);
+	assert.ok(lines.some((line) => line.includes("task 0")));
+	assert.ok(lines.some((line) => line.includes("task 1")));
 });
 
 test("renderTodos list collapsed: summary only", () => {

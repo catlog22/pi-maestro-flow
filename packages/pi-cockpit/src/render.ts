@@ -21,7 +21,19 @@ function formatDependencies(dependencies: readonly number[], glyphs: IconGlyphs)
 	return `${glyphs.depArrow} ${listed}${rest > 0 ? `,+${rest}` : ""}`;
 }
 
-export type PaintTheme = Pick<Theme, "fg">;
+// Weight and strikethrough are channels the hue palette cannot carry, so they are
+// part of the paint surface. They stay optional because the theme is injected: the
+// unit tests pass a bare `fg` stub, and a missing helper must degrade to plain text
+// rather than throw.
+export type PaintTheme = Pick<Theme, "fg"> & Partial<Pick<Theme, "bold" | "strikethrough">>;
+
+function bold(theme: PaintTheme, text: string): string {
+	return theme.bold ? theme.bold(text) : text;
+}
+
+function struck(theme: PaintTheme, text: string): string {
+	return theme.strikethrough ? theme.strikethrough(text) : text;
+}
 
 export interface RenderOpts {
 	glyphs: IconGlyphs;
@@ -61,7 +73,7 @@ function renderTodoBar(
 ): string {
 	const cell = (st: TodoItem["status"]): string => {
 		if (st === "completed") return theme.fg("success", g.barDone);
-		if (st === "in_progress") return theme.fg("accent", g.barActive);
+		if (st === "in_progress") return theme.fg("warning", g.barActive);
 		if (st === "blocked") return theme.fg("error", g.blocked);
 		return theme.fg("dim", g.barPending);
 	};
@@ -275,16 +287,35 @@ function todoActor(item: TodoItem, items: readonly TodoItem[]): string {
 	return `@${todoActorLabel(item.createdBy, items)}→${assigned}`;
 }
 
-function todoStateGlyph(
-	item: TodoItem,
-	glyphs: IconGlyphs,
-	spin: string,
-	theme: PaintTheme,
-): string {
-	if (item.status === "completed") return theme.fg("success", glyphs.check);
-	if (item.status === "in_progress") return theme.fg("accent", spin);
-	if (item.status === "blocked") return theme.fg("error", glyphs.blocked);
-	return theme.fg("dim", glyphs.pending);
+// One table for the whole todo surface: the summary's next-task label and the
+// expanded rows must not drift apart, and every status has to differ from its
+// neighbours by glyph *and* hue *and* weight — hue alone is not a channel a
+// colour-blind or monochrome terminal can read.
+interface TodoPaint {
+	glyph: string;
+	glyphColor: ThemeColor;
+	subjectColor: ThemeColor;
+	bold?: boolean;
+	struck?: boolean;
+}
+
+function todoPaint(status: TodoItem["status"], glyphs: IconGlyphs, spin: string): TodoPaint {
+	if (status === "completed") {
+		return { glyph: glyphs.check, glyphColor: "success", subjectColor: "dim", struck: true };
+	}
+	if (status === "in_progress") {
+		return { glyph: spin, glyphColor: "warning", subjectColor: "text", bold: true };
+	}
+	if (status === "blocked") {
+		return { glyph: glyphs.blocked, glyphColor: "error", subjectColor: "error" };
+	}
+	return { glyph: glyphs.pending, glyphColor: "accent", subjectColor: "text" };
+}
+
+function todoSubject(paint: TodoPaint, subject: string, theme: PaintTheme): string {
+	const text = theme.fg(paint.subjectColor, subject);
+	if (paint.struck) return struck(theme, text);
+	return paint.bold ? bold(theme, text) : text;
 }
 
 function todoNextLabel(
@@ -295,15 +326,11 @@ function todoNextLabel(
 	theme: PaintTheme,
 ): string {
 	const actor = todoActor(item, items);
-	const subjectColor: ThemeColor = item.status === "blocked"
-		? "error"
-		: item.status === "in_progress"
-			? "text"
-			: "muted";
+	const paint = todoPaint(item.status, glyphs, spin);
 	return [
-		todoStateGlyph(item, glyphs, spin, theme),
+		theme.fg(paint.glyphColor, paint.glyph),
 		actor ? theme.fg("mdLink", actor) : "",
-		theme.fg(subjectColor, item.subject),
+		todoSubject(paint, item.subject, theme),
 	].filter(Boolean).join(" ");
 }
 
@@ -358,7 +385,7 @@ export function renderTodos(
 	// The next actionable task outranks the counts: it is the one token that tells
 	// the user what to do, so it must survive when the terminal is narrow.
 	const summarySegs: PrioritizedSegment[] = [
-		{ text: theme.fg("muted", "Todo"), priority: 40, clippable: false },
+		{ text: theme.fg("syntaxFunction", "Todo"), priority: 40, clippable: false },
 		{ text: theme.fg("dim", `${done}/${total}`), priority: 80, clippable: false },
 		{ text: nextText, priority: 100, minWidth: 8 },
 	];
@@ -391,34 +418,11 @@ export function renderTodos(
 	const visible = ordered.slice(0, visibleCount);
 	const rows: string[] = [summaryLine];
 	for (const it of visible) {
-		let glyph: string;
-		let color: ThemeColor;
-		let tc: ThemeColor;
-		switch (it.status) {
-			case "completed":
-				glyph = g.check;
-				color = "success";
-				tc = "dim";
-				break;
-			case "in_progress":
-				glyph = spin;
-				color = "accent";
-				tc = "text";
-				break;
-			case "blocked":
-				glyph = g.blocked;
-				color = "error";
-				tc = "error";
-				break;
-			default:
-				glyph = g.pending;
-				color = "dim";
-				tc = "muted";
-		}
+		const paint = todoPaint(it.status, g, spin);
 		const actor = todoActor(it, items);
-		const segments = [`  ${theme.fg(color, glyph)}`];
+		const segments = [`  ${theme.fg(paint.glyphColor, paint.glyph)}`];
 		if (actor) segments.push(theme.fg("mdLink", actor));
-		segments.push(theme.fg(tc, it.subject));
+		segments.push(todoSubject(paint, it.subject, theme));
 		if (it.skills.length > 0) {
 			const primary = it.skills.find((skill) => skill.role === "primary") ?? it.skills[0];
 			segments.push(theme.fg("dim", `/${primary.name}${it.skills.length > 1 ? ` +${it.skills.length - 1}` : ""}`));
@@ -426,15 +430,7 @@ export function renderTodos(
 		if (it.status === "blocked" && it.blockedBy.length > 0) {
 			for (const dependencyId of it.blockedBy) {
 				const dependency = items.find((candidate) => candidate.id === dependencyId);
-				const depGlyph = dependency?.status === "completed"
-					? g.check
-					: dependency?.status === "in_progress"
-						? spin
-						: dependency?.status === "blocked"
-							? g.blocked
-							: dependency
-								? g.pending
-								: "?";
+				const depGlyph = dependency ? todoPaint(dependency.status, g, spin).glyph : "?";
 				segments.push(theme.fg("dim", `← ${depGlyph} ${dependency?.subject ?? "?"}`));
 			}
 		}
