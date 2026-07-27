@@ -81,3 +81,11 @@ mid-turn 自动压缩若持续失败（模型鉴权/summary 过大/provider 错�
 Pi 宿主 ToolExecutionComponent.updateDisplay() 把 renderCall/renderResult 的返回值直接 addChild 进 pi-tui Box，Box.render() 逐个调用 child.render(width)。宿主只 try/catch 渲染器抛出的异常，返回值类型错误不会被捕获，会逃逸成 uncaughtException 直接杀掉 pi（TypeError: child.render is not a function）。因此渲染器所有分支都必须返回带 render(width): string[] 的 Component（用 singleLine/textBlock/dynamicComponent 等 helper），禁止返回 AgentToolResult 形状的对象、字符串、数组或 Promise。src/extension/index.ts 不在任何 tsconfig 覆盖范围内（运行时靠 --experimental-transform-types 剥类型），类型系统拦不住这类错误，只能靠测试断言 typeof component.render === 'function'。
 
 </spec-entry>
+
+<spec-entry category="debug" keywords="bash_bg,foreground,background,triggerturn,process-exit,stdio" date="2026-07-27" sid="S-20260727-iqhy" title="bash_bg 前后台完成与通知解耦" description="防止已完成后台命令阻塞主流程或重复唤醒" source="master@c39ecb3a">
+
+### bash_bg 前后台完成与通知解耦
+
+bash_bg MUST 对齐 teammate 的前后台语义：action=run 在 foreground 窗口内完成时 MUST 直接返回结果且不得发送 triggerTurn completion；action=start 或 action=run 超时转入 background 后 MUST 先返回 acknowledgement，再于完成时发送且只发送一次 bash-bg-complete。shell process exit MUST 作为结果完成边界，stdout/stderr close 仅用于有界输出排空，不得因后代进程继承管道而把已退出任务继续标为 running。
+
+</spec-entry>
