@@ -117,7 +117,7 @@ test("overlong model is clipped within width", () => {
 
 test("footer omits provider while retaining the active model", () => {
 	const lines = renderFooter(parts({ width: 100, model: "qwen3-coder", provider: "maestro-qwen" }));
-	assert.match(lines[1], /qwen3-coder/);
+	assert.match(lines[0], /qwen3-coder/);
 	assert.doesNotMatch(lines.join("\n"), /maestro-qwen/);
 });
 
@@ -129,10 +129,20 @@ test("narrow footer keeps high-priority token totals instead of dropping the rig
 
 test("footer uses a workspace icon and omits monetary cost while keeping token usage", () => {
 	const lines = renderFooter(parts({ cwd: "~/work/project", width: 100 }));
-	assert.match(lines[0], /^ ~\/work\/project/);
+	assert.match(lines[0], /^⚡ stream-70b ·  ~\/work\/project/);
 	assert.match(lines[1], /↑12k/);
 	assert.match(lines[1], /↓3.4k/);
 	assert.doesNotMatch(lines.join("\n"), /\$0\.52/);
+});
+
+test("footer uses a coherent nerd icon set for model, workspace and git", () => {
+	const lines = renderFooter(parts({ cwd: "~/work/project", git: "main", width: 120 }));
+	assert.match(lines[0], /^⚡ stream-70b ·  ~\/work\/project ·  main/);
+});
+
+test("footer keeps readable ASCII icon fallbacks", () => {
+	const lines = renderFooter(parts({ glyphs: resolveGlyphs("ascii"), cwd: "~/work/project", git: "main", width: 120 }));
+	assert.match(lines[0], /^~ stream-70b \| \[\] ~\/work\/project \| git main/);
 });
 
 test("approval modes use distinct semantic colors", () => {

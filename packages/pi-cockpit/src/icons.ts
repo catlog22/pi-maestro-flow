@@ -36,6 +36,7 @@ export interface IconGlyphs {
 	emptyMark: string;
 	/** Vertical navigation affordance shown in help lines. */
 	upDown: string;
+	model: string;
 	workspace: string;
 	git: string;
 	tokensIn: string;
@@ -69,8 +70,9 @@ const NERD_GLYPHS: IconGlyphs = {
 	selectMarker: "›",
 	emptyMark: "○",
 	upDown: "↑↓",
-	workspace: "",
-	git: "⎇",
+	model: "⚡",
+	workspace: "",
+	git: "",
 	tokensIn: "↑",
 	tokensOut: "↓",
 	cost: "$",
@@ -100,8 +102,9 @@ const ASCII_GLYPHS: IconGlyphs = {
 	selectMarker: ">",
 	emptyMark: "o",
 	upDown: "up/dn",
-	workspace: "dir",
-	git: "*",
+	model: "~",
+	workspace: "[]",
+	git: "git",
 	tokensIn: "^",
 	tokensOut: "v",
 	cost: "$",

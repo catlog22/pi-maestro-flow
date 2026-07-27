@@ -191,9 +191,16 @@ export function renderFooter(p: FooterParts): string[] {
 		priority,
 		minWidth: utils.measure(glyph) + 1 + utils.measure(g.ellipsis) + 3,
 	});
-	const leftParts: PrioritizedSegment[] = [];
-	if (p.cwd) leftParts.push(labelled(g.workspace, p.cwd, 0, "syntaxString"));
-	if (p.git) leftParts.push(labelled(g.git, p.git, 3, "mdLink"));
+	const leftParts: PrioritizedSegment[] = [{
+		text: `${theme.fg("accent", g.model)} ${theme.fg("accent", p.model)}`,
+		priority: 5,
+		minWidth: utils.measure(g.model) + 1 + utils.measure(g.ellipsis) + 3,
+	}];
+	if (p.thinking && p.thinking !== "off") {
+		leftParts.push({ text: theme.fg("muted", p.thinking), priority: 4, clippable: false });
+	}
+	if (p.cwd) leftParts.push(labelled(g.workspace, p.cwd, 0, "syntaxFunction"));
+	if (p.git) leftParts.push(labelled(g.git, p.git, 3, "syntaxFunction"));
 
 	let right1 = "";
 	if (p.ctxWindow > 0) {
@@ -215,20 +222,16 @@ export function renderFooter(p: FooterParts): string[] {
 	}
 	const rightW = utils.measure(right1);
 	const availLeft = Math.max(0, width - rightW - (right1 ? 1 : 0));
-	const fittedLeft = fitSegmentsByPriority(leftParts, availLeft, utils.measure, utils.clip, g.ellipsis);
-	const line1 = alignRight(fittedLeft.join(" "), right1, width, utils.measure);
-
-	// line 2: model + thinking (left) · in/out/cache/cost/elapsed (right).
-	// Provider is configuration detail; the model already identifies the active
-	// runtime and keeps this high-frequency surface compact.
-	const modelSeparator = theme.fg("dim", " · ");
-	const modelSegs: PrioritizedSegment[] = [
-		{ text: theme.fg("syntaxFunction", p.model), priority: 3 },
-	];
-	if (p.thinking && p.thinking !== "off") {
-		modelSegs.push({ text: theme.fg("syntaxKeyword", `${p.thinking}`), priority: 2, clippable: false });
-	}
-	const modelLeft = modelSegs.map((seg) => seg.text).join(modelSeparator);
+	const identitySeparator = ` ${sep} `;
+	const fittedLeft = fitSegmentsByPriority(
+		leftParts,
+		availLeft,
+		utils.measure,
+		utils.clip,
+		g.ellipsis,
+		utils.measure(identitySeparator),
+	);
+	const line1 = alignRight(fittedLeft.join(identitySeparator), right1, width, utils.measure);
 
 	const t = p.totals;
 	const stats: PrioritizedSegment[] = [
@@ -242,29 +245,16 @@ export function renderFooter(p: FooterParts): string[] {
 	stats.push({ text: theme.fg("muted", p.elapsed), priority: 1 });
 	if (p.agentSummary) stats.push({ text: theme.fg("accent", p.agentSummary), priority: 0 });
 	const statSeparator = ` ${sep} `;
-	const modelReserve = width >= 32 ? Math.min(12, utils.measure(modelLeft)) : 0;
 	const fittedStats = fitSegmentsByPriority(
 		stats,
-		Math.max(0, width - modelReserve - (modelReserve > 0 ? 1 : 0)),
+		width,
 		utils.measure,
 		utils.clip,
 		g.ellipsis,
 		utils.measure(statSeparator),
 	);
 	const right2 = fittedStats.join(statSeparator);
-	const right2Width = utils.measure(right2);
-	const modelWidth = Math.max(0, width - right2Width - (right2 ? 1 : 0));
-	const fittedModel = modelWidth > 0
-		? fitSegmentsByPriority(
-			modelSegs,
-			modelWidth,
-			utils.measure,
-			utils.clip,
-			g.ellipsis,
-			utils.measure(modelSeparator),
-		).join(modelSeparator)
-		: "";
-	const line2 = alignRight(fittedModel, right2, width, utils.measure);
+	const line2 = right2;
 
 	const lines = [utils.clip(line1, width, ell), utils.clip(line2, width, ell)];
 	if (p.workflowStatus) {
