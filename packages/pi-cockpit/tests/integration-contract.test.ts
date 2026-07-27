@@ -26,11 +26,22 @@ test("Cockpit defaults Todo to a one-line collapsed summary", () => {
 test("Cockpit loads through the standard extension path without changing its public entry", () => {
 	const packageJson = JSON.parse(
 		readFileSync(new URL("../package.json", import.meta.url), "utf8"),
-	) as { main?: string; exports?: Record<string, string>; pi?: { extensions?: string[] } };
+	) as { main?: string; exports?: Record<string, string>; pi?: { extensions?: string[]; themes?: string[] } };
 	assert.deepEqual(packageJson.pi?.extensions, ["./src/extension/index.ts"]);
+	assert.deepEqual(packageJson.pi?.themes, ["./themes"]);
 	assert.equal(packageJson.main, "./src/index.ts");
 	assert.equal(packageJson.exports?.["."], "./src/index.ts");
 	assert.equal(extensionEntry, cockpitEntry);
+});
+
+test("Cockpit packages complete selectable color themes", () => {
+	for (const name of ["cockpit-notion", "cockpit-ocean", "cockpit-amber"]) {
+		const theme = JSON.parse(
+			readFileSync(new URL(`../themes/${name}.json`, import.meta.url), "utf8"),
+		) as { name?: string; colors?: Record<string, string> };
+		assert.equal(theme.name, name);
+		assert.ok(Object.keys(theme.colors ?? {}).length >= 51);
+	}
 });
 
 test("Cockpit owns native UI through events instead of clearing foreign widget keys", () => {

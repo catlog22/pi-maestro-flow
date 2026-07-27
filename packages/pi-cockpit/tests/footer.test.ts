@@ -133,7 +133,19 @@ test("approval mode moves to line two while usage remains right aligned", () => 
 		extensionStatuses: [{ key: "approval-mode", text: "APPROVAL YOLO" }],
 	}));
 	assert.equal(lines.length, 2);
-	assert.match(lines[1], /^! APPROVAL YOLO\s+↑12k · ↓3\.4k · 01:23$/);
+	assert.match(lines[1], /^APPROVAL YOLO\s+↑12k · ↓3\.4k · 01:23$/);
+});
+
+test("auto compact joins approval on line two", () => {
+	const lines = renderFooter(parts({
+		width: 100,
+		extensionStatuses: [
+			{ key: "approval-mode", text: "APPROVAL default" },
+			{ key: "maestro-auto-compact-mode", text: "AUTO ON" },
+		],
+	}));
+	assert.equal(lines.length, 2);
+	assert.match(lines[1], /^APPROVAL default · AUTO COMPACT ON\s+↑12k · ↓3\.4k · 01:23$/);
 });
 
 test("footer uses a workspace icon and omits monetary cost while keeping token usage", () => {
@@ -164,12 +176,9 @@ test("approval modes use distinct semantic colors", () => {
 	assert.match(renderMode("APPROVAL acceptEdits"), /\[success\]APPROVAL acceptEdits/);
 	assert.match(renderMode("APPROVAL dontAsk"), /\[warning\]APPROVAL dontAsk/);
 	assert.match(renderMode("APPROVAL plan"), /\[accent\]APPROVAL plan/);
-	// Disabling approval prompts is safety-relevant, so it carries a glyph as well
-	// as the error colour — colour alone must never encode this state.
-	assert.match(renderMode("APPROVAL YOLO"), /\[error\]! APPROVAL YOLO/);
-	assert.match(renderMode("APPROVAL bypassPermissions"), /\[error\]! APPROVAL bypassPermissions/);
-	// The safe modes must not gain the danger marker.
-	assert.doesNotMatch(renderMode("APPROVAL acceptEdits"), /!/);
+	assert.match(renderMode("APPROVAL YOLO"), /\[error\]APPROVAL YOLO/);
+	assert.match(renderMode("APPROVAL bypassPermissions"), /\[error\]APPROVAL bypassPermissions/);
+	assert.doesNotMatch(renderMode("APPROVAL YOLO"), /!/);
 });
 
 test("an unsafe approval mode survives when the status row must be truncated", () => {

@@ -14,6 +14,7 @@
   "license": "MIT",
   "files": [
     "src/",
+    "themes/",
     "README.md"
   ],
   "scripts": {
@@ -23,6 +24,9 @@
   "pi": {
     "extensions": [
       "./src/extension/index.ts"
+    ],
+    "themes": [
+      "./themes"
     ]
   },
   "peerDependencies": {

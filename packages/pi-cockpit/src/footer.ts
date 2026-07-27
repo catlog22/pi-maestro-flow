@@ -144,6 +144,9 @@ function approvalMode(status: ExtensionStatusSegment): string {
 }
 
 function extensionStatusColor(status: ExtensionStatusSegment): ThemeColor {
+	if (status.key === "maestro-auto-compact-mode") {
+		return /\bON$/i.test(status.text.trim()) ? "success" : "muted";
+	}
 	if (status.key === "mode") {
 		const mode = status.text.trim().toUpperCase();
 		if (mode === "ACT") return "success";
@@ -170,11 +173,12 @@ function isVisibleExtensionStatus(status: ExtensionStatusSegment, thinking?: str
 
 function paintExtensionStatus(
 	status: ExtensionStatusSegment,
-	glyphs: IconGlyphs,
 	theme: PaintTheme,
 ): string {
-	const unsafe = status.key === "approval-mode" && UNSAFE_APPROVAL_MODES.has(approvalMode(status));
-	return theme.fg(extensionStatusColor(status), `${unsafe ? `${glyphs.blocked} ` : ""}${status.text}`);
+	const text = status.key === "maestro-auto-compact-mode"
+		? status.text.replace(/^AUTO\s+/i, "AUTO COMPACT ")
+		: status.text;
+	return theme.fg(extensionStatusColor(status), text);
 }
 
 function alignRight(left: string, right: string, width: number, measure: WidthUtils["measure"]): string {
@@ -246,10 +250,13 @@ export function renderFooter(p: FooterParts): string[] {
 	const visibleStatuses = (p.extensionStatuses ?? []).filter(
 		(status) => isVisibleExtensionStatus(status, p.thinking),
 	);
-	const approvalStatus = visibleStatuses.find((status) => status.key === "approval-mode");
-	const approvalText = approvalStatus ? paintExtensionStatus(approvalStatus, g, theme) : "";
-	const approvalWidth = utils.measure(approvalText);
-	const statsWidth = Math.max(0, width - approvalWidth - (approvalText ? 1 : 0));
+	const controlStatuses = visibleStatuses.filter(
+		(status) => status.key === "approval-mode" || status.key === "maestro-auto-compact-mode",
+	);
+	const controlSeparator = ` ${sep} `;
+	const controlText = controlStatuses.map((status) => paintExtensionStatus(status, theme)).join(controlSeparator);
+	const controlWidth = utils.measure(controlText);
+	const statsWidth = Math.max(0, width - controlWidth - (controlText ? 1 : 0));
 	const stats: PrioritizedSegment[] = [
 		{ text: `${theme.fg("accent", g.tokensIn)}${fmtTokens(t.input)}`, priority: 5 },
 		{ text: `${theme.fg("success", g.tokensOut)}${fmtTokens(t.output)}`, priority: 4 },
@@ -270,20 +277,20 @@ export function renderFooter(p: FooterParts): string[] {
 		utils.measure(statSeparator),
 	);
 	const right2 = fittedStats.join(statSeparator);
-	const line2 = alignRight(approvalText, right2, width, utils.measure);
+	const line2 = alignRight(controlText, right2, width, utils.measure);
 
 	const lines = [utils.clip(line1, width, ell), utils.clip(line2, width, ell)];
 	if (p.workflowStatus) {
 		lines.push(utils.clip(theme.fg("muted", p.workflowStatus), width, ell));
 	}
-	const statuses = visibleStatuses.filter((status) => status !== approvalStatus);
+	const statuses = visibleStatuses.filter((status) => !controlStatuses.includes(status));
 	if (statuses.length > 0) {
 		const statusSeparator = ` ${sep} `;
 		const fittedStatuses = fitSegmentsByPriority(
 			statuses.map((status, index) => {
 				const unsafe = status.key === "approval-mode" && UNSAFE_APPROVAL_MODES.has(approvalMode(status));
 				return {
-					text: paintExtensionStatus(status, g, theme),
+					text: paintExtensionStatus(status, theme),
 					// An unsafe approval mode must never be the segment that gets dropped.
 					priority: unsafe ? statuses.length + 1 : statuses.length - index,
 					clippable: !unsafe,
