@@ -35,11 +35,21 @@ test("Cockpit loads through the standard extension path without changing its pub
 });
 
 test("Cockpit packages complete selectable color themes", () => {
-	const minimalThemes = ["cockpit-minimal", "cockpit-minimal-green", "cockpit-minimal-purple"];
+	const minimalThemes = [
+		"cockpit-minimal",
+		"cockpit-minimal-green",
+		"cockpit-minimal-purple",
+		"cockpit-minimal-cyan",
+		"cockpit-minimal-amber",
+		"cockpit-minimal-rose",
+	];
 	const minimalAccents: Record<string, string> = {
 		"cockpit-minimal": "#79b8ff",
 		"cockpit-minimal-green": "#79d49a",
 		"cockpit-minimal-purple": "#c3a6ff",
+		"cockpit-minimal-cyan": "#72d5d1",
+		"cockpit-minimal-amber": "#e6b566",
+		"cockpit-minimal-rose": "#e7a2b6",
 	};
 	for (const name of ["cockpit-notion", "cockpit-ocean", "cockpit-amber", ...minimalThemes]) {
 		const theme = JSON.parse(

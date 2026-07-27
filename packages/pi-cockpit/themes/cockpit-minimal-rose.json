@@ -1,0 +1,23 @@
+{
+  "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "name": "cockpit-minimal-rose",
+  "vars": {
+    "accent": "#e7a2b6", "blue": "#e7a2b6", "blueSoft": "#f0c1ce", "green": "#8bd49c", "pink": "#ff8d95",
+    "white": "#f2f5f7", "lightGray": "#b8c0ca", "dim": "#837c83", "border": "#71676d",
+    "selected": "#36262c", "message": "#281d21", "pending": "#2e2025", "successBg": "#1c2b23", "errorBg": "#342326"
+  },
+  "colors": {
+    "accent": "accent", "border": "border", "borderAccent": "blue", "borderMuted": "border",
+    "success": "green", "error": "pink", "warning": "blueSoft", "muted": "lightGray", "dim": "dim", "text": "white", "thinkingText": "lightGray",
+    "selectedBg": "selected", "userMessageBg": "message", "userMessageText": "white", "customMessageBg": "message", "customMessageText": "white", "customMessageLabel": "pink",
+    "toolPendingBg": "pending", "toolSuccessBg": "successBg", "toolErrorBg": "errorBg", "toolTitle": "white", "toolOutput": "lightGray",
+    "mdHeading": "white", "mdLink": "blue", "mdLinkUrl": "dim", "mdCode": "blue", "mdCodeBlock": "white", "mdCodeBlockBorder": "border",
+    "mdQuote": "lightGray", "mdQuoteBorder": "border", "mdHr": "border", "mdListBullet": "green",
+    "toolDiffAdded": "green", "toolDiffRemoved": "pink", "toolDiffContext": "dim",
+    "syntaxComment": "dim", "syntaxKeyword": "pink", "syntaxFunction": "blue", "syntaxVariable": "blueSoft", "syntaxString": "green",
+    "syntaxNumber": "blueSoft", "syntaxType": "blue", "syntaxOperator": "white", "syntaxPunctuation": "lightGray",
+    "thinkingOff": "lightGray", "thinkingMinimal": "lightGray", "thinkingLow": "lightGray", "thinkingMedium": "lightGray", "thinkingHigh": "lightGray", "thinkingXhigh": "lightGray", "thinkingMax": "lightGray",
+    "bashMode": "lightGray"
+  },
+  "export": { "pageBg": "#181216", "cardBg": "#21191e", "infoBg": "#302229" }
+}
