@@ -1845,7 +1845,8 @@ export default function registerTeammateExtension(
           onRetry: (retry) => applyAgentRetryState(state, retry),
           onTurnComplete: (result: SingleResult) => {
           const lastMessage = displayMessageForResult(result);
-          settleAgent(
+          const settle = isMultiTask ? settleGraphTaskAgent : settleAgent;
+          settle(
             state,
             result.correlationId,
             result.exitCode,
@@ -4146,9 +4147,32 @@ export function settleAgent(
   lastResult?: string,
   wakeable = true,
 ): void {
+  settleAgentLifecycle(state, correlationId, exitCode, lastResult, wakeable, true);
+}
+
+function settleGraphTaskAgent(
+  state: TeammateState,
+  correlationId: string,
+  exitCode: number,
+  lastResult?: string,
+  wakeable = true,
+): void {
+  // graph task 与容器共享 controller；task 自然结算只收敛自身状态，
+  // cohort cancellation 仍由 graph 容器或显式 killAgentTree 拥有。
+  settleAgentLifecycle(state, correlationId, exitCode, lastResult, wakeable, false);
+}
+
+function settleAgentLifecycle(
+  state: TeammateState,
+  correlationId: string,
+  exitCode: number,
+  lastResult: string | undefined,
+  wakeable: boolean,
+  abortProcess: boolean,
+): void {
   clearAgentResultReadyState(state, correlationId);
   if (exitCode !== 0) {
-    killAgent(state, correlationId, undefined, "failed");
+    killAgent(state, correlationId, undefined, "failed", abortProcess);
     return;
   }
   if (wakeable) {
@@ -4159,7 +4183,7 @@ export function settleAgent(
   // has nothing left to wake. It was folded into the failure branch, which
   // resolved its waiters as `failed`; harmless while failure was invisible,
   // and a red ✗ on a successful run now that it is not.
-  killAgent(state, correlationId, undefined, "completed");
+  killAgent(state, correlationId, undefined, "completed", abortProcess);
 }
 
 export function resolveAgentCorrelationId(
@@ -4247,6 +4271,7 @@ function killAgent(
   correlationId: string,
   name?: string,
   waitStatus: Extract<TeammateWaitStatus, "completed" | "failed" | "terminated"> = "terminated",
+  abortProcess = true,
 ): void {
   const agent = state.activeRuns.get(correlationId);
   if (!agent) return;
@@ -4256,7 +4281,7 @@ function killAgent(
   // interaction queue would otherwise hold that queue for a process that is
   // already gone, stalling every agent lined up behind it.
   state.cancelInteractions?.(correlationId, "The teammate was terminated before this was answered.");
-  agent.abortController.abort();
+  if (abortProcess) agent.abortController.abort();
   settleTeammateWaiters(state, correlationId, waitStatus);
 
   if (waitStatus === "failed") {
@@ -5455,7 +5480,8 @@ export async function handleProxyRequest(
         },
         onTurnComplete: (result) => {
           const lastMessage = displayMessageForResult(result);
-          settleAgent(
+          const settle = normalizedTasks ? settleGraphTaskAgent : settleAgent;
+          settle(
             state,
             result.correlationId,
             result.exitCode,

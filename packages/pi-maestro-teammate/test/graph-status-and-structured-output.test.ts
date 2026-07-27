@@ -164,6 +164,48 @@ function createStructuredSpawn(
   }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
 }
 
+function createAbortAwareStructuredSpawn(
+  values: readonly unknown[],
+): NonNullable<TeammateRuntimeOptions["spawnChildProcess"]> {
+  let index = 0;
+  return (() => {
+    const value = values[index++];
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    let killed = false;
+    let settled = false;
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() {
+        if (settled) return true;
+        killed = true;
+        queueMicrotask(() => child.emit("close", 1, null));
+        return true;
+      },
+    });
+    queueMicrotask(() => {
+      if (killed) return;
+      settled = true;
+      stdout.write(`${JSON.stringify({
+        type: "agent_end",
+        message: {
+          role: "assistant",
+          content: value === undefined
+            ? [{ type: "text", text: "consumer completed" }]
+            : [{ type: "toolCall", name: "structured_output", arguments: value }],
+        },
+      })}\n`);
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+}
+
 function createRootTool(runtimeOptions: TeammateRuntimeOptions): RegisteredTeammateTool {
   delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
     Symbol.for("pi-maestro-teammate.root-registry")
@@ -445,6 +487,81 @@ test("root and proxy expose identical validated structuredOutput projections", a
       [undefined],
     );
     assert.equal(Object.hasOwn(graphOmitted.details ?? {}, "structuredOutput"), false);
+  }
+});
+
+test("structured graph producers do not cancel dependent tasks on root or proxy paths", async () => {
+  const schema = {
+    type: "object",
+    properties: { value: { type: "number" } },
+    required: ["value"],
+    additionalProperties: false,
+  };
+
+  for (const publicPath of ["root", "proxy"] as const) {
+    for (const reference of ["{producer.value}", "{producer}"] as const) {
+      const params = {
+        tasks: [
+          { agent: "delegate", name: "producer", task: "produce", outputSchema: schema },
+          { agent: "delegate", name: "consumer", task: `consume ${reference}` },
+        ],
+        concurrency: 1,
+        background: false,
+      };
+      const runtimeOptions = {
+        spawnChildProcess: createAbortAwareStructuredSpawn([{ value: 3 }, undefined]),
+      };
+      let result: Awaited<ReturnType<RegisteredTeammateTool["execute"]>>;
+
+      if (publicPath === "root") {
+        result = await createRootTool(runtimeOptions).execute(
+          `structured-dependency-${reference}`,
+          params,
+          new AbortController().signal,
+          undefined,
+          rootToolContext(),
+        );
+        delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+          Symbol.for("pi-maestro-teammate.root-registry")
+        ];
+      } else {
+        const state: TeammateState = {
+          baseCwd: process.cwd(),
+          currentSessionId: null,
+          activeRuns: new Map(),
+          namedAgents: new Map(),
+        };
+        let replyMessage: {
+          result: Awaited<ReturnType<RegisteredTeammateTool["execute"]>>;
+        } | undefined;
+        await handleProxyRequest(
+          new Proxy({ events: { on: () => () => {}, emit() {} }, sendMessage() {} }, {
+            get(target, property) {
+              if (property in target) return target[property as keyof typeof target];
+              return () => {};
+            },
+          }) as unknown as ExtensionAPI,
+          state,
+          { tool: "teammate", requestId: `structured-dependency-${reference}`, params },
+          (message) => { replyMessage = message as typeof replyMessage; },
+          undefined,
+          [],
+          undefined,
+          undefined,
+          runtimeOptions,
+        );
+        assert.ok(replyMessage);
+        result = replyMessage.result;
+      }
+
+      assert.equal(result.isError, false, `${publicPath} ${reference}`);
+      assert.deepEqual(result.details.results.map((entry) => entry.exitCode), [0, 0]);
+      assert.deepEqual(result.details.structuredOutput, { producer: { value: 3 } });
+      assert.equal(
+        result.details.results[1]?.task,
+        reference === "{producer.value}" ? "consume 3" : 'consume {"value":3}',
+      );
+    }
   }
 });
 
