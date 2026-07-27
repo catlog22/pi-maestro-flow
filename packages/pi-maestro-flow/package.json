@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "Pi extension for Maestro knowledge and workflow orchestration with teammate dispatch",
   "type": "module",
   "engines": {
@@ -84,9 +84,9 @@
     "@modelcontextprotocol/ext-apps": "1.7.4",
     "@modelcontextprotocol/sdk": "1.29.0",
     "cross-spawn": "7.0.6",
-    "maestro-flow": "0.5.55",
+    "maestro-flow": "0.5.57",
     "open": "10.2.0",
-    "pi-cockpit": "0.1.0",
+    "pi-cockpit": "0.1.1",
     "pi-maestro-teammate": "0.6.0",
     "puppeteer-core": "24.31.0",
     "recheck": "4.5.0",
