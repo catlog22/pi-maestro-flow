@@ -82,10 +82,18 @@ Pi 宿主 ToolExecutionComponent.updateDisplay() 把 renderCall/renderResult 的
 
 </spec-entry>
 
-<spec-entry category="debug" keywords="bash_bg,foreground,background,triggerturn,process-exit,stdio" date="2026-07-27" sid="S-20260727-iqhy" title="bash_bg 前后台完成与通知解耦" description="防止已完成后台命令阻塞主流程或重复唤醒" source="master@c39ecb3a">
+<spec-entry category="debug" keywords="bash_bg,foreground,background,triggerturn,process-exit,stdio" date="2026-07-27" sid="S-20260727-iqhy" title="bash_bg 前后台完成与通知解耦" description="防止已完成后台命令阻塞主流程或重复唤醒" source="master@c39ecb3a" status="deprecated" superseded-by="S-20260727-mhzq">
 
 ### bash_bg 前后台完成与通知解耦
 
 bash_bg MUST 对齐 teammate 的前后台语义：action=run 在 foreground 窗口内完成时 MUST 直接返回结果且不得发送 triggerTurn completion；action=start 或 action=run 超时转入 background 后 MUST 先返回 acknowledgement，再于完成时发送且只发送一次 bash-bg-complete。shell process exit MUST 作为结果完成边界，stdout/stderr close 仅用于有界输出排空，不得因后代进程继承管道而把已退出任务继续标为 running。
+
+</spec-entry>
+
+<spec-entry category="debug" keywords="bash_bg,triggerturn,deliveras,completion,logpath,expanded" date="2026-07-27" sid="S-20260727-mhzq" title="bash_bg 完成必须即时唤醒并暴露日志" description="防止完成消息在用户下次输入时集中注入，并保证日志可追溯" source="master@d003b4c4" supersedes="S-20260727-iqhy">
+
+### bash_bg 完成必须即时唤醒并暴露日志
+
+bash_bg MUST 对齐 teammate 的 foreground/background 契约：action=run 在前台完成时直接返回且不得发送 completion；action=start 或 run 超时后台化后先返回 acknowledgement，完成时使用 triggerTurn=true 立即注入独立 turn，MUST NOT 使用 deliverAs=nextTurn 延迟到用户下次输入。shell exit 是结果完成边界，stdio close 仅做有界排空。所有 job 结果 MUST 返回 logPath 与跨平台 viewCommand；TUI 折叠态显示摘要，展开态显示已返回 tail。
 
 </spec-entry>
