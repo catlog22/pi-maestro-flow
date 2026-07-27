@@ -1,140 +1,103 @@
-# v0.5.0 — Two-Layer Compaction, Goal Verification Overhaul, MCP Adapter & GUI Sidecar
+# v0.6.0 — Pi Cockpit, Teammate State Rebuild, Soft Plan Mode & Custom API Channels
 
 ## Overview
 
-This is a major release focused on **context compaction resilience**, **Goal verification integrity**, and **platform extensibility**. The compaction system is rebuilt with a two-layer architecture to prevent output-token-limit truncation. Goal completion now uses acceptance-command-first verification with hardened evidence checks. A full MCP adapter has been ported with a GUI sidecar service for cross-extension tool registration.
+This is a major release headlined by the **first publication of `pi-cockpit`** — a list-mode status stack (live teammates + todo plan) pinned above the editor with a Starship-style footer, rendered exclusively through public extension APIs. The **teammate runtime state layer is rebuilt** around a single state table with hardened lifecycle edge semantics, a real nested-depth guard, and a global concurrency gate. **Plan mode becomes a soft, prompt-only constraint** with zero per-turn cache impact, and **skill injection moves off the system prompt** onto the context channel to eliminate cache busting. A **custom API provider channel** lands alongside the Cockpit, and Goal verification gains adversarial checks, stall detection, and a bounded verifier circuit breaker.
+
+> ⚠️ **Breaking:** `teammate` `background` now defaults to `false` (foreground/blocking). Callers that relied on the old background-by-default behavior must pass `background: true` explicitly. Teammate nesting is capped at two layers.
 
 ## Package Versions
 
 | Package | Version | npm |
 |---------|---------|-----|
-| `pi-maestro-flow` | 0.5.0 | `npm i pi-maestro-flow@0.5.0` |
-| `pi-maestro-teammate` | 0.4.7 | `npm i pi-maestro-teammate@0.4.7` |
+| `pi-maestro-flow` | 0.6.0 | `npm i pi-maestro-flow@0.6.0` |
+| `pi-maestro-teammate` | 0.6.0 | `npm i pi-maestro-teammate@0.6.0` |
+| `pi-cockpit` | 0.1.0 (first publish) | `npm i pi-cockpit@0.1.0` |
+
+`pi-maestro-flow@0.6.0` pins `pi-maestro-teammate@0.6.0`; `pi-cockpit@0.1.0` peer-depends on `pi-maestro-teammate@^0.6.0`.
 
 ## Detailed Changes
 
-### 🔧 Two-Layer Compaction System
+### 🛰️ Pi Cockpit (new package — first publish)
 
-Prevent output-token-limit truncation via a graduated compaction pipeline:
+A self-contained Pi extension that renders only via public extension APIs (`setWidget`/`setFooter`), 37 commits / 45 files / +5793 lines under `packages/pi-cockpit/`:
 
-- **Content-aware token estimation (F1)** — replaces naive character counting with structure-aware estimation (`auto-compaction.ts`)
-- **Compaction failure circuit breaker (F2)** — halts compaction after repeated failures to avoid infinite loops (`auto-compaction.ts`)
-- **Graduated eviction of bulk tool outputs (F3)** — progressively removes large tool outputs before touching conversation content (`auto-compaction.ts`)
-- **Redundancy detection + telemetry (F4)** — identifies and deduplicates redundant context blocks (`auto-compaction.ts`)
-- **Multi-criteria soft trigger with velocity-based early pruning** — Phase 1 equivalent refactor + Phase 2 velocity pruning to trigger compaction before hard limits (`auto-compaction.ts`)
-- **Compaction settings module + arbiter + TUI** — extracted `compaction-settings.ts`, `compaction-arbiter.ts`, and `tui/compaction-settings.ts` for configurable thresholds
-- **Plan mode exit + compaction arbitration integration** (`plan.ts`, `compaction-arbiter.ts`)
-- Focused tests for F1–F4 + velocity pruning coverage (`test/compaction.test.ts` +1100 lines, `test/compaction-settings.test.ts`, `test/compaction-tui.test.ts`)
+- **Status stack widget** — live teammates + todo plan pinned above the editor (`stack-widget.ts`, `agents-store.ts`, `todo-store.ts`)
+- **Starship-style footer** — approval state, usage statistics, and control status; safety-relevant state never relies on color alone and never truncates (`footer.ts`)
+- **`/cockpit` panel** — viewport-aware row allocation so panels no longer squeeze the main content; three zero-row ambient info panes (`index.ts`, `viewport.ts`, `layout.ts`, `ambient.ts`)
+- **`/theme` command** — live-preview, undoable theme picker that expands in-place inside the `/cockpit` panel (Esc no longer overflows the stack) (`theme-picker.ts`, `settings-view.ts`)
+- **9 themes** — Notion, Ocean, Amber, and minimal green/purple/cyan/rose/amber variants with unified input borders (`themes/*.json`)
+- **Background task cards** — bash-bg tasks render cards that use their full requested height (`bash-bg-widget.ts`, `bash-bg-overlay.ts`, `bash-bg-store.ts`)
+- **Todo ownership handoff** — the Todo panel can be handed to the Cockpit extension via the `cockpit:ui-ownership` event (loosely coupled, no package dependency) (`extension/index.ts`)
+- 148 tests + clean typecheck; ships `src/`, `themes/`, and `README.md` (30 packed files)
 
-### 🎯 Goal Verification Overhaul
+### 🤝 Teammate State Rebuild & Contract Hardening
 
-- **Acceptance-command-first verification** — Goal completion now runs declared acceptance commands as primary evidence; verifier bash removed (`goal.ts` +914/-lines)
-- **Multi-goal registry + Todo quality gate** — supports multiple concurrent Goals with Todo-level quality gate binding (`goal.ts`, `todo.ts`)
-- **Compact goal panel + Alt+G detail overlay** — new `goal-overlay.ts` (357 lines) with keyboard-driven detail view
-- **Hardened evidence verification** — prevents completion claims without fresh command output (`goal.ts`)
-- **Workflow isolation scope** — Goal blocking scoped to its own Workflow, not global (`goal.ts`)
-- **Accelerated completion verification** — reduced verifier overhead (`goal.ts`)
+The `odyssey-improve(teammate-state)` series reconstructs the runtime around a single source of truth, 83 files / +9151/-852 under `packages/pi-maestro-teammate/`:
 
-### 🔌 MCP Adapter Port
+- **Single TUI state table** — status presentation unified onto one state table; failed agents no longer vanish in the same frame as the event that produced them (`progress-tree.ts`, `agent-status.ts`)
+- **Lifecycle edge semantics** — result-ready edge semantics, cohort reclamation, name-conflict handling, and execution-layer lifecycle backstops with bounded buffer overhead (`execution.ts`, `retry.ts`)
+- **Real concurrency guards** — nested-depth guard made real (capped at two layers) plus a global concurrency gate (`limits.ts`)
+- **Ownership & authorization** — `parentCid` claim must land within the dispatcher subtree; cross-subtree send/abort and `structured_output` authorization enforced (`child-extensions.ts`)
+- **Foreground streaming** — foreground tree streaming updates, foreground-lane result publish with grace period + absolute ceiling to prevent caller deadlocks; foreground task list streamlined
+- **public/v1 event contract** — cross-extension event contract promoted to `public/v1`; Flow↔Teammate type boundary established (`public/v1/events.d.ts`, `public/v1/index.d.ts`)
+- **Breaking default flip** — `background` defaults to `false` (foreground/blocking) with updated invocation/DAG/stage-model guidance
+- Provider failure reasons preserved; agents sorted by most-recent activity; interaction queue and wait loop de-bounded
 
-Full MCP (Model Context Protocol) adapter ported with 40+ new source files under `src/mcp/`:
+### 🎯 Goal Verification & Recovery
 
-- Server manager, config center, OAuth flow, callback server (`server-manager.ts`, `config.ts`, `mcp-auth-flow.ts`, `mcp-callback-server.ts`)
-- MCP panel with menu + toggle + JSON editor mode (`mcp-panel.ts`, 878 lines)
-- Setup panel, consent manager, elicitation handler (`mcp-setup-panel.ts`, `consent-manager.ts`, `elicitation-handler.ts`)
-- Proxy modes, output guard, sampling handler (`proxy-modes.ts`, `mcp-output-guard.ts`, `sampling-handler.ts`)
-- UI server, session, stream types (`ui-server.ts`, `ui-session.ts`, `ui-stream-types.ts`)
-- NPX resolver, metadata cache, tool registrar (`npx-resolver.ts`, `metadata-cache.ts`, `tool-registrar.ts`)
+- **Adversarial verification + stall detection + richer diagnostics** (`goal.ts`)
+- **Bounded verifier circuit breaker** — infrastructure faults trip a bounded breaker instead of infinite retries
+- **Compaction resilience** — Goal and Plan recovery state saved structurally across compaction; Goal compaction continuation restored; goal panel widget reads the registry per-frame instead of freezing on a mount-time snapshot
+- **Referential integrity** — `goalId` bindings cascade-unbind on destruction and validate on load; `todo next` no longer revives a user-stopped Goal
 
-### 🖥️ GUI Sidecar Service
+### 📝 Soft Plan Mode & Performance
 
-- New GUI sidecar with cross-extension tool registration (`src/gui/` — 8 files, ~1000 lines)
-- GUI server, client, registry, state, events, tool routes, types (`gui-server.ts`, `gui-client.ts`, `gui-registry.ts`, etc.)
-- FFF search tools (fuzzy file finder + literal grep) (`tools/fff.ts`, 108 lines)
-- API contextWindow editing + statusline cache hit rate display (`statusline.ts`)
+- **Prompt-only plan mode** — plan mode no longer mutates the tool panel or rewrites the system prompt each turn; one-time injection yields **zero per-turn cache impact**; all hard blocks removed in favor of soft constraints
+- **Skill injection moved to the context channel** — eliminates per-turn system-prompt cache busting
+- **Handoff decoupling** — plan handoff no longer force-links to Goal; the handoff key is given to the model; approval failure reports that the draft is retained instead of swallowing typed errors
+- **Permission safety** — plan mode no longer passes mutating tools
 
-### 🤝 Teammate Lifecycle Fixes
+### 🔌 Custom API Channels & Provider Config
 
-- **Progress token cross-turn accumulation** — tokens now accumulate correctly across turns; sleeping duration frozen during idle (`execution.ts`)
-- **Block async teammate status polling** — prevents wasteful polling loops (`extension/index.ts`)
-- **Decouple result return from lifecycle confirmation** — result delivery no longer blocked by lifecycle handshake (`execution.ts`)
-- **Fix Pi result ready state** — corrects premature ready-state signaling (`execution.ts`)
-- Retry utility for teammate operations (`retry.ts`)
-- GUI registry shared module (`shared/gui-registry.ts`)
+- **Custom API provider channel** — register custom providers with configurable endpoints (`api-provider-config.ts`, `provider-registry.ts`)
+- **MCP sampling handler** refinements (`sampling-handler.ts`)
+- Pi 0.82 base-type compatibility fixes; Pi SDK dependency hardening + packaging verification
 
-### 📋 Plan Mode Enhancements
+### 🧰 Tooling & UX
 
-- `plan-confirm` / `/plan approve` now triggers mode-change listener to resync approval status bar (`plan-confirm.ts`)
-- Plan mode only restricts edit tools, not read/search (`plan.ts`)
-- Exit Plan mode action added (`plan.ts`)
-- Handoff switch to quality-gate Goal regression tests (`test/plan-lifecycle.test.ts`)
-
-### ✅ Todo Batch Creation
-
-- **Batch create entire plan in ONE call** — `todo action=create` with `tasks` array; array order = execution order; `blockedBy: "#N"` for intra-plan dependencies (`todo.ts` +258 lines)
-- Todo UI: color-coded statuses + expandable details + merged goal/runs view (`todo-overlay.ts`)
-
-### 🧩 Skill Management TUI
-
-- New Skill manager with TUI interface — browse, enable/disable, configure skills (`skill-manager.ts`, `skill-manager-tui.ts`, `skill-manager-store.ts`, ~900 lines)
-
-### 🔍 Model Availability Tool
-
-- New `model-availability` tool — reports reachable teammate models + delegate CLI tools + fallback routing (`tools/model-availability.ts`, 190 lines)
-- Progressive fallback guidance in system prompt for external model requests
-
-### 🧠 Thinking Intensity Control
-
-- Model-level thinking depth control (`api-provider-config.ts` +270 lines)
-- Statusline thinking intensity linkage (`effort-display.ts`)
-
-### 🔄 CLI Adapter Session/Run Architecture
-
-- CLI adapter adapted to Session/Run architecture for v0.5.0 (`cli-adapter.ts`)
-
-### 📖 Documentation
-
-- Chinese default README + English version (`README.md`, `README_EN.md`)
-- Comprehensive bilingual USAGE docs (`docs/USAGE.md`, `docs/USAGE_EN.md`, 1375 lines each)
-- Plugin tool interface development guide (`docs/plugin-tool-interface-guide.md`, 965 lines)
-- Tool interface guide updates — GUI/UCL sidecar, compaction, FFF tools
-
-### 🏗️ System Prompt & Skills Refactor
-
-- Unified system prompt into `.pi/SYSTEM.md`, removed `AGENTS.md`
-- Delegation routed to teammate, Plan Mode added, prose trimmed
-- 200+ skill files updated (team skills, scholar skills, workflow skills)
-- Extension consolidation + workflow knowledge capture
-
-### 🚀 Cache Hit Rate Optimization
-
-- Stable auto-pruning to improve prompt cache hit rate
-- Fixed F1–F3 & F6–F10 cache hit issues
-- Compact statusline progress bar
+- **`bash_bg` tool** — adaptive foreground/background shell execution registered with system-prompt selection guidance
+- **`ask` tool** — options accept supplementary details; "none of the above" supports a custom answer
+- **`explore`** — per-explore prompt count capped at `maxAgents`
+- **Input history** — persisted per working directory so new sessions can recall prior input; covered by a real TUI render-pipeline test
+- **Browser tool** — documented Puppeteer run API, added `visible` (headed) launch, and fixed run-code helper collisions with user declarations
+- **Compaction cache stability** — pruning cache invalidation cost model; redundant-judgment converged to a single definition
+- **macOS** — shortcuts display as Option key with terminal configuration notes
+- **YOLO approval mode** — enabled by default (documented)
+- **Skills/agents refactor** — flattened skill directory, `maestro-manage` split into three intent entries, frontmatter unified to the `tools` field, `ralph-executor` demoted to an alias
 
 ## Statistics
 
-- **Commits**: 53 (v0.4.14..v0.5.0)
-- **Files changed**: 393
-- **Lines**: +38,411 / −3,955
-- **pi-maestro-flow src**: 84 files, +20,368 / −741
-- **pi-maestro-flow test**: 32 files, +6,592 / −471
-- **pi-maestro-teammate src**: 10 files, +795 / −92
-- **pi-maestro-teammate test**: 5 files, +687 / −3
-- **Skills/docs/config**: 244 files, +9,418 / −2,544
+- **130 commits** since `v0.5.0`
+- **747 files changed**, +31,342 / −75,173 lines
+- `pi-maestro-flow`: 73 files, +7,056 / −1,215
+- `pi-maestro-teammate`: 83 files, +9,151 / −852
+- `pi-cockpit`: 45 files, +5,793 (new package)
 
-## Upgrade Guide
+## Installation & Upgrade
 
 ```bash
-npm install pi-maestro-flow@0.5.0
+# Fresh install
+npm i pi-maestro-flow@0.6.0
+npm i pi-cockpit@0.1.0        # optional Cockpit UI extension
+
+# Upgrade from 0.5.0
+npm i pi-maestro-flow@0.6.0 pi-maestro-teammate@0.6.0
 ```
 
-`pi-maestro-flow@0.5.0` depends on `pi-maestro-teammate@0.4.7` — the dependency is pinned and will be installed automatically.
+**Upgrade notes:**
 
-## Verification
-
-```bash
-npm view pi-maestro-flow@0.5.0 version
-npm view pi-maestro-teammate@0.4.7 version
-npm view pi-maestro-flow@0.5.0 dependencies.pi-maestro-teammate  # should be 0.4.7
-```
+1. `pi-maestro-teammate` must be upgraded to `0.6.0` together with `pi-maestro-flow` — flow `0.6.0` pins teammate `0.6.0`.
+2. **Breaking:** teammate `background` now defaults to `false`. If you dispatched teammates expecting them to run detached, pass `background: true` explicitly.
+3. Teammate nesting is capped at two levels; deeper chains are rejected.
+4. `pi-cockpit` is optional and independent — install it separately to enable the status stack, footer, `/cockpit` panel, and `/theme` picker.
