@@ -64,3 +64,11 @@ Cockpit 的 Working 状态 MUST 保留宿主默认 Working、耗时与中断提�
 无显式 permissions.defaultMode 时，pi-maestro-flow MUST 使用 bypassPermissions 作为默认审批模式，并在 Footer 以红色 YOLO 显示。显式 defaultMode MUST 覆盖该默认值；permissions.disableBypassPermissionsMode=disable MUST 具有最高优先级并回退到 default。
 
 </spec-entry>
+
+<spec-entry category="review" keywords="bash_bg,footer,agent-widget,alt+j,layout" date="2026-07-27" sid="S-20260727-k6zg" title="bash_bg 摘要归属 Footer 第二行" description="约束后台 Bash 摘要的唯一常驻位置、空态与窄屏行为" source="master@7fa25b0f">
+
+### bash_bg 摘要归属 Footer 第二行
+
+活动中的 bash_bg 摘要 MUST 显示在 Cockpit Footer 第二行并左对齐；无活动任务时 MUST 不增加该行。Agent widget MUST 只显示 teammate roster，不得重复展示 bash_bg。摘要 MUST 保留状态文本与 Alt+J 详情提示，并按终端宽度裁剪；bash-bg:update/query 快照协议与 Alt+J overlay 继续作为状态和详情来源。
+
+</spec-entry>
