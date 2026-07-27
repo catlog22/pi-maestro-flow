@@ -1,7 +1,13 @@
 import { randomUUID } from "node:crypto";
 import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
-import { PERMISSION_MODES, type PermissionBehavior, type PermissionMode, type PermissionRuleSettings } from "./types.ts";
+import {
+  DEFAULT_PERMISSION_MODE,
+  PERMISSION_MODES,
+  type PermissionBehavior,
+  type PermissionMode,
+  type PermissionRuleSettings,
+} from "./types.ts";
 
 export interface LoadedPermissionSettings {
   permissions: PermissionRuleSettings;
@@ -11,7 +17,12 @@ export interface LoadedPermissionSettings {
   localSettingsPath: string;
 }
 
-const EMPTY_PERMISSIONS: PermissionRuleSettings = { allow: [], ask: [], deny: [] };
+const EMPTY_PERMISSIONS: PermissionRuleSettings = {
+  allow: [],
+  ask: [],
+  deny: [],
+  defaultMode: DEFAULT_PERMISSION_MODE,
+};
 const mutationQueues = new Map<string, Promise<void>>();
 
 export async function loadPermissionSettings(

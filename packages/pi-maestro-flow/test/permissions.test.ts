@@ -14,6 +14,35 @@ import {
 
 const empty = { allow: [], ask: [], deny: [] };
 
+test("permission settings default to YOLO when no scope configures a mode", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-permissions-default-yolo-"));
+  try {
+    const loaded = await loadPermissionSettings(root, join(root, "missing-user.json"));
+    assert.equal(loaded.permissions.defaultMode, "bypassPermissions");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("disabling bypass mode overrides the YOLO default", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-permissions-disable-yolo-"));
+  const userSettingsPath = join(root, "user-settings.json");
+  await writeFile(userSettingsPath, JSON.stringify({
+    permissions: { disableBypassPermissionsMode: "disable" },
+  }));
+  const ctx = {
+    cwd: root,
+    hasUI: true,
+    ui: { notify() {} },
+  } as unknown as ExtensionContext;
+  try {
+    const controller = createPermissionController({ userSettingsPath });
+    assert.equal(await controller.reload(ctx), "default");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("permission rules use deny then ask then allow precedence", () => {
   const call = { toolName: "bash", input: { command: "git push origin main" } };
   const decision = evaluatePermission(call, "default", {

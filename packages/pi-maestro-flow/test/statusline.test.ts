@@ -400,7 +400,7 @@ test("statusline links approval mode with ACT, PLAN and READY using width-aware 
       ["ACT", "APPROVAL default", "[A] ACT · APPROVAL default", "ACT/default", "A/D"],
       ["ACT", "APPROVAL acceptEdits", "[A] ACT · APPROVAL acceptEdits", "ACT/acceptEdits", "A/E"],
 	  ["ACT", "APPROVAL dontAsk", "[A] ACT · APPROVAL dontAsk", "ACT/dontAsk", "A/N"],
-	  ["ACT", "APPROVAL YOLO", "[A] ACT · APPROVAL YOLO", "ACT/YOLO", "A/Y"],
+	  ["ACT", "APPROVAL YOLO", "[A] ACT · YOLO", "ACT/YOLO", "A/Y"],
       ["PLAN", "APPROVAL default", "[P] PLAN · APPROVAL plan", "PLAN/plan", "P/P"],
       ["READY", "APPROVAL bypassPermissions", "[P] READY · APPROVAL plan", "READY/plan", "R/P"],
     ] as const) {
@@ -414,7 +414,7 @@ test("statusline links approval mode with ACT, PLAN and READY using width-aware 
     harness.statuses.set("mode", "ACT");
     harness.statuses.set("approval-mode", "APPROVAL YOLO");
     const yolo = harness.render(100)[0];
-    assert.ok(yolo.includes(`${ansiFg(COLORS.danger)}${ANSI_BOLD}APPROVAL YOLO`));
+    assert.ok(yolo.includes(`${ansiFg(COLORS.danger)}${ANSI_BOLD}YOLO`));
 
     for (let width = 1; width <= 120; width++) {
       for (const line of harness.render(width)) {
@@ -426,7 +426,7 @@ test("statusline links approval mode with ACT, PLAN and READY using width-aware 
   }
 });
 
-test("statusline compacts labels before truncating the cwd and Git segment", async () => {
+test("short YOLO label preserves the full mode, cwd and Git layout", async () => {
   const harness = createHarness({
     exec: async () => ({ code: 0, stdout: "## master\n", stderr: "" }),
   });
@@ -437,8 +437,8 @@ test("statusline compacts labels before truncating the cwd and Git segment", asy
     await settleAsyncWork();
 
     const line = stripAnsi(harness.render(94)[0]);
-    assert.match(line, /^ACT\/YOLO/);
-    assert.match(line, /AUTO ON/);
+    assert.match(line, /^\[A\] ACT · YOLO/);
+    assert.match(line, /AUTO-COMPACT ON/);
     assert.match(line, /pi-maestro-flow/);
     assert.match(line, /master/);
     assert.doesNotMatch(line, /…/);

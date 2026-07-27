@@ -7,6 +7,7 @@ export const PERMISSION_MODES = [
 ] as const;
 
 export type PermissionMode = (typeof PERMISSION_MODES)[number];
+export const DEFAULT_PERMISSION_MODE: PermissionMode = "bypassPermissions";
 export type PermissionBehavior = "allow" | "ask" | "deny";
 
 export interface PermissionRuleSettings {

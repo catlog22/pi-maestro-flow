@@ -161,7 +161,7 @@ test("approval mode leads line one while usage stays right aligned", () => {
 		extensionStatuses: [{ key: "approval-mode", text: "APPROVAL YOLO" }],
 	}));
 	assert.equal(lines.length, 1);
-	assert.match(lines[0], /^APPROVAL YOLO · ⚡ stream-70b/);
+	assert.match(lines[0], /^YOLO · ⚡ stream-70b/);
 	assert.equal(lines[0].length, 80);
 	assert.match(lines[0], /↑12k · ↓3\.4k$/);
 });
@@ -209,8 +209,8 @@ test("approval modes use distinct semantic colors", () => {
 	assert.match(renderMode("APPROVAL acceptEdits"), /\[success\]APPROVAL acceptEdits/);
 	assert.match(renderMode("APPROVAL dontAsk"), /\[warning\]APPROVAL dontAsk/);
 	assert.match(renderMode("APPROVAL plan"), /\[accent\]APPROVAL plan/);
-	assert.match(renderMode("APPROVAL YOLO"), /\[error\]APPROVAL YOLO/);
-	assert.match(renderMode("APPROVAL bypassPermissions"), /\[error\]APPROVAL bypassPermissions/);
+	assert.match(renderMode("APPROVAL YOLO"), /\[error\]YOLO/);
+	assert.match(renderMode("APPROVAL bypassPermissions"), /\[error\]YOLO/);
 	assert.doesNotMatch(renderMode("APPROVAL YOLO"), /!/);
 });
 
@@ -221,7 +221,7 @@ test("an unsafe approval mode survives when the status row must be truncated", (
 		{ key: "z-noise", text: "another long informational status" },
 	];
 	const lines = renderFooter(parts({ width: 30, extensionStatuses: statuses }));
-	assert.match(lines[0], /APPROVAL yolo/);
+	assert.match(lines[0], /YOLO/);
 });
 
 test("ACT is omitted while PLAN and READY retain distinct semantic colors", () => {
@@ -245,7 +245,7 @@ test("internal swarm projection statuses stay out of the footer", () => {
 		],
 	})).join("\n");
 	assert.doesNotMatch(line, /TEAM SWARM|BEST|COMPLETED/);
-	assert.match(line, /APPROVAL YOLO/);
+	assert.match(line, /YOLO/);
 });
 
 test("ambient MCP and auto compact statuses stay out of the footer", () => {

@@ -131,7 +131,11 @@ import {
 import { installStatusline } from "../statusline/statusline.ts";
 import { registerCodexHookAdapter } from "../hooks/pi-adapter.ts";
 import { createPermissionController } from "../permissions/controller.ts";
-import { PERMISSION_MODES, type PermissionMode } from "../permissions/types.ts";
+import {
+  DEFAULT_PERMISSION_MODE,
+  PERMISSION_MODES,
+  type PermissionMode,
+} from "../permissions/types.ts";
 import {
   createMaestroCompaction,
   persistMaestroCompactionKnowhow,
@@ -856,7 +860,7 @@ When NOT to use:
     },
   });
 
-  let approvalMode: PermissionMode = "default";
+  let approvalMode: PermissionMode = DEFAULT_PERMISSION_MODE;
   setPlanModeChangeListener((ctx) => {
     updateTodoWidget();
     syncApprovalModeStatus(ctx, approvalMode);
@@ -1709,7 +1713,8 @@ export function approvalModeStatusValue(
   planMode: boolean,
   approvalMode: PermissionMode,
 ): string | undefined {
-  return planMode ? undefined : `APPROVAL ${approvalMode === "bypassPermissions" ? "YOLO" : approvalMode}`;
+  if (planMode) return undefined;
+  return approvalMode === "bypassPermissions" ? "YOLO" : `APPROVAL ${approvalMode}`;
 }
 
 function syncApprovalModeStatus(

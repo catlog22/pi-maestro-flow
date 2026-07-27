@@ -179,9 +179,11 @@ function paintExtensionStatus(
 	status: ExtensionStatusSegment,
 	theme: PaintTheme,
 ): string {
-	const text = status.key === "maestro-auto-compact-mode"
-		? status.text.replace(/^AUTO\s+/i, "AUTO COMPACT ")
-		: status.text;
+	const text = status.key === "approval-mode" && UNSAFE_APPROVAL_MODES.has(approvalMode(status))
+		? "YOLO"
+		: status.key === "maestro-auto-compact-mode"
+			? status.text.replace(/^AUTO\s+/i, "AUTO COMPACT ")
+			: status.text;
 	return theme.fg(extensionStatusColor(status), text);
 }
 

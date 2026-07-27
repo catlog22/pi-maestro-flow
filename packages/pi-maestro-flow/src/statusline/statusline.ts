@@ -151,7 +151,9 @@ function renderPlanModeStatus(
 	const modeLabel = width >= 80
 		? mode === "ACT" ? "[A] ACT" : mode === "PLAN" ? "[P] PLAN" : "[P] READY"
 		: width >= 48 ? mode : mode === "ACT" ? "A" : mode === "PLAN" ? "P" : "R";
-	const approvalLabel = width >= 80 ? `APPROVAL ${approval}` : width >= 48 ? approval : approvalInitial(approval);
+	const approvalLabel = approval === "YOLO"
+		? approval
+		: width >= 80 ? `APPROVAL ${approval}` : width >= 48 ? approval : approvalInitial(approval);
 	const separator = width >= 80
 		? `${ansiFg(COLORS.separator)} · ${ANSI_RESET}`
 		: `${ansiFg(COLORS.separator)}/${ANSI_RESET}`;
