@@ -56,3 +56,11 @@ Footer 的 Context、input/output 与 cache 资源组 MUST 位于第一行右侧
 Cockpit 的 Working 状态 MUST 保留宿主默认 Working、耗时与中断提示，不得展示 Todo、agent 或后台任务内容；仅当前台工具正在执行时以工具名称替换 Working 标签，工具结束后立即恢复。
 
 </spec-entry>
+
+<spec-entry category="review" keywords="approval,yolo,bypasspermissions,defaultmode,footer" date="2026-07-27" sid="S-20260727-91p8" title="默认 YOLO 审批模式与显式禁用优先级" description="默认 YOLO、显式配置覆盖与管理员禁用边界" source="session:20260727-impeccable-default-yolo">
+
+### 默认 YOLO 审批模式与显式禁用优先级
+
+无显式 permissions.defaultMode 时，pi-maestro-flow MUST 使用 bypassPermissions 作为默认审批模式，并在 Footer 以红色 YOLO 显示。显式 defaultMode MUST 覆盖该默认值；permissions.disableBypassPermissionsMode=disable MUST 具有最高优先级并回退到 default。
+
+</spec-entry>
