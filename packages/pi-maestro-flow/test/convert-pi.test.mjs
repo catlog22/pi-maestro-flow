@@ -74,7 +74,7 @@ description: Example skill
 maestro run prepare   # check if prepare command works
 `,
     verify(output) {
-      assert.match(output, /maestro run start --cmd/);
+      assert.match(output, /maestro run start --platform pi --cmd/);
       assert.match(output, /maestro run status --workflow-root/);
       assert.doesNotMatch(output, /maestro run prepare/);
     },
@@ -84,7 +84,49 @@ maestro run prepare   # check if prepare command works
     file: "D:/fixture/skills/maestro-odyssey/SKILL.md",
     input: "Compatibility: `maestro session start` is an alias for `maestro run create` (see companion.md). Both resolve the same lifecycle.",
     verify(output) {
-      assert.equal(output, "Use `maestro run start` as the only lifecycle entry; no compatibility alias is required.");
+      assert.equal(output, "Use `maestro run start --platform pi` as the only lifecycle entry; no compatibility alias is required.");
+    },
+  },
+  {
+    name: "binds Pi on every platform-aware Session and Run call",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: `maestro session create "topic" --id demo --chain analyze
+maestro session start "topic" --chain analyze
+maestro run start "goal" --cmd companion
+maestro run create plan --session demo
+maestro run prepare analyze --session demo
+maestro run skill analyze
+maestro run brief run-1 --session demo
+maestro session next --session demo
+maestro run check run-1 --session demo
+`,
+    verify(output) {
+      assert.match(output, /maestro session create --platform pi "topic"/);
+      assert.match(output, /maestro session start --platform pi "topic"/);
+      assert.match(output, /maestro run start --platform pi "goal"/);
+      assert.match(output, /maestro run create --platform pi plan/);
+      assert.match(output, /maestro run prepare --platform pi analyze/);
+      assert.match(output, /maestro run skill --platform pi analyze/);
+      assert.match(output, /maestro run brief --platform pi run-1/);
+      assert.match(output, /maestro session next --session demo/);
+      assert.match(output, /maestro run check run-1 --session demo/);
+      assert.doesNotMatch(output, /maestro session next --platform/);
+      assert.doesNotMatch(output, /maestro run check --platform/);
+    },
+  },
+  {
+    name: "normalizes canonical placeholders and Claude bindings to Pi",
+    file: "D:/fixture/skills/example/SKILL.md",
+    input: `maestro skills --steps --json --platform {target_platform}
+maestro session create "topic" --platform {target_platform} --chain analyze
+maestro session start "topic" --platform claude --chain analyze
+maestro run create plan --platform {target_platform} --session demo
+maestro run brief run-1 --platform claude
+`,
+    verify(output) {
+      assert.doesNotMatch(output, /\{target_platform\}/);
+      assert.doesNotMatch(output, /--platform claude/);
+      assert.equal(output.match(/--platform pi/g)?.length, 5);
     },
   },
   {
