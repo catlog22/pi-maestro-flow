@@ -216,6 +216,13 @@ function renderMultiTaskCall(
     return dynamicComponent((w) => [header, ...tree.map((row) => row.text)]
       .map((line) => truncateToWidth(line, Math.max(1, w), "…")));
   }
+  // 前台 progress 紧随调用行渲染，已包含同一任务拓扑及实时状态。
+  // collapsed 调用仅保留启动摘要，避免相邻组件重复显示任务行。
+  if (!isBg) {
+    return dynamicComponent((w) => [
+      truncateToWidth(header, Math.max(1, w), "…"),
+    ]);
+  }
   // Collapsed: list every agent with its dependency edges so the DAG stays visible.
   const agentLines = tasks.map((task, index) => {
     const label = task.name

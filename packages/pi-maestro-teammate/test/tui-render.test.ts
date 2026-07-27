@@ -19,7 +19,7 @@ function makeResult(): SingleResult {
   };
 }
 
-test("collapsed multi-task call lists every dispatched agent", () => {
+test("collapsed background multi-task call lists every dispatched agent", () => {
   const rendered = renderTeammateCall({
     tasks: [
       { agent: "explorer", name: "scan", task: "find auth" },
@@ -34,6 +34,20 @@ test("collapsed multi-task call lists every dispatched agent", () => {
   assert.equal(rendered[2], "→ 2 □ @review (delegate) ← result #1");
   assert.equal(rendered[3], "• 3 □ delegate");
   assert.equal(rendered.length, 4);
+});
+
+test("collapsed foreground multi-task call omits the agent list duplicated by streaming progress", () => {
+  const rendered = renderTeammateCall({
+    tasks: [
+      { agent: "explorer", name: "pkgs", task: "inspect packages" },
+      { agent: "delegate", name: "summary", task: "summarize {pkgs}" },
+    ],
+    background: false,
+  }, theme as never, { expanded: false }).render(80);
+
+  assert.deepEqual(rendered, [
+    "■ 2 result chain foreground agents launched (Alt+B to detach)",
+  ]);
 });
 
 test("collapsed multi-task call shows a non-linear DAG with multi-result edges", () => {
