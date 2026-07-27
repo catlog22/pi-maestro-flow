@@ -14,3 +14,13 @@ export function singleLine(text: string): Component {
     invalidate() {},
   };
 }
+
+/** A static multi-line component used by expanded tool results. */
+export function textBlock(text: string): Component {
+  return {
+    render: (width: number) => text
+      .split("\n")
+      .map((line) => truncateToWidth(line, Math.max(1, width), "…")),
+    invalidate() {},
+  };
+}

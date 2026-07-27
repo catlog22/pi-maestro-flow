@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
 	BASH_BG_QUERY_EVENT,
 	BASH_BG_UPDATE_EVENT,
@@ -23,6 +23,11 @@ interface ToolLike {
 		},
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<BashBgDetails>>;
+	renderResult(
+		result: AgentToolResult<BashBgDetails>,
+		options: { expanded: boolean },
+		theme: Theme,
+	): { render(width: number): string[] };
 }
 
 interface Harness {
@@ -87,7 +92,16 @@ test("bash_bg run completes inline without queueing a redundant turn", async () 
 		});
 		assert.equal(result.details?.running, false);
 		assert.equal(result.details?.exitCode, 0);
-		assert.match(result.content[0] && "text" in result.content[0] ? result.content[0].text : "", /done/);
+		const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
+		assert.match(text, /done/);
+		assert.match(text, /\nlog: .+\.log\nview: /);
+		assert.equal(result.details?.logPath?.endsWith(".log"), true);
+		assert.equal(result.details?.viewCommand?.includes(result.details.logPath ?? ""), true);
+		const theme = { fg: (_color: string, value: string) => value } as Theme;
+		const collapsed = harness.tool.renderResult(result, { expanded: false }, theme).render(200);
+		const expanded = harness.tool.renderResult(result, { expanded: true }, theme).render(200);
+		assert.equal(collapsed.length, 1);
+		assert.match(expanded.join("\n"), /done[\s\S]*log: [\s\S]*view: /);
 		assert.deepEqual(harness.messages, []);
 	} finally {
 		harness.shutdown();
@@ -129,7 +143,7 @@ test("bash_bg start queues one completion turn after returning control", async (
 		await waitForMessage(harness.messages, "bash-bg-complete");
 		assert.equal(harness.messages.length, 1);
 		assert.equal(harness.messages[0]?.options?.triggerTurn, true);
-		assert.equal(harness.messages[0]?.options?.deliverAs, "nextTurn");
+		assert.equal(harness.messages[0]?.options?.deliverAs, undefined);
 	} finally {
 		harness.shutdown();
 	}
@@ -151,6 +165,7 @@ test("bash_bg run follows teammate detach semantics after the foreground timeout
 		await waitForMessage(harness.messages, "bash-bg-complete");
 		assert.equal(harness.messages.length, 1);
 		assert.equal(harness.messages[0]?.options?.triggerTurn, true);
+		assert.equal(harness.messages[0]?.options?.deliverAs, undefined);
 	} finally {
 		harness.shutdown();
 	}

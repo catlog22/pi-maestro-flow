@@ -1,7 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { singleLine } from "../tui/components.ts";
+import { singleLine, textBlock } from "../tui/components.ts";
 import { Type } from "typebox";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
@@ -56,6 +56,8 @@ export interface BashBgDetails {
   running?: boolean;
   exitCode?: number | null;
   command?: string;
+  logPath?: string;
+  viewCommand?: string;
 }
 
 interface Job {
@@ -113,6 +115,36 @@ function jobSnapshot(job: Job): BashBgJobSnapshot {
     outputTail: tailLines(job, MAX_SNAPSHOT_TAIL_LINES),
     outputBytes: job.outputBytes,
     logPath: job.outFile,
+  };
+}
+
+function shellQuote(value: string): string {
+  if (process.platform === "win32") return `'${value.replace(/'/g, "''")}'`;
+  return `'${value.replace(/'/g, "'\"'\"'")}'`;
+}
+
+function viewLogCommand(job: Job): string {
+  const file = shellQuote(job.outFile);
+  if (process.platform === "win32") {
+    return `Get-Content -LiteralPath ${file} -Tail 200${job.done ? "" : " -Wait"}`;
+  }
+  return `tail -n 200${job.done ? "" : " -f"} -- ${file}`;
+}
+
+function logAccess(job: Job): string {
+  return `log: ${job.outFile}\nview: ${viewLogCommand(job)}`;
+}
+
+function jobDetails(job: Job, action: string): BashBgDetails {
+  return {
+    action,
+    jobId: job.id,
+    pid: job.pid,
+    running: !job.done,
+    exitCode: job.exitCode,
+    command: job.command,
+    logPath: job.outFile,
+    viewCommand: viewLogCommand(job),
   };
 }
 
@@ -175,10 +207,11 @@ export function registerBashBg(pi: ExtensionAPI): void {
       `Background bash job ${job.id} ${status} (exit ${job.exitCode}).`,
       `command: ${job.command}`,
       tail ? `output (tail):\n${tail}` : "output: (empty)",
+      logAccess(job),
     ].join("\n");
     pi.sendMessage(
       { customType: "bash-bg-complete", content: body, display: true, details: { jobId: job.id, exitCode: job.exitCode } },
-      { triggerTurn: true, deliverAs: "nextTurn" },
+      { triggerTurn: true },
     );
   };
 
@@ -296,9 +329,10 @@ export function registerBashBg(pi: ExtensionAPI): void {
             text:
               `Started background job ${job.id} (pid ${job.pid}).\ncommand: ${job.command}\n` +
               `You will receive a bash-bg-complete notification when it finishes. ` +
-              `Use bash_bg action=status jobId=${job.id} to peek, or action=wait to block.`,
+              `Use bash_bg action=status jobId=${job.id} to peek, or action=wait to block.\n` +
+              logAccess(job),
           }],
-          details: { action: "start", jobId: job.id, pid: job.pid, running: true, command: job.command },
+          details: jobDetails(job, "start"),
         };
       }
 
@@ -317,8 +351,8 @@ export function registerBashBg(pi: ExtensionAPI): void {
         if (job.done) {
           const out = tailLines(job, params.tail ?? 200);
           return {
-            content: [{ type: "text", text: `${out || "(no output)"}\n(exit ${job.exitCode})` }],
-            details: { action: "run", jobId: job.id, pid: job.pid, running: false, exitCode: job.exitCode, command: job.command },
+            content: [{ type: "text", text: `${out || "(no output)"}\n(exit ${job.exitCode})\n${logAccess(job)}` }],
+            details: jobDetails(job, "run"),
           };
         }
         job.background = true;
@@ -328,16 +362,17 @@ export function registerBashBg(pi: ExtensionAPI): void {
             text:
               `Still running after ${Math.round(windowMs / 1000)}s — moved to background as job ${job.id} (pid ${job.pid}).\ncommand: ${job.command}\n` +
               `You will receive a bash-bg-complete notification when it finishes. ` +
-              `Use bash_bg action=status jobId=${job.id} to peek, or action=wait to block.`,
+              `Use bash_bg action=status jobId=${job.id} to peek, or action=wait to block.\n` +
+              logAccess(job),
           }],
-          details: { action: "run", jobId: job.id, pid: job.pid, running: true, command: job.command },
+          details: jobDetails(job, "run"),
         };
       }
 
       if (params.action === "list") {
         if (jobs.size === 0) return { content: [{ type: "text", text: "No background jobs." }], details: { action: "list" } };
         const lines = [...jobs.values()].map(
-          (j) => `${j.id}\t${jobStatus(j)}${j.done ? `(exit ${j.exitCode})` : ""}\tpid ${j.pid}\t${j.command}`,
+          (j) => `${j.id}\t${jobStatus(j)}${j.done ? `(exit ${j.exitCode})` : ""}\tpid ${j.pid}\t${j.command}\t${j.outFile}`,
         );
         return { content: [{ type: "text", text: lines.join("\n") }], details: { action: "list" } };
       }
@@ -349,8 +384,8 @@ export function registerBashBg(pi: ExtensionAPI): void {
       if (params.action === "status") {
         const state = job.done ? `${jobStatus(job)} (exit ${job.exitCode})` : jobStatus(job);
         return {
-          content: [{ type: "text", text: `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${tailLines(job, tailCount) || "(empty)"}` }],
-          details: { action: "status", jobId: job.id, pid: job.pid, running: !job.done, exitCode: job.exitCode },
+          content: [{ type: "text", text: `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${tailLines(job, tailCount) || "(empty)"}\n${logAccess(job)}` }],
+          details: jobDetails(job, "status"),
         };
       }
 
@@ -362,8 +397,8 @@ export function registerBashBg(pi: ExtensionAPI): void {
           killTree(job.pid);
         }
         return {
-          content: [{ type: "text", text: `${job.done ? "Job already finished" : "Stopping job"} ${job.id} (pid ${job.pid}).` }],
-          details: { action: "kill", jobId: job.id, pid: job.pid, running: !job.done, exitCode: job.exitCode },
+          content: [{ type: "text", text: `${job.done ? "Job already finished" : "Stopping job"} ${job.id} (pid ${job.pid}).\n${logAccess(job)}` }],
+          details: jobDetails(job, "kill"),
         };
       }
 
@@ -377,8 +412,8 @@ export function registerBashBg(pi: ExtensionAPI): void {
         ? `${jobStatus(job)} (exit ${job.exitCode})`
         : `${jobStatus(job)} after ${Math.round(timeoutMs / 1000)}s`;
       return {
-        content: [{ type: "text", text: `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${tailLines(job, tailCount) || "(empty)"}` }],
-        details: { action: "wait", jobId: job.id, pid: job.pid, running: !job.done, exitCode: job.exitCode },
+        content: [{ type: "text", text: `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${tailLines(job, tailCount) || "(empty)"}\n${logAccess(job)}` }],
+        details: jobDetails(job, "wait"),
       };
     },
     renderCall(args, theme) {
@@ -386,13 +421,14 @@ export function registerBashBg(pi: ExtensionAPI): void {
       const target = (args.action === "start" || args.action === "run") ? String(args.command ?? "").slice(0, 50) : String(args.jobId ?? "");
       return singleLine(`${theme.fg("toolTitle", theme.bold("bash_bg "))}${action}${target ? ` ${theme.fg("accent", target)}` : ""}`);
     },
-    renderResult(result, _opts, theme) {
+    renderResult(result, opts, theme) {
       const details = result.details as BashBgDetails | undefined;
       const isError = (result as { isError?: boolean }).isError === true;
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
+      if (opts.expanded) return textBlock(text);
       if (isError) return singleLine(theme.fg("error", `✗ ${text.split("\n")[0]?.slice(0, 120) ?? "bash_bg failed"}`));
       const icon = details?.running === false ? theme.fg("success", "✓") : theme.fg("warning", "•");
-      return singleLine(`${icon} ${theme.fg("muted", text.split("\n")[0]?.slice(0, 110) ?? "")}`);
+      return singleLine(`${icon} ${theme.fg("muted", text.split("\n")[0] ?? "")}`);
     },
   });
 
