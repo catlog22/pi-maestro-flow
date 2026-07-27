@@ -127,7 +127,7 @@ test("missing graph task row never flattens child progress onto the parent", () 
 test("complete removes the row", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "explorer" }, 1);
-	s.applyComplete({ correlationId: "c1" });
+	s.applyComplete({ correlationId: "c1", exitCode: 0 });
 	assert.equal(s.size, 0);
 });
 
@@ -136,13 +136,13 @@ test("complete removes the full descendant tree", () => {
 	s.applyStarted({ correlationId: "grandchild", agent: "reviewer", spawnedBy: "child" }, 3);
 	s.applyStarted({ correlationId: "child", agent: "executor", spawnedBy: "root" }, 2);
 	s.applyStarted({ correlationId: "root", agent: "planner" }, 1);
-	s.applyComplete({ correlationId: "root" });
+	s.applyComplete({ correlationId: "root", exitCode: 0 });
 	assert.equal(s.size, 0);
 });
 
 test("complete for unknown correlationId does not throw", () => {
 	const s = new AgentsStore();
-	assert.doesNotThrow(() => s.applyComplete({ correlationId: "nope" }));
+	assert.doesNotThrow(() => s.applyComplete({ correlationId: "nope", exitCode: 0 }));
 });
 
 test("snapshot orders by latest activity regardless of start time or status", () => {
@@ -246,7 +246,7 @@ test("a failed agent survives its own completion so the failure can be read", ()
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
 	s.applyMessage({ correlationId: "c1", status: "failed", lastMessage: "build broke" });
-	s.applyComplete({ correlationId: "c1" }, 1_000);
+	s.applyComplete({ correlationId: "c1", exitCode: 1 }, 1_000);
 	const row = s.snapshot(1_000)[0];
 	assert.equal(row.status, "failed");
 	assert.equal(row.tail, "build broke");
@@ -258,7 +258,7 @@ test("a lingering failure expires on its own without anyone clearing it", () => 
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
 	s.applyMessage({ correlationId: "c1", status: "failed" });
-	s.applyComplete({ correlationId: "c1" }, 1_000);
+	s.applyComplete({ correlationId: "c1", exitCode: 1 }, 1_000);
 	assert.equal(s.prune(1_000 + FAILED_LINGER_MS - 1), false, "not yet");
 	assert.equal(s.size, 1);
 	assert.equal(s.prune(1_000 + FAILED_LINGER_MS), true);
@@ -274,6 +274,21 @@ test("a lingering failure drops its active tool, which is no longer running", ()
 		status: "failed",
 		recentTools: [{ name: "grep", status: "running" }],
 	});
-	s.applyComplete({ correlationId: "c1" }, 1_000);
+	s.applyComplete({ correlationId: "c1", exitCode: 1 }, 1_000);
 	assert.equal(s.snapshot(1_000)[0].activeTool, undefined);
+});
+
+test("a nonzero complete exit code preserves a running row as failed", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyMessage({ correlationId: "c1", status: "running", lastMessage: "process exited quickly" });
+
+	s.applyComplete({ correlationId: "c1", exitCode: 2 }, 1_000);
+
+	const row = s.snapshot(1_000)[0];
+	assert.equal(row.status, "failed");
+	assert.equal(row.taskStatus, "failed");
+	assert.equal(row.tail, "process exited quickly");
+	assert.equal(row.lastActivityAt, 1_000);
+	assert.ok(s.hasLingering());
 });

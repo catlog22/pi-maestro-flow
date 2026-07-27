@@ -1,3 +1,4 @@
+import type { TeammateCompleteEvent } from "pi-maestro-teammate/v1/events";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { AgentRow, AgentStatus } from "./types.ts";
 
@@ -56,9 +57,7 @@ export interface MessagePayload {
 	lastActivityAt?: number | string;
 	progress?: ProgressPayload[];
 }
-export interface CompletePayload {
-	correlationId: string;
-}
+export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exitCode">;
 
 /**
  * How long a failed agent stays on screen after it completes.
@@ -182,7 +181,12 @@ export class AgentsStore {
 			// only evidence of the failure disappeared in the same frame it appeared.
 			// Successes still vanish immediately — the work has simply moved on.
 			const row = this.roster.get(id);
-			if (row?.status === "failed") {
+			const failedByExitCode = id === p.correlationId
+				&& Number.isFinite(p.exitCode)
+				&& p.exitCode !== 0;
+			if (row && (row.status === "failed" || failedByExitCode)) {
+				row.status = "failed";
+				row.taskStatus = "failed";
 				row.failedAt = now;
 				row.lastActivityAt = now;
 				delete row.activeTool;
