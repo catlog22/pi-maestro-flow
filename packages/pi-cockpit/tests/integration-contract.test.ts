@@ -38,9 +38,24 @@ test("Cockpit packages complete selectable color themes", () => {
 	for (const name of ["cockpit-notion", "cockpit-ocean", "cockpit-amber", "cockpit-minimal"]) {
 		const theme = JSON.parse(
 			readFileSync(new URL(`../themes/${name}.json`, import.meta.url), "utf8"),
-		) as { name?: string; colors?: Record<string, string> };
+		) as { name?: string; vars?: Record<string, string>; colors?: Record<string, string> };
 		assert.equal(theme.name, name);
 		assert.ok(Object.keys(theme.colors ?? {}).length >= 51);
+		if (name === "cockpit-minimal") {
+			assert.equal(theme.vars?.lightGray, "#b8c0ca");
+			for (const slot of [
+				"thinkingOff",
+				"thinkingMinimal",
+				"thinkingLow",
+				"thinkingMedium",
+				"thinkingHigh",
+				"thinkingXhigh",
+				"thinkingMax",
+				"bashMode",
+			]) {
+				assert.equal(theme.colors?.[slot], "lightGray");
+			}
+		}
 	}
 });
 

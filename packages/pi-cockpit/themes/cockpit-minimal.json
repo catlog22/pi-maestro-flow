@@ -16,8 +16,8 @@
     "toolDiffAdded": "green", "toolDiffRemoved": "pink", "toolDiffContext": "dim",
     "syntaxComment": "dim", "syntaxKeyword": "pink", "syntaxFunction": "blue", "syntaxVariable": "blueSoft", "syntaxString": "green",
     "syntaxNumber": "blueSoft", "syntaxType": "blue", "syntaxOperator": "white", "syntaxPunctuation": "lightGray",
-    "thinkingOff": "dim", "thinkingMinimal": "lightGray", "thinkingLow": "blueSoft", "thinkingMedium": "blue", "thinkingHigh": "green", "thinkingXhigh": "pink", "thinkingMax": "white",
-    "bashMode": "green"
+    "thinkingOff": "lightGray", "thinkingMinimal": "lightGray", "thinkingLow": "lightGray", "thinkingMedium": "lightGray", "thinkingHigh": "lightGray", "thinkingXhigh": "lightGray", "thinkingMax": "lightGray",
+    "bashMode": "lightGray"
   },
   "export": { "pageBg": "#111418", "cardBg": "#181d23", "infoBg": "#202832" }
 }
