@@ -1806,7 +1806,9 @@ export function renderTodoWidget(
   if (!hasTasks) return lines;
 
   const ordered = [...tasks].sort((left, right) =>
-    todoIdOrder(left.id) - todoIdOrder(right.id) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+    todoStatusRank(left.status) - todoStatusRank(right.status)
+    || todoIdOrder(left.id) - todoIdOrder(right.id)
+    || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
   );
   const visible = ordered.slice(0, 8);
   for (const task of visible) {
@@ -1816,6 +1818,12 @@ export function renderTodoWidget(
   if (hidden > 0) lines.push(truncateToWidth(dim(`  … ${hidden} more · ${TODO_TOGGLE_LABEL} collapse`), safeWidth, "…"));
 
   return lines;
+}
+
+const TODO_STATUS_RANK: Record<string, number> = { in_progress: 0, blocked: 1, pending: 2, completed: 3 };
+
+function todoStatusRank(status: string): number {
+  return TODO_STATUS_RANK[status] ?? 4;
 }
 
 // Tasks keep their creation order (the numeric id assigned at allocation).
