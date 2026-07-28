@@ -262,6 +262,12 @@ export function renderAgents(
 
 const TODO_MAX_VISIBLE = 8;
 
+const TODO_STATUS_RANK: Record<string, number> = { in_progress: 0, blocked: 1, pending: 2, completed: 3 };
+
+function todoStatusRank(status: string): number {
+	return TODO_STATUS_RANK[status] ?? 4;
+}
+
 // Tasks keep their creation order (the numeric id assigned at allocateTaskId).
 // Non-numeric ids (workflow mirrors) sort after numeric ones, then lexicographically.
 function todoIdOrder(id: string): number {
@@ -376,7 +382,11 @@ export function renderTodos(
 	// Creation order drives both the next-task pointer and the expanded rows, so
 	// compute it once up front. The pointer is the first task the user can act on:
 	// not done, not blocked, and free of unresolved dependencies.
-	const ordered = [...items].sort((a, b) => todoIdOrder(a.id) - todoIdOrder(b.id) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
+	const ordered = [...items].sort((a, b) =>
+		todoStatusRank(a.status) - todoStatusRank(b.status)
+		|| todoIdOrder(a.id) - todoIdOrder(b.id)
+		|| (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
+	);
 	const next = ordered.find((it) => it.status !== "completed" && it.status !== "blocked" && it.blockedBy.length === 0);
 	if (next) {
 		const np = todoPaint(next.status, g, spin);

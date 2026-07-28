@@ -888,6 +888,97 @@ test("todo widget renders nothing when there are no tasks or runs", () => {
   assert.deepEqual(renderTodoWidget([], true, 120, []), []);
 });
 
+test("todo allocates 0-based ids and update resolves #0", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-zero-id-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    const first = await executeTodo({ action: "create", subject: "Zeroth task" }, ctx);
+    assert.match((first.content[0] as { text: string }).text, /Created #0/);
+    const second = await executeTodo({ action: "create", subject: "First task" }, ctx);
+    assert.match((second.content[0] as { text: string }).text, /Created #1/);
+
+    const updated = await executeTodo({ action: "update", id: "#0", status: "completed" }, ctx);
+    assert.equal((updated as { isError?: boolean }).isError, undefined);
+    assert.match((updated.content[0] as { text: string }).text, /Updated #0/);
+
+    const tasks = getVisibleTasks();
+    assert.equal(tasks[0].id, "0");
+    assert.equal(tasks[0].status, "completed");
+    assert.equal(tasks[1].id, "1");
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("todo widget sinks completed tasks below active ones regardless of creation order", () => {
+  const tasks = [
+    { id: "0", subject: "Done early", status: "completed", blockedBy: [], skills: [] },
+    { id: "1", subject: "Done second", status: "completed", blockedBy: [], skills: [] },
+    { id: "2", subject: "Active work", status: "in_progress", blockedBy: [], skills: [] },
+    { id: "3", subject: "Waiting", status: "pending", blockedBy: [], skills: [] },
+    { id: "4", subject: "Stuck", status: "blocked", blockedBy: ["2"], skills: [] },
+  ];
+
+  const lines = renderTodoWidget(tasks, true, 120);
+
+  assert.equal(lines.length, 6); // 1 summary + 5 tasks
+  assert.match(lines[1], /Active work/);
+  assert.match(lines[2], /Stuck/);
+  assert.match(lines[3], /Waiting/);
+  assert.match(lines[4], /Done early/);
+  assert.match(lines[5], /Done second/);
+});
+
+test("todo widget unifies root and teammate tasks sorted by status priority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-unified-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+  const worker: TodoActorRef = { kind: "teammate", id: "worker-1", label: "worker", agentType: "delegate" };
+
+  try {
+    await executeTodo({ action: "create", subject: "Root done" }, ctx);
+    await executeTodo({ action: "create", subject: "Root pending" }, ctx);
+    await executeTodo({ action: "create", subject: "Worker active" }, ctx, worker);
+    await executeTodo({ action: "update", id: "0", status: "completed" }, ctx);
+    await executeTodo({ action: "next" }, ctx, worker);
+
+    const visible = getVisibleTasks();
+    assert.equal(visible.length, 3);
+
+    const lines = renderTodoWidget(visible.map((t) => ({
+      id: t.id,
+      subject: t.subject,
+      status: t.status,
+      blockedBy: t.blockedBy,
+      skills: t.skills,
+      createdBy: t.createdBy,
+      assignee: t.assignee,
+    })), true, 160);
+
+    assert.equal(lines.length, 4); // 1 summary + 3 tasks
+    assert.match(lines[1], /Worker active/);
+    assert.match(lines[1], /@worker/);
+    assert.match(lines[2], /Root pending/);
+    assert.match(lines[3], /Root done/);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("todo state version is 5", () => {
   assert.equal(getTodoCompactionSnapshot().stateVersion, 5);
 });

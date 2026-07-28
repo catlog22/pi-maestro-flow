@@ -151,7 +151,7 @@ const TODO_STATE_ENTRY_TYPE = "todo-state";
 const TODO_STATE_VERSION = 5;
 
 let tasks: Map<string, TodoTask> = new Map();
-let nextTaskId = 1;
+let nextTaskId = 0;
 let knownActors: Map<string, TodoActorRef> = new Map([[ROOT_TODO_ACTOR.id, ROOT_TODO_ACTOR]]);
 let extensionApi: ExtensionAPI | undefined;
 let onTodoStateChanged: (() => void) | undefined;
@@ -210,7 +210,7 @@ export function onSessionShutdown(ctx: TodoContext): void {
   todoGeneration++;
   todoMutationQueue = Promise.resolve();
   tasks.clear();
-  nextTaskId = 1;
+  nextTaskId = 0;
   knownActors = new Map([[ROOT_TODO_ACTOR.id, cloneActor(ROOT_TODO_ACTOR)]]);
   skillLoader = undefined;
   skillRuntime = undefined;
@@ -1014,7 +1014,7 @@ function allocateTaskId(): string {
 }
 
 function syncTaskIdCounter(state: Map<string, TodoTask> = tasks): void {
-  let max = 0;
+  let max = -1;
   for (const id of state.keys()) {
     const n = Number(id);
     if (Number.isInteger(n) && n > max) max = n;
