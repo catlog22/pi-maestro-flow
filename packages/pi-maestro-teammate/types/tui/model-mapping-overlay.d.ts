@@ -61,6 +61,7 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private readonly models;
     private readonly modelCapabilities;
     private readonly agents;
+    private readonly taskTypes;
     private readonly activeAgents;
     constructor(params: TeammateControlCenterParams);
     invalidate(): void;
@@ -74,6 +75,7 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private activateSelection;
     private activateThinkingSelection;
     private handleModelInput;
+    private taskTypeMeta;
     private filteredTaskTypes;
     private filteredRoles;
     private filteredActiveAgents;

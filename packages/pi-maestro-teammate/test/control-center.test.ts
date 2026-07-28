@@ -80,6 +80,16 @@ test("control center keeps roles, routing and active collaboration visible", () 
   assert.match(narrow, /Teammate Control Center|Teammates/);
 });
 
+test("control center derives custom routing types from discovered agents", () => {
+  const specialist = { ...agent("security-specialist"), taskType: "security-audit" };
+  const { center } = makeCenter({ agents: [agent("planner"), specialist] });
+  center.handleInput("audit");
+  const view = center.render(100).join("\n");
+  assert.match(view, /Routing 8/);
+  assert.match(view, /Security Audit/);
+  assert.match(view, /security-specialist/);
+});
+
 test("control center accepts cross-platform Enter and Escape encodings", () => {
   for (const enter of ["\x1bOM", "\x1b[13u", "\x1b[57414u"]) {
     const { center } = makeCenter();
@@ -183,15 +193,19 @@ test("routing filter still accepts t-prefixed text and every view fits widths 1 
   }
 });
 
-test("thinking picker follows the routed model capability surface", () => {
+test("thinking picker shows the full depth range and marks model capability limits", () => {
   const openai = makeCenter({
     config: { version: 2, mappings: { explore: "openai/gpt-5" }, thinkingLevels: {} },
   }).center;
   openai.handleInput("\x1b[1;5C");
+  openai.handleInput("\x1b[B");
   const openaiPicker = openai.render(90).join("\n");
+  assert.match(openaiPicker, /off/);
   assert.match(openaiPicker, /minimal/);
   assert.match(openaiPicker, /high/);
-  assert.doesNotMatch(openaiPicker, /xhigh \/ max/);
+  assert.match(openaiPicker, /xhigh \/ max/);
+  assert.match(openaiPicker, /does not support this level/);
+  assert.match(openaiPicker, /! unavailable/);
 
   const anthropic = makeCenter({
     config: { version: 2, mappings: { explore: "anthropic/sonnet" }, thinkingLevels: {} },
@@ -236,6 +250,26 @@ test("model routing is reversible and saves inline", async () => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(saved, [{ taskType: "explore", model: "anthropic/sonnet" }]);
   assert.match(center.render(90).join("\n"), /Saved/);
+});
+
+test("model routing continues into thinking depth for the associated model", async () => {
+  const { center, saved, savedThinking } = makeCenter();
+  center.handleInput("\r");
+  center.handleInput("\x1b[B");
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(saved, [{ taskType: "explore", model: "anthropic/sonnet" }]);
+  const thinkingPicker = center.render(90).join("\n");
+  assert.match(thinkingPicker, /Explore › Thinking/);
+  assert.match(thinkingPicker, /Saved model · choose thinking depth for anthropic\/sonnet/);
+  assert.match(thinkingPicker, /xhigh \/ max/);
+
+  center.handleInput("\x1b[B");
+  center.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(savedThinking, [{ taskType: "explore", thinking: "off" }]);
+  assert.match(center.render(90).join("\n"), /Saved · explore thinking → off/);
 });
 
 test("model routing keeps the editor open when persistence fails", async () => {

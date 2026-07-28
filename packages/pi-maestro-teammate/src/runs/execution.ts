@@ -13,16 +13,16 @@ import { createHash, randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Writable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { fileURLToPath } from "node:url";
-import { Check } from "typebox/value";
+import { Check, Errors } from "typebox/value";
 import crossSpawn from "cross-spawn";
 import { listAgentSummaries, resolveAgent, type AgentConfig } from "../agents/agents.ts";
-import { resolvePromptTask } from "../prompts/prompts.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
 import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
-import type { TeammateTaskType } from "../models/model-routing.ts";
+import { applyModelRouting, type TeammateTaskType } from "../models/model-routing.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import { getTeammateChildExtensions } from "./child-extensions.ts";
 import {
@@ -40,11 +40,40 @@ import {
 // Public param / option interfaces
 // ---------------------------------------------------------------------------
 
+export interface TeammateTaskSpec {
+  prompt: string;
+  agent?: string;
+  taskType?: TeammateTaskType;
+  name?: string;
+  dependsOn?: string[];
+  context?: "fresh" | "fork";
+  model?: string;
+  thinking?: TeammateThinkingInput;
+  cwd?: string;
+  outputSchema?: Record<string, unknown>;
+  timeoutMs?: number;
+}
+
 export interface RunTeammateParams {
+  tasks: TeammateTaskSpec[];
+  agent?: string;
+  taskType?: TeammateTaskType;
+  reply_to?: "caller" | "main";
+  background?: boolean;
+  context?: "fresh" | "fork";
+  model?: string;
+  thinking?: TeammateThinkingInput;
+  cwd?: string;
+  timeoutMs?: number;
+  outputSchema?: Record<string, unknown>;
+  concurrency?: number;
+  maxAgents?: number;
+}
+
+/** Parameters for the internal single-agent execution primitive. */
+export interface RunSingleTeammateParams {
   agent: string;
   task?: string;
-  prompt?: string;
-  promptArgs?: string[];
   taskType?: TeammateTaskType;
   name?: string;
   reply_to?: "caller" | "main";
@@ -56,10 +85,6 @@ export interface RunTeammateParams {
   cwd?: string;
   timeoutMs?: number;
   outputSchema?: Record<string, unknown>;
-  tasks?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; name?: string; dependsOn?: string[]; context?: "fresh" | "fork"; model?: string; thinking?: TeammateThinkingInput; cwd?: string; outputSchema?: Record<string, unknown>; timeoutMs?: number }>;
-  chain?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; model?: string; thinking?: TeammateThinkingInput }>;
-  concurrency?: number;
-  maxAgents?: number;
 }
 
 export interface RunTeammateOptions {
@@ -110,9 +135,7 @@ export interface RunTeammateOptions {
 
 export interface NormalizedTask {
   agent: string;
-  task: string;
-  prompt?: string;
-  promptArgs?: string[];
+  prompt: string;
   taskType?: TeammateTaskType;
   name?: string;
   dependsOn?: string[];
@@ -236,6 +259,60 @@ export function extractValidatedStructuredOutput(
     return validateStructuredOutputValue(value, schema) ? value : undefined;
   }
   return undefined;
+}
+
+export function describeStructuredOutputValidationFailure(
+  event: Record<string, unknown>,
+  schema: Record<string, unknown>,
+): string | undefined {
+  const message = event.message as Record<string, unknown> | undefined;
+  const content = message?.content;
+  if (!Array.isArray(content)) return undefined;
+
+  for (const item of content) {
+    if (!item || typeof item !== "object") continue;
+    const block = item as Record<string, unknown>;
+    if ((block.name ?? block.toolName) !== "structured_output") continue;
+    const raw = block.arguments ?? block.input;
+    let value = raw;
+    if (typeof raw === "string") {
+      try {
+        value = JSON.parse(raw);
+      } catch (error) {
+        return `structured_output validation failed: arguments are not valid JSON (${error instanceof Error ? error.message : String(error)}).`;
+      }
+    }
+    if (validateStructuredOutputValue(value, schema)) return undefined;
+    try {
+      const issue = [...Errors(schema, value)][0] as {
+        instancePath?: string;
+        schemaPath?: string;
+        message?: string;
+      } | undefined;
+      if (issue) {
+        const instancePath = issue.instancePath || "/";
+        const schemaPath = issue.schemaPath ? `, schema=${issue.schemaPath}` : "";
+        return `structured_output validation failed at ${instancePath}${schemaPath}: ${issue.message ?? "value does not match the schema"}.`;
+      }
+    } catch {
+      // The final generic diagnostic below still identifies the failing phase.
+    }
+    return "structured_output validation failed: value does not match the supplied schema.";
+  }
+  return undefined;
+}
+
+export function extractPiEventError(event: Record<string, unknown>): string | undefined {
+  const message = event.message as Record<string, unknown> | undefined;
+  const candidates = [
+    message?.errorMessage,
+    message?.error,
+    event.errorMessage,
+    event.error,
+  ];
+  return candidates.find((candidate): candidate is string => (
+    typeof candidate === "string" && candidate.trim().length > 0
+  ))?.trim();
 }
 
 function validateStructuredOutputValue(
@@ -492,10 +569,10 @@ function editDistance(a: string, b: string): number {
  * and progress snapshots so all three agree on the dependency set.
  */
 export function taskDependencyNames(
-  task: Pick<NormalizedTask, "task" | "dependsOn">,
+  task: Pick<NormalizedTask, "prompt" | "dependsOn">,
   taskNames: Set<string>,
 ): string[] {
-  const deps = extractDependencies(task.task, taskNames);
+  const deps = extractDependencies(task.prompt, taskNames);
   for (const name of task.dependsOn ?? []) {
     if (taskNames.has(name) && !deps.includes(name)) deps.push(name);
   }
@@ -528,7 +605,7 @@ export function validateTaskReferences(
       }
     }
     if (taskNames.size === 0) return;
-    for (const name of collectUnknownRefs(t.task, taskNames)) {
+    for (const name of collectUnknownRefs(t.prompt, taskNames)) {
       const threshold = name.length <= 3 ? 1 : 2;
       const close = [...taskNames].find(
         (candidate) => candidate !== t.name && editDistance(name, candidate) <= threshold,
@@ -645,147 +722,55 @@ export function inferGraphMode(
 }
 
 // ---------------------------------------------------------------------------
-// Chain → tasks normalization (backward compat)
-// ---------------------------------------------------------------------------
-
-export function normalizeChainToTasks(
-  chain: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[]; taskType?: TeammateTaskType; model?: string; thinking?: TeammateThinkingInput }>,
-  initialTask: string,
-): NormalizedTask[] {
-  return chain.map((step, i) => {
-    const name = `_step${i}`;
-    let task: string;
-    if (i === 0) {
-      task = step.task ?? initialTask;
-    } else {
-      const prevName = `_step${i - 1}`;
-      const template = step.task ?? `{${prevName}}`;
-      task = template.replace(/\{previous\}/g, `{${prevName}}`);
-    }
-    return {
-      agent: step.agent,
-      task,
-      name,
-      model: step.model,
-      thinking: parseTeammateThinkingLevel(step.thinking),
-      taskType: step.taskType,
-      prompt: step.prompt,
-      promptArgs: step.promptArgs,
-    };
-  });
-}
-
-// ---------------------------------------------------------------------------
 // Unified param normalization (shared by tool execute and child proxy paths)
 // ---------------------------------------------------------------------------
 
 export interface NormalizeTeammateResult {
-  /** Normalized task list; null when running in single-agent mode. */
-  tasks: NormalizedTask[] | null;
+  tasks: NormalizedTask[];
   isMultiTask: boolean;
-  /** Non-fatal issues surfaced to the caller alongside the result. */
   warnings: string[];
-  /** Fatal validation error — nothing was dispatched. */
   error?: string;
 }
 
-/**
- * Normalize teammate tool params into a task list.
- *
- * Precedence: tasks > chain (deprecated) > single-agent sugar.
- * Top-level prompt/promptArgs/taskType/context/model/thinking/cwd/
- * outputSchema/timeoutMs act as defaults; per-task values win.
- */
+/** Normalize the tasks-only public contract into executable graph tasks. */
 export function normalizeTeammateParams(
   params: RunTeammateParams,
 ): NormalizeTeammateResult {
-  // background defaults to false (foreground/blocking); resolve once here so both
-  // dispatch paths (root execute + child proxy) share the same default.
   params.background = params.background === true;
   const warnings: string[] = [];
-  const hasTasks = !!params.tasks?.length;
-  const hasChain = !!params.chain?.length;
 
-  let normalized: NormalizedTask[];
-
-  if (hasTasks) {
-    if (hasChain) {
-      warnings.push(
-        '"chain" is deprecated and was ignored because "tasks" is also provided — migrate chain steps to tasks with {name} references',
-      );
-    }
-    if (params.agent || params.task) {
-      warnings.push(
-        'top-level "agent"/"task" are ignored in multi-task mode — set them per task',
-      );
-    }
-    normalized = params.tasks!.map((t) => ({
-      agent: t.agent,
-      task: t.task ?? "",
-      prompt: t.prompt ?? params.prompt,
-      promptArgs: t.promptArgs ?? params.promptArgs,
-      taskType: t.taskType ?? params.taskType,
-      name: t.name,
-      dependsOn: t.dependsOn,
-      context: t.context ?? params.context,
-      model: t.model ?? params.model,
-      thinking: parseTeammateThinkingLevel(t.thinking ?? params.thinking),
-      cwd: t.cwd ?? params.cwd,
-      outputSchema: (t.outputSchema ?? params.outputSchema) as Record<string, unknown> | undefined,
-      timeoutMs: t.timeoutMs ?? params.timeoutMs,
-    }));
-  } else if (hasChain) {
-    warnings.push(
-      '"chain" is deprecated — use "tasks" with {name} references instead',
-    );
-    if (params.agent) {
-      warnings.push('top-level "agent" is ignored in chain mode — set it per step');
-    }
-    normalized = normalizeChainToTasks(params.chain!, params.task ?? "").map((t) => ({
-      ...t,
-      prompt: t.prompt ?? params.prompt,
-      promptArgs: t.promptArgs ?? params.promptArgs,
-      taskType: t.taskType ?? params.taskType,
-      context: params.context,
-      model: t.model ?? params.model,
-      thinking: t.thinking ?? parseTeammateThinkingLevel(params.thinking),
-      cwd: t.cwd ?? params.cwd,
-      outputSchema: (t.outputSchema ?? params.outputSchema) as Record<string, unknown> | undefined,
-      timeoutMs: t.timeoutMs ?? params.timeoutMs,
-    }));
-  } else if (params.agent) {
-    if (!params.task && !params.prompt) {
-      return {
-        tasks: null,
-        isMultiTask: false,
-        warnings,
-        error: 'Single mode requires "task" or "prompt" — refusing to dispatch an empty task.',
-      };
-    }
-    if (params.promptArgs?.length && !params.prompt) {
-      warnings.push('"promptArgs" has no effect without "prompt"');
-    }
-    return { tasks: null, isMultiTask: false, warnings };
-  } else {
+  if (!Array.isArray(params.tasks) || params.tasks.length === 0) {
     return {
-      tasks: null,
+      tasks: [],
       isMultiTask: false,
       warnings,
-      error: 'Requires "agent" (with "task" or "prompt") for single mode, or "tasks" for multi-task mode.',
+      error: 'Requires a non-empty "tasks" array.',
     };
   }
 
-  for (const [i, t] of normalized.entries()) {
-    if (!t.task && !t.prompt) {
+  const normalized: NormalizedTask[] = params.tasks.map((task) => ({
+    agent: task.agent ?? params.agent ?? "general",
+    prompt: task.prompt,
+    taskType: task.taskType ?? params.taskType,
+    name: task.name,
+    dependsOn: task.dependsOn,
+    context: task.context ?? params.context,
+    model: task.model ?? params.model,
+    thinking: parseTeammateThinkingLevel(task.thinking ?? params.thinking),
+    cwd: task.cwd ?? params.cwd,
+    outputSchema: task.outputSchema ?? params.outputSchema,
+    timeoutMs: task.timeoutMs ?? params.timeoutMs,
+  }));
+  const isMultiTask = normalized.length > 1;
+
+  for (const [index, task] of normalized.entries()) {
+    if (typeof task.prompt !== "string" || task.prompt.trim().length === 0) {
       return {
         tasks: normalized,
-        isMultiTask: true,
+        isMultiTask,
         warnings,
-        error: `tasks[${i}]${t.name ? ` "${t.name}"` : ""} requires "task" or "prompt" — refusing to dispatch an empty task.`,
+        error: `tasks[${index}]${task.name ? ` "${task.name}"` : ""} requires a non-empty "prompt".`,
       };
-    }
-    if (t.promptArgs?.length && !t.prompt) {
-      warnings.push(`tasks[${i}]: "promptArgs" has no effect without "prompt"`);
     }
   }
 
@@ -793,7 +778,7 @@ export function normalizeTeammateParams(
   if (normalized.length > maxAgents) {
     return {
       tasks: normalized,
-      isMultiTask: true,
+      isMultiTask,
       warnings,
       error: `Too many tasks: ${normalized.length} exceeds the maximum of ${maxAgents}. Split into smaller batches or raise the limit via maxAgents / PI_TEAMMATE_MAX_AGENTS.`,
     };
@@ -804,13 +789,13 @@ export function normalizeTeammateParams(
   if (refCheck.errors.length > 0) {
     return {
       tasks: normalized,
-      isMultiTask: true,
+      isMultiTask,
       warnings,
       error: refCheck.errors.join("\n"),
     };
   }
 
-  return { tasks: normalized, isMultiTask: true, warnings };
+  return { tasks: normalized, isMultiTask, warnings };
 }
 
 // ---------------------------------------------------------------------------
@@ -1052,7 +1037,7 @@ export function resolveModelSpecifier(
 
 export function buildPiArgs(
   agentConfig: AgentConfig,
-  params: RunTeammateParams,
+  params: RunSingleTeammateParams,
   systemPromptFile: string,
   modelOverride?: string,
   sessionDir?: string,
@@ -1522,8 +1507,8 @@ export function bindChildTerminationSignal(
 // Core: run a single teammate agent
 // ---------------------------------------------------------------------------
 
-export async function runTeammate(
-  params: RunTeammateParams,
+export async function runSingleTeammate(
+  params: RunSingleTeammateParams,
   options: RunTeammateOptions,
 ): Promise<SingleResult> {
   const startTime = Date.now();
@@ -1548,21 +1533,6 @@ export async function runTeammate(
     const schemaHazard = findStructuredOutputSchemaHazard(params.outputSchema);
     if (schemaHazard) return rejectWith(schemaHazard);
   }
-
-  const promptResolution = resolvePromptTask(cwd, params.prompt, params.task, params.promptArgs);
-  if (promptResolution.error) {
-    return {
-      agent: params.agent,
-      task: params.task ?? "",
-      exitCode: 1,
-      messages: [{ role: "system", content: promptResolution.error }],
-      usage: emptyUsage(),
-      model: params.model ?? "unknown",
-      correlationId,
-      durationMs: Date.now() - startTime,
-    };
-  }
-  if (params.prompt) params = { ...params, task: promptResolution.task };
 
   // AC4: Depth guard
   const depthCheck = checkDepthGuard(options.depth ?? getTeammateDepth());
@@ -1693,7 +1663,7 @@ interface AttemptSessionContext {
 }
 
 function resolveAttemptSessionContext(
-  params: RunTeammateParams,
+  params: RunSingleTeammateParams,
   agentConfig: AgentConfig,
   correlationId: string,
   options: RunTeammateOptions,
@@ -1731,6 +1701,8 @@ interface AttemptState {
   streamingText: string;
   stderrBuffer: string;
   capturedStructuredOutput: unknown;
+  structuredOutputValidationFailure?: string;
+  reportedRuntimeErrors: Set<string>;
   /**
    * progress.toolCount stays cumulative for the lifetime of a wakeable agent so
    * it reads on the same scale as the cumulative token counters. This per-turn
@@ -1822,14 +1794,14 @@ function bindChildIpcRelay(
           })
         : undefined,
       (reply) => {
-        try { child.send(reply as never); } catch { /* child disconnected */ }
+        sendChildIpcMessage(child, reply as Record<string, unknown>);
       },
     );
   });
 }
 
 async function runSingleAttempt(
-  params: RunTeammateParams,
+  params: RunSingleTeammateParams,
   agentConfig: AgentConfig,
   cwd: string,
   correlationId: string,
@@ -1871,6 +1843,8 @@ async function runSingleAttempt(
     streamingText: "",
     stderrBuffer: "",
     capturedStructuredOutput: undefined,
+    structuredOutputValidationFailure: undefined,
+    reportedRuntimeErrors: new Set(),
     turnToolCount: 0,
     turnLifecycleSettled: false,
     resolvedModel: modelOverride ?? params.model ?? agentConfig.model ?? "unknown",
@@ -1919,7 +1893,9 @@ async function runSingleAttempt(
         exitCode: 1,
         messages: [{
           role: "system",
-          content: `Failed to spawn pi subprocess: ${error instanceof Error ? error.message : String(error)}`,
+          content:
+            `Failed to spawn pi subprocess (agent=${params.agent}, model=${state.resolvedModel || "unknown"}, `
+            + `correlationId=${correlationId}, phase=spawn): ${error instanceof Error ? error.message : String(error)}`,
         }],
         usage: emptyUsage(),
         model: state.resolvedModel,
@@ -1928,6 +1904,8 @@ async function runSingleAttempt(
       });
       return;
     }
+
+    if (child.stdin) guardChildStdin(child.stdin);
 
     // RPC mode: stdin stays open for bidirectional messaging.
     // Send initial prompt via RPC command.
@@ -1941,13 +1919,7 @@ async function runSingleAttempt(
     // Expose stdin for teammate-send message injection
     if (child.stdin) {
       options.onChildSpawned?.(child.stdin, (message) => {
-        if (!child.connected) return false;
-        try {
-          child.send(message as never);
-          return true;
-        } catch {
-          return false;
-        }
+        return sendChildIpcMessage(child, message);
       }, sessionDir, correlationId);
     }
 
@@ -1998,7 +1970,10 @@ async function runSingleAttempt(
     }
     timers.firstActivity = setTimeout(() => {
       if (state.initialResultPublished || state.receivedFirstActivity) return;
-      const message = "Timed out waiting for the first child agent event. The child process started but did not report model activity.";
+      const message =
+        `Timed out waiting for the first child agent event `
+        + `(agent=${params.agent}, model=${state.resolvedModel || "unknown"}, correlationId=${correlationId}, `
+        + `phase=first-activity); the child process started but did not report model activity.`;
       state.lastContent = message;
       progress.status = "failed";
       progress.durationMs = Date.now() - startTime;
@@ -2090,6 +2065,8 @@ async function runSingleAttempt(
         state.streamingText = "";
         state.stderrBuffer = "";
         state.capturedStructuredOutput = undefined;
+        state.structuredOutputValidationFailure = undefined;
+        state.reportedRuntimeErrors.clear();
         resetUsage(pendingMessageUsage);
         if (terminateChild) {
           state.terminal = true;
@@ -2155,6 +2132,7 @@ async function runSingleAttempt(
         // output was captured instead of blocking on a missing agent_end/close.
         const structuredOutput = readStructuredOutput(true);
         if (structuredOutput === undefined) {
+          appendStructuredOutputFailure();
           appendBoundedTranscriptMessage(messages, {
             role: "system",
             content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.resultReadyGrace,
@@ -2163,6 +2141,34 @@ async function runSingleAttempt(
         completeTurn(structuredOutput, true, structuredOutput === undefined ? 1 : 0);
       }, options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS);
       timers.resultReadyGrace.unref?.();
+    }
+
+    function appendStructuredOutputFailure(): void {
+      if (!state.structuredOutputValidationFailure) return;
+      if (!messages.some((message) => message.content === state.structuredOutputValidationFailure)) {
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content: state.structuredOutputValidationFailure,
+        });
+      }
+    }
+
+    function recordRuntimeEventError(event: JsonLineEvent, phase: string): void {
+      const error = extractPiEventError(event);
+      if (!error || state.reportedRuntimeErrors.has(error)) return;
+      state.reportedRuntimeErrors.add(error);
+      const message = event.message as Record<string, unknown> | undefined;
+      const model = typeof message?.model === "string"
+        ? message.model
+        : typeof event.model === "string"
+          ? event.model
+          : state.resolvedModel;
+      const diagnostic =
+        `Teammate runtime error (phase=${phase}, agent=${params.agent}, model=${model || "unknown"}, `
+        + `correlationId=${correlationId}): ${error}`;
+      appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
+      progress.lastMessage = diagnostic;
+      options.onProgress?.(progress);
     }
 
     // --- Per-event handlers -------------------------------------------------
@@ -2188,8 +2194,8 @@ async function runSingleAttempt(
         correlationId,
       };
       const respond = (response: unknown) => {
-        if (!child.stdin?.writable) return;
-        child.stdin.write(`${JSON.stringify(response)}\n`);
+        if (!child.stdin) return;
+        writeChildStdinLine(child.stdin, JSON.stringify(response));
       };
       if (options.onChildRequest) options.onChildRequest(request, respond);
       else if (typeof event.id === "string") {
@@ -2220,6 +2226,7 @@ async function runSingleAttempt(
       if (messageModel) {
         state.resolvedModel = messageModel;
       }
+      recordRuntimeEventError(event, event.type);
       options.onProgress?.(progress);
     }
 
@@ -2321,6 +2328,9 @@ async function runSingleAttempt(
           progress.lastMessage = text;
         }
       }
+      const messageModel = typeof msg?.model === "string" ? msg.model : event.model;
+      if (messageModel) state.resolvedModel = messageModel;
+      recordRuntimeEventError(event, "turn_end");
       if (isPiResultReadyTurn(event)) {
         progress.resultReadyAt = Date.now();
         options.onProgress?.(progress);
@@ -2334,9 +2344,11 @@ async function runSingleAttempt(
     }
 
     /** Pi's authoritative end-of-agent event — the lifecycle settles here. */
-    function onAgentEnd(): void {
+    function onAgentEnd(event: JsonLineEvent): void {
+      recordRuntimeEventError(event, "agent_end");
       const structuredOutput = readStructuredOutput(false);
       if (params.outputSchema && structuredOutput === undefined) {
+        appendStructuredOutputFailure();
         appendBoundedTranscriptMessage(messages, {
           role: "system",
           content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.agentEnd,
@@ -2350,10 +2362,7 @@ async function runSingleAttempt(
     }
 
     function onErrorEvent(event: JsonLineEvent): void {
-      appendBoundedTranscriptMessage(messages, {
-        role: "system",
-        content: event.error ?? "Unknown error",
-      });
+      recordRuntimeEventError(event, "error");
     }
 
     /**
@@ -2395,6 +2404,8 @@ async function runSingleAttempt(
       if (state.terminal) return;
       if (state.capturedStructuredOutput === undefined && params.outputSchema) {
         state.capturedStructuredOutput = extractValidatedStructuredOutput(event, params.outputSchema);
+        state.structuredOutputValidationFailure = describeStructuredOutputValidationFailure(event, params.outputSchema)
+          ?? state.structuredOutputValidationFailure;
       }
       // AC8: Update lastActivityAt on every event
       progress.lastActivityAt = Date.now();
@@ -2467,6 +2478,7 @@ async function runSingleAttempt(
         ? 1
         : code ?? 1;
       if (exitCode !== 0 && params.outputSchema && structuredOutput === undefined) {
+        appendStructuredOutputFailure();
         appendBoundedTranscriptMessage(messages, {
           role: "system",
           content: STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS.close,
@@ -2507,10 +2519,13 @@ async function runSingleAttempt(
       progress.durationMs = Date.now() - startTime;
       options.onProgress?.(progress);
 
+      const processError =
+        `Teammate child process error (agent=${params.agent}, model=${state.resolvedModel || "unknown"}, `
+        + `correlationId=${correlationId}, phase=child-error): ${error.message}`;
       if (state.initialResultPublished) {
         appendBoundedTranscriptMessage(messages, {
           role: "system",
-          content: `Process error: ${error.message}`,
+          content: processError,
         });
         completeTurn(undefined, true, 1);
         return;
@@ -2524,7 +2539,7 @@ async function runSingleAttempt(
           exitCode: 1,
           messages: [{
             role: "system",
-            content: `Process error: ${error.message}`,
+            content: processError,
           }],
           usage: emptyUsage(),
           model: state.resolvedModel,
@@ -2569,7 +2584,7 @@ export async function runGraph(
   if (refCheck.errors.length > 0) {
     return tasks.map((t, index) => ({
       agent: t.agent,
-      task: t.task,
+      task: t.prompt,
       exitCode: 1,
       messages: [{ role: "system", content: refCheck.errors.join("\n") }],
       usage: emptyUsage(),
@@ -2588,7 +2603,7 @@ export async function runGraph(
   if (hasCycle(deps)) {
     return tasks.map((t, index) => ({
       agent: t.agent,
-      task: t.task,
+      task: t.prompt,
       exitCode: 1,
       messages: [{ role: "system", content: "Circular dependency detected in task graph" }],
       usage: emptyUsage(),
@@ -2607,7 +2622,7 @@ export async function runGraph(
     if (count > 1) {
       return tasks.map((t, index) => ({
         agent: t.agent,
-        task: t.task,
+        task: t.prompt,
         exitCode: 1,
         messages: [{ role: "system", content: `Duplicate task name "${name}"` }],
         usage: emptyUsage(),
@@ -2714,7 +2729,7 @@ export async function runGraph(
       failed.add(idx);
       results[idx] = {
         agent: task.agent,
-        task: task.task,
+        task: task.prompt,
         exitCode: 1,
         messages: [{ role: "system", content: "Skipped: upstream dependency failed" }],
         usage: emptyUsage(),
@@ -2727,14 +2742,14 @@ export async function runGraph(
       return;
     }
 
-    let resolvedTask = task.task;
+    let resolvedTask = task.prompt;
     try {
-      resolvedTask = resolveVariables(task.task, outputs, taskNames);
+      resolvedTask = resolveVariables(task.prompt, outputs, taskNames);
     } catch (err) {
       failed.add(idx);
       results[idx] = {
         agent: task.agent,
-        task: task.task,
+        task: task.prompt,
         exitCode: 1,
         messages: [{
           role: "system",
@@ -2753,12 +2768,10 @@ export async function runGraph(
     await acquire();
 
     try {
-      const result = await runTeammate(
+      const result = await runSingleTeammate(
         {
           agent: task.agent,
           task: resolvedTask,
-          prompt: task.prompt,
-          promptArgs: task.promptArgs,
           context: task.context,
           model: task.model,
           thinking: task.thinking,
@@ -2821,30 +2834,74 @@ export async function runGraph(
   return results;
 }
 
+/** Programmatic tasks-only entry point matching the public teammate schema. */
+export async function runTeammate(
+  params: RunTeammateParams,
+  options: RunTeammateOptions,
+): Promise<SingleResult[]> {
+  const routed = applyModelRouting(
+    params,
+    options.baseCwd,
+    options.modelCapabilities?.map((capability) => capability.id) ?? [],
+  );
+  const normalized = normalizeTeammateParams(routed);
+  if (normalized.error) throw new Error(normalized.error);
+  return runGraph(normalized.tasks, params.concurrency ?? 4, options);
+}
+
 // ---------------------------------------------------------------------------
 // RPC: Send message to running agent via stdin
 // ---------------------------------------------------------------------------
 
 export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort";
 
+const guardedChildStdinStreams = new WeakSet<Writable>();
+
+function guardChildStdin(stdin: Writable): void {
+  if (guardedChildStdinStreams.has(stdin)) return;
+  guardedChildStdinStreams.add(stdin);
+  // Child termination is reported by the process lifecycle. Stdin delivery is
+  // best-effort, so a concurrent pipe close must not crash the parent process.
+  stdin.on("error", () => {});
+}
+
+function writeChildStdinLine(stdin: Writable, line: string): boolean {
+  guardChildStdin(stdin);
+  if (!stdin.writable || stdin.writableEnded || stdin.destroyed) return false;
+  try {
+    stdin.write(`${line}\n`);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 export function sendRpcMessage(
-  stdin: import("node:stream").Writable,
+  stdin: Writable,
   message: string,
   mode: RpcMessageMode = "follow_up",
   token?: LeaseToken,
 ): boolean {
-  if (!stdin.writable) return false;
   if (mode === "abort") {
-    stdin.write(JSON.stringify({ type: "abort" }) + "\n");
-    return true;
+    return writeChildStdinLine(stdin, JSON.stringify({ type: "abort" }));
   }
   const leasedMessage = wrapLeasedMessage(message, token);
   if (mode === "prompt") {
-    stdin.write(JSON.stringify({ type: "prompt", message: leasedMessage }) + "\n");
-    return true;
+    return writeChildStdinLine(stdin, JSON.stringify({ type: "prompt", message: leasedMessage }));
   }
-  stdin.write(JSON.stringify({ type: mode, message: leasedMessage }) + "\n");
-  return true;
+  return writeChildStdinLine(stdin, JSON.stringify({ type: mode, message: leasedMessage }));
+}
+
+export function sendChildIpcMessage(
+  child: ChildProcess,
+  message: Record<string, unknown>,
+): boolean {
+  if (!child.connected) return false;
+  try {
+    return child.send(message as never, () => {});
+  } catch {
+    return false;
+  }
 }
 
 export function dispatchChildIpcMessage(

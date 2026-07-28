@@ -3,6 +3,7 @@ name: explorer
 description: Read-only codebase discovery and call-chain tracing specialist
 systemPromptMode: replace
 thinking: low
+taskType: explore
 tools: read, grep, find, ls
 inheritProjectContext: false
 inheritSkills: false

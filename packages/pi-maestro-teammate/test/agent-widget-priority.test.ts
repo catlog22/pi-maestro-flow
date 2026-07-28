@@ -100,7 +100,7 @@ test("agent widget distinguishes a Pi result-ready turn from a stalled agent", (
 test("agent widget freezes duration while an agent is sleeping", () => {
   const now = Date.now();
   const agent = {
-    agent: "delegate",
+    agent: "general",
     name: "sleeper",
     correlationId: "sleeping-agent",
     startedAt: now - 90_000,
@@ -116,5 +116,5 @@ test("agent widget freezes duration while an agent is sleeping", () => {
   const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
   const output = renderAgentStatusWidget([agent], 120, theme).join("\n");
 
-  assert.match(output, /@sleeper delegate · 30s/);
+  assert.match(output, /@sleeper general · 30s/);
 });

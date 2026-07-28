@@ -2,8 +2,8 @@
  * TypeBox schemas for teammate tool parameters.
  *
  * Unified TaskSpec model:
- *   - Single agent: { agent, task }
- *   - Multi-task: { tasks: TaskSpec[] } with {name} variable references defining execution order
+ *   - Every public dispatch uses a non-empty tasks array
+ *   - prompt is the task text; agent may inherit from the top level
  *   - Top-level fields serve as defaults, per-task overrides win
  *
  * P0 three-axis decoupling:
@@ -14,15 +14,11 @@
 import { Type } from "typebox";
 import { TEAMMATE_THINKING_INPUTS } from "../shared/thinking.ts";
 
-const TaskType = StringEnum([
-  "explore",
-  "analysis",
-  "debug",
-  "planning",
-  "development",
-  "review",
-  "testing",
-]);
+const TaskType = Type.String({
+  minLength: 1,
+  maxLength: 64,
+  pattern: "^[a-z][a-z0-9._-]*$",
+});
 
 const ThinkingLevel = StringEnum([...TEAMMATE_THINKING_INPUTS]);
 
@@ -38,23 +34,14 @@ function StringEnum<T extends string[]>(values: [...T]) {
 // ---------------------------------------------------------------------------
 
 export const TaskSpec = Type.Object({
-  agent: Type.String({
-    description: "Agent name to dispatch (matches agents/*.md filename)",
+  prompt: Type.String({
+    minLength: 1,
+    description:
+      "Required non-empty task text. Use {name} to reference another task's output, {name.field} for structured output fields.",
   }),
-  task: Type.Optional(
+  agent: Type.Optional(
     Type.String({
-      description:
-        "Task description. Use {name} to reference another task's output, {name.field} for structured output fields.",
-    }),
-  ),
-  prompt: Type.Optional(
-    Type.String({
-      description: "Fixed prompt template name from project, user, or bundled teammate prompts",
-    }),
-  ),
-  promptArgs: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "Additional positional prompt arguments. task is $1; promptArgs begin at $2",
+      description: 'Agent name to dispatch; defaults to the top-level agent, then "general"',
     }),
   ),
   taskType: Type.Optional(
@@ -112,36 +99,16 @@ export const TaskSpec = Type.Object({
       description: "Timeout in milliseconds for this task",
     }),
   ),
-});
+}, { additionalProperties: false });
 
 // ---------------------------------------------------------------------------
 // TeammateParams — top-level tool parameters
 // ---------------------------------------------------------------------------
 
 export const TeammateParams = Type.Object({
-  // === Single Agent Sugar (top-level is itself a TaskSpec) ===
-
   agent: Type.Optional(
     Type.String({
-      description:
-        "Agent name to dispatch. Required for single mode, optional when using tasks.",
-    }),
-  ),
-
-  task: Type.Optional(
-    Type.String({
-      description:
-        "Task description. Supports {name} variable references in multi-task mode.",
-    }),
-  ),
-  prompt: Type.Optional(
-    Type.String({
-      description: "Default fixed prompt template name. Per-task prompt takes precedence",
-    }),
-  ),
-  promptArgs: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "Default additional positional prompt arguments. Per-task promptArgs take precedence",
+      description: 'Default agent for tasks that omit agent; defaults to "general"',
     }),
   ),
   taskType: Type.Optional(
@@ -152,14 +119,7 @@ export const TeammateParams = Type.Object({
     }),
   ),
 
-  // === P0 Three-Axis Fields ===
-
-  name: Type.Optional(
-    Type.String({
-      description:
-        "Addressable name — enables variable referencing via {name} and cross-agent routing via teammate-send",
-    }),
-  ),
+  // === P0 Result Routing ===
 
   reply_to: Type.Optional(
     Type.Unsafe<"caller" | "main">({
@@ -170,36 +130,13 @@ export const TeammateParams = Type.Object({
     }),
   ),
 
-  // === Multi-Task ===
+  // === Tasks ===
 
-  tasks: Type.Optional(
-    Type.Array(TaskSpec, {
-      description:
-        "Multiple tasks to execute. Dependencies come from {name}/{name.field} references in task descriptions plus explicit dependsOn lists — dependent tasks are awaited; independent tasks run in parallel. A {ref} that matches no task name is passed through as literal text (misspellings close to an existing name are rejected).",
-    }),
-  ),
-
-  chain: Type.Optional(
-    Type.Array(
-      Type.Object({
-        agent: Type.String(),
-        task: Type.Optional(
-          Type.String({
-            description: "Task template with {previous} variable",
-          }),
-        ),
-        model: Type.Optional(Type.String()),
-        thinking: Type.Optional(ThinkingLevel),
-        taskType: Type.Optional(TaskType),
-        prompt: Type.Optional(Type.String()),
-        promptArgs: Type.Optional(Type.Array(Type.String())),
-      }),
-      {
-        description:
-          "[Deprecated] Use tasks with {name} references instead. Sequential pipeline where each step receives {previous} result.",
-      },
-    ),
-  ),
+  tasks: Type.Array(TaskSpec, {
+    minItems: 1,
+    description:
+      "Tasks to execute. Dependencies come from {name}/{name.field} references in prompts plus explicit dependsOn lists; dependent tasks are awaited and independent tasks run in parallel.",
+  }),
 
   concurrency: Type.Optional(
     Type.Integer({
@@ -223,7 +160,7 @@ export const TeammateParams = Type.Object({
       type: "object",
       additionalProperties: true,
       description:
-        "JSON Schema for structured output validation. In multi-task mode, serves as default for tasks without their own outputSchema.",
+        "JSON Schema for structured output validation. Serves as the default for every task without its own outputSchema.",
     }),
   ),
 
@@ -255,7 +192,8 @@ export const TeammateParams = Type.Object({
   thinking: Type.Optional(
     Type.Unsafe({
       ...ThinkingLevel,
-      description: "Default Pi thinking depth. Per-task thinking takes precedence; max aliases xhigh.",
+      description:
+        "Default Pi thinking depth. Precedence: task thinking, top-level thinking, taskType routing, agent frontmatter, then Pi default. max aliases xhigh.",
     }),
   ),
 
@@ -273,7 +211,7 @@ export const TeammateParams = Type.Object({
         "Default timeout in milliseconds. Per-task timeoutMs takes precedence.",
     }),
   ),
-});
+}, { additionalProperties: false });
 
 // ---------------------------------------------------------------------------
 // Other tool schemas (unchanged)

@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-teammate",
-  "version": "0.6.0",
+  "version": "1.0.0",
   "description": "Pi extension — teammate agent dispatch with DAG task graphs, RPC messaging, and compact TUI",
   "type": "module",
   "keywords": [
@@ -52,10 +52,6 @@
       "types": "./types/public/v1/model-routing.d.ts",
       "default": "./src/public/v1/model-routing.ts"
     },
-    "./v1/prompts": {
-      "types": "./types/public/v1/prompts.d.ts",
-      "default": "./src/public/v1/prompts.ts"
-    },
     "./v1/progress-tree": {
       "types": "./types/public/v1/progress-tree.d.ts",
       "default": "./src/public/v1/progress-tree.ts"
@@ -77,7 +73,6 @@
     "src/**/*.ts",
     "types/**/*.d.ts",
     "agents/",
-    "prompts/",
     "README.md"
   ],
   "pi": {

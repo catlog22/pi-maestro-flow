@@ -9,10 +9,10 @@ import {
   supportedThinkingLevels,
   type AvailableModelEntry,
 } from "../src/models/model-catalog.ts";
-import { buildPiArgs, clampThinkingForModel, normalizeChainToTasks } from "../src/runs/execution.ts";
+import { buildPiArgs, clampThinkingForModel } from "../src/runs/execution.ts";
 
 const baseAgent: AgentConfig = {
-  name: "delegate",
+  name: "general",
   description: "Delegate",
   tools: ["read"],
   systemPromptMode: "append",
@@ -20,7 +20,7 @@ const baseAgent: AgentConfig = {
   inheritSkills: false,
   systemPrompt: "Delegate prompt",
   source: "builtin",
-  filePath: "delegate.md",
+  filePath: "general.md",
 };
 
 test("model catalog is deterministic, deduplicated, and replaceable", () => {
@@ -121,37 +121,26 @@ test("session start snapshots models and before_agent_start refreshes changed re
   }
 });
 
-test("top-level, task, and legacy chain model overrides reach child Pi", () => {
-  const args = buildPiArgs(baseAgent, { agent: "delegate", model: "openai/gpt-5" }, "prompt.md");
+test("explicit model overrides reach child Pi", () => {
+  const args = buildPiArgs(baseAgent, { agent: "general", model: "openai/gpt-5" }, "prompt.md");
   assert.equal(args[args.indexOf("--model") + 1], "openai/gpt-5");
-
-  const tasks = normalizeChainToTasks([
-    { agent: "delegate", model: "anthropic/claude-opus" },
-    { agent: "reviewer", task: "Review {previous}", model: "google/gemini-pro" },
-  ], "");
-  assert.equal(tasks[0].model, "anthropic/claude-opus");
-  assert.equal(tasks[1].model, "google/gemini-pro");
 });
 
-test("thinking overrides reach child Pi once and legacy chains preserve them", () => {
+test("thinking overrides reach child Pi once", () => {
   const explicit = buildPiArgs(
     { ...baseAgent, thinking: "medium" },
-    { agent: "delegate", thinking: "xhigh" },
+    { agent: "general", thinking: "xhigh" },
     "prompt.md",
   );
   assert.equal(explicit[explicit.indexOf("--thinking") + 1], "xhigh");
   assert.equal(explicit.filter((arg) => arg === "--thinking").length, 1);
 
-  const fallback = buildPiArgs({ ...baseAgent, thinking: "minimal" }, { agent: "delegate" }, "prompt.md");
+  const fallback = buildPiArgs({ ...baseAgent, thinking: "minimal" }, { agent: "general" }, "prompt.md");
   assert.equal(fallback[fallback.indexOf("--thinking") + 1], "minimal");
-  assert.equal(buildPiArgs(baseAgent, { agent: "delegate" }, "prompt.md").includes("--thinking"), false);
+  assert.equal(buildPiArgs(baseAgent, { agent: "general" }, "prompt.md").includes("--thinking"), false);
 
-  const tasks = normalizeChainToTasks([{ agent: "delegate", thinking: "high" }], "task");
-  assert.equal(tasks[0].thinking, "high");
-
-  const maxAlias = buildPiArgs(baseAgent, { agent: "delegate", thinking: "max" }, "prompt.md");
+  const maxAlias = buildPiArgs(baseAgent, { agent: "general", thinking: "max" }, "prompt.md");
   assert.equal(maxAlias[maxAlias.indexOf("--thinking") + 1], "xhigh");
-  assert.equal(normalizeChainToTasks([{ agent: "delegate", thinking: "max" }], "task")[0].thinking, "xhigh");
 });
 
 test("thinking clamps to the final model capability before child Pi", () => {
@@ -168,7 +157,7 @@ test("thinking clamps to the final model capability before child Pi", () => {
 
   const fallbackAttempt = buildPiArgs(
     baseAgent,
-    { agent: "delegate", thinking: "max" },
+    { agent: "general", thinking: "max" },
     "prompt.md",
     "maestro-openai/gpt-5",
     undefined,
@@ -180,7 +169,7 @@ test("thinking clamps to the final model capability before child Pi", () => {
 
   const anthropic = buildPiArgs(
     baseAgent,
-    { agent: "delegate", model: "maestro-anthropic/claude-sonnet-4-5", thinking: "max" },
+    { agent: "general", model: "maestro-anthropic/claude-sonnet-4-5", thinking: "max" },
     "prompt.md",
     undefined,
     undefined,

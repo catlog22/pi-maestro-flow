@@ -10,164 +10,112 @@ import {
   type RunTeammateParams,
 } from "../src/runs/execution.ts";
 
-// ---------------------------------------------------------------------------
-// normalizeTeammateParams — mode selection and fail-fast validation
-// ---------------------------------------------------------------------------
-
-test("empty params are rejected before dispatch", () => {
-  const result = normalizeTeammateParams({} as never);
-  assert.ok(result.error);
-  assert.match(result.error!, /Requires "agent"/);
+test("missing and empty tasks arrays are rejected before dispatch", () => {
+  assert.match(normalizeTeammateParams({} as never).error ?? "", /non-empty "tasks"/);
+  assert.match(normalizeTeammateParams({ tasks: [] }).error ?? "", /non-empty "tasks"/);
 });
 
-test("single mode without task or prompt is rejected as an empty task", () => {
-  const result = normalizeTeammateParams({ agent: "delegate" });
-  assert.ok(result.error);
-  assert.match(result.error!, /task" or "prompt/);
+test("a task requires non-empty prompt text", () => {
+  const missing = normalizeTeammateParams({ tasks: [{ agent: "explorer" }] } as never);
+  assert.match(missing.error ?? "", /requires a non-empty "prompt"/);
+
+  const blank = normalizeTeammateParams({ tasks: [{ prompt: "   " }] });
+  assert.match(blank.error ?? "", /requires a non-empty "prompt"/);
 });
 
-test("single mode with a prompt template but no task is accepted", () => {
-  const result = normalizeTeammateParams({ agent: "delegate", prompt: "analysis" });
+test("one public task normalizes for the internal single-task primitive", () => {
+  const result = normalizeTeammateParams({ tasks: [{ agent: "general", prompt: "Inspect auth" }] });
   assert.equal(result.error, undefined);
   assert.equal(result.isMultiTask, false);
-  assert.equal(result.tasks, null);
+  assert.equal(result.tasks.length, 1);
+  assert.equal(result.tasks[0].prompt, "Inspect auth");
 });
-
-test("single mode promptArgs without prompt produces a warning", () => {
-  const result = normalizeTeammateParams({
-    agent: "delegate",
-    task: "inspect",
-    promptArgs: ["@src"],
-  });
-  assert.equal(result.error, undefined);
-  assert.ok(result.warnings.some((w) => w.includes("promptArgs")));
-});
-
-test("multi-task tasks without task or prompt are rejected as empty tasks", () => {
-  const result = normalizeTeammateParams({
-    tasks: [{ agent: "explorer", name: "scan" }],
-  } as never);
-  assert.ok(result.error);
-  assert.match(result.error!, /tasks\[0\] "scan" requires/);
-});
-
-// ---------------------------------------------------------------------------
-// Top-level defaults sink into tasks; per-task values win
-// ---------------------------------------------------------------------------
 
 test("top-level defaults apply to tasks and per-task overrides win", () => {
   const result = normalizeTeammateParams({
+    agent: "general",
+    taskType: "analysis",
     model: "prov/default-model",
     thinking: "low",
     cwd: "D:/base",
     context: "fork",
     timeoutMs: 5000,
+    outputSchema: { type: "object" },
     tasks: [
-      { agent: "a", task: "one" },
-      { agent: "b", task: "two", model: "prov/override", context: "fresh", cwd: "D:/other" },
+      { prompt: "one" },
+      { agent: "reviewer", prompt: "two", model: "prov/override", thinking: "high", context: "fresh", cwd: "D:/other" },
     ],
-  } as never);
+  });
   assert.equal(result.error, undefined);
-  const [first, second] = result.tasks!;
+  const [first, second] = result.tasks;
+  assert.equal(first.agent, "general");
+  assert.equal(first.taskType, "analysis");
   assert.equal(first.model, "prov/default-model");
+  assert.equal(first.thinking, "low");
   assert.equal(first.context, "fork");
   assert.equal(first.cwd, "D:/base");
   assert.equal(first.timeoutMs, 5000);
+  assert.deepEqual(first.outputSchema, { type: "object" });
+  assert.equal(second.agent, "reviewer");
   assert.equal(second.model, "prov/override");
+  assert.equal(second.thinking, "high");
   assert.equal(second.context, "fresh");
   assert.equal(second.cwd, "D:/other");
 });
 
-test("top-level agent and task are flagged as ignored in multi-task mode", () => {
-  const result = normalizeTeammateParams({
-    agent: "delegate",
-    task: "ignored",
-    tasks: [{ agent: "a", task: "one" }],
-  } as never);
+test("prompt text is always literal and template-like text is not loaded", () => {
+  const result = normalizeTeammateParams({ tasks: [{ prompt: "template:analysis" }] });
   assert.equal(result.error, undefined);
-  assert.ok(result.warnings.some((w) => w.includes("ignored in multi-task mode")));
+  assert.equal(result.tasks[0].prompt, "template:analysis");
 });
 
-// ---------------------------------------------------------------------------
-// chain deprecation — tasks take precedence
-// ---------------------------------------------------------------------------
-
-test("tasks take precedence over deprecated chain and a warning is emitted", () => {
-  const result = normalizeTeammateParams({
-    tasks: [{ agent: "a", task: "from tasks" }],
-    chain: [{ agent: "b", task: "from chain" }],
-  } as never);
+test("agent defaults to general when neither task nor top level specifies one", () => {
+  const result = normalizeTeammateParams({ tasks: [{ prompt: "work" }] });
   assert.equal(result.error, undefined);
-  assert.equal(result.tasks!.length, 1);
-  assert.equal(result.tasks![0].task, "from tasks");
-  assert.ok(result.warnings.some((w) => w.includes('"chain" is deprecated')));
+  assert.equal(result.tasks[0].agent, "general");
 });
-
-test("chain alone still works with deprecation warning and top-level defaults", () => {
-  const result = normalizeTeammateParams({
-    task: "start here",
-    model: "prov/m",
-    chain: [{ agent: "a" }, { agent: "b" }],
-  } as never);
-  assert.equal(result.error, undefined);
-  assert.equal(result.tasks!.length, 2);
-  assert.equal(result.tasks![0].task, "start here");
-  assert.match(result.tasks![1].task, /\{_step0\}/);
-  assert.equal(result.tasks![0].model, "prov/m");
-  assert.ok(result.warnings.some((w) => w.includes('"chain" is deprecated')));
-});
-
-// ---------------------------------------------------------------------------
-// Reference validation — misspellings rejected, literals warned
-// ---------------------------------------------------------------------------
 
 test("misspelled {name} reference close to a task name is rejected", () => {
   const result = normalizeTeammateParams({
     tasks: [
-      { agent: "a", name: "scan_api", task: "list endpoints" },
-      { agent: "b", task: "review {scan-appi} output" },
+      { agent: "a", name: "scan_api", prompt: "list endpoints" },
+      { agent: "b", prompt: "review {scan-appi} output" },
     ],
-  } as never);
-  assert.ok(result.error);
-  assert.match(result.error!, /misspelled reference to task "scan_api"/);
+  });
+  assert.match(result.error ?? "", /misspelled reference to task "scan_api"/);
 });
 
 test("unrelated {literal} braces produce a warning but do not block dispatch", () => {
   const result = normalizeTeammateParams({
     tasks: [
-      { agent: "a", name: "scan", task: "list endpoints" },
-      { agent: "b", task: "use {scan} and replace {placeholder} in templates" },
+      { agent: "a", name: "scan", prompt: "list endpoints" },
+      { agent: "b", prompt: "use {scan} and replace {placeholder} in templates" },
     ],
-  } as never);
+  });
   assert.equal(result.error, undefined);
-  assert.ok(result.warnings.some((w) => w.includes("{placeholder}")));
+  assert.ok(result.warnings.some((warning) => warning.includes("{placeholder}")));
 });
 
 test("reference analysis is skipped when no task has a name", () => {
   const result = normalizeTeammateParams({
     tasks: [
-      { agent: "a", task: "replace {id} in files" },
-      { agent: "b", task: "replace {slug} in files" },
+      { agent: "a", prompt: "replace {id} in files" },
+      { agent: "b", prompt: "replace {slug} in files" },
     ],
-  } as never);
+  });
   assert.equal(result.error, undefined);
-  assert.equal(result.warnings.length, 0);
+  assert.deepEqual(result.warnings, []);
 });
 
 test("dependsOn with an unknown task name is rejected", () => {
   const result = normalizeTeammateParams({
     tasks: [
-      { agent: "a", name: "scan", task: "list" },
-      { agent: "b", task: "summarize", dependsOn: ["missing"] },
+      { agent: "a", name: "scan", prompt: "list" },
+      { agent: "b", prompt: "summarize", dependsOn: ["missing"] },
     ],
-  } as never);
-  assert.ok(result.error);
-  assert.match(result.error!, /dependsOn references unknown task name "missing"/);
+  });
+  assert.match(result.error ?? "", /dependsOn references unknown task name "missing"/);
 });
-
-// ---------------------------------------------------------------------------
-// collectUnknownRefs / validateTaskReferences primitives
-// ---------------------------------------------------------------------------
 
 test("collectUnknownRefs separates known and unknown references", () => {
   const names = new Set(["scan", "review"]);
@@ -177,8 +125,8 @@ test("collectUnknownRefs separates known and unknown references", () => {
 
 test("validateTaskReferences distinguishes misspellings from literals", () => {
   const tasks: NormalizedTask[] = [
-    { agent: "a", name: "scan", task: "list" },
-    { agent: "b", task: "check {scen} and {totally_unrelated}" },
+    { agent: "a", name: "scan", prompt: "list" },
+    { agent: "b", prompt: "check {scen} and {totally_unrelated}" },
   ];
   const { errors, warnings } = validateTaskReferences(tasks);
   assert.equal(errors.length, 1);
@@ -187,62 +135,33 @@ test("validateTaskReferences distinguishes misspellings from literals", () => {
   assert.match(warnings[0], /"\{totally_unrelated\}".*literal text/);
 });
 
-// ---------------------------------------------------------------------------
-// dependsOn participates in graph edges alongside {name} references
-// ---------------------------------------------------------------------------
-
-test("taskDependencyNames merges implicit references and explicit dependsOn", () => {
+test("taskDependencyNames merges prompt references and explicit dependsOn", () => {
   const names = new Set(["scan", "lint", "build"]);
   const deps = taskDependencyNames(
-    { task: "review {scan} output", dependsOn: ["lint", "scan"] },
+    { prompt: "review {scan} output", dependsOn: ["lint", "scan"] },
     names,
   );
   assert.deepEqual(deps.sort(), ["lint", "scan"]);
 });
 
-test("inferGraphMode sees dependsOn-only graphs as dependent, not parallel", () => {
+test("inferGraphMode sees dependsOn-only graphs as dependent", () => {
   const tasks: NormalizedTask[] = [
-    { agent: "a", name: "scan", task: "list endpoints" },
-    { agent: "b", name: "report", task: "write summary", dependsOn: ["scan"] },
+    { agent: "a", name: "scan", prompt: "list endpoints" },
+    { agent: "b", name: "report", prompt: "write summary", dependsOn: ["scan"] },
   ];
   assert.equal(inferGraphMode(tasks), "chain");
 });
 
-// ---------------------------------------------------------------------------
-// context passthrough (multi-task fork)
-// ---------------------------------------------------------------------------
+test("background defaults to false and preserves explicit values", () => {
+  const omitted: RunTeammateParams = { tasks: [{ prompt: "inspect" }] };
+  assert.equal(normalizeTeammateParams(omitted).error, undefined);
+  assert.equal(omitted.background, false);
 
-test("context flows through normalization for every task", () => {
-  const result = normalizeTeammateParams({
-    context: "fork",
-    tasks: [
-      { agent: "a", task: "one" },
-      { agent: "b", task: "two" },
-    ],
-  } as never);
-  assert.equal(result.error, undefined);
-  assert.ok(result.tasks!.every((t) => t.context === "fork"));
-});
+  const enabled: RunTeammateParams = { tasks: [{ prompt: "inspect" }], background: true };
+  normalizeTeammateParams(enabled);
+  assert.equal(enabled.background, true);
 
-// ---------------------------------------------------------------------------
-// background default resolution (foreground/blocking is the default)
-// ---------------------------------------------------------------------------
-
-test("background defaults to false (foreground) when omitted", () => {
-  const params: RunTeammateParams = { agent: "delegate", task: "inspect" };
-  const result = normalizeTeammateParams(params);
-  assert.equal(result.error, undefined);
-  assert.equal(params.background, false);
-});
-
-test("background: true is preserved for detached work", () => {
-  const params: RunTeammateParams = { agent: "delegate", task: "inspect", background: true };
-  normalizeTeammateParams(params);
-  assert.equal(params.background, true);
-});
-
-test("background: false stays false", () => {
-  const params: RunTeammateParams = { agent: "delegate", task: "inspect", background: false };
-  normalizeTeammateParams(params);
-  assert.equal(params.background, false);
+  const disabled: RunTeammateParams = { tasks: [{ prompt: "inspect" }], background: false };
+  normalizeTeammateParams(disabled);
+  assert.equal(disabled.background, false);
 });

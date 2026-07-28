@@ -11,6 +11,7 @@ import {
 import {
   bindChildTerminationSignal,
   createChildTerminationController,
+  sendChildIpcMessage,
 } from "../src/runs/execution.ts";
 
 class FakeChild extends EventEmitter {
@@ -148,6 +149,27 @@ test("pre-aborted child termination signal is applied immediately after binding"
 
   assert.equal(terminations, 1);
   unbind();
+});
+
+test("fire-and-forget child IPC sends absorb asynchronous channel errors", async () => {
+  let callbackInstalled = false;
+  const child = {
+    connected: true,
+    send(_message: unknown, callback: (error: Error | null) => void) {
+      callbackInstalled = typeof callback === "function";
+      queueMicrotask(() => callback(Object.assign(new Error("channel closed"), {
+        code: "ERR_IPC_CHANNEL_CLOSED",
+      })));
+      return true;
+    },
+  } as unknown as ChildProcess;
+
+  assert.equal(sendChildIpcMessage(child, { type: "late_reply" }), true);
+  await delay(0);
+  assert.equal(callbackInstalled, true);
+
+  const disconnectedChild = { connected: false } as unknown as ChildProcess;
+  assert.equal(sendChildIpcMessage(disconnectedChild, { type: "after_disconnect" }), false);
 });
 
 test("child proxy response wins exactly once over a late send callback error", async () => {

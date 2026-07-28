@@ -19,7 +19,7 @@ import { isGuiTeammateToolAllowed, registerGuiTool } from "../shared/gui-registr
 import { truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams } from "./schemas.ts";
 import {
-  runTeammate,
+  runSingleTeammate,
   runGraph,
   normalizeTeammateParams,
   inferGraphMode,
@@ -109,7 +109,6 @@ import {
   listAgentSummaries,
   type AgentSummary,
 } from "../agents/agents.ts";
-import { formatPromptCatalog } from "../prompts/prompts.ts";
 import {
   appendModelCatalog,
   createModelCatalogSnapshot,
@@ -119,6 +118,7 @@ import {
 import {
   applyModelRouting,
   formatModelRoutingConfig,
+  parseTeammateTaskType,
   type TeammateTaskType,
 } from "../models/model-routing.ts";
 import type { TeammateThinkingInput } from "../shared/thinking.ts";
@@ -152,9 +152,12 @@ function displayMessageForResult(result: SingleResult): string {
   const schemaDiagnostic = result.messages
     .filter((message) => isStructuredOutputSettlementDiagnostic(message.content))
     .at(-1)?.content;
-  const primaryDiagnostic = result.messages
-    .filter((message) => message.role === "system" && !isStructuredOutputSettlementDiagnostic(message.content))
-    .at(-1)?.content;
+  const primaryDiagnostics = result.messages
+    .filter((message) => message.role === "system" && !isStructuredOutputSettlementDiagnostic(message.content));
+  const primaryDiagnostic = primaryDiagnostics
+    .find((message) => !message.content.startsWith("Fork requested but parent session file not available"))
+    ?.content
+    ?? primaryDiagnostics.at(-1)?.content;
 
   if (primaryDiagnostic && schemaDiagnostic && primaryDiagnostic !== schemaDiagnostic) {
     return `${primaryDiagnostic}\n\nStructured output: ${schemaDiagnostic}`;
@@ -195,13 +198,11 @@ export type TeammateRuntimeOptions = Pick<
 export function buildTeammateToolDescription(cwd: string): string {
   return `Dispatch tasks to teammate agents. Teammates run as Pi subprocesses with their own tools and context.
 
-Call forms:
-  - Single: { agent: "delegate", taskType: "analysis", task: "...", model: "provider/model" }
-  - Explore: { agent: "explorer", taskType: "explore", task: "FIND: ...\\nSCOPE: ..." }
-  - Fork: { agent: "delegate", task: "...", context: "fork" }
-  - Parallel: { tasks: [{ agent: "explorer", name: "scan", task: "..." }, { agent: "delegate", name: "review", task: "..." }], concurrency: 2, background: false }
-  - DAG: name tasks and reference {name} or {name.field} from dependent tasks, or declare dependsOn: ["name"] for ordering without output injection
-  - Fixed prompt: { agent: "delegate", prompt: "analysis", task: "Inspect auth", promptArgs: ["@src/auth", "file:line findings"] }
+Call form:
+  { tasks: [{ prompt: "Inspect auth", agent: "general", taskType: "analysis" }] }
+
+Every dispatch uses a non-empty tasks array. Task-level values override top-level defaults. Tasks that omit agent inherit the top-level agent, then default to "general".
+Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
@@ -210,11 +211,8 @@ For background work, wait for the automatic teammate-complete notification. Do n
 Available teammate agents for ${cwd}:
 ${formatAgentCatalog(cwd, Number.MAX_SAFE_INTEGER, 160)}
 
-Available teammate prompts for ${cwd}:
-${formatPromptCatalog(cwd)}
-
 Configured task-type model routing for ${cwd}:
-${formatModelRoutingConfig(cwd)}`;
+${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;
 }
 
 const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID, or unique ID prefix.
@@ -1362,7 +1360,12 @@ export default function registerTeammateExtension(
     let unregisterChildProxyCaller: (() => void) | undefined;
 
     const sendChildEvent = (message: Record<string, unknown>): void => {
-      if (typeof process.send === "function") process.send(message);
+      if (typeof process.send !== "function" || process.connected === false) return;
+      try {
+        process.send(message, () => {});
+      } catch {
+        // Parent IPC closed between the connected check and send.
+      }
     };
 
     const publishSessionIdentity = (ctx: ExtensionContext): void => {
@@ -1560,9 +1563,10 @@ export default function registerTeammateExtension(
       parameters: TeammateParams,
       async execute(_id: string, params: RunTeammateParams, signal: AbortSignal) {
         const ctx = bridge.ctx;
+        const cwd = ctx?.cwd ?? process.cwd();
         const routed = applyModelRouting(
           params,
-          ctx?.cwd ?? process.cwd(),
+          cwd,
           ctx ? refreshModelCatalog(ctx).modelIds : modelCatalog.modelIds,
         );
         return proxyCall<Details>("teammate", routed, signal);
@@ -1669,9 +1673,10 @@ export default function registerTeammateExtension(
         | undefined,
       ctx: ExtensionContext,
     ): Promise<TeammateToolResult<Details>> {
+      const baseCwd = (params.cwd ?? state.baseCwd) || ctx.cwd;
       params = applyModelRouting(
         params,
-        (params.cwd ?? state.baseCwd) || ctx.cwd,
+        baseCwd,
         refreshModelCatalog(ctx).modelIds,
       );
 
@@ -1685,7 +1690,21 @@ export default function registerTeammateExtension(
         };
       }
       const { isMultiTask } = normalization;
-      const normalizedTasks: NormalizedTask[] = normalization.tasks ?? [];
+      const normalizedTasks = normalization.tasks;
+      const singleTask = normalizedTasks[0];
+      const singleRunParams = {
+        agent: singleTask.agent,
+        task: singleTask.prompt,
+        taskType: singleTask.taskType,
+        name: singleTask.name,
+        reply_to: params.reply_to,
+        context: singleTask.context,
+        model: singleTask.model,
+        thinking: singleTask.thinking,
+        cwd: singleTask.cwd,
+        outputSchema: singleTask.outputSchema,
+        timeoutMs: singleTask.timeoutMs,
+      };
       let foregroundUpdateOpen = params.background === false;
       const warningPrefix = normalization.warnings.length
         ? normalization.warnings.map((w) => `[warn] ${w}`).join("\n") + "\n\n"
@@ -1725,11 +1744,11 @@ export default function registerTeammateExtension(
 
       const abortController = new AbortController();
 
-      const agentLabel = isMultiTask ? `graph(${normalizedTasks.length})` : params.agent!;
+      const agentLabel = isMultiTask ? `graph(${normalizedTasks.length})` : singleTask.agent;
 
       const activeAgent: ActiveAgent = {
         agent: agentLabel,
-        name: params.name,
+        name: isMultiTask ? undefined : singleTask.name,
         correlationId,
         startedAt: Date.now(),
         abortController,
@@ -1742,8 +1761,10 @@ export default function registerTeammateExtension(
         status: "running",
         sleepMs: 0,
         lease: createChildLease(),
-        promptSeq: params.task ? 1 : 0,
-        expectsStructuredOutput: params.outputSchema !== undefined,
+        promptSeq: 1,
+        expectsStructuredOutput: isMultiTask
+          ? params.outputSchema !== undefined
+          : singleTask.outputSchema !== undefined,
         ...(isMultiTask ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(correlationId, activeAgent);
@@ -1792,7 +1813,7 @@ export default function registerTeammateExtension(
             status: "pending",
             sleepMs: 0,
             lease: createChildLease(),
-            promptSeq: task.task ? 1 : 0,
+            promptSeq: 1,
             expectsStructuredOutput: (task.outputSchema ?? params.outputSchema) !== undefined,
           };
           state.activeRuns.set(childId, childAgent);
@@ -1801,8 +1822,8 @@ export default function registerTeammateExtension(
         });
       }
 
-      if (params.name) {
-        bindAgentName(state, params.name, correlationId);
+      if (!isMultiTask && singleTask.name) {
+        bindAgentName(state, singleTask.name, correlationId);
       }
 
       emitTeammateStarted(pi, activeAgent, { id });
@@ -2211,7 +2232,7 @@ export default function registerTeammateExtension(
 
           const options = makeOptions();
           const runPromise = runWithProgressFlushCleanup(
-            () => runTeammate(params, options),
+            () => runSingleTeammate(singleRunParams, options),
             progressFlushGate,
           );
           const race = await Promise.race([
@@ -2224,7 +2245,7 @@ export default function registerTeammateExtension(
           if (race.done) {
             const result = race.result;
             if (!result) throw new Error("Foreground teammate finished without a result.");
-            emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
+            emitComplete(pi, id, agentLabel, correlationId, result.exitCode, result.durationMs);
             const lastMessage = displayMessageForResult(result);
             if (!result.lifecyclePending) {
               settleAgent(state, correlationId, result.exitCode, lastMessage, result.wakeable !== false);
@@ -2243,7 +2264,7 @@ export default function registerTeammateExtension(
           // Alt+B: detach to background
           detached = true;
           runPromise.then((result) => {
-            emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
+            emitComplete(pi, id, agentLabel, correlationId, result.exitCode, result.durationMs);
             const lastMsg = displayMessageForResult(result);
             if (!result.lifecyclePending) {
               settleAgent(state, correlationId, result.exitCode, lastMsg, result.wakeable !== false);
@@ -2259,12 +2280,12 @@ export default function registerTeammateExtension(
             );
           }).catch((error) => {
             killAgent(state, correlationId, undefined, "failed");
-            notifyBackgroundFailure(pi, id, params.agent, correlationId, error);
+            notifyBackgroundFailure(pi, id, agentLabel, correlationId, error);
           });
           return {
             content: [{
               type: "text",
-              text: `■ @${params.name ?? params.agent} detached. ${backgroundWaitGuidance(correlationId)}`,
+              text: `■ @${singleTask.name ?? singleTask.agent} detached. ${backgroundWaitGuidance(correlationId)}`,
             }],
             isError: false,
             details: { mode: "single", results: [] },
@@ -2274,12 +2295,12 @@ export default function registerTeammateExtension(
         // --- BACKGROUND (default) ---
         const options = makeOptions();
         const bgPromise = runWithProgressFlushCleanup(
-          () => runTeammate(params, options),
+          () => runSingleTeammate(singleRunParams, options),
           progressFlushGate,
         );
 
         bgPromise.then((result) => {
-          emitComplete(pi, id, params.agent, correlationId, result.exitCode, result.durationMs);
+          emitComplete(pi, id, agentLabel, correlationId, result.exitCode, result.durationMs);
           const lastMsg = displayMessageForResult(result);
           if (!result.lifecyclePending) {
             settleAgent(state, correlationId, result.exitCode, lastMsg, result.wakeable !== false);
@@ -2296,13 +2317,13 @@ export default function registerTeammateExtension(
           );
         }).catch((error) => {
           killAgent(state, correlationId, undefined, "failed");
-          notifyBackgroundFailure(pi, id, params.agent, correlationId, error);
+          notifyBackgroundFailure(pi, id, agentLabel, correlationId, error);
         });
 
         return {
           content: [{
             type: "text",
-            text: `${warningPrefix}■ @${params.name ?? params.agent} running in background. ${backgroundWaitGuidance(correlationId)}`,
+            text: `${warningPrefix}■ @${singleTask.name ?? singleTask.agent} running in background. ${backgroundWaitGuidance(correlationId)}`,
           }],
           isError: false,
           details: { mode: "single", results: [] },
@@ -3917,7 +3938,9 @@ export function notifyBackgroundFailure(
   correlationId: string,
   error: unknown,
 ): void {
-  const message = `Background teammate ${agent} failed: ${error instanceof Error ? error.message : String(error)}`;
+  const message =
+    `Background teammate failed (agent=${agent}, correlationId=${correlationId}, phase=background-promise): `
+    + `${error instanceof Error ? error.message : String(error)}`;
   emitComplete(pi, id, agent, correlationId, 1, 0);
   pi.sendMessage(
     {
@@ -4631,7 +4654,7 @@ export interface TeammateDirectChildRequestHandlerOptions {
 }
 
 /**
- * Build the child-request bridge required by direct runTeammate/runGraph users.
+ * Build the child-request bridge required by direct runSingleTeammate/runGraph users.
  *
  * The root teammate tool installs the same interaction routing internally, but
  * native orchestrators such as Swarm call the public execution API directly.
@@ -5108,37 +5131,16 @@ export function parseProxyTeammateParams(
   if (!Check(TeammateParams, params)) return undefined;
   return {
     ...params,
-    agent: typeof params.agent === "string" ? params.agent : "",
-    taskType: parseTaskType(params.taskType),
+    taskType: parseTeammateTaskType(params.taskType),
     thinking: parseThinkingInput(params.thinking),
     outputSchema: parseOutputSchema(params.outputSchema),
-    tasks: params.tasks?.map((task) => ({
+    tasks: params.tasks.map((task) => ({
       ...task,
-      taskType: parseTaskType(task.taskType),
+      taskType: parseTeammateTaskType(task.taskType),
       thinking: parseThinkingInput(task.thinking),
       outputSchema: parseOutputSchema(task.outputSchema),
     })),
-    chain: params.chain?.map((task) => ({
-      ...task,
-      taskType: parseTaskType(task.taskType),
-      thinking: parseThinkingInput(task.thinking),
-    })),
   };
-}
-
-function parseTaskType(value: unknown): TeammateTaskType | undefined {
-  if (
-    value === "explore"
-    || value === "analysis"
-    || value === "debug"
-    || value === "planning"
-    || value === "development"
-    || value === "review"
-    || value === "testing"
-  ) {
-    return value;
-  }
-  return undefined;
 }
 
 function parseThinkingInput(value: unknown): TeammateThinkingInput | undefined {
@@ -5228,7 +5230,22 @@ export async function handleProxyRequest(
         }});
         return;
       }
-      const normalizedTasks: NormalizedTask[] | null = normalization.tasks;
+      const allTasks = normalization.tasks;
+      const singleTask = allTasks[0];
+      const normalizedTasks = normalization.isMultiTask ? allTasks : null;
+      const singleRunParams = {
+        agent: singleTask.agent,
+        task: singleTask.prompt,
+        taskType: singleTask.taskType,
+        name: singleTask.name,
+        reply_to: p.reply_to,
+        context: singleTask.context,
+        model: singleTask.model,
+        thinking: singleTask.thinking,
+        cwd: singleTask.cwd,
+        outputSchema: singleTask.outputSchema,
+        timeoutMs: singleTask.timeoutMs,
+      };
       const warningPrefix = normalization.warnings.length
         ? normalization.warnings.map((w) => `[warn] ${w}`).join("\n") + "\n\n"
         : "";
@@ -5258,8 +5275,8 @@ export async function handleProxyRequest(
 
       const abortCtrl = new AbortController();
       const activeAgent: ActiveAgent = {
-        agent: p.agent ?? `graph(${normalizedTasks?.length ?? 0})`,
-        name: p.name,
+        agent: normalizedTasks ? `graph(${normalizedTasks.length})` : singleTask.agent,
+        name: normalizedTasks ? undefined : singleTask.name,
         correlationId: cid,
         startedAt: Date.now(),
         abortController: abortCtrl,
@@ -5271,13 +5288,15 @@ export async function handleProxyRequest(
         status: "running",
         sleepMs: 0,
         lease: createChildLease(),
-        promptSeq: p.task ? 1 : 0,
-        expectsStructuredOutput: p.outputSchema !== undefined,
+        promptSeq: 1,
+        expectsStructuredOutput: normalizedTasks
+          ? p.outputSchema !== undefined
+          : singleTask.outputSchema !== undefined,
         ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
       };
       state.activeRuns.set(cid, activeAgent);
       trackProxyDispatch(state, requestId, cid);
-      if (p.name) bindAgentName(state, p.name, cid);
+      if (!normalizedTasks && singleTask.name) bindAgentName(state, singleTask.name, cid);
 
       const parentAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
       const reportChildStatus = (
@@ -5286,7 +5305,7 @@ export async function handleProxyRequest(
       ): void => {
         onChildStatus?.({
           agent: activeAgent.agent,
-          ...(p.name ? { name: p.name } : {}),
+          ...(!normalizedTasks && singleTask.name ? { name: singleTask.name } : {}),
           correlationId: cid,
           ...(parentCid ? { parentCorrelationId: parentCid } : {}),
           ...(parentAgent ? { parentName: parentAgent.name ?? parentAgent.agent } : {}),
@@ -5330,7 +5349,7 @@ export async function handleProxyRequest(
           status: "pending",
           sleepMs: 0,
           lease: createChildLease(),
-          promptSeq: task.task ? 1 : 0,
+          promptSeq: 1,
           expectsStructuredOutput: (task.outputSchema ?? p.outputSchema) !== undefined,
         };
         state.activeRuns.set(childId, childAgent);
@@ -5343,7 +5362,7 @@ export async function handleProxyRequest(
       pi.sendMessage(
         {
           customType: "teammate-started",
-          content: `● @${spawnerLabel} spawned @${p.name ?? p.agent ?? activeAgent.agent}`,
+          content: `● @${spawnerLabel} spawned @${singleTask.name ?? activeAgent.agent}`,
           display: true,
         },
         { triggerTurn: true },
@@ -5422,7 +5441,7 @@ export async function handleProxyRequest(
         const running = entries.find((entry) => entry.status === "running");
         return {
           agent: activeAgent.agent,
-          ...(p.name ? { name: p.name } : {}),
+          ...(!normalizedTasks && singleTask.name ? { name: singleTask.name } : {}),
           correlationId: cid,
           status: "running",
           recentTools: running?.recentTools ?? [],
@@ -5595,7 +5614,7 @@ export async function handleProxyRequest(
           };
         }
 
-        const result = await runTeammate(p, runOpts);
+        const result = await runSingleTeammate(singleRunParams, runOpts);
         const lastMsg = displayMessageForResult(result);
         return {
           resultPayload: {
@@ -5676,7 +5695,7 @@ export async function handleProxyRequest(
       });
 
       const mode = normalizedTasks ? inferGraphMode(normalizedTasks) : "single";
-      const runningLabel = p.name ?? p.agent ?? activeAgent.agent;
+        const runningLabel = singleTask.name ?? activeAgent.agent;
       reply({ type: "teammate_proxy_result", requestId, result: {
         content: [{
           type: "text",

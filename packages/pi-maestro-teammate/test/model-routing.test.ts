@@ -5,6 +5,7 @@ import * as path from "node:path";
 import test from "node:test";
 import {
   applyModelRouting,
+  discoverRoutingTaskTypes,
   getProjectModelRoutingPath,
   inferTaskType,
   loadModelRoutingConfig,
@@ -19,16 +20,15 @@ test("task types expose role metadata for the configuration UI", () => {
   assert.equal(Object.keys(TEAMMATE_TASK_TYPE_META).length, 7);
 });
 
-test("task type inference prioritizes explicit phases and specialized prompts", () => {
+test("task type inference prioritizes explicit phases, roles, and task text", () => {
   assert.equal(inferTaskType({ taskType: "testing", agent: "explorer" }), "testing");
-  assert.equal(inferTaskType({ prompt: "analysis-diagnose-bug-root-cause" }), "debug");
-  assert.equal(inferTaskType({ prompt: "analysis-review-code-quality" }), "review");
-  assert.equal(inferTaskType({ prompt: "analysis-trace-code-execution" }), "analysis");
-  assert.equal(inferTaskType({ prompt: "planning-plan-migration-strategy" }), "planning");
-  assert.equal(inferTaskType({ prompt: "development-generate-tests" }), "testing");
-  assert.equal(inferTaskType({ prompt: "development-implement-feature" }), "development");
   assert.equal(inferTaskType({ agent: "explorer" }), "explore");
+  assert.equal(inferTaskType({ agent: "planner" }), "planning");
+  assert.equal(inferTaskType({ agent: "research" }), "analysis");
   assert.equal(inferTaskType({ task: "Reproduce the crash and find the root cause" }), "debug");
+  assert.equal(inferTaskType({ task: "Review the authentication security risk" }), "review");
+  assert.equal(inferTaskType({ task: "Implement the requested feature" }), "development");
+  assert.equal(inferTaskType({ task: "Trace the token refresh flow" }), "analysis");
 });
 
 test("project model mappings persist and route single tasks", () => {
@@ -39,20 +39,87 @@ test("project model mappings persist and route single tasks", () => {
     assert.equal(fs.existsSync(getProjectModelRoutingPath(cwd)), true);
 
     const routed = applyModelRouting({
-      agent: "delegate",
-      prompt: "analysis-trace-code-execution",
-      task: "Trace the request",
+      agent: "general",
+      taskType: "analysis",
+      tasks: [{ prompt: "Trace the request" }],
     }, cwd, ["openai/gpt-5"]);
-    assert.equal(routed.model, "openai/gpt-5");
+    assert.equal(routed.tasks[0].model, "openai/gpt-5");
 
     const explicit = applyModelRouting({
-      agent: "delegate",
+      agent: "general",
       taskType: "analysis",
       model: "anthropic/claude-opus",
+      tasks: [{ prompt: "Trace the request" }],
     }, cwd, ["openai/gpt-5", "anthropic/claude-opus"]);
-    assert.equal(explicit.model, "anthropic/claude-opus");
+    assert.equal(explicit.tasks[0].model, "anthropic/claude-opus");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("role frontmatter taskType routes models below explicit task types", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-role-routing-"));
+  const agentsDir = path.join(cwd, ".pi", "agents");
+  fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(agentsDir, "security-specialist.md"), `---
+name: security-specialist
+description: Security review specialist
+taskType: security-audit
+---
+Review security evidence.
+`);
+  try {
+    saveProjectModelMapping(cwd, "security-audit", "provider/review");
+    saveProjectModelMapping(cwd, "analysis", "provider/analysis");
+    saveProjectModelMapping(cwd, "debug", "provider/debug");
+    const available = ["provider/review", "provider/analysis", "provider/debug"];
+
+    const fromRole = applyModelRouting({
+      tasks: [{ agent: "security-specialist", prompt: "Inspect the module" }],
+    }, cwd, available);
+    assert.equal(fromRole.tasks[0].taskType, "security-audit");
+    assert.equal(fromRole.tasks[0].model, "provider/review");
+    assert.ok(discoverRoutingTaskTypes(cwd, [{ taskType: "security-audit" }]).includes("security-audit"));
+
+    const fromTopLevel = applyModelRouting({
+      taskType: "analysis",
+      tasks: [{ agent: "security-specialist", prompt: "Inspect the module" }],
+    }, cwd, available);
+    assert.equal(fromTopLevel.tasks[0].taskType, "analysis");
+    assert.equal(fromTopLevel.tasks[0].model, "provider/analysis");
+
+    const fromTask = applyModelRouting({
+      taskType: "analysis",
+      tasks: [{ agent: "security-specialist", taskType: "debug", prompt: "Inspect the module" }],
+    }, cwd, available);
+    assert.equal(fromTask.tasks[0].taskType, "debug");
+    assert.equal(fromTask.tasks[0].model, "provider/debug");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("task cwd selects that project's custom role type and routing config", () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-cwd-routing-"));
+  const target = path.join(root, "target");
+  const agentsDir = path.join(target, ".pi", "agents");
+  fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(agentsDir, "release-manager.md"), `---
+name: release-manager
+description: Release manager
+taskType: release
+---
+Manage releases.
+`);
+  try {
+    saveProjectModelMapping(target, "release", "provider/release");
+    const routed = applyModelRouting({
+      tasks: [{ agent: "release-manager", cwd: target, prompt: "Prepare release" }],
+    }, root, ["provider/release"]);
+    assert.equal(routed.tasks[0].taskType, "release");
+    assert.equal(routed.tasks[0].model, "provider/release");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
   }
 });
 
@@ -86,23 +153,56 @@ test("v1 routing configs migrate without losing models and thinking saves indepe
   }
 });
 
+test("teammate model and thinking saves never mutate the original model configuration", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-routing-"));
+  try {
+    const originalModelsPath = path.join(cwd, ".pi", "models.json");
+    const originalSettingsPath = path.join(cwd, ".pi", "settings.json");
+    fs.mkdirSync(path.dirname(originalModelsPath), { recursive: true });
+    fs.writeFileSync(originalModelsPath, JSON.stringify({
+      version: 1,
+      modelDefaults: { "openai/gpt-5": "minimal" },
+    }));
+    fs.writeFileSync(originalSettingsPath, JSON.stringify({ defaultThinkingLevel: "low" }));
+    const originalModels = fs.readFileSync(originalModelsPath, "utf8");
+    const originalSettings = fs.readFileSync(originalSettingsPath, "utf8");
+
+    saveProjectModelMapping(cwd, "analysis", "openai/gpt-5");
+    saveProjectThinkingLevel(cwd, "analysis", "xhigh");
+
+    assert.equal(fs.readFileSync(originalModelsPath, "utf8"), originalModels);
+    assert.equal(fs.readFileSync(originalSettingsPath, "utf8"), originalSettings);
+    assert.deepEqual(JSON.parse(fs.readFileSync(getProjectModelRoutingPath(cwd), "utf8")), {
+      version: 2,
+      mappings: { analysis: "openai/gpt-5" },
+      thinkingLevels: { analysis: "xhigh" },
+    });
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("thinking routing follows per-task, top-level, task type, then agent fallback precedence", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-routing-"));
   try {
     saveProjectThinkingLevel(cwd, "analysis", "medium");
     const routed = applyModelRouting({
-      agent: "delegate",
+      agent: "general",
       thinking: "low",
       tasks: [
-        { agent: "delegate", taskType: "analysis", thinking: "xhigh" },
-        { agent: "delegate", taskType: "analysis" },
+        { agent: "general", prompt: "one", taskType: "analysis", thinking: "xhigh" },
+        { agent: "general", prompt: "two", taskType: "analysis" },
       ],
     }, cwd);
     assert.equal(routed.tasks?.[0].thinking, "xhigh");
     assert.equal(routed.tasks?.[1].thinking, "low");
 
-    const mapped = applyModelRouting({ agent: "delegate", taskType: "analysis" }, cwd);
-    assert.equal(mapped.thinking, "medium");
+    const mapped = applyModelRouting({
+      agent: "general",
+      taskType: "analysis",
+      tasks: [{ prompt: "work" }],
+    }, cwd);
+    assert.equal(mapped.tasks[0].thinking, "medium");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -119,12 +219,16 @@ test("max aliases canonicalize before routing and persisted max values migrate t
     }));
     assert.equal(loadModelRoutingConfig(cwd).thinkingLevels.analysis, "xhigh");
 
-    const topLevel = applyModelRouting({ agent: "delegate", thinking: "max" }, cwd);
+    const topLevel = applyModelRouting({
+      agent: "general",
+      thinking: "max",
+      tasks: [{ prompt: "work" }],
+    }, cwd);
     assert.equal(topLevel.thinking, "xhigh");
     const tasks = applyModelRouting({
-      agent: "delegate",
+      agent: "general",
       thinking: "low",
-      tasks: [{ agent: "delegate", thinking: "max" }],
+      tasks: [{ agent: "general", prompt: "work", thinking: "max" }],
     }, cwd);
     assert.equal(tasks.tasks?.[0].thinking, "xhigh");
   } finally {
@@ -139,11 +243,11 @@ test("multi-task routing applies per phase while explicit defaults win", () => {
     saveProjectModelMapping(cwd, "debug", "openai/gpt-5");
 
     const routed = applyModelRouting({
-      agent: "delegate",
+      agent: "general",
       tasks: [
-        { agent: "explorer", task: "Locate auth handlers" },
-        { agent: "delegate", prompt: "analysis-diagnose-bug-root-cause", task: "Diagnose auth failure" },
-        { agent: "reviewer", task: "Review the fix", model: "anthropic/claude-sonnet" },
+        { agent: "explorer", prompt: "Locate auth handlers" },
+        { agent: "general", prompt: "Diagnose auth failure", taskType: "debug" },
+        { agent: "reviewer", prompt: "Review the fix", model: "anthropic/claude-sonnet" },
       ],
     }, cwd, ["google/gemini-pro", "openai/gpt-5", "anthropic/claude-sonnet"]);
     assert.equal(routed.tasks?.[0].model, "google/gemini-pro");
@@ -151,9 +255,9 @@ test("multi-task routing applies per phase while explicit defaults win", () => {
     assert.equal(routed.tasks?.[2].model, "anthropic/claude-sonnet");
 
     const topLevel = applyModelRouting({
-      agent: "delegate",
+      agent: "general",
       model: "openai/default",
-      tasks: [{ agent: "explorer", task: "Locate routes" }],
+      tasks: [{ agent: "explorer", prompt: "Locate routes" }],
     }, cwd, ["google/gemini-pro", "openai/default"]);
     assert.equal(topLevel.tasks?.[0].model, "openai/default");
   } finally {
@@ -166,11 +270,11 @@ test("unavailable configured models fall back instead of launching invalid model
   try {
     saveProjectModelMapping(cwd, "planning", "missing/model");
     const routed = applyModelRouting({
-      agent: "delegate",
+      agent: "general",
       taskType: "planning",
-      task: "Plan migration",
+      tasks: [{ prompt: "Plan migration" }],
     }, cwd, ["openai/gpt-5"]);
-    assert.equal(routed.model, undefined);
+    assert.equal(routed.tasks[0].model, undefined);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }

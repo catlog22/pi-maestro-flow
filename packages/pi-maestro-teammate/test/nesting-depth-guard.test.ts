@@ -50,7 +50,7 @@ async function dispatchNested(
       type: "teammate_proxy_request",
       tool: "teammate",
       requestId: randomUUID(),
-      params: { agent: "worker", task: "noop" },
+      params: { tasks: [{ agent: "worker", prompt: "noop" }] },
       ...claimed,
     },
     (msg) => { captured = msg as Record<string, unknown>; },

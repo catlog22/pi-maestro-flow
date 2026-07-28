@@ -4,7 +4,7 @@ import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Writable } from "node:stream";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -239,7 +239,7 @@ function rootToolContext(): Record<string, unknown> {
 function lateProgress(status: AgentProgress["status"] = "running"): AgentProgress {
   const now = Date.now();
   return {
-    agent: "delegate",
+    agent: "general",
     correlationId: "late-progress",
     taskIndex: 0,
     dependencies: [],
@@ -301,6 +301,47 @@ test("assistant structured_output calls provide a schema-validated settlement fa
   }, schema), undefined);
 });
 
+test("foreground summaries keep the timeout cause ahead of the later abnormal-exit wrapper", async () => {
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    let closed = false;
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() {
+        if (!closed) {
+          closed = true;
+          queueMicrotask(() => child.emit("close", 143, "SIGTERM"));
+        }
+        return true;
+      },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const result = await createRootTool({ spawnChildProcess }).execute(
+    "timeout-cause",
+    { tasks: [{ agent: "general", prompt: "stall", timeoutMs: 10 }], background: false },
+    new AbortController().signal,
+    undefined,
+    rootToolContext(),
+  );
+  delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ];
+
+  const text = result.content.map((item) => item.text).join("\n");
+  assert.equal(result.isError, true);
+  assert.match(text, /exceeded its 10ms limit/);
+  assert.match(text, /agent=general/);
+  assert.doesNotMatch(text, /^Teammate child process exited abnormally/);
+});
+
 test("root and proxy single/graph paths preserve provider cause before every schema settlement diagnostic", async () => {
   const schema = {
     type: "object",
@@ -321,9 +362,12 @@ test("root and proxy single/graph paths preserve provider cause before every sch
           resultReadyGraceMs: 1,
         };
         const params = mode === "single"
-          ? { agent: "delegate", task: "diagnose", background: false, outputSchema: schema }
+          ? { tasks: [{ agent: "general", prompt: "diagnose", outputSchema: schema }], background: false }
           : {
-              tasks: [{ agent: "delegate", name: "diagnose", task: "diagnose", outputSchema: schema }],
+              tasks: [
+                { agent: "general", name: "diagnose", prompt: "diagnose", outputSchema: schema },
+                { agent: "general", name: "confirm", prompt: "confirm", outputSchema: schema },
+              ],
               background: false,
             };
         let result: Awaited<ReturnType<RegisteredTeammateTool["execute"]>>;
@@ -380,7 +424,7 @@ test("root and proxy single/graph paths preserve provider cause before every sch
           text,
           new RegExp(`Structured output: ${expectedSchemaText.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`),
         );
-        assert.equal(result.details?.results.length, 1);
+        assert.equal(result.details?.results.length, mode === "graph" ? 2 : 1);
         assert.equal(result.details?.results[0]?.exitCode, 1);
         if (mode === "graph") assert.equal(result.details?.progress?.[0]?.status, "failed");
         if (publicPath === "proxy") assert.equal(childStatuses.at(-1), "failed");
@@ -448,14 +492,14 @@ test("root and proxy expose identical validated structuredOutput projections", a
   for (const publicPath of ["root", "proxy"] as const) {
     const single = await execute(
       publicPath,
-      { agent: "delegate", task: "single", background: false, outputSchema: schema },
+      { tasks: [{ agent: "general", prompt: "single", outputSchema: schema }], background: false },
       [{ value: "single" }],
     );
     assert.deepEqual(single.details?.structuredOutput, { value: "single" });
 
     const singleOmitted = await execute(
       publicPath,
-      { agent: "delegate", task: "single omitted", background: false },
+      { tasks: [{ agent: "general", prompt: "single omitted" }], background: false },
       [undefined],
     );
     assert.equal(Object.hasOwn(singleOmitted.details ?? {}, "structuredOutput"), false);
@@ -464,9 +508,9 @@ test("root and proxy expose identical validated structuredOutput projections", a
       publicPath,
       {
         tasks: [
-          { agent: "delegate", name: "named", task: "named", outputSchema: schema },
-          { agent: "delegate", task: "indexed", outputSchema: schema },
-          { agent: "delegate", name: "omitted", task: "omitted" },
+          { agent: "general", name: "named", prompt: "named", outputSchema: schema },
+          { agent: "general", prompt: "indexed", outputSchema: schema },
+          { agent: "general", name: "omitted", prompt: "omitted" },
         ],
         concurrency: 1,
         background: false,
@@ -481,7 +525,7 @@ test("root and proxy expose identical validated structuredOutput projections", a
     const graphOmitted = await execute(
       publicPath,
       {
-        tasks: [{ agent: "delegate", name: "omitted", task: "omitted" }],
+        tasks: [{ agent: "general", name: "omitted", prompt: "omitted" }],
         background: false,
       },
       [undefined],
@@ -502,8 +546,8 @@ test("structured graph producers do not cancel dependent tasks on root or proxy 
     for (const reference of ["{producer.value}", "{producer}"] as const) {
       const params = {
         tasks: [
-          { agent: "delegate", name: "producer", task: "produce", outputSchema: schema },
-          { agent: "delegate", name: "consumer", task: `consume ${reference}` },
+          { agent: "general", name: "producer", prompt: "produce", outputSchema: schema },
+          { agent: "general", name: "consumer", prompt: `consume ${reference}` },
         ],
         concurrency: 1,
         background: false,
@@ -573,26 +617,35 @@ test("foreground updates close before every public settlement and reject late ca
     additionalProperties: false,
   };
   const cases = [
-    { name: "single success", mode: "single", outcome: "success", params: { agent: "delegate", task: "ok" } },
+    { name: "single success", mode: "single", outcome: "success", params: { tasks: [{ agent: "general", prompt: "ok" }] } },
     {
       name: "single failed",
       mode: "single",
       outcome: "failed",
-      params: { agent: "delegate", task: "fail", background: false, outputSchema: schema },
+      params: { tasks: [{ agent: "general", prompt: "fail", outputSchema: schema }], background: false },
     },
-    { name: "single throw", mode: "single", outcome: "throw", params: { agent: "delegate", task: "throw" } },
+    { name: "single throw", mode: "single", outcome: "throw", params: { tasks: [{ agent: "general", prompt: "throw" }] } },
     {
       name: "graph success",
       mode: "graph",
       outcome: "success",
-      params: { tasks: [{ agent: "delegate", name: "ok", task: "ok" }], background: false },
+      params: {
+        tasks: [
+          { agent: "general", name: "ok", prompt: "ok" },
+          { agent: "general", name: "ok2", prompt: "ok again" },
+        ],
+        background: false,
+      },
     },
     {
       name: "graph failed",
       mode: "graph",
       outcome: "failed",
       params: {
-        tasks: [{ agent: "delegate", name: "fail", task: "fail", outputSchema: schema }],
+        tasks: [
+          { agent: "general", name: "fail", prompt: "fail", outputSchema: schema },
+          { agent: "general", name: "fail2", prompt: "fail again", outputSchema: schema },
+        ],
         background: false,
       },
     },
@@ -600,7 +653,13 @@ test("foreground updates close before every public settlement and reject late ca
       name: "graph throw",
       mode: "graph",
       outcome: "throw",
-      params: { tasks: [{ agent: "delegate", name: "throw", task: "throw" }], background: false },
+      params: {
+        tasks: [
+          { agent: "general", name: "throw", prompt: "throw" },
+          { agent: "general", name: "throw2", prompt: "throw again" },
+        ],
+        background: false,
+      },
     },
   ] as const;
 
@@ -642,7 +701,7 @@ test("foreground updates close before every public settlement and reject late ca
       {
         tool: "teammate",
         requestId: `late-${entry.name}`,
-        params: { agent: "delegate", task: "late", background: true },
+        params: { tasks: [{ agent: "general", prompt: "late" }], background: true },
       },
       () => {},
     );
@@ -680,7 +739,7 @@ test("detach and background acknowledgement never publish post-settlement update
   });
   const execution = tool.execute(
     "detach",
-    { agent: "delegate", task: "detach", background: false },
+    { tasks: [{ agent: "general", prompt: "detach" }], background: false },
     new AbortController().signal,
     (update) => updates.push(update),
     {
@@ -715,7 +774,7 @@ test("detach and background acknowledgement never publish post-settlement update
     onRunOptionsCreated: (options) => { backgroundOptions = options; },
   }).execute(
     "background",
-    { agent: "delegate", task: "background", background: true },
+    { tasks: [{ agent: "general", prompt: "background" }], background: true },
     new AbortController().signal,
     (update) => backgroundUpdates.push(update),
     rootToolContext(),
@@ -760,7 +819,13 @@ test("foreground nested proxy updates preserve the two allowed teammate levels",
     onRunOptionsCreated: (options) => { rootOptions ??= options; },
   }).execute(
     "nested-tree",
-    { tasks: [{ agent: "delegate", name: "planner", task: "root" }], background: false },
+    {
+      tasks: [
+        { agent: "general", name: "planner", prompt: "root" },
+        { agent: "general", name: "peer", prompt: "peer" },
+      ],
+      background: false,
+    },
     new AbortController().signal,
     (update) => updates.push(update),
     rootToolContext(),
@@ -777,7 +842,7 @@ test("foreground nested proxy updates preserve the two allowed teammate levels",
       tool: "teammate",
       requestId: "child",
       parentCid: rootOptions.taskCorrelationIds?.[0],
-      params: { agent: "delegate", name: "child", task: "child", background: false },
+      params: { tasks: [{ agent: "general", name: "child", prompt: "child" }], background: false },
     },
     () => {},
   );
@@ -808,7 +873,8 @@ test("root and proxy teammate initialization use their own request params", () =
   assert.ok(rootStart >= 0 && rootEnd > rootStart);
 
   const rootInitialization = source.slice(rootStart, rootEnd);
-  assert.match(rootInitialization, /promptSeq:\s*params\.task \? 1 : 0/);
+  assert.match(rootInitialization, /promptSeq:\s*1/);
+  assert.match(rootInitialization, /singleTask\.outputSchema/);
   assert.doesNotMatch(rootInitialization, /\bp\.task\b/);
   assert.equal(rootInitialization.match(/lease:\s*createChildLease\(\)/g)?.length, 1);
 
@@ -817,7 +883,8 @@ test("root and proxy teammate initialization use their own request params", () =
   assert.ok(proxyStart > rootEnd && proxyEnd > proxyStart);
 
   const proxyInitialization = source.slice(proxyStart, proxyEnd);
-  assert.match(proxyInitialization, /promptSeq:\s*p\.task \? 1 : 0/);
+  assert.match(proxyInitialization, /promptSeq:\s*1/);
+  assert.match(proxyInitialization, /singleTask\.outputSchema/);
   assert.doesNotMatch(proxyInitialization, /promptSeq:\s*params\.task/);
   assert.equal(proxyInitialization.match(/lease:\s*createChildLease\(\)/g)?.length, 1);
 });
@@ -832,9 +899,9 @@ test("root and proxy graph normalization share one implementation that preserves
   const indexSource = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
   const executionSource = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8");
 
-  // The shared normalizer parses thinking for both tasks and chain branches.
-  assert.match(executionSource, /thinking:\s*parseTeammateThinkingLevel\(t\.thinking \?\? params\.thinking\)/);
-  assert.match(executionSource, /thinking:\s*t\.thinking \?\? parseTeammateThinkingLevel\(params\.thinking\)/);
+  // The shared normalizer parses task thinking after applying the top-level default.
+  assert.match(executionSource, /thinking:\s*parseTeammateThinkingLevel\(task\.thinking \?\? params\.thinking\)/);
+  assert.doesNotMatch(executionSource, /params\.chain/);
 
   // Both the root execute and the child proxy paths call it — no local re-implementation.
   assert.match(indexSource, /const normalization = normalizeTeammateParams\(params\)/);
@@ -882,7 +949,7 @@ test("child lifecycle commit wins over a later handback failure recovery", () =>
     currentSessionId: null,
     namedAgents: new Map(),
     activeRuns: new Map([[correlationId, {
-      agent: "delegate",
+      agent: "general",
       correlationId,
       startedAt: Date.now(),
       abortController: new AbortController(),
@@ -1023,7 +1090,7 @@ test("registered parent extensions and their interaction tools reach every teamm
   try {
     const args = buildPiArgs(
       { tools: ["read"] } as never,
-      { agent: "delegate" },
+      { agent: "general" },
       "prompt.md",
     );
     const extensionPaths = args.flatMap((arg, index) => arg === "--extension" ? [args[index + 1].replaceAll("\\", "/")] : []);
@@ -1171,6 +1238,19 @@ test("idle teammate wake-up uses the RPC prompt command", async () => {
   assert.equal(sendRpcMessage(stdin, "continue the task", "prompt"), true);
   await new Promise((resolve) => setTimeout(resolve, 0));
   assert.deepEqual(JSON.parse(written.trim()), { type: "prompt", message: "continue the task" });
+});
+
+test("RPC writes absorb an asynchronous EPIPE from closed child stdin", async () => {
+  const stdin = new Writable({
+    write(_chunk, _encoding, callback) {
+      queueMicrotask(() => callback(Object.assign(new Error("write EPIPE"), { code: "EPIPE" })));
+    },
+  });
+  const error = new Promise<Error>((resolve) => stdin.once("error", resolve));
+
+  assert.equal(sendRpcMessage(stdin, "late reply", "follow_up"), true);
+  assert.equal((await error as NodeJS.ErrnoException).code, "EPIPE");
+  assert.equal(stdin.destroyed, true);
 });
 
 test("initial teammate prompt carries the child lease token", async () => {
@@ -1386,7 +1466,7 @@ test("teammate-wait settles from lifecycle events without polling teammate-watch
     currentSessionId: null,
     namedAgents: new Map([["worker", correlationId]]),
     activeRuns: new Map([[correlationId, {
-      agent: "delegate",
+      agent: "general",
       name: "worker",
       correlationId,
       startedAt: now,
@@ -1486,7 +1566,7 @@ test("retrying agents remain distinct from sleeping and expose retry metadata", 
   const correlationId = "retrying-agent";
   const now = Date.now();
   const agent = {
-    agent: "delegate",
+    agent: "general",
     correlationId,
     startedAt: now,
     abortController: new AbortController(),
@@ -1855,7 +1935,7 @@ test("persistent agent widget deduplicates graph progress and direct child rows"
     correlationId: "aaaaaaaa-parent",
     status: "sleeping" as const,
     progress: [{
-      agent: "delegate",
+      agent: "general",
       name: "pkg-info",
       correlationId: childId,
       taskIndex: 0,
@@ -1867,7 +1947,7 @@ test("persistent agent widget deduplicates graph progress and direct child rows"
   };
   const child = {
     ...shared,
-    agent: "delegate",
+    agent: "general",
     name: "pkg-info",
     correlationId: childId,
     spawnedBy: parent.correlationId,
@@ -1889,7 +1969,7 @@ test("persistent agent widget orders roots and siblings by latest activity witho
     lastActivityAt: number,
     spawnedBy?: string,
   ): ActiveAgent => ({
-    agent: "delegate",
+    agent: "general",
     name,
     correlationId,
     startedAt: 1,

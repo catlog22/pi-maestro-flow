@@ -22,25 +22,25 @@ function makeResult(): SingleResult {
 test("collapsed background multi-task call lists every dispatched agent", () => {
   const rendered = renderTeammateCall({
     tasks: [
-      { agent: "explorer", name: "scan", task: "find auth" },
-      { agent: "delegate", name: "review", task: "review {scan}" },
-      { agent: "delegate", task: "summarize" },
+      { agent: "explorer", name: "scan", prompt: "find auth" },
+      { agent: "general", name: "review", prompt: "review {scan}" },
+      { agent: "general", prompt: "summarize" },
     ],
     background: true,
   }, theme as never, { expanded: false }).render(80);
 
   assert.match(rendered[0], /3 result chain background agents launched/);
   assert.equal(rendered[1], "• 1 □ @scan (explorer)");
-  assert.equal(rendered[2], "→ 2 □ @review (delegate) ← result #1");
-  assert.equal(rendered[3], "• 3 □ delegate");
+  assert.equal(rendered[2], "→ 2 □ @review (general) ← result #1");
+  assert.equal(rendered[3], "• 3 □ general");
   assert.equal(rendered.length, 4);
 });
 
 test("collapsed foreground multi-task call omits the agent list duplicated by streaming progress", () => {
   const rendered = renderTeammateCall({
     tasks: [
-      { agent: "explorer", name: "pkgs", task: "inspect packages" },
-      { agent: "delegate", name: "summary", task: "summarize {pkgs}" },
+      { agent: "explorer", name: "pkgs", prompt: "inspect packages" },
+      { agent: "general", name: "summary", prompt: "summarize {pkgs}" },
     ],
     background: false,
   }, theme as never, { expanded: false }).render(80);
@@ -53,15 +53,15 @@ test("collapsed foreground multi-task call omits the agent list duplicated by st
 test("collapsed multi-task call shows a non-linear DAG with multi-result edges", () => {
   const rendered = renderTeammateCall({
     tasks: [
-      { agent: "explorer", name: "a", task: "find auth" },
-      { agent: "explorer", name: "b", task: "find db" },
-      { agent: "delegate", name: "merge", task: "combine {a} and {b}" },
+      { agent: "explorer", name: "a", prompt: "find auth" },
+      { agent: "explorer", name: "b", prompt: "find db" },
+      { agent: "general", name: "merge", prompt: "combine {a} and {b}" },
     ],
     background: true,
   }, theme as never, { expanded: false }).render(80);
 
   assert.match(rendered[0], /3 result graph background agents launched/);
-  assert.equal(rendered[3], "→ 3 □ @merge (delegate) ← results #1, #2");
+  assert.equal(rendered[3], "→ 3 □ @merge (general) ← results #1, #2");
 });
 
 test("completed teammate results expose the expand affordance", () => {
@@ -103,7 +103,7 @@ test("progress tree renders one row per task index when snapshots repeat", () =>
   };
   const rows = buildProgressTree([
     {
-      agent: "delegate",
+      agent: "general",
       correlationId: "first-correlation",
       taskIndex: 0,
       dependencies: [],
@@ -113,7 +113,7 @@ test("progress tree renders one row per task index when snapshots repeat", () =>
       tokens: 0,
     },
     {
-      agent: "delegate",
+      agent: "general",
       correlationId: "second-correlation",
       taskIndex: 0,
       dependencies: [],
@@ -125,7 +125,7 @@ test("progress tree renders one row per task index when snapshots repeat", () =>
   ], palette);
 
   assert.equal(rows.length, 1);
-  assert.match(rows[0]?.text ?? "", /✓ completed delegate/);
+  assert.match(rows[0]?.text ?? "", /✓ completed general/);
   assert.match(rows[0]?.text ?? "", /second-c/);
 });
 
@@ -157,7 +157,7 @@ test("streaming progress shows live duration and split token usage", () => {
       mode: "single",
       results: [],
       progress: [{
-        agent: "delegate",
+        agent: "general",
         name: "metrics",
         correlationId: "metrics-agent",
         taskIndex: 0,
@@ -187,7 +187,7 @@ test("streaming progress keeps per-second metrics off the header line", () => {
       mode: "single",
       results: [],
       progress: [{
-        agent: "delegate",
+        agent: "general",
         name: "metrics",
         correlationId: "metrics-agent",
         taskIndex: 0,
@@ -270,7 +270,7 @@ test("streaming teammate result nests child agents under their parent as a tree"
       mode: "single",
       results: [],
       progress: [{
-        agent: "delegate",
+        agent: "general",
         name: "planner",
         correlationId: "task-1",
         taskIndex: 0,
@@ -299,7 +299,7 @@ test("streaming teammate result nests child agents under their parent as a tree"
   }, { expanded: false }, theme as never).render(100).join("\n");
 
   const lines = rendered.split("\n");
-  assert.match(rendered, /• 1 □ pending @planner \(delegate\)/);
+  assert.match(rendered, /• 1 □ pending @planner \(general\)/);
   const reviewLine = lines.find((line) => line.includes("@review"));
   const deepLine = lines.find((line) => line.includes("@deep"));
   assert.ok(reviewLine?.startsWith("  └─ "), `review should nest under task: ${reviewLine}`);
@@ -340,7 +340,7 @@ test("streaming teammate result wraps long agent output instead of truncating it
       mode: "single",
       results: [],
       progress: [{
-        agent: "delegate",
+        agent: "general",
         name: "fresh",
         correlationId: "fresh-agent",
         taskIndex: 0,

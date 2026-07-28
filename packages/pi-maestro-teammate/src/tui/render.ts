@@ -131,7 +131,7 @@ function formatTokens(count: number): string {
 interface TaskArg {
   agent: string;
   name?: string;
-  task?: string;
+  prompt?: string;
 }
 
 export function renderTeammateCall(
@@ -139,7 +139,8 @@ export function renderTeammateCall(
   theme: Theme,
   context?: { expanded?: boolean },
 ): Component {
-  const tasks = args.tasks as TaskArg[] | undefined;
+  const tasks = (args.tasks as Array<Omit<TaskArg, "agent"> & { agent?: string }> | undefined)
+    ?.map((task) => ({ ...task, agent: task.agent ?? (args.agent as string | undefined) ?? "general" }));
   const isBg = args.background === true;
 
   // Multi-task: tree with dependency topology
@@ -170,7 +171,7 @@ function renderMultiTaskCall(
   expanded: boolean,
 ): Component {
   const taskNames = new Set(tasks.filter((t) => t.name).map((t) => t.name!));
-  const hasDeps = tasks.some((t) => extractDependencies(t.task, taskNames).length > 0);
+  const hasDeps = tasks.some((t) => extractDependencies(t.prompt, taskNames).length > 0);
 
   const modeWord = isBg ? "background" : "foreground";
   const hint = isBg
@@ -189,7 +190,7 @@ function renderMultiTaskCall(
     if (task.name) indexByName.set(task.name, index);
   });
   const dependenciesByIndex = tasks.map((task) =>
-    extractDependencies(task.task, taskNames)
+    extractDependencies(task.prompt, taskNames)
       .map((name) => indexByName.get(name))
       .filter((dependency): dependency is number => dependency !== undefined)
   );
@@ -241,7 +242,7 @@ function renderMultiTaskCall(
 
 function isLinearChain(tasks: TaskArg[], taskNames: Set<string>): boolean {
   for (let i = 0; i < tasks.length; i++) {
-    const deps = extractDependencies(tasks[i].task, taskNames);
+    const deps = extractDependencies(tasks[i].prompt, taskNames);
     if (deps.length > 1) return false;
     if (deps.length === 1 && i > 0 && deps[0] !== tasks[i - 1].name) return false;
   }

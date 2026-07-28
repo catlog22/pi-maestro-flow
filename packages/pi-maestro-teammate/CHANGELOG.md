@@ -1,5 +1,27 @@
 # Changelog
 
+## 1.0.0
+
+### Breaking
+
+- Public `teammate` and programmatic `runTeammate` calls now require a non-empty `tasks[]`; one task represents single-agent work.
+- `tasks[].prompt` is the only task text and is always literal. Removed `task`, `promptArgs`, top-level `prompt`, `chain`, prompt discovery, bundled prompt templates, and `./v1/prompts`.
+- Built-in roles are `general`, `explorer`, `planner`, `analyst`, `research`, `verifier`, and `workflow`. The dedicated `verifier` is the Goal fallback when no acceptance commands are declared. Removed the built-in `delegate`, `goal-verifier`, and `coordinator` names.
+- Public parameter objects reject unknown fields.
+
+### Added
+
+- Top-level role, task type, model, thinking, context, cwd, output schema, and timeout values act as task defaults with per-task overrides.
+- Custom role YAML accepts built-in or custom `taskType` identifiers; the Control Center discovers them automatically. Explicit task/top-level values override role metadata, followed by role-name or prompt inference.
+- The `research` role can query Maestro project/architecture knowledge through `maestro search/load` and external sources through `smart_search`/`source_check`.
+- End-to-end task model and thinking propagation is covered through proxy parsing, normalization, DAG execution, and child CLI arguments.
+- Custom role YAML tool lists are normalized into executable Pi tool IDs.
+
+### Changed
+
+- Goal completion verification uses the read-only `analyst` role with an explicit fail-closed verification policy and structured verdict contract.
+- `runTeammate` is the tasks-only public programmatic entry; the single-subprocess primitive is internal.
+
 ## 0.5.0 (2026-07-25)
 
 ### 行为变化（Breaking）

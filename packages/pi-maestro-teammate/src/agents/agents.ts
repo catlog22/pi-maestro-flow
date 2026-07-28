@@ -10,28 +10,31 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseFrontmatter } from "./frontmatter.ts";
+import { parseTeammateTaskType, type TeammateTaskType } from "../shared/task-types.ts";
 import { parseTeammateThinkingLevel, type TeammateThinkingLevel } from "../shared/thinking.ts";
 
 type SystemPromptMode = "append" | "replace";
 export type AgentSource = "builtin" | "user" | "project";
 
 export const BUILTIN_AGENT_NAMES = [
-  "delegate",
+  "general",
   "explorer",
-  "goal-verifier",
+  "planner",
+  "analyst",
+  "research",
+  "verifier",
   "workflow",
 ] as const;
 export type BuiltinAgentName = (typeof BUILTIN_AGENT_NAMES)[number];
 export const PUBLIC_BUILTIN_AGENT_NAMES = [
-  "delegate",
+  "general",
   "explorer",
-  "goal-verifier",
+  "planner",
+  "analyst",
+  "research",
+  "verifier",
   "workflow",
 ] as const satisfies readonly BuiltinAgentName[];
-
-const LEGACY_AGENT_ALIASES: Readonly<Record<string, BuiltinAgentName>> = {
-  coordinator: "workflow",
-};
 
 const AGENT_CATALOG_START_MARKER = "<!-- teammate-agent-catalog:start -->";
 const AGENT_CATALOG_END_MARKER = "<!-- teammate-agent-catalog:end -->";
@@ -42,6 +45,7 @@ export interface AgentConfig {
   tools?: string[];
   model?: string;
   fallbackModels?: string[];
+  taskType?: TeammateTaskType;
   thinking?: TeammateThinkingLevel;
   systemPromptMode: SystemPromptMode;
   inheritProjectContext: boolean;
@@ -108,8 +112,8 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
     }
 
     const rawTools = frontmatter.tools
-      ?.split(",")
-      .map((t) => t.trim())
+      ?.split(/[\n,]+/)
+      .map((tool) => tool.replace(/^\s*-\s*/, "").trim().toLowerCase())
       .filter(Boolean);
 
     const systemPromptMode: SystemPromptMode =
@@ -117,7 +121,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
         ? "replace"
         : frontmatter.systemPromptMode === "append"
           ? "append"
-          : frontmatter.name === "delegate"
+          : frontmatter.name === "general"
             ? "append"
             : "replace";
 
@@ -126,7 +130,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
         ? true
         : frontmatter.inheritProjectContext === "false"
           ? false
-          : frontmatter.name === "delegate";
+          : frontmatter.name === "general";
 
     const inheritSkills = frontmatter.inheritSkills === "true";
 
@@ -148,6 +152,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
       tools: rawTools && rawTools.length > 0 ? rawTools : undefined,
       model: frontmatter.model,
       fallbackModels: rawFallbackModels && rawFallbackModels.length > 0 ? rawFallbackModels : undefined,
+      taskType: parseTeammateTaskType(frontmatter.taskType),
       thinking: parseTeammateThinkingLevel(frontmatter.thinking),
       systemPromptMode,
       inheritProjectContext,
@@ -167,11 +172,7 @@ export function isBuiltinAgentName(name: string): name is BuiltinAgentName {
 }
 
 function isReservedAgentName(name: string): boolean {
-  return isBuiltinAgentName(name) || Object.hasOwn(LEGACY_AGENT_ALIASES, name);
-}
-
-function canonicalAgentName(name: string): string {
-  return LEGACY_AGENT_ALIASES[name] ?? name;
+  return isBuiltinAgentName(name);
 }
 
 /**
@@ -248,8 +249,7 @@ export function resolveAgent(
   agentName: string,
 ): AgentConfig | undefined {
   const agents = discoverAgents(cwd);
-  const canonicalName = canonicalAgentName(agentName);
-  return agents.find((a) => a.name === canonicalName);
+  return agents.find((agent) => agent.name === agentName);
 }
 
 /** Return resolved role metadata without exposing the role prompt body. */

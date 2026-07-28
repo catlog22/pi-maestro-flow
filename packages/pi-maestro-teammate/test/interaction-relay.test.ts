@@ -24,7 +24,7 @@ import type { ActiveAgent, TeammateState } from "../src/shared/types.ts";
 
 function createState(): { state: TeammateState; agent: ActiveAgent } {
   const agent: ActiveAgent = {
-    agent: "delegate",
+    agent: "general",
     name: "reviewer",
     correlationId: "child-12345678",
     startedAt: Date.now(),

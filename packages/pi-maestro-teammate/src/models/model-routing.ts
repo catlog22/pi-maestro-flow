@@ -2,31 +2,28 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RunTeammateParams } from "../runs/execution.ts";
+import { resolveAgent } from "../agents/agents.ts";
+import {
+  TEAMMATE_TASK_TYPES,
+  parseTeammateTaskType,
+  type TeammateTaskType,
+} from "../shared/task-types.ts";
 import { parseTeammateThinkingLevel, type TeammateThinkingLevel } from "../shared/thinking.ts";
 
-export const TEAMMATE_TASK_TYPES = [
-  "explore",
-  "analysis",
-  "debug",
-  "planning",
-  "development",
-  "review",
-  "testing",
-] as const;
-
-export type TeammateTaskType = (typeof TEAMMATE_TASK_TYPES)[number];
+export { TEAMMATE_TASK_TYPES, parseTeammateTaskType } from "../shared/task-types.ts";
+export type { TeammateTaskType } from "../shared/task-types.ts";
 
 export const TEAMMATE_TASK_TYPE_META: Record<
-  TeammateTaskType,
+  string,
   { label: string; roles: string; description: string }
 > = {
   explore: { label: "Explore", roles: "explorer", description: "File discovery, definitions, and call sites" },
-  analysis: { label: "Analysis", roles: "delegate / analyst", description: "Read-only tracing and technical investigation" },
-  debug: { label: "Debug", roles: "debugger", description: "Root-cause diagnosis and runtime debugging" },
-  planning: { label: "Planning", roles: "planner / architect", description: "Architecture and execution planning" },
-  development: { label: "Development", roles: "developer / worker", description: "Implementation and refactoring" },
-  review: { label: "Review", roles: "reviewer", description: "Correctness, quality, and security review" },
-  testing: { label: "Testing", roles: "tester / qa", description: "Tests, coverage, and regression validation" },
+  analysis: { label: "Analysis", roles: "analyst / research / general", description: "Read-only tracing and technical investigation" },
+  debug: { label: "Debug", roles: "analyst / general", description: "Root-cause diagnosis and runtime debugging" },
+  planning: { label: "Planning", roles: "planner / workflow", description: "Architecture and execution planning" },
+  development: { label: "Development", roles: "general", description: "Implementation and refactoring" },
+  review: { label: "Review", roles: "analyst", description: "Correctness, quality, and security review" },
+  testing: { label: "Testing", roles: "general / analyst", description: "Tests, coverage, and regression validation" },
 };
 
 export interface ModelRoutingConfig {
@@ -37,7 +34,6 @@ export interface ModelRoutingConfig {
 
 export interface TaskTypeInput {
   taskType?: TeammateTaskType;
-  prompt?: string;
   agent?: string;
   task?: string;
 }
@@ -57,11 +53,16 @@ function readConfig(filePath: string): ModelRoutingConfig {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<ModelRoutingConfig>;
     const mappings: Partial<Record<TeammateTaskType, string | null>> = {};
     const thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>> = {};
-    for (const taskType of TEAMMATE_TASK_TYPES) {
-      const value = parsed.mappings?.[taskType];
+    const rawMappings = parsed.mappings && typeof parsed.mappings === "object" ? parsed.mappings : {};
+    const rawThinking = parsed.thinkingLevels && typeof parsed.thinkingLevels === "object" ? parsed.thinkingLevels : {};
+    const taskTypes = new Set([...Object.keys(rawMappings), ...Object.keys(rawThinking)]);
+    for (const rawTaskType of taskTypes) {
+      const taskType = parseTeammateTaskType(rawTaskType);
+      if (!taskType) continue;
+      const value = rawMappings[rawTaskType];
       if (typeof value === "string" && value.trim()) mappings[taskType] = value.trim();
       else if (value === null) mappings[taskType] = null;
-      const thinking = parsed.thinkingLevels?.[taskType];
+      const thinking = rawThinking[rawTaskType];
       if (thinking === null) thinkingLevels[taskType] = null;
       else {
         const parsedThinking = parseTeammateThinkingLevel(thinking);
@@ -84,14 +85,41 @@ export function loadModelRoutingConfig(cwd: string): ModelRoutingConfig {
   };
 }
 
+export function discoverRoutingTaskTypes(
+  cwd: string,
+  agents: readonly { taskType?: TeammateTaskType }[] = [],
+): TeammateTaskType[] {
+  const config = loadModelRoutingConfig(cwd);
+  const taskTypes = new Set<TeammateTaskType>(TEAMMATE_TASK_TYPES);
+  for (const agent of agents) {
+    const taskType = parseTeammateTaskType(agent.taskType);
+    if (taskType) taskTypes.add(taskType);
+  }
+  for (const taskType of [...Object.keys(config.mappings), ...Object.keys(config.thinkingLevels)]) {
+    const normalized = parseTeammateTaskType(taskType);
+    if (normalized) taskTypes.add(normalized);
+  }
+  const builtins = new Set<string>(TEAMMATE_TASK_TYPES);
+  return [...taskTypes].sort((left, right) => {
+    const leftIndex = TEAMMATE_TASK_TYPES.indexOf(left as typeof TEAMMATE_TASK_TYPES[number]);
+    const rightIndex = TEAMMATE_TASK_TYPES.indexOf(right as typeof TEAMMATE_TASK_TYPES[number]);
+    if (builtins.has(left) && builtins.has(right)) return leftIndex - rightIndex;
+    if (builtins.has(left)) return -1;
+    if (builtins.has(right)) return 1;
+    return left.localeCompare(right);
+  });
+}
+
 export function saveProjectThinkingLevel(
   cwd: string,
   taskType: TeammateTaskType,
   thinking: TeammateThinkingLevel | null,
 ): ModelRoutingConfig {
+  const normalizedTaskType = parseTeammateTaskType(taskType);
+  if (!normalizedTaskType) throw new Error(`Invalid teammate task type: ${taskType}`);
   const filePath = getProjectModelRoutingPath(cwd);
   const config = readConfig(filePath);
-  config.thinkingLevels[taskType] = thinking;
+  config.thinkingLevels[normalizedTaskType] = thinking;
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   return loadModelRoutingConfig(cwd);
@@ -102,9 +130,11 @@ export function saveProjectModelMapping(
   taskType: TeammateTaskType,
   model: string | null,
 ): ModelRoutingConfig {
+  const normalizedTaskType = parseTeammateTaskType(taskType);
+  if (!normalizedTaskType) throw new Error(`Invalid teammate task type: ${taskType}`);
   const filePath = getProjectModelRoutingPath(cwd);
   const config = readConfig(filePath);
-  config.mappings[taskType] = model;
+  config.mappings[normalizedTaskType] = model;
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
   fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
   return loadModelRoutingConfig(cwd);
@@ -113,17 +143,9 @@ export function saveProjectModelMapping(
 export function inferTaskType(input: TaskTypeInput): TeammateTaskType | undefined {
   if (input.taskType) return input.taskType;
 
-  const prompt = input.prompt?.toLowerCase() ?? "";
-  if (prompt.includes("diagnose-bug") || prompt.includes("debug-runtime")) return "debug";
-  if (prompt.includes("review-architecture") || prompt.includes("review-code-quality")) return "review";
-  if (prompt.startsWith("analysis-")) return "analysis";
-  if (prompt.startsWith("planning-")) return "planning";
-  if (prompt.startsWith("development-generate-tests")) return "testing";
-  if (prompt.startsWith("development-")) return "development";
-  if (prompt === "review" || prompt.includes("review-code-quality")) return "review";
-
   const agent = input.agent?.toLowerCase() ?? "";
   if (agent.includes("explorer") || agent === "explore") return "explore";
+  if (agent.includes("analyst") || agent.includes("research")) return "analysis";
   if (agent.includes("debug")) return "debug";
   if (agent.includes("planner") || agent.includes("architect")) return "planning";
   if (agent.includes("review")) return "review";
@@ -165,61 +187,47 @@ export function applyModelRouting(
   cwd: string,
   availableModels: readonly string[] = [],
 ): RunTeammateParams {
-  const config = loadModelRoutingConfig(cwd);
   const topLevelModel = params.model;
   const topLevelThinking = parseTeammateThinkingLevel(params.thinking);
 
-  const tasks = params.tasks?.map((task) => ({
-    ...task,
-    taskType: task.taskType ?? params.taskType,
-    model: task.model ?? topLevelModel ?? mappedModel(config, {
-      taskType: task.taskType ?? params.taskType,
-      prompt: task.prompt ?? params.prompt,
-      agent: task.agent,
-      task: task.task,
-    }, availableModels),
-    thinking: parseTeammateThinkingLevel(task.thinking) ?? topLevelThinking ?? mappedThinking(config, {
-      taskType: task.taskType ?? params.taskType,
-      prompt: task.prompt ?? params.prompt,
-      agent: task.agent,
-      task: task.task,
-    }),
-  }));
+  const tasks = params.tasks.map((task) => {
+    const routingCwd = path.resolve(cwd, task.cwd ?? params.cwd ?? ".");
+    const config = loadModelRoutingConfig(routingCwd);
+    const agent = task.agent ?? params.agent ?? "general";
+    const explicitTaskType = task.taskType ?? params.taskType;
+    const roleTaskType = resolveAgent(routingCwd, agent)?.taskType;
+    const taskType = explicitTaskType
+      ?? roleTaskType
+      ?? inferTaskType({ agent, task: task.prompt });
+    return {
+      ...task,
+      ...(taskType ? { taskType } : {}),
+      model: task.model ?? topLevelModel ?? mappedModel(config, {
+        taskType,
+        agent,
+        task: task.prompt,
+      }, availableModels),
+      thinking: parseTeammateThinkingLevel(task.thinking) ?? topLevelThinking ?? mappedThinking(config, {
+        taskType,
+        agent,
+        task: task.prompt,
+      }),
+    };
+  });
 
-  const chain = params.chain?.map((step) => ({
-    ...step,
-    taskType: step.taskType ?? params.taskType,
-    model: step.model ?? topLevelModel ?? mappedModel(config, {
-      taskType: step.taskType ?? params.taskType,
-      prompt: step.prompt ?? params.prompt,
-      agent: step.agent,
-      task: step.task,
-    }, availableModels),
-    thinking: parseTeammateThinkingLevel(step.thinking) ?? topLevelThinking ?? mappedThinking(config, {
-      taskType: step.taskType ?? params.taskType,
-      prompt: step.prompt ?? params.prompt,
-      agent: step.agent,
-      task: step.task,
-    }),
-  }));
-
-  const isSingle = !tasks?.length && !chain?.length;
   return {
     ...params,
-    ...(tasks ? { tasks } : {}),
-    ...(chain ? { chain } : {}),
-    ...(isSingle && !params.model
-      ? { model: mappedModel(config, params, availableModels) }
-      : {}),
-    ...(isSingle && !topLevelThinking
-      ? { thinking: mappedThinking(config, params) }
-      : { thinking: topLevelThinking }),
+    tasks,
+    thinking: topLevelThinking,
   };
 }
 
-export function formatModelRoutingConfig(cwd: string): string {
+export function formatModelRoutingConfig(
+  cwd: string,
+  agents: readonly { taskType?: TeammateTaskType }[] = [],
+): string {
   const config = loadModelRoutingConfig(cwd);
-  return TEAMMATE_TASK_TYPES
+  return discoverRoutingTaskTypes(cwd, agents)
     .map((taskType) => `- ${taskType}: model=${config.mappings[taskType] ?? "auto/default"}, thinking=${config.thinkingLevels[taskType] ?? "inherit/default"}`)
     .join("\n");
 }

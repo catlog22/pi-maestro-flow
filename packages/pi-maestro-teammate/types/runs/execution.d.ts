@@ -8,18 +8,46 @@
  * Supports single, parallel (tasks[]), and chain (chain[]) execution modes.
  */
 import { spawn, type ChildProcess } from "node:child_process";
+import type { Writable } from "node:stream";
 import crossSpawn from "cross-spawn";
 import { type AgentConfig } from "../agents/agents.ts";
 import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
 import { type LeaseToken } from "./session-handoff.ts";
-import type { TeammateTaskType } from "../models/model-routing.ts";
+import { type TeammateTaskType } from "../models/model-routing.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
 import { type TeammateThinkingInput, type TeammateThinkingLevel } from "../shared/thinking.ts";
+export interface TeammateTaskSpec {
+    prompt: string;
+    agent?: string;
+    taskType?: TeammateTaskType;
+    name?: string;
+    dependsOn?: string[];
+    context?: "fresh" | "fork";
+    model?: string;
+    thinking?: TeammateThinkingInput;
+    cwd?: string;
+    outputSchema?: Record<string, unknown>;
+    timeoutMs?: number;
+}
 export interface RunTeammateParams {
+    tasks: TeammateTaskSpec[];
+    agent?: string;
+    taskType?: TeammateTaskType;
+    reply_to?: "caller" | "main";
+    background?: boolean;
+    context?: "fresh" | "fork";
+    model?: string;
+    thinking?: TeammateThinkingInput;
+    cwd?: string;
+    timeoutMs?: number;
+    outputSchema?: Record<string, unknown>;
+    concurrency?: number;
+    maxAgents?: number;
+}
+/** Parameters for the internal single-agent execution primitive. */
+export interface RunSingleTeammateParams {
     agent: string;
     task?: string;
-    prompt?: string;
-    promptArgs?: string[];
     taskType?: TeammateTaskType;
     name?: string;
     reply_to?: "caller" | "main";
@@ -31,32 +59,6 @@ export interface RunTeammateParams {
     cwd?: string;
     timeoutMs?: number;
     outputSchema?: Record<string, unknown>;
-    tasks?: Array<{
-        agent: string;
-        task?: string;
-        prompt?: string;
-        promptArgs?: string[];
-        taskType?: TeammateTaskType;
-        name?: string;
-        dependsOn?: string[];
-        context?: "fresh" | "fork";
-        model?: string;
-        thinking?: TeammateThinkingInput;
-        cwd?: string;
-        outputSchema?: Record<string, unknown>;
-        timeoutMs?: number;
-    }>;
-    chain?: Array<{
-        agent: string;
-        task?: string;
-        prompt?: string;
-        promptArgs?: string[];
-        taskType?: TeammateTaskType;
-        model?: string;
-        thinking?: TeammateThinkingInput;
-    }>;
-    concurrency?: number;
-    maxAgents?: number;
 }
 export interface RunTeammateOptions {
     baseCwd: string;
@@ -96,9 +98,7 @@ export interface RunTeammateOptions {
 }
 export interface NormalizedTask {
     agent: string;
-    task: string;
-    prompt?: string;
-    promptArgs?: string[];
+    prompt: string;
     taskType?: TeammateTaskType;
     name?: string;
     dependsOn?: string[];
@@ -180,7 +180,7 @@ export declare function collectUnknownRefs(template: string | undefined, taskNam
  * Single source of truth for graph edges — used by inferGraphMode, runGraph,
  * and progress snapshots so all three agree on the dependency set.
  */
-export declare function taskDependencyNames(task: Pick<NormalizedTask, "task" | "dependsOn">, taskNames: Set<string>): string[];
+export declare function taskDependencyNames(task: Pick<NormalizedTask, "prompt" | "dependsOn">, taskNames: Set<string>): string[];
 /**
  * Validate task references before dispatch.
  *
@@ -198,31 +198,13 @@ export declare function validateTaskReferences(tasks: NormalizedTask[]): {
 };
 export declare function resolveVariables(template: string, outputs: Map<string, TaskOutput>, taskNames: Set<string>): string;
 export declare function inferGraphMode(tasks: NormalizedTask[]): "parallel" | "chain" | "graph";
-export declare function normalizeChainToTasks(chain: Array<{
-    agent: string;
-    task?: string;
-    prompt?: string;
-    promptArgs?: string[];
-    taskType?: TeammateTaskType;
-    model?: string;
-    thinking?: TeammateThinkingInput;
-}>, initialTask: string): NormalizedTask[];
 export interface NormalizeTeammateResult {
-    /** Normalized task list; null when running in single-agent mode. */
-    tasks: NormalizedTask[] | null;
+    tasks: NormalizedTask[];
     isMultiTask: boolean;
-    /** Non-fatal issues surfaced to the caller alongside the result. */
     warnings: string[];
-    /** Fatal validation error — nothing was dispatched. */
     error?: string;
 }
-/**
- * Normalize teammate tool params into a task list.
- *
- * Precedence: tasks > chain (deprecated) > single-agent sugar.
- * Top-level prompt/promptArgs/taskType/context/model/thinking/cwd/
- * outputSchema/timeoutMs act as defaults; per-task values win.
- */
+/** Normalize the tasks-only public contract into executable graph tasks. */
 export declare function normalizeTeammateParams(params: RunTeammateParams): NormalizeTeammateResult;
 export interface PiSpawnCommandOptions {
     envBinary?: string | null;
@@ -261,7 +243,7 @@ export declare function checkDepthGuard(depth: number): {
 export declare function clampThinkingForModel(thinking: TeammateThinkingLevel, model: string | undefined, modelCapabilities?: readonly TeammateModelCapability[]): TeammateThinkingLevel;
 export declare function validateModelSpecifier(model: string): string;
 export declare function resolveModelSpecifier(model: string, modelCapabilities?: readonly TeammateModelCapability[]): string;
-export declare function buildPiArgs(agentConfig: AgentConfig, params: RunTeammateParams, systemPromptFile: string, modelOverride?: string, sessionDir?: string, forkSessionFile?: string, schemaFile?: string, modelCapabilities?: readonly TeammateModelCapability[]): string[];
+export declare function buildPiArgs(agentConfig: AgentConfig, params: RunSingleTeammateParams, systemPromptFile: string, modelOverride?: string, sessionDir?: string, forkSessionFile?: string, schemaFile?: string, modelCapabilities?: readonly TeammateModelCapability[]): string[];
 export declare const PRIVATE_DIRECTORY_MODE = 448;
 export declare const PRIVATE_FILE_MODE = 384;
 /**
@@ -310,10 +292,13 @@ export interface ChildTerminationOptions {
 export declare function createChildTerminationController(child: ChildProcess, options?: ChildTerminationOptions): ChildTerminationController;
 /** @internal Exported for lifecycle regression tests. */
 export declare function bindChildTerminationSignal(termination: ChildTerminationController, signal?: AbortSignal): () => void;
-export declare function runTeammate(params: RunTeammateParams, options: RunTeammateOptions): Promise<SingleResult>;
+export declare function runSingleTeammate(params: RunSingleTeammateParams, options: RunTeammateOptions): Promise<SingleResult>;
 export declare function normalizeGraphConcurrency(concurrency: number, taskCount: number): number;
 export declare function runGraph(tasks: NormalizedTask[], concurrency: number, options: RunTeammateOptions): Promise<SingleResult[]>;
+/** Programmatic tasks-only entry point matching the public teammate schema. */
+export declare function runTeammate(params: RunTeammateParams, options: RunTeammateOptions): Promise<SingleResult[]>;
 export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort";
-export declare function sendRpcMessage(stdin: import("node:stream").Writable, message: string, mode?: RpcMessageMode, token?: LeaseToken): boolean;
+export declare function sendRpcMessage(stdin: Writable, message: string, mode?: RpcMessageMode, token?: LeaseToken): boolean;
+export declare function sendChildIpcMessage(child: ChildProcess, message: Record<string, unknown>): boolean;
 export declare function dispatchChildIpcMessage(message: Record<string, unknown>, onRequest: RunTeammateOptions["onChildRequest"], onEvent: RunTeammateOptions["onChildEvent"], reply: (message: unknown) => void): "request" | "event";
 export {};

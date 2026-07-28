@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 import { parseProxyTeammateParams } from "../src/extension/index.ts";
+import { normalizeTeammateParams } from "../src/runs/execution.ts";
 
 const PUBLIC_DIR = fileURLToPath(new URL("../src/public/v1/", import.meta.url));
 const SRC_DIR = fileURLToPath(new URL("../src/", import.meta.url));
@@ -53,7 +54,6 @@ const LEAF_SUBPATHS = [
   "retry.ts",
   "progress-tree.ts",
   "agents.ts",
-  "prompts.ts",
   "model-routing.ts",
   "child-extensions.ts",
 ];
@@ -136,17 +136,34 @@ test("the v1 barrel re-exports every v1 module", () => {
   }
 });
 
-test("child IPC teammate parameters are parsed before shared normalization", () => {
+test("child IPC preserves model and thinking defaults before shared normalization", () => {
   const parsed = parseProxyTeammateParams({
-    tasks: [{ agent: "explorer", task: "inspect", taskType: "explore", thinking: "max" }],
+    agent: "general",
+    model: "provider/default",
+    thinking: "low",
+    tasks: [
+      { prompt: "default" },
+      { agent: "analyst", prompt: "override", model: "provider/task", thinking: "max" },
+    ],
     background: false,
     outputSchema: { type: "object" },
   });
-  assert.equal(parsed?.agent, "");
-  assert.equal(parsed?.tasks?.[0]?.taskType, "explore");
-  assert.equal(parsed?.tasks?.[0]?.thinking, "max");
-  assert.deepEqual(parsed?.outputSchema, { type: "object" });
+  assert.ok(parsed);
+  assert.equal(parsed.model, "provider/default");
+  assert.equal(parsed.thinking, "low");
+  assert.equal(parsed.tasks[1]?.model, "provider/task");
+  assert.equal(parsed.tasks[1]?.thinking, "max");
 
-  assert.equal(parseProxyTeammateParams({ agent: "delegate", task: "inspect", taskType: "invalid" }), undefined);
-  assert.equal(parseProxyTeammateParams({ tasks: [{ agent: 42, task: "inspect" }] }), undefined);
+  const normalized = normalizeTeammateParams(parsed);
+  assert.equal(normalized.error, undefined);
+  assert.equal(normalized.tasks[0].model, "provider/default");
+  assert.equal(normalized.tasks[0].thinking, "low");
+  assert.equal(normalized.tasks[1].model, "provider/task");
+  assert.equal(normalized.tasks[1].thinking, "xhigh");
+  assert.deepEqual(normalized.tasks[0].outputSchema, { type: "object" });
+
+  assert.ok(parseProxyTeammateParams({ tasks: [{ agent: "general", prompt: "inspect", taskType: "security-audit" }] }));
+  assert.equal(parseProxyTeammateParams({ tasks: [{ agent: "general", prompt: "inspect", taskType: "Bad Type!" }] }), undefined);
+  assert.equal(parseProxyTeammateParams({ agent: "general", task: "inspect", taskType: "invalid" }), undefined);
+  assert.equal(parseProxyTeammateParams({ tasks: [{ agent: 42, prompt: "inspect" }] }), undefined);
 });

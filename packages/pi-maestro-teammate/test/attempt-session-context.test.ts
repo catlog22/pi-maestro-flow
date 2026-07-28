@@ -6,9 +6,9 @@ import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { ChildProcess } from "node:child_process";
-import { runTeammate } from "../src/runs/execution.ts";
+import { runSingleTeammate } from "../src/runs/execution.ts";
 
-type SpawnSeam = NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+type SpawnSeam = NonNullable<Parameters<typeof runSingleTeammate>[1]["spawnChildProcess"]>;
 
 function createFakeChild(): ChildProcess {
   const child = new EventEmitter() as ChildProcess;
@@ -39,7 +39,7 @@ interface SpawnCapture {
  * handed to onChildSpawned, and the child environment.
  */
 async function runWithCapture(
-  params: Parameters<typeof runTeammate>[0],
+  params: Parameters<typeof runSingleTeammate>[0],
   parentSessionFile: string | undefined,
 ): Promise<{ capture: SpawnCapture; messages: Array<{ role: string; content: string }> }> {
   const capture: SpawnCapture = { args: [], spawnEnv: {} };
@@ -59,7 +59,7 @@ async function runWithCapture(
     return child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(params, {
+  const result = await runSingleTeammate(params, {
     baseCwd: process.cwd(),
     spawnChildProcess,
     parentSessionFile,
@@ -94,7 +94,7 @@ test("a fork with an available parent session reaches the child as --fork", asyn
   await withoutAmbientParentSession(() =>
     withTempSession(async (parentSessionFile) => {
       const { capture, messages } = await runWithCapture(
-        { agent: "delegate", task: "continue the parent thread", context: "fork" },
+        { agent: "general", task: "continue the parent thread", context: "fork" },
         parentSessionFile,
       );
 
@@ -114,7 +114,7 @@ test("a fork without a parent session degrades to fresh context with a transcrip
   await withoutAmbientParentSession(async () => {
     const missing = path.join(os.tmpdir(), "teammate-session-ctx-absent", "parent.jsonl");
     const { capture, messages } = await runWithCapture(
-      { agent: "delegate", task: "continue the parent thread", context: "fork" },
+      { agent: "general", task: "continue the parent thread", context: "fork" },
       missing,
     );
 
@@ -133,7 +133,7 @@ test("a non-fork context never forks even when a parent session exists", async (
   await withoutAmbientParentSession(() =>
     withTempSession(async (parentSessionFile) => {
       const { capture, messages } = await runWithCapture(
-        { agent: "delegate", task: "start clean", context: "fresh" },
+        { agent: "general", task: "start clean", context: "fresh" },
         parentSessionFile,
       );
 
@@ -151,7 +151,7 @@ test("an available parent session yields a private per-correlation session direc
   await withoutAmbientParentSession(() =>
     withTempSession(async (parentSessionFile) => {
       const { capture } = await runWithCapture(
-        { agent: "delegate", task: "start clean", context: "fresh" },
+        { agent: "general", task: "start clean", context: "fresh" },
         parentSessionFile,
       );
 
@@ -167,7 +167,7 @@ test("an available parent session yields a private per-correlation session direc
 test("no parent session means no session directory and no fork", async () => {
   await withoutAmbientParentSession(async () => {
     const { capture } = await runWithCapture(
-      { agent: "delegate", task: "start clean", context: "fresh" },
+      { agent: "general", task: "start clean", context: "fresh" },
       undefined,
     );
 
@@ -203,8 +203,8 @@ test("a settled turn does not leak its assistant text into the next turn", async
     return child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "answer, then stay awake", context: "fresh" },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "answer, then stay awake", context: "fresh" },
     {
       baseCwd: process.cwd(),
       spawnChildProcess,
@@ -254,8 +254,8 @@ test("prototype-shaped event types stay inert instead of dispatching", async () 
     return child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "emit odd event types", context: "fresh" },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "emit odd event types", context: "fresh" },
     { baseCwd: process.cwd(), spawnChildProcess },
   );
 

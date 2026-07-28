@@ -81,8 +81,8 @@ test("effective display status derives result-ready and stalled from the shared 
 
 test("progress tree renders retrying tasks distinctly instead of pending", () => {
   const rows = buildProgressTree([
-    { agent: "delegate", name: "flaky", correlationId: "flaky", taskIndex: 0, dependencies: [], status: "retrying" },
-    { agent: "delegate", name: "waiting", correlationId: "waiting", taskIndex: 1, dependencies: [], status: "pending" },
+    { agent: "general", name: "flaky", correlationId: "flaky", taskIndex: 0, dependencies: [], status: "retrying" },
+    { agent: "general", name: "waiting", correlationId: "waiting", taskIndex: 1, dependencies: [], status: "pending" },
   ] as AgentProgressSnapshot[], palette);
 
   assert.match(rows[0].text, /↻ retrying/);
@@ -137,8 +137,8 @@ test("attach overlay detail view surfaces a stalled agent instead of plain Runni
 test("attach overlay task status shows retrying rather than pending", () => {
   const now = Date.now();
   const progress: AgentProgressSnapshot[] = [
-    { agent: "delegate", name: "flaky", correlationId: "flaky", taskIndex: 0, dependencies: [], status: "retrying" },
-    { agent: "delegate", name: "waiting", correlationId: "waiting", taskIndex: 1, dependencies: [], status: "pending" },
+    { agent: "general", name: "flaky", correlationId: "flaky", taskIndex: 0, dependencies: [], status: "retrying" },
+    { agent: "general", name: "waiting", correlationId: "waiting", taskIndex: 1, dependencies: [], status: "pending" },
   ];
   const agent = activeAgent({ lastActivityAt: now, progress });
   const overlay = new AttachOverlay(agent, () => {}, () => new Map([[agent.correlationId, agent]]));
@@ -169,7 +169,7 @@ test("background tab updates never repaint the visible frame", () => {
     overlay.setActiveTools(second.correlationId, [{ name: "read", status: "running", startedAt: now }]);
     overlay.applyProgressEvent(second.correlationId, {
       progress: [{
-        agent: "delegate",
+        agent: "general",
         correlationId: second.correlationId,
         taskIndex: 0,
         dependencies: [],

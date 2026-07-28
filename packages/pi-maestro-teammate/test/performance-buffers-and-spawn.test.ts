@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import { spawn as nodeSpawn, spawnSync, type ChildProcess, type SpawnOptions } from "node:child_process";
@@ -28,6 +29,7 @@ import {
   releasePublishedTurnHistory,
   resolveModelSpecifier,
   runGraph,
+  runSingleTeammate,
   runTeammate,
   validateModelSpecifier,
 } from "../src/runs/execution.ts";
@@ -43,7 +45,7 @@ import type {
 import { AttachOverlay } from "../src/tui/attach-overlay.ts";
 
 const baseAgentConfig: AgentConfig = {
-  name: "delegate",
+  name: "general",
   description: "Delegate",
   tools: ["read"],
   systemPromptMode: "append",
@@ -51,10 +53,10 @@ const baseAgentConfig: AgentConfig = {
   inheritSkills: false,
   systemPrompt: "Delegate prompt",
   source: "builtin",
-  filePath: "delegate.md",
+  filePath: "general.md",
 };
 
-type SpawnChildProcess = NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+type SpawnChildProcess = NonNullable<Parameters<typeof runSingleTeammate>[1]["spawnChildProcess"]>;
 type MutableFakeProcess = Omit<ChildProcess, "exitCode"> & { exitCode: number | null };
 type FakeSpawn = (command: string, args: readonly string[], options: SpawnOptions) => MutableFakeProcess;
 
@@ -85,7 +87,7 @@ function adaptFakeSpawn(factory: FakeSpawn): SpawnChildProcess {
 function activeAgent(): ActiveAgent {
   const now = Date.now();
   return {
-    agent: "delegate",
+    agent: "general",
     name: "bounded",
     correlationId: "agent-bounded",
     startedAt: now,
@@ -178,7 +180,7 @@ test("root graph progress wiring projects and broadcasts only after the batch is
   assert.match(publishBody, /if \(foregroundUpdateOpen\) \{\s*onUpdate\?\./);
 
   const childStatusStart = source.indexOf("const publishChildCallStatus");
-  const childStatusEnd = source.indexOf("\n\n      if (isMultiTask) {\n        normalizedTasks.forEach", childStatusStart);
+  const childStatusEnd = source.indexOf("normalizedTasks.forEach((task, index) => {", childStatusStart);
   assert.ok(childStatusStart >= 0 && childStatusEnd > childStatusStart);
   assert.match(
     source.slice(childStatusStart, childStatusEnd),
@@ -270,7 +272,7 @@ test("root progress cleanup flushes then disposes on success, error, and termina
   assert.ok(executeStart >= 0 && executeEnd > executeStart);
   const rootExecute = source.slice(executeStart, executeEnd);
   assert.equal(rootExecute.match(/runWithProgressFlushCleanup\(/g)?.length, 3);
-  assert.doesNotMatch(rootExecute, /runTeammate\(params, makeOptions\(\)\)/);
+  assert.doesNotMatch(rootExecute, /runSingleTeammate\(params, makeOptions\(\)\)/);
 
   for (const outcome of ["success", "error", "termination"] as const) {
     const lifecycle: string[] = [];
@@ -344,7 +346,7 @@ test("one overlay progress event requests at most one render", () => {
   let renders = 0;
   overlay.setRequestRender(() => { renders += 1; });
   const progress: AgentProgressSnapshot[] = [{
-    agent: "delegate",
+    agent: "general",
     correlationId: agent.correlationId,
     taskIndex: 0,
     dependencies: [],
@@ -431,7 +433,7 @@ test("published turn result can survive while disposable transcript and tool his
   const messages = [{ role: "assistant", content: "published result" }];
   const published = [...messages];
   const progress: AgentProgress = {
-    agent: "delegate",
+    agent: "general",
     status: "completed",
     startedAt: Date.now(),
     durationMs: 1,
@@ -474,15 +476,15 @@ test("Windows Pi fallback is shell-free and preserves hostile-looking argv as on
   for (const invalid of ["openai/gpt-5&whoami", "--help", "openai/gpt 5", "a/b/c", "x\n--tools"]) {
     assert.throws(() => validateModelSpecifier(invalid), /Invalid teammate model specifier/);
     assert.throws(
-      () => buildPiArgs(baseAgentConfig, { agent: "delegate", model: invalid }, "prompt.md"),
+      () => buildPiArgs(baseAgentConfig, { agent: "general", model: invalid }, "prompt.md"),
       /Invalid teammate model specifier/,
     );
   }
 });
 
 test("invalid model input is rejected before a child process is spawned", async () => {
-  const result = await runTeammate(
-    { agent: "delegate", task: "Do work", model: "openai/gpt-5&whoami" },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Do work", model: "openai/gpt-5&whoami" },
     { baseCwd: process.cwd() },
   );
   assert.equal(result.exitCode, 1);
@@ -599,8 +601,8 @@ test("final turn_end publishes a wakeable result before agent_end settles lifecy
   });
 
   const result = await Promise.race([
-    runTeammate(
-      { agent: "delegate", task: "Return before lifecycle confirmation", context: "fresh", timeoutMs: 2_000 },
+    runSingleTeammate(
+      { agent: "general", task: "Return before lifecycle confirmation", context: "fresh", timeoutMs: 2_000 },
       {
         baseCwd: process.cwd(),
         spawnChildProcess,
@@ -670,8 +672,8 @@ test("four parallel teammates return after final turn_end without waiting for ag
   const results = await Promise.race([
     runGraph(
       Array.from({ length: 4 }, (_, index) => ({
-        agent: "delegate",
-        task: `parallel task ${index}`,
+        agent: "general",
+        prompt: `parallel task ${index}`,
         name: `parallel_${index}`,
         context: "fresh" as const,
         timeoutMs: 2_000,
@@ -693,6 +695,122 @@ test("four parallel teammates return after final turn_end without waiting for ag
   for (const stream of stdoutStreams) stream.write(`${JSON.stringify({ type: "agent_end" })}\n`);
   await new Promise((resolve) => setTimeout(resolve, 10));
   assert.equal(killed, 0);
+});
+
+test("runGraph forwards each task model and thinking level to child CLI arguments", async () => {
+  const capturedArgs: string[][] = [];
+  const stdoutStreams: PassThrough[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    capturedArgs.push([...args]);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    stdoutStreams.push(stdout);
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({
+        type: "turn_end",
+        message: {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "done" }],
+        },
+        toolResults: [],
+      })}\n`);
+    });
+    return child;
+  });
+
+  await runGraph([
+    {
+      agent: "general",
+      prompt: "fast task",
+      model: "provider/fast",
+      thinking: "low",
+      context: "fresh",
+      timeoutMs: 2_000,
+    },
+    {
+      agent: "analyst",
+      prompt: "deep task",
+      model: "provider/deep",
+      thinking: "high",
+      context: "fresh",
+      timeoutMs: 2_000,
+    },
+  ], 2, { baseCwd: process.cwd(), spawnChildProcess });
+
+  const selections = capturedArgs.map((args) => ({
+    model: args[args.indexOf("--model") + 1],
+    thinking: args[args.indexOf("--thinking") + 1],
+  })).sort((left, right) => left.model.localeCompare(right.model));
+  assert.deepEqual(selections, [
+    { model: "provider/deep", thinking: "high" },
+    { model: "provider/fast", thinking: "low" },
+  ]);
+
+  for (const stream of stdoutStreams) stream.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+});
+
+test("public runTeammate rejects unavailable configured models before child launch", async () => {
+  const cwd = fs.mkdtempSync(path.join(process.cwd(), ".tmp-routing-"));
+  const configDir = path.join(cwd, ".pi");
+  fs.mkdirSync(configDir, { recursive: true });
+  fs.writeFileSync(path.join(configDir, "teammate-models.json"), JSON.stringify({
+    version: 2,
+    mappings: { analysis: "missing/model" },
+    thinkingLevels: {},
+  }));
+  const capturedArgs: string[][] = [];
+  const stdoutStreams: PassThrough[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    capturedArgs.push([...args]);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    stdoutStreams.push(stdout);
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({
+        type: "turn_end",
+        message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
+        toolResults: [],
+      })}\n`);
+    });
+    return child;
+  });
+
+  try {
+    await runTeammate({
+      taskType: "analysis",
+      tasks: [{ agent: "general", prompt: "Analyze" }],
+    }, {
+      baseCwd: cwd,
+      modelCapabilities: [{ id: "provider/available", reasoning: true, thinkingLevels: ["low"] }],
+      spawnChildProcess,
+    });
+    assert.equal(capturedArgs.length, 1);
+    assert.equal(capturedArgs[0].includes("missing/model"), false);
+  } finally {
+    for (const stream of stdoutStreams) stream.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("DAG dependencies advance on result publication instead of agent_end", async () => {
@@ -735,10 +853,10 @@ test("DAG dependencies advance on result publication instead of agent_end", asyn
   const results = await Promise.race([
     runGraph(
       [
-        { agent: "delegate", task: "produce seed", name: "seed", context: "fresh", timeoutMs: 2_000 },
+        { agent: "general", prompt: "produce seed", name: "seed", context: "fresh", timeoutMs: 2_000 },
         {
-          agent: "delegate",
-          task: "consume {seed}",
+          agent: "general",
+          prompt: "consume {seed}",
           name: "dependent",
           dependsOn: ["seed"],
           context: "fresh",
@@ -790,8 +908,8 @@ test("process close after result publication confirms lifecycle exactly once", a
   });
 
   const result = await Promise.race([
-    runTeammate(
-      { agent: "delegate", task: "Close after result", context: "fresh", timeoutMs: 2_000 },
+    runSingleTeammate(
+      { agent: "general", task: "Close after result", context: "fresh", timeoutMs: 2_000 },
       {
         baseCwd: process.cwd(),
         spawnChildProcess,
@@ -849,8 +967,8 @@ test("process error after result publication fails lifecycle without retracting 
   });
 
   const result = await Promise.race([
-    runTeammate(
-      { agent: "delegate", task: "Error after result", context: "fresh", timeoutMs: 2_000 },
+    runSingleTeammate(
+      { agent: "general", task: "Error after result", context: "fresh", timeoutMs: 2_000 },
       {
         baseCwd: process.cwd(),
         spawnChildProcess,
@@ -895,8 +1013,8 @@ test("teammate retries a transient network failure before succeeding", async () 
     return child;
   });
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "Recover from a transient failure", context: "fork" },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Recover from a transient failure", context: "fork" },
     {
       baseCwd: process.cwd(),
       spawnChildProcess,
@@ -926,8 +1044,8 @@ test("teammate stops after the initial attempt and five transient retries", asyn
     return child;
   });
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "Bound transient retries", context: "fork" },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Bound transient retries", context: "fork" },
     {
       baseCwd: process.cwd(),
       spawnChildProcess,
@@ -978,8 +1096,8 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
     return child;
   });
 
-  const first = await runTeammate(
-    { agent: "delegate", task: "original prompt", context: "fresh", timeoutMs: 2_000 },
+  const first = await runSingleTeammate(
+    { agent: "general", task: "original prompt", context: "fresh", timeoutMs: 2_000 },
     {
       baseCwd: process.cwd(),
       spawnChildProcess: spawnFresh,
@@ -1036,8 +1154,8 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
     }, 0);
     return child;
   });
-  const fork = await runTeammate(
-    { agent: "delegate", task: "fork once", context: "fork", timeoutMs: 2_000 },
+  const fork = await runSingleTeammate(
+    { agent: "general", task: "fork once", context: "fork", timeoutMs: 2_000 },
     { baseCwd: process.cwd(), spawnChildProcess: spawnFork },
   );
   assert.equal(fork.wakeable, false);
@@ -1133,8 +1251,8 @@ test("structured_output tool completion settles the child without waiting for ag
   });
 
   const result = await Promise.race([
-    runTeammate(
-      { agent: "delegate", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+    runSingleTeammate(
+      { agent: "general", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
       {
         baseCwd: process.cwd(),
         spawnChildProcess,
@@ -1192,8 +1310,8 @@ test("parent rejects a schema-invalid structured output file", async () => {
     return child;
   });
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
     { baseCwd: process.cwd(), spawnChildProcess },
   );
 
@@ -1248,9 +1366,9 @@ test("outputSchema lane settles with its published result when agent_end never a
   );
 
   const result = await Promise.race([
-    runTeammate(
+    runSingleTeammate(
       {
-        agent: "delegate",
+        agent: "general",
         task: "Return structured output",
         context: "fresh",
         outputSchema: { type: "object", properties: { answer: { type: "string" } }, required: ["answer"] },
@@ -1282,8 +1400,8 @@ test("foreground lane with no timeout is bounded by the default ceiling", async 
   );
 
   const result = await Promise.race([
-    runTeammate(
-      { agent: "delegate", task: "Runs forever", context: "fresh" },
+    runSingleTeammate(
+      { agent: "general", task: "Runs forever", context: "fresh" },
       { baseCwd: process.cwd(), spawnChildProcess, foregroundMaxRunMs: 60 },
     ),
     new Promise<never>((_, reject) => setTimeout(() => reject(new Error("foreground lane was not bounded by the ceiling")), 1_000)),
@@ -1308,8 +1426,8 @@ test("background lane is exempt from the foreground ceiling", async () => {
     () => { killed++; },
   );
 
-  const pending = runTeammate(
-    { agent: "delegate", task: "Background work", context: "fresh", background: true },
+  const pending = runSingleTeammate(
+    { agent: "general", task: "Background work", context: "fresh", background: true },
     { baseCwd: process.cwd(), spawnChildProcess, foregroundMaxRunMs: 40 },
   );
 

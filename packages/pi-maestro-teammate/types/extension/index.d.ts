@@ -289,7 +289,7 @@ export interface TeammateDirectChildRequestHandlerOptions {
     fallbackCorrelationId?: string;
 }
 /**
- * Build the child-request bridge required by direct runTeammate/runGraph users.
+ * Build the child-request bridge required by direct runSingleTeammate/runGraph users.
  *
  * The root teammate tool installs the same interaction routing internally, but
  * native orchestrators such as Swarm call the public execution API directly.

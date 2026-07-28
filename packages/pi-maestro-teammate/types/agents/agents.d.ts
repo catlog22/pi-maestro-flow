@@ -4,18 +4,20 @@
  * Discovers agent definitions from compatible project and user locations.
  * Precedence: project .pi/agents > project .agents > ~/.agents > legacy user > builtin.
  */
+import { type TeammateTaskType } from "../shared/task-types.ts";
 import { type TeammateThinkingLevel } from "../shared/thinking.ts";
 type SystemPromptMode = "append" | "replace";
 export type AgentSource = "builtin" | "user" | "project";
-export declare const BUILTIN_AGENT_NAMES: readonly ["delegate", "explorer", "goal-verifier", "workflow"];
+export declare const BUILTIN_AGENT_NAMES: readonly ["general", "explorer", "planner", "analyst", "research", "verifier", "workflow"];
 export type BuiltinAgentName = (typeof BUILTIN_AGENT_NAMES)[number];
-export declare const PUBLIC_BUILTIN_AGENT_NAMES: readonly ["delegate", "explorer", "goal-verifier", "workflow"];
+export declare const PUBLIC_BUILTIN_AGENT_NAMES: readonly ["general", "explorer", "planner", "analyst", "research", "verifier", "workflow"];
 export interface AgentConfig {
     name: string;
     description: string;
     tools?: string[];
     model?: string;
     fallbackModels?: string[];
+    taskType?: TeammateTaskType;
     thinking?: TeammateThinkingLevel;
     systemPromptMode: SystemPromptMode;
     inheritProjectContext: boolean;

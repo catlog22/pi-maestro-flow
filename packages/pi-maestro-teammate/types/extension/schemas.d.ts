@@ -2,8 +2,8 @@
  * TypeBox schemas for teammate tool parameters.
  *
  * Unified TaskSpec model:
- *   - Single agent: { agent, task }
- *   - Multi-task: { tasks: TaskSpec[] } with {name} variable references defining execution order
+ *   - Every public dispatch uses a non-empty tasks array
+ *   - prompt is the task text; agent may inherit from the top level
  *   - Top-level fields serve as defaults, per-task overrides win
  *
  * P0 three-axis decoupling:
@@ -12,10 +12,8 @@
  */
 import { Type } from "typebox";
 export declare const TaskSpec: Type.TObject<{
-    agent: Type.TString;
-    task: Type.TOptional<Type.TString>;
-    prompt: Type.TOptional<Type.TString>;
-    promptArgs: Type.TOptional<Type.TArray<Type.TString>>;
+    prompt: Type.TString;
+    agent: Type.TOptional<Type.TString>;
     taskType: Type.TOptional<Type.TUnsafe<unknown>>;
     name: Type.TOptional<Type.TString>;
     dependsOn: Type.TOptional<Type.TArray<Type.TString>>;
@@ -28,17 +26,11 @@ export declare const TaskSpec: Type.TObject<{
 }>;
 export declare const TeammateParams: Type.TObject<{
     agent: Type.TOptional<Type.TString>;
-    task: Type.TOptional<Type.TString>;
-    prompt: Type.TOptional<Type.TString>;
-    promptArgs: Type.TOptional<Type.TArray<Type.TString>>;
     taskType: Type.TOptional<Type.TUnsafe<unknown>>;
-    name: Type.TOptional<Type.TString>;
     reply_to: Type.TOptional<Type.TUnsafe<"main" | "caller">>;
-    tasks: Type.TOptional<Type.TArray<Type.TObject<{
-        agent: Type.TString;
-        task: Type.TOptional<Type.TString>;
-        prompt: Type.TOptional<Type.TString>;
-        promptArgs: Type.TOptional<Type.TArray<Type.TString>>;
+    tasks: Type.TArray<Type.TObject<{
+        prompt: Type.TString;
+        agent: Type.TOptional<Type.TString>;
         taskType: Type.TOptional<Type.TUnsafe<unknown>>;
         name: Type.TOptional<Type.TString>;
         dependsOn: Type.TOptional<Type.TArray<Type.TString>>;
@@ -48,16 +40,7 @@ export declare const TeammateParams: Type.TObject<{
         cwd: Type.TOptional<Type.TString>;
         outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
         timeoutMs: Type.TOptional<Type.TInteger>;
-    }>>>;
-    chain: Type.TOptional<Type.TArray<Type.TObject<{
-        agent: Type.TString;
-        task: Type.TOptional<Type.TString>;
-        model: Type.TOptional<Type.TString>;
-        thinking: Type.TOptional<Type.TUnsafe<"off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max">>;
-        taskType: Type.TOptional<Type.TUnsafe<"explore" | "analysis" | "debug" | "planning" | "development" | "review" | "testing">>;
-        prompt: Type.TOptional<Type.TString>;
-        promptArgs: Type.TOptional<Type.TArray<Type.TString>>;
-    }>>>;
+    }>>;
     concurrency: Type.TOptional<Type.TInteger>;
     maxAgents: Type.TOptional<Type.TInteger>;
     outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;

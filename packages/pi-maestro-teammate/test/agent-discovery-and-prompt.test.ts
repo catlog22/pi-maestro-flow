@@ -21,7 +21,7 @@ import {
   TEAMMATE_PROMPT_GUIDELINES,
   TEAMMATE_PROMPT_SNIPPET,
 } from "../src/extension/index.ts";
-import { buildPiArgs, runTeammate } from "../src/runs/execution.ts";
+import { buildPiArgs, runSingleTeammate } from "../src/runs/execution.ts";
 
 function agentConfig(overrides: Partial<AgentConfig> = {}): AgentConfig {
   return {
@@ -45,6 +45,7 @@ test("project teammate roles are discovered and injected into the active system 
   fs.writeFileSync(path.join(agentsDir, "specialist.md"), `---
 name: specialist
 description: Project-specific specialist for catalog injection
+taskType: specialist-work
 ---
 
 Act as the project specialist.
@@ -66,11 +67,16 @@ Act as the project specialist.
     const description = buildTeammateToolDescription(project);
     assert.match(description, /Available Teammate Agents section/);
     assert.match(description, /specialist \[project\]: Project-specific specialist/);
+    assert.match(description, /specialist-work: model=auto\/default/);
 
     const systemPrompt = appendAgentCatalog("Base prompt", project);
     assert.match(systemPrompt, /# Available Teammate Agents/);
-    assert.match(systemPrompt, /Built-in roles:\n- delegate:/);
+    assert.match(systemPrompt, /Built-in roles:\n- general:/);
     assert.match(systemPrompt, /- explorer:/);
+    assert.match(systemPrompt, /- planner:/);
+    assert.match(systemPrompt, /- analyst:/);
+    assert.match(systemPrompt, /- research:/);
+    assert.match(systemPrompt, /- verifier:/);
     assert.match(systemPrompt, /- workflow:/);
     assert.match(systemPrompt, /Discovered project and user roles:\n- specialist: Project-specific specialist/);
     assert.doesNotMatch(description, /Act as the project specialist/);
@@ -126,7 +132,28 @@ ${description} prompt.
   }
 });
 
-test("builtin role names are reserved and coordinator remains a workflow alias", () => {
+test("custom role YAML tool lists normalize to executable tool ids", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-tools-list-"));
+  const agentsDir = path.join(project, ".pi", "agents");
+  fs.mkdirSync(agentsDir, { recursive: true });
+  fs.writeFileSync(path.join(agentsDir, "worker.md"), `---
+name: worker
+description: Worker with YAML tools
+tools:
+  - Read
+  - Write
+  - Bash
+---
+Worker prompt.
+`);
+  try {
+    assert.deepEqual(resolveAgent(project, "worker")?.tools, ["read", "write", "bash"]);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("canonical builtin role names are reserved and legacy aliases are absent", () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-reserved-"));
   const agentsDir = path.join(project, ".pi", "agents");
   fs.mkdirSync(agentsDir, { recursive: true });
@@ -139,56 +166,75 @@ description: Project override that must be ignored
 Unsafe project override.
 `);
   }
-  fs.writeFileSync(path.join(agentsDir, "coordinator.md"), `---
-name: coordinator
-description: Legacy alias override that must be ignored
----
-Legacy alias override.
-`);
 
   try {
     const agents = discoverAgents(project);
+    assert.deepEqual(BUILTIN_AGENT_NAMES, ["general", "explorer", "planner", "analyst", "research", "verifier", "workflow"]);
     for (const name of PUBLIC_BUILTIN_AGENT_NAMES) {
       const agent = agents.find((candidate) => candidate.name === name);
       assert.equal(agent?.source, "builtin");
       assert.doesNotMatch(agent?.systemPrompt ?? "", /Unsafe project override/);
     }
-    assert.equal(resolveAgent(project, "coordinator")?.name, "workflow");
-    assert.equal(agents.some((agent) => agent.name === "coordinator"), false);
+    for (const removed of ["delegate", "goal-verifier", "coordinator"]) {
+      assert.equal(resolveAgent(project, removed), undefined);
+      assert.equal(agents.some((agent) => agent.name === removed), false);
+    }
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
   }
 });
 
-test("goal verifier is a bundled read-only role with objective-scoped checks", () => {
-  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-goal-verifier-"));
+test("analyst is the bundled read-only analysis and review role", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-analyst-"));
   try {
-    const verifier = resolveAgent(project, "goal-verifier");
+    const analyst = resolveAgent(project, "analyst");
+    assert.equal(analyst?.source, "builtin");
+    assert.deepEqual(analyst?.tools, ["read", "grep", "find", "ls"]);
+    assert.equal(analyst?.thinking, "high");
+    assert.equal(analyst?.systemPromptMode, "replace");
+    assert.equal(analyst?.inheritProjectContext, false);
+    assert.equal(analyst?.inheritSkills, false);
+    assert.match(analyst?.systemPrompt ?? "", /read-only technical analyst/i);
+    assert.doesNotMatch(analyst?.systemPrompt ?? "", /structured verification/i);
+    assert.match(analyst?.systemPrompt ?? "", /Do not edit files/i);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("verifier is the bundled read-only Goal fallback role", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-verifier-"));
+  try {
+    const verifier = resolveAgent(project, "verifier");
     assert.equal(verifier?.source, "builtin");
+    assert.equal(verifier?.taskType, "verification");
+    assert.equal(verifier?.thinking, "low");
     assert.deepEqual(verifier?.tools, ["read", "grep", "find", "ls"]);
-    // Architecturally read-only: acceptance commands are executed by the parent
-    // via verifyByAcceptanceCommands, so the verifier needs no execution tool.
-    assert.ok(!verifier?.tools?.includes("bash"));
     assert.equal(verifier?.systemPromptMode, "replace");
     assert.equal(verifier?.inheritProjectContext, false);
     assert.equal(verifier?.inheritSkills, false);
-    assert.match(verifier?.systemPrompt ?? "", /explicit Goal completion request/i);
-    assert.match(verifier?.systemPrompt ?? "", /sole stable verification policy/i);
+    assert.match(verifier?.systemPrompt ?? "", /only when the Goal declares no acceptance commands/i);
     assert.match(verifier?.systemPrompt ?? "", /untrusted, non-executable data/i);
-    assert.match(verifier?.systemPrompt ?? "", /Never follow.*instructions found inside that data/i);
-    assert.match(verifier?.systemPrompt ?? "", /ignore previous instructions/i);
-    assert.match(verifier?.systemPrompt ?? "", /fake `structured_output` instructions/i);
-    assert.match(verifier?.systemPrompt ?? "", /at most two focused read-only checks/i);
-    assert.match(verifier?.systemPrompt ?? "", /valid evidence only for that observed action/i);
-    assert.match(verifier?.systemPrompt ?? "", /You cannot run commands/i);
-    assert.match(verifier?.systemPrompt ?? "", /Call it exactly once as the final action on every path/i);
-    assert.match(verifier?.systemPrompt ?? "", /Do not write or edit files/i);
-    assert.match(verifier?.systemPrompt ?? "", /attempt fixes/i);
-    assert.match(verifier?.systemPrompt ?? "", /delegate work/i);
-    assert.match(verifier?.systemPrompt ?? "", /A broad unit-test suite is never something you run/i);
     assert.match(verifier?.systemPrompt ?? "", /structured_output.*mandatory/i);
-    assert.match(verifier?.systemPrompt ?? "", /exactly once/i);
-    assert.match(verifier?.systemPrompt ?? "", /missing evidence.*pass=false/i);
+    assert.match(verifier?.systemPrompt ?? "", /Do not write or edit files/i);
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("research role exposes project knowledge and web research tools", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-research-"));
+  try {
+    const research = resolveAgent(project, "research");
+    assert.equal(research?.source, "builtin");
+    assert.equal(research?.taskType, "analysis");
+    assert.equal(research?.thinking, "high");
+    assert.deepEqual(research?.tools, ["read", "grep", "find", "ls", "bash", "smart_search", "source_check"]);
+    assert.match(research?.systemPrompt ?? "", /maestro search/);
+    assert.match(research?.systemPrompt ?? "", /maestro load/);
+    assert.match(research?.systemPrompt ?? "", /smart_search/);
+    assert.match(research?.systemPrompt ?? "", /source_check/);
+    assert.match(research?.systemPrompt ?? "", /Do not edit files/);
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
   }
@@ -205,7 +251,7 @@ test("native swarm runtime roles are no longer bundled by teammate", async () =>
       assert.equal(resolveAgent(project, name), undefined);
       assert.equal(summaries.some((role) => role.name === name), false);
       assert.doesNotMatch(catalog, new RegExp(name));
-      const blocked = await runTeammate({ agent: name, task: "must not exist" }, { baseCwd: project });
+      const blocked = await runSingleTeammate({ agent: name, task: "must not exist" }, { baseCwd: project });
       assert.equal(blocked.exitCode, 1);
       assert.match(blocked.messages[0]?.content ?? "", new RegExp(`Unknown teammate agent "${name}"`));
     }
@@ -391,22 +437,25 @@ Worker prompt.
 test("unknown agent names fail with the available catalog instead of generic fallback", async () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-unknown-"));
   try {
-    const result = await runTeammate(
+    const result = await runSingleTeammate(
       { agent: "missing-role", task: "Do work" },
       { baseCwd: project },
     );
     assert.equal(result.exitCode, 1);
     const message = result.messages[0]?.content ?? "";
     assert.match(message, /Unknown teammate agent "missing-role"/);
-    assert.match(message, /\bdelegate\b/);
+    assert.match(message, /\bgeneral\b/);
     assert.match(message, /\bexplorer\b/);
+    assert.match(message, /\bplanner\b/);
+    assert.match(message, /\banalyst\b/);
+    assert.match(message, /\bresearch\b/);
     assert.match(message, /\bworkflow\b/);
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
   }
 });
 
-test("agent frontmatter accepts supported thinking and ignores invalid values", () => {
+test("agent frontmatter accepts built-in and custom task types plus thinking values", () => {
   const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-thinking-"));
   const agentsDir = path.join(project, ".pi", "agents");
   fs.mkdirSync(agentsDir, { recursive: true });
@@ -414,6 +463,7 @@ test("agent frontmatter accepts supported thinking and ignores invalid values", 
 name: valid
 description: Valid thinking
 thinking: high
+taskType: review
 ---
 Valid prompt.
 `);
@@ -421,6 +471,7 @@ Valid prompt.
 name: invalid
 description: Invalid thinking
 thinking: ultra
+taskType: Bad Type!
 ---
 Invalid prompt.
 `);
@@ -433,8 +484,19 @@ Max prompt.
 `);
   try {
     assert.equal(resolveAgent(project, "valid")?.thinking, "high");
+    assert.equal(resolveAgent(project, "valid")?.taskType, "review");
     assert.equal(resolveAgent(project, "max")?.thinking, "xhigh");
     assert.equal(resolveAgent(project, "invalid")?.thinking, undefined);
+    assert.equal(resolveAgent(project, "invalid")?.taskType, undefined);
+
+    fs.writeFileSync(path.join(agentsDir, "custom.md"), `---
+name: custom
+description: Custom task type
+taskType: security-audit
+---
+Custom prompt.
+`);
+    assert.equal(resolveAgent(project, "custom")?.taskType, "security-audit");
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
   }

@@ -9,12 +9,12 @@ import type { ChildProcess } from "node:child_process";
 import {
   findStructuredOutputSchemaHazard,
   resolveContainedCwd,
-  runTeammate,
+  runSingleTeammate,
   teammateTempRoot,
 } from "../src/runs/execution.ts";
 import type { AgentProgress, SingleResult } from "../src/shared/types.ts";
 
-type SpawnSeam = NonNullable<Parameters<typeof runTeammate>[1]["spawnChildProcess"]>;
+type SpawnSeam = NonNullable<Parameters<typeof runSingleTeammate>[1]["spawnChildProcess"]>;
 
 interface FakeChildHandle {
   child: ChildProcess;
@@ -82,8 +82,8 @@ test("REL-4: a silent child after result-ready settles on the lifecycle deadline
     return handle!.child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "answer then hang", context: "fresh" },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "answer then hang", context: "fresh" },
     {
       baseCwd: process.cwd(),
       spawnChildProcess,
@@ -105,7 +105,7 @@ test("REL-4: a silent child after result-ready settles on the lifecycle deadline
   assert.equal(completions.length, 1, "lifecycle must be confirmed by the deadline");
   assert.equal(completions[0].exitCode, 0, "the deadline must not retract a published success");
   assert.match(completions[0].messages.at(-1)?.content ?? "", /never confirmed its lifecycle within 40ms/);
-  assert.match(completions[0].messages.at(-1)?.content ?? "", /agent=delegate/);
+  assert.match(completions[0].messages.at(-1)?.content ?? "", /agent=general/);
   assert.equal(handle!.killed(), true, "the wedged child must be terminated");
   assert.equal(progress.at(-1)?.status, "completed");
   assert.equal(progress.at(-1)?.resultReadyAt, undefined);
@@ -123,8 +123,8 @@ test("REL-4: a prompt agent_end still settles before the lifecycle deadline fire
     return handle!.child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "answer and settle", context: "fresh" },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "answer and settle", context: "fresh" },
     { baseCwd: process.cwd(), spawnChildProcess, resultReadyGraceMs: 40, onTurnComplete: (e) => completions.push(e) },
   );
 
@@ -157,8 +157,8 @@ test("OBS-6: a run killed by its timeout records why it was truncated", async ()
     return handle.child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "stall forever", context: "fresh", timeoutMs: 60 },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "stall forever", context: "fresh", timeoutMs: 60 },
     {
       baseCwd: process.cwd(),
       spawnChildProcess,
@@ -170,7 +170,7 @@ test("OBS-6: a run killed by its timeout records why it was truncated", async ()
   const timeoutEvidence = result.messages.find((m) => /exceeded its 60ms limit/.test(m.content));
   assert.ok(timeoutEvidence, `no timeout evidence in ${JSON.stringify(result.messages)}`);
   assert.equal(timeoutEvidence.role, "system");
-  assert.match(timeoutEvidence.content, /agent=delegate/);
+  assert.match(timeoutEvidence.content, /agent=general/);
   assert.match(timeoutEvidence.content, new RegExp(`correlationId=${result.correlationId}`));
   assert.match(timeoutEvidence.content, /elapsed=\d+ms/);
   assert.ok(
@@ -194,8 +194,8 @@ test("OBS-7: a crash after assistant output keeps stderr, exit code and signal",
     return handle.child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "crash after output", context: "fresh", timeoutMs: 5_000 },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "crash after output", context: "fresh", timeoutMs: 5_000 },
     { baseCwd: process.cwd(), spawnChildProcess },
   );
 
@@ -209,7 +209,7 @@ test("OBS-7: a crash after assistant output keeps stderr, exit code and signal",
   assert.equal(crashEvidence.role, "system");
   assert.match(crashEvidence.content, /exit=137/);
   assert.match(crashEvidence.content, /signal=SIGKILL/);
-  assert.match(crashEvidence.content, /agent=delegate/);
+  assert.match(crashEvidence.content, /agent=general/);
   assert.match(crashEvidence.content, new RegExp(`correlationId=${result.correlationId}`));
   assert.match(crashEvidence.content, /Reached heap limit/);
 });
@@ -227,8 +227,8 @@ test("OBS-7: a clean exit is never annotated as an abnormal termination", async 
     return handle.child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "exit cleanly", context: "fresh", timeoutMs: 5_000 },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "exit cleanly", context: "fresh", timeoutMs: 5_000 },
     { baseCwd: process.cwd(), spawnChildProcess },
   );
 
@@ -246,14 +246,100 @@ test("OBS-7: stderr-only failures are reported once, not duplicated", async () =
     return handle.child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "fail immediately", context: "fresh", timeoutMs: 5_000 },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "fail immediately", context: "fresh", timeoutMs: 5_000 },
     { baseCwd: process.cwd(), spawnChildProcess },
   );
 
   assert.equal(result.exitCode, 1);
   const occurrences = result.messages.filter((m) => m.content.includes("boom: could not start")).length;
   assert.equal(occurrences, 1, `stderr repeated in ${JSON.stringify(result.messages)}`);
+});
+
+test("provider errors embedded in assistant events retain runtime location before schema settlement", async () => {
+  const spawnChildProcess = (() => {
+    const handle = createFakeChild();
+    queueMicrotask(() => {
+      handle.stdout.write(line({
+        type: "message_end",
+        message: {
+          role: "assistant",
+          model: "maestro-openai/gpt-5.6-sol",
+          stopReason: "error",
+          errorMessage: "Authentication failed: token expired",
+          content: [],
+        },
+      }));
+      handle.stdout.write(line({ type: "agent_end" }));
+    });
+    return handle.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    {
+      agent: "general",
+      task: "return structured output",
+      context: "fresh",
+      timeoutMs: 5_000,
+      outputSchema: {
+        type: "object",
+        properties: { value: { type: "string" } },
+        required: ["value"],
+      },
+    },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+
+  assert.equal(result.exitCode, 1);
+  const runtimeError = result.messages.find((message) => message.content.includes("Authentication failed"));
+  assert.ok(runtimeError, `provider error missing from ${JSON.stringify(result.messages)}`);
+  assert.match(runtimeError.content, /phase=message_end/);
+  assert.match(runtimeError.content, /agent=general/);
+  assert.match(runtimeError.content, /model=maestro-openai\/gpt-5\.6-sol/);
+  assert.match(runtimeError.content, new RegExp(`correlationId=${result.correlationId}`));
+  assert.ok(result.messages.some((message) => /completed without calling structured_output/.test(message.content)));
+});
+
+test("invalid structured_output reports the failing instance and schema paths", async () => {
+  const spawnChildProcess = (() => {
+    const handle = createFakeChild();
+    queueMicrotask(() => {
+      handle.stdout.write(line({
+        type: "agent_end",
+        message: {
+          role: "assistant",
+          content: [{
+            type: "toolCall",
+            name: "structured_output",
+            arguments: { count: "not-an-integer" },
+          }],
+        },
+      }));
+    });
+    return handle.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    {
+      agent: "general",
+      task: "return structured output",
+      context: "fresh",
+      timeoutMs: 5_000,
+      outputSchema: {
+        type: "object",
+        properties: { count: { type: "integer" } },
+        required: ["count"],
+      },
+    },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+
+  assert.equal(result.exitCode, 1);
+  const validationError = result.messages.find((message) => message.content.includes("validation failed at"));
+  assert.ok(validationError, `validation error missing from ${JSON.stringify(result.messages)}`);
+  assert.match(validationError.content, /\/count/);
+  assert.match(validationError.content, /schema=#\/properties\/count/);
+  assert.match(validationError.content, /must be integer/);
 });
 
 // ---------------------------------------------------------------------------
@@ -279,8 +365,8 @@ test("OBS-14: toolCount accumulates across turns like the token counters", async
     return handle.child;
   }) as unknown as SpawnSeam;
 
-  await runTeammate(
-    { agent: "delegate", task: "two tool turns", context: "fresh", timeoutMs: 5_000 },
+  await runSingleTeammate(
+    { agent: "general", task: "two tool turns", context: "fresh", timeoutMs: 5_000 },
     {
       baseCwd: process.cwd(),
       spawnChildProcess,
@@ -325,8 +411,8 @@ test("SEC-6: an out-of-project cwd fails without spawning a child", async () => 
   }) as unknown as SpawnSeam;
 
   try {
-    const result = await runTeammate(
-      { agent: "delegate", task: "load a foreign persona", cwd: outside, context: "fresh" },
+    const result = await runSingleTeammate(
+      { agent: "general", task: "load a foreign persona", cwd: outside, context: "fresh" },
       { baseCwd: process.cwd(), spawnChildProcess },
     );
     assert.equal(result.exitCode, 1);
@@ -346,8 +432,8 @@ test("SEC-6: a cwd inside the project still reaches the child process", async ()
     return handle.child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(
-    { agent: "delegate", task: "run in a subdirectory", cwd: "src", context: "fresh", timeoutMs: 5_000 },
+  const result = await runSingleTeammate(
+    { agent: "general", task: "run in a subdirectory", cwd: "src", context: "fresh", timeoutMs: 5_000 },
     { baseCwd: process.cwd(), spawnChildProcess },
   );
 
@@ -367,9 +453,9 @@ test("SEC-8: catastrophic-backtracking patterns are rejected before spawn", asyn
     return createFakeChild().child;
   }) as unknown as SpawnSeam;
 
-  const result = await runTeammate(
+  const result = await runSingleTeammate(
     {
-      agent: "delegate",
+      agent: "general",
       task: "return structured output",
       context: "fresh",
       outputSchema: {
