@@ -102,6 +102,17 @@ test("Goal overlay renders width-safely in list, detail, and confirm modes", () 
   assert.equal(h.closed, 1);
 });
 
+test("Goal overlay accepts keypad Enter and protocol Escape encodings", () => {
+  const h = harness();
+  h.overlay.handleInput("\x1b[106u");
+  h.overlay.handleInput("\x1bOM");
+  assert.match(h.overlay.render(80).join("\n"), /Second gate/);
+  h.overlay.handleInput("\x1b[27u");
+  assert.doesNotMatch(h.overlay.render(80).join("\n"), /Esc back/);
+  h.overlay.handleInput("\x1b[27;1;27~");
+  assert.equal(h.closed, 1);
+});
+
 test("Goal overlay lists every goal with status chips and marks the current one", () => {
   const h = harness();
   const text = h.overlay.render(100).join("\n");

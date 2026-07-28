@@ -40,6 +40,17 @@ test("team-swarm overlay retains views, scrolling, and mouse input", () => {
   assert.equal(parseMouseWheelDelta("\x1b[<65;10;5M"), 3);
 });
 
+test("team-swarm overlay accepts protocol navigation and Escape encodings", () => {
+  for (const escape of ["\x1b[27u", "\x1b[27;1;27~"]) {
+    let closed = 0;
+    const overlay = new SwarmOverlay({ snapshot: snapshot(), requestRender() {}, close() { closed++; } });
+    overlay.handleInput("\x1b[51u");
+    assert.match(overlay.render(90).join("\n"), /tau-max/);
+    overlay.handleInput(escape);
+    assert.equal(closed, 1);
+  }
+});
+
 test("status line identifies team-swarm JSON projection", () => {
   assert.match(renderSwarmStatusLine(snapshot(), 120), /TEAM SWARM 2\/5 · ACTIVE · 1 active · BEST 70%/);
 });

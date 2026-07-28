@@ -65,6 +65,15 @@ test("control center decodes split paste markers and backspaces by grapheme", ()
   assert.match(control.render(80).join("\n"), /Explore/);
 });
 
+test("control center resets selection after a narrowing paste filter", () => {
+  const control = center();
+  control.handleInput("\x1b[B");
+  control.handleInput("\x1b[200~testing\x1b[201~");
+  assert.match(control.render(80).join("\n"), /Testing/);
+  control.handleInput("\r");
+  assert.match(control.render(80).join("\n"), /Testing › Model/);
+});
+
 test("host-driven control center disposal settles the custom overlay", async () => {
   let disposed = false;
   const ctx = {

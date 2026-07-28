@@ -76,6 +76,30 @@ test("Todo overlay renders shared member scopes width-safely and distinguishes c
   assert.doesNotMatch(overlay.render(60).join("\n"), /task detail/);
 });
 
+test("Todo overlay accepts Kitty Enter and Escape encodings", () => {
+  let closed = 0;
+  const overlay = new TodoOverlay({
+    getTasks: () => [
+      task("1", "Portable keys", "pending", root, root),
+      task("2", "Other task", "pending", root, root),
+    ],
+    requestRender() {},
+    close() { closed++; },
+    theme: mockTheme,
+  });
+
+  overlay.handleInput("\x1b[112u");
+  assert.match(overlay.render(60).join("\n"), /Portable keys/);
+  assert.doesNotMatch(overlay.render(60).join("\n"), /Other task/);
+  overlay.handleInput("\x1b[127u");
+  overlay.handleInput("\x1b[13u");
+  assert.match(overlay.render(60).join("\n"), /task detail/);
+  overlay.handleInput("\x1b[27u");
+  assert.doesNotMatch(overlay.render(60).join("\n"), /task detail/);
+  overlay.handleInput("\x1b[27;1;27~");
+  assert.equal(closed, 1);
+});
+
 test("Todo overlay filters by printable paste and keeps narrow recovery controls visible", () => {
   const overlay = new TodoOverlay({
     getTasks: () => [

@@ -80,6 +80,50 @@ test("control center keeps roles, routing and active collaboration visible", () 
   assert.match(narrow, /Teammate Control Center|Teammates/);
 });
 
+test("control center accepts cross-platform Enter and Escape encodings", () => {
+  for (const enter of ["\x1bOM", "\x1b[13u", "\x1b[57414u"]) {
+    const { center } = makeCenter();
+    center.handleInput(enter);
+    assert.match(center.render(90).join("\n"), /Explore/);
+    assert.match(center.render(90).join("\n"), /Esc\/← back/);
+  }
+
+  for (const escape of ["\x1b[27u", "\x1b[27;1;27~"]) {
+    const { center, closed } = makeCenter();
+    center.handleInput("\r");
+    center.handleInput(escape);
+    assert.equal(closed.length, 0);
+    assert.match(center.render(90).join("\n"), /Routing 7/);
+    center.handleInput(escape);
+    assert.equal(closed.length, 1);
+  }
+
+  const kittyText = makeCenter().center;
+  kittyText.handleInput("\x1b[116u");
+  const filtered = kittyText.render(90).join("\n");
+  assert.match(filtered, /Testing/);
+  assert.doesNotMatch(filtered, /\[116u/);
+  kittyText.handleInput("\x1b[127u");
+  assert.match(kittyText.render(90).join("\n"), /Routing 7/);
+
+  const kittyNavigation = makeCenter().center;
+  kittyNavigation.handleInput("\x1b[1;1B");
+  kittyNavigation.handleInput("\x1b[13u");
+  assert.match(kittyNavigation.render(90).join("\n"), /Analysis › Model/);
+
+  const kittyTabs = makeCenter().center;
+  kittyTabs.handleInput("\x1b[9u");
+  assert.match(kittyTabs.render(90).join("\n"), /\[Roles 2\]/);
+  kittyTabs.handleInput("\x1b[9;2u");
+  assert.match(kittyTabs.render(90).join("\n"), /\[Routing 7\]/);
+
+  const rapidEscape = makeCenter();
+  rapidEscape.center.handleInput("\r");
+  rapidEscape.center.handleInput("\x1b");
+  rapidEscape.center.handleInput("\x1b");
+  assert.equal(rapidEscape.closed.length, 1);
+});
+
 test("thinking routing supports inherit, all Pi levels, save errors, and narrow widths", async () => {
   const { center, savedThinking } = makeCenter();
   center.handleInput("\x1b[1;5C");

@@ -1,6 +1,8 @@
 import {
+  Key,
   type Component,
   type Focusable,
+  matchesKey,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -43,7 +45,7 @@ export class GoalOverlay implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.pending) return;
-    if (data === "\x1b") {
+    if (matchesKey(data, Key.escape)) {
       if (this.mode === "confirm" || this.mode === "detail") this.mode = "list";
       else this.params.close();
       this.params.requestRender();
@@ -59,11 +61,11 @@ export class GoalOverlay implements Component, Focusable {
       return;
     }
 
-    if (data === "\x1b[A" || data === "k") {
+    if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
       this.move(-1);
       return;
     }
-    if (data === "\x1b[B" || data === "j") {
+    if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
       this.move(1);
       return;
     }
@@ -290,10 +292,10 @@ export class GoalOverlay implements Component, Focusable {
 }
 
 function actionForInput(data: string): GoalOverlayAction | undefined {
-  if (data === "s") return "switch";
-  if (data === "p") return "stop";
-  if (data === "r") return "resume";
-  if (data === "x") return "clear";
+  if (matchesKey(data, "s")) return "switch";
+  if (matchesKey(data, "p")) return "stop";
+  if (matchesKey(data, "r")) return "resume";
+  if (matchesKey(data, "x")) return "clear";
   return undefined;
 }
 
@@ -317,7 +319,7 @@ function ageSeconds(timestamp: number): number {
 }
 
 function isEnter(data: string): boolean {
-  return data === "\r" || data === "\n";
+  return matchesKey(data, Key.enter);
 }
 
 function wrapIndex(index: number, length: number): number {

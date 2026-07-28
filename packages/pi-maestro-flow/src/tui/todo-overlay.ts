@@ -1,4 +1,4 @@
-import { type Component, type Focusable, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, type Component, type Focusable, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { formatTodoActorSelector, type TodoActorRef, type TodoTask } from "../tools/todo.ts";
 
@@ -30,43 +30,44 @@ export class TodoOverlay implements Component, Focusable {
   dispose(): void {}
 
   handleInput(data: string): void {
-    if (data === "\x1b") {
+    if (matchesKey(data, Key.escape)) {
       if (this.mode === "detail") this.mode = "list";
       else this.params.close();
       this.params.requestRender();
       return;
     }
-    if (data === "\x1b[D") {
+    if (matchesKey(data, Key.left)) {
       this.moveScope(-1);
       return;
     }
-    if (data === "\x1b[C" || data === "\t") {
+    if (matchesKey(data, Key.right) || matchesKey(data, Key.tab)) {
       this.moveScope(1);
       return;
     }
-    if (data === "\x1b[A") {
+    if (matchesKey(data, Key.up)) {
       this.moveSelection(-1);
       return;
     }
-    if (data === "\x1b[B") {
+    if (matchesKey(data, Key.down)) {
       this.moveSelection(1);
       return;
     }
-    if (data === "\r" || data === "\n") {
+    if (matchesKey(data, Key.enter)) {
       if (this.selectedTask()) this.mode = "detail";
       this.params.requestRender();
       return;
     }
-    if (data === "\x7f" || data === "\b") {
+    if (matchesKey(data, Key.backspace)) {
       if (this.lastWidth < 20) return;
       this.query = this.query.slice(0, -1);
       this.selected = 0;
       this.params.requestRender();
       return;
     }
-    if (isPrintableInput(data)) {
+    const input = printableInput(data);
+    if (input) {
       if (this.lastWidth < 20) return;
-      this.query += data;
+      this.query += input;
       this.selected = 0;
       this.params.requestRender();
     }
@@ -287,8 +288,11 @@ function actorLabel(actor: TodoActorRef, tasks: readonly TodoTask[]): string {
   return formatTodoActorSelector(actor, tasks.flatMap((task) => [task.createdBy, task.assignee]));
 }
 
-function isPrintableInput(data: string): boolean {
-  return data.length > 0 && !data.includes("\x1b") && [...data].every((char) => char >= " " && char !== "\x7f");
+function printableInput(data: string): string {
+  const input = decodeKittyPrintable(data) ?? data;
+  return input.length > 0 && !input.includes("\x1b") && [...input].every((char) => char >= " " && char !== "\x7f")
+    ? input
+    : "";
 }
 
 function visibleStart(selected: number, length: number, size: number): number {

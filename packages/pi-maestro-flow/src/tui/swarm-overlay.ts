@@ -1,4 +1,4 @@
-import { type Component, type Focusable, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
+import { Key, type Component, type Focusable, decodeKittyPrintable, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@earendil-works/pi-tui";
 import type { TeamSwarmMetric, TeamSwarmProjection } from "../swarm/projection.ts";
 
 type SwarmView = "summary" | "topology" | "metrics" | "result";
@@ -24,17 +24,17 @@ export class SwarmOverlay implements Component, Focusable {
   update(snapshot: TeamSwarmProjection): void { this.snapshot = snapshot; this.params.requestRender(); }
 
   handleInput(data: string): void {
-    if (data === "\x1b" || data === "q") return this.params.close();
+    if (matchesKey(data, Key.escape) || matchesKey(data, "q")) return this.params.close();
     const wheel = parseMouseWheelDelta(data);
     if (wheel !== undefined) return this.scroll(wheel);
-    const direct = Number.parseInt(data, 10);
+    const direct = Number.parseInt(decodeKittyPrintable(data) ?? data, 10);
     if (direct >= 1 && direct <= VIEWS.length) return this.switchView(VIEWS[direct - 1]!);
-    if (data === "\x1b[C" || data === "l" || data === "\t") return this.switchView(VIEWS[(VIEWS.indexOf(this.view) + 1) % VIEWS.length]!);
-    if (data === "\x1b[D" || data === "h") return this.switchView(VIEWS[(VIEWS.indexOf(this.view) - 1 + VIEWS.length) % VIEWS.length]!);
-    if (data === "\x1b[A" || data === "k") return this.scroll(-1);
-    if (data === "\x1b[B" || data === "j") return this.scroll(1);
-    if (data === "\x1b[5~") return this.scroll(-6);
-    if (data === "\x1b[6~") return this.scroll(6);
+    if (matchesKey(data, Key.right) || matchesKey(data, "l") || matchesKey(data, Key.tab)) return this.switchView(VIEWS[(VIEWS.indexOf(this.view) + 1) % VIEWS.length]!);
+    if (matchesKey(data, Key.left) || matchesKey(data, "h")) return this.switchView(VIEWS[(VIEWS.indexOf(this.view) - 1 + VIEWS.length) % VIEWS.length]!);
+    if (matchesKey(data, Key.up) || matchesKey(data, "k")) return this.scroll(-1);
+    if (matchesKey(data, Key.down) || matchesKey(data, "j")) return this.scroll(1);
+    if (matchesKey(data, Key.pageUp)) return this.scroll(-6);
+    if (matchesKey(data, Key.pageDown)) return this.scroll(6);
   }
 
   render(width: number): string[] {

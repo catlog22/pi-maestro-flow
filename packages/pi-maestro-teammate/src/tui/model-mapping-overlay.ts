@@ -2,8 +2,11 @@ import * as path from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   CURSOR_MARKER,
+  Key,
   type Component,
   type Focusable,
+  decodeKittyPrintable,
+  matchesKey,
   truncateToWidth,
   visibleWidth,
   wrapTextWithAnsi,
@@ -80,7 +83,7 @@ const TAB_LABELS: Record<ControlCenterTab, string> = {
 };
 
 function printableInput(data: string): string {
-  return sanitizeSingleLineInput(data);
+  return decodeKittyPrintable(data) ?? sanitizeSingleLineInput(data);
 }
 
 function normalizedText(value: string): string {
@@ -150,7 +153,12 @@ export class TeammateControlCenter implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.lastWidth < 20) {
-      if (data === "\x1b") this.params.close(null);
+      if (matchesKey(data, Key.escape)) this.params.close(null);
+      return;
+    }
+    if (matchesKey(data, Key.escape)) {
+      this.handleDecodedInput(data);
+      this.params.requestRender();
       return;
     }
     if (this.pasteFlushTimer) clearTimeout(this.pasteFlushTimer);
@@ -167,8 +175,13 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private dispatchDecodedToken(token: DecodedInputToken): void {
     if (token.kind === "paste") {
-      if (this.modelTaskType) this.modelQuery += token.text;
-      else this.queries[this.tab] += token.text;
+      if (this.modelTaskType) {
+        this.modelQuery += token.text;
+        this.modelSelected = 0;
+      } else {
+        this.queries[this.tab] += token.text;
+        this.selected[this.tab] = 0;
+      }
       this.statusText = "";
       return;
     }
@@ -181,27 +194,27 @@ export class TeammateControlCenter implements Component, Focusable {
       return;
     }
 
-    if (data === "\x1b") {
+    if (matchesKey(data, Key.escape)) {
       this.params.close(null);
       return;
     }
-    if (data === "\t" || data === "\x1b[C") {
+    if (matchesKey(data, Key.tab) || matchesKey(data, Key.right)) {
       this.switchTab(1);
       return;
     }
-    if (data === "\x1b[Z" || data === "\x1b[D") {
+    if (matchesKey(data, Key.shift("tab")) || matchesKey(data, Key.left)) {
       this.switchTab(-1);
       return;
     }
-    if (data === "\x1b[A" || (data === "k" && !this.queries[this.tab])) {
+    if (matchesKey(data, Key.up) || (matchesKey(data, "k") && !this.queries[this.tab])) {
       this.moveSelection(-1);
       return;
     }
-    if (data === "\x1b[B" || (data === "j" && !this.queries[this.tab])) {
+    if (matchesKey(data, Key.down) || (matchesKey(data, "j") && !this.queries[this.tab])) {
       this.moveSelection(1);
       return;
     }
-    if (data === "\x7f" || data === "\b") {
+    if (matchesKey(data, Key.backspace)) {
       const query = this.queries[this.tab];
       if (query) {
         this.queries[this.tab] = removeLastGrapheme(query);
@@ -211,11 +224,11 @@ export class TeammateControlCenter implements Component, Focusable {
       }
       return;
     }
-    if (data === "\r" || data === "\n") {
+    if (matchesKey(data, Key.enter)) {
       this.activateSelection();
       return;
     }
-    if (data === "\x1b[1;5C" && this.tab === "routing") {
+    if (matchesKey(data, Key.ctrl("right")) && this.tab === "routing") {
       this.activateThinkingSelection();
       return;
     }
@@ -282,7 +295,7 @@ export class TeammateControlCenter implements Component, Focusable {
 
   private handleModelInput(data: string): void {
     if (this.saving) return;
-    if (data === "\x1b" || data === "\x1b[D") {
+    if (matchesKey(data, Key.escape) || matchesKey(data, Key.left)) {
       this.modelTaskType = null;
       this.modelQuery = "";
       this.statusText = "";
@@ -290,17 +303,17 @@ export class TeammateControlCenter implements Component, Focusable {
       return;
     }
     const items = this.filteredEditorItems();
-    if (data === "\x1b[A" || (data === "k" && !this.modelQuery)) {
+    if (matchesKey(data, Key.up) || (matchesKey(data, "k") && !this.modelQuery)) {
       this.modelSelected = clampIndex(this.modelSelected - 1, items.length);
       this.params.requestRender();
       return;
     }
-    if (data === "\x1b[B" || (data === "j" && !this.modelQuery)) {
+    if (matchesKey(data, Key.down) || (matchesKey(data, "j") && !this.modelQuery)) {
       this.modelSelected = clampIndex(this.modelSelected + 1, items.length);
       this.params.requestRender();
       return;
     }
-    if (data === "\x7f" || data === "\b") {
+    if (matchesKey(data, Key.backspace)) {
       if (this.modelQuery) {
         this.modelQuery = removeLastGrapheme(this.modelQuery);
         this.modelSelected = 0;
@@ -308,7 +321,7 @@ export class TeammateControlCenter implements Component, Focusable {
       }
       return;
     }
-    if (data === "\r" || data === "\n") {
+    if (matchesKey(data, Key.enter)) {
       const taskType = this.modelTaskType;
       const item = items[this.modelSelected];
       if (!taskType || !item) return;
