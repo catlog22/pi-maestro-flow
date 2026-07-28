@@ -20,6 +20,8 @@ Thumbs.db
 # Pi / Maestro runtime artifacts (see .workflow/specs/ for tracked config)
 .history/
 .pi/settings.local.json
+.pi/scratch/
+.workflow/*.pid
 .workflow/.backups/
 .workflow/.csv-wave/
 .workflow/.maestro/
@@ -63,6 +65,8 @@ Thumbs.db
 packages/*/dist/
 packages/*/node_modules/
 packages/*/.workflow/
+packages/*/.tmp-*.log
+packages/*/.verify-*.ts
 
 # Python cache artifacts
 __pycache__/
