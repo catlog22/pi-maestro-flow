@@ -123,6 +123,7 @@ test("registers configured providers and the /api-manager command", async (t) =>
   assert.equal(registered[1].config.models[0].id, "qwen3.8-max-preview");
   assert.equal(registered[2].config.name, undefined);
   assert.equal(registered[2].config.models[0].id, "claude-sonnet-4-5");
+  assert.deepEqual(registered[2].config.models[0].thinkingLevelMap, { xhigh: "high" });
   assert.equal(commands.size, 2);
   assert.ok(commands.has("api-manager"));
   assert.ok(commands.has("effort"));
@@ -305,6 +306,101 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(notifications.at(-1)?.type, "info");
 });
 
+test("/api-manager edits a concrete OpenAI model and shows its API format", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-openai-model-edit-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const base = {
+    provider: "maestro-openai",
+    baseUrl: "https://gateway.example.com/v1",
+    apiKey: "openai-secret",
+  };
+  await saveApiProviderSettings({ ...base, modelId: "model-a", contextWindow: 111_000, reasoning: false }, modelsPath);
+  await saveApiProviderSettings({ ...base, modelId: "model-b", contextWindow: 222_000, reasoning: true }, modelsPath);
+  const before = JSON.parse(readFileSync(modelsPath, "utf8"));
+  const modelABefore = before.providers["maestro-openai"].models[0];
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    unregisterProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    setThinkingLevel() {},
+  } as any, { modelsPath });
+  const inputs = ["https://gateway.example.com/v1", "model-b", "333000", "openai-secret"];
+  const selections = ["model-b", "关闭：仅 off", "off"];
+  const rendered: string[][] = [];
+  const confirmations: string[] = [];
+  await commands.get("api-manager").handler("set openai", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: { refresh() {}, getAll() { return []; } },
+    ui: {
+      async input() { return inputs.shift(); },
+      async select(_title: string, options: string[]) {
+        rendered.push(options);
+        return selections.shift();
+      },
+      async confirm(_title: string, details: string) {
+        confirmations.push(details);
+        return true;
+      },
+      notify() {},
+    },
+  });
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  const openai = saved.providers["maestro-openai"];
+  assert.equal(openai.api, "openai-responses");
+  assert.deepEqual(openai.models[0], modelABefore);
+  assert.equal(openai.models[1].id, "model-b");
+  assert.equal(openai.models[1].contextWindow, 333_000);
+  assert.equal(openai.models[1].reasoning, false);
+  assert.equal(openai.models[1].thinkingLevelMap, undefined);
+  assert.deepEqual(rendered[0], ["model-a", "model-b", "➕ 新增 model…"]);
+  assert.match(confirmations[0] ?? "", /API format：openai-responses/);
+  assert.match(confirmations[0] ?? "", /其余 1 个 model/);
+});
+
+test("/api-manager shows one concrete Anthropic model with anthropic-messages format", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-anthropic-show-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const base = {
+    provider: "maestro-anthropic",
+    baseUrl: "https://anthropic.example.com",
+    apiKey: "anthropic-secret-must-not-be-shown",
+  };
+  await saveApiProviderSettings({ ...base, modelId: "claude-a", contextWindow: 200_000, reasoning: true }, modelsPath);
+  await saveApiProviderSettings({ ...base, modelId: "claude-b", contextWindow: 250_000, reasoning: false }, modelsPath);
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+  } as any, { modelsPath });
+  const notifications: string[] = [];
+  await commands.get("api-manager").handler("show anthropic", {
+    cwd: tempDir,
+    hasUI: true,
+    ui: {
+      async select(_title: string, options: string[]) {
+        assert.deepEqual(options, ["claude-a", "claude-b"]);
+        return "claude-b";
+      },
+      notify(message: string) { notifications.push(message); },
+    },
+  });
+
+  const output = notifications.at(-1) ?? "";
+  assert.match(output, /API format：anthropic-messages/);
+  assert.match(output, /Model：claude-b/);
+  assert.match(output, /Context window：250,000 Token/);
+  assert.match(output, /Reasoning：disabled/);
+  assert.doesNotMatch(output, /claude-a/);
+  assert.doesNotMatch(output, /anthropic-secret-must-not-be-shown/);
+});
+
 test("/api-manager qwen creates an OpenAI-compatible provider and default model", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-qwen-login-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
@@ -435,7 +531,7 @@ test("/api-manager rejects invalid URL, context window, and API key", async (t) 
     };
   };
 
-  const emptyUrl = makeContext([""]);
+  const emptyUrl = makeContext([""], ["gpt-old"]);
   await command.handler("set openai", emptyUrl.ctx);
   let saved = JSON.parse(readFileSync(modelsPath, "utf8"));
   assert.equal(saved.providers["maestro-openai"].baseUrl, "https://old.example.com/v1");
@@ -445,7 +541,7 @@ test("/api-manager rejects invalid URL, context window, and API key", async (t) 
 
   const invalidContext = makeContext(
     ["https://new.example.com/v1", "gpt-new", "0"],
-    ["启用：minimal / low / medium / high / xhigh / max", "medium"],
+    ["gpt-old", "启用：minimal / low / medium / high / xhigh / max", "medium"],
   );
   await command.handler("set openai", invalidContext.ctx);
   saved = JSON.parse(readFileSync(modelsPath, "utf8"));
@@ -455,7 +551,7 @@ test("/api-manager rejects invalid URL, context window, and API key", async (t) 
 
   const emptyKey = makeContext(
     ["https://new.example.com/v1", "gpt-new", "400000", ""],
-    ["启用：minimal / low / medium / high / xhigh / max", "medium"],
+    ["gpt-old", "启用：minimal / low / medium / high / xhigh / max", "medium"],
   );
   await command.handler("set openai", emptyKey.ctx);
   saved = JSON.parse(readFileSync(modelsPath, "utf8"));

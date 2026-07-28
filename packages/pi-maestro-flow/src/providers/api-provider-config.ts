@@ -82,6 +82,7 @@ const THINKING_FORMAT_OPTIONS: ReadonlyArray<{ label: string; value?: string }> 
 ];
 
 const AUTO_LABEL = "自动（按 URL 识别）";
+const ADD_MODEL_LABEL = "➕ 新增 model…";
 
 interface LoadedApiProviderSettings extends ApiProviderSettings {
   configured: boolean;
@@ -236,6 +237,7 @@ export function registerApiProviderConfigs(
 export async function loadApiProviderSettings(
   provider: string,
   modelsPath = join(getAgentDir(), "models.json"),
+  modelId?: string | null,
 ): Promise<LoadedApiProviderSettings> {
   await migrateLegacyProviderThinkingMaps(provider, modelsPath);
   const preset = findPreset(provider);
@@ -247,7 +249,11 @@ export async function loadApiProviderSettings(
   const configured = isRecord(candidate);
   const config = configured ? candidate : {};
   const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
-  const model = models[0];
+  const model = modelId === null
+    ? undefined
+    : modelId
+      ? models.find((entry) => entry.id === modelId)
+      : models[0];
   const thinkingLevelMap = isRecord(model?.thinkingLevelMap) ? model.thinkingLevelMap : {};
   return {
     configured,
@@ -402,14 +408,21 @@ async function configureProvider(
   modelsPath: string,
   defaultsPath: string,
 ): Promise<void> {
-  const current = await loadApiProviderSettings(provider.id, modelsPath);
+  const target = await chooseModelToConfigure(provider.id, provider.name, ctx, modelsPath);
+  if (!target) return;
+  const current = await loadApiProviderSettings(provider.id, modelsPath, target.modelId);
   const maxThinking = current.maxThinking === true || runtimeSupportsMaxThinking(ctx);
   const baseUrlInput = await ctx.ui.input(`${provider.name} Base URL`, current.configured ? current.baseUrl : "");
   if (baseUrlInput === undefined) return;
   const baseUrl = normalizeBaseUrl(baseUrlInput);
-  const modelInput = await ctx.ui.input(`${provider.name} model ID`, current.configured ? current.modelId : provider.modelId);
+  const modelInput = await ctx.ui.input(
+    `${provider.name} model ID`,
+    target.adding ? "" : current.configured ? current.modelId : provider.modelId,
+  );
   if (modelInput === undefined) return;
   const modelId = required(modelInput, "Model ID");
+  const siblingCount = (await configuredModelIds(provider.id, modelsPath))
+    .filter((id) => id !== modelId).length;
   const maxSuffix = maxThinking ? " / max" : "";
   const enabledLabel = provider.api === "openai-responses"
     ? `启用：minimal / low / medium / high / xhigh${maxSuffix}`
@@ -453,12 +466,17 @@ async function configureProvider(
   const confirmed = await ctx.ui.confirm(
     `保存 ${provider.name} API 配置？`,
     [
+      `Provider：${provider.id}`,
+      `API format：${provider.api}`,
       `Base URL：${next.baseUrl}`,
       `Model：${next.modelId}`,
       `Context window：${next.contextWindow?.toLocaleString("en-US")} Token`,
       `Reasoning：${next.reasoning ? "enabled" : "disabled"}`,
       `Default thinking（Pi 全局）：${defaultThinkingLevel}`,
       "Auth：stored API key",
+      ...(siblingCount > 0
+        ? [`Provider 级 URL / API key 将同时用于其余 ${siblingCount} 个 model`]
+        : []),
     ].join("\n"),
   );
   if (!confirmed) return;
@@ -495,8 +513,14 @@ async function configureCustomChannel(
     await configureProvider(pi, preset, ctx, modelsPath, defaultsPath);
     return;
   }
-  const current = await loadApiProviderSettings(providerId, modelsPath);
-  const apiChoice = await ctx.ui.select("API 协议", [...KNOWN_APIS]);
+  const currentDisplayName = await channelDisplayName(providerId, modelsPath);
+  const target = await chooseModelToConfigure(providerId, currentDisplayName, ctx, modelsPath);
+  if (!target) return;
+  const current = await loadApiProviderSettings(providerId, modelsPath, target.modelId);
+  const apiOptions = current.api && KNOWN_APIS.includes(current.api)
+    ? [current.api, ...KNOWN_APIS.filter((api) => api !== current.api)]
+    : [...KNOWN_APIS];
+  const apiChoice = await ctx.ui.select("API format", apiOptions);
   if (!apiChoice) return;
   const api = apiChoice;
   const nameInput = await ctx.ui.input("渠道显示名称", current.name ?? providerId);
@@ -505,9 +529,14 @@ async function configureCustomChannel(
   const baseUrlInput = await ctx.ui.input(`${displayName} Base URL`, current.configured ? current.baseUrl : "");
   if (baseUrlInput === undefined) return;
   const baseUrl = normalizeBaseUrl(baseUrlInput);
-  const modelInput = await ctx.ui.input(`${displayName} model ID`, current.configured ? current.modelId : "");
+  const modelInput = await ctx.ui.input(
+    `${displayName} model ID`,
+    target.adding ? "" : current.configured ? current.modelId : "",
+  );
   if (modelInput === undefined) return;
   const modelId = required(modelInput, "Model ID");
+  const siblingCount = (await configuredModelIds(providerId, modelsPath))
+    .filter((id) => id !== modelId).length;
   const maxThinking = current.maxThinking === true || runtimeSupportsMaxThinking(ctx);
   const maxSuffix = maxThinking ? " / max" : "";
   const enabledLabel = api === "openai-responses"
@@ -627,6 +656,9 @@ async function configureCustomChannel(
       `请求头：${Object.keys(headers).length > 0 ? Object.keys(headers).join(", ") : "无"}`,
       `Authorization：${authHeader === undefined ? "自动" : authHeader ? "Bearer" : "关闭"}`,
       "Auth：stored API key",
+      ...(siblingCount > 0
+        ? [`Provider 级 API format / URL / API key 将同时用于其余 ${siblingCount} 个 model`]
+        : []),
     ].join("\n"),
   );
   if (!confirmed) return;
@@ -781,16 +813,42 @@ async function showProvider(
   const providers = isRecord(root.providers) ? root.providers : {};
   const config = isRecord(providers[providerId]) ? providers[providerId] : {};
   const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
+  const api = typeof config.api === "string" ? config.api : preset?.api ?? "?";
+  if (ctx.hasUI && models.length > 0) {
+    const modelIds = models
+      .map((model) => model.id)
+      .filter((id): id is string => typeof id === "string");
+    const modelId = modelIds.length === 1
+      ? modelIds[0]
+      : await ctx.ui.select(`选择要查看的 ${displayName} model`, modelIds);
+    if (!modelId) return;
+    const model = models.find((entry) => entry.id === modelId) ?? {};
+    const level = await loadModelThinkingDefault(providerId, modelId, defaultsPath);
+    ctx.ui.notify([
+      displayName,
+      `Provider ID：${providerId}`,
+      `API format：${api}`,
+      `Base URL：${typeof config.baseUrl === "string" ? config.baseUrl : preset?.baseUrl ?? ""}`,
+      `Model：${modelId}`,
+      `Context window：${typeof model.contextWindow === "number" ? model.contextWindow.toLocaleString("en-US") : "?"} Token`,
+      `Max output：${typeof model.maxTokens === "number" ? model.maxTokens.toLocaleString("en-US") : "?"} Token`,
+      `Reasoning：${model.reasoning === true ? "enabled" : "disabled"}`,
+      `Default thinking：${level ?? "global"}`,
+      `Auth：${authSource(config.apiKey)}`,
+      `同 Provider 其他 models：${Math.max(0, modelIds.length - 1)}`,
+      `文件：${modelsPath}`,
+    ].join("\n"), "info");
+    return;
+  }
   const modelLines = await Promise.all(models.map(async (model) => {
     const id = typeof model.id === "string" ? model.id : "<invalid>";
     const level = id === "<invalid>" ? undefined : await loadModelThinkingDefault(providerId, id, defaultsPath);
     return `- ${id} · reasoning=${model.reasoning === true ? "enabled" : "disabled"} · default=${level ?? "global"}`;
   }));
-  const api = typeof config.api === "string" ? config.api : preset?.api ?? "?";
   ctx.ui.notify([
     displayName,
     `Provider ID：${providerId}`,
-    `API 协议：${api}`,
+    `API format：${api}`,
     `Base URL：${typeof config.baseUrl === "string" ? config.baseUrl : preset?.baseUrl ?? ""}`,
     `Models（${models.length}）：`,
     ...modelLines,
@@ -1064,6 +1122,11 @@ interface ChannelRef {
   name: string;
 }
 
+interface ConfigureModelTarget {
+  modelId: string | null;
+  adding: boolean;
+}
+
 interface ParsedManagerArgs {
   action?: ApiProviderAction;
   target?: ChannelTarget;
@@ -1098,6 +1161,24 @@ function usageError(): Error {
   );
 }
 
+async function chooseModelToConfigure(
+  providerId: string,
+  displayName: string,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+): Promise<ConfigureModelTarget | undefined> {
+  const modelIds = await configuredModelIds(providerId, modelsPath);
+  if (modelIds.length === 0) return { modelId: null, adding: false };
+  const choice = await ctx.ui.select(
+    `选择要修改的 ${displayName} model`,
+    [...modelIds, ADD_MODEL_LABEL],
+  );
+  if (!choice) return undefined;
+  return choice === ADD_MODEL_LABEL
+    ? { modelId: null, adding: true }
+    : { modelId: choice, adding: false };
+}
+
 async function chooseChannel(
   ctx: ExtensionCommandContext,
   action: ApiProviderAction,
@@ -1105,7 +1186,7 @@ async function chooseChannel(
   defaultsPath: string,
 ): Promise<ChannelTarget | undefined> {
   const options: Array<{ label: string; target: ChannelTarget }> = PROVIDERS.map((preset) => ({
-    label: preset.name,
+    label: `${preset.name} · ${preset.api}`,
     target: { kind: "preset", preset },
   }));
   for (const id of managedChannelIdsSync(defaultsPath)) {
@@ -1152,8 +1233,8 @@ function normalizeChannelId(value: string): string {
 async function chooseAction(ctx: ExtensionCommandContext): Promise<ApiProviderAction | undefined> {
   const choices: Array<{ action: ApiProviderAction; label: string }> = [
     { action: "list", label: "查看全部渠道" },
-    { action: "configure", label: "新增或修改渠道" },
-    { action: "show", label: "查看单个渠道" },
+    { action: "configure", label: "新增或修改具体 model" },
+    { action: "show", label: "查看具体 provider / model" },
     { action: "delete", label: "删除渠道配置" },
     { action: "logout", label: "注销渠道配置" },
     { action: "reset", label: "重置为未配置" },
