@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { renderAgents, renderTodos, type PaintTheme, type WidthUtils } from "../src/render.ts";
+import { formatAgentMetric, renderAgents, renderTodos, type PaintTheme, type WidthUtils } from "../src/render.ts";
 import { resolveGlyphs } from "../src/icons.ts";
 import type { AgentRow, TodoItem } from "../src/types.ts";
 
@@ -105,11 +105,36 @@ test("renderAgents exposes pending state and graph dependency without color", ()
 	assert.match(line, /← #1,#2/);
 });
 
-test("renderAgents list includes teammate tool and progress metrics", () => {
-	const line = renderAgents([agent({ activeTool: "apply_patch (running)", toolCount: 3, tokens: 900 })], "list", 120, theme, utils, opts)[0];
+test("formatAgentMetric abbreviates values above two digits", () => {
+	assert.equal(formatAgentMetric(99), "99");
+	assert.equal(formatAgentMetric(100), "0.1k");
+	assert.equal(formatAgentMetric(999), "1k");
+	assert.equal(formatAgentMetric(1_000), "1k");
+	assert.equal(formatAgentMetric(1_200), "1.2k");
+	assert.equal(formatAgentMetric(24_000), "24k");
+	assert.equal(formatAgentMetric(999_949), "999.9k");
+	assert.equal(formatAgentMetric(999_950), "1m");
+	assert.equal(formatAgentMetric(1_000_000), "1m");
+	assert.equal(formatAgentMetric(2_500_000), "2.5m");
+});
+
+test("renderAgents list includes teammate tool and input/output metrics", () => {
+	const line = renderAgents([agent({
+		activeTool: "apply_patch (running)",
+		toolCount: 3,
+		tokens: 1_290,
+		inputTokens: 1_234,
+		outputTokens: 56,
+	})], "list", 120, theme, utils, opts)[0];
 	assert.match(line, /tool apply_patch \(running\)/);
 	assert.match(line, /3 tools/);
-	assert.match(line, /900 tok/);
+	assert.match(line, /in 1.2k · out 56/);
+	assert.doesNotMatch(line, /1290 tok/);
+});
+
+test("renderAgents falls back to compact aggregate tokens", () => {
+	const line = renderAgents([agent({ tokens: 900 })], "list", 120, theme, utils, opts)[0];
+	assert.match(line, /0.9k tok/);
 });
 
 test("renderAgents list caps at 6 visible + overflow", () => {
@@ -124,6 +149,8 @@ test("renderAgents keeps deep long-text rows bounded at narrow widths", () => {
 		correlationId: `node-${index}`,
 		parentCorrelationId: index === 0 ? undefined : `node-${index - 1}`,
 		task: `任务 ${index} 🚀 ${"very-long-text ".repeat(8)}`,
+		inputTokens: 12_345,
+		outputTokens: 678,
 	}));
 	for (const width of [1, 8, 16, 24, 40]) {
 		const lines = renderAgents(rows, "list", width, theme, utils, opts);

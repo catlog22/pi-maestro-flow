@@ -59,6 +59,8 @@ test("progress message projects teammate tools, tokens, status and last message"
 		],
 		toolCount: 4,
 		tokens: 1200,
+		inputTokens: 1_000,
+		outputTokens: 200,
 		status: "running",
 	});
 	const row = s.snapshot()[0];
@@ -66,6 +68,8 @@ test("progress message projects teammate tools, tokens, status and last message"
 	assert.equal(row.activeTool, "apply_patch (running)");
 	assert.equal(row.toolCount, 4);
 	assert.equal(row.tokens, 1200);
+	assert.equal(row.inputTokens, 1_000);
+	assert.equal(row.outputTokens, 200);
 	assert.equal(row.taskStatus, "running");
 });
 
@@ -92,6 +96,8 @@ test("graph progress updates the task row instead of flattening child state onto
 			lastMessage: "writing code",
 			toolCount: 2,
 			tokens: 300,
+			inputTokens: 240,
+			outputTokens: 60,
 		}],
 	});
 	const [root, child] = ["root", "child"].map((id) => s.snapshot().find((row) => row.correlationId === id)!);
@@ -102,6 +108,8 @@ test("graph progress updates the task row instead of flattening child state onto
 	assert.equal(child.parentCorrelationId, "root");
 	assert.equal(child.toolCount, 2);
 	assert.equal(child.tokens, 300);
+	assert.equal(child.inputTokens, 240);
+	assert.equal(child.outputTokens, 60);
 });
 
 test("message for unknown correlationId is ignored", () => {

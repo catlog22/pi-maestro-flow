@@ -35,6 +35,8 @@ export interface AgentRow {
 	lastActivityAt: number;
 	toolCount?: number;
 	tokens?: number;
+	inputTokens?: number;
+	outputTokens?: number;
 	taskStatus?: string;
 	activeTool?: string;
 	taskIndex?: number;

@@ -106,6 +106,16 @@ export function formatDuration(ms: number): string {
 	return `${h}h ${m}m ${s}s`;
 }
 
+export function formatAgentMetric(value: number): string {
+	if (value < 100) return String(value);
+	if (value < 999_950) return `${trimMetric(value / 1_000)}k`;
+	return `${trimMetric(value / 1_000_000)}m`;
+}
+
+function trimMetric(value: number): string {
+	return value.toFixed(1).replace(/\.0$/, "");
+}
+
 // Role is identity, status is state — they must not share a palette. Reusing
 // success/warning/error for roles meant a green row could mean "executor" or
 // "done", and every theme inherits that ambiguity. Roles therefore draw from the
@@ -236,7 +246,12 @@ export function renderAgents(
 		if (r.activeTool) segs.push({ text: theme.fg("accent", `tool ${r.activeTool}`), priority: 50, minWidth: 8 });
 		if (r.tail) segs.push({ text: theme.fg("dim", r.tail), priority: 40, minWidth: 8 });
 		if (r.toolCount !== undefined) segs.push({ text: theme.fg("muted", `${r.toolCount} tools`), priority: 20, clippable: false });
-		if (r.tokens !== undefined) segs.push({ text: theme.fg("muted", `${r.tokens} tok`), priority: 10, clippable: false });
+		if (r.inputTokens !== undefined || r.outputTokens !== undefined) {
+			const usage = `in ${formatAgentMetric(r.inputTokens ?? 0)} · out ${formatAgentMetric(r.outputTokens ?? 0)}`;
+			segs.push({ text: theme.fg("muted", usage), priority: 10, clippable: false });
+		} else if (r.tokens !== undefined) {
+			segs.push({ text: theme.fg("muted", `${formatAgentMetric(r.tokens)} tok`), priority: 10, clippable: false });
+		}
 		return fitLineByPriority(segs, width, utils, " ", g.ellipsis);
 	});
 	if (hidden > 0) {

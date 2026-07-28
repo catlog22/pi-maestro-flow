@@ -41,6 +41,8 @@ export interface ProgressPayload {
 	recentTools?: Array<string | { name?: string; status?: string }>;
 	toolCount?: number;
 	tokens?: number;
+	inputTokens?: number;
+	outputTokens?: number;
 	lastMessage?: string;
 }
 export interface MessagePayload {
@@ -53,6 +55,8 @@ export interface MessagePayload {
 	recentTools?: Array<string | { name?: string; status?: string }>;
 	toolCount?: number;
 	tokens?: number;
+	inputTokens?: number;
+	outputTokens?: number;
 	status?: string;
 	lastActivityAt?: number | string;
 	progress?: ProgressPayload[];
@@ -159,6 +163,8 @@ export class AgentsStore {
 		}
 		if (typeof p.toolCount === "number") row.toolCount = p.toolCount;
 		if (typeof p.tokens === "number") row.tokens = p.tokens;
+		if (typeof p.inputTokens === "number") row.inputTokens = p.inputTokens;
+		if (typeof p.outputTokens === "number") row.outputTokens = p.outputTokens;
 		if (typeof p.status === "string") {
 			row.taskStatus = p.status;
 			row.status = mapAgentStatus(p.status);
@@ -241,6 +247,8 @@ export class AgentsStore {
 		}
 		if (typeof p.toolCount === "number") row.toolCount = p.toolCount;
 		if (typeof p.tokens === "number") row.tokens = p.tokens;
+		if (typeof p.inputTokens === "number") row.inputTokens = p.inputTokens;
+		if (typeof p.outputTokens === "number") row.outputTokens = p.outputTokens;
 		if (typeof p.lastMessage === "string" && p.lastMessage.length > 0) {
 			row.tail = truncateTail(p.lastMessage);
 		}
