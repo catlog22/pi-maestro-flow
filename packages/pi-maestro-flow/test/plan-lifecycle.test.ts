@@ -356,6 +356,24 @@ test("plan-confirm execute fires the mode-change listener so the approval status
   }
 });
 
+test("plan-enter fires the mode-change listener so cockpit fields follow the transition", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-enter-listener-"));
+  const harness = createHarness(root, true);
+  harness.ctx.isIdle = () => false;
+  let listenerCalls = 0;
+  try {
+    await onSessionStartPlan(harness.ctx);
+    setPlanModeChangeListener(() => { listenerCalls++; });
+    await execute(harness, "plan-enter");
+    assert.equal(getMode(), "plan");
+    assert.ok(listenerCalls >= 1, "mode-change listener must fire on plan-enter so cockpit fields re-sync");
+  } finally {
+    setPlanModeChangeListener(undefined);
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("/plan approve fires the mode-change listener so the approval statusline re-syncs", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-approve-listener-"));
   const harness = createHarness(root, true);

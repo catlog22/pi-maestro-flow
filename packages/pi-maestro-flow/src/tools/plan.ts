@@ -202,6 +202,7 @@ async function enterPlanMode(ctx: PlanContext): Promise<void> {
   mode = "plan";
   activatePlanToolSurface();
   syncModeStatus(ctx);
+  onPlanModeChanged?.(ctx);
   ctx.ui.notify(`Plan mode · ${store.currentPath}`, "info");
 }
 
@@ -226,7 +227,6 @@ export function exitMode(ctx: PlanContext): Mode {
 export async function toggleMode(ctx: PlanContext): Promise<Mode> {
   if (mode === "act") {
     await enterPlanMode(ctx);
-    onPlanModeChanged?.(ctx);
     return mode;
   }
   if (hasPlan() && ctx.hasUI !== false) {
