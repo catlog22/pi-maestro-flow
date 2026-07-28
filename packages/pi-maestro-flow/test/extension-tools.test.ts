@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -19,6 +20,35 @@ import {
   getTeammateChildToolBroker,
   getTeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
+
+test("workspace extension path loads before runtime actions are bound", () => {
+  const extensionUrl = new URL("../src/extension/index.ts", import.meta.url).href;
+  const script = `
+    import { fileURLToPath } from "node:url";
+    import { createEventBus, createExtensionRuntime } from "@earendil-works/pi-coding-agent";
+    const loaderUrl = new URL(
+      "./core/extensions/loader.js",
+      import.meta.resolve("@earendil-works/pi-coding-agent"),
+    );
+    const { loadExtensions } = await import(loaderUrl.href);
+    const result = await loadExtensions(
+      [fileURLToPath(${JSON.stringify(extensionUrl)})],
+      process.cwd(),
+      createEventBus(),
+      createExtensionRuntime(),
+    );
+    if (result.errors.length > 0) throw new Error(result.errors.map((entry) => entry.error).join("\\n"));
+    if (result.extensions.length !== 1) throw new Error("workspace extension did not load exactly once");
+    if (!result.extensions[0].tools.has("apply_patch")) throw new Error("apply_patch was not registered");
+  `;
+  const result = spawnSync(
+    process.execPath,
+    ["--experimental-transform-types", "--input-type=module", "--eval", script],
+    { cwd: process.cwd(), encoding: "utf8" },
+  );
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+});
 
 test("Workflow Goal restore requires a workflow-owned Goal matching the canonical Session", () => {
   const snapshot = workflowAttachSnapshot();

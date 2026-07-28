@@ -28,7 +28,7 @@
     "test:swarm": "node --experimental-transform-types --test test/swarm-projection.test.ts test/swarm-tui.test.ts",
     "test:packed": "node --test test/packed-consumer-e2e.test.mjs",
     "test:packed-todo": "node --test test/packed-todo-consumer.test.mjs",
-    "test:intelligence": "node --experimental-transform-types --test test/search-tool-bm25.test.ts test/smart-search.test.ts test/smart-search-config.test.ts test/lsp-client.test.ts test/lsp-manager.test.ts test/lsp-tool.test.ts test/lsp-output.test.ts test/lsp-auto-diagnostics.test.ts test/workspace-edit.test.ts test/browser-tool.test.ts test/extension-tools.test.ts test/fff.test.ts",
+    "test:intelligence": "node --experimental-transform-types --test test/apply-patch.test.ts test/search-tool-bm25.test.ts test/smart-search.test.ts test/smart-search-config.test.ts test/lsp-client.test.ts test/lsp-manager.test.ts test/lsp-tool.test.ts test/lsp-output.test.ts test/lsp-auto-diagnostics.test.ts test/workspace-edit.test.ts test/browser-tool.test.ts test/extension-tools.test.ts test/fff.test.ts",
     "check:mcp": "tsc -p tsconfig.mcp.json",
     "check:types": "tsc -p tsconfig.intelligence.json",
     "typecheck": "tsc -p tsconfig.build.json"
