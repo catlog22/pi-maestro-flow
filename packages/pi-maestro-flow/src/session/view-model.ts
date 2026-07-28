@@ -106,6 +106,14 @@ export interface WorkflowViewModel {
   decisionPending: boolean;
   nextAction?: string;
   recoveryAction?: string;
+  knowledge?: {
+    consumed: number;
+    cited: number;
+    validated: number;
+    contradicted: number;
+    pendingCandidates: number;
+    reviewRequired: number;
+  };
 }
 
 const GLYPHS: Record<WorkflowStatus, string> = {

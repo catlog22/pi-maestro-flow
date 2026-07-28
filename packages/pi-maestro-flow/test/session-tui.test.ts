@@ -201,6 +201,26 @@ test("Session overlay provides list/detail/confirm controls and preserves select
   assert.equal(closed, 1);
 });
 
+test("Session overlay accepts keypad Enter and protocol Escape encodings", () => {
+  const view = deriveWorkflowViewModel(snapshot);
+  assert.ok(view);
+  let closed = 0;
+  const overlay = new SessionOverlay({
+    view,
+    requestRender() {},
+    close() { closed++; },
+    onAction() {},
+  });
+
+  overlay.handleInput("\x1b[106u");
+  overlay.handleInput("\x1bOM");
+  assert.match(overlay.render(100).join("\n"), /002\/grill/);
+  overlay.handleInput("\x1b[27u");
+  assert.doesNotMatch(overlay.render(100).join("\n"), /run detail/);
+  overlay.handleInput("\x1b[27;1;27~");
+  assert.equal(closed, 1);
+});
+
 async function flushAsync(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }

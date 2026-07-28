@@ -94,7 +94,7 @@ import { loadLatestTeamSwarmProjection } from "../swarm/projection.ts";
 import { RunCliAdapter } from "../session/cli-adapter.ts";
 import { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
-import { deriveWorkflowViewModel, workflowStatusLabel, type WorkflowSnapshotLike } from "../session/view-model.ts";
+import { deriveWorkflowViewModel, workflowStatusLabel, type WorkflowSnapshotLike, type WorkflowViewModel } from "../session/view-model.ts";
 import { createRunEventComponent, type RunEventDetails } from "../session/run-event.ts";
 import {
   executeRunControl,
@@ -105,6 +105,9 @@ import {
 import { SessionOverlay, type SessionOverlayAction } from "../tui/session-overlay.ts";
 import { TodoOverlay } from "../tui/todo-overlay.ts";
 import { GoalOverlay, type GoalOverlayAction } from "../tui/goal-overlay.ts";
+import { KnowledgeOverlay, type KnowledgeOverlayAction } from "../tui/knowledge-overlay.ts";
+import { KnowledgeCliAdapter, resolveLatestSessionId } from "../knowledge/cli-adapter.ts";
+import { buildKnowledgeCenterView, type KnowledgeCenterView } from "../knowledge/view-model.ts";
 import {
   onSessionStart as inputHistorySessionStart,
   onSessionShutdown as inputHistorySessionShutdown,
@@ -1071,10 +1074,30 @@ When NOT to use:
       ctx.ui.notify("No active canonical Workflow Session.", "info");
       return;
     }
+    const knowledgeAdapter = new KnowledgeCliAdapter(ctx.cwd);
+    const withKnowledge = async (vm: WorkflowViewModel): Promise<WorkflowViewModel> => {
+      try {
+        const summary = await knowledgeAdapter.review(vm.sessionId);
+        return {
+          ...vm,
+          knowledge: {
+            consumed: summary.input_totals.consumed,
+            cited: summary.input_totals.cited,
+            validated: summary.input_totals.validated,
+            contradicted: summary.input_totals.contradicted,
+            pendingCandidates: summary.candidates.filter((c) => c.status === "pending").length,
+            reviewRequired: summary.candidates.filter((c) => c.reconciliation?.promotion_eligibility === "review_required").length,
+          },
+        };
+      } catch {
+        return vm;
+      }
+    };
+    const enrichedView = await withKnowledge(view);
     await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
       let overlay: SessionOverlay;
       overlay = new SessionOverlay({
-        view,
+        view: enrichedView,
         requestRender: () => tui.requestRender(),
         close: () => done(undefined),
         onAction: async (action: SessionOverlayAction, runId?: string) => {
@@ -1111,7 +1134,7 @@ When NOT to use:
           }
           await refreshWorkflow(ctx, true);
           const updated = deriveWorkflowViewModel(workflowSnapshotForUi());
-          if (updated) overlay.update(updated);
+          if (updated) overlay.update(await withKnowledge(updated));
         },
       });
       return overlay;
@@ -1166,9 +1189,89 @@ When NOT to use:
     });
   }
 
+  async function openKnowledgeOverlay(ctx: ExtensionContext, sessionIdArg?: string): Promise<void> {
+    const adapter = new KnowledgeCliAdapter(ctx.cwd);
+    const sessionId = sessionIdArg?.trim()
+      || workflowSnapshotForUi()?.session?.sessionId
+      || resolveLatestSessionId(ctx.cwd);
+    if (!sessionId) {
+      ctx.ui.notify("No Workflow Session found to review.", "info");
+      return;
+    }
+
+    const loadView = async (refresh: boolean): Promise<KnowledgeCenterView> => {
+      const [reviewResult, auditResult] = await Promise.allSettled([
+        adapter.review(sessionId, { refresh }),
+        adapter.audit("all"),
+      ]);
+      const review = reviewResult.status === "fulfilled" ? reviewResult.value : null;
+      const audit = auditResult.status === "fulfilled" ? auditResult.value : null;
+      const error = reviewResult.status === "rejected"
+        ? (reviewResult.reason instanceof Error ? reviewResult.reason.message : String(reviewResult.reason))
+        : null;
+      return buildKnowledgeCenterView(review, audit, error);
+    };
+
+    const view = await loadView(false);
+    await ctx.ui.custom<void>((tui, _theme, _keybindings, done) => {
+      let overlay: KnowledgeOverlay;
+      overlay = new KnowledgeOverlay({
+        view,
+        requestRender: () => tui.requestRender(),
+        close: () => done(undefined),
+        onAction: async (action: KnowledgeOverlayAction) => {
+          if (action.kind === "refresh") {
+            overlay.update(await loadView(true));
+            return;
+          }
+          if (action.kind === "resolve-batch") {
+            const current = await loadView(false);
+            const byId = new Map(current.candidates.map((c) => [c.candidate.candidate_id, c]));
+            const items = action.candidateIds.map((candidateId) => {
+              const summary = byId.get(candidateId);
+              const target = action.as !== "unique"
+                ? (summary?.canonicalId ?? summary?.candidate.reconciliation?.matches[0]?.knowledge_id)
+                : undefined;
+              return { candidateId, as: action.as, target, reason: action.reason };
+            });
+            const result = await adapter.resolveMany(sessionId, items);
+            overlay.update(await loadView(false));
+            if (result.failed.length > 0) {
+              throw new Error(
+                `resolved ${result.resolved}, failed ${result.failed.length}: `
+                + result.failed.map((f) => f.candidateId).join(", "),
+              );
+            }
+            return;
+          }
+          if (action.kind === "resolve") {
+            await adapter.resolve(sessionId, action.candidateId, {
+              as: action.as,
+              target: action.target,
+              reason: action.reason,
+            });
+          } else if (action.kind === "promote") {
+            await adapter.promote(sessionId, { candidates: [action.candidateId] });
+          } else if (action.kind === "promote-all") {
+            await adapter.promote(sessionId, { all: true });
+          }
+          overlay.update(await loadView(false));
+        },
+      });
+      return overlay;
+    }, {
+      overlay: true,
+      overlayOptions: { anchor: "center", width: "92%", maxHeight: "90%" },
+    });
+  }
+
   pi.registerCommand("maestro-session", {
     description: "Open the canonical Workflow Session control center",
     async handler(_args, ctx) { await openSessionOverlay(ctx); },
+  });
+  pi.registerCommand("maestro-knowledge", {
+    description: "Open the Knowledge center — review session candidates, reconciliation matches, and corpus health",
+    async handler(args, ctx) { await openKnowledgeOverlay(ctx, args); },
   });
   pi.registerCommand("maestro-todo", {
     description: "Open the shared root and teammate Todo center",

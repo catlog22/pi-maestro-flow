@@ -1,4 +1,4 @@
-import { type Component, type Focusable, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Key, type Component, type Focusable, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   type WorkflowRunView,
   type WorkflowViewModel,
@@ -48,7 +48,7 @@ export class SessionOverlay implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.pending) return;
-    if (data === "\x1b") {
+    if (matchesKey(data, Key.escape)) {
       if (this.mode === "confirm") {
         this.mode = "detail";
         this.confirmAction = undefined;
@@ -66,12 +66,12 @@ export class SessionOverlay implements Component, Focusable {
       return;
     }
 
-    if (data === "\x1b[A" || data === "k") {
+    if (matchesKey(data, Key.up) || matchesKey(data, "k")) {
       this.selected = wrapIndex(this.selected - 1, this.view.runs.length);
       this.params.requestRender();
       return;
     }
-    if (data === "\x1b[B" || data === "j") {
+    if (matchesKey(data, Key.down) || matchesKey(data, "j")) {
       this.selected = wrapIndex(this.selected + 1, this.view.runs.length);
       this.params.requestRender();
       return;
@@ -134,6 +134,16 @@ export class SessionOverlay implements Component, Focusable {
       if (run.blockedBy) rows.push(fitLine(`Blocked by: ${run.blockedBy}`, inner));
       if (run.nextAction) rows.push(fitLine(`» Next: ${run.nextAction}`, inner));
     }
+    const knowledge = this.view.knowledge;
+    if (knowledge) {
+      rows.push(rule(inner));
+      const review = knowledge.reviewRequired > 0 ? ` · ${fg("33", `${knowledge.reviewRequired} review`)}` : "";
+      rows.push(fitLine(
+        `Knowledge: ${knowledge.pendingCandidates} pending${review} · consumed ${knowledge.consumed} · `
+        + `validated ${knowledge.validated} · cited ${knowledge.cited} · contradicted ${knowledge.contradicted}`,
+        inner,
+      ));
+    }
     if (this.status) rows.push(fitLine(this.status, inner));
     rows.push(fitSegments(inner, this.controlSegments("Esc back")));
     return frame(rows, width);
@@ -194,18 +204,18 @@ export class SessionOverlay implements Component, Focusable {
 }
 
 function actionForInput(data: string): SessionOverlayAction | undefined {
-  if (data === "p") return "pause";
-  if (data === "r") return "resume";
-  if (data === "d") return "decision";
-  if (data === "b") return "brief";
-  if (data === "c") return "check";
-  if (data === "n") return "next";
-  if (data === "D") return "done";
+  if (matchesKey(data, "p")) return "pause";
+  if (matchesKey(data, "r")) return "resume";
+  if (matchesKey(data, "d")) return "decision";
+  if (matchesKey(data, "b")) return "brief";
+  if (matchesKey(data, "c")) return "check";
+  if (matchesKey(data, "n")) return "next";
+  if (matchesKey(data, Key.shift("d"))) return "done";
   return undefined;
 }
 
 function isEnter(data: string): boolean {
-  return data === "\r" || data === "\n";
+  return matchesKey(data, Key.enter);
 }
 
 function wrapIndex(index: number, length: number): number {
@@ -234,6 +244,11 @@ function fitLine(value: string, width: number): string {
 
 function rule(width: number): string {
   return "─".repeat(Math.max(1, width));
+}
+
+function fg(code: string, text: string): string {
+  if (!code) return text;
+  return `\x1b[${code}m${text}\x1b[0m`;
 }
 
 function frame(rows: readonly string[], width: number): string[] {
