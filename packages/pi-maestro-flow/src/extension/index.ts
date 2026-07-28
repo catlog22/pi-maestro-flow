@@ -678,8 +678,8 @@ Only request completion after all work is done; the extension verifies it indepe
 
 - create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name: "maestro-execute", role: "primary", args: "..." }] }
 - create (batch — lay out a whole plan in ONE call): { action: "create", tasks: [{ subject: "Step 1", context: "..." }, { subject: "Step 2", blockedBy: ["#0"] }, { subject: "Step 3", blockedBy: ["#1"] }] }
-- update: { action: "update", id: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", status: "completed", summary: "..." }
-- clear context/skills: { action: "update", id: "...", context: "", skills: [] }
+- update: { action: "update", id: "...", updateFields: ["status", "summary"], status: "completed", summary: "..." }
+- clear context/skills: { action: "update", id: "...", updateFields: ["context", "skills"], context: "", skills: [] }
 - list: { action: "list", filter: { status: "pending", memberId: "self|root|correlation-id|unique-id-prefix|label|@label|label#id-prefix" } }
 - get: { action: "get", id: "..." }
 - delete: { action: "delete", id: "..." }
@@ -691,7 +691,7 @@ Rules:
 - subject is the title; description is the detail — do not swap. Set summary on completion; the next action consumes prior summaries.
 - One in_progress task at a time in the root session.
 - Skill binding requires exactly one primary; guard/support are optional. Skill file changes after activation mark the binding stale — re-activate.
-- In update: omitted fields are preserved, null clears, empty array replaces.`,
+- In update: list changed fields in updateFields. Unlisted fields are preserved; empty strings or arrays clear fields that support clearing.`,
 
     promptSnippet: "Lay out a whole multi-step plan in one batch create (≥3 steps), then drive it step by step with resolved context and optional skill guidance.",
     promptGuidelines: [

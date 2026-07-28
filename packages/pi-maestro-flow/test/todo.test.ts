@@ -119,6 +119,96 @@ test("todo create/update preserves, replaces, and clears context and skills", as
   }
 });
 
+test("todo updateFields ignores materialized defaults and applies only selected fields", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-todo-update-fields-"));
+  const loader = new TodoSkillLoader({
+    cwd: root,
+    agentDir: join(root, "agent"),
+    resourceLoader: { async reload() {}, getSkills: () => ({ skills: [], diagnostics: [] }) },
+  });
+  const todoContext = startTodo(root, loader);
+  const ctx = makeExtensionContext();
+
+  try {
+    const created = await executeTodo({
+      action: "create",
+      subject: "Keep title",
+      description: "Keep description",
+      context: "Keep context",
+      skills: [{ name: "demo", role: "primary" }],
+    }, ctx);
+    const id = (created.details as { tasks: Array<{ id: string }> }).tasks[0].id;
+
+    await executeTodo({ action: "update", id, subject: "  Keep title  " }, ctx);
+    assert.equal(getVisibleTasks()[0].subject, "  Keep title  ");
+
+    await executeTodo({
+      action: "update",
+      id,
+      updateFields: ["status", "summary"],
+      subject: "",
+      description: "",
+      status: "completed",
+      blockedBy: [],
+      context: "",
+      skills: [],
+      summary: "Finished",
+      assignee: "",
+      goalId: "",
+    }, ctx);
+
+    let task = getVisibleTasks()[0];
+    assert.equal(task.subject, "  Keep title  ");
+    assert.equal(task.description, "Keep description");
+    assert.equal(task.context, "Keep context");
+    assert.deepEqual(task.skills, [{ name: "demo", role: "primary" }]);
+    assert.equal(task.status, "completed");
+    assert.equal(task.summary, "Finished");
+
+    await executeTodo({
+      action: "update",
+      id,
+      updateFields: ["context", "skills"],
+      subject: "",
+      description: "",
+      status: "pending",
+      blockedBy: [],
+      context: "",
+      skills: [],
+      summary: "",
+      assignee: "",
+      goalId: "",
+    }, ctx);
+
+    task = getVisibleTasks()[0];
+    assert.equal(task.subject, "  Keep title  ");
+    assert.equal(task.status, "completed");
+    assert.equal(task.context, undefined);
+    assert.deepEqual(task.skills, []);
+
+    const rejected = await executeTodo({
+      action: "update",
+      id,
+      updateFields: ["subject"],
+      subject: "   ",
+    }, ctx);
+    assert.equal(rejected.isError, true);
+    assert.match((rejected.content[0] as { text: string }).text, /subject cannot be empty/);
+    assert.equal(getVisibleTasks()[0].subject, "  Keep title  ");
+
+    const missingValue = await executeTodo({
+      action: "update",
+      id,
+      updateFields: ["summary"],
+    }, ctx);
+    assert.equal(missingValue.isError, true);
+    assert.match((missingValue.content[0] as { text: string }).text, /summary is required when listed in updateFields/);
+  } finally {
+    onSessionShutdown(todoContext);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Todo creation and reload preserve the approved Plan handoff binding", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-handoff-"));
   const loader = new TodoSkillLoader({
@@ -753,6 +843,7 @@ test("todo public schema exposes only the canonical context and skills contract"
   assert.equal(skills.type, "array", "public skills must remain a direct array schema for provider compatibility");
   assert.equal(skills.anyOf, undefined, "public skills must not use an array/null union");
   assert.ok(properties.summary);
+  assert.ok(properties.updateFields);
   assert.ok(properties.assignee);
   for (const legacy of ["skill", "injection", "load", "refs", "inject", "owner", "completion", "decision", "metadata"]) {
     assert.equal(properties[legacy], undefined, `legacy field ${legacy} should not be public`);

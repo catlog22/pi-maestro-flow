@@ -29,6 +29,7 @@ import {
   type TodoMirrorTaskSpec,
   type TodoTaskOrigin,
 } from "../session/types.ts";
+import type { TodoUpdateField } from "./todo-contract.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -89,6 +90,7 @@ export interface TodoParams {
   context?: string;
   skills?: TodoSkillBinding[] | null;
   summary?: string;
+  updateFields?: TodoUpdateField[];
   id?: string;
   assignee?: string;
   tasks?: TodoBatchSpec[];
@@ -630,43 +632,55 @@ async function handleUpdate(
 
   const before = cloneTodoTask(task);
   const draft = cloneTodoTask(task);
+  const updateFields = params.updateFields ? new Set(params.updateFields) : undefined;
+  const updates = (field: TodoUpdateField): boolean =>
+    updateFields ? updateFields.has(field) : params[field] !== undefined;
 
-  if (params.subject !== undefined) draft.subject = params.subject;
-  if (params.description !== undefined) draft.description = params.description;
-  if (params.summary !== undefined) draft.summary = params.summary;
-  if (params.goalId !== undefined) {
+  if (updateFields) {
+    for (const field of updateFields) {
+      if (params[field] === undefined) return err(`${field} is required when listed in updateFields`, "update");
+    }
+  }
+
+  if (updates("subject")) {
+    const subject = params.subject!;
+    if (!subject.trim()) return err("subject cannot be empty", "update");
+    draft.subject = subject;
+  }
+  if (updates("description")) draft.description = params.description;
+  if (updates("summary")) draft.summary = params.summary;
+  if (updates("goalId")) {
     if (params.goalId === "") delete draft.goalId;
     else draft.goalId = params.goalId;
   }
 
-  if (params.assignee !== undefined) {
-    const assignee = resolveAssignee(params.assignee, actor);
+  if (updates("assignee")) {
+    const assignee = resolveAssignee(params.assignee!, actor);
     if ("error" in assignee) return err(assignee.error, "update");
     draft.assignee = assignee.actor;
   }
 
-  if (params.context !== undefined) {
+  if (updates("context")) {
     if (params.context === "") delete draft.context;
     else draft.context = params.context;
     draft.skillActivation = undefined;
   }
 
-  if (params.skills !== undefined) {
+  if (updates("skills")) {
     draft.skills = params.skills ?? [];
     draft.skillActivation = undefined;
   }
 
-  if (params.blockedBy !== undefined) {
-    const blockerResolution = resolveBlockedBy(draft.id, params.blockedBy);
+  if (updates("blockedBy")) {
+    const blockerResolution = resolveBlockedBy(draft.id, params.blockedBy!);
     if (blockerResolution.error) return err(blockerResolution.error, "update");
     draft.blockedBy = blockerResolution.blockedBy;
   }
 
-  if (params.status !== undefined) draft.status = params.status;
+  if (updates("status")) draft.status = params.status!;
   if (
-    params.status === "pending"
-    || params.status === "blocked"
-    || (params.status === undefined && params.blockedBy !== undefined)
+    (updates("status") && (params.status === "pending" || params.status === "blocked"))
+    || (!updates("status") && updates("blockedBy"))
   ) {
     draft.status = deriveDependencyStatus(draft.blockedBy);
   }

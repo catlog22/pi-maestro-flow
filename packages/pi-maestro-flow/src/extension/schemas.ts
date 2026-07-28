@@ -6,6 +6,7 @@
  */
 
 import { Type } from "typebox";
+import { TODO_UPDATE_FIELDS } from "../tools/todo-contract.ts";
 
 function StringEnum<T extends string[]>(values: [...T]) {
   return Type.Unsafe<T[number]>({
@@ -241,6 +242,12 @@ export const TodoToolParams = Type.Object({
   ),
   summary: Type.Optional(
     Type.String({ description: "Short completion summary carried into later todo steps" }),
+  ),
+  updateFields: Type.Optional(
+    Type.Array(
+      StringEnum([...TODO_UPDATE_FIELDS]),
+      { description: "Fields to modify during update. When present, other top-level values are ignored; omit for legacy presence-based updates", uniqueItems: true },
+    ),
   ),
   assignee: Type.Optional(
     Type.String({ description: "Assignee selector: self, root, a known teammate id or unique id prefix, label, @label, or label#id-prefix" }),
