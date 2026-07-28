@@ -117,9 +117,10 @@ function normalizePlanModeStatus(value: string | undefined): PlanModeStatus {
 }
 
 function normalizeApprovalMode(value: string | undefined, planMode: PlanModeStatus): string {
-	if (planMode === "PLAN" || planMode === "READY") return "plan";
 	const normalized = value?.replace(/^APPROVAL\s+/i, "").trim();
+	// YOLO is safety-relevant and inherits into Plan mode; it wins over the plan indicator.
 	if (/^(?:YOLO|bypassPermissions)$/i.test(normalized ?? "")) return "YOLO";
+	if (planMode === "PLAN" || planMode === "READY") return "plan";
 	return normalized && normalized !== "plan" ? normalized : "default";
 }
 

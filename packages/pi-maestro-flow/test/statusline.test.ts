@@ -442,7 +442,7 @@ test("statusline links approval mode with ACT, PLAN and READY using width-aware 
 	  ["ACT", "APPROVAL dontAsk", "[A] ACT · APPROVAL dontAsk", "ACT/dontAsk", "A/N"],
 	  ["ACT", "APPROVAL YOLO", "[A] ACT · YOLO", "ACT/YOLO", "A/Y"],
       ["PLAN", "APPROVAL default", "[P] PLAN · APPROVAL plan", "PLAN/plan", "P/P"],
-      ["READY", "APPROVAL bypassPermissions", "[P] READY · APPROVAL plan", "READY/plan", "R/P"],
+      ["READY", "APPROVAL bypassPermissions", "[P] READY · YOLO", "READY/YOLO", "R/Y"],
     ] as const) {
       harness.statuses.set("mode", status);
       harness.statuses.set("approval-mode", approval);

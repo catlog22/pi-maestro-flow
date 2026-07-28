@@ -1721,16 +1721,17 @@ When NOT to use:
 }
 
 /**
- * Plan owns the mode indicator while it is active. Keeping a second
- * `APPROVAL plan` indicator wastes narrow terminal space and can become stale
- * when Plan is toggled through a different shortcut.
+ * Plan owns the mode indicator while it is active, so non-YOLO approval modes
+ * are hidden to avoid a stale second indicator. YOLO is the exception: it is
+ * safety-relevant and must stay visible, inherited unchanged into Plan mode.
  */
 export function approvalModeStatusValue(
   planMode: boolean,
   approvalMode: PermissionMode,
 ): string | undefined {
+  if (approvalMode === "bypassPermissions") return "YOLO";
   if (planMode) return undefined;
-  return approvalMode === "bypassPermissions" ? "YOLO" : `APPROVAL ${approvalMode}`;
+  return `APPROVAL ${approvalMode}`;
 }
 
 function syncApprovalModeStatus(

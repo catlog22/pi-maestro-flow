@@ -33,3 +33,7 @@ test("plan mode owns the mode indicator without a duplicate approval status", ()
 test("bypassPermissions is presented as the explicit YOLO mode", () => {
   assert.equal(approvalModeStatusValue(false, "bypassPermissions"), "YOLO");
 });
+
+test("YOLO is safety-relevant and inherits into plan mode", () => {
+  assert.equal(approvalModeStatusValue(true, "bypassPermissions"), "YOLO");
+});
