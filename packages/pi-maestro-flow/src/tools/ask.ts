@@ -483,7 +483,7 @@ async function showAskWizard(
           ? ["Esc 返回", "Enter 保存"]
           : q.multiSelect
             ? ["Esc 取消", "Enter/→/Tab 下一步", "↑↓ 移动", "空格 切换", "d 附加说明"]
-            : ["Esc 取消", "Enter/→/Tab 下一步", "↑↓ 移动", "1-9 选择", "d 附加说明"])));
+            : ["Esc 取消", "Enter 选择/确认", "→/Tab 下一步", "↑↓ 移动", "1-9 选择", "d 附加说明"])));
         return lines.slice(0, 10);
       }
 
@@ -674,7 +674,7 @@ async function showAskWizard(
         footer.push(truncateToWidth(theme.fg("dim", actionFooter(width, q.multiSelect
           ? ["Esc 取消", "Enter/→/Tab 下一步", "↑↓ 移动", "空格 切换", "d 附加说明", "PgDn/Shift+↓ 滚动"]
           : options.length > 0
-            ? ["Esc 取消", "Enter/→/Tab 下一步", "↑↓ 移动", "1-9 选择", "d 附加说明", "PgDn/Shift+↓ 滚动"]
+            ? ["Esc 取消", "Enter 选择/确认", "→/Tab 下一步", "↑↓ 移动", "1-9 选择", "d 附加说明", "PgDn/Shift+↓ 滚动"]
             : ["Esc 返回", "Enter 保存"])), width, "…"));
 
         const bodyBudget = clampInt(termRows() - header.length - footer.length - 9, 5, 18);
@@ -837,7 +837,7 @@ async function showAskWizard(
         }
       }
 
-      function handleChoice(data: string): void {
+      function handleChoice(data: string, advanceOnSelect = false): void {
         const q = currentQuestion();
         const options = optionsList[step];
         const noneIndex = noneOptionIndex(step);
@@ -917,6 +917,7 @@ async function showAskWizard(
             feedback = "";
             tui.requestRender();
           } else {
+            const wasSelected = selected[step].has(cursor);
             selected[step].clear();
             selected[step].add(cursor);
             feedback = "";
@@ -928,8 +929,10 @@ async function showAskWizard(
               typing = true;
               input = optionDetails[step][cursor];
               tui.requestRender();
-            } else {
+            } else if (wasSelected || advanceOnSelect) {
               advance();
+            } else {
+              tui.requestRender();
             }
           }
           return;
@@ -995,8 +998,12 @@ async function showAskWizard(
           if (step > 0) enterStep(step - 1);
           return;
         }
-        if (value === "\x1bOM" || value === "\x1b[C" || value === "\x1bOC" || value === "\t") {
+        if (value === "\x1bOM") {
           handleChoice("\r");
+          return;
+        }
+        if (value === "\x1b[C" || value === "\x1bOC" || value === "\t") {
+          handleChoice("\r", true);
           return;
         }
         handleChoice(value);

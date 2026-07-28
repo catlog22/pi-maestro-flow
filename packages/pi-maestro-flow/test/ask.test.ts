@@ -70,6 +70,7 @@ test("single select uses color-block selection, numeric shortcuts, default none,
   assert.equal(harness.handler("1")?.consume, true); // Select Preset directly.
   assert.match(harness.component.render(80).join("\n"), /Preset  已选/);
   assert.match(harness.component.render(80).join("\n"), /附加说明（按 d 添加）/);
+  assert.match(harness.component.render(80).join("\n"), /Enter 选择\/确认/);
   harness.handler("d");
   harness.handler("Prefer the nearest region");
   harness.handler("\r"); // Save details without replacing the option.
@@ -81,6 +82,78 @@ test("single select uses color-block selection, numeric shortcuts, default none,
   assert.equal(result.details.answers[0].text, undefined);
   assert.equal(harness.cleared, true);
   assert.equal(harness.unsubscribed, true);
+});
+
+test("single select Enter allows details before advancing and after back navigation", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [
+      { question: "First question?", options: [{ label: "A" }, { label: "B" }] },
+      { question: "Second question?", options: [{ label: "C" }, { label: "D" }] },
+    ],
+  }, harness.ctx);
+
+  harness.handler?.("\r"); // Select A without advancing.
+  let rendered = harness.component?.render(80).join("\n") ?? "";
+  assert.match(rendered, /First question\?/);
+  assert.match(rendered, /A  已选/);
+
+  harness.handler?.("d");
+  harness.handler?.("initial");
+  harness.handler?.("\r");
+  harness.handler?.("\r"); // Confirm A and advance.
+  assert.match(harness.component?.render(80).join("\n") ?? "", /Second question\?/);
+
+  harness.handler?.("\x1b[D"); // Return to the first question.
+  rendered = harness.component?.render(80).join("\n") ?? "";
+  assert.match(rendered, /First question\?/);
+  assert.match(rendered, /附加说明：initial/);
+
+  harness.handler?.("d");
+  harness.handler?.(" updated");
+  harness.handler?.("\r");
+  harness.handler?.("\r");
+  harness.handler?.("1");
+  harness.handler?.("\r");
+  harness.handler?.("\r");
+
+  const result = await pending;
+  assert.deepEqual(result.details.answers[0].selected, ["A"]);
+  assert.deepEqual(result.details.answers[0].details, { A: "initial updated" });
+  assert.deepEqual(result.details.answers[1].selected, ["C"]);
+});
+
+test("single select keypad Enter uses two-stage confirmation", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [{ question: "Choose one", options: [{ label: "A" }] }],
+  }, harness.ctx);
+
+  harness.handler?.("\x1bOM");
+  assert.match(harness.component?.render(80).join("\n") ?? "", /A  已选/);
+  harness.handler?.("\x1bOM");
+
+  const result = await pending;
+  assert.deepEqual(result.details.answers[0].selected, ["A"]);
+});
+
+test("single select right arrow and Tab keep direct progression", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [
+      { question: "First question?", options: [{ label: "A" }] },
+      { question: "Second question?", options: [{ label: "B" }] },
+    ],
+  }, harness.ctx);
+
+  harness.handler?.("\x1b[C");
+  assert.match(harness.component?.render(80).join("\n") ?? "", /Second question\?/);
+  harness.handler?.("\t");
+  assert.match(harness.component?.render(80).join("\n") ?? "", /核对答案/);
+  harness.handler?.("\r");
+
+  const result = await pending;
+  assert.deepEqual(result.details.answers.map((answer) => answer.selected), [["A"], ["B"]]);
 });
 
 test("single select none-of-the-above captures a custom answer", async () => {
