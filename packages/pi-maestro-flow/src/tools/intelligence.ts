@@ -1,5 +1,4 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { registerApplyPatch } from "./apply-patch.ts";
 import { createBrowserTool } from "./browser-tool.ts";
 import { browserManager, type BrowserManagerLike } from "./browser/manager.ts";
 import { createLspTool } from "./lsp-tool.ts";
@@ -12,7 +11,6 @@ import { createSourceCheckTool } from "./web-access/source-check-tool.ts";
 import { registerCuratorCommands } from "./web-access/curator.ts";
 
 export function registerIntelligenceTools(pi: ExtensionAPI): void {
-  registerApplyPatch(pi);
   pi.registerTool(createLspTool());
   registerLspAutoDiagnostics(pi);
   pi.registerTool(createBrowserTool());

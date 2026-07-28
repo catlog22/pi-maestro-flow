@@ -1,10 +1,5 @@
 {
   "skills": [
     "../packages/pi-maestro-flow/.pi/skills"
-  ],
-  "platformTools": {
-    "applyPatch": {
-      "enabled": true
-    }
-  }
+  ]
 }

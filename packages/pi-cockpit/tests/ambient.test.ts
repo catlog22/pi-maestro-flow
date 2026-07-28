@@ -41,10 +41,10 @@ test("workingMessage preserves the host default when no foreground tool runs", (
 
 test("workingMessage shows only the active foreground tool name", () => {
 	assert.equal(workingMessage(state({
-		activeTool: "apply_patch",
+		activeTool: "edit",
 		todos: [todo({ status: "in_progress", subject: "ship the widget" })],
 		agents: [agent({ role: "reviewer", activeTool: "grep" })],
-	})), "apply_patch");
+	})), "edit");
 });
 
 test("title falls back to the bare workspace when nothing is happening", () => {

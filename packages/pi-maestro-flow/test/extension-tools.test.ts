@@ -39,7 +39,7 @@ test("workspace extension path loads before runtime actions are bound", () => {
     );
     if (result.errors.length > 0) throw new Error(result.errors.map((entry) => entry.error).join("\\n"));
     if (result.extensions.length !== 1) throw new Error("workspace extension did not load exactly once");
-    if (!result.extensions[0].tools.has("apply_patch")) throw new Error("apply_patch was not registered");
+    if (!result.extensions[0].tools.has("lsp")) throw new Error("lsp was not registered");
   `;
   const result = spawnSync(
     process.execPath,

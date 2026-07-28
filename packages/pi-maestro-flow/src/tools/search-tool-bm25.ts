@@ -9,7 +9,6 @@ import {
 } from "./tool-discovery.ts";
 
 const DEFAULT_LIMIT = 8;
-const ACTIVATION_GATED_TOOLS = new Set(["apply_patch"]);
 
 export const SearchToolBm25Params = Type.Object({
   query: Type.String({ minLength: 1, description: "Natural-language tool search query" }),
@@ -53,7 +52,7 @@ export function createSearchToolBm25(pi: Pick<ExtensionAPI, "getAllTools" | "get
         const activeSet = new Set(active);
         const activated = ranked
           .map((result) => result.tool.name)
-          .filter((name) => !activeSet.has(name) && !ACTIVATION_GATED_TOOLS.has(name));
+          .filter((name) => !activeSet.has(name));
         if (activated.length > 0) pi.setActiveTools([...active, ...activated]);
 
         const details: SearchToolBm25Details = {

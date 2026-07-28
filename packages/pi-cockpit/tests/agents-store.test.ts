@@ -55,7 +55,7 @@ test("progress message projects teammate tools, tokens, status and last message"
 		lastMessage: "implementing footer",
 		recentTools: [
 			{ name: "read", status: "completed" },
-			{ name: "apply_patch", status: "running" },
+			{ name: "edit", status: "running" },
 		],
 		toolCount: 4,
 		tokens: 1200,
@@ -65,7 +65,7 @@ test("progress message projects teammate tools, tokens, status and last message"
 	});
 	const row = s.snapshot()[0];
 	assert.equal(row.tail, "implementing footer");
-	assert.equal(row.activeTool, "apply_patch (running)");
+	assert.equal(row.activeTool, "edit (running)");
 	assert.equal(row.toolCount, 4);
 	assert.equal(row.tokens, 1200);
 	assert.equal(row.inputTokens, 1_000);

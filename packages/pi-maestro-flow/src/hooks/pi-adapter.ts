@@ -386,8 +386,8 @@ function sessionStartSource(reason: string): "startup" | "resume" | "clear" | "c
 
 function toolMatchValues(toolName: string): string[] {
   if (toolName === "bash") return ["Bash", "bash"];
-  if (toolName === "edit") return ["apply_patch", "Edit", "edit"];
-  if (toolName === "write") return ["apply_patch", "Write", "write"];
+  if (toolName === "edit") return ["Edit", "edit"];
+  if (toolName === "write") return ["Write", "write"];
   return [toolName];
 }
 

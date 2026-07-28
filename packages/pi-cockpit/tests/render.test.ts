@@ -120,13 +120,13 @@ test("formatAgentMetric abbreviates values above two digits", () => {
 
 test("renderAgents list includes teammate tool and input/output metrics", () => {
 	const line = renderAgents([agent({
-		activeTool: "apply_patch (running)",
+		activeTool: "edit (running)",
 		toolCount: 3,
 		tokens: 1_290,
 		inputTokens: 1_234,
 		outputTokens: 56,
 	})], "list", 120, theme, utils, opts)[0];
-	assert.match(line, /tool apply_patch \(running\)/);
+	assert.match(line, /tool edit \(running\)/);
 	assert.match(line, /3 tools/);
 	assert.match(line, /in 1.2k · out 56/);
 	assert.doesNotMatch(line, /1290 tok/);

@@ -72,14 +72,14 @@ test("matches regex groups and skips async or non-command handlers", () => {
   const config = validateCodexHooks({
     hooks: {
       PreToolUse: [
-        { matcher: "Bash|apply_patch", hooks: [{ type: "command", command: "echo sync" }] },
+        { matcher: "Bash|Edit", hooks: [{ type: "command", command: "echo sync" }] },
         { matcher: "*", hooks: [{ type: "command", command: "echo async", async: true }] },
         { hooks: [{ type: "prompt", prompt: "ignored" }] },
       ],
     },
   });
   assert.deepEqual(
-    getMatchingCommandHooks(config, "PreToolUse", ["apply_patch", "Edit"]).map((hook) => hook.command),
+    getMatchingCommandHooks(config, "PreToolUse", ["Edit"]).map((hook) => hook.command),
     ["echo sync"],
   );
 });
