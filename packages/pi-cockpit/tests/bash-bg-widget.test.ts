@@ -31,7 +31,7 @@ function running(overrides: Partial<BashBgJob> = {}): BashBgJob {
 	};
 }
 
-test("summary shows active count, duration, command, latest output and detail shortcut", () => {
+test("summary shows only active count, duration and detail shortcut", () => {
 	const line = renderBashBgSummary(
 		[running({ id: "bg-2", startedAt: 4_000 }), running()],
 		160,
@@ -42,10 +42,10 @@ test("summary shows active count, duration, command, latest output and detail sh
 	assert.match(line, /BG/);
 	assert.match(line, /2 running/);
 	assert.match(line, /8s/);
-	assert.match(line, /bg-2/);
-	assert.match(line, /npm run dev/);
-	assert.match(line, /http:\/\/localhost:3000/);
 	assert.match(line, /Alt\+J details/);
+	assert.doesNotMatch(line, /bg-2/);
+	assert.doesNotMatch(line, /npm run dev/);
+	assert.doesNotMatch(line, /http:\/\/localhost:3000/);
 });
 
 test("summary distinguishes stopping jobs and hides terminal-only history", () => {
@@ -62,7 +62,7 @@ test("summary distinguishes stopping jobs and hides terminal-only history", () =
 	assert.deepEqual(renderBashBgSummary([terminal], 100, theme, utils, options), []);
 });
 
-test("summary is bounded for narrow widths and multiline commands", () => {
+test("summary is bounded for narrow widths and never exposes command details", () => {
 	for (const width of [1, 8, 16, 24, 40]) {
 		const lines = renderBashBgSummary([
 			running({
@@ -74,5 +74,6 @@ test("summary is bounded for narrow widths and multiline commands", () => {
 		assert.ok(utils.measure(lines[0]) <= width, `w=${width}: ${lines[0]}`);
 		assert.doesNotMatch(lines[0], /\n/);
 		assert.doesNotMatch(lines[0], /\u001b/);
+		assert.doesNotMatch(lines[0], /node -e|unsafe|很长/);
 	}
 });

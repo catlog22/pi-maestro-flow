@@ -277,11 +277,11 @@ test("extension statuses render on a dedicated line and duplicate thinking is om
 test("active bash_bg status renders left-aligned on line two", () => {
 	const lines = renderFooter(parts({
 		width: 100,
-		bashBgStatus: "⠴ · BG · 1 running · npm run dev · Alt+J details",
+		bashBgStatus: "⠴ · BG · 1 running · 8s · Alt+J details",
 	}));
 	assert.equal(lines.length, 2);
-	assert.equal(lines[1], "⠴ · BG · 1 running · npm run dev · Alt+J details");
-	assert.doesNotMatch(lines[0], /BG|npm run dev/);
+	assert.equal(lines[1], "⠴ · BG · 1 running · 8s · Alt+J details");
+	assert.doesNotMatch(lines[0], /BG|Alt\+J/);
 });
 
 test("bash_bg status is clipped to the footer width", () => {
