@@ -535,6 +535,97 @@ maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [-
   return bindPiPlatformToLifecycleCalls(result);
 }
 
+// ---------------------------------------------------------------------------
+// maestro delegate/explore CLI → teammate() tool rewriting
+// ---------------------------------------------------------------------------
+
+function parseDelegateOptions(optsStr) {
+  const opts = {};
+  const re = /--([\w][\w-]*)(?:\s+((?!--)[\w./${}"'\\:@<>-]+(?:\s+(?!--)[\w./${}"'\\:@<>-]+)*))?/g;
+  let m;
+  while ((m = re.exec(optsStr)) !== null) {
+    const val = m[2]?.trim().replace(/["'`\\]+$/, '') ?? 'true';
+    opts[m[1]] = val;
+  }
+  return opts;
+}
+
+function delegateModeToTaskType(mode) {
+  return mode === 'write' ? 'development' : 'analysis';
+}
+
+function formatTeammateCall(prompt, opts) {
+  const parts = ['agent: "delegate"'];
+  parts.push(`taskType: "${delegateModeToTaskType(opts['mode'])}"`);
+  const cleanPrompt = prompt.trim();
+  if (cleanPrompt && cleanPrompt !== '<PROMPT>') {
+    const escaped = cleanPrompt.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+    const truncated = escaped.length > 120 ? escaped.slice(0, 120) + '…' : escaped;
+    parts.push(`task: "${truncated}"`);
+  } else {
+    parts.push('task: "<PROMPT>"');
+  }
+  if (opts['rule']) parts.push(`prompt: "${opts['rule']}"`);
+  if (opts['cd']) parts.push(`cwd: "${opts['cd']}"`);
+  if (opts['to']) parts.push(`/* --to ${opts['to']}: set model via model-availability */`);
+  if (opts['resume']) parts.push('/* --resume: no teammate equivalent; re-dispatch or use resident agent */');
+  if (opts['id']) parts.push(`name: "${opts['id']}"`);
+  return `teammate({ ${parts.join(', ')} })`;
+}
+
+function rewriteDelegateCallsPi(body) {
+  let out = body;
+
+  // Tier 0: escaped-quote delegate calls — Bash("maestro delegate \\\"...\\\" ...")
+  out = out.replace(
+    /maestro delegate\s+\\+"([\s\S]*?)\\+"((?:\s+--[\w-]+(?:\s+(?!--)[\S]+)?)*)/g,
+    (_full, prompt, optsStr) => formatTeammateCall(prompt, parseDelegateOptions(optsStr)),
+  );
+
+  // Tier 1: maestro delegate "PROMPT" [options] — standard quoted prompt
+  out = out.replace(
+    /maestro delegate\s+(["'`])([\s\S]*?)\1((?:\s+--[\w-]+(?:\s+(?!--)[\S]+)?)*)/g,
+    (_full, _q, prompt, optsStr) => formatTeammateCall(prompt, parseDelegateOptions(optsStr)),
+  );
+
+  // Tier 2: maestro explore "PROMPT" [options]
+  out = out.replace(
+    /maestro explore\s+(["'`])([\s\S]*?)\1((?:\s+--[\w-]+(?:\s+(?!--)[\S]+)?)*)/g,
+    (_full, _q, prompt, _optsStr) => {
+      const escaped = prompt.trim().replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n');
+      return `teammate({ agent: "explorer", task: "${escaped}", taskType: "explore" })`;
+    },
+  );
+
+  // Tier 3: prose / table inline — maestro delegate --mode analysis (no quoted prompt)
+  out = out.replace(
+    /maestro delegate((?:\s+--[\w-]+(?:\s+[\w./${}"'<>-]+)?)*)/g,
+    (_full, optsStr) => {
+      if (!optsStr.trim()) return 'teammate';
+      const opts = parseDelegateOptions(optsStr);
+      const parts = [`taskType: "${delegateModeToTaskType(opts['mode'])}"`];
+      if (opts['rule']) parts.push(`prompt: "${opts['rule']}"`);
+      if (opts['to']) parts.push(`/* --to ${opts['to']} */`);
+      if (opts['id']) parts.push(`name: "${opts['id']}"`);
+      return `teammate({ ${parts.join(', ')} })`;
+    },
+  );
+
+  // Tier 4: bare maestro explore prose reference
+  out = out.replace(/\bmaestro explore\b/g, 'teammate({ agent: "explorer" })');
+
+  // Tier 5: run_in_background → background
+  out = out.replace(/\brun_in_background\s*:\s*true/g, 'background: true');
+  out = out.replace(/\brun_in_background\s*:\s*false/g, 'background: false');
+
+  // Tier 6: section headers / prose mentions
+  out = out.replace(/Execute via maestro delegate (\w+)/gi, 'Execute via teammate ($1)');
+  out = out.replace(/via maestro delegate/g, 'via teammate');
+  out = out.replace(/maestro delegate message/g, 'teammate-send');
+
+  return out;
+}
+
 export function transformBody(body, filePath) {
   let result = body;
 
@@ -550,6 +641,9 @@ export function transformBody(body, filePath) {
   result = result.replace(/\bAgent\(\s*\{/g, 'teammate({');
   result = result.replace(/\bspawn(?:ing)?\s+(?:an?\s+)?Agent\b/gi, 'dispatch via teammate');
   result = result.replace(/\bAgent\(\s*name:/g, 'teammate(name:');
+
+  // 5b. maestro delegate/explore CLI → teammate() tool calls
+  result = rewriteDelegateCallsPi(result);
 
   // 6. AskUserQuestion → ask the user
   result = result.replace(/\bAskUserQuestion\b(?!\s*\()/g, 'user prompt');
