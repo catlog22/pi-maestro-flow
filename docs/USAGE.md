@@ -1156,8 +1156,8 @@ maestro load --type spec --category coding
 
 ```bash
 # 添加
-/spec-add coding "使用 Result<T,E>" "服务方法必须返回 Result<T,AppError>" --keywords error-handling
-/manage-knowhow-capture
+/maestro-spec "coding: 使用 Result<T,E> — 服务方法必须返回 Result<T,AppError>"
+/maestro-knowhow
 
 # 演化
 maestro spec supersede SPEC-042 --by SPEC-089     # 替代旧规则
@@ -1215,7 +1215,7 @@ maestro search "旧模式" --include-deprecated       # 搜索全部
 ```
 1. /skill:odyssey-debug        → 考古 → 诊断 → 修复 → 泛化
 2. /skill:quality-test         → 验证修复
-3. /manage-knowhow-capture     → 持久化经验
+3. /maestro-knowhow            → 持久化经验
 ```
 
 ### 模式 5：多阶段 DAG 管线

@@ -98,7 +98,7 @@ On startup, trust the project when prompted. Type `/skill:maestro-help` to explo
 | Debug a complex bug | `/skill:odyssey-debug` |
 | Code review | `/skill:team-review` or `teammate` + `prompt: "review"` |
 | Team coordination | `/skill:team-lifecycle-v4` |
-| Build knowledge base | `/skill:spec-add`, `/skill:manage-knowhow-capture` |
+| Build knowledge base | `/skill:maestro-spec`, `/skill:maestro-knowhow` |
 
 ---
 
@@ -300,8 +300,8 @@ maestro load --type spec --category coding
 ### Adding Knowledge
 
 ```bash
-/spec-add coding "Use Result<T,E>" "Service methods must return Result<T,AppError>, not throw" --keywords error-handling,result-type
-/manage-knowhow-capture
+/maestro-spec "coding: Use Result<T,E> — Service methods must return Result<T,AppError>, not throw"
+/maestro-knowhow
 /domain-add "Workspace" "Top-level organizational unit containing projects, members, settings"
 ```
 
@@ -359,7 +359,7 @@ maestro search "old pattern" --include-deprecated  # Search all
 ### Knowledge Management
 
 ```bash
-/skill:manage-knowledge-audit --scope all --level P0 --interactive
+/skill:maestro-knowledge audit --scope all --level P0 --interactive
 /skill:manage-codebase-rebuild --force
 /skill:manage-drift-realign --scope all --since HEAD~10
 /skill:manage-harvest SESSION-123 --to spec --auto
@@ -541,8 +541,8 @@ Use: `prompt: "security-audit"` with appropriate `promptArgs`.
 ```
 1. /skill:odyssey-debug        → Archaeology → Diagnosis → Fix → Generalize
 2. /skill:quality-test         → Verify fix
-3. /skill:manage-knowhow-capture → Persist lessons
-4. /skill:manage-knowledge-audit → Prevent knowledge rot
+3. /skill:maestro-knowhow       → Persist lessons
+4. /skill:maestro-knowledge audit → Prevent knowledge rot
 ```
 
 ### Pattern 5: Team-Driven Development
@@ -813,8 +813,8 @@ pi list
 # ─── Knowledge ───
 maestro search "query" --code
 maestro load --type spec --category coding
-/spec-add coding "title" "content" --keywords k1,k2
-/manage-knowhow-capture
+/maestro-spec "coding: title"
+/maestro-knowhow
 
 # ─── Exploration ───
 teammate({ agent: "explorer", taskType: "explore", task: "FIND: ...\nSCOPE: src/..." })

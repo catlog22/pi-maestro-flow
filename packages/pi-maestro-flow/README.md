@@ -12,10 +12,10 @@ Pi extension providing Maestro's workflow tools — the top-level entry of the t
 | **Goal tool** | 1 | `goal` (`get` / `create`; user-owned lifecycle commands) |
 | **Shell tool** | 1 | `bash_bg` (adaptive foreground/background execution, new in v0.6.0) |
 | **Intelligence tools** | 3 | `lsp`, `browser`, `search_tool_bm25` |
-| **Workflow docs** | 82 | Installed from `maestro-flow` to `~/.maestro/workflows` |
+| **Workflow docs** | 87 | Installed from `maestro-flow` to `~/.maestro/workflows` |
 | **Templates** | 23 | Bundled template files |
 
-Skills (113) and agents (29) are in the project root `.pi/` directory, not in this package.
+Skills (63) and agents (25) are in the project root `.pi/` directory, not in this package.
 
 ## Prerequisites
 
@@ -64,17 +64,15 @@ reserved for coordinator chains that require structured decision or decompositio
 
 ## Skills Categories
 
-**Workflow orchestration:** `maestro-analyze`, `maestro-plan`, `maestro-execute`, `maestro-ralph-v2`, `maestro-roadmap`
+**Workflow orchestration:** `maestro`, `maestro-next`, `maestro-companion`, `maestro-ralph`, `maestro-fork`, `maestro-guard`, `maestro-session-seal`, `maestro-odyssey`, `maestro-merge`, `maestro-overlay`, `maestro-init`, `maestro-update`, `maestro-help`, `maestro-impeccable`
 
-**Quality & review:** `quality-review`, `quality-test`, `quality-refactor`, `security-audit`
+**Knowledge management:** `maestro-spec`, `maestro-knowhow`, `maestro-knowledge`, `maestro-learn`, `maestro-issue`, `codify-to-knowhow`
 
-**Odyssey workflows:** `odyssey-planex`, `odyssey-debug`, `odyssey-review-test-fix`, `odyssey-ui`
+**Team orchestration:** `team-lifecycle-v4`, `team-coordinate`, `team-executor`, `team-review`, `team-quality-assurance`, `team-testing`, `team-swarm`, `team-adversarial-swarm`, `team-brainstorm`, `team-planex`, `team-roadmap-dev`, `team-frontend`, `team-frontend-debug`, `team-ui-polish`, `team-uidesign`, `team-designer`, `team-interactive-craft`, `team-motion-design`, `team-visual-a11y`, `team-ux-improve`, `team-arch-opt`, `team-perf-opt`, `team-tech-debt`, `team-ultra-analyze`, `team-issue`
 
-**Team orchestration:** `team-coordinator`, `team-executor`, `team-frontend`, `team-quality-assurance`
+**Academic writing:** `scholar-writing`, `scholar-review`, `scholar-experiment`, `scholar-thesis-docx`, `scholar-ideation`, `scholar-citation-verify`, `scholar-rebuttal-pro`, `scholar-publish`, `scholar-latex-organizer`, `scholar-anti-ai-writing`
 
-**Knowledge management:** `spec-add`, `spec-load`, `manage-knowhow-capture`, `manage-knowledge-audit`
-
-**Academic writing:** `scholar-writing`, `scholar-review`, `scholar-experiment`, `scholar-thesis-docx`
+**Skill tooling:** `skill-generator`, `skill-iter-tune`, `skill-simplify`, `skill-tuning`, `workflow-skill-designer`, `prompt-generator`, `delegation-check`, `insight-challenge`
 
 ## Tool Actions
 
@@ -435,7 +433,7 @@ Repository commands require review before first execution. Run `/hooks` to inspe
 
 pi-maestro-teammate (execution engine) and pi-cockpit (status UI)
 are dependencies since v0.6.1 and auto-register on postinstall.
-Skills (113) and agents (29) are in .pi/ at project root.
+Skills (63) and agents (25) are in .pi/ at project root.
 ```
 
 ## License

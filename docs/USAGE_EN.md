@@ -1156,8 +1156,8 @@ maestro load --type spec --category coding
 
 ```bash
 # Add
-/spec-add coding "Use Result<T,E>" "Service methods must return Result<T,AppError>" --keywords error-handling
-/manage-knowhow-capture
+/maestro-spec "coding: Use Result<T,E> — Service methods must return Result<T,AppError>"
+/maestro-knowhow
 
 # Evolve
 maestro spec supersede SPEC-042 --by SPEC-089     # Replace old rule
@@ -1215,7 +1215,7 @@ maestro search "old pattern" --include-deprecated  # Search all
 ```
 1. /skill:odyssey-debug        → Archaeology → Diagnosis → Fix → Generalize
 2. /skill:quality-test         → Verify fix
-3. /manage-knowhow-capture     → Persist lessons
+3. /maestro-knowhow            → Persist lessons
 ```
 
 ### Pattern 5: Multi-Stage DAG Pipeline
