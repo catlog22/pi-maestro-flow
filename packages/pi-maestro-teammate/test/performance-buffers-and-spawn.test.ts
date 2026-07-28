@@ -396,6 +396,16 @@ test("sleeping agent history has byte and count bounds while watch retains last 
   assert.match(watch, /sleeping/);
 });
 
+test("agent history compacts sparse output logs without throwing", () => {
+  const agent = activeAgent();
+  agent.outputLog = ["first", "second"];
+  agent.outputLog[10] = "latest";
+
+  retainBoundedAgentHistory(agent);
+
+  assert.deepEqual(agent.outputLog, ["first", "second", "latest"]);
+});
+
 test("transcript, decoder, stderr-adjacent stream limits are byte bounded", () => {
   const transcript: Array<{ role: string; content: string }> = [];
   for (let index = 0; index < EXECUTION_BUFFER_LIMITS.transcriptMessages + 20; index += 1) {

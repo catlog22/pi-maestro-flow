@@ -387,6 +387,7 @@ function logNeedsNoTrim(lines: readonly string[], lineLimit: number): boolean {
   if (lines.length > lineLimit) return false;
   let upperBound = 0;
   for (const line of lines) {
+    if (typeof line !== "string") return false;
     const lineUpperBound = line.length * 3;
     if (lineUpperBound > AGENT_BUFFER_LIMITS.logLineBytes) return false;
     upperBound += lineUpperBound;
@@ -427,7 +428,9 @@ function trimAgentBuffers(agent: ActiveAgent, sleeping = false): void {
   let logBytes = 0;
   const retainedLog: string[] = [];
   for (let index = agent.outputLog.length - 1; index >= 0 && retainedLog.length < lineLimit; index -= 1) {
-    const line = truncateUtf8Tail(agent.outputLog[index], AGENT_BUFFER_LIMITS.logLineBytes);
+    const existingLine = agent.outputLog[index];
+    if (typeof existingLine !== "string") continue;
+    const line = truncateUtf8Tail(existingLine, AGENT_BUFFER_LIMITS.logLineBytes);
     const lineBytes = Buffer.byteLength(line, "utf8");
     if (retainedLog.length > 0 && logBytes + lineBytes > AGENT_BUFFER_LIMITS.logBytes) break;
     retainedLog.push(line);
@@ -1863,6 +1866,7 @@ export default function registerTeammateExtension(
           const logStates = new Map<string, {
             loggedToolCount: number;
             streamingLineIdx: number;
+            streamingLineText: string | undefined;
             loggedToolLines: Map<number, number>;
             childStreamingLineIdx: number;
             childToolLines: Map<number, number>;
@@ -1919,6 +1923,7 @@ export default function registerTeammateExtension(
             const logState = logStates.get(logKey) ?? {
               loggedToolCount: 0,
               streamingLineIdx: -1,
+              streamingLineText: undefined,
               loggedToolLines: new Map<number, number>(),
               childStreamingLineIdx: -1,
               childToolLines: new Map<number, number>(),
@@ -1956,6 +1961,7 @@ export default function registerTeammateExtension(
                 logState.loggedToolLines.set(ti, at.parent);
                 logState.childToolLines.set(ti, at.own);
                 logState.streamingLineIdx = -1;
+                logState.streamingLineText = undefined;
                 logState.childStreamingLineIdx = -1;
               }
               for (let ti = 0; ti < data.recentTools.length; ti++) {
@@ -1968,9 +1974,14 @@ export default function registerTeammateExtension(
             if (data.lastMessage) {
               const lastLine = data.lastMessage.split("\n").pop()?.trim();
               if (lastLine) {
-                if (logState.streamingLineIdx >= 0) {
+                const parentStreamingLineExists = logState.streamingLineText !== undefined
+                  && activeAgent.outputLog[logState.streamingLineIdx] === `${logLabel} │ ${logState.streamingLineText}`;
+                const childStreamingLineExists = !ownLog
+                  || (logState.streamingLineText !== undefined
+                    && ownLog.outputLog[logState.childStreamingLineIdx] === `│ ${logState.streamingLineText}`);
+                if (parentStreamingLineExists && childStreamingLineExists) {
                   activeAgent.outputLog[logState.streamingLineIdx] = `${logLabel} │ ${lastLine}`;
-                  if (ownLog && logState.childStreamingLineIdx >= 0) {
+                  if (ownLog) {
                     ownLog.outputLog[logState.childStreamingLineIdx] = `│ ${lastLine}`;
                   }
                 } else {
@@ -1978,6 +1989,7 @@ export default function registerTeammateExtension(
                   logState.streamingLineIdx = at.parent;
                   logState.childStreamingLineIdx = at.own;
                 }
+                logState.streamingLineText = lastLine;
               }
             }
             const logLengthBeforeTrim = activeAgent.outputLog.length;
