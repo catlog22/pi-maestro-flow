@@ -79,10 +79,24 @@ test("Cockpit packages complete selectable color themes", () => {
 test("Cockpit owns native UI through events instead of clearing foreign widget keys", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(source, /pi\.events\.emit\(COCKPIT_UI_OWNERSHIP_EVENT/);
+	assert.match(source, /footer: config\.enabled/);
+	assert.match(source, /footer: false/);
 	assert.match(source, /pi\.events\.on\(COCKPIT_TODO_TOGGLE_EVENT/);
 	assert.doesNotMatch(source, /teammate-agents|todo-panel/);
 	assert.equal(COCKPIT_UI_OWNERSHIP_EVENT, "cockpit:ui-ownership");
 	assert.equal(COCKPIT_TODO_TOGGLE_EVENT, "cockpit:toggle-todo");
+});
+
+test("Cockpit acquires the footer before installing and releases it after uninstalling", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(
+		source,
+		/session_start[\s\S]*?if \(config\.enabled\) \{\s*publishUiOwnership\(\);\s*applyUi\(ctx\);\s*\} else \{\s*applyUi\(ctx\);\s*publishUiOwnership\(\);/,
+	);
+	assert.match(
+		source,
+		/if \(wasEnabled !== config\.enabled\)[\s\S]*?if \(config\.enabled\) \{\s*publishUiOwnership\(\);\s*applyUi\(ctx\);\s*\} else \{\s*uninstallUi\(ctx\);\s*publishUiOwnership\(\);/,
+	);
 });
 
 test("Cockpit teammate event names stay aligned with the public v1 contract", () => {

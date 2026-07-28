@@ -25,6 +25,7 @@ function createHarness(options: {
   exec?: (cwd: string) => Promise<{ code: number; stdout: string; stderr: string }>;
 } = {}) {
   const handlers = new Map<string, EventHandler[]>();
+  const eventHandlers = new Map<string, Array<(payload: unknown) => void>>();
   const statuses = new Map<string, string>();
   const branchChangeHandlers = new Set<() => void>();
   let component: { render(width: number): string[]; dispose?(): void } | undefined;
@@ -33,6 +34,7 @@ function createHarness(options: {
   let renderRequests = 0;
   let forcedRenderRequests = 0;
   let lastRequestedRender: string[] | undefined;
+  let footerInstallCount = 0;
   const footerData = {
     getGitBranch: () => null,
     getExtensionStatuses: () => statuses,
@@ -50,6 +52,13 @@ function createHarness(options: {
     },
     async exec(_command: string, _args: string[], execOptions: { cwd?: string }) {
       return options.exec?.(execOptions.cwd ?? "") ?? { code: 1, stdout: "", stderr: "" };
+    },
+    events: {
+      on(name: string, handler: (payload: unknown) => void) {
+        const registered = eventHandlers.get(name) ?? [];
+        registered.push(handler);
+        eventHandlers.set(name, registered);
+      },
     },
   } as unknown as ExtensionAPI;
   let branchEntries = options.branchEntries ?? [];
@@ -78,8 +87,11 @@ function createHarness(options: {
         if (value === undefined) statuses.delete(key);
         else statuses.set(key, value);
       },
-      setFooter(factory: Function) {
+      setFooter(factory: Function | undefined) {
         component?.dispose?.();
+        component = undefined;
+        if (!factory) return;
+        footerInstallCount += 1;
         component = factory({
           terminal: { get columns() { return terminalWidth; } },
           invalidate() { invalidations++; },
@@ -108,6 +120,12 @@ function createHarness(options: {
     statuses,
     emit(name: string, event: unknown = {}) {
       for (const handler of handlers.get(name) ?? []) handler(event, ctx);
+    },
+    emitExtensionEvent(name: string, payload: unknown) {
+      for (const handler of eventHandlers.get(name) ?? []) handler(payload);
+    },
+    footerState() {
+      return { installed: component !== undefined, installCount: footerInstallCount };
     },
     startSession(nextCwd: string) {
       ctx = { ...ctx, cwd: nextCwd } as ExtensionContext;
@@ -138,6 +156,28 @@ function createHarness(options: {
     },
   };
 }
+
+test("Cockpit ownership isolates the Flow footer from lifecycle reinstalls", () => {
+  const harness = createHarness();
+  try {
+    assert.deepEqual(harness.footerState(), { installed: true, installCount: 1 });
+
+    harness.emitExtensionEvent("cockpit:ui-ownership", { footer: true });
+    assert.deepEqual(harness.footerState(), { installed: false, installCount: 1 });
+
+    harness.emit("session_tree", { type: "session_tree", oldLeafId: "old", newLeafId: "new" });
+    assert.deepEqual(
+      harness.footerState(),
+      { installed: false, installCount: 1 },
+      "Flow must not reclaim the single footer slot while Cockpit owns it",
+    );
+
+    harness.emitExtensionEvent("cockpit:ui-ownership", { footer: false });
+    assert.deepEqual(harness.footerState(), { installed: true, installCount: 2 });
+  } finally {
+    harness.dispose();
+  }
+});
 
 test("statusline reflows on silent terminal width changes using the same footer instance", (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });

@@ -133,6 +133,7 @@ export default function (pi: ExtensionAPI): void {
 		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, {
 			todo: config.enabled,
 			agents: config.enabled && config.hideNativeAgents,
+			footer: config.enabled,
 			todoExpanded: config.todoExpanded,
 		});
 	};
@@ -316,8 +317,13 @@ export default function (pi: ExtensionAPI): void {
 		// through /settings since — including an automatic "light/dark" pair, which
 		// cockpit cannot represent and would silently flatten to a single theme.
 		todos.hydrateFromEntries(ctx.sessionManager.getEntries());
-		applyUi(ctx);
-		publishUiOwnership();
+		if (config.enabled) {
+			publishUiOwnership();
+			applyUi(ctx);
+		} else {
+			applyUi(ctx);
+			publishUiOwnership();
+		}
 		pi.events.emit(BASH_BG_QUERY_EVENT, undefined);
 		req();
 	});
@@ -327,6 +333,7 @@ export default function (pi: ExtensionAPI): void {
 		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, {
 			todo: false,
 			agents: false,
+			footer: false,
 			todoExpanded: config.todoExpanded,
 		});
 		lastCtx = undefined;
@@ -520,10 +527,16 @@ export default function (pi: ExtensionAPI): void {
 					? { kind: "saved" }
 					: { kind: "failed", message: result.error ?? "unknown error" };
 				if (wasEnabled !== config.enabled) {
-					if (config.enabled) applyUi(ctx);
-					else uninstallUi(ctx);
+					if (config.enabled) {
+						publishUiOwnership();
+						applyUi(ctx);
+					} else {
+						uninstallUi(ctx);
+						publishUiOwnership();
+					}
+				} else {
+					publishUiOwnership();
 				}
-				publishUiOwnership();
 				req();
 			};
 			const ui = {

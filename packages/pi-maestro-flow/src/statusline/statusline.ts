@@ -362,6 +362,7 @@ export function renderSwarmStatusline(value: string | undefined, width: number):
 const GIT_REFRESH_INTERVAL = 30_000;
 const GIT_DEBOUNCE_MS = 500;
 const WIDTH_POLL_INTERVAL = 250;
+const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
 export function installStatusline(
 	pi: ExtensionAPI,
 	getMaestroState: () => MaestroState,
@@ -381,6 +382,8 @@ export function installStatusline(
 	let disposed = false;
 	let sessionGeneration = 0;
 	let footerGeneration = 0;
+	let footerCtx: ExtensionContext | undefined;
+	let cockpitOwnsFooter = false;
 
 	function invalidate(): void {
 		invalidateFn?.();
@@ -432,7 +435,8 @@ export function installStatusline(
 
 	// --- Footer registration ---
 	function installFooter(ctx: ExtensionContext): void {
-		if (!ctx.hasUI) return;
+		footerCtx = ctx;
+		if (!ctx.hasUI || cockpitOwnsFooter) return;
 		const generation = ++footerGeneration;
 		ctx.ui.setFooter((tui, _theme, footerData) => {
 			disposed = false;
@@ -504,6 +508,20 @@ export function installStatusline(
 
 	// --- Event handlers ---
 
+	pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
+		if (!payload || typeof payload !== "object") return;
+		const ownership = payload as { footer?: unknown };
+		const nextOwnership = ownership.footer === true;
+		if (nextOwnership === cockpitOwnsFooter) return;
+		cockpitOwnsFooter = nextOwnership;
+		if (cockpitOwnsFooter) {
+			footerGeneration += 1;
+			footerCtx?.ui.setFooter(undefined);
+			return;
+		}
+		if (footerCtx) installFooter(footerCtx);
+	});
+
 	pi.on("session_start", (_event, ctx) => {
 		// Clear any leaked timers from prior session
 		if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }
@@ -548,6 +566,7 @@ export function installStatusline(
 		sessionGeneration += 1;
 		footerGeneration += 1;
 		disposed = true;
+		footerCtx = undefined;
 		invalidateFn = null;
 		if (gitTimer) { clearInterval(gitTimer); gitTimer = null; }
 		if (gitDebounceTimer) { clearTimeout(gitDebounceTimer); gitDebounceTimer = null; }
