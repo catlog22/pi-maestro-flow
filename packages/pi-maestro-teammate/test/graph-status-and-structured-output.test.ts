@@ -889,10 +889,13 @@ test("root and proxy teammate initialization use their own request params", () =
   assert.equal(proxyInitialization.match(/lease:\s*createChildLease\(\)/g)?.length, 1);
 });
 
-test("native teammate status widget yields when Cockpit owns agent display", () => {
+test("native teammate status widget yields while another surface owns agent display", () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
   assert.match(source, /pi\.events\.on\(COCKPIT_UI_OWNERSHIP_EVENT[\s\S]*?cockpitOwnsAgents = .*?\.agents === true/);
-  assert.match(source, /if \(cockpitOwnsAgents \|\| interactivePanelActive\) \{[\s\S]*?setWidget\("teammate-agents", undefined\)/);
+  assert.match(source, /const foregroundToolRuns = new Set<string>\(\)/);
+  assert.match(source, /if \(params\.background === false\) \{[\s\S]*?foregroundToolRuns\.add\(correlationId\)[\s\S]*?updateAgentWidget\(\)/);
+  assert.match(source, /if \(foregroundToolRuns\.delete\(correlationId\)\) updateAgentWidget\(\)/);
+  assert.match(source, /if \(cockpitOwnsAgents \|\| interactivePanelActive \|\| foregroundToolRuns\.size > 0\) \{[\s\S]*?setWidget\("teammate-agents", undefined\)/);
 });
 
 test("root and proxy graph normalization share one implementation that preserves thinking", () => {
@@ -903,9 +906,10 @@ test("root and proxy graph normalization share one implementation that preserves
   assert.match(executionSource, /thinking:\s*parseTeammateThinkingLevel\(task\.thinking \?\? params\.thinking\)/);
   assert.doesNotMatch(executionSource, /params\.chain/);
 
-  // Both the root execute and the child proxy paths call it — no local re-implementation.
+  // Root and proxy paths both call the shared normalizer; the root process also
+  // applies authoritative model routing before normalizing proxied input.
   assert.match(indexSource, /const normalization = normalizeTeammateParams\(params\)/);
-  assert.match(indexSource, /const normalization = normalizeTeammateParams\(p\)/);
+  assert.match(indexSource, /const routedParams = applyModelRouting\([\s\S]*?const normalization = normalizeTeammateParams\(routedParams\)/);
   assert.doesNotMatch(indexSource, /thinking:\s*parseTeammateThinkingLevel\(/);
   assert.match(executionSource, /options\.onChildEvent[\s\S]*?\.\.\.event,\s*\/\/ Lifecycle ownership is assigned by the spawning parent\.\s*correlationId,/);
   assert.doesNotMatch(executionSource, /correlationId: event\.correlationId \?\? correlationId/);

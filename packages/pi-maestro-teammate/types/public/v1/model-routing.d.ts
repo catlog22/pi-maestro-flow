@@ -7,4 +7,5 @@
  * how every dispatch picks a model, so the entry point stays published and is
  * not deprecated.
  */
+export * from "../../models/model-catalog.ts";
 export * from "../../models/model-routing.ts";

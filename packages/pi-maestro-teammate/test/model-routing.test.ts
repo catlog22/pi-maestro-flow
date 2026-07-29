@@ -9,6 +9,7 @@ import {
   getProjectModelRoutingPath,
   inferTaskType,
   loadModelRoutingConfig,
+  saveProjectFallbackMapping,
   saveProjectModelMapping,
   saveProjectThinkingLevel,
   TEAMMATE_TASK_TYPE_META,
@@ -120,6 +121,40 @@ Manage releases.
     assert.equal(routed.tasks[0].model, "provider/release");
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("fallback mappings persist, filter unavailable models, and follow explicit precedence", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-fallback-routing-"));
+  try {
+    saveProjectFallbackMapping(cwd, "analysis", ["provider/backup-a", "provider/backup-a", "provider/backup-b"]);
+    assert.deepEqual(loadModelRoutingConfig(cwd).fallbackMappings?.analysis, [
+      "provider/backup-a",
+      "provider/backup-b",
+    ]);
+
+    const mapped = applyModelRouting({
+      agent: "general",
+      taskType: "analysis",
+      tasks: [{ prompt: "Trace the request" }],
+    }, cwd, ["provider/primary", "provider/backup-b"]);
+    assert.deepEqual(mapped.tasks[0].fallbackModels, ["provider/backup-b"]);
+
+    const topLevel = applyModelRouting({
+      taskType: "analysis",
+      fallbackModels: ["provider/top"],
+      tasks: [{ prompt: "Trace the request" }],
+    }, cwd, ["provider/top", "provider/task"]);
+    assert.deepEqual(topLevel.tasks[0].fallbackModels, ["provider/top"]);
+
+    const perTask = applyModelRouting({
+      taskType: "analysis",
+      fallbackModels: ["provider/top"],
+      tasks: [{ prompt: "Trace the request", fallbackModels: ["provider/task"] }],
+    }, cwd, ["provider/top", "provider/task"]);
+    assert.deepEqual(perTask.tasks[0].fallbackModels, ["provider/task"]);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
 
@@ -263,6 +298,12 @@ test("multi-task routing applies per phase while explicit defaults win", () => {
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("nested teammate routing is deferred to the authoritative root proxy", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.match(source, /execute\(_id: string, params: RunTeammateParams[\s\S]*?proxyCall<Details>\("teammate", params, signal\)/);
+  assert.match(source, /const routedParams = applyModelRouting\([\s\S]*?modelCapabilities\.map[\s\S]*?normalizeTeammateParams\(routedParams\)/);
 });
 
 test("unavailable configured models fall back instead of launching invalid model IDs", () => {

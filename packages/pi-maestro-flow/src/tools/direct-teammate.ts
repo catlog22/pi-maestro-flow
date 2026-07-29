@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { createTeammateDirectChildRequestHandler } from "pi-maestro-teammate/v1/extension";
+import { createModelCatalogSnapshot } from "pi-maestro-teammate/v1/model-routing";
 import type { RunTeammateOptions } from "pi-maestro-teammate/v1/execution";
 
 export type DirectTeammateRunOverrides = Omit<RunTeammateOptions, "onChildRequest">;
@@ -16,6 +17,8 @@ export function createDirectTeammateRunOptions(
   return {
     ...overrides,
     baseCwd: overrides.baseCwd || ctx.cwd,
+    modelCapabilities: overrides.modelCapabilities
+      ?? createModelCatalogSnapshot(ctx.modelRegistry.getAvailable()).models,
     onChildRequest: createTeammateDirectChildRequestHandler(pi, ctx),
   };
 }

@@ -29,6 +29,7 @@ export const TEAMMATE_TASK_TYPE_META: Record<
 export interface ModelRoutingConfig {
   version: 2;
   mappings: Partial<Record<TeammateTaskType, string | null>>;
+  fallbackMappings?: Partial<Record<TeammateTaskType, string[] | null>>;
   thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>>;
 }
 
@@ -52,16 +53,24 @@ function readConfig(filePath: string): ModelRoutingConfig {
   try {
     const parsed = JSON.parse(fs.readFileSync(filePath, "utf8")) as Partial<ModelRoutingConfig>;
     const mappings: Partial<Record<TeammateTaskType, string | null>> = {};
+    const fallbackMappings: Partial<Record<TeammateTaskType, string[] | null>> = {};
     const thinkingLevels: Partial<Record<TeammateTaskType, TeammateThinkingLevel | null>> = {};
     const rawMappings = parsed.mappings && typeof parsed.mappings === "object" ? parsed.mappings : {};
+    const rawFallbacks = parsed.fallbackMappings && typeof parsed.fallbackMappings === "object" ? parsed.fallbackMappings : {};
     const rawThinking = parsed.thinkingLevels && typeof parsed.thinkingLevels === "object" ? parsed.thinkingLevels : {};
-    const taskTypes = new Set([...Object.keys(rawMappings), ...Object.keys(rawThinking)]);
+    const taskTypes = new Set([...Object.keys(rawMappings), ...Object.keys(rawFallbacks), ...Object.keys(rawThinking)]);
     for (const rawTaskType of taskTypes) {
       const taskType = parseTeammateTaskType(rawTaskType);
       if (!taskType) continue;
       const value = rawMappings[rawTaskType];
       if (typeof value === "string" && value.trim()) mappings[taskType] = value.trim();
       else if (value === null) mappings[taskType] = null;
+      const fallback = rawFallbacks[rawTaskType];
+      if (fallback === null) fallbackMappings[taskType] = null;
+      else if (Array.isArray(fallback)) {
+        const models = [...new Set(fallback.filter((model): model is string => typeof model === "string").map((model) => model.trim()).filter(Boolean))];
+        fallbackMappings[taskType] = models;
+      }
       const thinking = rawThinking[rawTaskType];
       if (thinking === null) thinkingLevels[taskType] = null;
       else {
@@ -69,7 +78,12 @@ function readConfig(filePath: string): ModelRoutingConfig {
         if (parsedThinking) thinkingLevels[taskType] = parsedThinking;
       }
     }
-    return { version: 2, mappings, thinkingLevels };
+    return {
+      version: 2,
+      mappings,
+      ...(Object.keys(fallbackMappings).length > 0 ? { fallbackMappings } : {}),
+      thinkingLevels,
+    };
   } catch {
     return { version: 2, mappings: {}, thinkingLevels: {} };
   }
@@ -81,6 +95,7 @@ export function loadModelRoutingConfig(cwd: string): ModelRoutingConfig {
   return {
     version: 2,
     mappings: { ...globalConfig.mappings, ...projectConfig.mappings },
+    fallbackMappings: { ...globalConfig.fallbackMappings, ...projectConfig.fallbackMappings },
     thinkingLevels: { ...globalConfig.thinkingLevels, ...projectConfig.thinkingLevels },
   };
 }
@@ -95,7 +110,11 @@ export function discoverRoutingTaskTypes(
     const taskType = parseTeammateTaskType(agent.taskType);
     if (taskType) taskTypes.add(taskType);
   }
-  for (const taskType of [...Object.keys(config.mappings), ...Object.keys(config.thinkingLevels)]) {
+  for (const taskType of [
+    ...Object.keys(config.mappings),
+    ...Object.keys(config.fallbackMappings ?? {}),
+    ...Object.keys(config.thinkingLevels),
+  ]) {
     const normalized = parseTeammateTaskType(taskType);
     if (normalized) taskTypes.add(normalized);
   }
@@ -140,6 +159,24 @@ export function saveProjectModelMapping(
   return loadModelRoutingConfig(cwd);
 }
 
+export function saveProjectFallbackMapping(
+  cwd: string,
+  taskType: TeammateTaskType,
+  models: string[] | null,
+): ModelRoutingConfig {
+  const normalizedTaskType = parseTeammateTaskType(taskType);
+  if (!normalizedTaskType) throw new Error(`Invalid teammate task type: ${taskType}`);
+  const filePath = getProjectModelRoutingPath(cwd);
+  const config = readConfig(filePath);
+  config.fallbackMappings ??= {};
+  config.fallbackMappings[normalizedTaskType] = models === null
+    ? null
+    : [...new Set(models.map((model) => model.trim()).filter(Boolean))];
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  fs.writeFileSync(filePath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  return loadModelRoutingConfig(cwd);
+}
+
 export function inferTaskType(input: TaskTypeInput): TeammateTaskType | undefined {
   if (input.taskType) return input.taskType;
 
@@ -176,6 +213,21 @@ function mappedModel(
   return configured;
 }
 
+function mappedFallbackModels(
+  config: ModelRoutingConfig,
+  input: TaskTypeInput,
+  availableModels: readonly string[],
+): string[] | undefined {
+  const taskType = inferTaskType(input);
+  if (!taskType) return undefined;
+  const configured = config.fallbackMappings?.[taskType];
+  if (!configured) return undefined;
+  const filtered = availableModels.length > 0
+    ? configured.filter((model) => availableModels.includes(model))
+    : configured;
+  return filtered.length > 0 ? [...new Set(filtered)] : undefined;
+}
+
 function mappedThinking(config: ModelRoutingConfig, input: TaskTypeInput): TeammateThinkingLevel | undefined {
   const taskType = inferTaskType(input);
   if (!taskType) return undefined;
@@ -207,6 +259,11 @@ export function applyModelRouting(
         agent,
         task: task.prompt,
       }, availableModels),
+      fallbackModels: task.fallbackModels ?? params.fallbackModels ?? mappedFallbackModels(config, {
+        taskType,
+        agent,
+        task: task.prompt,
+      }, availableModels),
       thinking: parseTeammateThinkingLevel(task.thinking) ?? topLevelThinking ?? mappedThinking(config, {
         taskType,
         agent,
@@ -228,6 +285,9 @@ export function formatModelRoutingConfig(
 ): string {
   const config = loadModelRoutingConfig(cwd);
   return discoverRoutingTaskTypes(cwd, agents)
-    .map((taskType) => `- ${taskType}: model=${config.mappings[taskType] ?? "auto/default"}, thinking=${config.thinkingLevels[taskType] ?? "inherit/default"}`)
+    .map((taskType) => {
+      const fallbacks = config.fallbackMappings?.[taskType]?.join(",") || "none";
+      return `- ${taskType}: model=${config.mappings[taskType] ?? "auto/default"}, fallbacks=${fallbacks}, thinking=${config.thinkingLevels[taskType] ?? "inherit/default"}`;
+    })
     .join("\n");
 }

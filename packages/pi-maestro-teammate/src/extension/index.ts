@@ -1562,14 +1562,7 @@ export default function registerTeammateExtension(
       promptGuidelines: TEAMMATE_PROMPT_GUIDELINES,
       parameters: TeammateParams,
       async execute(_id: string, params: RunTeammateParams, signal: AbortSignal) {
-        const ctx = bridge.ctx;
-        const cwd = ctx?.cwd ?? process.cwd();
-        const routed = applyModelRouting(
-          params,
-          cwd,
-          ctx ? refreshModelCatalog(ctx).modelIds : modelCatalog.modelIds,
-        );
-        return proxyCall<Details>("teammate", routed, signal);
+        return proxyCall<Details>("teammate", params, signal);
       },
     };
     if (canDispatchNestedTeammate) pi.registerTool(proxyTeammateTool);
@@ -1639,6 +1632,7 @@ export default function registerTeammateExtension(
   };
   rootGlobals[registryKey] = state;
   const interactionQueue = createTeammateInteractionQueue(pi, state);
+  const foregroundToolRuns = new Set<string>();
   state.cancelInteractions = (correlationId, reason) =>
     void interactionQueue.cancelForAgent(correlationId, reason);
 
@@ -1700,6 +1694,7 @@ export default function registerTeammateExtension(
         reply_to: params.reply_to,
         context: singleTask.context,
         model: singleTask.model,
+        fallbackModels: singleTask.fallbackModels,
         thinking: singleTask.thinking,
         cwd: singleTask.cwd,
         outputSchema: singleTask.outputSchema,
@@ -1743,6 +1738,12 @@ export default function registerTeammateExtension(
       const correlationId = randomUUID();
 
       const abortController = new AbortController();
+
+      let detached = false;
+      if (params.background === false) {
+        foregroundToolRuns.add(correlationId);
+        updateAgentWidget();
+      }
 
       const agentLabel = isMultiTask ? `graph(${normalizedTasks.length})` : singleTask.agent;
 
@@ -2111,8 +2112,6 @@ export default function registerTeammateExtension(
         return options;
       };
 
-      let detached = false;
-
       try {
         // --- MULTI-TASK MODE (parallel / chain / graph) ---
         if (isMultiTask) {
@@ -2340,6 +2339,7 @@ export default function registerTeammateExtension(
             else retireAgent(state, correlationId, agent.lastResult);
           }
         }
+        if (foregroundToolRuns.delete(correlationId)) updateAgentWidget();
         signal.removeEventListener("abort", abortForward);
       }
     },
@@ -3191,7 +3191,7 @@ export default function registerTeammateExtension(
 
   function updateAgentWidget(): void {
     if (!widgetCtx) return;
-    if (cockpitOwnsAgents || interactivePanelActive) {
+    if (cockpitOwnsAgents || interactivePanelActive || foregroundToolRuns.size > 0) {
       widgetCtx.ui.setWidget("teammate-agents", undefined);
       return;
     }
@@ -5221,8 +5221,15 @@ export async function handleProxyRequest(
         return;
       }
 
-      // Normalize (shared with the root tool execute path)
-      const normalization = normalizeTeammateParams(p);
+      const routedParams = applyModelRouting(
+        p,
+        state.baseCwd || process.cwd(),
+        modelCapabilities.map((model) => model.id),
+      );
+
+      // Normalize (shared with the root tool execute path). The root process is
+      // the routing authority because the child catalog can be stale or scoped.
+      const normalization = normalizeTeammateParams(routedParams);
       if (normalization.error) {
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: normalization.error }],
@@ -5238,9 +5245,10 @@ export async function handleProxyRequest(
         task: singleTask.prompt,
         taskType: singleTask.taskType,
         name: singleTask.name,
-        reply_to: p.reply_to,
+        reply_to: routedParams.reply_to,
         context: singleTask.context,
         model: singleTask.model,
+        fallbackModels: singleTask.fallbackModels,
         thinking: singleTask.thinking,
         cwd: singleTask.cwd,
         outputSchema: singleTask.outputSchema,

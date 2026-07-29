@@ -15,6 +15,7 @@ import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
 import { type LeaseToken } from "./session-handoff.ts";
 import { type TeammateTaskType } from "../models/model-routing.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
+import { type ModelCircuitBreaker } from "../models/model-circuit-breaker.ts";
 import { type TeammateThinkingInput, type TeammateThinkingLevel } from "../shared/thinking.ts";
 export interface TeammateTaskSpec {
     prompt: string;
@@ -24,6 +25,7 @@ export interface TeammateTaskSpec {
     dependsOn?: string[];
     context?: "fresh" | "fork";
     model?: string;
+    fallbackModels?: string[];
     thinking?: TeammateThinkingInput;
     cwd?: string;
     outputSchema?: Record<string, unknown>;
@@ -37,6 +39,7 @@ export interface RunTeammateParams {
     background?: boolean;
     context?: "fresh" | "fork";
     model?: string;
+    fallbackModels?: string[];
     thinking?: TeammateThinkingInput;
     cwd?: string;
     timeoutMs?: number;
@@ -55,6 +58,7 @@ export interface RunSingleTeammateParams {
     background?: boolean;
     context?: "fresh" | "fork";
     model?: string;
+    fallbackModels?: string[];
     thinking?: TeammateThinkingInput;
     cwd?: string;
     timeoutMs?: number;
@@ -63,6 +67,7 @@ export interface RunSingleTeammateParams {
 export interface RunTeammateOptions {
     baseCwd: string;
     modelCapabilities?: readonly TeammateModelCapability[];
+    modelCircuitBreaker?: ModelCircuitBreaker;
     correlationId?: string;
     taskCorrelationIds?: string[];
     /**
@@ -104,6 +109,7 @@ export interface NormalizedTask {
     dependsOn?: string[];
     context?: "fresh" | "fork";
     model?: string;
+    fallbackModels?: string[];
     thinking?: TeammateThinkingLevel;
     cwd?: string;
     outputSchema?: Record<string, unknown>;
@@ -133,6 +139,8 @@ export declare function isPiResultReadyTurn(event: Record<string, unknown>): boo
  * observable to the parent runner.
  */
 export declare function extractValidatedStructuredOutput(event: Record<string, unknown>, schema: Record<string, unknown>): unknown | undefined;
+export declare function describeStructuredOutputValidationFailure(event: Record<string, unknown>, schema: Record<string, unknown>): string | undefined;
+export declare function extractPiEventError(event: Record<string, unknown>): string | undefined;
 export interface Utf8LineDecoder {
     write(chunk: Buffer): string[];
     end(): string[];

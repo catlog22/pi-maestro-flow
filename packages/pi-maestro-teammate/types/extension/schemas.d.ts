@@ -19,6 +19,7 @@ export declare const TaskSpec: Type.TObject<{
     dependsOn: Type.TOptional<Type.TArray<Type.TString>>;
     context: Type.TOptional<Type.TUnsafe<"fresh" | "fork">>;
     model: Type.TOptional<Type.TString>;
+    fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
     thinking: Type.TOptional<Type.TUnsafe<unknown>>;
     cwd: Type.TOptional<Type.TString>;
     outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
@@ -36,6 +37,7 @@ export declare const TeammateParams: Type.TObject<{
         dependsOn: Type.TOptional<Type.TArray<Type.TString>>;
         context: Type.TOptional<Type.TUnsafe<"fresh" | "fork">>;
         model: Type.TOptional<Type.TString>;
+        fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
         thinking: Type.TOptional<Type.TUnsafe<unknown>>;
         cwd: Type.TOptional<Type.TString>;
         outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
@@ -47,6 +49,7 @@ export declare const TeammateParams: Type.TObject<{
     background: Type.TOptional<Type.TBoolean>;
     context: Type.TOptional<Type.TUnsafe<"fresh" | "fork">>;
     model: Type.TOptional<Type.TString>;
+    fallbackModels: Type.TOptional<Type.TArray<Type.TString>>;
     thinking: Type.TOptional<Type.TUnsafe<unknown>>;
     cwd: Type.TOptional<Type.TString>;
     timeoutMs: Type.TOptional<Type.TInteger>;

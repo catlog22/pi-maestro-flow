@@ -24,6 +24,10 @@ import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import { applyModelRouting, type TeammateTaskType } from "../models/model-routing.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
+import {
+  sharedModelCircuitBreaker,
+  type ModelCircuitBreaker,
+} from "../models/model-circuit-breaker.ts";
 import { getTeammateChildExtensions } from "./child-extensions.ts";
 import {
   parseTeammateThinkingLevel,
@@ -48,6 +52,7 @@ export interface TeammateTaskSpec {
   dependsOn?: string[];
   context?: "fresh" | "fork";
   model?: string;
+  fallbackModels?: string[];
   thinking?: TeammateThinkingInput;
   cwd?: string;
   outputSchema?: Record<string, unknown>;
@@ -62,6 +67,7 @@ export interface RunTeammateParams {
   background?: boolean;
   context?: "fresh" | "fork";
   model?: string;
+  fallbackModels?: string[];
   thinking?: TeammateThinkingInput;
   cwd?: string;
   timeoutMs?: number;
@@ -81,6 +87,7 @@ export interface RunSingleTeammateParams {
   background?: boolean;
   context?: "fresh" | "fork";
   model?: string;
+  fallbackModels?: string[];
   thinking?: TeammateThinkingInput;
   cwd?: string;
   timeoutMs?: number;
@@ -90,6 +97,7 @@ export interface RunSingleTeammateParams {
 export interface RunTeammateOptions {
   baseCwd: string;
   modelCapabilities?: readonly TeammateModelCapability[];
+  modelCircuitBreaker?: ModelCircuitBreaker;
   correlationId?: string;
   taskCorrelationIds?: string[];
   /**
@@ -141,6 +149,7 @@ export interface NormalizedTask {
   dependsOn?: string[];
   context?: "fresh" | "fork";
   model?: string;
+  fallbackModels?: string[];
   thinking?: TeammateThinkingLevel;
   cwd?: string;
   outputSchema?: Record<string, unknown>;
@@ -756,6 +765,7 @@ export function normalizeTeammateParams(
     dependsOn: task.dependsOn,
     context: task.context ?? params.context,
     model: task.model ?? params.model,
+    fallbackModels: task.fallbackModels ?? params.fallbackModels,
     thinking: parseTeammateThinkingLevel(task.thinking ?? params.thinking),
     cwd: task.cwd ?? params.cwd,
     outputSchema: task.outputSchema ?? params.outputSchema,
@@ -931,20 +941,13 @@ function getTeammateSessionRoot(parentSessionFile: string | null): string | unde
 // ---------------------------------------------------------------------------
 
 function buildModelCandidates(primary?: string, fallbacks?: string[]): string[] {
-  const candidates: string[] = [];
-  if (primary) candidates.push(primary);
-  if (fallbacks) candidates.push(...fallbacks);
-  return candidates;
+  return [...new Set([primary, ...(fallbacks ?? [])].filter((model): model is string => Boolean(model)))];
 }
 
 function isRetryableModelError(messages: Array<{ role: string; content: string }>): boolean {
-  const errorPatterns = ["model", "rate", "unavailable", "capacity", "overloaded", "429", "503"];
-  for (const msg of messages) {
-    if (msg.role !== "system") continue;
-    const lower = msg.content.toLowerCase();
-    if (isRetryableProviderError(msg.content) || errorPatterns.some((p) => lower.includes(p))) return true;
-  }
-  return false;
+  return messages.some((message) =>
+    message.role === "system" && isRetryableProviderError(message.content)
+  );
 }
 
 function resultFailureMessage(messages: Array<{ role: string; content: string }>): string {
@@ -1293,17 +1296,13 @@ const RESULT_READY_GRACE_MS = 60_000;
 const DEFAULT_FOREGROUND_LANE_MAX_RUN_MS = 30 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
-// Working-directory containment
+// Working-directory resolution
 // ---------------------------------------------------------------------------
 
 /**
- * `params.cwd` is a free-form, model-authored string that decides where the
- * child looks for `.pi/agents` and `.pi/prompts` — i.e. which files define the
- * sub-agent's persona and tool surface. Confine it to the project root.
- *
- * Symlinks are resolved on both sides so a link inside the project cannot point
- * the child at an external tree. Non-existent paths keep their lexical form so
- * the caller still gets the ordinary "directory does not exist" spawn failure.
+ * Resolve `params.cwd` relative to the session directory while permitting an
+ * explicit path outside the current project. Existing paths are canonicalized;
+ * non-existent paths keep their lexical form so spawn reports the normal error.
  */
 function canonicalDirectoryPath(candidate: string): string {
   const resolved = path.resolve(candidate);
@@ -1319,17 +1318,7 @@ export function resolveContainedCwd(
   baseCwd: string,
 ): { cwd: string } | { error: string } {
   if (requested === undefined) return { cwd: baseCwd };
-  const base = canonicalDirectoryPath(baseCwd);
-  const candidate = canonicalDirectoryPath(path.resolve(base, requested));
-  const relative = path.relative(base, candidate);
-  if (relative !== "" && (relative.startsWith("..") || path.isAbsolute(relative))) {
-    return {
-      error:
-        `Teammate cwd "${requested}" resolves to "${candidate}", which is outside the project root `
-        + `"${base}". Choose a directory inside the project.`,
-    };
-  }
-  return { cwd: candidate };
+  return { cwd: canonicalDirectoryPath(path.resolve(baseCwd, requested)) };
 }
 
 // ---------------------------------------------------------------------------
@@ -1579,15 +1568,16 @@ export async function runSingleTeammate(
     name: params.name,
   });
 
-  // AC7: Model fallback — try each candidate
+  // AC7: Model fallback — skip open circuits and try each healthy candidate.
   const candidates = buildModelCandidates(
     params.model ?? agentConfig.model,
-    agentConfig.fallbackModels,
+    params.fallbackModels ?? agentConfig.fallbackModels,
   );
   try {
     for (let index = 0; index < candidates.length; index += 1) {
       candidates[index] = resolveModelSpecifier(candidates[index], options.modelCapabilities);
     }
+    candidates.splice(0, candidates.length, ...new Set(candidates));
   } catch (error) {
     return {
       agent: params.agent,
@@ -1603,52 +1593,70 @@ export async function runSingleTeammate(
       durationMs: Date.now() - startTime,
     };
   }
+
+  const breaker = options.modelCircuitBreaker ?? sharedModelCircuitBreaker;
+  const modelCandidates: Array<string | undefined> = candidates.length > 0 ? candidates : [undefined];
   const attemptedModels: string[] = [];
-  let retryCount = 0;
+  let lastResult: SingleResult | undefined;
 
-  for (let mi = 0; mi <= candidates.length; mi++) {
-    const modelToUse = mi < candidates.length ? candidates[mi] : undefined;
-    if (modelToUse) attemptedModels.push(modelToUse);
+  for (const modelToUse of modelCandidates) {
+    const acquisition = modelToUse ? breaker.acquireCandidate(modelToUse) : undefined;
+    if (acquisition && !acquisition.allowed) continue;
+    if (modelToUse && !attemptedModels.includes(modelToUse)) attemptedModels.push(modelToUse);
 
-    let result = await runSingleAttempt(
-      params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, options,
-    );
+    const maxRetries = acquisition?.state === "HALF_OPEN" ? 0 : NETWORK_RETRY_POLICY.maxRetries;
+    let retryCount = 0;
+    let candidateResult: SingleResult | undefined;
 
-    while (
-      result.exitCode !== 0
-      && retryCount < NETWORK_RETRY_POLICY.maxRetries
-      && isRetryableProviderError(resultFailureMessage(result.messages))
-      && !options.signal?.aborted
-    ) {
-      retryCount++;
+    while (!options.signal?.aborted) {
+      candidateResult = await runSingleAttempt(
+        params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, options,
+      );
+      lastResult = candidateResult;
+      const error = resultFailureMessage(candidateResult.messages);
+      const retryable = candidateResult.exitCode !== 0 && isRetryableProviderError(error);
+
+      if (candidateResult.exitCode === 0) {
+        if (acquisition?.allowed) breaker.recordSuccess(acquisition);
+        candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+        return candidateResult;
+      }
+      if (!retryable || retryCount >= maxRetries) {
+        if (retryable && acquisition?.allowed) breaker.recordRetryableFailure(acquisition);
+        break;
+      }
+
+      retryCount += 1;
       const delayMs = retryDelayMs(retryCount);
-      const error = resultFailureMessage(result.messages);
       options.onRetry?.({
         correlationId,
         attempt: retryCount,
-        maxRetries: NETWORK_RETRY_POLICY.maxRetries,
+        maxRetries,
         delayMs,
         nextRetryAt: Date.now() + delayMs,
         error,
       });
       const ready = await (options.waitForRetry?.(delayMs, options.signal) ?? waitForRetryDelay(delayMs, options.signal));
       if (!ready) break;
-      result = await runSingleAttempt(
-        params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, options,
-      );
     }
 
-    if (result.exitCode === 0 || mi >= candidates.length - 1 || !isRetryableModelError(result.messages)) {
-      result.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
-      return result;
+    if (!candidateResult) {
+      if (acquisition?.allowed) breaker.releaseCandidate(acquisition);
+      continue;
     }
-    // Model error and more candidates — try next
+    if (!isRetryableModelError(candidateResult.messages)) {
+      if (acquisition?.allowed) breaker.releaseCandidate(acquisition);
+      candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+      return candidateResult;
+    }
   }
 
-  // Unreachable: the loop always returns on its final iteration. Kept so the
-  // declared Promise<SingleResult> holds without an implicit undefined.
+  if (lastResult) {
+    lastResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+    return lastResult;
+  }
   return rejectWith(
-    `Teammate exhausted every model candidate without producing a result (agent=${params.agent}).`,
+    `Teammate skipped every model candidate because their circuit breakers are open (agent=${params.agent}).`,
   );
 }
 
@@ -1703,6 +1711,7 @@ interface AttemptState {
   capturedStructuredOutput: unknown;
   structuredOutputValidationFailure?: string;
   reportedRuntimeErrors: Set<string>;
+  runtimeFailure?: string;
   /**
    * progress.toolCount stays cumulative for the lifetime of a wakeable agent so
    * it reads on the same scale as the cumulative token counters. This per-turn
@@ -1845,6 +1854,7 @@ async function runSingleAttempt(
     capturedStructuredOutput: undefined,
     structuredOutputValidationFailure: undefined,
     reportedRuntimeErrors: new Set(),
+    runtimeFailure: undefined,
     turnToolCount: 0,
     turnLifecycleSettled: false,
     resolvedModel: modelOverride ?? params.model ?? agentConfig.model ?? "unknown",
@@ -1906,6 +1916,12 @@ async function runSingleAttempt(
     }
 
     if (child.stdin) guardChildStdin(child.stdin);
+
+    // Teammate owns retry and model failover for child runs. Disable Pi's inner
+    // retry loop first so one provider failure cannot multiply both budgets.
+    if (child.stdin) {
+      writeChildStdinLine(child.stdin, JSON.stringify({ type: "set_auto_retry", enabled: false }));
+    }
 
     // RPC mode: stdin stays open for bidirectional messaging.
     // Send initial prompt via RPC command.
@@ -2067,6 +2083,7 @@ async function runSingleAttempt(
         state.capturedStructuredOutput = undefined;
         state.structuredOutputValidationFailure = undefined;
         state.reportedRuntimeErrors.clear();
+        state.runtimeFailure = undefined;
         resetUsage(pendingMessageUsage);
         if (terminateChild) {
           state.terminal = true;
@@ -2167,6 +2184,7 @@ async function runSingleAttempt(
         `Teammate runtime error (phase=${phase}, agent=${params.agent}, model=${model || "unknown"}, `
         + `correlationId=${correlationId}): ${error}`;
       appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
+      state.runtimeFailure = diagnostic;
       progress.lastMessage = diagnostic;
       options.onProgress?.(progress);
     }
@@ -2179,6 +2197,7 @@ async function runSingleAttempt(
     /** A new agent loop starts: the previous turn's settlement no longer applies. */
     function onTurnBoundary(): void {
       state.turnLifecycleSettled = false;
+      state.runtimeFailure = undefined;
       progress.status = "running";
       progress.resultReadyAt = undefined;
       progress.recentTools = [];
@@ -2356,7 +2375,7 @@ async function runSingleAttempt(
         completeTurn(undefined, true, 1);
         return;
       }
-      completeTurn(structuredOutput, !wakeable);
+      completeTurn(structuredOutput, !wakeable, state.runtimeFailure ? 1 : 0);
       // Process stays alive. Idle agents must be resumed with an RPC prompt;
       // steer/follow_up only queue while an agent loop is already running.
     }
@@ -2774,6 +2793,7 @@ export async function runGraph(
           task: resolvedTask,
           context: task.context,
           model: task.model,
+          fallbackModels: task.fallbackModels,
           thinking: task.thinking,
           cwd: task.cwd,
           outputSchema: task.outputSchema,

@@ -43,6 +43,7 @@ import { executeMoa, type MoaParams } from "../tools/moa.ts";
 import { registerSwarmDisplay } from "../tools/swarm.ts";
 import { registerMaestroProviders } from "../providers/provider-registry.ts";
 import { registerApiProviderConfigs } from "../providers/api-provider-config.ts";
+import { registerModelFailover } from "../providers/model-failover.ts";
 import registerMcpAdapter from "../mcp/index.ts";
 import {
   initGoal,
@@ -430,6 +431,14 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     // Provider registration failures should not block extension load
     console.error(
       `[maestro] Provider registration warning: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+
+  try {
+    registerModelFailover(pi);
+  } catch (error) {
+    console.error(
+      `[maestro] Model failover registration warning: ${error instanceof Error ? error.message : String(error)}`,
     );
   }
 

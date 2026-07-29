@@ -11,7 +11,13 @@ test("direct teammate options install the parent-authoritative request bridge", 
     sendMessage() {},
     events: { emit(name: string, payload: unknown) { emitted.push({ name, payload }); } },
   } as unknown as ExtensionAPI;
-  const ctx = { cwd: "D:/workspace", hasUI: false } as ExtensionContext;
+  const ctx = {
+    cwd: "D:/workspace",
+    hasUI: false,
+    modelRegistry: {
+      getAvailable: () => [{ provider: "provider", id: "model", reasoning: true }],
+    },
+  } as unknown as ExtensionContext;
   const signal = new AbortController().signal;
   const unregister = registerTeammatePermissionBroker(async (request) => {
     assert.equal(request.toolName, "read");
@@ -22,6 +28,7 @@ test("direct teammate options install the parent-authoritative request bridge", 
     const options = createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal });
     assert.equal(options.baseCwd, ctx.cwd);
     assert.equal(options.signal, signal);
+    assert.equal(options.modelCapabilities?.[0]?.id, "provider/model");
     assert.equal(typeof options.onChildRequest, "function");
 
     const reply = await new Promise<any>((resolve) => options.onChildRequest?.({

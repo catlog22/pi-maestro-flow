@@ -76,6 +76,11 @@ export const TaskSpec = Type.Object({
       description: "Exact provider/model override for this task; overrides the top-level model default",
     }),
   ),
+  fallbackModels: Type.Optional(
+    Type.Array(Type.String(), {
+      description: "Ordered provider/model fallbacks for this task; overrides the top-level fallback chain",
+    }),
+  ),
   thinking: Type.Optional(
     Type.Unsafe({
       ...ThinkingLevel,
@@ -187,6 +192,12 @@ export const TeammateParams = Type.Object({
     Type.String({
       description:
         "Exact provider/model default from the injected available model catalog. Per-task model takes precedence.",
+    }),
+  ),
+  fallbackModels: Type.Optional(
+    Type.Array(Type.String(), {
+      description:
+        "Ordered provider/model fallback chain. Per-task fallbackModels takes precedence.",
     }),
   ),
   thinking: Type.Optional(

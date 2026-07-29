@@ -383,10 +383,10 @@ test("OBS-14: toolCount accumulates across turns like the token counters", async
 });
 
 // ---------------------------------------------------------------------------
-// SEC-6 — params.cwd is confined to the project root
+// SEC-6 — params.cwd supports explicit external working directories
 // ---------------------------------------------------------------------------
 
-test("SEC-6: resolveContainedCwd accepts inside paths and rejects escapes", () => {
+test("SEC-6: resolveContainedCwd accepts inside and external paths", () => {
   const base = process.cwd();
   const inside = resolveContainedCwd("src", base);
   assert.ok("cwd" in inside);
@@ -396,28 +396,29 @@ test("SEC-6: resolveContainedCwd accepts inside paths and rejects escapes", () =
   assert.ok("cwd" in resolveContainedCwd(base, base));
 
   for (const escape of ["..", path.join("..", ".."), path.resolve(base, "..")]) {
-    const rejected = resolveContainedCwd(escape, base);
-    assert.ok("error" in rejected, `escape not rejected: ${escape}`);
-    assert.match(rejected.error, /outside the project root/);
+    const resolved = resolveContainedCwd(escape, base);
+    assert.ok("cwd" in resolved, `external cwd not resolved: ${escape}`);
+    assert.equal(resolved.cwd, fs.realpathSync.native(path.resolve(base, escape)));
   }
 });
 
-test("SEC-6: an out-of-project cwd fails without spawning a child", async () => {
+test("SEC-6: an out-of-project cwd reaches the child process", async () => {
   const outside = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-outside-"));
-  let spawned = 0;
-  const spawnChildProcess = (() => {
-    spawned += 1;
-    return createFakeChild().child;
+  let spawnedCwd: string | undefined;
+  const spawnChildProcess = ((_command: string, _args: readonly string[], options: { cwd?: string }) => {
+    spawnedCwd = options.cwd;
+    const handle = createFakeChild();
+    queueMicrotask(() => handle.close(0, null));
+    return handle.child;
   }) as unknown as SpawnSeam;
 
   try {
     const result = await runSingleTeammate(
-      { agent: "general", task: "load a foreign persona", cwd: outside, context: "fresh" },
+      { agent: "general", task: "inspect an external project", cwd: outside, context: "fresh", timeoutMs: 5_000 },
       { baseCwd: process.cwd(), spawnChildProcess },
     );
-    assert.equal(result.exitCode, 1);
-    assert.equal(spawned, 0, "an out-of-project cwd must never reach spawn");
-    assert.match(result.messages[0].content, /outside the project root/);
+    assert.equal(result.exitCode, 0);
+    assert.equal(spawnedCwd, fs.realpathSync.native(outside));
   } finally {
     fs.rmSync(outside, { recursive: true, force: true });
   }

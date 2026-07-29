@@ -33,6 +33,7 @@ import {
   runTeammate,
   validateModelSpecifier,
 } from "../src/runs/execution.ts";
+import { ModelCircuitBreaker } from "../src/models/model-circuit-breaker.ts";
 import { NETWORK_RETRY_POLICY, classifyRetryError, retryDelayMs } from "../src/runs/retry.ts";
 import type {
   ActiveAgent,
@@ -990,6 +991,37 @@ test("process error after result publication fails lifecycle without retracting 
   assert.match(completions[0].messages.at(-1)?.content ?? "", /late transport failure/);
 });
 
+test("child RPC disables Pi auto-retry before sending the initial prompt", async () => {
+  let written = "";
+  const spawnChildProcess = adaptFakeSpawn(() => {
+    const child = createFakeProcess();
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    stdin.on("data", (chunk) => { written += chunk.toString(); });
+    Object.assign(child, {
+      stdin, stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "done" }] } })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Do the work", context: "fork" },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+  assert.equal(result.exitCode, 0);
+  const commands = written.trim().split("\n").map((line) => JSON.parse(line));
+  assert.deepEqual(commands.slice(0, 2), [
+    { type: "set_auto_retry", enabled: false },
+    { type: "prompt", message: "Do the work" },
+  ]);
+});
+
 test("teammate retries a transient network failure before succeeding", async () => {
   let attempts = 0;
   const retryDelays: number[] = [];
@@ -1027,6 +1059,139 @@ test("teammate retries a transient network failure before succeeding", async () 
   assert.equal(attempts, 2);
   assert.deepEqual(retryDelays, [1_000]);
   assert.match(result.messages.at(-1)?.content ?? "", /recovered/);
+});
+
+test("teammate exhausts a primary model, falls back, and skips its open circuit on later runs", async () => {
+  const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+  const launchedModels: string[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    const modelIndex = args.indexOf("--model");
+    const model = modelIndex >= 0 ? args[modelIndex + 1] : "unknown";
+    launchedModels.push(model);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      if (model === "provider/primary") {
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", stopReason: "error", errorMessage: "Provider returned error: 503 unavailable" },
+        })}\n`);
+        stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+        return;
+      }
+      stdout.write(`${JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "fallback recovered" }] } })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  });
+  const params = {
+    agent: "general",
+    task: "Use a healthy model",
+    model: "provider/primary",
+    fallbackModels: ["provider/backup"],
+    context: "fork" as const,
+  };
+  const options = {
+    baseCwd: process.cwd(),
+    modelCircuitBreaker: breaker,
+    modelCapabilities: [
+      { id: "provider/primary" },
+      { id: "provider/backup" },
+    ],
+    spawnChildProcess,
+    async waitForRetry() { return true; },
+  };
+
+  const first = await runSingleTeammate(params, options);
+  assert.equal(first.exitCode, 0);
+  assert.deepEqual(first.attemptedModels, ["provider/primary", "provider/backup"]);
+  assert.deepEqual(launchedModels, [
+    "provider/primary", "provider/primary", "provider/primary",
+    "provider/primary", "provider/primary", "provider/primary",
+    "provider/backup",
+  ]);
+  assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
+
+  launchedModels.length = 0;
+  const second = await runSingleTeammate(params, options);
+  assert.equal(second.exitCode, 0);
+  assert.deepEqual(launchedModels, ["provider/backup"]);
+});
+
+test("permanent provider failures do not advance the fallback chain", async () => {
+  const launchedModels: string[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    const modelIndex = args.indexOf("--model");
+    launchedModels.push(args[modelIndex + 1]);
+    const child = createFakeProcess();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => child.emit("error", new Error("Unauthorized: invalid API key")));
+    return child;
+  });
+
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "Do not reroute permanent failures",
+    model: "provider/primary",
+    fallbackModels: ["provider/backup"],
+    context: "fork",
+  }, {
+    baseCwd: process.cwd(),
+    modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+    spawnChildProcess,
+    async waitForRetry() { return true; },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(launchedModels, ["provider/primary"]);
+  assert.equal(result.attemptedModels, undefined);
+});
+
+test("resolved model aliases are deduplicated before retry and breaker accounting", async () => {
+  let attempts = 0;
+  const breaker = new ModelCircuitBreaker({ threshold: 2 });
+  const spawnChildProcess = adaptFakeSpawn(() => {
+    attempts += 1;
+    const child = createFakeProcess();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => child.emit("error", new Error("Provider returned error: 503 unavailable")));
+    return child;
+  });
+
+  await runSingleTeammate({
+    agent: "general",
+    task: "Deduplicate aliases",
+    model: "provider",
+    fallbackModels: ["provider/model"],
+    context: "fork",
+  }, {
+    baseCwd: process.cwd(),
+    modelCapabilities: [{ id: "provider/model" }],
+    modelCircuitBreaker: breaker,
+    spawnChildProcess,
+    async waitForRetry() { return true; },
+  });
+
+  assert.equal(attempts, 6);
+  assert.deepEqual(breaker.snapshot().find((entry) => entry.model === "provider/model"), {
+    model: "provider/model",
+    state: "CLOSED",
+    consecutiveFailures: 1,
+    halfOpenTrialInProgress: false,
+  });
 });
 
 test("teammate stops after the initial attempt and five transient retries", async () => {
