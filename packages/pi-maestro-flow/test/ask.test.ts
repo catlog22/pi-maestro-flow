@@ -43,7 +43,7 @@ function createHarness() {
   };
 }
 
-test("single select uses color-block selection, numeric shortcuts, default none, and skips submit", async () => {
+test("single select previews the answer before explicit submission", async () => {
   const harness = createHarness();
   const pending = executeAsk({
     questions: [{
@@ -74,7 +74,13 @@ test("single select uses color-block selection, numeric shortcuts, default none,
   harness.handler("d");
   harness.handler("Prefer the nearest region");
   harness.handler("\r"); // Save details without replacing the option.
-  harness.handler("\r"); // Finish without a separate Next row.
+  harness.handler("\r"); // Open the preview after confirming the answer.
+  const preview = harness.component.render(80).join("\n");
+  assert.match(preview, /核对答案/);
+  assert.match(preview, /提交/);
+  assert.match(preview, /取消/);
+  assert.equal(harness.cleared, false);
+  harness.handler("\r"); // Submit the preview.
 
   const result = await pending;
   assert.deepEqual(result.details.answers[0].selected, ["Preset"]);
@@ -132,9 +138,27 @@ test("single select keypad Enter uses two-stage confirmation", async () => {
   harness.handler?.("\x1bOM");
   assert.match(harness.component?.render(80).join("\n") ?? "", /A  已选/);
   harness.handler?.("\x1bOM");
+  assert.match(harness.component?.render(80).join("\n") ?? "", /核对答案/);
+  harness.handler?.("\x1bOM");
 
   const result = await pending;
   assert.deepEqual(result.details.answers[0].selected, ["A"]);
+});
+
+test("review can explicitly cancel instead of submitting", async () => {
+  const harness = createHarness();
+  const pending = executeAsk({
+    questions: [{ question: "Choose one", options: [{ label: "A" }] }],
+  }, harness.ctx);
+
+  harness.handler?.("1");
+  harness.handler?.("\r");
+  assert.match(harness.component?.render(80).join("\n") ?? "", /提交.*取消/);
+  harness.handler?.("\x1b[C");
+  harness.handler?.("\r");
+
+  const result = await pending;
+  assert.equal(result.details.cancelled, true);
 });
 
 test("single select right arrow and Tab keep direct progression", async () => {
@@ -170,7 +194,8 @@ test("single select none-of-the-above captures a custom answer", async () => {
   harness.handler?.("\r"); // Enter on none auto-opens the custom input once
   harness.handler?.("I want the nearest region");
   harness.handler?.("\r"); // save custom text, return to choices
-  harness.handler?.("\r"); // finish
+  harness.handler?.("\r"); // open preview
+  harness.handler?.("\r"); // submit
 
   const result = await pending;
   assert.deepEqual(result.details.answers[0].selected, ["以上都不是"]);
@@ -189,7 +214,8 @@ test("single select none-of-the-above can be confirmed without an explanation", 
   harness.handler?.("3"); // select None of the above
   harness.handler?.("\r"); // auto-opens custom input
   harness.handler?.("\r"); // empty input saves nothing, back to choices
-  harness.handler?.("\r"); // finish without looping back into the input
+  harness.handler?.("\r"); // open preview without looping back into the input
+  harness.handler?.("\r"); // submit
 
   const result = await pending;
   assert.deepEqual(result.details.answers[0].selected, ["以上都不是"]);
@@ -214,7 +240,8 @@ test("multi-select captures independent details per option", async () => {
   harness.handler?.("d"); // detail for Lint
   harness.handler?.("strict");
   harness.handler?.("\r"); // save detail
-  harness.handler?.("\r"); // finish
+  harness.handler?.("\r"); // open preview
+  harness.handler?.("\r"); // submit
 
   const result = await pending;
   assert.deepEqual(result.details.answers[0].selected, ["Tests", "Lint"]);
@@ -237,6 +264,7 @@ test("multi-select keeps checkbox affordances", async () => {
   harness.handler?.("3");
   harness.handler?.("1");
   harness.handler?.("\r");
+  harness.handler?.("\r");
   const result = await pending;
   assert.deepEqual(result.details.answers[0].selected, ["Tests"]);
 });
@@ -253,6 +281,7 @@ test("multi-select none option remains exclusive", async () => {
 
   harness.handler?.("1");
   harness.handler?.("3");
+  harness.handler?.("\r");
   harness.handler?.("\r");
   const result = await pending;
   assert.deepEqual(result.details.answers[0].selected, ["以上都不是"]);
@@ -288,6 +317,8 @@ test("free response decodes bracketed paste and deletes a whole grapheme", async
   harness.handler?.("0~A👨‍👩‍👧‍👦\x1b[20");
   harness.handler?.("1~");
   harness.handler?.("\x7f");
+  harness.handler?.("\r");
+  assert.match(harness.component?.render(80).join("\n") ?? "", /核对答案/);
   harness.handler?.("\r");
   const result = await pending;
   assert.equal(result.details.answers[0].text, "A");
