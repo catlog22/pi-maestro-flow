@@ -22,6 +22,10 @@ import {
   getPlanCompactionSnapshot,
   type PlanCompactionSnapshot,
 } from "../tools/plan.ts";
+import type {
+  CompactionOwner,
+  CompactionTrigger,
+} from "./compaction-arbiter.ts";
 
 const DETAILS_KIND = "maestro-session-checkpoint";
 const DETAILS_VERSION = 3;
@@ -81,6 +85,12 @@ export interface MaestroCompactionDetails {
   activeSkills: MaestroActiveSkill[];
   references: MaestroCompactionReference[];
   knowhowPath: string;
+  /**
+   * Optional durable trigger metadata. Additive and self-describing (discriminated
+   * by `owner`), so it does not require a schema-version bump: older readers ignore
+   * it and older details simply omit it.
+   */
+  trigger?: CompactionTrigger;
 }
 
 interface SummaryResponse {
@@ -104,6 +114,8 @@ interface CreateCompactionDependencies {
   now?: () => Date;
   completeSummary?: (prompt: string, event: SessionBeforeCompactEvent, ctx: ExtensionContext) => Promise<SummaryResponse>;
   getWorkflowIdentity?: () => WorkflowRecoveryIdentity | undefined | Promise<WorkflowRecoveryIdentity | undefined>;
+  /** Owner-typed trigger observed by the arbiter, when the extension initiated this compaction. */
+  trigger?: CompactionTrigger;
 }
 
 interface PersistCompactionDependencies {
@@ -130,16 +142,55 @@ export function autoCompactionIdleStatus(enabled: boolean): string {
   return enabled ? "AUTO ON" : "AUTO OFF";
 }
 
+/**
+ * Single formatter for the hard-compaction status line. The leading
+ * `COMPACT <used>/<threshold>` token is stable so existing statusline regex
+ * consumers keep parsing; the owner and reason ride in the trailing reason slot
+ * so a mid-turn compaction keeps its effective threshold denominator instead of
+ * being overwritten by the raw native count, and each owner stays distinguishable.
+ *
+ * Native compaction (no trigger) renders only the raw configured reference and
+ * never claims a trigger reason it did not observe.
+ */
+export function formatCompactionStatus(input: {
+  owner: CompactionOwner;
+  trigger?: CompactionTrigger;
+  tokensBefore: number;
+  contextWindow: number;
+  configuredReserveTokens: number;
+}): string {
+  const configuredThreshold = Math.max(1, input.contextWindow - input.configuredReserveTokens);
+  const trigger = input.trigger;
+  if (trigger?.owner === "mid-turn") {
+    return `COMPACT ${trigger.estimatedTokens}/${trigger.effectiveThresholdTokens} mid-turn ${trigger.reason}`;
+  }
+  if (trigger?.owner === "output-limit") {
+    const usage = trigger.usageTokens ?? input.tokensBefore;
+    const percent = trigger.usagePercent == null ? "" : ` ${Math.round(trigger.usagePercent)}%`;
+    return `COMPACT ${usage}/${trigger.contextWindow} output-limit gate:${Math.round(trigger.gateRatio * 100)}%${percent}`;
+  }
+  if (trigger?.owner === "plan-handoff") {
+    return `COMPACT ${input.tokensBefore}/${input.contextWindow} plan-handoff`;
+  }
+  return `COMPACT ${input.tokensBefore}/${configuredThreshold} native configured`;
+}
+
 export async function runWithCompactionStatus<T>(
   event: Pick<SessionBeforeCompactEvent, "preparation">,
   ctx: Pick<ExtensionContext, "model" | "ui">,
   operation: () => Promise<T>,
+  observed: { owner: CompactionOwner; trigger?: CompactionTrigger } = { owner: "native" },
 ): Promise<T> {
   const contextWindow = ctx.model?.contextWindow ?? event.preparation.tokensBefore;
-  const thresholdTokens = Math.max(1, contextWindow - event.preparation.settings.reserveTokens);
   ctx.ui.setStatus(
     COMPACTION_STATUS_KEY,
-    `COMPACT ${event.preparation.tokensBefore}/${thresholdTokens}`,
+    formatCompactionStatus({
+      owner: observed.owner,
+      trigger: observed.trigger,
+      tokensBefore: event.preparation.tokensBefore,
+      contextWindow,
+      configuredReserveTokens: event.preparation.settings.reserveTokens,
+    }),
   );
   try {
     return await operation();
@@ -288,6 +339,7 @@ export async function createMaestroCompaction(
     activeSkills,
     references,
     knowhowPath,
+    ...(dependencies.trigger ? { trigger: dependencies.trigger } : {}),
   };
 
   const messages = [...event.preparation.messagesToSummarize, ...event.preparation.turnPrefixMessages];

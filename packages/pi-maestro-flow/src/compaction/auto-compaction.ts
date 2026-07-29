@@ -9,11 +9,14 @@ import {
 import {
   type CompactionArbiter,
   type CompactionLease,
+  type CompactionTrigger,
 } from "./compaction-arbiter.ts";
+import { deriveCompactionThreshold, effectiveReserveTokens } from "./compaction-threshold.ts";
 import {
   autoCompactionIdleStatus,
   COMPACTION_MODE_STATUS_KEY,
   COMPACTION_STATUS_KEY,
+  formatCompactionStatus,
 } from "./maestro-compaction.ts";
 import { loadPiCompactionInternals, type PiCompactionInternals } from "./pi-internals.ts";
 import {
@@ -462,7 +465,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return pressure.messages;
       }
       state.lastNoCompactableKey = undefined;
-      const lease = dependencies.arbiter?.request("mid-turn");
+      const midTurnTrigger = buildMidTurnTrigger({
+        estimatedTokens: estimate.tokens,
+        contextWindow: ctx.model.contextWindow,
+        modelMaxTokens: ctx.model.maxTokens,
+        configuredReserveTokens: settings.reserveTokens,
+      });
+      const lease = dependencies.arbiter?.request("mid-turn", midTurnTrigger);
       if (dependencies.arbiter && !lease) return pressure.messages;
       state.lastTriggerKey = triggerKey;
       state.running = true;
@@ -485,7 +494,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // forever, silently disabling compaction for the rest of the session.
       try {
         ctx.abort();
-        ctx.ui.setStatus(COMPACTION_STATUS_KEY, `COMPACT ${estimate.tokens}/${thresholdTokens}`);
+        ctx.ui.setStatus(COMPACTION_STATUS_KEY, formatCompactionStatus({
+          owner: "mid-turn",
+          trigger: midTurnTrigger,
+          tokensBefore: estimate.tokens,
+          contextWindow: ctx.model.contextWindow,
+          configuredReserveTokens: settings.reserveTokens,
+        }));
         const instructions = buildMidTurnInstructions(
           estimate,
           ctx.model.contextWindow,
@@ -615,7 +630,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         );
         return;
       }
-      const lease = dependencies.arbiter?.request("output-limit");
+      const outputLimitTrigger: CompactionTrigger = {
+        owner: "output-limit",
+        usageTokens: usage?.tokens ?? null,
+        contextWindow: usage?.contextWindow ?? ctx.model.contextWindow,
+        usagePercent: usage?.percent ?? null,
+        gateRatio: threshold,
+      };
+      const lease = dependencies.arbiter?.request("output-limit", outputLimitTrigger);
       if (dependencies.arbiter && !lease) return;
       state.outputLimitCompactions += 1;
       const instructions = buildOutputLimitInstructions(usage, effectiveReserveTokens(settings, ctx.model.contextWindow, ctx.model.maxTokens));
@@ -673,38 +695,21 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   };
 }
 
-/**
- * Minimum context-window fraction kept free when neither the configured reserve
- * nor the model's max output demand more. A fixed absolute reserve (e.g. 16K)
- * sits dangerously close to 100% on large windows — 400K would only trigger
- * compaction past 95.9% — so this ratio floor keeps compaction starting around
- * 90% regardless of window size.
- */
-export const MIN_RESERVE_RATIO = 0.1;
-
-/**
- * Derive the reserve that drives the proactive compaction trigger from the
- * model's real limits:
- * - the configured reserve (the user's compaction ceiling), honored as a floor;
- * - a ratio of the context window, so large windows still keep output room;
- * - the model's maximum single-response output, so the trigger never sits closer
- *   to the limit than one full response and a max-size response cannot truncate
- *   against the context window.
- * The max-output term is capped below the window so compaction always retains a
- * usable recent context and never disables itself.
- */
-export function effectiveReserveTokens(
-  settings: Pick<CompactionSettings, "reserveTokens">,
-  contextWindow: number,
-  modelMaxTokens?: number,
-): number {
-  const ratioFloor = Math.floor(contextWindow * MIN_RESERVE_RATIO);
-  let reserve = Math.max(settings.reserveTokens, ratioFloor);
-  if (typeof modelMaxTokens === "number" && modelMaxTokens > reserve) {
-    reserve = Math.min(modelMaxTokens, contextWindow - ratioFloor);
-  }
-  return reserve;
-}
+// Threshold derivation lives in compaction-threshold.ts (pure, neutral). The
+// runtime helpers are re-exported so existing consumers keep their imports.
+export {
+  MIN_RESERVE_RATIO,
+  effectiveReserveTokens,
+  deriveCompactionThreshold,
+} from "./compaction-threshold.ts";
+export type {
+  CompactionThresholdDerivation,
+  CompactionThresholdInput,
+  CompactionThresholdModel,
+  CompactionThresholdReason,
+  SoftThresholdDerivation,
+  UnusableContextThreshold,
+} from "./compaction-threshold.ts";
 
 export function applyContextPressurePolicy(
   messages: AgentMessage[],
@@ -1479,6 +1484,9 @@ function pressureResult(input: PressureResultInput): ContextPressureResult {
     ? { band, action: "none", reasons: [] }
     : decideContextAction(band, computeContextSignals({ messages, estimatedTokens, contextWindow, thresholdTokens }));
   const reasons = [...decision.reasons];
+  if (band === "critical" && prunedToolResults > 0) {
+    reasons.push("prune-insufficient");
+  }
   if (band !== "normal" && velocity.slope !== undefined) {
     const epochs = velocity.epochsToCritical !== undefined ? `,${velocity.epochsToCritical.toFixed(1)}ep` : "";
     reasons.push(`velocity:${Math.round(velocity.slope)}/ep${epochs}`);
@@ -1831,6 +1839,36 @@ function buildOutputLimitInstructions(
     "Preserve the exact current objective, completed work, modified files, and the interrupted response's intent so execution can resume and complete the truncated output immediately.",
     `Context usage: ${usage.tokens ?? "unknown"}/${usage.contextWindow} tokens (${percent}); reserve: ${reserveTokens}.`,
   ].join("\n");
+}
+
+/**
+ * Durable mid-turn trigger metadata derived from the same threshold model that
+ * drives the trigger itself, so the recorded effective threshold and reason can
+ * never drift from what actually fired. Undefined only when the context window
+ * is unusable, in which case no honest trigger can be recorded.
+ */
+function buildMidTurnTrigger(input: {
+  estimatedTokens: number;
+  contextWindow: number;
+  modelMaxTokens?: number;
+  configuredReserveTokens: number;
+}): CompactionTrigger | undefined {
+  const derivation = deriveCompactionThreshold({
+    reserveTokens: input.configuredReserveTokens,
+    contextWindow: input.contextWindow,
+    modelMaxTokens: input.modelMaxTokens,
+  });
+  if (!derivation.usable) return undefined;
+  return {
+    owner: "mid-turn",
+    estimatedTokens: input.estimatedTokens,
+    contextWindow: derivation.contextWindow,
+    effectiveThresholdTokens: derivation.thresholdTokens,
+    configuredThresholdTokens: derivation.contextWindow - derivation.configuredReserveTokens,
+    effectiveReserveTokens: derivation.effectiveReserveTokens,
+    configuredReserveTokens: derivation.configuredReserveTokens,
+    reason: derivation.reason,
+  };
 }
 
 function buildMidTurnInstructions(estimate: ContextEstimate, contextWindow: number, reserveTokens: number): string {

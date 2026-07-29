@@ -667,6 +667,46 @@ test("statusline renders reason-bearing context pressure without dropping the li
   }
 });
 
+test("statusline keeps hard-compaction statuses owner-distinguishing across widths", () => {
+  const harness = createHarness();
+  try {
+    harness.statuses.set("mode", "ACT");
+    harness.statuses.set("maestro-auto-compact-mode", "AUTO ON");
+
+    // mid-turn keeps its effective denominator and carries owner+reason in the tail.
+    harness.statuses.set("maestro-auto-compact", "COMPACT 23000/25000 mid-turn ratio-floor");
+    assert.match(stripAnsi(harness.render(120)[1]), /CTX COMPACT 23000\/25000 mid-turn ratio-floor/);
+    assert.match(stripAnsi(harness.render(70)[1]), /CTX COMPACT mid-turn ratio-floor/);
+    // Narrow tier drops numbers and reasons but keeps the owner.
+    assert.match(stripAnsi(harness.render(36)[1]), /CTX COMPACT mid-turn/);
+
+    // output-limit and plan-handoff owners render distinctly.
+    harness.statuses.set("maestro-auto-compact", "COMPACT 180000/200000 output-limit gate:80% 90%");
+    assert.match(stripAnsi(harness.render(120)[1]), /CTX COMPACT 180000\/200000 output-limit gate:80% 90%/);
+    assert.match(stripAnsi(harness.render(36)[1]), /CTX COMPACT output-limit/);
+
+    harness.statuses.set("maestro-auto-compact", "COMPACT 180000/200000 plan-handoff");
+    assert.match(stripAnsi(harness.render(120)[1]), /CTX COMPACT 180000\/200000 plan-handoff/);
+    assert.match(stripAnsi(harness.render(36)[1]), /CTX COMPACT plan-handoff/);
+
+    harness.statuses.set("maestro-auto-compact", "COMPACT 180000/175000 native configured");
+    assert.match(stripAnsi(harness.render(120)[1]), /CTX COMPACT 180000\/175000 native configured/);
+    assert.match(stripAnsi(harness.render(36)[1]), /CTX COMPACT native/);
+
+    // Legacy reason tails without an owner render exactly as before.
+    harness.statuses.set("maestro-auto-compact", "CTX AUTO-PRUNE 82000/90000 -3");
+    assert.equal(stripAnsi(harness.render(120)[1]), "CTX AUTO-PRUNE 82000/90000 -3");
+
+    for (let width = 1; width <= 120; width++) {
+      for (const line of harness.render(width)) {
+        assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
+      }
+    }
+  } finally {
+    harness.dispose();
+  }
+});
+
 test("statusline renders canonical Session/Run separately from active tool calls", () => {
   const harness = createHarness({
     activeToolCalls: 2,

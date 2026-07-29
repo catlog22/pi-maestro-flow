@@ -19,7 +19,7 @@ function makeResult(): SingleResult {
   };
 }
 
-test("collapsed background multi-task call lists every dispatched agent", () => {
+test("collapsed background multi-task call omits the agent list duplicated by the ack progress snapshot", () => {
   const rendered = renderTeammateCall({
     tasks: [
       { agent: "explorer", name: "scan", prompt: "find auth" },
@@ -29,11 +29,9 @@ test("collapsed background multi-task call lists every dispatched agent", () => 
     background: true,
   }, theme as never, { expanded: false }).render(80);
 
-  assert.match(rendered[0], /3 result chain background agents launched/);
-  assert.equal(rendered[1], "• 1 □ @scan (explorer)");
-  assert.equal(rendered[2], "→ 2 □ @review (general) ← result #1");
-  assert.equal(rendered[3], "• 3 □ general");
-  assert.equal(rendered.length, 4);
+  assert.deepEqual(rendered, [
+    "■ 3 result chain background agents launched (Alt+R to manage)",
+  ]);
 });
 
 test("collapsed foreground multi-task call omits the agent list duplicated by streaming progress", () => {
@@ -50,7 +48,7 @@ test("collapsed foreground multi-task call omits the agent list duplicated by st
   ]);
 });
 
-test("collapsed multi-task call shows a non-linear DAG with multi-result edges", () => {
+test("expanded multi-task call shows a non-linear DAG with multi-result edges", () => {
   const rendered = renderTeammateCall({
     tasks: [
       { agent: "explorer", name: "a", prompt: "find auth" },
@@ -58,10 +56,10 @@ test("collapsed multi-task call shows a non-linear DAG with multi-result edges",
       { agent: "general", name: "merge", prompt: "combine {a} and {b}" },
     ],
     background: true,
-  }, theme as never, { expanded: false }).render(80);
+  }, theme as never, { expanded: true }).render(80);
 
   assert.match(rendered[0], /3 result graph background agents launched/);
-  assert.equal(rendered[3], "→ 3 □ @merge (general) ← results #1, #2");
+  assert.equal(rendered[3], "→ 3 □ pending @merge (general) ← results #1, #2");
 });
 
 test("completed teammate results expose the expand affordance", () => {

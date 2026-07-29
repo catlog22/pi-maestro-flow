@@ -48,6 +48,10 @@ export interface ProgressPayload {
 export interface MessagePayload {
 	correlationId: string;
 	taskCorrelationId?: string;
+	// Present on progress/interaction deltas (teammate/.../index.ts publishProgress);
+	// absent on send deltas. Used to self-heal a row when `started` was missed.
+	agent?: string;
+	name?: string;
 	taskIndex?: number;
 	dependencies?: number[];
 	message?: string;
@@ -120,6 +124,9 @@ function latestTool(tools: MessagePayload["recentTools"]): string | undefined {
 // Self-accumulating roster. The teammate extension only broadcasts deltas
 // (started/message/complete), never a full snapshot, so we rebuild the list here.
 // Cold start is empty by design — we only reflect activity observed after load.
+// The roster is self-healing: message/progress deltas for an agent whose
+// `started` delta was missed still materialize a row, so a running agent is
+// always represented as long as it keeps emitting activity.
 export class AgentsStore {
 	private readonly roster = new Map<string, AgentRow>();
 
@@ -150,6 +157,22 @@ export class AgentsStore {
 			for (const progress of p.progress) this.applyProgress(p.correlationId, progress, now);
 		}
 		const targetId = p.taskCorrelationId ?? p.correlationId;
+		if (!this.roster.has(targetId)) {
+			// Self-heal the roster: a running agent must stay visible even when its
+			// `started` delta was missed (cold start, event reorder, or a foreground
+			// dispatch that detached to background). Materialize the row from this
+			// event instead of dropping it; later deltas refine the placeholder.
+			this.applyStarted({
+				correlationId: targetId,
+				agent: p.agent ?? "",
+				name: p.name,
+				status: p.status,
+				lastActivityAt: p.lastActivityAt,
+				...(p.taskCorrelationId && p.taskCorrelationId !== p.correlationId
+					? { spawnedBy: p.correlationId }
+					: {}),
+			}, now);
+		}
 		const row = this.roster.get(targetId);
 		if (!row) return;
 		const progressActivity = p.progress?.find((progress) => progress.correlationId === targetId)?.lastActivityAt;
@@ -223,6 +246,21 @@ export class AgentsStore {
 	}
 
 	private applyProgress(parentCorrelationId: string, p: ProgressPayload, now: number): void {
+		if (!this.roster.has(p.correlationId)) {
+			// Self-heal: see applyMessage. A graph child whose `started` delta was
+			// missed still materializes from its first progress event.
+			this.applyStarted({
+				correlationId: p.correlationId,
+				agent: p.agent,
+				name: p.name,
+				status: p.status,
+				startedAt: p.startedAt,
+				lastActivityAt: p.lastActivityAt,
+				...(parentCorrelationId !== p.correlationId
+					? { spawnedBy: parentCorrelationId }
+					: {}),
+			}, now);
+		}
 		const row = this.roster.get(p.correlationId);
 		if (!row) return;
 		row.parentCorrelationId = parentCorrelationId === p.correlationId

@@ -1522,7 +1522,8 @@ When NOT to use:
       return await runWithCompactionStatus(event, ctx, () =>
         createMaestroCompaction(event, ctx, {
           getWorkflowIdentity: () => workflowRecoveryIdentity(),
-        }));
+          trigger: observed.trigger,
+        }), observed);
     } catch (error) {
       observed.releaseIfNative();
       throw error;

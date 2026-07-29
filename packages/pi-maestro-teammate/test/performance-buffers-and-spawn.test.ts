@@ -483,6 +483,33 @@ test("Windows Pi fallback is shell-free and preserves hostile-looking argv as on
   }
 });
 
+test("teammate child processes are hidden on Windows", async () => {
+  let windowsHide: boolean | undefined;
+  const spawnChildProcess = adaptFakeSpawn((_command, _args, options) => {
+    windowsHide = options.windowsHide;
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+      child.emit("exit", 0, null);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Do work", timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(windowsHide, true);
+});
+
 test("invalid model input is rejected before a child process is spawned", async () => {
   const result = await runSingleTeammate(
     { agent: "general", task: "Do work", model: "openai/gpt-5&whoami" },

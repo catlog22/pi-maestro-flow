@@ -24,7 +24,11 @@ import {
   type CompactionSettingsSnapshot,
   type SoftCompactionConfigPatch,
 } from "../compaction/compaction-settings.ts";
-import { effectiveReserveTokens, MIN_RESERVE_RATIO } from "../compaction/auto-compaction.ts";
+import {
+  deriveCompactionThreshold,
+  type CompactionThresholdDerivation,
+  type CompactionThresholdReason,
+} from "../compaction/compaction-threshold.ts";
 
 type CompactionField = typeof COMPACTION_FIELDS[number];
 type EditableCompactionField = Exclude<CompactionField, "enabled">;
@@ -62,17 +66,17 @@ export interface CompactionSettingsOverlayParams {
 const MENU_ITEMS: readonly MenuItem[] = ["threshold", "enabled", "keepRecentTokens", "softEnabled"];
 
 const ITEM_LABELS: Record<MenuItem, string> = {
-  threshold: "压缩阈值",
+  threshold: "实际硬压缩阈值",
   enabled: "自动压缩",
   keepRecentTokens: "保留最近上下文",
   softEnabled: "软压缩开关",
 };
 
 const ITEM_DETAILS: Record<MenuItem, string> = {
-  threshold: "上下文达到此 Token 数时触发压缩（硬压缩）。",
+  threshold: "显示运行时真实阈值；编辑的是配置阈值，保存后仍换算为预留输出空间。",
   enabled: "同时控制 Pi 原生自动压缩与 Maestro 执行中压缩。",
   keepRecentTokens: "清理旧工具结果时，优先保留最近的上下文。",
-  softEnabled: "开启后在达到硬阈值前先裁剪陈旧工具结果（软压缩）；比例经 settings 的 compaction.soft 微调。",
+  softEnabled: "开启后在硬压缩前裁剪陈旧工具结果；若硬阈值更早，界面会标记软阶段不可达。",
 };
 
 export class CompactionSettingsOverlay implements Component, Focusable {
@@ -245,32 +249,38 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     if (item === "threshold") {
       const contextWindow = this.params.contextWindow;
       if (contextWindow) {
-        const reserve = contextWindow - Number(this.editValue);
+        const configuredThreshold = Number(this.editValue);
+        const reserve = contextWindow - configuredThreshold;
         const validReserve = Number.isSafeInteger(reserve) && reserve > 0;
         rows.push(
-          fitLine(`上下文窗口 · ${formatNumber(contextWindow)} Token`, inner),
+          fitLine(`配置阈值 · ${formatNumber(configuredThreshold)} / ${formatNumber(contextWindow)} Token`, inner),
           fitLine(
             validReserve
-              ? `保存后预留输出 · ${formatNumber(reserve)} Token`
-              : "保存后预留输出 · 必须大于 0 Token",
+              ? `配置预留 · ${formatNumber(reserve)} Token`
+              : "配置预留 · 必须大于 0 Token",
             inner,
           ),
         );
         if (validReserve) {
-          const ratioPct = Math.round(MIN_RESERVE_RATIO * 100);
-          const ratioFloor = Math.floor(contextWindow * MIN_RESERVE_RATIO);
-          const maxOutput = this.params.maxTokens ?? 0;
-          const effective = effectiveReserveTokens({ reserveTokens: reserve }, contextWindow, this.params.maxTokens);
-          const trigger = contextWindow - effective;
-          const triggerPct = Math.round((trigger / contextWindow) * 100);
-          rows.push(
-            fitLine(`最大输出 · ${formatNumber(maxOutput)} Token`, inner),
-            this.params.theme.fg("accent", fitLine(
-              `公式 · max(配置 ${formatNumber(reserve)}, 窗口${ratioPct}% ${formatNumber(ratioFloor)}, 输出 ${formatNumber(maxOutput)})`,
-              inner,
-            )),
-            fitLine(`有效预留 = ${formatNumber(effective)} · 约 ${formatNumber(trigger)} (${triggerPct}%) 触发压缩`, inner),
-          );
+          const model = deriveCompactionThreshold({
+            reserveTokens: reserve,
+            contextWindow,
+            modelMaxTokens: this.params.maxTokens,
+            soft: this.effective().soft,
+          });
+          if (model.usable) {
+            rows.push(
+              fitLine(`窗口 10% 底线 · ${formatNumber(model.ratioFloorTokens)} Token`, inner),
+              fitLine(`模型单次最大输出 · ${formatNumber(this.params.maxTokens ?? 0)} Token`, inner),
+              fitLine(`实际安全预留 · ${formatNumber(model.effectiveReserveTokens)} Token`, inner),
+              this.params.theme.fg("accent", fitLine(
+                `实际硬压缩 · 超过 ${formatNumber(model.thresholdTokens)} Token (${formatPercent(model.thresholdTokens, contextWindow)})`,
+                inner,
+              )),
+              fitLine(`生效原因 · ${thresholdReasonLabel(model.reason)}`, inner),
+              fitLine(softThresholdSummary(model), inner),
+            );
+          }
         }
       } else {
         rows.push(this.params.theme.fg("warning", fitLine(
@@ -394,8 +404,14 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     if (item === "enabled") return effective.enabled ? "已开启" : "已关闭";
     if (item === "softEnabled") return effective.soft.enabled ? "已开启" : "已关闭";
     if (item === "threshold") {
-      return this.params.contextWindow
-        ? thresholdLabel(this.params.contextWindow, effective.reserveTokens)
+      const model = deriveCompactionThreshold({
+        reserveTokens: effective.reserveTokens,
+        contextWindow: this.params.contextWindow,
+        modelMaxTokens: this.params.maxTokens,
+        soft: effective.soft,
+      });
+      return model.usable
+        ? actualThresholdLabel(model)
         : `预留 ${formatNumber(effective.reserveTokens)} Token`;
     }
     return `${formatNumber(effective.keepRecentTokens)} Token`;
@@ -421,27 +437,38 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     const rows = [fitLine(ITEM_DETAILS[item], width)];
     if (item !== "threshold") return rows;
     const effective = this.effective();
-    if (this.params.contextWindow) {
-      rows.push(fitLine(
-        `上下文窗口 ${formatNumber(this.params.contextWindow)} · 预留输出 ${formatNumber(effective.reserveTokens)} Token`,
-        width,
-      ));
-      if (safeWidth >= 40) rows.push(fitLine(this.pressurePreview(effective.reserveTokens), width));
+    const model = deriveCompactionThreshold({
+      reserveTokens: effective.reserveTokens,
+      contextWindow: this.params.contextWindow,
+      modelMaxTokens: this.params.maxTokens,
+      soft: effective.soft,
+    });
+    if (model.usable) {
+      const configuredThreshold = model.contextWindow - model.configuredReserveTokens;
+      rows.push(
+        this.params.theme.fg("accent", fitLine(
+          `实际硬压缩 · 超过 ${formatNumber(model.thresholdTokens)} / ${formatNumber(model.contextWindow)} Token (${formatPercent(model.thresholdTokens, model.contextWindow)})`,
+          width,
+        )),
+        fitLine(
+          `配置阈值 · ${formatNumber(configuredThreshold)} Token (${formatPercent(configuredThreshold, model.contextWindow)}) · 配置预留 ${formatNumber(model.configuredReserveTokens)}`,
+          width,
+        ),
+        fitLine(
+          `实际安全预留 · ${formatNumber(model.effectiveReserveTokens)} Token · ${thresholdReasonLabel(model.reason)}`,
+          width,
+        ),
+        fitLine(`模型单次最大输出 · ${formatNumber(this.params.maxTokens ?? 0)} Token`, width),
+      );
+      if (safeWidth >= 40) rows.push(fitLine(this.pressurePreview(model), width));
     } else {
-      rows.push(this.params.theme.fg("warning", fitLine("△ 当前模型缺少上下文窗口，无法计算压缩阈值", width)));
+      rows.push(this.params.theme.fg("warning", fitLine("△ 当前模型缺少上下文窗口，无法计算实际压缩阈值", width)));
     }
     return rows;
   }
 
-  private pressurePreview(reserveTokens: number): string {
-    const contextWindow = this.params.contextWindow;
-    if (!contextWindow || reserveTokens >= contextWindow) return "压力区间 · 当前模型上下文不可用";
-    const threshold = contextWindow - reserveTokens;
-    const percent = (threshold / contextWindow * 100).toFixed(1);
-    const soft = this.effective().soft;
-    const nudge = Math.round(soft.nudgeRatio * 100);
-    const prune = Math.round(soft.pruneRatio * 100);
-    return `压力区间 · 正常 <${nudge}% · 提醒 ${nudge}–${prune}% · 清理 ${prune}–${percent}% · 压缩 ≥${percent}%`;
+  private pressurePreview(model: CompactionThresholdDerivation): string {
+    return softThresholdSummary(model);
   }
 
   private styledNotice(notice: string, width: number): string {
@@ -607,10 +634,29 @@ function softDraftEqual(left?: SoftCompactionConfigPatch, right?: SoftCompaction
     && l.pruneTargetRatio === r.pruneTargetRatio;
 }
 
-function thresholdLabel(contextWindow: number | undefined, reserveTokens: number): string {
-  if (!contextWindow || reserveTokens >= contextWindow) return "当前模型不可用";
-  const threshold = contextWindow - reserveTokens;
-  return `${formatNumber(threshold)} / ${formatNumber(contextWindow)} (${(threshold / contextWindow * 100).toFixed(1)}%)`;
+function actualThresholdLabel(model: CompactionThresholdDerivation): string {
+  return `实际 >${formatNumber(model.thresholdTokens)} / ${formatNumber(model.contextWindow)} (${formatPercent(model.thresholdTokens, model.contextWindow)})`;
+}
+
+function thresholdReasonLabel(reason: CompactionThresholdReason): string {
+  if (reason === "configured") return "由配置预留决定";
+  if (reason === "ratio-floor") return "窗口 10% 安全底线下调";
+  if (reason === "max-output") return "模型最大输出保护下调";
+  return "模型最大输出过大，安全预留封顶为窗口 90%";
+}
+
+function softThresholdSummary(model: CompactionThresholdDerivation): string {
+  if (!model.soft) return "软阶段 · 未配置";
+  const nudge = `提醒 ${formatNumber(model.soft.nudgeTokens)} (${formatPercent(model.soft.nudgeTokens, model.contextWindow)})`;
+  const prune = `裁剪 ${formatNumber(model.soft.pruneTokens)} (${formatPercent(model.soft.pruneTokens, model.contextWindow)})`;
+  const nudgeState = model.soft.nudgeReachable ? "可达" : "不可达";
+  const pruneState = model.soft.pruneReachable ? "可达" : "不可达";
+  const warning = !model.soft.nudgeReachable || !model.soft.pruneReachable ? " · 硬压缩会先触发" : "";
+  return `软阶段 · ${nudge} ${nudgeState} · ${prune} ${pruneState}${warning}`;
+}
+
+function formatPercent(tokens: number, contextWindow: number): string {
+  return `${(tokens / contextWindow * 100).toFixed(1)}%`;
 }
 
 function shortLabel(item: MenuItem): string {
@@ -649,6 +695,10 @@ function localizeValidation(message: string): string {
   }
   if (message.startsWith("keepRecentTokens") && message.includes("positive safe integer")) {
     return "保留最近上下文必须是大于 0 的整数";
+  }
+  if (message.startsWith("reserveTokens") && message.includes("must be <=")) {
+    const ceiling = message.match(/must be <= (\d+)/)?.[1];
+    return `预留输出空间 ${values[0] ?? ""} 不得超过 ${ceiling ? formatNumber(Number(ceiling)) : ""}`.trim();
   }
   if (message.startsWith("reserveTokens") && message.includes("contextWindow")) {
     return `预留输出空间 ${values[0] ?? ""} 必须小于上下文窗口 ${values[1] ?? ""}`.trim();

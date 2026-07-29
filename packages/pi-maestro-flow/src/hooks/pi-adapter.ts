@@ -40,6 +40,11 @@ import type {
   PermissionToolCall,
 } from "../permissions/types.ts";
 import { isTeammateChild } from "../permissions/teammate-relay.ts";
+import {
+  createHookContextComponent,
+  parseMaestroContext,
+  type HookContextDetails,
+} from "./hook-context-renderer.ts";
 
 export type { PermissionMode } from "../permissions/types.ts";
 
@@ -357,30 +362,45 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
     if (event.source === "extension" || !state.active) return;
     state.turnId = randomUUID();
     state.stopHookActive = false;
-    const outputs = await execute("UserPromptSubmit", [], {
-      ...turnInput("UserPromptSubmit", ctx, state, getPermissionMode()),
-      prompt: event.text,
-    }, ctx);
-    const blocked = blockingReason(outputs) ?? continueFalseReason(outputs);
-    if (blocked) {
-      ctx.ui.notify(blocked, "warning");
-      return { action: "handled" as const };
+    ctx.ui.setStatus(STATUS_KEY, "⬡ Hook…");
+    try {
+      const outputs = await execute("UserPromptSubmit", [], {
+        ...turnInput("UserPromptSubmit", ctx, state, getPermissionMode()),
+        prompt: event.text,
+      }, ctx);
+      const blocked = blockingReason(outputs) ?? continueFalseReason(outputs);
+      if (blocked) {
+        ctx.ui.notify(blocked, "warning");
+        return { action: "handled" as const };
+      }
+      state.pendingContext.push(...collectAdditionalContext(outputs, true));
+    } finally {
+      ctx.ui.setStatus(STATUS_KEY, undefined);
     }
-    state.pendingContext.push(...collectAdditionalContext(outputs, true));
   });
 
   pi.on("before_agent_start", (_event) => {
     state.turnId ??= randomUUID();
     if (state.pendingContext.length === 0) return;
     const context = state.pendingContext.splice(0).join("\n\n");
+    const details = parseMaestroContext(context);
     return {
       message: {
         customType: "codex-hook-context",
         content: context,
-        display: false,
-        details: { source: "hooks" },
+        display: true,
+        details,
       },
     };
+  });
+
+  pi.registerMessageRenderer<HookContextDetails>("codex-hook-context", (message, options, theme) => {
+    const details = message.details;
+    if (!details) return undefined;
+    const content = typeof message.content === "string"
+      ? message.content
+      : message.content.map((c) => ("text" in c ? c.text : "")).join("\n");
+    return createHookContextComponent(content, details, options.expanded, theme);
   });
 
   pi.on("tool_call", async (event, ctx) => {

@@ -25,6 +25,8 @@ import {
   effortProgressBar,
   isThinkingLevel as isCanonicalThinkingLevel,
 } from "../effort-display.ts";
+import { readCompactionSettings } from "../compaction/compaction-settings.ts";
+import { deriveCompactionThreshold, type CompactionThresholdReason } from "../compaction/compaction-threshold.ts";
 
 export type ApiProviderId = "maestro-openai" | "maestro-qwen" | "maestro-anthropic";
 
@@ -268,6 +270,9 @@ export async function loadApiProviderSettings(
     maxThinking: thinkingLevelMap.xhigh === "max" || thinkingLevelMap.max === "max",
     api: typeof config.api === "string" ? config.api : preset?.api,
     name: typeof config.name === "string" ? config.name : preset?.name,
+    maxTokens: typeof model?.maxTokens === "number"
+      ? model.maxTokens
+      : preset?.maxTokens ?? 16_384,
   };
 }
 
@@ -281,7 +286,7 @@ export async function saveApiProviderSettings(
     modelId: required(settings.modelId, "Model ID"),
     contextWindow: settings.contextWindow === undefined
       ? undefined
-      : positiveInteger(settings.contextWindow, "Context window"),
+      : positiveInteger(settings.contextWindow, "上下文窗口 contextWindow"),
     reasoning: settings.reasoning,
     apiKey: required(settings.apiKey ?? "", "API key config"),
     maxThinking: settings.maxThinking === true,
@@ -290,7 +295,7 @@ export async function saveApiProviderSettings(
     compat: settings.compat,
     maxTokens: settings.maxTokens === undefined
       ? undefined
-      : positiveInteger(settings.maxTokens, "Max tokens"),
+      : positiveInteger(settings.maxTokens, "单次最大输出 maxTokens"),
     headers: settings.headers && Object.keys(settings.headers).length > 0 ? settings.headers : undefined,
     authHeader: settings.authHeader,
   };
@@ -444,11 +449,18 @@ async function configureProvider(
   if (!defaultThinkingLevel) return;
 
   const contextWindowInput = await ctx.ui.input(
-    `${provider.name} context window（Token）`,
+    `${provider.name} 上下文窗口 contextWindow（输入+输出总 Token，本地注册值）`,
     String(current.contextWindow ?? provider.contextWindow),
   );
   if (contextWindowInput === undefined) return;
-  const contextWindow = positiveInteger(contextWindowInput, "Context window");
+  const contextWindow = positiveInteger(contextWindowInput, "上下文窗口 contextWindow");
+  const maxTokensInput = await ctx.ui.input(
+    `${provider.name} 单次最大输出 maxTokens（值越大，安全压缩可能越早）`,
+    String(current.maxTokens ?? provider.maxTokens),
+  );
+  if (maxTokensInput === undefined) return;
+  const maxTokens = positiveInteger(maxTokensInput, "单次最大输出 maxTokens");
+  validateModelWindow(contextWindow, maxTokens);
 
   const keyInput = await ctx.ui.input(`${provider.name} API key`, "");
   if (keyInput === undefined) return;
@@ -459,6 +471,7 @@ async function configureProvider(
     baseUrl,
     modelId,
     contextWindow,
+    maxTokens,
     reasoning: reasoningChoice === enabledLabel,
     apiKey,
     maxThinking,
@@ -470,7 +483,9 @@ async function configureProvider(
       `API format：${provider.api}`,
       `Base URL：${next.baseUrl}`,
       `Model：${next.modelId}`,
-      `Context window：${next.contextWindow?.toLocaleString("en-US")} Token`,
+      `上下文窗口 contextWindow：${next.contextWindow?.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
+      `单次最大输出 maxTokens：${next.maxTokens?.toLocaleString("en-US")} Token`,
+      ...compactionPreviewLines(ctx.cwd, contextWindow, maxTokens),
       `Reasoning：${next.reasoning ? "enabled" : "disabled"}`,
       `Default thinking（Pi 全局）：${defaultThinkingLevel}`,
       "Auth：stored API key",
@@ -559,11 +574,18 @@ async function configureCustomChannel(
   );
   if (!defaultThinkingLevel) return;
   const contextWindowInput = await ctx.ui.input(
-    `${displayName} context window（Token）`,
+    `${displayName} 上下文窗口 contextWindow（输入+输出总 Token，本地注册值）`,
     String(current.configured ? current.contextWindow : 128_000),
   );
   if (contextWindowInput === undefined) return;
-  const contextWindow = positiveInteger(contextWindowInput, "Context window");
+  const contextWindow = positiveInteger(contextWindowInput, "上下文窗口 contextWindow");
+  const maxTokensInput = await ctx.ui.input(
+    `${displayName} 单次最大输出 maxTokens（值越大，安全压缩可能越早）`,
+    String(current.configured ? current.maxTokens : 16_384),
+  );
+  if (maxTokensInput === undefined) return;
+  const maxTokens = positiveInteger(maxTokensInput, "单次最大输出 maxTokens");
+  validateModelWindow(contextWindow, maxTokens);
   let compat: Record<string, unknown> | undefined;
   if (api === "openai-completions") {
     const compatAccumulator: Record<string, unknown> = {};
@@ -590,7 +612,7 @@ async function configureCustomChannel(
       if (!effortChoice) return;
       if (effortChoice !== AUTO_LABEL) compatAccumulator.supportsReasoningEffort = effortChoice === "支持";
       const maxTokensFieldChoice = await ctx.ui.select(
-        "max tokens 字段",
+        "最大输出请求字段（兼容选项，不是 maxTokens 数值）",
         [AUTO_LABEL, "max_completion_tokens", "max_tokens"],
       );
       if (!maxTokensFieldChoice) return;
@@ -633,6 +655,7 @@ async function configureCustomChannel(
     baseUrl,
     modelId,
     contextWindow,
+    maxTokens,
     reasoning,
     apiKey,
     maxThinking,
@@ -649,7 +672,9 @@ async function configureCustomChannel(
       `API 协议：${api}`,
       `Base URL：${next.baseUrl}`,
       `Model：${next.modelId}`,
-      `Context window：${next.contextWindow?.toLocaleString("en-US")} Token`,
+      `上下文窗口 contextWindow：${next.contextWindow?.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
+      `单次最大输出 maxTokens：${next.maxTokens?.toLocaleString("en-US")} Token`,
+      ...compactionPreviewLines(ctx.cwd, contextWindow, maxTokens),
       `Reasoning：${next.reasoning ? "enabled" : "disabled"}`,
       `Default thinking（Pi 全局）：${defaultThinkingLevel}`,
       `Compat：${compat ? JSON.stringify(compat) : "自动"}`,
@@ -830,8 +855,11 @@ async function showProvider(
       `API format：${api}`,
       `Base URL：${typeof config.baseUrl === "string" ? config.baseUrl : preset?.baseUrl ?? ""}`,
       `Model：${modelId}`,
-      `Context window：${typeof model.contextWindow === "number" ? model.contextWindow.toLocaleString("en-US") : "?"} Token`,
-      `Max output：${typeof model.maxTokens === "number" ? model.maxTokens.toLocaleString("en-US") : "?"} Token`,
+      `上下文窗口 contextWindow：${typeof model.contextWindow === "number" ? model.contextWindow.toLocaleString("en-US") : "?"} Token（输入+输出总量，本地注册值）`,
+      `单次最大输出 maxTokens：${typeof model.maxTokens === "number" ? model.maxTokens.toLocaleString("en-US") : "?"} Token`,
+      ...(typeof model.contextWindow === "number" && typeof model.maxTokens === "number"
+        ? compactionPreviewLines(ctx.cwd, model.contextWindow, model.maxTokens)
+        : []),
       `Reasoning：${model.reasoning === true ? "enabled" : "disabled"}`,
       `Default thinking：${level ?? "global"}`,
       `Auth：${authSource(config.apiKey)}`,
@@ -873,17 +901,19 @@ async function writeApiProviderSettings(
     : [];
   const existingIndex = currentModels.findIndex((model) => model.id === settings.modelId);
   const existingModel = existingIndex >= 0 ? currentModels[existingIndex] : {};
+  const contextWindow = settings.contextWindow
+    ?? (typeof existingModel.contextWindow === "number" ? existingModel.contextWindow : defaults.contextWindow);
+  const maxTokens = settings.maxTokens
+    ?? (typeof existingModel.maxTokens === "number" ? existingModel.maxTokens : defaults.maxTokens);
+  validateModelWindow(contextWindow, maxTokens);
   const nextModel: Record<string, unknown> = {
     ...existingModel,
     id: settings.modelId,
     name: typeof existingModel.name === "string" ? existingModel.name : settings.modelId,
     reasoning: settings.reasoning,
     input: Array.isArray(existingModel.input) ? existingModel.input : ["text", "image"],
-    contextWindow: settings.contextWindow
-      ?? (typeof existingModel.contextWindow === "number" ? existingModel.contextWindow : defaults.contextWindow),
-    maxTokens: typeof existingModel.maxTokens === "number"
-      ? existingModel.maxTokens
-      : defaults.maxTokens,
+    contextWindow,
+    maxTokens,
   };
   if (settings.reasoning) {
     const thinkingLevelMap: Record<string, string | null> = defaults.api === "anthropic-messages"
@@ -990,7 +1020,7 @@ function resolveWriteDefaults(settings: ApiProviderSettings): ChannelWriteDefaul
     return {
       api: preset.api,
       contextWindow: settings.contextWindow ?? preset.contextWindow,
-      maxTokens: preset.maxTokens,
+      maxTokens: settings.maxTokens ?? preset.maxTokens,
       compat: preset.compat,
     };
   }
@@ -1520,6 +1550,47 @@ function notifySaved(
   ctx.ui.notify(`${displayName} ${suffix}\n配置：${result.path}${backup}`, "info");
 }
 
+function compactionPreviewLines(projectRoot: string, contextWindow: number, maxTokens: number): string[] {
+  const compaction = readCompactionSettings(projectRoot).effective;
+  const model = deriveCompactionThreshold({
+    reserveTokens: compaction.reserveTokens,
+    contextWindow,
+    modelMaxTokens: maxTokens,
+    soft: compaction.soft,
+  });
+  if (!model.usable) return ["预计硬压缩：当前模型窗口不可用"];
+  const configuredThreshold = contextWindow - compaction.reserveTokens;
+  const lines = [
+    `预计实际硬压缩：上下文超过 ${model.thresholdTokens.toLocaleString("en-US")} Token（${(model.thresholdPercent).toFixed(0)}%）`,
+  ];
+  if (configuredThreshold !== model.thresholdTokens) {
+    lines.push(
+      `配置阈值：${configuredThreshold.toLocaleString("en-US")} Token；${providerThresholdReason(model.reason)}`,
+    );
+  }
+  if (model.soft && !model.soft.nudgeReachable) {
+    lines.push("提醒：当前硬压缩阈值早于软提醒，软提醒不可达。");
+  } else if (model.soft && !model.soft.pruneReachable) {
+    lines.push("提醒：当前硬压缩阈值早于软裁剪，可能直接硬压缩。");
+  }
+  return lines;
+}
+
+function providerThresholdReason(reason: CompactionThresholdReason): string {
+  if (reason === "configured") return "由压缩配置预留决定";
+  if (reason === "ratio-floor") return "受上下文窗口 10% 安全底线下调";
+  if (reason === "max-output") return "受单次最大输出保护下调";
+  return "单次最大输出过大，安全预留已封顶为窗口 90%";
+}
+
+function validateModelWindow(contextWindow: number, maxTokens: number): void {
+  if (maxTokens >= contextWindow) {
+    throw new Error(
+      `单次最大输出 maxTokens（${maxTokens.toLocaleString("en-US")}）必须小于上下文窗口 contextWindow（${contextWindow.toLocaleString("en-US")}）；否则没有空间容纳输入。`,
+    );
+  }
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -1533,7 +1604,9 @@ function required(value: string, label: string): string {
 function positiveInteger(value: string | number, label: string): number {
   const parsed = typeof value === "number" ? value : Number(value.trim());
   if (!Number.isSafeInteger(parsed) || parsed <= 0) {
-    throw new Error(`${label} must be a positive integer`);
+    throw new Error(/[\u3400-\u9fff]/.test(label)
+      ? `${label} 必须是大于 0 的整数`
+      : `${label} must be a positive integer`);
   }
   return parsed;
 }

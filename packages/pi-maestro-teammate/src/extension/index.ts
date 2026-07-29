@@ -1251,6 +1251,32 @@ export function rejectAllChildProxyRequests(
 }
 
 /** @internal Exported for lifecycle regression tests. */
+export type IpcSender = (
+  message: Record<string, unknown>,
+  callback: (error: Error | null) => void,
+) => boolean;
+
+/**
+ * Builds the IPC sender the teammate proxy uses to talk to its parent.
+ *
+ * Node's IPC `send` reads `this.connected` internally, so detaching it from its
+ * owner (`const send = proc.send`) leaves `this` undefined in module scope and
+ * throws "Cannot read properties of undefined (reading 'connected')" on the
+ * first call — which broke every proxied teammate tool in a nested child.
+ * Binding the owner keeps the proxied call working. Returns undefined when no
+ * live IPC channel exists.
+ */
+export function createIpcSender(
+  // Node's IPC process.send is a loosely-typed boundary (message: any); any[]
+  // is the signature both process.send and test fakes satisfy without casts.
+  proc: { connected?: boolean; send?: (...args: any[]) => boolean } = process,
+): IpcSender | undefined {
+  const rawSend = proc.send;
+  if (typeof rawSend !== "function" || proc.connected === false) return undefined;
+  const send = rawSend.bind(proc);
+  return (message, callback) => send(message, callback);
+}
+
 export function createChildProxyRequest(
   pendingRequests: ChildProxyPendingRequests,
   requestId: string,
@@ -1562,8 +1588,8 @@ export default function registerTeammateExtension(
       params: unknown,
       signal?: AbortSignal,
     ): Promise<TeammateToolResult<T>> {
-      const send = process.send;
-      if (typeof send !== "function" || process.connected === false) {
+      const send = createIpcSender();
+      if (!send) {
         throw new Error("IPC not available. Teammate proxy requires IPC channel.");
       }
       const requestId = randomUUID();
@@ -1577,7 +1603,7 @@ export default function registerTeammateExtension(
           params,
           correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
         },
-        (message, callback) => send(message, callback),
+        send,
         CHILD_PROXY_TIMEOUT_MS,
         signal,
       );

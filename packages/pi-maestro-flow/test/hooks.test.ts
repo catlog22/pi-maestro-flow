@@ -681,6 +681,7 @@ test("Hook fallback refuses to trust without a complete review TUI", async () =>
     },
     sendMessage() {},
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: root,
@@ -725,6 +726,7 @@ test("/hooks opens the installer for a missing config then routes to hash review
     },
     sendMessage() {},
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const theme = {
     fg(_role: string, text: string) { return text; },
@@ -796,6 +798,7 @@ test("/hooks install explicitly opens the dedicated installer", async () => {
     },
     sendMessage() {},
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const theme = {
     fg(_role: string, text: string) { return text; },
@@ -846,6 +849,7 @@ test("/hooks install fails closed without an interactive TUI", async () => {
     },
     sendMessage() {},
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: root,
@@ -892,6 +896,7 @@ test("/hooks opens the custom TUI by default and applies toggles immediately", a
     },
     sendMessage() {},
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const theme = {
     fg(_role: string, text: string) { return text; },
@@ -961,6 +966,7 @@ test("/hooks keeps toggle persistence failures inside the review overlay", async
     },
     sendMessage() {},
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const theme = {
     fg(_role: string, text: string) { return text; },
@@ -1039,6 +1045,7 @@ process.stdin.on("end", () => fs.writeFileSync(${JSON.stringify(markerPath)}, "r
     },
     sendMessage() {},
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: root,
@@ -1217,6 +1224,7 @@ test("Pi adapter ignores PreToolUse deny output after the Hook is trusted", asyn
       sentMessages.push({ message, options });
     },
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const notifications: string[] = [];
   const sentMessages: Array<{ message: unknown; options: unknown }> = [];
@@ -1308,6 +1316,7 @@ process.exitCode = 1;
       sentMessages.push({ message, options });
     },
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: root,
@@ -1406,6 +1415,7 @@ test("Pi adapter absorbs hook results after session shutdown", async () => {
     registerCommand() {},
     sendMessage() { sentMessages++; },
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: root,
@@ -1434,7 +1444,7 @@ test("Pi adapter absorbs hook results after session shutdown", async () => {
 
     assert.deepEqual(notifications, []);
     assert.equal(sentMessages, 0);
-    assert.deepEqual(statuses, ["running hook", undefined]);
+    assert.deepEqual(statuses, ["⬡ Hook…", "running hook", undefined, undefined]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -1466,6 +1476,7 @@ test("Pi adapter does not append a Stop continuation behind a pending message", 
     registerCommand() {},
     sendMessage() {},
     sendUserMessage(message: string) { continuations.push(message); },
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: root,
@@ -1541,6 +1552,7 @@ process.stdout.write(JSON.stringify({ hookSpecificOutput }));
     registerCommand() {},
     sendMessage() {},
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   let prompts = 0;
   const ctx = {
@@ -1617,6 +1629,7 @@ process.stdout.write(JSON.stringify({ hookSpecificOutput }));
       registerCommand() {},
       sendMessage() {},
       sendUserMessage() {},
+      registerMessageRenderer() {},
     } as unknown as ExtensionAPI;
     registerCodexHookAdapter(childPi, {
       trustFilePath: trustPath,
@@ -1675,6 +1688,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({
     registerCommand() {},
     sendMessage() {},
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: root,
@@ -1706,12 +1720,10 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({
     };
 
     assert.equal(result.systemPrompt, undefined);
-    assert.deepEqual(result.message, {
-      customType: "codex-hook-context",
-      content: "dynamic hook context",
-      display: false,
-      details: { source: "hooks" },
-    });
+    assert.equal(result.message?.customType, "codex-hook-context");
+    assert.equal(result.message?.content, "dynamic hook context");
+    assert.equal(result.message?.display, true);
+    assert.equal((result.message as Record<string, unknown>)?.details != null, true);
     assert.equal(notices.length, 1);
     assert.equal(notices[0].level, "info");
     assert.equal(notices[0].message.length, 500);
@@ -1758,6 +1770,7 @@ test("Pi adapter keeps successful command hook output out of the transcript", as
       sentMessages.push({ message, options });
     },
     sendUserMessage() {},
+    registerMessageRenderer() {},
   } as unknown as ExtensionAPI;
   const ctx = {
     cwd: root,

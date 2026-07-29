@@ -27,7 +27,8 @@ test("compaction TUI renders safely at narrow, boundary, and wide widths", () =>
   }
   assert.match(overlay.render(80).join("\n"), /Maestro 压缩设置/);
   assert.match(overlay.render(80).join("\n"), /压缩阈值/);
-  assert.match(overlay.render(80).join("\n"), /290,000 \/ 300,000 \(96\.7%\)/);
+  assert.match(overlay.render(80).join("\n"), /实际 >270,000 \/ 300,000 \(90\.0%\)/);
+  assert.match(overlay.render(80).join("\n"), /配置阈值 · 290,000 Token \(96\.7%\)/);
   assert.match(overlay.render(20).join("\n"), /Esc关闭 Enter修改/);
   overlay.handleInput("\r");
   assert.match(overlay.render(20).join("\n"), /Esc返回 Enter确认/);
@@ -43,7 +44,8 @@ test("compaction TUI supports direct threshold editing, scope tabs, toggle, inhe
   });
 
   overlay.handleInput("U");
-  assert.match(overlay.render(80).join("\n"), /压缩阈值 · 280,000 \/ 300,000 \(93\.3%\) · 继承自用户/);
+  assert.match(overlay.render(80).join("\n"), /实际硬压缩阈值 · 实际 >270,000 \/ 300,000 \(90\.0%\) · 继承自用户/);
+  assert.match(overlay.render(80).join("\n"), /配置阈值 · 280,000 Token \(93\.3%\)/);
   assert.match(overlay.render(20).join("\n"), /Esc关闭 Ctrl\+S保存/);
   overlay.handleInput("\x1b[B");
   overlay.handleInput(" ");
@@ -124,13 +126,28 @@ test("compaction TUI falls back to reserve-token editing when model context is u
   assert.match(rendered, /新值 · 10,000 Token/);
 });
 
-test("compaction TUI shows the effective-reserve formula while editing the threshold", () => {
+test("compaction TUI shows the stepwise effective-reserve derivation while editing the configured threshold", () => {
   const overlay = createOverlay();
   overlay.handleInput("\r");
   const rendered = overlay.render(80).join("\n");
-  assert.match(rendered, /最大输出 · 16,000 Token/);
-  assert.match(rendered, /公式 · max\(配置 10,000, 窗口10% 30,000, 输出 16,000\)/);
-  assert.match(rendered, /有效预留 = 30,000 · 约 270,000 \(90%\) 触发压缩/);
+  assert.match(rendered, /配置阈值 · 290,000 \/ 300,000 Token/);
+  assert.match(rendered, /配置预留 · 10,000 Token/);
+  assert.match(rendered, /窗口 10% 底线 · 30,000 Token/);
+  assert.match(rendered, /模型单次最大输出 · 16,000 Token/);
+  assert.match(rendered, /实际安全预留 · 30,000 Token/);
+  assert.match(rendered, /实际硬压缩 · 超过 270,000 Token \(90\.0%\)/);
+  assert.match(rendered, /生效原因 · 窗口 10% 安全底线下调/);
+});
+
+test("compaction TUI localizes the absolute reserve ceiling", () => {
+  const overlay = createOverlay({
+    contextWindow: 4_000_000,
+    snapshot: {
+      scopes: { user: {}, project: { reserveTokens: 2_000_001 } },
+      effective: {} as never,
+    },
+  });
+  assert.match(overlay.render(120).join("\n"), /预留输出空间 2,000,001 不得超过 2,000,000/);
 });
 
 test("/maestro-compaction reloads exactly once only after a successful save", async () => {
@@ -204,7 +221,17 @@ test("compaction TUI pressure preview derives from the effective soft ratios", (
       effective: {} as never,
     },
   });
-  assert.match(overlay.render(120).join("\n"), /正常 <50% · 提醒 50–65% · 清理 65–/);
+  assert.match(overlay.render(120).join("\n"), /软阶段 · 提醒 150,000 \(50\.0%\) 可达 · 裁剪 195,000 \(65\.0%\) 可达/);
+});
+
+test("compaction TUI exposes max-output-capped hard pressure before unreachable soft stages", () => {
+  const overlay = createOverlay({ contextWindow: 250_000, maxTokens: 250_000 });
+  const rendered = overlay.render(120).join("\n");
+  assert.match(rendered, /实际硬压缩阈值 · 实际 >25,000 \/ 250,000 \(10\.0%\)/);
+  assert.match(rendered, /配置阈值 · 240,000 Token \(96\.0%\)/);
+  assert.match(rendered, /实际安全预留 · 225,000 Token · 模型最大输出过大，安全预留封顶为窗口 90%/);
+  assert.match(rendered, /提醒 175,000 \(70\.0%\) 不可达/);
+  assert.match(rendered, /裁剪 200,000 \(80\.0%\) 不可达 · 硬压缩会先触发/);
 });
 
 function createOverlay(overrides: Partial<ConstructorParameters<typeof CompactionSettingsOverlay>[0]> = {}) {

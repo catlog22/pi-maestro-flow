@@ -552,7 +552,10 @@ async function startImplementation(
       delivered = true;
       sendImplementationMessage(ctx, executionMessage);
     };
-    const lease = compactionArbiter?.request("plan-handoff");
+    const lease = compactionArbiter?.request("plan-handoff", {
+      owner: "plan-handoff",
+      reason: "preserve-approved-plan",
+    });
     if (compactionArbiter && !lease) {
       ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
       deliver();

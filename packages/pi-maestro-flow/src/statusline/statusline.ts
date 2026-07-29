@@ -181,12 +181,20 @@ function renderContextPressure(value: string | undefined, width: number): string
 	if (!match) return "";
 	const band = match[1].toUpperCase();
 	const pruned = match[4] ? ` -${match[4]}${match[5] ? `/${match[5]}` : ""}` : "";
-	const reasons = match[6]?.trim() ? ` ${match[6].trim()}` : "";
+	// Hard-compaction statuses lead their reason tail with the triggering owner
+	// (mid-turn/output-limit/plan-handoff). Split it out so the line stays
+	// owner-distinguishing even at narrow widths; any other reason tail is left
+	// untouched so legacy statuses render exactly as before.
+	const tail = match[6]?.trim() ?? "";
+	const ownerMatch = /^(mid-turn|output-limit|plan-handoff|native)\b\s*(.*)$/i.exec(tail);
+	const ownerLabel = ownerMatch ? ` ${ownerMatch[1].toLowerCase()}` : "";
+	const rest = ownerMatch ? ownerMatch[2].trim() : tail;
+	const reasons = rest ? ` ${rest}` : "";
 	const text = width >= 80
-		? `CTX ${band} ${match[2]}/${match[3]}${pruned}${reasons}`
+		? `CTX ${band} ${match[2]}/${match[3]}${pruned}${ownerLabel}${reasons}`
 		: width >= 48
-			? `CTX ${band === "AUTO-PRUNE" ? "PRUNE" : band}${pruned}${reasons}`
-			: band === "AUTO-PRUNE" ? `CTX PRUNE${pruned}` : `CTX ${band}${pruned}`;
+			? `CTX ${band === "AUTO-PRUNE" ? "PRUNE" : band}${pruned}${ownerLabel}${reasons}`
+			: band === "AUTO-PRUNE" ? `CTX PRUNE${pruned}${ownerLabel}` : `CTX ${band}${pruned}${ownerLabel}`;
 	const color = band === "CRITICAL" || band === "COMPACT" ? COLORS.ctxCrit : band === "AUTO-PRUNE" ? COLORS.ctxAlert : COLORS.ctxWarn;
 	return `${ansiFg(color)}${text}${ANSI_RESET}`;
 }

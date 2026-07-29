@@ -112,24 +112,89 @@ test("graph progress updates the task row instead of flattening child state onto
 	assert.equal(child.outputTokens, 60);
 });
 
-test("message for unknown correlationId is ignored", () => {
+test("message for unknown correlationId self-heals a running row", () => {
 	const s = new AgentsStore();
-	s.applyMessage({ correlationId: "nope", message: "hi" });
-	assert.equal(s.size, 0);
+	s.applyMessage({ correlationId: "nope", agent: "explorer", name: "scan", message: "hi" }, 500);
+	assert.equal(s.size, 1);
+	const row = s.snapshot()[0];
+	assert.equal(row.correlationId, "nope");
+	assert.equal(row.role, "explorer");
+	assert.equal(row.task, "scan");
+	assert.equal(row.status, "running");
+	assert.equal(row.tail, "hi");
 });
 
-test("missing graph task row never flattens child progress onto the parent", () => {
+test("message without agent identity self-heals a placeholder row that later refines", () => {
+	const s = new AgentsStore();
+	// A send-style delta carries no agent/name; the row still materializes so a
+	// running agent is never invisible, and a later progress delta refines it.
+	s.applyMessage({ correlationId: "c1", message: "queued" }, 500);
+	assert.equal(s.size, 1);
+	assert.equal(s.snapshot()[0].role, "agent");
+	// Identity flows in through progress deltas, which refine the placeholder.
+	s.applyMessage({
+		correlationId: "c1",
+		progress: [{ correlationId: "c1", agent: "reviewer", name: "review", taskIndex: 0, status: "running" }],
+	}, 600);
+	const row = s.snapshot()[0];
+	assert.equal(row.role, "reviewer");
+	assert.equal(row.task, "review");
+	assert.equal(s.size, 1);
+});
+
+test("progress for an unknown graph child self-heals its own row", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "root", agent: "graph(2)" }, 1);
+	s.applyMessage({
+		correlationId: "root",
+		progress: [{
+			correlationId: "child-1",
+			agent: "executor",
+			name: "step",
+			taskIndex: 0,
+			status: "running",
+			lastMessage: "working",
+		}],
+	}, 500);
+	const child = s.snapshot().find((r) => r.correlationId === "child-1");
+	assert.ok(child);
+	assert.equal(child.role, "executor");
+	assert.equal(child.status, "running");
+	assert.equal(child.parentCorrelationId, "root");
+	assert.equal(child.tail, "working");
+});
+
+test("missing graph child self-heals its own row and never flattens onto the parent", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "root", agent: "graph(1)", name: "plan" }, 1);
 	s.applyMessage({
 		correlationId: "root",
 		taskCorrelationId: "missing-child",
+		agent: "executor",
+		name: "step",
 		status: "failed",
 		lastMessage: "child failed",
-	});
-	const row = s.snapshot()[0];
-	assert.equal(row.status, "running");
-	assert.equal(row.tail, "");
+	}, 500);
+	const byId = new Map(s.snapshot().map((r) => [r.correlationId, r]));
+	// The child materializes as its own failed row...
+	const child = byId.get("missing-child");
+	assert.ok(child);
+	assert.equal(child.status, "failed");
+	assert.equal(child.tail, "child failed");
+	assert.equal(child.parentCorrelationId, "root");
+	// ...and the parent is untouched: still running, empty tail.
+	const parent = byId.get("root");
+	assert.ok(parent);
+	assert.equal(parent.status, "running");
+	assert.equal(parent.tail, "");
+});
+
+test("complete still removes a self-healed row", () => {
+	const s = new AgentsStore();
+	s.applyMessage({ correlationId: "c1", agent: "explorer", message: "hi" }, 500);
+	assert.equal(s.size, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 600);
+	assert.equal(s.size, 0);
 });
 
 test("complete removes the row", () => {

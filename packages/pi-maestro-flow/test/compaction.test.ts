@@ -9,6 +9,7 @@ import {
   COMPACTION_MODE_STATUS_KEY,
   COMPACTION_STATUS_KEY,
   createMaestroCompaction,
+  formatCompactionStatus,
   mergeCompactionReferences,
   MAESTRO_COMPACTION_SYSTEM_PROMPT,
   persistMaestroCompactionKnowhow,
@@ -27,6 +28,7 @@ import {
   suffixTokenSums,
   createMidTurnAutoCompaction,
   decideContextAction,
+  deriveCompactionThreshold,
   derivePressureBand,
   disableInvalidBudgetThinking,
   EMPTY_VELOCITY_TRACKER,
@@ -76,7 +78,7 @@ test("compaction lifecycle publishes active status and always clears it", async 
     await runWithCompactionStatus(event, ctx, async () => {
       assert.deepEqual(statuses.at(-1), {
         key: COMPACTION_STATUS_KEY,
-        value: "COMPACT 91000/90000",
+        value: "COMPACT 91000/90000 native configured",
       });
       throw new Error("summary failed");
     });
@@ -102,7 +104,7 @@ test("compaction lifecycle clears active state independently of the auto mode", 
   } as never;
 
   await runWithCompactionStatus(event, ctx, async () => undefined);
-  assert.deepEqual(statuses, ["COMPACT 91000/90000", undefined]);
+  assert.deepEqual(statuses, ["COMPACT 91000/90000 native configured", undefined]);
 });
 
 function details(): MaestroCompactionDetails {
@@ -257,6 +259,110 @@ test("compaction arbiter preserves output-limit ownership through instruction ta
   assert.equal(observed.owner, "output-limit");
   assert.equal(observed.allowed, true);
   outputLimit.release();
+});
+
+test("compaction arbiter carries owner-typed trigger metadata without altering instruction tags", () => {
+  const arbiter = new CompactionArbiter();
+  const trigger = {
+    owner: "mid-turn",
+    estimatedTokens: 23000,
+    contextWindow: 200000,
+    effectiveThresholdTokens: 25000,
+    configuredThresholdTokens: 175000,
+    effectiveReserveTokens: 175000,
+    configuredReserveTokens: 25000,
+    reason: "ratio-floor",
+  } as const;
+  const lease = arbiter.request("mid-turn", trigger);
+  assert.ok(lease);
+  assert.deepEqual(lease.trigger, trigger);
+  // The tag stays owner:id only — no metadata leaks into the instruction prefix.
+  const request = compactionRequestFromInstructions(lease.tagInstructions("summary"));
+  assert.deepEqual(request, { owner: "mid-turn", id: 1 });
+  const observed = arbiter.observeStart(request);
+  assert.equal(observed.allowed, true);
+  assert.equal(observed.owner, "mid-turn");
+  assert.deepEqual(observed.trigger, trigger);
+  lease.release();
+
+  // Native compaction is observed only, so it fabricates no trigger.
+  const native = arbiter.observeStart();
+  assert.equal(native.owner, "native");
+  assert.equal(native.trigger, undefined);
+  native.releaseIfNative();
+});
+
+test("runWithCompactionStatus keeps the mid-turn effective denominator instead of the raw native count", async () => {
+  const statuses: Array<string | undefined> = [];
+  const event = {
+    preparation: {
+      tokensBefore: 233616,
+      settings: { reserveTokens: 25000 },
+    },
+  } as never;
+  const ctx = {
+    model: { contextWindow: 200000 },
+    ui: { setStatus(_key: string, value: string | undefined) { statuses.push(value); } },
+  } as never;
+  const trigger = {
+    owner: "mid-turn",
+    estimatedTokens: 23000,
+    contextWindow: 200000,
+    effectiveThresholdTokens: 25000,
+    configuredThresholdTokens: 175000,
+    effectiveReserveTokens: 175000,
+    configuredReserveTokens: 25000,
+    reason: "ratio-floor",
+  } as const;
+  await runWithCompactionStatus(event, ctx, async () => undefined, { owner: "mid-turn", trigger });
+  // The raw 233616 numerator and the configured-reserve denominator never replace
+  // the owner's estimated/effective figures.
+  assert.deepEqual(statuses, ["COMPACT 23000/25000 mid-turn ratio-floor", undefined]);
+});
+
+test("runWithCompactionStatus labels native compaction with its raw configured reference", async () => {
+  const statuses: Array<string | undefined> = [];
+  const event = {
+    preparation: {
+      tokensBefore: 233616,
+      settings: { reserveTokens: 25000 },
+    },
+  } as never;
+  const ctx = {
+    model: { contextWindow: 200000 },
+    ui: { setStatus(_key: string, value: string | undefined) { statuses.push(value); } },
+  } as never;
+  await runWithCompactionStatus(event, ctx, async () => undefined, { owner: "native" });
+  assert.deepEqual(statuses, ["COMPACT 233616/175000 native configured", undefined]);
+});
+
+test("formatCompactionStatus distinguishes output-limit and plan-handoff owners in the reason tail", () => {
+  const base = { tokensBefore: 180000, contextWindow: 200000, configuredReserveTokens: 25000 };
+  assert.equal(
+    formatCompactionStatus({
+      owner: "output-limit",
+      trigger: { owner: "output-limit", usageTokens: 180000, contextWindow: 200000, usagePercent: 90, gateRatio: 0.8 },
+      ...base,
+    }),
+    "COMPACT 180000/200000 output-limit gate:80% 90%",
+  );
+  // Null Pi usage falls back to tokensBefore and omits the percent.
+  assert.equal(
+    formatCompactionStatus({
+      owner: "output-limit",
+      trigger: { owner: "output-limit", usageTokens: null, contextWindow: 200000, usagePercent: null, gateRatio: 0.8 },
+      ...base,
+    }),
+    "COMPACT 180000/200000 output-limit gate:80%",
+  );
+  assert.equal(
+    formatCompactionStatus({
+      owner: "plan-handoff",
+      trigger: { owner: "plan-handoff", reason: "preserve-approved-plan" },
+      ...base,
+    }),
+    "COMPACT 180000/200000 plan-handoff",
+  );
 });
 
 test("mid-turn token estimate adds tool results after the last assistant usage", () => {
@@ -1190,6 +1296,116 @@ test("custom compaction captures the persisted active Todo skill", async () => {
   }
 });
 
+test("createMaestroCompaction records the observed trigger without bumping the schema version", async () => {
+  initTodo({ appendEntry() {} } as never);
+  const todoContext = {
+    cwd: "D:\\repo",
+    ui: { setStatus() {} },
+    sessionManager: { getEntries: () => [] },
+  };
+  onSessionStart(todoContext);
+  try {
+    const trigger = { owner: "plan-handoff", reason: "preserve-approved-plan" } as const;
+    const result = await createMaestroCompaction(
+      {
+        preparation: {
+          firstKeptEntryId: "kept-1",
+          messagesToSummarize: [],
+          turnPrefixMessages: [],
+          isSplitTurn: false,
+          tokensBefore: 1000,
+          fileOps: { read: new Set<string>(), written: new Set<string>(), edited: new Set<string>() },
+          settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
+        },
+        branchEntries: [],
+        signal: new AbortController().signal,
+        type: "session_before_compact",
+      } as never,
+      {
+        cwd: "D:\\repo",
+        model: { id: "faux", maxTokens: 2000 },
+        sessionManager: { getSessionId: () => "session-1" },
+      } as never,
+      {
+        checkpointId: () => "checkpoint-trigger",
+        now: () => new Date("2026-07-12T02:30:00.000Z"),
+        completeSummary: async () => ({
+          stopReason: "stop",
+          content: [{ type: "text", text: "## Session\n- Current Objective: trigger" }],
+        }),
+        trigger,
+      },
+    );
+    const captured = result?.compaction?.details as MaestroCompactionDetails;
+    // Additive optional field: the schema version is unchanged.
+    assert.equal(captured.schemaVersion, 3);
+    assert.deepEqual(captured.trigger, trigger);
+  } finally {
+    onSessionShutdown(todoContext);
+  }
+});
+
+test("createMaestroCompaction omits trigger for native compaction and still reads older trigger-less details", async () => {
+  initTodo({ appendEntry() {} } as never);
+  const todoContext = {
+    cwd: "D:\\repo",
+    ui: { setStatus() {} },
+    sessionManager: { getEntries: () => [] },
+  };
+  onSessionStart(todoContext);
+  try {
+    const previousDetails = details();
+    previousDetails.schemaVersion = 2;
+    assert.equal(previousDetails.trigger, undefined);
+    const result = await createMaestroCompaction(
+      {
+        preparation: {
+          firstKeptEntryId: "kept-1",
+          messagesToSummarize: [],
+          turnPrefixMessages: [],
+          isSplitTurn: false,
+          tokensBefore: 1000,
+          fileOps: { read: new Set<string>(), written: new Set<string>(), edited: new Set<string>() },
+          settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
+        },
+        branchEntries: [{
+          type: "compaction",
+          id: "previous-entry",
+          parentId: "parent-entry",
+          timestamp: "2026-07-12T02:00:00.000Z",
+          summary: "previous summary",
+          firstKeptEntryId: "previous-kept",
+          tokensBefore: 900,
+          details: previousDetails,
+        }],
+        signal: new AbortController().signal,
+        type: "session_before_compact",
+      } as never,
+      {
+        cwd: "D:\\repo",
+        model: { id: "faux", maxTokens: 2000 },
+        sessionManager: { getSessionId: () => "session-1" },
+      } as never,
+      {
+        checkpointId: () => "checkpoint-native",
+        now: () => new Date("2026-07-12T02:30:00.000Z"),
+        completeSummary: async () => ({
+          stopReason: "stop",
+          content: [{ type: "text", text: "## Session\n- Current Objective: native" }],
+        }),
+      },
+    );
+    const captured = result?.compaction?.details as MaestroCompactionDetails;
+    assert.equal(captured.schemaVersion, 3);
+    // No observed trigger was supplied, so none is fabricated; the trigger-less
+    // previous details were still read for lineage.
+    assert.equal(captured.trigger, undefined);
+    assert.equal(captured.previousCheckpointId, "checkpoint-2");
+  } finally {
+    onSessionShutdown(todoContext);
+  }
+});
+
 test("successful Maestro compaction is copied to a unique knowhow document", async () => {
     const root = await mkdtemp(join(tmpdir(), "pi-maestro-compact-"));
   const checkpoint = details();
@@ -1267,6 +1483,131 @@ test("effective reserve integrates context window, configured ceiling, and max o
   assert.equal(effectiveReserveTokens({ reserveTokens: 80_000 }, 400_000, 64_000), 80_000, "explicit larger configured ceiling is honored");
   assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 900_000), 360_000, "max output is capped below the window so compaction stays enabled");
   assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 100_000), 16_384, "small window keeps the absolute reserve");
+});
+
+test("deriveCompactionThreshold caps max output and marks every soft band unreachable on a small window", () => {
+  const model = deriveCompactionThreshold({
+    reserveTokens: 16_384,
+    contextWindow: 250_000,
+    modelMaxTokens: 250_000,
+    soft: DEFAULT_SOFT_COMPACTION,
+  });
+  assert.ok(model.usable);
+  assert.equal(model.effectiveReserveTokens, 225_000);
+  assert.equal(model.thresholdTokens, 25_000);
+  assert.equal(model.thresholdPercent, 10);
+  assert.equal(model.reason, "max-output-capped");
+  assert.ok(model.soft);
+  assert.equal(model.soft.nudgeReachable, false, "nudge sits far above the 10% trigger");
+  assert.equal(model.soft.pruneReachable, false);
+  assert.equal(model.soft.pruneTargetTokens, 25_000);
+  assert.equal(model.soft.pruneTargetReachable, false, "prune target collapses onto the trigger");
+});
+
+test("deriveCompactionThreshold flags the soft nudge unreachable when max output dominates a large window", () => {
+  const model = deriveCompactionThreshold({
+    reserveTokens: 16_384,
+    contextWindow: 400_000,
+    modelMaxTokens: 128_000,
+    soft: DEFAULT_SOFT_COMPACTION,
+  });
+  assert.ok(model.usable);
+  assert.equal(model.thresholdTokens, 272_000);
+  assert.equal(model.thresholdPercent, 68);
+  assert.equal(model.reason, "max-output");
+  assert.ok(model.soft);
+  assert.equal(model.soft.nudgeTokens, 280_000);
+  assert.equal(model.soft.nudgeReachable, false, "280K nudge sits above the 272K trigger");
+  assert.equal(model.soft.pruneTokens, 320_000);
+  assert.equal(model.soft.pruneReachable, false);
+  assert.equal(model.soft.pruneTargetTokens, 272_000);
+  assert.equal(model.soft.pruneTargetReachable, false);
+});
+
+test("deriveCompactionThreshold keeps soft bands reachable when the trigger sits high enough", () => {
+  const model = deriveCompactionThreshold({
+    reserveTokens: 16_384,
+    contextWindow: 400_000,
+    modelMaxTokens: 64_000,
+    soft: DEFAULT_SOFT_COMPACTION,
+  });
+  assert.ok(model.usable);
+  assert.equal(model.thresholdTokens, 336_000);
+  assert.equal(model.thresholdPercent, 84);
+  assert.equal(model.reason, "max-output");
+  assert.ok(model.soft);
+  assert.equal(model.soft.nudgeTokens, 280_000);
+  assert.equal(model.soft.nudgeReachable, true);
+  assert.equal(model.soft.pruneTokens, 320_000);
+  assert.equal(model.soft.pruneReachable, true);
+  assert.equal(model.soft.pruneTargetTokens, 280_000);
+  assert.equal(model.soft.pruneTargetReachable, true);
+});
+
+test("deriveCompactionThreshold uses the first integer token that can reach a fractional soft ratio", () => {
+  const model = deriveCompactionThreshold({
+    reserveTokens: 1,
+    contextWindow: 3,
+    soft: { nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 },
+  });
+  assert.ok(model.usable && model.soft);
+  assert.equal(model.thresholdTokens, 2);
+  assert.equal(model.soft.nudgeTokens, 3, "ceil(3 * 0.7) is the first integer satisfying ratio >= 0.7");
+  assert.equal(model.soft.pruneTokens, 3);
+  assert.equal(model.soft.nudgeReachable, false);
+  assert.equal(model.soft.pruneReachable, false);
+});
+
+test("deriveCompactionThreshold reports configured and ratio-floor reasons", () => {
+  const ratio = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: 400_000 });
+  assert.ok(ratio.usable);
+  assert.equal(ratio.effectiveReserveTokens, 40_000);
+  assert.equal(ratio.thresholdTokens, 360_000);
+  assert.equal(ratio.reason, "ratio-floor");
+  const configured = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: 100_000 });
+  assert.ok(configured.usable);
+  assert.equal(configured.effectiveReserveTokens, 16_384);
+  assert.equal(configured.thresholdTokens, 83_616);
+  assert.equal(configured.reason, "configured");
+  const explicit = deriveCompactionThreshold({ reserveTokens: 80_000, contextWindow: 400_000, modelMaxTokens: 64_000 });
+  assert.ok(explicit.usable);
+  assert.equal(explicit.effectiveReserveTokens, 80_000);
+  assert.equal(explicit.reason, "configured", "larger configured ceiling beats max output");
+});
+
+test("deriveCompactionThreshold degrades without a usable context window", () => {
+  const missing = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: undefined });
+  assert.equal(missing.usable, false);
+  if (!missing.usable) {
+    assert.equal(missing.problem, "missing-context-window");
+    assert.equal(missing.configuredReserveTokens, 16_384);
+  }
+  for (const contextWindow of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const invalid = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow });
+    assert.equal(invalid.usable, false, `contextWindow ${contextWindow} is unusable`);
+    if (!invalid.usable) assert.equal(invalid.problem, "invalid-context-window");
+  }
+});
+
+test("compaction trigger is strict: an estimate exactly at the derived threshold does not compact", () => {
+  const model = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: 400_000, modelMaxTokens: 64_000 });
+  assert.ok(model.usable);
+  assert.equal(model.thresholdTokens, 336_000);
+  assert.equal(model.trigger, "strictly-above-threshold");
+  const settings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 10 };
+  const trailing = estimateContextTokens(highUsageToolBatch(0)).tokens;
+  const exact = highUsageToolBatch(336_000 - trailing);
+  assert.equal(estimateContextTokens(exact).tokens, 336_000, "sanity: estimate lands exactly on the trigger");
+  assert.equal(
+    shouldCompactMidTurn({ messages: exact, contextWindow: 400_000, settings, modelMaxTokens: 64_000 }),
+    false,
+    "estimate exactly at the threshold is not exceeded, so no compaction",
+  );
+  assert.equal(
+    shouldCompactMidTurn({ messages: highUsageToolBatch(336_001 - trailing), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }),
+    true,
+    "one token above the threshold compacts",
+  );
 });
 
 test("shouldCompactMidTurn triggers around 90% on a large window instead of hugging the limit", () => {
@@ -2324,6 +2665,8 @@ test("cache gate is bypassed once pressure is already critical", () => {
     messages as never, 10_000, { ...base, soft: softWithCache(true) }, new Map(),
   );
   assert.ok(gated.prunedToolResults > 0, "critical pressure must prune regardless of cache cost");
+  assert.equal(gated.band, "critical");
+  assert.ok(gated.reasons.includes("prune-insufficient"), "telemetry explains that pruning could not clear critical pressure");
 });
 
 test("cacheWorthwhileDepth picks the deepest paying depth, not the first", () => {

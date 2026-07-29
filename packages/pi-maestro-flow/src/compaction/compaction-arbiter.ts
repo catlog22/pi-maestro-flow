@@ -1,8 +1,49 @@
+import type { CompactionThresholdReason } from "./compaction-threshold.ts";
+
 export type CompactionRequestOwner = "mid-turn" | "plan-handoff" | "output-limit";
 export type CompactionOwner = CompactionRequestOwner | "native";
 
+/**
+ * Durable, owner-typed trigger metadata for a hard compaction. Each owner
+ * records only the facts it actually observed at the request site. Native
+ * compaction carries no trigger: the extension did not initiate it, so it must
+ * not fabricate one.
+ */
+export interface MidTurnCompactionTrigger {
+  owner: "mid-turn";
+  estimatedTokens: number;
+  contextWindow: number;
+  /** Effective trigger threshold: contextWindow - effectiveReserve. */
+  effectiveThresholdTokens: number;
+  /** Threshold implied by the configured reserve alone. */
+  configuredThresholdTokens: number;
+  effectiveReserveTokens: number;
+  configuredReserveTokens: number;
+  reason: CompactionThresholdReason;
+}
+
+export interface OutputLimitCompactionTrigger {
+  owner: "output-limit";
+  usageTokens: number | null;
+  contextWindow: number;
+  usagePercent: number | null;
+  /** Context-usage ratio that gated the trigger. */
+  gateRatio: number;
+}
+
+export interface PlanHandoffCompactionTrigger {
+  owner: "plan-handoff";
+  reason: string;
+}
+
+export type CompactionTrigger =
+  | MidTurnCompactionTrigger
+  | OutputLimitCompactionTrigger
+  | PlanHandoffCompactionTrigger;
+
 export interface CompactionLease {
   readonly owner: CompactionRequestOwner;
+  readonly trigger?: CompactionTrigger;
   tagInstructions(instructions: string): string;
   release(): void;
 }
@@ -15,12 +56,14 @@ export interface CompactionRequest {
 export interface ObservedCompaction {
   readonly owner: CompactionOwner;
   readonly allowed: boolean;
+  readonly trigger?: CompactionTrigger;
   releaseIfNative(): void;
 }
 
 interface ActiveCompaction {
   id: number;
   owner: CompactionOwner;
+  trigger?: CompactionTrigger;
   cleanup?: () => void;
 }
 
@@ -34,12 +77,13 @@ export class CompactionArbiter {
   private nextId = 0;
   private active?: ActiveCompaction;
 
-  request(owner: CompactionRequestOwner): CompactionLease | undefined {
+  request(owner: CompactionRequestOwner, trigger?: CompactionTrigger): CompactionLease | undefined {
     if (this.active) return undefined;
     const id = ++this.nextId;
-    this.active = { id, owner };
+    this.active = { id, owner, trigger };
     return {
       owner,
+      trigger,
       tagInstructions: (instructions) => tagCompactionInstructions({ owner, id }, instructions),
       release: () => this.release(id),
     };
@@ -59,6 +103,7 @@ export class CompactionArbiter {
         allowed: request !== undefined
           && observed.owner === request.owner
           && observed.id === request.id,
+        trigger: observed.trigger,
         releaseIfNative: () => {
           if (observed.owner === "native") this.release(observed.id);
         },
@@ -68,6 +113,7 @@ export class CompactionArbiter {
       return {
         owner: request.owner,
         allowed: false,
+        trigger: undefined,
         releaseIfNative() {},
       };
     }
@@ -90,6 +136,7 @@ export class CompactionArbiter {
     return {
       owner: observed.owner,
       allowed: true,
+      trigger: observed.trigger,
       releaseIfNative: () => {
         if (observed.owner === "native") this.release(observed.id);
       },

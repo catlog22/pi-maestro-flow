@@ -243,13 +243,14 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
     },
   } as any, { modelsPath });
 
-  const inputAnswers = ["https://proxy.example.com/v1/", "gpt-5.4", "400000", "openai-secret"];
+  const inputAnswers = ["https://proxy.example.com/v1/", "gpt-5.4", "400000", "128000", "openai-secret"];
   const selectAnswers = [
     "启用：minimal / low / medium / high / xhigh / max",
     "max",
   ];
   const selectOptions: string[][] = [];
   const notifications: Array<{ type: string; message: string }> = [];
+  const confirmations: string[] = [];
   const command = commands.get("api-manager");
   assert.ok(command);
   await command.handler("openai", {
@@ -268,7 +269,8 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
         selectOptions.push(options);
         return selectAnswers.shift();
       },
-      async confirm() {
+      async confirm(_title: string, details: string) {
+        confirmations.push(details);
         return true;
       },
       notify(message: string, type: string) {
@@ -282,6 +284,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(saved.providers["maestro-openai"].models[0].id, "gpt-5.4");
   assert.equal(saved.providers["maestro-openai"].models[0].reasoning, true);
   assert.equal(saved.providers["maestro-openai"].models[0].contextWindow, 400_000);
+  assert.equal(saved.providers["maestro-openai"].models[0].maxTokens, 128_000);
   assert.equal(saved.providers["maestro-openai"].models[0].thinkingLevelMap.xhigh, "max");
   assert.equal("max" in saved.providers["maestro-openai"].models[0].thinkingLevelMap, false);
   assert.equal(saved.providers["maestro-openai"].apiKey, "openai-secret");
@@ -302,6 +305,10 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(registrations.at(-1)?.name, "maestro-openai");
   assert.equal(registrations.at(-1)?.config.name, undefined);
   assert.equal(registrations.at(-1)?.config.models[0].id, "gpt-5.4");
+  assert.match(confirmations[0] ?? "", /上下文窗口 contextWindow：400,000 Token/);
+  assert.match(confirmations[0] ?? "", /单次最大输出 maxTokens：128,000 Token/);
+  assert.match(confirmations[0] ?? "", /预计实际硬压缩：上下文超过 272,000 Token/);
+  assert.match(confirmations[0] ?? "", /软提醒不可达/);
   assert.match(notifications.at(-1)?.message ?? "", /默认模型为 maestro-openai\/gpt-5\.4/);
   assert.equal(notifications.at(-1)?.type, "info");
 });
@@ -315,7 +322,7 @@ test("/api-manager edits a concrete OpenAI model and shows its API format", asyn
     baseUrl: "https://gateway.example.com/v1",
     apiKey: "openai-secret",
   };
-  await saveApiProviderSettings({ ...base, modelId: "model-a", contextWindow: 111_000, reasoning: false }, modelsPath);
+  await saveApiProviderSettings({ ...base, modelId: "model-a", contextWindow: 111_000, maxTokens: 32_000, reasoning: false }, modelsPath);
   await saveApiProviderSettings({ ...base, modelId: "model-b", contextWindow: 222_000, reasoning: true }, modelsPath);
   const before = JSON.parse(readFileSync(modelsPath, "utf8"));
   const modelABefore = before.providers["maestro-openai"].models[0];
@@ -327,7 +334,7 @@ test("/api-manager edits a concrete OpenAI model and shows its API format", asyn
     registerCommand(name: string, command: any) { commands.set(name, command); },
     setThinkingLevel() {},
   } as any, { modelsPath });
-  const inputs = ["https://gateway.example.com/v1", "model-b", "333000", "openai-secret"];
+  const inputs = ["https://gateway.example.com/v1", "model-b", "333000", "64000", "openai-secret"];
   const selections = ["model-b", "关闭：仅 off", "off"];
   const rendered: string[][] = [];
   const confirmations: string[] = [];
@@ -355,6 +362,7 @@ test("/api-manager edits a concrete OpenAI model and shows its API format", asyn
   assert.deepEqual(openai.models[0], modelABefore);
   assert.equal(openai.models[1].id, "model-b");
   assert.equal(openai.models[1].contextWindow, 333_000);
+  assert.equal(openai.models[1].maxTokens, 64_000);
   assert.equal(openai.models[1].reasoning, false);
   assert.equal(openai.models[1].thinkingLevelMap, undefined);
   assert.deepEqual(rendered[0], ["model-a", "model-b", "➕ 新增 model…"]);
@@ -395,7 +403,8 @@ test("/api-manager shows one concrete Anthropic model with anthropic-messages fo
   const output = notifications.at(-1) ?? "";
   assert.match(output, /API format：anthropic-messages/);
   assert.match(output, /Model：claude-b/);
-  assert.match(output, /Context window：250,000 Token/);
+  assert.match(output, /上下文窗口 contextWindow：250,000 Token/);
+  assert.match(output, /单次最大输出 maxTokens：64,000 Token/);
   assert.match(output, /Reasoning：disabled/);
   assert.doesNotMatch(output, /claude-a/);
   assert.doesNotMatch(output, /anthropic-secret-must-not-be-shown/);
@@ -421,6 +430,7 @@ test("/api-manager qwen creates an OpenAI-compatible provider and default model"
     "https://dashscope.aliyuncs.com/compatible-mode/v1/",
     "qwen3.8-max-preview",
     "1000000",
+    "128000",
     "qwen-secret",
   ];
   const selectAnswers = [
@@ -547,10 +557,20 @@ test("/api-manager rejects invalid URL, context window, and API key", async (t) 
   saved = JSON.parse(readFileSync(modelsPath, "utf8"));
   assert.equal(saved.providers["maestro-openai"].models[0].id, "gpt-old");
   assert.equal(invalidContext.confirms, 0);
-  assert.match(invalidContext.notifications.at(-1)?.message ?? "", /Context window must be a positive integer/);
+  assert.match(invalidContext.notifications.at(-1)?.message ?? "", /上下文窗口 contextWindow 必须是大于 0 的整数/);
+
+  const invalidMax = makeContext(
+    ["https://new.example.com/v1", "gpt-new", "400000", "400000"],
+    ["gpt-old", "启用：minimal / low / medium / high / xhigh / max", "medium"],
+  );
+  await command.handler("set openai", invalidMax.ctx);
+  saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.equal(saved.providers["maestro-openai"].models[0].id, "gpt-old");
+  assert.equal(invalidMax.confirms, 0);
+  assert.match(invalidMax.notifications.at(-1)?.message ?? "", /没有空间容纳输入/);
 
   const emptyKey = makeContext(
-    ["https://new.example.com/v1", "gpt-new", "400000", ""],
+    ["https://new.example.com/v1", "gpt-new", "400000", "128000", ""],
     ["gpt-old", "启用：minimal / low / medium / high / xhigh / max", "medium"],
   );
   await command.handler("set openai", emptyKey.ctx);
@@ -1248,6 +1268,7 @@ test("/api-manager creates a custom channel with a free-form id and chosen proto
     "https://proxy.example.com/v1/",
     "my-model",
     "200000",
+    "32768",
     "X-Custom",
     "custom-val",
     "",
@@ -1297,6 +1318,7 @@ test("/api-manager creates a custom channel with a free-form id and chosen proto
   assert.equal(custom.authHeader, true);
   assert.equal(custom.models[0].id, "my-model");
   assert.equal(custom.models[0].contextWindow, 200_000);
+  assert.equal(custom.models[0].maxTokens, 32_768);
   assert.equal(custom.models[0].reasoning, true);
   assert.equal(custom.models[0].thinkingLevelMap.xhigh, "max");
 
@@ -1448,6 +1470,7 @@ test("/api-manager leaves compat/headers unset on the auto path so pi detects xa
     "https://api.x.ai/v1",
     "grok-3",
     "131072",
+    "32768",
     "xai-secret",
   ];
   const selectAnswers = [
