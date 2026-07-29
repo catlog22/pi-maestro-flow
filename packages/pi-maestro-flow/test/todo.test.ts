@@ -3,6 +3,7 @@ import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { Check } from "typebox/value";
 import type { Skill } from "@earendil-works/pi-coding-agent";
 import { TodoSkillLoader } from "../src/skills/skill-loader.ts";
 import {
@@ -53,6 +54,38 @@ function startTodo(cwd: string, loader: TodoSkillLoader, entries: unknown[] = []
   onSessionStart(context);
   return context;
 }
+
+test("todo schema rejects empty batches and unknown nested fields", () => {
+  assert.equal(Check(TodoToolParams, { action: "create", tasks: [] }), false);
+  assert.equal(Check(TodoToolParams, { action: "list", filter: { typo: true } }), false);
+  assert.equal(Check(TodoToolParams, {
+    action: "create",
+    subject: "Legacy skill remains compatible",
+    skill: { name: "demo" },
+  }), true);
+});
+
+test("todo single create trims titles and rejects whitespace-only titles", async () => {
+  initTodo({ appendEntry() {} } as never);
+  const todoContext: TodoContext = {
+    cwd: "",
+    ui: { setStatus() {} },
+    sessionManager: { getEntries: () => [] },
+  };
+  onSessionStart(todoContext);
+
+  try {
+    const created = await executeTodo({ action: "create", subject: "  Trim me  " }, makeExtensionContext());
+    assert.equal(created.isError, undefined);
+    assert.equal(getVisibleTasks()[0]?.subject, "Trim me");
+
+    const rejected = await executeTodo({ action: "create", subject: "   " }, makeExtensionContext());
+    assert.equal(rejected.isError, true);
+    assert.equal(getVisibleTasks().length, 1);
+  } finally {
+    onSessionShutdown(todoContext);
+  }
+});
 
 test("Todo keeps its task summary out of the statusline", async () => {
   const statusValues: Array<string | undefined> = [];

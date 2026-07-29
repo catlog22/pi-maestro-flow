@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
+import { Check } from "typebox/value";
 import {
   defaultRunner,
   RunCliAdapter,
@@ -20,7 +21,12 @@ import {
   type WorkflowSnapshotProvider,
 } from "../src/session/coordinator.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
-import { executeRunControl } from "../src/tools/run-control.ts";
+import { executeRunControl, RunControlParams } from "../src/tools/run-control.ts";
+
+test("run-control schema rejects unknown fields", () => {
+  assert.equal(Check(RunControlParams, { action: "status" }), true);
+  assert.equal(Check(RunControlParams, { action: "status", typo: true }), false);
+});
 
 test("coordinator attaches brief-first and fences old continuation markers across done and next", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-workflow-coordinator-"));

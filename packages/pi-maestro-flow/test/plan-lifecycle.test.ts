@@ -30,6 +30,8 @@ import {
 } from "../src/tools/goal.ts";
 
 interface ToolLike {
+  description?: string;
+  parameters?: unknown;
   execute(id: string, params: Record<string, unknown>, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext): Promise<any>;
 }
 
@@ -209,6 +211,22 @@ async function executeCommand(harness: ReturnType<typeof createHarness>, name: s
   assert.ok(command, `missing command ${name}`);
   await command.handler(args, harness.ctx);
 }
+
+test("Plan tool descriptions match the prompt-only mode lifecycle", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-tool-contract-"));
+  const harness = createHarness(root);
+  try {
+    assert.match(harness.tools.get("plan-enter")?.description ?? "", /load this chat session's current\.md draft/);
+    assert.doesNotMatch(harness.tools.get("plan-enter")?.description ?? "", /activate Plan-only tools/);
+    assert.match(harness.tools.get("plan-exit")?.description ?? "", /return to Act mode/);
+    assert.doesNotMatch(harness.tools.get("plan-exit")?.description ?? "", /restore the exact prior active tool set/);
+    assert.match(harness.tools.get("plan-status")?.description ?? "", /while Plan mode is active/);
+    assert.match(harness.tools.get("plan-review")?.description ?? "", /interactive UI/);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("Plan lifecycle leaves the tool surface untouched across every transition", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-lifecycle-"));

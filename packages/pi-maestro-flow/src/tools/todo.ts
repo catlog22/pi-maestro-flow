@@ -499,7 +499,8 @@ async function executeTodoAction(
 
 function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActorRef): FlowToolResult {
   if (params.tasks && params.tasks.length > 0) return handleBatchCreate(params.tasks, actor, params.planHandoffKey);
-  if (!params.subject) return err("subject is required for create", "create");
+  const subject = params.subject?.trim();
+  if (!subject) return err("subject is required for create", "create");
 
   const id = allocateTaskId();
   const now = Date.now();
@@ -512,7 +513,7 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
 
   const task: TodoTask = {
     id,
-    subject: params.subject,
+    subject,
     description: params.description,
     status: blockedBy.length > 0 ? "blocked" : "pending",
     blockedBy,

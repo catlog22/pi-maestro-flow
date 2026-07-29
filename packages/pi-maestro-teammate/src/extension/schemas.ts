@@ -53,8 +53,9 @@ export const TaskSpec = Type.Object({
   ),
   name: Type.Optional(
     Type.String({
+      minLength: 1,
       description:
-        "Task identifier — enables referencing via {name} in other tasks and addressing via teammate-send",
+        "Task identifier, unique within this dispatch; enables references and teammate-send addressing",
     }),
   ),
   dependsOn: Type.Optional(
@@ -243,17 +244,23 @@ export const TeammateSendParams = Type.Object({
     Type.Unsafe<"steer" | "follow_up" | "abort">({
       type: "string",
       enum: ["steer", "follow_up", "abort"],
+      default: "follow_up",
       description:
-        'Delivery mode (default: "follow_up"). "steer" interrupts the current turn, "follow_up" queues after it, "abort" terminates the agent.',
+        'Delivery mode. "steer" interrupts the current turn, "follow_up" queues after it, "abort" terminates the agent.',
     }),
   ),
-});
+}, { additionalProperties: false });
 
 export const TeammateListParams = Type.Object({
   view: Type.Optional(
-    StringEnum(["active", "named", "all", "roles"]),
+    Type.Unsafe<"active" | "named" | "all" | "roles">({
+      type: "string",
+      enum: ["active", "named", "all", "roles"],
+      default: "active",
+      description: 'View to return: "active" live agents except completed entries, "named" addressable agents, "all" tracked live entries, or "roles" available role definitions.',
+    }),
   ),
-});
+}, { additionalProperties: false });
 
 export const TeammateWatchParams = Type.Object({
   name: Type.String({
@@ -265,24 +272,28 @@ export const TeammateWatchParams = Type.Object({
       description: "Number of recent output lines to return (default: 20)",
     }),
   ),
-});
+}, { additionalProperties: false });
 
 export const TeammateWaitParams = Type.Object({
   name: Type.Optional(
     Type.String({
-      description: "Agent name, @name, displayed name#id-prefix, or correlation ID/prefix to wait for",
+      description: "Agent selector to wait for. Omit only when waitMs is provided",
     }),
   ),
   timeoutMs: Type.Optional(
     Type.Integer({
       minimum: 1,
-      description: "Maximum time to wait for the selected agent to settle",
+      default: 10 * 60_000,
+      description: "Maximum named-wait time in milliseconds (default: 600000)",
     }),
   ),
   waitMs: Type.Optional(
     Type.Integer({
       minimum: 1,
-      description: "Fixed delay in milliseconds when no agent name is supplied",
+      description: "Fixed delay in milliseconds when name is omitted; ignored when name is provided",
     }),
   ),
+}, {
+  additionalProperties: false,
+  description: "Provide name for an agent wait or waitMs for a fixed delay.",
 });

@@ -660,7 +660,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const enterTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: PLAN_ENTER_TOOL,
     label: "Plan Enter",
-    description: "Enter durable Plan mode, load this chat session's current.md draft, and activate Plan-only tools.",
+    description: "Enter durable Plan mode and load this chat session's current.md draft.",
     promptSnippet: "Use plan-enter before producing or editing an implementation Plan.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
@@ -673,7 +673,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const updateTool: ToolDefinition<typeof PlanUpdateParams, PlanToolDetails> = {
     name: "plan-update",
     label: "Plan Update",
-    description: "Replace this chat session's current.md draft with complete Markdown using optional revision checking.",
+    description: "Replace this chat session's current.md draft with complete Markdown. expectedRevision defaults to the currently loaded revision.",
     promptSnippet: "Use plan-update to persist the decision-complete Markdown Plan before review.",
     parameters: PlanUpdateParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -691,7 +691,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const reviewTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-review",
     label: "Plan Review",
-    description: "Open the full-screen editable Markdown draft. Save or cancel without entering Act mode.",
+    description: "Open the full-screen editable Markdown draft in an interactive UI. Save or cancel without entering Act mode.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const blocked = requirePlanMode("review");
@@ -704,7 +704,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const confirmTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-confirm",
     label: "Plan Confirm",
-    description: "Present the Markdown Plan to the user with choices: execute, modify, discuss, or exit. Does not force execution — the user always decides. Call in the same turn as plan-update when the draft is decision-complete.",
+    description: "Present the Markdown Plan in an interactive UI with choices to execute, modify, discuss, or exit. The user always decides. Call in the same turn as plan-update when the draft is decision-complete.",
     promptSnippet: "Standard presentation step after plan-update. Renders the plan and gives the user full control over next steps.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
@@ -730,7 +730,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const exitTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-exit",
     label: "Plan Exit",
-    description: "Exit Plan mode without deleting the persisted draft and restore the exact prior active tool set.",
+    description: "Exit Plan mode without deleting the persisted draft and return to Act mode.",
     parameters: EmptyPlanParams,
     async execute(_id, _params, _signal, _onUpdate, ctx) {
       const blocked = requirePlanMode("exit");
@@ -743,7 +743,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
   const statusTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
     name: "plan-status",
     label: "Plan Status",
-    description: "Return current Plan mode, draft path, revision and approval status.",
+    description: "Return the draft path, revision, approval status, and handoff state while Plan mode is active.",
     parameters: EmptyPlanParams,
     async execute() {
       const blocked = requirePlanMode("status");

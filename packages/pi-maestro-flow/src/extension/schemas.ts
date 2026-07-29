@@ -121,7 +121,7 @@ export const GoalToolParams = Type.Object({
   acceptance: Type.Optional(
     Type.Array(Type.String(), {
       maxItems: 5,
-      description: "Optional acceptance commands (max 5); the harness runs these commands during verification and supplies their results to the independent verifier as primary functional evidence of completion. create only",
+      description: "Acceptance commands (max 5), configurable on create or update. During completion the extension reruns them and their exit status directly determines verification; without commands, completion uses the agent verifier.",
     }),
   ),
 }, { additionalProperties: false });
@@ -171,7 +171,7 @@ const TodoSkillBindingSchema = Type.Object({
   args: Type.Optional(
     Type.String({ description: "Task-level skill arguments; override matching skill-config defaults" }),
   ),
-});
+}, { additionalProperties: false });
 
 const TodoFilterSchema = Type.Object({
   status: Type.Optional(
@@ -180,7 +180,7 @@ const TodoFilterSchema = Type.Object({
   memberId: Type.Optional(
     Type.String({ description: "Return tasks created by or assigned to self, root, a teammate id or unique id prefix, label, @label, or label#id-prefix" }),
   ),
-});
+}, { additionalProperties: false });
 
 const TodoBatchTaskSchema = Type.Object({
   subject: Type.String({
@@ -207,8 +207,9 @@ const TodoBatchTaskSchema = Type.Object({
   goalId: Type.Optional(
     Type.String({ description: "Id of the Goal acting as this task's quality gate. Bind only key tasks with verifiable acceptance criteria — do not create a Goal for every task; the task completes only after this Goal verifies" }),
   ),
-});
+}, { additionalProperties: false });
 
+// The top level remains permissive for the legacy `skill` input normalized by todo.ts.
 export const TodoToolParams = Type.Object({
   action: StringEnum([
     "create",
@@ -221,7 +222,7 @@ export const TodoToolParams = Type.Object({
   ]),
 
   subject: Type.Optional(
-    Type.String({ description: "Task title (required for create)" }),
+    Type.String({ minLength: 1, description: "Task title (required for single create)" }),
   ),
   description: Type.Optional(
     Type.String({ description: "Long-form task detail" }),
@@ -255,7 +256,8 @@ export const TodoToolParams = Type.Object({
 
   tasks: Type.Optional(
     Type.Array(TodoBatchTaskSchema, {
-      description: "Batch-create an entire multi-step plan in ONE create call instead of creating tasks one by one. Array order is the execution order; use blockedBy \"#N\" for intra-plan dependencies",
+      minItems: 1,
+      description: "Non-empty batch for create. Array order is the execution order; use blockedBy \"#N\" for intra-plan dependencies",
     }),
   ),
 

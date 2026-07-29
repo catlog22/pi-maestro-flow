@@ -208,14 +208,11 @@ Use an exact role name from the Available Teammate Agents section in the active 
 
 For background work, wait for the automatic teammate-complete notification. Do not poll teammate-watch or teammate-list; if the current turn must wait, call teammate-wait once with the returned correlation ID.
 
-Available teammate agents for ${cwd}:
-${formatAgentCatalog(cwd, Number.MAX_SAFE_INTEGER, 160)}
-
 Configured task-type model routing for ${cwd}:
 ${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;
 }
 
-const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID, or unique ID prefix.
+const TEAMMATE_SEND_DESCRIPTION = `Send a message to a running or sleeping teammate agent, addressed by name, @name, displayed name#id-prefix, correlation ID, or unique ID prefix.
 
 Modes (default: follow_up):
   - "steer" — interrupt the current turn and inject immediately
@@ -226,8 +223,12 @@ const TEAMMATE_SEND_GUIDELINES = [
   "Use teammate-send only for a named running or sleeping agent; use follow_up by default, steer for urgent correction, and abort only to terminate work.",
 ];
 
-const TEAMMATE_LIST_DESCRIPTION =
-  'List available roles or active teammate agents. Use view="roles" for builtin, project, and user-defined agent names and descriptions.';
+const TEAMMATE_LIST_DESCRIPTION = `List available roles or teammate agents. view defaults to "active".
+
+- "active": live agents except completed entries
+- "named": addressable named agents
+- "all": all tracked live entries
+- "roles": builtin, project, and user-defined role definitions`;
 const TEAMMATE_LIST_SNIPPET = "List available teammate roles or inspect active and named agent status.";
 const TEAMMATE_LIST_GUIDELINES = [
   'Use teammate-list with view="roles" when an available builtin or custom agent name is needed; use active/named/all for running work.',
@@ -241,7 +242,7 @@ const TEAMMATE_WATCH_GUIDELINES = [
   "Use teammate-wait once when completion or a result is required, or wait for the automatic teammate-complete notification.",
 ];
 const TEAMMATE_WAIT_DESCRIPTION =
-  "Wait once for a teammate result, lifecycle settlement, or a fixed delay. Agent waits are event-driven and replace repeated teammate-watch calls.";
+  "Wait once for a teammate result or lifecycle settlement by name, or provide waitMs for a fixed delay. Named waits default to a bounded 10-minute timeout. Agent waits are event-driven and replace repeated teammate-watch calls.";
 const TEAMMATE_WAIT_SNIPPET = "Wait once for a teammate result or for a bounded delay.";
 const TEAMMATE_WAIT_GUIDELINES = [
   "Call teammate-wait exactly once with a returned name or correlation ID and a bounded timeout instead of repeatedly calling teammate-watch.",

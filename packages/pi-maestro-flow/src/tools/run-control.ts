@@ -83,7 +83,7 @@ export const RunControlParams = Type.Object({
   insertedBy: Type.Optional(Type.String({
     description: "Actor recorded for an inserted edit step; Maestro defaults to manual.",
   })),
-});
+}, { additionalProperties: false });
 
 export interface RunControlInput {
   action: RunControlAction;

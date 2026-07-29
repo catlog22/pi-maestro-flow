@@ -602,9 +602,9 @@ When NOT to use:
 - get: Read the current Goal state. { action: "get" }
 - create: Create a new Goal without a budget by default. { action: "create", objective: "..." }
 - update: Replace the active Goal objective and resume it automatically. { action: "update", objective: "..." }
-- complete: Request independent completion verification after all work is done. Run the acceptance commands first and include their fresh output in the summary. { action: "complete", summary: "..." }
+- complete: Request completion verification after all work is done. Declared acceptance commands are rerun and decide the result directly; without them, an independent agent verifier is used. { action: "complete", summary: "..." }
 - optional budget: Include tokenBudget only when the user explicitly requests one. { action: "create", objective: "...", tokenBudget: "100k" }
-- optional acceptance: Declare up to 5 acceptance commands the harness runs during verification as functional evidence of completion (results are supplied to the verifier). { action: "create", objective: "...", acceptance: ["npm test -- foo.test.ts"] }
+- optional acceptance: Declare or replace up to 5 acceptance commands on create or update. { action: "create", objective: "...", acceptance: ["npm test -- foo.test.ts"] }
 
 When to use:
 - create a Goal for multi-turn autonomous work that needs sustained momentum, a token budget, or verified completion.
@@ -619,8 +619,8 @@ Only request completion after all work is done; the extension verifies it indepe
       "When a goal is active, keep working until it is complete; do not stop with only a plan or partial progress.",
       "Use goal get to inspect state. Use goal create only when no Goal exists; use goal update to replace its objective and resume it.",
       "Omit tokenBudget by default. Set it only when the user explicitly requests a Token budget.",
-      "Use goal complete only after all requirements are met and provide concise verification evidence; the verifier owns the done transition.",
-      "Prefer declaring acceptance commands at goal create; before goal complete, run them yourself and put their fresh output in the summary so the verifier can confirm functionally.",
+      "Use goal complete only after all requirements are met and provide concise verification evidence; the extension owns the done transition.",
+      "Prefer declaring acceptance commands at goal create or update. Run focused checks before goal complete for fresh evidence; the extension reruns declared commands during verification.",
     ],
 
     parameters: GoalToolParams,
@@ -696,12 +696,12 @@ Only request completion after all work is done; the extension verifies it indepe
 - get: { action: "get", id: "..." }
 - delete: { action: "delete", id: "..." }
 - clear: { action: "clear" }
-- next: { action: "next" } — activate the next pending task and return its resolved context
+- next: { action: "next" } — activate the oldest runnable pending task assigned to the caller and return its resolved context
 
 Rules:
 - For multi-step work, create the ENTIRE plan up front in ONE batch create (the tasks array) — never create tasks one at a time as you go. Array order is the execution order; use blockedBy "#N" to depend on the Nth task in the same batch.
 - subject is the title; description is the detail — do not swap. Set summary on completion; the next action consumes prior summaries.
-- One in_progress task at a time in the root session.
+- Each actor may have at most one in_progress task.
 - Skill binding requires exactly one primary; guard/support are optional. Skill file changes after activation mark the binding stale — re-activate.
 - In update: list changed fields in updateFields. Unlisted fields are preserved; empty strings or arrays clear fields that support clearing.`,
 

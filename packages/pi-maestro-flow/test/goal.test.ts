@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { visibleWidth } from "@earendil-works/pi-tui";
+import { GoalToolParams } from "../src/extension/schemas.ts";
 import {
   addGoal,
   buildCanonicalEvidence,
@@ -30,6 +31,14 @@ import {
   onSessionStart,
   type GoalContext,
 } from "../src/tools/goal.ts";
+
+test("goal acceptance schema documents create/update and deterministic verification", () => {
+  const description = GoalToolParams.properties.acceptance.description ?? "";
+  assert.match(description, /create or update/);
+  assert.match(description, /directly determines verification/);
+  assert.match(description, /without commands.*agent verifier/);
+  assert.doesNotMatch(description, /create only/);
+});
 import { buildTodoMirrorSpecs } from "../src/session/bridge.ts";
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { renderGoalWidget, renderGoalPanel, type GoalWidgetModel, type GoalPanelEntry } from "../src/tui/goal-widget.ts";

@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Check } from "typebox/value";
-import { TeammateListParams, TeammateParams } from "../src/extension/schemas.ts";
+import {
+  TeammateListParams,
+  TeammateParams,
+  TeammateSendParams,
+  TeammateWaitParams,
+  TeammateWatchParams,
+} from "../src/extension/schemas.ts";
 import {
   parseTeammateThinkingLevel,
   TEAMMATE_THINKING_INPUTS,
@@ -56,4 +62,24 @@ test("teammate schema rejects unsupported thinking depths", () => {
 test("teammate-list schema exposes discovered role listing", () => {
   assert.equal(Check(TeammateListParams, { view: "roles" }), true);
   assert.equal(Check(TeammateListParams, { view: "unknown" }), false);
+  assert.equal(Check(TeammateListParams, { view: "active", typo: true }), false);
+  assert.equal((TeammateListParams.properties.view as { default?: string }).default, "active");
+});
+
+test("teammate auxiliary schemas reject unknown fields and publish wait defaults", () => {
+  assert.equal(Check(TeammateSendParams, { to: "worker", message: "continue", extra: true }), false);
+  assert.equal(Check(TeammateWatchParams, { name: "worker", extra: true }), false);
+  assert.equal(Check(TeammateWaitParams, { name: "worker", extra: true }), false);
+  assert.equal((TeammateWaitParams.properties.timeoutMs as { default?: number }).default, 600_000);
+  assert.match(
+    (TeammateWaitParams.properties.waitMs as { description?: string }).description ?? "",
+    /ignored when name is provided/,
+  );
+});
+
+test("teammate schema exposes model fallback chains at both levels", () => {
+  assert.equal(Check(TeammateParams, {
+    fallbackModels: ["provider/top"],
+    tasks: [{ prompt: "work", fallbackModels: ["provider/task"] }],
+  }), true);
 });
