@@ -63,7 +63,8 @@
             "type": { "const": "command" },
             "command": { "type": "string", "minLength": 1 },
             "commandWindows": { "type": "string" },
-            "timeout": { "type": "integer", "minimum": 0, "default": 600 },
+            "command_windows": { "type": "string" },
+            "timeout": { "type": "integer", "minimum": 1, "default": 600 },
             "statusMessage": { "type": "string" },
             "async": { "type": "boolean", "default": false }
           },

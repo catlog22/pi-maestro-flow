@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { mkdtemp, mkdir, readFile, readdir, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, sep } from "node:path";
+import { dirname, join, sep } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { visibleWidth } from "@earendil-works/pi-tui";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
+import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
 import {
   CodexHookConfigError,
   loadCodexHooks,
@@ -15,10 +19,24 @@ import {
 } from "../src/hooks/runner.ts";
 import {
   isHookConfigTrusted,
+  loadHookToggles,
   revokeHookConfigTrust,
+  setHookEnabled,
   trustHookConfig,
 } from "../src/hooks/trust.ts";
 import { registerCodexHookAdapter } from "../src/hooks/pi-adapter.ts";
+import { buildHookReviewEntries } from "../src/hooks/review.ts";
+import { HookReviewOverlay, type HookReviewAction } from "../src/hooks/review-tui.ts";
+import { createPermissionController } from "../src/permissions/controller.ts";
+
+function isProcessRunning(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 test("loads Codex-compatible hooks from .pi/hooks.json", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-hooks-config-"));
@@ -66,6 +84,163 @@ test("rejects malformed event and matcher definitions", () => {
     }),
     /matcher is invalid/,
   );
+});
+
+test("rejects unknown hook fields and non-positive timeouts", () => {
+  assert.throws(
+    () => validateCodexHooks({ hooks: {}, typo: true }),
+    /root\.typo is not supported/,
+  );
+  assert.throws(
+    () => validateCodexHooks({ hooks: { Stop: [{ timeOut: 1, hooks: [] }] } }),
+    /timeOut is not supported/,
+  );
+  assert.throws(
+    () => validateCodexHooks({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: "echo ok", timeOut: 1 }] }] },
+    }),
+    /timeOut is not supported/,
+  );
+  assert.throws(
+    () => validateCodexHooks({
+      hooks: { Stop: [{ hooks: [{ type: "command", command: "echo ok", timeout: 0 }] }] },
+    }),
+    /timeout must be a positive integer/,
+  );
+  assert.doesNotThrow(() => validateCodexHooks({ $schema: "./hooks.schema.json", hooks: {} }));
+});
+
+test("published JSON Schema matches runtime command validation", async () => {
+  const schema = JSON.parse(
+    await readFile(new URL("../schemas/hooks.schema.json", import.meta.url), "utf8"),
+  ) as JsonSchemaType;
+  const validate = new AjvJsonSchemaValidator().getValidator(schema);
+  const validConfig = {
+    $schema: "./hooks.schema.json",
+    hooks: {
+      Stop: [{ hooks: [{ type: "command", command: "echo ok", command_windows: "echo ok", timeout: 1 }] }],
+    },
+  };
+  const unknownField = {
+    hooks: { Stop: [{ hooks: [{ type: "command", command: "echo ok", timeOut: 1 }] }] },
+  };
+  const zeroTimeout = {
+    hooks: { Stop: [{ hooks: [{ type: "command", command: "echo ok", timeout: 0 }] }] },
+  };
+
+  assert.equal(validate(validConfig).valid, true);
+  assert.equal(validate(unknownField).valid, false);
+  assert.equal(validate(zeroTimeout).valid, false);
+  assert.doesNotThrow(() => validateCodexHooks(validConfig));
+  assert.throws(() => validateCodexHooks(unknownField), CodexHookConfigError);
+  assert.throws(() => validateCodexHooks(zeroTimeout), CodexHookConfigError);
+});
+
+test("Hook review TUI supports bounded rendering, explicit filtering, toggles, and trust actions", () => {
+  const config = validateCodexHooks({
+    hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [
+        { type: "command", command: "echo check", timeout: 5 },
+        { type: "prompt", prompt: "unsupported prompt" },
+      ] }],
+      PostToolUse: [{ hooks: [{ type: "command", command: "echo \x1b[2Jwrite\nforged\u202ehidden", timeout: 5 }] }],
+    },
+  });
+  const entries = buildHookReviewEntries({
+    config,
+    filePath: ".pi/hooks.json",
+    hash: "hash",
+    exists: true,
+  }, {});
+  const theme = {
+    fg(_role: string, text: string) { return text; },
+    bold(text: string) { return text; },
+  };
+  let action: HookReviewAction | undefined;
+  const overlay = new HookReviewOverlay({
+    entries,
+    trusted: false,
+    configPath: ".pi/hooks.json",
+    hash: "hash",
+    theme,
+    requestRender() {},
+    done(next) { action = next; },
+  });
+
+  for (let width = 1; width <= 120; width++) {
+    for (const line of overlay.render(width)) {
+      assert.ok(visibleWidth(line) <= width, `width ${width}: ${line}`);
+    }
+  }
+  overlay.handleInput("/");
+  overlay.handleInput("write");
+  const renderedUnsafe = overlay.render(80).join("\n");
+  assert.match(renderedUnsafe, /echo \\x1b\[2Jwrite\\nforged\\u202ehidden/);
+  assert.doesNotMatch(renderedUnsafe, /\x1b|\u202e/);
+  assert.doesNotMatch(overlay.render(80).join("\n"), /echo check/);
+  overlay.handleInput("T");
+  assert.equal(action, undefined, "筛选模式不能触发字母功能键");
+  overlay.handleInput("\x1b");
+  overlay.handleInput("T");
+  assert.equal(action?.kind, "toggle-trust");
+
+  action = undefined;
+  const toggle = new HookReviewOverlay({
+    entries,
+    trusted: true,
+    configPath: ".pi/hooks.json",
+    hash: "hash",
+    theme,
+    requestRender() {},
+    done(next) { action = next; },
+  });
+  toggle.handleInput(" ");
+  assert.equal(action?.kind, "toggle");
+  assert.equal(action?.hookId, entries[0].id);
+});
+
+test("Hook review detail exposes the complete long command before trust", () => {
+  const command = Array.from({ length: 80 }, (_, index) => `token-${String(index).padStart(2, "0")}`).join(" ");
+  const config = validateCodexHooks({
+    hooks: { Stop: [{ hooks: [{ type: "command", command, timeout: 5 }] }] },
+  });
+  const entries = buildHookReviewEntries({
+    config,
+    filePath: ".pi/hooks.json",
+    hash: "hash",
+    exists: true,
+  }, {});
+  const theme = {
+    fg(_role: string, text: string) { return text; },
+    bold(text: string) { return text; },
+  };
+  let action: HookReviewAction | undefined;
+  const overlay = new HookReviewOverlay({
+    entries,
+    trusted: false,
+    configPath: ".pi/hooks.json",
+    hash: "hash",
+    theme,
+    requestRender() {},
+    done(next) { action = next; },
+  });
+
+  assert.doesNotMatch(overlay.render(32).join("\n"), /token-79/);
+  overlay.handleInput("\r");
+  assert.equal(action, undefined, "Enter opens detail instead of trusting the config");
+  let detail = overlay.render(32).join("\n");
+  assert.match(detail, /token-00/);
+  for (let index = 0; index < 20 && !detail.includes("token-79"); index++) {
+    overlay.handleInput("\x1b[6~");
+    detail = overlay.render(32).join("\n");
+  }
+  assert.match(detail, /token-79/);
+  for (const line of overlay.render(10)) assert.ok(visibleWidth(line) <= 10);
+  overlay.handleInput("T");
+  assert.equal(action, undefined, "detail mode cannot trigger trust shortcuts");
+  overlay.handleInput("\x1b");
+  overlay.handleInput("T");
+  assert.equal(action?.kind, "toggle-trust");
 });
 
 test("matches regex groups and skips async or non-command handlers", () => {
@@ -130,11 +305,11 @@ process.stdin.on("end", () => {
 test("command hook timeout is enforced", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-hooks-timeout-"));
   const scriptPath = join(root, "slow.cjs");
-  await writeFile(scriptPath, "setTimeout(() => process.stdout.write('{}'), 1000);");
+  await writeFile(scriptPath, "setTimeout(() => process.stdout.write('{}'), 5000);");
   const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
   const config = validateCodexHooks({
     hooks: {
-      Stop: [{ hooks: [{ type: "command", command, timeout: 0 }] }],
+      Stop: [{ hooks: [{ type: "command", command, timeout: 1 }] }],
     },
   });
 
@@ -142,6 +317,56 @@ test("command hook timeout is enforced", async () => {
     const [result] = await runMatchingCommandHooks(config, "Stop", [], {}, root);
     assert.equal(result.timedOut, true);
     assert.match(result.error ?? "", /timed out/);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("command hook completion terminates descendant processes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-abort-"));
+  const scriptPath = join(root, "tree.cjs");
+  const pidPath = join(root, "descendant.pid");
+  await writeFile(scriptPath, `
+const { spawn } = require("node:child_process");
+const { writeFileSync } = require("node:fs");
+const descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "inherit" });
+writeFileSync(${JSON.stringify(pidPath)}, String(descendant.pid));
+process.exit(0);
+`);
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
+  const config = validateCodexHooks({
+    hooks: { Stop: [{ hooks: [{ type: "command", command, timeout: 10 }] }] },
+  });
+  let descendantPid: number | undefined;
+
+  try {
+    const [result] = await runMatchingCommandHooks(config, "Stop", [], {}, root);
+    descendantPid = Number(await readFile(pidPath, "utf8"));
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.timedOut, false);
+    assert.equal(result.error, undefined);
+    assert.equal(isProcessRunning(descendantPid), false);
+  } finally {
+    if (descendantPid && isProcessRunning(descendantPid)) {
+      try { process.kill(descendantPid, "SIGKILL"); } catch {}
+    }
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("command hook output is retained within the combined byte limit", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-output-limit-"));
+  const scriptPath = join(root, "large-output.cjs");
+  await writeFile(scriptPath, "process.stdout.write('x'.repeat(2 * 1024 * 1024)); setInterval(() => {}, 1000);");
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
+  const config = validateCodexHooks({
+    hooks: { Stop: [{ hooks: [{ type: "command", command, timeout: 10 }] }] },
+  });
+
+  try {
+    const [result] = await runMatchingCommandHooks(config, "Stop", [], {}, root);
+    assert.match(result.error ?? "", /output exceeded/);
+    assert.ok(Buffer.byteLength(result.stdout) + Buffer.byteLength(result.stderr) <= 1024 * 1024);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -156,6 +381,358 @@ test("trust is bound to the exact hooks.json hash", async () => {
     await trustHookConfig(trustPath, configPath, "hash-a");
     assert.equal(await isHookConfigTrusted(trustPath, configPath, "hash-a"), true);
     assert.equal(await isHookConfigTrusted(trustPath, configPath, "hash-b"), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("per-Hook toggles persist without changing config trust", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-toggle-"));
+  const trustPath = join(root, "user", "hook-trust.json");
+  const configPath = join(root, ".pi", "hooks.json");
+  const config = validateCodexHooks({
+    hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [
+        { type: "command", command: "echo first", timeout: 5 },
+        { type: "command", command: "echo second", timeout: 5 },
+      ] }],
+    },
+  });
+  const loaded = { config, filePath: configPath, hash: "hash-a", exists: true };
+  const entries = buildHookReviewEntries(loaded, {});
+  const reordered = buildHookReviewEntries({
+    ...loaded,
+    config: validateCodexHooks({
+      hooks: {
+        PreToolUse: [{ matcher: "Bash", hooks: [
+          { type: "command", command: "echo second", timeout: 5 },
+          { type: "command", command: "echo first", timeout: 5 },
+        ] }],
+      },
+    }),
+  }, {});
+  assert.deepEqual(
+    Object.fromEntries(entries.map((entry) => [entry.command, entry.id])),
+    Object.fromEntries(reordered.map((entry) => [entry.command, entry.id])),
+    "reordering distinct handlers must not reset their toggle IDs",
+  );
+
+  const duplicateConfig = validateCodexHooks({
+    hooks: {
+      Stop: [{ hooks: [
+        { type: "command", command: "echo duplicate", timeout: 5 },
+        { type: "command", command: "echo duplicate", timeout: 5 },
+      ] }],
+    },
+  });
+  const duplicateLoaded = { ...loaded, config: duplicateConfig };
+  const duplicates = buildHookReviewEntries(duplicateLoaded, {});
+  assert.notEqual(duplicates[0].id, duplicates[1].id);
+  assert.deepEqual(
+    duplicates.map((entry) => entry.id),
+    buildHookReviewEntries(duplicateLoaded, {}).map((entry) => entry.id),
+  );
+  assert.equal(
+    getMatchingCommandHooks(duplicateConfig, "Stop", [], { [duplicates[0].id]: false }).length,
+    1,
+  );
+
+  try {
+    await trustHookConfig(trustPath, configPath, "hash-a");
+    await setHookEnabled(trustPath, configPath, entries[0].id, false);
+    const toggles = await loadHookToggles(trustPath, configPath);
+    assert.equal(await isHookConfigTrusted(trustPath, configPath, "hash-a"), true);
+    assert.equal(toggles[entries[0].id], false);
+    assert.deepEqual(
+      getMatchingCommandHooks(config, "PreToolUse", ["Bash"], toggles).map((handler) => handler.command),
+      ["echo second"],
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("malformed Hook trust state fails closed without being overwritten", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-malformed-trust-"));
+  const trustPath = join(root, "user", "hook-trust.json");
+  const configPath = join(root, ".pi", "hooks.json");
+  await mkdir(dirname(trustPath), { recursive: true });
+
+  try {
+    for (const malformed of [
+      "{not-json\n",
+      JSON.stringify({ version: 1, trusted: { [configPath]: 42 }, toggles: {} }),
+      JSON.stringify({ version: 1, trusted: {}, toggles: { [configPath]: { hook: "off" } } }),
+    ]) {
+      await writeFile(trustPath, malformed);
+      await assert.rejects(isHookConfigTrusted(trustPath, configPath, "hash"));
+      await assert.rejects(loadHookToggles(trustPath, configPath));
+      await assert.rejects(setHookEnabled(trustPath, configPath, "hook", false));
+      assert.equal(await readFile(trustPath, "utf8"), malformed);
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Hook fallback refuses to trust without a complete review TUI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-trust-preview-"));
+  const configDir = join(root, ".pi");
+  const trustPath = join(root, "user", "hook-trust.json");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(join(configDir, "hooks.json"), JSON.stringify({
+    hooks: {
+      Stop: Array.from({ length: 10 }, (_, index) => ({
+        hooks: [{
+          type: "command",
+          command: index === 0 ? "echo 0\x1b[2J\nforged\u202ehidden\x1b]8;;https://invalid.example\x07link\x1b]8;;\x07" : `echo ${index}`,
+        }],
+      })),
+    },
+  }));
+
+  type Handler = (args: string, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  let hooksCommand: Handler | undefined;
+  let confirmCalls = 0;
+  const notifications: string[] = [];
+  const fakePi = {
+    on() {},
+    registerCommand(name: string, definition: { handler: Handler }) {
+      if (name === "hooks") hooksCommand = definition.handler;
+    },
+    sendMessage() {},
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd: root,
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getSessionFile: () => undefined,
+    },
+    ui: {
+      notify(message: string) { notifications.push(message); },
+      setStatus() {},
+      async confirm() {
+        confirmCalls++;
+        return true;
+      },
+    },
+  } as unknown as ExtensionContext;
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+
+  try {
+    assert.ok(hooksCommand);
+    await hooksCommand("", ctx);
+    const loaded = await loadCodexHooks(root);
+    assert.equal(confirmCalls, 0);
+    assert.equal(await isHookConfigTrusted(trustPath, loaded.filePath, loaded.hash ?? ""), false);
+    assert.equal(notifications.some((message) => message.includes("信任未更改")), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/hooks opens the custom TUI by default and applies toggles immediately", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-tui-command-"));
+  const configDir = join(root, ".pi");
+  const trustPath = join(root, "user", "hook-trust.json");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(join(configDir, "hooks.json"), JSON.stringify({
+    hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command: "echo managed", timeout: 5 }] }],
+    },
+  }));
+  const loaded = await loadCodexHooks(root);
+
+  type CommandHandler = (args: string, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  let hooksCommand: CommandHandler | undefined;
+  let customCalls = 0;
+  const fakePi = {
+    on() {},
+    registerCommand(name: string, definition: { handler: CommandHandler }) {
+      if (name === "hooks") hooksCommand = definition.handler;
+    },
+    sendMessage() {},
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  const theme = {
+    fg(_role: string, text: string) { return text; },
+    bold(text: string) { return text; },
+  };
+  const ctx = {
+    cwd: root,
+    hasUI: true,
+    model: { id: "test-model" },
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getSessionFile: () => undefined,
+    },
+    ui: {
+      notify() {},
+      setStatus() {},
+      async confirm() { return true; },
+      async custom(factory: Function) {
+        return new Promise((resolve) => {
+          const component = factory({ requestRender() {} }, theme, {}, resolve);
+          assert.equal(typeof component.render, "function");
+          customCalls++;
+          setImmediate(() => {
+            if (customCalls === 1) component.handleInput("T");
+            else if (customCalls === 2) component.handleInput(" ");
+            else {
+              assert.match(component.render(80).join("\n"), /○ 停用/);
+              component.handleInput("\x1b");
+            }
+          });
+        });
+      },
+    },
+  } as unknown as ExtensionContext;
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+
+  try {
+    assert.ok(hooksCommand);
+    await hooksCommand("", ctx);
+    const entries = buildHookReviewEntries(loaded, await loadHookToggles(trustPath, loaded.filePath));
+    assert.equal(customCalls, 3);
+    assert.equal(await isHookConfigTrusted(trustPath, loaded.filePath, loaded.hash ?? ""), true);
+    assert.equal(entries[0].enabled, false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/hooks keeps toggle persistence failures inside the review overlay", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-tui-failure-"));
+  const configDir = join(root, ".pi");
+  const trustPath = join(root, "user", "hook-trust.json");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(join(configDir, "hooks.json"), JSON.stringify({
+    hooks: { Stop: [{ hooks: [{ type: "command", command: "echo failure", timeout: 5 }] }] },
+  }));
+
+  type CommandHandler = (args: string, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  let hooksCommand: CommandHandler | undefined;
+  let customCalls = 0;
+  let confirmCalls = 0;
+  const notifications: string[] = [];
+  const fakePi = {
+    on() {},
+    registerCommand(name: string, definition: { handler: CommandHandler }) {
+      if (name === "hooks") hooksCommand = definition.handler;
+    },
+    sendMessage() {},
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  const theme = {
+    fg(_role: string, text: string) { return text; },
+    bold(text: string) { return text; },
+  };
+  const ctx = {
+    cwd: root,
+    hasUI: true,
+    model: { id: "test-model" },
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getSessionFile: () => undefined,
+    },
+    ui: {
+      notify(message: string) { notifications.push(message); },
+      setStatus() {},
+      async confirm() { confirmCalls++; return false; },
+      async custom(factory: Function) {
+        return new Promise((resolve, reject) => {
+          const component = factory({ requestRender() {} }, theme, {}, resolve);
+          customCalls++;
+          setImmediate(() => {
+            if (customCalls === 1) {
+              void mkdir(trustPath, { recursive: true }).then(() => component.handleInput(" "), reject);
+            } else {
+              assert.match(component.render(100).join("\n"), /更新失败/);
+              component.handleInput("\x1b");
+            }
+          });
+        });
+      },
+    },
+  } as unknown as ExtensionContext;
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+
+  try {
+    assert.ok(hooksCommand);
+    await hooksCommand("", ctx);
+    assert.equal(customCalls, 2);
+    assert.equal(confirmCalls, 0);
+    assert.equal(notifications.some((message) => message.includes("TUI 不可用")), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Hook trust is the only gate for command execution", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-single-gate-"));
+  const configDir = join(root, ".pi");
+  const trustPath = join(root, "user", "hook-trust.json");
+  const scriptPath = join(root, "mark.cjs");
+  const markerPath = join(root, "ran.txt");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(scriptPath, `
+const fs = require("node:fs");
+process.stdin.resume();
+process.stdin.on("end", () => fs.writeFileSync(${JSON.stringify(markerPath)}, "ran"));
+`);
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
+  await writeFile(join(configDir, "hooks.json"), JSON.stringify({
+    hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command, timeout: 5 }] }],
+    },
+  }));
+
+  type EventHandler = (event: any, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  type CommandHandler = (args: string, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  const handlers = new Map<string, EventHandler[]>();
+  let hooksCommand: CommandHandler | undefined;
+  const fakePi = {
+    on(name: string, handler: EventHandler) {
+      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+    },
+    registerCommand(name: string, definition: { handler: CommandHandler }) {
+      if (name === "hooks") hooksCommand = definition.handler;
+    },
+    sendMessage() {},
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd: root,
+    model: { id: "test-model" },
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getSessionFile: () => undefined,
+    },
+    ui: {
+      notify() {},
+      setStatus() {},
+      async confirm() { return true; },
+    },
+  } as unknown as ExtensionContext;
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+
+  try {
+    for (const handler of handlers.get("session_start") ?? []) {
+      await handler({ type: "session_start", reason: "startup" }, ctx);
+    }
+    const [toolHandler] = handlers.get("tool_call") ?? [];
+    await toolHandler({ toolName: "bash", toolCallId: "before-trust", input: { command: "echo ok" } }, ctx);
+    await assert.rejects(stat(markerPath), (error: unknown) =>
+      typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT");
+
+    const loaded = await loadCodexHooks(root);
+    await trustHookConfig(trustPath, loaded.filePath, loaded.hash ?? "");
+    for (const handler of handlers.get("session_start") ?? []) {
+      await handler({ type: "session_start", reason: "resume" }, ctx);
+    }
+    await toolHandler({ toolName: "bash", toolCallId: "after-trust", input: { command: "echo ok" } }, ctx);
+    assert.equal(await readFile(markerPath, "utf8"), "ran");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -203,7 +780,79 @@ test("concurrent hook trust and revoke mutations preserve unrelated entries and 
   }
 });
 
-test("Pi adapter maps PreToolUse deny output to tool_call blocking", async () => {
+test("fresh processes preserve concurrent Hook trust and toggle mutations", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-cross-process-"));
+  const trustPath = join(root, "user", "hook-trust.json");
+  const workerPath = join(root, "worker.mjs");
+  const trustModuleUrl = new URL("../src/hooks/trust.ts", import.meta.url).href;
+  const workerCount = 12;
+  const configPaths = Array.from(
+    { length: workerCount },
+    (_, index) => join(root, `project-${index}`, ".pi", "hooks.json"),
+  );
+  await writeFile(workerPath, `
+import { setHookEnabled, trustHookConfig } from ${JSON.stringify(trustModuleUrl)};
+const [trustPath, configPath, index, startAt] = process.argv.slice(2);
+const wait = Number(startAt) - Date.now();
+if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
+await trustHookConfig(trustPath, configPath, \`hash-\${index}\`);
+await setHookEnabled(trustPath, configPath, \`hook-\${index}\`, false);
+`);
+
+  const startAt = Date.now() + 1_000;
+  await mkdir(`${trustPath}.lock`, { recursive: true });
+  const staleTime = new Date(Date.now() - 60_000);
+  await utimes(`${trustPath}.lock`, staleTime, staleTime);
+  try {
+    await Promise.all(configPaths.map((configPath, index) => new Promise<void>((resolveChild, rejectChild) => {
+      const child = spawn(process.execPath, [
+        "--experimental-transform-types",
+        workerPath,
+        trustPath,
+        configPath,
+        String(index),
+        String(startAt),
+      ], { windowsHide: true, stdio: ["ignore", "ignore", "pipe"] });
+      let stderr = "";
+      child.stderr.on("data", (chunk) => { stderr += chunk.toString(); });
+      child.once("error", rejectChild);
+      child.once("close", (code) => {
+        if (code === 0) resolveChild();
+        else rejectChild(new Error(`Hook trust worker ${index} exited ${code}: ${stderr}`));
+      });
+    })));
+
+    for (const [index, configPath] of configPaths.entries()) {
+      assert.equal(await isHookConfigTrusted(trustPath, configPath, `hash-${index}`), true);
+      assert.equal((await loadHookToggles(trustPath, configPath))[`hook-${index}`], false);
+    }
+    assert.deepEqual((await readdir(dirname(trustPath))).filter((entry) => entry.endsWith(".lock")), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Hook trust mutations recover a stale lock directory", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-stale-lock-"));
+  const trustPath = join(root, "user", "hook-trust.json");
+  const configPath = join(root, ".pi", "hooks.json");
+  const lockPath = `${trustPath}.lock`;
+  await mkdir(dirname(trustPath), { recursive: true });
+  await mkdir(lockPath, { recursive: true });
+  const staleTime = new Date(Date.now() - 60_000);
+  await utimes(lockPath, staleTime, staleTime);
+
+  try {
+    await trustHookConfig(trustPath, configPath, "hash");
+    assert.equal(await isHookConfigTrusted(trustPath, configPath, "hash"), true);
+    await assert.rejects(stat(lockPath), (error: unknown) =>
+      typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi adapter ignores PreToolUse deny output after the Hook is trusted", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-hooks-adapter-"));
   const configDir = join(root, ".pi");
   const trustPath = join(root, "user", "hook-trust.json");
@@ -257,18 +906,197 @@ test("Pi adapter maps PreToolUse deny output to tool_call blocking", async () =>
       toolName: "bash",
       toolCallId: "tool-1",
       input: { command: "danger" },
-    }, ctx) as { block?: boolean; reason?: string };
-    assert.equal(result.block, true);
-    assert.equal(result.reason, "blocked by policy");
+    }, ctx);
+    assert.equal(result, undefined);
     assert.deepEqual(notifications, []);
-    assert.equal(sentMessages.length, 1);
-    assert.deepEqual(sentMessages[0].options, { triggerTurn: false });
-    assert.deepEqual(sentMessages[0].message, {
-      customType: "codex-hook-output",
-      content: `Codex Hook: PreToolUse\nCommand: ${command}\nOutput:\nblocked by policy`,
-      display: true,
-      details: { event: "PreToolUse", command },
-    });
+    assert.equal(sentMessages.length, 0);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi adapter ignores protocol output from failed hooks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-failed-output-"));
+  const configDir = join(root, ".pi");
+  const trustPath = join(root, "user", "hook-trust.json");
+  const scriptPath = join(root, "failed.cjs");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(scriptPath, `
+const fs = require("node:fs");
+const input = JSON.parse(fs.readFileSync(0, "utf8"));
+let output;
+if (input.hook_event_name === "PreToolUse") {
+  output = { hookSpecificOutput: { permissionDecision: "allow", updatedInput: { command: "replaced" } } };
+} else if (input.hook_event_name === "PermissionRequest") {
+  output = { hookSpecificOutput: { decision: { behavior: "allow", updatedInput: { command: "replaced" } } } };
+} else {
+  output = {
+    systemMessage: "must not notify",
+    diagnostic: "x".repeat(5000),
+    hookSpecificOutput: { additionalContext: "must not inject" }
+  };
+}
+process.stdout.write(JSON.stringify(output));
+process.exitCode = 1;
+`);
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
+  await writeFile(join(configDir, "hooks.json"), JSON.stringify({
+    hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [{ type: "command", command, timeout: 5 }] }],
+      PermissionRequest: [{ matcher: "Bash", hooks: [{ type: "command", command, timeout: 5 }] }],
+      UserPromptSubmit: [{ hooks: [
+        { type: "command", command, timeout: 5 },
+        { type: "command", command, timeout: 5 },
+      ] }],
+    },
+  }));
+  const loaded = await loadCodexHooks(root);
+  await trustHookConfig(trustPath, loaded.filePath, loaded.hash ?? "");
+
+  type Handler = (event: any, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  const handlers = new Map<string, Handler[]>();
+  const notifications: string[] = [];
+  const sentMessages: Array<{
+    message: { customType?: string; content?: string; details?: unknown };
+    options?: { triggerTurn?: boolean };
+  }> = [];
+  let prompts = 0;
+  const fakePi = {
+    on(name: string, handler: Handler) {
+      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+    },
+    registerCommand() {},
+    sendMessage(message: typeof sentMessages[number]["message"], options?: typeof sentMessages[number]["options"]) {
+      sentMessages.push({ message, options });
+    },
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd: root,
+    hasUI: true,
+    model: { id: "test-model" },
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getSessionFile: () => undefined,
+    },
+    ui: {
+      notify: (message: string) => notifications.push(message),
+      setStatus() {},
+      async select() {
+        prompts++;
+        return "仅本次允许";
+      },
+    },
+  } as unknown as ExtensionContext;
+  const adapter = registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+
+  try {
+    for (const handler of handlers.get("session_start") ?? []) {
+      await handler({ type: "session_start", reason: "startup" }, ctx);
+    }
+    const input = { command: "original" };
+    const [toolHandler] = handlers.get("tool_call") ?? [];
+    assert.equal(await toolHandler({
+      type: "tool_call",
+      toolName: "bash",
+      toolCallId: "failed-tool",
+      input,
+    }, ctx), undefined);
+    assert.deepEqual(input, { command: "original" });
+    assert.equal(prompts, 0);
+
+    assert.equal(await adapter.requestPermission(
+      { toolName: "bash", input: { command: "original" } },
+      ctx,
+      "Bash(original)",
+      false,
+    ), undefined);
+
+    const [inputHandler] = handlers.get("input") ?? [];
+    await inputHandler({ source: "user", text: "continue" }, ctx);
+    const [beforeAgentStart] = handlers.get("before_agent_start") ?? [];
+    assert.equal(await beforeAgentStart({ prompt: "continue", systemPrompt: "stable" }, ctx), undefined);
+    assert.equal(notifications.some((message) => message.includes("must not notify")), false);
+    assert.deepEqual(notifications, []);
+    assert.equal(sentMessages.length, 3);
+    assert.match(sentMessages[0].message.content ?? "", /^Hook 失败 · PreToolUse/);
+    assert.match(sentMessages[1].message.content ?? "", /^Hook 失败 · PermissionRequest/);
+    assert.match(sentMessages[2].message.content ?? "", /^Hook 失败 · UserPromptSubmit（2）/);
+    assert.match(sentMessages[2].message.content ?? "", /其他失败：\n2\./);
+    assert.match(sentMessages[2].message.content ?? "", /\[truncated\]/);
+    assert.ok((sentMessages[2].message.content ?? "").length < 3000);
+    assert.deepEqual(sentMessages[2].message.details, { event: "UserPromptSubmit", count: 2 });
+    for (const entry of sentMessages) {
+      assert.equal(entry.message.customType, "codex-hook-failure");
+      assert.deepEqual(entry.options, { triggerTurn: false });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Pi adapter absorbs hook results after session shutdown", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-shutdown-"));
+  const configDir = join(root, ".pi");
+  const trustPath = join(root, "user", "hook-trust.json");
+  const scriptPath = join(root, "slow.cjs");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(scriptPath, "setTimeout(() => process.stdout.write(JSON.stringify({systemMessage: 'late'})), 5000);");
+  const command = `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)}`;
+  await writeFile(join(configDir, "hooks.json"), JSON.stringify({
+    hooks: {
+      UserPromptSubmit: [{ hooks: [{
+        type: "command",
+        command,
+        timeout: 10,
+        statusMessage: "running hook",
+      }] }],
+    },
+  }));
+  const loaded = await loadCodexHooks(root);
+  await trustHookConfig(trustPath, loaded.filePath, loaded.hash ?? "");
+
+  type Handler = (event: any, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  const handlers = new Map<string, Handler[]>();
+  const notifications: string[] = [];
+  const statuses: Array<string | undefined> = [];
+  let sentMessages = 0;
+  const fakePi = {
+    on(name: string, handler: Handler) {
+      handlers.set(name, [...(handlers.get(name) ?? []), handler]);
+    },
+    registerCommand() {},
+    sendMessage() { sentMessages++; },
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd: root,
+    model: { id: "test-model" },
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getSessionFile: () => undefined,
+    },
+    ui: {
+      notify: (message: string) => notifications.push(message),
+      setStatus: (_key: string, value: string | undefined) => statuses.push(value),
+    },
+  } as unknown as ExtensionContext;
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+
+  try {
+    for (const handler of handlers.get("session_start") ?? []) {
+      await handler({ type: "session_start", reason: "startup" }, ctx);
+    }
+    const [inputHandler] = handlers.get("input") ?? [];
+    const pending = inputHandler({ source: "user", text: "continue" }, ctx);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const [shutdownHandler] = handlers.get("session_shutdown") ?? [];
+    shutdownHandler({ type: "session_shutdown" }, ctx);
+    await pending;
+
+    assert.deepEqual(notifications, []);
+    assert.equal(sentMessages, 0);
+    assert.deepEqual(statuses, ["running hook", undefined]);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
@@ -330,7 +1158,8 @@ test("Pi adapter does not append a Stop continuation behind a pending message", 
   }
 });
 
-test("Pi adapter maps PreToolUse ask and PermissionRequest decisions", async () => {
+test("Pi adapter ignores Hook permission decisions but retains input updates", async () => {
+  const permissionPrompts: Array<{ title: string; options: string[] }> = [];
   const root = await mkdtemp(join(tmpdir(), "pi-hooks-permission-request-"));
   const configDir = join(root, ".pi");
   const trustPath = join(root, "user", "hook-trust.json");
@@ -349,13 +1178,8 @@ const hookSpecificOutput = input.hook_event_name === "PreToolUse"
   : {
       hookEventName: "PermissionRequest",
       decision: {
-        behavior: "allow",
-        updatedPermissions: [{
-          type: "addRules",
-          behavior: "allow",
-          destination: "session",
-          rules: [{ toolName: "Bash", ruleContent: "npm test" }]
-        }]
+        behavior: "deny",
+        message: "ignored permission decision"
       }
     };
 process.stdout.write(JSON.stringify({ hookSpecificOutput }));
@@ -392,15 +1216,20 @@ process.stdout.write(JSON.stringify({ hookSpecificOutput }));
     ui: {
       notify() {},
       setStatus() {},
-      async select() {
+      async select(title: string, options: string[]) {
         prompts++;
+        permissionPrompts.push({ title, options });
         return "Allow once";
       },
     },
   } as unknown as ExtensionContext;
   const adapter = registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+  const permissionController = createPermissionController({
+    userSettingsPath: join(root, "user", "settings.json"),
+  });
 
   try {
+    await permissionController.reload(ctx);
     for (const handler of handlers.get("session_start") ?? []) {
       await handler({ type: "session_start", reason: "startup" }, ctx);
     }
@@ -412,22 +1241,19 @@ process.stdout.write(JSON.stringify({ hookSpecificOutput }));
       toolCallId: "tool-ask",
       input,
     }, ctx), undefined);
-    assert.equal(prompts, 1);
+    assert.equal(prompts, 0);
     assert.deepEqual(input, { command: "npm test" });
 
-    const decision = await adapter.requestPermission(
-      { toolName: "bash", input: { command: "npm test" } },
+    assert.equal(await permissionController.authorize(
+      { toolName: "bash", input },
       ctx,
-      "Bash(npm test)",
-      false,
-    );
-    assert.equal(decision?.behavior, "allow");
-    assert.deepEqual(decision?.updatedPermissions, [{
-      type: "addRules",
-      behavior: "allow",
-      destination: "session",
-      rules: [{ toolName: "Bash", ruleContent: "npm test" }],
-    }]);
+      "default",
+      adapter,
+    ), undefined);
+    assert.equal(prompts, 1);
+    assert.match(permissionPrompts[0].title, /^Permission required: bash/);
+    assert.doesNotMatch(permissionPrompts[0].title, /review command|ignored permission decision/);
+    assert.deepEqual(permissionPrompts[0].options, ["Allow once", "Always allow", "Deny"]);
 
     const brokerInput = { command: "npm run nested" };
     assert.equal(await adapter.beforeToolCall({
@@ -435,14 +1261,15 @@ process.stdout.write(JSON.stringify({ hookSpecificOutput }));
       toolCallId: "nested-tool-ask",
       input: brokerInput,
     }, ctx), undefined);
-    assert.equal(prompts, 2);
+    assert.equal(prompts, 1);
     assert.deepEqual(brokerInput, { command: "npm test" });
-    assert.deepEqual(await adapter.requestPermission(
+    assert.equal(await permissionController.authorize(
       { toolName: "bash", input: brokerInput },
       ctx,
-      "Bash(npm test)",
-      false,
-    ), { behavior: "allow" });
+      "bypassPermissions",
+      adapter,
+    ), undefined);
+    assert.equal(prompts, 1);
 
     const childHandlers = new Map<string, Handler[]>();
     const childPi = {
@@ -469,13 +1296,14 @@ process.stdout.write(JSON.stringify({ hookSpecificOutput }));
       input: childInput,
     }, ctx), undefined);
     assert.deepEqual(childInput, { command: "npm run unsafe" });
-    assert.equal(prompts, 2);
+    assert.equal(prompts, 1);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
 test("Pi adapter injects UserPromptSubmit context as a message, not the system prompt", async () => {
+  const notices: Array<{ message: string; level: string }> = [];
   const root = await mkdtemp(join(tmpdir(), "pi-hooks-context-"));
   const configDir = join(root, ".pi");
   const trustPath = join(root, "user", "hook-trust.json");
@@ -484,6 +1312,7 @@ test("Pi adapter injects UserPromptSubmit context as a message, not the system p
   await writeFile(scriptPath, `
 process.stdin.resume();
 process.stdin.on("end", () => process.stdout.write(JSON.stringify({
+  systemMessage: "notice-" + "x".repeat(600),
   hookSpecificOutput: {
     hookEventName: "UserPromptSubmit",
     additionalContext: "dynamic hook context"
@@ -517,7 +1346,7 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({
       getSessionFile: () => undefined,
     },
     ui: {
-      notify() {},
+      notify(message: string, level: string) { notices.push({ message, level }); },
       setStatus() {},
     },
   } as unknown as ExtensionContext;
@@ -545,12 +1374,16 @@ process.stdin.on("end", () => process.stdout.write(JSON.stringify({
       display: false,
       details: { source: "hooks" },
     });
+    assert.equal(notices.length, 1);
+    assert.equal(notices[0].level, "info");
+    assert.equal(notices[0].message.length, 500);
+    assert.match(notices[0].message, /\[truncated\]$/);
   } finally {
     await rm(root, { recursive: true, force: true });
   }
 });
 
-test("Pi adapter sends a visible bounded message for every executed command hook", async () => {
+test("Pi adapter keeps successful command hook output out of the transcript", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-hooks-visible-output-"));
   const configDir = join(root, ".pi");
   const trustPath = join(root, "user", "hook-trust.json");
@@ -609,19 +1442,7 @@ test("Pi adapter sends a visible bounded message for every executed command hook
     const [inputHandler] = handlers.get("input") ?? [];
     await inputHandler({ source: "user", text: "continue" }, ctx);
 
-    assert.equal(sentMessages.length, 2);
-    for (const entry of sentMessages) {
-      assert.equal(entry.message.customType, "codex-hook-output");
-      assert.equal(entry.message.display, true);
-      assert.deepEqual(entry.options, { triggerTurn: false });
-      assert.match(entry.message.content ?? "", /^Codex Hook: UserPromptSubmit\nCommand: /);
-      assert.ok((entry.message.content ?? "").length <= 4000);
-    }
-    assert.match(sentMessages[0].message.content ?? "", new RegExp(firstCommand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.match(sentMessages[0].message.content ?? "", /first output:/);
-    assert.match(sentMessages[0].message.content ?? "", /\[truncated\]$/);
-    assert.match(sentMessages[1].message.content ?? "", new RegExp(secondCommand.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
-    assert.match(sentMessages[1].message.content ?? "", /"result": "second output"/);
+    assert.equal(sentMessages.length, 0);
   } finally {
     await rm(root, { recursive: true, force: true });
   }

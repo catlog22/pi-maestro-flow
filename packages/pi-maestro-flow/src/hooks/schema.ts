@@ -88,6 +88,10 @@ export async function loadCodexHooks(cwd: string): Promise<LoadedCodexHooks> {
 
 export function validateCodexHooks(raw: unknown, filePath = ".pi/hooks.json"): CodexHooksFile {
   if (!isRecord(raw)) throw new CodexHookConfigError(filePath, "root must be an object");
+  rejectUnknownFields(raw, ["$schema", "hooks"], filePath, "root");
+  if (raw.$schema !== undefined && typeof raw.$schema !== "string") {
+    throw new CodexHookConfigError(filePath, "$schema must be a string");
+  }
   if (!isRecord(raw.hooks)) throw new CodexHookConfigError(filePath, "hooks must be an object");
 
   const hooks: Partial<Record<CodexHookEvent, CodexHookMatcherGroup[]>> = {};
@@ -113,6 +117,7 @@ function validateGroup(
 ): CodexHookMatcherGroup {
   const field = `hooks.${eventName}[${groupIndex}]`;
   if (!isRecord(raw)) throw new CodexHookConfigError(filePath, `${field} must be an object`);
+  rejectUnknownFields(raw, ["matcher", "hooks"], filePath, field);
   if (raw.matcher !== undefined && typeof raw.matcher !== "string") {
     throw new CodexHookConfigError(filePath, `${field}.matcher must be a string`);
   }
@@ -140,6 +145,12 @@ function validateHandler(raw: unknown, filePath: string, field: string): CodexHo
   if (raw.type !== "command") {
     throw new CodexHookConfigError(filePath, `${field}.type must be command, prompt, or agent`);
   }
+  rejectUnknownFields(
+    raw,
+    ["type", "command", "commandWindows", "command_windows", "timeout", "statusMessage", "async"],
+    filePath,
+    field,
+  );
   if (typeof raw.command !== "string" || raw.command.trim() === "") {
     throw new CodexHookConfigError(filePath, `${field}.command must be a non-empty string`);
   }
@@ -149,8 +160,8 @@ function validateHandler(raw: unknown, filePath: string, field: string): CodexHo
   if (raw.command_windows !== undefined && typeof raw.command_windows !== "string") {
     throw new CodexHookConfigError(filePath, `${field}.command_windows must be a string`);
   }
-  if (raw.timeout !== undefined && (!Number.isInteger(raw.timeout) || Number(raw.timeout) < 0)) {
-    throw new CodexHookConfigError(filePath, `${field}.timeout must be a non-negative integer`);
+  if (raw.timeout !== undefined && (!Number.isInteger(raw.timeout) || Number(raw.timeout) <= 0)) {
+    throw new CodexHookConfigError(filePath, `${field}.timeout must be a positive integer`);
   }
   if (raw.statusMessage !== undefined && typeof raw.statusMessage !== "string") {
     throw new CodexHookConfigError(filePath, `${field}.statusMessage must be a string`);
@@ -170,6 +181,17 @@ function validateHandler(raw: unknown, filePath: string, field: string): CodexHo
     statusMessage: typeof raw.statusMessage === "string" ? raw.statusMessage : undefined,
     async: raw.async === true,
   };
+}
+
+function rejectUnknownFields(
+  record: Record<string, unknown>,
+  allowed: readonly string[],
+  filePath: string,
+  field: string,
+): void {
+  const allowedSet = new Set(allowed);
+  const unknown = Object.keys(record).find((key) => !allowedSet.has(key));
+  if (unknown) throw new CodexHookConfigError(filePath, `${field}.${unknown} is not supported`);
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
