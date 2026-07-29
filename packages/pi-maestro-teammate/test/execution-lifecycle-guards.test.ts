@@ -143,22 +143,22 @@ test("REL-4: a prompt agent_end still settles before the lifecycle deadline fire
 // OBS-6 / OBS-7 — terminal conditions must leave evidence
 // ---------------------------------------------------------------------------
 
-test("OBS-6: a run killed by its timeout records why it was truncated", async () => {
+test("OBS-6: a foreground wait timeout never truncates the running child", async () => {
   const progress: AgentProgress[] = [];
+  let handle: ReturnType<typeof createFakeChild> | undefined;
   const spawnChildProcess = (() => {
-    const handle = createFakeChild();
+    handle = createFakeChild();
     queueMicrotask(() => {
-      handle.stdout.write(line({
+      handle!.stdout.write(line({
         type: "message_end",
         message: { role: "assistant", content: [{ type: "text", text: "partial work" }] },
       }));
-      // Then stalls mid-run until the timeout kills it.
     });
     return handle.child;
   }) as unknown as SpawnSeam;
 
-  const result = await runSingleTeammate(
-    { agent: "general", task: "stall forever", context: "fresh", timeoutMs: 60 },
+  const pending = runSingleTeammate(
+    { agent: "general", task: "continue in background", context: "fresh", timeoutMs: 60 },
     {
       baseCwd: process.cwd(),
       spawnChildProcess,
@@ -166,18 +166,15 @@ test("OBS-6: a run killed by its timeout records why it was truncated", async ()
     },
   );
 
-  assert.notEqual(result.exitCode, 0);
-  const timeoutEvidence = result.messages.find((m) => /exceeded its 60ms limit/.test(m.content));
-  assert.ok(timeoutEvidence, `no timeout evidence in ${JSON.stringify(result.messages)}`);
-  assert.equal(timeoutEvidence.role, "system");
-  assert.match(timeoutEvidence.content, /agent=general/);
-  assert.match(timeoutEvidence.content, new RegExp(`correlationId=${result.correlationId}`));
-  assert.match(timeoutEvidence.content, /elapsed=\d+ms/);
-  assert.ok(
-    result.messages.some((m) => m.content === "partial work"),
-    "the truncated work must be preserved alongside the timeout note",
-  );
-  assert.ok(progress.some((entry) => entry.status === "failed"));
+  await delay(120);
+  assert.ok(handle);
+  assert.equal(handle.killed(), false, "foreground wait expiry must not kill the child");
+  assert.equal(progress.some((entry) => entry.status === "failed"), false);
+
+  handle.stdout.write(line({ type: "agent_end" }));
+  const result = await pending;
+  assert.equal(result.exitCode, 0);
+  assert.ok(result.messages.some((message) => message.content === "partial work"));
 });
 
 test("OBS-7: a crash after assistant output keeps stderr, exit code and signal", async () => {

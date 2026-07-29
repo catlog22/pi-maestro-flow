@@ -102,7 +102,8 @@ export const TaskSpec = Type.Object({
   timeoutMs: Type.Optional(
     Type.Integer({
       minimum: 1,
-      description: "Timeout in milliseconds for this task",
+      description:
+        "Foreground wait window in milliseconds. If it elapses first, the dispatch moves to background and continues running; for graphs, the shortest task window applies to the whole dispatch.",
     }),
   ),
 }, { additionalProperties: false });
@@ -176,7 +177,7 @@ export const TeammateParams = Type.Object({
     Type.Boolean({
       default: false,
       description:
-        "Run in background (default: false — foreground/blocking). By default the call blocks until the teammate completes and returns the result directly. Set true only for genuinely independent or detached work: the call then returns an acknowledgement and an automatic teammate-complete notification arrives later — do not poll teammate-watch or teammate-list.",
+        "Run in background (default: false). Foreground calls return the result directly when it is ready; if timeoutMs elapses first, they return a background acknowledgement while the teammate continues. Explicit background calls acknowledge immediately and send one automatic teammate-complete notification later.",
     }),
   ),
 
@@ -220,7 +221,7 @@ export const TeammateParams = Type.Object({
     Type.Integer({
       minimum: 1,
       description:
-        "Default timeout in milliseconds. Per-task timeoutMs takes precedence.",
+        "Default foreground wait window in milliseconds. Per-task timeoutMs takes precedence; when the effective window elapses, the dispatch moves to background without terminating its agents.",
     }),
   ),
 }, { additionalProperties: false });

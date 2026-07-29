@@ -98,7 +98,7 @@ export interface RunTeammateOptions {
     waitForRetry?: (delayMs: number, signal?: AbortSignal) => Promise<boolean>;
     /** @internal Test seam for the result-ready grace period. */
     resultReadyGraceMs?: number;
-    /** @internal Test seam for the foreground absolute run ceiling. */
+    /** @internal Foreground wait window before the extension detaches a still-running task. */
     foregroundMaxRunMs?: number;
 }
 export interface NormalizedTask {

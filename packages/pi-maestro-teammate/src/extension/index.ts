@@ -136,9 +136,9 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "Do not use teammate for trivial, tightly coupled, single-step work that is faster to complete directly.",
   "Use teammate tasks for parallel or DAG work; {name} and {name.field} references create dependencies between named tasks, and dependsOn declares ordering without injecting output.",
   "Give every multi-task teammate item a stable unique name so nested work remains traceable and addressable; a {ref} that matches no task name is passed through as literal text.",
-  "Set teammate concurrency explicitly for provider-safe fan-out; background defaults to false (the call blocks and returns child results directly), so set background: true only for genuinely independent or detached work.",
+  "Set teammate concurrency explicitly for provider-safe fan-out; background defaults to false, so the call waits for results until completion or its foreground timeoutMs window, then moves unfinished work to background without terminating it.",
   'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default, and in multi-task mode prefer per-task fork over a top-level default.',
-  "After teammate returns a background acknowledgement (background: true), normally end the current turn and wait for the automatic teammate-complete notification, which will trigger a new turn with the result.",
+  "After teammate returns a background acknowledgement (explicit background, manual detach, or elapsed foreground window), normally end the current turn and wait for the automatic teammate-complete notification, which will trigger a new turn with the result.",
   "Do not poll teammate-watch or teammate-list after starting background work; use teammate-watch only for a one-off inspection explicitly needed for debugging or requested by the user.",
   "If the current turn must wait for an already-backgrounded result, call teammate-wait exactly once with the returned name or correlation ID and a bounded timeout; never loop teammate-watch.",
   "Use teammate-send for steering or follow-up while a teammate remains running or wakeable.",
@@ -276,6 +276,35 @@ function appendTeammateDepthContext(systemPrompt: string, depth: number): string
 
 function backgroundWaitGuidance(correlationId: string): string {
   return `correlationId=${correlationId}. Automatic teammate-complete notification will trigger a new turn with the result. Do not poll teammate-watch or teammate-list. If this turn must consume the result, call teammate-wait exactly once with { name: "${correlationId}" }; otherwise end the turn now.`;
+}
+
+function foregroundWaitWindowMs(
+  tasks: ReadonlyArray<{ timeoutMs?: number }>,
+  fallbackMs?: number,
+): number | undefined {
+  const configured = tasks
+    .map((task) => task.timeoutMs)
+    .filter((timeout): timeout is number => timeout !== undefined);
+  return configured.length > 0 ? Math.min(...configured) : fallbackMs;
+}
+
+function createForegroundDeadline(timeoutMs?: number): {
+  promise: Promise<"timeout">;
+  dispose(): void;
+} {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const promise = timeoutMs === undefined
+    ? new Promise<"timeout">(() => {})
+    : new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), timeoutMs);
+      });
+  return {
+    promise,
+    dispose() {
+      if (timer) clearTimeout(timer);
+      timer = undefined;
+    },
+  };
 }
 
 export const AGENT_BUFFER_LIMITS = Object.freeze({
@@ -1699,7 +1728,6 @@ export default function registerTeammateExtension(
         thinking: singleTask.thinking,
         cwd: singleTask.cwd,
         outputSchema: singleTask.outputSchema,
-        timeoutMs: singleTask.timeoutMs,
       };
       let foregroundUpdateOpen = params.background === false;
       const warningPrefix = normalization.warnings.length
@@ -2106,9 +2134,6 @@ export default function registerTeammateExtension(
         if (runtimeOptions.resultReadyGraceMs !== undefined) {
           options.resultReadyGraceMs = runtimeOptions.resultReadyGraceMs;
         }
-        if (runtimeOptions.foregroundMaxRunMs !== undefined) {
-          options.foregroundMaxRunMs = runtimeOptions.foregroundMaxRunMs;
-        }
         runtimeOptions.onRunOptionsCreated?.(options);
         return options;
       };
@@ -2163,49 +2188,76 @@ export default function registerTeammateExtension(
             return { results, hasError, totalDur, summaries, structuredOutput, progress };
           };
 
+          const completeGraphInBackground = (
+            bgPromise: ReturnType<typeof executeGraph>,
+          ): void => {
+            void bgPromise.then(({ results, summaries, progress, totalDur }) => {
+              const exitCode = results.some((result) => result.exitCode !== 0) ? 1 : 0;
+              settleAgent(state, correlationId, exitCode, summaries, params.context !== "fork");
+              emitComplete(pi, id, activeGraphMode, correlationId, exitCode, totalDur);
+
+              pi.sendMessage(
+                {
+                  customType: "teammate-complete",
+                  content: summaries,
+                  display: true,
+                  details: { mode: graphMode, results, progress },
+                },
+                { triggerTurn: true },
+              );
+            }).catch((error) => {
+              killAgent(state, correlationId, undefined, "failed");
+              notifyBackgroundFailure(pi, id, activeGraphMode, correlationId, error);
+            });
+          };
+
           if (params.background === false) {
-            // Foreground: block until completion
-            const { results, hasError, totalDur, summaries, structuredOutput, progress } = await executeGraph();
+            const graphPromise = executeGraph();
+            const waitMs = foregroundWaitWindowMs(normalizedTasks, runtimeOptions.foregroundMaxRunMs);
+            const deadline = createForegroundDeadline(waitMs);
+            let race:
+              | { done: true; result: Awaited<typeof graphPromise> }
+              | { done: false; result: null };
+            try {
+              race = await Promise.race([
+                graphPromise.then((result) => ({ done: true as const, result })),
+                deadline.promise.then(() => ({ done: false as const, result: null })),
+              ]);
+            } finally {
+              deadline.dispose();
+            }
 
-            emitComplete(pi, id, activeGraphMode, correlationId, hasError ? 1 : 0, totalDur);
-            settleAgent(state, correlationId, hasError ? 1 : 0, summaries, params.context !== "fork");
+            if (race.done) {
+              const { results, hasError, totalDur, summaries, structuredOutput, progress } = race.result;
+              emitComplete(pi, id, activeGraphMode, correlationId, hasError ? 1 : 0, totalDur);
+              settleAgent(state, correlationId, hasError ? 1 : 0, summaries, params.context !== "fork");
 
+              return {
+                content: [{ type: "text", text: warningPrefix + summaries }],
+                isError: hasError,
+                details: {
+                  mode: activeGraphMode,
+                  results,
+                  progress,
+                  ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+                },
+              };
+            }
+
+            detached = true;
+            completeGraphInBackground(graphPromise);
             return {
-              content: [{ type: "text", text: warningPrefix + summaries }],
-              isError: hasError,
-              details: {
-                mode: activeGraphMode,
-                results,
-                progress,
-                ...(structuredOutput !== undefined ? { structuredOutput } : {}),
-              },
+              content: [{
+                type: "text",
+                text: `${warningPrefix}${normalizedTasks.length} tasks (${activeGraphMode}) moved to background after ${waitMs}ms. ${backgroundWaitGuidance(correlationId)}`,
+              }],
+              isError: false,
+              details: { mode: activeGraphMode, results: [], progress: progressSnapshot() },
             };
           }
 
-          // Background (default)
           const bgPromise = executeGraph();
-
-          bgPromise.then(({ results, summaries, progress, totalDur }) => {
-            const exitCode = results.some((result) => result.exitCode !== 0) ? 1 : 0;
-            settleAgent(state, correlationId, exitCode, summaries, params.context !== "fork");
-            // Subscribers use this to retire the row, stop the widget timer and
-            // run the wakeable budget. Only the foreground branch used to emit
-            // it, so a backgrounded graph stayed on screen for the session.
-            emitComplete(pi, id, activeGraphMode, correlationId, exitCode, totalDur);
-
-            pi.sendMessage(
-              {
-                customType: "teammate-complete",
-                content: summaries,
-                display: true,
-                details: { mode: graphMode, results, progress },
-              },
-              { triggerTurn: true },
-            );
-          }).catch((error) => {
-            killAgent(state, correlationId, undefined, "failed");
-            notifyBackgroundFailure(pi, id, activeGraphMode, correlationId, error);
-          });
+          completeGraphInBackground(bgPromise);
 
           return {
             content: [{
@@ -2218,29 +2270,39 @@ export default function registerTeammateExtension(
         }
 
         if (params.background === false) {
-          // --- FOREGROUND: block until completion, Alt+B to detach ---
-          let detachResolve: (() => void) | null = null;
-          const detachPromise = new Promise<void>((r) => { detachResolve = r; });
+          // --- FOREGROUND: block until completion, Alt+B or deadline to detach ---
+          let detachResolve: ((reason: "manual") => void) | null = null;
+          const detachPromise = new Promise<"manual">((resolve) => { detachResolve = resolve; });
+          const waitMs = foregroundWaitWindowMs(normalizedTasks, runtimeOptions.foregroundMaxRunMs);
+          const deadline = createForegroundDeadline(waitMs);
 
           const removeListener = ctx.hasUI
             ? ctx.ui.onTerminalInput((data: string) => {
                 if (data !== "\x1bb") return undefined;
-                detachResolve?.(); // Alt+B
+                detachResolve?.("manual"); // Alt+B
                 return { consume: true };
               })
             : null;
 
-          const options = makeOptions();
-          const runPromise = runWithProgressFlushCleanup(
-            () => runSingleTeammate(singleRunParams, options),
-            progressFlushGate,
-          );
-          const race = await Promise.race([
-            runPromise.then((r) => ({ done: true as const, result: r })),
-            detachPromise.then(() => ({ done: false as const, result: null })),
-          ]);
-
-          removeListener?.();
+          let runPromise: Promise<SingleResult>;
+          let race:
+            | { done: true; result: SingleResult; reason: undefined }
+            | { done: false; result: null; reason: "manual" | "timeout" };
+          try {
+            const options = makeOptions();
+            runPromise = runWithProgressFlushCleanup(
+              () => runSingleTeammate(singleRunParams, options),
+              progressFlushGate,
+            );
+            race = await Promise.race([
+              runPromise.then((result) => ({ done: true as const, result, reason: undefined })),
+              detachPromise.then((reason) => ({ done: false as const, result: null, reason })),
+              deadline.promise.then((reason) => ({ done: false as const, result: null, reason })),
+            ]);
+          } finally {
+            removeListener?.();
+            deadline.dispose();
+          }
 
           if (race.done) {
             const result = race.result;
@@ -2261,7 +2323,7 @@ export default function registerTeammateExtension(
             };
           }
 
-          // Alt+B: detach to background
+          // Manual and timed detach share the same background completion path.
           detached = true;
           runPromise.then((result) => {
             emitComplete(pi, id, agentLabel, correlationId, result.exitCode, result.durationMs);
@@ -2282,10 +2344,13 @@ export default function registerTeammateExtension(
             killAgent(state, correlationId, undefined, "failed");
             notifyBackgroundFailure(pi, id, agentLabel, correlationId, error);
           });
+          const detachText = race.reason === "timeout"
+            ? `■ @${singleTask.name ?? singleTask.agent} moved to background after ${waitMs}ms.`
+            : `■ @${singleTask.name ?? singleTask.agent} detached.`;
           return {
             content: [{
               type: "text",
-              text: `■ @${singleTask.name ?? singleTask.agent} detached. ${backgroundWaitGuidance(correlationId)}`,
+              text: `${detachText} ${backgroundWaitGuidance(correlationId)}`,
             }],
             isError: false,
             details: { mode: "single", results: [] },
@@ -5253,7 +5318,6 @@ export async function handleProxyRequest(
         thinking: singleTask.thinking,
         cwd: singleTask.cwd,
         outputSchema: singleTask.outputSchema,
-        timeoutMs: singleTask.timeoutMs,
       };
       const warningPrefix = normalization.warnings.length
         ? normalization.warnings.map((w) => `[warn] ${w}`).join("\n") + "\n\n"
@@ -5648,18 +5712,52 @@ export async function handleProxyRequest(
       // not tear down an agent that already settled (or, worse, an unrelated
       // one that reused the id).
       const untrackDispatch = () => state.proxyDispatchByRequest?.delete(requestId);
+      const nestedPromise = executeNested();
+      const mode = normalizedTasks ? inferGraphMode(normalizedTasks) : "single";
+      const runningLabel = singleTask.name ?? activeAgent.agent;
 
-      if (p.background === false) {
-        try {
-          const completed = await executeNested();
+      const completeNestedInBackground = (): void => {
+        void nestedPromise.then((completed) => {
           untrackDispatch();
           if (!completed.lifecyclePending) {
             settleAgent(state, cid, completed.exitCode, completed.summary, p.context !== "fork");
             reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
             emitNestedComplete(completed.exitCode);
           }
-          reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
-        } catch (error) {
+          pi.sendMessage(
+            {
+              customType: "teammate-complete",
+              content: completed.summary,
+              display: true,
+              details: {
+                mode: completed.mode,
+                results: completed.results,
+                ...(completed.progress ? { progress: completed.progress } : {}),
+              },
+            },
+            { triggerTurn: true },
+          );
+        }).catch((error) => {
+          untrackDispatch();
+          killAgent(state, cid, undefined, "failed");
+          reportChildStatus("failed");
+          notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error);
+        });
+      };
+
+      if (p.background === false) {
+        const waitMs = foregroundWaitWindowMs(allTasks, runtimeOptions.foregroundMaxRunMs);
+        const deadline = createForegroundDeadline(waitMs);
+        const race = await Promise.race([
+          nestedPromise.then(
+            (completed) => ({ status: "completed" as const, completed }),
+            (error: unknown) => ({ status: "failed" as const, error }),
+          ),
+          deadline.promise.then(() => ({ status: "timeout" as const })),
+        ]);
+        deadline.dispose();
+
+        if (race.status === "failed") {
           untrackDispatch();
           killAgent(state, cid, undefined, "failed");
           reportChildStatus("failed");
@@ -5667,44 +5765,43 @@ export async function handleProxyRequest(
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{
               type: "text",
-              text: `Nested teammate failed: ${error instanceof Error ? error.message : String(error)}`,
+              text: `Nested teammate failed: ${race.error instanceof Error ? race.error.message : String(race.error)}`,
             }],
             isError: true,
-            details: { mode: normalizedTasks ? inferGraphMode(normalizedTasks) : "single", results: [] },
+            details: { mode, results: [] },
           }});
+          return;
         }
+
+        if (race.status === "completed") {
+          const completed = race.completed;
+          untrackDispatch();
+          if (!completed.lifecyclePending) {
+            settleAgent(state, cid, completed.exitCode, completed.summary, p.context !== "fork");
+            reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
+            emitNestedComplete(completed.exitCode);
+          }
+          reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
+          return;
+        }
+
+        completeNestedInBackground();
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{
+            type: "text",
+            text: `${warningPrefix}@${runningLabel} moved to background after ${waitMs}ms. ${backgroundWaitGuidance(cid)}`,
+          }],
+          isError: false,
+          details: {
+            mode,
+            results: [],
+            ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
+          },
+        }});
         return;
       }
 
-      void executeNested().then((completed) => {
-        untrackDispatch();
-        if (!completed.lifecyclePending) {
-          settleAgent(state, cid, completed.exitCode, completed.summary, p.context !== "fork");
-          reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
-          emitNestedComplete(completed.exitCode);
-        }
-        pi.sendMessage(
-          {
-            customType: "teammate-complete",
-            content: completed.summary,
-            display: true,
-            details: {
-              mode: completed.mode,
-              results: completed.results,
-              ...(completed.progress ? { progress: completed.progress } : {}),
-            },
-          },
-          { triggerTurn: true },
-        );
-      }).catch((error) => {
-        untrackDispatch();
-        killAgent(state, cid, undefined, "failed");
-        reportChildStatus("failed");
-        notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error);
-      });
-
-      const mode = normalizedTasks ? inferGraphMode(normalizedTasks) : "single";
-        const runningLabel = singleTask.name ?? activeAgent.agent;
+      completeNestedInBackground();
       reply({ type: "teammate_proxy_result", requestId, result: {
         content: [{
           type: "text",

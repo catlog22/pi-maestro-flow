@@ -133,7 +133,7 @@ export interface RunTeammateOptions {
   waitForRetry?: (delayMs: number, signal?: AbortSignal) => Promise<boolean>;
   /** @internal Test seam for the result-ready grace period. */
   resultReadyGraceMs?: number;
-  /** @internal Test seam for the foreground absolute run ceiling. */
+  /** @internal Foreground wait window before the extension detaches a still-running task. */
   foregroundMaxRunMs?: number;
 }
 
@@ -1290,10 +1290,10 @@ const CHILD_TERMINATION_GRACE_MS = 5_000;
 // blocks indefinitely on a missing terminal event.
 const RESULT_READY_GRACE_MS = 60_000;
 
-// Absolute ceiling for a foreground (blocking) lane that never settles, so a
-// child stuck mid-tool cannot wedge the caller forever. Background agents keep
-// their session-end lifetime. Overridable via params.timeoutMs.
-const DEFAULT_FOREGROUND_LANE_MAX_RUN_MS = 30 * 60 * 1000;
+// Child startup is an infrastructure boundary, independent of the caller's
+// foreground wait window. A process that never emits any event is not useful
+// background work and must still settle as failed.
+const FIRST_ACTIVITY_TIMEOUT_MS = 120_000;
 
 // ---------------------------------------------------------------------------
 // Working-directory resolution
@@ -1740,12 +1740,11 @@ interface AttemptState {
 }
 
 /**
- * The three deadlines an attempt can arm. Every settlement path clears all of
- * them; cleared handles are deliberately left in place so `armResultReadyGrace`
- * still recognises a grace window that has already been used.
+ * The lifecycle deadlines an attempt can arm. Every settlement path clears
+ * both; cleared handles are deliberately left in place so
+ * `armResultReadyGrace` still recognises a grace window that was already used.
  */
 interface AttemptTimers {
-  run?: ReturnType<typeof setTimeout>;
   firstActivity?: ReturnType<typeof setTimeout>;
   resultReadyGrace?: ReturnType<typeof setTimeout>;
 }
@@ -1955,35 +1954,9 @@ async function runSingleAttempt(
     // Cleared handles are deliberately left assigned: armResultReadyGrace()
     // treats a non-empty handle as "this window was already used".
     const clearAllTimers = (): void => {
-      if (timers.run) clearTimeout(timers.run);
       if (timers.firstActivity) clearTimeout(timers.firstActivity);
       if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
     };
-    const effectiveRunTimeout =
-      params.timeoutMs ??
-      (params.background === true
-        ? undefined
-        : (options.foregroundMaxRunMs ?? DEFAULT_FOREGROUND_LANE_MAX_RUN_MS));
-    if (effectiveRunTimeout) {
-      timers.run = setTimeout(() => {
-        // A silent kill made a truncated run indistinguishable from a clean
-        // one. Record the reason before the child stops producing evidence.
-        const elapsedMs = Date.now() - startTime;
-        const message =
-          `Teammate run exceeded its ${effectiveRunTimeout}ms limit `
-          + `(agent=${params.agent}, correlationId=${correlationId}, elapsed=${elapsedMs}ms, `
-          + `tools=${progress.toolCount}, turnTools=${state.turnToolCount}); the child process was terminated.`;
-        appendBoundedTranscriptMessage(messages, { role: "system", content: message });
-        progress.status = "failed";
-        progress.durationMs = elapsedMs;
-        progress.lastMessage = message;
-        options.onProgress?.(progress);
-        termination.terminate();
-      }, effectiveRunTimeout);
-      // The implicit ceiling must never hold the event loop open on its own;
-      // a live child's stdio keeps the loop alive so the timer still fires.
-      if (params.timeoutMs === undefined) timers.run.unref?.();
-    }
     timers.firstActivity = setTimeout(() => {
       if (state.initialResultPublished || state.receivedFirstActivity) return;
       const message =
@@ -1996,7 +1969,7 @@ async function runSingleAttempt(
       progress.lastMessage = message;
       options.onProgress?.(progress);
       termination.terminate();
-    }, Math.min(params.timeoutMs ?? 120_000, 120_000));
+    }, FIRST_ACTIVITY_TIMEOUT_MS);
 
     // Parse JSON lines from stdout
     const stdoutLines = createUtf8LineDecoder();
@@ -2797,7 +2770,6 @@ export async function runGraph(
           thinking: task.thinking,
           cwd: task.cwd,
           outputSchema: task.outputSchema,
-          timeoutMs: task.timeoutMs,
         },
         {
           ...options,

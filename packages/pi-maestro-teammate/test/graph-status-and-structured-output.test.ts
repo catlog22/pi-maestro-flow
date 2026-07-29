@@ -206,7 +206,10 @@ function createAbortAwareStructuredSpawn(
   }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
 }
 
-function createRootTool(runtimeOptions: TeammateRuntimeOptions): RegisteredTeammateTool {
+function createRootTool(
+  runtimeOptions: TeammateRuntimeOptions,
+  sentMessages?: Array<{ customType?: string; content?: string }>,
+): RegisteredTeammateTool {
   delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
     Symbol.for("pi-maestro-teammate.root-registry")
   ];
@@ -216,6 +219,9 @@ function createRootTool(runtimeOptions: TeammateRuntimeOptions): RegisteredTeamm
     events,
     registerTool(tool: RegisteredTeammateTool & { name: string }) {
       if (tool.name === "teammate") teammateTool = tool;
+    },
+    sendMessage(message: { customType?: string; content?: string }) {
+      sentMessages?.push(message);
     },
   }, {
     get(target, property) {
@@ -299,47 +305,6 @@ test("assistant structured_output calls provide a schema-validated settlement fa
     ...event,
     message: { content: [{ type: "toolCall", name: "structured_output", arguments: { ...verdict, pass: "no" } }] },
   }, schema), undefined);
-});
-
-test("foreground summaries keep the timeout cause ahead of the later abnormal-exit wrapper", async () => {
-  const spawnChildProcess = (() => {
-    const child = new EventEmitter() as ChildProcess;
-    let closed = false;
-    Object.assign(child, {
-      stdin: new PassThrough(),
-      stdout: new PassThrough(),
-      stderr: new PassThrough(),
-      connected: false,
-      exitCode: null,
-      signalCode: null,
-      pid: undefined,
-      kill() {
-        if (!closed) {
-          closed = true;
-          queueMicrotask(() => child.emit("close", 143, "SIGTERM"));
-        }
-        return true;
-      },
-    });
-    return child;
-  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
-
-  const result = await createRootTool({ spawnChildProcess }).execute(
-    "timeout-cause",
-    { tasks: [{ agent: "general", prompt: "stall", timeoutMs: 10 }], background: false },
-    new AbortController().signal,
-    undefined,
-    rootToolContext(),
-  );
-  delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
-    Symbol.for("pi-maestro-teammate.root-registry")
-  ];
-
-  const text = result.content.map((item) => item.text).join("\n");
-  assert.equal(result.isError, true);
-  assert.match(text, /exceeded its 10ms limit/);
-  assert.match(text, /agent=general/);
-  assert.doesNotMatch(text, /^Teammate child process exited abnormally/);
 });
 
 test("root and proxy single/graph paths preserve provider cause before every schema settlement diagnostic", async () => {
@@ -787,6 +752,228 @@ test("detach and background acknowledgement never publish post-settlement update
   delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
     Symbol.for("pi-maestro-teammate.root-registry")
   ];
+});
+
+test("foreground timeout moves single and graph dispatches to background without killing children", async () => {
+  for (const taskCount of [1, 2]) {
+    const stdouts: PassThrough[] = [];
+    let killed = 0;
+    const sentMessages: Array<{ customType?: string; content?: string }> = [];
+    const spawnChildProcess = (() => {
+      const child = new EventEmitter() as ChildProcess;
+      const stdout = new PassThrough();
+      stdouts.push(stdout);
+      Object.assign(child, {
+        stdin: new PassThrough(),
+        stdout,
+        stderr: new PassThrough(),
+        connected: false,
+        exitCode: null,
+        signalCode: null,
+        pid: undefined,
+        kill() { killed += 1; return true; },
+      });
+      queueMicrotask(() => {
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: "reviewing" }] },
+        })}\n`);
+      });
+      return child;
+    }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+    const tasks = Array.from({ length: taskCount }, (_, index) => ({
+      agent: "general",
+      name: `review-${index}`,
+      prompt: `review ${index}`,
+    }));
+    const result = await createRootTool({ spawnChildProcess }, sentMessages).execute(
+      `timed-detach-${taskCount}`,
+      { tasks, background: false, timeoutMs: 30 },
+      new AbortController().signal,
+      undefined,
+      rootToolContext(),
+    );
+
+    assert.match(result.content[0]?.text ?? "", /moved to background after 30ms/);
+    assert.equal(result.isError, false);
+    assert.deepEqual(result.details.results, []);
+    assert.equal(stdouts.length, taskCount);
+    assert.equal(killed, 0, "foreground timeout must not terminate any child");
+
+    for (const stdout of stdouts) {
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(killed, 0);
+    assert.equal(
+      sentMessages.filter((message) => message.customType === "teammate-complete").length,
+      1,
+      "detached dispatch must publish exactly one completion notification",
+    );
+
+    delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+      Symbol.for("pi-maestro-teammate.root-registry")
+    ];
+  }
+});
+
+test("explicit background ignores the foreground timeout window", async () => {
+  let stdoutRef: PassThrough | undefined;
+  let killed = 0;
+  const sentMessages: Array<{ customType?: string; content?: string }> = [];
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdoutRef = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout: stdoutRef,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { killed += 1; return true; },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  const result = await createRootTool({ spawnChildProcess }, sentMessages).execute(
+    "explicit-background-timeout",
+    {
+      tasks: [{ agent: "general", name: "background-review", prompt: "review" }],
+      background: true,
+      timeoutMs: 1,
+    },
+    new AbortController().signal,
+    undefined,
+    rootToolContext(),
+  );
+
+  assert.match(result.content[0]?.text ?? "", /running in background/);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(killed, 0, "timeoutMs must not apply to explicit background work");
+
+  stdoutRef?.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
+
+  delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ];
+});
+
+test("foreground rejection cleans its deadline and terminal listener", async () => {
+  for (const taskCount of [1, 2]) {
+    let removed = 0;
+    const tool = createRootTool({
+      onRunOptionsCreated() {
+        throw new Error(`forced rejection ${taskCount}`);
+      },
+    });
+    const tasks = Array.from({ length: taskCount }, (_, index) => ({
+      agent: "general",
+      name: `reject-${index}`,
+      prompt: `reject ${index}`,
+    }));
+
+    await assert.rejects(
+      tool.execute(
+        `reject-cleanup-${taskCount}`,
+        { tasks, background: false, timeoutMs: 60_000 },
+        new AbortController().signal,
+        undefined,
+        {
+          ...rootToolContext(),
+          hasUI: true,
+          ui: {
+            onTerminalInput() {
+              return () => { removed += 1; };
+            },
+          },
+        },
+      ),
+      new RegExp(`forced rejection ${taskCount}`),
+    );
+    assert.equal(removed, taskCount === 1 ? 1 : 0);
+
+    delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
+      Symbol.for("pi-maestro-teammate.root-registry")
+    ];
+  }
+});
+
+test("foreground nested dispatch timeout acknowledges background work and preserves the child", async () => {
+  let stdoutRef: PassThrough | undefined;
+  let killed = 0;
+  const sentMessages: Array<{ customType?: string; content?: string }> = [];
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdoutRef = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout: stdoutRef,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { killed += 1; return true; },
+    });
+    queueMicrotask(() => {
+      stdoutRef?.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "nested review" }] },
+      })}\n`);
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    activeRuns: new Map(),
+    namedAgents: new Map(),
+  };
+  let replyMessage: { result: PublicToolResult } | undefined;
+  const pi = new Proxy({
+    events: { on: () => () => {}, emit() {} },
+    sendMessage(message: { customType?: string; content?: string }) {
+      sentMessages.push(message);
+    },
+  }, {
+    get(target, property) {
+      if (property in target) return target[property as keyof typeof target];
+      return () => {};
+    },
+  }) as unknown as ExtensionAPI;
+
+  await handleProxyRequest(
+    pi,
+    state,
+    {
+      tool: "teammate",
+      requestId: "nested-timeout",
+      params: {
+        tasks: [{ agent: "general", name: "nested-review", prompt: "review" }],
+        background: false,
+        timeoutMs: 30,
+      },
+    },
+    (message) => { replyMessage = message as typeof replyMessage; },
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess },
+  );
+
+  assert.ok(replyMessage);
+  assert.match(replyMessage.result.content[0]?.text ?? "", /moved to background after 30ms/);
+  assert.equal(killed, 0);
+  stdoutRef?.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(killed, 0);
+  assert.equal(sentMessages.filter((message) => message.customType === "teammate-complete").length, 1);
 });
 
 test("foreground nested proxy updates preserve the two allowed teammate levels", async () => {
@@ -1628,10 +1815,10 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   // Every name binding goes through the one helper that reports collisions.
   assert.equal(source.match(/state\.namedAgents\.set\(/g)?.length, 1, "only bindAgentName may write the name map");
   assert.match(source, /normalizedTasks \? \{ taskCorrelationIds \} : \{ correlationId: cid \}/);
-  assert.match(source, /if \(p\.background === false\) \{[\s\S]*await executeNested\(\)/);
+  assert.match(source, /if \(p\.background === false\) \{[\s\S]*?createForegroundDeadline\(waitMs\)[\s\S]*?completeNestedInBackground\(\)/);
   assert.match(source, /running in background\. \$\{backgroundWaitGuidance\(cid\)\}/);
   assert.match(source, /function backgroundWaitGuidance\(/);
-  assert.equal(source.match(/backgroundWaitGuidance\(/g)?.length, 5);
+  assert.equal(source.match(/backgroundWaitGuidance\(/g)?.length, 7);
   assert.match(source, /Do not poll teammate-watch or teammate-list/);
   assert.match(source, /call teammate-wait exactly once/);
   assert.match(source, /handleProxyRequest\([\s\S]*?publishChildCallStatus/);

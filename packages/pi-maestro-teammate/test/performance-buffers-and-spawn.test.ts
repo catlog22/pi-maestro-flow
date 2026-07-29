@@ -1551,33 +1551,7 @@ test("outputSchema lane settles with its published result when agent_end never a
   assert.equal(killed, 1, "child is terminated after grace settlement");
 });
 
-test("foreground lane with no timeout is bounded by the default ceiling", async () => {
-  let killed = 0;
-  const spawnChildProcess = spawnScriptedChild(
-    (stdout) => {
-      stdout.write(`${JSON.stringify({
-        type: "message_end",
-        message: { role: "assistant", content: [{ type: "text", text: "started working" }] },
-      })}\n`);
-      // Silence afterwards: no turn_end, no agent_end, no close — a child stuck mid-tool.
-    },
-    () => { killed++; },
-  );
-
-  const result = await Promise.race([
-    runSingleTeammate(
-      { agent: "general", task: "Runs forever", context: "fresh" },
-      { baseCwd: process.cwd(), spawnChildProcess, foregroundMaxRunMs: 60 },
-    ),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("foreground lane was not bounded by the ceiling")), 1_000)),
-  ]);
-
-  assert.equal(killed, 1, "ceiling terminates the stuck child");
-  assert.notEqual(result.exitCode, 0, "bounded lane settles as failed");
-  assert.ok(result.messages.some((m) => m.content.includes("started working")), "captured output is returned");
-});
-
-test("background lane is exempt from the foreground ceiling", async () => {
+test("foreground wait settings never terminate a running child process", async () => {
   let killed = 0;
   let stdoutRef: PassThrough | undefined;
   const spawnChildProcess = spawnScriptedChild(
@@ -1585,23 +1559,23 @@ test("background lane is exempt from the foreground ceiling", async () => {
       stdoutRef = stdout;
       stdout.write(`${JSON.stringify({
         type: "message_end",
-        message: { role: "assistant", content: [{ type: "text", text: "working" }] },
+        message: { role: "assistant", content: [{ type: "text", text: "still working" }] },
       })}\n`);
     },
     () => { killed++; },
   );
 
   const pending = runSingleTeammate(
-    { agent: "general", task: "Background work", context: "fresh", background: true },
+    { agent: "general", task: "Long review", context: "fresh", timeoutMs: 40 },
     { baseCwd: process.cwd(), spawnChildProcess, foregroundMaxRunMs: 40 },
   );
 
-  // Well past the 40ms ceiling: a background lane must NOT be terminated.
   await new Promise((resolve) => setTimeout(resolve, 150));
-  assert.equal(killed, 0, "foreground ceiling must not bound a background lane");
+  assert.equal(killed, 0, "foreground wait expiry must not terminate the child");
 
-  if (!stdoutRef) throw new Error("background fake stdout was not initialized");
+  if (!stdoutRef) throw new Error("fake stdout was not initialized");
   stdoutRef.write(`${JSON.stringify({ type: "agent_end" })}\n`);
   const result = await pending;
   assert.equal(result.exitCode, 0);
+  assert.ok(result.messages.some((message) => message.content.includes("still working")));
 });
