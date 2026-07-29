@@ -3,5 +3,10 @@
   "mappings": {
     "explore": "deepseek/deepseek-v4-flash"
   },
+  "fallbackMappings": {
+    "explore": [
+      "maestro-openai/gpt-5.6-sol"
+    ]
+  },
   "thinkingLevels": {}
 }

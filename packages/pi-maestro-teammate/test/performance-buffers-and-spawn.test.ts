@@ -1123,7 +1123,66 @@ test("teammate exhausts a primary model, falls back, and skips its open circuit 
   assert.deepEqual(launchedModels, ["provider/backup"]);
 });
 
-test("permanent provider failures do not advance the fallback chain", async () => {
+test("billing failures advance to the fallback model without retrying the exhausted provider", async () => {
+  const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+  const launchedModels: string[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    const modelIndex = args.indexOf("--model");
+    const model = args[modelIndex + 1];
+    launchedModels.push(model);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      if (model === "provider/primary") {
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", stopReason: "error", errorMessage: "402: Insufficient Balance" },
+        })}\n`);
+      } else {
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: "fallback recovered" }] },
+        })}\n`);
+      }
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  });
+
+  const options = {
+    baseCwd: process.cwd(),
+    modelCircuitBreaker: breaker,
+    modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+    spawnChildProcess,
+  };
+  const params = {
+    agent: "general",
+    task: "Use a funded model",
+    model: "provider/primary",
+    fallbackModels: ["provider/backup"],
+    context: "fork" as const,
+  };
+
+  const result = await runSingleTeammate(params, options);
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.messages.at(-1)?.content, "fallback recovered");
+  assert.deepEqual(result.attemptedModels, ["provider/primary", "provider/backup"]);
+  assert.deepEqual(launchedModels, ["provider/primary", "provider/backup"]);
+  assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
+
+  launchedModels.length = 0;
+  const second = await runSingleTeammate(params, options);
+  assert.equal(second.exitCode, 0);
+  assert.deepEqual(launchedModels, ["provider/backup"]);
+});
+
+test("permanent provider failures override overlapping billing fallback markers", async () => {
   const launchedModels: string[] = [];
   const spawnChildProcess = adaptFakeSpawn((_command, args) => {
     const modelIndex = args.indexOf("--model");
@@ -1134,7 +1193,10 @@ test("permanent provider failures do not advance the fallback chain", async () =
       exitCode: null, signalCode: null, pid: undefined,
       kill() { return true; },
     });
-    queueMicrotask(() => child.emit("error", new Error("Unauthorized: invalid API key")));
+    queueMicrotask(() => child.emit(
+      "error",
+      new Error("402 Unauthorized: invalid API key; Insufficient Balance"),
+    ));
     return child;
   });
 

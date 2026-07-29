@@ -26,6 +26,13 @@ const CANONICAL_TOOL_NAMES: Record<string, string> = {
   find: "Find",
 };
 
+const PLAN_READ_ONLY_TEAMMATE_AGENTS = new Set([
+  "analyst",
+  "research",
+  "explorer",
+  "planner",
+]);
+
 const ALWAYS_ALLOWED_TOOLS = new Set([
   "Read",
   "Grep",
@@ -69,6 +76,16 @@ export function evaluatePermission(
   if (explicit) return explicit;
 
   const toolName = canonicalToolName(call.toolName);
+  if (mode === "plan" && toolName === "teammate") {
+    const agents = selectedTeammateAgents(call.input);
+    if (agents.length > 0 && agents.every((agent) => PLAN_READ_ONLY_TEAMMATE_AGENTS.has(agent))) {
+      return { behavior: "allow", reason: `Plan mode allows read-only teammate roles: ${agents.join(", ")}.` };
+    }
+    return {
+      behavior: "ask",
+      reason: "Plan mode pre-approves only the analyst, research, explorer, and planner teammate roles.",
+    };
+  }
   if (ALWAYS_ALLOWED_TOOLS.has(toolName)) {
     return { behavior: "allow", reason: `${toolName} is an internal or read-only tool.` };
   }
@@ -84,6 +101,22 @@ export function evaluatePermission(
   // boundary had already screened the call; that boundary is gone, and the stale `allow` made
   // Plan strictly weaker than `default`.
   return { behavior: "ask", reason: `${toolName} requires user approval in ${mode} mode.` };
+}
+
+function selectedTeammateAgents(input: Record<string, unknown>): string[] {
+  const topLevelAgent = typeof input.agent === "string" && input.agent.trim()
+    ? input.agent.trim()
+    : undefined;
+  if (!Array.isArray(input.tasks) || input.tasks.length === 0) {
+    return topLevelAgent ? [topLevelAgent] : [];
+  }
+  return input.tasks.map((task) => {
+    if (task && typeof task === "object") {
+      const taskAgent = (task as Record<string, unknown>).agent;
+      if (typeof taskAgent === "string" && taskAgent.trim()) return taskAgent.trim();
+    }
+    return topLevelAgent ?? "general";
+  });
 }
 
 export function suggestedAllowRule(call: PermissionToolCall, cwd?: string): string {

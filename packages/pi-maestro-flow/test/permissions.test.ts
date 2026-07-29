@@ -103,6 +103,41 @@ test("permission modes each enforce their own behavior", () => {
   );
 });
 
+test("plan mode pre-approves only the four built-in read-only planning roles", () => {
+  for (const agent of ["analyst", "research", "explorer", "planner"]) {
+    const decision = evaluatePermission({
+      toolName: "teammate",
+      input: { tasks: [{ prompt: "Inspect the bounded planning question", agent }] },
+    }, "plan", empty);
+    assert.equal(decision.behavior, "allow", agent);
+    assert.match(decision.reason, /read-only teammate roles/);
+  }
+
+  const inheritedPlanner = evaluatePermission({
+    toolName: "teammate",
+    input: {
+      agent: "planner",
+      tasks: [{ prompt: "Inspect one boundary" }, { prompt: "Review the task DAG" }],
+    },
+  }, "plan", empty);
+  assert.equal(inheritedPlanner.behavior, "allow");
+
+  for (const input of [
+    { tasks: [{ prompt: "Implement the plan", agent: "general" }] },
+    {
+      tasks: [
+        { prompt: "Explore", agent: "explorer" },
+        { prompt: "Implement", agent: "general" },
+      ],
+    },
+    { tasks: [{ prompt: "Use the default role" }] },
+  ]) {
+    const decision = evaluatePermission({ toolName: "teammate", input }, "plan", empty);
+    assert.equal(decision.behavior, "ask");
+    assert.match(decision.reason, /analyst, research, explorer, and planner/);
+  }
+});
+
 // Regression guard for the invariant that was actually violated: plan mode used to return
 // `allow` for mutating tools while `default` returned `ask`, so toggling into plan mode
 // silently switched the confirmation prompt off. Plan may be as strict as default or

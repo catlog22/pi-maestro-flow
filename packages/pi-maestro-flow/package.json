@@ -1,6 +1,6 @@
 {
   "name": "pi-maestro-flow",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Pi extension for Maestro knowledge and workflow orchestration with teammate dispatch",
   "type": "module",
   "engines": {
@@ -90,7 +90,7 @@
     "maestro-flow": "0.5.58",
     "open": "10.2.0",
     "p-limit": "^7.3.1",
-    "pi-cockpit": "0.1.2",
+    "pi-cockpit": "0.2.0",
     "pi-maestro-teammate": "1.0.0",
     "promise.try": "^2.0.1",
     "proper-lockfile": "4.1.2",

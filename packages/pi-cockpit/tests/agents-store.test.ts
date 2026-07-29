@@ -250,6 +250,27 @@ test("teammate strings are stripped of control characters on ingest", () => {
 	assert.equal(row.task, "build auth");
 });
 
+test("a successful wake lifecycle recreates a row removed at completion", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor", name: "worker" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 100);
+	assert.equal(s.size, 0);
+
+	s.applyStarted({
+		correlationId: "c1",
+		agent: "executor",
+		name: "worker",
+		status: "running",
+		startedAt: 1,
+		lastActivityAt: 200,
+	}, 200);
+
+	const row = s.snapshot(200)[0];
+	assert.equal(row.correlationId, "c1");
+	assert.equal(row.status, "running");
+	assert.equal(row.lastActivityAt, 200);
+});
+
 test("a failed agent survives its own completion so the failure can be read", () => {
 	const s = new AgentsStore();
 	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);

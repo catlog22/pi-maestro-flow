@@ -15,6 +15,9 @@ const NETWORK_ERROR =
 const PROVIDER_ERROR =
   /\b(?:429|5\d\d|rate limit(?:ed)?|capacity|overloaded|unavailable|provider returned error)\b/i;
 
+const FALLBACK_ONLY_ERROR =
+  /\b(?:402|insufficient (?:balance|credits?)|credits? exhausted|billing quota)\b/i;
+
 export function classifyRetryError(message: string | undefined): RetryErrorKind {
   if (!message || NON_RETRYABLE_ERROR.test(message)) return "non-retryable";
   if (NETWORK_ERROR.test(message)) return "network";
@@ -24,6 +27,11 @@ export function classifyRetryError(message: string | undefined): RetryErrorKind 
 
 export function isRetryableProviderError(message: string | undefined): boolean {
   return classifyRetryError(message) !== "non-retryable";
+}
+
+export function isFallbackProviderError(message: string | undefined): boolean {
+  if (!message || NON_RETRYABLE_ERROR.test(message)) return false;
+  return isRetryableProviderError(message) || FALLBACK_ONLY_ERROR.test(message);
 }
 
 export function retryDelayMs(retry: number): number {

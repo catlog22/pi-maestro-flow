@@ -705,6 +705,23 @@ function emitTeammateStarted(
   });
 }
 
+/** Reactivate a wakeable child and republish it to lifecycle-only consumers. */
+function wakeSleepingAgent(
+  pi: ExtensionAPI,
+  agent: ActiveAgent,
+  now = Date.now(),
+): boolean {
+  if (agent.status !== "sleeping") return false;
+  agent.status = "running";
+  if (agent.sleptAt) {
+    agent.sleepMs += now - agent.sleptAt;
+    agent.sleptAt = undefined;
+  }
+  agent.lastActivityAt = now;
+  emitTeammateStarted(pi, agent);
+  return true;
+}
+
 export function buildAgentSelectorRows(agents: ActiveAgent[]): AgentSelectorRow[] {
   const visible = agents.filter((agent) => agent.status !== "completed");
   const byId = new Map(visible.map((agent) => [agent.correlationId, agent]));
@@ -2516,17 +2533,9 @@ export default function registerTeammateExtension(
         };
       }
 
-      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
-      const wasSleeping = agent.status === "sleeping";
-      if (wasSleeping && mode !== "abort") {
-        agent.status = "running";
-        if (agent.sleptAt) {
-          agent.sleepMs += Date.now() - agent.sleptAt;
-          agent.sleptAt = undefined;
-        }
-      }
-
       const now = Date.now();
+      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+      const wasSleeping = mode !== "abort" && wakeSleepingAgent(pi, agent, now);
       agent.inbox.push({ id: randomUUID(), from: "caller", to: params.to, kind: mode === "abort" ? "notification" : "task", payload: message, timestamp: now });
       agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);
       trimAgentBuffers(agent);
@@ -2770,6 +2779,7 @@ export default function registerTeammateExtension(
             if (sendMode === "prompt") target.promptSeq = (target.promptSeq ?? 0) + 1;
 
             const now = Date.now();
+            wakeSleepingAgent(pi, target, now);
             const label = target.name ?? target.correlationId.slice(0, 8);
             target.inbox.push({
               id: randomUUID(),
@@ -2782,13 +2792,6 @@ export default function registerTeammateExtension(
             target.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ follow_up: ${message.slice(0, 100)}`);
             trimAgentBuffers(target);
             target.lastActivityAt = now;
-            if (target.status === "sleeping") {
-              target.status = "running";
-              if (target.sleptAt) {
-                target.sleepMs += now - target.sleptAt;
-                target.sleptAt = undefined;
-              }
-            }
             pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
               correlationId: cid,
               from: "caller",
@@ -5923,15 +5926,9 @@ export async function handleProxyRequest(
         }});
         return;
       }
-      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
-      if (agent.status === "sleeping" && mode === "prompt") {
-        agent.status = "running";
-        if (agent.sleptAt) {
-          agent.sleepMs += Date.now() - agent.sleptAt;
-          agent.sleptAt = undefined;
-        }
-      }
       const now = Date.now();
+      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+      wakeSleepingAgent(pi, agent, now);
       agent.inbox.push({ id: randomUUID(), from: spawnedBy ?? "proxy", to, kind: mode === "abort" ? "notification" : "task", payload: message, timestamp: now });
       agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);
       trimAgentBuffers(agent);

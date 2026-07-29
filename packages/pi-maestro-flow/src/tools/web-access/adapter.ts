@@ -106,10 +106,10 @@ export interface ProviderAvailability {
   anysearch: boolean;
 }
 
-export function checkProviderAvailability(): ProviderAvailability {
+export async function checkProviderAvailability(): Promise<ProviderAvailability> {
   return {
     perplexity: _perplexity(),
-    openai: _openai(),
+    openai: await _openai(),
     brave: _brave(),
     parallel: _parallel(),
     tavily: _tavily(),
@@ -117,7 +117,7 @@ export function checkProviderAvailability(): ProviderAvailability {
     searxng: _searxng(),
     exa: _exa(),
     geminiApi: _geminiApi(),
-    geminiWeb: _geminiWeb(),
+    geminiWeb: Boolean(await _geminiWeb()),
     anysearch: _anysearch(),
   };
 }

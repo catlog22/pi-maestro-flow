@@ -389,11 +389,14 @@ test("todo next switches to the task's quality-gate Goal but leaves a user-stopp
   const todoContext = startTodo(root, loader);
   const ctx = makeExtensionContext();
   initGoal({ appendEntry() {} } as never);
-  const goalCtx: GoalContext = {
+  const goalCtx = {
     cwd: root,
+    modelRegistry: {
+      getAvailable: () => [{ provider: "provider", id: "verifier-model" }],
+    },
     ui: { notify() {}, setStatus() {} },
     abort() {},
-  };
+  } as GoalContext;
   goalSessionStart(goalCtx, { reason: "new" });
   try {
     const goalA = addGoal("Gate A", goalCtx);
@@ -545,12 +548,15 @@ test("todo with a quality-gate Goal blocks completion until the Goal verifies", 
     structuredOutput: { pass: true, reasoning: "verified", unmet: [], evidence: ["Gate verified by test"] },
   }));
   initGoal({ appendEntry() {} } as never);
-  const goalCtx: GoalContext = {
+  const goalCtx = {
     cwd: root,
+    modelRegistry: {
+      getAvailable: () => [{ provider: "provider", id: "verifier-model" }],
+    },
     ui: { notify() {}, setStatus() {} },
     isIdle: () => false,
     abort() {},
-  };
+  } as GoalContext;
   goalSessionStart(goalCtx, { reason: "new" });
   try {
     const gate = addGoal("Quality gate", goalCtx);

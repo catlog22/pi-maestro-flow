@@ -36,6 +36,7 @@ import {
 } from "../shared/thinking.ts";
 import {
   NETWORK_RETRY_POLICY,
+  isFallbackProviderError,
   isRetryableProviderError,
   retryDelayMs,
 } from "./retry.ts";
@@ -944,9 +945,9 @@ function buildModelCandidates(primary?: string, fallbacks?: string[]): string[] 
   return [...new Set([primary, ...(fallbacks ?? [])].filter((model): model is string => Boolean(model)))];
 }
 
-function isRetryableModelError(messages: Array<{ role: string; content: string }>): boolean {
+function isFallbackModelError(messages: Array<{ role: string; content: string }>): boolean {
   return messages.some((message) =>
-    message.role === "system" && isRetryableProviderError(message.content)
+    message.role === "system" && isFallbackProviderError(message.content)
   );
 }
 
@@ -1615,6 +1616,7 @@ export async function runSingleTeammate(
       lastResult = candidateResult;
       const error = resultFailureMessage(candidateResult.messages);
       const retryable = candidateResult.exitCode !== 0 && isRetryableProviderError(error);
+      const fallbackEligible = candidateResult.exitCode !== 0 && isFallbackProviderError(error);
 
       if (candidateResult.exitCode === 0) {
         if (acquisition?.allowed) breaker.recordSuccess(acquisition);
@@ -1622,7 +1624,7 @@ export async function runSingleTeammate(
         return candidateResult;
       }
       if (!retryable || retryCount >= maxRetries) {
-        if (retryable && acquisition?.allowed) breaker.recordRetryableFailure(acquisition);
+        if (fallbackEligible && acquisition?.allowed) breaker.recordRetryableFailure(acquisition);
         break;
       }
 
@@ -1644,7 +1646,7 @@ export async function runSingleTeammate(
       if (acquisition?.allowed) breaker.releaseCandidate(acquisition);
       continue;
     }
-    if (!isRetryableModelError(candidateResult.messages)) {
+    if (!isFallbackModelError(candidateResult.messages)) {
       if (acquisition?.allowed) breaker.releaseCandidate(acquisition);
       candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
       return candidateResult;

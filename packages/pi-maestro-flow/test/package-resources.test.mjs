@@ -28,7 +28,6 @@ const teammatePublicExports = {
   "./v1/execution": ["./types/public/v1/execution.d.ts", "./src/public/v1/execution.ts"],
   "./v1/extension": ["./types/public/v1/extension.d.ts", "./src/public/v1/extension.ts"],
   "./v1/model-routing": ["./types/public/v1/model-routing.d.ts", "./src/public/v1/model-routing.ts"],
-  "./v1/prompts": ["./types/public/v1/prompts.d.ts", "./src/public/v1/prompts.ts"],
   "./v1/progress-tree": ["./types/public/v1/progress-tree.d.ts", "./src/public/v1/progress-tree.ts"],
   "./v1/retry": ["./types/public/v1/retry.d.ts", "./src/public/v1/retry.ts"],
   "./v1/types": ["./types/public/v1/types.d.ts", "./src/public/v1/types.ts"],

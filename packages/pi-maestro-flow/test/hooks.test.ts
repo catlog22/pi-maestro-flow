@@ -27,6 +27,16 @@ import {
 import { registerCodexHookAdapter } from "../src/hooks/pi-adapter.ts";
 import { buildHookReviewEntries } from "../src/hooks/review.ts";
 import { HookReviewOverlay, type HookReviewAction } from "../src/hooks/review-tui.ts";
+import {
+  MaestroHookInstallerOverlay,
+  type MaestroHookInstallerAction,
+} from "../src/hooks/installer-tui.ts";
+import {
+  MaestroHookInstallerStore,
+  hooksForPreset,
+  maestroHookDefinitions,
+  mergeMaestroHooks,
+} from "../src/hooks/installer-store.ts";
 import { createPermissionController } from "../src/permissions/controller.ts";
 
 function isProcessRunning(pid: number): boolean {
@@ -136,6 +146,162 @@ test("published JSON Schema matches runtime command validation", async () => {
   assert.throws(() => validateCodexHooks(zeroTimeout), CodexHookConfigError);
 });
 
+test("Maestro Hook installer presets merge owned hooks and preserve user hooks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-maestro-hook-installer-"));
+  const configDir = join(root, ".pi");
+  const configPath = join(configDir, "hooks.json");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(configPath, JSON.stringify({
+    $schema: "./hooks.schema.json",
+    hooks: {
+      PreToolUse: [{ matcher: "Bash", hooks: [
+        { type: "command", command: "echo user", timeout: 9 },
+        { type: "command", command: "maestro hooks run workflow-guard", timeout: 600 },
+      ] }],
+      UserPromptSubmit: [{ hooks: [
+        { type: "command", command: "maestro hooks run kg-unified-injector", timeout: 600 },
+      ] }],
+    },
+  }));
+  const store = new MaestroHookInstallerStore(root);
+
+  try {
+    const initial = await store.load();
+    assert.deepEqual(initial.installedNames, ["workflow-guard"]);
+    assert.equal(initial.thirdPartyHandlers, 1);
+    assert.ok(initial.definitions.some((definition) => definition.name === "session-context"));
+
+    const installed = await store.apply(hooksForPreset("minimal"));
+    assert.equal(installed.installedPreset, "minimal");
+    const loaded = await loadCodexHooks(root);
+    assert.equal(loaded.config.$schema, "./hooks.schema.json");
+    const commands = Object.values(loaded.config.hooks)
+      .flatMap((groups) => groups ?? [])
+      .flatMap((group) => group.hooks)
+      .filter((handler) => handler.type === "command")
+      .map((handler) => handler.command);
+    assert.ok(commands.includes("echo user"));
+    assert.equal(commands.some((command) => command.includes("kg-unified-injector")), false);
+    assert.deepEqual(
+      commands.filter((command) => command.startsWith("maestro hooks run ")),
+      hooksForPreset("minimal").map((name) => `maestro hooks run ${name}`),
+    );
+
+    await store.uninstall();
+    const uninstalled = await loadCodexHooks(root);
+    const remaining = Object.values(uninstalled.config.hooks)
+      .flatMap((groups) => groups ?? [])
+      .flatMap((group) => group.hooks)
+      .filter((handler) => handler.type === "command")
+      .map((handler) => handler.command);
+    assert.deepEqual(remaining, ["echo user"]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Maestro Hook installer defaults to standard and refuses malformed config", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-maestro-hook-malformed-"));
+  const store = new MaestroHookInstallerStore(root);
+  const configPath = join(root, ".pi", "hooks.json");
+
+  try {
+    const missing = await store.load();
+    assert.deepEqual(missing.suggestedNames, hooksForPreset("standard"));
+    assert.equal(missing.installedPreset, "none");
+    assert.equal(maestroHookDefinitions().filter((definition) => definition.permissionAdvisory).length, 3);
+
+    await mkdir(dirname(configPath), { recursive: true });
+    const malformed = "{ broken installer config\n";
+    await writeFile(configPath, malformed);
+    await assert.rejects(store.apply(hooksForPreset("minimal")));
+    assert.equal(await readFile(configPath, "utf8"), malformed);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("concurrent Maestro Hook installer writes remain valid and preserve user hooks", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-maestro-hook-concurrent-"));
+  const configDir = join(root, ".pi");
+  const configPath = join(configDir, "hooks.json");
+  await mkdir(configDir, { recursive: true });
+  await writeFile(configPath, JSON.stringify({
+    hooks: { Stop: [{ hooks: [{ type: "command", command: "echo keep", timeout: 5 }] }] },
+  }));
+  const store = new MaestroHookInstallerStore(root);
+
+  try {
+    const levels = ["minimal", "standard", "full", "none"] as const;
+    await Promise.all(Array.from({ length: 24 }, (_, index) => store.apply(hooksForPreset(levels[index % levels.length]))));
+    const loaded = await loadCodexHooks(root);
+    const commands = Object.values(loaded.config.hooks)
+      .flatMap((groups) => groups ?? [])
+      .flatMap((group) => group.hooks)
+      .filter((handler) => handler.type === "command")
+      .map((handler) => handler.command);
+    assert.ok(commands.includes("echo keep"));
+    assert.deepEqual((await readdir(configDir)).filter((entry) => entry.endsWith(".tmp") || entry.endsWith(".lock")), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Maestro Hook installer TUI supports presets, filtering, actions, and narrow rendering", () => {
+  const definitions = maestroHookDefinitions();
+  const snapshot = {
+    configPath: ".pi/hooks.json",
+    configExists: false,
+    definitions,
+    installedNames: [],
+    suggestedNames: hooksForPreset("standard"),
+    installedPreset: "none" as const,
+    thirdPartyHandlers: 2,
+  };
+  const theme = {
+    fg(_role: string, text: string) { return text; },
+    bold(text: string) { return text; },
+  };
+  let action: MaestroHookInstallerAction | undefined;
+  const overlay = new MaestroHookInstallerOverlay({
+    snapshot,
+    theme,
+    requestRender() {},
+    done(next) { action = next; },
+  });
+
+  for (let width = 1; width <= 120; width++) {
+    for (const line of overlay.render(width)) assert.ok(visibleWidth(line) <= width, `width ${width}: ${line}`);
+  }
+  overlay.handleInput("/");
+  overlay.handleInput("guard");
+  assert.match(overlay.render(100).join("\n"), /workflow-guard/);
+  overlay.handleInput("A");
+  assert.equal(action, undefined, "filter mode reserves ordinary letters for text");
+  overlay.handleInput("\x1b");
+  overlay.handleInput("2");
+  overlay.handleInput("A");
+  assert.equal(action?.kind, "apply");
+  assert.deepEqual(action?.uiState.selectedNames, hooksForPreset("minimal"));
+
+  action = undefined;
+  const discard = new MaestroHookInstallerOverlay({
+    snapshot,
+    theme,
+    requestRender() {},
+    done(next) { action = next; },
+  });
+  discard.handleInput("\x1b");
+  assert.equal(action, undefined);
+  assert.match(discard.render(100).join("\n"), /有未应用修改/);
+  discard.handleInput("\x1b");
+  assert.equal(action?.kind, "close");
+});
+
+test("mergeMaestroHooks rejects unknown selections", () => {
+  assert.throws(() => mergeMaestroHooks({ hooks: {} }, ["not-a-maestro-hook"]));
+});
+
 test("Hook review TUI supports bounded rendering, explicit filtering, toggles, and trust actions", () => {
   const config = validateCodexHooks({
     hooks: {
@@ -197,6 +363,19 @@ test("Hook review TUI supports bounded rendering, explicit filtering, toggles, a
   toggle.handleInput(" ");
   assert.equal(action?.kind, "toggle");
   assert.equal(action?.hookId, entries[0].id);
+
+  action = undefined;
+  const install = new HookReviewOverlay({
+    entries,
+    trusted: true,
+    configPath: ".pi/hooks.json",
+    hash: "hash",
+    theme,
+    requestRender() {},
+    done(next) { action = next; },
+  });
+  install.handleInput("I");
+  assert.equal(action?.kind, "install");
 });
 
 test("Hook review detail exposes the complete long command before trust", () => {
@@ -527,6 +706,165 @@ test("Hook fallback refuses to trust without a complete review TUI", async () =>
     assert.equal(confirmCalls, 0);
     assert.equal(await isHookConfigTrusted(trustPath, loaded.filePath, loaded.hash ?? ""), false);
     assert.equal(notifications.some((message) => message.includes("信任未更改")), true);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/hooks opens the installer for a missing config then routes to hash review", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-install-command-"));
+  const trustPath = join(root, "user", "hook-trust.json");
+  type CommandHandler = (args: string, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  let hooksCommand: CommandHandler | undefined;
+  let customCalls = 0;
+  let confirmCalls = 0;
+  const fakePi = {
+    on() {},
+    registerCommand(name: string, definition: { handler: CommandHandler }) {
+      if (name === "hooks") hooksCommand = definition.handler;
+    },
+    sendMessage() {},
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  const theme = {
+    fg(_role: string, text: string) { return text; },
+    bold(text: string) { return text; },
+  };
+  const ctx = {
+    cwd: root,
+    hasUI: true,
+    model: { id: "test-model" },
+    sessionManager: {
+      getSessionId: () => "session-1",
+      getSessionFile: () => undefined,
+    },
+    ui: {
+      notify() {},
+      setStatus() {},
+      async confirm() { confirmCalls++; return true; },
+      async custom(factory: Function) {
+        return new Promise((resolve, reject) => {
+          const component = factory({ requestRender() {} }, theme, {}, resolve);
+          customCalls++;
+          setImmediate(() => {
+            try {
+              const rendered = component.render(100).join("\n");
+              if (customCalls === 1) {
+                assert.match(rendered, /Maestro Flow Hooks 安装/);
+                component.handleInput("2");
+                component.handleInput("A");
+              } else if (customCalls === 2) {
+                assert.match(rendered, /已安装/);
+                component.handleInput("\x1b");
+              } else {
+                assert.match(rendered, /Hook 审查/);
+                component.handleInput("\x1b");
+              }
+            } catch (error) {
+              reject(error);
+            }
+          });
+        });
+      },
+    },
+  } as unknown as ExtensionContext;
+  registerCodexHookAdapter(fakePi, { trustFilePath: trustPath });
+
+  try {
+    assert.ok(hooksCommand);
+    await hooksCommand("", ctx);
+    const loaded = await loadCodexHooks(root);
+    const snapshot = await new MaestroHookInstallerStore(root).load();
+    assert.equal(customCalls, 3);
+    assert.equal(confirmCalls, 1);
+    assert.equal(snapshot.installedPreset, "minimal");
+    assert.equal(await isHookConfigTrusted(trustPath, loaded.filePath, loaded.hash ?? ""), false);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/hooks install explicitly opens the dedicated installer", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-install-explicit-"));
+  type CommandHandler = (args: string, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  let hooksCommand: CommandHandler | undefined;
+  let rendered = "";
+  const fakePi = {
+    on() {},
+    registerCommand(name: string, definition: { handler: CommandHandler }) {
+      if (name === "hooks") hooksCommand = definition.handler;
+    },
+    sendMessage() {},
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  const theme = {
+    fg(_role: string, text: string) { return text; },
+    bold(text: string) { return text; },
+  };
+  const ctx = {
+    cwd: root,
+    hasUI: true,
+    model: { id: "test-model" },
+    sessionManager: { getSessionId: () => "session-1", getSessionFile: () => undefined },
+    ui: {
+      notify() {},
+      setStatus() {},
+      async custom(factory: Function) {
+        return new Promise((resolve) => {
+          const component = factory({ requestRender() {} }, theme, {}, resolve);
+          rendered = component.render(100).join("\n");
+          setImmediate(() => {
+            component.handleInput("\x1b");
+            component.handleInput("\x1b");
+          });
+        });
+      },
+    },
+  } as unknown as ExtensionContext;
+  registerCodexHookAdapter(fakePi, { trustFilePath: join(root, "trust.json") });
+
+  try {
+    assert.ok(hooksCommand);
+    await hooksCommand("install", ctx);
+    assert.match(rendered, /Maestro Flow Hooks 安装/);
+    await assert.rejects(stat(join(root, ".pi", "hooks.json")), (error: unknown) =>
+      typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("/hooks install fails closed without an interactive TUI", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-hooks-install-no-ui-"));
+  type CommandHandler = (args: string, ctx: ExtensionContext) => unknown | Promise<unknown>;
+  let hooksCommand: CommandHandler | undefined;
+  const notifications: string[] = [];
+  const fakePi = {
+    on() {},
+    registerCommand(name: string, definition: { handler: CommandHandler }) {
+      if (name === "hooks") hooksCommand = definition.handler;
+    },
+    sendMessage() {},
+    sendUserMessage() {},
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    cwd: root,
+    hasUI: false,
+    model: { id: "test-model" },
+    sessionManager: { getSessionId: () => "session-1", getSessionFile: () => undefined },
+    ui: {
+      notify(message: string) { notifications.push(message); },
+      setStatus() {},
+    },
+  } as unknown as ExtensionContext;
+  registerCodexHookAdapter(fakePi, { trustFilePath: join(root, "trust.json") });
+
+  try {
+    assert.ok(hooksCommand);
+    await hooksCommand("install", ctx);
+    assert.equal(notifications.some((message) => message.includes("需要交互式 TUI")), true);
+    await assert.rejects(stat(join(root, ".pi", "hooks.json")), (error: unknown) =>
+      typeof error === "object" && error !== null && "code" in error && error.code === "ENOENT");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

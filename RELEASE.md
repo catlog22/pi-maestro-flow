@@ -1,96 +1,92 @@
-# v0.7.0 — Native Web-Access Engine, Smart Search Native Mode & Ask TUI Overhaul
+# v0.8.0 - Teammate 1.0, Model Failover, Hook Installer, and Planning Pipeline
 
 ## Overview
 
-A feature release with three major additions. **A complete native TypeScript web-access engine** (`src/tools/web-access/`, ~42 modules, ~14k lines) brings first-class web search and page fetching directly into the extension — supporting Perplexity, OpenAI, Brave, Parallel, SERPdive, SearXNG, Gemini, Exa, Tavily, Firecrawl, GitHub, YouTube, and PDF extraction, with SSRF protection and a curator pipeline. **Smart Search gains a `native` mode** that routes queries through these TS providers instead of the Python CLI, with automatic fallback on configuration errors. **The `ask-user-question` TUI wizard is overhauled** with a two-column layout for wide terminals, Chinese localization, and preview scrolling.
+This release upgrades the orchestration stack around `pi-maestro-teammate@1.0.0`, adds resilient model routing and a stricter planning pipeline, and expands the Pi extension with a native Maestro Hook installer and session knowledge review UI. It also consolidates task dispatch, failure handling, todo ordering, cockpit ownership, and tool contracts across the monorepo.
 
-Additionally, todo rendering in both `pi-cockpit` and the flow extension widget is simplified to creation-order display, and several bugs are fixed (TUI expanded rendering, companion re-registration, compaction budget overflow, Pi Skill platform injection).
-
-`pi-maestro-teammate` is unchanged at `0.6.0` and is not republished.
+The release publishes all three workspaces. `pi-maestro-teammate` moves from `0.6.0` to `1.0.0` with a versioned public API and a unified execution model. `pi-cockpit` moves to `0.2.0` because its teammate peer range crosses the 1.0 boundary. `pi-maestro-flow` moves to `0.8.0` and pins both updated sibling packages.
 
 ## Package Versions
 
-| Package | Version | npm |
-|---------|---------|-----|
-| `pi-maestro-flow` | 0.7.0 | `npm i pi-maestro-flow@0.7.0` |
-| `pi-maestro-teammate` | 0.6.0 (unchanged) | `npm i pi-maestro-teammate@0.6.0` |
-| `pi-cockpit` | 0.1.2 | `npm i pi-cockpit@0.1.2` |
+| Package | Previous | New | Install |
+|---------|----------|-----|---------|
+| `pi-maestro-teammate` | 0.6.0 | 1.0.0 | `npm i pi-maestro-teammate@1.0.0` |
+| `pi-cockpit` | 0.1.2 | 0.2.0 | `npm i pi-cockpit@0.2.0` |
+| `pi-maestro-flow` | 0.7.0 | 0.8.0 | `npm i pi-maestro-flow@0.8.0` |
 
-`pi-maestro-flow@0.7.0` depends on `pi-cockpit@0.1.2`, `pi-maestro-teammate@0.6.0`, and `maestro-flow@0.5.57`.
+`pi-maestro-flow@0.8.0` depends on `pi-maestro-teammate@1.0.0`, `pi-cockpit@0.2.0`, and `maestro-flow@0.5.58`.
 
 ## Detailed Changes
 
-### 🌐 Native Web-Access Engine (flow, NEW)
+### Teammate 1.0 execution model
 
-A complete native TypeScript web search and content extraction engine, eliminating the Python CLI dependency for common web operations:
+- Unified single-task and DAG dispatch behind the `teammate` tool, including dependency-aware output injection, structured results, foreground/background transitions, and nested-agent depth controls.
+- Hardened execution lifecycle behavior for retries, failures, timeouts, result publication, progress cursors, and control-center recovery.
+- Timed foreground runs now move to the background instead of failing when the interactive wait window expires.
+- Introduced a versioned `./v1/*` public API surface and removed the legacy prompt-template exports and bundled prompt catalog.
+- Reworked built-in agent roles and discovery, including dedicated analyst, explorer, planner, research, verifier, and workflow contracts.
 
-- **`src/tools/web-access/`** (~42 modules, ~14,000 lines) — provider adapters for Perplexity, OpenAI Search, Brave, Parallel AI, SERPdive, SearXNG, Gemini (web search + URL context), Exa, Tavily, Firecrawl, GitHub API, YouTube transcript extraction, and PDF extraction (`unpdf`).
-- **`search-router.ts` / `fetch-router.ts`** — unified routing across providers with credential-based auto-selection and concurrency control (`p-limit`).
-- **`ssrf-protection.ts`** — SSRF guard with configurable allow/deny domain policies and IP range validation.
-- **`curator.ts` / `curator-server.ts`** — AI-powered result curation and summarization pipeline.
-- **`extract.ts` / `rsc-extract.ts`** — HTML-to-Markdown extraction via `@mozilla/readability` + `turndown` + `linkedom`.
-- **`source-check.ts` / `source-check-tool.ts`** — claim verification against web sources with source quality classification.
+### Model routing and resilience
 
-### 🔍 Smart Search Native Mode (flow)
+- Added per-task model routing with task-type mappings, explicit overrides, configurable thinking levels, and authenticated model catalog validation.
+- Added a model circuit breaker and failover routing, with a dedicated settings TUI and status projection.
+- Billing and credit-exhaustion failures now skip futile retries and advance directly to the next configured fallback model.
+- Improved retry classification, timeout handling, background failure reporting, and structured-output validation.
 
-- **`native` parameter** on the `smart_search` tool — routes `search` and `fetch` modes through native TS providers instead of the Python CLI (`src/tools/smart-search.ts`, +180).
-- **Automatic fallback** — when the Python CLI fails with a configuration error, the tool transparently retries via native providers.
-- **Enhanced `renderResult`** — richer collapsed/expanded rendering with source attribution and result parsing.
+### Planning pipeline
 
-### ⚙️ Smart Search Config Expansion (flow)
+- Plan mode now delegates every final implementation Plan to the built-in read-only `planner`, which owns a required execution-ready Markdown contract.
+- The planner may use bounded read-only analyst, research, and explorer delegates while implementation-capable roles remain approval-gated.
+- Added evidence, requirement mapping, executable task DAG, exact validation, risk/recovery, and open-decision requirements to generated Plans.
+- Improved direct Plan mode entry, mode-state synchronization, footer projection, and Plan/Todo lifecycle integration.
 
-- **`WEB_ACCESS_CONFIG_GROUPS`** — 10+ new configuration groups for native web-access providers (Perplexity, OpenAI, Brave, Parallel, SERPdive, SearXNG, Gemini, SSRF, Curator, Video) (`src/tools/smart-search-config.ts`, +162).
-- **Web Access config sync** — bidirectional sync bridge between `~/.pi/web-search.json` and the Smart Search config store, with conflict detection and status indicators (`src/tui/smart-search-config.ts`, +200).
+### Maestro Hook review and installer
 
-### 🎨 Ask TUI Wizard Overhaul (flow)
+- Added a dedicated `/hooks install` TUI with `none`, `minimal`, `standard`, and `full` presets plus per-Hook selection and filtering.
+- Installer writes are atomic and lock-protected, preserve unrelated project Hooks, remove legacy Maestro entries, and never grant trust automatically.
+- Missing Hook configuration now opens the installer from `/hooks`; installed configurations return to hash-based review and trust.
+- Hook permission-shaped output is explicitly advisory. Pi's permission controller remains the only authorization boundary, and non-interactive installation fails closed.
 
-- **Two-column layout** — when the terminal is ≥84 columns and ≥16 rows, the wizard renders options and a live preview side by side (`src/tools/ask.ts`, +359).
-- **Chinese localization** — all wizard prompts, labels, and option text localized to Chinese.
-- **Preview scrolling** — the detail preview pane supports scroll navigation for long descriptions.
-- **Review cursor** — improved navigation in the review/confirmation step.
+### Knowledge, session, and task workflows
 
-### 📋 Todo Rendering Simplification (cockpit 0.1.2 + flow)
+- Added a session knowledge review center and native knowledge/session view models.
+- Unified root and teammate todo ordering and improved active-work prioritization, partial updates, overlays, and session projection.
+- Added canonical run-control and tool schema alignment across built-in tools.
+- Reworked delegate CLI conversion to emit native teammate calls and synchronized the Pi skills and agent catalog.
 
-- **Creation-order display** — tasks are now sorted by their numeric creation ID instead of a priority-based rank (`todoDisplayRank` removed). Non-numeric IDs (workflow mirrors) sort after numeric ones.
-- **Removed next-task preview** from the collapsed cockpit todo bar — the bar now shows only the progress bar, percentage, and blocked count.
-- **Visible task limit raised** from 5 to 8 in the flow extension widget.
-- Removed `findNextTodo`, `todoNextLabel`, and `RECENT_COMPLETED_MS` from both `pi-cockpit` and the flow widget.
+### Cockpit and interactive UI
 
-### 🐛 Bug Fixes (flow)
+- `pi-cockpit@0.2.0` now consumes `pi-maestro-teammate@1.0.0` and coordinates primary footer ownership with Plan mode and the flow extension.
+- Simplified background-run summaries and added compact token breakdowns, stable progress rendering, and integration contract coverage.
+- Refined provider/model configuration interactions and made Ask review submission explicit.
+- Improved cross-platform key normalization and narrow-terminal rendering across interactive overlays.
 
-- **TUI expanded rendering** — `options.expanded` is now honored in `renderResult` across 11 tool sites (`9d26c1f7`).
-- **Companion re-registration** — companion packages are re-registered at extension load, not just postinstall (`5bb4a15b`).
-- **Compaction budget overflow** — fixed request budget overflow when compacting with no history (`54a62c0f`).
-- **Pi Skill platform injection** — generated Pi Skills now include the runtime platform (`945c7a13`).
+### Documentation and maintenance
 
-### 📝 Documentation
-
-- Root README simplified to a quick overview (Chinese + English).
-- All three plugin READMEs updated for v0.6.0/v0.6.1 with cross-references.
-- Release workflow knowhow captured with pitfall documentation.
-
-### 📦 New Dependencies (flow)
-
-`@mozilla/readability`, `turndown`, `linkedom`, `p-limit`, `promise.try`, `unpdf`, `@types/turndown` — supporting the native web-access engine's HTML extraction, PDF parsing, and concurrency control.
+- Updated package guides, tool schema references, bundled skills, project agents, and conversion resources for the teammate 1.0 architecture.
+- Added design documentation for multicriteria soft compaction and refreshed runtime dependencies.
+- Updated `@modelcontextprotocol/sdk` to `1.30.0` and `maestro-flow` to `0.5.58`.
 
 ## Statistics
 
-- **7 commits** since `v0.6.1` + uncommitted web-access engine
-- **~60 files changed**, +17,000 / −600 lines (including ~14k new web-access modules)
-- `pi-maestro-flow`: ~55 files, +16,500 / −500
-- `pi-cockpit`: 3 files, +97 / −93
+- 31 commits after `v0.7.0`, plus the Hook installer and planning-contract completion included in the release commit.
+- More than 280 tracked files changed across the three workspaces, runtime skills, agents, tests, and documentation.
+- More than 33,000 lines added and 5,000 lines removed since `v0.7.0` before generated release metadata.
 
-## Installation & Upgrade
+## Installation and Upgrade
 
 ```bash
-# Fresh install
-npm i pi-maestro-flow@0.7.0
+# Fresh install or upgrade
+npm i pi-maestro-flow@0.8.0
 
-# Upgrade from 0.6.x
-npm i pi-maestro-flow@0.7.0
+# Install the packages independently
+npm i pi-maestro-teammate@1.0.0
+npm i pi-cockpit@0.2.0
 ```
 
-**Upgrade notes:**
-- The native web-access engine is opt-in via the `native: true` parameter on `smart_search`. The Python CLI path remains the default.
-- Configure native providers via `Alt+S` → Smart Search Config, or set API keys in `~/.pi/web-search.json`.
-- Todo rendering now uses creation order — no configuration change needed.
+Upgrade notes:
+
+- Consumers of `pi-maestro-teammate` should use the versioned `pi-maestro-teammate/v1/*` exports. The deprecated prompt-template API and prompt catalog are no longer published.
+- `pi-cockpit@0.2.0` expects `pi-maestro-teammate@^1.0.0` when teammate integration is enabled.
+- Use `/hooks install` to configure Maestro project Hooks. Installation changes the config hash and requires an explicit review and trust step.
+- Existing `pi-maestro-flow` installations receive `pi-maestro-teammate@1.0.0`, `pi-cockpit@0.2.0`, and `maestro-flow@0.5.58` through exact dependencies.

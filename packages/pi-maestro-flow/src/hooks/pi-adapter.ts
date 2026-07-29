@@ -34,6 +34,7 @@ import {
   type HookReviewAction,
   type HookReviewUiState,
 } from "./review-tui.ts";
+import { runMaestroHookInstaller } from "./installer.ts";
 import type {
   PermissionMode,
   PermissionToolCall,
@@ -202,17 +203,18 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
     if (context.length > 0 && event.toolCallId) state.toolContext.set(event.toolCallId, context);
   };
 
-  const runHookReview = async (ctx: ExtensionContext): Promise<void> => {
+  const runHookReview = async (ctx: ExtensionContext): Promise<"close" | "install"> => {
     let uiState: Partial<HookReviewUiState> = { query: "" };
     let notice: string | undefined;
     while (state.loaded?.exists && state.loaded.hash) {
       const loaded = state.loaded;
       const hash = loaded.hash;
-      if (!hash) return;
+      if (!hash) return "close";
       const entries = buildHookReviewEntries(loaded, state.toggles);
       const action = await showHookReviewOverlay(ctx, entries, state.active, loaded, uiState, notice);
       uiState = action.uiState;
-      if (action.kind === "close") return;
+      if (action.kind === "close") return "close";
+      if (action.kind === "install") return "install";
 
       if (action.kind === "toggle") {
         const selected = entries.find((entry) => entry.id === action.hookId);
@@ -256,6 +258,26 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
         notice = `更新信任失败 · ${errorMessage(error)}`;
       }
     }
+    return "close";
+  };
+
+  const runHookInterface = async (ctx: ExtensionContext, startInInstaller: boolean): Promise<void> => {
+    let installMode = startInInstaller;
+    while (true) {
+      if (installMode || !state.loaded?.exists || !state.loaded.hash) {
+        const result = await runMaestroHookInstaller(ctx);
+        if (!result.changed) return;
+        await reload(ctx, false);
+        installMode = false;
+      }
+      if (!state.loaded?.exists || !state.loaded.hash) return;
+      const next = await runHookReview(ctx);
+      if (next === "install") {
+        installMode = true;
+        continue;
+      }
+      return;
+    }
   };
 
   const fallbackHookReview = async (ctx: ExtensionContext, loaded: LoadedCodexHooks): Promise<void> => {
@@ -271,16 +293,16 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
   };
 
   pi.registerCommand("hooks", {
-    description: "审核、信任或撤销 .pi/hooks.json",
+    description: "安装、审核、信任或撤销 .pi/hooks.json",
     async handler(args, ctx) {
       await reload(ctx, false);
-      const loaded = state.loaded;
-      if (!loaded?.exists || !loaded.hash) {
-        ctx.ui.notify(`未找到 ${loaded?.filePath ?? join(ctx.cwd, ".pi", "hooks.json")}`, "info");
-        return;
-      }
       const action = args.trim().toLowerCase();
+      const loaded = state.loaded;
       if (action === "revoke") {
+        if (!loaded?.exists || !loaded.hash) {
+          ctx.ui.notify(`未找到 ${loaded?.filePath ?? join(ctx.cwd, ".pi", "hooks.json")}`, "info");
+          return;
+        }
         try {
           await revokeHookConfigTrust(trustFilePath, loaded.filePath);
           state.active = false;
@@ -292,11 +314,16 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
       }
       if (ctx.hasUI) {
         try {
-          await runHookReview(ctx);
+          await runHookInterface(ctx, action === "install" || !loaded?.exists || !loaded.hash);
           return;
         } catch (error) {
-          ctx.ui.notify(`Hook TUI 不可用，已降级为确认模式：${sanitizeHookDisplayText(errorMessage(error))}`, "warning");
+          ctx.ui.notify(`Hook TUI 不可用，未进行安装或信任：${sanitizeHookDisplayText(errorMessage(error))}`, "error");
+          return;
         }
+      }
+      if (!loaded?.exists || !loaded.hash || action === "install") {
+        ctx.ui.notify("Maestro Flow Hooks 安装需要交互式 TUI。", "error");
+        return;
       }
       await fallbackHookReview(ctx, loaded);
     },

@@ -9,7 +9,7 @@ import {
 } from "@earendil-works/pi-tui";
 import { sanitizeHookDisplayText, type HookReviewEntry } from "./review.ts";
 
-export type HookReviewActionKind = "close" | "toggle" | "toggle-trust";
+export type HookReviewActionKind = "close" | "toggle" | "toggle-trust" | "install";
 
 export interface HookReviewUiState {
   query: string;
@@ -92,7 +92,7 @@ export class HookReviewOverlay implements Component, Focusable {
       }
     }
     if (this.params.notice) rows.push(this.styledNotice(this.params.notice, inner));
-    rows.push(fitLine("Esc 关闭 · ↑↓ 选择 · Enter 详情 · / 筛选 · Space 开关 · T 信任/撤销", inner));
+    rows.push(fitLine("Esc 关闭 · ↑↓ 选择 · Enter 详情 · / 筛选 · Space 开关 · T 信任/撤销 · I 安装", inner));
     return frame(rows, safeWidth, this.params.theme);
   }
 
@@ -146,6 +146,7 @@ export class HookReviewOverlay implements Component, Focusable {
     if (matchesKey(data, Key.pageUp)) return this.move(-MAX_VISIBLE);
     if (matchesKey(data, Key.pageDown)) return this.move(MAX_VISIBLE);
     if (data === "q" || data === "Q") return this.finish("close");
+    if (data === "i" || data === "I") return this.finish("install");
     if (data === "t" || data === "T") {
       return this.finish("toggle-trust");
     }

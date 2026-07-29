@@ -2,7 +2,7 @@ import { activityMonitor, type ActivityEntry } from "./activity.ts";
 
 export interface ActivityWidgetState {
   visible: boolean;
-  entries: ActivityEntry[];
+  entries: readonly ActivityEntry[];
 }
 
 let widgetVisible = false;
@@ -17,7 +17,7 @@ export function isActivityWidgetVisible(): boolean {
   return widgetVisible;
 }
 
-export function getActivityEntries(): ActivityEntry[] {
+export function getActivityEntries(): readonly ActivityEntry[] {
   return activityMonitor.getEntries();
 }
 
@@ -27,12 +27,12 @@ export function renderActivityWidget(width: number): string[] {
   const inner = Math.max(1, width - 2);
   const lines: string[] = [`Activity (${entries.length})`];
   for (const entry of entries) {
-    const elapsed = entry.endMs
-      ? `${((entry.endMs - entry.startMs) / 1000).toFixed(1)}s`
+    const elapsed = entry.endTime
+      ? `${((entry.endTime - entry.startTime) / 1000).toFixed(1)}s`
       : "running";
-    const status = entry.error ? "✗" : entry.endMs ? "✓" : "…";
-    const label = entry.type === "search"
-      ? `search:${entry.provider ?? "?"}`
+    const status = entry.error ? "✗" : entry.endTime ? "✓" : "…";
+    const label = entry.type === "api"
+      ? `api:${(entry.query ?? "?").slice(0, 30)}`
       : `fetch:${(entry.url ?? "?").slice(0, 30)}`;
     lines.push(`${status} ${label} ${elapsed}`);
   }

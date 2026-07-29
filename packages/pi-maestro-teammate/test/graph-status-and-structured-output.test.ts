@@ -1293,6 +1293,95 @@ test("registered parent extensions and their interaction tools reach every teamm
   }
 });
 
+test("nested teammate-send republishes a running lifecycle when it wakes an agent", async () => {
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const target = {
+    agent: "general",
+    name: "worker",
+    correlationId: "wake-1",
+    spawnedBy: "parent-1",
+    startedAt: 50,
+    lastActivityAt: 90,
+    status: "sleeping",
+    sleptAt: 100,
+    sleepMs: 25,
+    promptSeq: 1,
+    stdin: new PassThrough(),
+    lease: createChildLease(),
+    inbox: [],
+    outputLog: [],
+    abortController: new AbortController(),
+    depth: 1,
+  } as ActiveAgent;
+  const parent = {
+    agent: "general",
+    name: "parent",
+    correlationId: "parent-1",
+    startedAt: 1,
+    lastActivityAt: 1,
+    status: "running",
+    sleepMs: 0,
+    inbox: [],
+    outputLog: [],
+    abortController: new AbortController(),
+    depth: 0,
+  } as ActiveAgent;
+  const state = {
+    activeRuns: new Map([
+      [parent.correlationId, parent],
+      [target.correlationId, target],
+    ]),
+    namedAgents: new Map([["worker", target.correlationId]]),
+  } as TeammateState;
+  const pi = {
+    events: {
+      emit(event: string, payload: Record<string, unknown>) {
+        emitted.push({ event, payload });
+      },
+    },
+    sendMessage() {},
+  } as unknown as ExtensionAPI;
+  let reply: Record<string, unknown> | undefined;
+
+  await handleProxyRequest(
+    pi,
+    state,
+    {
+      tool: "teammate-send",
+      requestId: "send-1",
+      params: { to: "worker", message: "continue" },
+      correlationId: parent.correlationId,
+    },
+    (message) => { reply = message as Record<string, unknown>; },
+    parent.correlationId,
+  );
+
+  assert.equal(target.status, "running");
+  assert.equal(target.sleepMs >= 85, true);
+  assert.equal(target.sleptAt, undefined);
+  assert.equal(target.promptSeq, 2);
+  assert.equal(emitted.filter(({ event }) => event === "teammate:started").length, 1);
+  assert.match(JSON.stringify(reply), /queued after current turn/);
+
+  await handleProxyRequest(
+    pi,
+    state,
+    {
+      tool: "teammate-send",
+      requestId: "send-2",
+      params: { to: "worker", message: "more" },
+      correlationId: parent.correlationId,
+    },
+    () => {},
+    parent.correlationId,
+  );
+  assert.equal(
+    emitted.filter(({ event }) => event === "teammate:started").length,
+    1,
+    "messages to an already-running agent must not republish started",
+  );
+});
+
 test("session ownership handoff fences stale writers and requires reload before child resumes", () => {
   let lease = createChildLease();
   const staleChild = leaseToken(lease);

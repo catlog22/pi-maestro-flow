@@ -66,7 +66,7 @@ Act as the project specialist.
 
     const description = buildTeammateToolDescription(project);
     assert.match(description, /Available Teammate Agents section/);
-    assert.match(description, /specialist \[project\]: Project-specific specialist/);
+    assert.doesNotMatch(description, /specialist \[project\]/);
     assert.match(description, /specialist-work: model=auto\/default/);
 
     const systemPrompt = appendAgentCatalog("Base prompt", project);
@@ -178,6 +178,70 @@ Unsafe project override.
     for (const removed of ["delegate", "goal-verifier", "coordinator"]) {
       assert.equal(resolveAgent(project, removed), undefined);
       assert.equal(agents.some((agent) => agent.name === removed), false);
+    }
+  } finally {
+    fs.rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test("planner is the sole Plan author with an execution-ready document contract", () => {
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-planner-"));
+  try {
+    const planner = resolveAgent(project, "planner");
+    assert.ok(planner);
+    assert.equal(planner.source, "builtin");
+    assert.equal(planner.taskType, "planning");
+    assert.equal(planner.thinking, "high");
+    assert.deepEqual(planner.tools, ["read", "grep", "find", "ls"]);
+    assert.equal(planner.systemPromptMode, "replace");
+    assert.equal(planner.inheritProjectContext, true);
+    assert.equal(planner.inheritSkills, false);
+
+    const prompt = planner.systemPrompt;
+    assert.match(prompt, /sole author of implementation Plan documents/);
+    assert.match(prompt, /nested `teammate` tool/);
+    for (const role of ["analyst", "research", "explorer"]) {
+      assert.ok(prompt.includes(`\`${role}\``), role);
+    }
+    assert.match(prompt, /Give each nested task `MODE: analysis`/);
+    assert.match(prompt, /Never call `general`/);
+    assert.match(prompt, /Return only Markdown for the Plan/);
+    assert.match(prompt, /Do not call `plan-update`, `plan-confirm`, or any persistence tool/);
+    assert.match(prompt, /parent flow owns spot-checking the returned Markdown/);
+    for (const section of [
+      "Objective",
+      "Evidence",
+      "Scope",
+      "Requirements",
+      "Design",
+      "Execution Plan",
+      "Validation",
+      "Risks and Recovery",
+      "Open Decisions",
+    ]) {
+      assert.ok(prompt.includes(`## ${section}`), section);
+    }
+    for (const taskField of [
+      "ID",
+      "Outcome",
+      "Files / symbols",
+      "Changes",
+      "Dependencies / parallelism",
+      "Acceptance criteria",
+      "Verification",
+    ]) {
+      assert.ok(prompt.includes(`\`${taskField}\``), taskField);
+    }
+    assert.match(prompt, /Dependencies must form an executable DAG/);
+    assert.match(prompt, /Do not edit files/);
+
+    const args = buildPiArgs(planner, { agent: "planner" }, "prompt.md");
+    const childTools = args[args.indexOf("--tools") + 1].split(",");
+    for (const tool of ["read", "grep", "find", "ls", "teammate", "teammate-send", "teammate-list", "teammate-watch"]) {
+      assert.ok(childTools.includes(tool), `planner child tool: ${tool}`);
+    }
+    for (const rootOnlyTool of ["plan-update", "plan-confirm"]) {
+      assert.ok(!childTools.includes(rootOnlyTool), `planner must not receive root-only tool: ${rootOnlyTool}`);
     }
   } finally {
     fs.rmSync(project, { recursive: true, force: true });
@@ -557,7 +621,8 @@ Proxy specialist prompt.
     sessionStartHandlers[0]({}, context);
 
     const refreshed = tools.get("teammate");
-    assert.match(String(refreshed?.description), /proxy-specialist \[project\]/);
+    assert.doesNotMatch(String(refreshed?.description), /proxy-specialist \[project\]/);
+    assert.match(String(refreshed?.description), /Available Teammate Agents section/);
     assert.equal(refreshed?.promptSnippet, TEAMMATE_PROMPT_SNIPPET);
     assert.equal(beforeAgentStartHandlers.length, 1);
     const injected = beforeAgentStartHandlers[0]({ systemPrompt: "Base child prompt" }, context);
@@ -678,7 +743,8 @@ ${name} prompt.
     });
     sessionStartHandlers[0]({}, context(firstProject));
     const first = tools.get("teammate");
-    assert.match(String(first?.description), /root-alpha \[project\]/);
+    assert.doesNotMatch(String(first?.description), /root-alpha \[project\]/);
+    assert.match(String(first?.description), /Available Teammate Agents section/);
     assert.deepEqual(first?.promptGuidelines, TEAMMATE_PROMPT_GUIDELINES);
     assert.equal(typeof first?.execute, "function");
     const firstPrompt = beforeAgentStartHandlers[0]({ systemPrompt: "Base root prompt" }, context(firstProject));
@@ -686,7 +752,8 @@ ${name} prompt.
 
     sessionStartHandlers[0]({}, context(secondProject));
     const second = tools.get("teammate");
-    assert.match(String(second?.description), /root-beta \[project\]/);
+    assert.doesNotMatch(String(second?.description), /root-beta \[project\]/);
+    assert.match(String(second?.description), /Available Teammate Agents section/);
     assert.equal(second?.promptSnippet, TEAMMATE_PROMPT_SNIPPET);
     assert.equal(typeof second?.execute, "function");
     const secondPrompt = beforeAgentStartHandlers[0](firstPrompt, context(secondProject));

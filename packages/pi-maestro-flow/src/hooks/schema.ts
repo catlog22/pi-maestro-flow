@@ -39,6 +39,7 @@ export interface CodexHookMatcherGroup {
 }
 
 export interface CodexHooksFile {
+  $schema?: string;
   hooks: Partial<Record<CodexHookEvent, CodexHookMatcherGroup[]>>;
 }
 
@@ -106,7 +107,10 @@ export function validateCodexHooks(raw: unknown, filePath = ".pi/hooks.json"): C
       validateGroup(group, filePath, eventName as CodexHookEvent, groupIndex),
     );
   }
-  return { hooks };
+  return {
+    ...(typeof raw.$schema === "string" ? { $schema: raw.$schema } : {}),
+    hooks,
+  };
 }
 
 function validateGroup(

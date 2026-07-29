@@ -398,8 +398,8 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     toolResult = await handler(toolEvent, ctx);
     if ((toolResult as { block?: boolean } | undefined)?.block) break;
   }
-  assert.equal(permissionPrompts, 1);
-  assert.match((toolResult as { reason?: string }).reason ?? "", /denied by user/i);
+  assert.equal(permissionPrompts, 0, "default YOLO mode must not open a permission prompt");
+  assert.equal(toolResult, undefined);
   for (const handler of handlers.get("session_shutdown") ?? []) await handler({ type: "session_shutdown" }, ctx);
   assert.equal(getTeammateChildToolBroker("todo"), undefined);
   assert.equal(getTeammatePermissionBroker(), undefined);

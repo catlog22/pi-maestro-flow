@@ -358,7 +358,7 @@ file from the installed package and appends it to Pi's system prompt through the
 `before_agent_start` event. This keeps the instructions available after npm installation
 without requiring a repository-root `AGENTS.md`, which other coding agents may discover.
 
-`pi-maestro-flow` pins `maestro-flow@0.5.57` as an associated workflow resource package.
+`pi-maestro-flow` pins `maestro-flow@0.5.58` as an associated workflow resource package.
 During postinstall it calls Maestro's workflows-only installer from the prepared registry
 artifact, which includes the complete runtime `dist` tree and canonical workflow documents.
 The installer writes to `~/.maestro/workflows`. The active Maestro CLI remains an environment
@@ -414,9 +414,13 @@ Project hooks use `.pi/hooks.json` as their only configuration source. The shape
 }
 ```
 
-Command hooks receive Codex-compatible JSON on `stdin` and return JSON on `stdout`. Pi maps `SessionStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, and `Stop`. `PreToolUse` supports `allow`, `ask`, and `deny`; `PermissionRequest` can allow or deny the pending prompt and may return `updatedInput` or `updatedPermissions`. `SubagentStart` and `SubagentStop` are accepted by the schema but reported as unmapped because Pi does not currently expose equivalent lifecycle events here.
+Command hooks receive Codex-compatible JSON on `stdin` and return JSON on `stdout`. Pi maps `SessionStart`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `PreCompact`, `PostCompact`, `UserPromptSubmit`, and `Stop`. Hook permission-shaped outputs are compatibility data, not an authorization channel: `PreToolUse` `allow`, `ask`, `deny`, `block`, and exit-code-2 results do not allow or block the target tool, and `PermissionRequest` decisions or permission updates are ignored. A successful `PreToolUse` `allow` or `ask` result may still provide `updatedInput` or additional context. Target-tool authorization remains exclusively owned by Pi's permission controller. `SubagentStart` and `SubagentStop` are accepted by the schema but reported as unmapped because Pi does not currently expose equivalent lifecycle events here.
 
 Repository commands require review before first execution. Run `/hooks` to inspect and trust the exact config hash; run `/hooks revoke` to disable it. Any change to `.pi/hooks.json` invalidates the previous trust entry.
+
+Run `/hooks install` to open the dedicated Maestro Flow Hooks installer. When the project has no `.pi/hooks.json`, `/hooks` opens the installer automatically. The installer supports the Maestro `none`, `minimal`, `standard`, and `full` presets plus individual Hook selection. It only manages exact `maestro hooks run <name>` entries and preserves unrelated project Hooks. Applying or uninstalling a selection changes the config hash and returns to `/hooks` review; installation never grants trust automatically.
+
+Installer keys: `1`-`4` select a preset, `Space` toggles one Hook, `/` enters filtering, `A` applies the draft, `U` uninstalls Maestro entries, and `Esc` returns without writing. PreToolUse guards are marked advisory because Pi tool authorization remains owned by the permission controller.
 
 ## Architecture
 

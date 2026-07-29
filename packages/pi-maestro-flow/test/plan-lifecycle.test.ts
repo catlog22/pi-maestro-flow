@@ -750,6 +750,20 @@ test("Plan hooks keep compatibility capture and gate nothing at the tool-call la
     const planPrompt = onBeforeAgentStartPlan({ systemPrompt: "base" })?.systemPrompt ?? "";
     assert.match(planPrompt, /Align every user requirement/);
     assert.match(planPrompt, /verifiable acceptance check/);
+    for (const role of ["analyst", "research", "explorer", "planner"]) {
+      assert.ok(planPrompt.includes(`\`${role}\``), role);
+    }
+    assert.match(planPrompt, /dispatch the built-in `planner` role for every final Plan, including\s+small Plans/);
+    assert.match(planPrompt, /The planner owns the document and may call `analyst`/);
+    assert.match(planPrompt, /role-level Plan document contract/);
+    assert.match(planPrompt, /evidence spot-checking, contract validation, plan-update, and plan-confirm/);
+    assert.match(planPrompt, /persist the returned\s+Markdown only after that check/);
+    assert.match(planPrompt, /return incomplete drafts\s+to the same planner/);
+    assert.match(planPrompt, /against the planner role contract before persisting it/);
+    assert.match(planPrompt, /Do not use\s+implementation-capable agents in Plan mode/);
+    assert.doesNotMatch(planPrompt, /Required Plan document contract/);
+    assert.doesNotMatch(planPrompt, /## Objective/);
+    assert.doesNotMatch(planPrompt, /Files \/ symbols/);
     assert.match(planPrompt, /Socratic pressure review/);
     assert.match(planPrompt, /Use ask-user-question for every user question/);
     assert.match(planPrompt, /Ask 2-4 related questions per call/);
@@ -809,12 +823,15 @@ test("Approved Plan handoff gate is restored from the manifest after restart", a
 test("Approved Plan handoff stays satisfied after execution switches to a quality-gate Goal", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-handoff-qgate-"));
   initGoal({ appendEntry() {} } as never);
-  const goalCtx: GoalContext = {
+  const goalCtx = {
     cwd: root,
+    modelRegistry: {
+      getAvailable: () => [{ provider: "provider", id: "verifier-model" }],
+    },
     ui: { notify() {}, setStatus() {} },
     isIdle: () => false,
     abort() {},
-  };
+  } as GoalContext;
   goalOnSessionStart(goalCtx, { reason: "new" });
   setGoalVerifierRunnerForTest(() => Promise.resolve({
     exitCode: 0,
