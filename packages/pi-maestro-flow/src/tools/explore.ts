@@ -69,20 +69,23 @@ export async function executeExplore(
     const name = `explore-${String(index + 1).padStart(2, "0")}`;
 
     try {
-      const result = await runTeammate(
+      const [result] = await runTeammate(
         {
-          agent: "explorer",
-          task: prompt,
-          name,
-          model: params.model ?? params.endpoint,
-          cwd: params.cwd,
-          timeoutMs: params.timeoutMs,
+          tasks: [{
+            agent: "explorer",
+            prompt,
+            name,
+            model: params.model ?? params.endpoint,
+            cwd: params.cwd,
+            timeoutMs: params.timeoutMs,
+            context: "fresh",
+          }],
           background: false,
-          context: "fresh",
           reply_to: "caller",
         },
         createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
       );
+      if (!result) throw new Error("Explore returned no teammate result");
 
       const lastMessage =
         result.messages[result.messages.length - 1]?.content ?? "(no output)";

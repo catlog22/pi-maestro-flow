@@ -75,19 +75,22 @@ export async function executeMoa(
 
     const promise = (async () => {
       try {
-        const result = await runTeammate(
+        const [result] = await runTeammate(
           {
-            agent: "delegate",
-            taskType: "analysis",
-            task: primaryPrompt,
-            model,
-            cwd: params.cwd,
+            tasks: [{
+              agent: "analyst",
+              taskType: "analysis",
+              prompt: primaryPrompt,
+              model,
+              cwd: params.cwd,
+              context: "fresh",
+            }],
             background: false,
-            context: "fresh",
             reply_to: "caller",
           },
           createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
         );
+        if (!result) throw new Error("MOA reference returned no teammate result");
 
         const lastMessage =
           result.messages[result.messages.length - 1]?.content ?? "(no output)";
@@ -144,19 +147,22 @@ export async function executeMoa(
   );
 
   try {
-    const aggregatorResult = await runTeammate(
+    const [aggregatorResult] = await runTeammate(
       {
-        agent: "delegate",
-        taskType: "analysis",
-        task: aggregationPrompt,
-        model: params.model,
-        cwd: params.cwd,
+        tasks: [{
+          agent: "analyst",
+          taskType: "analysis",
+          prompt: aggregationPrompt,
+          model: params.model,
+          cwd: params.cwd,
+          context: "fresh",
+        }],
         background: false,
-        context: "fresh",
         reply_to: "caller",
       },
       createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
     );
+    if (!aggregatorResult) throw new Error("MOA aggregator returned no teammate result");
 
     const lastMessage =
       aggregatorResult.messages[aggregatorResult.messages.length - 1]

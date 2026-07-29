@@ -27,7 +27,7 @@ test("real teammate child IPC resumes permission and AskUserQuestion calls", asy
   const emittedEvents: unknown[] = [];
   const pendingWasVisible: boolean[] = [];
   const agent: ActiveAgent = {
-    agent: "delegate",
+    agent: "general",
     name: "ipc-reviewer",
     correlationId: "ipc-e2e-child",
     startedAt: Date.now(),

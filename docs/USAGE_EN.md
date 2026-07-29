@@ -36,7 +36,7 @@
    - [GUI Subsystem (UCL)](#92-gui-subsystem-ucl)
    - [TUI Components](#93-tui-components)
 10. [Agent Roles (27)](#10-agent-roles-27)
-11. [Prompt Templates (20)](#11-prompt-templates-20)
+11. [Prompt Input](#11-prompt-input)
 12. [Skills Index (68)](#12-skills-index-68)
 13. [Knowledge System](#13-knowledge-system)
 14. [Workflow Patterns](#14-workflow-patterns)
@@ -96,170 +96,33 @@ After installation, the plugin registers these tools with Pi:
 
 ### 2.1 teammate — Multi-Agent Dispatch
 
-The core capability. Spawns independent Pi subprocesses as agents, each with its own toolset and context.
-
-#### Single Task (Foreground Blocking)
+Every call uses a required non-empty `tasks[]` array. One task represents single-agent work; multiple tasks represent parallel or dependency-aware work. Each `prompt` is literal task text and no prompt template is loaded.
 
 ```javascript
+teammate({ tasks: [{
+  agent: "explorer",
+  taskType: "explore",
+  prompt: "FIND: auth entry points
+SCOPE: src/"
+}] })
+
 teammate({
-  agent: "delegate",
-  taskType: "analysis",
-  task: "PURPOSE: Analyze auth flow for security gaps\nTASK: Trace entry | Trace validation | Summarize\nMODE: analysis\nCONTEXT: @src/auth/**/*.ts\nEXPECTED: file:line evidence + conclusion\nCONSTRAINTS: Read-only",
+  agent: "explorer",
+  model: "provider/fast-model",
+  tasks: [
+    { name: "scan", prompt: "Locate auth entry points" },
+    { name: "calls", prompt: "Locate call sites" },
+    { name: "review", agent: "analyst", taskType: "review",
+      model: "provider/deep-model", prompt: "Review {scan} and {calls}" }
+  ],
+  concurrency: 2,
   background: false
 })
 ```
 
-#### Parallel Tasks
+Top-level `agent/taskType/model/thinking/context/cwd/outputSchema/timeoutMs` values are task defaults; task values override them. The final role default is `general`. `{name}`/`{name.field}` inject upstream output and `dependsOn` declares ordering only. `background` defaults to `false`.
 
-```javascript
-teammate({
-  taskType: "explore",
-  background: false,
-  tasks: [
-    {
-      name: "definitions",
-      agent: "explorer",
-      task: "FIND: All exported auth functions\nSCOPE: src/auth/\nEXPECTED: function name + file:line"
-    },
-    {
-      name: "consumers",
-      agent: "explorer",
-      task: "FIND: All call sites importing auth module\nSCOPE: src/**/*.ts\nEXCLUDE: src/auth/\nEXPECTED: import path + file:line"
-    }
-  ]
-})
-```
-
-#### DAG Dependency Graph
-
-Reference other tasks' output via `{name}` to establish dependencies automatically:
-
-```javascript
-teammate({
-  tasks: [
-    {
-      name: "scan",
-      agent: "explorer",
-      task: "FIND: Null pointer risks\nSCOPE: src/**/*.ts\nEXPECTED: file:line list"
-    },
-    {
-      name: "fix",
-      agent: "delegate",
-      taskType: "development",
-      task: "PURPOSE: Fix all issues\nTASK: Process {scan} findings | Add null guards\nMODE: write"
-    },
-    {
-      name: "verify",
-      agent: "delegate",
-      taskType: "review",
-      task: "PURPOSE: Verify {fix} changes\nTASK: Read changed files | Run tests\nMODE: analysis"
-    }
-  ]
-})
-// Execution order: scan → fix → verify (auto-inferred)
-```
-
-Use `outputSchema` for structured field references via `{name.field}`:
-
-```javascript
-{
-  name: "scan",
-  agent: "workflow-reviewer",
-  task: "Scan for security issues",
-  outputSchema: {
-    type: "object",
-    properties: {
-      critical: { type: "array" },
-      high: { type: "array" }
-    }
-  }
-}
-// Downstream tasks can reference {scan.critical}, {scan.high}
-```
-
-#### Background Tasks
-
-```javascript
-teammate({
-  name: "long-test",
-  agent: "delegate",
-  task: "Run full test suite and generate report",
-  background: true
-})
-// Continue working; teammate-complete notification arrives on completion
-```
-
-#### Context Modes
-
-| Mode | Behavior |
-|------|----------|
-| `context: "fresh"` (default) | Clean subprocess — system prompt + task only |
-| `context: "fork"` | Inherits full parent session history, continues independently |
-
-#### P0 Three-Axis Control
-
-| Axis | Options | Purpose |
-|------|---------|---------|
-| `name` | any string | Addressable name for `teammate-send` and DAG references |
-| `reply_to` | `"caller"` / `"main"` | Controls result delivery target |
-| `lifecycle` | `"ephemeral"` / `"resident"` | Ephemeral: exits on completion. Resident: sleeps, awaits commands |
-
-#### Automatic Model Routing
-
-Maps to configured models based on `taskType`:
-
-| taskType | Purpose |
-|----------|---------|
-| `explore` | Code exploration |
-| `analysis` | Read-only analysis |
-| `debug` | Debugging |
-| `planning` | Planning |
-| `development` | Implementation |
-| `review` | Code review |
-| `testing` | Testing |
-
-Model precedence: task-level `model` → top-level `model` → `taskType` mapping → inferred type → agent default.
-
-Configure via `Alt+M` or `/teammate-models`.
-
-#### Thinking Depth
-
-Each teammate task can independently control thinking depth:
-
-```javascript
-teammate({
-  agent: "delegate",
-  task: "...",
-  thinking: "high"   // off | minimal | low | medium | high | xhigh | max
-})
-```
-
-| Level | Description |
-|-------|-------------|
-| `off` | Disable extended thinking |
-| `minimal` | Minimal thinking |
-| `low` | Low depth |
-| `medium` | Medium depth |
-| `high` | High depth |
-| `xhigh` | Extra-high depth |
-| `max` | Alias for `xhigh` |
-
-Precedence: task-level `thinking` → top-level `thinking` → model default. Supported levels vary by model.
-
-#### Structured Prompt Format
-
-```
-PURPOSE: [goal] + [success criteria]
-TASK: [step 1] | [step 2] | [step 3]
-MODE: analysis|write
-CONTEXT: @[file patterns] | Memory: [prior work]
-EXPECTED: [output format]
-CONSTRAINTS: [scope limits]
-```
-
-`MODE` is mandatory. In `analysis` mode, the agent MUST remain read-only.
-
----
+Model precedence is task model > top-level model > taskType mapping > role model > parent Pi model. taskType affects routing only. The Control Center automatically combines built-in types, types declared by currently discovered built-in/project/user agent YAML, and types already present in routing configuration; custom agents may declare new lower-case identifiers.
 
 ### 2.2 maestro — Knowledge-Aware Dispatch
 
@@ -687,15 +550,15 @@ Teammate dispatch supports fine-grained thinking depth control, affecting subpro
 teammate({
   thinking: "high",
   tasks: [
-    { name: "quick-scan", agent: "explorer", task: "...", thinking: "off" },
-    { name: "deep-analysis", agent: "delegate", task: "...", thinking: "xhigh" }
+    { name: "quick-scan", agent: "explorer", prompt: "...", thinking: "off" },
+    { name: "deep-analysis", agent: "general", prompt: "...", thinking: "xhigh" }
   ]
 })
 ```
 
 ### Precedence
 
-Task-level `thinking` → top-level `thinking` → model default
+Task-level `thinking` → top-level `thinking` → `taskType` mapping → agent frontmatter → Pi default
 
 > Note: supported thinking levels vary by model. E.g. `deepseek/deepseek-v4-flash` supports only `off` and `high`, while `maestro-openai/gpt-5.6-sol` supports all levels.
 
@@ -851,149 +714,25 @@ The plugin registers multiple TUI overlays and panels:
 
 ---
 
-## 10. Agent Roles (27)
+## 10. Agent Roles
 
-Each agent is a specialized subprocess configuration with a distinct system prompt and toolset.
+### Built-In Roles
 
-### Core Agents
+| Role | Purpose | Boundary |
+|---|---|---|
+| `general` | General implementation, analysis, and verification | Read/write/command tools |
+| `explorer` | Code discovery and call-chain tracing | Read-only |
+| `planner` | Architecture and execution planning | Read-only, high thinking |
+| `analyst` | Technical analysis and review | Read-only, high thinking |
+| `research` | Project architecture knowledge and external web research | Read-only, knowledge CLI and web search |
+| `verifier` | Goal fallback when no acceptance commands are declared | Strictly read-only, structured fail-closed verdict |
+| `workflow` | Dependency-aware DAG decomposition and dispatch | Read and teammate collaboration tools |
 
-| Agent | Purpose |
-|-------|---------|
-| `explorer` | Fast read-only code reconnaissance for parallel search |
-| `delegate` | General-purpose agent for delegated analysis or implementation |
-| `goal-verifier` | Independent verifier that audits goal completion claims |
-| `ralph-executor` | Single-step executor for maestro orchestration pipelines |
+The old `delegate`, `goal-verifier`, and `coordinator` names are not built-ins. Goal runs acceptance commands first and invokes `verifier` only when no commands were declared. Project roles live in `.pi/agents/*.md`; user roles live in `~/.agents/*.md`. Built-in names cannot be overridden.
 
-### Workflow Agents
+## 11. Prompt Input
 
-| Agent | Purpose |
-|-------|---------|
-| `workflow-analyzer` | Multi-dimensional evaluation with evidence-based scoring |
-| `workflow-codebase-mapper` | Analyzes codebase from a specific focus area |
-| `workflow-collab-planner` | Collaborative planner with pre-allocated task ID ranges |
-| `workflow-debugger` | Hypothesis-driven debugging with structured evidence logging |
-| `workflow-executor` | Single-task implementation with verification and commit discipline |
-| `workflow-external-researcher` | External research via Exa MCP for API/tech evaluation |
-| `workflow-integration-checker` | Cross-phase integration validation |
-| `workflow-nyquist-auditor` | Test coverage audit with gap detection and stub generation |
-| `workflow-phase-researcher` | Implementation approach research for roadmap phases |
-| `workflow-plan-checker` | Plan quality validation with up to 3 revision rounds |
-| `workflow-planner` | Execution plans with task decomposition, waves, and dependencies |
-| `workflow-project-researcher` | Domain research for project initialization |
-| `workflow-research-synthesizer` | Merges multiple researcher outputs into unified summary |
-| `workflow-reviewer` | Multi-dimensional code review (single dimension per agent) |
-| `workflow-roadmapper` | Project roadmap with phased milestones |
-| `workflow-verifier` | Goal-backward verification (existence, substance, connection) |
-
-### Specialist Agents
-
-| Agent | Purpose |
-|-------|---------|
-| `team-supervisor` | Resident pipeline supervisor for quality observation |
-| `team-worker` | Unified worker executing role_spec file logic |
-| `ui-design-agent` | UI design token management and prototype generation (WCAG AA) |
-| `impeccable-agent` | Autonomous UI audit, polish, harden, layout executor |
-| `role-design-author` | Multi-file role analysis for brainstorm sessions |
-| `cross-role-reviewer` | Decision digest comparison across role analysis files |
-| `cli-explore-agent` | Bash + CLI semantic dual-source read-only code exploration |
-| `aggregator` | MOA aggregator, synthesizes multiple reference analyses |
-| `reference` | MOA reference, single-model perspective independent analysis |
-
-### Custom Agents
-
-Create a Markdown file under `.pi/agents/` to define a new agent:
-
-```markdown
-<!-- .pi/agents/db-migrator.md -->
-# Database Migrator
-You are a database schema migration specialist.
-## Role
-- Analyze existing schemas
-- Plan safe migrations with rollback strategies
-- Generate migration files
-## Constraints
-- Always include verified rollback plan
-```
-
-Usage: `teammate({ agent: "db-migrator", taskType: "planning", task: "..." })`
-
----
-
-## 11. Prompt Templates (20)
-
-Called via the `prompt` field in `teammate` dispatch. Discovery order: project `.pi/prompts/` → user `~/.pi/agent/prompts/` → bundled catalog.
-
-### Analysis Templates
-
-| Template | Purpose |
-|----------|---------|
-| `analysis-trace-code-execution` | Trace execution, control flow, data movement |
-| `analysis-diagnose-bug-root-cause` | Diagnose bug root cause, propose read-only corrections |
-| `analysis-analyze-code-patterns` | Analyze implementation patterns, conventions, anti-patterns |
-| `analysis-analyze-technical-document` | Analyze technical docs with evidence-backed references |
-| `analysis-review-architecture` | Review architecture, dependencies, integration points, trade-offs |
-| `analysis-review-code-quality` | Review correctness, maintainability, and testing |
-| `analysis-analyze-performance` | Analyze bottlenecks and optimization opportunities |
-| `analysis-assess-security-risks` | Assess attack surfaces and prioritized mitigations |
-
-### Planning Templates
-
-| Template | Purpose |
-|----------|---------|
-| `planning-plan-architecture-design` | Structured software architecture design |
-| `planning-breakdown-task-steps` | Break requirements into executable, verifiable steps |
-| `planning-design-component-spec` | Component spec (interfaces + acceptance criteria) |
-| `planning-plan-migration-strategy` | Staged migration (compatibility + rollback) |
-
-### Development Templates
-
-| Template | Purpose |
-|----------|---------|
-| `development-implement-feature` | Implement feature following existing patterns |
-| `development-refactor-codebase` | Safe refactoring preserving behavior |
-| `development-generate-tests` | Generate tests closing concrete coverage gaps |
-| `development-implement-component-ui` | Reusable accessible UI component + tests |
-| `development-debug-runtime-issues` | Reproduce, diagnose, fix, regression-test |
-
-### Compact Compatibility Templates
-
-| Template | Mode | Arguments |
-|----------|------|-----------|
-| `analysis` | analysis | purpose, context, expected output |
-| `review` | analysis | review target, extra constraints |
-| `write` | write | implementation goal, context, acceptance output |
-
-### Usage Example
-
-```javascript
-teammate({
-  agent: "delegate",
-  taskType: "analysis",
-  prompt: "analysis-trace-code-execution",
-  task: "Trace the token refresh flow",
-  promptArgs: ["@src/auth/tokens.ts", "file:line evidence + state transitions"],
-  background: false
-})
-```
-
-### Custom Templates
-
-Create a Markdown file under `.pi/prompts/`:
-
-```markdown
-<!-- .pi/prompts/security-audit.md -->
-# Security Audit
-Review for:
-1. OWASP Top 10 vulnerabilities
-2. Supply chain risks in {{dependency}}
-3. Data exposure in {{dataFlow}}
-Focus: {{focus}}
-Expected: vulnerability list with severity and file:line
-```
-
-Usage: `prompt: "security-audit"` with corresponding `promptArgs`.
-
----
+`tasks[].prompt` is required literal task text. Teammate 1.0 does not discover `.pi/prompts`, ship bundled prompt templates, or support `promptArgs`, positional parameters, or template-name expansion. Reusable instructions must be rendered by the caller or a Skill and passed as a complete prompt.
 
 ## 12. Skills Index (68)
 
@@ -1224,14 +963,14 @@ maestro search "old pattern" --include-deprecated  # Search all
 teammate({
   tasks: [
     // Stage 1: Parallel research
-    { name: "api-research", agent: "workflow-external-researcher", task: "Research rate limiting best practices" },
-    { name: "codebase-survey", agent: "explorer", task: "FIND: All API endpoints\nSCOPE: src/api/" },
+    { name: "api-research", agent: "workflow-external-researcher", prompt: "Research rate limiting best practices" },
+    { name: "codebase-survey", agent: "explorer", prompt: "FIND: All API endpoints\nSCOPE: src/api/" },
     // Stage 2: Plan (after research + survey complete)
-    { name: "plan", agent: "workflow-planner", task: "Incorporate {api-research} + {codebase-survey} into plan" },
+    { name: "plan", agent: "workflow-planner", prompt: "Incorporate {api-research} + {codebase-survey} into plan" },
     // Stage 3: Implement
-    { name: "implement", agent: "workflow-executor", task: "Execute {plan}" },
+    { name: "implement", agent: "workflow-executor", prompt: "Execute {plan}" },
     // Stage 4: Verify
-    { name: "verify", agent: "workflow-verifier", task: "Verify {implement} against {plan}" }
+    { name: "verify", agent: "workflow-verifier", prompt: "Verify {implement} against {plan}" }
   ]
 })
 ```
@@ -1277,7 +1016,6 @@ Configure interactively via `Alt+M` or `/teammate-models`.
 | File | Purpose |
 |------|---------|
 | `.pi/teammate-models.json` | Model routing mappings for this project |
-| `.pi/prompts/` | Project-specific prompt templates |
 | `.pi/agents/` | Project-specific agent definitions |
 | `.pi/settings.json` | Pi settings overrides |
 
@@ -1286,7 +1024,6 @@ Configure interactively via `Alt+M` or `/teammate-models`.
 | File | Purpose |
 |------|---------|
 | `~/.pi/agent/teammate-models.json` | Global model routing defaults |
-| `~/.pi/agent/prompts/` | User-level prompt templates |
 | `~/.pi/agent/settings.json` | Global Pi settings |
 
 ---
@@ -1328,7 +1065,7 @@ teammate-list({ view: "all" })                          // Check status
 teammate-watch({ name: "stuck", lines: 50 })            // Inspect output
 teammate-send({ to: "stuck", mode: "abort" })           // Terminate
 // Retry with timeout:
-teammate({ agent: "delegate", task: "...", timeoutMs: 120000 })
+teammate({ tasks: [{ agent: "general", prompt: "...", timeoutMs: 120000 }] })
 ```
 
 ### Long Session Context Overflow
@@ -1336,7 +1073,7 @@ teammate({ agent: "delegate", task: "...", timeoutMs: 120000 })
 ```bash
 /compact "Summarize key decisions and current state"
 # Or use fresh context for heavy work:
-teammate({ agent: "delegate", context: "fresh", task: "PURPOSE: Read state and continue\n..." })
+teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: Read state and continue\n..." }] })
 ```
 
 ---
@@ -1352,13 +1089,13 @@ maestro search "query" --code
 maestro load --type spec --category coding
 
 # ─── Explore ───
-teammate({ agent: "explorer", taskType: "explore", task: "FIND: ...\nSCOPE: src/..." })
+teammate({ tasks: [{ agent: "explorer", taskType: "explore", prompt: "FIND: ...\nSCOPE: src/..." }] })
 
 # ─── Analyze ───
-teammate({ agent: "delegate", taskType: "analysis", prompt: "analysis-trace-code-execution", task: "..." })
+teammate({ tasks: [{ agent: "analyst", taskType: "analysis", prompt: "Analyze the target with file:line evidence" }] })
 
 # ─── Implement ───
-teammate({ agent: "delegate", taskType: "development", prompt: "development-implement-feature", task: "..." })
+teammate({ tasks: [{ agent: "general", taskType: "development", prompt: "Implement the target and run focused tests" }] })
 
 # ─── Review ───
 /skill:team-review src/ --level deep

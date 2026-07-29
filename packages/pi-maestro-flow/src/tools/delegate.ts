@@ -1,7 +1,7 @@
 /**
  * Delegate action — task delegation to a specific model/provider.
  *
- * Spawns a single teammate agent (delegate profile) with the specified
+ * Spawns a single teammate agent (general profile) with the specified
  * model override from registered providers, passing the prompt as task
  * with analysis or write mode.
  */
@@ -54,20 +54,23 @@ export async function executeDelegate(
   const model = params.model ?? params.tool;
 
   try {
-    const result = await runTeammate(
+    const [result] = await runTeammate(
       {
-        agent: "delegate",
-        task,
-        name: params.name,
-        model,
-        cwd: params.cwd,
-        timeoutMs: params.timeoutMs,
+        tasks: [{
+          agent: "general",
+          prompt: task,
+          name: params.name,
+          model,
+          cwd: params.cwd,
+          timeoutMs: params.timeoutMs,
+          context: "fresh",
+        }],
         background: false,
-        context: "fresh",
         reply_to: "caller",
       },
       createDirectTeammateRunOptions(pi, ctx, { baseCwd: ctx.cwd, signal }),
     );
+    if (!result) throw new Error("Delegate returned no teammate result");
 
     const lastMessage =
       result.messages[result.messages.length - 1]?.content ?? "(no output)";

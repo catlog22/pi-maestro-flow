@@ -36,7 +36,7 @@
    - [GUI 子系统（UCL）](#92-gui-子系统ucl)
    - [TUI 界面组件](#93-tui-界面组件)
 10. [Agent 角色（27 个）](#10-agent-角色27-个)
-11. [Prompt 模板（20 个）](#11-prompt-模板20-个)
+11. [Prompt 输入](#11-prompt-输入)
 12. [Skills 索引（68 个）](#12-skills-索引68-个)
 13. [知识系统](#13-知识系统)
 14. [工作流模式](#14-工作流模式)
@@ -96,170 +96,33 @@ pi list
 
 ### 2.1 teammate — 多智能体调度
 
-插件的核心能力。将独立的 Pi 子进程作为 Agent 启动，每个 Agent 拥有独立的工具集和上下文。
-
-#### 单任务（前台阻塞）
+所有调用统一使用必需的非空 `tasks[]`。单 Agent 是一个 task，多 Agent 是多个 task。每项 `prompt` 都是字面任务文本，不加载 Prompt 模板。
 
 ```javascript
+teammate({ tasks: [{
+  agent: "explorer",
+  taskType: "explore",
+  prompt: "FIND: 认证入口
+SCOPE: src/"
+}] })
+
 teammate({
-  agent: "delegate",
-  taskType: "analysis",
-  task: "PURPOSE: 分析认证流程的安全隐患\nTASK: 追踪入口 | 追踪验证逻辑 | 汇总发现\nMODE: analysis\nCONTEXT: @src/auth/**/*.ts\nEXPECTED: file:line 证据 + 结论\nCONSTRAINTS: 只读，不修改文件",
+  agent: "explorer",
+  model: "provider/fast-model",
+  tasks: [
+    { name: "scan", prompt: "定位认证入口" },
+    { name: "calls", prompt: "定位调用点" },
+    { name: "review", agent: "analyst", taskType: "review",
+      model: "provider/deep-model", prompt: "审查 {scan} 与 {calls}" }
+  ],
+  concurrency: 2,
   background: false
 })
 ```
 
-#### 并行任务
+顶层 `agent/taskType/model/thinking/context/cwd/outputSchema/timeoutMs` 是 task 默认值，task 同名字段覆盖。未指定角色时默认 `general`。`{name}`/`{name.field}` 注入上游输出，`dependsOn` 只声明顺序。`background` 默认 `false`。
 
-```javascript
-teammate({
-  taskType: "explore",
-  background: false,
-  tasks: [
-    {
-      name: "definitions",
-      agent: "explorer",
-      task: "FIND: 所有导出的认证函数\nSCOPE: src/auth/\nEXPECTED: 函数名 + file:line"
-    },
-    {
-      name: "consumers",
-      agent: "explorer",
-      task: "FIND: 所有导入 auth 模块的调用点\nSCOPE: src/**/*.ts\nEXCLUDE: src/auth/\nEXPECTED: 导入路径 + file:line"
-    }
-  ]
-})
-```
-
-#### DAG 依赖图
-
-通过 `{name}` 引用其他任务的输出，自动建立依赖关系：
-
-```javascript
-teammate({
-  tasks: [
-    {
-      name: "scan",
-      agent: "explorer",
-      task: "FIND: 空指针风险\nSCOPE: src/**/*.ts\nEXPECTED: file:line 列表"
-    },
-    {
-      name: "fix",
-      agent: "delegate",
-      taskType: "development",
-      task: "PURPOSE: 修复所有问题\nTASK: 处理 {scan} 的发现 | 添加空值守卫\nMODE: write"
-    },
-    {
-      name: "verify",
-      agent: "delegate",
-      taskType: "review",
-      task: "PURPOSE: 验证 {fix} 的修复\nTASK: 读取变更文件 | 运行测试\nMODE: analysis"
-    }
-  ]
-})
-// 执行顺序: scan → fix → verify（自动推断）
-```
-
-使用 `outputSchema` 可通过 `{name.field}` 引用结构化字段：
-
-```javascript
-{
-  name: "scan",
-  agent: "workflow-reviewer",
-  task: "扫描安全问题",
-  outputSchema: {
-    type: "object",
-    properties: {
-      critical: { type: "array" },
-      high: { type: "array" }
-    }
-  }
-}
-// 下游任务可引用 {scan.critical}、{scan.high}
-```
-
-#### 后台任务
-
-```javascript
-teammate({
-  name: "long-test",
-  agent: "delegate",
-  task: "运行完整测试套件并生成报告",
-  background: true
-})
-// 继续其他工作；完成后收到 teammate-complete 通知
-```
-
-#### 上下文模式
-
-| 模式 | 行为 |
-|------|------|
-| `context: "fresh"`（默认） | 干净子进程 — 仅系统提示 + 任务描述 |
-| `context: "fork"` | 继承父会话完整历史，独立继续 |
-
-#### P0 三轴控制
-
-| 轴 | 选项 | 用途 |
-|----|------|------|
-| `name` | 任意字符串 | 可寻址名称，用于 `teammate-send` 和 DAG 引用 |
-| `reply_to` | `"caller"` / `"main"` | 控制结果投递目标 |
-| `lifecycle` | `"ephemeral"` / `"resident"` | 临时：完成后退出。常驻：休眠等待后续指令 |
-
-#### 自动模型路由
-
-根据 `taskType` 自动映射到配置的模型：
-
-| taskType | 用途 |
-|----------|------|
-| `explore` | 代码探索 |
-| `analysis` | 只读分析 |
-| `debug` | 调试 |
-| `planning` | 规划 |
-| `development` | 实现 |
-| `review` | 代码审查 |
-| `testing` | 测试 |
-
-模型优先级：任务级 `model` → 顶层 `model` → `taskType` 映射 → 推断类型 → Agent 默认。
-
-通过 `Alt+M` 或 `/teammate-models` 配置路由映射。
-
-#### 思考深度
-
-每个 teammate 任务可独立控制思考深度：
-
-```javascript
-teammate({
-  agent: "delegate",
-  task: "...",
-  thinking: "high"   // off | minimal | low | medium | high | xhigh | max
-})
-```
-
-| 级别 | 说明 |
-|------|------|
-| `off` | 关闭扩展思考 |
-| `minimal` | 最小思考 |
-| `low` | 低深度 |
-| `medium` | 中等深度 |
-| `high` | 高深度 |
-| `xhigh` | 极高深度 |
-| `max` | `xhigh` 的别名 |
-
-优先级：任务级 `thinking` → 顶层 `thinking` → 模型默认。不同模型支持的级别范围不同（见可用模型目录）。
-
-#### 结构化 Prompt 格式
-
-```
-PURPOSE: [目标] + [成功标准]
-TASK: [步骤1] | [步骤2] | [步骤3]
-MODE: analysis|write
-CONTEXT: @[文件模式] | Memory: [先前工作]
-EXPECTED: [输出格式]
-CONSTRAINTS: [范围限制]
-```
-
-`MODE` 必填。`analysis` 模式下 Agent 必须保持只读。
-
----
+模型优先级：task model > 顶层 model > taskType 映射 > 角色 model > 父 Pi 模型。taskType 只影响路由，不改变角色行为。Control Center 会自动合并内置类型、当前发现的内置/项目/用户 Agent YAML 类型及已有映射类型；自定义 Agent 可声明新的小写类型标识。
 
 ### 2.2 maestro — 知识感知调度
 
@@ -687,15 +550,15 @@ Teammate 调度支持精细的思考深度控制，影响子进程 Agent 的推�
 teammate({
   thinking: "high",
   tasks: [
-    { name: "quick-scan", agent: "explorer", task: "...", thinking: "off" },
-    { name: "deep-analysis", agent: "delegate", task: "...", thinking: "xhigh" }
+    { name: "quick-scan", agent: "explorer", prompt: "...", thinking: "off" },
+    { name: "deep-analysis", agent: "general", prompt: "...", thinking: "xhigh" }
   ]
 })
 ```
 
 ### 优先级
 
-任务级 `thinking` → 顶层 `thinking` → 模型默认
+任务级 `thinking` → 顶层 `thinking` → `taskType` 映射 → Agent frontmatter → Pi 默认
 
 > 注意：不同模型支持的思考级别范围不同。例如 `deepseek/deepseek-v4-flash` 仅支持 `off` 和 `high`，而 `maestro-openai/gpt-5.6-sol` 支持全部级别。
 
@@ -851,149 +714,25 @@ PI_GUI=1 pi   # 启动带 GUI sidecar 的 Pi
 
 ---
 
-## 10. Agent 角色（27 个）
+## 10. Agent 角色
 
-每个 Agent 是一个专门的子进程配置，拥有独立的系统提示和工具集。
+### 内置角色
 
-### 核心 Agent
+| 角色 | 用途 | 边界 |
+|---|---|---|
+| `general` | 通用实现、分析和验证 | 读写与命令工具 |
+| `explorer` | 代码发现与调用链追踪 | 只读 |
+| `planner` | 架构与执行规划 | 只读，高 thinking |
+| `analyst` | 技术分析和审查 | 只读，高 thinking |
+| `research` | 项目架构知识与外部网络研究 | 只读，知识 CLI 与网络搜索 |
+| `verifier` | 无 acceptance commands 时的 Goal 备用验证 | 严格只读，结构化 fail-closed verdict |
+| `workflow` | 分解并派发依赖 DAG | 读取与 teammate 协作工具 |
 
-| Agent | 用途 |
-|-------|------|
-| `explorer` | 快速只读代码侦察，用于并行搜索 |
-| `delegate` | 通用 Agent，用于委派分析或实现 |
-| `goal-verifier` | 独立验证器，审计目标完成声明 |
-| `ralph-executor` | 单步执行器，用于 maestro 编排管线 |
+旧 `delegate`、`goal-verifier` 和 `coordinator` 不再是内置名称。Goal 优先运行 acceptance commands；仅在未声明 commands 时调用 `verifier`。项目自定义角色放在 `.pi/agents/*.md`，用户角色放在 `~/.agents/*.md`；内置名称不可覆盖。
 
-### 工作流 Agent
+## 11. Prompt 输入
 
-| Agent | 用途 |
-|-------|------|
-| `workflow-analyzer` | 多维评估，基于证据的评分 |
-| `workflow-codebase-mapper` | 从特定焦点分析代码库 |
-| `workflow-collab-planner` | 协作规划器，预分配任务 ID 范围 |
-| `workflow-debugger` | 假设驱动调试，结构化证据日志 |
-| `workflow-executor` | 单任务实现，带验证和提交纪律 |
-| `workflow-external-researcher` | 外部研究（Exa MCP），API/技术评估 |
-| `workflow-integration-checker` | 跨阶段集成验证 |
-| `workflow-nyquist-auditor` | 测试覆盖审计，缺口检测和测试桩生成 |
-| `workflow-phase-researcher` | 特定路线图阶段的实现方案研究 |
-| `workflow-plan-checker` | 计划质量验证，最多 3 轮修订 |
-| `workflow-planner` | 执行计划，任务分解、波次和依赖 |
-| `workflow-project-researcher` | 项目初始化的领域研究 |
-| `workflow-research-synthesizer` | 合并多个研究者输出为统一摘要 |
-| `workflow-reviewer` | 多维代码审查（每 Agent 单维度） |
-| `workflow-roadmapper` | 项目路线图，阶段化里程碑 |
-| `workflow-verifier` | 目标反向验证（存在性、实质性、连接性） |
-
-### 专家 Agent
-
-| Agent | 用途 |
-|-------|------|
-| `team-supervisor` | 常驻管线监督者，质量观察 |
-| `team-worker` | 统一工作者，执行 role_spec 文件中的角色逻辑 |
-| `ui-design-agent` | UI 设计令牌管理和原型生成（WCAG AA 验证） |
-| `impeccable-agent` | 自主 UI 审计、打磨、加固、排版执行器 |
-| `role-design-author` | 为头脑风暴会话生成多文件角色分析 |
-| `cross-role-reviewer` | 跨角色分析文件的决策摘要比较 |
-| `cli-explore-agent` | Bash + CLI 语义双源只读代码探索 |
-| `aggregator` | MOA 聚合器，合成多个参考分析 |
-| `reference` | MOA 参考，单模型视角独立分析 |
-
-### 自定义 Agent
-
-在 `.pi/agents/` 下创建 Markdown 文件即可定义新 Agent：
-
-```markdown
-<!-- .pi/agents/db-migrator.md -->
-# Database Migrator
-你是数据库模式迁移专家。
-## 角色
-- 分析现有模式
-- 规划安全迁移（含回滚策略）
-- 生成迁移文件
-## 约束
-- 始终包含经验证的回滚计划
-```
-
-使用：`teammate({ agent: "db-migrator", taskType: "planning", task: "..." })`
-
----
-
-## 11. Prompt 模板（20 个）
-
-通过 `teammate` 的 `prompt` 字段调用。发现顺序：项目 `.pi/prompts/` → 用户 `~/.pi/agent/prompts/` → 内置目录。
-
-### 分析模板
-
-| 模板 | 用途 |
-|------|------|
-| `analysis-trace-code-execution` | 追踪执行流、控制流、数据流 |
-| `analysis-diagnose-bug-root-cause` | 诊断 Bug 根因，提出只读修正 |
-| `analysis-analyze-code-patterns` | 分析实现模式、约定、反模式 |
-| `analysis-analyze-technical-document` | 分析技术文档，证据支撑引用 |
-| `analysis-review-architecture` | 审查架构、依赖、集成点、权衡 |
-| `analysis-review-code-quality` | 审查正确性、可维护性、测试 |
-| `analysis-analyze-performance` | 分析瓶颈和优化机会 |
-| `analysis-assess-security-risks` | 评估攻击面和优先级缓解措施 |
-
-### 规划模板
-
-| 模板 | 用途 |
-|------|------|
-| `planning-plan-architecture-design` | 结构化软件架构设计 |
-| `planning-breakdown-task-steps` | 将需求分解为可执行、可验证的步骤 |
-| `planning-design-component-spec` | 组件规格（接口 + 验收标准） |
-| `planning-plan-migration-strategy` | 分阶段迁移（兼容性 + 回滚） |
-
-### 开发模板
-
-| 模板 | 用途 |
-|------|------|
-| `development-implement-feature` | 遵循现有模式实现功能 |
-| `development-refactor-codebase` | 安全重构，保持行为不变 |
-| `development-generate-tests` | 生成测试，填补具体覆盖缺口 |
-| `development-implement-component-ui` | 可复用的无障碍 UI 组件 + 测试 |
-| `development-debug-runtime-issues` | 复现、诊断、修复、回归测试 |
-
-### 紧凑兼容模板
-
-| 模板 | 模式 | 参数 |
-|------|------|------|
-| `analysis` | analysis | 目的、上下文、预期输出 |
-| `review` | analysis | 审查目标、额外约束 |
-| `write` | write | 实现目标、上下文、验收输出 |
-
-### 使用示例
-
-```javascript
-teammate({
-  agent: "delegate",
-  taskType: "analysis",
-  prompt: "analysis-trace-code-execution",
-  task: "追踪令牌刷新流程",
-  promptArgs: ["@src/auth/tokens.ts", "file:line 证据 + 状态转换"],
-  background: false
-})
-```
-
-### 自定义模板
-
-在 `.pi/prompts/` 下创建 Markdown 文件：
-
-```markdown
-<!-- .pi/prompts/security-audit.md -->
-# Security Audit
-审查以下内容：
-1. OWASP Top 10 漏洞
-2. {{dependency}} 的供应链风险
-3. {{dataFlow}} 中的数据暴露
-焦点: {{focus}}
-预期: 漏洞列表（含严重性和 file:line）
-```
-
-使用：`prompt: "security-audit"` + 对应 `promptArgs`。
-
----
+`tasks[].prompt` 是必需的字面任务文本。Teammate 1.0 不发现 `.pi/prompts`，不提供 bundled Prompt 模板，也不支持 `promptArgs`、位置参数或模板名展开。可复用指令应由调用方或 Skill 生成后作为完整 prompt 传入。
 
 ## 12. Skills 索引（68 个）
 
@@ -1224,14 +963,14 @@ maestro search "旧模式" --include-deprecated       # 搜索全部
 teammate({
   tasks: [
     // 阶段 1: 并行研究
-    { name: "api-research", agent: "workflow-external-researcher", task: "研究速率限制最佳实践" },
-    { name: "codebase-survey", agent: "explorer", task: "FIND: 所有 API 端点\nSCOPE: src/api/" },
+    { name: "api-research", agent: "workflow-external-researcher", prompt: "研究速率限制最佳实践" },
+    { name: "codebase-survey", agent: "explorer", prompt: "FIND: 所有 API 端点\nSCOPE: src/api/" },
     // 阶段 2: 规划（研究 + 调查完成后）
-    { name: "plan", agent: "workflow-planner", task: "整合 {api-research} + {codebase-survey} 制定计划" },
+    { name: "plan", agent: "workflow-planner", prompt: "整合 {api-research} + {codebase-survey} 制定计划" },
     // 阶段 3: 实现
-    { name: "implement", agent: "workflow-executor", task: "执行 {plan}" },
+    { name: "implement", agent: "workflow-executor", prompt: "执行 {plan}" },
     // 阶段 4: 验证
-    { name: "verify", agent: "workflow-verifier", task: "验证 {implement} 是否满足 {plan}" }
+    { name: "verify", agent: "workflow-verifier", prompt: "验证 {implement} 是否满足 {plan}" }
   ]
 })
 ```
@@ -1277,7 +1016,6 @@ teammate({
 | 文件 | 用途 |
 |------|------|
 | `.pi/teammate-models.json` | 本项目的模型路由映射 |
-| `.pi/prompts/` | 项目特定 Prompt 模板 |
 | `.pi/agents/` | 项目特定 Agent 定义 |
 | `.pi/settings.json` | Pi 设置覆盖 |
 
@@ -1286,7 +1024,6 @@ teammate({
 | 文件 | 用途 |
 |------|------|
 | `~/.pi/agent/teammate-models.json` | 全局模型路由默认值 |
-| `~/.pi/agent/prompts/` | 用户级 Prompt 模板 |
 | `~/.pi/agent/settings.json` | 全局 Pi 设置 |
 
 ---
@@ -1328,7 +1065,7 @@ teammate-list({ view: "all" })                          // 检查状态
 teammate-watch({ name: "stuck", lines: 50 })            // 查看输出
 teammate-send({ to: "stuck", mode: "abort" })           // 终止
 // 带超时重试:
-teammate({ agent: "delegate", task: "...", timeoutMs: 120000 })
+teammate({ tasks: [{ agent: "general", prompt: "...", timeoutMs: 120000 }] })
 ```
 
 ### 长会话上下文溢出
@@ -1336,7 +1073,7 @@ teammate({ agent: "delegate", task: "...", timeoutMs: 120000 })
 ```bash
 /compact "总结关键决策和当前状态"
 # 或对重工作使用 fresh 上下文:
-teammate({ agent: "delegate", context: "fresh", task: "PURPOSE: 读取状态并继续\n..." })
+teammate({ tasks: [{ agent: "general", context: "fresh", prompt: "PURPOSE: 读取状态并继续\n..." }] })
 ```
 
 ---
@@ -1352,13 +1089,13 @@ maestro search "查询" --code
 maestro load --type spec --category coding
 
 # ─── 探索 ───
-teammate({ agent: "explorer", taskType: "explore", task: "FIND: ...\nSCOPE: src/..." })
+teammate({ tasks: [{ agent: "explorer", taskType: "explore", prompt: "FIND: ...\nSCOPE: src/..." }] })
 
 # ─── 分析 ───
-teammate({ agent: "delegate", taskType: "analysis", prompt: "analysis-trace-code-execution", task: "..." })
+teammate({ tasks: [{ agent: "analyst", taskType: "analysis", prompt: "分析目标并提供 file:line 证据" }] })
 
 # ─── 实现 ───
-teammate({ agent: "delegate", taskType: "development", prompt: "development-implement-feature", task: "..." })
+teammate({ tasks: [{ agent: "general", taskType: "development", prompt: "实现目标并运行 focused tests" }] })
 
 # ─── 审查 ───
 /skill:team-review src/ --level deep

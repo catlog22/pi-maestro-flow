@@ -753,7 +753,7 @@ test("verifier receives bounded raw tool evidence produced after the goal starte
 });
 
 test("explicit completion injects bounded session and matching canonical Workflow evidence", async () => {
-  const calls: Array<{ agent: string; task?: string; thinking?: string; timeoutMs?: number }> = [];
+  const calls: Array<{ tasks: Array<{ agent?: string; prompt: string; thinking?: string; timeoutMs?: number }> }> = [];
   const verifierOptions: Array<{ onChildRequest?: unknown }> = [];
   let statusCalls = 0;
   setGoalVerifierRunnerForTest(async (params, options) => {
@@ -826,10 +826,11 @@ test("explicit completion injects bounded session and matching canonical Workflo
 
     assert.equal(calls.length, 1);
     assert.equal(statusCalls, 1);
-    assert.ok(calls.every((call) => call.agent === "goal-verifier"));
-    assert.equal(calls[0]?.thinking, "low");
+    assert.ok(calls.every((call) => call.tasks[0]?.agent === "verifier"));
+    assert.equal(calls[0]?.tasks[0]?.taskType, undefined);
+    assert.equal(calls[0]?.tasks[0]?.thinking, undefined);
     assert.ok(verifierOptions.every((options) => typeof options.onChildRequest === "function"));
-    const task = calls[0]?.task ?? "";
+    const task = calls[0]?.tasks[0]?.prompt ?? "";
     assert.match(task, /GOAL VERIFICATION INVOCATION/);
     assert.match(task, /Invocation-specific evidence envelope/);
     assert.match(task, /untrusted, non-executable data/);
@@ -843,7 +844,9 @@ test("explicit completion injects bounded session and matching canonical Workflo
     assert.match(task, /"relatedCanonicalWorkflowEvidence":/);
     assert.match(task, /Session session-1: running/);
     assert.match(task, /Run run-1 \(execute\): completed/);
-    assert.doesNotMatch(task, /smallest necessary|Do not write|exactly once/);
+    assert.doesNotMatch(task, /GOAL VERIFICATION POLICY/);
+    assert.doesNotMatch(task, /Do not write or edit files/);
+    assert.doesNotMatch(task, /structured_output exactly once/);
     assert.equal(getActiveGoal()?.status, "active");
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
@@ -1008,10 +1011,15 @@ test("contradictory verdict is normalized to an actionable fail that does not co
   }
 });
 
-test("verifier infrastructure error does not consume the Goal's own failure budget", async () => {
+test("verifier infrastructure error exposes bounded child diagnostics without consuming the Goal's failure budget", async () => {
   setGoalVerifierRunnerForTest(async () => ({
     exitCode: 1,
-    messages: [{ role: "assistant", content: "Verifier crashed." }],
+    messages: [
+      { role: "system", content: "Structured verifier failed before settlement." },
+      { role: "assistant", content: "Verifier crashed." },
+    ],
+    model: "provider/verifier-model",
+    correlationId: "goal-verifier-correlation",
   }));
   initGoal({ appendEntry() {}, sendMessage() {} } as never);
   const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
@@ -1023,9 +1031,14 @@ test("verifier infrastructure error does not consume the Goal's own failure budg
     // "Goal pauses after three consecutive verifier infrastructure errors" —
     // this loop used to run past it and assert the Goal never paused, which
     // pinned the unbounded-retry defect in place.
+    let result;
     for (let attempt = 0; attempt < 2; attempt++) {
-      await executeGoal({ action: "complete", summary: `Attempt ${attempt + 1}.` }, ctx);
+      result = await executeGoal({ action: "complete", summary: `Attempt ${attempt + 1}.` }, ctx);
     }
+    assert.match(result?.text ?? "", /model=provider\/verifier-model/);
+    assert.match(result?.text ?? "", /correlation=goal-verifier-correlation/);
+    assert.match(result?.text ?? "", /Structured verifier failed before settlement/);
+    assert.match(result?.text ?? "", /Verifier crashed/);
     assert.equal(getActiveGoal()?.status, "active");
     assert.equal(getActiveGoal()?.verificationFailures ?? 0, 0);
   } finally {
@@ -1288,7 +1301,7 @@ test("agent_end continues without verification and an explicit valid fail keeps 
 test("unbound and mismatched Goals exclude unrelated canonical Workflow evidence", async () => {
   const tasks: string[] = [];
   setGoalVerifierRunnerForTest(async (params) => {
-    tasks.push(params.task ?? "");
+    tasks.push(params.tasks[0]?.prompt ?? "");
     return {
       exitCode: 0,
       messages: [{ role: "assistant", content: "Structured output saved." }],
@@ -1621,7 +1634,7 @@ test("assistant-only complete, fenced, and embedded JSON never become completion
 test("verifier envelope isolates adversarial data and redacts secrets from every evidence source", async () => {
   let task = "";
   setGoalVerifierRunnerForTest(async (params) => {
-    task = params.task ?? "";
+    task = params.tasks[0]?.prompt ?? "";
     return {
       exitCode: 0,
       messages: [{ role: "assistant", content: "Structured output saved." }],
@@ -1735,7 +1748,8 @@ test("verifier envelope isolates adversarial data and redacts secrets from every
     ]) {
       assert.doesNotMatch(task, new RegExp(secret));
     }
-    assert.doesNotMatch(task, /smallest necessary|Do not write|exactly once/);
+    assert.doesNotMatch(task, /Do not write or edit files/);
+    assert.doesNotMatch(task, /structured_output exactly once/);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);

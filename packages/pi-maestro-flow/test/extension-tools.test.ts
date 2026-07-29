@@ -86,14 +86,14 @@ test("teammate started events expose a Todo actor before the teammate calls Todo
   assert.deepEqual(todoActorFromTeammateStarted({
     correlationId: "worker-correlation",
     name: "worker-alpha",
-    agent: "delegate",
+    agent: "general",
   }), {
     kind: "teammate",
     id: "worker-correlation",
     label: "worker-alpha",
-    agentType: "delegate",
+    agentType: "general",
   });
-  assert.equal(todoActorFromTeammateStarted({ correlationId: "unknown", agent: "delegate" }), undefined);
+  assert.equal(todoActorFromTeammateStarted({ correlationId: "unknown", agent: "general" }), undefined);
 });
 
 test("Workflow writer attachment and Todo projection require local Workflow opt-in", () => {
@@ -203,7 +203,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
 
   const maestro = tools.find((tool) => tool.name === "maestro");
   const maestroProperties = (maestro?.parameters as { properties?: Record<string, unknown> } | undefined)?.properties;
-  assert.ok(maestroProperties?.name, "maestro delegate schema should expose a stable task name");
+  assert.ok(maestroProperties?.name, "maestro general schema should expose a stable task name");
   assert.ok(maestroProperties?.concurrency, "maestro explore schema should expose a concurrency bound");
 
   const askTool = tools.find((tool) => tool.name === "ask-user-question");

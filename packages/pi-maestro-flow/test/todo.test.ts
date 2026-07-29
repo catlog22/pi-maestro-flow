@@ -946,7 +946,7 @@ test("todo widget unifies root and teammate tasks sorted by status priority", as
   });
   const todoContext = startTodo(root, loader);
   const ctx = makeExtensionContext();
-  const worker: TodoActorRef = { kind: "teammate", id: "worker-1", label: "worker", agentType: "delegate" };
+  const worker: TodoActorRef = { kind: "teammate", id: "worker-1", label: "worker", agentType: "general" };
 
   try {
     await executeTodo({ action: "create", subject: "Root done" }, ctx);
@@ -1098,8 +1098,8 @@ test("Todo selectors round-trip displayed actors and support proactive teammate 
   const first: TodoActorRef = { kind: "teammate", id: "api-1111", label: "api", agentType: "worker" };
   const second: TodoActorRef = { kind: "teammate", id: "api-2222", label: "api", agentType: "reviewer" };
   const solo: TodoActorRef = { kind: "teammate", id: "solo-3333", label: "solo", agentType: "worker" };
-  const workerAlpha: TodoActorRef = { kind: "teammate", id: "d16d57c2-full", label: "worker-alpha", agentType: "delegate" };
-  const workerBeta: TodoActorRef = { kind: "teammate", id: "d16d9999-full", label: "worker-beta", agentType: "delegate" };
+  const workerAlpha: TodoActorRef = { kind: "teammate", id: "d16d57c2-full", label: "worker-alpha", agentType: "general" };
+  const workerBeta: TodoActorRef = { kind: "teammate", id: "d16d9999-full", label: "worker-beta", agentType: "general" };
 
   try {
     registerTodoActor(first);

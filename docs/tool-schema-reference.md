@@ -97,71 +97,65 @@ edit({
 
 ---
 
-## 5. `teammate` - 派发 Teammate 代理
+## 5. `teammate` - 派发 Teammate 任务
 
-支持单任务、并行多任务、DAG 依赖任务、固定 Prompt 模板。
+所有调用统一使用非空 `tasks[]`。单 Agent 是一个 task，多 Agent 是多个 task；不存在公开的 single/chain 模式。每个 task 的 `prompt` 是必需的字面任务文本，系统不会加载或展开 Prompt 模板。
 
-**模式选择**：提供 `tasks` → 多任务模式；否则提供 `agent`（配 `task` 或 `prompt`）→ 单任务模式。两者都缺失、或任务既无 `task` 也无 `prompt` 时**派发前报错**（不会空跑）。
-
-**核心语义 — 顶层字段是多任务默认值**：`prompt`/`promptArgs`/`taskType`/`context`/`model`/`thinking`/`cwd`/`outputSchema`/`timeoutMs` 在多任务模式下作为所有任务的默认值，per-task 同名字段优先。顶层 `agent`/`task` 在多任务模式下被忽略（会返回警告）。
+**核心语义**：顶层 `agent`/`taskType`/`context`/`model`/`thinking`/`cwd`/`outputSchema`/`timeoutMs` 是 task 默认值，task 同名字段优先。未提供有效 agent 时默认 `general`。公共参数对象是封闭 schema，未声明字段（包括内部 `protocol_version`）会被拒绝。
 
 ### 顶层参数
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|:---:|------|
-| `agent` | string | 单任务✅ | Agent 名称（对应 agents/*.md） |
-| `task` | string | | 任务描述（单任务模式；与 `prompt` 至少一个） |
-| `prompt` | string | | 固定 prompt 模板名默认值（task 为 $1，promptArgs 从 $2 起） |
-| `promptArgs` | string[] | | 额外位置参数默认值（无 `prompt` 时无效，会警告） |
-| `taskType` | enum | | `explore`/`analysis`/`debug`/`planning`/`development`/`review`/`testing`。**仅影响模型路由**（task.model > 顶层 model > taskType 路由），不改变 agent 行为 |
-| `name` | string | | 可寻址名称（teammate-send 寻址 + `{name}` 引用） |
-| `reply_to` | enum | | `caller`(默认)/`main` — 结果路由 |
-| `tasks` | Task[] | | 多任务数组 |
-| `chain` | Step[] | | **已废弃**，用 `tasks` + `{name}` 引用替代。与 `tasks` 同给时忽略 chain 并警告 |
-| `concurrency` | integer | | 最大并发(默认4) |
-| `outputSchema` | object | | JSON Schema 验证（多任务模式下为默认值） |
-| `background` | boolean | | 后台运行(默认true) |
-| `context` | enum | | `fresh`(默认)/`fork`。多任务模式下对每个任务生效（per-task 可覆盖）；fork N 个任务=复制 N 份父会话，注意成本 |
-| `model` | string | | `provider/model` 默认值 |
-| `thinking` | enum | | `off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`（max 是 xhigh 别名） |
-| `cwd` | string | | 工作目录默认值 |
-| `timeoutMs` | integer | | 超时毫秒数默认值 |
+| `tasks` | Task[] | ✅ | 非空任务数组 |
+| `agent` | string | | 默认角色；最终默认 `general` |
+| `taskType` | string | | 默认任务类型；可使用内置类型或自定义 Agent 声明的小写标识，仅影响模型路由 |
+| `reply_to` | enum | | `caller`（默认）/`main`，控制结果路由 |
+| `concurrency` | integer | | 最大并发，默认 4 |
+| `maxAgents` | integer | | 单次派发允许的最大任务数，默认 15 |
+| `outputSchema` | object | | 默认 JSON Schema |
+| `background` | boolean | | 后台运行，默认 `false` |
+| `context` | enum | | `fresh`（默认）/`fork` |
+| `model` | string | | 精确 `provider/model` 默认值 |
+| `thinking` | enum | | 默认思考深度；`max` 是 `xhigh` 别名 |
+| `cwd` | string | | 默认工作目录 |
+| `timeoutMs` | integer | | 默认超时毫秒数 |
 
 ### Task 结构
 
 | 字段 | 类型 | 必需 | 说明 |
 |------|------|:---:|------|
-| `agent` | string | ✅ | Agent 名称 |
-| `task` | string | | 任务描述（与 `prompt` 至少一个，否则报错） |
-| `prompt` | string | | 固定 prompt 模板 |
-| `promptArgs` | string[] | | 附加参数 |
-| `taskType` | enum | | 任务类型（仅模型路由） |
-| `name` | string | | 任务标识符（引用 + 寻址） |
-| `dependsOn` | string[] | | 显式依赖任务名。与 `{name}` 推导取并集；适合只要顺序、不注入输出的场景。**未知名直接报错** |
-| `context` | enum | | `fresh`/`fork`，覆盖顶层默认 |
+| `prompt` | string | ✅ | 非空字面任务文本 |
+| `agent` | string | | 角色覆盖 |
+| `taskType` | string | | 内置或自定义 Agent 任务类型；格式为小写标识，仅模型路由 |
+| `name` | string | | 任务标识符，用于引用和寻址 |
+| `dependsOn` | string[] | | 显式依赖任务名；未知名称直接报错 |
+| `context` | enum | | `fresh`/`fork` 覆盖 |
 | `model` | string | | 模型覆盖 |
-| `thinking` | enum | | 思考深度 |
-| `cwd` | string | | 工作目录 |
-| `outputSchema` | object | | 输出 JSON Schema |
-| `timeoutMs` | integer | | 超时毫秒数 |
+| `thinking` | enum | | 思考深度覆盖 |
+| `cwd` | string | | 工作目录覆盖 |
+| `outputSchema` | object | | 结构化输出 JSON Schema |
+| `timeoutMs` | integer | | 超时覆盖 |
 
 ### 依赖与变量引用
 
-- `{name}` 注入被引用任务的最终输出；`{name.field}` / `{name[0].field}` 访问其结构化输出（需该任务定义 `outputSchema`）。
-- 依赖边 = 任务文本中的 `{name}` 引用 ∪ `dependsOn` 列表。有依赖的任务等待上游完成；上游失败则跳过下游。
-- **未匹配任何任务名的 `{ref}` 按字面文本原样传递**（返回警告）；与现有任务名编辑距离很近的 `{ref}` 视为拼写错误，**派发前报错**。
-- 循环依赖、重名任务在派发前被拒绝。
+- `{name}` 注入上游最终输出；`{name.field}` / `{name[0].field}` 访问结构化输出。
+- 依赖边 = `prompt` 中的引用 ∪ `dependsOn`。上游失败时下游跳过。
+- 未匹配引用按字面文本传递并警告；近似已有任务名的引用按拼写错误拒绝。
+- 循环依赖和重名任务在派发前被拒绝。
 
 ```js
-// 单任务
-teammate({ agent: "delegate", taskType: "analysis", task: "...", background: false })
+teammate({ tasks: [{ agent: "analyst", taskType: "analysis", prompt: "分析认证流程" }] })
 
-// 并行 + 依赖（输出注入）
-teammate({ tasks: [{ name: "a", agent: "explorer", task: "..." }, { name: "b", agent: "delegate", task: "...{a}" }], background: false })
-
-// 只要顺序、不注入输出
-teammate({ tasks: [{ name: "lint", agent: "delegate", task: "..." }, { agent: "delegate", task: "...", dependsOn: ["lint"] }] })
+teammate({ tasks: [
+  { name: "scan", agent: "explorer", prompt: "定位认证入口" },
+  { name: "review", agent: "analyst", prompt: "审查 {scan}" }
+], background: false })
 ```
+
+内置角色为 `general`、`explorer`、`planner`、`analyst`、`research`、`verifier`、`workflow`。`verifier` 仅在 Goal 没有 acceptance commands 时作为独立只读备用验证器。旧 `delegate`、`goal-verifier` 和 `coordinator` 不再是内置名称。
+
+模型优先级：`task.model > 顶层 model > taskType 映射 > 角色 model > 父 Pi 模型`。Thinking 优先级：`task.thinking > 顶层 thinking > taskType 映射 > 角色 frontmatter > Pi 默认`。Control Center 自动合并内置类型、当前发现的内置/项目/用户 Agent YAML 类型和已有路由配置类型；自定义 Agent 可用 `taskType: security-audit` 声明新类型。
 
 ### teammate vs maestro（§9）如何选
 

@@ -100,7 +100,7 @@ import { runTeammate, sendRpcMessage, normalizeTeammateParams } from "pi-maestro
 import type { RunTeammateParams, RunTeammateOptions, SingleResult } from "pi-maestro-teammate/v1";
 ```
 
-可用子路径：`/v1`（聚合）、`/v1/agents`、`/v1/execution`、`/v1/extension`、`/v1/model-routing`、`/v1/prompts`、`/v1/progress-tree`、`/v1/retry`、`/v1/types`。
+可用子路径：`/v1`（聚合）、`/v1/agents`、`/v1/execution`、`/v1/extension`、`/v1/model-routing`、`/v1/progress-tree`、`/v1/retry`、`/v1/types`。
 
 ---
 
@@ -141,68 +141,49 @@ interface AgentToolResult<TDetails> {
 
 ## 4. 工具接口详解
 
-### 4.1 `teammate` — 派发子代理
+### 4.1 `teammate` — 派发子代理任务
 
-派发一个或多个子代理（Pi 子进程）。支持单代理、多任务 DAG、（已弃用的）chain 流水线三种模式。顶层字段作为默认值，`tasks[]` 内的同名字段覆盖顶层。
+所有公开调用统一使用非空 `tasks[]`。单代理是一个 task，多代理是多个 task。`TaskSpec.prompt` 是必需的非空字面任务文本，不存在模板加载、`promptArgs` 或 `chain`。顶层与 task 参数对象都是封闭 schema，未声明字段（包括内部 `protocol_version`）会被拒绝。
 
 **参数**（`TeammateParams`）：
 
 | 参数 | 类型 | 必需 | 说明 |
 |------|------|:---:|------|
-| `agent` | string | 单模式✅ | 代理名（匹配 `agents/*.md` 文件名）。单模式必填；`tasks` 模式可省 |
-| `task` | string | | 任务描述。多任务模式支持 `{name}` 变量引用 |
-| `prompt` | string | | 固定 prompt 模板名（项目/用户/内置）。任务级优先 |
-| `promptArgs` | string[] | | 附加位置参数。`task` 是 `$1`，`promptArgs` 从 `$2` 开始 |
-| `taskType` | enum | | 仅用于自动模型路由：`explore`/`analysis`/`debug`/`planning`/`development`/`review`/`testing`。不改变代理行为 |
-| `name` | string | | 可寻址名称，启用 `{name}` 引用与 `teammate-send` 寻址 |
-| `reply_to` | enum | | 结果路由：`caller`（默认，返回派发上下文）/ `main`（路由到主会话） |
-| `tasks` | TaskSpec[] | | 多任务数组。依赖来自 `{name}`/`{name.field}` 引用 + 显式 `dependsOn`；有依赖的被等待，无依赖的并行 |
-| `chain` | object[] | | **已弃用**，改用带 `{name}` 的 `tasks`。串行流水线，每步接收 `{previous}` |
-| `concurrency` | integer≥1 | | 最大并发任务数（默认 4） |
-| `outputSchema` | object | | 结构化输出 JSON Schema。多任务模式下作为无自身 schema 任务的默认值 |
-| `background` | boolean | | 后台运行（默认 **true**）。后台完成会发 `teammate-complete` 通知；需直接拿结果时置 `false` |
-| `context` | enum | | `fresh`（默认，空白会话）/ `fork`（继承当前会话完整历史） |
-| `model` | string | | 精确 `provider/model` 默认值。任务级优先 |
-| `thinking` | enum | | 思考深度：`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`（`max` 等价 `xhigh`）。任务级优先 |
-| `cwd` | string | | 默认工作目录。任务级优先 |
-| `timeoutMs` | integer≥1 | | 默认超时毫秒。任务级优先 |
+| `tasks` | TaskSpec[] | ✅ | 非空任务数组 |
+| `agent` | string | | task 默认角色；最终默认 `general` |
+| `taskType` | string | | task 默认类型；支持内置或自定义 Agent 的小写类型标识，仅影响模型路由 |
+| `reply_to` | enum | | `caller`（默认）/`main` |
+| `concurrency` | integer≥1 | | 最大并发，默认 4 |
+| `maxAgents` | integer≥1 | | 单次最大任务数，默认 15 |
+| `outputSchema` | object | | task 默认结构化输出 schema |
+| `background` | boolean | | 后台运行，默认 `false` |
+| `context` | enum | | `fresh`（默认）/`fork` |
+| `model` | string | | task 默认精确 `provider/model` |
+| `thinking` | enum | | task 默认思考深度，`max` 等价 `xhigh` |
+| `cwd` | string | | task 默认工作目录 |
+| `timeoutMs` | integer≥1 | | task 默认超时 |
 
-**`TaskSpec`（`tasks[]` 元素）字段**：`agent`(✅)、`task`、`prompt`、`promptArgs`、`taskType`、`name`、`dependsOn`(string[])、`context`、`model`、`thinking`、`cwd`、`outputSchema`、`timeoutMs`。语义与顶层同名字段一致，且覆盖顶层默认。
+**TaskSpec**：必需非空 `prompt`；可选 `agent`、`taskType`、`name`、`dependsOn`、`context`、`model`、`thinking`、`cwd`、`outputSchema`、`timeoutMs`。task 同名字段覆盖顶层默认。`taskType` 可由当前发现的内置/项目/用户 Agent YAML 自动提供，也可由自定义 Agent 声明新的小写标识；Control Center 会自动纳入对应模型和 thinking 绑定。Thinking 优先级为 `task.thinking > 顶层 thinking > taskType 映射 > 角色 frontmatter > Pi 默认`。
 
-**返回**：`AgentToolResult<Details>`
-
-```ts
-interface Details {
-  mode: "single" | "parallel" | "chain" | "graph";
-  results: SingleResult[];      // 每个子代理一个结果
-  structuredOutput?: unknown;   // outputSchema 校验后的结构化输出
-  progress?: AgentProgressSnapshot[];
-  childCalls?: ChildAgentCallSnapshot[];
-}
-```
-
-`content[0].text` 为最后一个子代理的最终消息；`isError` 在子代理非零退出时为 `true`。后台 detach 时 `results` 为空数组，结果稍后经 `teammate-complete` 消息送达。
-
-**示例**：
+**返回**：`AgentToolResult<Details>`。mode 由任务数量与依赖拓扑报告为 `single`/`parallel`/`chain`/`graph`；这只是结果分类，不是输入模式。
 
 ```js
-// 单代理前台（直接拿结果）
-teammate({ agent: "explorer", taskType: "explore", background: false,
-  task: "FIND: 鉴权中间件\nSCOPE: src/middleware/\nEXPECTED: file:line 列表" })
+teammate({ tasks: [{
+  agent: "explorer",
+  taskType: "explore",
+  prompt: "FIND: 鉴权中间件
+SCOPE: src/middleware/"
+}] })
 
-// 多任务 DAG（definitions 与 calls 并行，review 依赖二者）
-teammate({ taskType: "explore", background: false, tasks: [
-  { name: "definitions", agent: "explorer", task: "FIND: 导出定义\nSCOPE: src/auth/" },
-  { name: "calls", agent: "explorer", task: "FIND: import 调用点\nSCOPE: src/**/*.ts" },
-  { name: "review", agent: "delegate", taskType: "review",
-    task: "综合 {definitions} 与 {calls} 给出审查结论" }
+teammate({ background: false, tasks: [
+  { name: "definitions", agent: "explorer", prompt: "定位导出定义" },
+  { name: "calls", agent: "explorer", prompt: "定位调用点" },
+  { name: "review", agent: "analyst", taskType: "review",
+    prompt: "综合 {definitions} 与 {calls} 给出审查结论" }
 ] })
 ```
 
-**注意**：
-- `background` 默认 `true`；单任务需要结果时务必显式 `background: false`。
-- `{ref}` 匹配不到任何任务名时按字面量透传；接近已有名的拼写错误会被拒绝。
-- 嵌套深度有守卫，防止递归 fork-bomb。
+注意：`background` 默认 `false`；未匹配的 `{ref}` 按字面量透传并警告，近似任务名的拼写错误会被拒绝；嵌套深度有守卫。
 
 ---
 
@@ -496,67 +477,25 @@ fffind({ pattern: "compaction arbiter", limit: 5 })
 
 在自有 Node/TS 程序中编排子代理时，直接使用 `pi-maestro-teammate/v1`，无需经过 LLM 工具层。
 
-### 5.1 `runTeammate(params, options): Promise<SingleResult>`
+### 5.1 `runTeammate(params, options): Promise<SingleResult[]>`
 
-核心执行函数。解析 prompt 模板、应用模型路由、派发子进程并收集结果。
-
-```ts
-import { runTeammate } from "pi-maestro-teammate/v1";
-import type { RunTeammateParams, RunTeammateOptions, SingleResult } from "pi-maestro-teammate/v1";
-
-const result: SingleResult = await runTeammate(
-  { agent: "explorer", task: "FIND: 鉴权中间件\nSCOPE: src/", model: "provider/model" },
-  { baseCwd: process.cwd(), correlationId: "my-task-1" },
-);
-console.log(result.messages.at(-1)?.content);
-```
-
-**`RunTeammateParams`**（与 `teammate` 工具参数同构）：
+编程式入口与工具层使用相同的必需 `tasks[]` 契约。它应用任务类型路由、统一规范化并执行一个或多个 task；单 task 也返回长度为 1 的结果数组。
 
 ```ts
-interface RunTeammateParams {
-  agent: string;
-  task?: string;
-  prompt?: string;
-  promptArgs?: string[];
-  taskType?: TeammateTaskType;
-  name?: string;
-  reply_to?: "caller" | "main";
-  protocol_version?: number;
-  background?: boolean;
-  context?: "fresh" | "fork";
-  model?: string;
-  thinking?: TeammateThinkingInput;
-  cwd?: string;
-  timeoutMs?: number;
-  outputSchema?: Record<string, unknown>;
-  tasks?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[];
-    taskType?: TeammateTaskType; name?: string; dependsOn?: string[]; context?: "fresh"|"fork";
-    model?: string; thinking?: TeammateThinkingInput; cwd?: string;
-    outputSchema?: Record<string, unknown>; timeoutMs?: number }>;
-  chain?: Array<{ agent: string; task?: string; prompt?: string; promptArgs?: string[];
-    taskType?: TeammateTaskType; model?: string; thinking?: TeammateThinkingInput }>;
-  concurrency?: number;
-}
+import { runTeammate } from "pi-maestro-teammate/v1/execution";
+
+const [result] = await runTeammate({
+  agent: "explorer",
+  model: "provider/model",
+  tasks: [{ prompt: "FIND: 鉴权中间件
+SCOPE: src/" }]
+}, { baseCwd: process.cwd() });
+console.log(result?.messages.at(-1)?.content);
 ```
 
-**`RunTeammateOptions`**（运行时上下文与回调）：
+`RunTeammateParams` 与工具 schema 同构：必需 `tasks: TaskSpec[]`，并可提供顶层 `agent/taskType/model/thinking/context/cwd/outputSchema/timeoutMs` 默认值和 `concurrency/maxAgents/background/reply_to` 调度字段。内部单子进程原语不属于 v1 公共调用契约。
 
-| 字段 | 类型 | 说明 |
-|------|------|------|
-| `baseCwd` | string(✅) | 基准工作目录 |
-| `modelCapabilities` | readonly | 可用模型能力清单 |
-| `correlationId` | string | 关联 ID（缺省随机 UUID） |
-| `taskCorrelationIds` | string[] | 多任务的关联 ID |
-| `signal` | AbortSignal | 取消信号 |
-| `onProgress` | `(data: AgentProgress) => void` | 进度回调 |
-| `onRetry` | `(retry) => void` | 重试回调（attempt/maxRetries/delayMs/error…） |
-| `onChildRequest` | `(event, reply) => void` | 子代理请求回调（需 `reply`） |
-| `onChildEvent` | `(event) => void` | 子代理事件回调 |
-| `parentSessionFile` | string | 父会话文件（fork 源） |
-| `initialLeaseToken` | LeaseToken \| fn | 初始租约 token |
-| `onChildSpawned` | `(stdin, sendControl, sessionDir?, correlationId?) => void` | 子进程生成回调 |
-| `onTurnComplete` | `(result: SingleResult) => void` | 单 turn 完成回调 |
+**RunTeammateOptions** 保留 `baseCwd`、模型能力、correlation IDs、取消信号、进度/重试/子请求回调、父会话和测试 spawn seam 等运行时字段。
 
 ### 5.2 `SingleResult` 返回
 
@@ -881,8 +820,8 @@ arbiter.complete();
 
 ```js
 // 派发 explorer 做只读发现
-teammate({ agent: "explorer", taskType: "explore", background: false,
-  task: "FIND: 所有导出函数\nSCOPE: src/auth/\nEXPECTED: 函数名 + file:line" })
+teammate({ tasks: [{ agent: "explorer", taskType: "explore",
+  prompt: "FIND: 所有导出函数\nSCOPE: src/auth/\nEXPECTED: 函数名 + file:line" }] })
 
 // 创建并推进任务
 todo({ action: "create", subject: "实现令牌校验" })
@@ -898,20 +837,20 @@ goal({ action: "complete", summary: "令牌校验已实现并通过 12 个测试
 import { runTeammate, normalizeTeammateParams } from "pi-maestro-teammate/v1";
 
 // 1) 校验参数合法性
-const norm = normalizeTeammateParams({ agent: "delegate", task: "分析模块" });
-if ("error" in norm) throw new Error(norm.error);
+const norm = normalizeTeammateParams({ tasks: [{ agent: "analyst", prompt: "分析模块" }] });
+if (norm.error) throw new Error(norm.error);
 
 // 2) 执行并消费结构化结果
-const res = await runTeammate(
-  { agent: "delegate", task: "分析鉴权模块并给出风险清单",
+const [res] = await runTeammate(
+  { tasks: [{ agent: "analyst", prompt: "分析鉴权模块并给出风险清单",
     outputSchema: { type: "object", required: ["risks"],
-      properties: { risks: { type: "array", items: { type: "string" } } } } },
+      properties: { risks: { type: "array", items: { type: "string" } } } } }] },
   { baseCwd: process.cwd(),
     onProgress: (p) => console.log(`[${p.status}] ${p.agent} tools=${p.toolCount}`) },
 );
 
-if (res.exitCode !== 0) {
-  console.error("子代理失败:", res.messages.at(-1)?.content);
+if (!res || res.exitCode !== 0) {
+  console.error("子代理失败:", res?.messages.at(-1)?.content);
   process.exit(1);
 }
 const risks = (res.structuredOutput as { risks: string[] })?.risks ?? [];
@@ -934,8 +873,8 @@ console.log("风险清单:", risks);
 - `teammate-send`/`watch` 的 `to`/`name` 选择器无法解析到代理。
 
 **最佳实践**：
-- `teammate` 单任务需结果时显式 `background: false`；后台任务依赖 `teammate-complete` 通知而非轮询。
-- 多任务用 `tasks[]` + `{name}` 引用表达依赖，避免已弃用的 `chain`。
+- `teammate` 默认前台返回结果；仅独立任务使用 `background: true`，并依赖 `teammate-complete` 通知而非轮询。
+- 所有调用使用非空 `tasks[]`；用 `{name}` 和 `dependsOn` 表达依赖。
 - 需要程序化消费输出时提供 `outputSchema`，通过 `structuredOutput`/`{name.field}` 获取。
 - `run-control` 写动作（next/done/edit）需已附着规范化 Session；只读动作（status/brief/check）无此要求。
 - `goal`/`todo` 的 `planHandoffKey` 为内部字段，对接方不要手工填写。
@@ -947,7 +886,7 @@ console.log("风险清单:", risks);
 
 | 工具 | 必填参数 | 关键可选参数 | 返回 `details` |
 |------|---------|-------------|----------------|
-| `teammate` | `agent`（单模式） | `task`/`tasks`/`prompt`/`model`/`background`/`context`/`outputSchema` | `{ mode, results: SingleResult[], structuredOutput? }` |
+| `teammate` | `tasks`（非空，每项有 `prompt`） | 顶层 task 默认值、`concurrency`/`background`/`reply_to` | `{ mode, results: SingleResult[], structuredOutput? }` |
 | `teammate-send` | `to` | `message`/`mode` | `{ delivered }` |
 | `teammate-list` | — | `view` | `{ agents[] }` |
 | `teammate-watch` | `name` | `lines` | `{ output[] }` |
