@@ -40,6 +40,8 @@ interface MutableModelCircuit {
   generation: number;
   openedAt?: number;
   halfOpenTrialInProgress: boolean;
+  /** Timestamp when the circuit entered HALF_OPEN; used as a watchdog deadline. */
+  halfOpenEnteredAt?: number;
 }
 
 export class ModelCircuitBreaker {
@@ -74,11 +76,23 @@ export class ModelCircuitBreaker {
     }
 
     if (circuit.state === "HALF_OPEN") {
-      return {
-        allowed: false,
-        model,
-        state: "HALF_OPEN",
-      };
+      // Watchdog: if the HALF_OPEN trial has not settled within cooldownMs,
+      // the trial holder likely crashed or leaked.  Re-open so the normal
+      // OPEN → cooldown → HALF_OPEN recovery cycle can proceed.
+      // Skipped when cooldownMs is 0 because the watchdog would fire
+      // immediately and break the single-trial invariant.
+      if (this.cooldownMs > 0
+        && circuit.halfOpenEnteredAt !== undefined
+        && this.now() >= circuit.halfOpenEnteredAt + this.cooldownMs) {
+        this.open(circuit);
+        // Fall through to the OPEN branch below (retryAt check).
+      } else {
+        return {
+          allowed: false,
+          model,
+          state: "HALF_OPEN",
+        };
+      }
     }
 
     const retryAt = this.retryAt(circuit);
@@ -93,6 +107,7 @@ export class ModelCircuitBreaker {
 
     circuit.state = "HALF_OPEN";
     circuit.halfOpenTrialInProgress = true;
+    circuit.halfOpenEnteredAt = this.now();
     return {
       allowed: true,
       model,
@@ -111,6 +126,7 @@ export class ModelCircuitBreaker {
     circuit.consecutiveFailures = 0;
     circuit.openedAt = undefined;
     circuit.halfOpenTrialInProgress = false;
+    circuit.halfOpenEnteredAt = undefined;
     if (acquisition.state === "HALF_OPEN") circuit.generation += 1;
   }
 
@@ -171,6 +187,7 @@ export class ModelCircuitBreaker {
     circuit.state = "OPEN";
     circuit.openedAt = this.now();
     circuit.halfOpenTrialInProgress = false;
+    circuit.halfOpenEnteredAt = undefined;
     circuit.generation += 1;
   }
 

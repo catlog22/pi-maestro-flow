@@ -185,3 +185,79 @@ test("non-retryable authentication failures do not switch or poison model health
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("session_shutdown releases the active acquisition so the circuit does not leak", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: {} });
+    const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+    const runtime = harness(cwd, breaker);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+
+    // Shut down without agent_settled — the acquisition must still be released.
+    await runtime.emit("session_shutdown");
+
+    // The primary circuit should remain CLOSED (released, not recorded as failure).
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "CLOSED");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("open circuit with no healthy fallback emits a warning notification", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 });
+    // Open both primary and backup circuits.
+    const p = breaker.acquireCandidate("provider/primary");
+    if (p.allowed) breaker.recordRetryableFailure(p);
+    const b = breaker.acquireCandidate("provider/backup");
+    if (b.allowed) breaker.recordRetryableFailure(b);
+    const runtime = harness(cwd, breaker);
+
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+
+    // No model could be selected — a warning must be emitted.
+    assert.equal(runtime.selected.length, 0);
+    assert.ok(
+      runtime.notifications.some((n) => /no healthy fallback/i.test(n) && /continuing with the current model/i.test(n)),
+      `Expected a no-fallback warning, got: ${JSON.stringify(runtime.notifications)}`,
+    );
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("agent_end releases the old acquisition when replacing active with a fallback", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const breaker = new ModelCircuitBreaker({ threshold: 2, cooldownMs: 60_000 });
+    const runtime = harness(cwd, breaker);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    // Do NOT emit turn_start — active.used stays false.
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Provider overloaded: 503" }],
+    });
+
+    // The old primary acquisition should have been released (not leaked).
+    // With threshold=2 and only a release (not a failure record), the primary
+    // circuit must still be CLOSED.
+    assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "CLOSED");
+    // The fallback should have been selected.
+    assert.deepEqual(runtime.selected, ["provider/backup"]);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});

@@ -165,3 +165,89 @@ test("rejects invalid configuration and empty model keys", () => {
   assert.throws(() => new ModelCircuitBreaker({ cooldownMs: -1 }), RangeError);
   assert.throws(() => new ModelCircuitBreaker().acquireCandidate(""), TypeError);
 });
+
+test("cooldown of zero allows an immediate half-open trial and preserves single-trial invariant", () => {
+  let now = 100;
+  const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 0, now: () => now });
+  const model = "provider/model";
+
+  breaker.recordRetryableFailure(acquire(breaker, model));
+  assert.equal(breaker.snapshot()[0]?.state, "OPEN");
+
+  // cooldown=0 means retryAt === openedAt, so the very next acquire at the
+  // same timestamp should transition straight to HALF_OPEN.
+  const trial = acquire(breaker, model);
+  assert.equal(trial.state, "HALF_OPEN");
+
+  // The watchdog must NOT fire for cooldownMs=0: a second acquire while the
+  // trial is unsettled must be rejected, preserving the single-trial gate.
+  const second = breaker.acquireCandidate(model);
+  assert.equal(second.allowed, false);
+  assert.equal(second.state, "HALF_OPEN");
+
+  breaker.recordSuccess(trial);
+  assert.equal(breaker.snapshot()[0]?.state, "CLOSED");
+});
+
+test("a leaked half-open trial is reclaimed by the watchdog after cooldownMs", () => {
+  let now = 0;
+  const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 10, now: () => now });
+  const model = "provider/model";
+
+  // Open the circuit, then let cooldown expire to enter HALF_OPEN.
+  breaker.recordRetryableFailure(acquire(breaker, model));
+  now = 10;
+  const trial = acquire(breaker, model);
+  assert.equal(trial.state, "HALF_OPEN");
+
+  // Simulate a leaked trial: no recordSuccess / recordRetryableFailure /
+  // releaseCandidate is ever called.  Before the watchdog deadline the
+  // circuit stays HALF_OPEN and rejects others.
+  now = 15;
+  assert.deepEqual(breaker.acquireCandidate(model), {
+    allowed: false,
+    model,
+    state: "HALF_OPEN",
+  });
+
+  // After cooldownMs elapses from halfOpenEnteredAt (10 + 10 = 20), the
+  // watchdog re-opens the circuit so recovery can proceed.
+  now = 20;
+  const rejected = breaker.acquireCandidate(model);
+  // The watchdog fires inside acquireCandidate: HALF_OPEN → open() → OPEN
+  // branch.  Because now === openedAt (just set), retryAt = now + cooldownMs.
+  assert.equal(rejected.allowed, false);
+  assert.equal(rejected.state, "OPEN");
+
+  // After the fresh cooldown, a new trial is possible.
+  now = 30;
+  const retry = acquire(breaker, model);
+  assert.equal(retry.state, "HALF_OPEN");
+  breaker.recordSuccess(retry);
+  assert.equal(breaker.snapshot()[0]?.state, "CLOSED");
+});
+
+test("concurrent acquisitions during half-open: only the first trial is allowed", () => {
+  let now = 0;
+  const breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 5, now: () => now });
+  const model = "provider/model";
+
+  breaker.recordRetryableFailure(acquire(breaker, model));
+  now = 5;
+
+  // First caller gets the trial.
+  const first = breaker.acquireCandidate(model);
+  assert.equal(first.allowed, true);
+  assert.equal(first.state, "HALF_OPEN");
+
+  // Simulate N concurrent callers — all must be rejected.
+  for (let i = 0; i < 5; i += 1) {
+    const nth = breaker.acquireCandidate(model);
+    assert.equal(nth.allowed, false);
+    assert.equal(nth.state, "HALF_OPEN");
+  }
+
+  // Trial succeeds — circuit closes and the next acquire is allowed.
+  if (first.allowed) breaker.recordSuccess(first);
+  assert.equal(breaker.acquireCandidate(model).allowed, true);
+});

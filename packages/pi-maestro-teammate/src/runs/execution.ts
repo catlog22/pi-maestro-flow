@@ -1605,51 +1605,61 @@ export async function runSingleTeammate(
     if (acquisition && !acquisition.allowed) continue;
     if (modelToUse && !attemptedModels.includes(modelToUse)) attemptedModels.push(modelToUse);
 
-    const maxRetries = acquisition?.state === "HALF_OPEN" ? 0 : NETWORK_RETRY_POLICY.maxRetries;
-    let retryCount = 0;
-    let candidateResult: SingleResult | undefined;
+    let settled = false;
+    try {
+      const maxRetries = acquisition?.state === "HALF_OPEN" ? 0 : NETWORK_RETRY_POLICY.maxRetries;
+      let retryCount = 0;
+      let candidateResult: SingleResult | undefined;
 
-    while (!options.signal?.aborted) {
-      candidateResult = await runSingleAttempt(
-        params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, options,
-      );
-      lastResult = candidateResult;
-      const error = resultFailureMessage(candidateResult.messages);
-      const retryable = candidateResult.exitCode !== 0 && isRetryableProviderError(error);
-      const fallbackEligible = candidateResult.exitCode !== 0 && isFallbackProviderError(error);
+      while (!options.signal?.aborted) {
+        candidateResult = await runSingleAttempt(
+          params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, options,
+        );
+        lastResult = candidateResult;
+        const error = resultFailureMessage(candidateResult.messages);
+        const retryable = candidateResult.exitCode !== 0 && isRetryableProviderError(error);
+        const fallbackEligible = candidateResult.exitCode !== 0 && isFallbackProviderError(error);
 
-      if (candidateResult.exitCode === 0) {
-        if (acquisition?.allowed) breaker.recordSuccess(acquisition);
+        if (candidateResult.exitCode === 0) {
+          if (acquisition?.allowed) { breaker.recordSuccess(acquisition); settled = true; }
+          candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+          return candidateResult;
+        }
+        if (!retryable || retryCount >= maxRetries) {
+          if (fallbackEligible && acquisition?.allowed) { breaker.recordRetryableFailure(acquisition); settled = true; }
+          break;
+        }
+
+        retryCount += 1;
+        const delayMs = retryDelayMs(retryCount);
+        options.onRetry?.({
+          correlationId,
+          attempt: retryCount,
+          maxRetries,
+          delayMs,
+          nextRetryAt: Date.now() + delayMs,
+          error,
+        });
+        const ready = await (options.waitForRetry?.(delayMs, options.signal) ?? waitForRetryDelay(delayMs, options.signal));
+        if (!ready) break;
+      }
+
+      if (!candidateResult) {
+        if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
+        continue;
+      }
+      if (!isFallbackModelError(candidateResult.messages)) {
+        if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
         candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
         return candidateResult;
       }
-      if (!retryable || retryCount >= maxRetries) {
-        if (fallbackEligible && acquisition?.allowed) breaker.recordRetryableFailure(acquisition);
-        break;
+    } finally {
+      // Safety net: if a HALF_OPEN trial was acquired but never settled
+      // (e.g. runSingleAttempt threw, or error-classification diverged),
+      // release it so the circuit does not stay stuck in HALF_OPEN forever.
+      if (!settled && acquisition?.allowed && acquisition.state === "HALF_OPEN") {
+        breaker.releaseCandidate(acquisition);
       }
-
-      retryCount += 1;
-      const delayMs = retryDelayMs(retryCount);
-      options.onRetry?.({
-        correlationId,
-        attempt: retryCount,
-        maxRetries,
-        delayMs,
-        nextRetryAt: Date.now() + delayMs,
-        error,
-      });
-      const ready = await (options.waitForRetry?.(delayMs, options.signal) ?? waitForRetryDelay(delayMs, options.signal));
-      if (!ready) break;
-    }
-
-    if (!candidateResult) {
-      if (acquisition?.allowed) breaker.releaseCandidate(acquisition);
-      continue;
-    }
-    if (!isFallbackModelError(candidateResult.messages)) {
-      if (acquisition?.allowed) breaker.releaseCandidate(acquisition);
-      candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
-      return candidateResult;
     }
   }
 
@@ -1891,6 +1901,7 @@ async function runSingleAttempt(
         stdio: useIpc ? ["pipe", "pipe", "pipe", "ipc"] : ["pipe", "pipe", "pipe"],
         env: spawnEnv,
         shell: spawnSpec.shell,
+        windowsHide: true,
       };
       child = (options.spawnChildProcess ?? crossSpawn)(spawnSpec.command, spawnSpec.args, spawnOpts);
     } catch (error) {

@@ -239,6 +239,12 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     if (fallback) {
       active = fallback;
       ctx.ui.notify(`Model circuit open for ${current}; switched to ${fallback.model}.`, "warning");
+    } else {
+      ctx.ui.notify(
+        `Model circuit open for ${current} and no healthy fallback available. ` +
+        `Continuing with the current model because no fallback can be selected.`,
+        "warning",
+      );
     }
   });
 
@@ -270,7 +276,20 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     }
 
     const failedModel = active.model;
+    const previous = active;
     const fallback = await selectCandidate(ctx, active.chain, active.index + 1);
+    // Release the old acquisition if it was never settled (e.g. used===false
+    // skipped recordRetryableFailure above).  Without this, a HALF_OPEN trial
+    // would leak and the circuit could stay stuck.
+    if (!previous.failureRecorded) breaker.releaseCandidate(previous.acquisition);
+    previous.failureRecorded = true;
+    // Guard: agent_settled may have fired during the await and cleared active.
+    if (active !== previous) {
+      // Release the fallback acquisition that selectCandidate already took;
+      // without this a HALF_OPEN trial on the fallback model would leak.
+      if (fallback && !fallback.failureRecorded) breaker.releaseCandidate(fallback.acquisition);
+      return;
+    }
     if (!fallback) return;
     active = fallback;
     ctx.ui.notify(`Model ${failedModel} failed; retrying with ${fallback.model}.`, "warning");
