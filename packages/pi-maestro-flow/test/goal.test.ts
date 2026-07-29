@@ -37,12 +37,15 @@ import { renderGoalWidget, renderGoalPanel, type GoalWidgetModel, type GoalPanel
 function createContext(overrides: Partial<GoalContext> = {}): GoalContext {
   return {
     cwd: "D:/workspace",
+    modelRegistry: {
+      getAvailable: () => [{ provider: "provider", id: "verifier-model" }],
+    },
     ui: {
       notify() {},
       setStatus() {},
     },
     ...overrides,
-  };
+  } as GoalContext;
 }
 
 test("Goal shares teammate retry classification for transient provider failures", () => {
