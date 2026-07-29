@@ -127,7 +127,7 @@ function tagCompactionInstructions(request: CompactionRequest, instructions: str
 export function compactionRequestFromInstructions(
   instructions: string | undefined,
 ): CompactionRequest | undefined {
-  const match = instructions?.match(/^\[maestro-compaction-owner:(mid-turn|plan-handoff):(\d+)\]/);
+  const match = instructions?.match(/^\[maestro-compaction-owner:(mid-turn|plan-handoff|output-limit):(\d+)\]/);
   if (!match) return undefined;
   return {
     owner: match[1] as CompactionRequestOwner,

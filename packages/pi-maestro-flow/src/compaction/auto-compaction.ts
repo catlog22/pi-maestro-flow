@@ -521,6 +521,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
 
   return {
     onSessionStart(ctx) {
+      state.generation += 1;
       if (state.sessionId) void cleanupSpillDir(state.sessionId);
       releaseInFlight();
       state.pruneManifest.clear();

@@ -246,6 +246,19 @@ test("compaction arbiter serializes extension requests while only observing nati
   assert.equal(arbiter.currentOwner(), undefined);
 });
 
+test("compaction arbiter preserves output-limit ownership through instruction tags", () => {
+  const arbiter = new CompactionArbiter();
+  const outputLimit = arbiter.request("output-limit");
+  assert.ok(outputLimit);
+  const request = compactionRequestFromInstructions(outputLimit.tagInstructions("summary"));
+  assert.deepEqual(request, { owner: "output-limit", id: 1 });
+
+  const observed = arbiter.observeStart(request);
+  assert.equal(observed.owner, "output-limit");
+  assert.equal(observed.allowed, true);
+  outputLimit.release();
+});
+
 test("mid-turn token estimate adds tool results after the last assistant usage", () => {
   const messages = [{
     role: "assistant",
@@ -770,6 +783,49 @@ test("mid-turn reset fences stale compaction callbacks from the next lifecycle",
   assert.equal(sent.length, 1);
   guard.onAgentEnd(ctx);
   assert.equal(statuses.at(-1), undefined);
+});
+
+test("session start fences an evaluation awaiting compaction internals from the previous session", async () => {
+  let resolveInternals!: (internals: { prepareCompaction(): unknown }) => void;
+  const internals = new Promise<{ prepareCompaction(): unknown }>((resolve) => {
+    resolveInternals = resolve;
+  });
+  let oldSessionAborts = 0;
+  let oldSessionCompactions = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: () => internals,
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const oldCtx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { oldSessionAborts++; },
+    compact() { oldSessionCompactions++; },
+    sessionManager: {
+      getSessionId: () => "old-session",
+      getBranch: () => [{ type: "message", id: "old-entry" }],
+    },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const newCtx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    compact() {},
+    sessionManager: {
+      getSessionId: () => "new-session",
+      getBranch: () => [],
+    },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  const staleEvaluation = guard.evaluate(pressureToolBatch(), oldCtx);
+  guard.onSessionStart(newCtx);
+  resolveInternals({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) });
+  await staleEvaluation;
+
+  assert.equal(oldSessionAborts, 0);
+  assert.equal(oldSessionCompactions, 0);
 });
 
 test("pressure policy honors large reserve thresholds below the auto-prune ratio", () => {
