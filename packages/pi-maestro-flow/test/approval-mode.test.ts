@@ -3,6 +3,7 @@ import test from "node:test";
 import {
   APPROVAL_MODES,
   approvalModeStatusValue,
+  effectivePermissionMode,
   nextApprovalMode,
 } from "../src/extension/index.ts";
 
@@ -36,4 +37,15 @@ test("bypassPermissions is presented as the explicit YOLO mode", () => {
 
 test("YOLO is safety-relevant and inherits into plan mode", () => {
   assert.equal(approvalModeStatusValue(true, "bypassPermissions"), "YOLO");
+});
+
+test("plan mode is display-only: permission evaluation inherits the prior approval mode", () => {
+  // Entering plan mode no longer forces the read-only "plan" permission mode; it
+  // keeps whatever approval mode was active before (including YOLO). The legacy
+  // "plan" approval-mode carousel entry evaluates as "default".
+  assert.equal(effectivePermissionMode("bypassPermissions"), "bypassPermissions");
+  assert.equal(effectivePermissionMode("default"), "default");
+  assert.equal(effectivePermissionMode("acceptEdits"), "acceptEdits");
+  assert.equal(effectivePermissionMode("dontAsk"), "dontAsk");
+  assert.equal(effectivePermissionMode("plan"), "default");
 });

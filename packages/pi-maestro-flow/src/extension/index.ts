@@ -202,6 +202,16 @@ export function nextApprovalMode(
   return "default";
 }
 
+/**
+ * Permission mode used to authorize tool calls. Plan mode is advisory and
+ * display-only: it no longer overrides the approval mode, so entering Plan
+ * mode keeps whatever approval mode was active before (including YOLO). The
+ * legacy "plan" approval-mode carousel entry evaluates as "default".
+ */
+export function effectivePermissionMode(approvalMode: PermissionMode): PermissionMode {
+  return approvalMode === "plan" ? "default" : approvalMode;
+}
+
 const TODO_TOGGLE_KEY = "alt+t";
 const TODO_TOGGLE_LABEL = altKey("T");
 const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
@@ -921,17 +931,13 @@ When NOT to use:
         ctx.ui.notify("权限配置已重新加载。", "info");
         return;
       }
-      ctx.ui.notify(permissionController.summary(isPlanMode() ? "plan" : approvalMode), "info");
+      ctx.ui.notify(permissionController.summary(effectivePermissionMode(approvalMode)), "info");
     },
   });
   pi.registerShortcut(APPROVAL_MODE_CYCLE_KEY, {
     description: "Cycle approval mode",
     async handler(ctx: ExtensionContext) {
-      const current: PermissionMode = isPlanMode()
-        ? "plan"
-        : approvalMode === "plan"
-          ? "default"
-          : approvalMode;
+      const current: PermissionMode = effectivePermissionMode(approvalMode);
       const disabled = permissionController.bypassDisabled()
         ? new Set<PermissionMode>(["bypassPermissions"])
         : new Set<PermissionMode>();
@@ -1470,7 +1476,7 @@ When NOT to use:
             return (result.details as { agents?: unknown } | undefined)?.agents ?? null;
           },
           swarm: () => loadLatestTeamSwarmProjection(ctx.cwd) ?? null,
-          approvalMode: () => (approvalMode === "plan" ? "default" : approvalMode),
+          approvalMode: () => effectivePermissionMode(approvalMode),
           sessionId: () => guiSessionId,
         },
       });
@@ -1613,7 +1619,7 @@ When NOT to use:
 
   // Hook denial runs after Plan's advisory tool_call pass and before the interactive prompt.
   const hookAdapter = registerCodexHookAdapter(pi, {
-    getPermissionMode: () => isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
+    getPermissionMode: () => effectivePermissionMode(approvalMode),
   });
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {
     const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
@@ -1623,7 +1629,7 @@ When NOT to use:
     const block = await permissionController.authorize(
       call,
       ctx,
-      isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
+      effectivePermissionMode(approvalMode),
       hookAdapter,
     );
     if (block) return { action: "deny", reason: block.reason };
@@ -1635,7 +1641,7 @@ When NOT to use:
   // interactive approval prompt (ctx.ui.select) surfaces over RPC as
   // extension_ui_request for the GUI to answer.
   function buildGuiPermissionGateway(ctx: ExtensionContext): GuiPermissionGateway {
-    const mode = (): PermissionMode => (isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode);
+    const mode = (): PermissionMode => effectivePermissionMode(approvalMode);
     return {
       mode,
       authorize: async (toolName, input) => {
@@ -1699,7 +1705,7 @@ When NOT to use:
   pi.on("tool_call", async (event, ctx) => permissionController.authorize(
     event,
     ctx,
-    isPlanMode() ? "plan" : approvalMode === "plan" ? "default" : approvalMode,
+    effectivePermissionMode(approvalMode),
     hookAdapter,
   ));
 }
