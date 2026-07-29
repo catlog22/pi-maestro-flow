@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
@@ -15,6 +17,11 @@ import registerMaestroExtension, {
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
 import { isRunControlReadAction } from "../src/tools/run-control.ts";
+import {
+  MAESTRO_GLOBAL_SHORTCUTS,
+  auditShortcutConflicts,
+  executeKeybindingsCommand,
+} from "../src/keybindings-command.ts";
 import {
   getTeammateChildExtensions,
   getTeammateChildToolBroker,
@@ -127,6 +134,57 @@ test("Workflow writer attachment and Todo projection require local Workflow opt-
   }
 });
 
+test("shortcut audit covers built-in, configured, and companion extension collisions", () => {
+  assert.deepEqual(auditShortcutConflicts({ "app.thinking.cycle": "shift+e" }), []);
+
+  const defaults = auditShortcutConflicts({});
+  assert.equal(defaults.length, 1);
+  assert.equal(defaults[0]?.key, "shift+tab");
+  assert.deepEqual(defaults[0]?.owners, ["Maestro approval mode", "Pi app.thinking.cycle"]);
+
+  for (const shortcut of MAESTRO_GLOBAL_SHORTCUTS) {
+    const custom = auditShortcutConflicts({
+      "app.thinking.cycle": "shift+e",
+      "app.model.select": shortcut.key,
+    });
+    assert.deepEqual(custom, [{
+      key: shortcut.key,
+      owners: [shortcut.owner, "Pi app.model.select"],
+    }]);
+  }
+});
+
+test("shortcut command menu fixes, re-audits, and restores without touching other actions", async () => {
+  const root = mkdtempSync(join(tmpdir(), "pi-maestro-keybindings-command-"));
+  const configPath = join(root, "keybindings.json");
+  const notifications: Array<{ message: string; type: string }> = [];
+  const ctx = {
+    ui: {
+      async select(_title: string, options: string[]) { return options[1]; },
+      notify(message: string, type: string) { notifications.push({ message, type }); },
+    },
+  } as unknown as ExtensionContext;
+
+  await executeKeybindingsCommand("", ctx, configPath);
+  assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { "app.thinking.cycle": "shift+e" });
+  assert.match(notifications.at(-1)?.message ?? "", /未发现其他冲突/);
+
+  writeFileSync(configPath, JSON.stringify({
+    "app.thinking.cycle": "shift+tab",
+    "app.model.select": "alt+p",
+  }));
+  await executeKeybindingsCommand("fix", ctx, configPath);
+  assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), {
+    "app.thinking.cycle": "shift+e",
+    "app.model.select": "alt+p",
+  });
+  assert.equal(notifications.at(-1)?.type, "warning");
+  assert.match(notifications.at(-1)?.message ?? "", /仍有 1 个冲突.*alt\+p/);
+
+  await executeKeybindingsCommand("restore", ctx, configPath);
+  assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { "app.model.select": "alt+p" });
+});
+
 test("extension registers LSP, browser, and BM25 discovery", async () => {
   const tools: ToolDefinition[] = [];
   const active: string[] = [];
@@ -179,6 +237,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   assert.equal(names.includes("swarm_runtime"), false);
   assert.ok(commands.includes("maestro-session"));
   assert.ok(commands.includes("maestro-todo"));
+  assert.ok(commands.includes("maestro-keybindings"));
   assert.equal(commands.includes("swarm"), false);
   assert.ok(renderers.includes("run-event"));
 

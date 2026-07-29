@@ -241,6 +241,13 @@ control the permission engine and are also forwarded as `permission_mode` to
 Codex-style hooks. Permissions are application-level gates, not an operating-system
 sandbox.
 
+Run `/maestro-keybindings` to open the shortcut conflict menu. It can audit all
+Maestro Flow, Teammate, and Cockpit global shortcuts, apply the recommended
+`Shift+Tab` fix, report any remaining custom conflicts, or restore Pi's default binding. The same actions are available directly as
+`/maestro-keybindings check`, `/maestro-keybindings fix`, and
+`/maestro-keybindings restore`. Run `/reload` after a change; restoring the Pi default
+intentionally disables Maestro's conflicting `Shift+Tab` shortcut.
+
 The statusline follows the effective approval mode. Wide terminals show labels such as
 `ACT · APPROVAL acceptEdits`; medium and narrow terminals progressively compact this to
 `ACT/acceptEdits` and `A/E`. Active or ready Plan mode always renders approval as `plan`,

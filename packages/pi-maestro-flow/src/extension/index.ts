@@ -37,6 +37,7 @@ import {
   TodoToolParams,
 } from "./schemas.ts";
 import { altKey } from "../key-labels.ts";
+import { registerKeybindingsCommand } from "../keybindings-command.ts";
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
 import { executeMoa, type MoaParams } from "../tools/moa.ts";
@@ -875,6 +876,7 @@ When NOT to use:
   registerFff(pi);
   registerBashBg(pi);
   registerModelAvailability(pi);
+  registerKeybindingsCommand(pi);
 
   pi.registerShortcut(PLAN_TOGGLE_KEY, {
     description: `Toggle Plan/Act mode (${PLAN_TOGGLE_LABEL})`,
