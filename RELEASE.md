@@ -1,92 +1,72 @@
-# v0.8.0 - Teammate 1.0, Model Failover, Hook Installer, and Planning Pipeline
+# v0.9.0 - Proactive Compaction Threshold, Session Export, and Hook Context Rendering
 
 ## Overview
 
-This release upgrades the orchestration stack around `pi-maestro-teammate@1.0.0`, adds resilient model routing and a stricter planning pipeline, and expands the Pi extension with a native Maestro Hook installer and session knowledge review UI. It also consolidates task dispatch, failure handling, todo ordering, cockpit ownership, and tool contracts across the monorepo.
+This release centers on a reworked proactive compaction model: a dependency-free threshold derivation that keeps compaction starting around 90% of the context window regardless of window size, plus durable owner-typed trigger metadata so each hard compaction records exactly the facts its owner observed. It adds a session export module, a hook context renderer for startup/resume context sections, and a reworked API provider config resolver. It also enriches todo list output, hardens the teammate circuit breaker, and makes plan mode display-only for permission evaluation.
 
-The release publishes all three workspaces. `pi-maestro-teammate` moves from `0.6.0` to `1.0.0` with a versioned public API and a unified execution model. `pi-cockpit` moves to `0.2.0` because its teammate peer range crosses the 1.0 boundary. `pi-maestro-flow` moves to `0.8.0` and pins both updated sibling packages.
+The release publishes all three workspaces. `pi-maestro-teammate` moves from `1.0.0` to `1.1.0`, `pi-cockpit` moves from `0.2.0` to `0.3.0`, and `pi-maestro-flow` moves from `0.8.0` to `0.9.0` and pins both updated sibling packages. The external core engine `maestro-flow` pin is unchanged at `0.5.58` (verified aligned with upstream before release).
 
 ## Package Versions
 
 | Package | Previous | New | Install |
 |---------|----------|-----|---------|
-| `pi-maestro-teammate` | 0.6.0 | 1.0.0 | `npm i pi-maestro-teammate@1.0.0` |
-| `pi-cockpit` | 0.1.2 | 0.2.0 | `npm i pi-cockpit@0.2.0` |
-| `pi-maestro-flow` | 0.7.0 | 0.8.0 | `npm i pi-maestro-flow@0.8.0` |
+| `pi-maestro-teammate` | 1.0.0 | 1.1.0 | `npm i pi-maestro-teammate@1.1.0` |
+| `pi-cockpit` | 0.2.0 | 0.3.0 | `npm i pi-cockpit@0.3.0` |
+| `pi-maestro-flow` | 0.8.0 | 0.9.0 | `npm i pi-maestro-flow@0.9.0` |
 
-`pi-maestro-flow@0.8.0` depends on `pi-maestro-teammate@1.0.0`, `pi-cockpit@0.2.0`, and `maestro-flow@0.5.58`.
+`pi-maestro-flow@0.9.0` depends on `pi-maestro-teammate@1.1.0`, `pi-cockpit@0.3.0`, and `maestro-flow@0.5.58`.
 
 ## Detailed Changes
 
-### Teammate 1.0 execution model
+### Proactive compaction threshold (`packages/pi-maestro-flow/src/compaction/`)
 
-- Unified single-task and DAG dispatch behind the `teammate` tool, including dependency-aware output injection, structured results, foreground/background transitions, and nested-agent depth controls.
-- Hardened execution lifecycle behavior for retries, failures, timeouts, result publication, progress cursors, and control-center recovery.
-- Timed foreground runs now move to the background instead of failing when the interactive wait window expires.
-- Introduced a versioned `./v1/*` public API surface and removed the legacy prompt-template exports and bundled prompt catalog.
-- Reworked built-in agent roles and discovery, including dedicated analyst, explorer, planner, research, verifier, and workflow contracts.
+- Added `compaction-threshold.ts`, a pure, dependency-free derivation of the proactive compaction trigger from model limits and soft pressure settings. A `MIN_RESERVE_RATIO` (0.1) floor keeps compaction starting around 90% of the window even on large contexts, where a fixed absolute reserve would sit dangerously close to 100%.
+- Reworked `compaction-arbiter.ts` to carry durable, owner-typed trigger metadata (`mid-turn`, `output-limit`, `plan-handoff`). Each owner records only the facts it observed at the request site; native compaction carries no fabricated trigger.
+- Updated `auto-compaction.ts` and `maestro-compaction.ts` to consume the effective reserve derivation and surface the full threshold breakdown to UI and telemetry.
+- Expanded the compaction settings TUI (`tui/compaction-settings.ts`, +193) and `compaction-settings.ts` to render the threshold derivation, with substantial new coverage in `test/compaction.test.ts` (+347), `test/compaction-settings.test.ts`, and `test/compaction-tui.test.ts`.
 
-### Model routing and resilience
+### Session export (`packages/pi-maestro-flow/src/session/`)
 
-- Added per-task model routing with task-type mappings, explicit overrides, configurable thinking levels, and authenticated model catalog validation.
-- Added a model circuit breaker and failover routing, with a dedicated settings TUI and status projection.
-- Billing and credit-exhaustion failures now skip futile retries and advance directly to the next configured fallback model.
-- Improved retry classification, timeout handling, background failure reporting, and structured-output validation.
+- Added `session-export.ts` (+109) for exporting session content, wired through `extension/index.ts` (+52) and covered by `test/session-export.test.ts` (+134), now part of the `test:session` suite.
 
-### Planning pipeline
+### Hook context rendering (`packages/pi-maestro-flow/src/hooks/`)
 
-- Plan mode now delegates every final implementation Plan to the built-in read-only `planner`, which owns a required execution-ready Markdown contract.
-- The planner may use bounded read-only analyst, research, and explorer delegates while implementation-capable roles remain approval-gated.
-- Added evidence, requirement mapping, executable task DAG, exact validation, risk/recovery, and open-decision requirements to generated Plans.
-- Improved direct Plan mode entry, mode-state synchronization, footer projection, and Plan/Todo lifecycle integration.
+- Added `hook-context-renderer.ts` (+86) to render startup/resume context sections (source, labeled counts), wired through `hooks/pi-adapter.ts`.
+- Tracked `.pi/hooks.json` declaring the SessionStart hook chain (session-context, spec-injector).
 
-### Maestro Hook review and installer
+### API provider config rework (`packages/pi-maestro-flow/src/providers/`)
 
-- Added a dedicated `/hooks install` TUI with `none`, `minimal`, `standard`, and `full` presets plus per-Hook selection and filtering.
-- Installer writes are atomic and lock-protected, preserve unrelated project Hooks, remove legacy Maestro entries, and never grant trust automatically.
-- Missing Hook configuration now opens the installer from `/hooks`; installed configurations return to hash-based review and trust.
-- Hook permission-shaped output is explicitly advisory. Pi's permission controller remains the only authorization boundary, and non-interactive installation fails closed.
+- Reworked `api-provider-config.ts` (+109) provider resolution logic, with expanded coverage in `test/api-provider-config.test.ts`.
 
-### Knowledge, session, and task workflows
+### Todo list enrichment
 
-- Added a session knowledge review center and native knowledge/session view models.
-- Unified root and teammate todo ordering and improved active-work prioritization, partial updates, overlays, and session projection.
-- Added canonical run-control and tool schema alignment across built-in tools.
-- Reworked delegate CLI conversion to emit native teammate calls and synchronized the Pi skills and agent catalog.
+- `feat(todo)`: list output now surfaces goal binding, blocking relationships, and skill tags for clearer task context.
 
-### Cockpit and interactive UI
+### Teammate circuit breaker fix (`packages/pi-maestro-teammate/`)
 
-- `pi-cockpit@0.2.0` now consumes `pi-maestro-teammate@1.0.0` and coordinates primary footer ownership with Plan mode and the flow extension.
-- Simplified background-run summaries and added compact token breakdowns, stable progress rendering, and integration contract coverage.
-- Refined provider/model configuration interactions and made Ask review submission explicit.
-- Improved cross-platform key normalization and narrow-terminal rendering across interactive overlays.
+- `fix(teammate)`: prevented the `HALF_OPEN` circuit breaker from getting permanently stuck and fixed acquisition leaks.
+- Updated `extension/index.ts` and `tui/render.ts`; added `test/proxy-ipc-binding.test.ts` (+67) and expanded performance/render coverage.
 
-### Documentation and maintenance
+### Plan mode permission fix
 
-- Updated package guides, tool schema references, bundled skills, project agents, and conversion resources for the teammate 1.0 architecture.
-- Added design documentation for multicriteria soft compaction and refreshed runtime dependencies.
-- Updated `@modelcontextprotocol/sdk` to `1.30.0` and `maestro-flow` to `0.5.58`.
+- `fix(flow)`: plan mode is now display-only for permission evaluation, so read-only planning no longer trips permission gates.
+
+### pi-cockpit
+
+- Extended `agents-store.ts` (+38) with expanded coverage in `tests/agents-store.test.ts` (+81).
 
 ## Statistics
 
-- 31 commits after `v0.7.0`, plus the Hook installer and planning-contract completion included in the release commit.
-- More than 280 tracked files changed across the three workspaces, runtime skills, agents, tests, and documentation.
-- More than 33,000 lines added and 5,000 lines removed since `v0.7.0` before generated release metadata.
+- Commits since v0.8.0: 5
+- Files changed: 38 (+2688 / −258)
+  - `pi-maestro-flow`: 25 files (+1940 / −172)
+  - `pi-maestro-teammate`: 8 files (+294 / −76)
+  - `pi-cockpit`: 2 files (+111 / −8)
 
-## Installation and Upgrade
+## Installation / Upgrade
 
 ```bash
-# Fresh install or upgrade
-npm i pi-maestro-flow@0.8.0
-
-# Install the packages independently
-npm i pi-maestro-teammate@1.0.0
-npm i pi-cockpit@0.2.0
+npm i pi-maestro-flow@0.9.0
 ```
 
-Upgrade notes:
-
-- Consumers of `pi-maestro-teammate` should use the versioned `pi-maestro-teammate/v1/*` exports. The deprecated prompt-template API and prompt catalog are no longer published.
-- `pi-cockpit@0.2.0` expects `pi-maestro-teammate@^1.0.0` when teammate integration is enabled.
-- Use `/hooks install` to configure Maestro project Hooks. Installation changes the config hash and requires an explicit review and trust step.
-- Existing `pi-maestro-flow` installations receive `pi-maestro-teammate@1.0.0`, `pi-cockpit@0.2.0`, and `maestro-flow@0.5.58` through exact dependencies.
+Upgrade note: `pi-maestro-flow@0.9.0` requires the updated sibling packages `pi-maestro-teammate@1.1.0` and `pi-cockpit@0.3.0`; both are published and pinned by the main package. The `maestro-flow` engine pin is unchanged at `0.5.58`.

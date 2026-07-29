@@ -1,6 +1,6 @@
 {
   "name": "pi-cockpit",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Agent cockpit for Pi: a list-mode status stack (live teammates + todo plan) pinned above the editor, plus a Starship-style footer. Renders only via public extension APIs (setWidget/setFooter).",
   "type": "module",
   "keywords": [

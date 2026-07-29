@@ -155,6 +155,21 @@ export declare function rejectChildProxyRequest(pendingRequests: ChildProxyPendi
 /** @internal Exported for lifecycle regression tests. */
 export declare function rejectAllChildProxyRequests(pendingRequests: ChildProxyPendingRequests, error: Error): void;
 /** @internal Exported for lifecycle regression tests. */
+export type IpcSender = (message: Record<string, unknown>, callback: (error: Error | null) => void) => boolean;
+/**
+ * Builds the IPC sender the teammate proxy uses to talk to its parent.
+ *
+ * Node's IPC `send` reads `this.connected` internally, so detaching it from its
+ * owner (`const send = proc.send`) leaves `this` undefined in module scope and
+ * throws "Cannot read properties of undefined (reading 'connected')" on the
+ * first call — which broke every proxied teammate tool in a nested child.
+ * Binding the owner keeps the proxied call working. Returns undefined when no
+ * live IPC channel exists.
+ */
+export declare function createIpcSender(proc?: {
+    connected?: boolean;
+    send?: (...args: any[]) => boolean;
+}): IpcSender | undefined;
 export declare function createChildProxyRequest(pendingRequests: ChildProxyPendingRequests, requestId: string, message: Record<string, unknown>, send: (message: Record<string, unknown>, callback: (error: Error | null) => void) => boolean, timeoutMs?: number, signal?: AbortSignal): Promise<unknown>;
 export default function registerTeammateExtension(pi: ExtensionAPI, runtimeOptions?: TeammateRuntimeOptions): void;
 type AgentListView = "active" | "named" | "all";
