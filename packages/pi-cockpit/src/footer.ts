@@ -207,7 +207,9 @@ export function renderFooter(p: FooterParts): string[] {
 		(status) => isVisibleExtensionStatus(status, p.thinking),
 	);
 	const controlStatuses = visibleStatuses.filter(
-		(status) => status.key === "approval-mode" || status.key === "maestro-auto-compact-mode",
+		(status) => status.key === "mode"
+			|| status.key === "approval-mode"
+			|| status.key === "maestro-auto-compact-mode",
 	);
 
 	// line 1: prioritized identity and control segments

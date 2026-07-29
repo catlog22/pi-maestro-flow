@@ -260,7 +260,7 @@ test("ambient MCP and auto compact statuses stay out of the footer", () => {
 	assert.match(line, /PLAN/);
 });
 
-test("extension statuses render on a dedicated line and duplicate thinking is omitted", () => {
+test("Plan mode leads line one while duplicate thinking is omitted", () => {
 	const lines = renderFooter(parts({
 		thinking: "high",
 		extensionStatuses: [
@@ -268,10 +268,9 @@ test("extension statuses render on a dedicated line and duplicate thinking is om
 			{ key: "mode", text: "PLAN" },
 		],
 	}));
-	assert.equal(lines.length, 2);
-	assert.match(lines[1], /^PLAN/);
-	assert.ok(lines[1].includes("PLAN"));
-	assert.ok(!lines[1].includes("high"));
+	assert.equal(lines.length, 1);
+	assert.match(lines[0], /^PLAN · ⚡ stream-70b/);
+	assert.equal(lines[0].match(/high/g)?.length, 1);
 });
 
 test("active bash_bg status renders left-aligned on line two", () => {
@@ -294,16 +293,16 @@ test("bash_bg status is clipped to the footer width", () => {
 	assert.match(lines[1], /…$/);
 });
 
-test("workflow status renders before generic extension statuses", () => {
+test("workflow status renders after the mode-bearing first line", () => {
 	const lines = renderFooter(parts({
 		bashBgStatus: "BG · 1 running",
 		workflowStatus: "⚑ session · running · 003/execute",
 		extensionStatuses: [{ key: "mode", text: "PLAN" }],
 	}));
-	assert.equal(lines.length, 4);
+	assert.equal(lines.length, 3);
+	assert.match(lines[0], /^PLAN/);
 	assert.match(lines[1], /^BG/);
 	assert.match(lines[2], /^⚑ session/);
-	assert.match(lines[3], /PLAN/);
 });
 
 test("fmtTokens formats k and m", () => {
