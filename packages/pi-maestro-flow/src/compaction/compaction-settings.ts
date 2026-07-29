@@ -82,10 +82,12 @@ export interface CompactionConfigPatch {
   enabled?: boolean;
   reserveTokens?: number;
   keepRecentTokens?: number;
+  /** Compaction summary model as `provider/id`; undefined follows the active session model. */
+  model?: string;
   soft?: SoftCompactionConfigPatch;
 }
 
-export const COMPACTION_FIELDS = ["enabled", "reserveTokens", "keepRecentTokens"] as const;
+export const COMPACTION_FIELDS = ["enabled", "reserveTokens", "keepRecentTokens", "model"] as const;
 
 export type CompactionSettingSource = "project" | "user" | "default";
 
@@ -93,6 +95,8 @@ export interface EffectiveCompactionSettings {
   enabled: boolean;
   reserveTokens: number;
   keepRecentTokens: number;
+  /** Configured compaction model (`provider/id`); undefined follows the active session model. */
+  model?: string;
   soft: SoftCompactionSettings;
   source: Record<keyof CompactionConfigPatch, CompactionSettingSource>;
 }
@@ -135,6 +139,7 @@ function readRawCompaction(path: string): CompactionConfigPatch {
     if (rt !== undefined) patch.reserveTokens = rt;
     const kr = positiveNumber(hard?.keepRecentTokens) ?? positiveNumber(c.keepRecentTokens);
     if (kr !== undefined) patch.keepRecentTokens = kr;
+    if (typeof c.model === "string" && c.model.trim().length > 0) patch.model = c.model.trim();
     const soft = readRawSoft(c.soft);
     if (soft) patch.soft = soft;
     return patch;
@@ -210,18 +215,21 @@ export function resolveEffectiveCompactionSettings(
     enabled: "default",
     reserveTokens: "default",
     keepRecentTokens: "default",
+    model: "default",
     soft: "default",
   };
 
   let enabled = true;
   let reserveTokens = DEFAULT_RESERVE_TOKENS;
   let keepRecentTokens = DEFAULT_KEEP_RECENT_TOKENS;
+  let model: string | undefined;
   const soft: SoftCompactionSettings = createDefaultSoftCompaction();
 
   for (const [patch, src] of [[userPatch, "user"], [projectPatch, "project"]] as const) {
     if (patch.enabled !== undefined) { enabled = patch.enabled; source.enabled = src; }
     if (patch.reserveTokens !== undefined) { reserveTokens = patch.reserveTokens; source.reserveTokens = src; }
     if (patch.keepRecentTokens !== undefined) { keepRecentTokens = patch.keepRecentTokens; source.keepRecentTokens = src; }
+    if (patch.model !== undefined) { model = patch.model; source.model = src; }
     if (patch.soft !== undefined) {
       if (patch.soft.enabled !== undefined) soft.enabled = patch.soft.enabled;
       if (patch.soft.nudgeRatio !== undefined) soft.nudgeRatio = patch.soft.nudgeRatio;
@@ -239,7 +247,7 @@ export function resolveEffectiveCompactionSettings(
     }
   }
 
-  return { enabled, reserveTokens, keepRecentTokens, soft, source };
+  return { enabled, reserveTokens, keepRecentTokens, model, soft, source };
 }
 
 export function validateCompactionPatch(
@@ -249,6 +257,10 @@ export function validateCompactionPatch(
 ): CompactionValidation {
   const errors: string[] = [];
   const warnings: string[] = [];
+
+  if (patch.model !== undefined && (typeof patch.model !== "string" || !patch.model.includes("/"))) {
+    errors.push(`model must be a "provider/id" reference`);
+  }
 
   for (const field of ["reserveTokens", "keepRecentTokens"] as const) {
     const value = patch[field];
@@ -347,6 +359,9 @@ export function validateEffectiveCompactionSettings(settings: EffectiveCompactio
   if (!Number.isSafeInteger(settings.keepRecentTokens) || settings.keepRecentTokens <= 0) {
     errors.push(`keepRecentTokens must be a positive safe integer`);
   }
+  if (settings.model !== undefined && (typeof settings.model !== "string" || !settings.model.includes("/"))) {
+    errors.push(`model must be a "provider/id" reference`);
+  }
   return { errors, warnings: [] };
 }
 
@@ -403,6 +418,7 @@ async function patchSettingsFile(path: string, patch: CompactionConfigPatch): Pr
   const root = readJsonRoot(path);
   const compaction = normalizeCompactionRecord(isRecord(root.compaction) ? { ...root.compaction } : {});
   if (patch.enabled !== undefined) compaction.enabled = patch.enabled;
+  if (patch.model !== undefined) compaction.model = patch.model;
   if (patch.reserveTokens !== undefined || patch.keepRecentTokens !== undefined) {
     const hard = isRecord(compaction.hard) ? { ...compaction.hard } : {};
     if (patch.reserveTokens !== undefined) hard.reserveTokens = patch.reserveTokens;
@@ -444,6 +460,10 @@ async function replaceKnownFieldsInSettingsFile(path: string, values: Compaction
   const compaction = normalizeCompactionRecord(isRecord(root.compaction) ? { ...root.compaction } : {});
   if (values.enabled === undefined) delete compaction.enabled;
   else compaction.enabled = values.enabled;
+  if (values.model === undefined) delete compaction.model;
+  else compaction.model = values.model;
+  // Native compact routing was removed; clear any stale setting on save.
+  delete compaction.endpoint;
   const hard = isRecord(compaction.hard) ? { ...compaction.hard } : {};
   if (values.reserveTokens === undefined) delete hard.reserveTokens;
   else hard.reserveTokens = values.reserveTokens;

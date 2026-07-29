@@ -166,7 +166,8 @@ test("/maestro-compaction reloads exactly once only after a successful save", as
     await command.handler("", {
       cwd: join(root, "project"),
       hasUI: true,
-      model: { contextWindow: 300_000, maxTokens: 20_000 },
+      model: { contextWindow: 300_000, maxTokens: 20_000, provider: "maestro-openai", id: "gpt-5.6-sol", api: "openai-responses", baseUrl: "https://api.openai.com/v1" },
+      modelRegistry: { getAvailable: () => [] },
       async reload() { reloads++; },
       ui: {
         notify() {},
@@ -234,6 +235,42 @@ test("compaction TUI exposes max-output-capped hard pressure before unreachable 
   assert.match(rendered, /裁剪 200,000 \(80\.0%\) 不可达 · 硬压缩会先触发/);
 });
 
+test("compaction TUI selects a compaction model from the catalog and saves it", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  const overlay = createOverlay({
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+  for (let index = 0; index < 4; index++) overlay.handleInput("\x1b[B"); // -> compactModel
+  assert.match(overlay.render(80).join("\n"), /压缩模型 · 跟随会话模型/);
+  overlay.handleInput("\r"); // open picker
+  assert.match(overlay.render(80).join("\n"), /选择压缩模型/);
+  assert.match(overlay.render(80).join("\n"), /跟随当前会话模型（当前 maestro-openai\/gpt-5\.6-sol）/);
+  overlay.handleInput("\x1b[B"); // inherit -> first catalog model
+  overlay.handleInput("\x1b[B"); // -> second catalog model (qwen)
+  overlay.handleInput("\r");
+  assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max-preview · 项目/);
+  overlay.handleInput("\x13");
+  await flushAsync();
+  const projectSave = saves.find((save) => save.scope === "project");
+  assert.equal(projectSave?.values.model, "maestro-qwen/qwen3.8-max-preview");
+});
+
+test("compaction TUI model picker inherit entry clears the configured model", () => {
+  const overlay = createOverlay({
+    snapshot: {
+      scopes: { user: {}, project: { model: "maestro-qwen/qwen3.8-max-preview" } },
+      effective: {} as never,
+    },
+  });
+  for (let index = 0; index < 4; index++) overlay.handleInput("\x1b[B");
+  assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max-preview/);
+  overlay.handleInput("\r"); // cursor starts on the matching entry
+  overlay.handleInput("\x1b[A");
+  overlay.handleInput("\x1b[A"); // -> inherit entry
+  overlay.handleInput("\r");
+  assert.match(overlay.render(80).join("\n"), /压缩模型 · 跟随会话模型/);
+});
+
 function createOverlay(overrides: Partial<ConstructorParameters<typeof CompactionSettingsOverlay>[0]> = {}) {
   return new CompactionSettingsOverlay({
     projectRoot: "D:\\repo",
@@ -255,6 +292,12 @@ function createOverlay(overrides: Partial<ConstructorParameters<typeof Compactio
     },
     contextWindow: 300_000,
     maxTokens: 16_000,
+    currentModel: { reference: "maestro-openai/gpt-5.6-sol" },
+    availableModels: [
+      { reference: "maestro-openai/gpt-5.6-sol" },
+      { reference: "maestro-qwen/qwen3.8-max-preview" },
+      { reference: "maestro-anthropic/claude-sonnet" },
+    ],
     theme,
     requestRender() {},
     done() {},

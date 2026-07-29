@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import type { Api, Model } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
 import {
   convertToLlm,
@@ -26,6 +27,7 @@ import type {
   CompactionOwner,
   CompactionTrigger,
 } from "./compaction-arbiter.ts";
+import { readEffectiveCompactionSettings } from "./compaction-settings.ts";
 
 const DETAILS_KIND = "maestro-session-checkpoint";
 const DETAILS_VERSION = 3;
@@ -558,8 +560,10 @@ async function completeWithCurrentModel(
   event: SessionBeforeCompactEvent,
   ctx: ExtensionContext,
 ): Promise<SummaryResponse> {
-  const model = ctx.model;
-  if (!model) throw new Error("No model selected for Maestro compaction");
+  const currentModel = ctx.model;
+  if (!currentModel) throw new Error("No model selected for Maestro compaction");
+  const settings = readEffectiveCompactionSettings(ctx.cwd);
+  const model = await resolveConfiguredCompactionModel(settings.model, currentModel, ctx);
   const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   if (!auth.ok || !auth.apiKey) throw new Error("Compaction model authentication is unavailable");
   const maxTokens = Math.min(
@@ -583,6 +587,33 @@ async function completeWithCurrentModel(
       signal: event.signal,
     }),
   );
+}
+
+/**
+ * Resolves the configured compaction model reference (`provider/id`) against
+ * the model registry. Any resolution or authentication failure degrades to the
+ * active session model so a stale configuration never blocks compaction.
+ */
+export async function resolveConfiguredCompactionModel(
+  reference: string | undefined,
+  currentModel: Model<Api>,
+  ctx: ExtensionContext,
+): Promise<Model<Api>> {
+  if (!reference) return currentModel;
+  const separator = reference.indexOf("/");
+  const provider = separator > 0 ? reference.slice(0, separator) : "";
+  const modelId = separator > 0 ? reference.slice(separator + 1) : "";
+  const model = provider && modelId ? ctx.modelRegistry.find(provider, modelId) : undefined;
+  if (!model) {
+    ctx.ui.notify(`Configured compaction model "${reference}" is not available; using the current session model.`, "warning");
+    return currentModel;
+  }
+  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if (!auth.ok || !auth.apiKey) {
+    ctx.ui.notify(`Configured compaction model "${reference}" has no usable authentication; using the current session model.`, "warning");
+    return currentModel;
+  }
+  return model;
 }
 
 function renderKnowhowCopy(event: SessionCompactEvent, details: MaestroCompactionDetails): string {

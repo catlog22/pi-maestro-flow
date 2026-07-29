@@ -13,6 +13,7 @@ import {
   mergeCompactionReferences,
   MAESTRO_COMPACTION_SYSTEM_PROMPT,
   persistMaestroCompactionKnowhow,
+  resolveConfiguredCompactionModel,
   runWithCompactionStatus,
   type MaestroCompactionDetails,
 } from "../src/compaction/maestro-compaction.ts";
@@ -2742,4 +2743,43 @@ test("a prune survives a tool result leaving and re-entering the window", async 
   // content — not a freshly recomputed one, and certainly not the original text.
   const back = await guard.evaluate(branchA, ctx);
   assert.equal(JSON.stringify(back?.[1]), stableReplacement);
+});
+
+// ---------------------------------------------------------------------------
+// Configured text-summary model resolution
+// ---------------------------------------------------------------------------
+
+test("resolveConfiguredCompactionModel degrades to the session model on stale or unauthenticated references", async () => {
+  const currentModel = { id: "current-model", provider: "maestro-openai", api: "openai-responses" };
+  const qwen = { id: "qwen3", provider: "maestro-qwen", api: "openai-responses" };
+  const notifications: string[] = [];
+  let qwenAuthenticated = false;
+  const ctx = {
+    ui: { notify(message: string) { notifications.push(message); } },
+    modelRegistry: {
+      find(provider: string, id: string) {
+        return provider === qwen.provider && id === qwen.id ? qwen : undefined;
+      },
+      async getApiKeyAndHeaders(model: { id: string }) {
+        return model.id === qwen.id && !qwenAuthenticated
+          ? { ok: false, error: "expired" }
+          : { ok: true, apiKey: "sk-test" };
+      },
+    },
+  } as never;
+
+  assert.equal(await resolveConfiguredCompactionModel(undefined, currentModel as never, ctx), currentModel);
+  assert.equal(notifications.length, 0);
+
+  assert.equal(await resolveConfiguredCompactionModel("maestro-qwen/qwen3", currentModel as never, ctx), currentModel);
+  assert.match(notifications.at(-1) ?? "", /no usable authentication/);
+
+  assert.equal(await resolveConfiguredCompactionModel("missing/model", currentModel as never, ctx), currentModel);
+  assert.match(notifications.at(-1) ?? "", /not available/);
+
+  assert.equal(await resolveConfiguredCompactionModel("no-slash", currentModel as never, ctx), currentModel);
+  assert.match(notifications.at(-1) ?? "", /not available/);
+
+  qwenAuthenticated = true;
+  assert.equal(await resolveConfiguredCompactionModel("maestro-qwen/qwen3", currentModel as never, ctx), qwen);
 });

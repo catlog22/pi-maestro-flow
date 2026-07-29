@@ -27,6 +27,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { FlowToolResult } from "../tools/tool-result.ts";
 import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -98,6 +99,15 @@ import { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
 import { deriveWorkflowViewModel, workflowStatusLabel, type WorkflowSnapshotLike, type WorkflowViewModel } from "../session/view-model.ts";
 import { createRunEventComponent, type RunEventDetails } from "../session/run-event.ts";
+import {
+  exportSessionHistory,
+  formatBytes,
+  formatSessionLocation,
+  probeSessionFile,
+  resolveExportTarget,
+  tryCopyToClipboard,
+  type SessionLocationInfo,
+} from "../session/session-export.ts";
 import {
   executeRunControl,
   isRunControlReadAction,
@@ -1324,6 +1334,48 @@ When NOT to use:
         `Context files (${contextFiles.length}): ${contextFiles.join(", ") || "(none)"}`,
       ].join("\n");
       ctx.ui.notify(summary, "info");
+    },
+  });
+
+  pi.registerCommand("export-session-info", {
+    description:
+      "Show the current session id and where its history (transcript) is stored, and copy it to the clipboard. Pass a destination path to also export a copy of the history file there.",
+    async handler(args, ctx) {
+      const manager = ctx.sessionManager;
+      const info: SessionLocationInfo = {
+        sessionId: manager.getSessionId(),
+        sessionName: manager.getSessionName(),
+        sessionFile: manager.getSessionFile(),
+        sessionDir: manager.getSessionDir(),
+      };
+      const destination = args.trim();
+      if (!destination) {
+        const status = info.sessionFile ? await probeSessionFile(info.sessionFile) : undefined;
+        const report = formatSessionLocation(info, status);
+        const copied = await tryCopyToClipboard(report, copyToClipboard);
+        const suffix = copied ? "\nCopied to clipboard." : "\n(Clipboard unavailable.)";
+        ctx.ui.notify(`${report}${suffix}`, "info");
+        return;
+      }
+      if (!info.sessionFile) {
+        ctx.ui.notify("No active session history file to export.", "warning");
+        return;
+      }
+      const status = await probeSessionFile(info.sessionFile);
+      if (!status.exists) {
+        ctx.ui.notify(`Session history file not found on disk:\n${info.sessionFile}`, "warning");
+        return;
+      }
+      try {
+        const target = await resolveExportTarget(destination, info.sessionFile, ctx.cwd);
+        const { written, bytes } = await exportSessionHistory(info.sessionFile, target);
+        ctx.ui.notify(
+          `${formatSessionLocation(info, status)}\nExported to : ${written} (${formatBytes(bytes)})`,
+          "info",
+        );
+      } catch (error) {
+        ctx.ui.notify(`Export failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+      }
     },
   });
 

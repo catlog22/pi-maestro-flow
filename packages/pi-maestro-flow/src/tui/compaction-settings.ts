@@ -32,7 +32,7 @@ import {
 
 type CompactionField = typeof COMPACTION_FIELDS[number];
 type EditableCompactionField = Exclude<CompactionField, "enabled">;
-type MenuItem = "threshold" | "enabled" | "keepRecentTokens" | "softEnabled";
+type MenuItem = "threshold" | "enabled" | "keepRecentTokens" | "softEnabled" | "compactModel";
 type SaveState = "clean" | "dirty" | "saving" | "failed";
 
 interface CompactionTheme {
@@ -44,6 +44,7 @@ interface ScopeDraft {
   enabled?: boolean;
   reserveTokens?: string;
   keepRecentTokens?: string;
+  model?: string;
   soft?: SoftCompactionConfigPatch;
 }
 
@@ -51,11 +52,20 @@ export interface CompactionSettingsResult {
   saved: boolean;
 }
 
+/** A selectable compaction model, projected from the model registry. */
+export interface CompactionModelOption {
+  reference: string;
+}
+
 export interface CompactionSettingsOverlayParams {
   projectRoot: string;
   snapshot: CompactionSettingsSnapshot;
   contextWindow?: number;
   maxTokens?: number;
+  /** Active session model; used when no explicit compaction model is configured. */
+  currentModel?: CompactionModelOption;
+  /** Models selectable as the compaction model (`provider/id` references). */
+  availableModels?: CompactionModelOption[];
   projectReadonlyReason?: string;
   theme: CompactionTheme;
   requestRender: () => void;
@@ -63,13 +73,14 @@ export interface CompactionSettingsOverlayParams {
   saveScope?: (scope: CompactionScope, values: CompactionConfigPatch) => Promise<void>;
 }
 
-const MENU_ITEMS: readonly MenuItem[] = ["threshold", "enabled", "keepRecentTokens", "softEnabled"];
+const MENU_ITEMS: readonly MenuItem[] = ["threshold", "enabled", "keepRecentTokens", "softEnabled", "compactModel"];
 
 const ITEM_LABELS: Record<MenuItem, string> = {
   threshold: "实际硬压缩阈值",
   enabled: "自动压缩",
   keepRecentTokens: "保留最近上下文",
   softEnabled: "软压缩开关",
+  compactModel: "压缩模型",
 };
 
 const ITEM_DETAILS: Record<MenuItem, string> = {
@@ -77,13 +88,19 @@ const ITEM_DETAILS: Record<MenuItem, string> = {
   enabled: "同时控制 Pi 原生自动压缩与 Maestro 执行中压缩。",
   keepRecentTokens: "清理旧工具结果时，优先保留最近的上下文。",
   softEnabled: "开启后在硬压缩前裁剪陈旧工具结果；若硬阈值更早，界面会标记软阶段不可达。",
+  compactModel: "用于生成文本压缩摘要的模型；默认跟随当前会话模型，解析失败运行时自动回退。",
 };
+
+const INHERIT_MODEL_LABEL = "跟随当前会话模型";
+const MODEL_PICKER_MAX_VISIBLE = 10;
 
 export class CompactionSettingsOverlay implements Component, Focusable {
   focused = false;
   private scope: CompactionScope;
   private selected = 0;
   private editing = false;
+  private pickingModel = false;
+  private modelCursor = 0;
   private editValue = "";
   private saveState: SaveState = "clean";
   private notice = "";
@@ -109,6 +126,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   render(width: number): string[] {
     const safeWidth = Math.max(1, Math.min(width, 140));
     if (safeWidth < 20) return [this.renderTiny(safeWidth)];
+    if (this.pickingModel) return this.renderModelPicker(safeWidth);
     if (this.editing) return this.renderEditor(safeWidth);
     const inner = safeWidth - 2;
     const rows = [
@@ -143,6 +161,10 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   handleInput(data: string): void {
     if (this.saveState === "saving") return;
+    if (this.pickingModel) {
+      this.handleModelPickerInput(data);
+      return;
+    }
     if (this.editing) {
       this.handleEditInput(data);
       return;
@@ -187,18 +209,22 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       this.markDirty();
       return;
     }
-    if ((matchesKey(data, Key.space) || data === " ") && (this.selectedItem() === "enabled" || this.selectedItem() === "softEnabled")) {
+    if ((matchesKey(data, Key.space) || data === " ") && this.isToggleItem(this.selectedItem())) {
       if (!this.canEdit()) return;
-      this.toggleEnabledItem(this.selectedItem());
+      this.toggleSelectedItem(this.selectedItem());
       this.markDirty();
       return;
     }
     if (matchesKey(data, Key.enter) || data === "\r") {
       if (!this.canEdit()) return;
       const item = this.selectedItem();
-      if (item === "enabled" || item === "softEnabled") {
-        this.toggleEnabledItem(item);
+      if (this.isToggleItem(item)) {
+        this.toggleSelectedItem(item);
         this.markDirty();
+        return;
+      }
+      if (item === "compactModel") {
+        this.openModelPicker();
         return;
       }
       this.editValue = this.editorValue(item);
@@ -399,10 +425,44 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     return validateCompactionPatch(effective, this.params.contextWindow, this.params.maxTokens);
   }
 
+  /**
+   * Model option the summary request would use: the configured reference when
+   * resolvable in the available catalog, otherwise the active session model.
+   * `stale` marks a configured reference the catalog cannot resolve.
+   */
+  private effectiveModelOption(): { option?: CompactionModelOption; stale: boolean } {
+    const effective = this.effective();
+    if (effective.model) {
+      const match = (this.params.availableModels ?? []).find((option) => option.reference === effective.model);
+      if (match) return { option: match, stale: false };
+      return { option: this.params.currentModel, stale: true };
+    }
+    return { option: this.params.currentModel, stale: false };
+  }
+
+  private compactModelDetailRows(width: number): string[] {
+    const effective = this.effective();
+    const rows: string[] = [];
+    const { option, stale } = this.effectiveModelOption();
+    if (effective.model) {
+      rows.push(fitLine(`配置模型 · ${effective.model} · 来源${sourceLabel(effective.source.model)}`, width));
+      if (stale) {
+        rows.push(this.params.theme.fg("warning", fitLine(
+          `△ 配置模型不在可用列表中，运行时回退${option ? ` ${option.reference}` : "当前会话模型"}`,
+          width,
+        )));
+      }
+    } else {
+      rows.push(fitLine(`配置模型 · 未配置，跟随当前会话模型${option ? ` ${option.reference}` : ""}`, width));
+    }
+    return rows;
+  }
+
   private itemValue(item: MenuItem): string {
     const effective = this.effective();
     if (item === "enabled") return effective.enabled ? "已开启" : "已关闭";
     if (item === "softEnabled") return effective.soft.enabled ? "已开启" : "已关闭";
+    if (item === "compactModel") return effective.model ?? "跟随会话模型";
     if (item === "threshold") {
       const model = deriveCompactionThreshold({
         reserveTokens: effective.reserveTokens,
@@ -435,6 +495,10 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   private detailRows(width: number, safeWidth: number): string[] {
     const item = this.selectedItem();
     const rows = [fitLine(ITEM_DETAILS[item], width)];
+    if (item === "compactModel") {
+      rows.push(...this.compactModelDetailRows(width));
+      return rows;
+    }
     if (item !== "threshold") return rows;
     const effective = this.effective();
     const model = deriveCompactionThreshold({
@@ -503,10 +567,14 @@ export class CompactionSettingsOverlay implements Component, Focusable {
   private selectedConfigField(): EditableCompactionField | undefined {
     const item = this.selectedItem();
     if (item === "enabled" || item === "softEnabled") return undefined;
-    return item === "threshold" ? "reserveTokens" : "keepRecentTokens";
+    return configFieldForItem(item) as EditableCompactionField;
   }
 
-  private toggleEnabledItem(item: MenuItem): void {
+  private isToggleItem(item: MenuItem): boolean {
+    return item === "enabled" || item === "softEnabled";
+  }
+
+  private toggleSelectedItem(item: MenuItem): void {
     if (item === "softEnabled") {
       const current = this.drafts[this.scope].soft ?? {};
       this.drafts[this.scope].soft = { ...current, enabled: !this.effective().soft.enabled };
@@ -515,24 +583,108 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     }
   }
 
+  private openModelPicker(): void {
+    const effectiveModel = this.effective().model;
+    const options = this.modelPickerOptions();
+    const index = options.findIndex((option) => option.reference === effectiveModel);
+    this.modelCursor = index >= 0 ? index : 0;
+    this.pickingModel = true;
+    this.notice = "";
+    this.requestRender();
+  }
+
+  /** First entry inherits the session model (undefined reference). */
+  private modelPickerOptions(): CompactionModelOption[] {
+    return [
+      { reference: "" },
+      ...(this.params.availableModels ?? []),
+    ];
+  }
+
+  private renderModelPicker(width: number): string[] {
+    const inner = width - 2;
+    const options = this.modelPickerOptions();
+    const effectiveModel = this.effective().model;
+    const start = visibleStart(this.modelCursor, options.length, MODEL_PICKER_MAX_VISIBLE);
+    const visible = options.slice(start, start + MODEL_PICKER_MAX_VISIBLE);
+    const rows = [
+      fitLine(`${this.params.theme.bold("选择压缩模型")} · ${scopeLabel(this.scope)}`, inner),
+      rule(inner),
+      ...visible.map((option, index) => {
+        const absolute = start + index;
+        const marker = absolute === this.modelCursor ? this.params.theme.fg("accent", "›") : " ";
+        const current = absolute === 0
+          ? !effectiveModel ? this.params.theme.fg("success", "✓") : " "
+          : option.reference === effectiveModel ? this.params.theme.fg("success", "✓") : " ";
+        const label = absolute === 0
+          ? `${INHERIT_MODEL_LABEL}${this.params.currentModel ? `（当前 ${this.params.currentModel.reference}）` : ""}`
+          : option.reference;
+        const boldLabel = absolute === this.modelCursor ? this.params.theme.bold(label) : label;
+        return fitLine(`${marker} ${current} ${boldLabel}`, inner);
+      }),
+    ];
+    if (options.length > MODEL_PICKER_MAX_VISIBLE) {
+      rows.push(this.params.theme.fg("dim", fitLine(`… ${options.length} 个模型 · ${start + 1}-${Math.min(start + MODEL_PICKER_MAX_VISIBLE, options.length)}`, inner)));
+    }
+    rows.push(rule(inner));
+    if (this.notice) rows.push(this.styledNotice(this.notice, inner));
+    rows.push(inner < 30
+      ? fitLine("Esc返回 Enter选择", inner)
+      : fitSegments(inner, ["Esc 返回", "Enter 选择", "↑↓ 移动"]));
+    return frame(rows, width, this.params.theme);
+  }
+
+  private handleModelPickerInput(data: string): void {
+    const options = this.modelPickerOptions();
+    if (matchesKey(data, Key.escape)) {
+      this.pickingModel = false;
+      this.notice = "";
+      this.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.up)) {
+      this.modelCursor = (this.modelCursor - 1 + options.length) % options.length;
+      this.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.down)) {
+      this.modelCursor = (this.modelCursor + 1) % options.length;
+      this.requestRender();
+      return;
+    }
+    if (matchesKey(data, Key.enter) || data === "\r") {
+      if (!this.canEdit()) return;
+      const option = options[this.modelCursor];
+      if (option && option.reference) {
+        this.drafts[this.scope].model = option.reference;
+      } else {
+        delete this.drafts[this.scope].model;
+      }
+      this.pickingModel = false;
+      this.markDirty();
+      return;
+    }
+  }
+
   private menuFooterSegments(): string[] {
     const item = this.selectedItem();
     return [
       "Esc 关闭",
       ...(this.isDirty() ? ["Ctrl+S 保存"] : []),
-      `Enter ${item === "enabled" || item === "softEnabled" ? "切换" : "修改"}`,
+      `Enter ${this.isToggleItem(item) ? "切换" : item === "compactModel" ? "选择" : "修改"}`,
       "↑↓ 选择",
       "Tab 切换范围",
-      ...(item === "enabled" || item === "softEnabled" ? ["Space 切换"] : []),
+      ...(this.isToggleItem(item) ? ["Space 切换"] : []),
       "U 恢复继承",
     ];
   }
 
   private menuFooter(width: number): string {
     if (width < 30) {
+      const item = this.selectedItem();
       const footer = this.isDirty()
         ? "Esc关闭 Ctrl+S保存"
-        : `Esc关闭 Enter${this.selectedItem() === "enabled" || this.selectedItem() === "softEnabled" ? "切换" : "修改"}`;
+        : `Esc关闭 Enter${this.isToggleItem(item) ? "切换" : item === "compactModel" ? "选择" : "修改"}`;
       return fitLine(footer, width);
     }
     return fitSegments(width, this.menuFooterSegments());
@@ -576,12 +728,19 @@ export async function showCompactionSettingsOverlay(
 ): Promise<CompactionSettingsResult> {
   const snapshot = readCompactionSettings(ctx.cwd);
   const projectReadonlyReason = await projectWriteRestriction(ctx.cwd);
+  const toOption = (model: { provider: string; id: string }): CompactionModelOption => ({
+    reference: `${model.provider}/${model.id}`,
+  });
+  const availableModels = ctx.modelRegistry.getAvailable().map(toOption);
+  const currentModel = ctx.model ? toOption(ctx.model) : undefined;
   return ctx.ui.custom<CompactionSettingsResult>((tui, theme, _keybindings, done) =>
     new CompactionSettingsOverlay({
       projectRoot: ctx.cwd,
       snapshot,
       contextWindow: ctx.model?.contextWindow,
       maxTokens: ctx.model?.maxTokens,
+      currentModel,
+      availableModels,
       projectReadonlyReason,
       theme,
       requestRender: () => tui.requestRender(),
@@ -607,6 +766,7 @@ function toDraft(patch: CompactionConfigPatch): ScopeDraft {
     ...(patch.enabled !== undefined ? { enabled: patch.enabled } : {}),
     ...(patch.reserveTokens !== undefined ? { reserveTokens: String(patch.reserveTokens) } : {}),
     ...(patch.keepRecentTokens !== undefined ? { keepRecentTokens: String(patch.keepRecentTokens) } : {}),
+    ...(patch.model !== undefined ? { model: patch.model } : {}),
     ...(patch.soft !== undefined ? { soft: { ...patch.soft } } : {}),
   };
 }
@@ -616,6 +776,7 @@ function draftToPatch(draft: ScopeDraft): CompactionConfigPatch {
     ...(draft.enabled !== undefined ? { enabled: draft.enabled } : {}),
     ...(draft.reserveTokens !== undefined ? { reserveTokens: Number(draft.reserveTokens) } : {}),
     ...(draft.keepRecentTokens !== undefined ? { keepRecentTokens: Number(draft.keepRecentTokens) } : {}),
+    ...(draft.model !== undefined ? { model: draft.model } : {}),
     ...(draft.soft !== undefined ? { soft: { ...draft.soft } } : {}),
   };
 }
@@ -663,11 +824,19 @@ function shortLabel(item: MenuItem): string {
   if (item === "threshold") return "阈值";
   if (item === "enabled") return "自动";
   if (item === "softEnabled") return "软压缩";
+  if (item === "compactModel") return "模型";
   return "保留";
 }
 
+function visibleStart(selected: number, length: number, maxVisible: number): number {
+  if (length <= maxVisible) return 0;
+  return Math.max(0, Math.min(Math.max(0, length - maxVisible), selected - Math.floor(maxVisible / 2)));
+}
+
 function configFieldForItem(item: Exclude<MenuItem, "softEnabled">): CompactionField {
-  return item === "threshold" ? "reserveTokens" : item;
+  if (item === "threshold") return "reserveTokens";
+  if (item === "compactModel") return "model";
+  return item;
 }
 
 function sourceLabel(source: CompactionScope | "default"): string {

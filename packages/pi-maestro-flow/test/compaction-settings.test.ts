@@ -40,11 +40,13 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
       enabled: true,
       reserveTokens: DEFAULT_RESERVE_TOKENS,
       keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
+      model: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
       source: {
         enabled: "default",
         reserveTokens: "default",
         keepRecentTokens: "default",
+        model: "default",
         soft: "default",
       },
     });
@@ -64,11 +66,13 @@ test("compaction settings resolve paths, precedence, and field-level sources", a
       enabled: true,
       reserveTokens: 24_000,
       keepRecentTokens: 12_000,
+      model: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
       source: {
         enabled: "project",
         reserveTokens: "user",
         keepRecentTokens: "project",
+        model: "default",
         soft: "default",
       },
     });
@@ -94,11 +98,13 @@ test("compaction settings ignore malformed files and invalid optional fields", a
       enabled: true,
       reserveTokens: DEFAULT_RESERVE_TOKENS,
       keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
+      model: undefined,
       soft: { ...DEFAULT_SOFT_COMPACTION },
       source: {
         enabled: "default",
         reserveTokens: "default",
         keepRecentTokens: "default",
+        model: "default",
         soft: "default",
       },
     });
@@ -418,6 +424,67 @@ test("compaction validation rejects invalid velocity signal fields", () => {
     soft: { velocity: { enabled: true, epochsToCritical: 3, minFullness: 0.7 } },
   });
   assert.equal(valid.errors.length, 0);
+});
+
+test("compaction summary model layers across scopes with field-level sources", async () => {
+  const fixture = await createFixture();
+  try {
+    await writeSettings(fixture.agentDir, {
+      compaction: { model: "maestro-qwen/qwen3.8-max-preview" },
+    });
+
+    assert.deepEqual(readScopeCompaction("user", fixture.projectDir), {
+      model: "maestro-qwen/qwen3.8-max-preview",
+    });
+    const effective = readEffectiveCompactionSettings(fixture.projectDir);
+    assert.equal(effective.model, "maestro-qwen/qwen3.8-max-preview");
+    assert.equal(effective.source.model, "user");
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("compaction settings ignore malformed summary model values", async () => {
+  const fixture = await createFixture();
+  try {
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: { model: 42, endpoint: "compact" },
+    });
+    const effective = readEffectiveCompactionSettings(fixture.projectDir);
+    assert.equal(effective.model, undefined);
+    assert.equal(effective.source.model, "default");
+  } finally {
+    await fixture.dispose();
+  }
+});
+
+test("compaction validation covers summary model references", () => {
+  const invalid = validateCompactionPatch({ model: "no-provider-slash" });
+  assert.ok(invalid.errors.includes(`model must be a "provider/id" reference`));
+
+  const valid = validateCompactionPatch({ model: "maestro-openai/gpt-5.6-sol" });
+  assert.equal(valid.errors.length, 0);
+});
+
+test("saveCompactionScope persists the summary model and clears retired endpoint settings", async () => {
+  const fixture = await createFixture();
+  try {
+    const path = resolveProjectSettingsPath(fixture.projectDir);
+    await writeSettings(join(fixture.projectDir, ".pi"), {
+      compaction: { endpoint: "compact" },
+    });
+    await saveCompactionScope("project", fixture.projectDir, {
+      model: "maestro-qwen/qwen3.8-max-preview",
+    });
+    assert.deepEqual(await readJson(path), {
+      compaction: { model: "maestro-qwen/qwen3.8-max-preview" },
+    });
+
+    await saveCompactionScope("project", fixture.projectDir, {});
+    assert.deepEqual(await readJson(path), {});
+  } finally {
+    await fixture.dispose();
+  }
 });
 
 async function createFixture() {
