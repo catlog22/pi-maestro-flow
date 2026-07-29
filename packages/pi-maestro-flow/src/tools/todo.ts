@@ -785,9 +785,29 @@ function handleList(params: TodoParams, actor: TodoActorRef): FlowToolResult {
     return ok("No tasks found.", "list");
   }
 
+  // Pre-compute reverse dependency map: taskId -> list of task IDs it blocks
+  const blocksMap = new Map<string, string[]>();
+  for (const t of getVisibleTasks()) {
+    for (const dep of t.blockedBy) {
+      const existing = blocksMap.get(dep);
+      if (existing) existing.push(`#${t.id}`);
+      else blocksMap.set(dep, [`#${t.id}`]);
+    }
+  }
+
   const lines = filtered.map((t) => {
-    const depTag = t.blockedBy.length > 0 ? ` [blocked by: ${t.blockedBy.join(", ")}]` : "";
-    return `${statusIcon(t.status)} ${actorTag(t)} #${t.id} ${t.subject}${depTag}`;
+    const tags: string[] = [];
+    if (t.blockedBy.length > 0) tags.push(`blocked by: ${t.blockedBy.join(", ")}`);
+    const blocks = blocksMap.get(t.id);
+    if (blocks && blocks.length > 0) tags.push(`blocks: ${blocks.join(", ")}`);
+    if (t.goalId) {
+      const gate = getGoalById(t.goalId);
+      const goalLabel = t.goalId.length > 8 ? t.goalId.slice(0, 8) : t.goalId;
+      tags.push(gate ? `goal: ${goalLabel} (${gate.status})` : `goal: ${goalLabel} (missing)`);
+    }
+    if (t.skills.length > 0) tags.push(`skills: ${t.skills.map((s) => s.name).join(", ")}`);
+    const tagStr = tags.length > 0 ? ` [${tags.join("] [")}]` : "";
+    return `${statusIcon(t.status)} ${actorTag(t)} #${t.id} ${t.subject}${tagStr}`;
   });
 
   return ok(lines.join("\n"), "list");
