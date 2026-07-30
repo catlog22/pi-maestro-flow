@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 <purpose>
@@ -53,7 +53,7 @@ Linear: create → explore → confirm → do → seal.
 ### 1. Create
 
 ```bash
-maestro session start "<intent>" --chain companion --session YYYYMMDD-companion-<topic> --arg "<intent>" --workflow-root .
+maestro session start --platform pi "<intent>" --chain companion --session YYYYMMDD-companion-<topic> --arg "<intent>" --workflow-root .
 ```
 
 Compatibility spelling for older callers: `maestro run start "<intent>" --cmd companion --session YYYYMMDD-companion-<topic> --platform pi --arg "<intent>" --workflow-root .`. The intent is Session metadata only; pass the same text with `--arg` because it is the required command arguments payload.
@@ -70,7 +70,7 @@ Init `{run_dir}/evidence/companion-log.md`:
 
 Locate targets and gather evidence before touching anything. Methods (pick what fits):
 
-- `maestro explore "FIND: ...\nSCOPE: ..."` — codebase search
+- `teammate({ agent: "explorer", task: "FIND: ...\\nSCOPE: ...", taskType: "explore" })` — codebase search
 - `maestro search "<keywords>" --type spec --type knowhow` — knowledge recall
 - Agent (subagent) — multi-file analysis, cross-reference, pattern discovery
 - Direct Read/Grep/Glob — known targets, quick lookups
@@ -113,14 +113,16 @@ Append outcome:
 **Files:** {modified/created, or "none"}
 ```
 
+Before completion, put accepted decisions/locked constraints in `report.md`. If a reusable recipe or pitfall emerged, stage it now:
+
 ```bash
+maestro knowledge stage knowhow "<title>" "<content>" --run <run_id>
 maestro session done <run_id> --verdict done --workflow-root .
 ```
 
 Display: `Companion done. Run: {run_id} | Evidence: {path}`
 
-If reusable insights emerged, suggest (never auto-execute):
-`/maestro-spec add ...` or `/maestro-knowhow`
+If the completion receipt contains candidate IDs, display its `review_command`. Do not persist the same insight again through `/maestro-spec` or `/maestro-knowhow`.
 
 If execution revealed the task requires multi-phase audit/diagnosis (e.g., root cause unknown, >3 files need coordinated changes), suggest: `/maestro-odyssey "<scope>" --mode debug|improve` for re-planning.
 
@@ -131,5 +133,5 @@ If execution revealed the task requires multi-phase audit/diagnosis (e.g., root 
 |------|----------|-----------|----------|
 | E001 | error | `session start` failed (CLI unavailable, invalid args) | Check maestro CLI installation |
 | E003 | error | Evidence log creation failed | Check run_dir permissions |
-| W001 | warning | Explore tools unavailable (maestro explore/search) | Degrade to direct Read/Grep |
+| W001 | warning | Explore tools unavailable (teammate({ agent: "explorer" })/search) | Degrade to direct Read/Grep |
 </error_codes>

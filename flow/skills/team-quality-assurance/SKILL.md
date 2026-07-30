@@ -1,12 +1,13 @@
 ---
 name: team-quality-assurance
 description: "Unified team skill for quality assurance. Full closed-loop QA combining issue discovery and software testing. Triggers on \"team quality-assurance\", \"team qa\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Quality Assurance
@@ -57,7 +58,7 @@ Parse `$ARGUMENTS`:
 - **Session prefix**: `QA`
 - **Session path**: `{run_dir}/work/team/`
 - **Team name**: `quality-assurance`
-- **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
+- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
@@ -65,12 +66,12 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: "quality-assurance",
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md
@@ -106,7 +107,7 @@ Execute built-in Phase 1 (task discovery) -> role Phase 2-4 -> built-in Phase 5 
 When pipeline completes, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Quality Assurance pipeline complete. What would you like to do?",
     header: "Completion",

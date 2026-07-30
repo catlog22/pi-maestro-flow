@@ -7,15 +7,15 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 <deferred_reading>
 Codify mode only (read when `--codify` and the corresponding phase starts):
-- [ui-codify.md](~/.maestro/workflows/ui-codify.md) — read always in codify mode (main workflow orchestrator)
-- [ui-codify-extract.md](~/.maestro/workflows/ui-codify-extract.md) — read when Codify Phase 2 starts (style extraction with 3 agents)
-- [ui-codify-package.md](~/.maestro/workflows/ui-codify-package.md) — read when Codify Phase 3 starts (reference package generation)
-- [ui-codify-knowhow.md](~/.maestro/workflows/ui-codify-knowhow.md) — read when Codify Phase 4 starts (knowledge asset generation)
+- [ui-codify.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify.md) — read always in codify mode (main workflow orchestrator)
+- [ui-codify-extract.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-extract.md) — read when Codify Phase 2 starts (style extraction with 3 agents)
+- [ui-codify-package.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-package.md) — read when Codify Phase 3 starts (reference package generation)
+- [ui-codify-knowhow.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-knowhow.md) — read when Codify Phase 4 starts (knowledge asset generation)
 </deferred_reading>
 
 <purpose>
@@ -42,7 +42,7 @@ $ARGUMENTS first word determines mode:
 
 ## Command Routing
 
-All workflows at `~/.maestro/workflows/impeccable/{command}.md`:
+All workflows at `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{command}.md`:
 
 | Command | Category | Description |
 |---------|----------|-------------|
@@ -78,7 +78,7 @@ responsive-design.md, spatial-design.md, typography.md, ux-writing.md
 
 ## Chains
 
-Chain step names below reuse Command Routing names but resolve through the chain runner. To avoid ambiguity with Direct command invocation, internal display, todo items, and session status records always tag chain steps with the `impeccable:` prefix (e.g. `impeccable:craft`, `impeccable:critique`). The bare names in this table refer to the workflow file at `~/.maestro/workflows/impeccable/{name}.md` that the chain step reads.
+Chain step names below reuse Command Routing names but resolve through the chain runner. To avoid ambiguity with Direct command invocation, internal display, todo items, and session status records always tag chain steps with the `impeccable:` prefix (e.g. `impeccable:craft`, `impeccable:critique`). The bare names in this table refer to the workflow file at `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{name}.md` that the chain step reads.
 
 | Chain | Steps | Scenario |
 |-------|-------|----------|
@@ -174,7 +174,7 @@ Before reading any command workflow:
 
 1. **Context**: `maestro load --type spec --category ui` → if empty → `maestro impeccable load-context`
 2. **PRODUCT.md**: missing/placeholder (<200 chars / `[TODO]`) → execute teach first, then resume original task
-3. **Register**: identify brand/product → Read `~/.maestro/workflows/impeccable/{brand|product}.md`
+3. **Register**: identify brand/product → Read `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{brand|product}.md`
 
 ## Direct Execution
 
@@ -185,7 +185,7 @@ Before reading any command workflow:
    Category: {category} | Target: {target}
    ─────────────────────────────────────────
    ```
-3. Read `~/.maestro/workflows/impeccable/{command}.md`
+3. Read `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{command}.md`
 4. **TodoWrite tracking**: create todo items for each major phase in the workflow file
    - Format: `[{command}] {phase description}`
    - Mark each phase completed immediately upon finishing
@@ -224,7 +224,7 @@ Before reading any command workflow:
    - If conditional step is skipped, immediately mark completed
    - Quality gate steps include threshold: `[chain] step 5: impeccable:critique ◆ gate ≥26/40`
 5. For each step:
-   - Read `~/.maestro/workflows/impeccable/{command}.md` → execute
+   - Read `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{command}.md` → execute
    - **Step start**: TodoWrite marks current step in_progress
    - **Step done**: TodoWrite marks completed + update status.json (`current_step`, step `status`)
    - **Step failed**: TodoWrite marks completed (with note) + record reason
@@ -270,7 +270,7 @@ maestro load --type spec --category ui
 ```
 
 ### Step 2: Execute Workflow
-Route to `~/.maestro/workflows/ui-codify.md` and follow completely. The workflow orchestrates 4 phases with deferred loading of phase-specific workflow files (see `<deferred_reading>`). Each phase reads its workflow file only when execution reaches that phase.
+Route to `~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify.md` and follow completely. The workflow orchestrates 4 phases with deferred loading of phase-specific workflow files (see `<deferred_reading>`). Each phase reads its workflow file only when execution reaches that phase.
 
 ### Codify Phase Gates (MANDATORY, BLOCKING)
 
@@ -363,7 +363,7 @@ Never auto-select: teach, shape, craft, live, document, extract, overdrive, crit
 | E002 | error | Source/target path not found | Verify path exists |
 | E003 | error | PRODUCT.md missing and teach step failed | Run `maestro impeccable teach` manually first |
 | E004 | error | Chain quality gate failed after max loops | Review findings manually, fix critical issues, then resume |
-| W001 | warning | UI specs not found via maestro run skill specs-load | Continuing without specs — output may miss project conventions |
+| W001 | warning | UI specs not found via maestro run skill --platform pi specs-load | Continuing without specs — output may miss project conventions |
 | W002 | warning | Quality gate score below threshold but P0 == 0 | Auto-refine loop triggered |
 | W003 | warning | Chain step failed but non-blocking | Step failure documented, chain continues |
 | E101 | error | Codify: source path not found or not a directory | Verify `--codify <source-path>` exists |
@@ -391,7 +391,7 @@ Chain mode:
 - [ ] Final report with scores, trend, and commands executed
 
 Codify mode:
-- [ ] UI specs loaded via `maestro run skill specs-load --category ui` (if available)
+- [ ] UI specs loaded via `maestro run skill --platform pi specs-load --category ui` (if available)
 - [ ] Source path validated and file discovery completed
 - [ ] design-tokens.json generated with color, typography, spacing tokens
 - [ ] layout-templates.json generated with component patterns (universal/specialized)

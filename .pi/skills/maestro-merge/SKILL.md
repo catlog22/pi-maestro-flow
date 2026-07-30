@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 <purpose>
@@ -24,7 +24,7 @@ Flags (`--session`, `--force`, `--dry-run`, `--no-cleanup`, `--continue`), merge
 </context>
 
 <execution>
-Follow '~/.maestro/workflows/merge.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/merge.md' completely.
 
 --dry-run short-circuit: execute GATE 1 health check only, display merge preview (files that would change, artifact sync plan), then EXIT before rebase/merge. GATE 2 and GATE 3 are not reached.
 

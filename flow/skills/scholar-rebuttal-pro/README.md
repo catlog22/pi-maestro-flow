@@ -164,33 +164,21 @@ scholar-rebuttal-pro/
 ### Phase 1 - 审稿意见分类
 
 ```bash
-maestro delegate "PURPOSE: Parse and classify reviewer comments by type and severity
-TASK: • Parse comment structure • Classify by severity • Extract key concerns
-MODE: analysis
-CONTEXT: @reviews.txt
-EXPECTED: JSON with classification results" \
+teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Parse and classify reviewer comments by type and severity\nTASK: • Parse comment structure • Classify by severi…" }) \
 --to agy --mode analysis --rule analysis-analyze-technical-document
 ```
 
 ### Phase 3 - 证据搜索
 
 ```bash
-maestro delegate "PURPOSE: Search paper content for evidence supporting response strategies
-TASK: • Locate relevant sections • Extract supporting data • Identify evidence gaps
-MODE: analysis
-CONTEXT: @paper.pdf
-EXPECTED: Evidence map with file:line references" \
+teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Search paper content for evidence supporting response strategies\nTASK: • Locate relevant sections • Extract su…" }) \
 --to agy --mode analysis
 ```
 
 ### Phase 5 - 质量验证
 
 ```bash
-maestro delegate "PURPOSE: Validate rebuttal quality (completeness, professionalism, persuasiveness)
-TASK: • Check all comments addressed • Assess tone • Evaluate evidence strength
-MODE: analysis
-CONTEXT: @rebuttal.md
-EXPECTED: Quality report with improvement suggestions" \
+teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Validate rebuttal quality (completeness, professionalism, persuasiveness)\nTASK: • Check all comments addressed…" }) \
 --to agy --mode analysis
 ```
 

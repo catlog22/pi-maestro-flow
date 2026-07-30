@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 # Skill Iter Tune
@@ -43,11 +43,11 @@ Iterative skill refinement through execute-evaluate-improve feedback loops. Each
 Chain Mode (execution_mode === "chain"):
 
 Phase 2 runs per-skill in chain_order:
-  Skill A → maestro delegate → artifacts/skill-A/
+  Skill A → teammate → artifacts/skill-A/
        ↓ (artifacts as input)
-  Skill B → maestro delegate → artifacts/skill-B/
+  Skill B → teammate → artifacts/skill-B/
        ↓ (artifacts as input)
-  Skill C → maestro delegate → artifacts/skill-C/
+  Skill C → teammate → artifacts/skill-C/
 
 Phase 3 evaluates entire chain output + per-skill scores
 Phase 4 improves weakest skill(s) in chain
@@ -170,14 +170,14 @@ while (true) {
 
   // === Phase 2: Execute ===
   // Read: phases/02-execute.md
-  // Single mode: one maestro delegate call for all skills
-  // Chain mode: sequential maestro delegate per skill in chain_order, passing artifacts
-  // Snapshot skill → construct prompt → maestro delegate --to claude --mode write
+  // Single mode: one teammate call for all skills
+  // Chain mode: sequential teammate per skill in chain_order, passing artifacts
+  // Snapshot skill → construct prompt → teammate({ taskType: "development", /* --to claude */ })
   // Collect artifacts
 
   // === Phase 3: Evaluate ===
   // Read: phases/03-evaluate.md
-  // Construct eval prompt → maestro delegate --to agy --mode analysis
+  // Construct eval prompt → teammate({ taskType: "analysis", /* --to agy */ })
   // Parse score → write iteration-N-eval.md → check termination
 
   // Check termination
@@ -200,7 +200,7 @@ Read and execute: `Ref: phases/02-execute.md`
 
 - Snapshot skill → `iteration-{N}/skill-snapshot/`
 - Build execution prompt from skill content + test scenario
-- Execute: `maestro delegate "..." --to claude --mode write --cd "${iterDir}/artifacts"`
+- Execute: `teammate({ agent: "delegate", taskType: "development", task: "...", cwd: ""${iterDir}/artifacts", /* --to claude: set model via model-availability */ })
 - Collect artifacts
 
 ### Phase 3: Evaluate Quality (per iteration)
@@ -208,7 +208,7 @@ Read and execute: `Ref: phases/02-execute.md`
 Read and execute: `Ref: phases/03-evaluate.md`
 
 - Build evaluation prompt with skill + artifacts + criteria + history
-- Execute: `maestro delegate "..." --to agy --mode analysis`
+- Execute: `teammate({ agent: "delegate", taskType: "analysis", task: "...", /* --to agy: set model via model-availability */ })
 - Parse 5-dimension score (Clarity, Completeness, Correctness, Effectiveness, Efficiency)
 - Write `iteration-{N}-eval.md`
 - Check termination: score >= threshold | iter >= max | convergence | error limit
@@ -235,8 +235,8 @@ Read and execute: `Ref: phases/05-report.md`
 | Phase | Document | Purpose | Compact |
 |-------|----------|---------|---------|
 | 1 | [phases/01-setup.md](phases/01-setup.md) | Initialize workspace and state | TodoWrite 驱动 |
-| 2 | [phases/02-execute.md](phases/02-execute.md) | Execute skill via maestro delegate Claude | TodoWrite 驱动 + 🔄 sentinel |
-| 3 | [phases/03-evaluate.md](phases/03-evaluate.md) | Evaluate via maestro delegate Agy | TodoWrite 驱动 + 🔄 sentinel |
+| 2 | [phases/02-execute.md](phases/02-execute.md) | Execute skill via teammate Claude | TodoWrite 驱动 + 🔄 sentinel |
+| 3 | [phases/03-evaluate.md](phases/03-evaluate.md) | Evaluate via teammate Agy | TodoWrite 驱动 + 🔄 sentinel |
 | 4 | [phases/04-improve.md](phases/04-improve.md) | Apply improvements via Agent | TodoWrite 驱动 + 🔄 sentinel |
 | 5 | [phases/05-report.md](phases/05-report.md) | Generate final report | TodoWrite 驱动 |
 
@@ -250,7 +250,7 @@ Read and execute: `Ref: phases/05-report.md`
 1. **Start Immediately**: First action is preference collection → Phase 1 setup
 2. **Progressive Loading**: Read phase doc ONLY when that phase is about to execute
 3. **Snapshot Before Execute**: Always snapshot skill state before each iteration
-4. **Background CLI**: maestro delegate runs in background, wait for hook callback before proceeding
+4. **Background CLI**: teammate runs in background, wait for hook callback before proceeding
 5. **Parse Every Output**: Extract structured JSON from CLI outputs for state updates
 6. **DO NOT STOP**: Continuous iteration until termination condition met
 7. **Single State Source**: `iteration-state.json` is the only source of truth
@@ -264,10 +264,10 @@ User Input (skill paths + test scenario)
 Phase 1: Setup
     ↓ workDir, targetSkills[], testScenario, iteration-state.json
     ↓
-┌─→ Phase 2: Execute (maestro delegate claude)
+┌─→ Phase 2: Execute (teammate claude)
 │   ↓ artifacts/ (skill execution output)
 │   ↓
-│   Phase 3: Evaluate (maestro delegate agy)
+│   Phase 3: Evaluate (teammate agy)
 │   ↓ score, dimensions[], suggestions[], iteration-N-eval.md
 │   ↓
 │   [Terminate?]─── YES ──→ Phase 5: Report → final-report.md

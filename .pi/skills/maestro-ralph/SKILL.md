@@ -7,8 +7,8 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode.md
-~/.maestro/workflows/orchestrator-run-loop.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/orchestrator-run-loop.md
 ~/.maestro/prepare/ralph.md
 </required_reading>
 
@@ -23,7 +23,7 @@ Pi mirrors canonical Session/Run state automatically:
 </host_mirror>
 
 <deferred_reading>
-- [ralph-amend-goal.md](~/.maestro/workflows/ralph-amend-goal.md) — read only for `--amend`
+- [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read only for `--amend`
 </deferred_reading>
 
 <purpose>
@@ -45,11 +45,11 @@ Apply retry, confidence, drift, goal-audit and stopping policy over any compatib
 Human-facing orchestration should stay on one topic Session:
 
 - Start one step with `maestro run start "<intent>" --cmd <step> --arg "<step input>" --platform pi --workflow-root .`
-- Start a simple chain with `maestro run start "<intent>" --chain analyze plan execute --no-dispatch --workflow-root .`
+- Start a simple chain with `maestro run start --platform pi "<intent>" --chain analyze plan execute --no-dispatch --workflow-root .`
 - Complete the active Run with `maestro run done [run_id] --verdict done|done-with-concerns|needs-retry|blocked --workflow-root .`
 - Add or change future simple steps with `maestro run edit <cmd...> --after latest --workflow-root .`
 
-Advanced coordinator chains use `maestro run start "<intent>" --chain-file - --id <session-slug> --no-dispatch`. Ralph has no separate CLI driver or Session type.
+Advanced coordinator chains use `maestro run start --platform pi "<intent>" --chain-file - --id <session-slug> --no-dispatch`. Ralph has no separate CLI driver or Session type.
 
 </cli_surface>
 
@@ -87,6 +87,7 @@ S_PARSE — parse intent and the three public flags
 S_RESOLVE — locate or create a compatible Session
 S_INFER — infer lifecycle position and roadmap need
 S_DECOMPOSE — derive boundary and observable goals for a new Session
+S_ASSESS — classify creation risk and evidence confidence
 S_BUILD — build initial Skill chain
 S_CREATE — `session create --chain-file`
 S_CONFIRM — confirm unless `-y`
@@ -111,9 +112,9 @@ S_RESOLVE:
   → S_INFER WHEN: no live Session and intent present
   → S_FAIL WHEN: multiple candidates or incompatible terminal Session
 
-S_INFER → S_DECOMPOSE → S_BUILD → S_CREATE
-S_CREATE → S_RUN_LOOP WHEN: `-y` AND risk ≠ high AND confidence ≥ 60
-S_CREATE → S_CONFIRM WHEN: `-y` AND (risk == high OR confidence < 60)
+S_INFER → S_DECOMPOSE → S_ASSESS → S_BUILD → S_CREATE
+S_CREATE → S_RUN_LOOP WHEN: `-y` AND risk ≠ high AND confidence_score ≥ 60
+S_CREATE → S_CONFIRM WHEN: `-y` AND (risk == high OR confidence_score < 60)
 S_CREATE → S_CONFIRM OTHERWISE
 S_CREATE → S_FAIL WHEN: creation fails (delete temp file, report error)
 S_CONFIRM → S_RUN_LOOP WHEN: confirmed
@@ -163,11 +164,70 @@ All command syntax and lifecycle mechanics follow `orchestrator-run-loop.md` and
 
 Read-only lookup via `run recall`. Explicit birth `session_id/run_id` wins. Multiple live candidates require user selection; historical similarity never grants authority.
 
+### A_INFER
+
+Classify `lifecycle_position` from evidence in this order:
+
+1. An explicit request for grill, brainstorm or blueprint selects that entry.
+2. Outside those three pre-project entries, a missing Maestro project structure selects init.
+3. Reusable sealed outputs from the same Session may skip only the stages they satisfy: verified analysis without a plan selects plan; a verified plan without implementation selects execute; verified implementation selects the first applicable review/test stage.
+4. Without reusable same-Session evidence, bounded work starts at analyze. Work whose scope is itself unresolved starts at analyze-macro.
+
+Code presence, historical similarity from another Session, or a stage name mentioned only as an example never proves lifecycle completion. Set `wants_roadmap=true` only for an explicit roadmap request or evidence of at least 2 independently releasable milestones; file count alone is insufficient.
+
+Record `lifecycle_position`, `wants_roadmap`, supporting evidence and every skipped stage with its reason. Ambiguous evidence is carried into A_ASSESS rather than silently choosing a later stage.
+
+### A_DECOMPOSE
+
+Derive one boundary contract and outcome-oriented goal set before building the chain:
+
+```json
+{
+  "boundary_contract": {
+    "in_scope": [],
+    "out_of_scope": [],
+    "constraints": [],
+    "definition_of_done": ""
+  },
+  "decomposition": {
+    "execution_criteria": [],
+    "goals": [
+      {
+        "id": "G1",
+        "goal": "",
+        "boundary": "",
+        "done_when": "",
+        "evidence": "",
+        "lifecycle": [],
+        "status": "pending"
+      }
+    ],
+    "changelog": []
+  }
+}
+```
+
+Work is broad when it affects at least 3 modules, changes a cross-package interface, or leaves at least 2 of scope/constraints/done criteria unresolved. Ask at most 3 boundary questions; `-y` cannot invent answers for broad ambiguity. Narrow work may use the intent as its single `in_scope` item, but still requires an observable `definition_of_done`.
+
+Every goal must describe a user-visible or verifiable outcome, map to at least one `in_scope` item, name concrete evidence in `done_when`/`evidence`, and list only lifecycle stages that can produce that evidence. Reject empty goals, stage-named goals, duplicate IDs and goals with no evidence path.
+
+### A_ASSESS
+
+Produce a creation assessment with `risk`, `risk_reasons`, `confidence_score`, `confidence_reasons` and `unresolved_questions`.
+
+- `high` risk: destructive or irreversible operations; production/release mutation; authentication, authorization or sensitive-data changes; data/schema migration without a proven rollback; or backward-incompatible public contract changes.
+- `medium` risk: multi-module behavior, compatible API/schema changes, new dependencies, concurrency/state-machine changes, or migrations with a verified rollback.
+- `low` risk: isolated reversible work with existing patterns and a known verification path.
+
+Compute confidence from 100 and clamp to 0–100. Apply each applicable penalty once: −30 unresolved scope/constraint/done criterion; −20 ambiguous lifecycle position; −20 missing or stale required upstream evidence; −15 unverified cross-module integration assumption; −15 unknown test or verification path. Cite evidence for every deduction.
+
+Confidence maps to low `<60`, medium `60–79`, high `≥80`. High risk always requires confirmation. Confidence below 60 cannot enter S_RUN_LOOP until the missing evidence or ambiguity is resolved; `-y` never bypasses either gate.
+
 ### A_BUILD
 
-Infer lifecycle start from intent and same-Session sealed outputs. New Sessions start from analysis unless intent explicitly calls for grill, brainstorm or blueprint. Roadmap is inferred only for multi-release evidence. Quality is quick/standard/full based on specs and observable risk, not a user flag. Quality criteria: quick = single-file + existing tests; standard = multi-file + new logic; full = cross-module + no existing coverage.
+Consume the outputs of A_INFER, A_DECOMPOSE and A_ASSESS; do not re-infer them while assembling the chain. Quality is quick/standard/full based on specs and observable risk, not a user flag. Quality criteria: quick = single-file + existing tests; standard = multi-file + new logic; full = cross-module + no existing coverage.
 
-Build outcome-oriented decomposition. For broad work, boundary clarification remains mandatory even with `-y`. Every chain includes at least one final quality/goal/scope decision node before seal; long chains also include periodic reground decision nodes. Step execution strategy is defined by each Skill, never by Ralph flags.
+Build the chain from `prepare/ralph.md` Stage Mapping, propagate goal references, map the current host to the Skill scanner's `target_platform` (`claude|codex|agent|agy|pi`), and prevalidate every command with `maestro skills --steps --json --platform pi`. Never default a non-Claude host to `claude`; `pi` resolves Skills from the installed `pi-maestro-flow` npm package's `package.json#pi.skills` directories. Every chain includes at least one final quality/goal/scope decision node before seal; long chains also include periodic reground decision nodes. Step execution strategy is defined by each Skill, never by Ralph flags.
 
 ### A_EXECUTE
 

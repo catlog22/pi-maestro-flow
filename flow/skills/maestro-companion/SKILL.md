@@ -1,12 +1,13 @@
 ---
 name: maestro-companion
 description: "Quick execution for small tasks — minimal run lifecycle (start + done) with evidence recording. Full LLM capability, scoped to mechanically clear tasks. Arguments: <intent> [-y]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: false
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 <purpose>
@@ -32,7 +33,7 @@ $ARGUMENTS — intent text + optional flags.
 |------|--------|
 | `-y` | Skip confirmation, execute directly |
 
-Mode detection: intent → execute | empty → [@ask] AskUserQuestion: request intent text; if still empty → display usage hint and exit
+Mode detection: intent → execute | empty → [@ask] user prompt: request intent text; if still empty → display usage hint and exit
 
 Knowledge utilities (note/log/promote) are available via `/maestro-knowledge`.
 </context>
@@ -52,10 +53,10 @@ Linear: create → explore → confirm → do → seal.
 ### 1. Create
 
 ```bash
-maestro session start "<intent>" --chain companion --session YYYYMMDD-companion-<topic> --arg "<intent>" --workflow-root .
+maestro session start --platform pi "<intent>" --chain companion --session YYYYMMDD-companion-<topic> --arg "<intent>" --workflow-root .
 ```
 
-Compatibility spelling for older callers: `maestro run create companion --session YYYYMMDD-companion-<topic> --intent "<intent>" --arg "<intent>" --workflow-root .`. The intent is Session metadata only; pass the same text with `--arg` because it is the required command arguments payload.
+Compatibility spelling for older callers: `maestro run start "<intent>" --cmd companion --session YYYYMMDD-companion-<topic> --platform pi --arg "<intent>" --workflow-root .`. The intent is Session metadata only; pass the same text with `--arg` because it is the required command arguments payload.
 
 Init `{run_dir}/evidence/companion-log.md`:
 ```markdown
@@ -69,7 +70,7 @@ Init `{run_dir}/evidence/companion-log.md`:
 
 Locate targets and gather evidence before touching anything. Methods (pick what fits):
 
-- `maestro explore "FIND: ...\nSCOPE: ..."` — codebase search
+- `teammate({ agent: "explorer", task: "FIND: ...\\nSCOPE: ...", taskType: "explore" })` — codebase search
 - `maestro search "<keywords>" --type spec --type knowhow` — knowledge recall
 - Agent (subagent) — multi-file analysis, cross-reference, pattern discovery
 - Direct Read/Grep/Glob — known targets, quick lookups
@@ -132,5 +133,5 @@ If execution revealed the task requires multi-phase audit/diagnosis (e.g., root 
 |------|----------|-----------|----------|
 | E001 | error | `session start` failed (CLI unavailable, invalid args) | Check maestro CLI installation |
 | E003 | error | Evidence log creation failed | Check run_dir permissions |
-| W001 | warning | Explore tools unavailable (maestro explore/search) | Degrade to direct Read/Grep |
+| W001 | warning | Explore tools unavailable (teammate({ agent: "explorer" })/search) | Degrade to direct Read/Grep |
 </error_codes>

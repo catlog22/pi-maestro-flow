@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team UX Improve
@@ -72,7 +72,7 @@ Parse `$ARGUMENTS`:
 
 - **Session prefix**: `ux-improve`
 - **Session path**: `{run_dir}/work/team/`
-- **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
+- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 - **Max test iterations**: 5
 
@@ -86,7 +86,7 @@ teammate({
   description: "Spawn <role> worker for <task-id>",
   team_name: "ux-improve",
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md

@@ -1,8 +1,9 @@
 ---
 name: prompt-generator
 description: "Generate or convert Claude Code prompt files — command orchestrators, skill files, agent role definitions, or style conversion of existing files. Follows GSD-style content separation with built-in quality gates. Triggers on \"create command\", \"new command\", \"create skill\", \"new skill\", \"create agent\", \"new agent\", \"convert command\", \"convert skill\", \"convert agent\", \"prompt generator\", \"优化\"."
-allowed-tools: Read Write Edit Bash Glob AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <purpose>
@@ -13,7 +14,7 @@ Generate or convert Claude Code prompt files with concrete, domain-specific cont
 - **Create agent** — new role + expertise file at `.claude/agents/`
 - **Convert** — restyle existing command/skill/agent to GSD conventions with zero content loss
 
-Content separation principle (from GSD): commands/skills own orchestration flow; agents own domain knowledge. Skills are loaded progressively inline; `@` references are reserved for mandatory shared lifecycle contracts such as `@~/.maestro/workflows/run-mode.md`, while phase/domain material remains progressively loaded.
+Content separation principle (from GSD): commands/skills own orchestration flow; agents own domain knowledge. Skills are loaded progressively inline; `@` references are reserved for mandatory shared lifecycle contracts such as `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md`, while phase/domain material remains progressively loaded.
 
 Invoked when user requests "create command", "new command", "create skill", "new skill", "create agent", "new agent", "convert command", "convert skill", "convert agent", "prompt generator", or "优化".
 </purpose>
@@ -170,7 +171,7 @@ Read 1-2 similar files to extract patterns: section structure, naming convention
 | Standard | Multi-aspect domain | `<role>` + 2-4 domain sections |
 | Expert | Deep domain with rules | `<role>` + 4-6 domain sections |
 
-If unclear, ask user with AskUserQuestion.
+If unclear, ask user with user prompt.
 
 ## 5. Generate Content
 
@@ -194,7 +195,7 @@ Generate a complete command file with:
 **Command writing rules:**
 - Steps are **numbered** (`## 1.`, `## 2.`) — follow `plan-phase.md` and `new-project.md` style
 - Use banners for phase transitions: `━━━ SKILL ► ACTION ━━━`
-- Agent spawning uses `Agent({ subagent_type, prompt, description, run_in_background })` pattern
+- Agent spawning uses `teammate({ subagent_type, prompt, description, run_in_background })` pattern
 - Prompt to agents uses `<objective>`, `<files_to_read>`, `<output>` blocks
 - Include `<offer_next>` block with formatted completion status
 - Handle agent return markers: `## TASK COMPLETE`, `## TASK BLOCKED`, `## CHECKPOINT REACHED`
@@ -210,7 +211,7 @@ Skills are command-like orchestrators loaded progressively inline. The canonical
 Generate a complete skill file with:
 
 1. **`<purpose>`** — 2-3 sentences: what + when + what it produces
-2. **Run dependency only** — stateful skills include `@~/.maestro/workflows/run-mode.md`; other external files are loaded via `Read()` within process steps.
+2. **Run dependency only** — stateful skills include `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md`; other external files are loaded via `Read()` within process steps.
 3. **`<process>`** — numbered steps (GSD workflow style):
    - Step 1: Initialize / parse arguments / set workflow preferences
    - Steps 2-N: Domain-specific orchestration logic with inline `Read("phases/...")` for phase files
@@ -219,7 +220,7 @@ Generate a complete skill file with:
 4. **`<success_criteria>`** — checkbox list of verifiable conditions
 
 **Skill-specific writing rules:**
-- **Canonical `<required_reading>` only** — stateful skills reference `@~/.maestro/workflows/run-mode.md`; do not eagerly include phase/domain files
+- **Canonical `<required_reading>` only** — stateful skills reference `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md`; do not eagerly include phase/domain files
 - **NO `@path` references** anywhere in the file — use `Read("path")` within `<process>` steps
 - Phase files loaded on-demand: `Read("phases/01-xxx.md")` within the step that needs it
 - Frontmatter uses `allowed-tools:` (not `argument-hint:`)
@@ -342,7 +343,7 @@ Set `$TARGET_PATH = $SOURCE_PATH` (in-place conversion) unless user specifies ou
 | `<process>` with numbered steps | At least 3 `## N.` headers |
 | Step 1 is initialization | Parses args or loads context |
 | Last step is status/report | Displays results or routes to `<offer_next>` |
-| Agent spawning (if complex) | `Agent({` call with `subagent_type` |
+| Agent spawning (if complex) | `teammate({` call with `subagent_type` |
 | Agent prompt structure | `<files_to_read>` + `<objective>` or `<output>` blocks |
 | Return handling | Routes on `## TASK COMPLETE` / `## TASK BLOCKED` markers |
 | `<offer_next>` | Banner + summary + next command suggestion |
@@ -354,7 +355,7 @@ Set `$TARGET_PATH = $SOURCE_PATH` (in-place conversion) unless user specifies ou
 | Check | Pass Condition |
 |-------|---------------|
 | `<purpose>` | 2-3 sentences, no placeholders |
-| **Canonical Run reference** | Stateful skills contain `@~/.maestro/workflows/run-mode.md` exactly once |
+| **Canonical Run reference** | Stateful skills contain `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md` exactly once |
 | **No eager phase/domain references** | Zero `@specs/`, `@phases/`, `@./` patterns in prose |
 | `<process>` with numbered steps | At least 3 `## N.` headers |
 | Step 1 is initialization | Parses args, sets workflow preferences |
@@ -376,7 +377,7 @@ Set `$TARGET_PATH = $SOURCE_PATH` (in-place conversion) unless user specifies ou
 | Examples present | Each domain section has 1+ comparison table or decision table |
 | `<output_contract>` | Defines return markers (COMPLETE/BLOCKED/CHECKPOINT) |
 | `<quality_gate>` | 3+ checkbox self-check items |
-| Content separation | No `AskUserQuestion`, no banner display, no argument parsing |
+| Content separation | No `user prompt`, no banner display, no argument parsing |
 
 ### 6d. Quality Gate Result
 

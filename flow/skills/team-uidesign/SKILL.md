@@ -1,12 +1,13 @@
 ---
 name: team-uidesign
 description: "Unified team skill for UI design team. Research -> design tokens -> audit -> implementation. Uses team-worker agent architecture with roles/ for domain logic. Coordinator orchestrates dual-track pipeline with GC loops and sync points. Triggers on \"team ui design\", \"ui design team\"."
-allowed-tools: Agent AskUserQuestion Read Write Edit Bash Glob Grep TaskList TaskGet TaskUpdate TaskCreate TeamCreate TeamDelete SendMessage mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team UI Design
@@ -62,7 +63,7 @@ Parse `$ARGUMENTS`:
 
 - **Session prefix**: `UDS`
 - **Session path**: `{run_dir}/work/team/`
-- **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
+- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 - **Max GC rounds**: 2
 
@@ -71,12 +72,12 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker for <task-id>",
   team_name: "uidesign",
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md

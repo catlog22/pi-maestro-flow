@@ -156,6 +156,17 @@ Use `bash` for ordinary commands whose output is needed now, including commands 
 
 Use `bash_bg run` when duration is uncertain: it returns inline if fast and backgrounds automatically if slow. Use `start` for servers, watchers, and other known long-lived processes. After backgrounding, wait for the completion notification or call `wait` once; do not poll.
 
+## Shell Safety Rules
+
+The shell is **Git Bash (MSYS2)** on Windows; use POSIX/bash syntax exclusively.
+
+- **Use the right tool**: Modify code with the `edit` tool, inspect files with the `read` tool, search paths with `fffind`/`ffgrep` as tool calls. Reserve bash for commands that genuinely need a shell (git, npm, node, rg, build tools).
+- **Use forward slashes in paths** (`"C:/Users/…"`), or single-quote Windows paths (`'C:\Users\…'`).
+- **Confirm paths before use**: guard compound commands with `test -d`/`test -f`; pass only verified-existing paths to `rg`.
+- **Keep commands short** (< ~2 000 chars). For larger payloads, write a file with the `write` tool first, then execute it.
+- **Verify npm scripts exist** in the target `package.json` before running them; in monorepos scripts usually live in sub-packages.
+- **Plan mode**: use only read-only commands (`ls`, `cat`, `grep`, `git log`, `git diff`, …).
+
 # Web Research
 
 Use `smart_search` only for external information. Do not use it for repository knowledge. For mixed questions, query external facts with `smart_search` and project behavior through the Project Knowledge Gate, then synthesize both.

@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Swarm
@@ -77,7 +77,7 @@ teammate({
   description: "Spawn <role> worker",
   team_name: "swarm",
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md

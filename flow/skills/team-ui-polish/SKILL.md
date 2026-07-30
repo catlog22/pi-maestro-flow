@@ -1,12 +1,13 @@
 ---
 name: team-ui-polish
 description: "Unified team skill for UI polish. Auto-discover and fix UI design issues using Impeccable design standards. Anti-AI-slop detection, color/typography/spacing quality, motion, interaction states, visual hierarchy. Uses team-worker agent architecture. Triggers on \"team ui polish\", \"ui polish\", \"design polish\"."
-allowed-tools: Agent AskUserQuestion Read Write Edit Bash Glob Grep TaskList TaskGet TaskUpdate TaskCreate TeamCreate TeamDelete SendMessage mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__maestro__team_msg mcp__chrome-devtools__evaluate_script mcp__chrome-devtools__take_screenshot mcp__chrome-devtools__navigate_page mcp__chrome-devtools__resize_page
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__chrome-devtools__evaluate_script mcp__chrome-devtools__take_screenshot mcp__chrome-devtools__navigate_page mcp__chrome-devtools__resize_page maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team UI Polish
@@ -63,7 +64,7 @@ Parse `$ARGUMENTS`:
 
 - **Session prefix**: `UIP`
 - **Session path**: `{run_dir}/work/team/`
-- **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
+- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 - **Max GC rounds**: 2
 
@@ -72,12 +73,12 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker for <task-id>",
   team_name: "ui-polish",
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md

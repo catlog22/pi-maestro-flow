@@ -1,24 +1,59 @@
 ---
 name: maestro
 description: "Intent-to-chain planner over the canonical Session/Run lifecycle Arguments: <intent> [-y] [-c] [--amend] [--dry-run]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent SendMessage AskUserQuestion TodoWrite TaskCreate TaskUpdate
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: false
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
-@~/.maestro/workflows/orchestrator-run-loop.md
-@~/.maestro/prepare/maestro.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/orchestrator-run-loop.md
+~/.maestro/prepare/maestro.md
 </required_reading>
 
+<host_mirror>
+
+Pi mirrors canonical Session/Run state automatically:
+
+- Advance only with `todo({ action: "next" })`; do not create or update mirror tasks manually.
+- Goal completion is derived from terminal chain state and clean gates.
+- After compaction, reattach through the current Run's `brief.command`.
+
+</host_mirror>
+
 <deferred_reading>
-- [maestro.md](~/.maestro/workflows/maestro.md) — read before initial intent classification
-- [ralph-amend-goal.md](~/.maestro/workflows/ralph-amend-goal.md) — read only for `--amend`
+- [maestro.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro.md) — read before initial intent classification
+- [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read only for `--amend`
 </deferred_reading>
 
 <purpose>
-Turn a user intent into the initial Skill chain, create one canonical topic Session through `maestro session create --chain-file`, then execute the shared Run loop. Static versus dynamic is not a Session or command mode: each Skill contract decides whether it emits a typed chain proposal. For new intents, use this command. For policy-driven execution over existing Sessions, use `/maestro-ralph`.
+Turn a user intent into the initial Skill chain, create one canonical topic Session through `maestro run start --platform pi --chain-file`, then execute the shared Run loop. Static versus dynamic is not a Session or command mode: each Skill contract decides whether it emits a typed chain proposal. For new intents, use this command. For policy-driven execution over existing Sessions, use `/maestro-ralph`.
 </purpose>
+
+<pi_context_contract>
+
+- Consume the injected Topic Session resolution and ReuseAssessment as read-only routing evidence.
+- Accept upstream only from same-Session sealed outputs.
+- Resolve each `argument_requirements` entry through `required`, `missing`, `type`, `source`, optional `default`, and `question`.
+- Treat the birth packet as compact routing; load the execution protocol from `brief.command`.
+- A completion hint with `suggest_only=true` is displayed and never executed implicitly.
+
+</pi_context_contract>
+
+<cli_surface>
+
+Human-facing orchestration uses the unified Run surface:
+
+- Single step: `maestro run start "<intent>" --cmd <step> --arg "<step input>" --platform pi --workflow-root .`
+- Simple command chain: `maestro run start --platform pi "<intent>" --chain analyze plan execute --no-dispatch --workflow-root .`
+- Advanced chain: `maestro run start --platform pi "<intent>" --chain-file - --id <session-slug> --no-dispatch --workflow-root .`
+- Completion: `maestro run done [run_id] --verdict done|done-with-concerns|needs-retry|blocked --workflow-root .`
+- Mid-task changes: `maestro run edit <cmd...> --after latest --workflow-root .`
+
+`--chain-file -` is reserved for advanced coordinator chains that need structured JSON fields such as `decision_points`, `decomposition`, `argument_requirements`, retry budgets, or executor metadata.
+
+</cli_surface>
 
 <interface>
 Only these user flags are accepted:

@@ -1,8 +1,9 @@
 ---
 name: maestro-knowledge
 description: "Intent-driven knowledge-store and Run knowledge lifecycle management — audit/prune, stage candidates (with signal recording), review/resolve/promote candidates, harvest artifacts, or manage wiki/domain knowledge. Arguments: [intent — e.g. '审计知识库' | 'harvest 这个 session' | 'wiki health' | '注册术语 MVP' | 'extractors']"
-allowed-tools: Read Write Edit Bash Glob Grep Agent WebFetch AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate WebFetch maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <purpose>
@@ -21,7 +22,7 @@ Intent-driven knowledge-store management. No fixed grammar — state your intent
 </purpose>
 
 <dispatch>
-Classify the intent in `$ARGUMENTS` into one operation, then run `maestro run skill <step>` and follow it completely.
+Classify the intent in `$ARGUMENTS` into one operation, then run `maestro run skill --platform pi <step>` and follow it completely.
 
 1. Explicit keyword present → use its step or direct CLI lifecycle command (deterministic shortcut).
 2. Otherwise infer from the intent (see the table above), e.g. "审计/清理知识库" → audit, "从工件/session 提取" → harvest, "知识图谱/wiki 健康" → wiki, "注册术语 X" → domain.

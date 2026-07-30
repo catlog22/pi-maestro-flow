@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Quality Assurance
@@ -58,7 +58,7 @@ Parse `$ARGUMENTS`:
 - **Session prefix**: `QA`
 - **Session path**: `{run_dir}/work/team/`
 - **Team name**: `quality-assurance`
-- **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
+- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
@@ -71,7 +71,7 @@ teammate({
   description: "Spawn <role> worker",
   team_name: "quality-assurance",
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md

@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 <host_mirror>
@@ -23,7 +23,7 @@ Pi mirrors canonical Session/Run state automatically:
 <purpose>
 Unified interactive entry for all development intents. Pure router: parse intent + project state → classify → assess complexity → route to the appropriate channel:
 - **Companion** (lightweight): route to `/maestro-companion "<intent>"` — minimal run lifecycle, continuous evidence recording
-- **Standard** (single run): recommend a step → confirm → execute via `maestro run start --cmd`
+- **Standard** (single run): recommend a step → confirm → execute via `maestro run start --platform pi --cmd`
 - **Multi-step**: route to `/maestro "<intent>"` (manual stepwise control) or `/maestro-ralph "<intent>"` (orchestrated closed-loop)
 
 This command is the single entry point. It classifies and routes. Multi-step execution loops live in `/maestro` (manual) and `/maestro-ralph` (orchestrated).
@@ -68,7 +68,7 @@ $ARGUMENTS — intent text + optional flags.
 9. **Multi-step routes to the orchestrators** — when intent spans ≥2 steps or needs orchestration, output `/maestro "<intent>"` (manual stepwise) or `/maestro-ralph "<intent>"` (orchestrated closed-loop). This command never creates sessions or manages chains itself
 10. **Cross-category keyword priority** — when an intent keyword matches both a first-tier step and a retained command, the first-tier step wins for candidate selection; complexity assessment still applies independently. Auxiliary clusters are advisory grouping for display, never routing overrides
 11. **`-y` means skip-confirmation, not auto-execute** — for standard channel, skipping confirmation proceeds to S_EXECUTE (this command runs the step). For companion/multi-step channels, this command is a router: skipping confirmation means outputting the target invocation text directly. The target command owns its own execution semantics
-9. simple chain 只通过 `maestro run start --chain ... --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。
+9. simple chain 只通过 `maestro run start --platform pi --chain ... --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。
 10. 中途新增下一步用 `maestro run edit <cmd...>` 修改未来 chain，不调用新的 `run start` 制造第二个 Topic Session。
 </invariants>
 
@@ -236,15 +236,15 @@ Dominant step = the step whose keyword appears first or carries the primary verb
 | UI design / design system / polish / impeccable | `/maestro-impeccable "<intent>" ...` (retained command) | Suggest exact slash command; user invokes it |
 | harvest / extract knowledge | `/maestro-knowledge "<intent>"` (retained command) | Suggest exact slash command; user invokes it |
 | fork / parallel dev | `/maestro-fork ...` (retained command) | Suggest exact slash command; user invokes it |
-| note / record observation | `/maestro-knowhow "<intent>"` (retained command) | Suggest exact slash command; user invokes it |
-| promote / distill insights | `/maestro-knowledge "<intent>"` (retained command) | Suggest exact slash command; user invokes it |
+| note / record observation during active Run | `maestro knowledge stage knowhow "<title>" "<content>" --run <run-id>` | Stage a reviewable candidate; do not direct-write project knowledge |
+| promote / distill insights | `maestro knowledge review <session-id>` → `maestro knowledge promote ...` | Review candidate receipts and evidence before explicit promotion |
 
 **Auxiliary workflow clusters:**
 
 | Cluster | Trigger | Chain |
 |---------|---------|-------|
 | Learning | New code / unknown module | maestro-learn follow → maestro-learn decompose → maestro-learn consult |
-| Knowledge | Distill experience | maestro-knowledge harvest → maestro-knowhow capture → maestro-spec add |
+| Knowledge | Review & promote experience | knowledge stage (--signal) → knowledge review --refresh --resolve → knowledge promote |
 | Issue | Defect management | maestro-issue discover → maestro-issue |
 
 ### A_EXECUTE_STEP

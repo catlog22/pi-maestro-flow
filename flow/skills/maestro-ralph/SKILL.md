@@ -1,23 +1,57 @@
 ---
 name: maestro-ralph
 description: "Closed-loop policy over the canonical Session/Run chain Arguments: <intent> [-y] [-c] [--amend]"
-allowed-tools: Read Write Edit Bash Glob Grep AskUserQuestion Agent SendMessage TaskCreate TaskUpdate
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: false
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
-@~/.maestro/workflows/orchestrator-run-loop.md
-@~/.maestro/prepare/ralph.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/orchestrator-run-loop.md
+~/.maestro/prepare/ralph.md
 </required_reading>
 
+<host_mirror>
+
+Pi mirrors canonical Session/Run state automatically:
+
+- Advance only with `todo({ action: "next" })`; do not create or update mirror tasks manually.
+- Goal completion is derived from terminal chain state and clean gates.
+- After compaction, reattach through the current Run's `brief.command`.
+
+</host_mirror>
+
 <deferred_reading>
-- [ralph-amend-goal.md](~/.maestro/workflows/ralph-amend-goal.md) — read only for `--amend`
+- [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read only for `--amend`
 </deferred_reading>
 
 <purpose>
 Apply retry, confidence, drift, goal-audit and stopping policy over any compatible canonical Session. Ralph does not own a CLI driver, private Session type or second state store; it calls only `maestro run ...` and follows the shared Run loop. Primary path: locate and drive an existing Session. Session creation is a fallback when no compatible Session exists.
 </purpose>
+
+<pi_context_contract>
+
+- Consume the injected Topic Session resolution and ReuseAssessment as read-only routing evidence.
+- Accept upstream only from same-Session sealed outputs.
+- Resolve each `argument_requirements` entry through `required`, `missing`, `type`, `source`, optional `default`, and `question`.
+- Treat the birth packet as compact routing; load the execution protocol from `brief.command`.
+- A completion hint with `suggest_only=true` is displayed and never executed implicitly.
+
+</pi_context_contract>
+
+<cli_surface>
+
+Human-facing orchestration should stay on one topic Session:
+
+- Start one step with `maestro run start "<intent>" --cmd <step> --arg "<step input>" --platform pi --workflow-root .`
+- Start a simple chain with `maestro run start --platform pi "<intent>" --chain analyze plan execute --no-dispatch --workflow-root .`
+- Complete the active Run with `maestro run done [run_id] --verdict done|done-with-concerns|needs-retry|blocked --workflow-root .`
+- Add or change future simple steps with `maestro run edit <cmd...> --after latest --workflow-root .`
+
+Advanced coordinator chains use `maestro run start --platform pi "<intent>" --chain-file - --id <session-slug> --no-dispatch`. Ralph has no separate CLI driver or Session type.
+
+</cli_surface>
 
 <interface>
 Only these user flags are accepted:
@@ -193,7 +227,7 @@ Confidence maps to low `<60`, medium `60–79`, high `≥80`. High risk always r
 
 Consume the outputs of A_INFER, A_DECOMPOSE and A_ASSESS; do not re-infer them while assembling the chain. Quality is quick/standard/full based on specs and observable risk, not a user flag. Quality criteria: quick = single-file + existing tests; standard = multi-file + new logic; full = cross-module + no existing coverage.
 
-Build the chain from `prepare/ralph.md` Stage Mapping, propagate goal references, map the current host to the Skill scanner's `target_platform` (`claude|codex|agent|agy|pi`), and prevalidate every command with `maestro skills --steps --json --platform {target_platform}`. Never default a non-Claude host to `claude`; `pi` resolves Skills from the installed `pi-maestro-flow` npm package's `package.json#pi.skills` directories. Every chain includes at least one final quality/goal/scope decision node before seal; long chains also include periodic reground decision nodes. Step execution strategy is defined by each Skill, never by Ralph flags.
+Build the chain from `prepare/ralph.md` Stage Mapping, propagate goal references, map the current host to the Skill scanner's `target_platform` (`claude|codex|agent|agy|pi`), and prevalidate every command with `maestro skills --steps --json --platform pi`. Never default a non-Claude host to `claude`; `pi` resolves Skills from the installed `pi-maestro-flow` npm package's `package.json#pi.skills` directories. Every chain includes at least one final quality/goal/scope decision node before seal; long chains also include periodic reground decision nodes. Step execution strategy is defined by each Skill, never by Ralph flags.
 
 ### A_EXECUTE
 

@@ -14,7 +14,7 @@ Scopes: `project` (default) · `global` · `team` · `personal`
 </purpose>
 
 <dispatch>
-Run `maestro run skill specs-add` with the full `$ARGUMENTS` passed through as the user's intent (the `add` keyword is implied). The step infers category + scope + content and appends the entry.
+Run `maestro run skill --platform pi specs-add` with the full `$ARGUMENTS` passed through as the user's intent (the `add` keyword is implied). The step infers category + scope + content and appends the entry.
 
 - Explicit positional form `<category> <content>` and `--scope`/`--uid` flags still work and override inference.
 - Otherwise the step infers the category from the intent (e.g. "禁止用 any/命名规范" → coding, "服务间/依赖方向" → arch, "覆盖率/质量标准" → quality, "测试约定" → test).

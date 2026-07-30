@@ -1,12 +1,13 @@
 ---
 name: team-lifecycle-v4
 description: "Full lifecycle team skill — plan, develop, test, review in one coordinated session. Role-based architecture with coordinator-driven beat model. Triggers on \"team lifecycle v4\"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Lifecycle v4
@@ -60,7 +61,7 @@ Parse `$ARGUMENTS`:
 
 - **Session prefix**: `TLV4`
 - **Session path**: `{run_dir}/work/team/`
-- **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
+- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
@@ -68,12 +69,12 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: <team-name>,
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md
@@ -102,12 +103,12 @@ Supervisor is a **resident agent** (independent from team-worker). Spawned once 
 ### Spawn (Phase 2 — once per session)
 
 ```
-Agent({
+teammate({
   subagent_type: "team-supervisor",
   description: "Spawn resident supervisor",
   team_name: <team-name>,
   name: "supervisor",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: supervisor
 role_spec: <skill_root>/roles/supervisor/role.md
@@ -169,7 +170,7 @@ SendMessage({
 When pipeline completes, coordinator presents:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Pipeline complete. What would you like to do?",
     header: "Completion",

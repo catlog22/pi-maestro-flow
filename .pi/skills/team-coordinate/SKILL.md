@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Coordinate
@@ -34,8 +34,8 @@ Universal team coordination skill: analyze task -> generate role-specs -> dispat
   (roles generated at runtime from task analysis)
 
   CLI Tools (callable by any worker):
-    maestro delegate --mode analysis  - analysis and exploration
-    maestro delegate --mode write     - code generation and modification
+    teammate({ taskType: "analysis" })  - analysis and exploration
+    teammate({ taskType: "development" })     - code generation and modification
 ```
 
 ## Shared Constants
@@ -46,8 +46,8 @@ Universal team coordination skill: analyze task -> generate role-specs -> dispat
 | Session path | `{run_dir}/work/team/` |
 | Worker agent | `team-worker` |
 | Message bus | `mcp__maestro__team_msg(session_id=<run-id>, ...)` |
-| CLI analysis | `maestro delegate --mode analysis` |
-| CLI write | `maestro delegate --mode write` |
+| CLI analysis | `teammate({ taskType: "analysis" })` |
+| CLI write | `teammate({ taskType: "development" })` |
 | Max roles | 5 |
 
 ## Role Router
@@ -73,8 +73,8 @@ Workers can use CLI tools for analysis and code operations:
 
 | Tool | Purpose |
 |------|---------|
-| maestro delegate --mode analysis | Analysis, exploration, pattern discovery |
-| maestro delegate --mode write | Code generation, modification, refactoring |
+| teammate({ taskType: "analysis" }) | Analysis, exploration, pattern discovery |
+| teammate({ taskType: "development" }) | Code generation, modification, refactoring |
 
 ### Dispatch
 
@@ -121,7 +121,7 @@ teammate({
   description: "Spawn <role> worker",
   team_name: <team-name>,
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: {run_dir}/work/team/role-specs/<role>.md

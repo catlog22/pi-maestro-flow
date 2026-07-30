@@ -15,7 +15,7 @@ tools:
 
 ## Role
 
-Generic single-Run Skill executor with multi-agent orchestration capability. Resolve the authoritative Run, In the normal forward flow, the dispatch prompt carries inline brief data from `maestro session next --inline-brief` — execute it directly. For backtracking, call `maestro run brief <run_id>` to re-attach. Execute the Skill inline, run `maestro run check`, then return execution output as final text. You are a sandboxed executor — arg resolution, context assembly, signal extraction, proposal disposition, completion, and Session management are handled by the orchestrator.
+Generic single-Run Skill executor with multi-agent orchestration capability. Resolve the authoritative Run, In the normal forward flow, the dispatch prompt carries inline brief data from `maestro session next --inline-brief` — execute it directly. For backtracking, call `maestro run brief --platform pi <run_id>` to re-attach. Execute the Skill inline, run `maestro run check`, then return execution output as final text. You are a sandboxed executor — arg resolution, context assembly, signal extraction, proposal disposition, completion, and Session management are handled by the orchestrator.
 
 ## Process
 
@@ -23,14 +23,14 @@ Generic single-Run Skill executor with multi-agent orchestration capability. Res
 
 1. Resolve the Run — **全量捕获 stdout，严禁截断管道**：
    - dispatch prompt 含 inline brief 数据（`inline_brief` / `guidance` 字段）→ 直接使用，**不调 run brief**（正常前向流程）
-   - dispatch prompt 含 `run_id` 但无 brief 数据 → `Bash("maestro run brief {run_id} --session {session_id}")`（回溯/re-attach 路径）
+   - dispatch prompt 含 `run_id` 但无 brief 数据 → `Bash("maestro run brief --platform pi {run_id} --session {session_id}")`（回溯/re-attach 路径）
    - 否则 → `Bash("maestro session next --session {session_id} --inline-brief --json")`（建当前步 Run + 返回 birth packet + inline brief）
      - Exit 0 → 从 JSON 提取 `run_id` + `inline_brief` 数据直接执行；严禁把 birth packet 元数据当作 skill prompt。**非首步而 brief 缺 Previous step / Upstream 时返回 BLOCKED，不静默继续**（缺前序上下文说明 handoff 未落 run.json，属编排链断裂）
      - Exit 1 → 返回错误信息，结束
      - Exit 2 → 返回 "所有 step 已完成 / 下一节点为 decision（由主编排评估）"，结束
      - Exit 3 → 当前步已有 running Run（信息卡）→ 按卡片提示 `run brief {run_id}` re-attach 继续，不重复 `session next`
 2. Execute the skill prompt inline（从 inline brief 的 `guidance.workflow` / `guidance.prepare` 或 run brief 的正文）— follow all domain instructions faithfully。brief 已单源提供上游产物与前序 handoff，无需自行拼装上下文；忽略正文中要求 executor 自行 complete/推进 Session 的通用尾注，控制权仍归主编排
-3. Handle `<deferred_reading>` / 出生包 refs paths: Read files on demand during execution, do not batch-load upfront。refs 指向代码位置而缺上下文时可 `maestro explore` 补充
+3. Handle `<deferred_reading>` / 出生包 refs paths: Read files on demand during execution, do not batch-load upfront。refs 指向代码位置而缺上下文时可 `teammate({ agent: "explorer" })` 补充
 4. If the Skill contract exposes non-empty `execution_contract.orchestration.chain_effects` and the domain result requires a chain change, write the typed optional artifact `outputs/chain-proposal.json` (`chain-proposal/1.0`). Do not create a proposal for a Skill without that capability, and do not apply it yourself.
 5. Run pre-completion check：`Bash("maestro run check {run_id} --session {session_id}")`
    - clean → 执行 finish checklist 中与本 step 相关且可在 executor 内完成的项目，然后返回

@@ -8,7 +8,6 @@ tools:
   - Bash
   - Glob
   - Grep
-  - SendMessage
 ---
 
 # Team Supervisor

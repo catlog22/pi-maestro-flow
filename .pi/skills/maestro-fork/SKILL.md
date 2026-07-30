@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 <purpose>
@@ -16,8 +16,8 @@ Supports `--sync` mode to pull latest main changes into an active worktree.
 </purpose>
 
 <deferred_reading>
-- [worktrees.json](~/.maestro/templates/worktrees.json) — read when updating registry
-- [worktree-scope.json](~/.maestro/templates/worktree-scope.json) — read when writing scope marker
+- [worktrees.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktrees.json) — read when updating registry
+- [worktree-scope.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktree-scope.json) — read when writing scope marker
 </deferred_reading>
 
 <context>
@@ -31,7 +31,7 @@ Modes (`Fork` / `Sync`), flags (`--session`, `--base`, `--sync`), session resolu
 </context>
 
 <execution>
-Follow '~/.maestro/workflows/fork.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/fork.md' completely.
 
 Fork and sync algorithm steps are defined in workflow `fork.md`.
 
@@ -72,7 +72,7 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 | Condition | Suggestion |
 |-----------|-----------|
 | Fork complete | `cd {wt.path}` then `maestro run start "{goal}" --cmd analyze --topic "{topic}" --platform pi --workflow-root .` |
-| Fork + automated | `maestro delegate "run full lifecycle for session" --cd {wt.path} --mode write` |
+| Fork + automated | `teammate({ agent: "delegate", taskType: "development", task: "run full lifecycle for session", cwd: "{wt.path}" }) |
 | Sync complete | Resume work in worktree |
 | Sync conflicts found | Resolve manually, then retry |
 </completion>

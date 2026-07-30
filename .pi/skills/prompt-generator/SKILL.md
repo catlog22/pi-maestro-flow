@@ -14,7 +14,7 @@ Generate or convert Claude Code prompt files with concrete, domain-specific cont
 - **Create agent** — new role + expertise file at `.claude/agents/`
 - **Convert** — restyle existing command/skill/agent to GSD conventions with zero content loss
 
-Content separation principle (from GSD): commands/skills own orchestration flow; agents own domain knowledge. Skills are loaded progressively inline; `@` references are reserved for mandatory shared lifecycle contracts such as `~/.maestro/workflows/run-mode.md`, while phase/domain material remains progressively loaded.
+Content separation principle (from GSD): commands/skills own orchestration flow; agents own domain knowledge. Skills are loaded progressively inline; `@` references are reserved for mandatory shared lifecycle contracts such as `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md`, while phase/domain material remains progressively loaded.
 
 Invoked when user requests "create command", "new command", "create skill", "new skill", "create agent", "new agent", "convert command", "convert skill", "convert agent", "prompt generator", or "优化".
 </purpose>
@@ -211,7 +211,7 @@ Skills are command-like orchestrators loaded progressively inline. The canonical
 Generate a complete skill file with:
 
 1. **`<purpose>`** — 2-3 sentences: what + when + what it produces
-2. **Run dependency only** — stateful skills include `~/.maestro/workflows/run-mode.md`; other external files are loaded via `Read()` within process steps.
+2. **Run dependency only** — stateful skills include `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md`; other external files are loaded via `Read()` within process steps.
 3. **`<process>`** — numbered steps (GSD workflow style):
    - Step 1: Initialize / parse arguments / set workflow preferences
    - Steps 2-N: Domain-specific orchestration logic with inline `Read("phases/...")` for phase files
@@ -220,7 +220,7 @@ Generate a complete skill file with:
 4. **`<success_criteria>`** — checkbox list of verifiable conditions
 
 **Skill-specific writing rules:**
-- **Canonical `<required_reading>` only** — stateful skills reference `~/.maestro/workflows/run-mode.md`; do not eagerly include phase/domain files
+- **Canonical `<required_reading>` only** — stateful skills reference `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md`; do not eagerly include phase/domain files
 - **NO `@path` references** anywhere in the file — use `Read("path")` within `<process>` steps
 - Phase files loaded on-demand: `Read("phases/01-xxx.md")` within the step that needs it
 - Frontmatter uses `allowed-tools:` (not `argument-hint:`)
@@ -355,7 +355,7 @@ Set `$TARGET_PATH = $SOURCE_PATH` (in-place conversion) unless user specifies ou
 | Check | Pass Condition |
 |-------|---------------|
 | `<purpose>` | 2-3 sentences, no placeholders |
-| **Canonical Run reference** | Stateful skills contain `~/.maestro/workflows/run-mode.md` exactly once |
+| **Canonical Run reference** | Stateful skills contain `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md` exactly once |
 | **No eager phase/domain references** | Zero `@specs/`, `@phases/`, `@./` patterns in prose |
 | `<process>` with numbered steps | At least 3 `## N.` headers |
 | Step 1 is initialization | Parses args, sets workflow preferences |

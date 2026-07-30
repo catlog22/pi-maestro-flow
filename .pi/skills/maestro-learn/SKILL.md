@@ -273,7 +273,7 @@ S_HYPOTHESIZE:
   → S_TEST        WHEN: no CLI tools OR trivial hypotheses (answerable by local Grep/Read)    DO: A_FORM_HYPOTHESES
 
 S_CLI_EXPLORE:
-  → S_TEST        DO: A_CLI_SUPPLEMENT (maestro delegate --to <first-enabled-tool> --mode analysis, run_in_background, STOP)
+  → S_TEST        DO: A_CLI_SUPPLEMENT (teammate({ taskType: "analysis", /* --to <first-enabled-tool> */ }), run_in_background, STOP)
 
 S_TEST:
   → S_REPORT      WHEN: hypothesis confirmed                  DO: A_TEST_HYPOTHESIS
@@ -318,10 +318,7 @@ Rank by plausibility (evidence strength). Write to understanding.md:
 ### A_CLI_SUPPLEMENT
 
 ```
-maestro delegate "PURPOSE: Gather evidence for hypotheses
-TASK: Trace call chains and data flows per hypothesis | Find corroborating/contradicting patterns
-EXPECTED: JSON [{hypothesis_rank, evidence: [{file, line, supports: bool, explanation}]}]
-" --to <first-enabled-tool> --mode analysis
+teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Gather evidence for hypotheses\nTASK: Trace call chains and data flows per hypothesis | Find corroborating/cont…", /* --to <first-enabled-tool>: set model via model-availability */ })
 ```
 Run_in_background, STOP, wait. On callback: append to evidence.ndjson.
 
@@ -518,7 +515,7 @@ Arguments — target and optional mode flag.
 
 `-y` in consult mode: skips the final write confirmation only. The interactive Q&A loop is NOT affected by `-y` (it is the core interaction, not a confirmation). Use `--mode review` for non-interactive alternative.
 
-**Pre-load** (optional): recommend `maestro run skill specs-load` for conventions + `maestro search "<target topic>"` for related entries.
+**Pre-load** (optional): recommend `maestro run skill --platform pi specs-load` for conventions + `maestro search "<target topic>"` for related entries.
 
 **Output**: `.workflow/knowhow/KNW-opinion-{slug}-{YYYY-MM-DD}.md`
 

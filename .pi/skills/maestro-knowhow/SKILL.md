@@ -20,7 +20,7 @@ Intent-driven knowhow precipitation path (沉淀路径) — captures reusable kn
 </purpose>
 
 <dispatch>
-Run `maestro run skill knowhow` with the full `$ARGUMENTS` passed through as the user's intent (first arg `capture` is implied). The step infers the content type from the intent, extracts the content, and writes the entry.
+Run `maestro run skill --platform pi knowhow` with the full `$ARGUMENTS` passed through as the user's intent (first arg `capture` is implied). The step infers the content type from the intent, extracts the content, and writes the entry.
 
 - A recognized type keyword anywhere in the intent pins the type deterministically.
 - Otherwise the step infers the type from the intent (e.g. "决策/决定用X" → decision, "模板/这段代码" → template, "步骤/怎么部署" → recipe).

@@ -19,7 +19,7 @@ Intent-driven issue management (renamed from maestro-manage, narrowed to issues)
 </purpose>
 
 <dispatch>
-Run `maestro run skill issue` with the full `$ARGUMENTS` passed through as the user's intent. The step classifies the intent, extracts parameters, and routes to the operation.
+Run `maestro run skill --platform pi issue` with the full `$ARGUMENTS` passed through as the user's intent. The step classifies the intent, extracts parameters, and routes to the operation.
 
 - Free-form intent is classified into create / list / show / update / close / link / discover.
 - Explicit keywords (`create|list|status|show|update|close|link`) and `--flags` still work as deterministic shortcuts and override inferred values.

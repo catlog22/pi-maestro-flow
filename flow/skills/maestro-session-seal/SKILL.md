@@ -1,13 +1,24 @@
 ---
 name: maestro-session-seal
 description: "Seal current session with knowledge candidate review and DAG progression Arguments: [--session <session_id>] [-y] [--skip-knowledge]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
+
+<host_mirror>
+
+Pi mirrors canonical Session/Run state automatically:
+
+- Advance only with `todo({ action: "next" })`; do not create or update mirror tasks manually.
+- Goal completion is derived from terminal chain state and clean gates.
+- After compaction, reattach through the current Run's `brief.command`.
+
+</host_mirror>
 
 <purpose>
 Seal a completed session: verify all Runs are sealed, review the durable knowledge candidate backlog, mark the Session as sealed, and recommend the next dep-ready Session from the DAG.
@@ -45,7 +56,7 @@ Note: maestro-next suggests session-seal when 'Tests green + active session'. Th
 3. Report exact/semantic duplicates, related/extends candidates, potential conflicts, supersession candidates, missing receipts, and promotion eligibility separately. Exact duplicates are suppressed automatically; unresolved `review_required` candidates cannot be promoted.
 4. If `--skip-knowledge`, report the pending/promoting/review-required/suppressed counts and continue. The backlog and reconciliation receipts remain durable after seal.
 5. Otherwise resolve review-required candidates before promotion with `maestro knowledge review {session_id} --resolve <candidate-id> --as duplicate|related|conflict|supersede|unique [--target <knowledge-id>] --reason "<reason>"`. A target must come from that candidate's evidence-backed matches.
-6. Present eligible pending candidates via `[@ask] AskUserQuestion`:
+6. Present eligible pending candidates via `[@ask] user prompt`:
    ```
    question: "以下知识候选项值得晋升到项目知识库吗？"
    options:
@@ -94,7 +105,7 @@ Status: DONE
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Next session activated | step `analyze` (`maestro run prepare analyze` + `maestro run create analyze --session {next-slug} --intent "{goal}"`) |
+| Next session activated | `maestro run start "{goal}" --cmd analyze --session {next-slug} --platform pi --workflow-root .` |
 | Knowledge candidates pending | `maestro knowledge review {session_id}` |
 | Knowledge health review needed | `/maestro-knowledge audit` |
 </completion>

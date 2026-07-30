@@ -1,8 +1,9 @@
 ---
 name: scholar-citation-verify
 description: "Four-layer citation verification for academic papers. Scans LaTeX/BibTeX files, verifies every citation via WebSearch and Google Scholar, generates verification report with fix suggestions. Triggers on \"verify citations\", \"check references\", \"citation verification\", \"prevent fake citations\", \"引用验证\"."
-allowed-tools: Read Write Edit Bash Glob Grep WebSearch WebFetch AskUserQuestion TodoWrite
+allowed-tools: Read Write Edit Bash Glob Grep WebSearch WebFetch maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 # Scholar Citation Verify

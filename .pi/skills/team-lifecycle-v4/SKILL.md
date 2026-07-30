@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Lifecycle v4
@@ -61,7 +61,7 @@ Parse `$ARGUMENTS`:
 
 - **Session prefix**: `TLV4`
 - **Session path**: `{run_dir}/work/team/`
-- **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
+- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Worker Spawn Template
@@ -74,7 +74,7 @@ teammate({
   description: "Spawn <role> worker",
   team_name: <team-name>,
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md
@@ -108,7 +108,7 @@ teammate({
   description: "Spawn resident supervisor",
   team_name: <team-name>,
   name: "supervisor",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: supervisor
 role_spec: <skill_root>/roles/supervisor/role.md

@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Frontend Debug Team
@@ -74,7 +74,7 @@ Parse `$ARGUMENTS`:
 
 - **Session prefix**: `TFD`
 - **Session path**: `{run_dir}/work/team/`
-- **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
+- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 
 ## Workspace Resolution
@@ -89,7 +89,7 @@ Coordinator MUST resolve paths at Phase 2 before TeamCreate:
    ```
 4. All worker `role_spec` values MUST use `<skill_root>/roles/<role>/role.md` (absolute)
 
-This ensures workers spawned with `run_in_background: true` always receive an absolute, resolvable path regardless of their working directory.
+This ensures workers spawned with `background: true` always receive an absolute, resolvable path regardless of their working directory.
 
 ## Chrome DevTools MCP Tools
 
@@ -124,7 +124,7 @@ teammate({
   description: "Spawn <role> worker",
   team_name: <team-name>,
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md

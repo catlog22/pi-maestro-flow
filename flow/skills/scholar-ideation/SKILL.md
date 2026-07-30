@@ -1,8 +1,9 @@
 ---
 name: scholar-ideation
 description: "Research ideation workflow from literature search to research planning. Triggers on \"brainstorm research ideas\", \"identify research gaps\", \"conduct gap analysis\", \"start research project\", \"conduct literature review\", \"define research question\", \"select research method\", \"plan research\", \"research ideation\"."
-allowed-tools: WebSearch WebFetch Read Write Edit Bash Glob Grep TodoWrite AskUserQuestion
+allowed-tools: WebSearch WebFetch Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 # Scholar Ideation
@@ -51,11 +52,11 @@ User Input (research topic/interest)
 Before dispatching to phases, collect research context and workflow preferences:
 
 ```
-AskUserQuestion:
+user prompt:
   question: "Please describe your research topic or interest area."
   → Store as: researchTopic
 
-AskUserQuestion:
+user prompt:
   question: "What is the scope and context of your research?"
   options:
     - "Broad exploration (survey a field)"
@@ -63,7 +64,7 @@ AskUserQuestion:
     - "Applied research (practical application)"
   → Store as: researchScope
 
-AskUserQuestion:
+user prompt:
   question: "What is your target research timeline?"
   options:
     - "Short-term (3-6 months)"
@@ -71,14 +72,14 @@ AskUserQuestion:
     - "Long-term (1-2 years)"
   → Store as: researchTimeline
 
-AskUserQuestion:
+user prompt:
   question: "Do you have access to Zotero for literature management?"
   options:
     - "Yes (auto-import papers to Zotero)"
     - "No (skip Zotero integration)"
   → Store as: useZotero
 
-AskUserQuestion:
+user prompt:
   question: "Workflow mode?"
   options:
     - "Interactive (confirm at each phase)"
@@ -189,7 +190,7 @@ TIMELINE: [short | medium | long]
 CONTEXT: [additional constraints, domain, background]
 ```
 
-If user provides a simple topic string, derive scope and timeline from the topic description or ask via AskUserQuestion.
+If user provides a simple topic string, derive scope and timeline from the topic description or ask via user prompt.
 
 ## Data Flow
 

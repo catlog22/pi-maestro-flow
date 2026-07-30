@@ -7,8 +7,8 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode.md
-~/.maestro/workflows/orchestrator-run-loop.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/orchestrator-run-loop.md
 ~/.maestro/prepare/maestro.md
 </required_reading>
 
@@ -23,12 +23,12 @@ Pi mirrors canonical Session/Run state automatically:
 </host_mirror>
 
 <deferred_reading>
-- [maestro.md](~/.maestro/workflows/maestro.md) — read before initial intent classification
-- [ralph-amend-goal.md](~/.maestro/workflows/ralph-amend-goal.md) — read only for `--amend`
+- [maestro.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro.md) — read before initial intent classification
+- [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read only for `--amend`
 </deferred_reading>
 
 <purpose>
-Turn a user intent into the initial Skill chain, create one canonical topic Session through `maestro run start --chain-file`, then execute the shared Run loop. Static versus dynamic is not a Session or command mode: each Skill contract decides whether it emits a typed chain proposal. For new intents, use this command. For policy-driven execution over existing Sessions, use `/maestro-ralph`.
+Turn a user intent into the initial Skill chain, create one canonical topic Session through `maestro run start --platform pi --chain-file`, then execute the shared Run loop. Static versus dynamic is not a Session or command mode: each Skill contract decides whether it emits a typed chain proposal. For new intents, use this command. For policy-driven execution over existing Sessions, use `/maestro-ralph`.
 </purpose>
 
 <pi_context_contract>
@@ -46,8 +46,8 @@ Turn a user intent into the initial Skill chain, create one canonical topic Sess
 Human-facing orchestration uses the unified Run surface:
 
 - Single step: `maestro run start "<intent>" --cmd <step> --arg "<step input>" --platform pi --workflow-root .`
-- Simple command chain: `maestro run start "<intent>" --chain analyze plan execute --no-dispatch --workflow-root .`
-- Advanced chain: `maestro run start "<intent>" --chain-file - --id <session-slug> --no-dispatch --workflow-root .`
+- Simple command chain: `maestro run start --platform pi "<intent>" --chain analyze plan execute --no-dispatch --workflow-root .`
+- Advanced chain: `maestro run start --platform pi "<intent>" --chain-file - --id <session-slug> --no-dispatch --workflow-root .`
 - Completion: `maestro run done [run_id] --verdict done|done-with-concerns|needs-retry|blocked --workflow-root .`
 - Mid-task changes: `maestro run edit <cmd...> --after latest --workflow-root .`
 

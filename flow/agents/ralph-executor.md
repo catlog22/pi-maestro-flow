@@ -3,7 +3,7 @@ name: ralph-executor
 description: "Deprecated compatibility alias for run-executor"
 tools:
   - Read
-  - Agent
+  - teammate
 ---
 
 # Ralph Executor Compatibility Alias

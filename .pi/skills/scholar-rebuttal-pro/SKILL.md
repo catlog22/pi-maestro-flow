@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 # Scholar Rebuttal Pro
@@ -116,7 +116,7 @@ When `workflowPreferences.autoYes === true`:
 Run Setup (see run-mode.md):
    └─ Birth packet injected run_id/run_dir? → use them, skip create.
       Else self-start: maestro run start "..." --cmd scholar-rebuttal-pro --session <YYYYMMDD-scholar-rebuttal-pro-{topic}> --platform pi
-      (Optional --resume <run_id> → maestro run brief <run_id> to continue an existing Run.)
+      (Optional --resume <run_id> → maestro run brief --platform pi <run_id> to continue an existing Run.)
    └─ output_base = {run_dir}/outputs
 
 Input Parsing:
@@ -179,7 +179,7 @@ Return:
 5. **Track Progress**: Update TodoWrite dynamically with task attachment/collapse pattern
 6. **Progressive Phase Loading**: Read phase docs ONLY when that phase is about to execute
 7. **DO NOT STOP**: Continuous multi-phase workflow until all phases complete
-8. **CLI Integration**: Use `maestro delegate --to agy --mode analysis` for semantic analysis tasks
+8. **CLI Integration**: Use `teammate({ taskType: "analysis", /* --to agy */ })` for semantic analysis tasks
 9. **Evidence Linking**: Every response strategy must link to paper content or experimental evidence
 
 ## Input Processing
@@ -198,7 +198,7 @@ The Run is the single source of truth (see run-mode.md). Resolve `run_dir`, then
 
 ```javascript
 // If the birth packet injected run_id/run_dir, use them (do NOT create).
-// Else if --resume <run_id>: maestro run brief <run_id> → run_dir.
+// Else if --resume <run_id>: maestro run brief --platform pi <run_id> → run_dir.
 // Else self-start: maestro run start "..." --cmd scholar-rebuttal-pro --session <slug> --platform pi
 //   (slug: YYYYMMDD-scholar-rebuttal-pro-{topic}, ASCII-only, ≤64 chars)
 
@@ -372,15 +372,11 @@ After Phase 5 completes:
 
 ## CLI Integration Details
 
-This skill uses `maestro delegate` for enhanced analysis:
+This skill uses `teammate` for enhanced analysis:
 
 **Phase 1 - Review Parsing**:
 ```bash
-maestro delegate "PURPOSE: Parse and classify reviewer comments by type (Major/Minor/Typo/Misunderstanding)
-TASK: • Extract comment structure • Classify by severity • Identify sentiment
-MODE: analysis
-CONTEXT: @<review-file>
-EXPECTED: JSON with classification results" --to agy --mode analysis
+teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Parse and classify reviewer comments by type (Major/Minor/Typo/Misunderstanding)\nTASK: • Extract comment struc…", /* --to agy: set model via model-availability */ })
 ```
 
 **Phase 2 - Multi-Perspective Discussion**:
@@ -388,20 +384,12 @@ Uses `team-ultra-analyze` skill or custom discussion agent to simulate multiple 
 
 **Phase 3 - Strategy Formulation**:
 ```bash
-maestro delegate "PURPOSE: Search paper content for evidence supporting response strategies
-TASK: • Locate relevant sections • Extract supporting data • Identify evidence gaps
-MODE: analysis
-CONTEXT: @<paper-file>
-EXPECTED: Evidence map with file:line references" --to agy --mode analysis
+teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Search paper content for evidence supporting response strategies\nTASK: • Locate relevant sections • Extract su…", /* --to agy: set model via model-availability */ })
 ```
 
 **Phase 5 - Quality Validation**:
 ```bash
-maestro delegate "PURPOSE: Validate rebuttal quality (completeness, professionalism, persuasiveness)
-TASK: • Check all comments addressed • Assess tone • Evaluate evidence strength
-MODE: analysis
-CONTEXT: @<rebuttal-file>
-EXPECTED: Quality report with improvement suggestions" --to agy --mode analysis
+teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: Validate rebuttal quality (completeness, professionalism, persuasiveness)\nTASK: • Check all comments addressed…", /* --to agy: set model via model-availability */ })
 ```
 
 ## Conference Template System

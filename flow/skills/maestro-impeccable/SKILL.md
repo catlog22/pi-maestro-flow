@@ -1,20 +1,21 @@
 ---
 name: maestro-impeccable
 description: "Use when designing, auditing, polishing, improving, or codifying frontend UI — websites, dashboards, landing pages, components, design systems Arguments: build|redesign|improve|enhance|launch|harden|foundation|live [target] [--codify <path>]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent Skill AskUserQuestion TodoWrite
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 <deferred_reading>
 Codify mode only (read when `--codify` and the corresponding phase starts):
-- [ui-codify.md](~/.maestro/workflows/ui-codify.md) — read always in codify mode (main workflow orchestrator)
-- [ui-codify-extract.md](~/.maestro/workflows/ui-codify-extract.md) — read when Codify Phase 2 starts (style extraction with 3 agents)
-- [ui-codify-package.md](~/.maestro/workflows/ui-codify-package.md) — read when Codify Phase 3 starts (reference package generation)
-- [ui-codify-knowhow.md](~/.maestro/workflows/ui-codify-knowhow.md) — read when Codify Phase 4 starts (knowledge asset generation)
+- [ui-codify.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify.md) — read always in codify mode (main workflow orchestrator)
+- [ui-codify-extract.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-extract.md) — read when Codify Phase 2 starts (style extraction with 3 agents)
+- [ui-codify-package.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-package.md) — read when Codify Phase 3 starts (reference package generation)
+- [ui-codify-knowhow.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify-knowhow.md) — read when Codify Phase 4 starts (knowledge asset generation)
 </deferred_reading>
 
 <purpose>
@@ -41,7 +42,7 @@ $ARGUMENTS first word determines mode:
 
 ## Command Routing
 
-All workflows at `~/.maestro/workflows/impeccable/{command}.md`:
+All workflows at `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{command}.md`:
 
 | Command | Category | Description |
 |---------|----------|-------------|
@@ -77,7 +78,7 @@ responsive-design.md, spatial-design.md, typography.md, ux-writing.md
 
 ## Chains
 
-Chain step names below reuse Command Routing names but resolve through the chain runner. To avoid ambiguity with Direct command invocation, internal display, todo items, and session status records always tag chain steps with the `impeccable:` prefix (e.g. `impeccable:craft`, `impeccable:critique`). The bare names in this table refer to the workflow file at `~/.maestro/workflows/impeccable/{name}.md` that the chain step reads.
+Chain step names below reuse Command Routing names but resolve through the chain runner. To avoid ambiguity with Direct command invocation, internal display, todo items, and session status records always tag chain steps with the `impeccable:` prefix (e.g. `impeccable:craft`, `impeccable:critique`). The bare names in this table refer to the workflow file at `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{name}.md` that the chain step reads.
 
 | Chain | Steps | Scenario |
 |-------|-------|----------|
@@ -94,7 +95,7 @@ Chain step names below reuse Command Routing names but resolve through the chain
 - `[refine]` = quality gate loop: gate fails → auto-select fix commands from findings → re-gate
 - `{cmd...}` = enhance supports multiple commands, comma-separated: `enhance colorize,typeset landing-page`
 
-Chain flags: --threshold <N> (default 26/40), --max-loops <N> (default 3), --skip-design, --styles <N>, -y (skip Layer 2 ambiguity AskUserQuestion — select first matching chain; skip chain session confirmation; skip quality gate refine confirmations. Does NOT skip prerequisite checks.)
+Chain flags: --threshold <N> (default 26/40), --max-loops <N> (default 3), --skip-design, --styles <N>, -y (skip Layer 2 ambiguity user prompt — select first matching chain; skip chain session confirmation; skip quality gate refine confirmations. Does NOT skip prerequisite checks.)
 
 ## Free Text Routing
 
@@ -165,7 +166,7 @@ Layer 1+2 both did not match, but intent is to build/create a specific thing:
 
 → Route to **craft** (Direct)
 
-If all three layers produce no match → E001 (No command or intent resolved). Before raising E001, attempt [@ask] AskUserQuestion with top 2-3 closest matches from Layer 1+2 tables.
+If all three layers produce no match → E001 (No command or intent resolved). Before raising E001, attempt [@ask] user prompt with top 2-3 closest matches from Layer 1+2 tables.
 
 ## Prerequisites
 
@@ -173,7 +174,7 @@ Before reading any command workflow:
 
 1. **Context**: `maestro load --type spec --category ui` → if empty → `maestro impeccable load-context`
 2. **PRODUCT.md**: missing/placeholder (<200 chars / `[TODO]`) → execute teach first, then resume original task
-3. **Register**: identify brand/product → Read `~/.maestro/workflows/impeccable/{brand|product}.md`
+3. **Register**: identify brand/product → Read `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{brand|product}.md`
 
 ## Direct Execution
 
@@ -184,7 +185,7 @@ Before reading any command workflow:
    Category: {category} | Target: {target}
    ─────────────────────────────────────────
    ```
-3. Read `~/.maestro/workflows/impeccable/{command}.md`
+3. Read `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{command}.md`
 4. **TodoWrite tracking**: create todo items for each major phase in the workflow file
    - Format: `[{command}] {phase description}`
    - Mark each phase completed immediately upon finishing
@@ -212,7 +213,7 @@ Before reading any command workflow:
    - `↺` marks refine loop with max iteration count
    - Conditional steps show trigger condition
    - Skipped conditional steps marked `(skipped)`
-3. **Confirm chain session**: [@ask] AskUserQuestion "Create chain session for '{chain_type}' targeting '{target}'?" — proceed only if user confirms. On decline, abort chain.
+3. **Confirm chain session**: [@ask] user prompt "Create chain session for '{chain_type}' targeting '{target}'?" — proceed only if user confirms. On decline, abort chain.
    Create session: `.workflow/.maestro/ui-craft-{YYYYMMDD-HHmmss}/status.json`
    ```json
    { "chain_type": "...", "target": "...", "steps": [...], "current_step": 0,
@@ -223,7 +224,7 @@ Before reading any command workflow:
    - If conditional step is skipped, immediately mark completed
    - Quality gate steps include threshold: `[chain] step 5: impeccable:critique ◆ gate ≥26/40`
 5. For each step:
-   - Read `~/.maestro/workflows/impeccable/{command}.md` → execute
+   - Read `~/.pi/agent/packages/pi-maestro-flow/workflows/impeccable/{command}.md` → execute
    - **Step start**: TodoWrite marks current step in_progress
    - **Step done**: TodoWrite marks completed + update status.json (`current_step`, step `status`)
    - **Step failed**: TodoWrite marks completed (with note) + record reason
@@ -258,7 +259,7 @@ Extract a design system from existing source code into tokens, a reference packa
 ### Codify Invariants
 1. **Source read-only** — the source path being analyzed MUST NOT be modified; extraction is purely read-only
 2. **Phase-sequential loading** — workflow files (ui-codify-extract, ui-codify-package, ui-codify-knowhow) MUST be read only when their phase starts; NEVER load all phases eagerly
-3. **User confirmation before knowhow** — Phase 3→4 gate MUST present [@ask] AskUserQuestion before generating knowledge assets; NEVER auto-proceed to knowhow generation
+3. **User confirmation before knowhow** — Phase 3→4 gate MUST present [@ask] user prompt before generating knowledge assets; NEVER auto-proceed to knowhow generation
 4. **Overwrite protection** — existing package directory MUST NOT be overwritten without `--overwrite` flag (E102)
 5. **Artifact completeness** — all 5 required artifacts MUST exist before reporting completion; NEVER skip artifact verification
 6. **Token-first extraction** — design-tokens.json MUST be generated before layout-templates.json; layout extraction depends on token foundation
@@ -269,7 +270,7 @@ maestro load --type spec --category ui
 ```
 
 ### Step 2: Execute Workflow
-Route to `~/.maestro/workflows/ui-codify.md` and follow completely. The workflow orchestrates 4 phases with deferred loading of phase-specific workflow files (see `<deferred_reading>`). Each phase reads its workflow file only when execution reaches that phase.
+Route to `~/.pi/agent/packages/pi-maestro-flow/workflows/ui-codify.md` and follow completely. The workflow orchestrates 4 phases with deferred loading of phase-specific workflow files (see `<deferred_reading>`). Each phase reads its workflow file only when execution reaches that phase.
 
 ### Codify Phase Gates (MANDATORY, BLOCKING)
 
@@ -285,7 +286,7 @@ Route to `~/.maestro/workflows/ui-codify.md` and follow completely. The workflow
 **GATE Phase 3 → Phase 4: Package → Knowhow**
 - REQUIRED: preview.html + preview.css generated as interactive showcase.
 - BLOCKED if missing: preview artifacts not generated — knowhow phase needs rendered reference for validation.
-- REQUIRED: [@ask] AskUserQuestion confirmation before proceeding to knowhow generation:
+- REQUIRED: [@ask] user prompt confirmation before proceeding to knowhow generation:
   ```
   question: "Preview 生成完成。是否继续将设计系统持久化为 knowhow 知识资产？"
   options:
@@ -362,7 +363,7 @@ Never auto-select: teach, shape, craft, live, document, extract, overdrive, crit
 | E002 | error | Source/target path not found | Verify path exists |
 | E003 | error | PRODUCT.md missing and teach step failed | Run `maestro impeccable teach` manually first |
 | E004 | error | Chain quality gate failed after max loops | Review findings manually, fix critical issues, then resume |
-| W001 | warning | UI specs not found via maestro run skill specs-load | Continuing without specs — output may miss project conventions |
+| W001 | warning | UI specs not found via maestro run skill --platform pi specs-load | Continuing without specs — output may miss project conventions |
 | W002 | warning | Quality gate score below threshold but P0 == 0 | Auto-refine loop triggered |
 | W003 | warning | Chain step failed but non-blocking | Step failure documented, chain continues |
 | E101 | error | Codify: source path not found or not a directory | Verify `--codify <source-path>` exists |
@@ -390,7 +391,7 @@ Chain mode:
 - [ ] Final report with scores, trend, and commands executed
 
 Codify mode:
-- [ ] UI specs loaded via `maestro run skill specs-load --category ui` (if available)
+- [ ] UI specs loaded via `maestro run skill --platform pi specs-load --category ui` (if available)
 - [ ] Source path validated and file discovery completed
 - [ ] design-tokens.json generated with color, typography, spacing tokens
 - [ ] layout-templates.json generated with component patterns (universal/specialized)

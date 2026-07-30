@@ -23,15 +23,15 @@ When spawned with `<files_to_read>`, read ALL listed files before any analysis.
 4. **Structured Output** — Schema-compliant JSON generation with validation
 
 **Analysis Modes**:
-- `quick-scan` → `maestro explore` single prompt (fast)
-- `deep-scan` → `maestro explore` multi-prompt parallel (thorough)
+- `quick-scan` → `teammate({ agent: "explorer" })` single prompt (fast)
+- `deep-scan` → `teammate({ agent: "explorer" })` multi-prompt parallel (thorough)
 - `dependency-map` → Multi-prompt + Bash graph construction (comprehensive)
 
 ## 4-Phase Execution Workflow
 
 ```
 Phase 1: Task Understanding → parse scope, output requirements, schema
-Phase 2: Analysis Execution → maestro explore + Bash structural scan
+Phase 2: Analysis Execution → teammate({ agent: "explorer" }) + Bash structural scan
 Phase 3: Schema Validation → read schema, validate structure
 Phase 4: Output Generation → agent report + file output
 ```
@@ -55,21 +55,18 @@ Phase 4: Output Generation → agent report + file output
 
 ## Phase 2: Analysis Execution
 
-### Primary: `maestro explore` (preferred)
+### Primary: `teammate({ agent: "explorer" })` (preferred)
 
 **Quick-scan** — single targeted prompt:
 
 ```bash
-maestro explore "FIND: <target from prompt>
-SCOPE: src/
-EXCLUDE: test files, node_modules, generated code
-EXPECTED: file:line evidence list" --max-turns 3
+teammate({ agent: "explorer", task: "FIND: <target from prompt>\nSCOPE: src/\nEXCLUDE: test files, node_modules, generated code\nEXPECTED: file:line evidence list", taskType: "explore" })
 ```
 
 **Deep-scan** — multi-prompt parallel for multi-angle coverage:
 
 ```bash
-maestro explore \
+teammate({ agent: "explorer" }) \
   "FIND: <structural patterns>
 SCOPE: src/
 EXPECTED: file:line list" \
@@ -82,11 +79,7 @@ EXPECTED: pattern descriptions with file evidence" \
 **Dependency-map** — combine explore + Bash:
 
 ```bash
-maestro explore "FIND: import/export relationships
-SCOPE: src/
-ATTENTION: circular dependencies, tight coupling
-EXPECTED: dependency pairs with file:line" --max-turns 4 --json
-```
+teammate({ agent: "explorer", task: "FIND: import/export relationships\nSCOPE: src/\nATTENTION: circular dependencies, tight coupling\nEXPECTED: dependency pairs with file:line", taskType: "explore" })
 
 ### Secondary: Bash structural scan (supplement only)
 
@@ -95,12 +88,12 @@ rg "^export (class|interface|function) " --type ts -n | head -30
 rg "^import .* from " -n | head -30
 ```
 
-Use Bash only when `maestro explore` results need structural verification.
+Use Bash only when `teammate({ agent: "explorer" })` results need structural verification.
 
-### Fallback: `maestro delegate` (only when explore unavailable)
+### Fallback: `teammate` (only when explore unavailable)
 
 ```bash
-maestro delegate "PURPOSE: {from prompt} TASK: {from prompt} MODE: analysis" --role explore --mode analysis
+teammate({ agent: "delegate", taskType: "analysis", task: "PURPOSE: {from prompt} TASK: {from prompt} MODE: analysis" })
 ```
 
 ### Dual-Source Synthesis
@@ -173,13 +166,13 @@ Brief summary: task completion status, key findings, generated file paths
 ## Rules
 
 ### ALWAYS
-- Prefer `maestro explore` over raw Grep/rg for code search
+- Prefer `teammate({ agent: "explorer" })` over raw Grep/rg for code search
 - Use structured prompt format (FIND/SCOPE/EXCLUDE/ATTENTION/EXPECTED)
 - Read schema file FIRST before generating output (if schema specified)
 - Copy field names EXACTLY from schema (case-sensitive)
 - Include file:line references in findings
 - Track discovery source for all findings
-- Use `run_in_background: false` for all Bash/CLI calls
+- Use `background: false` for all Bash/CLI calls
 
 ### NEVER
 - Modify any files (read-only agent)

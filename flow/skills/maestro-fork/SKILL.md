@@ -1,12 +1,13 @@
 ---
 name: maestro-fork
 description: "Create or sync session worktree for parallel dev Arguments: --session <session_id> [--base <ref>] [--sync]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 <purpose>
@@ -15,8 +16,8 @@ Supports `--sync` mode to pull latest main changes into an active worktree.
 </purpose>
 
 <deferred_reading>
-- [worktrees.json](~/.maestro/templates/worktrees.json) — read when updating registry
-- [worktree-scope.json](~/.maestro/templates/worktree-scope.json) — read when writing scope marker
+- [worktrees.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktrees.json) — read when updating registry
+- [worktree-scope.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktree-scope.json) — read when writing scope marker
 </deferred_reading>
 
 <context>
@@ -30,7 +31,7 @@ Modes (`Fork` / `Sync`), flags (`--session`, `--base`, `--sync`), session resolu
 </context>
 
 <execution>
-Follow '~/.maestro/workflows/fork.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/fork.md' completely.
 
 Fork and sync algorithm steps are defined in workflow `fork.md`.
 
@@ -50,7 +51,7 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 - BLOCKED if missing: worktree creation failed or shared files not copied — do not proceed to artifact scoping.
 
 **GATE 3: Artifact Copy → Completion**
-- REQUIRED: [@ask] AskUserQuestion confirmation before registry writes — show session scope, worktree path, and state entries to be written. User must confirm or abort.
+- REQUIRED: [@ask] user prompt confirmation before registry writes — show session scope, worktree path, and state entries to be written. User must confirm or abort.
 - REQUIRED: `worktree-scope.json` written with session scope (after confirmation).
 - REQUIRED: Scoped `state.json` written (only this session's data) (after confirmation).
 - REQUIRED: `worktrees.json` registry updated in main worktree (after confirmation).
@@ -70,8 +71,8 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Fork complete | `cd {wt.path}` then step `analyze` (`maestro run prepare analyze` + `maestro run create analyze --session YYYYMMDD-analyze-{topic} --intent "{goal}"`) |
-| Fork + automated | `maestro delegate "run full lifecycle for session" --cd {wt.path} --mode write` |
+| Fork complete | `cd {wt.path}` then `maestro run start "{goal}" --cmd analyze --topic "{topic}" --platform pi --workflow-root .` |
+| Fork + automated | `teammate({ agent: "delegate", taskType: "development", task: "run full lifecycle for session", cwd: "{wt.path}" }) |
 | Sync complete | Resume work in worktree |
 | Sync conflicts found | Resolve manually, then retry |
 </completion>
@@ -80,10 +81,10 @@ Fork and sync algorithm steps are defined in workflow `fork.md`.
 | Code | Severity | Condition | Recovery |
 |------|----------|-----------|----------|
 | E001 | error | Project not initialized | Run maestro-init first |
-| E002 | error | No roadmap found | Run step `roadmap` first (`maestro run prepare roadmap` + `maestro run create roadmap --session YYYYMMDD-roadmap-{topic} --intent "{goal}"`) |
+| E002 | error | No roadmap found | Run step `roadmap` first (`maestro run start "{goal}" --cmd roadmap --topic "{topic}" --platform pi --workflow-root .`) |
 | E003 | error | Running inside a worktree | Run from main worktree |
 | E004 | error | No session ID provided | Provide `--session <session_id>` |
-| E005 | error | No sessions defined in state.json | Run step `roadmap` first (`maestro run prepare roadmap` + `maestro run create roadmap --session YYYYMMDD-roadmap-{topic} --intent "{goal}"`) |
+| E005 | error | No sessions defined in state.json | Run step `roadmap` first (`maestro run start "{goal}" --cmd roadmap --topic "{topic}" --platform pi --workflow-root .`) |
 | E006 | error | Session not found in state.json.sessions[] | Check available sessions |
 | E007 | error | No active worktree for session (--sync) | Check worktrees.json |
 | E008 | error | Session already has active worktree | Merge or cleanup first |

@@ -1,12 +1,13 @@
 ---
 name: maestro-merge
 description: "Merge session worktree branch back to main Arguments: --session <session_id> [--force] [--dry-run] [--no-cleanup] [--continue]"
-allowed-tools: Read Write Edit Bash Glob Grep Agent AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 <purpose>
@@ -23,7 +24,7 @@ Flags (`--session`, `--force`, `--dry-run`, `--no-cleanup`, `--continue`), merge
 </context>
 
 <execution>
-Follow '~/.maestro/workflows/merge.md' completely.
+Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/merge.md' completely.
 
 --dry-run short-circuit: execute GATE 1 health check only, display merge preview (files that would change, artifact sync plan), then EXIT before rebase/merge. GATE 2 and GATE 3 are not reached.
 
@@ -52,7 +53,7 @@ Note on --force: skips user confirmation for incomplete phase artifacts (W002). 
 <completion>
 ### Knowledge inquiry
 
-After successful merge, use `[@ask] AskUserQuestion` to confirm knowledge persistence:
+After successful merge, use `[@ask] user prompt` to confirm knowledge persistence:
 
 ```
 question: "Merge 完成。是否记录本次工作经验教训？"
@@ -69,7 +70,7 @@ User selects "记录经验" → prompt for title/insight, then recommend `/maest
 
 | Condition | Suggestion |
 |-----------|-----------|
-| Next dep-ready session | step `analyze` for session (`maestro run prepare analyze --session {next-dep-ready-slug}` + `maestro run create analyze --session {next-dep-ready-slug} --intent "{goal}"`) |
+| Next dep-ready session | `maestro run start "{goal}" --cmd analyze --session {next-dep-ready-slug} --platform pi --workflow-root .` |
 </completion>
 
 <error_codes>

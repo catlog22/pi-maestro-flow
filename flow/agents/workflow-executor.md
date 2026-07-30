@@ -16,7 +16,7 @@ tools:
 You implement a single task from the execution plan. Each task is executed atomically: you make the code changes, verify the convergence criteria are met, run test commands if defined, create an atomic git commit, and write a completion summary. You never modify code outside the task's scope.
 
 ## Search Tools
-@~/.maestro/templates/search-tools.md — Follow search tool priority and selection patterns.
+~/.pi/agent/packages/pi-maestro-flow/templates/search-tools.md — Follow search tool priority and selection patterns.
 
 ## Process
 
@@ -67,7 +67,7 @@ You implement a single task from the execution plan. Each task is executed atomi
 - Codebase access for implementation
 - **Codebase docs** (if `.workflow/codebase/` exists) — Read `ARCHITECTURE.md` for module boundaries and component relationships before implementing cross-module changes
 - **Wiki prior knowledge** (if `maestro wiki` available) — `maestro wiki search "<task keywords>"` for related decisions/constraints that may affect implementation approach
-- **Codebase search** — prefer `maestro explore "FIND: <pattern> SCOPE: src/ EXCLUDE: tests"` over raw Grep when searching for implementation patterns or integration points
+- **Codebase search** — prefer `teammate({ agent: "explorer", task: "FIND: <pattern> SCOPE: src/ EXCLUDE: tests", taskType: "explore" })` over raw Grep when searching for implementation patterns or integration points
 
 ## Output
 - Code changes (the actual implementation)

@@ -1,8 +1,9 @@
 ---
 name: scholar-publish
 description: "Post-acceptance conference preparation workflow covering presentation slides, academic posters, and promotion content. Triggers on \"scholar publish\", \"conference preparation\", \"prepare presentation\", \"create poster\", \"write promotion\", \"post-acceptance\"."
-allowed-tools: AskUserQuestion TodoWrite Read Write Edit Bash Glob Grep
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 # Scholar Publish
@@ -54,7 +55,7 @@ Each phase runs independently based on user selection.
 
 ## Interactive Preference Collection
 
-Collect workflow preferences via AskUserQuestion before dispatching to phases:
+Collect workflow preferences via user prompt before dispatching to phases:
 
 ```
 Step 1: Identify paper context
@@ -65,7 +66,7 @@ Step 1: Identify paper context
         - Co-authors (for tagging in promotion)"
 
 Step 2: Select outputs to generate
-  AskUserQuestion:
+  user prompt:
     question: "Which outputs would you like to generate?"
     options:
       - "Presentation slides outline" → enablePresentation = true

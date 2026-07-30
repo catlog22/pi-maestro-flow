@@ -1,15 +1,16 @@
 ---
 name: team-coordinate
 description: "Universal team coordination skill with dynamic role generation. Uses team-worker agent architecture with role-spec files. Only coordinator is built-in -- all worker roles are generated at runtime as role-specs and spawned via team-worker agent. Beat/cadence model for orchestration. Triggers on \"Team Coordinate \"."
-allowed-tools: TeamCreate TeamDelete SendMessage TaskCreate TaskUpdate TaskList TaskGet Agent AskUserQuestion Read Write Edit Bash Glob Grep mcp__maestro__team_msg
+allowed-tools: teammate Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
-# Team Coordinate 
+# Team Coordinate
 
 Universal team coordination skill: analyze task -> generate role-specs -> dispatch -> execute -> deliver. Only the **coordinator** is built-in. All worker roles are **dynamically generated** as lightweight role-spec files and spawned via the `team-worker` agent.
 
@@ -33,8 +34,8 @@ Universal team coordination skill: analyze task -> generate role-specs -> dispat
   (roles generated at runtime from task analysis)
 
   CLI Tools (callable by any worker):
-    maestro delegate --mode analysis  - analysis and exploration
-    maestro delegate --mode write     - code generation and modification
+    teammate({ taskType: "analysis" })  - analysis and exploration
+    teammate({ taskType: "development" })     - code generation and modification
 ```
 
 ## Shared Constants
@@ -45,8 +46,8 @@ Universal team coordination skill: analyze task -> generate role-specs -> dispat
 | Session path | `{run_dir}/work/team/` |
 | Worker agent | `team-worker` |
 | Message bus | `mcp__maestro__team_msg(session_id=<run-id>, ...)` |
-| CLI analysis | `maestro delegate --mode analysis` |
-| CLI write | `maestro delegate --mode write` |
+| CLI analysis | `teammate({ taskType: "analysis" })` |
+| CLI write | `teammate({ taskType: "development" })` |
 | Max roles | 5 |
 
 ## Role Router
@@ -72,8 +73,8 @@ Workers can use CLI tools for analysis and code operations:
 
 | Tool | Purpose |
 |------|---------|
-| maestro delegate --mode analysis | Analysis, exploration, pattern discovery |
-| maestro delegate --mode write | Code generation, modification, refactoring |
+| teammate({ taskType: "analysis" }) | Analysis, exploration, pattern discovery |
+| teammate({ taskType: "development" }) | Code generation, modification, refactoring |
 
 ### Dispatch
 
@@ -115,12 +116,12 @@ User provides task description
 When coordinator spawns workers, use `team-worker` agent with role-spec path:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker",
   team_name: <team-name>,
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: {run_dir}/work/team/role-specs/<role>.md
@@ -152,7 +153,7 @@ Execute built-in Phase 1 (task discovery) -> role-spec Phase 2-4 -> built-in Pha
 When pipeline completes (all tasks done), coordinator presents an interactive choice:
 
 ```
-AskUserQuestion({
+ask user ({
   questions: [{
     question: "Team pipeline complete. What would you like to do?",
     header: "Completion",
@@ -250,7 +251,7 @@ AskUserQuestion({
 Coordinator supports `resume` / `continue` for interrupted sessions:
 
 1. Scan `{run_dir}/work/team/team-session.json` for active/paused sessions
-2. Multiple matches -> AskUserQuestion for selection
+2. Multiple matches -> user prompt for selection
 3. Audit TaskList -> reconcile session state <-> task status
 4. Reset in_progress -> pending (interrupted tasks)
 5. Rebuild team and spawn needed workers only

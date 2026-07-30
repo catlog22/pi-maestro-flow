@@ -116,7 +116,7 @@ teammate({
   description: "Spawn <role> worker",
   team_name: <team-name>,
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: {run_dir}/work/team/role-specs/<role>.md

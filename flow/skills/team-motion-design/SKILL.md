@@ -1,12 +1,13 @@
 ---
 name: team-motion-design
 description: "Unified team skill for motion design. Animation token systems, scroll choreography, GPU-accelerated transforms, reduced-motion fallback. Uses team-worker agent architecture. Triggers on \"team motion design\", \"animation system\"."
-allowed-tools: Agent AskUserQuestion Read Write Edit Bash Glob Grep TaskList TaskGet TaskUpdate TaskCreate TeamCreate TeamDelete SendMessage mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__maestro__team_msg mcp__chrome-devtools__performance_start_trace mcp__chrome-devtools__performance_stop_trace mcp__chrome-devtools__performance_analyze_insight mcp__chrome-devtools__evaluate_script mcp__chrome-devtools__take_screenshot
+allowed-tools: teammate Read Write Edit Bash Glob Grep mcp__maestro__read_file mcp__maestro__write_file mcp__maestro__edit_file mcp__chrome-devtools__performance_start_trace mcp__chrome-devtools__performance_stop_trace mcp__chrome-devtools__performance_analyze_insight mcp__chrome-devtools__evaluate_script mcp__chrome-devtools__take_screenshot maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Motion Design
@@ -62,7 +63,7 @@ Parse `$ARGUMENTS`:
 
 - **Session prefix**: `MD`
 - **Session path**: `{run_dir}/work/team/`
-- **CLI tools**: `maestro delegate --mode analysis` (read-only), `maestro delegate --mode write` (modifications)
+- **CLI tools**: `teammate({ taskType: "analysis" })` (read-only), `teammate({ taskType: "development" })` (modifications)
 - **Message bus**: `mcp__maestro__team_msg(session_id=<run-id>, ...)`
 - **Max GC rounds**: 2
 
@@ -71,12 +72,12 @@ Parse `$ARGUMENTS`:
 Coordinator spawns workers using this template:
 
 ```
-Agent({
+teammate({
   subagent_type: "team-worker",
   description: "Spawn <role> worker for <task-id>",
   team_name: "motion-design",
   name: "<role>",
-  run_in_background: true,
+  background: true,
   prompt: `## Role Assignment
 role: <role>
 role_spec: <skill_root>/roles/<role>/role.md

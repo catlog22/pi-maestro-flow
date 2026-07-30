@@ -1,12 +1,13 @@
 ---
 name: scholar-writing
 description: "End-to-end academic paper writing workflow. Takes a research repository and produces a publication-ready LaTeX manuscript for top ML/AI conferences (NeurIPS, ICML, ICLR, ACL, AAAI, COLM). Covers repo understanding, structure planning, section drafting, citation management, anti-AI polishing, and conference formatting. Triggers on \"write paper\", \"draft paper\", \"scholar writing\", \"paper writing workflow\"."
-allowed-tools: Read Write Edit Bash Glob Grep WebSearch WebFetch TodoWrite AskUserQuestion Task
+allowed-tools: Read Write Edit Bash Glob Grep WebSearch WebFetch Task maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 # Scholar Writing
@@ -15,10 +16,10 @@ End-to-end workflow for writing publication-ready ML/AI papers from research rep
 
 ## Run Lifecycle
 
-Follow `~/.maestro/workflows/run-mode.md`. If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them and do NOT call `maestro run create`. Otherwise self-start before Phase 1:
+Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md`. If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them and do NOT call `maestro run create --platform pi`. Otherwise self-start before Phase 1:
 
 ```bash
-maestro run create scholar-writing --session <YYYYMMDD-scholar-writing-{topic}> --intent "<short phrase>"
+maestro run start "<short phrase>" --cmd scholar-writing --session <YYYYMMDD-scholar-writing-{topic}> --platform pi
 ```
 
 Session slug is ASCII-only, ≤64 chars. The paper itself lives in the user's `outputDir` (a working area in the user's repo, like source code — **not** the Run truth source). Write the workflow synthesis and the delivery manifest (paths to `paper.tex` / `paper.pdf` / `references.bib`, verification status, remaining action items) to `{run_dir}/report.md`, and the machine-readable delivery-paths list to `{run_dir}/outputs/delivery.json` — the contract registers it as the primary artifact `latest-paper-delivery`, and the runtime only scans `{run_dir}/outputs/`, so a manifest written anywhere else is invisible. Close per the Final Checklist.

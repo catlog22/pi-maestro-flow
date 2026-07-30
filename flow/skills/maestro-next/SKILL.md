@@ -1,22 +1,43 @@
 ---
 name: maestro-next
 description: "Unified entry for all development intents — classify intent, assess complexity, route to the correct execution channel: /maestro-companion (lightweight), standard single run, or /maestro and /maestro-ralph (multi-step manual/orchestrated). Pure router, never runs execution loops itself Arguments: <intent> [-y]"
-allowed-tools: Read Write Edit Bash Glob Grep AskUserQuestion
+allowed-tools: Read Write Edit Bash Glob Grep maestro
 disable-model-invocation: false
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
+
+<host_mirror>
+
+Pi mirrors canonical Session/Run state automatically:
+
+- Advance only with `todo({ action: "next" })`; do not create or update mirror tasks manually.
+- Goal completion is derived from terminal chain state and clean gates.
+- After compaction, reattach through the current Run's `brief.command`.
+
+</host_mirror>
 
 <purpose>
 Unified interactive entry for all development intents. Pure router: parse intent + project state → classify → assess complexity → route to the appropriate channel:
 - **Companion** (lightweight): route to `/maestro-companion "<intent>"` — minimal run lifecycle, continuous evidence recording
-- **Standard** (single run): recommend a step → confirm → execute via `maestro run prepare` + `maestro run start`
+- **Standard** (single run): recommend a step → confirm → execute via `maestro run start --platform pi --cmd`
 - **Multi-step**: route to `/maestro "<intent>"` (manual stepwise control) or `/maestro-ralph "<intent>"` (orchestrated closed-loop)
 
 This command is the single entry point. It classifies and routes. Multi-step execution loops live in `/maestro` (manual) and `/maestro-ralph` (orchestrated).
 </purpose>
+
+<pi_context_contract>
+
+- Consume the injected Topic Session resolution and ReuseAssessment as read-only routing evidence.
+- Accept upstream only from same-Session sealed outputs.
+- Resolve each `argument_requirements` entry through `required`, `missing`, `type`, `source`, optional `default`, and `question`.
+- Treat the birth packet as compact routing; load the execution protocol from `brief.command`.
+- A completion hint with `suggest_only=true` is displayed and never executed implicitly.
+
+</pi_context_contract>
 
 <context>
 $ARGUMENTS — intent text + optional flags.
@@ -38,7 +59,7 @@ $ARGUMENTS — intent text + optional flags.
 <invariants>
 1. **Pure router for multi-step** — this command never runs execution loops (manual chain or orchestrated). Multi-step execution is delegated to `/maestro` (manual) or `/maestro-ralph` (orchestrated)
 2. **Pipeline orchestrators excluded** — only recommend registered steps as single-run targets
-3. **Lifecycle continuation** — "continue"/"next"/"go" are explicit continuation signals → lifecycle_position inference (S_STATE). Truly empty arguments (no text at all) → 1 clarify round via [@ask] AskUserQuestion; still empty → S_FALLBACK (E001)
+3. **Lifecycle continuation** — "continue"/"next"/"go" are explicit continuation signals → lifecycle_position inference (S_STATE). Truly empty arguments (no text at all) → 1 clarify round via [@ask] user prompt; still empty → S_FALLBACK (E001)
 4. **Literal match priority** — keyword match takes precedence; lifecycle is tie-breaker
 5. **Argument pass-through** — the intent phrase is Session metadata only (the positional phrase to `run start`); the selected step's domain payload becomes command input through repeatable `--arg <value>`. The user can modify command inputs at confirmation; `-y` only passes through when the user provided it
 6. **Manual campaigns excluded** — `team-*` and `maestro-odyssey` never enter the executable candidate pool and are never executed in this turn; they may only be emitted as suggest-only invocations (see the odyssey campaign rows in the intent routing table)
@@ -47,6 +68,8 @@ $ARGUMENTS — intent text + optional flags.
 9. **Multi-step routes to the orchestrators** — when intent spans ≥2 steps or needs orchestration, output `/maestro "<intent>"` (manual stepwise) or `/maestro-ralph "<intent>"` (orchestrated closed-loop). This command never creates sessions or manages chains itself
 10. **Cross-category keyword priority** — when an intent keyword matches both a first-tier step and a retained command, the first-tier step wins for candidate selection; complexity assessment still applies independently. Auxiliary clusters are advisory grouping for display, never routing overrides
 11. **`-y` means skip-confirmation, not auto-execute** — for standard channel, skipping confirmation proceeds to S_EXECUTE (this command runs the step). For companion/multi-step channels, this command is a router: skipping confirmation means outputting the target invocation text directly. The target command owns its own execution semantics
+9. simple chain 只通过 `maestro run start --platform pi --chain ... --no-dispatch` 创建；不得为同一任务的每个 skill 新建独立 Session。
+10. 中途新增下一步用 `maestro run edit <cmd...>` 修改未来 chain，不调用新的 `run start` 制造第二个 Topic Session。
 </invariants>
 
 <state_machine>
@@ -56,7 +79,7 @@ S_PARSE    — Parse arguments, extract flags, detect mode
 S_STATE    — Read project state, infer lifecycle_position
 S_RANK     — Score candidates, assess complexity, determine channel
 S_PRESENT  — Show top pick + alternatives + reasoning + channel verdict
-S_CONFIRM  — [@ask] AskUserQuestion for confirmation (skipped by -y)
+S_CONFIRM  — [@ask] user prompt for confirmation (skipped by -y)
 S_EXECUTE  — Run prepare + start for selected single step
 S_FALLBACK — Intent empty after clarification
 </states>
@@ -65,7 +88,7 @@ S_FALLBACK — Intent empty after clarification
 
 S_PARSE:
   → S_STATE    WHEN: intent present / "continue"/"next"/"go"
-  → S_PARSE    WHEN: no arguments at all (1 clarify round via [@ask] AskUserQuestion)
+  → S_PARSE    WHEN: no arguments at all (1 clarify round via [@ask] user prompt)
   → S_FALLBACK WHEN: clarification still empty
 
 S_STATE:
@@ -102,8 +125,8 @@ S_FALLBACK:
 Read project state to infer `lifecycle_position`:
 
 ```bash
-maestro run prepare   # check if prepare command works
-cat .workflow/state.json 2>/dev/null
+maestro run status --workflow-root .   # read canonical Session/Run position
+# Topic Session resolution and ReuseAssessment are injected read-only inputs
 ```
 
 **State → lifecycle_position → natural next step:**
@@ -231,19 +254,12 @@ Single-run path only. Multi-step execution is handled by `/maestro` (manual) and
 For first-tier steps (those with prepare/ + workflows/ files):
 
 ```bash
-# 1. Run prepare to get pre-task thinking content
-maestro run prepare <step>
+# Create one Run through the friendly unified entry.
+maestro run start "<short goal>" --cmd <step> --platform pi --workflow-root . [--arg "<required command input>"]
+# Returns run_id, run_dir, authoritative upstream refs, entry gates/blockers, and brief.command.
+```
 
-# 2. LLM performs pre-task thinking using prepare content
-#    Produces prep YAML (goal/approach/scope/risks/gates/reads)
-
-# 3. Start run — the intent is the positional phrase; --cmd names the step;
-#    always pass --session (ASCII slug). When the command contract or
-#    argument-hint requires input, pass each value with repeatable --arg <value>.
-maestro run start "<short goal>" --cmd <step> --session YYYYMMDD-<step>-<topic> [--arg "<required command input>"]
-#    Returns: run_id, run_dir, upstream (alias→artifact), entry_gates, entry_blockers, next (progressive hint)
-
-# 3a. Entry blocker degradation (execute-specific)
+# Entry blocker degradation (execute-specific)
 #    IF step == execute AND entry_blockers is non-empty (missing current-plan):
 #      Inspect upstream for alternative artifacts (latest-review, latest-debug, latest-fix-directions).
 #      Route per the degradation table in prepare/execute.md:

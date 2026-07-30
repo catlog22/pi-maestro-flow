@@ -1,8 +1,9 @@
 ---
 name: maestro-help
 description: "Maestro Flow 命令帮助系统。搜索命令、浏览技能、工作流推荐、新手引导。Triggers on \"maestro-help\", \"帮助\", \"命令\", \"怎么用\", \"skill\", \"workflow\", \"maestro 怎么用\"."
-allowed-tools: Read Grep Glob AskUserQuestion
+allowed-tools: Read Grep Glob maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 # Maestro Help
@@ -178,7 +179,7 @@ $ARGUMENTS → Parse:
 
 ### 上游起源 + 核心 (core)
 
-> 裸名称为 first-tier step：经 `/maestro "<意图>"` 自动路由，或 `maestro run prepare <step>` + `maestro run create <step> ...` 直接执行；`/` 前缀为独立命令。
+> 裸名称为 first-tier step：经 `/maestro "<意图>"` 自动路由，或 `maestro run start "<intent>" --cmd <step> --platform pi ...` 直接执行；`/` 前缀为独立命令。
 
 | 命令 | 用途 |
 |------|------|
@@ -310,8 +311,8 @@ Odyssey 长周期循环（独立路径）
 ## Related Resources
 
 - **Guide 目录**: `guide/` — 17 个专题指南文档
-- **Delegate 参考**: `~/.maestro/workflows/delegate-usage.md`
-- **Coding 哲学**: `~/.maestro/workflows/coding-philosophy.md`
+- **Delegate 参考**: `~/.pi/agent/packages/pi-maestro-flow/workflows/delegate-usage.md`
+- **Coding 哲学**: `~/.pi/agent/packages/pi-maestro-flow/workflows/coding-philosophy.md`
 - **CLI 工具配置**: `~/.maestro/cli-tools.json`
 
 ## Statistics

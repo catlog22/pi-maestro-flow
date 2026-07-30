@@ -1,12 +1,13 @@
 ---
 name: skill-generator
 description: "Meta-skill for creating new Claude Code skills with configurable execution modes. Supports sequential (fixed order) and autonomous (stateless) phase patterns. Use for skill scaffolding, skill creation, or building new workflows. Triggers on \"create skill\", \"new skill\", \"skill generator\"."
-allowed-tools: Agent AskUserQuestion Read Bash Glob Grep Write
+allowed-tools: teammate Read Bash Glob Grep Write maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
 </required_reading>
 
 # Skill Generator
@@ -15,10 +16,10 @@ Meta-skill for creating new Claude Code skills with configurable execution modes
 
 ## Run Lifecycle
 
-Follow `~/.maestro/workflows/run-mode.md`. If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them and do NOT call `maestro run create`. Otherwise self-start before Phase 1:
+Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md`. If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them and do NOT call `maestro run create --platform pi`. Otherwise self-start before Phase 1:
 
 ```bash
-maestro run create skill-generator --session <YYYYMMDD-skill-generator-{topic}> --intent "<short phrase>"
+maestro run start "<short phrase>" --cmd skill-generator --session <YYYYMMDD-skill-generator-{topic}> --platform pi
 ```
 
 Session slug is ASCII-only, ≤64 chars. Retain the returned `run_id` and `run_dir`; all `{run_dir}/...` paths below refer to it. Close per Phase 5.
@@ -165,7 +166,7 @@ Phase 0: Specification Study (MANDATORY - Must complete before proceeding)
 
 Phase 1: Requirements Discovery
    - Gather skill requirements via user interaction
-   - Tool: AskUserQuestion
+   - Tool: user prompt
    - Collect: Skill name, purpose, execution mode
    - Collect: Phase/Action definition
    - Collect: Tool dependencies, output format
@@ -233,7 +234,7 @@ Read('.claude/skills/skill-generator/specs/skill-requirements.md');
 Read('.claude/skills/skill-generator/templates/*.md'); // All templates
 
 // Phase 1: Gather requirements
-const answers = AskUserQuestion({
+const answers = ask user ({
   questions: [
     { question: "Skill name?", header: "Name", options: [...] },
     { question: "Execution mode?", header: "Mode", options: ["Sequential", "Autonomous"] }

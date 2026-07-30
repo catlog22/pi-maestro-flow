@@ -1,12 +1,13 @@
 ---
 name: team-adversarial-swarm
 description: "ACO swarm intelligence with modular Workflow composition and adversarial decision gates. Coordinator drives iteration loop; 4 composable Workflow scripts handle exploration, scoring, convergence, and synthesis — each with built-in adversarial patterns."
-allowed-tools: Read Write Edit Bash Glob Grep Workflow AskUserQuestion Agent
+allowed-tools: Read Write Edit Bash Glob Grep Workflow teammate maestro
 disable-model-invocation: true
+session-mode: none
 ---
 
 <required_reading>
-@~/.maestro/workflows/run-mode-lite.md
+~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
 </required_reading>
 
 # Team Adversarial Swarm
@@ -45,7 +46,7 @@ SKILL.md (Coordinator — this file)
 ## Workflow Module Registry
 
 | Module | Script | Args Interface | Adversarial Pattern | Returns |
-|--------|--------|---------------|--------------------|---------| 
+|--------|--------|---------------|--------------------|---------|
 | **Explore** | `workflows/wf-swarm-explore.js` | `{ iteration, assignments[], objective, session, config }` | N ants parallel | `{ ant_results[] }` |
 | **Score** | `workflows/wf-swarm-score.js` | `{ iteration, ant_results[], objective, rubric? }` | 3-vote per ant (prosecutor/defender/judge) | `{ scores{}, calibration }` |
 | **Converge** | `workflows/wf-swarm-converge.js` | `{ iteration, best, history[], config }` | prosecutor(continue)/defender(stop)/judge | `{ converged, reason, confidence }` |
@@ -110,7 +111,7 @@ SKILL.md (Coordinator — this file)
 
 解析用户 intent，生成 `swarm-config.json`。
 
-若 intent 不够明确，用 AskUserQuestion 澄清：
+若 intent 不够明确，用 user prompt 澄清：
 - 搜索空间是什么？（文件 glob / 节点列表 / 抽象决策集）
 - 目标是什么？（最优方案 / 发现问题 / 优化路径）
 - 如何评分？（测试通过率 / lint / 自定义规则 / LLM 对抗评分）
@@ -141,7 +142,7 @@ Write 到 `{run_dir}/work/team/swarm-config.json`。
 
 After session folder creation and before role-spec generation:
 
-1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run create team-adversarial-swarm --session <slug> --intent "<task summary>"`
+1. **Resolve Run** (birth-packet first): if the dispatch context already carries `run_id` / `run_dir` (injected by an orchestrator), store them in `team-session.json` and skip create — a second create mints an empty duplicate Run. Otherwise: `maestro run start "<task summary>" --cmd team-adversarial-swarm --session <slug> --platform pi --workflow-root .`
    - Slug format: `YYYYMMDD-team-adversarial-swarm-<topic>` (ASCII, ≤64 chars)
    - Store returned `run_id` and `run_dir` in `team-session.json`:
      ```json
@@ -155,29 +156,29 @@ After session folder creation and before role-spec generation:
 for k in range(1, max_iterations + 1):
     # 3a. ACO selection
     assignments = Bash("python aco.py --session {run_dir}/work/team select --iter k")
-    
+
     # 3b. Parallel exploration (Workflow Module 1)
     explore_result = Workflow({
         scriptPath: "<skill>/workflows/wf-swarm-explore.js",
         args: { iteration: k, assignments, objective, session, config }
     })
-    
+
     # 3c. Adversarial scoring (Workflow Module 2)
     score_result = Workflow({
         scriptPath: "<skill>/workflows/wf-swarm-score.js",
         args: { iteration: k, ant_results: explore_result.ant_results, objective, rubric }
     })
-    
+
     # 3d. Write scores + pheromone update
     Write("{run_dir}/work/team/scores/iter-k-scores.json", score_result)
     Bash("python aco.py --session {run_dir}/work/team --run-dir <run_dir> update --iter k")
-    
+
     # 3e. Adversarial convergence check (Workflow Module 3)
     converge_result = Workflow({
         scriptPath: "<skill>/workflows/wf-swarm-converge.js",
         args: { iteration: k, best: aco_best, history: iter_history, config }
     })
-    
+
     # 3f. Save + check
     Write("{run_dir}/work/team/workflows/converge-k.json", converge_result)
     if converge_result.converged: break
@@ -197,7 +198,7 @@ Coordinator 负责 Workflow 间的数据桥接和 Python 脚本调用。
    })
    ```
 3. 将 synthesis 结果写入 `{run_dir}/outputs/best-solution.md`
-4. 展示完成摘要 + AskUserQuestion（归档 / 保留 / 导出 / 再跑一轮）
+4. 展示完成摘要 + user prompt（归档 / 保留 / 导出 / 再跑一轮）
 
 ---
 
@@ -237,9 +238,9 @@ synthesize(best, top_k) → best-solution.md
 | aco.py 未找到 | Glob team-swarm skill 路径；提示安装 |
 | Python < 3.10 | 尝试 python3；报告依赖 |
 | Workflow 执行失败 | 记录错误，提供 --resume 恢复点 |
-| 所有蚁全部失败 | 暂停，AskUserQuestion（重试/终止/调整config） |
+| 所有蚁全部失败 | 暂停，user prompt（重试/终止/调整config） |
 | 收敛从不触发 | max_iterations 安全网总会触发 |
-| 幻觉集群 (>50% 蚁被降分) | 暂停，AskUserQuestion（继续/调整评分规则） |
+| 幻觉集群 (>50% 蚁被降分) | 暂停，user prompt（继续/调整评分规则） |
 
 ## Completion
 
