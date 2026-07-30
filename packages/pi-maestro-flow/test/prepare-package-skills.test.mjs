@@ -16,13 +16,22 @@ test("package skill preparation copies canonical skills and removes generated ou
   const teamSwarmPath = join(sourceDir, "team-swarm", "SKILL.md");
   mkdirSync(join(sourceDir, "workflow-skill-designer"), { recursive: true });
   mkdirSync(join(sourceDir, "team-swarm"), { recursive: true });
+  mkdirSync(join(sourceDir, "scratch"), { recursive: true });
   writeFileSync(skillPath, "# Workflow skills\n", "utf8");
   writeFileSync(teamSwarmPath, "# Team Swarm\n", "utf8");
+  writeFileSync(join(sourceDir, "SYSTEM.md"), "# System\n", "utf8");
+  writeFileSync(join(sourceDir, "settings.local.json"), "{}\n", "utf8");
+  writeFileSync(join(sourceDir, "model-failover.json"), "{}\n", "utf8");
+  writeFileSync(join(sourceDir, "scratch", "dbg.log"), "log\n", "utf8");
 
   try {
     preparePackagedSkills({ sourceDir, targetDir });
     assert.equal(readFileSync(join(targetDir, "workflow-skill-designer", "SKILL.md"), "utf8"), "# Workflow skills\n");
     assert.equal(readFileSync(join(targetDir, "team-swarm", "SKILL.md"), "utf8"), "# Team Swarm\n");
+    assert.equal(readFileSync(join(targetDir, "SYSTEM.md"), "utf8"), "# System\n");
+    assert.equal(existsSync(join(targetDir, "settings.local.json")), false, "settings.local.json is local-only");
+    assert.equal(existsSync(join(targetDir, "model-failover.json")), false, "model-failover.json is local-only");
+    assert.equal(existsSync(join(targetDir, "scratch")), false, "scratch is local-only");
     cleanPackagedSkills({ targetDir });
     assert.equal(existsSync(targetDir), false);
   } finally {

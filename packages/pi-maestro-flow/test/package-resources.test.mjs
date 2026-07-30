@@ -40,13 +40,16 @@ test("package manifest publishes the extension and canonical Pi skills", () => {
   const pkg = JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
   const teammatePkg = JSON.parse(readFileSync(join(teammateRoot, "package.json"), "utf8"));
   assert.match(pkg.version, exactSemver);
-  assert.equal(pkg.files.includes(".pi/skills/"), true);
+  assert.equal(pkg.files.includes(".pi/"), true);
   assert.equal(pkg.files.includes("workflows/"), false);
   assert.equal(pkg.files.includes("AGENTS.md"), true);
   assert.deepEqual(pkg.pi.skills, ["./.pi/skills"]);
   assert.match(pkg.scripts.postinstall, /install-workflows\.mjs/);
-  assert.ok(pkg.files.includes("!.pi/skills/**/__pycache__/**"));
-  assert.ok(pkg.files.includes("!.pi/skills/**/*.pyc"));
+  assert.ok(pkg.files.includes("!.pi/**/__pycache__/**"));
+  assert.ok(pkg.files.includes("!.pi/**/*.pyc"));
+  assert.ok(pkg.files.includes("!.pi/settings.local.json"));
+  assert.ok(pkg.files.includes("!.pi/model-failover.json"));
+  assert.ok(pkg.files.includes("!.pi/scratch/**"));
   assert.match(pkg.dependencies["maestro-flow"], exactSemver);
   assert.equal(pkg.dependencies["pi-maestro-teammate"], teammatePkg.version);
   assert.equal(
@@ -182,6 +185,15 @@ test("package contains the canonical workflow skill set", () => {
     "team-swarm must retain the Python ACO execution contract",
   );
   assert.equal(existsSync(join(root, ".pi", "skills", "swarm", "SKILL.md")), false, "native swarm Skill must not be packaged");
+});
+
+test("package publishes the full canonical Pi directory except local-only files", () => {
+  for (const entry of ["SYSTEM.md", "agents", "hooks.json", "settings.json", "teammate-models.json", "skills"]) {
+    assert.equal(existsSync(join(root, ".pi", entry)), true, `.pi/${entry} must be packaged`);
+  }
+  for (const entry of ["settings.local.json", "model-failover.json", "scratch"]) {
+    assert.equal(existsSync(join(root, ".pi", entry)), false, `.pi/${entry} is local-only and must not be packaged`);
+  }
 });
 
 function collectTypeScriptFiles(directory) {
