@@ -77,7 +77,7 @@ export interface TodoBatchSpec {
   context?: string;
   skills?: TodoSkillBinding[];
   assignee?: string;
-  blockedBy?: string[];
+  blockedBy?: number[];
   goalId?: string;
 }
 
@@ -538,8 +538,8 @@ function handleCreate(params: TodoParams, ctx: ExtensionContext, actor: TodoActo
 
 /**
  * Create an entire multi-step plan in one call. Array order is the execution
- * order (monotonic createdAt); a blockedBy entry of "#N" depends on the Nth
- * task in this same batch. The whole batch commits atomically — any invalid
+ * order (monotonic createdAt); each blockedBy integer is a zero-based index
+ * into this same batch. The whole batch commits atomically — any invalid
  * spec aborts the create without touching existing state.
  */
 function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHandoffKey?: string): FlowToolResult {
@@ -556,17 +556,19 @@ function handleBatchCreate(specs: TodoBatchSpec[], actor: TodoActorRef, planHand
   const resolvedDeps: string[][] = [];
   for (let i = 0; i < specs.length; i++) {
     const deps: string[] = [];
-    for (const dep of specs[i].blockedBy ?? []) {
-      const match = /^#(\d+)$/.exec(dep.trim());
-      if (!match) {
-        deps.push(dep);
-        continue;
+    for (const index of specs[i].blockedBy ?? []) {
+      if (!Number.isInteger(index) || index < 0) {
+        return err(`tasks[${i}].blockedBy contains invalid batch index ${index}; indexes must be non-negative integers.`, "create");
       }
-      const index = Number(match[1]);
-      if (index >= specs.length) {
-        return err(`tasks[${i}].blockedBy references out-of-range batch index: ${dep}`, "create");
+      if (index >= i) {
+        const validRange = i === 0
+          ? "tasks[0] cannot have dependencies because it has no earlier batch items"
+          : `valid indexes for tasks[${i}] are 0 through ${i - 1}`;
+        return err(
+          `tasks[${i}].blockedBy index ${index} must reference an earlier batch item; ${validRange}.`,
+          "create",
+        );
       }
-      if (index === i) return err(`tasks[${i}] cannot block itself`, "create");
       deps.push(ids[index]);
     }
     resolvedDeps.push(deps);

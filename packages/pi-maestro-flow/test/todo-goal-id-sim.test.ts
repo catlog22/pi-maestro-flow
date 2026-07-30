@@ -69,8 +69,8 @@ test("SIM: batch create → update/get/delete with #id prefix (original bug)", a
       action: "create",
       tasks: [
         { subject: "Task A" },
-        { subject: "Task B", blockedBy: ["#0"] },
-        { subject: "Task C", blockedBy: ["#0"] },
+        { subject: "Task B", blockedBy: [0] },
+        { subject: "Task C", blockedBy: [0] },
       ],
     }, ctx);
     const createdText = assertOk(created, "batch create");

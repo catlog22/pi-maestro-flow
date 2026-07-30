@@ -204,8 +204,11 @@ const TodoBatchTaskSchema = Type.Object({
     Type.String({ description: "Assignee selector; defaults to the calling actor" }),
   ),
   blockedBy: Type.Optional(
-    Type.Array(Type.String(), {
-      description: "Existing task IDs, or \"#N\" to depend on the Nth task in this same batch (0-based, e.g. \"#0\")",
+    Type.Array(Type.Integer({
+      minimum: 0,
+      description: "Zero-based index of an earlier dependency in this exact tasks array. For tasks[i], the index must be less than i; for example, tasks[1] may depend on 0.",
+    }), {
+      description: "Batch indexes this task depends on. Example: tasks[1].blockedBy = [0] makes the second item depend on the first.",
     }),
   ),
   goalId: Type.Optional(
@@ -261,7 +264,7 @@ export const TodoToolParams = Type.Object({
   tasks: Type.Optional(
     Type.Array(TodoBatchTaskSchema, {
       minItems: 1,
-      description: "Non-empty batch for create. Array order is the execution order; use blockedBy \"#N\" for intra-plan dependencies",
+      description: "Non-empty batch for create. Inside tasks[i].blockedBy, each integer N means tasks[N] in this same array and must satisfy 0 <= N < i.",
     }),
   ),
 

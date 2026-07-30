@@ -725,7 +725,7 @@ Only request completion after all work is done; the extension verifies it indepe
     description: `Task management with plain-text context and optional Pi skill execution — 7 actions.
 
 - create (single): { action: "create", subject: "...", assignee: "self|root|id|unique-id-prefix|label|@label|label#id-prefix", context: "...", skills: [{ name: "maestro-execute", role: "primary", args: "..." }] }
-- create (batch — lay out a whole plan in ONE call): { action: "create", tasks: [{ subject: "Step 1", context: "..." }, { subject: "Step 2", blockedBy: ["#0"] }, { subject: "Step 3", blockedBy: ["#1"] }] }
+- create (batch — lay out a whole plan in ONE call): { action: "create", tasks: [{ subject: "Step 1", context: "..." }, { subject: "Step 2", blockedBy: [0] }, { subject: "Step 3", blockedBy: [1] }] }
 - update: { action: "update", id: "...", updateFields: ["status", "summary"], status: "completed", summary: "..." }
 - clear context/skills: { action: "update", id: "...", updateFields: ["context", "skills"], context: "", skills: [] }
 - list: { action: "list", filter: { status: "pending", memberId: "self|root|correlation-id|unique-id-prefix|label|@label|label#id-prefix" } }
@@ -735,7 +735,8 @@ Only request completion after all work is done; the extension verifies it indepe
 - next: { action: "next" } — activate the oldest runnable pending task assigned to the caller and return its resolved context
 
 Rules:
-- For multi-step work, create the ENTIRE plan up front in ONE batch create (the tasks array) — never create tasks one at a time as you go. Array order is the execution order; use blockedBy "#N" to depend on the Nth task in the same batch.
+- For multi-step work, create the ENTIRE plan up front in ONE batch create (the tasks array) — never create tasks one at a time as you go.
+- In a batch, each blockedBy integer N means the earlier array item tasks[N]. For tasks[i], every dependency must satisfy 0 <= N < i. Example: tasks[1] depends on tasks[0] with blockedBy: [0].
 - subject is the title; description is the detail — do not swap. Set summary on completion; the next action consumes prior summaries.
 - Each actor may have at most one in_progress task.
 - Skill binding requires exactly one primary; guard/support are optional. Skill file changes after activation mark the binding stale — re-activate.
@@ -746,6 +747,7 @@ Rules:
       "Use todo for multi-step work: create the COMPLETE plan in a single batch create (action=create with a tasks array) BEFORE executing, whenever a request needs ≥3 distinct logical phases, spans multiple tool-call rounds, has step dependencies, or needs resumable cross-turn context. This trigger is mandatory — do not pause to judge whether tracking is needed.",
       "A todo task is a meaningful unit of work — a feature, a logical phase, a component, or an independently verifiable outcome — not a single edit or command. Multiple related edits that serve one logical change belong in ONE task (e.g. \"Implement JWT middleware\" touching 3 files = 1 task, not 3). Use description and context to make each task rich: affected files, expected changes, verification criteria.",
       "Always lay out the full plan up front with one batch create. Do NOT create a single task, finish it, then create the next — a one-at-a-time list hides the overall plan and provides no tracking value. Discover new sub-steps mid-work? Add them with another batch create so the whole remaining plan stays visible.",
+      "For batch dependencies, use earlier zero-based integer indexes: tasks[i].blockedBy = [N] means tasks[i] depends on tasks[N], where 0 <= N < i.",
       "Skip todo only for single-action work (one tool call or edit fully satisfies the request) or when an active Workflow Session already mirrors tasks.",
       "Decision rule: 1–2 logical phases → skip; ≥3 → always batch-create todos. Count logical phases and independently verifiable outcomes, not individual file edits or commands.",
       "Drive each step with todo action=next, and close it with todo update status=completed plus a concise summary before starting the next step.",

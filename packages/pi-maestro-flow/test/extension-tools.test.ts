@@ -351,6 +351,23 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   // guards against renderers that throw. Returning a non-Component therefore
   // escapes as an uncaughtException and kills the TUI.
   const todoTool = tools.find((tool) => tool.name === "todo");
+  assert.match(todoTool?.description ?? "", /blockedBy integer N means the zero-based array position tasks\[N\]/);
+  assert.match(todoTool?.description ?? "", /blockedBy: \[0\]/);
+  const todoSchema = todoTool?.parameters as {
+    properties?: {
+      tasks?: {
+        description?: string;
+        items?: { properties?: { blockedBy?: { items?: { description?: string; type?: string; minimum?: number } } } };
+      };
+    };
+  } | undefined;
+  assert.match(todoSchema?.properties?.tasks?.description ?? "", /0 <= N < i/);
+  assert.match(
+    todoSchema?.properties?.tasks?.items?.properties?.blockedBy?.items?.description ?? "",
+    /index must be less than i/,
+  );
+  assert.equal(todoSchema?.properties?.tasks?.items?.properties?.blockedBy?.items?.type, "integer");
+  assert.equal(todoSchema?.properties?.tasks?.items?.properties?.blockedBy?.items?.minimum, 0);
   assert.ok(todoTool?.renderResult);
   const renderTodoResult = todoTool.renderResult as unknown as (
     result: unknown,

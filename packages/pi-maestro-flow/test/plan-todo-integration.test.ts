@@ -232,7 +232,7 @@ test("a blocked Todo does not satisfy the Plan handoff until its dependency clea
       action: "create",
       tasks: [
         { subject: "Prepare" },
-        { subject: "Implement", blockedBy: ["#0"] },
+        { subject: "Implement", blockedBy: [0] },
       ],
       planHandoffKey: handoffKey,
     }, ctx);

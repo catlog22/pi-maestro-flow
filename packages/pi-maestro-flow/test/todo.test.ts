@@ -55,8 +55,18 @@ function startTodo(cwd: string, loader: TodoSkillLoader, entries: unknown[] = []
   return context;
 }
 
-test("todo schema rejects empty batches and unknown nested fields", () => {
+test("todo schema uses non-negative integer indexes for batch dependencies", () => {
   assert.equal(Check(TodoToolParams, { action: "create", tasks: [] }), false);
+  assert.equal(Check(TodoToolParams, {
+    action: "create",
+    tasks: [{ subject: "First" }, { subject: "Second", blockedBy: [0] }],
+  }), true);
+  for (const invalid of [["#0"], ["7"], [-1], [1.5]]) {
+    assert.equal(Check(TodoToolParams, {
+      action: "create",
+      tasks: [{ subject: "Invalid dependency", blockedBy: invalid }],
+    }), false, `batch dependencies ${JSON.stringify(invalid)} must be rejected`);
+  }
   assert.equal(Check(TodoToolParams, { action: "list", filter: { typo: true } }), false);
   assert.equal(Check(TodoToolParams, {
     action: "create",
@@ -287,7 +297,7 @@ test("Batch Todo creation binds every task to the approved Plan handoff key", as
       planHandoffKey: handoffKey,
       tasks: [
         { subject: "Step 1" },
-        { subject: "Step 2", blockedBy: ["#0"] },
+        { subject: "Step 2", blockedBy: [0] },
       ],
     }, ctx);
     const visible = getVisibleTasks();
@@ -365,7 +375,7 @@ test("Batch Todo creation stamps per-spec goalId on each task", async () => {
       action: "create",
       tasks: [
         { subject: "S1", goalId: "g1" },
-        { subject: "S2", goalId: "g2", blockedBy: ["#0"] },
+        { subject: "S2", goalId: "g2", blockedBy: [0] },
         { subject: "S3" },
       ],
     }, ctx);
@@ -1869,7 +1879,7 @@ test("todo next reports legacy dependency deadlocks and normalizes completed blo
   }
 });
 
-test("todo batch create lays out a whole plan in one call with ordered execution and #N dependencies", async () => {
+test("todo batch create lays out a whole plan with integer index dependencies", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-todo-batch-"));
   const loader = new TodoSkillLoader({
     cwd: root,
@@ -1884,8 +1894,8 @@ test("todo batch create lays out a whole plan in one call with ordered execution
       action: "create",
       tasks: [
         { subject: "Design schema" },
-        { subject: "Implement handler", blockedBy: ["#0"] },
-        { subject: "Write tests", blockedBy: ["#1"] },
+        { subject: "Implement handler", blockedBy: [0] },
+        { subject: "Write tests", blockedBy: [1] },
       ],
     }, ctx);
 
@@ -1928,11 +1938,26 @@ test("todo batch create is atomic — an invalid spec aborts without creating an
   try {
     const outOfRange = await executeTodo({
       action: "create",
-      tasks: [{ subject: "A" }, { subject: "B", blockedBy: ["#5"] }],
+      tasks: [{ subject: "A" }, { subject: "B", blockedBy: [2] }],
     }, ctx);
     assert.equal((outOfRange as { isError?: boolean }).isError, true);
-    assert.match((outOfRange.content[0] as { text: string }).text, /out-of-range batch index/);
+    assert.match((outOfRange.content[0] as { text: string }).text, /must reference an earlier batch item/);
+    assert.match((outOfRange.content[0] as { text: string }).text, /valid indexes for tasks\[1\] are 0 through 0/);
     assert.equal(getVisibleTasks().length, 0);
+
+    const forwardDependency = await executeTodo({
+      action: "create",
+      tasks: [{ subject: "A", blockedBy: [1] }, { subject: "B" }],
+    }, ctx);
+    assert.equal((forwardDependency as { isError?: boolean }).isError, true);
+    assert.match((forwardDependency.content[0] as { text: string }).text, /tasks\[0\] cannot have dependencies/);
+
+    const invalidIndex = await executeTodo({
+      action: "create",
+      tasks: [{ subject: "A", blockedBy: [-1] }],
+    }, ctx);
+    assert.equal((invalidIndex as { isError?: boolean }).isError, true);
+    assert.match((invalidIndex.content[0] as { text: string }).text, /indexes must be non-negative integers/);
 
     const missingSubject = await executeTodo({
       action: "create",
