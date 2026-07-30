@@ -2,16 +2,21 @@
 
 > Maestro workflow orchestration for [Pi](https://github.com/earendil-works/pi) — tools, workflows, and templates
 
-Pi extension providing Maestro's workflow tools — the top-level entry of the three-plugin suite. Built on [pi-maestro-teammate](../pi-maestro-teammate/) for the execution engine and paired with [pi-cockpit](../pi-cockpit/) for the status UI (both are dependencies since v0.6.1 and are auto-registered on postinstall). Skills and agents live in project-level `.pi/` directory (see root README).
+Pi extension providing Maestro's workflow tools — the top-level entry of the three-plugin suite. Built on [pi-maestro-teammate](../pi-maestro-teammate/) for the execution engine and paired with [pi-cockpit](../pi-cockpit/) for the status UI (both are dependencies and are auto-registered on postinstall). Skills and agents live in project-level `.pi/` directory (see root README).
 
 ## Contents
 
 | Resource | Count | Description |
 |----------|-------|-------------|
-| **Maestro tool** | 1 | `maestro` |
-| **Goal tool** | 1 | `goal` (`get` / `create`; user-owned lifecycle commands) |
-| **Shell tool** | 1 | `bash_bg` (adaptive foreground/background execution, new in v0.6.0) |
-| **Intelligence tools** | 3 | `lsp`, `browser`, `search_tool_bm25` |
+| **Maestro tool** | 1 | `maestro` (explore / delegate / moa) |
+| **Goal tool** | 1 | `goal` (`get` / `create` / `update` / `complete`; user-owned lifecycle commands) |
+| **Todo tool** | 1 | `todo` (create / update / list / get / delete / clear / next) |
+| **Run control** | 1 | `run-control` (status / brief / prepare / check / next / done / edit) |
+| **Shell tool** | 1 | `bash_bg` (adaptive foreground/background execution) |
+| **Intelligence tools** | 5 | `lsp`, `browser`, `search_tool_bm25`, `smart_search`, `source_check` |
+| **Search tools** | 2 | `ffgrep`, `fffind` (FFF-backed fast search) |
+| **Other tools** | 3 | `mcp`, `ask-user-question`, `model-availability` |
+| **Plan tools** | 5 | `plan-enter`, `plan-update`, `plan-review`, `plan-confirm`, `plan-exit` (+ `plan-status`) |
 | **Workflow docs** | 87 | Installed from `maestro-flow` to `~/.maestro/workflows` |
 | **Templates** | 23 | Bundled template files |
 
@@ -22,7 +27,7 @@ Skills (63) and agents (25) are in the project root `.pi/` directory, not in thi
 - **Pi coding agent** — the host runtime
 - **Maestro CLI** — `maestro search` and `maestro load` for the project knowledge system
 - **pi-maestro-teammate** — the execution engine for exploration, analysis, planning, development, review, and testing dispatch (dependency, auto-installed and auto-registered)
-- **pi-cockpit** — the status-stack / footer UI (dependency since v0.6.1, auto-installed and auto-registered; optional at runtime)
+- **pi-cockpit** — the status-stack / footer UI (dependency, auto-installed and auto-registered; optional at runtime)
 
 ## Install
 

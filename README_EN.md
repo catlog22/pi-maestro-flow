@@ -37,21 +37,26 @@ It ships as three plugins (install one, get all three):
 
 - 🔀 **Parallel multi-agent dispatch** — spawn multiple subprocess agents at once, with DAG dependency graphs and structured output
 - 🎯 **Goal — autonomous long-running objectives** — set an objective and token budget, loop autonomously across turns, audited by an independent verifier
-- 📝 **Plan — approve before you change** — draft a Markdown plan read-only; edits are released only after user approval
-- 🛰️ **Pi Cockpit visualization** — live view of running teammates and the todo plan, with 9 built-in themes
+- 📝 **Plan — approve before you change** — draft a Markdown plan read-only; edits are released only after user approval; supports a dedicated Plan model
+- 🛰️ **Pi Cockpit visualization** — live view of running teammates and the todo plan, with 9 built-in themes; Quiet mode compresses tool output and folds thinking blocks
 - ⏱️ **bash_bg adaptive shell** — long commands auto-background on timeout and notify on completion, without blocking the conversation
 - 🧠 **Persistent knowledge system** — semantic search, spec & knowhow capture, survives across sessions
-- 🔌 **Full protocol connectivity** — MCP client · LSP · browser control (CDP) · web search / deep research
+- 🔄 **Compaction capacity management** — proactive compaction threshold, linked threshold derivation, summary output budgeting against context-window overflow
+- 🔁 **Model circuit breaker & failover** — circuit breaker protects API calls with automatic failover to backup models; configurable API retry policy (up to 12 attempts)
+- 📤 **Session export** — export current session context for debugging and auditing
+- 🔌 **Full protocol connectivity** — MCP client (with OAuth auto-auth) · LSP · browser control (CDP) · web search / deep research
 - 🔒 **Permission control** — 5 modes (YOLO enabled by default), fine-grained allow/ask/deny, child-process permission relay
-- 👥 **27 specialized agents** · 💡 **per-task thinking depth** (`off`→`xhigh`) · 🔌 **custom API channels**
+- 🪝 **Codex-compatible Hooks** — project-level hook system with a built-in installer and trust review
+- ⌨️ **Shortcut conflict manager** — automatically detect and resolve Shift+Tab and other keybinding conflicts
+- 👥 **32 agent roles** (7 built-in + 25 project-level) · 💡 **per-task thinking depth** (`off`→`xhigh`) · 🔌 **custom API channels**
 
 ```javascript
 // Flagship: parallel dispatch + DAG dependencies in a single call
 teammate({
   tasks: [
-    { name: "defs", agent: "explorer", task: "FIND: Auth exports\nSCOPE: src/auth/" },
-    { name: "calls", agent: "explorer", task: "FIND: Auth imports\nSCOPE: src/" },
-    { name: "report", agent: "delegate", task: "Merge {defs} + {calls} into a gap report" }
+    { name: "defs", agent: "explorer", prompt: "FIND: Auth exports\nSCOPE: src/auth/" },
+    { name: "calls", agent: "explorer", prompt: "FIND: Auth imports\nSCOPE: src/" },
+    { name: "report", agent: "general", prompt: "Merge {defs} + {calls} into a gap report" }
   ]
 })
 ```
@@ -68,7 +73,7 @@ pi-maestro-flow is a **Pi plugin** — install it with `pi install` (not a regul
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # host runtime
 pi install npm:pi-maestro-flow                                     # install the plugin
 pi list                                                            # verify
-# Expected: pi-maestro-flow@0.6.1, pi-maestro-teammate@0.6.0, pi-cockpit@0.1.1
+# Expected: pi-maestro-flow@0.10.0, pi-maestro-teammate@1.2.0, pi-cockpit@0.4.0
 ```
 
 Installing `pi-maestro-flow` automatically pulls and registers `pi-maestro-teammate` and `pi-cockpit` — no manual setup required.
@@ -90,8 +95,8 @@ Maestro Flow classifies intent and routes automatically: **simple tasks** run di
   - Orchestration: `maestro` · `goal` · `todo` · `run-control` · `plan-*`
   - Connectivity: `mcp` · `lsp` · `browser` · `smart_search` · `ffgrep`/`fffind`
   - Other: `bash_bg` · `ask-user-question` · `search_tool_bm25`
-- **60+ skills** — orchestration, code quality, team coordination, UI design, academic writing, knowledge management
-- **27 agent roles** — explorer, delegate, planner, executor, reviewer, debugger, verifier…
+- **63 skills** — workflow orchestration (maestro/ralph/companion/next), knowledge management (spec/knowhow/issue), team coordination (swarm/brainstorm/roadmap), UI design (impeccable/uidesign/motion), academic writing (10 scholar skills), skill tooling (generator/tuning/simplify)
+- **32 agent roles** — 7 built-in (explorer, planner, analyst, research, general, verifier, workflow) + 25 project-level (executor, reviewer, debugger, roadmapper…)
 
 Full tool parameters, the skill catalog, and workflow definitions live in the **[Usage Guide](docs/USAGE_EN.md)** and **[Maestro Flow](https://github.com/catlog22/maestro-flow)**.
 

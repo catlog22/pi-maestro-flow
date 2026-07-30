@@ -37,21 +37,26 @@
 
 - 🔀 **并行多智能体调度** — 一次派出多个子进程智能体并行工作，支持 DAG 依赖图与结构化输出
 - 🎯 **Goal 自主长时目标** — 设定目标与 Token 预算，跨多轮自主循环，完成后由独立验证器审计
-- 📝 **Plan 先批准再动手** — 只读起草 Markdown 计划，用户批准后才放行编辑
-- 🛰️ **Pi Cockpit 可视化** — 实时呈现运行中的 teammate 与 todo 计划，内置 9 套主题
+- 📝 **Plan 先批准再动手** — 只读起草 Markdown 计划，用户批准后才放行编辑；支持独立 Plan 模型
+- 🛰️ **Pi Cockpit 可视化** — 实时呈现运行中的 teammate 与 todo 计划，内置 9 套主题；Quiet 模式压缩工具输出与思考折叠
 - ⏱️ **bash_bg 自适应 Shell** — 长命令超时自动转后台，完成时推送通知，不阻塞对话
 - 🧠 **持久化知识系统** — 语义搜索、规范与经验沉淀，跨会话存活
-- 🔌 **全协议连接** — MCP 客户端 · LSP · 浏览器控制（CDP）· 网络搜索/深度研究
+- 🔄 **Compaction 容量管理** — 主动压缩阈值、链接阈值推导、摘要输出预算，防止上下文窗口溢出
+- 🔁 **模型熔断与故障转移** — 电路断路器保护 API 调用，自动故障转移到备用模型；API 重试策略可配置（最多 12 次）
+- 📤 **会话导出** — 导出当前会话上下文信息，用于调试与审计
+- 🔌 **全协议连接** — MCP 客户端（含 OAuth 自动认证）· LSP · 浏览器控制（CDP）· 网络搜索/深度研究
 - 🔒 **权限控制** — 5 种模式（默认启用 YOLO），细粒度 allow/ask/deny，子进程权限中继
-- 👥 **27 个专业 Agent** · 💡 **逐任务思考深度控制**（`off`→`xhigh`）· 🔌 **自定义 API 渠道**
+- 🪝 **Codex 兼容 Hooks** — 项目级钩子系统，内置安装器与信任审查
+- ⌨️ **快捷键冲突管理** — 自动检测并修复 Shift+Tab 等快捷键冲突
+- 👥 **32 个 Agent 角色**（7 内置 + 25 项目级）· 💡 **逐任务思考深度控制**（`off`→`xhigh`）· 🔌 **自定义 API 渠道**
 
 ```javascript
 // 旗舰能力：并行派发 + DAG 依赖，一条指令搞定
 teammate({
   tasks: [
-    { name: "defs", agent: "explorer", task: "FIND: Auth 导出\nSCOPE: src/auth/" },
-    { name: "calls", agent: "explorer", task: "FIND: Auth 导入\nSCOPE: src/" },
-    { name: "report", agent: "delegate", task: "合并 {defs} + {calls} 生成缺口报告" }
+    { name: "defs", agent: "explorer", prompt: "FIND: Auth 导出\nSCOPE: src/auth/" },
+    { name: "calls", agent: "explorer", prompt: "FIND: Auth 导入\nSCOPE: src/" },
+    { name: "report", agent: "general", prompt: "合并 {defs} + {calls} 生成缺口报告" }
   ]
 })
 ```
@@ -68,7 +73,7 @@ pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm �
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # 宿主运行时
 pi install npm:pi-maestro-flow                                     # 安装插件
 pi list                                                            # 验证
-# 预期: pi-maestro-flow@0.6.1, pi-maestro-teammate@0.6.0, pi-cockpit@0.1.1
+# 预期: pi-maestro-flow@0.10.0, pi-maestro-teammate@1.2.0, pi-cockpit@0.4.0
 ```
 
 安装 `pi-maestro-flow` 会自动拉取并注册 `pi-maestro-teammate` 与 `pi-cockpit`，无需手动配置。
@@ -90,8 +95,8 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
   - 编排：`maestro` · `goal` · `todo` · `run-control` · `plan-*`
   - 连接：`mcp` · `lsp` · `browser` · `smart_search` · `ffgrep`/`fffind`
   - 其他：`bash_bg` · `ask-user-question` · `search_tool_bm25`
-- **60+ 技能** — 编排执行、代码质量、团队协作、UI 设计、学术写作、知识管理
-- **27 个 Agent 角色** — explorer、delegate、planner、executor、reviewer、debugger、verifier…
+- **63 个技能** — 工作流编排（maestro/ralph/companion/next）、知识管理（spec/knowhow/issue）、团队协作（swarm/brainstorm/roadmap）、UI 设计（impeccable/uidesign/motion）、学术写作（scholar 系列 10 个）、技能工具（generator/tuning/simplify）
+- **32 个 Agent 角色** — 7 内置（explorer、planner、analyst、research、general、verifier、workflow）+ 25 项目级（executor、reviewer、debugger、roadmapper…）
 
 完整工具参数、技能清单与工作流定义见 **[使用指南](docs/USAGE.md)** 与 **[Maestro Flow](https://github.com/catlog22/maestro-flow)**。
 
