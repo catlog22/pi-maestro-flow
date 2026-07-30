@@ -19,6 +19,7 @@ import {
 } from "../shared/agent-status.ts";
 import type { AgentProgressSnapshot, ChildAgentCallSnapshot, Details, SingleResult } from "../shared/types.ts";
 import { extractDependencies } from "../runs/execution.ts";
+import { isQuietMode } from "../quiet-state.ts";
 import {
   buildProgressTree,
   focusTaskIndex,
@@ -139,6 +140,7 @@ export function renderTeammateCall(
   theme: Theme,
   context?: { expanded?: boolean },
 ): Component {
+  if (isQuietMode()) return renderQuietTeammateCall(args, theme);
   const tasks = (args.tasks as Array<Omit<TaskArg, "agent"> & { agent?: string }> | undefined)
     ?.map((task) => ({ ...task, agent: task.agent ?? (args.agent as string | undefined) ?? "general" }));
   const isBg = args.background === true;
@@ -244,6 +246,7 @@ export function renderTeammateResult(
   options: { expanded: boolean },
   theme: Theme,
 ): Component {
+  if (isQuietMode()) return renderQuietTeammateResult(result, theme);
   const details = result.details;
 
   // No results yet — streaming progress or background ack
@@ -574,5 +577,116 @@ function renderMultiResult(
     if (w < 32) return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
     proxy.lines = lines;
     return [...box.render(w)];
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Quiet mode — single-line summaries for the teammate tool stream
+// ---------------------------------------------------------------------------
+//
+// When cockpit quiet mode is on the whole tool surface collapses to one line
+// per call/result. The teammate tool is the noisy one (full progress tree,
+// child subtree, streaming tail, key hints); here it becomes:
+//   call:      "  ⋯ teammate @name (agent)" / "  ⋯ teammate N agents chain"
+//   streaming: "  ■ teammate 2/3 running · @focus using read"
+//   done:      "  ✓ teammate 3/3 done · 9.4k tokens"  (✗ + first error on fail)
+// The tree/dependency detail dropped here is still fully shown by cockpit's
+// Agents widget, which quiet mode never compresses, so no information is lost.
+
+function qLine(theme: Theme, markedGlyph: string, name: string, rest: string): string {
+  const parts = [
+    theme.fg("toolTitle", theme.bold ? theme.bold(name) : name),
+    rest ? theme.fg("muted", rest) : "",
+  ].filter(Boolean);
+  return `  ${markedGlyph} ${parts.join(" ")}`;
+}
+
+function quietFirstError(r: SingleResult): string {
+  const text = r.messages[r.messages.length - 1]?.content ?? "";
+  const line = (text.split("\n").find((l) => l.trim()) ?? "").trim();
+  if (!line) return "failed";
+  return line.length > 60 ? `${line.slice(0, 59)}…` : line;
+}
+
+function quietTopoLabel(tasks: TaskArg[]): string {
+  const taskNames = new Set(tasks.filter((t) => t.name).map((t) => t.name!));
+  if (!tasks.some((t) => extractDependencies(t.prompt, taskNames).length > 0)) return "";
+  return isLinearChain(tasks, taskNames) ? "chain" : "graph";
+}
+
+function renderQuietTeammateCall(args: Record<string, unknown>, theme: Theme): Component {
+  const glyph = theme.fg("warning", "⋯");
+  const tasks = (args.tasks as Array<Omit<TaskArg, "agent"> & { agent?: string }> | undefined)
+    ?.map((task) => ({ ...task, agent: task.agent ?? (args.agent as string | undefined) ?? "general" }));
+  if (tasks?.length) {
+    const topo = quietTopoLabel(tasks);
+    const rest = `${tasks.length} agents${topo ? ` ${topo}` : ""}`;
+    return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
+  }
+  const agent = (args.agent as string | undefined) ?? "general";
+  const name = args.name as string | undefined;
+  const rest = name ? `@${name} (${agent})` : agent;
+  return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
+}
+
+function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Theme): Component {
+  const details = result.details;
+  const isError = (result as { isError?: boolean }).isError === true;
+
+  // Terminal results: one line, ✓/✗, done/failed counts + tokens or first error.
+  if (details && details.results.length > 0) {
+    const results = details.results;
+    const ok = results.filter((r) => r.exitCode === 0).length;
+    const total = results.length;
+    const failed = total - ok;
+    const totalTokens = results.reduce((sum, r) => sum + r.usage.inputTokens + r.usage.outputTokens, 0);
+    if (failed > 0 || isError) {
+      const firstFailed = results.find((r) => r.exitCode !== 0);
+      const err = firstFailed ? quietFirstError(firstFailed) : "failed";
+      const rest = total === 1
+        ? `${firstFailed?.agent ?? "agent"} failed · ${err}`
+        : `${failed}/${total} failed · ${err}`;
+      const glyph = theme.fg("error", "✗");
+      return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
+    }
+    const tokens = totalTokens > 0 ? ` · ${formatTokens(totalTokens)} tokens` : "";
+    const rest = total === 1 ? `${results[0].agent} done${tokens}` : `${ok}/${total} done${tokens}`;
+    const glyph = theme.fg("success", "✓");
+    return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
+  }
+
+  // Streaming: one aggregate line — no tree, no child subtree, no stream tail.
+  const entries = details?.progress ?? [];
+  const childCalls = details?.childCalls ?? [];
+  const running = entries.filter((e) => e.status === "running" || e.status === "retrying").length
+    + childCalls.filter((c) => c.status === "running" || c.status === "retrying").length;
+  const failed = entries.filter((e) => e.status === "failed").length
+    + childCalls.filter((c) => c.status === "failed").length;
+  const completed = entries.filter((e) => e.status === "completed").length;
+  const glyph = failed > 0
+    ? theme.fg("error", "✗")
+    : running > 0
+      ? theme.fg("warning", "■")
+      : theme.fg("success", "✓");
+  const stateText = entries.length === 0
+    ? `${running || childCalls.length} child agent${(running || childCalls.length) === 1 ? "" : "s"}`
+    : failed > 0
+      ? `${failed}/${entries.length} failed`
+      : running > 0
+        ? `${running}/${entries.length} running`
+        : `${completed}/${entries.length} done`;
+
+  return dynamicComponent((w) => {
+    const focus = entries.length > 0
+      ? entries.find((e) => e.taskIndex === focusTaskIndex(entries)) ?? entries[0]
+      : undefined;
+    const parts = [stateText];
+    if (focus && w >= 20) {
+      parts.push(`@${focus.name ?? focus.agent}`);
+      const activeTool = focus.recentTools?.find((t) => t.status === "running");
+      if (activeTool) parts.push(`using ${activeTool.name}`);
+      else if (focus.lastMessage) parts.push("streaming");
+    }
+    return [truncateToWidth(qLine(theme, glyph, "teammate", parts.join(" · ")), Math.max(1, w), "…")];
   });
 }

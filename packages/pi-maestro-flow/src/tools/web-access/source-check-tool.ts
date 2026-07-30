@@ -2,6 +2,8 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { singleLine, textBlock } from "../../tui/components.ts";
+import { isQuietMode } from "../../quiet-state.ts";
+import { quietToolCall, quietToolResult } from "../../quiet-render.ts";
 import {
   buildResearchArtifact,
   withClaimAssessment,
@@ -30,7 +32,8 @@ export function createSourceCheckTool(): ToolDefinition<typeof SourceCheckParams
   return {
     name: "source_check",
     label: "Source Check",
-    description: "Verify a claim against web sources and produce a machine-readable research artifact with source quality classification and claim assessment.",
+    description: "Verify a claim against web sources and produce a machine-readable research artifact with source quality classification and claim assessment. " +
+      "Example: { claim: \"Node 22 supports native TypeScript stripping\", recency: \"month\" }.",
     promptSnippet: "Use source_check to verify factual claims with attributed web evidence.",
     parameters: SourceCheckParams,
     async execute(_id, params, signal): Promise<AgentToolResult<SourceCheckDetails>> {
@@ -60,11 +63,17 @@ export function createSourceCheckTool(): ToolDefinition<typeof SourceCheckParams
       } as AgentToolResult<SourceCheckDetails>;
     },
     renderCall(args, theme) {
+      if (isQuietMode()) return quietToolCall(theme, "source_check", `"${String(args.claim ?? "").slice(0, 60)}"`);
       const claim = String(args.claim ?? "").slice(0, 60);
       return singleLine(`${theme.fg("toolTitle", theme.bold("source_check "))}${theme.fg("accent", `"${claim}"`)}`);
     },
     renderResult(result, opts, theme) {
       const isError = (result as { isError?: boolean }).isError === true;
+      if (isQuietMode()) {
+        const qdetails = result.details as SourceCheckDetails | undefined;
+        const qstatus = qdetails?.artifact?.claims?.[0]?.status ?? "unknown";
+        return quietToolResult(theme, "source_check", !isError, `claim: ${qstatus}`);
+      }
       if (isError) {
         const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
         if (opts.expanded) return textBlock(text);

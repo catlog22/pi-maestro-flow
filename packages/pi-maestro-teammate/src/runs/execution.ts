@@ -1694,7 +1694,15 @@ export async function runSingleTeammate(
   }
 
   const breaker = options.modelCircuitBreaker ?? sharedModelCircuitBreaker;
-  const modelCandidates: Array<string | undefined> = candidates.length > 0 ? candidates : [undefined];
+  // When no explicit model or fallbacks are configured, try the pi default
+  // first (undefined), then each authenticated model as an implicit fallback.
+  // This prevents a terminal failure when the default provider has no quota.
+  const implicitFallbacks = candidates.length === 0
+    ? (options.modelCapabilities ?? []).map((capability) => capability.id)
+    : [];
+  const modelCandidates: Array<string | undefined> = candidates.length > 0
+    ? candidates
+    : [undefined, ...implicitFallbacks];
   const attemptedModels: string[] = [];
   let lastResult: SingleResult | undefined;
 

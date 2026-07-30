@@ -9,7 +9,7 @@ import { loadMetadataCache } from "./metadata-cache.ts";
 import { executeAuthComplete, executeAuthStart, executeCall, executeConnect, executeDescribe, executeList, executeSearch, executeStatus, executeUiMessages } from "./proxy-modes.ts";
 import { getConfigPathFromArgv, normalizeDirectToolInputSchema, truncateAtWord } from "./utils.ts";
 import { initializeOAuth, shutdownOAuth } from "./mcp-auth-flow.ts";
-import { createMcpDirectToolCallRenderer, renderMcpProxyToolCall, renderMcpToolResult } from "./tool-result-renderer.ts";
+import { createMcpDirectToolCallRenderer, createMcpDirectToolResultRenderer, renderMcpProxyToolCall, renderMcpProxyToolResult } from "./tool-result-renderer.ts";
 import { toolErrorOverride } from "./error-signal.ts";
 
 export default function mcpAdapter(pi: ExtensionAPI) {
@@ -76,7 +76,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       parameters: Type.Unsafe(normalizeDirectToolInputSchema(spec.inputSchema) as never),
       execute: createDirectToolExecutor(() => state, () => initPromise, spec),
       renderCall: createMcpDirectToolCallRenderer(spec.prefixedName),
-      renderResult: renderMcpToolResult,
+      renderResult: createMcpDirectToolResultRenderer(spec.prefixedName),
     });
   }
 
@@ -295,7 +295,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
         server: Type.Optional(Type.String({ description: "Filter to specific server (also disambiguates tool calls)" })),
         action: Type.Optional(Type.String({ description: "Action: 'ui-messages', 'auth-start', or 'auth-complete'" })),
       }),
-      renderResult: renderMcpToolResult,
+      renderResult: renderMcpProxyToolResult,
       async execute(_toolCallId: string, params: {
         tool?: string;
         args?: string;

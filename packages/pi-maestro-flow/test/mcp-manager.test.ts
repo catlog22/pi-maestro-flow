@@ -11,6 +11,7 @@ const servers: McpManagerServerView[] = [
     readOnly: false,
     status: "connected",
     toolNames: ["read_file", "write_file", "list_directory"],
+    canAuthenticate: false,
     entry: {
       command: "npx",
       args: ["-y", "@modelcontextprotocol/server-filesystem", "/workspace"],
@@ -27,6 +28,7 @@ const servers: McpManagerServerView[] = [
     readOnly: false,
     status: "needs-auth",
     toolNames: ["search_packages"],
+    canAuthenticate: true,
     entry: { url: "https://mcp.example.com", auth: "oauth", lifecycle: "eager" },
   },
   {
@@ -37,6 +39,7 @@ const servers: McpManagerServerView[] = [
     importKind: "cursor",
     status: "failed",
     toolNames: [],
+    canAuthenticate: false,
     entry: { command: "cursor-mcp" },
   },
 ];
@@ -108,6 +111,32 @@ test("MCP 菜单进入管理与配置，管理页使用显式筛选", () => {
   edit.overlay.render(80);
   edit.overlay.handleInput("2");
   assert.equal(edit.action()?.kind, "edit-config");
+});
+
+test("MCP 管理面板认证快捷键仅对可认证服务生效", () => {
+  // Navigate to manage screen and select private-registry (index 1, canAuthenticate: true)
+  const auth = createOverlay();
+  auth.overlay.render(80);
+  auth.overlay.handleInput("\r"); // enter manage
+  auth.overlay.handleInput("\x1b[B"); // down to private-registry
+  auth.overlay.handleInput("a");
+  assert.equal(auth.action()?.kind, "authenticate");
+  assert.equal(auth.action()?.serverName, "private-registry");
+
+  // filesystem (index 0, canAuthenticate: false) should not trigger authenticate
+  const noAuth = createOverlay();
+  noAuth.overlay.render(80);
+  noAuth.overlay.handleInput("\r"); // enter manage
+  noAuth.overlay.handleInput("a");
+  assert.equal(noAuth.action(), undefined, "不可认证的服务不触发 authenticate");
+
+  // Wide layout shows auth hint for needs-auth server
+  const wide = createOverlay({ detail: false });
+  wide.overlay.render(80);
+  wide.overlay.handleInput("\r");
+  wide.overlay.handleInput("\x1b[B");
+  const wideOutput = wide.overlay.render(100).join("\n");
+  assert.match(wideOutput, /按 A 进行 OAuth 认证/);
 });
 
 test("MCP 菜单为空配置保留编辑入口", () => {

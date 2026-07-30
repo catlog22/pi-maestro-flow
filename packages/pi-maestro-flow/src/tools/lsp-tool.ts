@@ -1,5 +1,7 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { singleLine, textBlock } from "../tui/components.ts";
+import { isQuietMode } from "../quiet-state.ts";
+import { quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -37,7 +39,11 @@ export const LSP_READ_ONLY_ACTIONS = new Set([
   "diagnostics", "definition", "references", "hover", "symbols", "type_definition", "implementation", "status", "capabilities",
 ]);
 
-const LspActionSchema = Type.Unsafe<LspAction>({ type: "string", enum: [...LSP_ACTIONS] });
+const LspActionSchema = Type.Unsafe<LspAction>({
+  type: "string",
+  enum: [...LSP_ACTIONS],
+  description: "LSP operation: diagnostics, definition, references, hover, symbols, rename, rename_file, code_actions, type_definition, implementation, status, reload, capabilities, request",
+});
 
 export const LspParams = Type.Object({
   action: LspActionSchema,
@@ -65,7 +71,8 @@ export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinit
   return {
     name: "lsp",
     label: "LSP",
-    description: "Query language servers for diagnostics, definitions, references, hover, symbols, renames, code actions, capabilities, reloads, and raw requests.",
+    description: "Query language servers for diagnostics, definitions, references, hover, symbols, renames, code actions, capabilities, reloads, and raw requests. " +
+      "Example: { action: \"definition\", file: \"src/app.ts\", line: 10, symbol: \"handler\" }.",
     promptSnippet: "Use lsp for semantic code navigation, diagnostics, and language-aware refactoring.",
     promptGuidelines: [
       "Use 1-indexed line numbers and provide symbol when a line contains multiple relevant identifiers.",
@@ -93,6 +100,11 @@ export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinit
       }
     },
     renderCall(args, theme) {
+      if (isQuietMode()) {
+        const qaction = String(args.action ?? "?");
+        const qfile = args.file ? ` ${String(args.file)}${args.line ? `:${args.line}` : ""}` : "";
+        return quietToolCall(theme, "lsp", `${qaction}${qfile}`);
+      }
       const action = String(args.action ?? "?");
       const file = args.file ? ` ${String(args.file)}` : "";
       const line = args.line ? `:${args.line}` : "";
@@ -102,6 +114,7 @@ export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinit
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
       const isError = (result as { isError?: boolean }).isError === true;
+      if (isQuietMode()) return quietToolResult(theme, "lsp", !isError, resultSummary(result));
       if (opts.expanded) return textBlock(message);
       const firstLine = message.split("\n")[0]?.slice(0, 120) ?? "";
       const lineCount = message.split("\n").filter(Boolean).length;

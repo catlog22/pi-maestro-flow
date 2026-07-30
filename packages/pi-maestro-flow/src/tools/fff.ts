@@ -1,6 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { singleLine, textBlock } from "../tui/components.ts";
+import { isQuietMode } from "../quiet-state.ts";
+import { quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
 import { FileFinder, type FileFinderApi } from "@ff-labs/fff-node";
 import { Type } from "typebox";
 
@@ -8,13 +10,13 @@ const SCAN_TIMEOUT_MS = 15_000;
 
 const FffGrepParams = Type.Object({
   pattern: Type.String({ minLength: 1, description: "Literal text to search for" }),
-  context: Type.Optional(Type.Integer({ minimum: 0, maximum: 20 })),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+  context: Type.Optional(Type.Integer({ minimum: 0, maximum: 20, description: "Lines of context before and after each match (default: 0)" })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Maximum number of matches to return (default: 20)" })),
 });
 
 const FffFindParams = Type.Object({
   pattern: Type.String({ minLength: 1, description: "Fuzzy file-path query" }),
-  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+  limit: Type.Optional(Type.Integer({ minimum: 1, maximum: 100, description: "Maximum number of files to return (default: 30)" })),
 });
 
 /**
@@ -75,11 +77,13 @@ export function registerFff(pi: ExtensionAPI): void {
       return { content: [{ type: "text", text: formatGrep(result.value) }] } as AgentToolResult<unknown>;
     },
     renderCall(args, theme) {
+      if (isQuietMode()) return quietToolCall(theme, "ffgrep", `"${String(args.pattern ?? "")}"`);
       return singleLine(`${theme.fg("toolTitle", theme.bold("ffgrep "))}${theme.fg("accent", `"${String(args.pattern ?? "")}"`)}`);
     },
     renderResult(result, opts, theme) {
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
       const lines = text.split("\n").filter(Boolean);
+      if (isQuietMode()) return quietToolResult(theme, "ffgrep", text !== "No matches" && lines.length > 0, resultSummary(result));
       if (lines.length === 0 || text === "No matches") return singleLine(theme.fg("dim", "No matches"));
       if (opts.expanded) return textBlock(text);
       const header = lines[0].slice(0, 100);
@@ -106,10 +110,12 @@ export function registerFff(pi: ExtensionAPI): void {
       return { content: [{ type: "text", text }] } as AgentToolResult<unknown>;
     },
     renderCall(args, theme) {
+      if (isQuietMode()) return quietToolCall(theme, "fffind", `"${String(args.pattern ?? "")}"`);
       return singleLine(`${theme.fg("toolTitle", theme.bold("fffind "))}${theme.fg("accent", `"${String(args.pattern ?? "")}"`)}`);
     },
     renderResult(result, opts, theme) {
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
+      if (isQuietMode()) return quietToolResult(theme, "fffind", text !== "No files found", resultSummary(result));
       if (text === "No files found") return singleLine(theme.fg("dim", "No files found"));
       const lines = text.split("\n").filter(Boolean);
       if (opts.expanded) return textBlock(text);

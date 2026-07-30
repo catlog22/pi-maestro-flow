@@ -78,6 +78,22 @@ export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exi
  */
 export const FAILED_LINGER_MS = 30_000;
 
+/**
+ * How long a completed agent's tombstone suppresses self-healing.
+ *
+ * `complete` deletes a row, but the teammate extension can still publish
+ * progress afterwards: the flush gate may re-arm after disposal, a graph task
+ * that returned result-ready carries `status:"running"` until its lifecycle
+ * confirms (up to a 60s deadline), and nested/IPC deltas reorder freely. Any
+ * such late delta would otherwise self-heal a ghost row that no second
+ * `complete` ever removes — the footer keeps showing an agent as running long
+ * after its tool result was already returned. The tombstone blocks that
+ * rebuild. It must outlive the lifecycle-confirmation deadline with margin.
+ * An explicit `started` (a genuine new lifecycle, e.g. a woken agent) clears
+ * the tombstone, so legitimate reuse is never suppressed.
+ */
+export const COMPLETED_TOMBSTONE_MS = 120_000;
+
 function deriveRole(agent: string | undefined, name: string | undefined): string {
 	if (agent && !agent.startsWith("graph(")) return clean(agent);
 	return clean(name) || "agent";
@@ -145,9 +161,21 @@ function latestTool(tools: MessagePayload["recentTools"]): string | undefined {
 // always represented as long as it keeps emitting activity.
 export class AgentsStore {
 	private readonly roster = new Map<string, AgentRow>();
+	/** correlationId -> completion time; suppresses post-complete self-healing. */
+	private readonly completedAt = new Map<string, number>();
+
+	private isTombstoned(id: string | undefined, now: number): boolean {
+		if (id === undefined) return false;
+		const at = this.completedAt.get(id);
+		return at !== undefined && now - at < COMPLETED_TOMBSTONE_MS;
+	}
 
 	applyStarted(p: StartedPayload, now: number = Date.now()): void {
 		const id = p.correlationId;
+		// An explicit start is authoritative: a woken or re-dispatched agent
+		// reuses its correlationId and must reappear even if an earlier run was
+		// tombstoned.
+		this.completedAt.delete(id);
 		const prev = this.roster.get(id);
 		const row: AgentRow = {
 			...prev,
@@ -175,11 +203,16 @@ export class AgentsStore {
 			for (const progress of p.progress) this.applyProgress(p.correlationId, progress, now);
 		}
 		const targetId = p.taskCorrelationId ?? p.correlationId;
-		if (!this.roster.has(targetId)) {
+		if (!this.roster.has(targetId)
+			&& !this.isTombstoned(targetId, now)
+			&& !this.isTombstoned(p.correlationId, now)) {
 			// Self-heal the roster: a running agent must stay visible even when its
 			// `started` delta was missed (cold start, event reorder, or a foreground
 			// dispatch that detached to background). Materialize the row from this
 			// event instead of dropping it; later deltas refine the placeholder.
+			// A tombstoned target (or graph parent) means `complete` already ran, so
+			// this delta is a late ghost, not a missed start — dropping it keeps the
+			// row deleted.
 			this.applyStarted({
 				correlationId: targetId,
 				agent: p.agent ?? "",
@@ -242,6 +275,9 @@ export class AgentsStore {
 				delete row.activeTool;
 			} else {
 				this.roster.delete(id);
+				// Tombstone even when the row never existed: a `complete` that beats
+				// the first delta must still suppress the self-heal that follows.
+				this.completedAt.set(id, now);
 			}
 		}
 	}
@@ -255,6 +291,9 @@ export class AgentsStore {
 				changed = true;
 			}
 		}
+		for (const [id, at] of this.completedAt) {
+			if (now - at >= COMPLETED_TOMBSTONE_MS) this.completedAt.delete(id);
+		}
 		return changed;
 	}
 
@@ -267,9 +306,13 @@ export class AgentsStore {
 	}
 
 	private applyProgress(parentCorrelationId: string, p: ProgressPayload, now: number): void {
-		if (!this.roster.has(p.correlationId)) {
+		if (!this.roster.has(p.correlationId)
+			&& !this.isTombstoned(p.correlationId, now)
+			&& !this.isTombstoned(parentCorrelationId, now)) {
 			// Self-heal: see applyMessage. A graph child whose `started` delta was
-			// missed still materializes from its first progress event.
+			// missed still materializes from its first progress event — unless the
+			// child or its graph parent already completed, in which case this late
+			// snapshot entry is a ghost and the row must stay deleted.
 			this.applyStarted({
 				correlationId: p.correlationId,
 				agent: p.agent,
@@ -339,5 +382,6 @@ export class AgentsStore {
 
 	clear(): void {
 		this.roster.clear();
+		this.completedAt.clear();
 	}
 }

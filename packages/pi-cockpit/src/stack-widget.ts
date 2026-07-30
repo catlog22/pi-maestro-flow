@@ -97,6 +97,7 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				const animating = deps.isAnimating?.() ?? true;
 				const spin = spinFrame(g, now, animating);
 				const running = deps.isRunning();
+
 				// The panel budget covers the roster header and its rows.
 				const panel = panelRows(terminalRows(tui));
 				const rosterRows = panel === undefined

@@ -1,5 +1,7 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { singleLine, textBlock } from "../tui/components.ts";
+import { isQuietMode } from "../quiet-state.ts";
+import { quietToolCall, quietToolResult } from "../quiet-render.ts";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
@@ -88,9 +90,14 @@ export function createSearchToolBm25(pi: Pick<ExtensionAPI, "getAllTools" | "get
       }
     },
     renderCall(args, theme) {
+      if (isQuietMode()) return quietToolCall(theme, "search_tools", `"${String(args.query ?? "").slice(0, 50)}"`);
       return singleLine(`${theme.fg("toolTitle", theme.bold("search_tools "))}${theme.fg("accent", `"${String(args.query ?? "").slice(0, 50)}"`)}`);
     },
     renderResult(result, opts, theme) {
+      if (isQuietMode()) {
+        const qdetails = result.details as { tools?: Array<{ name: string }>; total_tools?: number } | undefined;
+        return quietToolResult(theme, "search_tools", true, `${qdetails?.tools?.length ?? 0} matches`);
+      }
       const details = result.details as { tools?: Array<{ name: string }>; activated_tools?: string[]; total_tools?: number } | undefined;
       const count = details?.tools?.length ?? 0;
       const activated = details?.activated_tools?.length ?? 0;

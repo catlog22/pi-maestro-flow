@@ -248,6 +248,12 @@ export declare function checkDepthGuard(depth: number): {
     current: number;
     max: number;
 };
+/**
+ * Pi's RPC set_auto_retry command persists to settings.json even though the
+ * child only needs a session-local override. Restore the original value after
+ * every concurrently starting child has acknowledged that command.
+ */
+export declare function acquireRetryPersistenceGuard(settingsPath: string): () => void;
 export declare function clampThinkingForModel(thinking: TeammateThinkingLevel, model: string | undefined, modelCapabilities?: readonly TeammateModelCapability[]): TeammateThinkingLevel;
 export declare function validateModelSpecifier(model: string): string;
 export declare function resolveModelSpecifier(model: string, modelCapabilities?: readonly TeammateModelCapability[]): string;

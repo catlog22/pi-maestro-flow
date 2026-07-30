@@ -93,6 +93,13 @@ export type IconMode = "auto" | "nerd" | "ascii";
 
 export interface CockpitConfig {
 	enabled: boolean;
+	/**
+	 * Quiet mode: compress built-in tool calls to one-line ✓/✗ summaries and fold
+	 * thinking blocks. Scoped to the tool stream only — the footer and the
+	 * Todo/Agents widgets render exactly as they do with quiet mode off.
+	 * Requires /reload or a new session to apply tool rendering changes.
+	 */
+	quietMode: boolean;
 	agentsMode: ViewMode;
 	todoMode: ViewMode;
 	todoExpanded: boolean;
@@ -107,6 +114,7 @@ export interface CockpitConfig {
 
 export const DEFAULT_CONFIG: CockpitConfig = {
 	enabled: true,
+	quietMode: false,
 	agentsMode: "list",
 	todoMode: "list",
 	todoExpanded: false,

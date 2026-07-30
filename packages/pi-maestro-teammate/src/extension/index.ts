@@ -127,6 +127,7 @@ import {
   getTeammatePermissionBroker,
   registerTeammateChildProxyCaller,
 } from "../runs/child-extensions.ts";
+import { setQuietMode } from "../quiet-state.ts";
 
 export const TEAMMATE_PROMPT_SNIPPET =
   "Dispatch bounded work to discovered teammate roles for parallel, sequential, or specialist execution.";
@@ -3382,6 +3383,7 @@ export default function registerTeammateExtension(
   pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
     if (!payload || typeof payload !== "object") return;
     cockpitOwnsAgents = (payload as { agents?: unknown }).agents === true;
+    setQuietMode((payload as { quiet?: unknown }).quiet === true);
     updateAgentWidget();
   });
   pi.events.on(TEAMMATE_STARTED_EVENT, () => {

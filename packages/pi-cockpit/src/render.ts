@@ -205,6 +205,7 @@ export function renderAgents(
 	if (rows.length === 0) return [];
 	const g = opts.glyphs;
 	const ell = theme.fg("dim", g.ellipsis);
+
 	if (mode === "compact") {
 		const active = rows.filter((row) => row.status === "running" || row.status === "retrying").length;
 		const head = `${theme.fg("text", String(rows.length))} ${theme.fg("muted", "agents")}${active ? theme.fg("dim", ` · ${active} active`) : ""}`;

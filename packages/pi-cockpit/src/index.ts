@@ -7,6 +7,7 @@ import { statusText, titleFor, workingMessage, type AmbientState } from "./ambie
 import { BashBgStore } from "./bash-bg-store.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
+import { registerQuietTools } from "./quiet-tools.ts";
 import { TodoStore } from "./todo-store.ts";
 import { makeTodoWidget, makeAgentWidget, terminalRows } from "./stack-widget.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
@@ -67,6 +68,7 @@ export default function (pi: ExtensionAPI): void {
 	// Persisted rather than toasted: a config that failed to load silently downgrades
 	// the whole session to defaults, so it belongs in a slot that does not scroll away.
 	let configProblem: string | undefined;
+	let quietToolsRegistered = false;
 
 	// The streaming line, the tab title and the footer status slot are all fed from
 	// the same snapshots the widgets read, so they can never disagree with them.
@@ -135,6 +137,7 @@ export default function (pi: ExtensionAPI): void {
 			agents: config.enabled && config.hideNativeAgents,
 			footer: config.enabled,
 			todoExpanded: config.todoExpanded,
+			quiet: config.enabled && config.quietMode,
 		});
 	};
 	const setTodoExpanded = (expanded: boolean): void => {
@@ -143,6 +146,36 @@ export default function (pi: ExtensionAPI): void {
 		saveConfig(config);
 		publishUiOwnership();
 		req();
+	};
+
+	// Quiet mode live toggle: widgets and footer read config on every render so
+	// they switch immediately. Tool rendering is a one-way latch (registerTool
+	// cannot be undone), so turning ON registers immediately but turning OFF
+	// requires /reload to restore the default tool shells.
+	const applyQuietMode = (ctx: ExtensionContext, was: boolean, now: boolean): void => {
+		// Broadcast so cross-extension surfaces (e.g. pi-maestro-flow's todo tool
+		// rendering) can follow quiet mode regardless of which path toggled it.
+		publishUiOwnership();
+		if (now && !was) {
+			if (!quietToolsRegistered) {
+				registerQuietTools(pi, () => config);
+				quietToolsRegistered = true;
+			}
+			try {
+				ctx.ui.setHiddenThinkingLabel("thoughts");
+			} catch { /* non-TUI */ }
+			ctx.ui.notify("quiet mode on — tools compressed, thinking folded", "info");
+		} else if (!now && was) {
+			try {
+				ctx.ui.setHiddenThinkingLabel(undefined);
+			} catch { /* non-TUI */ }
+			ctx.ui.notify(
+				quietToolsRegistered
+					? "quiet mode off — /reload to restore default tool rendering"
+					: "quiet mode off",
+				"info",
+			);
+		}
 	};
 
 	const uninstallUi = (ctx: ExtensionContext): void => {
@@ -311,6 +344,19 @@ export default function (pi: ExtensionAPI): void {
 			}
 		});
 		invalidateUsageCache();
+		// Quiet mode: register compact tool renderers and fold thinking blocks.
+		// Tools cannot be unregistered, so this is a one-way latch per process.
+		if (config.quietMode && !quietToolsRegistered) {
+			registerQuietTools(pi, () => config);
+			quietToolsRegistered = true;
+		}
+		if (config.quietMode) {
+			try {
+				ctx.ui.setHiddenThinkingLabel("thoughts");
+			} catch {
+				// non-TUI mode
+			}
+		}
 		// The theme is deliberately NOT re-applied here. ctx.ui.setTheme writes
 		// through to pi's own settings, so pi already restores the user's choice on
 		// its own. Replaying cockpit's copy would overwrite whatever the user set
@@ -335,6 +381,7 @@ export default function (pi: ExtensionAPI): void {
 			agents: false,
 			footer: false,
 			todoExpanded: config.todoExpanded,
+			quiet: false,
 		});
 		lastCtx = undefined;
 		running = false;
@@ -474,7 +521,13 @@ export default function (pi: ExtensionAPI): void {
 
 	// --- /cockpit: toggle list/compact + enabled + hide-native ---
 	pi.registerCommand("cockpit", {
-		description: "Open pi-cockpit settings; use /cockpit bg for background Bash job details",
+		description: "Open pi-cockpit settings; /cockpit quiet toggles quiet mode, /cockpit bg shows jobs",
+		getArgumentCompletions: (prefix) => {
+			const query = prefix.trim().toLowerCase();
+			const candidates = ["quiet", "quiet on", "quiet off", "bg", "jobs", "todo", "todo expand", "todo collapse"];
+			const matches = candidates.filter((c) => c.startsWith(query));
+			return matches.length > 0 ? matches.map((c) => ({ value: c, label: c })) : null;
+		},
 		handler: async (args, ctx) => {
 			if (!ctx.hasUI) return;
 			const action = args.trim().toLowerCase();
@@ -489,6 +542,24 @@ export default function (pi: ExtensionAPI): void {
 			}
 			if (action === "todo expand" || action === "todo collapse") {
 				setTodoExpanded(action.endsWith("expand"));
+				return;
+			}
+			if (action === "quiet" || action === "quiet toggle") {
+				const was = config.quietMode;
+				config = { ...config, quietMode: !was };
+				saveConfig(config);
+				applyQuietMode(ctx, was, config.quietMode);
+				req();
+				return;
+			}
+			if (action === "quiet on" || action === "quiet off") {
+				const target = action === "quiet on";
+				if (config.quietMode === target) return;
+				const was = config.quietMode;
+				config = { ...config, quietMode: target };
+				saveConfig(config);
+				applyQuietMode(ctx, was, target);
+				req();
 				return;
 			}
 			await openSettings(ctx);
@@ -511,6 +582,7 @@ export default function (pi: ExtensionAPI): void {
 			};
 			const apply = (key: string): void => {
 				const wasEnabled = config.enabled;
+				const wasQuiet = config.quietMode;
 				if (key === "theme") {
 					// Delegate: the picker previews live and reverts on Esc, neither of
 					// which a blind one-key cycle through the name list can do.
@@ -536,6 +608,9 @@ export default function (pi: ExtensionAPI): void {
 					}
 				} else {
 					publishUiOwnership();
+				}
+				if (wasQuiet !== config.quietMode) {
+					applyQuietMode(ctx, wasQuiet, config.quietMode);
 				}
 				req();
 			};

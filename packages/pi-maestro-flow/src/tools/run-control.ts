@@ -36,10 +36,10 @@ export const RunControlParams = Type.Object({
     description: "Run ID. Required for done; optional for brief/check, which default to the active Run.",
   })),
   step: Type.Optional(Type.String({
-    description: "Workflow step or command to preview; required for prepare.",
+    description: "Workflow step or command to preview (e.g. \"implement\", \"verify\"); required for prepare.",
   })),
   pick: Type.Optional(Type.String({
-    description: "Optional pending chain-step selector for next.",
+    description: "Pending chain-step selector for next: a step ID (e.g. \"step-2\") or a command name (e.g. \"implement\"). Omit to take the default next step.",
   })),
   verdict: Type.Optional(Type.Union([
     Type.Literal("done"),
@@ -67,7 +67,7 @@ export const RunControlParams = Type.Object({
     description: "Commands to insert with edit. Supply one command for replace; omit when only removing a step.",
   })),
   after: Type.Optional(Type.String({
-    description: "Insertion selector for edit: current, latest, start, a step ID, or an index; defaults to current.",
+    description: "Insertion point for edit: \"current\" (after active step), \"latest\", \"start\", a step ID (e.g. \"step-3\"), or a numeric index. Defaults to \"current\".",
   })),
   replace: Type.Optional(Type.String({
     description: "Pending step ID to replace with the first edit command.",

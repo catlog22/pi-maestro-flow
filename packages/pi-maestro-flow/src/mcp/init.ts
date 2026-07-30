@@ -21,6 +21,7 @@ import { buildToolMetadata, totalToolCount } from "./tool-metadata.ts";
 import { UiResourceHandler } from "./ui-resource-handler.ts";
 import { openUrl, parallelLimit } from "./utils.ts";
 import { logger } from "./logger.ts";
+import { authenticate, supportsOAuth } from "./mcp-auth-flow.ts";
 import { getMissingConfiguredDirectToolServers } from "./direct-tools.ts";
 import { throwIfAborted } from "./abort.ts";
 
@@ -299,12 +300,62 @@ export function getFailureAgeSeconds(state: McpExtensionState, serverName: strin
   return Math.round(ageMs / 1000);
 }
 
+/** Servers where autoAuth was attempted and failed; avoids repeated browser popups. */
+const autoAuthFailed = new Set<string>();
+
+async function tryAutoAuth(state: McpExtensionState, serverName: string): Promise<boolean> {
+  if (state.config.settings?.autoAuth !== true) return false;
+  const definition = state.config.mcpServers[serverName];
+  if (!definition?.url || !supportsOAuth(definition)) return false;
+  if (autoAuthFailed.has(serverName)) return false;
+
+  try {
+    if (state.ui) {
+      state.ui.setStatus("mcp", `MCP: authenticating ${serverName}...`);
+      state.ui.notify(
+        `MCP: ${serverName} requires OAuth authentication. Opening browser for authorization...`,
+        "info",
+      );
+    }
+    const status = await authenticate(serverName, definition.url, definition, {
+      onAuthorizationUrl: (authorizationUrl) => {
+        state.ui?.notify(
+          `Open this URL to authenticate ${serverName}:\n\n${authorizationUrl}\n\n` +
+          "After approving, return to Pi; the local callback will complete automatically.",
+          "info",
+        );
+      },
+    });
+    if (status === "authenticated") {
+      autoAuthFailed.delete(serverName);
+      state.ui?.notify(`MCP: OAuth authentication successful for ${serverName}. Connecting...`, "info");
+      return true;
+    }
+    autoAuthFailed.add(serverName);
+    return false;
+  } catch (error) {
+    autoAuthFailed.add(serverName);
+    const message = error instanceof Error ? error.message : String(error);
+    logger.debug(`MCP: autoAuth failed for ${serverName}: ${message}`);
+    state.ui?.notify(`MCP: Auto-authentication failed for ${serverName}: ${message}`, "warning");
+    return false;
+  } finally {
+    if (state.ui) {
+      state.ui.setStatus("mcp", undefined);
+    }
+  }
+}
+
 export async function lazyConnect(state: McpExtensionState, serverName: string, signal?: AbortSignal): Promise<boolean> {
   const connection = state.manager.getConnection(serverName);
   if (connection?.status === "needs-auth") {
-    return false;
+    if (await tryAutoAuth(state, serverName)) {
+      await state.manager.close(serverName);
+    } else {
+      return false;
+    }
   }
-  if (connection?.status === "connected") {
+  if (state.manager.getConnection(serverName)?.status === "connected") {
     updateServerMetadata(state, serverName);
     return true;
   }
@@ -321,6 +372,19 @@ export async function lazyConnect(state: McpExtensionState, serverName: string, 
     }
     const newConnection = await state.manager.connect(serverName, definition, signal);
     if (newConnection.status === "needs-auth") {
+      if (await tryAutoAuth(state, serverName)) {
+        await state.manager.close(serverName);
+        const retryConnection = await state.manager.connect(serverName, definition, signal);
+        if (retryConnection.status === "needs-auth") {
+          autoAuthFailed.add(serverName);
+          return false;
+        }
+        state.failureTracker.delete(serverName);
+        updateServerMetadata(state, serverName);
+        updateMetadataCache(state, serverName);
+        updateStatusBar(state);
+        return true;
+      }
       return false;
     }
     state.failureTracker.delete(serverName);

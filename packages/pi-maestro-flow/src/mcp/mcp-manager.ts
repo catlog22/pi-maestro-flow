@@ -14,11 +14,13 @@ export type McpManagerActionKind =
   | "close"
   | "edit-config"
   | "toggle"
-  | "delete";
+  | "delete"
+  | "authenticate";
 
 export interface McpManagerServerView extends McpManagedServer {
   status: McpManagerStatus;
   toolNames: string[];
+  canAuthenticate: boolean;
 }
 
 export interface McpManagerUiState {
@@ -156,6 +158,11 @@ export class McpManagerOverlay implements Component, Focusable {
       return;
     }
     if (matchesKey(data, Key.space) || data === " ") return this.finish("toggle");
+    if (data === "a" || data === "A") {
+      const server = this.selectedServer();
+      if (server?.canAuthenticate) return this.finish("authenticate");
+      return;
+    }
     if (data === "d" || data === "D") return this.finish("delete");
   }
 
@@ -229,7 +236,7 @@ export class McpManagerOverlay implements Component, Focusable {
     rows.push(...this.listRows(servers, inner));
     rows.push(this.filterLine(inner, servers.length));
     if (this.params.notice) rows.push(this.styledNotice(this.params.notice, inner));
-    rows.push(fitSegments(inner, ["Esc 菜单", "Enter 详情", "/ 筛选", "空格 开关", "D 删除"]));
+    rows.push(fitSegments(inner, this.hintSegments(["Esc 菜单", "Enter 详情", "/ 筛选", "空格 开关", "A 认证", "D 删除"])));
     return frame(rows, width, this.params.theme);
   }
 
@@ -247,7 +254,7 @@ export class McpManagerOverlay implements Component, Focusable {
     }
     rows.push(this.filterLine(inner, servers.length));
     if (this.params.notice) rows.push(this.styledNotice(this.params.notice, inner));
-    rows.push(fitSegments(inner, ["Esc 菜单", "↑↓ 服务", "/ 筛选", "空格 开关", "D 删除"]));
+    rows.push(fitSegments(inner, this.hintSegments(["Esc 菜单", "↑↓ 服务", "/ 筛选", "空格 开关", "A 认证", "D 删除"])));
     return frame(rows, width, this.params.theme);
   }
 
@@ -255,7 +262,7 @@ export class McpManagerOverlay implements Component, Focusable {
     const inner = width - 2;
     const rows = [this.header(inner), rule(inner), ...this.detailLines(this.selectedServer(), inner)];
     if (this.params.notice) rows.push(this.styledNotice(this.params.notice, inner));
-    rows.push(fitSegments(inner, ["Esc 返回", "↑↓ 服务", "/ 筛选", "空格 开关", "D 删除"]));
+    rows.push(fitSegments(inner, this.hintSegments(["Esc 返回", "↑↓ 服务", "/ 筛选", "空格 开关", "A 认证", "D 删除"])));
     return frame(rows, width, this.params.theme);
   }
 
@@ -304,6 +311,9 @@ export class McpManagerOverlay implements Component, Focusable {
     lines.push(fitLine(`超时      ${entry.requestTimeoutMs ? `${entry.requestTimeoutMs} ms` : "默认"}`, width));
     if (server.toolNames.length) {
       lines.push(this.params.theme.fg("dim", fitLine(`工具      ${server.toolNames.slice(0, 4).join(", ")}${server.toolNames.length > 4 ? ` +${server.toolNames.length - 4}` : ""}`, width)));
+    }
+    if (server.status === "needs-auth" && server.canAuthenticate) {
+      lines.push(this.params.theme.fg("warning", fitLine("提示      按 A 进行 OAuth 认证", width)));
     }
     lines.push(this.params.theme.fg("dim", fitLine(`配置      ${server.path}`, width)));
     return lines;
@@ -359,6 +369,14 @@ export class McpManagerOverlay implements Component, Focusable {
 
   private selectedServer(): McpManagerServerView | undefined {
     return this.filteredServers()[this.selected];
+  }
+
+  private hintSegments(segments: string[]): string[] {
+    const server = this.selectedServer();
+    if (!server?.canAuthenticate) {
+      return segments.filter((s) => s !== "A 认证");
+    }
+    return segments;
   }
 
   private finish(kind: McpManagerActionKind): void {

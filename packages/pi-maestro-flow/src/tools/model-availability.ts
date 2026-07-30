@@ -3,6 +3,8 @@ import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-w
 import { Type } from "typebox";
 import { getEnabledTools, loadCliToolsConfig } from "../providers/cli-tools-loader.ts";
 import { singleLine, textBlock } from "../tui/components.ts";
+import { isQuietMode } from "../quiet-state.ts";
+import { quietToolCall, quietToolResult } from "../quiet-render.ts";
 
 export const ModelAvailabilityParams = Type.Object({
   filter: Type.Optional(Type.String({ description: "Optional substring to filter model/tool names" })),
@@ -78,17 +80,12 @@ export function createModelAvailabilityTool(): ToolDefinition<typeof ModelAvaila
     description: `Check which models are reachable for delegated work, across two sources:
 
 - **teammate_models**: pi's own authenticated models (the same set shown in <available_teammate_models>), selectable via the teammate tool's model field.
-- **delegate_tools**: CLI tools enabled in the Maestro delegate config (~/.maestro/cli-tools.json), reachable via the bash CLI \`maestro delegate "<PROMPT>" --to <tool>\`.
-- **delegate_fallback**: enabled delegate tools that are NOT directly available as teammate models — route these through \`maestro delegate --to <name>\`.
+- **delegate_tools**: CLI tools enabled in the Maestro delegate config (~/.maestro/cli-tools.json), reachable via \`maestro delegate "<PROMPT>" --to <tool>\`.
+- **delegate_fallback**: enabled delegate tools NOT available as teammate models — route these through \`maestro delegate --to <name>\`.
 
-When to use:
-- A user explicitly requests a specific external model (codex, gemini, claude, opencode) — call this first to see whether it is a teammate model or a delegate-only fallback.
-- Before routing work to an external CLI endpoint, to confirm the tool is enabled.
+Call this before routing to a specific external model (codex, gemini, claude, opencode) to confirm availability. For ordinary delegation, use the teammate tool directly.
 
-When NOT to use:
-- For ordinary delegation where any capable model suffices — use the teammate tool directly.
-
-Pitfall: the \`--to <tool>\` flag is mandatory to target a delegate tool. A bare \`maestro delegate codex\` treats "codex" as the prompt and falls back to the first enabled tool. Full contract: ${DELEGATE_USAGE_DOC}.`,
+Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\` treats "codex" as the prompt and falls back to the first enabled tool. Contract: ${DELEGATE_USAGE_DOC}.`,
     promptSnippet: "Check reachable teammate models + Maestro delegate CLI tools before routing to a specific external model (codex/gemini/claude).",
     promptGuidelines: [
       "When a user explicitly requests an external model (codex, gemini, claude, opencode) that is NOT in <available_teammate_models>, call model-availability to confirm it is enabled, then route via bash: maestro delegate \"<PROMPT>\" --to <tool> --mode analysis.",
@@ -170,10 +167,17 @@ Pitfall: the \`--to <tool>\` flag is mandatory to target a delegate tool. A bare
       } as AgentToolResult<ModelAvailabilityDetails>;
     },
     renderCall(args, theme) {
+      if (isQuietMode()) return quietToolCall(theme, "model-availability", args.filter ? `"${String(args.filter)}"` : "");
       const filter = args.filter ? ` ${theme.fg("accent", `"${String(args.filter)}"`)}` : "";
       return singleLine(`${theme.fg("toolTitle", theme.bold("model-availability"))}${filter}`);
     },
     renderResult(result, opts, theme) {
+      if (isQuietMode()) {
+        const qdetails = result.details as ModelAvailabilityDetails | undefined;
+        const qtm = qdetails?.teammate_models?.length ?? 0;
+        const qdt = qdetails?.delegate_tools?.length ?? 0;
+        return quietToolResult(theme, "model-availability", true, `${qtm} teammate · ${qdt} delegate`);
+      }
       const details = result.details as ModelAvailabilityDetails | undefined;
       const tm = details?.teammate_models?.length ?? 0;
       const dt = details?.delegate_tools?.length ?? 0;

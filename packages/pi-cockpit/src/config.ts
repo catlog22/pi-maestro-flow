@@ -18,6 +18,7 @@ function deepMerge(base: CockpitConfig, over: unknown): CockpitConfig {
 		: undefined;
 	return {
 		enabled: typeof o.enabled === "boolean" ? o.enabled : base.enabled,
+		quietMode: typeof o.quietMode === "boolean" ? o.quietMode : base.quietMode,
 		agentsMode: isMode(o.agentsMode) ? o.agentsMode : base.agentsMode,
 		todoMode: isMode(o.todoMode) ? o.todoMode : base.todoMode,
 		todoExpanded: typeof o.todoExpanded === "boolean" ? o.todoExpanded : base.todoExpanded,

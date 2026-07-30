@@ -1,0 +1,266 @@
+// Quiet mode tool rendering: compress each built-in tool call into a single
+// ✓/✗/⋯ line. Architecture adapted from pi-quiet (github.com/wing900/pi-quiet):
+// a config-driven SPECS table + shared render functions. Execution is delegated
+// to the original built-in tools — only the rendering is replaced.
+//
+// Scope boundary: only the seven built-in tools (read/bash/edit/write/grep/find/ls)
+// are compressed. Compression works by re-registering the tool name and delegating
+// execution back to pi's exported creators. MCP/extension tools (todo, teammate,
+// mcp, lsp, ...) cannot be compressed this way: registerTool is first-name-wins and
+// replaces the whole definition, and the public API exposes neither a render-only
+// hook nor a handle to the original execute — re-registering them would break their
+// execution, so they keep their default rendering.
+//
+// Registered at session_start when config.quietMode is true. Because tools cannot
+// be unregistered, toggling quiet mode off requires /reload or a new session.
+
+import type {
+	BashToolDetails,
+	EditToolDetails,
+	ExtensionAPI,
+	ExtensionContext,
+	ReadToolDetails,
+} from "@earendil-works/pi-coding-agent";
+import {
+	createBashTool,
+	createEditTool,
+	createFindTool,
+	createGrepTool,
+	createLsTool,
+	createReadTool,
+	createWriteTool,
+} from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
+import { homedir } from "node:os";
+import type { CockpitConfig } from "./types.ts";
+import { resolveGlyphs } from "./icons.ts";
+
+// ---------- helpers ----------
+
+function shortenPath(p: string): string {
+	const home = homedir();
+	return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
+
+function truncate(s: string, max: number): string {
+	if (s.length <= max) return s;
+	return `${s.slice(0, max - 1)}…`;
+}
+
+function termWidth(): number {
+	return process.stdout.columns || 100;
+}
+
+function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
+	const c = result.content.find((c) => c.type === "text" && c.text);
+	return c?.text ?? "";
+}
+
+function parseBashExit(output: string): number | null {
+	const m = output.match(/exit code: (\d+)/);
+	return m ? parseInt(m[1], 10) : null;
+}
+
+function firstErrorLine(result: { content: Array<{ type: string; text?: string }> }): string {
+	return truncate(textOf(result).split("\n").find((l) => l.trim()) || "error", 60);
+}
+
+// ---------- built-in tool cache ----------
+
+type BuiltInTools = ReturnType<typeof createBuiltInTools>;
+const toolCache = new Map<string, BuiltInTools>();
+
+function createBuiltInTools(cwd: string) {
+	return {
+		read: createReadTool(cwd),
+		bash: createBashTool(cwd),
+		edit: createEditTool(cwd),
+		write: createWriteTool(cwd),
+		find: createFindTool(cwd),
+		grep: createGrepTool(cwd),
+		ls: createLsTool(cwd),
+	};
+}
+
+function getBuiltInTools(cwd: string): BuiltInTools {
+	let tools = toolCache.get(cwd);
+	if (!tools) {
+		tools = createBuiltInTools(cwd);
+		toolCache.set(cwd, tools);
+	}
+	return tools;
+}
+
+// ---------- tool spec ----------
+
+interface ToolSpec {
+	name: string;
+	/** Key argument shown after the tool name (path / $ command / pattern). */
+	arg: (args: any) => string;
+	/** Final summary after ✓/✗ (e.g. "12 lines", "exit 0 · 3 lines"). */
+	summary: (result: any, ctx: any) => string;
+	/** Expanded content; empty string means nothing extra. */
+	expanded?: (result: any) => string;
+	/** Success predicate; defaults to !ctx.isError. */
+	ok?: (result: any, ctx: any) => boolean;
+}
+
+const NAME_WIDTH = 5;
+
+const SPECS: ToolSpec[] = [
+	{
+		name: "read",
+		arg: (a) => shortenPath(a.path || ""),
+		summary: (r) => {
+			const c = r.content[0];
+			if (c?.type === "image") return "image";
+			const lines = c?.type === "text" ? c.text.split("\n").length : 0;
+			const d = r.details as ReadToolDetails | undefined;
+			let s = `${lines} lines`;
+			if (d?.truncation?.truncated) s += ` (truncated from ${d.truncation.totalLines})`;
+			return s;
+		},
+		expanded: (r) => textOf(r).split("\n").slice(0, 15).join("\n"),
+	},
+	{
+		name: "bash",
+		arg: (a) => `$ ${a.command || ""}`,
+		summary: (r) => {
+			const out = textOf(r);
+			const exit = parseBashExit(out);
+			const n = out.split("\n").filter((l: string) => l.trim()).length;
+			const d = r.details as BashToolDetails | undefined;
+			let s = `exit ${exit ?? "?"} · ${n} lines`;
+			if (d?.truncation?.truncated) s += " [truncated]";
+			return s;
+		},
+		expanded: (r) => textOf(r).split("\n").slice(0, 20).join("\n"),
+		ok: (r, ctx) => {
+			if (ctx.isError) return false;
+			const exit = parseBashExit(textOf(r));
+			return exit === null || exit === 0;
+		},
+	},
+	{
+		name: "edit",
+		arg: (a) => shortenPath(a.path || ""),
+		summary: (r, ctx) => {
+			if (ctx.isError) return firstErrorLine(r);
+			const d = r.details as EditToolDetails | undefined;
+			if (!d?.diff) return "applied";
+			let add = 0;
+			let del = 0;
+			for (const line of d.diff.split("\n")) {
+				if (line.startsWith("+") && !line.startsWith("+++")) add++;
+				if (line.startsWith("-") && !line.startsWith("---")) del++;
+			}
+			return `+${add}/-${del}`;
+		},
+		expanded: (r) => {
+			const d = r.details as EditToolDetails | undefined;
+			return d?.diff ?? textOf(r);
+		},
+	},
+	{
+		name: "write",
+		arg: (a) => shortenPath(a.path || ""),
+		summary: (_r, ctx) => (ctx.isError ? firstErrorLine(_r) : "written"),
+	},
+	{
+		name: "find",
+		arg: (a) => `${a.pattern || ""} in ${shortenPath(a.path || ".")}`,
+		summary: (r, ctx) => (ctx.isError ? firstErrorLine(r) : `${textOf(r).trim().split("\n").filter(Boolean).length} files`),
+		expanded: (r) => textOf(r),
+	},
+	{
+		name: "grep",
+		arg: (a) => `/${a.pattern || ""}/ in ${shortenPath(a.path || ".")}`,
+		summary: (r, ctx) => (ctx.isError ? firstErrorLine(r) : `${textOf(r).trim().split("\n").filter(Boolean).length} matches`),
+		expanded: (r) => textOf(r),
+	},
+	{
+		name: "ls",
+		arg: (a) => shortenPath(a.path || "."),
+		summary: (r, ctx) => (ctx.isError ? firstErrorLine(r) : `${textOf(r).trim().split("\n").filter(Boolean).length} entries`),
+		expanded: (r) => textOf(r),
+	},
+];
+
+// ---------- rendering ----------
+
+function renderCallLine(spec: ToolSpec, args: any, theme: any, glyphs: { ellipsis: string }): string {
+	const name = spec.name.padEnd(NAME_WIDTH);
+	const argCap = Math.max(10, termWidth() - (5 + NAME_WIDTH));
+	const argText = truncate(spec.arg(args), argCap);
+	return `  ${theme.fg("warning", "⋯")} ${theme.fg("toolTitle", theme.bold(name))} ${theme.fg("accent", argText)}`;
+}
+
+function renderResultLine(
+	spec: ToolSpec,
+	args: any,
+	result: any,
+	ctx: any,
+	theme: any,
+	expanded: boolean,
+	glyphs: { check: string; cross: string },
+): string {
+	const isOk = spec.ok ? spec.ok(result, ctx) : !ctx.isError;
+	const mark = isOk ? theme.fg("success", glyphs.check) : theme.fg("error", glyphs.cross);
+	const name = spec.name.padEnd(NAME_WIDTH);
+
+	const overhead = 8 + NAME_WIDTH;
+	const budget = Math.max(20, termWidth() - overhead);
+	const sumCap = Math.min(35, Math.floor(budget * 0.4));
+	const sumRaw = truncate(spec.summary(result, ctx), sumCap);
+	const argCap = Math.max(10, budget - sumRaw.length);
+	const argText = truncate(spec.arg(args), argCap);
+
+	let t = `  ${mark} ${theme.fg("toolTitle", theme.bold(name))} ${theme.fg("accent", argText)}`;
+	t += ` ${theme.fg("dim", "· " + sumRaw)}`;
+
+	if (expanded) {
+		const full = spec.expanded ? spec.expanded(result) : textOf(result);
+		if (full && full.trim()) {
+			t += "\n" + theme.fg("dim", full);
+		}
+	}
+	return t;
+}
+
+// ---------- registration ----------
+
+/**
+ * Register compact tool renderers for quiet mode. Called once at session_start
+ * when config.quietMode is true. Tools delegate execution to the built-in
+ * implementations; only the visual shell is replaced.
+ */
+export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitConfig): void {
+	for (const spec of SPECS) {
+		const original = (getBuiltInTools(process.cwd()) as any)[spec.name];
+		pi.registerTool({
+			name: spec.name,
+			label: spec.name,
+			description: original.description,
+			parameters: original.parameters,
+			renderShell: "self",
+
+			async execute(toolCallId: string, params: any, signal: any, onUpdate: any, ctx: ExtensionContext) {
+				return (getBuiltInTools(ctx.cwd) as any)[spec.name].execute(toolCallId, params, signal, onUpdate);
+			},
+
+			renderCall(args: any, theme: any, ctx: any) {
+				// Once the result arrives this slot is empty; only renderResult draws.
+				if (!ctx.isPartial) return new Text("", 0, 0);
+				const glyphs = resolveGlyphs(getConfig().icons.mode);
+				return new Text(renderCallLine(spec, args, theme, glyphs), 0, 0);
+			},
+
+			renderResult(result: any, { expanded, isPartial }: any, theme: any, ctx: any) {
+				// While streaming: leave empty, the renderCall ⋯ line is visible.
+				if (isPartial) return new Text("", 0, 0);
+				const glyphs = resolveGlyphs(getConfig().icons.mode);
+				return new Text(renderResultLine(spec, ctx.args, result, ctx, theme, expanded, glyphs), 0, 0);
+			},
+		});
+	}
+}

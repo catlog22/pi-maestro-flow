@@ -16,6 +16,8 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { altKey } from "../key-labels.ts";
+import { isQuietMode } from "../quiet-state.ts";
+import { quietToolCall } from "../quiet-render.ts";
 import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
 import { PlanApprovalError, PlanStore, prewarmProcessIdentity, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
@@ -670,7 +672,7 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       if (mode !== "plan") await enterPlanMode(ctx);
       return result(`Plan mode active. Draft: ${currentStore?.currentPath ?? ""}`, currentDetails("enter"));
     },
-    renderCall(_args, theme) { return new Text(theme.fg("toolTitle", theme.bold("plan enter")), 0, 0); },
+    renderCall(_args, theme) { return isQuietMode() ? quietToolCall(theme, "plan", "enter") : new Text(theme.fg("toolTitle", theme.bold("plan enter")), 0, 0); },
   };
 
   const updateTool: ToolDefinition<typeof PlanUpdateParams, PlanToolDetails> = {

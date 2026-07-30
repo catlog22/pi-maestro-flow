@@ -10,6 +10,7 @@ import {
 	type BashBgSnapshotPayload,
 	registerBashBg,
 } from "../src/tools/bash-bg.ts";
+import { setQuietMode } from "../src/quiet-state.ts";
 
 interface ToolLike {
 	execute(
@@ -81,6 +82,44 @@ function createHarness(): Harness {
 		},
 	};
 }
+
+test("bash_bg quiet render shows a running glyph in flight and an exit-aware glyph when done", () => {
+	const harness = createHarness();
+	try {
+		setQuietMode(true);
+		const theme = { fg: (_color: string, value: string) => value } as Theme;
+		const running = {
+			content: [{ type: "text", text: "job j1: running after 2s\ncommand: sleep 10\noutput (tail):\n(empty)" }],
+			details: { jobId: "j1", running: true, exitCode: null },
+		} as unknown as AgentToolResult<BashBgDetails>;
+		const rRun = harness.tool.renderResult(running, { expanded: false }, theme).render(200);
+		assert.equal(rRun.length, 1);
+		assert.match(rRun[0], /^\s*•/);
+		assert.match(rRun[0], /j1/);
+		assert.doesNotMatch(rRun[0], /✓/);
+
+		const completed = {
+			content: [{ type: "text", text: "job j1: completed (exit 0)\ncommand: echo hi\noutput (tail):\nhi" }],
+			details: { jobId: "j1", running: false, exitCode: 0 },
+		} as unknown as AgentToolResult<BashBgDetails>;
+		const rOk = harness.tool.renderResult(completed, { expanded: false }, theme).render(200);
+		assert.equal(rOk.length, 1);
+		assert.match(rOk[0], /✓/);
+		assert.match(rOk[0], /exit 0/);
+
+		const failed = {
+			content: [{ type: "text", text: "job j1: failed (exit 3)\ncommand: false\noutput (tail):\n" }],
+			details: { jobId: "j1", running: false, exitCode: 3 },
+		} as unknown as AgentToolResult<BashBgDetails>;
+		const rFail = harness.tool.renderResult(failed, { expanded: false }, theme).render(200);
+		assert.equal(rFail.length, 1);
+		assert.match(rFail[0], /✗/);
+		assert.match(rFail[0], /exit 3/);
+	} finally {
+		setQuietMode(false);
+		harness.shutdown();
+	}
+});
 
 test("bash_bg run completes inline without queueing a redundant turn", async () => {
 	const harness = createHarness();

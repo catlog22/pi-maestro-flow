@@ -1,5 +1,7 @@
 import type { AgentToolResult, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
+import { isQuietMode } from "../quiet-state.ts";
+import { compactJson, quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
 
 type McpToolResultDetails = Record<string, unknown> & { error?: unknown };
 type McpToolContentBlock = AgentToolResult<McpToolResultDetails>["content"][number];
@@ -104,11 +106,16 @@ function renderToolCallLines(lines: string[], theme: RenderTheme) {
 }
 
 export function renderMcpProxyToolCall(args: McpProxyToolCallInput, theme: RenderTheme) {
+  if (isQuietMode()) {
+    const [head = "status"] = formatMcpProxyToolCallLines(args);
+    return quietToolCall(theme, "mcp", head.replace(/^mcp\s+/, ""));
+  }
   return renderToolCallLines(formatMcpProxyToolCallLines(args), theme);
 }
 
 export function createMcpDirectToolCallRenderer(displayName: string) {
   return (args: Record<string, unknown>, theme: RenderTheme) => {
+    if (isQuietMode()) return quietToolCall(theme, displayName, compactJson(args));
     return renderToolCallLines(formatMcpDirectToolCallLines(displayName, args), theme);
   };
 }
@@ -158,4 +165,40 @@ export function renderMcpToolResult(
     : "";
 
   return new Text(`${output}${hint}`, 0, 0);
+}
+
+function mcpResultOk(result: AgentToolResult<McpToolResultDetails>, context?: McpToolRenderContext): boolean {
+  return !result.details.error && context?.isError !== true;
+}
+
+// Quiet-mode result renderers: collapse to a single ✓/✗ summary line. While
+// streaming (isPartial) they render nothing so the call line's ⋯ stays the visible
+// running indicator, mirroring cockpit's built-in bash compression.
+
+export function createMcpDirectToolResultRenderer(displayName: string) {
+  return (
+    result: AgentToolResult<McpToolResultDetails>,
+    options: ToolRenderResultOptions,
+    theme: RenderTheme,
+    context?: McpToolRenderContext,
+  ) => {
+    if (isQuietMode()) {
+      if (options.isPartial) return new Text("", 0, 0);
+      return quietToolResult(theme, displayName, mcpResultOk(result, context), resultSummary(result));
+    }
+    return renderMcpToolResult(result, options, theme, context);
+  };
+}
+
+export function renderMcpProxyToolResult(
+  result: AgentToolResult<McpToolResultDetails>,
+  options: ToolRenderResultOptions,
+  theme: RenderTheme,
+  context?: McpToolRenderContext,
+) {
+  if (isQuietMode()) {
+    if (options.isPartial) return new Text("", 0, 0);
+    return quietToolResult(theme, "mcp", mcpResultOk(result, context), resultSummary(result));
+  }
+  return renderMcpToolResult(result, options, theme, context);
 }

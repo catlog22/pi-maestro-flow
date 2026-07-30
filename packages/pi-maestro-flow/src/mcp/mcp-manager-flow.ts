@@ -11,6 +11,8 @@ import type { ServerEntry } from "./types.ts";
 export interface McpManagerRuntime {
   status(serverName: string): McpManagerStatus;
   toolNames(serverName: string): string[];
+  canAuthenticate(serverName: string): boolean;
+  authenticate(serverName: string): Promise<{ ok: boolean; message?: string }>;
 }
 
 export interface McpManagerFlowResult {
@@ -67,6 +69,28 @@ export async function runMcpManager(
       } finally {
         ctx.ui.setStatus("mcp-manager", undefined);
       }
+      continue;
+    }
+
+    if (action.kind === "authenticate") {
+      if (!runtime.canAuthenticate(selected.name)) {
+        notice = `无法认证 · ${selected.name} 不支持 OAuth（需设置 auth: "oauth" 或省略 auth 自动检测）`;
+        continue;
+      }
+      try {
+        ctx.ui.setStatus("mcp-manager", `MCP · 正在认证 ${selected.name}…`);
+        const result = await runtime.authenticate(selected.name);
+        if (result.ok) {
+          notice = `认证成功 · ${selected.name} · 关闭后重载生效`;
+        } else {
+          notice = `认证失败 · ${selected.name}${result.message ? ` · ${result.message}` : ""}`;
+        }
+      } catch (error) {
+        notice = `认证失败 · ${selected.name} · ${errorMessage(error)}`;
+      } finally {
+        ctx.ui.setStatus("mcp-manager", undefined);
+      }
+      uiState = { ...uiState, selectedName: selected.name };
       continue;
     }
 
@@ -142,6 +166,7 @@ function buildViews(snapshot: McpManagerSnapshot, runtime: McpManagerRuntime): M
     ...server,
     status: server.entry.enabled === false ? "disabled" : runtime.status(server.name),
     toolNames: server.entry.enabled === false ? [] : runtime.toolNames(server.name),
+    canAuthenticate: server.entry.enabled !== false && runtime.canAuthenticate(server.name),
   }));
 }
 

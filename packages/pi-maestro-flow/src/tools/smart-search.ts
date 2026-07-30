@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { singleLine, textBlock } from "../tui/components.ts";
+import { isQuietMode } from "../quiet-state.ts";
+import { quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
 import { showSmartSearchConfigOverlay } from "../tui/smart-search-config.ts";
@@ -20,19 +22,27 @@ type RouterModeValue = "hybrid" | "rules" | "off";
 const SmartSearchMode = Type.Unsafe<SmartSearchModeValue>({
   type: "string",
   enum: ["search", "research", "fetch", "route"],
+  description: "search: quick web results; research: multi-source deep analysis; fetch: retrieve a URL; route: provider diagnostics",
 });
 const Validation = Type.Unsafe<ValidationValue>({
   type: "string",
   enum: ["fast", "balanced", "strict"],
+  description: "Source validation depth: fast (minimal), balanced (default), strict (cross-check for security/compliance claims)",
 });
-const Fallback = Type.Unsafe<FallbackValue>({ type: "string", enum: ["auto", "off"] });
+const Fallback = Type.Unsafe<FallbackValue>({
+  type: "string",
+  enum: ["auto", "off"],
+  description: "Provider fallback on failure: auto (try alternatives) or off",
+});
 const Budget = Type.Unsafe<BudgetValue>({
   type: "string",
   enum: ["quick", "standard", "deep"],
+  description: "Research effort budget: quick (few sources), standard (default), deep (exhaustive)",
 });
 const RouterMode = Type.Unsafe<RouterModeValue>({
   type: "string",
   enum: ["hybrid", "rules", "off"],
+  description: "Provider routing strategy: hybrid (LLM + rules), rules (deterministic), off (single provider)",
 });
 
 export const SmartSearchParams = Type.Object({
@@ -40,15 +50,15 @@ export const SmartSearchParams = Type.Object({
   query: Type.String({ minLength: 1, description: "Search/research/route query, or URL for fetch" }),
   platform: Type.Optional(Type.String({ minLength: 1, description: "Search platform hint" })),
   model: Type.Optional(Type.String({ minLength: 1, description: "Search model override" })),
-  extra_sources: Type.Optional(Type.Integer({ minimum: 0, maximum: 20 })),
+  extra_sources: Type.Optional(Type.Integer({ minimum: 0, maximum: 20, description: "Additional sources beyond the default count" })),
   validation: Type.Optional(Validation),
   fallback: Type.Optional(Fallback),
   providers: Type.Optional(Type.String({ minLength: 1, description: "Comma-separated search providers" })),
   timeout: Type.Optional(Type.Integer({ minimum: 1, maximum: 600, description: "SmartSearch provider timeout in seconds" })),
   budget: Type.Optional(Budget),
-  evidence_dir: Type.Optional(Type.String({ minLength: 1 })),
+  evidence_dir: Type.Optional(Type.String({ minLength: 1, description: "Directory to write research evidence artifacts" })),
   router_mode: Type.Optional(RouterMode),
-  max_output_bytes: Type.Optional(Type.Integer({ minimum: 1_024, maximum: 10_000_000 })),
+  max_output_bytes: Type.Optional(Type.Integer({ minimum: 1_024, maximum: 10_000_000, description: "Output size cap in bytes (default: 1 MB)" })),
   native: Type.Optional(Type.Boolean({ description: "Use native TS search providers instead of Python CLI" })),
 });
 
@@ -144,7 +154,8 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
   return {
     name: "smart_search",
     label: "Smart Search",
-    description: "Run the bundled SmartSearch CLI for live search, deep research, page fetching, or read-only route diagnostics. The package-local npm wrapper is used instead of a global PATH command.",
+    description: "Run the bundled SmartSearch CLI for live search, deep research, page fetching, or read-only route diagnostics. The package-local npm wrapper is used instead of a global PATH command. " +
+      "Example: { mode: \"search\", query: \"TypeBox schema validation\" } or { mode: \"fetch\", query: \"https://example.com/api\" }.",
     promptSnippet: "Use smart_search for web search, evidence-first research, URL fetching, and provider route diagnostics.",
     parameters: SmartSearchParams,
     async execute(_id, params, signal, _onUpdate, ctx): Promise<AgentToolResult<SmartSearchDetails>> {
@@ -204,6 +215,10 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
       }
     },
     renderCall(args, theme) {
+      if (isQuietMode()) {
+        const qmode = String(args.mode ?? "search");
+        return quietToolCall(theme, "smart_search", `${qmode} "${String(args.query ?? "").slice(0, 60)}"`);
+      }
       const mode = String(args.mode ?? "search");
       const query = String(args.query ?? "").slice(0, 60);
       return singleLine(`${theme.fg("toolTitle", theme.bold("smart_search "))}${mode} ${theme.fg("accent", `"${query}"`)}`);
@@ -211,6 +226,7 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
     renderResult(result, opts, theme) {
       const details = result.details as SmartSearchDetails | undefined;
       const isError = (result as { isError?: boolean }).isError === true;
+      if (isQuietMode()) return quietToolResult(theme, "smart_search", !isError, resultSummary(result));
       if (isError) {
         const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
         if (opts.expanded) return textBlock(text);

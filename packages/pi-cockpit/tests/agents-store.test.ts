@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AgentsStore, FAILED_LINGER_MS, mapAgentStatus } from "../src/agents-store.ts";
+import { AgentsStore, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, mapAgentStatus } from "../src/agents-store.ts";
 
 test("started adds a running row with derived role and label", () => {
 	const s = new AgentsStore();
@@ -460,4 +460,73 @@ test("a nonzero complete exit code preserves a running row as failed", () => {
 	assert.equal(row.tail, "process exited quickly");
 	assert.equal(row.lastActivityAt, 1_000);
 	assert.ok(s.hasLingering());
+});
+
+// Regression: a teammate returns its tool result early (result-ready) and the
+// extension emits `complete`, but late progress deltas keep arriving afterwards
+// (flush gate re-arms, a graph task stays status:"running" until its lifecycle
+// confirms, IPC reorders). These used to self-heal a ghost row that no second
+// `complete` ever removed, so the panel showed an agent running forever.
+test("a late running message after complete does not resurrect a ghost row", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "explorer" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
+	assert.equal(s.size, 0);
+	// The tool result was already returned; this delta is a stale in-flight one.
+	s.applyMessage({ correlationId: "c1", agent: "explorer", status: "running", lastMessage: "stale" }, 1_500);
+	assert.equal(s.size, 0, "ghost row must not be self-healed after complete");
+});
+
+test("a late graph progress snapshot after complete does not resurrect child rows", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "root", agent: "graph(2)" }, 1);
+	s.applyMessage({
+		correlationId: "root",
+		progress: [
+			{ correlationId: "child-1", agent: "executor", name: "a", taskIndex: 0, status: "running" },
+			{ correlationId: "child-2", agent: "executor", name: "b", taskIndex: 1, status: "running" },
+		],
+	}, 500);
+	assert.equal(s.size, 3);
+	s.applyComplete({ correlationId: "root", exitCode: 0 }, 1_000);
+	assert.equal(s.size, 0);
+	// A result-ready task publishes status:"running" again once its lifecycle
+	// confirms; the whole snapshot is post-complete and must stay deleted.
+	s.applyMessage({
+		correlationId: "root",
+		progress: [
+			{ correlationId: "child-1", agent: "executor", name: "a", taskIndex: 0, status: "running" },
+			{ correlationId: "child-2", agent: "executor", name: "b", taskIndex: 1, status: "running" },
+		],
+	}, 1_500);
+	assert.equal(s.size, 0, "graph children must not be self-healed after the root completed");
+});
+
+test("complete that beats the first delta still suppresses the self-heal that follows", () => {
+	const s = new AgentsStore();
+	// Event reorder: `complete` arrives before any row existed for this agent.
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
+	s.applyMessage({ correlationId: "c1", agent: "explorer", status: "running", message: "late" }, 1_500);
+	assert.equal(s.size, 0);
+});
+
+test("an explicit started clears the tombstone so a woken agent reappears", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
+	assert.equal(s.size, 0);
+	// Waking a sleeping agent reuses its correlationId and re-emits `started`.
+	s.applyStarted({ correlationId: "c1", agent: "executor", status: "running" }, 2_000);
+	assert.equal(s.size, 1);
+	s.applyMessage({ correlationId: "c1", status: "running", lastMessage: "awake" }, 2_500);
+	assert.equal(s.snapshot(2_500)[0].tail, "awake");
+});
+
+test("a tombstone expires so a genuinely fresh agent is not suppressed forever", () => {
+	const s = new AgentsStore();
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
+	s.applyMessage({ correlationId: "c1", agent: "explorer", status: "running" }, 1_000 + COMPLETED_TOMBSTONE_MS - 1);
+	assert.equal(s.size, 0, "still suppressed just before expiry");
+	s.applyMessage({ correlationId: "c1", agent: "explorer", status: "running" }, 1_000 + COMPLETED_TOMBSTONE_MS);
+	assert.equal(s.size, 1, "self-heal allowed again after the tombstone expires");
 });

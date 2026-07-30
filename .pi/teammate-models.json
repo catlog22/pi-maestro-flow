@@ -2,11 +2,34 @@
   "version": 2,
   "mappings": {
     "explore": "maestro-qwen/qwen3.8-max-preview",
-    "analysis": "maestro-openai/gpt-5.6-sol"
+    "analysis": "maestro-openai/gpt-5.6-sol",
+    "review": "maestro-openai/gpt-5.6-sol",
+    "debug": "maestro-openai/gpt-5.6-sol",
+    "development": "maestro-openai/gpt-5.6-sol",
+    "testing": "maestro-openai/gpt-5.6-sol",
+    "planning": "maestro-openai/gpt-5.6-sol"
   },
   "fallbackMappings": {
     "explore": [
       "maestro-openai/gpt-5.6-sol"
+    ],
+    "analysis": [
+      "maestro-qwen/qwen3.8-max-preview"
+    ],
+    "review": [
+      "maestro-qwen/qwen3.8-max-preview"
+    ],
+    "debug": [
+      "maestro-qwen/qwen3.8-max-preview"
+    ],
+    "development": [
+      "maestro-qwen/qwen3.8-max-preview"
+    ],
+    "testing": [
+      "maestro-qwen/qwen3.8-max-preview"
+    ],
+    "planning": [
+      "maestro-qwen/qwen3.8-max-preview"
     ]
   },
   "thinkingLevels": {

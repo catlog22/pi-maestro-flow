@@ -202,6 +202,7 @@ export function renderFooter(p: FooterParts): string[] {
 	if (width <= 0) return [""];
 	const ell = theme.fg("dim", g.ellipsis);
 	const sep = theme.fg("dim", g.separator.trim());
+
 	const identitySeparator = ` ${sep} `;
 	const visibleStatuses = (p.extensionStatuses ?? []).filter(
 		(status) => isVisibleExtensionStatus(status, p.thinking),

@@ -51,6 +51,13 @@ export function buildRows(config: CockpitConfig): SettingsRow[] {
 			next: config.enabled ? "off" : "on",
 		},
 		{
+			key: "quietMode",
+			accel: "q",
+			label: "quiet (reload)",
+			value: config.quietMode ? "on" : "off",
+			next: config.quietMode ? "off" : "on",
+		},
+		{
 			key: "agentsMode",
 			accel: "a",
 			label: "agents",
@@ -107,6 +114,8 @@ export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
 	switch (key) {
 		case "enabled":
 			return { ...config, enabled: !config.enabled };
+		case "quietMode":
+			return { ...config, quietMode: !config.quietMode };
 		case "agentsMode":
 			return { ...config, agentsMode: cycle(VIEW_MODES, config.agentsMode) };
 		case "todoMode":

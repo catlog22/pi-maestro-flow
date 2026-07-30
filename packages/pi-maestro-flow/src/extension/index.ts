@@ -38,6 +38,8 @@ import {
   TodoToolParams,
 } from "./schemas.ts";
 import { altKey } from "../key-labels.ts";
+import { isQuietMode, setQuietMode } from "../quiet-state.ts";
+import { quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
 import { registerKeybindingsCommand } from "../keybindings-command.ts";
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
@@ -491,18 +493,11 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
 - **moa**: Mixture-of-Agents — parallel reference analysis across models, then aggregator synthesis.
   { action: "moa", prompts: ["Compare auth strategies"], preset: "deep" }
 
-When to use: in the pi-agent, prefer the **teammate** tool for ALL delegation, code exploration, and multi-model synthesis — teammate supports prompt templates (the prompt field) and model selection (the model field). The maestro actions below route to external CLI endpoints (gemini/codex CLI processes) and are rarely needed directly:
-- explore: external-CLI-backed parallel search.
-- delegate: route a task to an external CLI process (gemini/codex).
-- moa: multi-model synthesis across external CLI endpoints.
+These actions route to external CLI endpoints (gemini/codex CLI processes). Prefer the **teammate** tool for ordinary delegation and exploration.
 
-Progressive fallback (delegate as teammate degradation): when a user explicitly requests a specific external model (codex, gemini, claude, opencode) that is NOT listed in <available_teammate_models>, it may still be reachable through the Maestro delegate CLI. Call the **model-availability** tool to confirm what is enabled, then route via the bash CLI:
+Progressive fallback: when a user explicitly requests an external model (codex, gemini, claude, opencode) NOT in <available_teammate_models>, call **model-availability** first, then route via bash:
   maestro delegate "<PROMPT>" --to <tool> --mode analysis
-The --to flag is MANDATORY to target a tool. A bare \`maestro delegate codex\` treats "codex" as the prompt and silently falls back to the first enabled tool — this is the cause of "no output" reports. Full delegate contract (options, --rule templates, resume, message delivery): D:\\maestro2\\workflows\\delegate-usage.md.
-
-When NOT to use:
-- For pi-agent code discovery, delegation, analysis, or synthesis — use teammate (agent: "explorer" for discovery; the prompt field for templates; the model field for external models).
-- For a single known-symbol lookup or exact regex — use maestro search --code or rg directly.`,
+The --to flag is MANDATORY. A bare \`maestro delegate codex\` treats "codex" as the prompt and falls back to the first enabled tool. Contract: D:\\maestro2\\workflows\\delegate-usage.md.`,
 
     promptSnippet: "External-CLI-endpoint routing (explore/delegate/moa) with a delegate-as-teammate-fallback path. Prefer teammate; fall back to maestro delegate --to <tool> for explicit external models missing from the teammate catalog.",
     promptGuidelines: [
@@ -576,6 +571,17 @@ When NOT to use:
 
     renderCall(args, theme) {
       const action = (args.action as string) ?? "?";
+      if (isQuietMode()) {
+        let arg = action;
+        if (action === "explore") {
+          const prompts = args.prompts as string[] | undefined;
+          if (prompts) arg += ` (${prompts.length})`;
+        } else if (action === "delegate") {
+          const tool = (args.tool as string) ?? "";
+          if (tool) arg += ` ${tool}`;
+        }
+        return quietToolCall(theme, "maestro", arg);
+      }
       let detail = "";
       if (action === "explore") {
         const prompts = args.prompts as string[] | undefined;
@@ -597,6 +603,7 @@ When NOT to use:
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
       const isError = (result as { isError?: boolean }).isError === true;
+      if (isQuietMode()) return quietToolResult(theme, "maestro", !isError, resultSummary(result));
       if (opts.expanded) return textBlock(message);
       if (isError) {
         const firstLine = message.split("\n")[0] ?? message;
@@ -671,6 +678,10 @@ Only request completion after all work is done; the extension verifies it indepe
 
     renderCall(args, theme) {
       const action = (args.action as string) ?? "?";
+      if (isQuietMode()) {
+        const obj = action === "create" || action === "update" ? ((args.objective as string) ?? "") : "";
+        return quietToolCall(theme, "goal", obj ? `${action} ${obj.slice(0, 40)}` : action);
+      }
       let detail = "";
       if (action === "create" || action === "update") {
         const obj = (args.objective as string) ?? "";
@@ -682,6 +693,10 @@ Only request completion after all work is done; the extension verifies it indepe
     renderResult(result, options, theme) {
       const block = result.content.find((item) => item.type === "text");
       const text = block && "text" in block ? block.text : "Goal action completed.";
+      if (isQuietMode()) {
+        const isError = (result as { isError?: boolean }).isError === true;
+        return quietToolResult(theme, "goal", !isError, resultSummary(result));
+      }
       if (options.expanded) return textBlock(text);
 
       const isError = (result as { isError?: boolean }).isError === true;
@@ -763,6 +778,7 @@ Rules:
         const id = (args.id as string) ?? "";
         detail = id ? ` #${id}` : "";
       }
+      if (isQuietMode()) return quietToolCall(theme, "todo", `${action}${detail}`.trim());
       return singleLine(`${theme.fg("toolTitle", theme.bold("todo "))}${action}${detail}`);
     },
 
@@ -771,7 +787,7 @@ Rules:
       const rawText = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
 
       if (!details?.tasks) {
-        if (opts.expanded) return textBlock(rawText);
+        if (opts.expanded && !isQuietMode()) return textBlock(rawText);
         return singleLine(details?.error ? theme.fg("error", rawText) : theme.fg("dim", rawText));
       }
       if (details.error) {
@@ -788,7 +804,7 @@ Rules:
       if (open > 0) counts.push(`${open} open`);
       const progress = `${allTasks.length} tasks (${counts.join(", ")})`;
 
-      if (opts.expanded) return textBlock(rawText);
+      if (opts.expanded && !isQuietMode()) return textBlock(rawText);
 
       const action = details.action;
       if (action === "get") {
@@ -796,6 +812,9 @@ Rules:
         return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", firstLine)}`);
       }
       if (action === "list") {
+        if (isQuietMode()) {
+          return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", progress)}`);
+        }
         const lines = rawText.split("\n").filter(Boolean);
         const body = lines.length <= 6
           ? lines
@@ -835,7 +854,9 @@ When to use:
 - Inside an active Maestro Workflow Session: status/brief/check to inspect (read-only), next/done/edit to drive the chain (mutating).
 
 When NOT to use:
-- No active workflow or coordinator not attached — the call errors; do not invoke it.`,
+- No active workflow or coordinator not attached — the call errors; do not invoke it.
+
+Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "done", summary: "Implemented feature X" }, { action: "edit", commands: ["verify"], after: "current" }.`,
     promptSnippet: "Read (status/brief/check) or drive (next/done/edit) canonical Maestro Workflow Runs",
     parameters: RunControlParams,
     async execute(_id, params, _signal, _onUpdate, ctx) {
@@ -864,12 +885,14 @@ When NOT to use:
       };
     },
     renderCall(args, theme) {
+      if (isQuietMode()) return quietToolCall(theme, "run-control", String(args.action ?? "?"));
       return singleLine(`${theme.fg("toolTitle", theme.bold("run-control "))}${String(args.action ?? "?")}`);
     },
     renderResult(result, opts, theme) {
       const details = result.details as { ok?: boolean; action?: string; message?: string } | undefined;
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
+      if (isQuietMode()) return quietToolResult(theme, "run-control", details?.ok !== false, resultSummary(result));
       if (opts.expanded) return textBlock(message);
       const firstLine = message.split("\n")[0] ?? message;
       if (!details?.ok) {
@@ -1418,8 +1441,9 @@ When NOT to use:
 
   pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
     if (!payload || typeof payload !== "object") return;
-    const ownership = payload as { todo?: unknown; todoExpanded?: unknown };
+    const ownership = payload as { todo?: unknown; todoExpanded?: unknown; quiet?: unknown };
     cockpitOwnsTodo = ownership.todo === true;
+    setQuietMode(ownership.quiet === true);
     if (typeof ownership.todoExpanded === "boolean") {
       panelMode = ownership.todoExpanded ? "expanded" : "collapsed";
     }
@@ -1789,11 +1813,16 @@ Use assignee="root" to hand work back to root. Teammates can update tasks they c
     renderCall(args, theme) {
       const action = String(args.action ?? "?");
       const subject = action === "create" && args.subject ? ` ${String(args.subject).slice(0, 40)}` : "";
+      if (isQuietMode()) return quietToolCall(theme, "todo", `${action}${subject}`);
       return singleLine(`${theme.fg("toolTitle", theme.bold("todo "))}${action}${subject}`);
     },
     renderResult(result, options, theme) {
       const block = result.content.find((item) => item.type === "text");
       const text = block && "text" in block ? block.text : "Todo request completed.";
+      if (isQuietMode()) {
+        const isError = (result as { isError?: boolean }).isError === true;
+        return quietToolResult(theme, "todo", !isError, resultSummary(result));
+      }
       if (options.expanded) return textBlock(text);
       return singleLine((result as { isError?: boolean }).isError
         ? theme.fg("error", text)
@@ -1852,6 +1881,7 @@ When NOT to use:
     renderCall(args, theme) {
       const qs = args.questions as unknown[] | undefined;
       const count = qs?.length ?? 0;
+      if (isQuietMode()) return quietToolCall(theme, "ask", `${count} question${count !== 1 ? "s" : ""}`);
       return singleLine(
         `${theme.fg("toolTitle", theme.bold("ask "))}${count} question${count !== 1 ? "s" : ""}`,
       );
@@ -1859,6 +1889,11 @@ When NOT to use:
 
     renderResult(result, opts, theme) {
       const details = result.details as AskResultDetails | undefined;
+      if (isQuietMode()) {
+        if (details?.cancelled) return quietToolResult(theme, "ask", false, "cancelled");
+        const failed = (result as { isError?: boolean }).isError === true || !details;
+        return quietToolResult(theme, "ask", !failed, details ? `${details.answers.length} answers` : resultSummary(result));
+      }
       if (details?.cancelled) {
         return singleLine(theme.fg("warning", "! Questionnaire cancelled"));
       }

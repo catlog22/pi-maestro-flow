@@ -241,7 +241,9 @@ async function setPendingTransport(
   pendingTransports.set(serverName, transport)
   pendingAuthStates.set(serverName, oauthState)
   const cleanupTimer = setTimeout(() => {
-    void clearPendingAuth(serverName, oauthState)
+    clearPendingAuth(serverName, oauthState).catch((error) => {
+      console.debug("[MCP] Failed to clear pending auth on timeout", error)
+    })
   }, MANUAL_AUTH_TIMEOUT_MS)
   cleanupTimer.unref?.()
   pendingAuthCleanupTimers.set(serverName, cleanupTimer)

@@ -2,6 +2,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { singleLine, textBlock } from "../tui/components.ts";
+import { isQuietMode } from "../quiet-state.ts";
+import { quietToolCall, quietToolLine, resultFirstLine } from "../quiet-render.ts";
 import { Type } from "typebox";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
@@ -335,7 +337,8 @@ export function registerBashBg(pi: ExtensionAPI): void {
     description:
       "Run shell commands with adaptive foreground/background execution and job control. " +
       "action=run (recommended) blocks like the bash tool for up to timeout seconds and returns the output inline if the command finishes in time; if it is still running, it automatically moves to the background and returns a jobId, with a bash-bg-complete notification (a new turn) on completion. " +
-      "action=start backgrounds immediately (ack now). action=status returns a live snapshot + output tail; action=wait blocks an existing job until done or timeout; action=kill terminates the job's process tree; action=list shows all jobs.",
+      "action=start backgrounds immediately (ack now). action=status returns a live snapshot + output tail; action=wait blocks an existing job until done or timeout; action=kill terminates the job's process tree; action=list shows all jobs. " +
+      "Example: { action: \"run\", command: \"npm run build\", timeout: 60 }.",
     promptSnippet: "Run shell commands adaptively: action=run blocks like bash then auto-backgrounds on timeout; start/status/wait/kill/list for job control, with a completion notification that triggers a new turn.",
     promptGuidelines: [
       "Default to the bash tool for ordinary commands — blocking for tens of seconds is fine. Reach for bash_bg when a command is unbounded (dev server, watcher, tail -f), expected to run for minutes, or you want to keep working concurrently.",
@@ -448,6 +451,11 @@ export function registerBashBg(pi: ExtensionAPI): void {
       };
     },
     renderCall(args, theme) {
+      if (isQuietMode()) {
+        const qaction = String(args.action ?? "start");
+        const qtarget = (args.action === "start" || args.action === "run") ? String(args.command ?? "").slice(0, 50) : String(args.jobId ?? "");
+        return quietToolCall(theme, "bash_bg", qtarget ? `${qaction} ${qtarget}` : qaction);
+      }
       const action = String(args.action ?? "start");
       const target = (args.action === "start" || args.action === "run") ? String(args.command ?? "").slice(0, 50) : String(args.jobId ?? "");
       return singleLine(`${theme.fg("toolTitle", theme.bold("bash_bg "))}${action}${target ? ` ${theme.fg("accent", target)}` : ""}`);
@@ -456,6 +464,16 @@ export function registerBashBg(pi: ExtensionAPI): void {
       const details = result.details as BashBgDetails | undefined;
       const isError = (result as { isError?: boolean }).isError === true;
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
+      if (isQuietMode()) {
+        const running = details?.running === true;
+        const ok = !isError && !running && (details?.exitCode ?? 0) === 0;
+        const glyph = running
+          ? theme.fg("warning", "•")
+          : ok
+            ? theme.fg("success", "✓")
+            : theme.fg("error", "✗");
+        return quietToolLine(glyph, theme, "bash_bg", resultFirstLine(result));
+      }
       if (opts.expanded) return textBlock(text);
       if (isError) return singleLine(theme.fg("error", `✗ ${text.split("\n")[0]?.slice(0, 120) ?? "bash_bg failed"}`));
       const icon = details?.running === false ? theme.fg("success", "✓") : theme.fg("warning", "•");

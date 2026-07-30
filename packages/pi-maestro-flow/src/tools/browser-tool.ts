@@ -1,5 +1,7 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { singleLine, textBlock } from "../tui/components.ts";
+import { isQuietMode } from "../quiet-state.ts";
+import { quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { browserManager, type BrowserManagerLike } from "./browser/manager.ts";
@@ -7,7 +9,11 @@ import { browserManager, type BrowserManagerLike } from "./browser/manager.ts";
 type BrowserWaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 type BrowserDialogPolicy = "accept" | "dismiss";
 
-const BrowserAction = Type.Unsafe<"open" | "close" | "run">({ type: "string", enum: ["open", "close", "run"] });
+const BrowserAction = Type.Unsafe<"open" | "close" | "run">({
+  type: "string",
+  enum: ["open", "close", "run"],
+  description: "open: launch or attach a tab; close: close one or all tabs; run: execute JavaScript in a tab",
+});
 const WaitUntil = Type.Unsafe<BrowserWaitUntil>({
   type: "string",
   enum: ["load", "domcontentloaded", "networkidle0", "networkidle2"],
@@ -35,7 +41,7 @@ export const BrowserParams = Type.Object({
   code: Type.Optional(Type.String({ description: "Async JavaScript function body executed with page/browser/tab helpers" })),
   timeout: Type.Optional(Type.Number({ minimum: 1, maximum: 300, description: "Timeout in seconds" })),
   all: Type.Optional(Type.Boolean({ description: "Close all named tabs" })),
-  kill: Type.Optional(Type.Boolean({ description: "Compatibility flag; owned browsers (headless or headed) are always closed" })),
+  kill: Type.Optional(Type.Boolean({ description: "Deprecated alias for close; owned browsers are always closed regardless of this flag" })),
 });
 
 export interface BrowserToolDetails {
@@ -116,6 +122,11 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
       }
     },
     renderCall(args, theme) {
+      if (isQuietMode()) {
+        const qaction = String(args.action ?? "?");
+        const qurl = args.url ? ` ${String(args.url).slice(0, 60)}` : "";
+        return quietToolCall(theme, "browser", `${qaction}${qurl}`);
+      }
       const action = String(args.action ?? "?");
       const name = args.name ? ` [${String(args.name)}]` : "";
       const url = args.url ? ` ${String(args.url).slice(0, 60)}` : "";
@@ -124,6 +135,7 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
     renderResult(result, opts, theme) {
       const text = result.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
       const isError = (result as { isError?: boolean }).isError === true;
+      if (isQuietMode()) return quietToolResult(theme, "browser", !isError, resultSummary(result));
       if (opts.expanded) return textBlock(text);
       const firstLine = text.split("\n")[0]?.slice(0, 120) ?? "";
       const lineCount = text.split("\n").filter(Boolean).length;

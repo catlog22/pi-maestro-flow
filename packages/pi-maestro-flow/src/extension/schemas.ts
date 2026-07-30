@@ -62,7 +62,11 @@ export const MaestroParams = Type.Object({
     }),
   ),
   mode: Type.Optional(
-    StringEnum(["analysis", "write"]),
+    Type.Unsafe<"analysis" | "write">({
+      type: "string",
+      enum: ["analysis", "write"],
+      description: "analysis: read-only investigation; write: allow file modifications",
+    }),
   ),
   name: Type.Optional(
     Type.String({
