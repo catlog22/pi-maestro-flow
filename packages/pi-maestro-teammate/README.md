@@ -6,6 +6,8 @@ Pi extension for dispatching one or more role-based teammate tasks through a sin
 
 ## Breaking Changes In 1.0
 
+> Current version: **1.2.0**. The 1.0 breaking changes below remain in effect; versions 1.1 and 1.2 added circuit breaker, retry resilience, quiet state, and duration tracking without breaking the public API.
+
 - Every public `teammate` call requires a non-empty `tasks` array.
 - Single-agent work is represented by `tasks` with one item.
 - `tasks[].prompt` is the only task text and is always literal.
@@ -215,6 +217,55 @@ task.thinking > top-level thinking > taskType mapping > role thinking > Pi defau
 
 Role `fallbackModels` follow the selected primary model. Model identifiers must use exact authenticated `provider/model` values.
 
+## Agent Status Machine
+
+Every agent carries one of six canonical statuses (`AgentStatus`). Two additional derived display statuses exist only for rendering and are never stored on an agent.
+
+### Canonical statuses
+
+| Status | Icon | Meaning |
+|--------|------|---------|
+| `pending` | □ | Queued, waiting for a concurrency slot or dependency resolution |
+| `running` | ■ | Actively executing in a Pi subprocess |
+| `retrying` | ↻ | A retryable failure occurred; the agent is waiting for the next retry attempt (live countdown shown in the widget) |
+| `sleeping` | ◉ | Completed a turn and waiting for a follow-up message (resident agents only) |
+| `completed` | ✓ | Finished successfully; the agent is being cleaned up |
+| `failed` | ✗ | Terminated with an error. Failed agents are retained as tombstones for 2 minutes (`FAILED_AGENT_RETENTION_MS`) before removal, so callers can observe the failure |
+
+### Derived display statuses
+
+These are computed by `effectiveDisplayStatus()` for rendering only:
+
+| Display status | Icon | Condition |
+|----------------|------|-----------|
+| `result-ready` | ◆ | A `running` agent whose final assistant turn has already been produced (`resultReadyAt` is set) but whose result has not yet been consumed by a waiter |
+| `stalled` | ▲ | A `running` agent with no activity for longer than the stall timeout (30 s, `TEAMMATE_STALL_TIMEOUT_MS`) |
+
+All other statuses display as themselves. Rendering surfaces must use `STATUS_PRESENTATION` / `DERIVED_STATUS_PRESENTATION` lookup tables rather than `status === "..."` chains.
+
+## Circuit Breaker
+
+Model calls are protected by a per-model circuit breaker with three states:
+
+| State | Behavior |
+|-------|----------|
+| `CLOSED` | Normal operation; failures are counted |
+| `OPEN` | The model is blocked after reaching the failure threshold (default: 3 consecutive failures); calls are rejected until the cooldown expires (default: 60 s) |
+| `HALF_OPEN` | After cooldown, one trial call is allowed; success resets to `CLOSED`, failure re-opens the circuit |
+
+The breaker prevents cascading failures when a model endpoint is down. Use `/model-health` (registered by `pi-maestro-flow`) to inspect live circuit state.
+
+## Retry Resilience
+
+Retryable network and provider errors trigger automatic retries with exponential backoff:
+
+- **Max retries:** 12 attempts
+- **Max delay:** 10 minutes (exponential backoff capped)
+- **Retryable errors:** connection errors, timeouts, resets, rate limits, and transient provider failures
+- **Non-retryable errors:** authentication failures, invalid requests, and other permanent errors
+
+A **retry persistence guard** snapshots `settings.json` before child agents issue retry-related RPCs and restores the original value afterward, preventing session-local retry overrides from being persisted to disk. The agent widget shows a live `retry N/M in Xs` countdown during retry waits.
+
 ## Runtime
 
 - Foreground dispatch is the default and returns child results directly.
@@ -222,6 +273,8 @@ Role `fallbackModels` follow the selected primary model. Model identifiers must 
 - Named agents can receive `steer`, `follow_up`, or `abort` messages through `teammate-send`.
 - Resident agents sleep after a completed turn and can be resumed by follow-up messages.
 - Nesting is capped at two layers and concurrent agents are globally bounded.
+- Timed-out foreground runs are automatically moved to background rather than killed.
+- Agent duration is tracked and displayed for completed/failed agents.
 - Public lifecycle events are exported from `pi-maestro-teammate/v1/events`.
 
 ## Development

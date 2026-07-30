@@ -2,7 +2,7 @@
 
 A list-mode **agent cockpit** for [Pi](https://pi.dev): a status stack pinned **above the editor** showing live teammates and the current todo plan, plus a Starship-style footer. Everything is drawn through Pi's public extension APIs only (`setWidget` / `setFooter`) — no core patches.
 
-It is the third plugin of the `pi-maestro-flow` project (alongside `pi-maestro-flow` and `pi-maestro-teammate`). Since `pi-maestro-flow@0.6.1` it is an exact-pinned dependency of `pi-maestro-flow` — installed together and auto-registered into Pi's `settings.packages` on postinstall — but it also installs and runs standalone.
+It is the third plugin of the `pi-maestro-flow` project (alongside `pi-maestro-flow` and `pi-maestro-teammate`). Since `pi-maestro-flow@0.6.1` it is an exact-pinned dependency of `pi-maestro-flow` — installed together and auto-registered into Pi's `settings.packages` on postinstall — but it also installs and runs standalone. Current version: **0.4.0**.
 
 ```
  ┌─ AGENTS · 2 running ─────────────────────────────┐   ← setWidget(aboveEditor)
@@ -20,7 +20,7 @@ It is the third plugin of the `pi-maestro-flow` project (alongside `pi-maestro-f
 
 ## Install
 
-`pi-cockpit` comes automatically with the orchestration layer — installing `pi-maestro-flow@0.6.1` pulls `pi-cockpit@0.1.1` and registers it into `settings.packages` on postinstall, no manual setup required. To use it on its own:
+`pi-cockpit` comes automatically with the orchestration layer — installing `pi-maestro-flow` pulls `pi-cockpit` and registers it into `settings.packages` on postinstall, no manual setup required. To use it on its own:
 
 ```bash
 pi install npm:pi-cockpit     # standalone from npm
@@ -30,9 +30,11 @@ pi -e ./packages/pi-cockpit
 
 ## What it shows
 
-- **AGENTS** — every running teammate as a table row (status spinner · role · id · label · live tail), sorted running-first. Collapses to a one-line `N agents running` summary in compact mode.
+- **AGENTS** — every running teammate as a table row (status spinner · role · id · label · live tail), sorted running-first. Completed/failed agents show their total duration. Collapses to a one-line `N agents running` summary in compact mode.
 - **TODO** — the active plan as numbered rows with four states (done ✓ / in-progress spinner / blocked ! / pending ·). Collapses to a segmented progress bar + current step + percent.
-- **Footer** — `provider/model · context gauge · ↑in ↓out · $cost · elapsed · git branch`. Since v0.1.1, `bash_bg` background-job state lives on a **dedicated second footer row** so it no longer competes with the primary line.
+- **Footer** — `provider/model · context gauge · ↑in ↓out · $cost · elapsed · git branch`. `bash_bg` background-job state lives on a **dedicated second footer row** so it no longer competes with the primary line.
+- **Thinking timer** — while the model is thinking, the folded thinking row shows a spinner and running elapsed time; when the run ends, it settles to the actual duration (e.g. `thoughts · 8.4s`).
+- **Quiet mode** — compresses the seven built-in tool calls (read/bash/edit/write/grep/find/ls) into single-line ✓/✗/⋯ summaries and folds thinking blocks. Two glyph sets available: `check` (✓/✗/⋯) and `dot` (●/○/◌). Toggle with `/cockpit quiet`; turning off requires `/reload` to restore native tool renderers.
 
 Toggle each block between list and compact with `/cockpit`.
 
@@ -55,18 +57,29 @@ This is the whole coupling story: cockpit has **no package dependency on `pi-mae
 ```json
 {
   "enabled": true,
+  "quietMode": false,
+  "quietSymbols": "check",
   "agentsMode": "list",
   "todoMode": "list",
-  "hideNativeAgents": false
+  "todoExpanded": false,
+  "hideNativeAgents": true,
+  "icons": { "mode": "auto" },
+  "theme": ""
 }
 ```
 
+- `quietMode`: when `true`, compresses built-in tool rendering and folds thinking blocks.
+- `quietSymbols`: `"check"` (✓/✗/⋯) or `"dot"` (●/○/◌) lifecycle glyphs for quiet tool rows.
 - `agentsMode` / `todoMode`: `"list"` or `"compact"`.
-- `hideNativeAgents`: when `true`, clears the teammate extension's own `teammate-agents` widget (it draws a similar list *below* the editor) so the two don't duplicate. Off by default — the two widgets use different keys and placements and can coexist.
+- `todoExpanded`: when `true`, expands the todo widget by default.
+- `hideNativeAgents`: when `true`, clears the teammate extension's own `teammate-agents` widget (it draws a similar list *below* the editor) so the two don't duplicate. On by default.
+- `icons.mode`: `"auto"` (detect Nerd Font), `"nerd"`, or `"ascii"`.
+- `theme`: named theme override; empty string follows the Pi session theme.
 
-## Command
+## Commands
 
-`/cockpit` opens an overlay to toggle `enabled`, `agentsMode`, `todoMode`, and `hideNativeAgents` (`e` / `a` / `t` / `n`, `Esc` to close). Changes persist immediately.
+- `/cockpit` — opens an overlay to toggle `enabled`, `agentsMode`, `todoMode`, `quietMode`, and `hideNativeAgents`. `/cockpit quiet` toggles quiet mode directly; `/cockpit bg` shows background jobs.
+- `/theme` — switch theme with live preview; `/theme <name>` applies directly. Pi ships no standalone theme command; cockpit provides one.
 
 ## Terminal feasibility — what this design deliberately does NOT do
 
@@ -87,7 +100,7 @@ node --test --experimental-transform-types tests/agents-store.test.ts tests/todo
 ../../node_modules/.bin/tsc -p tsconfig.json     # type-check (uses the monorepo root's tsc + types)
 ```
 
-The package lives inside the `pi-maestro-flow` monorepo under `packages/` so it resolves `@earendil-works/*` types from the root `node_modules`. Since v0.6.1 it is also an exact-pinned dependency of `pi-maestro-flow` and ships as its own npm package (`pi-cockpit`).
+The package lives inside the `pi-maestro-flow` monorepo under `packages/` so it resolves `@earendil-works/*` types from the root `node_modules`. It is also an exact-pinned dependency of `pi-maestro-flow` and ships as its own npm package (`pi-cockpit`).
 
 ## License
 
