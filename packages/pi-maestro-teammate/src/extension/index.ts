@@ -147,7 +147,10 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
 ];
 
 function displayMessageForResult(result: SingleResult): string {
-  const lastMessage = result.messages.at(-1)?.content ?? "(no output)";
+  const lastMessage = result.messages.at(-1)?.content
+    ?? (result.structuredOutput !== undefined
+      ? `[structured_output] ${truncateUtf8Tail(JSON.stringify(result.structuredOutput), 512)}`
+      : "(no output)");
   if (result.exitCode === 0) return lastMessage;
 
   const schemaDiagnostic = result.messages
