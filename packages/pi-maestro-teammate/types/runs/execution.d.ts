@@ -134,9 +134,8 @@ export declare function correlationSessionDirectoryName(correlationId: string): 
  */
 export declare function isPiResultReadyTurn(event: Record<string, unknown>): boolean;
 /**
- * Captures a schema-valid structured_output call from Pi's assistant event.
- * This is a fallback for the small window before the child output file becomes
- * observable to the parent runner.
+ * Extracts a schema-valid structured_output payload from a Pi assistant event.
+ * Execution code treats this as pending until the tool execution succeeds.
  */
 export declare function extractValidatedStructuredOutput(event: Record<string, unknown>, schema: Record<string, unknown>): unknown | undefined;
 export declare function describeStructuredOutputValidationFailure(event: Record<string, unknown>, schema: Record<string, unknown>): string | undefined;

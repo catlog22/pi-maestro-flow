@@ -18,7 +18,7 @@
     "README.md"
   ],
   "scripts": {
-    "test": "node --test --experimental-transform-types tests/agents-store.test.ts tests/bash-bg-store.test.ts tests/bash-bg-widget.test.ts tests/bash-bg-overlay.test.ts tests/todo-store.test.ts tests/render.test.ts tests/footer.test.ts tests/extension-status.test.ts tests/integration-contract.test.ts tests/stack-widget.test.ts tests/settings-view.test.ts tests/ambient.test.ts tests/viewport.test.ts tests/theme-picker.test.ts",
+    "test": "node --test --experimental-transform-types tests/agents-store.test.ts tests/bash-bg-store.test.ts tests/bash-bg-widget.test.ts tests/bash-bg-overlay.test.ts tests/todo-store.test.ts tests/render.test.ts tests/footer.test.ts tests/extension-status.test.ts tests/integration-contract.test.ts tests/stack-widget.test.ts tests/settings-view.test.ts tests/thinking-fold.test.ts tests/thinking-timer.test.ts tests/ambient.test.ts tests/viewport.test.ts tests/theme-picker.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "pi": {

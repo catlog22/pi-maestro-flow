@@ -2,9 +2,8 @@ import type { AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/p
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { getEnabledTools, loadCliToolsConfig } from "../providers/cli-tools-loader.ts";
-import { singleLine, textBlock } from "../tui/components.ts";
-import { isQuietMode } from "../quiet-state.ts";
-import { quietToolCall, quietToolResult } from "../quiet-render.ts";
+import { Text } from "@earendil-works/pi-tui";
+import { toolCallLine, toolResultLine } from "../quiet-render.ts";
 
 export const ModelAvailabilityParams = Type.Object({
   filter: Type.Optional(Type.String({ description: "Optional substring to filter model/tool names" })),
@@ -166,29 +165,26 @@ Pitfall: the \`--to <tool>\` flag is mandatory. A bare \`maestro delegate codex\
         details,
       } as AgentToolResult<ModelAvailabilityDetails>;
     },
-    renderCall(args, theme) {
-      if (isQuietMode()) return quietToolCall(theme, "model-availability", args.filter ? `"${String(args.filter)}"` : "");
-      const filter = args.filter ? ` ${theme.fg("accent", `"${String(args.filter)}"`)}` : "";
-      return singleLine(`${theme.fg("toolTitle", theme.bold("model-availability"))}${filter}`);
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "model-availability", args.filter ? `"${String(args.filter)}"` : "");
     },
-    renderResult(result, opts, theme) {
-      if (isQuietMode()) {
-        const qdetails = result.details as ModelAvailabilityDetails | undefined;
-        const qtm = qdetails?.teammate_models?.length ?? 0;
-        const qdt = qdetails?.delegate_tools?.length ?? 0;
-        return quietToolResult(theme, "model-availability", true, `${qtm} teammate · ${qdt} delegate`);
-      }
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const details = result.details as ModelAvailabilityDetails | undefined;
       const tm = details?.teammate_models?.length ?? 0;
       const dt = details?.delegate_tools?.length ?? 0;
-      const fb = details?.delegate_fallback?.length ?? 0;
-      const fallbackNote = fb > 0 ? theme.fg("accent", ` · ${fb} delegate-only`) : "";
-      if (opts.expanded) {
-        const block = result.content.find((item) => item.type === "text");
-        const text = block && "text" in block ? block.text : "";
-        return textBlock(text);
-      }
-      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", `${tm} teammate models · ${dt} delegate tools`)}${fallbackNote}`);
+      const block = result.content.find((item) => item.type === "text");
+      const text = block && "text" in block ? block.text : "";
+      return toolResultLine(theme, {
+        name: "model-availability",
+        ok: true,
+        arg: ctx.args.filter ? `"${String(ctx.args.filter)}"` : "",
+        summary: `${tm} teammate · ${dt} delegate`,
+        expanded: opts.expanded,
+        detail: text,
+      });
     },
   };
 }

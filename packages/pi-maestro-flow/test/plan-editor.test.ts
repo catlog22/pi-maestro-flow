@@ -82,12 +82,13 @@ test("Plan editor saves without closing and confirms the exact edited buffer", a
   assert.deepEqual(confirmations, [{ markdown: "draft updated", revision: 5 }]);
 });
 
-test("Plan confirmation renders Markdown and selects compact execution", async () => {
+test("Plan confirmation renders Markdown and selects new-session execution by default", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: "# Approved Plan\n\n- Preserve boundaries",
     pathLabel: "current.md",
     canClearContext: true,
+    preferNewSession: true,
     contextPercent: 75,
   });
   assert.ok(harness.component);
@@ -98,7 +99,7 @@ test("Plan confirmation renders Markdown and selects compact execution", async (
       assert.match(lines[0], /╭/);
       assert.match(lines.at(-1) ?? "", /╰/);
       assert.match(lines.join("\n"), /1\. Execute/);
-      assert.match(lines.join("\n"), /2\. Compact then execute/);
+      assert.match(lines.join("\n"), /2\. Execute in new session/);
       assert.match(lines.join("\n"), /3\. View \/ modify Plan/);
       assert.match(lines.join("\n"), /4\. Continue discussion/);
       assert.match(lines.join("\n"), /5\. Exit Plan mode/);
@@ -106,6 +107,20 @@ test("Plan confirmation renders Markdown and selects compact execution", async (
     }
     for (const line of lines) assert.ok(visibleWidth(line) <= width, `width ${width}: ${visibleWidth(line)} ${line}`);
   }
+  harness.component.handleInput("2");
+  assert.equal(await pending, "execute-clear");
+});
+
+test("same-model approval keeps the original compact execution option", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Plan",
+    canClearContext: true,
+    contextPercent: 75,
+    preferNewSession: false,
+  });
+  assert.ok(harness.component);
+  assert.match(harness.component.render(100).join("\n"), /2\. Compact then execute/);
   harness.component.handleInput("2");
   assert.equal(await pending, "execute-compact");
 });
@@ -145,10 +160,11 @@ test("Plan confirmation accepts Ctrl+Enter across modifyOtherKeys encoding", asy
   const pending = openPlanConfirmation(harness.ctx, {
     markdown: "# Plan",
     canClearContext: true,
+    preferNewSession: true,
   });
   assert.ok(harness.component);
   harness.component.handleInput("\x1b[27;5;13~");
-  assert.equal(await pending, "execute");
+  assert.equal(await pending, "execute-clear");
 });
 
 test("Plan confirmation number keys match the numbered actions", async () => {
@@ -192,6 +208,7 @@ test("Plan confirmation returns to Plan scrolling when Up leaves the first actio
     harness.component.handleInput("\x1b[6~");
   }
   harness.component.handleInput("\x1b[B");
+  harness.component.handleInput("\x1b[A");
   harness.component.handleInput("\x1b[A");
   harness.component.handleInput("\x1b[A");
   const range = harness.component.render(80).join("\n").match(/Plan \d+-(\d+)\/(\d+)/);

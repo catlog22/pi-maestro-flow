@@ -215,6 +215,26 @@ The full-screen editor supports line numbers, current-line highlighting,
 multiline cursor editing, `Ctrl+S` save, `Ctrl+Enter` confirm and `Esc` cancel.
 `/plan` and `Alt+P` remain available as human-facing aliases.
 
+Plan mode can use a dedicated model while Act mode keeps the session model. Set
+`plan.model` to a configured `provider/model` reference in the user, project, or local
+settings file. Later settings files override earlier ones; set the value to `null` to
+disable an inherited Plan model. Project and local Plan-model settings are ignored until
+the workspace is trusted. The model is selected before the first Plan turn and
+the previous session model is restored before the next Act turn.
+
+```json
+{
+  "plan": {
+    "model": "anthropic/claude-sonnet-4-5"
+  }
+}
+```
+
+If the configured model is unavailable or has no authentication, Plan mode warns and
+continues with the session model. Run `/plan-model` to select an available model,
+`/plan-model provider/model` to set one directly, or `/plan-model off` to follow the
+session model. The command saves to `.pi/settings.local.json`.
+
 ### Approval-mode shortcut
 
 Maestro Flow registers `Shift+Tab` to cycle the hook approval mode in this order:

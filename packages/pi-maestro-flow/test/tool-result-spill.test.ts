@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, resolve, sep } from "node:path";
 import test from "node:test";
@@ -198,6 +198,37 @@ test("spillToolResult returns ok:false when the durable write fails", async () =
     assert.equal(result.originalChars, content.length);
   } finally {
     await rm(root, { force: true });
+    await cleanupSpillDir(sessionId);
+  }
+});
+
+test("spillToolResult rejects a symlinked session root", async () => {
+  const sessionId = `test-symlink-${Date.now()}`;
+  const root = dirname(spillDir(sessionId));
+  const target = await mkdtemp(resolve(tmpdir(), "spill-target-"));
+  try {
+    await symlink(target, root, process.platform === "win32" ? "junction" : "dir");
+    const result = await spillToolResult(sessionId, "call-symlink", "s".repeat(SPILL_THRESHOLD_CHARS));
+    assert.equal(result.ok, false);
+    assert.equal(result.path, "");
+    assert.deepEqual(await readDirNames(target), []);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
+  }
+});
+
+test("spillToolResult rejects mismatched content at an existing path", async () => {
+  const sessionId = `test-mismatch-${Date.now()}`;
+  const firstContent = "a".repeat(SPILL_THRESHOLD_CHARS);
+  const secondContent = "b".repeat(SPILL_THRESHOLD_CHARS);
+  try {
+    const first = await spillToolResult(sessionId, "call-mismatch", firstContent);
+    const second = await spillToolResult(sessionId, "call-mismatch", secondContent);
+    assert.equal(first.ok, true);
+    assert.equal(second.ok, false);
+    assert.equal(await readFile(first.path, "utf8"), firstContent);
+  } finally {
     await cleanupSpillDir(sessionId);
   }
 });

@@ -30,7 +30,7 @@ import type {
 import { copyToClipboard } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { FlowToolResult } from "../tools/tool-result.ts";
-import { type Component, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   MaestroParams,
   GoalToolParams,
@@ -38,8 +38,8 @@ import {
   TodoToolParams,
 } from "./schemas.ts";
 import { altKey } from "../key-labels.ts";
-import { isQuietMode, setQuietMode } from "../quiet-state.ts";
-import { quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
+import { setQuietMode } from "../quiet-state.ts";
+import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import { registerKeybindingsCommand } from "../keybindings-command.ts";
 import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
@@ -147,6 +147,7 @@ import {
   getPlanHandoffStatus,
   setPlanModeChangeListener,
 } from "../tools/plan.ts";
+import { registerPlanModelSelection, shouldStartPlanExecutionInNewSession } from "../tools/plan-model.ts";
 import { installStatusline } from "../statusline/statusline.ts";
 import { registerCodexHookAdapter } from "../hooks/pi-adapter.ts";
 import { createPermissionController } from "../permissions/controller.ts";
@@ -161,10 +162,14 @@ import {
   runWithCompactionStatus,
   type WorkflowRecoveryIdentity,
 } from "../compaction/maestro-compaction.ts";
-import { createMidTurnAutoCompaction } from "../compaction/auto-compaction.ts";
+import {
+  commitProjectedCompactionInput,
+  createMidTurnAutoCompaction,
+} from "../compaction/auto-compaction.ts";
 import {
   CompactionArbiter,
   compactionRequestFromInstructions,
+  runObservedCompaction,
 } from "../compaction/compaction-arbiter.ts";
 import { registerCompactionSettingsCommand } from "../tui/compaction-settings.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
@@ -230,22 +235,6 @@ const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
 const COCKPIT_TODO_TOGGLE_EVENT = "cockpit:toggle-todo";
 const GOAL_OVERLAY_KEY = "alt+g";
 const GOAL_OVERLAY_LABEL = altKey("G");
-
-function singleLine(text: string): Component {
-  return {
-    render: (width: number) => [truncateToWidth(text, Math.max(1, width), "…")],
-    invalidate() {},
-  };
-}
-
-function textBlock(text: string): Component {
-  return {
-    render: (width: number) => text
-      .split("\n")
-      .map((line) => truncateToWidth(line, Math.max(1, width), "…")),
-    invalidate() {},
-  };
-}
 
 export function shouldRestoreWorkflowGoal(
   reason: "startup" | "reload" | "new" | "resume" | "fork" | undefined,
@@ -457,6 +446,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     );
   }
 
+  registerPlanModelSelection(pi);
   try {
     registerModelFailover(pi);
   } catch (error) {
@@ -569,50 +559,35 @@ The --to flag is MANDATORY. A bare \`maestro delegate codex\` treats "codex" as 
       }
     },
 
-    renderCall(args, theme) {
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
       const action = (args.action as string) ?? "?";
-      if (isQuietMode()) {
-        let arg = action;
-        if (action === "explore") {
-          const prompts = args.prompts as string[] | undefined;
-          if (prompts) arg += ` (${prompts.length})`;
-        } else if (action === "delegate") {
-          const tool = (args.tool as string) ?? "";
-          if (tool) arg += ` ${tool}`;
-        }
-        return quietToolCall(theme, "maestro", arg);
-      }
-      let detail = "";
+      let arg = action;
       if (action === "explore") {
         const prompts = args.prompts as string[] | undefined;
-        detail = prompts
-          ? ` (${prompts.length} prompt${prompts.length !== 1 ? "s" : ""})`
-          : "";
+        if (prompts) arg += ` (${prompts.length})`;
       } else if (action === "delegate") {
         const tool = (args.tool as string) ?? "";
-        detail = tool ? ` ${theme.fg("accent", tool)}` : "";
-      } else if (action === "moa") {
-        detail = "";
+        if (tool) arg += ` ${tool}`;
       }
-
-      return singleLine(
-        `${theme.fg("toolTitle", theme.bold("maestro "))}${action}${detail}`,
-      );
+      return toolCallLine(theme, "maestro", arg);
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
       const isError = (result as { isError?: boolean }).isError === true;
-      if (isQuietMode()) return quietToolResult(theme, "maestro", !isError, resultSummary(result));
-      if (opts.expanded) return textBlock(message);
-      if (isError) {
-        const firstLine = message.split("\n")[0] ?? message;
-        return singleLine(theme.fg("error", `✗ ${firstLine}`));
+      const action = String(ctx.args.action ?? "?");
+      let arg = action;
+      if (action === "explore") {
+        const prompts = ctx.args.prompts as string[] | undefined;
+        if (prompts) arg += ` (${prompts.length})`;
+      } else if (action === "delegate") {
+        const tool = String(ctx.args.tool ?? "");
+        if (tool) arg += ` ${tool}`;
       }
-      const lines = message.split("\n").filter(Boolean);
-      const header = lines[0] ?? "";
-      const extra = lines.length > 1 ? theme.fg("dim", ` · ${lines.length - 1} more lines`) : "";
-      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", header.slice(0, 120))}${extra}`);
+      return toolResultLine(theme, { name: "maestro", ok: !isError, arg, summary: resultSummary(result), expanded: opts.expanded, detail: message });
     },
   };
 
@@ -676,33 +651,23 @@ Only request completion after all work is done; the extension verifies it indepe
       };
     },
 
-    renderCall(args, theme) {
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
       const action = (args.action as string) ?? "?";
-      if (isQuietMode()) {
-        const obj = action === "create" || action === "update" ? ((args.objective as string) ?? "") : "";
-        return quietToolCall(theme, "goal", obj ? `${action} ${obj.slice(0, 40)}` : action);
-      }
-      let detail = "";
-      if (action === "create" || action === "update") {
-        const obj = (args.objective as string) ?? "";
-        detail = obj ? ` ${obj.slice(0, 40)}${obj.length > 40 ? "…" : ""}` : "";
-      }
-      return singleLine(`${theme.fg("toolTitle", theme.bold("goal "))}${action}${detail}`);
+      const obj = action === "create" || action === "update" ? ((args.objective as string) ?? "") : "";
+      return toolCallLine(theme, "goal", obj ? `${action} ${obj.slice(0, 40)}` : action);
     },
 
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, ctx) {
+      if (options.isPartial) return new Text("", 0, 0);
       const block = result.content.find((item) => item.type === "text");
       const text = block && "text" in block ? block.text : "Goal action completed.";
-      if (isQuietMode()) {
-        const isError = (result as { isError?: boolean }).isError === true;
-        return quietToolResult(theme, "goal", !isError, resultSummary(result));
-      }
-      if (options.expanded) return textBlock(text);
-
       const isError = (result as { isError?: boolean }).isError === true;
-      const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
-      const firstLine = text.split("\n")[0] ?? text;
-      return singleLine(`${icon} ${theme.fg("muted", firstLine)}`);
+      const action = String(ctx.args.action ?? "?");
+      const objective = action === "create" || action === "update" ? String(ctx.args.objective ?? "") : "";
+      const arg = objective ? `${action} ${objective.slice(0, 40)}` : action;
+      return toolResultLine(theme, { name: "goal", ok: !isError, arg, summary: resultSummary(result), expanded: options.expanded, detail: text });
     },
   };
 
@@ -765,7 +730,9 @@ Rules:
       return executeTodo(params as unknown as TodoParams, ctx);
     },
 
-    renderCall(args, theme) {
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
       const action = (args.action as string) ?? "?";
       let detail = "";
       if (action === "create") {
@@ -780,20 +747,31 @@ Rules:
         const id = (args.id as string) ?? "";
         detail = id ? ` #${id}` : "";
       }
-      if (isQuietMode()) return quietToolCall(theme, "todo", `${action}${detail}`.trim());
-      return singleLine(`${theme.fg("toolTitle", theme.bold("todo "))}${action}${detail}`);
+      return toolCallLine(theme, "todo", `${action}${detail}`.trim());
     },
 
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const details = result.details as TodoResultDetails | undefined;
       const rawText = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
+      const isError = !!(details?.error);
+      const action = String(ctx.args.action ?? "?");
+      let callDetail = "";
+      if (action === "create") {
+        const batch = Array.isArray(ctx.args.tasks) ? ctx.args.tasks as unknown[] : undefined;
+        if (batch?.length) callDetail = ` ${batch.length} tasks`;
+        else {
+          const subject = String(ctx.args.subject ?? "");
+          if (subject) callDetail = ` ${subject.slice(0, 40)}${subject.length > 40 ? "…" : ""}`;
+        }
+      } else if (action === "update" || action === "get" || action === "delete") {
+        const id = String(ctx.args.id ?? "");
+        if (id) callDetail = ` #${id}`;
+      }
+      const arg = `${action}${callDetail}`.trim();
 
       if (!details?.tasks) {
-        if (opts.expanded && !isQuietMode()) return textBlock(rawText);
-        return singleLine(details?.error ? theme.fg("error", rawText) : theme.fg("dim", rawText));
-      }
-      if (details.error) {
-        return singleLine(theme.fg("error", `Error: ${details.error}`));
+        return toolResultLine(theme, { name: "todo", ok: !isError, arg, summary: rawText.split("\n")[0]?.slice(0, 80) ?? "", expanded: opts.expanded, detail: rawText });
       }
 
       const allTasks = details.tasks;
@@ -806,32 +784,7 @@ Rules:
       if (open > 0) counts.push(`${open} open`);
       const progress = `${allTasks.length} tasks (${counts.join(", ")})`;
 
-      if (opts.expanded && !isQuietMode()) return textBlock(rawText);
-
-      const action = details.action;
-      if (action === "get") {
-        const firstLine = rawText.split("\n")[0]?.replace(/^# /, "") ?? "";
-        return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", firstLine)}`);
-      }
-      if (action === "list") {
-        if (isQuietMode()) {
-          return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", progress)}`);
-        }
-        const lines = rawText.split("\n").filter(Boolean);
-        const body = lines.length <= 6
-          ? lines
-          : [...lines.slice(0, 5), `… and ${lines.length - 5} more`];
-        return textBlock(body.map((line) => theme.fg("muted", line)).join("\n"));
-      }
-      if (action === "create" && rawText.includes("\n")) {
-        const [header, ...taskLines] = rawText.split("\n");
-        const compact = taskLines.map((l) => l.replace(/^\s*/, "")).join(" · ");
-        return singleLine(`${theme.fg("success", "✓")} ${header}: ${theme.fg("muted", compact)}`);
-      }
-
-      const firstLine = rawText.split("\n")[0] ?? "";
-      const prefix = theme.fg("success", "✓");
-      return singleLine(`${prefix} ${theme.fg("muted", firstLine)} ${theme.fg("dim", `— ${progress}`)}`);
+      return toolResultLine(theme, { name: "todo", ok: !isError, arg, summary: progress, expanded: opts.expanded, detail: rawText });
     },
   };
 
@@ -886,21 +839,18 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         details: result,
       };
     },
-    renderCall(args, theme) {
-      if (isQuietMode()) return quietToolCall(theme, "run-control", String(args.action ?? "?"));
-      return singleLine(`${theme.fg("toolTitle", theme.bold("run-control "))}${String(args.action ?? "?")}`);
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "run-control", String(args.action ?? "?"));
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const details = result.details as { ok?: boolean; action?: string; message?: string } | undefined;
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
-      if (isQuietMode()) return quietToolResult(theme, "run-control", details?.ok !== false, resultSummary(result));
-      if (opts.expanded) return textBlock(message);
-      const firstLine = message.split("\n")[0] ?? message;
-      if (!details?.ok) {
-        return singleLine(theme.fg("error", `✗ ${firstLine}`));
-      }
-      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", `${details.action}: ${firstLine}`)}`);
+      const arg = String(ctx.args.action ?? details?.action ?? "?");
+      return toolResultLine(theme, { name: "run-control", ok: details?.ok !== false, arg, summary: resultSummary(result), expanded: opts.expanded, detail: message });
     },
   };
   pi.registerTool(runControlTool);
@@ -911,7 +861,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   });
 
   // === Plan Mode ===
-  initPlan(pi, { compactionArbiter });
+  initPlan(pi, { compactionArbiter, preferNewSession: shouldStartPlanExecutionInNewSession });
   registerPlanTools(pi);
   registerPlanCommand(pi);
   registerSwarmDisplay(pi);
@@ -1595,22 +1545,25 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       event.signal,
     );
     if (!observed.allowed) return { cancel: true };
-    goalBeforeCompact(ctx);
-    try {
+    return await runObservedCompaction(observed, async () => {
+      goalBeforeCompact(ctx);
+      const projected = await midTurnAutoCompaction.projectCompactionInput(event, ctx);
+      // Pi's default fallback closes over the original preparation object. Keep
+      // it in sync so a failed custom summary cannot resurrect raw tool output.
+      commitProjectedCompactionInput(event, projected);
       return await runWithCompactionStatus(event, ctx, () =>
         createMaestroCompaction(event, ctx, {
           getWorkflowIdentity: () => workflowRecoveryIdentity(),
           trigger: observed.trigger,
+          summaryInputTokens: projected.estimatedInputTokens,
         }), observed);
-    } catch (error) {
-      observed.releaseIfNative();
-      throw error;
-    }
+    });
   });
 
   pi.on("session_compact", async (event, ctx) => {
+    const completedOwner = compactionArbiter.currentOwner();
     compactionArbiter.complete();
-    midTurnAutoCompaction.onCompact();
+    midTurnAutoCompaction.onCompact(completedOwner);
     try {
       await persistMaestroCompactionKnowhow(event, ctx);
     } catch (error) {
@@ -1675,8 +1628,18 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     await step("Todo", () => onAgentEndTodo());
     await step("Output-limit compaction", () =>
       midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx));
-    await step("Mid-turn compaction", () => midTurnAutoCompaction.onAgentEnd(ctx));
     await step("Todo widget", () => updateTodoWidget());
+  });
+
+  pi.on("agent_settled", async (_event, ctx) => {
+    try {
+      await midTurnAutoCompaction.onAgentEnd(ctx);
+    } catch (error) {
+      ctx.ui.notify(
+        `Settled context compaction failed: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+    }
   });
 
   pi.on("tool_execution_end", async (event, ctx) => {
@@ -1812,23 +1775,21 @@ Use assignee="root" to hand work back to root. Teammates can update tasks they c
     async execute(_id, params, signal) {
       return proxyTeammateChildTool("todo", params as unknown as Record<string, unknown>, signal);
     },
-    renderCall(args, theme) {
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
       const action = String(args.action ?? "?");
       const subject = action === "create" && args.subject ? ` ${String(args.subject).slice(0, 40)}` : "";
-      if (isQuietMode()) return quietToolCall(theme, "todo", `${action}${subject}`);
-      return singleLine(`${theme.fg("toolTitle", theme.bold("todo "))}${action}${subject}`);
+      return toolCallLine(theme, "todo", `${action}${subject}`);
     },
-    renderResult(result, options, theme) {
+    renderResult(result, options, theme, ctx) {
+      if (options.isPartial) return new Text("", 0, 0);
       const block = result.content.find((item) => item.type === "text");
       const text = block && "text" in block ? block.text : "Todo request completed.";
-      if (isQuietMode()) {
-        const isError = (result as { isError?: boolean }).isError === true;
-        return quietToolResult(theme, "todo", !isError, resultSummary(result));
-      }
-      if (options.expanded) return textBlock(text);
-      return singleLine((result as { isError?: boolean }).isError
-        ? theme.fg("error", text)
-        : theme.fg("muted", text));
+      const isError = (result as { isError?: boolean }).isError === true;
+      const action = String(ctx.args.action ?? "?");
+      const subject = action === "create" && ctx.args.subject ? ` ${String(ctx.args.subject).slice(0, 40)}` : "";
+      return toolResultLine(theme, { name: "todo", ok: !isError, arg: `${action}${subject}`, summary: resultSummary(result), expanded: options.expanded, detail: text });
     },
   };
   pi.registerTool(todoProxyTool);
@@ -1880,32 +1841,29 @@ When NOT to use:
       return executeAsk(params as unknown as AskParams, ctx);
     },
 
-    renderCall(args, theme) {
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
       const qs = args.questions as unknown[] | undefined;
       const count = qs?.length ?? 0;
-      if (isQuietMode()) return quietToolCall(theme, "ask", `${count} question${count !== 1 ? "s" : ""}`);
-      return singleLine(
-        `${theme.fg("toolTitle", theme.bold("ask "))}${count} question${count !== 1 ? "s" : ""}`,
-      );
+      return toolCallLine(theme, "ask", `${count} question${count !== 1 ? "s" : ""}`);
     },
 
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const details = result.details as AskResultDetails | undefined;
-      if (isQuietMode()) {
-        if (details?.cancelled) return quietToolResult(theme, "ask", false, "cancelled");
-        const failed = (result as { isError?: boolean }).isError === true || !details;
-        return quietToolResult(theme, "ask", !failed, details ? `${details.answers.length} answers` : resultSummary(result));
-      }
+      const isError = (result as { isError?: boolean }).isError === true;
+      const questions = ctx.args.questions as unknown[] | undefined;
+      const arg = `${questions?.length ?? 0} question${questions?.length === 1 ? "" : "s"}`;
       if (details?.cancelled) {
-        return singleLine(theme.fg("warning", "! Questionnaire cancelled"));
+        return toolResultLine(theme, { name: "ask", ok: false, arg, summary: "cancelled" });
       }
-      if ((result as { isError?: boolean }).isError || !details) {
+      if (isError || !details) {
         const text = result.content[0];
         const fallback = text && "text" in text ? text.text : "Questionnaire failed.";
-        return singleLine(theme.fg("error", `✗ ${fallback}`));
+        return toolResultLine(theme, { name: "ask", ok: false, arg, summary: fallback });
       }
       const count = details.answers.length;
-      const header = `${theme.fg("success", "✓")} Collected ${count} answer${count === 1 ? "" : "s"}`;
       const answerLines = details.answers.map((answer, index) => {
         const chosen = answer.selected.map((label) => {
           const detail = answer.details?.[label];
@@ -1914,16 +1872,14 @@ When NOT to use:
         const value = [...chosen, ...(answer.text ? [answer.text] : [])].join(" — ") || "No answer";
         return `${index + 1}. ${answer.question} → ${value}`;
       });
-      return {
-        render(width: number): string[] {
-          const safeWidth = Math.max(1, width);
-          const lines = opts.expanded
-            ? [header, ...answerLines]
-            : [answerLines[0] ? `${header} · ${answerLines[0]}` : header];
-          return lines.map((line) => truncateToWidth(line, safeWidth, "…"));
-        },
-        invalidate() {},
-      };
+      return toolResultLine(theme, {
+        name: "ask",
+        ok: true,
+        arg,
+        summary: `${count} answer${count !== 1 ? "s" : ""}`,
+        expanded: opts.expanded,
+        detail: answerLines.join("\n"),
+      });
     },
   };
 

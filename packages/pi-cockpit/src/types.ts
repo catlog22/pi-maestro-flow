@@ -95,9 +95,13 @@ export interface CockpitConfig {
 	enabled: boolean;
 	/**
 	 * Quiet mode: compress built-in tool calls to one-line ✓/✗ summaries and fold
-	 * thinking blocks. Scoped to the tool stream only — the footer and the
-	 * Todo/Agents widgets render exactly as they do with quiet mode off.
-	 * Requires /reload or a new session to apply tool rendering changes.
+	 * thinking blocks. The fold drives pi's native thinking toggle, so pi owns
+	 * and persists the visibility; turning quiet off leaves thinking as the user
+	 * last set it (Ctrl+T or the panel's thinking row). The footer and the Todo
+	 * widget render exactly as they do with quiet mode off; the Agents widget
+	 * stays expanded but hides its live streaming tail (the per-message text),
+	 * keeping role/task/state/telemetry. Requires /reload or a new session to
+	 * apply tool rendering changes.
 	 */
 	quietMode: boolean;
 	agentsMode: ViewMode;

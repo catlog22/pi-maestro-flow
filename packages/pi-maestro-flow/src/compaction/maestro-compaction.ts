@@ -160,6 +160,8 @@ interface CreateCompactionDependencies {
   getWorkflowIdentity?: () => WorkflowRecoveryIdentity | undefined | Promise<WorkflowRecoveryIdentity | undefined>;
   /** Owner-typed trigger observed by the arbiter, when the extension initiated this compaction. */
   trigger?: CompactionTrigger;
+  /** Post-prune input estimate; raw tokensBefore remains unchanged for checkpoint audit. */
+  summaryInputTokens?: number;
 }
 
 interface PersistCompactionDependencies {
@@ -398,7 +400,7 @@ export async function createMaestroCompaction(
   try {
     const response = dependencies.completeSummary
       ? await dependencies.completeSummary(prompt, event, ctx)
-      : await completeWithCurrentModel(prompt, event, ctx);
+      : await completeWithCurrentModel(prompt, event, ctx, dependencies.summaryInputTokens);
     if (response.stopReason === "error") {
       ctx.ui.notify(
         `Maestro compaction summary failed; falling back to Pi summarization: ${response.errorMessage || "Unknown provider error"}`,
@@ -612,16 +614,18 @@ async function completeWithCurrentModel(
   prompt: string,
   event: SessionBeforeCompactEvent,
   ctx: ExtensionContext,
+  summaryInputTokens?: number,
 ): Promise<SummaryResponse> {
   const currentModel = ctx.model;
   if (!currentModel) throw new Error("No model selected for Maestro compaction");
   const settings = readEffectiveCompactionSettings(ctx.cwd);
   const estimatedRequestTokens = estimateSummaryRequestTokens(MAESTRO_COMPACTION_SYSTEM_PROMPT, prompt);
+  const budgetInputTokens = summaryInputTokens ?? event.preparation.tokensBefore;
   let model = await resolveConfiguredCompactionModel(settings.model, currentModel, ctx);
   let maxTokens: number;
   try {
     maxTokens = fitSummaryOutputBudget({
-      tokensBefore: event.preparation.tokensBefore,
+      tokensBefore: budgetInputTokens,
       estimatedRequestTokens,
       reserveTokens: event.preparation.settings.reserveTokens,
       contextWindow: model.contextWindow,
@@ -635,7 +639,7 @@ async function completeWithCurrentModel(
     );
     model = currentModel;
     maxTokens = fitSummaryOutputBudget({
-      tokensBefore: event.preparation.tokensBefore,
+      tokensBefore: budgetInputTokens,
       estimatedRequestTokens,
       reserveTokens: event.preparation.settings.reserveTokens,
       contextWindow: model.contextWindow,
@@ -651,7 +655,7 @@ async function completeWithCurrentModel(
     );
     model = currentModel;
     maxTokens = fitSummaryOutputBudget({
-      tokensBefore: event.preparation.tokensBefore,
+      tokensBefore: budgetInputTokens,
       estimatedRequestTokens,
       reserveTokens: event.preparation.settings.reserveTokens,
       contextWindow: model.contextWindow,

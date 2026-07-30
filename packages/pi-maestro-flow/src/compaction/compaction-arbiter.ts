@@ -165,6 +165,18 @@ export class CompactionArbiter {
   }
 }
 
+export async function runObservedCompaction<T>(
+  observed: ObservedCompaction,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    observed.releaseIfNative();
+    throw error;
+  }
+}
+
 const OWNER_PREFIX = "[maestro-compaction-owner:";
 
 function tagCompactionInstructions(request: CompactionRequest, instructions: string): string {

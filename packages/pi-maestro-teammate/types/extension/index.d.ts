@@ -196,6 +196,9 @@ interface ListedAgent {
     resultReadyAt?: number;
     /** Relayed permission/question requests this agent is blocked on. */
     pendingInteractions?: number;
+    requestedModel?: string;
+    resolvedModel?: string;
+    attemptedModels?: string[];
 }
 export declare function buildRoleList(cwd: string): {
     entries: AgentSummary[];
@@ -230,6 +233,16 @@ export declare function waitForTeammate(state: TeammateState, params: {
     timeoutMs?: number;
     waitMs?: number;
 }, signal?: AbortSignal): Promise<TeammateWaitResult>;
+/**
+ * Deferred background and IPC callbacks routinely outlive session replacement:
+ * after ctx.newSession()/fork()/switchSession()/reload() the host invalidates
+ * the captured ExtensionAPI and every action method throws synchronously via
+ * assertActive. The notification target no longer exists, and agent state has
+ * already settled via settleAgent/killAgent plus eventBus emit (which is not
+ * guarded), so drop the send instead of letting the throw escape into an
+ * unhandled rejection that kills the pi process.
+ */
+export declare function safeSendMessage(pi: ExtensionAPI, message: Parameters<ExtensionAPI["sendMessage"]>[0], options?: Parameters<ExtensionAPI["sendMessage"]>[1]): void;
 export declare function notifyBackgroundFailure(pi: ExtensionAPI, id: string, agent: string, correlationId: string, error: unknown): void;
 export declare function applyAgentRetryState(state: TeammateState, retry: {
     correlationId: string;

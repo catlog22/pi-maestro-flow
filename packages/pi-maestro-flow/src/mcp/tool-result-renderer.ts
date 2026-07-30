@@ -1,7 +1,6 @@
 import type { AgentToolResult, ToolRenderResultOptions } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
-import { isQuietMode } from "../quiet-state.ts";
-import { compactJson, quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
+import { compactJson, toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 
 type McpToolResultDetails = Record<string, unknown> & { error?: unknown };
 type McpToolContentBlock = AgentToolResult<McpToolResultDetails>["content"][number];
@@ -24,7 +23,9 @@ export interface McpProxyToolCallInput {
 }
 
 interface McpToolRenderContext {
-  isError: boolean;
+  isError?: boolean;
+  isPartial?: boolean;
+  args?: unknown;
 }
 
 export interface McpToolResultDisplay {
@@ -98,25 +99,20 @@ export function formatMcpDirectToolCallLines(
   return [displayName, formatJsonish(args, maxInputChars)];
 }
 
-function renderToolCallLines(lines: string[], theme: RenderTheme) {
-  const [title = "mcp", ...rest] = lines;
-  const styledTitle = theme.fg("toolTitle", theme.bold ? theme.bold(title) : title);
-  const styledRest = rest.map(line => theme.fg("muted", line));
-  return new Text([styledTitle, ...styledRest].join("\n"), 0, 0);
-}
-
-export function renderMcpProxyToolCall(args: McpProxyToolCallInput, theme: RenderTheme) {
-  if (isQuietMode()) {
-    const [head = "status"] = formatMcpProxyToolCallLines(args);
-    return quietToolCall(theme, "mcp", head.replace(/^mcp\s+/, ""));
-  }
-  return renderToolCallLines(formatMcpProxyToolCallLines(args), theme);
+export function renderMcpProxyToolCall(
+  args: McpProxyToolCallInput,
+  theme: RenderTheme,
+  context?: McpToolRenderContext,
+) {
+  if (context?.isPartial === false) return new Text("", 0, 0);
+  const [head = "status"] = formatMcpProxyToolCallLines(args);
+  return toolCallLine(theme, "mcp", head.replace(/^mcp\s+/, ""));
 }
 
 export function createMcpDirectToolCallRenderer(displayName: string) {
-  return (args: Record<string, unknown>, theme: RenderTheme) => {
-    if (isQuietMode()) return quietToolCall(theme, displayName, compactJson(args));
-    return renderToolCallLines(formatMcpDirectToolCallLines(displayName, args), theme);
+  return (args: Record<string, unknown>, theme: RenderTheme, context?: McpToolRenderContext) => {
+    if (context?.isPartial === false) return new Text("", 0, 0);
+    return toolCallLine(theme, displayName, hasUsefulObjectContent(args) ? compactJson(args) : "");
   };
 }
 
@@ -171,10 +167,6 @@ function mcpResultOk(result: AgentToolResult<McpToolResultDetails>, context?: Mc
   return !result.details.error && context?.isError !== true;
 }
 
-// Quiet-mode result renderers: collapse to a single ✓/✗ summary line. While
-// streaming (isPartial) they render nothing so the call line's ⋯ stays the visible
-// running indicator, mirroring cockpit's built-in bash compression.
-
 export function createMcpDirectToolResultRenderer(displayName: string) {
   return (
     result: AgentToolResult<McpToolResultDetails>,
@@ -182,11 +174,17 @@ export function createMcpDirectToolResultRenderer(displayName: string) {
     theme: RenderTheme,
     context?: McpToolRenderContext,
   ) => {
-    if (isQuietMode()) {
-      if (options.isPartial) return new Text("", 0, 0);
-      return quietToolResult(theme, displayName, mcpResultOk(result, context), resultSummary(result));
-    }
-    return renderMcpToolResult(result, options, theme, context);
+    if (options.isPartial) return new Text("", 0, 0);
+    const detail = formatMcpToolResultLines(result, true).lines.join("\n");
+    const arg = hasUsefulObjectContent(context?.args) ? compactJson(context?.args) : "";
+    return toolResultLine(theme, {
+      name: displayName,
+      ok: mcpResultOk(result, context),
+      arg,
+      summary: resultSummary(result),
+      expanded: options.expanded,
+      detail,
+    });
   };
 }
 
@@ -196,9 +194,16 @@ export function renderMcpProxyToolResult(
   theme: RenderTheme,
   context?: McpToolRenderContext,
 ) {
-  if (isQuietMode()) {
-    if (options.isPartial) return new Text("", 0, 0);
-    return quietToolResult(theme, "mcp", mcpResultOk(result, context), resultSummary(result));
-  }
-  return renderMcpToolResult(result, options, theme, context);
+  if (options.isPartial) return new Text("", 0, 0);
+  const detail = formatMcpToolResultLines(result, true).lines.join("\n");
+  const input = hasUsefulObjectContent(context?.args) ? context?.args as McpProxyToolCallInput : undefined;
+  const arg = input ? (formatMcpProxyToolCallLines(input)[0] ?? "").replace(/^mcp\s+/, "") : "";
+  return toolResultLine(theme, {
+    name: "mcp",
+    ok: mcpResultOk(result, context),
+    arg,
+    summary: resultSummary(result),
+    expanded: options.expanded,
+    detail,
+  });
 }

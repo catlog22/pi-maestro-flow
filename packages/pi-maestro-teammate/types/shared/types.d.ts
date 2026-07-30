@@ -53,6 +53,9 @@ export interface AgentProgress {
     /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
     resultReadyAt?: number;
     lastMessage?: string;
+    requestedModel?: string;
+    resolvedModel?: string;
+    attemptedModels?: string[];
 }
 export interface AgentProgressSnapshot {
     agent: string;
@@ -77,6 +80,9 @@ export interface AgentProgressSnapshot {
     resultReadyAt?: number;
     lastMessage?: string;
     error?: string;
+    requestedModel?: string;
+    resolvedModel?: string;
+    attemptedModels?: string[];
 }
 export interface ChildAgentCallSnapshot {
     agent: string;
@@ -162,6 +168,9 @@ export interface ActiveAgent {
     outputLog: string[];
     pendingResolve?: (result: SingleResult) => void;
     lastActivityAt: number;
+    requestedModel?: string;
+    resolvedModel?: string;
+    attemptedModels?: string[];
     /**
      * When this agent failed. Set alongside `status: "failed"`, mirroring
      * `sleptAt` for retired agents, and read by the retention sweep that
@@ -237,6 +246,9 @@ export interface SettledAgentRecord {
     status: "completed" | "failed" | "terminated";
     settledAt: number;
     lastResult?: string;
+    requestedModel?: string;
+    resolvedModel?: string;
+    attemptedModels?: string[];
 }
 export declare const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
 export declare const TEAMMATE_STARTED_EVENT = "teammate:started";

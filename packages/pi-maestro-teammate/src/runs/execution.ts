@@ -244,15 +244,15 @@ export function isPiResultReadyTurn(event: Record<string, unknown>): boolean {
   ));
 }
 
-/**
- * Captures a schema-valid structured_output call from Pi's assistant event.
- * This is a fallback for the small window before the child output file becomes
- * observable to the parent runner.
- */
-export function extractValidatedStructuredOutput(
+interface StructuredOutputCandidate {
+  value: unknown;
+  toolCallId?: string;
+}
+
+function extractStructuredOutputCandidate(
   event: Record<string, unknown>,
   schema: Record<string, unknown>,
-): unknown | undefined {
+): StructuredOutputCandidate | undefined {
   const message = event.message as Record<string, unknown> | undefined;
   const content = message?.content;
   if (!Array.isArray(content)) return undefined;
@@ -266,9 +266,26 @@ export function extractValidatedStructuredOutput(
     if (typeof raw === "string") {
       try { value = JSON.parse(raw); } catch { return undefined; }
     }
-    return validateStructuredOutputValue(value, schema) ? value : undefined;
+    if (!validateStructuredOutputValue(value, schema)) return undefined;
+    const toolCallId = typeof block.toolCallId === "string"
+      ? block.toolCallId
+      : typeof block.id === "string"
+        ? block.id
+        : undefined;
+    return { value, ...(toolCallId ? { toolCallId } : {}) };
   }
   return undefined;
+}
+
+/**
+ * Extracts a schema-valid structured_output payload from a Pi assistant event.
+ * Execution code treats this as pending until the tool execution succeeds.
+ */
+export function extractValidatedStructuredOutput(
+  event: Record<string, unknown>,
+  schema: Record<string, unknown>,
+): unknown | undefined {
+  return extractStructuredOutputCandidate(event, schema)?.value;
 }
 
 export function describeStructuredOutputValidationFailure(
@@ -1706,10 +1723,17 @@ export async function runSingleTeammate(
   const attemptedModels: string[] = [];
   let lastResult: SingleResult | undefined;
 
+  const publishTurnComplete = (result: SingleResult): void => {
+    try {
+      options.onTurnComplete?.(result);
+    } catch {
+      // Completion observers must not change the model fallback outcome.
+    }
+  };
+
   for (const modelToUse of modelCandidates) {
     const acquisition = modelToUse ? breaker.acquireCandidate(modelToUse) : undefined;
     if (acquisition && !acquisition.allowed) continue;
-    if (modelToUse && !attemptedModels.includes(modelToUse)) attemptedModels.push(modelToUse);
 
     let settled = false;
     try {
@@ -1718,9 +1742,40 @@ export async function runSingleTeammate(
       let candidateResult: SingleResult | undefined;
 
       while (!options.signal?.aborted) {
-        candidateResult = await runSingleAttempt(
-          params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, options,
-        );
+        if (modelToUse && !attemptedModels.includes(modelToUse)) attemptedModels.push(modelToUse);
+
+        // A failed candidate is not terminal while retry or fallback remains.
+        // Buffer lifecycle completion until the outer policy selects the
+        // authoritative attempt; successful wakeable children then stay open
+        // for later turn-complete callbacks.
+        let completionState: "buffering" | "forwarding" | "discarded" = "buffering";
+        const pendingCompletions: SingleResult[] = [];
+        const attemptOptions: RunTeammateOptions = options.onTurnComplete
+          ? {
+              ...options,
+              onTurnComplete(result) {
+                if (completionState === "forwarding") publishTurnComplete(result);
+                else if (completionState === "buffering") pendingCompletions.push(result);
+              },
+            }
+          : options;
+        const commitCompletion = (): void => {
+          completionState = "forwarding";
+          for (const result of pendingCompletions.splice(0)) publishTurnComplete(result);
+        };
+        const discardCompletion = (): void => {
+          completionState = "discarded";
+          pendingCompletions.length = 0;
+        };
+
+        try {
+          candidateResult = await runSingleAttempt(
+            params, agentConfig, cwd, correlationId, replyTo, startTime, modelToUse, attemptOptions,
+          );
+        } catch (error) {
+          discardCompletion();
+          throw error;
+        }
         lastResult = candidateResult;
         const error = resultFailureMessage(candidateResult.messages);
         const retryable = candidateResult.exitCode !== 0 && isRetryableProviderError(error);
@@ -1729,13 +1784,22 @@ export async function runSingleTeammate(
         if (candidateResult.exitCode === 0) {
           if (acquisition?.allowed) { breaker.recordSuccess(acquisition); settled = true; }
           candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+          commitCompletion();
           return candidateResult;
         }
         if (!retryable || retryCount >= maxRetries) {
           if (fallbackEligible && acquisition?.allowed) { breaker.recordRetryableFailure(acquisition); settled = true; }
+          if (!fallbackEligible) {
+            if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
+            candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+            commitCompletion();
+            return candidateResult;
+          }
+          discardCompletion();
           break;
         }
 
+        discardCompletion();
         retryCount += 1;
         const delayMs = retryDelayMs(retryCount);
         options.onRetry?.({
@@ -1757,6 +1821,7 @@ export async function runSingleTeammate(
       if (!isFallbackModelError(candidateResult.messages)) {
         if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
         candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+        publishTurnComplete(candidateResult);
         return candidateResult;
       }
     } finally {
@@ -1771,6 +1836,7 @@ export async function runSingleTeammate(
 
   if (lastResult) {
     lastResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+    publishTurnComplete(lastResult);
     return lastResult;
   }
   return rejectWith(
@@ -1826,6 +1892,7 @@ interface AttemptState {
   lastContent: string;
   streamingText: string;
   stderrBuffer: string;
+  pendingStructuredOutput?: StructuredOutputCandidate;
   capturedStructuredOutput: unknown;
   structuredOutputValidationFailure?: string;
   reportedRuntimeErrors: Set<string>;
@@ -1968,6 +2035,7 @@ async function runSingleAttempt(
     lastContent: "",
     streamingText: "",
     stderrBuffer: "",
+    pendingStructuredOutput: undefined,
     capturedStructuredOutput: undefined,
     structuredOutputValidationFailure: undefined,
     reportedRuntimeErrors: new Set(),
@@ -1984,6 +2052,7 @@ async function runSingleAttempt(
 
   // AC8: Rich progress tracking
   const progress = createProgress(params.agent, startTime);
+  progress.requestedModel = modelOverride ?? params.model ?? agentConfig.model;
 
   const updateProgressUsage = (): void => {
     const inputTokens = state.completedInputTokens + usage.inputTokens + pendingMessageUsage.inputTokens;
@@ -2175,6 +2244,7 @@ async function runSingleAttempt(
         state.lastContent = "";
         state.streamingText = "";
         state.stderrBuffer = "";
+        state.pendingStructuredOutput = undefined;
         state.capturedStructuredOutput = undefined;
         state.structuredOutputValidationFailure = undefined;
         state.reportedRuntimeErrors.clear();
@@ -2297,6 +2367,9 @@ async function runSingleAttempt(
       progress.resultReadyAt = undefined;
       progress.recentTools = [];
       state.turnToolCount = 0;
+      state.pendingStructuredOutput = undefined;
+      state.capturedStructuredOutput = undefined;
+      state.structuredOutputValidationFailure = undefined;
       options.onProgress?.(progress);
     }
 
@@ -2339,6 +2412,7 @@ async function runSingleAttempt(
       const messageModel = typeof msg?.model === "string" ? msg.model : event.model;
       if (messageModel) {
         state.resolvedModel = messageModel;
+        progress.resolvedModel = messageModel;
       }
       recordRuntimeEventError(event, event.type);
       options.onProgress?.(progress);
@@ -2413,10 +2487,25 @@ async function runSingleAttempt(
       if (
         event.type === "tool_execution_end"
         && completedTool === "structured_output"
-        && event.isError !== true
       ) {
+        const pending = state.pendingStructuredOutput;
+        const completedToolCallId = typeof event.toolCallId === "string"
+          ? event.toolCallId
+          : typeof event.id === "string"
+            ? event.id
+            : undefined;
+        const idsMatch = !pending?.toolCallId
+          || !completedToolCallId
+          || pending.toolCallId === completedToolCallId;
+        if (event.isError !== true && pending && idsMatch) {
+          state.capturedStructuredOutput = pending.value;
+        } else if (event.isError === true && idsMatch) {
+          state.pendingStructuredOutput = undefined;
+        }
         const structuredOutput = readStructuredOutput(false);
-        if (structuredOutput !== undefined) completeTurn(structuredOutput, true);
+        if (event.isError !== true && structuredOutput !== undefined) {
+          completeTurn(structuredOutput, true);
+        }
       }
     }
 
@@ -2443,7 +2532,10 @@ async function runSingleAttempt(
         }
       }
       const messageModel = typeof msg?.model === "string" ? msg.model : event.model;
-      if (messageModel) state.resolvedModel = messageModel;
+      if (messageModel) {
+        state.resolvedModel = messageModel;
+        progress.resolvedModel = messageModel;
+      }
       recordRuntimeEventError(event, "turn_end");
       if (isPiResultReadyTurn(event)) {
         progress.resultReadyAt = Date.now();
@@ -2518,7 +2610,8 @@ async function runSingleAttempt(
       // those buffered lines from reawakening the published agent loop.
       if (state.terminal) return;
       if (state.capturedStructuredOutput === undefined && params.outputSchema) {
-        state.capturedStructuredOutput = extractValidatedStructuredOutput(event, params.outputSchema);
+        const candidate = extractStructuredOutputCandidate(event, params.outputSchema);
+        if (candidate) state.pendingStructuredOutput = candidate;
         state.structuredOutputValidationFailure = describeStructuredOutputValidationFailure(event, params.outputSchema)
           ?? state.structuredOutputValidationFailure;
       }

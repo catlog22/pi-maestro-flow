@@ -1,7 +1,6 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { singleLine, textBlock } from "../tui/components.ts";
-import { isQuietMode } from "../quiet-state.ts";
-import { quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
+import { Text } from "@earendil-works/pi-tui";
+import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { browserManager, type BrowserManagerLike } from "./browser/manager.ts";
@@ -121,27 +120,27 @@ export function createBrowserTool(manager: BrowserManagerLike = browserManager):
         throw error instanceof Error ? error : new Error(String(error));
       }
     },
-    renderCall(args, theme) {
-      if (isQuietMode()) {
-        const qaction = String(args.action ?? "?");
-        const qurl = args.url ? ` ${String(args.url).slice(0, 60)}` : "";
-        return quietToolCall(theme, "browser", `${qaction}${qurl}`);
-      }
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
       const action = String(args.action ?? "?");
-      const name = args.name ? ` [${String(args.name)}]` : "";
       const url = args.url ? ` ${String(args.url).slice(0, 60)}` : "";
-      return singleLine(`${theme.fg("toolTitle", theme.bold("browser "))}${action}${name}${theme.fg("accent", url)}`);
+      return toolCallLine(theme, "browser", `${action}${url}`);
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const text = result.content.filter((item) => item.type === "text").map((item) => "text" in item ? item.text : "").join("\n");
       const isError = (result as { isError?: boolean }).isError === true;
-      if (isQuietMode()) return quietToolResult(theme, "browser", !isError, resultSummary(result));
-      if (opts.expanded) return textBlock(text);
-      const firstLine = text.split("\n")[0]?.slice(0, 120) ?? "";
-      const lineCount = text.split("\n").filter(Boolean).length;
-      const extra = lineCount > 1 ? theme.fg("dim", ` · ${lineCount} lines`) : "";
-      if (isError) return singleLine(theme.fg("error", `✗ ${firstLine}`));
-      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", firstLine)}${extra}`);
+      const action = String(ctx.args.action ?? "?");
+      const url = ctx.args.url ? ` ${String(ctx.args.url).slice(0, 60)}` : "";
+      return toolResultLine(theme, {
+        name: "browser",
+        ok: !isError,
+        arg: `${action}${url}`,
+        summary: resultSummary(result),
+        expanded: opts.expanded,
+        detail: text,
+      });
     },
   };
 }

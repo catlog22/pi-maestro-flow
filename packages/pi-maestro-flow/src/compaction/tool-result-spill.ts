@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { writeFile } from "node:fs/promises";
-import { rm, mkdir } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 
@@ -31,6 +30,7 @@ export async function spillToolResult(
   callId: string,
   content: string,
 ): Promise<SpillResult> {
+  const root = join(tmpdir(), spillRootName(sessionId));
   const dir = spillDir(sessionId);
   const path = spillPath(sessionId, callId);
   const { preview, hasMore } = generatePreview(content, SPILL_PREVIEW_CHARS);
@@ -43,17 +43,50 @@ export async function spillToolResult(
   }
 
   try {
-    await mkdir(dir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
-    await writeFile(path, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
-  } catch (error) {
-    const code = isNodeError(error) ? error.code : undefined;
-    if (code !== "EEXIST") {
-      return failure;
+    if (!await ensurePrivateDirectory(root) || !await ensurePrivateDirectory(dir)) return failure;
+    const realTmp = await realpath(tmpdir());
+    const realRoot = await realpath(root);
+    const realDir = await realpath(dir);
+    if (!isInside(realTmp, realRoot) || !isInside(realRoot, realDir)) return failure;
+
+    try {
+      await writeFile(path, content, { encoding: "utf8", flag: "wx", mode: 0o600 });
+    } catch (error) {
+      const code = isNodeError(error) ? error.code : undefined;
+      if (code !== "EEXIST" || !await existingSpillMatches(path, realDir, content)) return failure;
     }
-    // EEXIST: the content is already durably persisted at `path`.
+    const target = await lstat(path);
+    if (!target.isFile() || target.isSymbolicLink()) return failure;
+    await chmod(path, 0o600);
+  } catch {
+    return failure;
   }
 
   return { ok: true, path, preview, originalChars: content.length, hasMore };
+}
+
+async function ensurePrivateDirectory(path: string): Promise<boolean> {
+  try {
+    await mkdir(path, { mode: PRIVATE_DIRECTORY_MODE });
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "EEXIST") return false;
+  }
+  const stat = await lstat(path);
+  if (!stat.isDirectory() || stat.isSymbolicLink()) return false;
+  await chmod(path, PRIVATE_DIRECTORY_MODE);
+  return true;
+}
+
+async function existingSpillMatches(path: string, realDir: string, content: string): Promise<boolean> {
+  try {
+    const stat = await lstat(path);
+    if (!stat.isFile() || stat.isSymbolicLink()) return false;
+    const realTarget = await realpath(path);
+    if (!isInside(realDir, realTarget)) return false;
+    return await readFile(path, "utf8") === content;
+  } catch {
+    return false;
+  }
 }
 
 export function generatePreview(
@@ -93,6 +126,11 @@ export async function cleanupSpillDir(sessionId: string): Promise<void> {
     return;
   }
   try {
+    const stat = await lstat(root);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      await rm(root, { force: true });
+      return;
+    }
     await rm(root, { recursive: true, force: true });
   } catch {
     // best-effort

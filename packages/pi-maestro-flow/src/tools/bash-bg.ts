@@ -1,9 +1,8 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { singleLine, textBlock } from "../tui/components.ts";
-import { isQuietMode } from "../quiet-state.ts";
-import { quietToolCall, quietToolLine, resultFirstLine } from "../quiet-render.ts";
+import { Text } from "@earendil-works/pi-tui";
+import { toolCallLine, toolResultLine, resultFirstLine } from "../quiet-render.ts";
 import { Type } from "typebox";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
@@ -450,34 +449,31 @@ export function registerBashBg(pi: ExtensionAPI): void {
         details: jobDetails(job, "wait", out.truncated),
       };
     },
-    renderCall(args, theme) {
-      if (isQuietMode()) {
-        const qaction = String(args.action ?? "start");
-        const qtarget = (args.action === "start" || args.action === "run") ? String(args.command ?? "").slice(0, 50) : String(args.jobId ?? "");
-        return quietToolCall(theme, "bash_bg", qtarget ? `${qaction} ${qtarget}` : qaction);
-      }
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
       const action = String(args.action ?? "start");
       const target = (args.action === "start" || args.action === "run") ? String(args.command ?? "").slice(0, 50) : String(args.jobId ?? "");
-      return singleLine(`${theme.fg("toolTitle", theme.bold("bash_bg "))}${action}${target ? ` ${theme.fg("accent", target)}` : ""}`);
+      return toolCallLine(theme, "bash_bg", target ? `${action} ${target}` : action);
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const details = result.details as BashBgDetails | undefined;
       const isError = (result as { isError?: boolean }).isError === true;
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
-      if (isQuietMode()) {
-        const running = details?.running === true;
-        const ok = !isError && !running && (details?.exitCode ?? 0) === 0;
-        const glyph = running
-          ? theme.fg("warning", "•")
-          : ok
-            ? theme.fg("success", "✓")
-            : theme.fg("error", "✗");
-        return quietToolLine(glyph, theme, "bash_bg", resultFirstLine(result));
-      }
-      if (opts.expanded) return textBlock(text);
-      if (isError) return singleLine(theme.fg("error", `✗ ${text.split("\n")[0]?.slice(0, 120) ?? "bash_bg failed"}`));
-      const icon = details?.running === false ? theme.fg("success", "✓") : theme.fg("warning", "•");
-      return singleLine(`${icon} ${theme.fg("muted", text.split("\n")[0] ?? "")}`);
+      const running = details?.running === true;
+      const mark = running
+        ? theme.fg("warning", "•")
+        : (!isError && (details?.exitCode ?? 0) === 0
+          ? theme.fg("success", "✓")
+          : theme.fg("error", "✗"));
+      return toolResultLine(theme, {
+        name: "bash_bg",
+        mark,
+        summary: resultFirstLine(result),
+        expanded: opts.expanded,
+        detail: text,
+      });
     },
   });
 

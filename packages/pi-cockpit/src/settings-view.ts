@@ -41,7 +41,13 @@ function themeLabel(theme: string): string {
 	return theme === "" ? NO_THEME_LABEL : theme;
 }
 
-export function buildRows(config: CockpitConfig): SettingsRow[] {
+export interface LiveRowState {
+	/** pi's effective hideThinkingBlock; the thinking row is a pass-through. */
+	thinkingHidden: boolean;
+}
+
+export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsRow[] {
+	const thinkingHidden = live?.thinkingHidden ?? false;
 	return [
 		{
 			key: "enabled",
@@ -56,6 +62,16 @@ export function buildRows(config: CockpitConfig): SettingsRow[] {
 			label: "quiet (reload)",
 			value: config.quietMode ? "on" : "off",
 			next: config.quietMode ? "off" : "on",
+		},
+		{
+			// Pass-through to pi's native thinking toggle: the value mirrors pi's
+			// persisted hideThinkingBlock and the panel dispatches the toggle
+			// itself — applyRow deliberately ignores this key, like "theme".
+			key: "thinkingFold",
+			accel: "f",
+			label: "thinking fold",
+			value: thinkingHidden ? "hidden" : "visible",
+			next: thinkingHidden ? "visible" : "hidden",
 		},
 		{
 			key: "agentsMode",
@@ -128,6 +144,8 @@ export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
 			return { ...config, icons: { mode: cycle(ICON_MODES, config.icons.mode) } };
 		// "theme" is intentionally absent: the row hands off to the /theme picker,
 		// which owns both the preview and the write-through to pi's settings.
+		// "thinkingFold" is absent for the same reason: pi owns hideThinkingBlock,
+		// and the panel dispatches pi's native toggle instead of cycling config.
 		default:
 			return config;
 	}

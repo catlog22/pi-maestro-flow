@@ -20,6 +20,7 @@ async function createModelRegistry(credentials: unknown, modelsPath: string) {
   return new ModelRegistry(await ModelRuntime.create({ credentials, modelsPath }));
 }
 import {
+  ALLOW_INSECURE_PROVIDER_HTTP_ENV,
   deleteApiProviderModelSettings,
   ensureApiRetryDefaults,
   loadApiProviderSettings,
@@ -138,6 +139,53 @@ test("registers configured providers and the /api-manager command", async (t) =>
   assert.ok(getModels("anthropic").every((model) => model.api === "anthropic-messages"));
 });
 
+test("runtime registration rejects remote HTTP provider and model URLs", (t) => {
+  const previous = process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV];
+  t.after(() => {
+    if (previous === undefined) delete process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV];
+    else process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV] = previous;
+  });
+  delete process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV];
+
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-insecure-http-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  writeFileSync(modelsPath, JSON.stringify({
+    providers: {
+      "maestro-openai": {
+        baseUrl: "http://198.51.100.10:8080/v1",
+        api: "openai-responses",
+        apiKey: "test-key",
+        models: [{ id: "unsafe-provider-model" }],
+      },
+      "maestro-qwen": {
+        baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+        api: "openai-completions",
+        apiKey: "test-key",
+        models: [
+          { id: "unsafe-model-override", baseUrl: "http://203.0.113.10:8080/v1" },
+          { id: "safe-model" },
+        ],
+      },
+    },
+  }));
+
+  const registered = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider(name: string, config: any) {
+      registered.set(name, config);
+    },
+  } as any, { modelsPath });
+
+  assert.equal(registered.get("maestro-openai")?.baseUrl, undefined);
+  assert.equal(registered.get("maestro-openai")?.models, undefined);
+  assert.equal(registered.get("maestro-qwen")?.baseUrl, "https://dashscope.aliyuncs.com/compatible-mode/v1");
+  assert.deepEqual(
+    registered.get("maestro-qwen")?.models.map((model: any) => model.id),
+    ["safe-model"],
+  );
+});
+
 test("API Manager retry defaults are enabled and preserve explicit overrides", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-retry-defaults-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
@@ -254,10 +302,27 @@ test("/api-manager manages retry from commands and the interactive menu", async 
   assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 8 });
 });
 
-test("validates custom API base URLs", () => {
+test("validates custom API base URLs", (t) => {
+  const previous = process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV];
+  t.after(() => {
+    if (previous === undefined) delete process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV];
+    else process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV] = previous;
+  });
+  delete process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV];
+
   assert.equal(normalizeBaseUrl(" https://gateway.example.com/v1/ "), "https://gateway.example.com/v1");
+  assert.equal(normalizeBaseUrl("http://localhost:8080/v1/"), "http://localhost:8080/v1");
+  assert.equal(normalizeBaseUrl("http://127.23.45.67:8080/v1"), "http://127.23.45.67:8080/v1");
+  assert.equal(normalizeBaseUrl("http://[::1]:8080/v1"), "http://[::1]:8080/v1");
+  assert.throws(() => normalizeBaseUrl("http://198.51.100.10:8080/v1"), /must use https/);
   assert.throws(() => normalizeBaseUrl("file:///tmp/api"), /http or https/);
   assert.throws(() => normalizeBaseUrl(""), /cannot be empty/);
+
+  process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV] = "1";
+  assert.equal(
+    normalizeBaseUrl("http://198.51.100.10:8080/v1/"),
+    "http://198.51.100.10:8080/v1",
+  );
 });
 
 test("requires an explicit API key when saving API settings", async (t) => {

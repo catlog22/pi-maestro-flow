@@ -271,6 +271,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     result: unknown,
     options: { expanded: boolean; isPartial: boolean },
     theme: { fg(name: string, text: string): string },
+    context: { args: { questions: unknown[] } },
   ) => { render(width: number): string[] };
   const askResult = {
     content: [{ type: "text", text: "ok" }],
@@ -282,12 +283,12 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     },
   };
   const theme = { fg: (_name: string, text: string) => text };
-  const collapsed = renderAskResult(askResult, { expanded: false, isPartial: false }, theme).render(120);
-  const expanded = renderAskResult(askResult, { expanded: true, isPartial: false }, theme).render(120);
-  assert.equal(collapsed.length, 1);
-  assert.match(collapsed[0], /First question\?.*Alpha/);
-  assert.doesNotMatch(collapsed[0], /Second question/);
-  assert.deepEqual(expanded.slice(1), [
+  const askArgs = { questions: [{}, {}] };
+  const collapsed = renderAskResult(askResult, { expanded: false, isPartial: false }, theme, { args: askArgs }).render(120).map((line) => line.trimEnd());
+  const expanded = renderAskResult(askResult, { expanded: true, isPartial: false }, theme, { args: askArgs }).render(120).map((line) => line.trimEnd());
+  assert.deepEqual(collapsed, ["  ✓ ask 2 questions · 2 answers"]);
+  assert.deepEqual(expanded, [
+    "  ✓ ask 2 questions · 2 answers",
     "1. First question? → Alpha",
     "2. Second question? → Beta — with detail",
   ]);
@@ -319,28 +320,27 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     result: unknown,
     options: { expanded: boolean; isPartial: boolean },
     theme: { fg(name: string, text: string): string; bold(text: string): string },
+    context: { args: Record<string, unknown> },
   ) => { render(width: number): string[] };
   const goalTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
-  const goalCallComponent = renderGoalCall({
+  const goalArgs = {
     action: "create",
     objective: "完成 Git 仓库配置整理：这段长目标不应破坏 call 行宽度",
-  }, goalTheme);
-  const call = goalCallComponent.render(120);
-  assert.match(call[0] ?? "", /^goal create/);
+  };
+  const goalCallComponent = renderGoalCall(goalArgs, goalTheme);
+  const call = goalCallComponent.render(120).map((line) => line.trimEnd());
+  assert.match(call[0] ?? "", /^  ⋯ goal create/);
   const goalResult = {
     content: [{ type: "text", text: "Goal started: 完成 Git 仓库配置整理" }],
     isError: false,
   };
-  const collapsedGoalComponent = renderGoalResult(goalResult, { expanded: false, isPartial: false }, goalTheme);
-  const expandedGoalComponent = renderGoalResult(goalResult, { expanded: true, isPartial: false }, goalTheme);
-  const collapsedGoal = collapsedGoalComponent.render(120);
-  const expandedGoal = expandedGoalComponent.render(120);
-  // Collapsed is "success icon + the result's first line". Pinning a literal
-  // string here is exactly what let this assertion rot when the goal message
-  // text changed — it asserted a stale sample instead of the contract.
-  const goalFirstLine = goalResult.content[0].text.split("\n")[0];
-  assert.deepEqual(collapsedGoal, [`✓ ${goalFirstLine}`]);
-  assert.equal(expandedGoal.filter((line) => /完成 Git 仓库配置整理/.test(line)).length, 1);
+  const collapsedGoalComponent = renderGoalResult(goalResult, { expanded: false, isPartial: false }, goalTheme, { args: goalArgs });
+  const expandedGoalComponent = renderGoalResult(goalResult, { expanded: true, isPartial: false }, goalTheme, { args: goalArgs });
+  const collapsedGoal = collapsedGoalComponent.render(120).map((line) => line.trimEnd());
+  const expandedGoal = expandedGoalComponent.render(120).map((line) => line.trimEnd());
+  assert.match(collapsedGoal[0] ?? "", /^  ✓ goal create/);
+  assert.match(collapsedGoal[0] ?? "", /Goal started/);
+  assert.ok(expandedGoal.slice(1).some((line) => /完成 Git 仓库配置整理/.test(line)));
   for (let width = 1; width <= 120; width++) {
     for (const component of [goalCallComponent, collapsedGoalComponent, expandedGoalComponent]) {
       for (const line of component.render(width)) assert.ok(visibleWidth(line) <= width, `width ${width}: ${line}`);
@@ -351,7 +351,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   // guards against renderers that throw. Returning a non-Component therefore
   // escapes as an uncaughtException and kills the TUI.
   const todoTool = tools.find((tool) => tool.name === "todo");
-  assert.match(todoTool?.description ?? "", /blockedBy integer N means the zero-based array position tasks\[N\]/);
+  assert.match(todoTool?.description ?? "", /blockedBy integer N means the earlier array item tasks\[N\]/);
   assert.match(todoTool?.description ?? "", /blockedBy: \[0\]/);
   const todoSchema = todoTool?.parameters as {
     properties?: {
@@ -373,23 +373,17 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
     result: unknown,
     options: { expanded: boolean; isPartial: boolean },
     theme: { fg(name: string, text: string): string; bold(text: string): string },
+    context: { args: Record<string, unknown> },
   ) => { render(width: number): string[] };
   const todoTheme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
   const todoTasks = Array.from({ length: 9 }, (_, index) => ({ id: `t${index}`, status: "pending" }));
   const todoListComponent = renderTodoResult({
     content: [{ type: "text", text: todoTasks.map((_, index) => `- [ ] Task ${index + 1}`).join("\n") }],
     details: { action: "list", tasks: todoTasks },
-  }, { expanded: false, isPartial: false }, todoTheme);
+  }, { expanded: false, isPartial: false }, todoTheme, { args: { action: "list" } });
   assert.equal(typeof todoListComponent.render, "function", "todo list result must be a TUI Component");
-  const todoListLines = todoListComponent.render(80);
-  assert.deepEqual(todoListLines, [
-    "- [ ] Task 1",
-    "- [ ] Task 2",
-    "- [ ] Task 3",
-    "- [ ] Task 4",
-    "- [ ] Task 5",
-    "… and 4 more",
-  ]);
+  const todoListLines = todoListComponent.render(80).map((line) => line.trimEnd());
+  assert.deepEqual(todoListLines, ["  ✓ todo list · 9 tasks (9 open)"]);
   for (let width = 1; width <= 120; width++) {
     for (const line of todoListComponent.render(width)) assert.ok(visibleWidth(line) <= width, `width ${width}: ${line}`);
   }

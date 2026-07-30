@@ -1,13 +1,12 @@
-// Shared bash-style compact rendering for quiet mode.
+// Shared compact single-line rendering for flow-owned tools.
 //
-// When cockpit quiet mode is on, every flow-owned tool collapses to a single
-// line mirroring cockpit's built-in bash compression:
-//   running: "  ⋯ <name> <arg>"
-//   done:    "  ✓ <name> <summary>"   (or ✗ on error)
-// Renderers add a one-line `if (isQuietMode()) return quietToolCall/Result(...)`.
+// The call renderer owns the row while a tool is running. Once the result
+// arrives, the call renderer becomes empty and the result renderer redraws the
+// name and arguments on the same row, optionally followed by expanded detail.
 
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import type { Component } from "@earendil-works/pi-tui";
+import { truncateToWidth } from "@earendil-works/pi-tui";
 
 // A structural subset of pi's Theme so both the real Theme and the MCP renderer's
 // local RenderTheme (string-keyed fg) satisfy it without contravariance errors.
@@ -17,27 +16,40 @@ interface ResultLike {
 	content: Array<{ type: string; text?: string }>;
 }
 
-function boldName(theme: QuietTheme, name: string): string {
-	return theme.bold ? theme.bold(name) : name;
+function lineComponent(text: string): Component {
+	return {
+		render(width: number): string[] {
+			const safeWidth = Math.max(1, width);
+			return text.split("\n").map((line) => truncateToWidth(line, safeWidth, "…"));
+		},
+		invalidate(): void {},
+	};
 }
 
-// Shared one-line shell: two spaces + an already-colored glyph + bold name +
-// muted rest. Exported so tools that need a third mark state (e.g. bash-bg's
-// running •, which is neither ✓ nor ✗) can compose it directly instead of
-// forcing a boolean into quietToolResult.
-export function quietToolLine(mark: string, theme: QuietTheme, name: string, rest: string): Text {
-	const parts = [name ? theme.fg("toolTitle", boldName(theme, name)) : "", rest ? theme.fg("muted", rest) : ""].filter(Boolean);
-	return new Text(`  ${mark} ${parts.join(" ")}`, 0, 0);
+export function toolCallLine(theme: QuietTheme, name: string, arg = ""): Component {
+	const bold = theme.bold ?? ((text: string) => text);
+	return lineComponent(
+		`  ${theme.fg("warning", "⋯")} ${theme.fg("toolTitle", bold(name))}${arg ? ` ${theme.fg("accent", arg)}` : ""}`,
+	);
 }
 
-/** Compact single-line "tool is running" component: `  ⋯ <name> <arg>`. */
-export function quietToolCall(theme: QuietTheme, name: string, arg = ""): Text {
-	return quietToolLine(theme.fg("warning", "⋯"), theme, name, arg);
-}
-
-/** Compact single-line "tool finished" component: `  ✓/✗ <name> <summary>`. */
-export function quietToolResult(theme: QuietTheme, name: string, ok: boolean, summary = ""): Text {
-	return quietToolLine(ok ? theme.fg("success", "✓") : theme.fg("error", "✗"), theme, name, summary);
+export function toolResultLine(
+	theme: QuietTheme,
+	o: {
+		name: string;
+		mark?: string;
+		ok?: boolean;
+		arg?: string;
+		summary?: string;
+		detail?: string;
+		expanded?: boolean;
+	},
+): Component {
+	const bold = theme.bold ?? ((text: string) => text);
+	const mark = o.mark ?? (o.ok === false ? theme.fg("error", "✗") : theme.fg("success", "✓"));
+	let line = `  ${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;
+	if (o.expanded && o.detail && o.detail.trim()) line += `\n${theme.fg("dim", o.detail)}`;
+	return lineComponent(line);
 }
 
 /** First non-empty line of a tool result's text content, truncated to maxLen. */

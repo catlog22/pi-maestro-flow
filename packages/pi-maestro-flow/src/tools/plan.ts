@@ -16,8 +16,7 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { altKey } from "../key-labels.ts";
-import { isQuietMode } from "../quiet-state.ts";
-import { quietToolCall } from "../quiet-render.ts";
+import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import { openPlanConfirmation, type PlanConfirmationAction } from "./plan-confirm.ts";
 import { openPlanEditor } from "./plan-editor.ts";
 import { PlanApprovalError, PlanStore, prewarmProcessIdentity, type LoadedPlan, type PlanSessionIdentity } from "./plan-store.ts";
@@ -31,7 +30,7 @@ type PlanExecutionMode = "current" | "clear" | "compact";
 export type PlanHandoffStatus = "none" | "todo-required" | "ready";
 export type PlanContext = Pick<
   ExtensionContext,
-  "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager" | "compact"
+  "cwd" | "hasUI" | "ui" | "isIdle" | "sessionManager" | "compact" | "model" | "modelRegistry" | "isProjectTrusted"
 > & Partial<Pick<ExtensionContext, "abort" | "getContextUsage">>
   & Partial<Pick<ExtensionCommandContext, "newSession">>;
 
@@ -70,6 +69,7 @@ interface PlanRuntimeOptions {
   storeFactory?: (cwd: string, session: PlanSessionIdentity) => PlanStore;
   hasExecutableTodo?: (handoffKey: string) => boolean;
   compactionArbiter?: CompactionArbiter;
+  preferNewSession?: (ctx: PlanContext) => boolean;
 }
 
 const STATUS_KEY = "mode";
@@ -107,6 +107,7 @@ let awaitingAction = false;
 let pendingPlanExitReminder: string | undefined;
 let pendingPlanEnterNote: string | undefined;
 let compactionArbiter: CompactionArbiter | undefined;
+let preferNewSession = (_ctx: PlanContext): boolean => false;
 // The handoff gate reads todos only. Goal state was decoupled from it in 39a5f2dc;
 // the getters that used to feed it are gone so they cannot be wired back by accident.
 let hasExecutableTodoForHandoff = (handoffKey: string) => getVisibleTasks().some((task) =>
@@ -129,6 +130,7 @@ export function initPlan(pi: ExtensionAPI, options: PlanRuntimeOptions = {}): vo
     && task.blockedBy.length === 0
   ));
   compactionArbiter = options.compactionArbiter;
+  preferNewSession = options.preferNewSession ?? (() => false);
 }
 
 export function isPlanMode(): boolean {
@@ -306,7 +308,7 @@ export function onToolCallPlan(event: {
 
 
 export async function onAgentEndPlan(event: { messages: unknown[] }, ctx: PlanContext): Promise<void> {
-  if (mode !== "plan") return;
+  if (mode !== "plan" || latestStatus === "approved") return;
   const proposedPlan = extractProposedPlan(latestAssistantText(event.messages));
   if (!proposedPlan) return;
   try {
@@ -353,6 +355,7 @@ async function reviewPlan(
       // ContextUsage.percent is number | null; the overlay treats "unknown" as
       // absent, so collapse null into undefined rather than widening its type.
       contextPercent: ctx.getContextUsage?.()?.percent ?? undefined,
+      preferNewSession: preferNewSession(ctx),
     });
     if (action === "modify") {
       await editPlan(ctx, store.currentPath);
@@ -672,7 +675,17 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       if (mode !== "plan") await enterPlanMode(ctx);
       return result(`Plan mode active. Draft: ${currentStore?.currentPath ?? ""}`, currentDetails("enter"));
     },
-    renderCall(_args, theme) { return isQuietMode() ? quietToolCall(theme, "plan", "enter") : new Text(theme.fg("toolTitle", theme.bold("plan enter")), 0, 0); },
+    renderShell: "self",
+    renderCall(_args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "plan", "enter");
+    },
+    renderResult(result, opts, theme) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const block = result.content.find((c) => c.type === "text");
+      const text = block && "text" in block ? block.text : "";
+      return toolResultLine(theme, { name: "plan", ok: true, arg: "enter", summary: resultSummary(result), expanded: opts.expanded, detail: text });
+    },
   };
 
   const updateTool: ToolDefinition<typeof PlanUpdateParams, PlanToolDetails> = {
@@ -691,6 +704,18 @@ export function registerPlanTools(pi: ExtensionAPI): void {
         return result(errorMessage(error), { ...currentDetails("update"), error: errorMessage(error) }, true);
       }
     },
+    renderShell: "self",
+    renderCall(_args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "plan", "update");
+    },
+    renderResult(result, opts, theme) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const block = result.content.find((c) => c.type === "text");
+      const text = block && "text" in block ? block.text : "";
+      const isError = (result as { isError?: boolean }).isError === true;
+      return toolResultLine(theme, { name: "plan", ok: !isError, arg: "update", summary: resultSummary(result), expanded: opts.expanded, detail: text });
+    },
   };
 
   const reviewTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
@@ -703,6 +728,18 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       if (blocked) return blocked;
       await reviewPlan(ctx, false);
       return result("Plan review closed; Plan mode remains active.", currentDetails("review"));
+    },
+    renderShell: "self",
+    renderCall(_args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "plan", "review");
+    },
+    renderResult(result, opts, theme) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const block = result.content.find((c) => c.type === "text");
+      const text = block && "text" in block ? block.text : "";
+      const isError = (result as { isError?: boolean }).isError === true;
+      return toolResultLine(theme, { name: "plan", ok: !isError, arg: "review", summary: resultSummary(result), expanded: opts.expanded, detail: text });
     },
   };
 
@@ -730,6 +767,18 @@ export function registerPlanTools(pi: ExtensionAPI): void {
         approved: outcome.approved,
       });
     },
+    renderShell: "self",
+    renderCall(_args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "plan", "confirm");
+    },
+    renderResult(result, opts, theme) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const block = result.content.find((c) => c.type === "text");
+      const text = block && "text" in block ? block.text : "";
+      const isError = (result as { isError?: boolean }).isError === true;
+      return toolResultLine(theme, { name: "plan", ok: !isError, arg: "confirm", summary: resultSummary(result), expanded: opts.expanded, detail: text });
+    },
   };
 
   const exitTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
@@ -743,6 +792,18 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       exitMode(ctx);
       return result(buildPlanExitMessage(), currentDetails("exit"));
     },
+    renderShell: "self",
+    renderCall(_args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "plan", "exit");
+    },
+    renderResult(result, opts, theme) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const block = result.content.find((c) => c.type === "text");
+      const text = block && "text" in block ? block.text : "";
+      const isError = (result as { isError?: boolean }).isError === true;
+      return toolResultLine(theme, { name: "plan", ok: !isError, arg: "exit", summary: resultSummary(result), expanded: opts.expanded, detail: text });
+    },
   };
 
   const statusTool: ToolDefinition<typeof EmptyPlanParams, PlanToolDetails> = {
@@ -755,6 +816,18 @@ export function registerPlanTools(pi: ExtensionAPI): void {
       if (blocked) return blocked;
       const details = currentDetails("status");
       return result(`${details.mode} · ${details.status} · r${details.revision} · ${details.sessionId} · ${details.path}`, details);
+    },
+    renderShell: "self",
+    renderCall(_args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "plan", "status");
+    },
+    renderResult(result, opts, theme) {
+      if (opts.isPartial) return new Text("", 0, 0);
+      const block = result.content.find((c) => c.type === "text");
+      const text = block && "text" in block ? block.text : "";
+      const isError = (result as { isError?: boolean }).isError === true;
+      return toolResultLine(theme, { name: "plan", ok: !isError, arg: "status", summary: resultSummary(result), expanded: opts.expanded, detail: text });
     },
   };
 

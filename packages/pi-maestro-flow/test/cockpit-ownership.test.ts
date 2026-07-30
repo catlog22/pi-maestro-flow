@@ -12,15 +12,13 @@ test("Alt+T delegates Todo disclosure to Cockpit when Cockpit owns the panel", (
   );
 });
 
-test("todo main renderCall compresses under quiet mode via the shared quietToolCall shell", () => {
+test("todo main renderCall uses the shared single-line shell and clears after settlement", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  // Uniqueness/wiring guard (not an output assertion): the main todo tool's
-  // renderCall — identified by its `const action = (args.action as string) ?? "?"`
-  // opener — must route quiet mode through quietToolCall so it visually matches
-  // every other quiet-aware tool. The two-space + ⋯ + bold name shell itself is
-  // guaranteed by quiet-render; this only pins the wiring so it cannot regress.
+  // Uniqueness/wiring guard (not an output assertion): the main Todo call
+  // renderer must use the all-mode compact shell and disappear once the result
+  // renderer owns the row, preventing call + result from stacking vertically.
   assert.match(
     source,
-    /renderCall\(args, theme\) \{\s*const action = \(args\.action as string\) \?\? "\?";[\s\S]*?isQuietMode\(\)\) return quietToolCall\(theme, "todo"/,
+    /renderCall\(args, theme, ctx\) \{\s*if \(ctx\?\.isPartial === false\) return new Text\("", 0, 0\);\s*const action = \(args\.action as string\) \?\? "\?";[\s\S]*?return toolCallLine\(theme, "todo"/,
   );
 });

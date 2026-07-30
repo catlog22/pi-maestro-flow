@@ -1,8 +1,7 @@
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { singleLine, textBlock } from "../tui/components.ts";
-import { isQuietMode } from "../quiet-state.ts";
-import { quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
+import { Text } from "@earendil-works/pi-tui";
+import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import { FileFinder, type FileFinderApi } from "@ff-labs/fff-node";
 import { Type } from "typebox";
 
@@ -76,19 +75,23 @@ export function registerFff(pi: ExtensionAPI): void {
       if (!result.ok) throw new Error(`FFF grep failed: ${result.error}`);
       return { content: [{ type: "text", text: formatGrep(result.value) }] } as AgentToolResult<unknown>;
     },
-    renderCall(args, theme) {
-      if (isQuietMode()) return quietToolCall(theme, "ffgrep", `"${String(args.pattern ?? "")}"`);
-      return singleLine(`${theme.fg("toolTitle", theme.bold("ffgrep "))}${theme.fg("accent", `"${String(args.pattern ?? "")}"`)}`);
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "ffgrep", `"${String(args.pattern ?? "")}"`);
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
       const lines = text.split("\n").filter(Boolean);
-      if (isQuietMode()) return quietToolResult(theme, "ffgrep", text !== "No matches" && lines.length > 0, resultSummary(result));
-      if (lines.length === 0 || text === "No matches") return singleLine(theme.fg("dim", "No matches"));
-      if (opts.expanded) return textBlock(text);
-      const header = lines[0].slice(0, 100);
-      const extra = lines.length > 1 ? theme.fg("dim", ` · ${lines.length} lines`) : "";
-      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", header)}${extra}`);
+      return toolResultLine(theme, {
+        name: "ffgrep",
+        ok: text !== "No matches" && lines.length > 0,
+        arg: `"${String(ctx.args.pattern ?? "")}"`,
+        summary: resultSummary(result),
+        expanded: opts.expanded,
+        detail: text,
+      });
     },
   });
 
@@ -109,19 +112,22 @@ export function registerFff(pi: ExtensionAPI): void {
         : "No files found";
       return { content: [{ type: "text", text }] } as AgentToolResult<unknown>;
     },
-    renderCall(args, theme) {
-      if (isQuietMode()) return quietToolCall(theme, "fffind", `"${String(args.pattern ?? "")}"`);
-      return singleLine(`${theme.fg("toolTitle", theme.bold("fffind "))}${theme.fg("accent", `"${String(args.pattern ?? "")}"`)}`);
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
+      return toolCallLine(theme, "fffind", `"${String(args.pattern ?? "")}"`);
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
-      if (isQuietMode()) return quietToolResult(theme, "fffind", text !== "No files found", resultSummary(result));
-      if (text === "No files found") return singleLine(theme.fg("dim", "No files found"));
-      const lines = text.split("\n").filter(Boolean);
-      if (opts.expanded) return textBlock(text);
-      const header = lines[0]?.slice(0, 100) ?? "";
-      const extra = lines.length > 1 ? theme.fg("dim", ` · ${lines.length} files`) : "";
-      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", header)}${extra}`);
+      return toolResultLine(theme, {
+        name: "fffind",
+        ok: text !== "No files found",
+        arg: `"${String(ctx.args.pattern ?? "")}"`,
+        summary: resultSummary(result),
+        expanded: opts.expanded,
+        detail: text,
+      });
     },
   });
 }

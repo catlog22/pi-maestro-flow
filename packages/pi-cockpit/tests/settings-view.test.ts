@@ -3,9 +3,11 @@ import assert from "node:assert/strict";
 import { applyRow, buildRows, rowKeyForAccel } from "../src/settings-view.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";
 
-// The theme row is a hand-off to the /theme picker, not a cycle: it has no "next
-// value" to advertise and applyRow deliberately ignores it.
-const CYCLING_ROWS = (key: string): boolean => key !== "theme";
+// The theme row is a hand-off to the /theme picker and thinkingFold is a
+// pass-through to pi's native toggle: neither is a config cycle, so applyRow
+// deliberately ignores them and the "next advertises applyRow" invariant
+// cannot hold for them.
+const CYCLING_ROWS = (key: string): boolean => key !== "theme" && key !== "thinkingFold";
 
 test("every cycling row advertises the value its next press produces", () => {
 	const rows = buildRows(DEFAULT_CONFIG).filter((row) => CYCLING_ROWS(row.key));
@@ -14,6 +16,26 @@ test("every cycling row advertises the value its next press produces", () => {
 			.find((candidate) => candidate.key === row.key);
 		assert.equal(after?.value, row.next, `row ${row.key} mis-advertises its next value`);
 	}
+});
+
+test("thinking fold row mirrors pi's live state and advertises its inverse", () => {
+	const hidden = buildRows(DEFAULT_CONFIG, { thinkingHidden: true })
+		.find((row) => row.key === "thinkingFold");
+	assert.equal(hidden?.value, "hidden");
+	assert.equal(hidden?.next, "visible");
+	const visible = buildRows(DEFAULT_CONFIG, { thinkingHidden: false })
+		.find((row) => row.key === "thinkingFold");
+	assert.equal(visible?.value, "visible");
+	assert.equal(visible?.next, "hidden");
+});
+
+test("thinking fold sits next to quiet mode so the two quiet surfaces read together", () => {
+	const keys = buildRows(DEFAULT_CONFIG, { thinkingHidden: false }).map((row) => row.key);
+	assert.equal(keys[keys.indexOf("quietMode") + 1], "thinkingFold");
+});
+
+test("thinking fold is a pass-through: applyRow leaves config untouched", () => {
+	assert.equal(applyRow(DEFAULT_CONFIG, "thinkingFold"), DEFAULT_CONFIG);
 });
 
 test("accelerators are unique and resolve to their row", () => {

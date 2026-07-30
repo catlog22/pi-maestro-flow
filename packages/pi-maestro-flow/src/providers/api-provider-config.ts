@@ -363,11 +363,31 @@ export async function deleteApiProviderModelSettings(
   return result;
 }
 
+export const ALLOW_INSECURE_PROVIDER_HTTP_ENV = "PI_ALLOW_INSECURE_PROVIDER_HTTP";
+
+function isLoopbackHostname(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (normalized === "localhost" || normalized === "::1") return true;
+  const ipv4 = normalized.split(".");
+  return ipv4.length === 4
+    && ipv4.every((part) => /^\d{1,3}$/.test(part) && Number(part) <= 255)
+    && Number(ipv4[0]) === 127;
+}
+
 export function normalizeBaseUrl(value: string): string {
   const normalized = required(value, "Base URL").replace(/\/+$/, "");
   const parsed = new URL(normalized);
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error("Base URL must use http or https");
+  }
+  if (
+    parsed.protocol === "http:"
+    && !isLoopbackHostname(parsed.hostname)
+    && process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV] !== "1"
+  ) {
+    throw new Error(
+      `Remote Base URL must use https; set ${ALLOW_INSECURE_PROVIDER_HTTP_ENV}=1 to allow insecure HTTP explicitly`,
+    );
   }
   return normalized;
 }
@@ -1237,7 +1257,13 @@ function configuredProviderRegistration(
 
   const registration: ProviderConfig = {};
   if (typeof config.name === "string") registration.name = config.name;
-  if (typeof config.baseUrl === "string") registration.baseUrl = config.baseUrl;
+  if (typeof config.baseUrl === "string") {
+    try {
+      registration.baseUrl = normalizeBaseUrl(config.baseUrl);
+    } catch {
+      return { name: fallbackName };
+    }
+  }
   if (typeof config.apiKey === "string") registration.apiKey = config.apiKey;
   if (typeof config.api === "string") registration.api = config.api;
   if (typeof config.streamSimple === "function") registration.streamSimple = config.streamSimple as ProviderConfig["streamSimple"];
@@ -1265,7 +1291,13 @@ function configuredProviderRegistration(
       maxTokens: typeof model.maxTokens === "number" ? model.maxTokens : 16_384,
     };
     if (typeof model.api === "string") clone.api = model.api;
-    if (typeof model.baseUrl === "string") clone.baseUrl = model.baseUrl;
+    if (typeof model.baseUrl === "string") {
+      try {
+        clone.baseUrl = normalizeBaseUrl(model.baseUrl);
+      } catch {
+        return [];
+      }
+    }
     if (normalizedMap) clone.thinkingLevelMap = normalizedMap;
     if (isStringRecord(model.headers)) clone.headers = { ...model.headers };
     const compat = materializeProviderCompat(config.compat, model.compat);

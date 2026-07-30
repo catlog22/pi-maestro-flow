@@ -90,8 +90,16 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				// graph(...) is the dispatch container, not an additional worker. Keep it
 				// in AgentsStore for linkage and cleanup, and bridge its visible descendants
 				// to the nearest non-graph ancestor for rendering.
-				const agents = visibleAgentRows(deps.getAgents());
-				if (agents.length === 0) return [];
+				const roster = visibleAgentRows(deps.getAgents());
+				if (roster.length === 0) return [];
+				// Quiet mode keeps the roster fully expanded (role, task, state, duration,
+				// tool, tokens) but strips the live streaming tail: that per-message text
+				// updates on every teammate message and is exactly the dynamic noise quiet
+				// mode exists to suppress. Header counts are tail-independent, so reading
+				// them from the stripped rows leaves the summary unchanged.
+				const agents = cfg.quietMode
+					? roster.map((row) => (row.tail ? { ...row, tail: "" } : row))
+					: roster;
 				const g = resolveGlyphs(cfg.icons.mode);
 				const now = Date.now();
 				const animating = deps.isAnimating?.() ?? true;

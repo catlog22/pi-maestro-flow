@@ -23,6 +23,7 @@ export interface PlanConfirmationOptions {
   canClearContext: boolean;
   canCompactContext?: boolean;
   contextPercent?: number;
+  preferNewSession?: boolean;
 }
 
 interface ConfirmationItem {
@@ -55,7 +56,7 @@ export async function openPlanConfirmation(
         { action: "exit-plan", label: "Exit Plan mode", description: "Keep the draft and return to Act mode without approval", enabled: true },
       ];
       const markdown = new Markdown(options.markdown, 0, 0, markdownTheme(theme));
-      let selected = 0;
+      let selected = options.preferNewSession && contextItem.enabled ? 1 : 0;
       let previewOffset = 0;
       let previewMaxOffset = 0;
       let status = "";
@@ -167,7 +168,7 @@ export async function openPlanConfirmation(
             choose();
             return;
           } else if (matchesKey(data, Key.ctrl("enter")) || CTRL_ENTER_SEQUENCES.has(data)) {
-            choose("execute");
+            choose(options.preferNewSession && contextItem.enabled ? contextItem.action : "execute");
             return;
           } else if (matchesKey(data, Key.escape)) {
             done("close");
@@ -204,6 +205,14 @@ function unavailableMessage(item: ConfirmationItem): string {
 }
 
 function contextExecutionItem(options: PlanConfirmationOptions): ConfirmationItem {
+  if (options.preferNewSession && options.canClearContext) {
+    return {
+      action: "execute-clear",
+      label: "Execute in new session",
+      description: "Start with a clean context and inject the approved Plan",
+      enabled: true,
+    };
+  }
   const contextPercent = options.contextPercent ?? 0;
   if (contextPercent > 50 && options.canCompactContext !== false) {
     return {

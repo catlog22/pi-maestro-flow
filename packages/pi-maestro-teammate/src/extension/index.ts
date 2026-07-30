@@ -1816,6 +1816,7 @@ export default function registerTeammateExtension(
               .map((name) => taskIndexByName.get(name))
               .filter((dependency): dependency is number => dependency !== undefined),
             status: "pending",
+            requestedModel: task.model,
           });
         });
       }
@@ -1844,6 +1845,7 @@ export default function registerTeammateExtension(
         inbox: [],
         outputLog: [],
         lastActivityAt: Date.now(),
+        requestedModel: isMultiTask ? undefined : singleTask.model,
         replyTo: params.reply_to,
         // Root-tool dispatches start the tree.
         depth: 0,
@@ -1895,6 +1897,7 @@ export default function registerTeammateExtension(
             inbox: [],
             outputLog: [],
             lastActivityAt: Date.now(),
+            requestedModel: task.model,
             spawnedBy: correlationId,
             // Graph tasks belong to their dispatch, so they share its depth;
             // a teammate call made *by* one of them is what advances it.
@@ -1957,15 +1960,18 @@ export default function registerTeammateExtension(
           }),
           onRetry: (retry) => applyAgentRetryState(state, retry),
           onTurnComplete: (result: SingleResult) => {
-          const lastMessage = displayMessageForResult(result);
-          const settle = isMultiTask ? settleGraphTaskAgent : settleAgent;
-          settle(
-            state,
-            result.correlationId,
-            result.exitCode,
-            lastMessage,
-            result.wakeable !== false,
-          );
+            const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
+            target.resolvedModel = target.resolvedModel ?? result.model;
+            if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
+            const lastMessage = displayMessageForResult(result);
+            const settle = isMultiTask ? settleGraphTaskAgent : settleAgent;
+            settle(
+              state,
+              result.correlationId,
+              result.exitCode,
+              lastMessage,
+              result.wakeable !== false,
+            );
           },
           onProgress: (() => {
           const UPDATE_INTERVAL = 300; // ms — throttle TUI updates
@@ -2005,6 +2011,9 @@ export default function registerTeammateExtension(
               durationMs: data.durationMs,
               lastActivityAt: data.lastActivityAt,
               resultReadyAt: data.resultReadyAt,
+              requestedModel: data.requestedModel ?? existing?.requestedModel,
+              resolvedModel: data.resolvedModel ?? existing?.resolvedModel,
+              attemptedModels: data.attemptedModels ?? existing?.attemptedModels,
               ...(data.lastMessage
                 ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
                 : {}),
@@ -2022,6 +2031,11 @@ export default function registerTeammateExtension(
               clearAgentResultReadyState(state, entry.correlationId);
             }
             const childAgent = state.activeRuns.get(entry.correlationId);
+            if (childAgent) {
+              childAgent.requestedModel = entry.requestedModel ?? childAgent.requestedModel;
+              childAgent.resolvedModel = entry.resolvedModel ?? childAgent.resolvedModel;
+              childAgent.attemptedModels = entry.attemptedModels ?? childAgent.attemptedModels;
+            }
             if (childAgent && childAgent !== activeAgent) {
               childAgent.lastActivityAt = Date.now();
               childAgent.status = entry.status === "completed" ? "sleeping" : entry.status;
@@ -2255,7 +2269,8 @@ export default function registerTeammateExtension(
               settleAgent(state, correlationId, exitCode, summaries, params.context !== "fork");
               emitComplete(pi, id, activeGraphMode, correlationId, exitCode, totalDur);
 
-              pi.sendMessage(
+              safeSendMessage(
+                pi,
                 {
                   customType: "teammate-complete",
                   content: summaries,
@@ -2390,7 +2405,8 @@ export default function registerTeammateExtension(
             if (!result.lifecyclePending) {
               settleAgent(state, correlationId, result.exitCode, lastMsg, result.wakeable !== false);
             }
-            pi.sendMessage(
+            safeSendMessage(
+              pi,
               {
                 customType: "teammate-complete",
                 content: lastMsg,
@@ -2430,7 +2446,8 @@ export default function registerTeammateExtension(
             settleAgent(state, correlationId, result.exitCode, lastMsg, result.wakeable !== false);
           }
 
-          pi.sendMessage(
+          safeSendMessage(
+            pi,
             {
               customType: "teammate-complete",
               content: lastMsg,
@@ -3478,6 +3495,9 @@ interface ListedAgent {
   resultReadyAt?: number;
   /** Relayed permission/question requests this agent is blocked on. */
   pendingInteractions?: number;
+  requestedModel?: string;
+  resolvedModel?: string;
+  attemptedModels?: string[];
 }
 
 export function buildRoleList(cwd: string): { entries: AgentSummary[]; text: string } {
@@ -3562,6 +3582,9 @@ export function buildAgentList(
       depth,
       treePrefix,
       status: entry.status,
+      requestedModel: entry.requestedModel,
+      resolvedModel: entry.resolvedModel,
+      attemptedModels: entry.attemptedModels,
       ...(entry.resultReadyAt !== undefined ? { resultReadyAt: entry.resultReadyAt } : {}),
       ...(entry.pendingInteractions?.size ? { pendingInteractions: entry.pendingInteractions.size } : {}),
     });
@@ -3609,6 +3632,9 @@ export function buildAgentList(
         dependencies: progress.dependencies,
         toolCount: progress.toolCount,
         tokens: progress.tokens,
+        requestedModel: progress.requestedModel,
+        resolvedModel: progress.resolvedModel,
+        attemptedModels: progress.attemptedModels,
         ...(progress.resultReadyAt !== undefined ? { resultReadyAt: progress.resultReadyAt } : {}),
       });
       childIndex++;
@@ -3657,6 +3683,14 @@ export function buildAgentList(
           stalled ? `STALLED idle ${idleSeconds}s` : idleSeconds >= 5 ? `idle ${idleSeconds}s` : "",
           entry.toolCount ? `${entry.toolCount} tools` : "",
           entry.tokens ? `${entry.tokens} tok` : "",
+          entry.resolvedModel
+            ? `model=${entry.resolvedModel}`
+            : entry.requestedModel
+              ? `requested=${entry.requestedModel}`
+              : "",
+          entry.attemptedModels && entry.attemptedModels.length > 1
+            ? `attempted=${entry.attemptedModels.join(",")}`
+            : "",
           entry.inboxSize ? `inbox=${entry.inboxSize}` : "",
         ].filter(Boolean).join(" · ");
         return `${entry.treePrefix}${iconFor(entry.status)} ${identity} · ${metadata}`;
@@ -3776,6 +3810,15 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
       "---",
       ...log,
     ];
+    if (agent.resolvedModel || agent.requestedModel) {
+      output.push(
+        `Model: ${agent.resolvedModel ?? "not reported"}`
+        + (agent.requestedModel ? ` (requested ${agent.requestedModel})` : ""),
+      );
+    }
+    if (agent.attemptedModels && agent.attemptedModels.length > 1) {
+      output.push(`Attempted models: ${agent.attemptedModels.join(", ")}`);
+    }
     if (agent.status === "retrying" && agent.retry) {
       const retryIn = Math.max(0, Math.ceil((agent.retry.nextRetryAt - Date.now()) / 1000));
       output.push(`Retry ${agent.retry.attempt}/${agent.retry.maxRetries} in ${retryIn}s: ${agent.retry.lastError}`);
@@ -3812,6 +3855,15 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
     "---",
     ...log,
   ];
+  if (progress.resolvedModel || progress.requestedModel) {
+    output.push(
+      `Model: ${progress.resolvedModel ?? "not reported"}`
+      + (progress.requestedModel ? ` (requested ${progress.requestedModel})` : ""),
+    );
+  }
+  if (progress.attemptedModels && progress.attemptedModels.length > 1) {
+    output.push(`Attempted models: ${progress.attemptedModels.join(", ")}`);
+  }
   const lastMessage = progress.lastMessage?.trim();
   if (progress.resultReadyAt !== undefined && progress.status === "running") {
     output.push("Pi completed a no-tool assistant turn; final agent_end confirmation is pending.");
@@ -4043,6 +4095,28 @@ function emitComplete(
   });
 }
 
+/**
+ * Deferred background and IPC callbacks routinely outlive session replacement:
+ * after ctx.newSession()/fork()/switchSession()/reload() the host invalidates
+ * the captured ExtensionAPI and every action method throws synchronously via
+ * assertActive. The notification target no longer exists, and agent state has
+ * already settled via settleAgent/killAgent plus eventBus emit (which is not
+ * guarded), so drop the send instead of letting the throw escape into an
+ * unhandled rejection that kills the pi process.
+ */
+export function safeSendMessage(
+  pi: ExtensionAPI,
+  message: Parameters<ExtensionAPI["sendMessage"]>[0],
+  options?: Parameters<ExtensionAPI["sendMessage"]>[1],
+): void {
+  try {
+    pi.sendMessage(message, options);
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("extension ctx is stale")) return;
+    console.error("[pi-maestro-teammate] deferred sendMessage failed:", error);
+  }
+}
+
 export function notifyBackgroundFailure(
   pi: ExtensionAPI,
   id: string,
@@ -4054,7 +4128,8 @@ export function notifyBackgroundFailure(
     `Background teammate failed (agent=${agent}, correlationId=${correlationId}, phase=background-promise): `
     + `${error instanceof Error ? error.message : String(error)}`;
   emitComplete(pi, id, agent, correlationId, 1, 0);
-  pi.sendMessage(
+  safeSendMessage(
+    pi,
     {
       customType: "teammate-complete",
       content: message,
@@ -4319,6 +4394,10 @@ function settleAgentLifecycle(
 ): void {
   clearAgentResultReadyState(state, correlationId);
   if (exitCode !== 0) {
+    const agent = state.activeRuns.get(correlationId);
+    if (agent && lastResult !== undefined) {
+      agent.lastResult = truncateUtf8Tail(lastResult, AGENT_BUFFER_LIMITS.lastResultBytes);
+    }
     killAgent(state, correlationId, undefined, "failed", abortProcess);
     return;
   }
@@ -4371,6 +4450,9 @@ export function recordSettledAgent(
     status,
     settledAt: Date.now(),
     ...(agent.lastResult ? { lastResult: agent.lastResult } : {}),
+    ...(agent.requestedModel ? { requestedModel: agent.requestedModel } : {}),
+    ...(agent.resolvedModel ? { resolvedModel: agent.resolvedModel } : {}),
+    ...(agent.attemptedModels ? { attemptedModels: [...agent.attemptedModels] } : {}),
   });
   while (memo.size > SETTLED_AGENT_MEMO_LIMIT) {
     const oldest = memo.keys().next();
@@ -4654,7 +4736,7 @@ export async function handleChildInteractionRequest(
     : questionSummary(payload.questions);
   const parentAuthorization = interaction === "permission" && payload.authorization === "parent";
   if (!parentAuthorization) {
-    pi.sendMessage({
+    safeSendMessage(pi, {
       customType: "teammate-interaction-request",
       content: `? @${agentLabel} ${interaction}\n${requestSummary}`,
       display: true,
@@ -5386,6 +5468,7 @@ export async function handleProxyRequest(
             .map((name) => taskIndexByName.get(name))
             .filter((dependency): dependency is number => dependency !== undefined),
           status: "pending",
+          requestedModel: task.model,
         });
       });
       const progressSnapshot = (): AgentProgressSnapshot[] =>
@@ -5402,6 +5485,7 @@ export async function handleProxyRequest(
         inbox: [],
         outputLog: [],
         lastActivityAt: Date.now(),
+        requestedModel: normalizedTasks ? undefined : singleTask.model,
         spawnedBy: parentCid,
         depth: dispatchDepth,
         status: "running",
@@ -5467,6 +5551,7 @@ export async function handleProxyRequest(
           inbox: [],
           outputLog: [],
           lastActivityAt: Date.now(),
+          requestedModel: task.model,
           spawnedBy: cid,
           depth: dispatchDepth,
           status: "pending",
@@ -5482,7 +5567,8 @@ export async function handleProxyRequest(
 
       const spawnerAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
       const spawnerLabel = spawnerAgent?.name ?? spawnerAgent?.agent ?? "proxy";
-      pi.sendMessage(
+      safeSendMessage(
+        pi,
         {
           customType: "teammate-started",
           content: `● @${spawnerLabel} spawned @${singleTask.name ?? activeAgent.agent}`,
@@ -5514,6 +5600,9 @@ export async function handleProxyRequest(
           durationMs: data.durationMs,
           lastActivityAt: data.lastActivityAt,
           resultReadyAt: data.resultReadyAt,
+          requestedModel: data.requestedModel ?? existing?.requestedModel,
+          resolvedModel: data.resolvedModel ?? existing?.resolvedModel,
+          attemptedModels: data.attemptedModels ?? existing?.attemptedModels,
           ...(data.lastMessage
             ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
             : {}),
@@ -5533,6 +5622,11 @@ export async function handleProxyRequest(
         activeAgent.lastActivityAt = Date.now();
 
         const childAgent = state.activeRuns.get(correlationId);
+        if (childAgent) {
+          childAgent.requestedModel = entry.requestedModel ?? childAgent.requestedModel;
+          childAgent.resolvedModel = entry.resolvedModel ?? childAgent.resolvedModel;
+          childAgent.attemptedModels = entry.attemptedModels ?? childAgent.attemptedModels;
+        }
         if (childAgent && childAgent !== activeAgent) {
           childAgent.lastActivityAt = Date.now();
           childAgent.status = data.status === "completed" ? "sleeping" : data.status;
@@ -5637,6 +5731,9 @@ export async function handleProxyRequest(
           );
         },
         onTurnComplete: (result) => {
+          const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
+          target.resolvedModel = target.resolvedModel ?? result.model;
+          if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
           const lastMessage = displayMessageForResult(result);
           const settle = normalizedTasks ? settleGraphTaskAgent : settleAgent;
           settle(
@@ -5778,7 +5875,8 @@ export async function handleProxyRequest(
             reportChildStatus(completed.exitCode === 0 ? "completed" : "failed");
             emitNestedComplete(completed.exitCode);
           }
-          pi.sendMessage(
+          safeSendMessage(
+            pi,
             {
               customType: "teammate-complete",
               content: completed.summary,
@@ -5988,7 +6086,8 @@ export async function handleProxyRequest(
       // Notify main session TUI
       const senderAgent = spawnedBy ? state.activeRuns.get(spawnedBy) : undefined;
       const senderLabel = senderAgent?.name ?? senderAgent?.agent ?? "agent";
-      pi.sendMessage(
+      safeSendMessage(
+        pi,
         {
           customType: "teammate-message",
           content: `● @${senderLabel} → @${to} (${mode}): ${message.slice(0, 120)}`,

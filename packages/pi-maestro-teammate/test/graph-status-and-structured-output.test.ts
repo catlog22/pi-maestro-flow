@@ -150,13 +150,28 @@ function createStructuredSpawn(
     });
     queueMicrotask(() => {
       stdout.write(`${JSON.stringify({ type: "tool_execution_start", toolName: "read" })}\n`);
+      if (value !== undefined) {
+        stdout.write(`${JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "structured-call", name: "structured_output", arguments: value }],
+          },
+        })}\n`);
+        stdout.write(`${JSON.stringify({
+          type: "tool_execution_end",
+          toolName: "structured_output",
+          toolCallId: "structured-call",
+          isError: false,
+        })}\n`);
+      }
       stdout.write(`${JSON.stringify({
         type: "agent_end",
         message: {
           role: "assistant",
           content: value === undefined
             ? [{ type: "text", text: "plain result" }]
-            : [{ type: "toolCall", name: "structured_output", arguments: value }],
+            : [],
         },
       })}\n`);
     });
@@ -192,13 +207,28 @@ function createAbortAwareStructuredSpawn(
     queueMicrotask(() => {
       if (killed) return;
       settled = true;
+      if (value !== undefined) {
+        stdout.write(`${JSON.stringify({
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [{ type: "toolCall", id: "structured-call", name: "structured_output", arguments: value }],
+          },
+        })}\n`);
+        stdout.write(`${JSON.stringify({
+          type: "tool_execution_end",
+          toolName: "structured_output",
+          toolCallId: "structured-call",
+          isError: false,
+        })}\n`);
+      }
       stdout.write(`${JSON.stringify({
         type: "agent_end",
         message: {
           role: "assistant",
           content: value === undefined
             ? [{ type: "text", text: "consumer completed" }]
-            : [{ type: "toolCall", name: "structured_output", arguments: value }],
+            : [],
         },
       })}\n`);
     });
@@ -1644,6 +1674,9 @@ test("teammate-list expands graph tasks and watch keeps sleeping messages visibl
       inbox: [],
       outputLog: [`[10:00:00] @api#11111111 │ found /health`],
       lastActivityAt: now - 1000,
+      requestedModel: "maestro-qwen/qwen3.8-max-preview",
+      resolvedModel: "qwen3.8-max-preview",
+      attemptedModels: ["deepseek/deepseek-v4-pro", "maestro-qwen/qwen3.8-max-preview"],
       status: "sleeping",
       sleptAt: now - 1000,
       depth: 0,
@@ -1657,19 +1690,25 @@ test("teammate-list expands graph tasks and watch keeps sleeping messages visibl
         status: "completed",
         startedAt: new Date(now - 4000).toISOString(),
         completedAt: new Date(now - 1500).toISOString(),
+        requestedModel: "deepseek/deepseek-v4-pro",
+        resolvedModel: "qwen3.8-max-preview",
+        attemptedModels: ["deepseek/deepseek-v4-pro", "maestro-qwen/qwen3.8-max-preview"],
         lastMessage: "found /health",
       }],
     }]]),
   };
 
   const listed = buildAgentList(state, "active");
-  assert.match(listed.text, /◉ \[graph\(2\)\].*id=aaaaaaaa/);
-  assert.match(listed.text, /└─ ✓ \[scout\] name="api".*id=11111111/);
+  assert.match(listed.text, /◉ \[graph\(2\)\].*id=aaaaaaaa.*model=qwen3\.8-max-preview/);
+  assert.match(listed.text, /└─ ✓ \[scout\] name="api".*id=11111111.*model=qwen3\.8-max-preview/);
+  assert.match(listed.text, /attempted=deepseek\/deepseek-v4-pro,maestro-qwen\/qwen3\.8-max-preview/);
 
   const resolved = resolveWatchTarget(state, "11111111");
   assert.equal(resolved.match?.kind, "graph-task");
   assert.ok(resolved.match);
   const watched = buildWatchOutput(resolved.match, 20).join("\n");
+  assert.match(watched, /Model: qwen3\.8-max-preview \(requested deepseek\/deepseek-v4-pro\)/);
+  assert.match(watched, /Attempted models: deepseek\/deepseek-v4-pro, maestro-qwen\/qwen3\.8-max-preview/);
   assert.match(watched, /found \/health/);
   assert.match(watched, /graph is sleeping/);
 });
@@ -2413,6 +2452,40 @@ test("teammate-watch can recover a sleeping agent's complete last result", () =>
   assert.match(watched, /--- last result ---/);
   assert.match(watched, /result line 1/);
   assert.match(watched, /result line 30/);
+});
+
+test("teammate-watch retains the diagnostic for a failed agent", () => {
+  const correlationId = "bbbbbbbb-failed";
+  const now = Date.now();
+  const state: TeammateState = {
+    baseCwd: process.cwd(),
+    currentSessionId: null,
+    namedAgents: new Map([["failed-review", correlationId]]),
+    activeRuns: new Map([[correlationId, {
+      agent: "reviewer",
+      name: "failed-review",
+      correlationId,
+      startedAt: now - 1000,
+      abortController: new AbortController(),
+      inbox: [],
+      outputLog: [],
+      lastActivityAt: now - 100,
+      status: "running",
+      depth: 0,
+      sleepMs: 0,
+    }]]),
+  };
+
+  settleAgent(state, correlationId, 1, "provider failed after fallback exhaustion", false);
+
+  const failed = state.activeRuns.get(correlationId);
+  assert.equal(failed?.status, "failed");
+  assert.equal(failed?.lastResult, "provider failed after fallback exhaustion");
+  const resolved = resolveWatchTarget(state, "failed-review");
+  assert.equal(resolved.match?.kind, "agent");
+  assert.ok(resolved.match);
+  const watched = buildWatchOutput(resolved.match, 20).join("\n");
+  assert.match(watched, /provider failed after fallback exhaustion/);
 });
 
 test("background completion renderer stays compact but expands to the full result", () => {

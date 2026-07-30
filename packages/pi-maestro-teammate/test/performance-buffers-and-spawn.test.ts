@@ -1248,6 +1248,66 @@ test("billing failures advance to the fallback model without retrying the exhaus
   assert.deepEqual(launchedModels, ["provider/backup"]);
 });
 
+test("candidate failure does not publish a terminal lifecycle before fallback completes", async () => {
+  const launchedModels: string[] = [];
+  const completions: SingleResult[] = [];
+  const controller = new AbortController();
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    const modelIndex = args.indexOf("--model");
+    const model = args[modelIndex + 1];
+    launchedModels.push(model);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      if (model === "provider/primary") {
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", stopReason: "error", errorMessage: "402: Insufficient Balance" },
+        })}\n`);
+      } else {
+        stdout.write(`${JSON.stringify({
+          type: "message_end",
+          message: { role: "assistant", content: [{ type: "text", text: "fallback recovered" }] },
+        })}\n`);
+      }
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    {
+      agent: "general",
+      task: "Use a funded model",
+      model: "provider/primary",
+      fallbackModels: ["provider/backup"],
+      context: "fork",
+    },
+    {
+      baseCwd: process.cwd(),
+      modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+      spawnChildProcess,
+      signal: controller.signal,
+      onTurnComplete(result) {
+        completions.push(result);
+        if (result.exitCode !== 0) controller.abort();
+      },
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.deepEqual(launchedModels, ["provider/primary", "provider/backup"]);
+  assert.deepEqual(result.attemptedModels, ["provider/primary", "provider/backup"]);
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0].exitCode, 0);
+  assert.equal(controller.signal.aborted, false);
+});
+
 test("permanent provider failures override overlapping billing fallback markers", async () => {
   const launchedModels: string[] = [];
   const spawnChildProcess = adaptFakeSpawn((_command, args) => {
@@ -1610,6 +1670,54 @@ test("structured_output tool completion settles the child without waiting for ag
   assert.equal(result.messages.some((message) => /late assistant wake|Structured output saved/.test(message.content)), false);
   assert.equal(completionObserverCalled, true);
   assert.equal(killed, true, "settled child must be reclaimed after final structured output");
+});
+
+test("structured_output arguments are rejected when tool execution fails", async () => {
+  const schema = {
+    type: "object",
+    additionalProperties: false,
+    required: ["answer"],
+    properties: { answer: { type: "string" } },
+  };
+  const spawnChildProcess = adaptFakeSpawn(() => {
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({
+        type: "assistant",
+        message: {
+          content: [{
+            type: "toolCall",
+            id: "structured-call",
+            name: "structured_output",
+            arguments: { answer: "not persisted" },
+          }],
+        },
+      })}\n`);
+      stdout.write(`${JSON.stringify({
+        type: "tool_execution_end",
+        toolName: "structured_output",
+        toolCallId: "structured-call",
+        isError: true,
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Return structured output", outputSchema: schema, timeoutMs: 2_000 },
+    { baseCwd: process.cwd(), spawnChildProcess },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.structuredOutput, undefined);
+  assert.match(result.messages.at(-1)?.content ?? "", /schema-valid value/);
 });
 
 test("parent rejects a schema-invalid structured output file", async () => {

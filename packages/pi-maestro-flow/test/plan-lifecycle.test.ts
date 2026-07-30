@@ -871,6 +871,26 @@ test("Approved Plan handoff stays satisfied after execution switches to a qualit
   }
 });
 
+test("compatibility capture cannot downgrade an approved Plan", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-approved-capture-"));
+  const harness = createHarness(root, true);
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Approved" });
+    await execute(harness, "plan-confirm");
+    await execute(harness, "plan-enter");
+    await onAgentEndPlan({
+      messages: [{ role: "assistant", content: "<proposed_plan># Replacement</proposed_plan>" }],
+    }, harness.ctx);
+    const status = await execute(harness, "plan-status");
+    assert.equal(status.details.status, "approved");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Compatibility capture errors are isolated inside the Plan hook", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-capture-fail-"));
   const harness = createHarness(root, false, false, true);

@@ -1,5 +1,10 @@
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+  ContextUsage,
+  ExtensionAPI,
+  ExtensionContext,
+  SessionBeforeCompactEvent,
+} from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_SOFT_COMPACTION,
   readEffectiveCompactionSettings,
@@ -9,6 +14,7 @@ import {
 import {
   type CompactionArbiter,
   type CompactionLease,
+  type CompactionOwner,
   type CompactionTrigger,
 } from "./compaction-arbiter.ts";
 import {
@@ -200,12 +206,31 @@ export function disableInvalidBudgetThinking(payload: unknown): unknown {
   };
 }
 
+interface PendingCompactionIntent {
+  generation: number;
+  triggerKey: string;
+  estimate: ContextEstimate;
+  linkedThreshold: LinkedCompactionThresholdModel & { usable: true };
+  settings: CompactionSettings;
+  effectiveSettings: CompactionSettings;
+  contextExhausted: boolean;
+}
+
+interface PendingOutputLimitIntent {
+  generation: number;
+  settings: CompactionSettings;
+  usage: ContextUsage;
+  threshold: number;
+}
+
 interface AutoCompactionState {
   running: boolean;
   generation: number;
   nextOwner: number;
   activeOwner?: number;
   activeLease?: CompactionLease;
+  pendingIntent?: PendingCompactionIntent;
+  pendingOutputLimitIntent?: PendingOutputLimitIntent;
   lastTriggerKey?: string;
   internalsWarningShown: boolean;
   lastNoCompactableKey?: string;
@@ -229,8 +254,6 @@ interface AutoCompactionState {
   prunedDuringEpoch?: string;
   /** Cache-ratio movement attributed to the prunes of the previous epoch. */
   cacheDelta?: number;
-  /** Serializes manifest mutation; `running` covers compaction, not this. */
-  evaluating: boolean;
 }
 
 interface AutoCompactionDependencies {
@@ -249,13 +272,28 @@ interface MessageRecord {
   stopReason?: unknown;
 }
 
+export interface ProjectedCompactionInput {
+  event: SessionBeforeCompactEvent;
+  estimatedInputTokens?: number;
+  prunedToolResults: number;
+}
+
+export function commitProjectedCompactionInput(
+  event: SessionBeforeCompactEvent,
+  projected: ProjectedCompactionInput,
+): void {
+  event.preparation.messagesToSummarize = projected.event.preparation.messagesToSummarize;
+  event.preparation.turnPrefixMessages = projected.event.preparation.turnPrefixMessages;
+}
+
 export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: AutoCompactionDependencies = {}): {
   onSessionStart(ctx: ExtensionContext): void;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
+  projectCompactionInput(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<ProjectedCompactionInput>;
   beforeProviderRequest(payload: unknown, ctx: ExtensionContext): unknown | undefined;
-  onAgentEnd(ctx: ExtensionContext): void;
+  onAgentEnd(ctx: ExtensionContext): Promise<void>;
   onOutputLimit(messages: AgentMessage[], ctx: ExtensionContext): Promise<void>;
-  onCompact(): void;
+  onCompact(completedOwner?: CompactionOwner): void;
   reset(ctx?: ExtensionContext): void;
   refreshSettings(): void;
 } {
@@ -272,8 +310,19 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     turnCount: 0,
     outputLimitCompactions: 0,
     outputLimitBreakerNotified: false,
-    evaluating: false,
   };
+  let transformTail = Promise.resolve();
+  async function withTransformLock<T>(run: () => Promise<T>): Promise<T> {
+    const previous = transformTail;
+    let release!: () => void;
+    transformTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await run();
+    } finally {
+      release();
+    }
+  }
   const loadInternals = dependencies.loadInternals ?? loadPiCompactionInternals;
   const readSettings = dependencies.readSettings ?? readEffectiveCompactionSettings;
   // Settings are reparsed at most once per turn boundary (F11): the snapshot is
@@ -320,10 +369,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.activeOwner = undefined;
     state.activeLease?.release();
     state.activeLease = undefined;
+    state.pendingIntent = undefined;
+    state.pendingOutputLimitIntent = undefined;
     state.lastTriggerKey = undefined;
     state.lastNoCompactableKey = undefined;
     state.internalsWarningShown = false;
-    state.evaluating = false;
   }
   function resetCycleState(): void {
     state.velocityTracker = EMPTY_VELOCITY_TRACKER;
@@ -364,6 +414,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return undefined;
       }
       const linkedThreshold = await linkedThresholdFor(ctx, settings);
+      if (generation !== state.generation) return undefined;
       if (!settings.enabled || !linkedThreshold.usable || linkedThreshold.contextWindow <= settings.reserveTokens) {
         if (state.sessionId) void cleanupSpillDir(state.sessionId);
         state.pruneManifest.clear();
@@ -422,146 +473,280 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       persistPruneManifest(pi, state);
       if (pressure.action !== "compact") {
         state.lastNoCompactableKey = undefined;
+        state.pendingIntent = undefined;
+        state.lastTriggerKey = undefined;
         return pressure.prunedToolResults > 0 ? pressure.messages : undefined;
       }
       const estimate = estimateContextTokens(pressure.messages);
       const thresholdTokens = pressure.thresholdTokens;
 
       const triggerKey = `${estimate.tokens}:${thresholdTokens}:${messages.length}`;
-      if (state.lastTriggerKey === triggerKey) return pressure.messages;
-      const breakerCheck = compactionBreakerAllows(state.breaker, state.turnCount);
-      // A cooldown that auto-resets clears the trip; without also clearing the
-      // notified flag the SECOND and later trips in a session stay silent.
-      if (state.breaker.trippedAtTurn !== undefined && breakerCheck.breaker.trippedAtTurn === undefined) {
-        state.breakerNotified = false;
+      if (state.pendingIntent?.triggerKey === triggerKey) return pressure.messages;
+
+      // The context transform owns pruning only. Full compaction is submitted
+      // after the agent settles, where it can re-read the branch and arbitrate
+      // with Pi's native compaction without a context-hook TOCTOU race.
+      const contextExhausted = estimate.tokens >= ctx.model.contextWindow;
+      state.pendingIntent = {
+        generation,
+        triggerKey,
+        estimate,
+        linkedThreshold,
+        settings,
+        effectiveSettings,
+        contextExhausted,
+      };
+      state.lastTriggerKey = triggerKey;
+      if (contextExhausted) {
+        // An actually overflowing request must never fall through to the
+        // provider while waiting for the settled-phase compaction owner.
+        ctx.abort();
       }
-      state.breaker = breakerCheck.breaker;
-      if (!breakerCheck.allowed) {
-        if (!state.breakerNotified) {
-          state.breakerNotified = true;
+      return pressure.messages;
+  }
+
+  async function settlePendingCompaction(ctx: ExtensionContext): Promise<void> {
+    const intent = state.pendingIntent;
+    if (!intent || state.running || intent.generation !== state.generation) return;
+
+    const clearPending = () => {
+      if (state.pendingIntent === intent) state.pendingIntent = undefined;
+      if (state.lastTriggerKey === intent.triggerKey) state.lastTriggerKey = undefined;
+    };
+    const breakerCheck = compactionBreakerAllows(state.breaker, state.turnCount);
+    if (state.breaker.trippedAtTurn !== undefined && breakerCheck.breaker.trippedAtTurn === undefined) {
+      state.breakerNotified = false;
+    }
+    state.breaker = breakerCheck.breaker;
+    if (!breakerCheck.allowed) {
+      if (!state.breakerNotified) {
+        state.breakerNotified = true;
+        ctx.ui.notify(
+          `Mid-turn compaction paused after ${state.breaker.consecutiveFailures} consecutive failures; retrying after ${COMPACTION_BREAKER_COOLDOWN_TURNS} turns.`,
+          "warning",
+        );
+      }
+      clearPending();
+      return;
+    }
+
+    let internals: PiCompactionInternals;
+    try {
+      internals = await loadInternals();
+    } catch (error) {
+      if (intent.generation !== state.generation) return;
+      clearPressureStatus(ctx);
+      if (!state.internalsWarningShown) {
+        state.internalsWarningShown = true;
+        ctx.ui.notify(`Mid-turn compaction disabled: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      }
+      clearPending();
+      return;
+    }
+    if (intent.generation !== state.generation || state.running) return;
+    if (dependencies.arbiter?.currentOwner()) {
+      clearPending();
+      return;
+    }
+
+    const branch = ctx.sessionManager.getBranch();
+    let preparation: unknown;
+    try {
+      preparation = internals.prepareCompaction(branch, intent.settings);
+    } catch (error) {
+      clearPressureStatus(ctx);
+      ctx.ui.notify(`Mid-turn compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      clearPending();
+      return;
+    }
+    if (!preparation) {
+      ctx.ui.setStatus(
+        COMPACTION_STATUS_KEY,
+        `CTX CRITICAL ${intent.estimate.tokens}/${intent.linkedThreshold.thresholdTokens}`,
+      );
+      const noCompactableKey = `${intent.contextExhausted ? "exhausted" : "critical"}:${intent.linkedThreshold.thresholdTokens}:${intent.settings.keepRecentTokens}:${branch.length}`;
+      if (state.lastNoCompactableKey !== noCompactableKey) {
+        state.lastNoCompactableKey = noCompactableKey;
+        if (intent.contextExhausted) {
           ctx.ui.notify(
-            `Mid-turn compaction paused after ${state.breaker.consecutiveFailures} consecutive failures; retrying after ${COMPACTION_BREAKER_COOLDOWN_TURNS} turns.`,
+            `Mid-turn request stopped: context is already ${intent.estimate.tokens}/${ctx.model?.contextWindow ?? intent.linkedThreshold.contextWindow} tokens and Pi has no compactable history. Start a new session or reduce static prompt/tool scope.`,
+            "error",
+          );
+        } else {
+          ctx.ui.notify(
+            "Mid-turn compaction skipped: Pi has no compactable history; context pressure is inside the recent keep window or static prompt overhead.",
             "warning",
           );
         }
-        return pressure.messages;
       }
-      let internals: PiCompactionInternals;
-      try {
-        internals = await loadInternals();
-      } catch (error) {
-        if (state.generation !== generation) return undefined;
-        clearPressureStatus(ctx);
-        if (!state.internalsWarningShown) {
-          state.internalsWarningShown = true;
-          ctx.ui.notify(`Mid-turn compaction disabled: ${error instanceof Error ? error.message : String(error)}`, "warning");
-        }
-        return pressure.messages;
-      }
-      if (state.generation !== generation || state.running) return undefined;
-      // Defer before Pi's prepareCompaction scan: an in-flight owner will deny the
-      // lease anyway, and preparing a compaction we cannot own widens the TOCTOU
-      // window that can surface "Already compacted".
-      if (dependencies.arbiter?.currentOwner()) return pressure.messages;
-      const branch = ctx.sessionManager.getBranch();
-      let preparation: unknown;
-      try {
-        preparation = internals.prepareCompaction(branch, settings);
-      } catch (error) {
-        clearPressureStatus(ctx);
-        ctx.ui.notify(`Mid-turn compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
-        return pressure.messages;
-      }
-      if (!preparation) {
-        ctx.ui.setStatus(COMPACTION_STATUS_KEY, `CTX CRITICAL ${pressure.estimatedTokens}/${thresholdTokens}`);
-        const contextExhausted = pressure.estimatedTokens >= ctx.model.contextWindow;
-        const noCompactableKey = `${contextExhausted ? "exhausted" : "critical"}:${thresholdTokens}:${settings.keepRecentTokens}:${branch.length}`;
-        if (state.lastNoCompactableKey !== noCompactableKey) {
-          state.lastNoCompactableKey = noCompactableKey;
-          if (contextExhausted) {
-            ctx.ui.notify(
-              `Mid-turn request stopped: context is already ${pressure.estimatedTokens}/${ctx.model.contextWindow} tokens and Pi has no compactable history. Start a new session or reduce static prompt/tool scope.`,
-              "error",
-            );
-          } else {
-            ctx.ui.notify(
-              "Mid-turn compaction skipped: Pi has no compactable history; context pressure is inside the recent keep window or static prompt overhead.",
-              "warning",
-            );
+      clearPending();
+      return;
+    }
+
+    state.lastNoCompactableKey = undefined;
+    const midTurnTrigger = buildMidTurnTrigger({
+      estimatedTokens: intent.estimate.tokens,
+      threshold: intent.linkedThreshold,
+      configuredReserveTokens: intent.settings.reserveTokens,
+    });
+    const lease = dependencies.arbiter?.request("mid-turn", midTurnTrigger);
+    if (dependencies.arbiter && !lease) {
+      clearPending();
+      return;
+    }
+    clearPending();
+    state.running = true;
+    state.activeLease = lease;
+    const owner = ++state.nextOwner;
+    state.activeOwner = owner;
+    const failCompaction = (error: unknown) => {
+      if (intent.generation !== state.generation || state.activeOwner !== owner) return;
+      state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
+      state.running = false;
+      state.activeOwner = undefined;
+      state.lastTriggerKey = undefined;
+      state.activeLease?.release();
+      state.activeLease = undefined;
+      clearPressureStatus(ctx);
+      ctx.ui.notify(`Mid-turn compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    };
+    try {
+      ctx.ui.setStatus(COMPACTION_STATUS_KEY, formatCompactionStatus({
+        owner: "mid-turn",
+        trigger: midTurnTrigger,
+        tokensBefore: intent.estimate.tokens,
+        contextWindow: intent.linkedThreshold.contextWindow,
+        configuredReserveTokens: intent.settings.reserveTokens,
+      }));
+      const instructions = buildMidTurnInstructions(
+        intent.estimate,
+        intent.linkedThreshold.contextWindow,
+        intent.effectiveSettings.reserveTokens,
+      );
+      ctx.compact({
+        customInstructions: state.activeLease?.tagInstructions(instructions) ?? instructions,
+        onComplete: () => {
+          if (state.activeOwner !== owner) return;
+          state.breaker = resetCompactionBreaker();
+          state.breakerNotified = false;
+          state.running = false;
+          state.activeOwner = undefined;
+          state.lastTriggerKey = undefined;
+          state.activeLease?.release();
+          state.activeLease = undefined;
+          clearPressureStatus(ctx);
+          if (!intent.contextExhausted || ctx.hasPendingMessages?.()) return;
+          try {
+            pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
+          } catch (error) {
+            ctx.ui.notify(`Mid-turn continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
           }
-        }
-        if (contextExhausted) {
-          ctx.abort();
-        }
-        return pressure.messages;
-      }
-      state.lastNoCompactableKey = undefined;
-      const midTurnTrigger = buildMidTurnTrigger({
-        estimatedTokens: estimate.tokens,
-        threshold: linkedThreshold,
-        configuredReserveTokens: settings.reserveTokens,
+        },
+        onError: failCompaction,
       });
-      const lease = dependencies.arbiter?.request("mid-turn", midTurnTrigger);
-      if (dependencies.arbiter && !lease) return pressure.messages;
-      state.lastTriggerKey = triggerKey;
-      state.running = true;
-      state.activeLease = lease;
-      const owner = ++state.nextOwner;
-      state.activeOwner = owner;
-      const failCompaction = (error: unknown) => {
-        if (state.generation !== generation || state.activeOwner !== owner) return;
-        state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
-        state.running = false;
-        state.activeOwner = undefined;
-        state.lastTriggerKey = undefined;
-        state.activeLease?.release();
-        state.activeLease = undefined;
-        clearPressureStatus(ctx);
-        ctx.ui.notify(`Mid-turn compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-      };
-      // ctx.abort() and the status/instruction calls used to sit OUTSIDE this
-      // try. A throw there stranded the arbiter lease and pinned running=true
-      // forever, silently disabling compaction for the rest of the session.
-      try {
-        ctx.abort();
-        ctx.ui.setStatus(COMPACTION_STATUS_KEY, formatCompactionStatus({
-          owner: "mid-turn",
-          trigger: midTurnTrigger,
-          tokensBefore: estimate.tokens,
-          contextWindow: capacityWindow,
-          configuredReserveTokens: settings.reserveTokens,
-        }));
-        const instructions = buildMidTurnInstructions(
-          estimate,
-          capacityWindow,
-          effectiveSettings.reserveTokens,
-        );
-        ctx.compact({
-          customInstructions: state.activeLease?.tagInstructions(instructions) ?? instructions,
-          onComplete: () => {
-            if (state.generation !== generation || state.activeOwner !== owner) return;
-            state.breaker = resetCompactionBreaker();
-            state.breakerNotified = false;
-            state.running = false;
-            state.activeOwner = undefined;
-            state.lastTriggerKey = undefined;
-            state.activeLease?.release();
-            state.activeLease = undefined;
-            clearPressureStatus(ctx);
-            // 压缩完成期间，Goal 或其他扩展可能已投递恢复提示；保留最先入队的续接。
-            if (ctx.hasPendingMessages?.()) return;
-            try {
-              pi.sendUserMessage(CONTINUE_PROMPT, { deliverAs: "followUp" });
-            } catch (error) {
-              ctx.ui.notify(`Mid-turn continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-            }
-          },
-          onError: failCompaction,
-        });
-      } catch (error) {
-        failCompaction(error);
-      }
-      return pressure.messages;
+    } catch (error) {
+      failCompaction(error);
+    }
+  }
+
+  async function settlePendingOutputLimit(ctx: ExtensionContext): Promise<boolean> {
+    const intent = state.pendingOutputLimitIntent;
+    if (!intent || state.running || intent.generation !== state.generation) return false;
+    const clearPending = () => {
+      if (state.pendingOutputLimitIntent === intent) state.pendingOutputLimitIntent = undefined;
+    };
+
+    let internals: PiCompactionInternals;
+    try {
+      internals = await loadInternals();
+    } catch (error) {
+      if (intent.generation !== state.generation) return false;
+      clearPending();
+      ctx.ui.notify(`Output-limit compaction disabled: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      return false;
+    }
+    if (intent.generation !== state.generation || state.running) return false;
+
+    let linkedThreshold: LinkedCompactionThresholdModel;
+    try {
+      linkedThreshold = await linkedThresholdFor(ctx, intent.settings);
+    } catch (error) {
+      if (intent.generation !== state.generation) return false;
+      clearPending();
+      ctx.ui.notify(`Output-limit compaction model resolution failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      return false;
+    }
+    if (intent.generation !== state.generation || state.running) return false;
+    if (dependencies.arbiter?.currentOwner()) return true;
+
+    const branch = ctx.sessionManager.getBranch();
+    let preparation: unknown;
+    try {
+      preparation = internals.prepareCompaction(branch, intent.settings);
+    } catch (error) {
+      clearPending();
+      ctx.ui.notify(`Output-limit compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      return false;
+    }
+    if (!preparation) {
+      clearPending();
+      ctx.ui.notify(
+        "Output-limit compaction skipped: Pi has no compactable history; the response keeps hitting the output token limit inside the recent keep window.",
+        "warning",
+      );
+      return false;
+    }
+
+    const instructionReserve = linkedThreshold.usable
+      ? linkedThreshold.effectiveReserveTokens
+      : effectiveReserveTokens(intent.settings, ctx.model?.contextWindow ?? intent.usage.contextWindow, ctx.model?.maxTokens);
+    const outputLimitTrigger: CompactionTrigger = {
+      owner: "output-limit",
+      usageTokens: intent.usage.tokens,
+      contextWindow: intent.usage.contextWindow,
+      usagePercent: intent.usage.percent,
+      gateRatio: intent.threshold,
+    };
+    const lease = dependencies.arbiter?.request("output-limit", outputLimitTrigger);
+    if (dependencies.arbiter && !lease) return true;
+
+    clearPending();
+    state.outputLimitCompactions += 1;
+    state.running = true;
+    state.activeLease = lease;
+    const owner = ++state.nextOwner;
+    state.activeOwner = owner;
+    const instructions = buildOutputLimitInstructions(intent.usage, instructionReserve);
+    const failOutputLimit = (error: unknown) => {
+      if (state.activeOwner !== owner) return;
+      state.running = false;
+      state.activeOwner = undefined;
+      state.activeLease?.release();
+      state.activeLease = undefined;
+      ctx.ui.notify(`Output-limit compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+    };
+    try {
+      ctx.compact({
+        customInstructions: lease?.tagInstructions(instructions) ?? instructions,
+        onComplete: () => {
+          if (state.activeOwner !== owner) return;
+          state.running = false;
+          state.activeOwner = undefined;
+          state.activeLease?.release();
+          state.activeLease = undefined;
+          if (ctx.hasPendingMessages?.()) return;
+          try {
+            pi.sendUserMessage(OUTPUT_LIMIT_CONTINUE_PROMPT, { deliverAs: "followUp" });
+          } catch (error) {
+            ctx.ui.notify(`Output-limit continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+          }
+        },
+        onError: failOutputLimit,
+      });
+    } catch (error) {
+      failOutputLimit(error);
+    }
+    return true;
   }
 
   return {
@@ -582,17 +767,57 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     async evaluate(messages, ctx) {
       const generation = state.generation;
       if (state.running) return undefined;
-      // The prune manifest is mutated across an await (spill upgrade), and
-      // `running` only covers compaction — it is not set until much later. A
-      // second context hook arriving mid-await would otherwise interleave writes
-      // into the same Map and persist a manifest reflecting neither run.
-      if (state.evaluating) return undefined;
-      state.evaluating = true;
-      try {
+      return await withTransformLock(async () => {
+        if (generation !== state.generation || state.running) return undefined;
         return await evaluateInner(messages, ctx, generation);
-      } finally {
-        state.evaluating = false;
-      }
+      });
+    },
+    async projectCompactionInput(event, ctx) {
+      const generation = state.generation;
+      return await withTransformLock(async () => {
+        if (generation !== state.generation) return { event, prunedToolResults: 0 };
+        const summaryCount = event.preparation.messagesToSummarize.length;
+        const messages = [
+          ...event.preparation.messagesToSummarize,
+          ...event.preparation.turnPrefixMessages,
+        ];
+        const settings = settingsFor(ctx);
+        const linkedThreshold = await linkedThresholdFor(ctx, settings);
+        if (generation !== state.generation) return { event, prunedToolResults: 0 };
+        const contextWindow = linkedThreshold.usable
+          ? linkedThreshold.contextWindow
+          : ctx.model?.contextWindow
+            ?? Math.max(1, event.preparation.tokensBefore + event.preparation.settings.reserveTokens);
+        const pressure = applyContextPressurePolicy(
+          messages,
+          contextWindow,
+          linkedThreshold.usable
+            ? { ...settings, reserveTokens: linkedThreshold.effectiveReserveTokens }
+            : settings,
+          state.pruneManifest,
+          state.velocityTracker,
+          true,
+        );
+        persistPruneManifest(pi, state);
+        if (pressure.prunedToolResults === 0) {
+          return { event, prunedToolResults: 0 };
+        }
+        return {
+          event: {
+            ...event,
+            preparation: {
+              ...event.preparation,
+              messagesToSummarize: pressure.messages.slice(0, summaryCount),
+              turnPrefixMessages: pressure.messages.slice(summaryCount),
+            },
+          },
+          estimatedInputTokens: pressure.messages.reduce(
+            (tokens, message) => tokens + estimateMessageTokens(message),
+            0,
+          ),
+          prunedToolResults: pressure.prunedToolResults,
+        };
+      });
     },
     beforeProviderRequest(payload, ctx) {
       const guarded = disableInvalidBudgetThinking(payload);
@@ -603,27 +828,33 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       );
       return guarded;
     },
-    onAgentEnd(ctx) {
+    async onAgentEnd(ctx) {
       state.turnCount += 1;
-      if (!state.running) {
-        // Turn boundary: refresh so settings edited during the turn are reflected.
+      const outputLimitPending = await settlePendingOutputLimit(ctx);
+      if (!state.running && !outputLimitPending) await settlePendingCompaction(ctx);
+      if (!state.running && !state.pendingIntent && !state.pendingOutputLimitIntent) {
         state.settingsSnapshot = undefined;
         publishIdleStatus(ctx, settingsFor(ctx).enabled);
-        clearPressureStatus(ctx);
+        if (!state.lastNoCompactableKey) clearPressureStatus(ctx);
       }
     },
     async onOutputLimit(messages, ctx) {
       const settings = settingsFor(ctx);
       const finalStopReason = finalAssistantStopReason(messages);
       if (!settings.enabled || !ctx.model || finalStopReason !== "length") {
+        state.pendingOutputLimitIntent = undefined;
         state.outputLimitCompactions = 0;
         state.outputLimitBreakerNotified = false;
         return;
       }
       const usage = ctx.getContextUsage?.();
       const threshold = settings.soft?.pruneRatio ?? DEFAULT_OUTPUT_LIMIT_RATIO;
-      if (usage?.percent == null || usage.percent / 100 < threshold) return;
+      if (!usage || usage.percent == null || usage.percent / 100 < threshold) {
+        state.pendingOutputLimitIntent = undefined;
+        return;
+      }
       if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS) {
+        state.pendingOutputLimitIntent = undefined;
         if (!state.outputLimitBreakerNotified) {
           state.outputLimitBreakerNotified = true;
           ctx.ui.notify(
@@ -633,78 +864,40 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         }
         return;
       }
-      if (ctx.hasPendingMessages?.()) return;
-      if (dependencies.arbiter?.currentOwner()) return;
-      // These used to be fully swallowed, so a user whose response was cut off
-      // at the output limit saw no recovery and no reason. The structurally
-      // identical mid-turn path already notifies on all three.
-      let internals: PiCompactionInternals;
-      try {
-        internals = await loadInternals();
-      } catch (error) {
-        ctx.ui.notify(`Output-limit compaction disabled: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      if (ctx.hasPendingMessages?.()) {
+        state.pendingOutputLimitIntent = undefined;
         return;
       }
-      const branch = ctx.sessionManager.getBranch();
-      let preparation: unknown;
-      try {
-        preparation = internals.prepareCompaction(branch, settings);
-      } catch (error) {
-        ctx.ui.notify(`Output-limit compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
-        return;
-      }
-      if (!preparation) {
-        ctx.ui.notify(
-          "Output-limit compaction skipped: Pi has no compactable history; the response keeps hitting the output token limit inside the recent keep window.",
-          "warning",
-        );
-        return;
-      }
-      const linkedThreshold = await linkedThresholdFor(ctx, settings);
-      const instructionReserve = linkedThreshold.usable
-        ? linkedThreshold.effectiveReserveTokens
-        : effectiveReserveTokens(settings, ctx.model.contextWindow, ctx.model.maxTokens);
-      const outputLimitTrigger: CompactionTrigger = {
-        owner: "output-limit",
-        usageTokens: usage?.tokens ?? null,
-        contextWindow: usage?.contextWindow ?? ctx.model.contextWindow,
-        usagePercent: usage?.percent ?? null,
-        gateRatio: threshold,
+      state.pendingOutputLimitIntent = {
+        generation: state.generation,
+        settings,
+        usage: { ...usage },
+        threshold,
       };
-      const lease = dependencies.arbiter?.request("output-limit", outputLimitTrigger);
-      if (dependencies.arbiter && !lease) return;
-      state.outputLimitCompactions += 1;
-      const instructions = buildOutputLimitInstructions(usage, instructionReserve);
-      const failOutputLimit = (error: unknown) => {
-        lease?.release();
-        ctx.ui.notify(`Output-limit compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-      };
-      try {
-        ctx.compact({
-          customInstructions: lease?.tagInstructions(instructions) ?? instructions,
-          onComplete: () => {
-            lease?.release();
-            if (ctx.hasPendingMessages?.()) return;
-            try {
-              pi.sendUserMessage(OUTPUT_LIMIT_CONTINUE_PROMPT, { deliverAs: "followUp" });
-            } catch (error) {
-              ctx.ui.notify(`Output-limit continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-            }
-          },
-          onError: failOutputLimit,
-        });
-      } catch (error) {
-        failOutputLimit(error);
-      }
     },
-    onCompact() {
+    onCompact(completedOwner) {
+      state.generation += 1;
+      const activeRequestOwner = state.activeLease?.owner;
+      const wasPreempted = activeRequestOwner !== undefined
+        && completedOwner !== undefined
+        && completedOwner !== activeRequestOwner;
+      const preserveOutputLimitBreaker = !wasPreempted && activeRequestOwner === "output-limit";
+      const outputLimitCompactions = state.outputLimitCompactions;
+      const outputLimitBreakerNotified = state.outputLimitBreakerNotified;
+      if (wasPreempted) releaseInFlight();
       if (state.sessionId) void cleanupSpillDir(state.sessionId);
       state.pruneManifest.clear();
       state.restoredPrunes.clear();
       state.persistedPruneKey = undefined;
+      state.pendingIntent = undefined;
+      state.pendingOutputLimitIntent = undefined;
       state.lastTriggerKey = undefined;
       state.lastNoCompactableKey = undefined;
       resetCycleState();
+      if (preserveOutputLimitBreaker) {
+        state.outputLimitCompactions = outputLimitCompactions;
+        state.outputLimitBreakerNotified = outputLimitBreakerNotified;
+      }
     },
     reset(ctx) {
       state.generation += 1;
@@ -755,6 +948,7 @@ export function applyContextPressurePolicy(
   settings: CompactionSettings,
   pruneManifest: PruneManifest = new Map(),
   velocityTracker: VelocityTracker = EMPTY_VELOCITY_TRACKER,
+  compactionPending = false,
 ): ContextPressureResult {
   const thresholdTokens = contextWindow - settings.reserveTokens;
   const applied = applyRecordedPrunes(messages, pruneManifest);
@@ -787,10 +981,10 @@ export function applyContextPressurePolicy(
     velocityEscalate = shouldVelocityEscalate(velocity, soft, initialRatio);
   }
 
-  if (!settings.enabled || (!initiallyCritical && !velocityEscalate && (!soft.enabled || initialRatio < soft.nudgeRatio))) {
+  if (!settings.enabled || (!compactionPending && !initiallyCritical && !velocityEscalate && (!soft.enabled || initialRatio < soft.nudgeRatio))) {
     return pressureResult({ messages: transformed, band: "normal", estimatedTokens: initial, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
   }
-  if (soft.enabled && !initiallyCritical && !velocityEscalate && initialRatio < soft.pruneRatio) {
+  if (!compactionPending && soft.enabled && !initiallyCritical && !velocityEscalate && initialRatio < soft.pruneRatio) {
     return pressureResult({ messages: transformed, band: "nudge", estimatedTokens: initial, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
   }
 
@@ -811,7 +1005,7 @@ export function applyContextPressurePolicy(
     // to pay for the prefix it invalidates. Past critical, relieving pressure
     // dominates — a full compaction would invalidate everything anyway plus cost
     // an LLM call — so the gate is bypassed and every candidate is applied.
-    const suffixTokens = soft.cache.enabled && !initiallyCritical
+    const suffixTokens = soft.cache.enabled && !initiallyCritical && !compactionPending
       ? suffixTokenSums(transformed)
       : undefined;
     // Graduated eviction, cheapest/most-reversible first: pass 1 strips replayable
@@ -990,13 +1184,17 @@ function persistPruneManifest(pi: ExtensionAPI, state: AutoCompactionState): voi
   }
   const prunes = [...byCallId.values()].sort((a, b) => a.callId.localeCompare(b.callId));
   const nextKey = pruneKey(prunes);
-  if (nextKey === state.persistedPruneKey) return;
+  if (nextKey === state.persistedPruneKey || !pi.appendEntry) return;
+  try {
+    pi.appendEntry(PRUNE_STATE_ENTRY_TYPE, {
+      version: PRUNE_STATE_VERSION,
+      sessionId: state.sessionId,
+      prunes,
+    });
+  } catch {
+    return;
+  }
   state.persistedPruneKey = nextKey;
-  pi.appendEntry?.(PRUNE_STATE_ENTRY_TYPE, {
-    version: PRUNE_STATE_VERSION,
-    sessionId: state.sessionId,
-    prunes,
-  });
 }
 
 function loadPersistedPrunes(ctx: ExtensionContext, sessionId: string | undefined): Map<string, PersistedPruneEntry> {

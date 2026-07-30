@@ -26,6 +26,7 @@ import {
   cacheHitRatio,
   CACHE_PRUNE_MIN_SAVINGS_RATIO,
   cacheWorthwhileDepth,
+  commitProjectedCompactionInput,
   compactionBreakerAllows,
   COMPACTION_BREAKER_COOLDOWN_TURNS,
   computeContextSignals,
@@ -53,6 +54,7 @@ import {
 import {
   CompactionArbiter,
   compactionRequestFromInstructions,
+  runObservedCompaction,
 } from "../src/compaction/compaction-arbiter.ts";
 import { DEFAULT_SOFT_COMPACTION } from "../src/compaction/compaction-settings.ts";
 import {
@@ -250,6 +252,16 @@ test("compaction arbiter serializes extension requests while only observing nati
   assert.equal(native.owner, "native");
   assert.equal(arbiter.request("mid-turn"), undefined);
   native.releaseIfNative();
+  assert.equal(arbiter.currentOwner(), undefined);
+});
+
+test("runObservedCompaction releases native ownership when projection fails", async () => {
+  const arbiter = new CompactionArbiter();
+  const native = arbiter.observeStart();
+  await assert.rejects(
+    runObservedCompaction(native, async () => { throw new Error("projection failed"); }),
+    /projection failed/,
+  );
   assert.equal(arbiter.currentOwner(), undefined);
 });
 
@@ -580,8 +592,10 @@ test("mid-turn guard links its trigger to a smaller configured compaction model"
   } as never;
 
   await guard.evaluate(highUsageToolBatch(370_000), ctx);
-  assert.equal(aborted, 1);
-  assert.equal(compacted, 1);
+  assert.equal(aborted, 0, "below the session window, the current provider turn is not interrupted");
+  assert.equal(compacted, 0, "context hook only queues the compaction intent");
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 1, "settled phase submits the queued compaction");
   assert.match(statuses.get(COMPACTION_STATUS_KEY) ?? "", /COMPACT 370030\/360000/);
 });
 
@@ -594,8 +608,7 @@ test("mid-turn guard preserves a no-compactable request while it remains below t
     loadInternals: async () => ({ prepareCompaction: () => undefined }),
     readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
   });
-  const messages = pressureToolBatch();
-  const result = await guard.evaluate(messages, {
+  const ctx = {
     cwd: "D:\\repo",
     model: { contextWindow: 1_000 },
     abort() { aborted++; },
@@ -605,15 +618,13 @@ test("mid-turn guard preserves a no-compactable request while it remains below t
       setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
       notify(message: string) { notifications.push(message); },
     },
-  } as never);
-  await guard.evaluate(messages, {
-    cwd: "D:\\repo",
-    model: { contextWindow: 1_000 },
-    abort() { aborted++; },
-    compact() { compacted++; },
-    sessionManager: { getBranch: () => [] },
-    ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
-  } as never);
+  } as never;
+  const messages = pressureToolBatch();
+  const result = await guard.evaluate(messages, ctx);
+  assert.equal(compacted, 0, "critical intent is not submitted from the context hook");
+  await guard.onAgentEnd(ctx);
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
   assert.ok(result);
   assert.equal(aborted, 0);
   assert.equal(compacted, 0);
@@ -625,12 +636,18 @@ test("mid-turn guard aborts when no compactable history remains after exhausting
   let aborted = 0;
   let compacted = 0;
   const notifications: Array<{ message: string; level: string | undefined }> = [];
+  const preparedKeepWindows: number[] = [];
   const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
-    loadInternals: async () => ({ prepareCompaction: () => undefined }),
+    loadInternals: async () => ({
+      prepareCompaction: (_branch: unknown[], settings: { keepRecentTokens: number }) => {
+        preparedKeepWindows.push(settings.keepRecentTokens);
+        return undefined;
+      },
+    }),
     readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
   });
 
-  const result = await guard.evaluate(highUsageToolBatch(1_100), {
+  const ctx = {
     cwd: "D:\\repo",
     model: { contextWindow: 1_000 },
     abort() { aborted++; },
@@ -640,11 +657,15 @@ test("mid-turn guard aborts when no compactable history remains after exhausting
       setStatus() {},
       notify(message: string, level: string | undefined) { notifications.push({ message, level }); },
     },
-  } as never);
+  } as never;
+  const result = await guard.evaluate(highUsageToolBatch(1_100), ctx);
+  assert.equal(aborted, 1, "actual overflow is stopped before the provider request");
+  assert.equal(compacted, 0, "compaction waits for the settled phase");
+  await guard.onAgentEnd(ctx);
 
   assert.ok(result);
-  assert.equal(aborted, 1);
   assert.equal(compacted, 0);
+  assert.deepEqual(preparedKeepWindows, [100], "failed preparation does not pretend to change Pi's compact settings");
   assert.equal(notifications.length, 1);
   assert.equal(notifications[0]?.level, "error");
   assert.match(notifications[0]?.message ?? "", /context is already .* no compactable history/);
@@ -721,14 +742,16 @@ test("mid-turn compaction yields when native or plan compaction owns the arbiter
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
     readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
   });
-  const result = await guard.evaluate(pressureToolBatch(), {
+  const ctx = {
     cwd: "D:\\repo",
     model: { contextWindow: 1_000 },
     abort() { aborted++; },
     compact() { compacted++; },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify() {} },
-  } as never);
+  } as never;
+  const result = await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.onAgentEnd(ctx);
 
   assert.ok(result);
   assert.equal(aborted, 0);
@@ -747,14 +770,16 @@ test("mid-turn compaction defers before Pi preparation when the arbiter is owned
     loadInternals: async () => ({ prepareCompaction: () => { prepareCalls++; return { messagesToSummarize: [{}] }; } }),
     readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
   });
-  const result = await guard.evaluate(pressureToolBatch(), {
+  const ctx = {
     cwd: "D:\\repo",
     model: { contextWindow: 1_000 },
     abort() { aborted++; },
     compact() { compacted++; },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify() {} },
-  } as never);
+  } as never;
+  const result = await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.onAgentEnd(ctx);
 
   assert.ok(result);
   assert.equal(prepareCalls, 0, "owned arbiter must short-circuit before Pi preparation");
@@ -781,10 +806,12 @@ test("mid-turn guard clears its trigger key after compaction failure", async () 
   } as never;
   const messages = pressureToolBatch();
   await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
   onError?.(new Error("failed"));
   await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
   assert.equal(compactCalls, 2);
-  assert.equal(abortCalls, 2);
+  assert.equal(abortCalls, 0);
 });
 
 test("mid-turn guard settles state when compact throws synchronously", async () => {
@@ -803,7 +830,9 @@ test("mid-turn guard settles state when compact throws synchronously", async () 
     ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
   } as never;
   await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   assert.equal(attempts, 2);
   assert.match(notifications[0] ?? "", /sync failure/);
 });
@@ -824,10 +853,10 @@ test("mid-turn guard restores idle state on agent end but preserves active compa
     ui: { setStatus(key: string, value: string | undefined) { statuses.set(key, value); }, notify() {} },
   } as never;
   await guard.evaluate(pressureToolBatch(), ctx);
-  guard.onAgentEnd(ctx);
+  await guard.onAgentEnd(ctx);
   assert.match(statuses.get(COMPACTION_STATUS_KEY) ?? "", /COMPACT/);
   complete?.();
-  guard.onAgentEnd(ctx);
+  await guard.onAgentEnd(ctx);
   assert.equal(statuses.get(COMPACTION_MODE_STATUS_KEY), "AUTO ON");
   assert.equal(statuses.get(COMPACTION_STATUS_KEY), undefined);
 });
@@ -852,12 +881,13 @@ test("mid-turn guard preserves an already queued continuation", async () => {
   } as never;
 
   await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   complete?.();
 
   assert.deepEqual(sent, []);
 });
 
-test("mid-turn guard publishes enabled and disabled idle states across its lifecycle", () => {
+test("mid-turn guard publishes enabled and disabled idle states across its lifecycle", async () => {
   let enabled = true;
   const statuses: Array<{ key: string; value: string | undefined }> = [];
   const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
@@ -870,7 +900,7 @@ test("mid-turn guard publishes enabled and disabled idle states across its lifec
 
   guard.onSessionStart(ctx);
   enabled = false;
-  guard.onAgentEnd(ctx);
+  await guard.onAgentEnd(ctx);
   guard.reset(ctx);
 
   assert.deepEqual(statuses, [
@@ -924,7 +954,7 @@ test("mid-turn reset fences stale compaction callbacks from the next lifecycle",
   });
   const ctx = {
     cwd: "D:\\repo",
-    model: { contextWindow: 1_000 },
+    model: { contextWindow: 900 },
     abort() {},
     compact(options: { onComplete(): void; onError(error: Error): void }) { callbacks.push(options); },
     sessionManager: { getBranch: () => [{ type: "message" }] },
@@ -932,23 +962,25 @@ test("mid-turn reset fences stale compaction callbacks from the next lifecycle",
   } as never;
 
   await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   guard.reset(ctx);
   await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   assert.equal(callbacks.length, 2);
 
   callbacks[0]!.onComplete();
   callbacks[0]!.onError(new Error("late failure"));
   assert.deepEqual(sent, [], "stale lifecycle must not send a continuation");
-  guard.onAgentEnd(ctx);
+  await guard.onAgentEnd(ctx);
   assert.match(statuses.at(-1) ?? "", /COMPACT/, "stale callback must not settle the new owner");
 
   callbacks[1]!.onComplete();
   assert.equal(sent.length, 1);
-  guard.onAgentEnd(ctx);
+  await guard.onAgentEnd(ctx);
   assert.equal(statuses.at(-1), undefined);
 });
 
-test("session start fences an evaluation awaiting compaction internals from the previous session", async () => {
+test("session start fences a settled compaction awaiting internals from the previous session", async () => {
   let resolveInternals!: (internals: { prepareCompaction(): unknown }) => void;
   const internals = new Promise<{ prepareCompaction(): unknown }>((resolve) => {
     resolveInternals = resolve;
@@ -982,13 +1014,169 @@ test("session start fences an evaluation awaiting compaction internals from the 
     ui: { setStatus() {}, notify() {} },
   } as never;
 
-  const staleEvaluation = guard.evaluate(pressureToolBatch(), oldCtx);
+  await guard.evaluate(pressureToolBatch(), oldCtx);
+  const staleSettlement = guard.onAgentEnd(oldCtx);
   guard.onSessionStart(newCtx);
   resolveInternals({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) });
-  await staleEvaluation;
+  await staleSettlement;
 
   assert.equal(oldSessionAborts, 0);
   assert.equal(oldSessionCompactions, 0);
+});
+
+test("concurrent context evaluations serialize instead of leaking an untransformed request", async () => {
+  let resolveAuth!: () => void;
+  const authGate = new Promise<void>((resolve) => { resolveAuth = resolve; });
+  const summaryModel = {
+    provider: "maestro-qwen",
+    id: "summary",
+    contextWindow: 1_000,
+    maxTokens: 100,
+  };
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 100,
+      keepRecentTokens: 100,
+      model: "maestro-qwen/summary",
+    }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { provider: "maestro-openai", id: "session", contextWindow: 2_000, maxTokens: 100 },
+    modelRegistry: {
+      find() { return summaryModel; },
+      async getApiKeyAndHeaders() {
+        await authGate;
+        return { ok: true, apiKey: "test" };
+      },
+    },
+    abort() {},
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  const first = guard.evaluate(pressureToolBatch(), ctx);
+  const second = guard.evaluate(pressureToolBatch(), ctx);
+  resolveAuth();
+  assert.ok(await first);
+  assert.ok(await second, "the queued context receives its own pressure transform");
+});
+
+test("session switch fences evaluation awaiting linked-model authentication", async () => {
+  let resolveAuth!: () => void;
+  let markAuthStarted!: () => void;
+  const authGate = new Promise<void>((resolve) => { resolveAuth = resolve; });
+  const authStarted = new Promise<void>((resolve) => { markAuthStarted = resolve; });
+  const appended: unknown[] = [];
+  const summaryModel = {
+    provider: "maestro-qwen",
+    id: "summary-fence",
+    contextWindow: 1_000,
+    maxTokens: 100,
+  };
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(_type: string, data: unknown) { appended.push(data); },
+    sendUserMessage() {},
+  } as never, {
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 100,
+      keepRecentTokens: 100,
+      model: "maestro-qwen/summary-fence",
+    }),
+  });
+  let oldAborts = 0;
+  const registry = {
+    find() { return summaryModel; },
+    async getApiKeyAndHeaders() {
+      markAuthStarted();
+      await authGate;
+      return { ok: true, apiKey: "test" };
+    },
+  };
+  const oldCtx = {
+    cwd: "D:\\repo",
+    model: { provider: "maestro-openai", id: "old", contextWindow: 2_000, maxTokens: 100 },
+    modelRegistry: registry,
+    abort() { oldAborts++; },
+    sessionManager: { getSessionId: () => "old-session", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const newCtx = {
+    ...oldCtx,
+    model: { provider: "maestro-openai", id: "new", contextWindow: 2_000, maxTokens: 100 },
+    abort() {},
+    sessionManager: { getSessionId: () => "new-session", getBranch: () => [] },
+  } as never;
+
+  guard.onSessionStart(oldCtx);
+  const stale = guard.evaluate(pressureToolBatch(), oldCtx);
+  await authStarted;
+  guard.onSessionStart(newCtx);
+  resolveAuth();
+
+  assert.equal(await stale, undefined);
+  assert.equal(oldAborts, 0);
+  assert.deepEqual(appended, [], "old-session evaluation cannot persist into the new session");
+});
+
+test("prune manifest persistence retries after appendEntry fails", async () => {
+  let appendAttempts = 0;
+  const guard = createMidTurnAutoCompaction({
+    appendEntry() {
+      appendAttempts += 1;
+      if (appendAttempts === 1) throw new Error("persist failed");
+    },
+    sendUserMessage() {},
+  } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  assert.ok(await guard.evaluate(pressureToolBatch(), ctx));
+  assert.ok(await guard.evaluate(pressureToolBatch(), ctx));
+  assert.equal(appendAttempts, 2, "failed persistence must not publish the manifest key");
+});
+
+test("session switch fences output-limit settlement awaiting internals", async () => {
+  let resolveInternals!: (value: { prepareCompaction(): unknown }) => void;
+  const internals = new Promise<{ prepareCompaction(): unknown }>((resolve) => { resolveInternals = resolve; });
+  let oldCompactions = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: () => internals,
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const oldCtx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    getContextUsage: () => ({ tokens: 950, contextWindow: 1_000, percent: 95 }),
+    hasPendingMessages: () => false,
+    compact() { oldCompactions += 1; },
+    sessionManager: { getSessionId: () => "old-output", getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const newCtx = {
+    ...oldCtx,
+    model: { contextWindow: 2_000 },
+    getContextUsage: () => ({ tokens: 100, contextWindow: 2_000, percent: 5 }),
+    compact() {},
+    sessionManager: { getSessionId: () => "new-output", getBranch: () => [] },
+  } as never;
+
+  guard.onSessionStart(oldCtx);
+  await guard.onOutputLimit(lengthTruncatedBatch(), oldCtx);
+  const staleSettlement = guard.onAgentEnd(oldCtx);
+  guard.onSessionStart(newCtx);
+  resolveInternals({ prepareCompaction: () => ({}) });
+  await staleSettlement;
+  assert.equal(oldCompactions, 0);
 });
 
 test("pressure policy honors large reserve thresholds below the auto-prune ratio", () => {
@@ -1762,7 +1950,10 @@ test("output-limit guard compacts and continues when a length stop hits high con
     ui: { setStatus() {}, notify() {} },
   } as never;
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
-  assert.equal(compactCalls, 1);
+  assert.equal(compactCalls, 0, "agent_end only records the output-limit intent");
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls, 1, "agent_settled submits the intent");
+  guard.onCompact();
   complete?.();
   assert.equal(sent.length, 1);
   assert.match(sent[0] ?? "", /output token limit/);
@@ -1799,13 +1990,16 @@ test("output-limit guard ignores a normal stop and resets its breaker", async ()
     model: { contextWindow: 400_000 },
     getContextUsage: () => ({ tokens: 376_000, contextWindow: 400_000, percent: 94 }),
     hasPendingMessages: () => false,
-    compact() { compactCalls++; },
+    compact(options: { onComplete(): void }) { compactCalls++; options.onComplete(); },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify() {} },
   } as never;
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   await guard.onOutputLimit(lengthTruncatedBatch("stop"), ctx);
+  await guard.onAgentEnd(ctx);
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   assert.equal(compactCalls, 2, "a normal stop resets the breaker so the next length stop compacts again");
 });
 
@@ -1821,13 +2015,16 @@ test("output-limit guard stops compacting after the breaker cap", async () => {
     model: { contextWindow: 400_000 },
     getContextUsage: () => ({ tokens: 376_000, contextWindow: 400_000, percent: 94 }),
     hasPendingMessages: () => false,
-    compact() { compactCalls++; },
+    compact(options: { onComplete(): void }) { compactCalls++; options.onComplete(); },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
   } as never;
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   assert.equal(compactCalls, MAX_OUTPUT_LIMIT_COMPACTIONS);
   assert.equal(notifications.length, 1);
   assert.match(notifications[0] ?? "", /output token limit/i);
@@ -1850,6 +2047,67 @@ test("output-limit guard defers when a continuation is already queued", async ()
   } as never;
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
   assert.equal(compactCalls, 0);
+});
+
+test("output-limit intent yields to native compaction before settled submission", async () => {
+  const arbiter = new CompactionArbiter();
+  let compactCalls = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    arbiter,
+    loadInternals: async () => ({ prepareCompaction: () => ({}) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    getContextUsage: () => ({ tokens: 950, contextWindow: 1_000, percent: 95 }),
+    hasPendingMessages: () => false,
+    compact() { compactCalls += 1; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  const native = arbiter.observeStart();
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls, 0);
+  assert.equal(arbiter.currentOwner(), "native");
+  arbiter.complete();
+  guard.onCompact();
+  native.releaseIfNative();
+});
+
+test("native completion clears a preempted output-limit owner", async () => {
+  const arbiter = new CompactionArbiter();
+  let compactCalls = 0;
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    arbiter,
+    loadInternals: async () => ({ prepareCompaction: () => ({}) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    getContextUsage: () => ({ tokens: 950, contextWindow: 1_000, percent: 95 }),
+    hasPendingMessages: () => false,
+    compact() { compactCalls += 1; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls, 1);
+
+  const native = arbiter.observeStart();
+  const completedOwner = arbiter.currentOwner();
+  arbiter.complete();
+  guard.onCompact(completedOwner);
+  native.releaseIfNative();
+
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls, 2, "native preemption must not strand running=true");
 });
 
 function pressureToolBatch() {
@@ -2607,6 +2865,7 @@ test("L4 minimal replacement remains byte-identical across turns and restore", a
   const ctx = {
     cwd: "D:\\repo",
     model: { contextWindow: 4_000 },
+    abort() {},
     sessionManager: { getSessionId: () => "critical-spill-session", getBranch: () => [] },
     ui: { setStatus() {}, notify() {} },
   } as never;
@@ -2786,6 +3045,85 @@ test("cache gate is bypassed once pressure is already critical", () => {
   assert.ok(gated.prunedToolResults > 0, "critical pressure must prune regardless of cache cost");
   assert.equal(gated.band, "critical");
   assert.ok(gated.reasons.includes("prune-insufficient"), "telemetry explains that pruning could not clear critical pressure");
+});
+
+test("critical pruning is projected into the settled compaction input", async () => {
+  let abortCalls = 0;
+  let compactCalls = 0;
+  const messages = toolLoopTranscript(12, 20_000) as never;
+  const latestAssistant = [...messages].reverse().find((message) => message.role === "assistant");
+  latestAssistant.usage = {
+    input: 100_000,
+    output: 0,
+    cacheRead: 0,
+    cacheWrite: 0,
+    totalTokens: 100_000,
+    cost: { total: 0 },
+  };
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    abort() { abortCalls++; },
+    compact() { compactCalls++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  const transformed = await guard.evaluate(messages, ctx);
+  assert.ok(transformed);
+  assert.equal(compactCalls, 0, "context hook must not submit full compaction");
+  assert.equal(abortCalls, 1, "an overflowing post-prune request is stopped locally");
+
+  const event = {
+    preparation: {
+      messagesToSummarize: messages,
+      turnPrefixMessages: [],
+      firstKeptEntryId: "kept",
+      tokensBefore: 99_999,
+      settings: { enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 },
+    },
+    signal: new AbortController().signal,
+    type: "session_before_compact",
+  } as never;
+  const projected = await guard.projectCompactionInput(event, ctx);
+  assert.ok(projected.prunedToolResults > 0);
+  assert.ok((projected.estimatedInputTokens ?? Infinity) < event.preparation.tokensBefore);
+  assert.equal(projected.event.preparation.tokensBefore, 99_999, "raw checkpoint audit remains unchanged");
+  assert.match(JSON.stringify(projected.event.preparation.messagesToSummarize), /context pressure: stale large output/);
+  assert.match(JSON.stringify(messages), /0000000000/, "the session transcript remains unchanged");
+
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls, 1, "settled phase submits compaction after projection is available");
+});
+
+test("native compaction creates a safe prune pass even without a prior context transform", async () => {
+  const messages = toolLoopTranscript(12, 20_000) as never;
+  const guard = createMidTurnAutoCompaction({ appendEntry() {} } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 }),
+  });
+  const event = {
+    preparation: {
+      messagesToSummarize: messages,
+      turnPrefixMessages: [],
+      firstKeptEntryId: "kept",
+      tokensBefore: 99_999,
+      settings: { enabled: true, reserveTokens: 2_000, keepRecentTokens: 1_000 },
+    },
+    signal: new AbortController().signal,
+    type: "session_before_compact",
+  } as never;
+  const ctx = { cwd: "D:\\repo", model: { contextWindow: 10_000 } } as never;
+
+  const projected = await guard.projectCompactionInput(event, ctx);
+  assert.ok(projected.prunedToolResults > 0);
+  commitProjectedCompactionInput(event, projected);
+  assert.match(JSON.stringify(event.preparation.messagesToSummarize), /context pressure: stale large output/);
+  assert.match(JSON.stringify(projected.event.preparation.messagesToSummarize), /context pressure: stale large output/);
+  assert.match(JSON.stringify(messages), /0000000000/, "projection does not mutate the raw branch messages");
 });
 
 test("cacheWorthwhileDepth picks the deepest paying depth, not the first", () => {

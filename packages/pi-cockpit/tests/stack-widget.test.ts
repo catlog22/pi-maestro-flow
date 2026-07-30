@@ -62,6 +62,37 @@ test("agent-area widget excludes graph dispatch containers from rows and running
 	assert.equal(lines.filter((line) => /first|second/.test(line)).length, 2);
 });
 
+test("quiet mode keeps the roster expanded but drops the live streaming tail", () => {
+	const row = (overrides: Partial<AgentRow> = {}): AgentRow => ({
+		correlationId: "worker",
+		agent: "explorer",
+		name: undefined,
+		role: "explorer",
+		task: "inspect auth",
+		status: "running",
+		tail: "reading tokens.ts",
+		startedAt: 1,
+		lastActivityAt: 1,
+		...overrides,
+	});
+	const make = (quiet: boolean) => makeAgentWidget({
+		getAgents: () => [row()],
+		getConfig: () => ({ ...DEFAULT_CONFIG, quietMode: quiet }),
+		isRunning: () => true,
+	})(tui, theme);
+
+	const noisy = make(false).render(120);
+	assert.match(noisy[1], /inspect auth/, "non-quiet keeps the task");
+	assert.match(noisy[1], /reading tokens\.ts/, "non-quiet shows the streaming tail");
+
+	const quiet = make(true).render(120);
+	assert.match(quiet[1], /explorer/, "quiet keeps the role (roster stays expanded)");
+	assert.match(quiet[1], /inspect auth/, "quiet keeps the task");
+	assert.doesNotMatch(quiet[1], /reading tokens\.ts/, "quiet strips the streaming tail");
+	// Header summary is tail-independent, so it is identical in both modes.
+	assert.equal(quiet[0], noisy[0]);
+});
+
 test("agent-area widget bridges nested graph descendants to the nearest visible parent", () => {
 	const row = (overrides: Partial<AgentRow>): AgentRow => ({
 		correlationId: "worker",

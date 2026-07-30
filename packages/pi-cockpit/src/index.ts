@@ -8,6 +8,8 @@ import { BashBgStore } from "./bash-bg-store.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
+import { ensureThinkingFolded, readHideThinkingBlock } from "./thinking-fold.ts";
+import { ThinkingFoldTimer } from "./thinking-timer.ts";
 import { TodoStore } from "./todo-store.ts";
 import { makeTodoWidget, makeAgentWidget, terminalRows } from "./stack-widget.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
@@ -36,6 +38,9 @@ const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth 
 const BASH_BG_OVERLAY_KEY = "alt+j";
 const COCKPIT_STATUS_KEY = "cockpit";
 const WIDTH_POLL_INTERVAL_MS = 250;
+// Quiet mode's rename of pi's hidden-thinking label. The live thinking timer
+// derives its final "thoughts · 8.4s" labels from the same word.
+const QUIET_THINKING_LABEL = "thoughts";
 
 function isTuiContext(ctx: ExtensionContext): boolean {
 	try {
@@ -69,6 +74,33 @@ export default function (pi: ExtensionAPI): void {
 	// the whole session to defaults, so it belongs in a slot that does not scroll away.
 	let configProblem: string | undefined;
 	let quietToolsRegistered = false;
+
+	// Live labels for folded thinking rows: a spinner with running elapsed
+	// time while the model thinks, then the actual duration once it settles.
+	// Pi owns the fold; this only renames the label it already renders.
+	const thinkingTimer = new ThinkingFoldTimer({
+		getTui: () => capturedTui,
+		requestRender: () => {
+			try {
+				capturedTui?.requestRender();
+			} catch {
+				// tui may be gone between sessions
+			}
+		},
+		getBaseLabel: () => (config.quietMode ? QUIET_THINKING_LABEL : undefined),
+		getGlyphs: () => resolveGlyphs(config.icons.mode),
+		isThinkingHidden: () => (lastCtx ? readHideThinkingBlock(lastCtx.cwd) : false),
+		isEnabled: () => config.enabled,
+		setGlobalLabel: (label) => {
+			const ctx = lastCtx;
+			if (!ctx || !isTuiContext(ctx)) return;
+			try {
+				ctx.ui.setHiddenThinkingLabel(label);
+			} catch {
+				// non-TUI or mid-teardown
+			}
+		},
+	});
 
 	// The streaming line, the tab title and the footer status slot are all fed from
 	// the same snapshots the widgets read, so they can never disagree with them.
@@ -162,9 +194,18 @@ export default function (pi: ExtensionAPI): void {
 				quietToolsRegistered = true;
 			}
 			try {
-				ctx.ui.setHiddenThinkingLabel("thoughts");
+				ctx.ui.setHiddenThinkingLabel(QUIET_THINKING_LABEL);
 			} catch { /* non-TUI */ }
-			ctx.ui.notify("quiet mode on — tools compressed, thinking folded", "info");
+			// The label only renames an already-hidden block; the fold itself
+			// rides pi's native toggle, which also persists it. Report what
+			// actually happened instead of promising a fold we could not reach.
+			const folded = ensureThinkingFolded(capturedTui, ctx.cwd, true);
+			ctx.ui.notify(
+				folded
+					? "quiet mode on — tools compressed, thinking folded"
+					: "quiet mode on — tools compressed",
+				"info",
+			);
 		} else if (!now && was) {
 			try {
 				ctx.ui.setHiddenThinkingLabel(undefined);
@@ -335,6 +376,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
 		activeTools.clear();
+		thinkingTimer.reset();
 		ensureConfigExists();
 		config = loadConfig((m, l) => {
 			try {
@@ -352,7 +394,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 		if (config.quietMode) {
 			try {
-				ctx.ui.setHiddenThinkingLabel("thoughts");
+				ctx.ui.setHiddenThinkingLabel(QUIET_THINKING_LABEL);
 			} catch {
 				// non-TUI mode
 			}
@@ -370,6 +412,9 @@ export default function (pi: ExtensionAPI): void {
 			applyUi(ctx);
 			publishUiOwnership();
 		}
+		// applyUi captured the TUI synchronously, so the native toggle is
+		// reachable already; a no-op when cockpit is disabled or non-TUI.
+		if (config.quietMode) ensureThinkingFolded(capturedTui, ctx.cwd, true);
 		pi.events.emit(BASH_BG_QUERY_EVENT, undefined);
 		req();
 	});
@@ -386,6 +431,7 @@ export default function (pi: ExtensionAPI): void {
 		lastCtx = undefined;
 		running = false;
 		activeTools.clear();
+		thinkingTimer.reset();
 		invalidateUsageCache();
 		agents.clear();
 		bashBg.clear();
@@ -399,12 +445,21 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("agent_end", () => {
 		running = false;
 		activeTools.clear();
+		thinkingTimer.stop();
 		syncTick();
 		req();
 	});
 
+	// --- live labels for folded thinking rows ---
+	pi.on("message_update", (e) => {
+		thinkingTimer.onAssistantMessageEvent(e.assistantMessageEvent);
+	});
+
 	// --- redraw triggers for the footer's live data ---
-	pi.on("message_end", (_e, ctx) => {
+	pi.on("message_end", (e, ctx) => {
+		// Settle an interrupted thinking run: message_end fires for aborted
+		// and failed messages too, while the row is still mounted.
+		if (e.message.role === "assistant") thinkingTimer.onAssistantMessageEnd();
 		invalidateUsageCache();
 		if (isTuiContext(ctx)) req();
 	});
@@ -570,6 +625,10 @@ export default function (pi: ExtensionAPI): void {
 		ctx.ui.custom<void>((tui, theme, _kb, done) => {
 			let settingsCursor = 0;
 			let saveState: SaveState = { kind: "idle" };
+			// Mirror of pi's hideThinkingBlock, read when the panel opens. The
+			// overlay captures input, so Ctrl+T cannot flip it while this is open
+			// and the mirror stays exact until the panel closes.
+			let thinkingHidden = readHideThinkingBlock(ctx.cwd);
 			// The theme row expands in place rather than closing the panel and opening
 			// a second overlay: pi's `theme` is a live Proxy, so both surfaces repaint
 			// in the previewed colours, and Esc lands back on the row it was invoked
@@ -588,6 +647,18 @@ export default function (pi: ExtensionAPI): void {
 					// which a blind one-key cycle through the name list can do.
 					sub = makeThemePicker(ctx, tui, theme, closeSub);
 					tui.requestRender();
+					return;
+				}
+				if (key === "thinkingFold") {
+					// Pass-through row: pi owns hideThinkingBlock, so bring it to the
+					// wanted state through the native toggle instead of saving config.
+					// pi persists the flip synchronously through its settingsManager.
+					const target = !thinkingHidden;
+					const ok = ensureThinkingFolded(tui, ctx.cwd, target);
+					if (ok) thinkingHidden = target;
+					saveState = ok
+						? { kind: "saved" }
+						: { kind: "failed", message: "editor unreachable" };
 					return;
 				}
 				config = applyRow(config, key);
@@ -621,7 +692,7 @@ export default function (pi: ExtensionAPI): void {
 					// rows saying nothing the picker does not already say.
 					if (sub) return sub.render(width);
 					const paint: PaintTheme = theme;
-					const rows = buildRows(config);
+					const rows = buildRows(config, { thinkingHidden });
 					settingsCursor = Math.max(0, Math.min(settingsCursor, rows.length - 1));
 					const w = Math.min(width, 52);
 					const labelWidth = Math.max(...rows.map((r) => visibleWidth(r.label)));
@@ -651,7 +722,9 @@ export default function (pi: ExtensionAPI): void {
 					}
 					// The theme row opens /theme; /settings additionally pairs a light
 					// and a dark theme, which neither of cockpit's surfaces can express.
-					lines.push(paint.fg("dim", "theme is stored by pi · /settings pairs light+dark"));
+					// Thinking fold is pi's setting too (Ctrl+T), mirrored live here.
+					lines.push(paint.fg("dim", "theme & thinking are stored by pi"));
+					lines.push(paint.fg("dim", "/settings pairs light+dark"));
 					lines.push(paint.fg("dim", "↑↓ move · Enter change · letter jumps · Esc close"));
 					return lines.map((line) => truncateToWidth(line, width, "…"));
 				},
@@ -664,7 +737,7 @@ export default function (pi: ExtensionAPI): void {
 						tui.requestRender();
 						return;
 					}
-					const rows = buildRows(config);
+					const rows = buildRows(config, { thinkingHidden });
 					if (matchesKey(data, Key.escape)) {
 						done(undefined);
 						return;

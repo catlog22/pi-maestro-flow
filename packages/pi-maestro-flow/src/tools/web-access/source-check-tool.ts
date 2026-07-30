@@ -1,9 +1,8 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type, type Static } from "typebox";
-import { singleLine, textBlock } from "../../tui/components.ts";
-import { isQuietMode } from "../../quiet-state.ts";
-import { quietToolCall, quietToolResult } from "../../quiet-render.ts";
+import { Text } from "@earendil-works/pi-tui";
+import { toolCallLine, toolResultLine } from "../../quiet-render.ts";
 import {
   buildResearchArtifact,
   withClaimAssessment,
@@ -62,30 +61,28 @@ export function createSourceCheckTool(): ToolDefinition<typeof SourceCheckParams
         details: { claim, artifact },
       } as AgentToolResult<SourceCheckDetails>;
     },
-    renderCall(args, theme) {
-      if (isQuietMode()) return quietToolCall(theme, "source_check", `"${String(args.claim ?? "").slice(0, 60)}"`);
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
       const claim = String(args.claim ?? "").slice(0, 60);
-      return singleLine(`${theme.fg("toolTitle", theme.bold("source_check "))}${theme.fg("accent", `"${claim}"`)}`);
+      return toolCallLine(theme, "source_check", `"${claim}"`);
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const isError = (result as { isError?: boolean }).isError === true;
-      if (isQuietMode()) {
-        const qdetails = result.details as SourceCheckDetails | undefined;
-        const qstatus = qdetails?.artifact?.claims?.[0]?.status ?? "unknown";
-        return quietToolResult(theme, "source_check", !isError, `claim: ${qstatus}`);
-      }
-      if (isError) {
-        const text = result.content[0] && "text" in result.content[0] ? result.content[0].text : "";
-        if (opts.expanded) return textBlock(text);
-        return singleLine(theme.fg("error", `✗ ${text.split("\n")[0]?.slice(0, 120)}`));
-      }
-      if (opts.expanded) {
-        const block = result.content.find((item) => item.type === "text");
-        return textBlock(block && "text" in block ? block.text : "");
-      }
       const details = result.details as SourceCheckDetails | undefined;
       const status = details?.artifact?.claims?.[0]?.status ?? "unknown";
-      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", `claim: ${status}`)}`);
+      const block = result.content.find((c) => c.type === "text");
+      const text = block && "text" in block ? block.text : "";
+      const claim = String(ctx.args.claim ?? "").slice(0, 60);
+      return toolResultLine(theme, {
+        name: "source_check",
+        ok: !isError,
+        arg: `"${claim}"`,
+        summary: `claim: ${status}`,
+        expanded: opts.expanded,
+        detail: text,
+      });
     },
   };
 }

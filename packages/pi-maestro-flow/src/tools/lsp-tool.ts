@@ -1,7 +1,6 @@
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import { singleLine, textBlock } from "../tui/components.ts";
-import { isQuietMode } from "../quiet-state.ts";
-import { quietToolCall, quietToolResult, resultSummary } from "../quiet-render.ts";
+import { Text } from "@earendil-works/pi-tui";
+import { toolCallLine, toolResultLine, resultSummary } from "../quiet-render.ts";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -99,28 +98,28 @@ export function createLspTool(manager: LspManagerLike = lspManager): ToolDefinit
         timeout.dispose();
       }
     },
-    renderCall(args, theme) {
-      if (isQuietMode()) {
-        const qaction = String(args.action ?? "?");
-        const qfile = args.file ? ` ${String(args.file)}${args.line ? `:${args.line}` : ""}` : "";
-        return quietToolCall(theme, "lsp", `${qaction}${qfile}`);
-      }
+    renderShell: "self",
+    renderCall(args, theme, ctx) {
+      if (ctx?.isPartial === false) return new Text("", 0, 0);
       const action = String(args.action ?? "?");
-      const file = args.file ? ` ${String(args.file)}` : "";
-      const line = args.line ? `:${args.line}` : "";
-      return singleLine(`${theme.fg("toolTitle", theme.bold("lsp "))}${action}${theme.fg("accent", `${file}${line}`)}`);
+      const file = args.file ? ` ${String(args.file)}${args.line ? `:${args.line}` : ""}` : "";
+      return toolCallLine(theme, "lsp", `${action}${file}`);
     },
-    renderResult(result, opts, theme) {
+    renderResult(result, opts, theme, ctx) {
+      if (opts.isPartial) return new Text("", 0, 0);
       const text = result.content.find((item) => item.type === "text");
       const message = text && "text" in text ? text.text : "";
       const isError = (result as { isError?: boolean }).isError === true;
-      if (isQuietMode()) return quietToolResult(theme, "lsp", !isError, resultSummary(result));
-      if (opts.expanded) return textBlock(message);
-      const firstLine = message.split("\n")[0]?.slice(0, 120) ?? "";
-      const lineCount = message.split("\n").filter(Boolean).length;
-      if (isError) return singleLine(theme.fg("error", `✗ ${firstLine}`));
-      const extra = lineCount > 1 ? theme.fg("dim", ` · ${lineCount} lines`) : "";
-      return singleLine(`${theme.fg("success", "✓")} ${theme.fg("muted", firstLine)}${extra}`);
+      const action = String(ctx.args.action ?? "?");
+      const file = ctx.args.file ? ` ${String(ctx.args.file)}${ctx.args.line ? `:${ctx.args.line}` : ""}` : "";
+      return toolResultLine(theme, {
+        name: "lsp",
+        ok: !isError,
+        arg: `${action}${file}`,
+        summary: resultSummary(result),
+        expanded: opts.expanded,
+        detail: message,
+      });
     },
   };
 }
