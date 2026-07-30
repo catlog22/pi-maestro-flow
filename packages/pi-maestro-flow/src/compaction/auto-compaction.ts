@@ -898,6 +898,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.outputLimitCompactions = outputLimitCompactions;
         state.outputLimitBreakerNotified = outputLimitBreakerNotified;
       }
+      // Persist the cleared manifest so a session closed before the next
+      // evaluate() does not reload stale prune entries from the pre-compaction
+      // projectCompactionInput persist.  reset() already does this; onCompact
+      // was the only clear-path that skipped it.
+      persistPruneManifest(pi, state);
     },
     reset(ctx) {
       state.generation += 1;

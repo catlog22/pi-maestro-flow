@@ -3239,3 +3239,62 @@ test("resolveConfiguredCompactionModel degrades to the session model on stale or
   qwenAuthenticated = true;
   assert.equal(await resolveConfiguredCompactionModel("maestro-qwen/qwen3", currentModel as never, ctx), qwen);
 });
+
+test("onCompact persists the cleared prune manifest so a resumed session does not reload stale entries", async () => {
+  const appended: Array<{ type: string; data: unknown }> = [];
+  const settings = { enabled: true, reserveTokens: 100, keepRecentTokens: 50, soft: { enabled: true, nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7, velocity: { enabled: false, epochsToCritical: 3, minFullness: 0.7 }, cache: { enabled: false } } };
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { appended.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, { readSettings: () => settings });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 100_000 },
+    sessionManager: { getSessionId: () => "compact-persist", getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+    abort() {},
+  } as never;
+
+  guard.onSessionStart(ctx);
+  // Build a conversation with an early large tool result (prunable) followed by
+  // a recent usage record that pushes pressure above the prune ratio.
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "stale-call", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "stale-call",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(12_000) }],
+    isError: false,
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "recent-call", name: "read", arguments: {} }],
+    usage: { input: 85_000, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 85_000, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "recent-call",
+    toolName: "read",
+    content: [{ type: "text", text: "small" }],
+    isError: false,
+  }] as never;
+  await guard.evaluate(messages, ctx);
+
+  // At least one persist should have recorded the prune.
+  const pruneEntries = appended.filter((e) => e.type === "maestro-auto-prune-state");
+  assert.ok(pruneEntries.length >= 1, "prune was persisted during evaluate");
+  const lastBefore = pruneEntries.at(-1)?.data as { prunes: unknown[] };
+  assert.ok(lastBefore.prunes.length > 0, "manifest is non-empty before compaction");
+
+  // Simulate compaction completing.
+  guard.onCompact();
+
+  // The cleared manifest must be persisted so a session resume sees an empty list.
+  const afterCompact = appended.filter((e) => e.type === "maestro-auto-prune-state");
+  const lastAfter = afterCompact.at(-1)?.data as { prunes: unknown[] };
+  assert.ok(lastAfter, "a persist happened after onCompact");
+  assert.equal(lastAfter.prunes.length, 0, "manifest is empty after onCompact");
+
+  guard.reset(ctx);
+});
