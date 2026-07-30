@@ -1,6 +1,6 @@
 {
   "name": "pi-cockpit",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Agent cockpit for Pi: a list-mode status stack (live teammates + todo plan) pinned above the editor, plus a Starship-style footer. Renders only via public extension APIs (setWidget/setFooter).",
   "type": "module",
   "keywords": [
@@ -59,7 +59,7 @@
     "@earendil-works/pi-coding-agent": "0.82.1",
     "@earendil-works/pi-tui": "0.82.1",
     "@types/node": "^22.0.0",
-    "pi-maestro-teammate": "1.0.0",
+    "pi-maestro-teammate": "1.2.0",
     "typescript": "^5.5.0"
   },
   "main": "./src/index.ts",
