@@ -215,27 +215,20 @@ function convertSkills() {
       const frontmatter = buildSkillFrontmatter(meta);
       const output = frontmatter + '\n\n' + body.trim() + '\n';
 
+      // Recursively copy the ENTIRE skill directory so no subsidiary
+      // subfolder is lost. The previous hardcoded whitelist
+      //   ['scripts', 'references', 'assets']
+      // silently dropped every other subfolder (roles/, specs/, phases/,
+      // templates/, examples/, workflows/, agents/, index/, wisdom/, ...)
+      // plus any non-.md files nested inside them (e.g. team-review lost
+      // roles/ and specs/*.json). cpSync carries .md/.json/.ps1/etc. at
+      // any depth.
+      cpSync(join(srcDir, dir), targetDir, { recursive: true });
+
+      // Overwrite SKILL.md with the frontmatter-converted version
+      // (Claude tool names -> pi). Subsidiary .md/.json files are left as
+      // raw source here; convert-pi.mjs (phase 2) rewrites them in place.
       writeFileSync(join(targetDir, 'SKILL.md'), output, 'utf-8');
-
-      // Copy subdirectories (scripts/, references/, assets/)
-      for (const sub of ['scripts', 'references', 'assets']) {
-        const subSrc = join(srcDir, dir, sub);
-        if (existsSync(subSrc) && statSync(subSrc).isDirectory()) {
-          const subDst = join(targetDir, sub);
-          cpSync(subSrc, subDst, { recursive: true });
-        }
-      }
-
-      // Copy any other .md files in the skill directory
-      const otherFiles = readdirSync(join(srcDir, dir)).filter(f =>
-        f !== 'SKILL.md' && f.endsWith('.md')
-      );
-      for (const f of otherFiles) {
-        const src = join(srcDir, dir, f);
-        if (statSync(src).isFile()) {
-          writeFileSync(join(targetDir, f), readFileSync(src, 'utf-8'), 'utf-8');
-        }
-      }
 
       stats.skills++;
     } catch (e) {
