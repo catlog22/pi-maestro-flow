@@ -89,21 +89,26 @@ export interface TodoSkill {
 
 export type ViewMode = "list" | "compact";
 
+export type QuietSymbolMode = "check" | "dot";
+
 export type IconMode = "auto" | "nerd" | "ascii";
 
 export interface CockpitConfig {
 	enabled: boolean;
 	/**
-	 * Quiet mode: compress built-in tool calls to one-line ✓/✗ summaries and fold
-	 * thinking blocks. The fold drives pi's native thinking toggle, so pi owns
-	 * and persists the visibility; turning quiet off leaves thinking as the user
-	 * last set it (Ctrl+T or the panel's thinking row). The footer and the Todo
-	 * widget render exactly as they do with quiet mode off; the Agents widget
-	 * stays expanded but hides its live streaming tail (the per-message text),
-	 * keeping role/task/state/telemetry. Requires /reload or a new session to
-	 * apply tool rendering changes.
+	 * Quiet mode: compress built-in tool calls to one-line lifecycle summaries and
+	 * fold thinking blocks. The lifecycle glyph set is selected by quietSymbols.
+	 * The fold drives pi's native thinking toggle, so pi owns and persists the
+	 * visibility; turning quiet off leaves thinking as the user last set it
+	 * (Ctrl+T or the panel's thinking row). The footer and the Todo widget render
+	 * exactly as they do with quiet mode off; the Agents widget stays expanded
+	 * but hides its live streaming tail (the per-message text), keeping
+	 * role/task/state/telemetry. Symbol changes apply live. Turning Quiet off
+	 * still requires /reload or a new session to restore native tool renderers.
 	 */
 	quietMode: boolean;
+	/** Lifecycle glyph set used by compact Quiet tool rows. */
+	quietSymbols: QuietSymbolMode;
 	agentsMode: ViewMode;
 	todoMode: ViewMode;
 	todoExpanded: boolean;
@@ -119,6 +124,7 @@ export interface CockpitConfig {
 export const DEFAULT_CONFIG: CockpitConfig = {
 	enabled: true,
 	quietMode: false,
+	quietSymbols: "check",
 	agentsMode: "list",
 	todoMode: "list",
 	todoExpanded: false,

@@ -24,6 +24,7 @@ export interface PlanConfirmationOptions {
   canCompactContext?: boolean;
   contextPercent?: number;
   preferNewSession?: boolean;
+  clearContextMode?: "new-session" | "compaction";
 }
 
 interface ConfirmationItem {
@@ -205,11 +206,16 @@ function unavailableMessage(item: ConfirmationItem): string {
 }
 
 function contextExecutionItem(options: PlanConfirmationOptions): ConfirmationItem {
+  const resetWithCompaction = options.clearContextMode === "compaction";
+  const label = resetWithCompaction ? "Reset context then execute" : "Execute in new session";
+  const description = resetWithCompaction
+    ? "Keep this session and replace model context with the approved Plan"
+    : "Start with a clean context and inject the approved Plan";
   if (options.preferNewSession && options.canClearContext) {
     return {
       action: "execute-clear",
-      label: "Execute in new session",
-      description: "Start with a clean context and inject the approved Plan",
+      label,
+      description,
       enabled: true,
     };
   }
@@ -224,8 +230,8 @@ function contextExecutionItem(options: PlanConfirmationOptions): ConfirmationIte
   }
   return {
     action: "execute-clear",
-    label: "Execute in new session",
-    description: options.canClearContext ? "Start with a clean context" : "Available from /plan approve",
+    label,
+    description: options.canClearContext ? description : "Available from /plan approve",
     enabled: options.canClearContext,
   };
 }

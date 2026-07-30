@@ -162,6 +162,10 @@ interface CreateCompactionDependencies {
   trigger?: CompactionTrigger;
   /** Post-prune input estimate; raw tokensBefore remains unchanged for checkpoint audit. */
   summaryInputTokens?: number;
+  /** Deterministic summary used by clean-context handoffs; bypasses model summarization. */
+  summaryOverride?: string;
+  /** Override the recent-history boundary. A non-matching id keeps no old entries. */
+  firstKeptEntryIdOverride?: string;
 }
 
 interface PersistCompactionDependencies {
@@ -387,6 +391,19 @@ export async function createMaestroCompaction(
     knowhowPath,
     ...(dependencies.trigger ? { trigger: dependencies.trigger } : {}),
   };
+
+  if (dependencies.summaryOverride !== undefined) {
+    const summary = dependencies.summaryOverride.trim();
+    if (!summary) return undefined;
+    return {
+      compaction: {
+        summary,
+        firstKeptEntryId: dependencies.firstKeptEntryIdOverride ?? event.preparation.firstKeptEntryId,
+        tokensBefore: event.preparation.tokensBefore,
+        details,
+      },
+    };
+  }
 
   const messages = [...event.preparation.messagesToSummarize, ...event.preparation.turnPrefixMessages];
   const conversationText = serializeConversation(convertToLlm(messages));

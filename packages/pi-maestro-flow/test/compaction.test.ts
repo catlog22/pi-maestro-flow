@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
   buildMaestroCompactionPrompt,
   buildSummaryCompletionOptions,
@@ -1436,6 +1437,64 @@ test("mid-turn guard restores persisted prunes before the first resumed provider
   guard.onSessionStart(ctx);
   const resumed = await guard.evaluate(messages, ctx);
   assert.match(JSON.stringify(resumed?.[1]), /stale large output/);
+});
+
+test("clean-context compaction bypasses summarization and keeps no old provider messages", async () => {
+  let summarizerCalled = false;
+  const summary = "# Approved Plan Execution Context\n\nOnly the approved Plan remains.";
+  const firstKeptEntryId = "maestro-plan-clean-handoff";
+  const result = await createMaestroCompaction(
+    {
+      preparation: {
+        firstKeptEntryId: "old-recent-entry",
+        messagesToSummarize: [],
+        turnPrefixMessages: [],
+        isSplitTurn: false,
+        tokensBefore: 1200,
+        fileOps: {
+          read: new Set<string>(),
+          written: new Set<string>(),
+          edited: new Set<string>(),
+        },
+        settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
+      },
+      branchEntries: [],
+      signal: new AbortController().signal,
+      type: "session_before_compact",
+    } as never,
+    {
+      cwd: "D:\\repo",
+      model: { id: "faux", maxTokens: 2000 },
+      sessionManager: { getSessionId: () => "session-clean" },
+      ui: { notify() {} },
+    } as never,
+    {
+      checkpointId: () => "checkpoint-clean",
+      now: () => new Date("2026-07-30T00:00:00.000Z"),
+      summaryOverride: summary,
+      firstKeptEntryIdOverride: firstKeptEntryId,
+      completeSummary: async () => {
+        summarizerCalled = true;
+        throw new Error("clean-context compaction must not call the model");
+      },
+    },
+  );
+
+  assert.equal(summarizerCalled, false);
+  assert.equal(result?.compaction?.summary, summary);
+  assert.equal(result?.compaction?.firstKeptEntryId, firstKeptEntryId);
+  assert.equal((result?.compaction?.details as MaestroCompactionDetails).kind, "maestro-session-checkpoint");
+
+  const manager = SessionManager.inMemory("D:\\repo");
+  manager.appendMessage({
+    role: "user",
+    content: [{ type: "text", text: "OLD CONVERSATION MUST DISAPPEAR" }],
+    timestamp: Date.now(),
+  } as never);
+  manager.appendCompaction(summary, firstKeptEntryId, 1200, result?.compaction?.details, true);
+  const providerContext = JSON.stringify(manager.buildSessionContext().messages);
+  assert.doesNotMatch(providerContext, /OLD CONVERSATION MUST DISAPPEAR/);
+  assert.match(providerContext, /Only the approved Plan remains/);
 });
 
 test("custom compaction captures the persisted active Todo skill", async () => {

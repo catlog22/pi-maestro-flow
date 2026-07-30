@@ -3402,8 +3402,9 @@ export default function registerTeammateExtension(
   if (!isChild) {
   pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
     if (!payload || typeof payload !== "object") return;
-    cockpitOwnsAgents = (payload as { agents?: unknown }).agents === true;
-    setQuietMode((payload as { quiet?: unknown }).quiet === true);
+    const ownership = payload as { agents?: unknown; quiet?: unknown; quietSymbols?: unknown };
+    cockpitOwnsAgents = ownership.agents === true;
+    setQuietMode(ownership.quiet === true, ownership.quietSymbols);
     updateAgentWidget();
   });
   pi.events.on(TEAMMATE_STARTED_EVENT, () => {

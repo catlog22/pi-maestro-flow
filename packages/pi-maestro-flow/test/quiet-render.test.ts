@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import test from "node:test";
+import test, { afterEach } from "node:test";
+import { setQuietMode } from "../src/quiet-state.ts";
 import { createLspTool } from "../src/tools/lsp-tool.ts";
 import { toolCallLine, toolResultLine } from "../src/quiet-render.ts";
 
@@ -8,13 +9,15 @@ const theme = {
 	bold: (text: string) => text,
 };
 
+afterEach(() => setQuietMode(false, "check"));
+
 function lines(component: { render(width: number): string[] }): string[] {
 	return component.render(200).map((line) => line.trimEnd());
 }
 
 test("toolCallLine renders one running row with the tool name and arguments", () => {
 	assert.deepEqual(lines(toolCallLine(theme, "lsp", "diagnostics sample.ts:1")), [
-		"  ⋯ lsp diagnostics sample.ts:1",
+		"  … lsp diagnostics sample.ts:1",
 	]);
 });
 
@@ -25,6 +28,23 @@ test("toolResultLine renders one completed row with arguments and summary", () =
 		arg: "diagnostics sample.ts:1",
 		summary: "LSP: OK",
 	})), ["  ✓ lsp diagnostics sample.ts:1 · LSP: OK"]);
+});
+
+test("quiet renderers follow Cockpit's dot symbol mode", () => {
+	setQuietMode(true, "dot");
+	assert.deepEqual(lines(toolCallLine(theme, "lsp", "diagnostics sample.ts:1")), [
+		"  ○ lsp diagnostics sample.ts:1",
+	]);
+	assert.deepEqual(lines(toolResultLine(theme, {
+		name: "lsp",
+		ok: true,
+		summary: "LSP: OK",
+	})), ["  ● lsp · LSP: OK"]);
+	assert.deepEqual(lines(toolResultLine(theme, {
+		name: "lsp",
+		ok: false,
+		summary: "failed",
+	})), ["  ! lsp · failed"]);
 });
 
 test("toolResultLine appends detail only when expanded", () => {
@@ -62,7 +82,7 @@ test("lsp call and result renderers are mutually exclusive and settle to one row
 	) => { render(width: number): string[] };
 
 	assert.deepEqual(lines(renderCall(args, theme, { isPartial: true, args })), [
-		"  ⋯ lsp diagnostics sample.ts:1",
+		"  … lsp diagnostics sample.ts:1",
 	]);
 	assert.deepEqual(lines(renderCall(args, theme, { isPartial: false, args })), []);
 	assert.deepEqual(lines(renderResult(

@@ -6,7 +6,7 @@
 // the cursor/cycle logic so the behaviour is unit-testable; index.ts only paints
 // it and performs the actual save.
 
-import type { CockpitConfig, IconMode, ViewMode } from "./types.ts";
+import type { CockpitConfig, IconMode, QuietSymbolMode, ViewMode } from "./types.ts";
 
 export type SaveState =
 	| { kind: "idle" }
@@ -25,6 +25,7 @@ export interface SettingsRow {
 }
 
 const VIEW_MODES: ViewMode[] = ["list", "compact"];
+const QUIET_SYMBOL_MODES: QuietSymbolMode[] = ["check", "dot"];
 const ICON_MODES: IconMode[] = ["auto", "nerd", "ascii"];
 
 function cycle<T>(values: readonly T[], current: T): T {
@@ -62,6 +63,13 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			label: "quiet (reload)",
 			value: config.quietMode ? "on" : "off",
 			next: config.quietMode ? "off" : "on",
+		},
+		{
+			key: "quietSymbols",
+			accel: "s",
+			label: "quiet symbols",
+			value: config.quietSymbols,
+			next: cycle(QUIET_SYMBOL_MODES, config.quietSymbols),
 		},
 		{
 			// Pass-through to pi's native thinking toggle: the value mirrors pi's
@@ -132,6 +140,8 @@ export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
 			return { ...config, enabled: !config.enabled };
 		case "quietMode":
 			return { ...config, quietMode: !config.quietMode };
+		case "quietSymbols":
+			return { ...config, quietSymbols: cycle(QUIET_SYMBOL_MODES, config.quietSymbols) };
 		case "agentsMode":
 			return { ...config, agentsMode: cycle(VIEW_MODES, config.agentsMode) };
 		case "todoMode":

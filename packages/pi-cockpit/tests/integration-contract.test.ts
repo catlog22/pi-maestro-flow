@@ -19,8 +19,9 @@ import {
 import cockpitEntry from "../src/index.ts";
 import extensionEntry from "../src/extension/index.ts";
 
-test("Cockpit defaults Todo to a one-line collapsed summary", () => {
+test("Cockpit defaults Todo to a one-line collapsed summary and Quiet to check symbols", () => {
 	assert.equal(DEFAULT_CONFIG.todoExpanded, false);
+	assert.equal(DEFAULT_CONFIG.quietSymbols, "check");
 });
 
 test("Cockpit loads through the standard extension path without changing its public entry", () => {
@@ -79,6 +80,7 @@ test("Cockpit packages complete selectable color themes", () => {
 test("Cockpit owns native UI through events instead of clearing foreign widget keys", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(source, /pi\.events\.emit\(COCKPIT_UI_OWNERSHIP_EVENT/);
+	assert.match(source, /quietSymbols: config\.quietSymbols/);
 	assert.match(source, /footer: config\.enabled/);
 	assert.match(source, /footer: false/);
 	assert.match(source, /pi\.events\.on\(COCKPIT_TODO_TOGGLE_EVENT/);

@@ -19,7 +19,7 @@ import {
 } from "../shared/agent-status.ts";
 import type { AgentProgressSnapshot, ChildAgentCallSnapshot, Details, SingleResult } from "../shared/types.ts";
 import { extractDependencies } from "../runs/execution.ts";
-import { isQuietMode } from "../quiet-state.ts";
+import { isQuietMode, quietStatusMark } from "../quiet-state.ts";
 import {
   buildProgressTree,
   focusTaskIndex,
@@ -615,7 +615,7 @@ function quietTopoLabel(tasks: TaskArg[]): string {
 }
 
 function renderQuietTeammateCall(args: Record<string, unknown>, theme: Theme): Component {
-  const glyph = theme.fg("warning", "⋯");
+  const glyph = theme.fg("warning", quietStatusMark("running"));
   const tasks = (args.tasks as Array<Omit<TaskArg, "agent"> & { agent?: string }> | undefined)
     ?.map((task) => ({ ...task, agent: task.agent ?? (args.agent as string | undefined) ?? "general" }));
   if (tasks?.length) {
@@ -646,12 +646,12 @@ function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Them
       const rest = total === 1
         ? `${firstFailed?.agent ?? "agent"} failed · ${err}`
         : `${failed}/${total} failed · ${err}`;
-      const glyph = theme.fg("error", "✗");
+      const glyph = theme.fg("error", quietStatusMark("failure"));
       return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
     }
     const tokens = totalTokens > 0 ? ` · ${formatTokens(totalTokens)} tokens` : "";
     const rest = total === 1 ? `${results[0].agent} done${tokens}` : `${ok}/${total} done${tokens}`;
-    const glyph = theme.fg("success", "✓");
+    const glyph = theme.fg("success", quietStatusMark("success"));
     return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
   }
 
@@ -664,10 +664,10 @@ function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Them
     + childCalls.filter((c) => c.status === "failed").length;
   const completed = entries.filter((e) => e.status === "completed").length;
   const glyph = failed > 0
-    ? theme.fg("error", "✗")
+    ? theme.fg("error", quietStatusMark("failure"))
     : running > 0
-      ? theme.fg("warning", "■")
-      : theme.fg("success", "✓");
+      ? theme.fg("warning", quietStatusMark("running"))
+      : theme.fg("success", quietStatusMark("success"));
   const stateText = entries.length === 0
     ? `${running || childCalls.length} child agent${(running || childCalls.length) === 1 ? "" : "s"}`
     : failed > 0

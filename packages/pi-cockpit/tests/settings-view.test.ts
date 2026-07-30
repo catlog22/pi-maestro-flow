@@ -29,9 +29,21 @@ test("thinking fold row mirrors pi's live state and advertises its inverse", () 
 	assert.equal(visible?.next, "hidden");
 });
 
-test("thinking fold sits next to quiet mode so the two quiet surfaces read together", () => {
+test("quiet controls stay grouped in mode, symbol, thinking order", () => {
 	const keys = buildRows(DEFAULT_CONFIG, { thinkingHidden: false }).map((row) => row.key);
-	assert.equal(keys[keys.indexOf("quietMode") + 1], "thinkingFold");
+	const start = keys.indexOf("quietMode");
+	assert.deepEqual(keys.slice(start, start + 3), ["quietMode", "quietSymbols", "thinkingFold"]);
+});
+
+test("quiet symbols cycle between check and dot modes", () => {
+	const row = buildRows(DEFAULT_CONFIG).find((candidate) => candidate.key === "quietSymbols");
+	assert.deepEqual(
+		{ value: row?.value, next: row?.next, accel: row?.accel },
+		{ value: "check", next: "dot", accel: "s" },
+	);
+	const dotted = applyRow(DEFAULT_CONFIG, "quietSymbols");
+	assert.equal(dotted.quietSymbols, "dot");
+	assert.equal(applyRow(dotted, "quietSymbols").quietSymbols, "check");
 });
 
 test("thinking fold is a pass-through: applyRow leaves config untouched", () => {

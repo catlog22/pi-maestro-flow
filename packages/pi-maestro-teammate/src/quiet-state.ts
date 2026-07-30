@@ -1,24 +1,35 @@
 // Quiet-mode mirror for pi-maestro-teammate tool rendering.
 //
-// Cockpit owns the quiet-mode config and broadcasts it on the
-// cockpit:ui-ownership event (payload.quiet). The extension's ownership
-// listener mirrors it here via setQuietMode(); render.ts consults
-// isQuietMode() so the teammate tool stream collapses to single-line
-// summaries together with every other quiet-aware tool.
-//
-// This is a fan-out mirror of the same event that pi-maestro-flow mirrors in
-// its own quiet-state.ts. Teammate does not import that module (cross-package
-// import would create a cycle), so the two packages stay in sync through the
-// shared cockpit event rather than a shared implementation. The flag carries no
-// logic, so mirroring it twice cannot drift the way a duplicated normalization
-// routine would. Defaults to off when cockpit is absent.
+// Cockpit owns the config and broadcasts it on cockpit:ui-ownership. Teammate
+// mirrors both the enable flag and lifecycle glyph set so its compact tool rows
+// stay visually aligned with Cockpit and Flow without a cross-package import.
+
+export type QuietSymbolMode = "check" | "dot";
+export type QuietStatus = "running" | "success" | "failure";
 
 let quietMode = false;
+let quietSymbols: QuietSymbolMode = "check";
 
-export function setQuietMode(value: boolean): void {
+export function setQuietMode(value: boolean, symbols?: unknown): void {
 	quietMode = value;
+	if (symbols === "check" || symbols === "dot") quietSymbols = symbols;
 }
 
 export function isQuietMode(): boolean {
 	return quietMode;
+}
+
+export function getQuietSymbols(): QuietSymbolMode {
+	return quietSymbols;
+}
+
+export function quietStatusMark(status: QuietStatus): string {
+	if (quietSymbols === "dot") {
+		if (status === "running") return "○";
+		if (status === "success") return "●";
+		return "!";
+	}
+	if (status === "running") return "…";
+	if (status === "success") return "✓";
+	return "✕";
 }

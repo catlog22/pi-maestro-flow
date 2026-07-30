@@ -170,6 +170,7 @@ export default function (pi: ExtensionAPI): void {
 			footer: config.enabled,
 			todoExpanded: config.todoExpanded,
 			quiet: config.enabled && config.quietMode,
+			quietSymbols: config.quietSymbols,
 		});
 	};
 	const setTodoExpanded = (expanded: boolean): void => {
@@ -427,6 +428,7 @@ export default function (pi: ExtensionAPI): void {
 			footer: false,
 			todoExpanded: config.todoExpanded,
 			quiet: false,
+			quietSymbols: config.quietSymbols,
 		});
 		lastCtx = undefined;
 		running = false;

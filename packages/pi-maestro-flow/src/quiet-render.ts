@@ -4,6 +4,7 @@
 // arrives, the call renderer becomes empty and the result renderer redraws the
 // name and arguments on the same row, optionally followed by expanded detail.
 
+import { quietStatusMark } from "./quiet-state.ts";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { Component } from "@earendil-works/pi-tui";
 import { truncateToWidth } from "@earendil-works/pi-tui";
@@ -29,7 +30,7 @@ function lineComponent(text: string): Component {
 export function toolCallLine(theme: QuietTheme, name: string, arg = ""): Component {
 	const bold = theme.bold ?? ((text: string) => text);
 	return lineComponent(
-		`  ${theme.fg("warning", "⋯")} ${theme.fg("toolTitle", bold(name))}${arg ? ` ${theme.fg("accent", arg)}` : ""}`,
+		`  ${theme.fg("warning", quietStatusMark("running"))} ${theme.fg("toolTitle", bold(name))}${arg ? ` ${theme.fg("accent", arg)}` : ""}`,
 	);
 }
 
@@ -46,7 +47,9 @@ export function toolResultLine(
 	},
 ): Component {
 	const bold = theme.bold ?? ((text: string) => text);
-	const mark = o.mark ?? (o.ok === false ? theme.fg("error", "✗") : theme.fg("success", "✓"));
+	const mark = o.mark ?? (o.ok === false
+		? theme.fg("error", quietStatusMark("failure"))
+		: theme.fg("success", quietStatusMark("success")));
 	let line = `  ${mark} ${theme.fg("toolTitle", bold(o.name))}${o.arg ? ` ${theme.fg("accent", o.arg)}` : ""}${o.summary ? ` ${theme.fg("dim", `· ${o.summary}`)}` : ""}`;
 	if (o.expanded && o.detail && o.detail.trim()) line += `\n${theme.fg("dim", o.detail)}`;
 	return lineComponent(line);

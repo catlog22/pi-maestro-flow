@@ -111,6 +111,21 @@ test("Plan confirmation renders Markdown and selects new-session execution by de
   assert.equal(await pending, "execute-clear");
 });
 
+test("Plan confirmation offers a same-session clean context for tool callers", async () => {
+  const harness = createHarness();
+  const pending = openPlanConfirmation(harness.ctx, {
+    markdown: "# Approved Plan",
+    canClearContext: true,
+    clearContextMode: "compaction",
+  });
+  assert.ok(harness.component);
+  const rendered = harness.component.render(100).join("\n");
+  assert.match(rendered, /2\. Reset context then execute/);
+  assert.match(rendered, /Keep this session and replace model context/);
+  harness.component.handleInput("2");
+  assert.equal(await pending, "execute-clear");
+});
+
 test("same-model approval keeps the original compact execution option", async () => {
   const harness = createHarness();
   const pending = openPlanConfirmation(harness.ctx, {

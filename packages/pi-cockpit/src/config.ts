@@ -8,10 +8,11 @@ export function getConfigPath(): string {
 }
 
 // Flat, field-by-field merge: type-safe and forward-compatible (unknown keys ignored).
-function deepMerge(base: CockpitConfig, over: unknown): CockpitConfig {
+export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 	if (!over || typeof over !== "object" || Array.isArray(over)) return base;
 	const o = over as Record<string, unknown>;
 	const isMode = (v: unknown): v is "list" | "compact" => v === "list" || v === "compact";
+	const isQuietSymbolMode = (v: unknown): v is "check" | "dot" => v === "check" || v === "dot";
 	const isIconMode = (v: unknown): v is "auto" | "nerd" | "ascii" => v === "auto" || v === "nerd" || v === "ascii";
 	const iconsRaw = o.icons && typeof o.icons === "object" && !Array.isArray(o.icons)
 		? (o.icons as Record<string, unknown>)
@@ -19,6 +20,7 @@ function deepMerge(base: CockpitConfig, over: unknown): CockpitConfig {
 	return {
 		enabled: typeof o.enabled === "boolean" ? o.enabled : base.enabled,
 		quietMode: typeof o.quietMode === "boolean" ? o.quietMode : base.quietMode,
+		quietSymbols: isQuietSymbolMode(o.quietSymbols) ? o.quietSymbols : base.quietSymbols,
 		agentsMode: isMode(o.agentsMode) ? o.agentsMode : base.agentsMode,
 		todoMode: isMode(o.todoMode) ? o.todoMode : base.todoMode,
 		todoExpanded: typeof o.todoExpanded === "boolean" ? o.todoExpanded : base.todoExpanded,
@@ -47,7 +49,7 @@ export function loadConfig(notify?: (msg: string, level: "warning" | "info") => 
 		return structuredClone(DEFAULT_CONFIG);
 	}
 	try {
-		return deepMerge(DEFAULT_CONFIG, JSON.parse(readFileSync(path, "utf8")));
+		return mergeConfig(DEFAULT_CONFIG, JSON.parse(readFileSync(path, "utf8")));
 	} catch (err) {
 		notify?.(`pi-cockpit config parse error: ${err instanceof Error ? err.message : String(err)}`, "warning");
 		return structuredClone(DEFAULT_CONFIG);

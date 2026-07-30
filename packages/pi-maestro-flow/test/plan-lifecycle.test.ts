@@ -6,11 +6,16 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { CompactionArbiter } from "../src/compaction/compaction-arbiter.ts";
 import {
+  consumePlanCleanContextCompaction,
+  PLAN_CLEAN_CONTEXT_COMPACTION_MARKER,
   getMode,
   getPlanHandoffStatus,
   initPlan,
+  applyPlanContextToCompaction,
   onAgentEndPlan,
   onBeforeAgentStartPlan,
+  onCompactPlan,
+  onContextPlan,
   onSessionShutdownPlan,
   onSessionStartPlan,
   onToolCallPlan,
@@ -55,6 +60,7 @@ function createHarness(
     discussionInput?: string;
     idle?: boolean;
     arbiter?: CompactionArbiter;
+    deferCompactionComplete?: boolean;
   } = {},
 ) {
   let active = ["Read", "Write", "Bash", "todo", "custom-tool"];
@@ -63,7 +69,11 @@ function createHarness(
   const messages: string[] = [];
   const notifications: string[] = [];
   const statuses: Array<string | undefined> = [];
-  const compactions: Array<{ customInstructions?: string; onComplete?: (result: unknown) => void }> = [];
+  const compactions: Array<{
+    customInstructions?: string;
+    onComplete?: (result: unknown) => void;
+    onError?: (error: Error) => void;
+  }> = [];
   let newSessions = 0;
   let aborts = 0;
   const tui = { requestRender() {} };
@@ -107,9 +117,13 @@ function createHarness(
     isIdle: () => runtime.idle ?? true,
     abort() { aborts++; },
     getContextUsage: () => ({ percent: runtime.contextPercent ?? 0 }),
-    compact(options: { customInstructions?: string; onComplete?: (result: unknown) => void }) {
+    compact(options: {
+      customInstructions?: string;
+      onComplete?: (result: unknown) => void;
+      onError?: (error: Error) => void;
+    }) {
       compactions.push(options);
-      setImmediate(() => options.onComplete?.({}));
+      if (!runtime.deferCompactionComplete) setImmediate(() => options.onComplete?.({}));
     },
     sessionManager: {
       getSessionId: () => sessionId,
@@ -480,20 +494,22 @@ test("/plan approve compacts with an explicit approved-Plan link before executio
   }
 });
 
-test("plan-confirm tool keeps unavailable context execution in Plan mode", async () => {
+test("plan-confirm tool resets context without command session APIs", async () => {
   const root = await mkdtemp(join(tmpdir(), "pi-plan-confirm-tool-compact-"));
-  const harness = createHarness(root, false, false, false, false, "compact-tool-chat", ["2", "\x1b"]);
+  const harness = createHarness(root, false, false, false, false, "compact-tool-chat", ["2"]);
   harness.ctx.isIdle = () => false;
   try {
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Compact Tool Plan" });
     const confirmed = await execute(harness, "plan-confirm");
-    assert.equal(confirmed.details.approved, false);
-    assert.equal(harness.compactions.length, 0);
-    assert.equal(harness.messages.length, 0);
-    assert.equal(getMode(), "plan");
-    assert.equal(harness.aborts, 1);
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(harness.compactions.length, 1);
+    assert.match(harness.compactions[0]?.customInstructions ?? "", /maestro-plan-clean-context/);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(harness.messages.length, 1);
+    assert.equal(getMode(), "act");
+    assert.equal(harness.aborts, 0);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });
@@ -507,8 +523,7 @@ test("Plan confirmation can execute in a new session from command-capable contex
     await onSessionStartPlan(harness.ctx);
     await execute(harness, "plan-enter");
     await execute(harness, "plan-update", { markdown: "# Clean Context Plan" });
-    const confirmed = await execute(harness, "plan-confirm");
-    assert.equal(confirmed.details.approved, true);
+    await executeCommand(harness, "plan", "approve");
     assert.equal(harness.newSessions, 1);
     assert.equal(harness.messages.length, 1);
     assert.match(harness.messages.at(-1) ?? "", /# Clean Context Plan/);
@@ -1001,6 +1016,265 @@ test("Reinitializing Plan restores a leaked tool snapshot and resets module stat
     onSessionShutdownPlan(second.ctx);
   } finally {
     onSessionShutdownPlan(first.ctx);
+    await rm(firstRoot, { recursive: true, force: true });
+    await rm(secondRoot, { recursive: true, force: true });
+  }
+});
+
+test("Plan tool path resets provider context without command-context session APIs", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-clean-context-"));
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "clean-context-chat",
+    ["2"],
+    false,
+    { todoKeys: [] },
+    undefined,
+    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Clean Provider Context Plan" });
+    const confirmed = await execute(harness, "plan-confirm");
+
+    assert.equal(confirmed.details.approved, true);
+    assert.equal(harness.newSessions, 0);
+    assert.equal(harness.compactions.length, 1);
+    assert.match(harness.compactions[0]?.customInstructions ?? "", /maestro-compaction-owner:plan-handoff/);
+    assert.match(harness.compactions[0]?.customInstructions ?? "", new RegExp(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+
+    const request = consumePlanCleanContextCompaction();
+    assert.ok(request);
+    assert.match(request.summary, /# Clean Provider Context Plan/);
+    assert.match(request.summary, /prior conversation was intentionally cleared/);
+    assert.match(request.firstKeptEntryId, /^maestro-plan-clean-/);
+
+    harness.compactions[0]?.onComplete?.({});
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.messages[0] ?? "", /approved Plan/i);
+    assert.equal(getPlanHandoffStatus(), "todo-required");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Nothing to compact falls back to a stable Plan-only provider context", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-small-context-"));
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "small-context-chat",
+    ["2"],
+    false,
+    { todoKeys: [] },
+    undefined,
+    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Small Session Plan" });
+    await execute(harness, "plan-confirm");
+    harness.compactions[0]?.onError?.(new Error("Nothing to compact (session too small)"));
+
+    assert.equal(harness.messages.length, 1);
+    assert.match(harness.notifications.join("\n"), /using a clean Plan context/);
+    assert.doesNotMatch(harness.notifications.join("\n"), /executing with the current context/);
+
+    const oldMessages = [
+      { role: "user", content: [{ type: "text", text: "OLD HISTORY" }], timestamp: 1 },
+      { role: "assistant", content: [{ type: "text", text: "OLD ANSWER" }], timestamp: 2 },
+    ] as never;
+    const first = onContextPlan(oldMessages);
+    assert.ok(first);
+    assert.equal(first.messages.length, 1);
+    assert.match(JSON.stringify(first.messages), /# Small Session Plan/);
+    assert.doesNotMatch(JSON.stringify(first.messages), /OLD HISTORY|OLD ANSWER/);
+
+    const appended = [
+      ...oldMessages,
+      { role: "assistant", content: [{ type: "text", text: "NEW EXECUTION RESULT" }], timestamp: 3 },
+    ] as never;
+    const second = onContextPlan(appended);
+    assert.ok(second);
+    assert.equal(second.messages.length, 2);
+    assert.deepEqual(second.messages[0], first.messages[0], "replacement must remain byte-stable across turns");
+    assert.match(JSON.stringify(second.messages), /NEW EXECUTION RESULT/);
+    assert.doesNotMatch(JSON.stringify(second.messages), /OLD HISTORY|OLD ANSWER/);
+
+    const branched = [
+      { role: "user", content: [{ type: "text", text: "REWRITTEN OLD HISTORY" }], timestamp: 1 },
+      oldMessages[1],
+      { role: "user", content: [{ type: "text", text: "NEW BRANCH REQUEST" }], timestamp: 4 },
+    ] as never;
+    const branchResult = onContextPlan(branched);
+    assert.ok(branchResult);
+    assert.match(JSON.stringify(branchResult.messages), /NEW BRANCH REQUEST/);
+    assert.doesNotMatch(JSON.stringify(branchResult.messages), /REWRITTEN OLD HISTORY|OLD ANSWER/);
+
+    const branchWithResult = [
+      ...branched,
+      { role: "assistant", content: [{ type: "text", text: "BRANCH RESULT" }], timestamp: 5 },
+    ] as never;
+    const preparation = {
+      messagesToSummarize: oldMessages,
+      turnPrefixMessages: oldMessages,
+      firstKeptEntryId: "old-kept-entry",
+      previousSummary: "OLD SUMMARY MUST DISAPPEAR",
+    };
+    assert.equal(applyPlanContextToCompaction(preparation, branchWithResult), true);
+    assert.match(preparation.firstKeptEntryId, /^maestro-plan-replacement-/);
+    assert.equal(preparation.previousSummary, undefined);
+    assert.deepEqual(preparation.turnPrefixMessages, []);
+    assert.match(JSON.stringify(preparation.messagesToSummarize), /# Small Session Plan/);
+    assert.match(JSON.stringify(preparation.messagesToSummarize), /NEW BRANCH REQUEST|BRANCH RESULT/);
+    assert.doesNotMatch(
+      JSON.stringify(preparation.messagesToSummarize),
+      /REWRITTEN OLD HISTORY|OLD ANSWER|OLD SUMMARY MUST DISAPPEAR/,
+    );
+
+    onCompactPlan(harness.ctx);
+    assert.equal(onContextPlan(appended), undefined, "a real compaction starts a new replacement epoch");
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("session reset clears the small-session Plan context replacement", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-small-context-reset-"));
+  const harness = createHarness(
+    root,
+    false,
+    false,
+    false,
+    false,
+    "small-context-reset-chat",
+    ["2"],
+    false,
+    { todoKeys: [] },
+    undefined,
+    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+  );
+  try {
+    await onSessionStartPlan(harness.ctx);
+    await execute(harness, "plan-enter");
+    await execute(harness, "plan-update", { markdown: "# Reset Plan" });
+    await execute(harness, "plan-confirm");
+    harness.compactions[0]?.onError?.(new Error("Nothing to compact (session too small)"));
+    assert.ok(onContextPlan([{ role: "user", content: "old", timestamp: 1 }] as never));
+
+    onSessionShutdownPlan(harness.ctx);
+    assert.equal(onContextPlan([{ role: "user", content: "old", timestamp: 1 }] as never), undefined);
+  } finally {
+    onSessionShutdownPlan(harness.ctx);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("stale clean-context callback cannot erase or execute a newer session Plan", async () => {
+  const firstRoot = await mkdtemp(join(tmpdir(), "pi-plan-clean-stale-first-"));
+  const secondRoot = await mkdtemp(join(tmpdir(), "pi-plan-clean-stale-second-"));
+  const first = createHarness(
+    firstRoot,
+    false,
+    false,
+    false,
+    false,
+    "clean-stale-first",
+    ["2"],
+    false,
+    { todoKeys: [] },
+    undefined,
+    { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+  );
+  let second: ReturnType<typeof createHarness> | undefined;
+  try {
+    await onSessionStartPlan(first.ctx);
+    await execute(first, "plan-enter");
+    await execute(first, "plan-update", { markdown: "# Old Session Plan" });
+    await execute(first, "plan-confirm");
+    assert.equal(first.compactions.length, 1);
+
+    onSessionShutdownPlan(first.ctx);
+    second = createHarness(
+      secondRoot,
+      false,
+      false,
+      false,
+      false,
+      "clean-stale-second",
+      ["2"],
+      false,
+      { todoKeys: [] },
+      undefined,
+      { arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+    );
+    await onSessionStartPlan(second.ctx);
+    await execute(second, "plan-enter");
+    await execute(second, "plan-update", { markdown: "# New Session Plan" });
+    await execute(second, "plan-confirm");
+
+    first.compactions[0]?.onComplete?.({});
+    assert.equal(second.messages.length, 0, "stale callback must not inject the old Plan into the new session");
+    const secondRequest = consumePlanCleanContextCompaction();
+    assert.ok(secondRequest, "stale callback must not clear the newer request");
+    assert.match(secondRequest.summary, /# New Session Plan/);
+    assert.doesNotMatch(secondRequest.summary, /# Old Session Plan/);
+
+    second.compactions[0]?.onComplete?.({});
+    assert.equal(second.messages.length, 1);
+    assert.match(second.messages[0] ?? "", /approved Plan/i);
+  } finally {
+    if (second) onSessionShutdownPlan(second.ctx);
+    await rm(firstRoot, { recursive: true, force: true });
+    await rm(secondRoot, { recursive: true, force: true });
+  }
+});
+
+test("stale compact-before-execute callback cannot inject into a replacement session", async () => {
+  const firstRoot = await mkdtemp(join(tmpdir(), "pi-plan-compact-stale-first-"));
+  const secondRoot = await mkdtemp(join(tmpdir(), "pi-plan-compact-stale-second-"));
+  const first = createHarness(
+    firstRoot,
+    false,
+    false,
+    false,
+    false,
+    "compact-stale-first",
+    ["2"],
+    false,
+    { todoKeys: [] },
+    undefined,
+    { contextPercent: 75, arbiter: new CompactionArbiter(), deferCompactionComplete: true },
+  );
+  let second: ReturnType<typeof createHarness> | undefined;
+  try {
+    await onSessionStartPlan(first.ctx);
+    await execute(first, "plan-enter");
+    await execute(first, "plan-update", { markdown: "# Old Compact Plan" });
+    await executeCommand(first, "plan", "approve");
+    assert.equal(first.compactions.length, 1);
+
+    onSessionShutdownPlan(first.ctx);
+    second = createHarness(secondRoot, false, false, false, false, "compact-stale-second");
+    await onSessionStartPlan(second.ctx);
+
+    first.compactions[0]?.onError?.(new Error("stale failure"));
+    first.compactions[0]?.onComplete?.({});
+    assert.equal(second.messages.length, 0);
+    assert.doesNotMatch(first.notifications.join("\n"), /stale failure/);
+  } finally {
+    if (second) onSessionShutdownPlan(second.ctx);
     await rm(firstRoot, { recursive: true, force: true });
     await rm(secondRoot, { recursive: true, force: true });
   }

@@ -33,7 +33,7 @@ import {
 import { Text } from "@earendil-works/pi-tui";
 import { homedir } from "node:os";
 import type { CockpitConfig } from "./types.ts";
-import { resolveGlyphs } from "./icons.ts";
+import { resolveGlyphs, type IconGlyphs } from "./icons.ts";
 
 // ---------- helpers ----------
 
@@ -95,17 +95,15 @@ function getBuiltInTools(cwd: string): BuiltInTools {
 
 interface ToolSpec {
 	name: string;
-	/** Key argument shown after the tool name (path / $ command / pattern). */
+	/** Key argument shown after the tool name (path / command / pattern). */
 	arg: (args: any) => string;
-	/** Final summary after ✓/✗ (e.g. "12 lines", "exit 0 · 3 lines"). */
+	/** Final compact summary after the separator (for example "12M" or "0 · 3L"). */
 	summary: (result: any, ctx: any) => string;
 	/** Expanded content; empty string means nothing extra. */
 	expanded?: (result: any) => string;
 	/** Success predicate; defaults to !ctx.isError. */
 	ok?: (result: any, ctx: any) => boolean;
 }
-
-const NAME_WIDTH = 5;
 
 const SPECS: ToolSpec[] = [
 	{
@@ -116,22 +114,22 @@ const SPECS: ToolSpec[] = [
 			if (c?.type === "image") return "image";
 			const lines = c?.type === "text" ? c.text.split("\n").length : 0;
 			const d = r.details as ReadToolDetails | undefined;
-			let s = `${lines} lines`;
-			if (d?.truncation?.truncated) s += ` (truncated from ${d.truncation.totalLines})`;
+			let s = `${lines}L`;
+			if (d?.truncation?.truncated) s += `/${d.truncation.totalLines}L`;
 			return s;
 		},
 		expanded: (r) => textOf(r).split("\n").slice(0, 15).join("\n"),
 	},
 	{
 		name: "bash",
-		arg: (a) => `$ ${a.command || ""}`,
+		arg: (a) => a.command || "",
 		summary: (r) => {
 			const out = textOf(r);
 			const exit = parseBashExit(out);
 			const n = out.split("\n").filter((l: string) => l.trim()).length;
 			const d = r.details as BashToolDetails | undefined;
-			let s = `exit ${exit ?? "?"} · ${n} lines`;
-			if (d?.truncation?.truncated) s += " [truncated]";
+			let s = `${exit ?? "?"} · ${n}L`;
+			if (d?.truncation?.truncated) s += " · trunc";
 			return s;
 		},
 		expanded: (r) => textOf(r).split("\n").slice(0, 20).join("\n"),
@@ -164,35 +162,74 @@ const SPECS: ToolSpec[] = [
 	{
 		name: "write",
 		arg: (a) => shortenPath(a.path || ""),
-		summary: (_r, ctx) => (ctx.isError ? firstErrorLine(_r) : "written"),
+		summary: (r, ctx) => {
+			if (ctx.isError) return firstErrorLine(r);
+			const content = typeof ctx.args?.content === "string" ? ctx.args.content : "";
+			return `${content === "" ? 0 : content.split("\n").length}L`;
+		},
 	},
 	{
 		name: "find",
-		arg: (a) => `${a.pattern || ""} in ${shortenPath(a.path || ".")}`,
-		summary: (r, ctx) => (ctx.isError ? firstErrorLine(r) : `${textOf(r).trim().split("\n").filter(Boolean).length} files`),
+		arg: (a) => `${a.pattern || ""} @ ${shortenPath(a.path || ".")}`,
+		summary: (r, ctx) => (ctx.isError ? firstErrorLine(r) : `${textOf(r).trim().split("\n").filter(Boolean).length}F`),
 		expanded: (r) => textOf(r),
 	},
 	{
 		name: "grep",
-		arg: (a) => `/${a.pattern || ""}/ in ${shortenPath(a.path || ".")}`,
-		summary: (r, ctx) => (ctx.isError ? firstErrorLine(r) : `${textOf(r).trim().split("\n").filter(Boolean).length} matches`),
+		arg: (a) => `${a.pattern || ""} @ ${shortenPath(a.path || ".")}`,
+		summary: (r, ctx) => (ctx.isError ? firstErrorLine(r) : `${textOf(r).trim().split("\n").filter(Boolean).length}M`),
 		expanded: (r) => textOf(r),
 	},
 	{
 		name: "ls",
 		arg: (a) => shortenPath(a.path || "."),
-		summary: (r, ctx) => (ctx.isError ? firstErrorLine(r) : `${textOf(r).trim().split("\n").filter(Boolean).length} entries`),
+		summary: (r, ctx) => (ctx.isError ? firstErrorLine(r) : `${textOf(r).trim().split("\n").filter(Boolean).length}E`),
 		expanded: (r) => textOf(r),
 	},
 ];
 
 // ---------- rendering ----------
 
-function renderCallLine(spec: ToolSpec, args: any, theme: any, glyphs: { ellipsis: string }): string {
-	const name = spec.name.padEnd(NAME_WIDTH);
-	const argCap = Math.max(10, termWidth() - (5 + NAME_WIDTH));
+const TOOL_COLORS: Record<string, string> = {
+	bash: "syntaxFunction",
+	read: "syntaxType",
+	ls: "syntaxType",
+	grep: "syntaxKeyword",
+	find: "syntaxKeyword",
+	edit: "syntaxVariable",
+	write: "syntaxVariable",
+};
+
+function quietMark(
+	mode: CockpitConfig["quietSymbols"],
+	state: "running" | "success" | "failure",
+	glyphs: IconGlyphs,
+): string {
+	if (mode === "dot") {
+		if (state === "running") return glyphs.pending;
+		if (state === "success") return glyphs.dotRunning;
+		return glyphs.blocked;
+	}
+	if (state === "running") return glyphs.ellipsis;
+	if (state === "success") return glyphs.check;
+	return glyphs.cross;
+}
+
+function toolName(spec: ToolSpec, theme: any): string {
+	return theme.fg(TOOL_COLORS[spec.name] ?? "toolTitle", theme.bold(spec.name));
+}
+
+function renderCallLine(
+	spec: ToolSpec,
+	args: any,
+	theme: any,
+	glyphs: IconGlyphs,
+	mode: CockpitConfig["quietSymbols"],
+): string {
+	const mark = quietMark(mode, "running", glyphs);
+	const argCap = Math.max(10, termWidth() - (spec.name.length + mark.length + 5));
 	const argText = truncate(spec.arg(args), argCap);
-	return `  ${theme.fg("warning", "⋯")} ${theme.fg("toolTitle", theme.bold(name))} ${theme.fg("accent", argText)}`;
+	return `  ${theme.fg("warning", mark)} ${toolName(spec, theme)}${argText ? ` ${theme.fg("accent", argText)}` : ""}`;
 }
 
 function renderResultLine(
@@ -202,21 +239,22 @@ function renderResultLine(
 	ctx: any,
 	theme: any,
 	expanded: boolean,
-	glyphs: { check: string; cross: string },
+	glyphs: IconGlyphs,
+	mode: CockpitConfig["quietSymbols"],
 ): string {
 	const isOk = spec.ok ? spec.ok(result, ctx) : !ctx.isError;
-	const mark = isOk ? theme.fg("success", glyphs.check) : theme.fg("error", glyphs.cross);
-	const name = spec.name.padEnd(NAME_WIDTH);
+	const rawMark = quietMark(mode, isOk ? "success" : "failure", glyphs);
+	const mark = theme.fg(isOk ? "success" : "error", rawMark);
 
-	const overhead = 8 + NAME_WIDTH;
+	const overhead = 7 + spec.name.length + rawMark.length;
 	const budget = Math.max(20, termWidth() - overhead);
 	const sumCap = Math.min(35, Math.floor(budget * 0.4));
 	const sumRaw = truncate(spec.summary(result, ctx), sumCap);
 	const argCap = Math.max(10, budget - sumRaw.length);
 	const argText = truncate(spec.arg(args), argCap);
 
-	let t = `  ${mark} ${theme.fg("toolTitle", theme.bold(name))} ${theme.fg("accent", argText)}`;
-	t += ` ${theme.fg("dim", "· " + sumRaw)}`;
+	let t = `  ${mark} ${toolName(spec, theme)}${argText ? ` ${theme.fg("accent", argText)}` : ""}`;
+	if (sumRaw) t += ` ${theme.fg("dim", `· ${sumRaw}`)}`;
 
 	if (expanded) {
 		const full = spec.expanded ? spec.expanded(result) : textOf(result);
@@ -251,15 +289,21 @@ export function registerQuietTools(pi: ExtensionAPI, getConfig: () => CockpitCon
 			renderCall(args: any, theme: any, ctx: any) {
 				// Once the result arrives this slot is empty; only renderResult draws.
 				if (!ctx.isPartial) return new Text("", 0, 0);
-				const glyphs = resolveGlyphs(getConfig().icons.mode);
-				return new Text(renderCallLine(spec, args, theme, glyphs), 0, 0);
+				const config = getConfig();
+				const glyphs = resolveGlyphs(config.icons.mode);
+				return new Text(renderCallLine(spec, args, theme, glyphs, config.quietSymbols), 0, 0);
 			},
 
 			renderResult(result: any, { expanded, isPartial }: any, theme: any, ctx: any) {
-				// While streaming: leave empty, the renderCall ⋯ line is visible.
+				// While streaming, leave empty because renderCall owns the row.
 				if (isPartial) return new Text("", 0, 0);
-				const glyphs = resolveGlyphs(getConfig().icons.mode);
-				return new Text(renderResultLine(spec, ctx.args, result, ctx, theme, expanded, glyphs), 0, 0);
+				const config = getConfig();
+				const glyphs = resolveGlyphs(config.icons.mode);
+				return new Text(
+					renderResultLine(spec, ctx.args, result, ctx, theme, expanded, glyphs, config.quietSymbols),
+					0,
+					0,
+				);
 			},
 		});
 	}

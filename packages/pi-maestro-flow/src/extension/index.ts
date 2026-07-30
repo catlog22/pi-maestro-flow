@@ -27,7 +27,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import { copyToClipboard } from "@earendil-works/pi-coding-agent";
+import { buildSessionContext, copyToClipboard } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { FlowToolResult } from "../tools/tool-result.ts";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
@@ -138,9 +138,13 @@ import {
   onSessionStartPlan,
   onSessionShutdownPlan,
   onCompactPlan,
+  onContextPlan,
   onBeforeAgentStartPlan,
   onToolCallPlan,
   onAgentEndPlan,
+  consumePlanCleanContextCompaction,
+  applyPlanContextToCompaction,
+  PLAN_CLEAN_CONTEXT_COMPACTION_MARKER,
   getMode as getPlanMode,
   hasPlan,
   getPlanText,
@@ -1393,9 +1397,9 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
 
   pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
     if (!payload || typeof payload !== "object") return;
-    const ownership = payload as { todo?: unknown; todoExpanded?: unknown; quiet?: unknown };
+    const ownership = payload as { todo?: unknown; todoExpanded?: unknown; quiet?: unknown; quietSymbols?: unknown };
     cockpitOwnsTodo = ownership.todo === true;
-    setQuietMode(ownership.quiet === true);
+    setQuietMode(ownership.quiet === true, ownership.quietSymbols);
     if (typeof ownership.todoExpanded === "boolean") {
       panelMode = ownership.todoExpanded ? "expanded" : "collapsed";
     }
@@ -1547,6 +1551,31 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     if (!observed.allowed) return { cancel: true };
     return await runObservedCompaction(observed, async () => {
       goalBeforeCompact(ctx);
+      const cleanContextRequest = observed.trigger?.owner === "plan-handoff"
+        && observed.trigger.reason === "clean-context"
+        && event.customInstructions?.includes(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER)
+        ? consumePlanCleanContextCompaction()
+        : undefined;
+      if (observed.trigger?.owner === "plan-handoff" && observed.trigger.reason === "clean-context") {
+        if (!cleanContextRequest) {
+          ctx.ui.notify("Approved Plan context reset was cancelled because its payload was unavailable.", "warning");
+          return { cancel: true };
+        }
+        const result = await runWithCompactionStatus(event, ctx, () =>
+          createMaestroCompaction(event, ctx, {
+            getWorkflowIdentity: () => workflowRecoveryIdentity(),
+            trigger: observed.trigger,
+            summaryOverride: cleanContextRequest.summary,
+            firstKeptEntryIdOverride: cleanContextRequest.firstKeptEntryId,
+          }), observed);
+        return result?.compaction ? result : { cancel: true };
+      }
+
+      applyPlanContextToCompaction(
+        event.preparation,
+        buildSessionContext(event.branchEntries).messages,
+      );
+
       const projected = await midTurnAutoCompaction.projectCompactionInput(event, ctx);
       // Pi's default fallback closes over the original preparation object. Keep
       // it in sync so a failed custom summary cannot resurrect raw tool output.
@@ -1564,6 +1593,9 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const completedOwner = compactionArbiter.currentOwner();
     compactionArbiter.complete();
     midTurnAutoCompaction.onCompact(completedOwner);
+    // Clear the non-persistent Plan replacement before any async subsystem can
+    // enqueue a continuation or fail. The persisted compaction is now canonical.
+    onCompactPlan(ctx);
     try {
       await persistMaestroCompactionKnowhow(event, ctx);
     } catch (error) {
@@ -1573,7 +1605,6 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       );
     }
     await goalCompact(event, ctx);
-    onCompactPlan(ctx);
   });
 
   pi.on("input", (event) => {
@@ -1597,10 +1628,12 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   });
 
   pi.on("context", async (event, ctx) => {
-    const todoResult = await onContextTodo(event.messages);
-    const messages = todoResult?.messages ?? event.messages;
+    const planResult = onContextPlan(event.messages);
+    const todoResult = await onContextTodo(planResult?.messages ?? event.messages);
+    const messages = todoResult?.messages ?? planResult?.messages ?? event.messages;
     const pressureMessages = await midTurnAutoCompaction.evaluate(messages, ctx);
-    return pressureMessages ? { messages: pressureMessages } : todoResult;
+    if (pressureMessages) return { messages: pressureMessages };
+    return todoResult ?? planResult;
   });
 
   pi.on("before_provider_request", (event, ctx) =>

@@ -12,7 +12,7 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { AgentMessage, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import { altKey } from "../key-labels.ts";
@@ -108,6 +108,32 @@ let pendingPlanExitReminder: string | undefined;
 let pendingPlanEnterNote: string | undefined;
 let compactionArbiter: CompactionArbiter | undefined;
 let preferNewSession = (_ctx: PlanContext): boolean => false;
+
+export const PLAN_CLEAN_CONTEXT_COMPACTION_MARKER = "[maestro-plan-clean-context]";
+
+export interface PlanCleanContextCompactionRequest {
+  summary: string;
+  firstKeptEntryId: string;
+  lifecycleGeneration: number;
+  requestId: number;
+}
+
+interface PlanHandoffRequestIdentity {
+  lifecycleGeneration: number;
+  requestId: number;
+}
+
+interface PlanContextReplacement {
+  lifecycleGeneration: number;
+  replacement: AgentMessage;
+  baselineMessages?: string[];
+}
+
+let planLifecycleGeneration = 0;
+let nextPlanHandoffRequestId = 0;
+let activePlanHandoffRequest: PlanHandoffRequestIdentity | undefined;
+let pendingCleanContextCompaction: PlanCleanContextCompactionRequest | undefined;
+let planContextReplacement: PlanContextReplacement | undefined;
 // The handoff gate reads todos only. Goal state was decoupled from it in 39a5f2dc;
 // the getters that used to feed it are gone so they cannot be wired back by accident.
 let hasExecutableTodoForHandoff = (handoffKey: string) => getVisibleTasks().some((task) =>
@@ -271,6 +297,8 @@ export function onSessionShutdownPlan(ctx: PlanContext): void {
 }
 
 function resetRuntimeState(): void {
+  planLifecycleGeneration++;
+  activePlanHandoffRequest = undefined;
   mode = "act";
   currentStore = undefined;
   currentStoreKey = "";
@@ -281,10 +309,63 @@ function resetRuntimeState(): void {
   awaitingAction = false;
   pendingPlanExitReminder = undefined;
   pendingPlanEnterNote = undefined;
+  pendingCleanContextCompaction = undefined;
+  planContextReplacement = undefined;
 }
 
 export function onCompactPlan(ctx: PlanContext): void {
+  planContextReplacement = undefined;
   syncModeStatus(ctx);
+}
+
+export function onContextPlan(messages: AgentMessage[]): { messages: AgentMessage[] } | undefined {
+  const manifest = planContextReplacement;
+  if (!manifest) return undefined;
+  if (manifest.lifecycleGeneration !== planLifecycleGeneration) {
+    planContextReplacement = undefined;
+    return undefined;
+  }
+
+  const serialized = messages.map((message) => JSON.stringify(message));
+  if (!manifest.baselineMessages) {
+    manifest.baselineMessages = serialized;
+    return { messages: [manifest.replacement] };
+  }
+
+  const baselineMatches = manifest.baselineMessages.length <= serialized.length
+    && manifest.baselineMessages.every((message, index) => message === serialized[index]);
+  if (!baselineMatches) {
+    // Preserve the newest unmatched user turn while rebasing the dropped prefix.
+    // This avoids resurrecting rewritten history without hiding the request that
+    // caused a branch or host-prefix change.
+    let suffixStart = -1;
+    for (let index = messages.length - 1; index >= 0; index--) {
+      if (messages[index]?.role !== "user") continue;
+      if (index >= manifest.baselineMessages.length || serialized[index] !== manifest.baselineMessages[index]) {
+        suffixStart = index;
+        break;
+      }
+    }
+    if (suffixStart < 0) suffixStart = messages.length;
+    manifest.baselineMessages = serialized.slice(0, suffixStart);
+    return { messages: [manifest.replacement, ...messages.slice(suffixStart)] };
+  }
+  return {
+    messages: [manifest.replacement, ...messages.slice(manifest.baselineMessages.length)],
+  };
+}
+
+export function projectPlanContextForCompaction(messages: AgentMessage[]): {
+  messages: AgentMessage[];
+  firstKeptEntryId: string;
+} | undefined {
+  const manifest = planContextReplacement;
+  const projected = onContextPlan(messages);
+  if (!manifest || !projected || manifest.lifecycleGeneration !== planLifecycleGeneration) return undefined;
+  return {
+    messages: projected.messages,
+    firstKeptEntryId: `maestro-plan-replacement-${manifest.lifecycleGeneration}`,
+  };
 }
 
 export function onBeforeAgentStartPlan(event: { systemPrompt: string }): { systemPrompt: string } | undefined {
@@ -350,7 +431,8 @@ async function reviewPlan(
     const action = await openPlanConfirmation(ctx, {
       markdown: latestPlan ?? "",
       pathLabel: store.currentPath,
-      canClearContext: typeof ctx.newSession === "function",
+      canClearContext: true,
+      clearContextMode: typeof ctx.newSession === "function" ? "new-session" : "compaction",
       canCompactContext: handoffDelivery !== "tool-result",
       // ContextUsage.percent is number | null; the overlay treats "unknown" as
       // absent, so collapse null into undefined rather than widening its type.
@@ -458,6 +540,143 @@ function executionModeFor(action: PlanConfirmationAction): PlanExecutionMode {
   return "current";
 }
 
+async function executeNewSessionHandoff(
+  newSessionFn: NonNullable<ExtensionCommandContext["newSession"]>,
+  ctx: PlanContext,
+  markdown: string,
+  planPath: string,
+  handoffKey: string | undefined,
+  portableMessage: string,
+): Promise<void> {
+  let switchedToReplacement = false;
+  try {
+    const replacement = await newSessionFn({
+      async withSession(newCtx) {
+        switchedToReplacement = true;
+        const replacementCtx = newCtx as PlanContext;
+        try {
+          if (!handoffKey) throw new Error("approved Plan is missing its handoff key");
+          const replacementStore = await ensureStore(replacementCtx);
+          applyLoadedPlan(await replacementStore.approve(markdown, undefined, handoffKey));
+        } catch (error) {
+          try {
+            await enterPlanMode(replacementCtx);
+          } catch {
+            mode = "plan";
+            latestPlan = markdown;
+            latestRevision = 0;
+            latestStatus = "draft";
+            latestHandoffKey = undefined;
+            awaitingAction = false;
+            activatePlanToolSurface();
+            syncModeStatus(replacementCtx);
+          }
+          replacementCtx.ui.notify(
+            `Replacement session Plan handoff failed closed in Plan mode: ${errorMessage(error)}`,
+            "error",
+          );
+          return;
+        }
+        try {
+          await (newCtx as { sendUserMessage(msg: string): Promise<void> }).sendUserMessage(portableMessage);
+        } catch (error) {
+          replacementCtx.ui.notify(
+            `Replacement session holds the approved Plan, but its execution prompt could not be delivered: ${errorMessage(error)}`,
+            "error",
+          );
+        }
+      },
+    });
+    if (!replacement.cancelled || switchedToReplacement) return;
+    applyLoadedPlan(await (await ensureStore(ctx)).load());
+    ctx.ui.notify("New session was cancelled; executing in the current context.", "warning");
+  } catch (error) {
+    if (switchedToReplacement) return;
+    try {
+      applyLoadedPlan(await (await ensureStore(ctx)).load());
+    } catch {
+      // Preserve the original replacement failure; the still-persisted source approval reloads on restart.
+    }
+    ctx.ui.notify(`New session failed; executing in the current context: ${errorMessage(error)}`, "warning");
+  }
+}
+
+export function consumePlanCleanContextCompaction(): PlanCleanContextCompactionRequest | undefined {
+  const request = pendingCleanContextCompaction;
+  if (!request || !isCurrentPlanHandoff(request)) {
+    pendingCleanContextCompaction = undefined;
+    return undefined;
+  }
+  pendingCleanContextCompaction = undefined;
+  return request;
+}
+
+function beginPlanHandoff(): PlanHandoffRequestIdentity {
+  const request = {
+    lifecycleGeneration: planLifecycleGeneration,
+    requestId: ++nextPlanHandoffRequestId,
+  };
+  activePlanHandoffRequest = request;
+  return request;
+}
+
+function isCurrentPlanHandoff(request: PlanHandoffRequestIdentity): boolean {
+  return request.lifecycleGeneration === planLifecycleGeneration
+    && request.requestId === activePlanHandoffRequest?.requestId
+    && request.lifecycleGeneration === activePlanHandoffRequest.lifecycleGeneration;
+}
+
+function finishPlanHandoff(request: PlanHandoffRequestIdentity): boolean {
+  if (!isCurrentPlanHandoff(request)) return false;
+  activePlanHandoffRequest = undefined;
+  if (pendingCleanContextCompaction?.requestId === request.requestId
+    && pendingCleanContextCompaction.lifecycleGeneration === request.lifecycleGeneration) {
+    pendingCleanContextCompaction = undefined;
+  }
+  return true;
+}
+
+export function applyPlanContextToCompaction(
+  preparation: {
+    messagesToSummarize: AgentMessage[];
+    turnPrefixMessages: AgentMessage[];
+    firstKeptEntryId: string;
+    previousSummary?: string;
+  },
+  branchMessages: AgentMessage[],
+): boolean {
+  const projected = projectPlanContextForCompaction(branchMessages);
+  if (!projected) return false;
+  preparation.messagesToSummarize = projected.messages;
+  preparation.turnPrefixMessages = [];
+  preparation.firstKeptEntryId = projected.firstKeptEntryId;
+  preparation.previousSummary = undefined;
+  return true;
+}
+
+function activatePlanContextReplacement(summary: string): void {
+  const text = [
+    "The conversation history before this point was intentionally reset after explicit user approval.",
+    "",
+    "<summary>",
+    summary,
+    "</summary>",
+  ].join("\n");
+  planContextReplacement = {
+    lifecycleGeneration: planLifecycleGeneration,
+    replacement: {
+      role: "user",
+      content: [{ type: "text", text }],
+      timestamp: Date.now(),
+    } as AgentMessage,
+  };
+}
+
+function canReplaceContextAfterCompactionFailure(error: unknown): boolean {
+  const message = errorMessage(error);
+  return message.includes("Nothing to compact") || message.includes("Already compacted");
+}
+
 async function startImplementation(
   ctx: PlanContext,
   markdown: string,
@@ -495,77 +714,98 @@ async function startImplementation(
     executionMessage,
   ].join("\n");
 
-  if (executionMode === "clear" && ctx.newSession) {
-    const sourceHandoffKey = latestHandoffKey;
-    let switchedToReplacement = false;
+  if (executionMode === "clear") {
+    if (ctx.newSession) {
+      await executeNewSessionHandoff(ctx.newSession, ctx, markdown, planPath, latestHandoffKey, portableMessage);
+      return;
+    }
+
+    const lease = compactionArbiter?.request("plan-handoff", {
+      owner: "plan-handoff",
+      reason: "clean-context",
+    });
+    if (compactionArbiter && !lease) {
+      ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
+      if (handoffDelivery === "tool-result") return executionMessage;
+      sendImplementationMessage(ctx, executionMessage);
+      return;
+    }
+
+    const cleanContextSummary = [
+      "# Approved Plan Execution Context",
+      "",
+      "The prior conversation was intentionally cleared after explicit user approval.",
+      "Only this approved Plan and its execution contract remain authoritative.",
+      `Plan source: ${planPath}`,
+      "",
+      markdown,
+      "",
+      executionMessage,
+    ].join("\n");
+    const handoffRequest = beginPlanHandoff();
+    pendingCleanContextCompaction = {
+      summary: cleanContextSummary,
+      firstKeptEntryId: `maestro-plan-clean-${latestHandoffKey ?? "approved"}`,
+      ...handoffRequest,
+    };
+
+    let settled = false;
+    const settleCurrentRequest = (): boolean => {
+      if (settled) return false;
+      settled = true;
+      lease?.release();
+      return finishPlanHandoff(handoffRequest);
+    };
+    const handleResetFailure = (error: unknown) => {
+      if (!settleCurrentRequest()) return;
+      if (canReplaceContextAfterCompactionFailure(error)) {
+        activatePlanContextReplacement(cleanContextSummary);
+        ctx.ui.notify("Native compaction was unavailable; using a clean Plan context in this session.", "info");
+        sendImplementationMessage(ctx, executionMessage);
+        return;
+      }
+      ctx.ui.notify(`Context reset failed; executing with the current context: ${errorMessage(error)}`, "warning");
+      sendImplementationMessage(ctx, executionMessage);
+    };
+    ctx.ui.notify("Resetting context with the approved Plan preserved…", "info");
     try {
-      const replacement = await ctx.newSession({
-        async withSession(newCtx) {
-          switchedToReplacement = true;
-          const replacementCtx = newCtx as PlanContext;
-          try {
-            if (!sourceHandoffKey) throw new Error("approved Plan is missing its handoff key");
-            const replacementStore = await ensureStore(replacementCtx);
-            applyLoadedPlan(await replacementStore.approve(markdown, undefined, sourceHandoffKey));
-          } catch (error) {
-            try {
-              await enterPlanMode(replacementCtx);
-            } catch {
-              mode = "plan";
-              latestPlan = markdown;
-              latestRevision = 0;
-              latestStatus = "draft";
-              latestHandoffKey = undefined;
-              awaitingAction = false;
-              activatePlanToolSurface();
-              syncModeStatus(replacementCtx);
-            }
-            replacementCtx.ui.notify(
-              `Replacement session Plan handoff failed closed in Plan mode: ${errorMessage(error)}`,
-              "error",
-            );
-            return;
-          }
-          try {
-            await newCtx.sendUserMessage(portableMessage);
-          } catch (error) {
-            replacementCtx.ui.notify(
-              `Replacement session holds the approved Plan, but its execution prompt could not be delivered: ${errorMessage(error)}`,
-              "error",
-            );
-          }
+      ctx.compact({
+        customInstructions: lease?.tagInstructions(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER)
+          ?? PLAN_CLEAN_CONTEXT_COMPACTION_MARKER,
+        onComplete() {
+          if (!settleCurrentRequest()) return;
+          sendImplementationMessage(ctx, executionMessage);
+        },
+        onError(error) {
+          handleResetFailure(error);
         },
       });
-      if (!replacement.cancelled || switchedToReplacement) return;
-      applyLoadedPlan(await (await ensureStore(ctx)).load());
-      ctx.ui.notify("New session was cancelled; executing in the current context.", "warning");
     } catch (error) {
-      if (switchedToReplacement) return;
-      try {
-        applyLoadedPlan(await (await ensureStore(ctx)).load());
-      } catch {
-        // Preserve the original replacement failure; the still-persisted source approval reloads on restart.
-      }
-      ctx.ui.notify(`New session failed; executing in the current context: ${errorMessage(error)}`, "warning");
+      handleResetFailure(error);
     }
+    return;
   }
 
   if (executionMode === "compact") {
-    let delivered = false;
-    const deliver = () => {
-      if (delivered) return;
-      delivered = true;
-      sendImplementationMessage(ctx, executionMessage);
-    };
     const lease = compactionArbiter?.request("plan-handoff", {
       owner: "plan-handoff",
       reason: "preserve-approved-plan",
     });
     if (compactionArbiter && !lease) {
       ctx.ui.notify("Compaction is already in progress; executing with the current context.", "warning");
-      deliver();
+      sendImplementationMessage(ctx, executionMessage);
       return;
     }
+    const handoffRequest = beginPlanHandoff();
+    let delivered = false;
+    const deliver = () => {
+      if (delivered) return false;
+      delivered = true;
+      lease?.release();
+      if (!finishPlanHandoff(handoffRequest)) return false;
+      sendImplementationMessage(ctx, executionMessage);
+      return true;
+    };
     const compactionInstructions = [
       "Treat the following approved Plan as the authoritative execution contract.",
       `Preserve its source path, locked boundaries, risks, acceptance checks, and current execution position: ${planPath}`,
@@ -577,18 +817,19 @@ async function startImplementation(
       ctx.compact({
         customInstructions: lease?.tagInstructions(compactionInstructions) ?? compactionInstructions,
         onComplete() {
-          lease?.release();
           deliver();
         },
         onError(error) {
-          lease?.release();
-          ctx.ui.notify(`Compaction failed; executing with the current context: ${error.message}`, "warning");
+          if (isCurrentPlanHandoff(handoffRequest)) {
+            ctx.ui.notify(`Compaction failed; executing with the current context: ${error.message}`, "warning");
+          }
           deliver();
         },
       });
     } catch (error) {
-      lease?.release();
-      ctx.ui.notify(`Compaction failed; executing with the current context: ${errorMessage(error)}`, "warning");
+      if (isCurrentPlanHandoff(handoffRequest)) {
+        ctx.ui.notify(`Compaction failed; executing with the current context: ${errorMessage(error)}`, "warning");
+      }
       deliver();
     }
     return;

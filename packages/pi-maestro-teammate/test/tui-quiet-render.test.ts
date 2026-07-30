@@ -9,7 +9,7 @@ import type { SingleResult } from "../src/shared/types.ts";
 // renderer emits (two spaces + glyph + name + rest).
 const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 
-afterEach(() => setQuietMode(false));
+afterEach(() => setQuietMode(false, "check"));
 
 function okResult(): SingleResult {
   return {
@@ -44,7 +44,7 @@ test("quiet single-task call is one line without key hints or tree glyphs", () =
   const rendered = renderTeammateCall({ agent: "general", name: "ping", prompt: "reply pong" }, theme as never, { expanded: true }).render(80);
   assert.equal(rendered.length, 1);
   assert.doesNotMatch(rendered[0], /\n/);
-  assert.match(rendered[0], /^\s*⋯\s+teammate\s+@ping\s+\(general\)/);
+  assert.match(rendered[0], /^\s*…\s+teammate\s+@ping\s+\(general\)/);
   assert.doesNotMatch(rendered[0], /Alt\+B/);
   assert.doesNotMatch(rendered[0], /[├└│]/);
 });
@@ -117,7 +117,7 @@ test("quiet streaming progress collapses to state-only on a narrow viewport", ()
   // (w < 20), so only the glyph + tool name survive. Assert the prefix and the
   // absence of the focus handle — not the state word, which truncateToWidth
   // cuts off (and it appends an ANSI reset at the cut point).
-  assert.match(rendered[0], /^\s*■\s+teammate/);
+  assert.match(rendered[0], /^\s*…\s+teammate/);
   assert.doesNotMatch(rendered[0], /@focus/);
   assert.doesNotMatch(rendered[0], /[├└│]/);
 });
@@ -142,10 +142,28 @@ test("quiet failed result is one error line carrying the first error line", () =
     details: { mode: "single", results: [failedResult()] },
   }, { expanded: true }, theme as never).render(120);
   assert.equal(rendered.length, 1);
-  assert.match(rendered[0], /✗/);
+  assert.match(rendered[0], /✕/);
   assert.match(rendered[0], /failed/);
   assert.match(rendered[0], /boom error line/);
   assert.doesNotMatch(rendered[0], /stack trace noise/);
+});
+
+test("dot symbol mode applies to teammate running, success, and failure rows", () => {
+  setQuietMode(true, "dot");
+  const call = renderTeammateCall({ agent: "general", prompt: "inspect" }, theme as never).render(80);
+  assert.match(call[0], /^\s*○\s+teammate/);
+
+  const success = renderTeammateResult({
+    content: [{ type: "text", text: "complete output" }],
+    details: { mode: "single", results: [okResult()] },
+  }, { expanded: false }, theme as never).render(80);
+  assert.match(success[0], /^\s*●\s+teammate/);
+
+  const failure = renderTeammateResult({
+    content: [{ type: "text", text: "boom error line" }],
+    details: { mode: "single", results: [failedResult()] },
+  }, { expanded: false }, theme as never).render(80);
+  assert.match(failure[0], /^\s*!\s+teammate/);
 });
 
 // Uniqueness guard (not a behaviour test): the ownership event is the single
