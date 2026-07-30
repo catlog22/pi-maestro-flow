@@ -1,7 +1,7 @@
 export const NETWORK_RETRY_POLICY = Object.freeze({
-  maxRetries: 5,
+  maxRetries: 12,
   initialDelayMs: 1_000,
-  maxDelayMs: 16_000,
+  maxDelayMs: 10 * 60_000,
 });
 
 export type RetryErrorKind = "network" | "provider" | "non-retryable";
@@ -10,7 +10,7 @@ const NON_RETRYABLE_ERROR =
   /usage[_\s-]*limit|multi-auth rotation failed|unauthori[sz]ed|invalid api key|forbidden|invalid model|unknown model|context[_\s-]*length[_\s-]*exceeded|input exceeds the context window|schema[-\s]*valid|validation (?:failed|error)/i;
 
 const NETWORK_ERROR =
-  /\b(?:econnreset|econnrefused|ehostunreach|enotfound|eai_again|etimedout|socket hang up|fetch failed|network(?: error| request)?|websocket closed|sse response headers timed out|headers timed out|tls|certificate)\b/i;
+  /\b(?:econnreset|econnrefused|ehostunreach|enotfound|eai_again|etimedout|socket hang up|fetch failed|network(?: error| request)?|connection (?:error|failed|failure|reset|refused|timed out|timeout|closed)|websocket closed|sse response headers timed out|headers timed out|tls|certificate)\b/i;
 
 const PROVIDER_ERROR =
   /\b(?:429|5\d\d|rate limit(?:ed)?|capacity|overloaded|unavailable|provider returned error)\b/i;

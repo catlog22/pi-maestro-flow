@@ -1863,13 +1863,13 @@ test("retrying agents remain distinct from sleeping and expose retry metadata", 
   };
 
   applyAgentRetryState(state, {
-    correlationId, attempt: 2, maxRetries: 5, delayMs: 2_000,
+    correlationId, attempt: 2, maxRetries: 12, delayMs: 2_000,
     nextRetryAt: now + 2_000, error: "ECONNRESET",
   });
 
   assert.equal(agent.status, "retrying");
   const watched = buildWatchOutput({ kind: "agent", agent }, 20).join("\n");
-  assert.match(watched, /Retry 2\/5/);
+  assert.match(watched, /Retry 2\/12/);
   assert.doesNotMatch(watched, /\[sleeping/);
 });
 

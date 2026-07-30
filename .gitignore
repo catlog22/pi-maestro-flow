@@ -74,3 +74,4 @@ __pycache__/
 
 # Misc
 nul
+.pi/model-failover.json

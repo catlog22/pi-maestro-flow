@@ -365,6 +365,28 @@ test("a nested dispatch publishes the completion event root dispatches publish",
   assert.equal(typeof events[0].durationMs, "number");
 });
 
+test("the retrying widget shows attempt and next retry countdown", () => {
+  const state = makeState();
+  const now = Date.now();
+  const retrying = addAgent(state, "flaky", {
+    status: "retrying",
+    retry: {
+      attempt: 11,
+      maxRetries: 12,
+      nextRetryAt: now + 10 * 60_000,
+      lastError: "Error: Connection error.",
+    },
+  });
+  const rendered = renderAgentStatusWidget(
+    [retrying],
+    100,
+    { fg: (_name: string, text: string) => text, bold: (text: string) => text },
+  ).join("\n");
+
+  assert.match(rendered, /retry 11\/12 in (?:10m|9m 59s)/);
+  assert.match(rendered, /retrying/);
+});
+
 // --- ARCH-8: retrying read as a healthy green "Running" in the selector ----
 
 test("the Alt+R selector distinguishes retrying from running", () => {

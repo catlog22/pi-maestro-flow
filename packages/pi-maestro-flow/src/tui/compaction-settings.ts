@@ -25,9 +25,11 @@ import {
   type SoftCompactionConfigPatch,
 } from "../compaction/compaction-settings.ts";
 import {
-  deriveCompactionThreshold,
+  deriveLinkedCompactionThreshold,
+  summaryOutputTokenLimit,
   type CompactionThresholdDerivation,
   type CompactionThresholdReason,
+  type LinkedCompactionThresholdModel,
 } from "../compaction/compaction-threshold.ts";
 
 type CompactionField = typeof COMPACTION_FIELDS[number];
@@ -55,6 +57,8 @@ export interface CompactionSettingsResult {
 /** A selectable compaction model, projected from the model registry. */
 export interface CompactionModelOption {
   reference: string;
+  contextWindow?: number;
+  maxTokens?: number;
 }
 
 export interface CompactionSettingsOverlayParams {
@@ -273,7 +277,8 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       this.params.theme.fg("accent", fitLine(`› 新值 · ${this.formattedEditValue()} Token`, inner)),
     ];
     if (item === "threshold") {
-      const contextWindow = this.params.contextWindow;
+      const capacity = this.linkedThreshold();
+      const contextWindow = capacity.usable ? capacity.contextWindow : undefined;
       if (contextWindow) {
         const configuredThreshold = Number(this.editValue);
         const reserve = contextWindow - configuredThreshold;
@@ -288,21 +293,18 @@ export class CompactionSettingsOverlay implements Component, Focusable {
           ),
         );
         if (validReserve) {
-          const model = deriveCompactionThreshold({
-            reserveTokens: reserve,
-            contextWindow,
-            modelMaxTokens: this.params.maxTokens,
-            soft: this.effective().soft,
-          });
+          const model = this.linkedThreshold(reserve);
           if (model.usable) {
+            const maxTokens = this.thresholdOutputLimit(model, reserve);
             rows.push(
               fitLine(`窗口 10% 底线 · ${formatNumber(model.ratioFloorTokens)} Token`, inner),
-              fitLine(`模型单次最大输出 · ${formatNumber(this.params.maxTokens ?? 0)} Token`, inner),
+              fitLine(`阈值输出预算 · ${formatNumber(maxTokens ?? 0)} Token`, inner),
               fitLine(`实际安全预留 · ${formatNumber(model.effectiveReserveTokens)} Token`, inner),
               this.params.theme.fg("accent", fitLine(
                 `实际硬压缩 · 超过 ${formatNumber(model.thresholdTokens)} Token (${formatPercent(model.thresholdTokens, contextWindow)})`,
                 inner,
               )),
+              fitLine(`容量来源 · ${thresholdLimiterLabel(model)}`, inner),
               fitLine(`生效原因 · ${thresholdReasonLabel(model.reason)}`, inner),
               fitLine(softThresholdSummary(model), inner),
             );
@@ -351,14 +353,20 @@ export class CompactionSettingsOverlay implements Component, Focusable {
         this.requestRender();
         return;
       }
-      if (item === "threshold" && this.params.contextWindow && this.params.contextWindow > 0) {
-        const reserveTokens = this.params.contextWindow - numeric;
-        if (!Number.isSafeInteger(reserveTokens) || reserveTokens <= 0) {
-          this.notice = `× 压缩阈值必须小于上下文窗口 ${formatNumber(this.params.contextWindow)}`;
-          this.requestRender();
-          return;
+      if (item === "threshold") {
+        const capacity = this.linkedThreshold();
+        const contextWindow = capacity.usable ? capacity.contextWindow : undefined;
+        if (contextWindow) {
+          const reserveTokens = contextWindow - numeric;
+          if (!Number.isSafeInteger(reserveTokens) || reserveTokens <= 0) {
+            this.notice = `× 压缩阈值必须小于上下文窗口 ${formatNumber(contextWindow)}`;
+            this.requestRender();
+            return;
+          }
+          this.drafts[this.scope].reserveTokens = String(reserveTokens);
+        } else {
+          this.drafts[this.scope][field] = String(numeric);
         }
-        this.drafts[this.scope].reserveTokens = String(reserveTokens);
       } else {
         this.drafts[this.scope][field] = String(numeric);
       }
@@ -422,7 +430,13 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   private validation() {
     const effective = this.effective();
-    return validateCompactionPatch(effective, this.params.contextWindow, this.params.maxTokens);
+    const capacity = this.linkedThreshold();
+    const contextWindow = capacity.usable ? capacity.contextWindow : undefined;
+    return validateCompactionPatch(
+      effective,
+      contextWindow,
+      capacity.usable ? this.thresholdOutputLimit(capacity, effective.reserveTokens) : undefined,
+    );
   }
 
   /**
@@ -438,6 +452,25 @@ export class CompactionSettingsOverlay implements Component, Focusable {
       return { option: this.params.currentModel, stale: true };
     }
     return { option: this.params.currentModel, stale: false };
+  }
+
+  private linkedThreshold(reserveTokens = this.effective().reserveTokens): LinkedCompactionThresholdModel {
+    const effective = this.effective();
+    const compactionModel = this.effectiveModelOption().option;
+    return deriveLinkedCompactionThreshold({
+      reserveTokens,
+      sessionContextWindow: this.params.contextWindow,
+      sessionMaxTokens: this.params.maxTokens,
+      compactionContextWindow: compactionModel?.contextWindow,
+      compactionMaxTokens: compactionModel?.maxTokens,
+      soft: effective.soft,
+    });
+  }
+
+  private thresholdOutputLimit(model: LinkedCompactionThresholdModel, reserveTokens: number): number | undefined {
+    if (!model.usable || model.limiter === "session") return this.params.maxTokens;
+    const compactionModel = this.effectiveModelOption().option;
+    return summaryOutputTokenLimit(reserveTokens, compactionModel?.maxTokens);
   }
 
   private compactModelDetailRows(width: number): string[] {
@@ -464,12 +497,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     if (item === "softEnabled") return effective.soft.enabled ? "已开启" : "已关闭";
     if (item === "compactModel") return effective.model ?? "跟随会话模型";
     if (item === "threshold") {
-      const model = deriveCompactionThreshold({
-        reserveTokens: effective.reserveTokens,
-        contextWindow: this.params.contextWindow,
-        modelMaxTokens: this.params.maxTokens,
-        soft: effective.soft,
-      });
+      const model = this.linkedThreshold();
       return model.usable
         ? actualThresholdLabel(model)
         : `预留 ${formatNumber(effective.reserveTokens)} Token`;
@@ -479,9 +507,13 @@ export class CompactionSettingsOverlay implements Component, Focusable {
 
   private editorValue(item: MenuItem): string {
     const effective = this.effective();
-    if (item === "threshold" && this.params.contextWindow && this.params.contextWindow > 0) {
-      const threshold = this.params.contextWindow - effective.reserveTokens;
-      return threshold > 0 ? String(threshold) : "";
+    if (item === "threshold") {
+      const model = this.linkedThreshold();
+      if (model.usable) {
+        const threshold = model.contextWindow - effective.reserveTokens;
+        return threshold > 0 ? String(threshold) : "";
+      }
+      return String(effective.reserveTokens);
     }
     if (item === "softEnabled") return "";
     return String(effective[configFieldForItem(item)]);
@@ -501,14 +533,10 @@ export class CompactionSettingsOverlay implements Component, Focusable {
     }
     if (item !== "threshold") return rows;
     const effective = this.effective();
-    const model = deriveCompactionThreshold({
-      reserveTokens: effective.reserveTokens,
-      contextWindow: this.params.contextWindow,
-      modelMaxTokens: this.params.maxTokens,
-      soft: effective.soft,
-    });
+    const model = this.linkedThreshold();
     if (model.usable) {
       const configuredThreshold = model.contextWindow - model.configuredReserveTokens;
+      const maxTokens = this.thresholdOutputLimit(model, effective.reserveTokens);
       rows.push(
         this.params.theme.fg("accent", fitLine(
           `实际硬压缩 · 超过 ${formatNumber(model.thresholdTokens)} / ${formatNumber(model.contextWindow)} Token (${formatPercent(model.thresholdTokens, model.contextWindow)})`,
@@ -522,7 +550,8 @@ export class CompactionSettingsOverlay implements Component, Focusable {
           `实际安全预留 · ${formatNumber(model.effectiveReserveTokens)} Token · ${thresholdReasonLabel(model.reason)}`,
           width,
         ),
-        fitLine(`模型单次最大输出 · ${formatNumber(this.params.maxTokens ?? 0)} Token`, width),
+        fitLine(`容量来源 · ${thresholdLimiterLabel(model)}`, width),
+        fitLine(`阈值输出预算 · ${formatNumber(maxTokens ?? 0)} Token`, width),
       );
       if (safeWidth >= 40) rows.push(fitLine(this.pressurePreview(model), width));
     } else {
@@ -728,8 +757,10 @@ export async function showCompactionSettingsOverlay(
 ): Promise<CompactionSettingsResult> {
   const snapshot = readCompactionSettings(ctx.cwd);
   const projectReadonlyReason = await projectWriteRestriction(ctx.cwd);
-  const toOption = (model: { provider: string; id: string }): CompactionModelOption => ({
+  const toOption = (model: { provider: string; id: string; contextWindow?: number; maxTokens?: number }): CompactionModelOption => ({
     reference: `${model.provider}/${model.id}`,
+    contextWindow: model.contextWindow,
+    maxTokens: model.maxTokens,
   });
   const availableModels = ctx.modelRegistry.getAvailable().map(toOption);
   const currentModel = ctx.model ? toOption(ctx.model) : undefined;
@@ -797,6 +828,10 @@ function softDraftEqual(left?: SoftCompactionConfigPatch, right?: SoftCompaction
 
 function actualThresholdLabel(model: CompactionThresholdDerivation): string {
   return `实际 >${formatNumber(model.thresholdTokens)} / ${formatNumber(model.contextWindow)} (${formatPercent(model.thresholdTokens, model.contextWindow)})`;
+}
+
+function thresholdLimiterLabel(model: LinkedCompactionThresholdModel): string {
+  return model.limiter === "compaction" ? "压缩模型窗口" : "当前会话模型窗口";
 }
 
 function thresholdReasonLabel(reason: CompactionThresholdReason): string {

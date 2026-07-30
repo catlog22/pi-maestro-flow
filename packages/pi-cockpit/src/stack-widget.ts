@@ -34,6 +34,25 @@ export function terminalRows(tui: TUI): number | undefined {
 	}
 }
 
+function visibleAgentRows(rows: AgentRow[]): AgentRow[] {
+	const byId = new Map(rows.map((row) => [row.correlationId, row]));
+	return rows.filter((row) => !row.agent.startsWith("graph(")).map((row) => {
+		let parent = row.parentCorrelationId;
+		const visited = new Set([row.correlationId]);
+		while (parent) {
+			if (visited.has(parent)) {
+				parent = undefined;
+				break;
+			}
+			visited.add(parent);
+			const parentRow = byId.get(parent);
+			if (!parentRow || !parentRow.agent.startsWith("graph(")) break;
+			parent = parentRow.parentCorrelationId;
+		}
+		return parent === row.parentCorrelationId ? row : { ...row, parentCorrelationId: parent };
+	});
+}
+
 // Todo widget: pinned above the editor (setWidget "cockpit-stack", aboveEditor).
 export function makeTodoWidget(deps: TodoWidgetDeps) {
 	return (tui: TUI, theme: Theme) => {
@@ -68,7 +87,10 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 		return {
 			render(width: number): string[] {
 				const cfg = deps.getConfig();
-				const agents = deps.getAgents();
+				// graph(...) is the dispatch container, not an additional worker. Keep it
+				// in AgentsStore for linkage and cleanup, and bridge its visible descendants
+				// to the nearest non-graph ancestor for rendering.
+				const agents = visibleAgentRows(deps.getAgents());
 				if (agents.length === 0) return [];
 				const g = resolveGlyphs(cfg.icons.mode);
 				const now = Date.now();

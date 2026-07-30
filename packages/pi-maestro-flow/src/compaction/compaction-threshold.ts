@@ -13,6 +13,15 @@
  * 90% regardless of window size.
  */
 export const MIN_RESERVE_RATIO = 0.1;
+export const SUMMARY_OUTPUT_RATIO = 0.8;
+
+/** Output budget used by the checkpoint summarizer. */
+export function summaryOutputTokenLimit(reserveTokens: number, modelMaxTokens?: number): number {
+  const configuredLimit = Math.max(1, Math.floor(reserveTokens * SUMMARY_OUTPUT_RATIO));
+  return typeof modelMaxTokens === "number" && modelMaxTokens > 0
+    ? Math.min(configuredLimit, modelMaxTokens)
+    : configuredLimit;
+}
 
 /**
  * Derive the reserve that drives the proactive compaction trigger from the
@@ -87,11 +96,26 @@ export interface CompactionThresholdDerivation {
 
 export type CompactionThresholdModel = UnusableContextThreshold | CompactionThresholdDerivation;
 
+export type CompactionThresholdLimiter = "session" | "compaction";
+
+export type LinkedCompactionThresholdModel = CompactionThresholdModel & {
+  limiter: CompactionThresholdLimiter;
+};
+
 export interface CompactionThresholdInput {
   reserveTokens: number;
   contextWindow: number | undefined;
   modelMaxTokens?: number;
   soft?: { nudgeRatio: number; pruneRatio: number; pruneTargetRatio: number };
+}
+
+export interface LinkedCompactionThresholdInput {
+  reserveTokens: number;
+  sessionContextWindow: number | undefined;
+  sessionMaxTokens?: number;
+  compactionContextWindow?: number;
+  compactionMaxTokens?: number;
+  soft?: CompactionThresholdInput["soft"];
 }
 
 /**
@@ -143,4 +167,36 @@ export function deriveCompactionThreshold(input: CompactionThresholdInput): Comp
     };
   }
   return derivation;
+}
+
+/**
+ * Select the earliest safe trigger required by either the active session model
+ * or the configured summary model. The summary side reserves only the output
+ * budget the compaction request actually sends, rather than the model's full
+ * general-purpose response limit.
+ */
+export function deriveLinkedCompactionThreshold(
+  input: LinkedCompactionThresholdInput,
+): LinkedCompactionThresholdModel {
+  const session = deriveCompactionThreshold({
+    reserveTokens: input.reserveTokens,
+    contextWindow: input.sessionContextWindow,
+    modelMaxTokens: input.sessionMaxTokens,
+    soft: input.soft,
+  });
+  if (!session.usable || input.compactionContextWindow === undefined
+    || input.compactionContextWindow <= input.reserveTokens) {
+    return { ...session, limiter: "session" };
+  }
+
+  const compaction = deriveCompactionThreshold({
+    reserveTokens: input.reserveTokens,
+    contextWindow: input.compactionContextWindow,
+    modelMaxTokens: summaryOutputTokenLimit(input.reserveTokens, input.compactionMaxTokens),
+    soft: input.soft,
+  });
+  if (compaction.usable && compaction.thresholdTokens < session.thresholdTokens) {
+    return { ...compaction, limiter: "compaction" };
+  }
+  return { ...session, limiter: "session" };
 }

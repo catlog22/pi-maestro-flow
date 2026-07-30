@@ -133,7 +133,7 @@ test("compaction TUI shows the stepwise effective-reserve derivation while editi
   assert.match(rendered, /配置阈值 · 290,000 \/ 300,000 Token/);
   assert.match(rendered, /配置预留 · 10,000 Token/);
   assert.match(rendered, /窗口 10% 底线 · 30,000 Token/);
-  assert.match(rendered, /模型单次最大输出 · 16,000 Token/);
+  assert.match(rendered, /阈值输出预算 · 16,000 Token/);
   assert.match(rendered, /实际安全预留 · 30,000 Token/);
   assert.match(rendered, /实际硬压缩 · 超过 270,000 Token \(90\.0%\)/);
   assert.match(rendered, /生效原因 · 窗口 10% 安全底线下调/);
@@ -249,6 +249,7 @@ test("compaction TUI selects a compaction model from the catalog and saves it", 
   overlay.handleInput("\x1b[B"); // -> second catalog model (qwen)
   overlay.handleInput("\r");
   assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max-preview · 项目/);
+  assert.match(overlay.render(80).join("\n"), /实际 >108,000 \/ 120,000 \(90\.0%\)/);
   overlay.handleInput("\x13");
   await flushAsync();
   const projectSave = saves.find((save) => save.scope === "project");
@@ -292,11 +293,15 @@ function createOverlay(overrides: Partial<ConstructorParameters<typeof Compactio
     },
     contextWindow: 300_000,
     maxTokens: 16_000,
-    currentModel: { reference: "maestro-openai/gpt-5.6-sol" },
+    currentModel: {
+      reference: "maestro-openai/gpt-5.6-sol",
+      contextWindow: 300_000,
+      maxTokens: 16_000,
+    },
     availableModels: [
-      { reference: "maestro-openai/gpt-5.6-sol" },
-      { reference: "maestro-qwen/qwen3.8-max-preview" },
-      { reference: "maestro-anthropic/claude-sonnet" },
+      { reference: "maestro-openai/gpt-5.6-sol", contextWindow: 300_000, maxTokens: 16_000 },
+      { reference: "maestro-qwen/qwen3.8-max-preview", contextWindow: 120_000, maxTokens: 16_000 },
+      { reference: "maestro-anthropic/claude-sonnet", contextWindow: 200_000, maxTokens: 32_000 },
     ],
     theme,
     requestRender() {},

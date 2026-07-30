@@ -48,6 +48,14 @@ test("renderAgents list includes connector, role, task and tail", () => {
 	assert.ok(line.includes("⠋")); // running spinner
 });
 
+test("renderAgents freezes completed duration at finishedAt", () => {
+	const completed = agent({ status: "done", startedAt: 1_000, finishedAt: 66_000 });
+	const first = renderAgents([completed], "list", 120, theme, utils, { ...opts, now: 100_000 })[0];
+	const later = renderAgents([completed], "list", 120, theme, utils, { ...opts, now: 900_000 })[0];
+	assert.match(first, /1m 5s/);
+	assert.equal(later, first);
+});
+
 test("renderAgents list follows spawnedBy parent-child hierarchy", () => {
 	const lines = renderAgents([
 		agent({ correlationId: "child-a", parentCorrelationId: "root", role: "executor", task: "child a" }),

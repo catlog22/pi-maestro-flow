@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
@@ -21,6 +22,7 @@ import {
 } from "../src/extension/index.ts";
 import {
   EXECUTION_BUFFER_LIMITS,
+  acquireRetryPersistenceGuard,
   appendBoundedTranscriptMessage,
   buildPiArgs,
   createUtf8LineDecoder,
@@ -538,10 +540,14 @@ test("model specifiers resolve provider shorthand and reject unavailable exact r
   );
 });
 
-test("network retry policy is bounded, progressive, and rejects permanent failures", () => {
-  assert.equal(NETWORK_RETRY_POLICY.maxRetries, 5);
-  assert.deepEqual([1, 2, 3, 4, 5].map(retryDelayMs), [1_000, 2_000, 4_000, 8_000, 16_000]);
+test("network retry policy reaches a ten-minute cap and rejects permanent failures", () => {
+  assert.equal(NETWORK_RETRY_POLICY.maxRetries, 12);
+  assert.deepEqual(
+    Array.from({ length: NETWORK_RETRY_POLICY.maxRetries }, (_, index) => retryDelayMs(index + 1)),
+    [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 512_000, 600_000, 600_000],
+  );
   assert.equal(classifyRetryError("fetch failed: ECONNRESET"), "network");
+  assert.equal(classifyRetryError("Error: Connection error."), "network");
   assert.equal(classifyRetryError("Provider returned error: 503"), "provider");
   assert.equal(classifyRetryError("Invalid API key"), "non-retryable");
   assert.equal(classifyRetryError("context length exceeded"), "non-retryable");
@@ -1049,6 +1055,40 @@ test("child RPC disables Pi auto-retry before sending the initial prompt", async
   ]);
 });
 
+test("concurrent child retry overrides restore the original global setting once", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-retry-guard-"));
+  try {
+    const settingsPath = path.join(tempDir, "settings.json");
+    fs.writeFileSync(settingsPath, JSON.stringify({
+      theme: "custom",
+      retry: { enabled: true, maxRetries: 12, provider: { maxRetries: 0 } },
+    }));
+    const releaseFirst = acquireRetryPersistenceGuard(settingsPath);
+    const releaseSecond = acquireRetryPersistenceGuard(settingsPath);
+
+    fs.writeFileSync(settingsPath, JSON.stringify({
+      theme: "custom",
+      retry: { enabled: false, maxRetries: 12, provider: { maxRetries: 0 } },
+    }));
+    releaseFirst();
+    assert.equal(JSON.parse(fs.readFileSync(settingsPath, "utf8")).retry.enabled, false);
+    releaseSecond();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    const restored = JSON.parse(fs.readFileSync(settingsPath, "utf8"));
+    assert.equal(restored.theme, "custom");
+    assert.deepEqual(restored.retry, {
+      enabled: true,
+      maxRetries: 12,
+      provider: { maxRetries: 0 },
+    });
+    releaseSecond();
+    assert.equal(JSON.parse(fs.readFileSync(settingsPath, "utf8")).retry.enabled, true);
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
 test("teammate retries a transient network failure before succeeding", async () => {
   let attempts = 0;
   const retryDelays: number[] = [];
@@ -1138,8 +1178,7 @@ test("teammate exhausts a primary model, falls back, and skips its open circuit 
   assert.equal(first.exitCode, 0);
   assert.deepEqual(first.attemptedModels, ["provider/primary", "provider/backup"]);
   assert.deepEqual(launchedModels, [
-    "provider/primary", "provider/primary", "provider/primary",
-    "provider/primary", "provider/primary", "provider/primary",
+    ...Array<string>(13).fill("provider/primary"),
     "provider/backup",
   ]);
   assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
@@ -1274,7 +1313,7 @@ test("resolved model aliases are deduplicated before retry and breaker accountin
     async waitForRetry() { return true; },
   });
 
-  assert.equal(attempts, 6);
+  assert.equal(attempts, 13);
   assert.deepEqual(breaker.snapshot().find((entry) => entry.model === "provider/model"), {
     model: "provider/model",
     state: "CLOSED",
@@ -1283,7 +1322,7 @@ test("resolved model aliases are deduplicated before retry and breaker accountin
   });
 });
 
-test("teammate stops after the initial attempt and five transient retries", async () => {
+test("teammate stops after the initial attempt and twelve transient retries", async () => {
   let attempts = 0;
   const retries: number[] = [];
   const spawnChildProcess = adaptFakeSpawn(() => {
@@ -1309,8 +1348,50 @@ test("teammate stops after the initial attempt and five transient retries", asyn
   );
 
   assert.equal(result.exitCode, 1);
-  assert.equal(attempts, 6);
-  assert.deepEqual(retries, [1, 2, 3, 4, 5]);
+  assert.equal(attempts, 13);
+  assert.deepEqual(retries, Array.from({ length: 12 }, (_, index) => index + 1));
+});
+
+test("connection error remains retryable when an abnormal-exit diagnostic follows it", async () => {
+  let attempts = 0;
+  const retryErrors: string[] = [];
+  const spawnChildProcess = adaptFakeSpawn(() => {
+    attempts += 1;
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      if (attempts === 1) {
+        stdout.write(`${JSON.stringify({ type: "error", errorMessage: "Error: Connection error." })}\n`);
+        child.emit("close", 1, null);
+        return;
+      }
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text: "recovered" }] },
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Recover from connection loss", context: "fork" },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      onRetry(retry) { retryErrors.push(retry.error); },
+      async waitForRetry() { return true; },
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.equal(attempts, 2);
+  assert.match(retryErrors[0] ?? "", /Connection error/);
 });
 
 test("fresh agents publish follow-up turns while fork agents terminate after their first result", async () => {

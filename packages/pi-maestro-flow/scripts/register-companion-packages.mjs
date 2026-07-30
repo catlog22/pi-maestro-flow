@@ -19,6 +19,17 @@ function canonicalKey(path) {
   }
 }
 
+function packageName(packageDir) {
+  try {
+    const manifest = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf8"));
+    return typeof manifest.name === "string" && manifest.name.trim().length > 0
+      ? manifest.name.trim()
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 // Pi only reads the `pi` field of packages listed in settings.packages; it never
 // walks a package's dependencies. Companion extensions must therefore be registered
 // explicitly, and their directories are located by resolving the package entry point
@@ -68,17 +79,35 @@ export function registerCompanionPackages({
   if (existsSync(settingsFile)) {
     settings = JSON.parse(readFileSync(settingsFile, "utf8"));
   }
-  const packages = Array.isArray(settings.packages) ? [...settings.packages] : [];
-  const seen = new Set(packages.map(canonicalKey));
+  const configuredPackages = Array.isArray(settings.packages) ? settings.packages : [];
+  const companionNames = new Set(packageDirs.map(packageName).filter(Boolean));
+  const packages = [];
+  const seen = new Set();
+  const seenPackageNames = new Set();
+  let pruned = false;
+  for (const dir of configuredPackages) {
+    const key = canonicalKey(dir);
+    const name = packageName(dir);
+    if (seen.has(key) || (name && companionNames.has(name) && seenPackageNames.has(name))) {
+      pruned = true;
+      continue;
+    }
+    packages.push(dir);
+    seen.add(key);
+    if (name) seenPackageNames.add(name);
+  }
+
   const added = [];
   for (const dir of packageDirs) {
     const key = canonicalKey(dir);
-    if (seen.has(key)) continue;
+    const name = packageName(dir);
+    if (seen.has(key) || (name && seenPackageNames.has(name))) continue;
     packages.push(dir);
     seen.add(key);
+    if (name) seenPackageNames.add(name);
     added.push(dir);
   }
-  if (added.length === 0) {
+  if (!pruned && added.length === 0) {
     return { changed: false, added, packages };
   }
   settings.packages = packages;
@@ -91,7 +120,11 @@ function run() {
   try {
     const result = registerCompanionPackages();
     if (result.changed) {
-      console.log(`[pi-maestro-flow] Registered companion packages: ${result.added.join(", ")}`);
+      if (result.added.length > 0) {
+        console.log(`[pi-maestro-flow] Registered companion packages: ${result.added.join(", ")}`);
+      } else {
+        console.log("[pi-maestro-flow] Removed duplicate companion package registrations");
+      }
     } else {
       console.log("[pi-maestro-flow] Companion packages already registered");
     }

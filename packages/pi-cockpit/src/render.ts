@@ -239,7 +239,7 @@ export function renderAgents(
 		if (status.label) segs.push({ text: theme.fg(status.color, status.label), priority: 95, clippable: false });
 		segs.push({ text: theme.fg(rc, r.role), priority: 90 });
 		if (r.task) segs.push({ text: r.task, priority: 80, minWidth: 6 });
-		segs.push({ text: theme.fg("muted", formatDuration(now - r.startedAt)), priority: 70, clippable: false });
+		segs.push({ text: theme.fg("muted", formatDuration((r.finishedAt ?? now) - r.startedAt)), priority: 70, clippable: false });
 		if (r.dependencies?.length) {
 			segs.push({ text: theme.fg("dim", formatDependencies(r.dependencies, g)), priority: 60, clippable: false });
 		}

@@ -109,12 +109,23 @@ interface SaveApiProviderResult {
 export interface RegisterApiProviderOptions {
   modelsPath?: string;
   defaultsPath?: string;
+  settingsPath?: string;
 }
 
-type ApiProviderAction = "configure" | "delete" | "list" | "logout" | "reset" | "show";
+export interface ApiRetrySettings {
+  enabled: boolean;
+  maxRetries: number;
+}
+
+type ApiProviderAction = "configure" | "delete" | "list" | "logout" | "reset" | "retry" | "show";
 type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
+const API_RETRY_MAX_RETRIES = 12;
+const DEFAULT_API_RETRY_SETTINGS: Readonly<ApiRetrySettings> = Object.freeze({
+  enabled: true,
+  maxRetries: API_RETRY_MAX_RETRIES,
+});
 
 const PROVIDERS: readonly ProviderDefaults[] = [
   {
@@ -163,6 +174,7 @@ export function registerApiProviderConfigs(
 ): void {
   const modelsPath = options.modelsPath ?? join(getAgentDir(), "models.json");
   const defaultsPath = options.defaultsPath ?? join(dirname(modelsPath), "api-manager.json");
+  const settingsPath = options.settingsPath ?? join(dirname(modelsPath), "settings.json");
   const configured = configuredProviderIds(modelsPath);
   if (typeof pi.registerProvider === "function") {
     for (const provider of PROVIDERS) {
@@ -181,7 +193,7 @@ export function registerApiProviderConfigs(
     description: "增删查改 API 渠道（OpenAI / Qwen / Anthropic 预设 + 自定义渠道）",
     async handler(args, ctx) {
       try {
-        await showApiProviderManager(pi, args, ctx, modelsPath, defaultsPath);
+        await showApiProviderManager(pi, args, ctx, modelsPath, defaultsPath, settingsPath);
       } catch (error) {
         ctx.ui.notify(`API 配置失败：${errorMessage(error)}`, "error");
       }
@@ -223,7 +235,12 @@ export function registerApiProviderConfigs(
     },
   });
   if (typeof pi.on === "function") {
-    pi.on("session_start", (_event, ctx) => {
+    pi.on("session_start", async (_event, ctx) => {
+      try {
+        await ensureApiRetryDefaults(settingsPath);
+      } catch (error) {
+        ctx.ui.notify(`Retry 默认配置初始化失败：${errorMessage(error)}`, "warning");
+      }
       syncEffortStatus(ctx, pi.getThinkingLevel());
     });
     pi.on("model_select", async (event, ctx) => {
@@ -355,12 +372,120 @@ export function normalizeBaseUrl(value: string): string {
   return normalized;
 }
 
+export async function loadApiRetrySettings(
+  settingsPath = join(getAgentDir(), "settings.json"),
+): Promise<ApiRetrySettings> {
+  const root = await readModelsRoot(settingsPath);
+  const retry = isRecord(root.retry) ? root.retry : {};
+  return {
+    enabled: typeof retry.enabled === "boolean" ? retry.enabled : DEFAULT_API_RETRY_SETTINGS.enabled,
+    maxRetries: isPositiveInteger(retry.maxRetries)
+      ? retry.maxRetries
+      : DEFAULT_API_RETRY_SETTINGS.maxRetries,
+  };
+}
+
+export async function saveApiRetrySettings(
+  settings: ApiRetrySettings,
+  settingsPath = join(getAgentDir(), "settings.json"),
+): Promise<void> {
+  const maxRetries = retryCount(settings.maxRetries);
+  await serializeMutation(settingsPath, async () => {
+    const exists = await fileExists(settingsPath);
+    const root = await readModelsRoot(settingsPath);
+    const retry = isRecord(root.retry) ? root.retry : {};
+    await writeModelsRoot({
+      ...root,
+      retry: {
+        ...retry,
+        enabled: settings.enabled,
+        maxRetries,
+      },
+    }, settingsPath, exists);
+  });
+}
+
+export async function ensureApiRetryDefaults(
+  settingsPath = join(getAgentDir(), "settings.json"),
+): Promise<void> {
+  const root = await readModelsRoot(settingsPath);
+  const retry = isRecord(root.retry) ? root.retry : {};
+  if (typeof retry.enabled === "boolean" && isPositiveInteger(retry.maxRetries)) return;
+  await saveApiRetrySettings({
+    enabled: typeof retry.enabled === "boolean" ? retry.enabled : DEFAULT_API_RETRY_SETTINGS.enabled,
+    maxRetries: isPositiveInteger(retry.maxRetries)
+      ? retry.maxRetries
+      : DEFAULT_API_RETRY_SETTINGS.maxRetries,
+  }, settingsPath);
+}
+
+async function manageRetrySettings(
+  ctx: ExtensionCommandContext,
+  settingsPath: string,
+  command?: RetryManagerArgs,
+): Promise<void> {
+  const current = await loadApiRetrySettings(settingsPath);
+  if (command?.enabled !== undefined) {
+    const next = {
+      enabled: command.enabled,
+      maxRetries: command.maxRetries ?? current.maxRetries,
+    };
+    await saveApiRetrySettings(next, settingsPath);
+    notifyRetrySettings(ctx, next, settingsPath);
+    return;
+  }
+  if (!ctx.hasUI || command?.showOnly) {
+    notifyRetrySettings(ctx, current, settingsPath);
+    return;
+  }
+
+  const enabledLabel = `开启${current.enabled ? "（当前）" : ""}`;
+  const disabledLabel = `关闭${current.enabled ? "" : "（当前）"}`;
+  const enabledChoice = await ctx.ui.select("Provider 自动重试", [enabledLabel, disabledLabel]);
+  if (!enabledChoice) return;
+  const enabled = enabledChoice === enabledLabel;
+  let maxRetries = current.maxRetries;
+  if (enabled) {
+    const input = await ctx.ui.input(
+      `最大重试次数（1-${API_RETRY_MAX_RETRIES}）`,
+      String(current.maxRetries),
+    );
+    if (input === undefined) return;
+    maxRetries = retryCount(input);
+  }
+  const confirmed = await ctx.ui.confirm(
+    "保存 Provider 重试配置？",
+    [
+      `自动重试：${enabled ? "开启" : "关闭"}`,
+      `最大重试次数：${maxRetries}`,
+      "执行所有权：Pi core（指数退避，TUI 显示实时状态）",
+    ].join("\n"),
+  );
+  if (!confirmed) return;
+  const next = { enabled, maxRetries };
+  await saveApiRetrySettings(next, settingsPath);
+  notifyRetrySettings(ctx, next, settingsPath);
+}
+
+function notifyRetrySettings(
+  ctx: Pick<ExtensionCommandContext, "ui">,
+  settings: ApiRetrySettings,
+  settingsPath: string,
+): void {
+  ctx.ui.notify([
+    `Provider 自动重试：${settings.enabled ? "开启" : "关闭"}`,
+    `最大重试次数：${settings.maxRetries}`,
+    `配置：${settingsPath}`,
+  ].join("\n"), "info");
+}
+
 async function showApiProviderManager(
   pi: ExtensionAPI,
   args: string,
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
   const parsed = parseManagerArgs(args);
   if (!ctx.hasUI && !parsed.action) {
@@ -370,7 +495,11 @@ async function showApiProviderManager(
   const action = parsed.action ?? await chooseAction(ctx);
   if (!action) return;
   if (action === "list") {
-    await listProviders(ctx, modelsPath, defaultsPath);
+    await listProviders(ctx, modelsPath, defaultsPath, settingsPath);
+    return;
+  }
+  if (action === "retry") {
+    await manageRetrySettings(ctx, settingsPath, parsed.retry);
     return;
   }
   const target = parsed.target ?? (ctx.hasUI ? await chooseChannel(ctx, action, modelsPath, defaultsPath) : undefined);
@@ -792,8 +921,10 @@ async function listProviders(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
   const root = await readModelsRoot(modelsPath);
+  const retry = await loadApiRetrySettings(settingsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
   const presetLines = PROVIDERS.map((provider) => {
     const config = providers[provider.id];
@@ -817,6 +948,7 @@ async function listProviders(
     ...presetLines,
     ...(customLines.length > 0 ? ["自定义渠道：", ...customLines] : []),
     `Pi 全局默认思考强度：${currentDefaultThinkingLevel(ctx, modelsPath)}`,
+    `Provider 自动重试：${retry.enabled ? "开启" : "关闭"} · 最大 ${retry.maxRetries} 次`,
     `文件：${modelsPath}`,
   ].join("\n"), "info");
 }
@@ -1157,14 +1289,42 @@ interface ConfigureModelTarget {
   adding: boolean;
 }
 
+interface RetryManagerArgs {
+  enabled?: boolean;
+  maxRetries?: number;
+  showOnly?: boolean;
+}
+
 interface ParsedManagerArgs {
   action?: ApiProviderAction;
   target?: ChannelTarget;
+  retry?: RetryManagerArgs;
 }
 
 function parseManagerArgs(args: string): ParsedManagerArgs {
   const values = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
   if (values.length === 0) return {};
+  if (values[0] === "retry") {
+    if (values.length === 1) return { action: "retry" };
+    if ((values[1] === "show" || values[1] === "status") && values.length === 2) {
+      return { action: "retry", retry: { showOnly: true } };
+    }
+    if (values[1] === "off" || values[1] === "disable" || values[1] === "disabled") {
+      if (values.length !== 2) throw usageError();
+      return { action: "retry", retry: { enabled: false } };
+    }
+    if (values[1] === "on" || values[1] === "enable" || values[1] === "enabled") {
+      if (values.length > 3) throw usageError();
+      return {
+        action: "retry",
+        retry: {
+          enabled: true,
+          ...(values[2] ? { maxRetries: retryCount(values[2]) } : {}),
+        },
+      };
+    }
+    throw usageError();
+  }
   if (values.length === 1) {
     const action = actionFromArg(values[0]);
     if (action) return { action };
@@ -1187,7 +1347,7 @@ function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 function usageError(): Error {
   return new Error(
-    "用法：/api-manager list | show|set|delete|logout|reset [openai|qwen|anthropic|<自定义渠道 id>|new]",
+    "用法：/api-manager list | retry [show|on [1-12]|off] | show|set|delete|logout|reset [openai|qwen|anthropic|<自定义渠道 id>|new]",
   );
 }
 
@@ -1263,6 +1423,7 @@ function normalizeChannelId(value: string): string {
 async function chooseAction(ctx: ExtensionCommandContext): Promise<ApiProviderAction | undefined> {
   const choices: Array<{ action: ApiProviderAction; label: string }> = [
     { action: "list", label: "查看全部渠道" },
+    { action: "retry", label: "Provider 自动重试" },
     { action: "configure", label: "新增或修改具体 model" },
     { action: "show", label: "查看具体 provider / model" },
     { action: "delete", label: "删除渠道配置" },
@@ -1281,6 +1442,7 @@ function actionFromArg(value: string): ApiProviderAction | undefined {
   if (value === "list" || value === "ls") return "list";
   if (value === "show" || value === "get") return "show";
   if (value === "logout") return "logout";
+  if (value === "retry") return "retry";
   if (value === "reset") return "reset";
   return undefined;
 }
@@ -1609,6 +1771,18 @@ function positiveInteger(value: string | number, label: string): number {
       : `${label} must be a positive integer`);
   }
   return parsed;
+}
+
+function retryCount(value: string | number): number {
+  const parsed = positiveInteger(value, "最大重试次数");
+  if (parsed > API_RETRY_MAX_RETRIES) {
+    throw new Error(`最大重试次数必须在 1-${API_RETRY_MAX_RETRIES} 之间`);
+  }
+  return parsed;
+}
+
+function isPositiveInteger(value: unknown): value is number {
+  return typeof value === "number" && Number.isSafeInteger(value) && value > 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

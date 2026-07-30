@@ -952,7 +952,9 @@ function isFallbackModelError(messages: Array<{ role: string; content: string }>
 }
 
 function resultFailureMessage(messages: Array<{ role: string; content: string }>): string {
-  return [...messages].reverse().find((message) => message.role === "system")?.content
+  const newestFirst = [...messages].reverse();
+  return newestFirst.find((message) => isRetryableProviderError(message.content))?.content
+    ?? newestFirst.find((message) => message.role === "system")?.content
     ?? messages.at(-1)?.content
     ?? "Unknown teammate failure";
 }
@@ -970,6 +972,102 @@ function waitForRetryDelay(delayMs: number, signal?: AbortSignal): Promise<boole
     signal?.addEventListener("abort", abort, { once: true });
     timer = setTimeout(() => finish(true), delayMs);
   });
+}
+
+interface RetrySettingSnapshot {
+  hadRetry: boolean;
+  hadEnabled: boolean;
+  enabled?: boolean;
+}
+
+interface RetryPersistenceGuard {
+  depth: number;
+  snapshot?: RetrySettingSnapshot;
+  restoreTimer?: ReturnType<typeof setTimeout>;
+}
+
+const retryPersistenceGuards = new Map<string, RetryPersistenceGuard>();
+
+/**
+ * Pi's RPC set_auto_retry command persists to settings.json even though the
+ * child only needs a session-local override. Restore the original value after
+ * every concurrently starting child has acknowledged that command.
+ */
+export function acquireRetryPersistenceGuard(settingsPath: string): () => void {
+  const existing = retryPersistenceGuards.get(settingsPath);
+  if (!existing) {
+    const snapshot = readRetrySettingSnapshot(settingsPath);
+    if (snapshot?.hadEnabled && snapshot.enabled === false) return () => {};
+  }
+  if (existing?.restoreTimer) {
+    clearTimeout(existing.restoreTimer);
+    existing.restoreTimer = undefined;
+  }
+  const guard = existing ?? {
+    depth: 0,
+    snapshot: readRetrySettingSnapshot(settingsPath),
+  };
+  guard.depth += 1;
+  retryPersistenceGuards.set(settingsPath, guard);
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    guard.depth -= 1;
+    if (guard.depth > 0) return;
+    guard.restoreTimer = setTimeout(() => {
+      guard.restoreTimer = undefined;
+      if (guard.depth > 0) return;
+      retryPersistenceGuards.delete(settingsPath);
+      if (guard.snapshot) restoreRetrySettingSnapshot(settingsPath, guard.snapshot);
+    }, 250);
+  };
+}
+
+function readRetrySettingSnapshot(settingsPath: string): RetrySettingSnapshot | undefined {
+  try {
+    const root = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as unknown;
+    if (!root || typeof root !== "object" || Array.isArray(root)) return undefined;
+    const retry = (root as Record<string, unknown>).retry;
+    const hadRetry = Boolean(retry && typeof retry === "object" && !Array.isArray(retry));
+    const record = hadRetry ? retry as Record<string, unknown> : undefined;
+    return {
+      hadRetry,
+      hadEnabled: typeof record?.enabled === "boolean",
+      ...(typeof record?.enabled === "boolean" ? { enabled: record.enabled } : {}),
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function restoreRetrySettingSnapshot(settingsPath: string, snapshot: RetrySettingSnapshot): void {
+  try {
+    const root = JSON.parse(fs.readFileSync(settingsPath, "utf8")) as Record<string, unknown>;
+    if (!root || typeof root !== "object" || Array.isArray(root)) return;
+    const retry = root.retry && typeof root.retry === "object" && !Array.isArray(root.retry)
+      ? { ...root.retry as Record<string, unknown> }
+      : {};
+    const currentHadEnabled = typeof retry.enabled === "boolean";
+    if (
+      currentHadEnabled === snapshot.hadEnabled
+      && (!snapshot.hadEnabled || retry.enabled === snapshot.enabled)
+    ) return;
+    if (snapshot.hadEnabled) retry.enabled = snapshot.enabled;
+    else delete retry.enabled;
+    if (!snapshot.hadRetry && Object.keys(retry).length === 0) delete root.retry;
+    else root.retry = retry;
+    const temporary = `${settingsPath}.${process.pid}.${randomUUID()}.retry.tmp`;
+    fs.writeFileSync(temporary, `${JSON.stringify(root, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    fs.renameSync(temporary, settingsPath);
+  } catch {
+    // Best effort: a failed restore must not hide the child result.
+  }
+}
+
+function childSettingsPath(env: NodeJS.ProcessEnv): string {
+  const agentDir = env.PI_CODING_AGENT_DIR?.trim() || path.join(os.homedir(), ".pi", "agent");
+  return path.join(agentDir, "settings.json");
 }
 
 // ---------------------------------------------------------------------------
@@ -1889,6 +1987,7 @@ async function runSingleAttempt(
 
   return new Promise<SingleResult>((resolve) => {
     let child: ChildProcess;
+    let releaseRetryPersistenceGuard = () => {};
 
     const spawnEnv = buildChildSpawnEnv(correlationId, replyTo, options, schemaFile, outputFile);
 
@@ -1932,6 +2031,7 @@ async function runSingleAttempt(
     // Teammate owns retry and model failover for child runs. Disable Pi's inner
     // retry loop first so one provider failure cannot multiply both budgets.
     if (child.stdin) {
+      releaseRetryPersistenceGuard = acquireRetryPersistenceGuard(childSettingsPath(spawnEnv));
       writeChildStdinLine(child.stdin, JSON.stringify({ type: "set_auto_retry", enabled: false }));
     }
 
@@ -2024,6 +2124,7 @@ async function runSingleAttempt(
       exitCode = 0,
     ): void {
       if (state.terminal || state.turnLifecycleSettled) return;
+      releaseRetryPersistenceGuard();
       state.turnLifecycleSettled = true;
       progress.status = exitCode === 0 ? "completed" : "failed";
       progress.resultReadyAt = undefined;
@@ -2385,8 +2486,9 @@ async function runSingleAttempt(
       ["message_end", onAssistantMessage],
       ["assistant", onAssistantMessage],
       ["message_update", onMessageUpdate],
-      // RPC acknowledgement — nothing to record.
-      ["response", () => {}],
+      ["response", (event) => {
+        if (event.command === "set_auto_retry") releaseRetryPersistenceGuard();
+      }],
       ["tool_execution_start", onToolStart],
       ["tool_execution_end", onToolCompleted],
       ["tool_result_end", onToolCompleted],
@@ -2429,6 +2531,7 @@ async function runSingleAttempt(
     });
 
     child.on("close", (code, signal) => {
+      releaseRetryPersistenceGuard();
       clearAllTimers();
       termination.cleanup();
       unbindTerminationSignal();
@@ -2513,6 +2616,7 @@ async function runSingleAttempt(
     });
 
     child.on("error", (error) => {
+      releaseRetryPersistenceGuard();
       clearAllTimers();
       unbindTerminationSignal();
 

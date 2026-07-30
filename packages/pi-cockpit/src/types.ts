@@ -32,6 +32,8 @@ export interface AgentRow {
 	status: AgentStatus;
 	tail: string;
 	startedAt: number;
+	/** Terminal wall-clock used to freeze elapsed time for completed/failed rows. */
+	finishedAt?: number;
 	lastActivityAt: number;
 	toolCount?: number;
 	tokens?: number;

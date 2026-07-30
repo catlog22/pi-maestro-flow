@@ -28,6 +28,7 @@ import type {
   CompactionTrigger,
 } from "./compaction-arbiter.ts";
 import { readEffectiveCompactionSettings } from "./compaction-settings.ts";
+import { summaryOutputTokenLimit } from "./compaction-threshold.ts";
 
 const DETAILS_KIND = "maestro-session-checkpoint";
 const DETAILS_VERSION = 3;
@@ -35,6 +36,47 @@ const PREVIOUS_DETAILS_VERSION = 2;
 const LEGACY_DETAILS_VERSION = 1;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
+const resolvedCompactionModels = new WeakMap<object, Map<string, Model<Api>>>();
+export const SUMMARY_CAPACITY_MARGIN_TOKENS = 4_096;
+export const SUMMARY_REQUEST_PROTOCOL_TOKENS = 64;
+export const MIN_SUMMARY_OUTPUT_TOKENS = 1_024;
+
+export class CompactionCapacityError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "CompactionCapacityError";
+  }
+}
+
+export function estimateSummaryRequestTokens(systemPrompt: string, prompt: string): number {
+  let asciiChars = 0;
+  let nonAsciiChars = 0;
+  for (const char of `${systemPrompt}\n${prompt}`) {
+    if (char.codePointAt(0)! <= 0x7f) asciiChars += 1;
+    else nonAsciiChars += 1;
+  }
+  // Deliberately conservative versus the usual ~4 chars/token heuristic:
+  // JSON/code is budgeted at 2.5 ASCII chars/token and CJK at 1.5 tokens/char.
+  return Math.ceil(asciiChars / 2.5 + nonAsciiChars * 1.5) + SUMMARY_REQUEST_PROTOCOL_TOKENS;
+}
+
+export function fitSummaryOutputBudget(input: {
+  tokensBefore: number;
+  estimatedRequestTokens?: number;
+  reserveTokens: number;
+  contextWindow: number;
+  modelMaxTokens?: number;
+}): number {
+  const desired = summaryOutputTokenLimit(input.reserveTokens, input.modelMaxTokens);
+  const inputTokens = Math.max(input.tokensBefore, input.estimatedRequestTokens ?? 0);
+  const available = Math.floor(input.contextWindow - inputTokens - SUMMARY_CAPACITY_MARGIN_TOKENS);
+  if (available < MIN_SUMMARY_OUTPUT_TOKENS) {
+    throw new CompactionCapacityError(
+      `Compaction summary stopped locally: estimated request ${inputTokens}/${input.contextWindow} leaves ${Math.max(0, available)} output tokens after the ${SUMMARY_CAPACITY_MARGIN_TOKENS}-token safety margin; at least ${MIN_SUMMARY_OUTPUT_TOKENS} are required.`,
+    );
+  }
+  return Math.min(desired, available);
+}
 
 export interface WorkflowRecoveryIdentity {
   sessionId: string;
@@ -357,7 +399,13 @@ export async function createMaestroCompaction(
     const response = dependencies.completeSummary
       ? await dependencies.completeSummary(prompt, event, ctx)
       : await completeWithCurrentModel(prompt, event, ctx);
-    if (response.stopReason === "error") return undefined;
+    if (response.stopReason === "error") {
+      ctx.ui.notify(
+        `Maestro compaction summary failed; falling back to Pi summarization: ${response.errorMessage || "Unknown provider error"}`,
+        "warning",
+      );
+      return undefined;
+    }
     const summary = response.content
       .filter((part) => part.type === "text" && typeof part.text === "string")
       .map((part) => part.text)
@@ -373,7 +421,12 @@ export async function createMaestroCompaction(
         details,
       },
     };
-  } catch {
+  } catch (error) {
+    if (error instanceof CompactionCapacityError) throw error;
+    ctx.ui.notify(
+      `Maestro compaction summary failed; falling back to Pi summarization: ${error instanceof Error ? error.message : String(error)}`,
+      "warning",
+    );
     return undefined;
   }
 }
@@ -563,13 +616,50 @@ async function completeWithCurrentModel(
   const currentModel = ctx.model;
   if (!currentModel) throw new Error("No model selected for Maestro compaction");
   const settings = readEffectiveCompactionSettings(ctx.cwd);
-  const model = await resolveConfiguredCompactionModel(settings.model, currentModel, ctx);
-  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  const estimatedRequestTokens = estimateSummaryRequestTokens(MAESTRO_COMPACTION_SYSTEM_PROMPT, prompt);
+  let model = await resolveConfiguredCompactionModel(settings.model, currentModel, ctx);
+  let maxTokens: number;
+  try {
+    maxTokens = fitSummaryOutputBudget({
+      tokensBefore: event.preparation.tokensBefore,
+      estimatedRequestTokens,
+      reserveTokens: event.preparation.settings.reserveTokens,
+      contextWindow: model.contextWindow,
+      modelMaxTokens: model.maxTokens,
+    });
+  } catch (error) {
+    if (!(error instanceof CompactionCapacityError) || sameModel(model, currentModel)) throw error;
+    ctx.ui.notify(
+      `Configured compaction model "${model.provider}/${model.id}" cannot fit this checkpoint; using the current session model.`,
+      "warning",
+    );
+    model = currentModel;
+    maxTokens = fitSummaryOutputBudget({
+      tokensBefore: event.preparation.tokensBefore,
+      estimatedRequestTokens,
+      reserveTokens: event.preparation.settings.reserveTokens,
+      contextWindow: model.contextWindow,
+      modelMaxTokens: model.maxTokens,
+    });
+  }
+  let auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  if ((!auth.ok || !auth.apiKey) && !sameModel(model, currentModel)) {
+    invalidateCompactionModel(settings.model, currentModel, ctx);
+    ctx.ui.notify(
+      `Configured compaction model "${model.provider}/${model.id}" authentication expired; using the current session model.`,
+      "warning",
+    );
+    model = currentModel;
+    maxTokens = fitSummaryOutputBudget({
+      tokensBefore: event.preparation.tokensBefore,
+      estimatedRequestTokens,
+      reserveTokens: event.preparation.settings.reserveTokens,
+      contextWindow: model.contextWindow,
+      modelMaxTokens: model.maxTokens,
+    });
+    auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  }
   if (!auth.ok || !auth.apiKey) throw new Error("Compaction model authentication is unavailable");
-  const maxTokens = Math.min(
-    Math.floor(event.preparation.settings.reserveTokens * 0.8),
-    model.maxTokens > 0 ? model.maxTokens : Number.POSITIVE_INFINITY,
-  );
   return complete(
     model,
     {
@@ -589,6 +679,45 @@ async function completeWithCurrentModel(
   );
 }
 
+function compactionModelCacheKey(reference: string, currentModel: Model<Api>): string {
+  return `${currentModel.provider}/${currentModel.id}->${reference}`;
+}
+
+function cachedCompactionModel(
+  reference: string,
+  currentModel: Model<Api>,
+  ctx: ExtensionContext,
+): Model<Api> | undefined {
+  return resolvedCompactionModels.get(ctx.modelRegistry)?.get(compactionModelCacheKey(reference, currentModel));
+}
+
+function cacheCompactionModel(
+  reference: string,
+  currentModel: Model<Api>,
+  model: Model<Api>,
+  ctx: ExtensionContext,
+): void {
+  let cache = resolvedCompactionModels.get(ctx.modelRegistry);
+  if (!cache) {
+    cache = new Map();
+    resolvedCompactionModels.set(ctx.modelRegistry, cache);
+  }
+  cache.set(compactionModelCacheKey(reference, currentModel), model);
+}
+
+function invalidateCompactionModel(
+  reference: string | undefined,
+  currentModel: Model<Api>,
+  ctx: ExtensionContext,
+): void {
+  if (!reference) return;
+  resolvedCompactionModels.get(ctx.modelRegistry)?.delete(compactionModelCacheKey(reference, currentModel));
+}
+
+function sameModel(left: Model<Api>, right: Model<Api>): boolean {
+  return left.provider === right.provider && left.id === right.id;
+}
+
 /**
  * Resolves the configured compaction model reference (`provider/id`) against
  * the model registry. Any resolution or authentication failure degrades to the
@@ -600,6 +729,8 @@ export async function resolveConfiguredCompactionModel(
   ctx: ExtensionContext,
 ): Promise<Model<Api>> {
   if (!reference) return currentModel;
+  const cached = cachedCompactionModel(reference, currentModel, ctx);
+  if (cached) return cached;
   const separator = reference.indexOf("/");
   const provider = separator > 0 ? reference.slice(0, separator) : "";
   const modelId = separator > 0 ? reference.slice(separator + 1) : "";
@@ -608,11 +739,21 @@ export async function resolveConfiguredCompactionModel(
     ctx.ui.notify(`Configured compaction model "${reference}" is not available; using the current session model.`, "warning");
     return currentModel;
   }
-  const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  let auth: Awaited<ReturnType<ExtensionContext["modelRegistry"]["getApiKeyAndHeaders"]>>;
+  try {
+    auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+  } catch (error) {
+    ctx.ui.notify(
+      `Configured compaction model "${reference}" authentication check failed; using the current session model: ${error instanceof Error ? error.message : String(error)}`,
+      "warning",
+    );
+    return currentModel;
+  }
   if (!auth.ok || !auth.apiKey) {
     ctx.ui.notify(`Configured compaction model "${reference}" has no usable authentication; using the current session model.`, "warning");
     return currentModel;
   }
+  cacheCompactionModel(reference, currentModel, model, ctx);
   return model;
 }
 

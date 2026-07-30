@@ -68,6 +68,62 @@ test("dedupes against an existing non-canonical path entry", () => {
   assert.equal(written.packages.length, 1);
 });
 
+test("prunes duplicate package names while preserving the first configured source", () => {
+  const { settingsFile } = fixture();
+  const root = join(settingsFile, "..", "..", "..");
+  const workspace = join(root, "workspace", "pi-maestro-teammate");
+  const nested = join(root, "flow", "node_modules", "pi-maestro-teammate");
+  for (const dir of [workspace, nested]) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "pi-maestro-teammate" }), "utf8");
+  }
+  mkdirSync(join(settingsFile, ".."), { recursive: true });
+  writeFileSync(settingsFile, JSON.stringify({ packages: [workspace, nested] }), "utf8");
+
+  const result = registerCompanionPackages({ settingsFile, packageDirs: [nested] });
+
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.added, []);
+  assert.deepEqual(JSON.parse(readFileSync(settingsFile, "utf8")).packages, [workspace]);
+});
+
+test("does not add a nested companion when a workspace source is already configured", () => {
+  const { settingsFile } = fixture();
+  const root = join(settingsFile, "..", "..", "..");
+  const workspace = join(root, "workspace", "pi-maestro-teammate");
+  const nested = join(root, "flow", "node_modules", "pi-maestro-teammate");
+  for (const dir of [workspace, nested]) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "pi-maestro-teammate" }), "utf8");
+  }
+  mkdirSync(join(settingsFile, ".."), { recursive: true });
+  writeFileSync(settingsFile, JSON.stringify({ packages: [workspace] }), "utf8");
+
+  const result = registerCompanionPackages({ settingsFile, packageDirs: [nested] });
+
+  assert.equal(result.changed, false);
+  assert.deepEqual(result.added, []);
+  assert.deepEqual(result.packages, [workspace]);
+});
+
+test("does not prune duplicate names for packages outside the companion set", () => {
+  const { settingsFile, dirA } = fixture();
+  const root = join(settingsFile, "..", "..", "..");
+  const sourceA = join(root, "plugins", "source-a");
+  const sourceB = join(root, "plugins", "source-b");
+  for (const dir of [sourceA, sourceB]) {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "package.json"), JSON.stringify({ name: "unrelated-plugin" }), "utf8");
+  }
+  mkdirSync(join(settingsFile, ".."), { recursive: true });
+  writeFileSync(settingsFile, JSON.stringify({ packages: [sourceA, sourceB] }), "utf8");
+
+  const result = registerCompanionPackages({ settingsFile, packageDirs: [dirA] });
+
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.packages, [sourceA, sourceB, dirA]);
+});
+
 test("resolvePackageDir locates the workspace teammate package", () => {
   const dir = resolvePackageDir("pi-maestro-teammate", import.meta.url);
   assert.ok(dir, "expected to resolve pi-maestro-teammate");

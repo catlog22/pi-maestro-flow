@@ -886,6 +886,14 @@ function toolAction(name: string): string {
   return `using ${name}`;
 }
 
+function formatRetryDelay(delayMs: number): string {
+  const seconds = Math.max(0, Math.ceil(delayMs / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return remainder === 0 ? `${minutes}m` : `${minutes}m ${remainder}s`;
+}
+
 function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
   const rows = new Map<string, AgentWidgetRow>();
   const directAgents = new Map(agents.map((agent) => [agent.correlationId, agent]));
@@ -913,7 +921,11 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
         : status === "sleeping"
           ? "sleeping"
           : status === "retrying"
-            ? `retry ${direct?.retry?.attempt ?? "?"}/${direct?.retry?.maxRetries ?? "?"}`
+            ? direct?.retry
+              ? `retry ${direct.retry.attempt}/${direct.retry.maxRetries} in ${formatRetryDelay(
+                direct.retry.nextRetryAt - Date.now(),
+              )}`
+              : "retrying"
           : status === "pending"
             ? "waiting for dependencies"
             : status === "failed"
@@ -5404,6 +5416,7 @@ export async function handleProxyRequest(
       const reportChildStatus = (
         status: ChildAgentCallSnapshot["status"],
         progress?: AgentProgress,
+        retryMessage?: string,
       ): void => {
         onChildStatus?.({
           agent: activeAgent.agent,
@@ -5422,6 +5435,9 @@ export async function handleProxyRequest(
             outputTokens: progress.outputTokens,
             ...(progress.lastMessage ? { lastMessage: truncateUtf8Tail(progress.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) } : {}),
           } : {}),
+          ...(!progress?.lastMessage && retryMessage
+            ? { lastMessage: truncateUtf8Tail(retryMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
+            : {}),
         });
       };
 
@@ -5609,7 +5625,11 @@ export async function handleProxyRequest(
         }),
         onRetry: (retry) => {
           applyAgentRetryState(state, retry);
-          reportChildStatus("retrying");
+          reportChildStatus(
+            "retrying",
+            undefined,
+            `retry ${retry.attempt}/${retry.maxRetries} in ${formatRetryDelay(retry.delayMs)}: ${retry.error}`,
+          );
         },
         onTurnComplete: (result) => {
           const lastMessage = displayMessageForResult(result);

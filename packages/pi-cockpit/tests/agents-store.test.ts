@@ -112,6 +112,61 @@ test("graph progress updates the task row instead of flattening child state onto
 	assert.equal(child.outputTokens, 60);
 });
 
+test("completed graph progress freezes elapsed time from its completion timestamp", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "root", agent: "graph(1)" }, 1_000);
+	s.applyMessage({
+		correlationId: "root",
+		progress: [{
+			correlationId: "child",
+			agent: "explorer",
+			taskIndex: 0,
+			status: "completed",
+			startedAt: 2_000,
+			completedAt: 7_000,
+			durationMs: 99_000,
+		}],
+	}, 8_000);
+	const child = s.snapshot(50_000).find((row) => row.correlationId === "child");
+	assert.equal(child?.status, "done");
+	assert.equal(child?.startedAt, 2_000);
+	assert.equal(child?.finishedAt, 7_000);
+});
+
+test("completed graph progress falls back to its reported duration", () => {
+	const s = new AgentsStore();
+	s.applyMessage({
+		correlationId: "root",
+		progress: [{
+			correlationId: "child",
+			agent: "explorer",
+			taskIndex: 0,
+			status: "completed",
+			startedAt: 2_000,
+			durationMs: 5_000,
+		}],
+	}, 20_000);
+	assert.equal(s.snapshot(50_000).find((row) => row.correlationId === "child")?.finishedAt, 7_000);
+});
+
+test("progress does not overwrite an authoritative spawnedBy parent", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "child", agent: "explorer", spawnedBy: "actual-parent" }, 1_000);
+	s.applyMessage({
+		correlationId: "progress-envelope",
+		progress: [{
+			correlationId: "child",
+			agent: "explorer",
+			taskIndex: 0,
+			status: "running",
+		}],
+	}, 2_000);
+	assert.equal(
+		s.snapshot().find((row) => row.correlationId === "child")?.parentCorrelationId,
+		"actual-parent",
+	);
+});
+
 test("message for unknown correlationId self-heals a running row", () => {
 	const s = new AgentsStore();
 	s.applyMessage({ correlationId: "nope", agent: "explorer", name: "scan", message: "hi" }, 500);
@@ -334,6 +389,26 @@ test("a successful wake lifecycle recreates a row removed at completion", () => 
 	assert.equal(row.correlationId, "c1");
 	assert.equal(row.status, "running");
 	assert.equal(row.lastActivityAt, 200);
+});
+
+test("a failed descendant keeps its own terminal time when the parent completes", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "root", agent: "graph(1)" }, 100);
+	s.applyMessage({
+		correlationId: "root",
+		progress: [{
+			correlationId: "child",
+			agent: "executor",
+			taskIndex: 0,
+			status: "failed",
+			startedAt: 200,
+			completedAt: 700,
+		}],
+	}, 800);
+	s.applyComplete({ correlationId: "root", exitCode: 0, durationMs: 5_000 }, 6_000);
+	const child = s.snapshot(6_000).find((row) => row.correlationId === "child");
+	assert.equal(child?.status, "failed");
+	assert.equal(child?.finishedAt, 700);
 });
 
 test("a failed agent survives its own completion so the failure can be read", () => {

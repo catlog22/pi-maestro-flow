@@ -21,10 +21,13 @@ async function createModelRegistry(credentials: unknown, modelsPath: string) {
 }
 import {
   deleteApiProviderModelSettings,
+  ensureApiRetryDefaults,
   loadApiProviderSettings,
+  loadApiRetrySettings,
   normalizeBaseUrl,
   registerApiProviderConfigs,
   saveApiProviderSettings,
+  saveApiRetrySettings,
 } from "../src/providers/api-provider-config.ts";
 
 function createEffortHarness(options: {
@@ -133,6 +136,122 @@ test("registers configured providers and the /api-manager command", async (t) =>
   assert.ok(getModels("openai").every((model) => model.api === "openai-responses"));
   assert.ok(getModels("anthropic").length > 0);
   assert.ok(getModels("anthropic").every((model) => model.api === "anthropic-messages"));
+});
+
+test("API Manager retry defaults are enabled and preserve explicit overrides", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-retry-defaults-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const settingsPath = join(tempDir, "settings.json");
+
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 12 });
+  await ensureApiRetryDefaults(settingsPath);
+  assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")).retry, {
+    enabled: true,
+    maxRetries: 12,
+  });
+
+  writeFileSync(settingsPath, JSON.stringify({
+    theme: "custom",
+    retry: {
+      enabled: false,
+      baseDelayMs: 3_000,
+      provider: { maxRetries: 0, maxRetryDelayMs: 600_000 },
+    },
+  }));
+  await ensureApiRetryDefaults(settingsPath);
+  const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.equal(saved.theme, "custom");
+  assert.deepEqual(saved.retry, {
+    enabled: false,
+    maxRetries: 12,
+    baseDelayMs: 3_000,
+    provider: { maxRetries: 0, maxRetryDelayMs: 600_000 },
+  });
+});
+
+test("API Manager retry save validates the shared cap and preserves sibling settings", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-retry-save-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const settingsPath = join(tempDir, "settings.json");
+  writeFileSync(settingsPath, JSON.stringify({
+    defaultModel: "model-a",
+    retry: { baseDelayMs: 2_000, provider: { timeoutMs: 30_000 } },
+  }));
+
+  await saveApiRetrySettings({ enabled: false, maxRetries: 4 }, settingsPath);
+  const saved = JSON.parse(readFileSync(settingsPath, "utf8"));
+  assert.equal(saved.defaultModel, "model-a");
+  assert.deepEqual(saved.retry, {
+    enabled: false,
+    maxRetries: 4,
+    baseDelayMs: 2_000,
+    provider: { timeoutMs: 30_000 },
+  });
+  await assert.rejects(
+    () => saveApiRetrySettings({ enabled: true, maxRetries: 13 }, settingsPath),
+    /1-12/,
+  );
+});
+
+test("/api-manager manages retry from commands and the interactive menu", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-retry-command-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const settingsPath = join(tempDir, "settings.json");
+  const commands = new Map<string, any>();
+  let sessionStart: ((event: unknown, ctx: any) => Promise<void>) | undefined;
+  registerApiProviderConfigs({
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    getThinkingLevel() { return "medium"; },
+    on(event: string, handler: (event: unknown, ctx: any) => Promise<void>) {
+      if (event === "session_start") sessionStart = handler;
+    },
+  } as any, { modelsPath, settingsPath });
+  const notifications: string[] = [];
+  const baseContext = {
+    cwd: tempDir,
+    hasUI: false,
+    ui: { notify(message: string) { notifications.push(message); } },
+  };
+
+  assert.ok(sessionStart);
+  await sessionStart!({}, baseContext);
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 12 });
+
+  const manager = commands.get("api-manager");
+  await manager.handler("retry off", baseContext);
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 12 });
+  await manager.handler("retry on 6", baseContext);
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 6 });
+  await manager.handler("retry show", baseContext);
+  assert.match(notifications.at(-1) ?? "", /Provider 自动重试：开启/);
+  assert.match(notifications.at(-1) ?? "", /最大重试次数：6/);
+
+  const selections = ["Provider 自动重试", "关闭"];
+  await manager.handler("", {
+    ...baseContext,
+    hasUI: true,
+    ui: {
+      async select() { return selections.shift(); },
+      async input() { throw new Error("disabled retry must not request a count"); },
+      async confirm() { return true; },
+      notify(message: string) { notifications.push(message); },
+    },
+  });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 6 });
+
+  const enableSelections = ["Provider 自动重试", "开启"];
+  await manager.handler("", {
+    ...baseContext,
+    hasUI: true,
+    ui: {
+      async select() { return enableSelections.shift(); },
+      async input() { return "8"; },
+      async confirm() { return true; },
+      notify(message: string) { notifications.push(message); },
+    },
+  });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 8 });
 });
 
 test("validates custom API base URLs", () => {

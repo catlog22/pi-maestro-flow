@@ -11,12 +11,19 @@ import {
   type CompactionLease,
   type CompactionTrigger,
 } from "./compaction-arbiter.ts";
-import { deriveCompactionThreshold, effectiveReserveTokens } from "./compaction-threshold.ts";
+import {
+  deriveCompactionThreshold,
+  deriveLinkedCompactionThreshold,
+  effectiveReserveTokens,
+  type CompactionThresholdDerivation,
+  type LinkedCompactionThresholdModel,
+} from "./compaction-threshold.ts";
 import {
   autoCompactionIdleStatus,
   COMPACTION_MODE_STATUS_KEY,
   COMPACTION_STATUS_KEY,
   formatCompactionStatus,
+  resolveConfiguredCompactionModel,
 } from "./maestro-compaction.ts";
 import { loadPiCompactionInternals, type PiCompactionInternals } from "./pi-internals.ts";
 import {
@@ -51,7 +58,7 @@ const PRUNE_STATE_VERSION = 3;
 
 export type CompactionSettings = Pick<
   EffectiveCompactionSettings,
-  "enabled" | "reserveTokens" | "keepRecentTokens"
+  "enabled" | "reserveTokens" | "keepRecentTokens" | "model"
 > & { soft?: EffectiveCompactionSettings["soft"] };
 
 interface ContextEstimate {
@@ -279,6 +286,28 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     }
     return state.settingsSnapshot;
   }
+  async function linkedThresholdFor(
+    ctx: ExtensionContext,
+    settings: CompactionSettings,
+  ): Promise<LinkedCompactionThresholdModel> {
+    const sessionModel = ctx.model;
+    if (!sessionModel) {
+      return deriveLinkedCompactionThreshold({
+        reserveTokens: settings.reserveTokens,
+        sessionContextWindow: undefined,
+        soft: settings.soft,
+      });
+    }
+    const compactionModel = await resolveConfiguredCompactionModel(settings.model, sessionModel, ctx);
+    return deriveLinkedCompactionThreshold({
+      reserveTokens: settings.reserveTokens,
+      sessionContextWindow: sessionModel.contextWindow,
+      sessionMaxTokens: sessionModel.maxTokens,
+      compactionContextWindow: compactionModel.contextWindow,
+      compactionMaxTokens: compactionModel.maxTokens,
+      soft: settings.soft,
+    });
+  }
   /**
    * Every field a fresh lifecycle must start from. onSessionStart used to clear
    * only 13 of these and never touched the concurrency trio, so a session
@@ -334,7 +363,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         clearPressureStatus(ctx);
         return undefined;
       }
-      if (!settings.enabled || ctx.model.contextWindow <= settings.reserveTokens) {
+      const linkedThreshold = await linkedThresholdFor(ctx, settings);
+      if (!settings.enabled || !linkedThreshold.usable || linkedThreshold.contextWindow <= settings.reserveTokens) {
         if (state.sessionId) void cleanupSpillDir(state.sessionId);
         state.pruneManifest.clear();
         state.restoredPrunes.clear();
@@ -342,6 +372,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         clearPressureStatus(ctx);
         return undefined;
       }
+      const capacityWindow = linkedThreshold.contextWindow;
       hydrateRestoredPrunes(state, messages);
       retainVisiblePrunes(state.pruneManifest, messages, state.restoredPrunes);
       if (!endsWithCompleteToolResultBatch(messages)) {
@@ -352,12 +383,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       }
       const effectiveSettings: CompactionSettings = {
         ...settings,
-        reserveTokens: effectiveReserveTokens(settings, ctx.model.contextWindow, ctx.model.maxTokens),
+        reserveTokens: linkedThreshold.effectiveReserveTokens,
       };
       const manifestSizeBefore = state.pruneManifest.size;
       let pressure = applyContextPressurePolicy(
         messages,
-        ctx.model.contextWindow,
+        capacityWindow,
         effectiveSettings,
         state.pruneManifest,
         state.velocityTracker,
@@ -373,7 +404,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         pressure = adjustPressureAfterReplacementChange(
           pressure,
           upgraded.tokenDelta,
-          ctx.model.contextWindow,
+          capacityWindow,
           effectiveSettings,
         );
         if (pressure.band === "critical" && upgraded.callIds.size > 0) {
@@ -381,7 +412,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           pressure = adjustPressureAfterReplacementChange(
             pressure,
             minimized.tokenDelta,
-            ctx.model.contextWindow,
+            capacityWindow,
             effectiveSettings,
           );
         }
@@ -467,8 +498,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.lastNoCompactableKey = undefined;
       const midTurnTrigger = buildMidTurnTrigger({
         estimatedTokens: estimate.tokens,
-        contextWindow: ctx.model.contextWindow,
-        modelMaxTokens: ctx.model.maxTokens,
+        threshold: linkedThreshold,
         configuredReserveTokens: settings.reserveTokens,
       });
       const lease = dependencies.arbiter?.request("mid-turn", midTurnTrigger);
@@ -498,12 +528,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           owner: "mid-turn",
           trigger: midTurnTrigger,
           tokensBefore: estimate.tokens,
-          contextWindow: ctx.model.contextWindow,
+          contextWindow: capacityWindow,
           configuredReserveTokens: settings.reserveTokens,
         }));
         const instructions = buildMidTurnInstructions(
           estimate,
-          ctx.model.contextWindow,
+          capacityWindow,
           effectiveSettings.reserveTokens,
         );
         ctx.compact({
@@ -630,6 +660,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         );
         return;
       }
+      const linkedThreshold = await linkedThresholdFor(ctx, settings);
+      const instructionReserve = linkedThreshold.usable
+        ? linkedThreshold.effectiveReserveTokens
+        : effectiveReserveTokens(settings, ctx.model.contextWindow, ctx.model.maxTokens);
       const outputLimitTrigger: CompactionTrigger = {
         owner: "output-limit",
         usageTokens: usage?.tokens ?? null,
@@ -640,7 +674,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const lease = dependencies.arbiter?.request("output-limit", outputLimitTrigger);
       if (dependencies.arbiter && !lease) return;
       state.outputLimitCompactions += 1;
-      const instructions = buildOutputLimitInstructions(usage, effectiveReserveTokens(settings, ctx.model.contextWindow, ctx.model.maxTokens));
+      const instructions = buildOutputLimitInstructions(usage, instructionReserve);
       const failOutputLimit = (error: unknown) => {
         lease?.release();
         ctx.ui.notify(`Output-limit compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
@@ -699,14 +733,18 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
 // runtime helpers are re-exported so existing consumers keep their imports.
 export {
   MIN_RESERVE_RATIO,
-  effectiveReserveTokens,
   deriveCompactionThreshold,
+  deriveLinkedCompactionThreshold,
+  effectiveReserveTokens,
+  summaryOutputTokenLimit,
 } from "./compaction-threshold.ts";
 export type {
   CompactionThresholdDerivation,
   CompactionThresholdInput,
   CompactionThresholdModel,
   CompactionThresholdReason,
+  LinkedCompactionThresholdInput,
+  LinkedCompactionThresholdModel,
   SoftThresholdDerivation,
   UnusableContextThreshold,
 } from "./compaction-threshold.ts";
@@ -1849,16 +1887,10 @@ function buildOutputLimitInstructions(
  */
 function buildMidTurnTrigger(input: {
   estimatedTokens: number;
-  contextWindow: number;
-  modelMaxTokens?: number;
+  threshold: CompactionThresholdDerivation;
   configuredReserveTokens: number;
-}): CompactionTrigger | undefined {
-  const derivation = deriveCompactionThreshold({
-    reserveTokens: input.configuredReserveTokens,
-    contextWindow: input.contextWindow,
-    modelMaxTokens: input.modelMaxTokens,
-  });
-  if (!derivation.usable) return undefined;
+}): CompactionTrigger {
+  const derivation = input.threshold;
   return {
     owner: "mid-turn",
     estimatedTokens: input.estimatedTokens,

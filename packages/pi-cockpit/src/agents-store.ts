@@ -37,6 +37,8 @@ export interface ProgressPayload {
 	dependencies?: number[];
 	status?: string;
 	startedAt?: number | string;
+	completedAt?: number | string;
+	durationMs?: number;
 	lastActivityAt?: number | string;
 	recentTools?: Array<string | { name?: string; status?: string }>;
 	toolCount?: number;
@@ -65,7 +67,8 @@ export interface MessagePayload {
 	lastActivityAt?: number | string;
 	progress?: ProgressPayload[];
 }
-export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exitCode">;
+export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exitCode">
+	& Partial<Pick<TeammateCompleteEvent, "durationMs">>;
 
 /**
  * How long a failed agent stays on screen after it completes.
@@ -109,6 +112,19 @@ function normalizeStartedAt(value: number | string | undefined, fallback: number
 	return fallback;
 }
 
+function terminalTime(
+	row: AgentRow,
+	payload: { completedAt?: number | string; durationMs?: number },
+	now: number,
+): number {
+	const completedAt = normalizeStartedAt(payload.completedAt, Number.NaN);
+	if (Number.isFinite(completedAt)) return Math.max(row.startedAt, completedAt);
+	if (typeof payload.durationMs === "number" && Number.isFinite(payload.durationMs)) {
+		return row.startedAt + Math.max(0, payload.durationMs);
+	}
+	return row.finishedAt ?? now;
+}
+
 function latestTool(tools: MessagePayload["recentTools"]): string | undefined {
 	if (!tools?.length) return undefined;
 	const tool = tools.find((candidate) => typeof candidate === "object" && candidate?.status === "running")
@@ -133,7 +149,7 @@ export class AgentsStore {
 	applyStarted(p: StartedPayload, now: number = Date.now()): void {
 		const id = p.correlationId;
 		const prev = this.roster.get(id);
-		this.roster.set(id, {
+		const row: AgentRow = {
 			...prev,
 			correlationId: id,
 			agent: clean(p.agent) || prev?.agent || "",
@@ -149,7 +165,9 @@ export class AgentsStore {
 				: prev?.parentCorrelationId
 					? { parentCorrelationId: prev.parentCorrelationId }
 					: {}),
-		});
+		};
+		if (row.status !== "done" && row.status !== "failed") delete row.finishedAt;
+		this.roster.set(id, row);
 	}
 
 	applyMessage(p: MessagePayload, now = Date.now()): void {
@@ -191,6 +209,8 @@ export class AgentsStore {
 		if (typeof p.status === "string") {
 			row.taskStatus = p.status;
 			row.status = mapAgentStatus(p.status);
+			if (row.status === "done" || row.status === "failed") row.finishedAt ??= now;
+			else delete row.finishedAt;
 		}
 		if (typeof p.taskIndex === "number") row.taskIndex = p.taskIndex;
 		if (Array.isArray(p.dependencies)) row.dependencies = [...p.dependencies];
@@ -216,6 +236,7 @@ export class AgentsStore {
 			if (row && (row.status === "failed" || failedByExitCode)) {
 				row.status = "failed";
 				row.taskStatus = "failed";
+				row.finishedAt = terminalTime(row, id === p.correlationId ? p : {}, now);
 				row.failedAt = now;
 				row.lastActivityAt = now;
 				delete row.activeTool;
@@ -263,20 +284,26 @@ export class AgentsStore {
 		}
 		const row = this.roster.get(p.correlationId);
 		if (!row) return;
-		row.parentCorrelationId = parentCorrelationId === p.correlationId
-			? row.parentCorrelationId
-			: parentCorrelationId;
+		if (
+			parentCorrelationId !== p.correlationId
+			&& row.parentCorrelationId === undefined
+		) row.parentCorrelationId = parentCorrelationId;
 		row.agent = clean(p.agent) || row.agent;
 		row.name = p.name === undefined ? row.name : clean(p.name);
 		row.role = deriveRole(p.agent, p.name);
 		row.task = p.name === undefined ? row.task : clean(p.name);
+		if (p.startedAt !== undefined) row.startedAt = normalizeStartedAt(p.startedAt, row.startedAt);
 		if (typeof p.status === "string") {
 			row.taskStatus = p.status;
 			row.status = mapAgentStatus(p.status);
+			if (row.status === "done" || row.status === "failed") {
+				row.finishedAt = terminalTime(row, p, now);
+			} else {
+				delete row.finishedAt;
+			}
 		}
 		row.taskIndex = p.taskIndex;
 		row.dependencies = Array.isArray(p.dependencies) ? [...p.dependencies] : [];
-		if (p.startedAt !== undefined) row.startedAt = normalizeStartedAt(p.startedAt, row.startedAt);
 		row.lastActivityAt = normalizeStartedAt(p.lastActivityAt, now);
 		if (p.recentTools) {
 			const tool = latestTool(p.recentTools);

@@ -1,7 +1,7 @@
 export declare const NETWORK_RETRY_POLICY: Readonly<{
-    maxRetries: 5;
+    maxRetries: 12;
     initialDelayMs: 1000;
-    maxDelayMs: 16000;
+    maxDelayMs: number;
 }>;
 export type RetryErrorKind = "network" | "provider" | "non-retryable";
 export declare function classifyRetryError(message: string | undefined): RetryErrorKind;

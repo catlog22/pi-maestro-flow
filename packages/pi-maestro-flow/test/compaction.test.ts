@@ -9,6 +9,9 @@ import {
   COMPACTION_MODE_STATUS_KEY,
   COMPACTION_STATUS_KEY,
   createMaestroCompaction,
+  CompactionCapacityError,
+  estimateSummaryRequestTokens,
+  fitSummaryOutputBudget,
   formatCompactionStatus,
   mergeCompactionReferences,
   MAESTRO_COMPACTION_SYSTEM_PROMPT,
@@ -30,6 +33,7 @@ import {
   createMidTurnAutoCompaction,
   decideContextAction,
   deriveCompactionThreshold,
+  deriveLinkedCompactionThreshold,
   derivePressureBand,
   disableInvalidBudgetThinking,
   EMPTY_VELOCITY_TRACKER,
@@ -527,6 +531,58 @@ test("pressure policy honors custom soft nudgeRatio when classifying bands", () 
     soft: { enabled: true, nudgeRatio: 0.8, pruneRatio: 0.9, pruneTargetRatio: 0.8 },
   });
   assert.equal(raised.band, "normal");
+});
+
+test("mid-turn guard links its trigger to a smaller configured compaction model", async () => {
+  let aborted = 0;
+  let compacted = 0;
+  const statuses = new Map<string, string | undefined>();
+  const compactionModel = {
+    provider: "maestro-qwen",
+    id: "summary-small",
+    contextWindow: 400_000,
+    maxTokens: 128_000,
+  };
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      model: "maestro-qwen/summary-small",
+    }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: {
+      provider: "maestro-openai",
+      id: "session-large",
+      contextWindow: 1_000_000,
+      maxTokens: 128_000,
+    },
+    modelRegistry: {
+      find(provider: string, id: string) {
+        return provider === compactionModel.provider && id === compactionModel.id
+          ? compactionModel
+          : undefined;
+      },
+      async getApiKeyAndHeaders() {
+        return { ok: true, apiKey: "sk-test" };
+      },
+    },
+    abort() { aborted++; },
+    compact() { compacted++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
+      notify() {},
+    },
+  } as never;
+
+  await guard.evaluate(highUsageToolBatch(370_000), ctx);
+  assert.equal(aborted, 1);
+  assert.equal(compacted, 1);
+  assert.match(statuses.get(COMPACTION_STATUS_KEY) ?? "", /COMPACT 370030\/360000/);
 });
 
 test("mid-turn guard preserves a no-compactable request while it remains below the model window", async () => {
@@ -1476,6 +1532,68 @@ test("Maestro compaction recomputes knowhow paths and rejects cross-session deta
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("linked compaction threshold follows the tighter summary-model window", () => {
+  const smallerSummaryModel = deriveLinkedCompactionThreshold({
+    reserveTokens: 16_384,
+    sessionContextWindow: 1_000_000,
+    sessionMaxTokens: 128_000,
+    compactionContextWindow: 400_000,
+    compactionMaxTokens: 128_000,
+    soft: DEFAULT_SOFT_COMPACTION,
+  });
+  assert.ok(smallerSummaryModel.usable);
+  assert.equal(smallerSummaryModel.limiter, "compaction");
+  assert.equal(smallerSummaryModel.contextWindow, 400_000);
+  assert.equal(smallerSummaryModel.thresholdTokens, 360_000);
+
+  const largerSummaryModel = deriveLinkedCompactionThreshold({
+    reserveTokens: 16_384,
+    sessionContextWindow: 400_000,
+    sessionMaxTokens: 128_000,
+    compactionContextWindow: 1_000_000,
+    compactionMaxTokens: 128_000,
+  });
+  assert.ok(largerSummaryModel.usable);
+  assert.equal(largerSummaryModel.limiter, "session");
+  assert.equal(largerSummaryModel.thresholdTokens, 272_000);
+  const oversizedReserve = deriveLinkedCompactionThreshold({
+    reserveTokens: 150_000,
+    sessionContextWindow: 1_000_000,
+    sessionMaxTokens: 128_000,
+    compactionContextWindow: 120_000,
+    compactionMaxTokens: 16_000,
+  });
+  assert.ok(oversizedReserve.usable);
+  assert.equal(oversizedReserve.limiter, "session", "an unusable summary window follows the session-model fallback");
+});
+
+test("summary request budget shrinks at the boundary and fails closed before overflow", () => {
+  const expandedRequestTokens = estimateSummaryRequestTokens("system", "中".repeat(1_000));
+  assert.ok(expandedRequestTokens > 1_500, "CJK expansion is counted from the final request text");
+  assert.equal(fitSummaryOutputBudget({
+    tokensBefore: 100,
+    estimatedRequestTokens: expandedRequestTokens,
+    reserveTokens: 1_000,
+    contextWindow: 7_000,
+    modelMaxTokens: 2_000,
+  }), 800);
+  assert.equal(fitSummaryOutputBudget({
+    tokensBefore: 383_616,
+    reserveTokens: 16_384,
+    contextWindow: 400_000,
+    modelMaxTokens: 128_000,
+  }), 12_288);
+  assert.throws(
+    () => fitSummaryOutputBudget({
+      tokensBefore: 395_000,
+      reserveTokens: 16_384,
+      contextWindow: 400_000,
+      modelMaxTokens: 128_000,
+    }),
+    (error: unknown) => error instanceof CompactionCapacityError && /stopped locally/.test(error.message),
+  );
 });
 
 test("effective reserve integrates context window, configured ceiling, and max output", () => {

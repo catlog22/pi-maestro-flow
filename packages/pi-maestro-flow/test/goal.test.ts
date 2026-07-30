@@ -2414,7 +2414,7 @@ test("transient Goal provider failures share the bounded retry status projection
     }, ctx);
 
     assert.equal(getActiveGoal()?.status, "active");
-    assert.ok(statuses.includes("retrying 1/5"));
+    assert.ok(statuses.includes("retrying 1/12"));
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
