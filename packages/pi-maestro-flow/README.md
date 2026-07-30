@@ -43,9 +43,39 @@ After installation:
 - Maestro dispatch is available through the single `maestro` tool
 - Autonomous Goal state is available through `goal`; use `/goal stop`, `/goal resume`, and `/goal clear` for lifecycle control
 - Adaptive foreground/background shell is available through `bash_bg` (auto-backgrounds on timeout, notifies on completion)
-- LSP navigation/refactoring, named-tab browser control, and BM25 tool discovery are available through `lsp`, `browser`, and `search_tool_bm25`
+- LSP navigation/refactoring, named-tab browser control, BM25 tool discovery, smart search, and source verification are available through `lsp`, `browser`, `search_tool_bm25`, `smart_search`, and `source_check`
+- Compaction capacity management, API retry settings, and model failover are configured through `/maestro-compaction`, `/api-manager`, and `/model-failover`
+- MCP OAuth auto-authentication is managed through `/mcp-auth`
+- Session export is available through `/export-session-info`
 - Companion extensions `pi-maestro-teammate` and `pi-cockpit` are pulled as dependencies and auto-registered into `settings.packages` on postinstall (best-effort; a failure only warns)
 - Maestro workflow docs installed at `~/.maestro/workflows/`
+
+## Commands
+
+| Command | Description |
+|---------|-------------|
+| `/permissions` | Inspect and manage permission rules; `/permissions yolo` enables bypass mode |
+| `/plan`, `Alt+P` | Enter durable Plan mode |
+| `/plan-model` | Select or disable a dedicated Plan model |
+| `/goal` | Goal lifecycle: `/goal stop`, `/goal resume`, `/goal clear` |
+| `/maestro-session` | Canonical Maestro Session management |
+| `/maestro-knowledge` | Knowledge store management |
+| `/maestro-todo`, `Alt+T` | Shared Todo Center TUI |
+| `/maestro-goal` | Goal panel |
+| `/maestro-compaction` | Compaction settings TUI (threshold, model, capacity) |
+| `/maestro-keybindings` | Shortcut conflict audit and fix |
+| `/hooks` | Hook trust review; `/hooks install` opens the installer |
+| `/mcp` | MCP server management |
+| `/mcp-auth` | MCP OAuth authentication flow |
+| `/api-manager` | API provider configuration (models, retry settings) |
+| `/effort` | Thinking effort level |
+| `/model-failover` | Model failover routing configuration |
+| `/model-health` | Circuit breaker health status |
+| `/smart-search` | Smart Search provider configuration |
+| `/websearch`, `/curator` | Native web search and content curator |
+| `/skills` | Skill manager |
+| `/sysprompt` | System prompt inspection |
+| `/export-session-info` | Export session identity and history snapshot |
 
 ## Pi Skill Conversion
 
@@ -447,6 +477,29 @@ Run `/hooks install` to open the dedicated Maestro Flow Hooks installer. When th
 
 Installer keys: `1`-`4` select a preset, `Space` toggles one Hook, `/` enters filtering, `A` applies the draft, `U` uninstalls Maestro entries, and `Esc` returns without writing. PreToolUse guards are marked advisory because Pi tool authorization remains owned by the permission controller.
 
+## Session Export
+
+`/export-session-info` exports the current session's identity and history-storage snapshot to a file. Useful for debugging, auditing, and cross-session context handoff.
+
+## Compaction Capacity Management
+
+Pi compaction is extended with proactive capacity management:
+
+- **Linked threshold derivation** — computes the earliest safe compaction trigger across both the session model and the configured summary model, preventing context-window overflow.
+- **Summary output budget** — validates that the estimated request tokens plus a safety margin leave sufficient output tokens; falls back to the session model when the compaction model cannot fit the checkpoint.
+- **Auto-compaction** — mid-turn auto-compaction resolves the linked threshold at session start and uses the governing capacity window for all trigger comparisons.
+- **Settings TUI** — `/maestro-compaction` opens a threshold editor showing the output budget, capacity source label, and linked-threshold validation.
+
+## API Retry and Model Failover
+
+- **API retry settings** — `/api-manager` includes a `retry` action to view and toggle API retry behavior (enabled/disabled, max retries up to 12). Settings persist to `settings.json`.
+- **Circuit breaker** — model calls are protected by a circuit breaker that trips on repeated failures and automatically recovers after a cooldown period.
+- **Failover routing** — `/model-failover` configures automatic failover to backup models when the primary model is unavailable. `/model-health` shows live circuit breaker state.
+
+## MCP Auto-Auth
+
+MCP servers that require OAuth authentication are handled automatically: `/mcp-auth` manages the authentication flow, and the extension can auto-initiate OAuth when a server returns an authentication challenge during tool calls.
+
 ## Architecture
 
 ```
@@ -457,8 +510,13 @@ Installer keys: `1`-`4` select a preset, `Space` toggles one Hook, `/` enters fi
 │  Extension tools:                        │
 │    maestro · goal · todo · run-control   │
 │    bash_bg · lsp · browser · mcp         │
-│    smart_search · ffgrep/fffind          │
-│    search_tool_bm25 · plan-*             │
+│    smart_search · source_check            │
+│    ffgrep/fffind · search_tool_bm25      │
+│    model-availability · plan-*            │
+│                                          │
+│  Subsystems:                             │
+│    compaction · session export · hooks   │
+│    API retry · model failover · MCP auth │
 │                                          │
 │  Runtime assets:                         │
 │    Maestro workflows + Templates (23)    │
@@ -468,7 +526,7 @@ Installer keys: `1`-`4` select a preset, `Space` toggles one Hook, `/` enters fi
 └──────────────────────────────────────────┘
 
 pi-maestro-teammate (execution engine) and pi-cockpit (status UI)
-are dependencies since v0.6.1 and auto-register on postinstall.
+are dependencies and auto-register on postinstall.
 Skills (63) and agents (25) are in .pi/ at project root.
 ```
 
