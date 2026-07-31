@@ -3,6 +3,9 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { type CockpitConfig, DEFAULT_CONFIG } from "./types.ts";
 
+const SIDEBAR_MIN_WIDTH = 32;
+const SIDEBAR_MAX_WIDTH = 56;
+
 export function getConfigPath(): string {
 	return join(getAgentDir(), "cockpit.json");
 }
@@ -14,9 +17,17 @@ export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 	const isMode = (v: unknown): v is "list" | "compact" => v === "list" || v === "compact";
 	const isQuietSymbolMode = (v: unknown): v is "check" | "dot" => v === "check" || v === "dot";
 	const isIconMode = (v: unknown): v is "auto" | "nerd" | "ascii" => v === "auto" || v === "nerd" || v === "ascii";
+	const isSidebarMode = (v: unknown): v is "auto" | "on" | "off" => v === "auto" || v === "on" || v === "off";
+	const isSidebarDensity = (v: unknown): v is "comfortable" | "compact" => v === "comfortable" || v === "compact";
 	const iconsRaw = o.icons && typeof o.icons === "object" && !Array.isArray(o.icons)
 		? (o.icons as Record<string, unknown>)
 		: undefined;
+	const sidebarRaw = o.sidebar && typeof o.sidebar === "object" && !Array.isArray(o.sidebar)
+		? (o.sidebar as Record<string, unknown>)
+		: undefined;
+	const sidebarWidth = sidebarRaw && typeof sidebarRaw.width === "number" && Number.isFinite(sidebarRaw.width)
+		? Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(sidebarRaw.width)))
+		: base.sidebar.width;
 	return {
 		enabled: typeof o.enabled === "boolean" ? o.enabled : base.enabled,
 		quietMode: typeof o.quietMode === "boolean" ? o.quietMode : base.quietMode,
@@ -26,6 +37,11 @@ export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 		todoExpanded: typeof o.todoExpanded === "boolean" ? o.todoExpanded : base.todoExpanded,
 		hideNativeAgents: typeof o.hideNativeAgents === "boolean" ? o.hideNativeAgents : base.hideNativeAgents,
 		icons: { mode: iconsRaw && isIconMode(iconsRaw.mode) ? iconsRaw.mode : base.icons.mode },
+		sidebar: {
+			mode: sidebarRaw && isSidebarMode(sidebarRaw.mode) ? sidebarRaw.mode : base.sidebar.mode,
+			width: sidebarWidth,
+			density: sidebarRaw && isSidebarDensity(sidebarRaw.density) ? sidebarRaw.density : base.sidebar.density,
+		},
 		theme: typeof o.theme === "string" ? o.theme : base.theme,
 	};
 }

@@ -5,6 +5,8 @@ import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
 import { statusText, titleFor, workingMessage, type AmbientState } from "./ambient.ts";
 import { BashBgStore } from "./bash-bg-store.ts";
+import { MaestroStore } from "./maestro-store.ts";
+import { createSidebarController, type SidebarController } from "./sidebar-controller.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
@@ -18,6 +20,12 @@ import { collectExtensionStatuses } from "./extension-status.ts";
 import { ANIMATION_PERIOD_MS, resolveGlyphs, spinFrame } from "./icons.ts";
 import { ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
 import { applyRow, buildRows, rowKeyForAccel, type SaveState } from "./settings-view.ts";
+import {
+	COCKPIT_MAESTRO_QUERY_EVENT,
+	MAESTRO_UI_SNAPSHOT_EVENT,
+	MAESTRO_UI_SNAPSHOT_VERSION,
+	type CockpitUiOwnershipV1,
+} from "./public/v1/events.ts";
 import {
 	AGENT_WIDGET_KEY,
 	BASH_BG_QUERY_EVENT,
@@ -36,11 +44,23 @@ import {
 
 const FOOTER_UTILS: WidthUtils = { measure: visibleWidth, clip: truncateToWidth };
 const BASH_BG_OVERLAY_KEY = "alt+j";
+const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
 const COCKPIT_STATUS_KEY = "cockpit";
 const WIDTH_POLL_INTERVAL_MS = 250;
 // Quiet mode's rename of pi's hidden-thinking label. The live thinking timer
 // derives its final "thoughts · 8.4s" labels from the same word.
 const QUIET_THINKING_LABEL = "thoughts";
+
+export type CockpitSurfaceState = "dock" | "widgets" | "disabled";
+
+export function resolveCockpitSurfaceState(
+	enabled: boolean,
+	sidebarMode: CockpitConfig["sidebar"]["mode"],
+	dockEffectiveVisible: boolean,
+): CockpitSurfaceState {
+	if (!enabled) return "disabled";
+	return sidebarMode !== "off" && dockEffectiveVisible ? "dock" : "widgets";
+}
 
 function isTuiContext(ctx: ExtensionContext): boolean {
 	try {
@@ -64,9 +84,13 @@ export default function (pi: ExtensionAPI): void {
 	const agents = new AgentsStore();
 	const bashBg = new BashBgStore();
 	const todos = new TodoStore();
+	const maestro = new MaestroStore();
 	let config: CockpitConfig = structuredClone(DEFAULT_CONFIG);
 	let lastCtx: ExtensionContext | undefined;
 	let capturedTui: TUI | undefined;
+	let sidebarController: SidebarController | undefined;
+	let dockEffectiveVisible = false;
+	let surfaceState: CockpitSurfaceState = "disabled";
 	let running = false;
 	const activeTools = new Map<string, string>();
 	let tick: ReturnType<typeof setInterval> | undefined;
@@ -74,6 +98,21 @@ export default function (pi: ExtensionAPI): void {
 	// the whole session to defaults, so it belongs in a slot that does not scroll away.
 	let configProblem: string | undefined;
 	let quietToolsRegistered = false;
+
+	// Register quiet tools at extension load time, not just in session_start.
+	// During /resume, pi renders history BEFORE emitting session_start
+	// (rebindCurrentSession({ renderBeforeBind: true })), so tools registered
+	// only in session_start miss the initial render pass and every historical
+	// tool call gets the verbose default renderer.  registerTool() is valid
+	// during extension load (loader.ts: "refresh is only needed post-bind"),
+	// and the Extension.tools map is read by _refreshToolRegistry during
+	// AgentSession construction — before renderInitialMessages runs.
+	ensureConfigExists();
+	config = loadConfig();
+	if (config.quietMode) {
+		registerQuietTools(pi, () => config);
+		quietToolsRegistered = true;
+	}
 
 	// Live labels for folded thinking rows: a spinner with running elapsed
 	// time while the model thinks, then the actual duration once it settles.
@@ -134,6 +173,7 @@ export default function (pi: ExtensionAPI): void {
 		refreshAmbient();
 		try {
 			capturedTui?.requestRender();
+			sidebarController?.requestRender();
 		} catch {
 			// tui may be gone between sessions
 		}
@@ -163,15 +203,22 @@ export default function (pi: ExtensionAPI): void {
 			tick = undefined;
 		}
 	};
+	const emitMaestroQuery = (): void => {
+		pi.events.emit(COCKPIT_MAESTRO_QUERY_EVENT, { version: MAESTRO_UI_SNAPSHOT_VERSION });
+	};
 	const publishUiOwnership = (): void => {
-		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, {
+		const ownsDock = surfaceState === "dock";
+		const ownership: CockpitUiOwnershipV1 = {
 			todo: config.enabled,
 			agents: config.enabled && config.hideNativeAgents,
 			footer: config.enabled,
+			sidebar: ownsDock,
+			goal: ownsDock,
 			todoExpanded: config.todoExpanded,
 			quiet: config.enabled && config.quietMode,
 			quietSymbols: config.quietSymbols,
-		});
+		};
+		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, ownership);
 	};
 	const setTodoExpanded = (expanded: boolean): void => {
 		if (config.todoExpanded === expanded) return;
@@ -220,28 +267,12 @@ export default function (pi: ExtensionAPI): void {
 		}
 	};
 
-	const uninstallUi = (ctx: ExtensionContext): void => {
+	const clearWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(STACK_WIDGET_KEY, undefined);
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
-		ctx.ui.setFooter(undefined);
-		try {
-			// Leaving these set would strand a title and a status line owned by an
-			// extension that is no longer painting anything.
-			ctx.ui.setWorkingMessage(undefined);
-			ctx.ui.setStatus(COCKPIT_STATUS_KEY, undefined);
-		} catch {
-			// ambient surfaces are best-effort
-		}
-		stopTick();
-		capturedTui = undefined;
 	};
 
-	const applyUi = (ctx: ExtensionContext): void => {
-		if (!isTuiContext(ctx)) return;
-		if (!config.enabled) {
-			uninstallUi(ctx);
-			return;
-		}
+	const installWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(
 			STACK_WIDGET_KEY,
 			(tui, theme) => {
@@ -267,10 +298,88 @@ export default function (pi: ExtensionAPI): void {
 			},
 			{ placement: "belowEditor" },
 		);
-		// Re-enabling mid-run reinstalls the widgets but used to leave the ticker
-		// stopped, freezing every spinner and elapsed counter until some unrelated
-		// event happened to trigger a redraw.
-		syncTick();
+	};
+
+	const reconcileSurface = (ctx: ExtensionContext): void => {
+		const next = resolveCockpitSurfaceState(config.enabled, config.sidebar.mode, dockEffectiveVisible);
+		if (next === surfaceState) return;
+		if (next === "dock" || next === "disabled") clearWidgets(ctx);
+		else installWidgets(ctx);
+		surfaceState = next;
+		publishUiOwnership();
+		req();
+	};
+
+	const ensureSidebarController = (ctx: ExtensionContext): SidebarController => {
+		if (sidebarController) return sidebarController;
+		sidebarController = createSidebarController({
+			ctx,
+			getMaestroSnapshot: () => maestro.snapshot(),
+			getTodos: () => todos.snapshot(),
+			getAgents: () => agents.snapshot(),
+			getJobs: () => bashBg.snapshot(),
+			getConfig: () => config,
+			onVisibilityChange: (visible) => {
+				dockEffectiveVisible = visible;
+				const activeCtx = lastCtx;
+				if (visible) emitMaestroQuery();
+				if (activeCtx && isTuiContext(activeCtx)) reconcileSurface(activeCtx);
+			},
+			onResizeCommit: (width) => {
+				config = { ...config, sidebar: { ...config.sidebar, width } };
+				const result = saveConfig(config);
+				if (!result.ok) {
+					configProblem = `sidebar width save failed: ${result.error ?? "unknown error"}`;
+					ctx.ui.notify(`Cockpit sidebar width kept for this session; save failed: ${result.error ?? "unknown error"}`, "warning");
+				} else if (configProblem?.startsWith("sidebar width save failed:")) {
+					configProblem = undefined;
+				}
+				req();
+			},
+			onWarning: (message) => ctx.ui.notify(message, "warning"),
+			onError: (error) => {
+				ctx.ui.notify(`Cockpit sidebar unavailable: ${error instanceof Error ? error.message : String(error)}`, "warning");
+			},
+		});
+		return sidebarController;
+	};
+
+	const syncSidebarMode = (ctx: ExtensionContext): void => {
+		const controller = ensureSidebarController(ctx);
+		if (config.sidebar.mode === "off") {
+			dockEffectiveVisible = false;
+			controller.hide();
+		} else {
+			controller.show();
+		}
+		reconcileSurface(ctx);
+	};
+
+	const uninstallUi = (ctx: ExtensionContext): void => {
+		dockEffectiveVisible = false;
+		sidebarController?.dispose();
+		sidebarController = undefined;
+		clearWidgets(ctx);
+		ctx.ui.setFooter(undefined);
+		surfaceState = "disabled";
+		try {
+			// Leaving these set would strand a title and a status line owned by an
+			// extension that is no longer painting anything.
+			ctx.ui.setWorkingMessage(undefined);
+			ctx.ui.setStatus(COCKPIT_STATUS_KEY, undefined);
+		} catch {
+			// ambient surfaces are best-effort
+		}
+		stopTick();
+		capturedTui = undefined;
+	};
+
+	const applyUi = (ctx: ExtensionContext): void => {
+		if (!isTuiContext(ctx)) return;
+		if (!config.enabled) {
+			uninstallUi(ctx);
+			return;
+		}
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			capturedTui = tui;
 			let observedWidth = tui.terminal.columns;
@@ -329,6 +438,9 @@ export default function (pi: ExtensionAPI): void {
 			};
 			return component;
 		});
+		syncSidebarMode(ctx);
+		// Re-enabling mid-run must restart live spinner and elapsed updates.
+		syncTick();
 	};
 
 	// --- teammate lifecycle (custom event bus; subscribed once for the extension lifetime) ---
@@ -350,6 +462,10 @@ export default function (pi: ExtensionAPI): void {
 	pi.events.on(BASH_BG_UPDATE_EVENT, (payload) => {
 		if (!bashBg.applySnapshot(payload)) return;
 		syncTick();
+		req();
+	});
+	pi.events.on(MAESTRO_UI_SNAPSHOT_EVENT, (payload) => {
+		if (!maestro.applySnapshot(payload)) return;
 		req();
 	});
 	pi.events.on(COCKPIT_TODO_TOGGLE_EVENT, (payload) => {
@@ -376,8 +492,10 @@ export default function (pi: ExtensionAPI): void {
 	// --- session + agent lifecycle ---
 	pi.on("session_start", (_e, ctx) => {
 		lastCtx = ctx;
+		configProblem = undefined;
 		activeTools.clear();
 		thinkingTimer.reset();
+		maestro.clear();
 		ensureConfigExists();
 		config = loadConfig((m, l) => {
 			try {
@@ -388,7 +506,10 @@ export default function (pi: ExtensionAPI): void {
 		});
 		invalidateUsageCache();
 		// Quiet mode: register compact tool renderers and fold thinking blocks.
-		// Tools cannot be unregistered, so this is a one-way latch per process.
+		// Tools are normally registered at extension load time (above) so they
+		// are available before pi renders resumed history.  This session_start
+		// path is a fallback for the rare case where the early config load
+		// returned defaults but the persisted config enables quiet mode.
 		if (config.quietMode && !quietToolsRegistered) {
 			registerQuietTools(pi, () => config);
 			quietToolsRegistered = true;
@@ -417,19 +538,23 @@ export default function (pi: ExtensionAPI): void {
 		// reachable already; a no-op when cockpit is disabled or non-TUI.
 		if (config.quietMode) ensureThinkingFolded(capturedTui, ctx.cwd, true);
 		pi.events.emit(BASH_BG_QUERY_EVENT, undefined);
+		emitMaestroQuery();
 		req();
 	});
 
 	pi.on("session_shutdown", (_e, ctx) => {
 		if (lastCtx) uninstallUi(lastCtx);
-		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, {
+		const released: CockpitUiOwnershipV1 = {
 			todo: false,
 			agents: false,
 			footer: false,
+			sidebar: false,
+			goal: false,
 			todoExpanded: config.todoExpanded,
 			quiet: false,
 			quietSymbols: config.quietSymbols,
-		});
+		};
+		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, released);
 		lastCtx = undefined;
 		running = false;
 		activeTools.clear();
@@ -437,6 +562,7 @@ export default function (pi: ExtensionAPI): void {
 		invalidateUsageCache();
 		agents.clear();
 		bashBg.clear();
+		maestro.clear();
 	});
 
 	pi.on("agent_start", () => {
@@ -569,6 +695,26 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
+	const setSidebarMode = (
+		ctx: ExtensionContext,
+		mode: CockpitConfig["sidebar"]["mode"],
+	): void => {
+		if (config.sidebar.mode === mode) {
+			ctx.ui.notify(`Cockpit sidebar: ${mode}`, "info");
+			return;
+		}
+		config = { ...config, sidebar: { ...config.sidebar, mode } };
+		const result = saveConfig(config);
+		if (!result.ok) {
+			ctx.ui.notify(`Cockpit sidebar mode kept for this session; save failed: ${result.error ?? "unknown error"}`, "warning");
+		} else if (configProblem?.startsWith("sidebar width save failed:")) {
+			configProblem = undefined;
+		}
+		if (config.enabled && isTuiContext(ctx)) syncSidebarMode(ctx);
+		publishUiOwnership();
+		req();
+	};
+
 	pi.registerShortcut(BASH_BG_OVERLAY_KEY, {
 		description: "Open background Bash jobs — live status, command, cwd, duration and output tail",
 		async handler(ctx) {
@@ -576,12 +722,26 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	// --- /cockpit: toggle list/compact + enabled + hide-native ---
+	pi.registerShortcut(SIDEBAR_RESIZE_KEY, {
+		description: "Resize the Cockpit sidebar",
+		handler(ctx) {
+			if (!config.enabled) {
+				ctx.ui.notify("Cockpit is disabled", "warning");
+				return;
+			}
+			sidebarController?.beginResize();
+		},
+	});
+
+	// --- /cockpit: settings plus direct surface controls ---
 	pi.registerCommand("cockpit", {
-		description: "Open pi-cockpit settings; /cockpit quiet toggles quiet mode, /cockpit bg shows jobs",
+		description: "Open pi-cockpit settings; /cockpit sidebar controls the dock, /cockpit bg shows jobs",
 		getArgumentCompletions: (prefix) => {
 			const query = prefix.trim().toLowerCase();
-			const candidates = ["quiet", "quiet on", "quiet off", "bg", "jobs", "todo", "todo expand", "todo collapse"];
+			const candidates = [
+				"quiet", "quiet on", "quiet off", "bg", "jobs", "todo", "todo expand", "todo collapse",
+				"sidebar", "sidebar auto", "sidebar on", "sidebar off", "sidebar resize",
+			];
 			const matches = candidates.filter((c) => c.startsWith(query));
 			return matches.length > 0 ? matches.map((c) => ({ value: c, label: c })) : null;
 		},
@@ -590,6 +750,22 @@ export default function (pi: ExtensionAPI): void {
 			const action = args.trim().toLowerCase();
 			if (action === "bg" || action === "jobs") {
 				await openBashBgOverlay(ctx);
+				return;
+			}
+			if (action === "sidebar") {
+				ctx.ui.notify(
+					`Cockpit sidebar: ${config.sidebar.mode} · ${config.sidebar.width} columns · ${config.sidebar.density}`,
+					"info",
+				);
+				return;
+			}
+			if (action === "sidebar resize") {
+				if (!config.enabled) ctx.ui.notify("Cockpit is disabled", "warning");
+				else sidebarController?.beginResize();
+				return;
+			}
+			if (action === "sidebar auto" || action === "sidebar on" || action === "sidebar off") {
+				setSidebarMode(ctx, action.slice("sidebar ".length) as CockpitConfig["sidebar"]["mode"]);
 				return;
 			}
 			if (action === "todo" || action === "todo toggle") {
@@ -627,6 +803,7 @@ export default function (pi: ExtensionAPI): void {
 		ctx.ui.custom<void>((tui, theme, _kb, done) => {
 			let settingsCursor = 0;
 			let saveState: SaveState = { kind: "idle" };
+			let enableAfterClose = false;
 			// Mirror of pi's hideThinkingBlock, read when the panel opens. The
 			// overlay captures input, so Ctrl+T cannot flip it while this is open
 			// and the mirror stays exact until the panel closes.
@@ -644,6 +821,7 @@ export default function (pi: ExtensionAPI): void {
 			const apply = (key: string): void => {
 				const wasEnabled = config.enabled;
 				const wasQuiet = config.quietMode;
+				const wasSidebarMode = config.sidebar.mode;
 				if (key === "theme") {
 					// Delegate: the picker previews live and reverts on Esc, neither of
 					// which a blind one-key cycle through the name list can do.
@@ -671,15 +849,22 @@ export default function (pi: ExtensionAPI): void {
 				saveState = result.ok
 					? { kind: "saved" }
 					: { kind: "failed", message: result.error ?? "unknown error" };
+				if (result.ok && configProblem?.startsWith("sidebar width save failed:")) {
+					configProblem = undefined;
+				}
 				if (wasEnabled !== config.enabled) {
 					if (config.enabled) {
-						publishUiOwnership();
-						applyUi(ctx);
+						// Creating a non-capturing sidebar while this capturing settings
+						// overlay is still open would put it on top; settings done() would
+						// then close the sidebar. Acquire/install only after settings disposes.
+						enableAfterClose = true;
 					} else {
+						enableAfterClose = false;
 						uninstallUi(ctx);
 						publishUiOwnership();
 					}
 				} else {
+					if (config.enabled && wasSidebarMode !== config.sidebar.mode) syncSidebarMode(ctx);
 					publishUiOwnership();
 				}
 				if (wasQuiet !== config.quietMode) {
@@ -762,6 +947,14 @@ export default function (pi: ExtensionAPI): void {
 					// with no way back, so route through the picker's own cancel path.
 					sub?.handleInput("\x1b");
 					sub?.dispose();
+					if (enableAfterClose && config.enabled) {
+						queueMicrotask(() => {
+							if (lastCtx !== ctx || !config.enabled) return;
+							publishUiOwnership();
+							applyUi(ctx);
+							req();
+						});
+					}
 				},
 			};
 			return ui;

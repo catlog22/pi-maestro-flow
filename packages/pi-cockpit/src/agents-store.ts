@@ -68,7 +68,7 @@ export interface MessagePayload {
 	progress?: ProgressPayload[];
 }
 export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exitCode">
-	& Partial<Pick<TeammateCompleteEvent, "durationMs">>;
+	& Partial<Pick<TeammateCompleteEvent, "durationMs" | "wakeable">>;
 
 /**
  * How long a failed agent stays on screen after it completes.
@@ -77,6 +77,14 @@ export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exi
  * the panel still empties itself without the user clearing anything.
  */
 export const FAILED_LINGER_MS = 30_000;
+
+/**
+ * How long a sleeping (wakeable) row stays visible after completion.
+ *
+ * Matches the native widget's idle-hide window so both surfaces agree on
+ * when an idle agent stops occupying screen space.
+ */
+export const SLEEPING_LINGER_MS = 60_000;
 
 /**
  * How long a completed agent's tombstone suppresses self-healing.
@@ -170,6 +178,14 @@ export class AgentsStore {
 		return at !== undefined && now - at < COMPLETED_TOMBSTONE_MS;
 	}
 
+	private canMaterialize(id: string, parentId: string | undefined, now: number): boolean {
+		if (this.isTombstoned(parentId, now)) return false;
+		if (!this.isTombstoned(id, now)) return true;
+		// An explicit parent restart clears only the graph container's tombstone.
+		// Its next full snapshot is authoritative for the child lifecycle too.
+		return parentId !== undefined && parentId !== id && this.roster.has(parentId);
+	}
+
 	applyStarted(p: StartedPayload, now: number = Date.now()): void {
 		const id = p.correlationId;
 		// An explicit start is authoritative: a woken or re-dispatched agent
@@ -203,9 +219,11 @@ export class AgentsStore {
 			for (const progress of p.progress) this.applyProgress(p.correlationId, progress, now);
 		}
 		const targetId = p.taskCorrelationId ?? p.correlationId;
+		const parentId = p.taskCorrelationId && p.taskCorrelationId !== p.correlationId
+			? p.correlationId
+			: undefined;
 		if (!this.roster.has(targetId)
-			&& !this.isTombstoned(targetId, now)
-			&& !this.isTombstoned(p.correlationId, now)) {
+			&& this.canMaterialize(targetId, parentId, now)) {
 			// Self-heal the roster: a running agent must stay visible even when its
 			// `started` delta was missed (cold start, event reorder, or a foreground
 			// dispatch that detached to background). Materialize the row from this
@@ -273,6 +291,13 @@ export class AgentsStore {
 				row.failedAt = now;
 				row.lastActivityAt = now;
 				delete row.activeTool;
+			} else if (row && p.wakeable && p.exitCode === 0) {
+				// A wakeable agent enters sleeping state after completion.
+				// Keep the row visible so the user can see it is idle but recallable.
+				row.status = "sleeping";
+				row.finishedAt = terminalTime(row, id === p.correlationId ? p : {}, now);
+				row.lastActivityAt = now;
+				delete row.activeTool;
 			} else {
 				this.roster.delete(id);
 				// Tombstone even when the row never existed: a `complete` that beats
@@ -282,11 +307,14 @@ export class AgentsStore {
 		}
 	}
 
-	/** Drop failed rows that have had their time on screen. Returns true if any went. */
+	/** Drop failed or expired sleeping rows that have had their time on screen. Returns true if any went. */
 	prune(now = Date.now()): boolean {
 		let changed = false;
 		for (const [id, row] of this.roster) {
 			if (row.failedAt !== undefined && now - row.failedAt >= FAILED_LINGER_MS) {
+				this.roster.delete(id);
+				changed = true;
+			} else if (row.status === "sleeping" && row.finishedAt !== undefined && now - row.finishedAt >= SLEEPING_LINGER_MS) {
 				this.roster.delete(id);
 				changed = true;
 			}
@@ -297,18 +325,18 @@ export class AgentsStore {
 		return changed;
 	}
 
-	/** True while a failed row is still counting down, so the redraw loop must run. */
+	/** True while a failed or sleeping row is still counting down, so the redraw loop must run. */
 	hasLingering(): boolean {
 		for (const row of this.roster.values()) {
 			if (row.failedAt !== undefined) return true;
+			if (row.status === "sleeping") return true;
 		}
 		return false;
 	}
 
 	private applyProgress(parentCorrelationId: string, p: ProgressPayload, now: number): void {
 		if (!this.roster.has(p.correlationId)
-			&& !this.isTombstoned(p.correlationId, now)
-			&& !this.isTombstoned(parentCorrelationId, now)) {
+			&& this.canMaterialize(p.correlationId, parentCorrelationId, now)) {
 			// Self-heal: see applyMessage. A graph child whose `started` delta was
 			// missed still materializes from its first progress event — unless the
 			// child or its graph parent already completed, in which case this late

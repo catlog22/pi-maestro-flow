@@ -93,6 +93,16 @@ export type QuietSymbolMode = "check" | "dot";
 
 export type IconMode = "auto" | "nerd" | "ascii";
 
+export type SidebarMode = "auto" | "on" | "off";
+
+export type SidebarDensity = "comfortable" | "compact";
+
+export interface SidebarConfig {
+	mode: SidebarMode;
+	width: number;
+	density: SidebarDensity;
+}
+
 export interface CockpitConfig {
 	enabled: boolean;
 	/**
@@ -114,6 +124,7 @@ export interface CockpitConfig {
 	todoExpanded: boolean;
 	hideNativeAgents: boolean;
 	icons: { mode: IconMode };
+	sidebar: SidebarConfig;
 	/**
 	 * Theme to apply at session start. Empty means "leave whatever pi is using",
 	 * so cockpit never overrides a theme the user picked elsewhere.
@@ -130,5 +141,6 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	todoExpanded: false,
 	hideNativeAgents: true,
 	icons: { mode: "auto" },
+	sidebar: { mode: "auto", width: 40, density: "comfortable" },
 	theme: "",
 };

@@ -6,7 +6,14 @@
 // the cursor/cycle logic so the behaviour is unit-testable; index.ts only paints
 // it and performs the actual save.
 
-import type { CockpitConfig, IconMode, QuietSymbolMode, ViewMode } from "./types.ts";
+import type {
+	CockpitConfig,
+	IconMode,
+	QuietSymbolMode,
+	SidebarDensity,
+	SidebarMode,
+	ViewMode,
+} from "./types.ts";
 
 export type SaveState =
 	| { kind: "idle" }
@@ -27,6 +34,8 @@ export interface SettingsRow {
 const VIEW_MODES: ViewMode[] = ["list", "compact"];
 const QUIET_SYMBOL_MODES: QuietSymbolMode[] = ["check", "dot"];
 const ICON_MODES: IconMode[] = ["auto", "nerd", "ascii"];
+const SIDEBAR_MODES: SidebarMode[] = ["auto", "on", "off"];
+const SIDEBAR_DENSITIES: SidebarDensity[] = ["comfortable", "compact"];
 
 function cycle<T>(values: readonly T[], current: T): T {
 	const index = values.indexOf(current);
@@ -110,6 +119,20 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			next: config.hideNativeAgents ? "no" : "yes",
 		},
 		{
+			key: "sidebarMode",
+			accel: "b",
+			label: "sidebar",
+			value: config.sidebar.mode,
+			next: cycle(SIDEBAR_MODES, config.sidebar.mode),
+		},
+		{
+			key: "sidebarDensity",
+			accel: "d",
+			label: "sidebar density",
+			value: config.sidebar.density,
+			next: cycle(SIDEBAR_DENSITIES, config.sidebar.density),
+		},
+		{
 			key: "icons",
 			accel: "i",
 			label: "icons",
@@ -150,6 +173,16 @@ export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
 			return { ...config, todoExpanded: !config.todoExpanded };
 		case "hideNativeAgents":
 			return { ...config, hideNativeAgents: !config.hideNativeAgents };
+		case "sidebarMode":
+			return {
+				...config,
+				sidebar: { ...config.sidebar, mode: cycle(SIDEBAR_MODES, config.sidebar.mode) },
+			};
+		case "sidebarDensity":
+			return {
+				...config,
+				sidebar: { ...config.sidebar, density: cycle(SIDEBAR_DENSITIES, config.sidebar.density) },
+			};
 		case "icons":
 			return { ...config, icons: { mode: cycle(ICON_MODES, config.icons.mode) } };
 		// "theme" is intentionally absent: the row hands off to the /theme picker,
