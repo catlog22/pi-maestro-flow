@@ -16,12 +16,24 @@ import {
 	TEAMMATE_MESSAGE_EVENT,
 	TEAMMATE_STARTED_EVENT,
 } from "../src/types.ts";
-import cockpitEntry from "../src/index.ts";
+import {
+	COCKPIT_MAESTRO_QUERY_EVENT,
+	MAESTRO_UI_SNAPSHOT_EVENT,
+	MAESTRO_UI_SNAPSHOT_VERSION,
+} from "../src/public/v1/events.ts";
+import cockpitEntry, { resolveCockpitSurfaceState } from "../src/index.ts";
 import extensionEntry from "../src/extension/index.ts";
 
 test("Cockpit defaults Todo to a one-line collapsed summary and Quiet to check symbols", () => {
 	assert.equal(DEFAULT_CONFIG.todoExpanded, false);
 	assert.equal(DEFAULT_CONFIG.quietSymbols, "check");
+});
+
+test("Cockpit resolves one actual surface from enablement and deferred dock visibility", () => {
+	assert.equal(resolveCockpitSurfaceState(false, "auto", true), "disabled");
+	assert.equal(resolveCockpitSurfaceState(true, "off", true), "widgets");
+	assert.equal(resolveCockpitSurfaceState(true, "auto", false), "widgets");
+	assert.equal(resolveCockpitSurfaceState(true, "on", true), "dock");
 });
 
 test("Cockpit loads through the standard extension path without changing its public entry", () => {
@@ -32,6 +44,7 @@ test("Cockpit loads through the standard extension path without changing its pub
 	assert.deepEqual(packageJson.pi?.themes, ["./themes"]);
 	assert.equal(packageJson.main, "./src/index.ts");
 	assert.equal(packageJson.exports?.["."], "./src/index.ts");
+	assert.equal(packageJson.exports?.["./v1/events"], "./src/public/v1/events.ts");
 	assert.equal(extensionEntry, cockpitEntry);
 });
 
@@ -83,13 +96,17 @@ test("Cockpit owns native UI through events instead of clearing foreign widget k
 	assert.match(source, /quietSymbols: config\.quietSymbols/);
 	assert.match(source, /footer: config\.enabled/);
 	assert.match(source, /footer: false/);
+	assert.match(source, /sidebar: ownsDock/);
+	assert.match(source, /goal: ownsDock/);
+	assert.match(source, /sidebar: false/);
+	assert.match(source, /goal: false/);
 	assert.match(source, /pi\.events\.on\(COCKPIT_TODO_TOGGLE_EVENT/);
 	assert.doesNotMatch(source, /teammate-agents|todo-panel/);
 	assert.equal(COCKPIT_UI_OWNERSHIP_EVENT, "cockpit:ui-ownership");
 	assert.equal(COCKPIT_TODO_TOGGLE_EVENT, "cockpit:toggle-todo");
 });
 
-test("Cockpit acquires the footer before installing and releases it after uninstalling", () => {
+test("Cockpit acquires the footer before installing and releases it before deferred re-enable", () => {
 	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
 	assert.match(
 		source,
@@ -97,7 +114,7 @@ test("Cockpit acquires the footer before installing and releases it after uninst
 	);
 	assert.match(
 		source,
-		/if \(wasEnabled !== config\.enabled\)[\s\S]*?if \(config\.enabled\) \{\s*publishUiOwnership\(\);\s*applyUi\(ctx\);\s*\} else \{\s*uninstallUi\(ctx\);\s*publishUiOwnership\(\);/,
+		/if \(wasEnabled !== config\.enabled\)[\s\S]*?if \(config\.enabled\) \{[\s\S]*?enableAfterClose = true;[\s\S]*?\} else \{[\s\S]*?uninstallUi\(ctx\);[\s\S]*?publishUiOwnership\(\);/,
 	);
 });
 
@@ -105,6 +122,36 @@ test("Cockpit teammate event names stay aligned with the public v1 contract", ()
 	assert.equal(TEAMMATE_STARTED_EVENT, PUBLIC_TEAMMATE_STARTED_EVENT);
 	assert.equal(TEAMMATE_MESSAGE_EVENT, PUBLIC_TEAMMATE_MESSAGE_EVENT);
 	assert.equal(TEAMMATE_COMPLETE_EVENT, PUBLIC_TEAMMATE_COMPLETE_EVENT);
+});
+
+test("Cockpit consumes Maestro snapshots and emits versioned queries at session start and dock acquisition", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.equal(COCKPIT_MAESTRO_QUERY_EVENT, "cockpit:maestro-query");
+	assert.equal(MAESTRO_UI_SNAPSHOT_EVENT, "maestro:ui-snapshot");
+	assert.equal(MAESTRO_UI_SNAPSHOT_VERSION, 1);
+	assert.match(source, /new MaestroStore\(\)/);
+	assert.match(source, /pi\.events\.on\(MAESTRO_UI_SNAPSHOT_EVENT/);
+	assert.match(source, /maestro\.applySnapshot\(payload\)/);
+	assert.match(source, /pi\.events\.emit\(COCKPIT_MAESTRO_QUERY_EVENT, \{ version: MAESTRO_UI_SNAPSHOT_VERSION \}\)/);
+	assert.match(source, /if \(visible\) emitMaestroQuery\(\)/);
+	assert.match(source, /session_start[\s\S]*?emitMaestroQuery\(\)/);
+});
+
+test("Cockpit defers settings-driven re-enable until the settings overlay is closed", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(source, /let enableAfterClose = false/);
+	assert.match(source, /if \(config\.enabled\) \{[\s\S]*?enableAfterClose = true;[\s\S]*?\} else \{/);
+	assert.match(source, /dispose\(\): void \{[\s\S]*?if \(enableAfterClose && config\.enabled\)[\s\S]*?queueMicrotask[\s\S]*?publishUiOwnership\(\);[\s\S]*?applyUi\(ctx\)/);
+	assert.doesNotMatch(source, /if \(config\.enabled\) \{\s*publishUiOwnership\(\);\s*applyUi\(ctx\);\s*\} else \{\s*enableAfterClose/);
+});
+
+test("Cockpit sidebar controls persist only committed resize widths", () => {
+	const source = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	assert.match(source, /onResizeCommit: \(width\) => \{[\s\S]*?sidebar: \{ \.\.\.config\.sidebar, width \}[\s\S]*?saveConfig\(config\)/);
+	assert.match(source, /width kept for this session; save failed/);
+	assert.match(source, /registerShortcut\(SIDEBAR_RESIZE_KEY/);
+	assert.match(source, /"sidebar auto"[\s\S]*?"sidebar on"[\s\S]*?"sidebar off"[\s\S]*?"sidebar resize"/);
+	assert.doesNotMatch(source, /onEffectiveWidthChange:[\s\S]*?saveConfig/);
 });
 
 test("Flow publishes authoritative bash_bg snapshots and Cockpit can request a refresh", () => {

@@ -68,6 +68,23 @@ test("icon mode is reachable from the panel so a tofu terminal can escape to asc
 	assert.deepEqual([...seen].sort(), ["ascii", "auto", "nerd"]);
 });
 
+test("sidebar rows expose the mode and density cycles", () => {
+	const rows = buildRows(DEFAULT_CONFIG);
+	assert.deepEqual(
+		rows.filter((row) => row.key.startsWith("sidebar")).map((row) => [row.key, row.value, row.next]),
+		[
+			["sidebarMode", "auto", "on"],
+			["sidebarDensity", "comfortable", "compact"],
+		],
+	);
+	const on = applyRow(DEFAULT_CONFIG, "sidebarMode");
+	assert.equal(on.sidebar.mode, "on");
+	assert.equal(applyRow(applyRow(on, "sidebarMode"), "sidebarMode").sidebar.mode, "auto");
+	const compact = applyRow(DEFAULT_CONFIG, "sidebarDensity");
+	assert.equal(compact.sidebar.density, "compact");
+	assert.equal(applyRow(compact, "sidebarDensity").sidebar.density, "comfortable");
+});
+
 test("applyRow leaves the config untouched for an unknown key", () => {
 	assert.deepEqual(applyRow(DEFAULT_CONFIG, "nope"), DEFAULT_CONFIG);
 });

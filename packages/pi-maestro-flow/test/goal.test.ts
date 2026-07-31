@@ -24,6 +24,7 @@ import {
   parseGoalCommand,
   reconcileWorkflowGoal,
   setAcceptanceRunnerForTest,
+  setGoalPanelOwnership,
   setGoalVerifierRunnerForTest,
   setWorkflowCoordinator,
   switchCurrentGoal,
@@ -314,6 +315,44 @@ test("goal lifecycle keeps a below-editor widget synchronized without displacing
     await executeGoalCommand({ action: "clear" }, ctx);
     assert.equal(widgetContent, undefined);
   } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("Cockpit goal ownership withdraws the panel and release restores live Goal state", async () => {
+  let widgetContent: unknown;
+  initGoal({ appendEntry() {} } as never);
+  const ctx = createContext({
+    ui: {
+      notify() {},
+      setStatus() {},
+      setWidget(_key: string, content: unknown) { widgetContent = content; },
+    },
+  });
+  const renderCurrent = () => {
+    assert.equal(typeof widgetContent, "function");
+    return (widgetContent as (
+      tui: unknown,
+      theme: typeof goalWidgetTheme,
+    ) => { render(width: number): string[] })(undefined, goalWidgetTheme).render(100).join("\n");
+  };
+
+  setGoalPanelOwnership(false, ctx);
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    await executeGoal({ action: "create", objective: "Project the live Goal into Cockpit" }, ctx);
+    assert.match(renderCurrent(), /ACTIVE/);
+
+    setGoalPanelOwnership(true, ctx);
+    assert.equal(widgetContent, undefined);
+    await executeGoalCommand({ action: "stop" }, ctx);
+    assert.equal(widgetContent, undefined, "Goal mutations must not reclaim an externally owned panel");
+
+    setGoalPanelOwnership(false, ctx);
+    assert.match(renderCurrent(), /STOPPED/);
+  } finally {
+    setGoalPanelOwnership(false, ctx);
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
   }
@@ -2414,7 +2453,7 @@ test("transient Goal provider failures share the bounded retry status projection
     }, ctx);
 
     assert.equal(getActiveGoal()?.status, "active");
-    assert.ok(statuses.includes("retrying 1/12"));
+    assert.ok(statuses.includes("retrying 1/10"));
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);

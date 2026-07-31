@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AgentsStore, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, mapAgentStatus } from "../src/agents-store.ts";
+import { AgentsStore, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SLEEPING_LINGER_MS, mapAgentStatus } from "../src/agents-store.ts";
 
 test("started adds a running row with derived role and label", () => {
 	const s = new AgentsStore();
@@ -502,6 +502,32 @@ test("a late graph progress snapshot after complete does not resurrect child row
 	assert.equal(s.size, 0, "graph children must not be self-healed after the root completed");
 });
 
+test("an explicitly restarted graph can recreate child rows from its new progress", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "root", agent: "graph(1)" }, 1);
+	s.applyMessage({
+		correlationId: "root",
+		progress: [
+			{ correlationId: "child", agent: "executor", name: "worker", taskIndex: 0, status: "running" },
+		],
+	}, 500);
+	s.applyComplete({ correlationId: "root", exitCode: 0 }, 1_000);
+	assert.equal(s.size, 0);
+
+	// A wake reuses the graph correlationId and explicitly republishes started.
+	s.applyStarted({ correlationId: "root", agent: "graph(1)", status: "running" }, 2_000);
+	s.applyMessage({
+		correlationId: "root",
+		progress: [
+			{ correlationId: "child", agent: "executor", name: "worker", taskIndex: 0, status: "running" },
+		],
+	}, 2_500);
+
+	const child = s.snapshot(2_500).find((row) => row.correlationId === "child");
+	assert.equal(child?.status, "running");
+	assert.equal(child?.parentCorrelationId, "root");
+});
+
 test("complete that beats the first delta still suppresses the self-heal that follows", () => {
 	const s = new AgentsStore();
 	// Event reorder: `complete` arrives before any row existed for this agent.
@@ -529,4 +555,39 @@ test("a tombstone expires so a genuinely fresh agent is not suppressed forever",
 	assert.equal(s.size, 0, "still suppressed just before expiry");
 	s.applyMessage({ correlationId: "c1", agent: "explorer", status: "running" }, 1_000 + COMPLETED_TOMBSTONE_MS);
 	assert.equal(s.size, 1, "self-heal allowed again after the tombstone expires");
+});
+
+test("a wakeable completion keeps the row as sleeping instead of deleting it", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor", name: "worker" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 0, wakeable: true }, 1_000);
+	const row = s.snapshot(1_000)[0];
+	assert.equal(row?.status, "sleeping", "wakeable agent must stay visible as sleeping");
+	assert.equal(row?.finishedAt, 1_000);
+	assert.equal(s.size, 1);
+});
+
+test("a non-wakeable completion still deletes the row", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 0 }, 1_000);
+	assert.equal(s.size, 0, "non-wakeable success must be removed");
+});
+
+test("a sleeping row expires after the linger window", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 0, wakeable: true }, 1_000);
+	assert.equal(s.size, 1);
+	s.snapshot(1_000 + SLEEPING_LINGER_MS - 1);
+	assert.equal(s.size, 1, "still visible just before expiry");
+	s.snapshot(1_000 + SLEEPING_LINGER_MS);
+	assert.equal(s.size, 0, "pruned after linger window");
+});
+
+test("hasLingering includes sleeping rows so the redraw loop keeps running", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 0, wakeable: true }, 1_000);
+	assert.equal(s.hasLingering(), true);
 });

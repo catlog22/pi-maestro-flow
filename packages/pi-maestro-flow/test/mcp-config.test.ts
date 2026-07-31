@@ -157,6 +157,16 @@ test("MCP manager accepts a complete pasted configuration document", async (t) =
   await assert.rejects(() => store.replaceEditableConfig("[]"), /配置必须是 JSON 对象/);
 });
 
+test("MCP adapter await sites use lifecycle-fenced initialization", async () => {
+  const adapterSource = readFileSync(new URL("../src/mcp/index.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(adapterSource, /state\s*=\s*await initPromise/);
+  assert.equal((adapterSource.match(/await awaitInitializedState\(\)/g) ?? []).length, 3);
+
+  const directSource = readFileSync(new URL("../src/mcp/direct-tools.ts", import.meta.url), "utf8");
+  assert.doesNotMatch(directSource, /state\s*=\s*await initPromise/);
+  assert.match(directSource, /getInitPromise\(\) === initPromise/);
+});
+
 test("MCP adapter 仅注册单一 MCP 管理入口", () => {
   const commands = new Set<string>();
   const tools = new Set<string>();

@@ -6,6 +6,7 @@ import {
   cancelProxyDispatch,
   createChildProxyRequest,
   handleProxyRequest,
+  rejectAllChildProxyRequests,
   resolveChildProxyRequest,
   waitForTeammate,
   type ChildProxyPendingRequests,
@@ -86,6 +87,25 @@ test("an aborted proxy request also announces itself", async () => {
 
   await assert.rejects(inFlight, (error: Error) => error.name === "AbortError");
   assert.equal(sent.find((m) => m.type === "teammate_proxy_cancel")?.reason, "aborted");
+});
+
+test("session cleanup announces every abandoned proxy request", async () => {
+  const pending: ChildProxyPendingRequests = new Map();
+  const sent: Array<Record<string, unknown>> = [];
+  const requestId = randomUUID();
+  const inFlight = createChildProxyRequest(
+    pending,
+    requestId,
+    { type: "teammate_proxy_request", tool: "teammate", requestId },
+    (message, callback) => { sent.push(message); callback(null); return true; },
+    60_000,
+  );
+
+  rejectAllChildProxyRequests(pending, new Error("session shutdown"));
+
+  await assert.rejects(inFlight, /session shutdown/);
+  assert.equal(sent.find((message) => message.type === "teammate_proxy_cancel")?.reason, "aborted");
+  assert.equal(pending.size, 0);
 });
 
 test("a request answered in time announces nothing", async () => {

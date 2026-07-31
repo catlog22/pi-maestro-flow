@@ -371,9 +371,9 @@ test("the retrying widget shows attempt and next retry countdown", () => {
   const retrying = addAgent(state, "flaky", {
     status: "retrying",
     retry: {
-      attempt: 11,
-      maxRetries: 12,
-      nextRetryAt: now + 10 * 60_000,
+      attempt: 10,
+      maxRetries: 10,
+      nextRetryAt: now + 16_000,
       lastError: "Error: Connection error.",
     },
   });
@@ -383,7 +383,7 @@ test("the retrying widget shows attempt and next retry countdown", () => {
     { fg: (_name: string, text: string) => text, bold: (text: string) => text },
   ).join("\n");
 
-  assert.match(rendered, /retry 11\/12 in (?:10m|9m 59s)/);
+  assert.match(rendered, /retry 10\/10 in (?:16s|15s)/);
   assert.match(rendered, /retrying/);
 });
 

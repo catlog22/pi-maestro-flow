@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import {
   waitForTeammate,
+  hasTeammateWidgetWork,
   TEAMMATE_STALL_TIMEOUT_MS,
   TEAMMATE_PENDING_STALL_TIMEOUT_MS,
   TEAMMATE_WAIT_POLL_FLOOR_MS,
@@ -97,6 +98,23 @@ test("a retrying agent that stopped reporting is treated as stalled", async () =
 
   const result = await waitForTeammate(state, { name: "flaky" });
   assert.equal(result.status, "stalled");
+});
+
+test("an active retry deadline prevents a healthy backoff from being called stalled", async () => {
+  const state = makeState();
+  const now = Date.now();
+  addAgent(state, "backoff", "retrying", TEAMMATE_STALL_TIMEOUT_MS + 1_000, {
+    retry: {
+      attempt: 10,
+      maxRetries: 10,
+      nextRetryAt: now + 1_000,
+      lastError: "Provider returned error: 503",
+    },
+  });
+
+  assert.equal(hasTeammateWidgetWork(state, now), true);
+  const result = await waitForTeammate(state, { name: "backoff", timeoutMs: 50 });
+  assert.equal(result.status, "timeout");
 });
 
 test("an agent awaiting a relayed permission is never reported as stalled", async () => {

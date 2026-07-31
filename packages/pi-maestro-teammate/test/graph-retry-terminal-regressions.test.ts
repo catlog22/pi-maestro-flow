@@ -108,6 +108,7 @@ async function assertTerminalScenario(
     {
       baseCwd: process.cwd(),
       spawnChildProcess,
+      async waitForRetry() { return false; },
       onTurnComplete(entry) { completions.push(entry); },
     },
   );
@@ -153,7 +154,7 @@ test("all pre-execution graph rejections publish synthetic terminal completions"
   const cases: Array<{ name: string; tasks: NormalizedTask[]; message: RegExp }> = [
     {
       name: "invalid reference",
-      tasks: [{ agent: "general", name: "only", prompt: "use {missing}" }],
+      tasks: [{ agent: "general", name: "only", prompt: "only", dependsOn: ["missing"] }],
       message: /missing/i,
     },
     {

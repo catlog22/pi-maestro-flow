@@ -15,8 +15,14 @@ import {
 } from "../src/tools/smart-search-config.ts";
 import {
   SmartSearchConfigOverlay,
+  WebAccessConfigSync,
   type SmartSearchConfigStoreLike,
+  type WebAccessConfigSyncLike,
 } from "../src/tui/smart-search-config.ts";
+import {
+  invalidateWebConfigCaches,
+  registerWebConfigInvalidator,
+} from "../src/tools/web-access/web-config-cache.ts";
 
 const theme = {
   fg: (_role: string, text: string) => text,
@@ -271,6 +277,125 @@ test("Smart Search TUI keeps failed secret edit context without exposing the val
   overlay.handleInput("\r");
   await flushAsync();
   assert.deepEqual(attempts, ["replacement-secret", "replacement-secre"]);
+});
+
+test("WebAccessConfigSync push preserves unknown keys and fans out invalidation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-access-sync-"));
+  try {
+    const webSearchJson = join(root, "web-search.json");
+    await writeFile(
+      webSearchJson,
+      JSON.stringify({ customKeep: { deep: 1 }, exaApiKey: "old-key" }),
+      "utf8",
+    );
+    let invalidated = 0;
+    const unregister = registerWebConfigInvalidator(() => {
+      invalidated++;
+    });
+    try {
+      const sync = new WebAccessConfigSync(webSearchJson);
+      sync.pushToWebConfig({ EXA_API_KEY: "new-key" });
+
+      const written = JSON.parse(await readFile(webSearchJson, "utf8"));
+      assert.deepEqual(written.customKeep, { deep: 1 }, "unknown web-search.json keys must survive the push");
+      assert.equal(written.exaApiKey, "new-key");
+      assert.equal(invalidated, 1, "a successful push must invalidate memoized provider caches");
+      assert.equal(sync.webValueForKey("EXA_API_KEY"), "new-key");
+      assert.deepEqual(await readdir(root), ["web-search.json"], "atomic sync must not leave a temporary file");
+    } finally {
+      unregister();
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("WebAccessConfigSync push refreshes real memoized providers", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-web-access-providers-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousExaKey = process.env.EXA_API_KEY;
+  const previousFirecrawlUrl = process.env.FIRECRAWL_BASE_URL;
+  process.env.PI_CODING_AGENT_DIR = root;
+  delete process.env.EXA_API_KEY;
+  delete process.env.FIRECRAWL_BASE_URL;
+  try {
+    const webSearchJson = join(root, "web-search.json");
+    await writeFile(
+      webSearchJson,
+      JSON.stringify({ exaApiKey: "file-key", firecrawlBaseUrl: "https://fc.example" }),
+      "utf8",
+    );
+    const exa = await import("../src/tools/web-access/exa.ts");
+    const firecrawl = await import("../src/tools/web-access/firecrawl.ts");
+
+    assert.equal(exa.hasExaApiKey(), true);
+    assert.equal(firecrawl.isFirecrawlAvailable(), true);
+
+    // External edit is invisible until invalidation (memoized views).
+    await writeFile(webSearchJson, JSON.stringify({}), "utf8");
+    assert.equal(exa.hasExaApiKey(), true, "memoized view stays stale before invalidation");
+    assert.equal(firecrawl.isFirecrawlAvailable(), true);
+    invalidateWebConfigCaches();
+    assert.equal(exa.hasExaApiKey(), false, "fan-out must drop the memoized Exa config");
+    assert.equal(firecrawl.isFirecrawlAvailable(), false, "fan-out must drop the memoized Firecrawl config");
+
+    // A successful sync push must make providers observe the pushed values.
+    const sync = new WebAccessConfigSync(webSearchJson);
+    sync.pushToWebConfig({ FIRECRAWL_API_URL: "https://pushed.example", FIRECRAWL_API_KEY: "pushed-key" });
+    const written = JSON.parse(await readFile(webSearchJson, "utf8"));
+    assert.equal(written.firecrawlBaseUrl, "https://pushed.example");
+    assert.equal(written.firecrawlApiKey, "pushed-key");
+    assert.equal(firecrawl.isFirecrawlAvailable(), true, "push must invalidate so providers reload");
+  } finally {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousExaKey === undefined) delete process.env.EXA_API_KEY;
+    else process.env.EXA_API_KEY = previousExaKey;
+    if (previousFirecrawlUrl === undefined) delete process.env.FIRECRAWL_BASE_URL;
+    else process.env.FIRECRAWL_BASE_URL = previousFirecrawlUrl;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Smart Search TUI syncs through the sync interface without a concrete-class cast", async () => {
+  const pushed: SmartSearchConfig[] = [];
+  const sync: WebAccessConfigSyncLike = {
+    loadWebConfig: () => ({}),
+    syncStatusForKey: () => "unmapped",
+    webValueForKey: () => undefined,
+    pushToWebConfig: (config) => {
+      pushed.push(config);
+    },
+  };
+  const overlay = new SmartSearchConfigOverlay({
+    config: { XAI_MODEL: "grok" },
+    store: createStore({ XAI_MODEL: "grok" }, async (patch) => patch),
+    theme,
+    sync,
+    requestRender() {},
+    close() {},
+  });
+
+  overlay.handleInput("\x13");
+  assert.deepEqual(pushed, [{ XAI_MODEL: "grok" }]);
+  assert.match(overlay.render(80).join("\n"), /Synced Smart Search → web-search.json/);
+
+  const failingSync: WebAccessConfigSyncLike = {
+    ...sync,
+    pushToWebConfig: () => {
+      throw new Error("read-only filesystem");
+    },
+  };
+  const failingOverlay = new SmartSearchConfigOverlay({
+    config: {},
+    store: createStore({}, async (patch) => patch),
+    theme,
+    sync: failingSync,
+    requestRender() {},
+    close() {},
+  });
+  failingOverlay.handleInput("\x13");
+  assert.match(failingOverlay.render(80).join("\n"), /Sync failed · read-only filesystem/);
 });
 
 function createStore(

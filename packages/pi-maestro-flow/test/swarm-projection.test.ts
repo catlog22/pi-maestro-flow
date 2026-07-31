@@ -55,14 +55,18 @@ test("display integration exposes no swarm tool or slash command and keeps hidde
   const handlers = new Map<string, Function[]>();
   const statuses = new Map<string, string | undefined>();
   const notifications: string[] = [];
+  const projectionChanges: Array<ReturnType<typeof loadLatestTeamSwarmProjection>> = [];
   const api = {
     registerTool(tool: { name: string }) { tools.push(tool.name); },
     registerCommand(name: string) { commands.push(name); },
     on(event: string, handler: Function) { handlers.set(event, [...(handlers.get(event) ?? []), handler]); },
   } as unknown as ExtensionAPI;
-  registerSwarmDisplay(api);
+  registerSwarmDisplay(api, {
+    onProjectionChange(projection) { projectionChanges.push(projection); },
+  });
   const ctx = { cwd: base, ui: { setStatus(key: string, value: string | undefined) { statuses.set(key, value); }, notify(message: string) { notifications.push(message); } } };
   await handlers.get("session_start")?.[0]?.({}, ctx);
+  assert.equal(projectionChanges.at(-1)?.source, "team-swarm-json");
   assert.deepEqual(tools, []);
   assert.deepEqual(commands, []);
   assert.match(statuses.get("maestro-swarm") ?? "", /TEAM SWARM/);
@@ -72,6 +76,8 @@ test("display integration exposes no swarm tool or slash command and keeps hidde
   const rejected = await handlers.get("input")?.[0]?.({ text: "/swarm execute anything" }, ctx);
   assert.deepEqual(rejected, { action: "handled" });
   assert.match(notifications.at(-1) ?? "", /Use \/skill:team-swarm/);
+  await handlers.get("session_shutdown")?.[0]?.({}, ctx);
+  assert.equal(projectionChanges.at(-1), undefined, "shutdown must clear the unified read-only projection");
   resetSwarmDisplayStateForTest();
 });
 

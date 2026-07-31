@@ -19,7 +19,7 @@ function makeResult(): SingleResult {
   };
 }
 
-test("collapsed background multi-task call omits the agent list duplicated by the ack progress snapshot", () => {
+test("background multi-task call leaves rendering to the result snapshot", () => {
   const rendered = renderTeammateCall({
     tasks: [
       { agent: "explorer", name: "scan", prompt: "find auth" },
@@ -29,12 +29,10 @@ test("collapsed background multi-task call omits the agent list duplicated by th
     background: true,
   }, theme as never, { expanded: false }).render(80);
 
-  assert.deepEqual(rendered, [
-    "■ 3 result chain background agents launched (Alt+R to manage)",
-  ]);
+  assert.deepEqual(rendered, []);
 });
 
-test("collapsed foreground multi-task call omits the agent list duplicated by streaming progress", () => {
+test("foreground multi-task call leaves rendering to streaming progress", () => {
   const rendered = renderTeammateCall({
     tasks: [
       { agent: "explorer", name: "pkgs", prompt: "inspect packages" },
@@ -43,12 +41,10 @@ test("collapsed foreground multi-task call omits the agent list duplicated by st
     background: false,
   }, theme as never, { expanded: false }).render(80);
 
-  assert.deepEqual(rendered, [
-    "■ 2 result chain foreground agents launched (Alt+B to detach)",
-  ]);
+  assert.deepEqual(rendered, []);
 });
 
-test("expanded multi-task call shows a non-linear DAG with multi-result edges", () => {
+test("expanded multi-task call leaves DAG rendering to progress", () => {
   const rendered = renderTeammateCall({
     tasks: [
       { agent: "explorer", name: "a", prompt: "find auth" },
@@ -58,8 +54,7 @@ test("expanded multi-task call shows a non-linear DAG with multi-result edges", 
     background: true,
   }, theme as never, { expanded: true }).render(80);
 
-  assert.match(rendered[0], /3 result graph background agents launched/);
-  assert.equal(rendered[3], "→ 3 □ pending @merge (general) ← results #1, #2");
+  assert.deepEqual(rendered, []);
 });
 
 test("completed teammate results expose the expand affordance", () => {

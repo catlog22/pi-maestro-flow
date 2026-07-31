@@ -10,6 +10,7 @@ import {
   spillDir,
   spillPath,
   spillToolResult,
+  validateSpillPath,
   SPILL_PREVIEW_CHARS,
   SPILL_THRESHOLD_CHARS,
 } from "../src/compaction/tool-result-spill.ts";
@@ -246,6 +247,69 @@ test("spillToolResult returns ok:true on the EEXIST (already persisted) path", a
     assert.equal(written, content);
   } finally {
     await cleanupSpillDir(sessionId);
+  }
+});
+
+test("validateSpillPath accepts a live spill file and rejects dead or foreign paths", async () => {
+  const sessionId = `test-validate-${Date.now()}`;
+  const otherSessionId = `test-validate-other-${Date.now()}`;
+  const content = "v".repeat(SPILL_THRESHOLD_CHARS);
+  try {
+    const result = await spillToolResult(sessionId, "call-validate", content);
+    assert.equal(result.ok, true);
+    assert.equal(await validateSpillPath(sessionId, result.path), true);
+    // Expected shape, but no file behind it (cleaned tmpdir / failed write).
+    assert.equal(await validateSpillPath(sessionId, spillPath(sessionId, "call-missing")), false);
+    // A live file owned by another session's root is foreign.
+    const foreign = await spillToolResult(otherSessionId, "call-foreign", content);
+    assert.equal(foreign.ok, true);
+    assert.equal(await validateSpillPath(sessionId, foreign.path), false);
+    // A path outside any spill root.
+    assert.equal(await validateSpillPath(sessionId, resolve(tmpdir(), "not-a-spill-file.txt")), false);
+  } finally {
+    await cleanupSpillDir(sessionId);
+    await cleanupSpillDir(otherSessionId);
+  }
+});
+
+test("validateSpillPath rejects a symlink planted at the expected spill path", async (t) => {
+  const sessionId = `test-validate-link-${Date.now()}`;
+  const content = "l".repeat(SPILL_THRESHOLD_CHARS);
+  const real = await spillToolResult(sessionId, "call-real", content);
+  assert.equal(real.ok, true);
+  const linkPath = spillPath(sessionId, "call-link");
+  try {
+    try {
+      await symlink(real.path, linkPath);
+    } catch {
+      t.skip("file symlinks require elevated privileges on this platform");
+      return;
+    }
+    assert.equal(await validateSpillPath(sessionId, linkPath), false);
+  } finally {
+    await rm(linkPath, { force: true });
+    await cleanupSpillDir(sessionId);
+  }
+});
+
+test("validateSpillPath rejects a spill dir whose realpath escapes the session root", async () => {
+  const sessionId = `test-validate-escape-${Date.now()}`;
+  const root = dirname(spillDir(sessionId));
+  const dir = spillDir(sessionId);
+  const target = await mkdtemp(resolve(tmpdir(), "spill-escape-"));
+  try {
+    await mkdir(root, { recursive: true });
+    await symlink(target, dir, process.platform === "win32" ? "junction" : "dir");
+    const escapedPath = resolve(dir, "call-escape.txt");
+    await writeFile(escapedPath, "x", "utf8");
+    // Lexically inside spillDir and a regular file, but realpath lands outside
+    // the session root.
+    assert.equal(await validateSpillPath(sessionId, escapedPath), false);
+  } finally {
+    // Remove the junction/symlink itself, never through it into the target.
+    await rm(dir, { force: true });
+    await rm(root, { recursive: true, force: true });
+    await rm(target, { recursive: true, force: true });
   }
 });
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { visibleWidth } from "@earendil-works/pi-tui";
+import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import registerMaestroExtension, {
   CHINESE_RESPONSE_PROMPT,
   appendChineseResponsePrompt,
@@ -20,6 +20,7 @@ import registerMaestroExtension, {
 import type { WorkflowSnapshot } from "../src/session/types.ts";
 import { shutdownIntelligenceTools } from "../src/tools/intelligence.ts";
 import { isRunControlReadAction } from "../src/tools/run-control.ts";
+import { PLAN_TOGGLE_KEY } from "../src/tools/plan.ts";
 import {
   MAESTRO_GLOBAL_SHORTCUTS,
   auditShortcutConflicts,
@@ -185,7 +186,13 @@ test("Workflow writer attachment and Todo projection require local Workflow opt-
 });
 
 test("shortcut audit covers built-in, configured, and companion extension collisions", () => {
-  assert.deepEqual(auditShortcutConflicts({ "app.thinking.cycle": "shift+e" }), []);
+  assert.equal(PLAN_TOGGLE_KEY, "alt+shift+p");
+  assert.equal(matchesKey("\x1b[112;4u", PLAN_TOGGLE_KEY), true);
+  assert.deepEqual(
+    MAESTRO_GLOBAL_SHORTCUTS.find((shortcut) => shortcut.owner === "Maestro Plan mode"),
+    { key: PLAN_TOGGLE_KEY, owner: "Maestro Plan mode" },
+  );
+  assert.deepEqual(auditShortcutConflicts({ "app.thinking.cycle": "ctrl+shift+e" }), []);
 
   const defaults = auditShortcutConflicts({});
   assert.equal(defaults.length, 1);
@@ -194,7 +201,7 @@ test("shortcut audit covers built-in, configured, and companion extension collis
 
   for (const shortcut of MAESTRO_GLOBAL_SHORTCUTS) {
     const custom = auditShortcutConflicts({
-      "app.thinking.cycle": "shift+e",
+      "app.thinking.cycle": "ctrl+shift+e",
       "app.model.select": shortcut.key,
     });
     assert.deepEqual(custom, [{
@@ -216,23 +223,23 @@ test("shortcut command menu fixes, re-audits, and restores without touching othe
   } as unknown as ExtensionContext;
 
   await executeKeybindingsCommand("", ctx, configPath);
-  assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { "app.thinking.cycle": "shift+e" });
+  assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { "app.thinking.cycle": "ctrl+shift+e" });
   assert.match(notifications.at(-1)?.message ?? "", /未发现其他冲突/);
 
   writeFileSync(configPath, JSON.stringify({
     "app.thinking.cycle": "shift+tab",
-    "app.model.select": "alt+p",
+    "app.model.select": "alt+shift+p",
   }));
   await executeKeybindingsCommand("fix", ctx, configPath);
   assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), {
-    "app.thinking.cycle": "shift+e",
-    "app.model.select": "alt+p",
+    "app.thinking.cycle": "ctrl+shift+e",
+    "app.model.select": "alt+shift+p",
   });
   assert.equal(notifications.at(-1)?.type, "warning");
-  assert.match(notifications.at(-1)?.message ?? "", /仍有 1 个冲突.*alt\+p/);
+  assert.match(notifications.at(-1)?.message ?? "", /仍有 1 个冲突.*alt\+shift\+p/);
 
   await executeKeybindingsCommand("restore", ctx, configPath);
-  assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { "app.model.select": "alt+p" });
+  assert.deepEqual(JSON.parse(readFileSync(configPath, "utf8")), { "app.model.select": "alt+shift+p" });
 });
 
 test("extension registers LSP, browser, and BM25 discovery", async () => {

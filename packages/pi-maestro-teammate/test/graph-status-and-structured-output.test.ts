@@ -1151,9 +1151,9 @@ test("child lifecycle commit wins over a later handback failure recovery", () =>
   const registrationStart = source.indexOf("export default function registerTeammateExtension(");
   assert.ok(handlerStart >= 0 && handlerStart < registrationStart);
   assert.equal(source.match(/function handleChildLifecycleEvent\(/g)?.length, 1);
-  assert.match(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.event,\s*correlationId,/s);
-  assert.match(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.childEvent,\s*correlationId: cid,/s);
-  assert.doesNotMatch(source, /correlationId: (?:event|childEvent)\.correlationId \?\?/);
+  assert.match(source, /onChildEvent: \(event: Record<string, unknown>\) => handleChildLifecycleEvent\(state, event\)/);
+  assert.match(source, /onChildEvent: \(childEvent\) => handleChildLifecycleEvent\(state, childEvent\)/);
+  assert.doesNotMatch(source, /handleChildLifecycleEvent\(state, \{\s*\.\.\.(?:event|childEvent),\s*correlationId(?:: cid)?,/s);
 
   const sessionDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-lifecycle-state-"));
   const sessionFile = path.join(sessionDir, "session.jsonl");
@@ -1906,13 +1906,13 @@ test("retrying agents remain distinct from sleeping and expose retry metadata", 
   };
 
   applyAgentRetryState(state, {
-    correlationId, attempt: 2, maxRetries: 12, delayMs: 2_000,
+    correlationId, attempt: 2, maxRetries: 10, delayMs: 2_000,
     nextRetryAt: now + 2_000, error: "ECONNRESET",
   });
 
   assert.equal(agent.status, "retrying");
   const watched = buildWatchOutput({ kind: "agent", agent }, 20).join("\n");
-  assert.match(watched, /Retry 2\/12/);
+  assert.match(watched, /Retry 2\/10/);
   assert.doesNotMatch(watched, /\[sleeping/);
 });
 
@@ -1959,7 +1959,8 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   assert.doesNotMatch(source, /outputLog = \[\.\.\.activeAgent\.outputLog\]/);
   assert.match(source, /childStreamingLineIdx/);
   assert.match(source, /childToolLines/);
-  assert.match(source, /reportChildStatus\("running"\)[\s\S]*?reportChildStatus\(completed\.exitCode === 0 \? "completed" : "failed"\)/);
+  assert.match(source, /const deliverNestedCompletion = \(\): void => \{[\s\S]*?reportChildStatus\(nestedPublication\.exitCode === 0 \? "completed" : "failed"\)/);
+  assert.match(source, /reportChildStatus\("running"\)/);
   assert.match(source, /progress: currentProgress,[\s\S]*?childCalls: \[\.\.\.childCalls\.values\(\)\]/);
   assert.doesNotMatch(source, /spawned @\$\{p\.name \?\? p\.agent\}/);
 });

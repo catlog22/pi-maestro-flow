@@ -6,6 +6,7 @@ import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerTeammateExtension, {
   handleProxyRequest,
+  settleAgent,
   switchConversationSession,
   type TeammateRuntimeOptions,
 } from "../src/extension/index.ts";
@@ -116,6 +117,52 @@ function createProxyState(): TeammateState {
   };
 }
 
+test("a terminal requester reclaims nested dispatches and pending admissions", () => {
+  const state = createProxyState();
+  const parentController = new AbortController();
+  const nestedController = new AbortController();
+  const now = Date.now();
+  const parent: ActiveAgent = {
+    agent: "general",
+    correlationId: "parent",
+    startedAt: now,
+    abortController: parentController,
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    depth: 0,
+    status: "running",
+    sleepMs: 0,
+  };
+  const nested: ActiveAgent = {
+    agent: "general",
+    correlationId: "nested",
+    startedAt: now,
+    abortController: nestedController,
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    spawnedBy: "parent",
+    depth: 1,
+    status: "running",
+    sleepMs: 0,
+  };
+  state.activeRuns.set(parent.correlationId, parent);
+  state.activeRuns.set(nested.correlationId, nested);
+  state.pendingProxyDispatchRequests = new Set(["pending-request"]);
+  state.pendingProxyDispatchParents = new Map([["pending-request", "parent"]]);
+  state.proxyDispatchByRequest = new Map([["running-request", "nested"]]);
+
+  settleAgent(state, "parent", 1, "parent failed", false);
+
+  assert.equal(nestedController.signal.aborted, true);
+  assert.equal(state.activeRuns.has("nested"), false);
+  assert.equal(state.pendingProxyDispatchRequests.has("pending-request"), false);
+  assert.equal(state.pendingProxyDispatchParents.has("pending-request"), false);
+  assert.equal(state.proxyDispatchByRequest.has("running-request"), false);
+  assert.equal(state.recentlySettled?.get("nested")?.status, "terminated");
+});
+
 test("root teammate rejects a pre-aborted dispatch before registration or spawn", async () => {
   let spawns = 0;
   const { teammate, emitted } = createHarness({
@@ -216,6 +263,86 @@ test("root emits complete only after result-ready receives lifecycle confirmatio
   assert.equal(completed.length, 1);
   assert.equal(completed[0].payload.exitCode, 0);
   assert.equal(completed[0].payload.wakeable, true);
+});
+
+test("root background spawn failure publishes one completion and clears live state", async () => {
+  const { teammate, emitted } = createHarness({
+    spawnChildProcess: (() => { throw new Error("spawn unavailable"); }) as never,
+    onRunOptionsCreated(options) {
+      options.waitForRetry = async () => false;
+    },
+  });
+
+  const result = await teammate.execute(
+    "background-spawn-failure",
+    {
+      tasks: [{ agent: "general", name: "spawn-failure", prompt: "fail" }],
+      background: true,
+    },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  assert.equal(result.isError, false);
+
+  await delay(100);
+  const completed = emitted.filter(({ event }) => event === "teammate:complete");
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].payload.exitCode, 1);
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  assert.equal(
+    [...state.activeRuns.values()].some((agent) =>
+      agent.status === "running" || agent.status === "pending" || agent.status === "retrying"
+    ),
+    false,
+  );
+  assert.equal(
+    [...state.activeRuns.values()].find((agent) => agent.name === "spawn-failure")?.status,
+    "failed",
+  );
+});
+
+test("root cycle rejection settles every graph task and aggregate without spawning", async () => {
+  let spawns = 0;
+  const { teammate, emitted } = createHarness({
+    spawnChildProcess: (() => { spawns += 1; throw new Error("must not spawn"); }) as never,
+  });
+
+  const result = await teammate.execute(
+    "cycle",
+    {
+      tasks: [
+        { agent: "general", name: "left", prompt: "left", dependsOn: ["right"] },
+        { agent: "general", name: "right", prompt: "right", dependsOn: ["left"] },
+      ],
+      background: false,
+    },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+
+  assert.equal(result.isError, true);
+  assert.equal(spawns, 0);
+  assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 1);
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  assert.equal(
+    [...state.activeRuns.values()].some((agent) =>
+      agent.status === "running" || agent.status === "pending" || agent.status === "retrying"
+    ),
+    false,
+  );
+  assert.deepEqual(
+    [...state.activeRuns.values()]
+      .filter((agent) => agent.name === "left" || agent.name === "right")
+      .map((agent) => agent.status)
+      .sort(),
+    ["failed", "failed"],
+  );
 });
 
 test("proxy single emits complete only after result-ready lifecycle confirmation", async () => {
@@ -383,6 +510,58 @@ test("root retry cancellation records terminated state and a cancelled complete 
     Symbol.for("pi-maestro-teammate.root-registry")
   ] as TeammateState;
   assert.equal([...state.recentlySettled?.values() ?? []].find((entry) => entry.name === "retrying")?.status, "terminated");
+});
+
+test("root graph retry cancellation keeps aggregate event and registry terminal status aligned", async () => {
+  const controller = new AbortController();
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => child.emit("error", new Error("fetch failed: ECONNRESET")));
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const { teammate, emitted } = createHarness({
+    spawnChildProcess,
+    onRunOptionsCreated(options) {
+      options.waitForRetry = async () => {
+        controller.abort();
+        return false;
+      };
+    },
+  });
+
+  const result = await teammate.execute(
+    "graph-retry-abort",
+    {
+      tasks: [
+        { agent: "general", name: "retry-a", prompt: "retry a" },
+        { agent: "general", name: "retry-b", prompt: "retry b" },
+      ],
+      background: false,
+    },
+    controller.signal,
+    undefined,
+    context(),
+  );
+
+  assert.equal(result.isError, true);
+  const completed = emitted.filter(({ event }) => event === "teammate:complete");
+  assert.equal(completed.length, 1);
+  assert.equal(completed[0].payload.cancelled, true);
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  const aggregateId = completed[0].payload.correlationId as string;
+  assert.equal(state.recentlySettled?.get(aggregateId)?.status, "terminated");
 });
 
 test("root DAG skip writes failed settled history for the never-spawned task", async () => {

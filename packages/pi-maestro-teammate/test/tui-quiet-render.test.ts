@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { afterEach } from "node:test";
 import { isQuietMode, setQuietMode } from "../src/quiet-state.ts";
-import { renderQuietTeammateAux, renderTeammateCall, renderTeammateResult } from "../src/tui/render.ts";
+import { renderQuietTeammateAux, renderTeammateCall, renderTeammateListCall, renderTeammateListResult, renderTeammateResult } from "../src/tui/render.ts";
 import type { SingleResult } from "../src/shared/types.ts";
 
 // Identity theme strips color so assertions read the plain text the quiet
@@ -60,17 +60,13 @@ test("quiet auxiliary teammate surfaces use lifecycle rows without message bodie
   assert.equal(renderQuietTeammateAux("teammate-send", "SECRET_MESSAGE", "running", theme as never), undefined);
 });
 
-test("quiet single-task call is one line without key hints or tree glyphs", () => {
+test("quiet single-task call leaves all rendering to the result component", () => {
   setQuietMode(true);
   const rendered = renderTeammateCall({ agent: "general", name: "ping", prompt: "reply pong" }, theme as never, { expanded: true }).render(80);
-  assert.equal(rendered.length, 1);
-  assert.doesNotMatch(rendered[0], /\n/);
-  assert.match(rendered[0], /^\s*…\s+teammate\s+@ping\s+\(general\)/);
-  assert.doesNotMatch(rendered[0], /Alt\+B/);
-  assert.doesNotMatch(rendered[0], /[├└│]/);
+  assert.deepEqual(rendered, []);
 });
 
-test("quiet multi-task call leaves the named tree to the result component", () => {
+test("quiet multi-task call leaves all rendering to the result component", () => {
   setQuietMode(true);
   const rendered = renderTeammateCall({
     tasks: [
@@ -79,10 +75,7 @@ test("quiet multi-task call leaves the named tree to the result component", () =
     ],
     background: false,
   }, theme as never, { expanded: true }).render(80);
-  assert.equal(rendered.length, 1);
-  assert.match(rendered[0], /2 agents chain/);
-  assert.doesNotMatch(rendered[0], /@pkgs|@summary|inspect packages|summarize/);
-  assert.doesNotMatch(rendered[0], /launched|Alt\+R/);
+  assert.deepEqual(rendered, []);
 });
 
 test("quiet streaming progress keeps agent and child trees but hides stream content", () => {
@@ -135,6 +128,24 @@ test("quiet streaming progress retains a structural row on a narrow viewport", (
   assert.equal(rendered.length, 2);
   assert.match(rendered[0], /^\s*…\s+teammate/);
   assert.match(rendered[1], /^•\s+1/);
+});
+
+test("teammate-list call and result own mutually exclusive unbacked phases", () => {
+  const call = renderTeammateListCall({ view: "active" }, theme as never, { isPartial: true }).render(80);
+  const settledCall = renderTeammateListCall({ view: "active" }, theme as never, { isPartial: false }).render(80);
+  const partialResult = renderTeammateListResult({
+    content: [{ type: "text", text: "@worker running" }],
+    details: { agents: [] },
+  }, { isPartial: true }, theme as never).render(80);
+  const result = renderTeammateListResult({
+    content: [{ type: "text", text: "@worker running" }],
+    details: { agents: [] },
+  }, { isPartial: false }, theme as never).render(80);
+
+  assert.match(call[0], /teammate-list active/);
+  assert.deepEqual(settledCall, []);
+  assert.deepEqual(partialResult, []);
+  assert.deepEqual(result, ["@worker running"]);
 });
 
 test("quiet completed single result is one concise named line without its message body", () => {
@@ -216,7 +227,7 @@ test("quiet failed result keeps an agent row and a single error summary", () => 
 test("dot symbol mode applies to teammate running, success, and failure rows", () => {
   setQuietMode(true, "dot");
   const call = renderTeammateCall({ agent: "general", prompt: "inspect" }, theme as never).render(80);
-  assert.match(call[0], /^\s*○\s+teammate/);
+  assert.deepEqual(call, []);
 
   const success = renderTeammateResult({
     content: [{ type: "text", text: "complete output" }],
@@ -238,10 +249,18 @@ test("started, send, wait, and watch are wired to the shared quiet renderer", ()
   }
 });
 
-test("teammate dispatch and list use the self-rendered shell in root and nested paths", () => {
+test("auxiliary teammate renderers make call and result phases mutually exclusive", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.equal((source.match(/name: "teammate",[\s\S]{0,100}?renderShell: "self"/g) ?? []).length, 2);
-  assert.equal((source.match(/name: "teammate-list",[\s\S]{0,100}?renderShell: "self"/g) ?? []).length, 2);
+  assert.equal((source.match(/if \(context\.isPartial === false\) return new Text\("", 0, 0\);/g) ?? []).length, 3);
+  assert.equal((source.match(/if \(options\.isPartial\) return new Text\("", 0, 0\);/g) ?? []).length, 3);
+});
+
+test("root and nested self-rendered teammate tools share renderers", () => {
+  const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.equal((source.match(/return renderTeammateCall\(/g) ?? []).length, 2);
+  assert.equal((source.match(/return renderTeammateResult\(/g) ?? []).length, 3);
+  assert.equal((source.match(/return renderTeammateListCall\(/g) ?? []).length, 2);
+  assert.equal((source.match(/return renderTeammateListResult\(/g) ?? []).length, 2);
 });
 
 // Uniqueness guard (not a behaviour test): the ownership event is the single

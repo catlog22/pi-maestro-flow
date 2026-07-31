@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 import {
@@ -58,6 +58,7 @@ import {
   runObservedCompaction,
 } from "../src/compaction/compaction-arbiter.ts";
 import { DEFAULT_SOFT_COMPACTION } from "../src/compaction/compaction-settings.ts";
+import { cleanupSpillDir, spillDir, spillPath } from "../src/compaction/tool-result-spill.ts";
 import {
   initTodo,
   onSessionShutdown,
@@ -3401,4 +3402,326 @@ test("onCompact persists the cleared prune manifest so a resumed session does no
   assert.equal(lastAfter.prunes.length, 0, "manifest is empty after onCompact");
 
   guard.reset(ctx);
+});
+
+// ---------------------------------------------------------------------------
+// Production-order cache-stability regressions
+// (team-swarm 20260731 cache-hit audit: F1 spill-retry mutation, F2 dead spill
+// restoration, F3 shutdown tombstoning)
+// ---------------------------------------------------------------------------
+
+/** The L2-shaped transcript: one stale 16K read behind a recent usage record. */
+function spillShapedTranscript(callId: string): unknown[] {
+  return [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: callId, name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: callId,
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: "keep".repeat(1_500) }],
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: `${callId}-latest`, name: "read", arguments: {} }],
+    usage: { input: 8_700, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 8_700, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: `${callId}-latest`,
+    toolName: "read",
+    content: [{ type: "text", text: "ok" }],
+    isError: false,
+  }];
+}
+
+/** Canonical byte view of a transformed frame, for serialized-equality asserts. */
+function serializedFrames(messages: readonly unknown[] | undefined): string[] {
+  return (messages ?? []).map((message) => JSON.stringify(message));
+}
+
+test("cache stability: a failed spill write freezes the published replacement for the epoch", async () => {
+  const sessionId = `freeze-spill-${Date.now()}`;
+  const settings = { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 };
+  const messages = spillShapedTranscript("freeze-call");
+  // Occupy the session spill root with a FILE so the first durable write fails.
+  const root = dirname(spillDir(sessionId));
+  await mkdir(dirname(root), { recursive: true });
+  await writeFile(root, "occupied", "utf8");
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
+    readSettings: () => settings,
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    sessionManager: { getSessionId: () => sessionId, getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  try {
+    guard.onSessionStart(ctx);
+    const first = await guard.evaluate(messages as never, ctx);
+    const firstReplacement = JSON.stringify(first?.[1]);
+    assert.match(firstReplacement, /stale large output/, "a failed spill keeps the plain placeholder");
+    assert.ok(!firstReplacement.includes("<persisted-output>"));
+
+    // The disk recovers and the next frame completes a tool batch, so the spill
+    // machinery runs again. The recorded entry must NOT be upgraded now: its
+    // replacement was already published to the provider prefix.
+    await rm(root, { force: true });
+    const second = await guard.evaluate([
+      ...messages,
+      { role: "user", content: [{ type: "text", text: "next turn" }] },
+      { role: "assistant", content: [{ type: "toolCall", id: "freeze-next", name: "read", arguments: {} }] },
+      { role: "toolResult", toolCallId: "freeze-next", toolName: "read", content: [{ type: "text", text: "ok" }], isError: false },
+    ] as never, ctx);
+    assert.ok(second, "recorded prunes still transform the second frame");
+    assert.equal(
+      firstDivergence(serializedFrames(first), serializedFrames(second)),
+      first!.length,
+      "only the new tail may differ — the published prefix stays byte-identical",
+    );
+    assert.ok(!JSON.stringify(second).includes("<persisted-output>"), "no late spill upgrade leaks into the prefix");
+  } finally {
+    await rm(root, { force: true });
+    guard.reset(ctx);
+    await cleanupSpillDir(sessionId);
+  }
+});
+
+test("cache stability: a dead persisted spill path downgrades to a stable plain prune", async () => {
+  const sessionId = `dead-spill-${Date.now()}`;
+  const appended: Array<{ type: string; data: unknown }> = [];
+  const settings = { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 };
+  const deadPath = spillPath(sessionId, "dead-call");
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "dead-call", name: "read", arguments: {} }],
+    usage: { input: 100, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 100, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "dead-call",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: "resume" }],
+  }];
+  const persisted = {
+    version: 3,
+    sessionId,
+    prunes: [{ callId: "dead-call", level: "spill", spillPath: deadPath }],
+  };
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { appended.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, { readSettings: () => settings });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    sessionManager: {
+      getSessionId: () => sessionId,
+      getBranch: () => [{ type: "custom", customType: "maestro-auto-prune-state", data: persisted }],
+    },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  try {
+    guard.onSessionStart(ctx);
+    const first = await guard.evaluate(messages as never, ctx);
+    const firstReplacement = JSON.stringify(first?.[1]);
+    assert.match(firstReplacement, /stale large output/, "a dead path degrades to the plain placeholder");
+    assert.ok(!firstReplacement.includes("<persisted-output>"));
+    assert.ok(!firstReplacement.includes(deadPath), "the dead path is not advertised");
+
+    // The downgrade is persisted: plain level, no spillPath.
+    const pruneEntries = appended.filter((entry) => entry.type === "maestro-auto-prune-state");
+    assert.ok(pruneEntries.length >= 1, "the downgrade was persisted");
+    const last = pruneEntries.at(-1)?.data as { prunes: Array<{ callId: string; level: string; spillPath?: string }> };
+    const downgraded = last.prunes.find((entry) => entry.callId === "dead-call");
+    assert.equal(downgraded?.level, "pruned");
+    assert.equal(downgraded?.spillPath, undefined);
+
+    // Subsequent evaluations stay byte-identical: no dead-path/recovered-path
+    // toggling within the epoch.
+    const second = await guard.evaluate([
+      ...messages,
+      { role: "user", content: [{ type: "text", text: "again" }] },
+    ] as never, ctx);
+    assert.equal(
+      firstDivergence(serializedFrames(first), serializedFrames(second)),
+      first!.length,
+      "the downgraded replacement is frozen for the epoch",
+    );
+  } finally {
+    guard.reset(ctx);
+    await cleanupSpillDir(sessionId);
+  }
+});
+
+test("lifecycle: production-order shutdown preserves prune identity across resume", async () => {
+  const sessionId = `shutdown-resume-${Date.now()}`;
+  const appended: Array<{ type: string; data: unknown }> = [];
+  const settings = { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 };
+  const messages = spillShapedTranscript("shutdown-call");
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { appended.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, { readSettings: () => settings });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    sessionManager: { getSessionId: () => sessionId, getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  try {
+    guard.onSessionStart(ctx);
+    const first = await guard.evaluate(messages as never, ctx);
+    const firstReplacement = JSON.stringify(first?.[1]);
+    assert.match(firstReplacement, /<persisted-output>/, "the first epoch lands a spill replacement");
+
+    // Production order: shutdown FIRST, then resume from the persisted state.
+    guard.onSessionShutdown(ctx);
+    const pruneEntries = appended.filter((entry) => entry.type === "maestro-auto-prune-state");
+    const persistedAfterShutdown = pruneEntries.at(-1)?.data as { prunes: unknown[] };
+    assert.ok(persistedAfterShutdown.prunes.length > 0, "shutdown preserves the manifest instead of tombstoning it");
+
+    const resumedCtx = {
+      cwd: "D:\\repo",
+      model: { contextWindow: 10_000 },
+      sessionManager: {
+        getSessionId: () => sessionId,
+        getBranch: () => [{ type: "custom", customType: "maestro-auto-prune-state", data: persistedAfterShutdown }],
+      },
+      ui: { setStatus() {}, notify() {} },
+    } as never;
+    guard.onSessionStart(resumedCtx);
+    const resumed = await guard.evaluate([
+      ...messages,
+      { role: "user", content: [{ type: "text", text: "resume" }] },
+    ] as never, resumedCtx);
+    assert.equal(
+      firstDivergence(serializedFrames(first), serializedFrames(resumed)),
+      first!.length,
+      "the resumed request replays the exact prior replacement bytes",
+    );
+    assert.equal(JSON.stringify(resumed?.[1]), firstReplacement);
+
+    // reset() remains the destructive path.
+    guard.reset(resumedCtx);
+    const afterReset = appended.filter((entry) => entry.type === "maestro-auto-prune-state").at(-1)?.data as { prunes: unknown[] };
+    assert.equal(afterReset.prunes.length, 0, "reset still tombstones the manifest");
+  } finally {
+    await cleanupSpillDir(sessionId);
+  }
+});
+
+test("lifecycle: restored prunes hydrate before projectCompactionInput on a resumed session", async () => {
+  const sessionId = `hydrate-project-${Date.now()}`;
+  const appended: Array<{ type: string; data: unknown }> = [];
+  const settings = { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 };
+  const messages = spillShapedTranscript("hydrate-call");
+  const firstGuard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) { appended.push({ type, data }); },
+    sendUserMessage() {},
+  } as never, { readSettings: () => settings });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    sessionManager: { getSessionId: () => sessionId, getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  try {
+    firstGuard.onSessionStart(ctx);
+    const first = await firstGuard.evaluate(messages as never, ctx);
+    const firstReplacement = JSON.stringify(first?.[1]);
+    assert.match(firstReplacement, /<persisted-output>/);
+    const persisted = appended.filter((entry) => entry.type === "maestro-auto-prune-state").at(-1);
+
+    // A resumed session can compact before any context evaluation: the
+    // projection must replay the persisted spill replacement, not raw output.
+    const resumedGuard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
+      readSettings: () => settings,
+    });
+    const resumedCtx = {
+      cwd: "D:\\repo",
+      model: { contextWindow: 10_000 },
+      sessionManager: {
+        getSessionId: () => sessionId,
+        getBranch: () => [{ type: "custom", customType: persisted?.type, data: persisted?.data }],
+      },
+      ui: { setStatus() {}, notify() {} },
+    } as never;
+    resumedGuard.onSessionStart(resumedCtx);
+    const event = {
+      preparation: {
+        messagesToSummarize: messages.slice(0, 2),
+        turnPrefixMessages: [],
+        firstKeptEntryId: "kept",
+        tokensBefore: 99_999,
+        settings,
+      },
+      signal: new AbortController().signal,
+      type: "session_before_compact",
+    } as never;
+    const projected = await resumedGuard.projectCompactionInput(event, resumedCtx);
+    assert.ok(projected.prunedToolResults > 0, "hydrated prunes apply during projection");
+    assert.equal(JSON.stringify(projected.event.preparation.messagesToSummarize[1]), firstReplacement);
+    resumedGuard.reset(resumedCtx);
+  } finally {
+    firstGuard.reset(ctx);
+    await cleanupSpillDir(sessionId);
+  }
+});
+
+test("cache stability: canonical serialized equality across growing frames in one epoch", async () => {
+  const sessionId = `canonical-epoch-${Date.now()}`;
+  const settings = { enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 };
+  const messages = spillShapedTranscript("canonical-call");
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
+    readSettings: () => settings,
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    sessionManager: { getSessionId: () => sessionId, getBranch: () => [] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  try {
+    guard.onSessionStart(ctx);
+    const frame1 = await guard.evaluate(messages as never, ctx);
+    assert.match(JSON.stringify(frame1?.[1]), /<persisted-output>/);
+    const turnTwo = [
+      ...messages,
+      { role: "user", content: [{ type: "text", text: "turn two" }] },
+      { role: "assistant", content: [{ type: "toolCall", id: "canonical-next", name: "read", arguments: {} }] },
+      { role: "toolResult", toolCallId: "canonical-next", toolName: "read", content: [{ type: "text", text: "ok" }], isError: false },
+    ];
+    const frame2 = await guard.evaluate(turnTwo as never, ctx);
+    const frame3 = await guard.evaluate([
+      ...turnTwo,
+      { role: "user", content: [{ type: "text", text: "turn three" }] },
+    ] as never, ctx);
+    assert.ok(frame2 && frame3);
+    assert.equal(
+      firstDivergence(serializedFrames(frame1), serializedFrames(frame2)),
+      frame1!.length,
+      "frame 2 diverges only at the new tail",
+    );
+    assert.equal(
+      firstDivergence(serializedFrames(frame2), serializedFrames(frame3)),
+      frame2!.length,
+      "frame 3 diverges only at the new tail",
+    );
+    assert.equal(
+      JSON.stringify(frame3?.slice(0, frame1!.length)),
+      JSON.stringify(frame1),
+      "every same-epoch frame serializes byte-identically over the shared prefix",
+    );
+  } finally {
+    guard.reset(ctx);
+    await cleanupSpillDir(sessionId);
+  }
 });

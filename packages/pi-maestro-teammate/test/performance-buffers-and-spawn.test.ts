@@ -270,9 +270,10 @@ test("widget work ignores pending agents after the grace period measured from la
 
 test("root progress cleanup flushes then disposes on success, error, and termination", async () => {
   const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
-  const executeStart = source.indexOf("async execute(");
+  const teammateToolStart = source.indexOf("const tool: ToolDefinition<typeof TeammateParams");
+  const executeStart = source.indexOf("async execute(", teammateToolStart);
   const executeEnd = source.indexOf("renderCall(args", executeStart);
-  assert.ok(executeStart >= 0 && executeEnd > executeStart);
+  assert.ok(teammateToolStart >= 0 && executeStart > teammateToolStart && executeEnd > executeStart);
   const rootExecute = source.slice(executeStart, executeEnd);
   assert.equal(rootExecute.match(/runWithProgressFlushCleanup\(/g)?.length, 3);
   assert.doesNotMatch(rootExecute, /runSingleTeammate\(params, makeOptions\(\)\)/);
@@ -540,16 +541,22 @@ test("model specifiers resolve provider shorthand and reject unavailable exact r
   );
 });
 
-test("network retry policy reaches a ten-minute cap and rejects permanent failures", () => {
-  assert.equal(NETWORK_RETRY_POLICY.maxRetries, 12);
+test("network retry policy is bounded, progressive, and rejects permanent failures", () => {
+  assert.equal(NETWORK_RETRY_POLICY.maxRetries, 10);
   assert.deepEqual(
     Array.from({ length: NETWORK_RETRY_POLICY.maxRetries }, (_, index) => retryDelayMs(index + 1)),
-    [1_000, 2_000, 4_000, 8_000, 16_000, 32_000, 64_000, 128_000, 256_000, 512_000, 600_000, 600_000],
+    [1_000, 2_000, 4_000, 8_000, 16_000, 16_000, 16_000, 16_000, 16_000, 16_000],
   );
   assert.equal(classifyRetryError("fetch failed: ECONNRESET"), "network");
   assert.equal(classifyRetryError("Error: Connection error."), "network");
   assert.equal(classifyRetryError("Provider returned error: 503"), "provider");
+  assert.equal(classifyRetryError("402: Insufficient Balance"), "fallback-only");
+  assert.equal(
+    classifyRetryError("Teammate runtime error (phase=message_end): 402: Insufficient Balance"),
+    "fallback-only",
+  );
   assert.equal(classifyRetryError("Invalid API key"), "non-retryable");
+  assert.equal(classifyRetryError("Authentication failed: token expired"), "non-retryable");
   assert.equal(classifyRetryError("context length exceeded"), "non-retryable");
   assert.equal(
     classifyRetryError("Timed out waiting for the first child agent event (agent=general, model=qwen, correlationId=abc, phase=first-activity); the child process started but did not report model activity."),
@@ -558,18 +565,18 @@ test("network retry policy reaches a ten-minute cap and rejects permanent failur
   );
   assert.equal(
     classifyRetryError("Teammate runtime error (phase=message_end, agent=planner, model=qwen, correlationId=abc): some provider issue"),
-    "provider",
-    "runtime error diagnostic wrapper must be retryable",
+    "non-retryable",
+    "a generic runtime wrapper cannot make an unknown failure transient",
   );
   assert.equal(
     classifyRetryError("Teammate child process exited abnormally (agent=general, correlationId=abc, exit=1, signal=SIGKILL, elapsed=5000ms, tools=3)."),
-    "network",
-    "abnormal child exit must be retryable",
+    "non-retryable",
+    "a local process exit is not itself a network failure",
   );
   assert.equal(
     classifyRetryError("Teammate child process error (agent=general, model=qwen, correlationId=abc, phase=child-error): read EPIPE"),
     "network",
-    "child process error wrapper must be retryable",
+    "the underlying transport code remains retryable",
   );
   assert.equal(
     classifyRetryError("Failed to spawn pi subprocess (agent=general, model=qwen, correlationId=abc, phase=spawn): ENOENT"),
@@ -1086,14 +1093,14 @@ test("concurrent child retry overrides restore the original global setting once"
     const settingsPath = path.join(tempDir, "settings.json");
     fs.writeFileSync(settingsPath, JSON.stringify({
       theme: "custom",
-      retry: { enabled: true, maxRetries: 12, provider: { maxRetries: 0 } },
+      retry: { enabled: true, maxRetries: 10, provider: { maxRetries: 0 } },
     }));
     const releaseFirst = acquireRetryPersistenceGuard(settingsPath);
     const releaseSecond = acquireRetryPersistenceGuard(settingsPath);
 
     fs.writeFileSync(settingsPath, JSON.stringify({
       theme: "custom",
-      retry: { enabled: false, maxRetries: 12, provider: { maxRetries: 0 } },
+      retry: { enabled: false, maxRetries: 10, provider: { maxRetries: 0 } },
     }));
     releaseFirst();
     assert.equal(JSON.parse(fs.readFileSync(settingsPath, "utf8")).retry.enabled, false);
@@ -1104,7 +1111,7 @@ test("concurrent child retry overrides restore the original global setting once"
     assert.equal(restored.theme, "custom");
     assert.deepEqual(restored.retry, {
       enabled: true,
-      maxRetries: 12,
+      maxRetries: 10,
       provider: { maxRetries: 0 },
     });
     releaseSecond();
@@ -1151,6 +1158,37 @@ test("teammate retries a transient network failure before succeeding", async () 
   assert.equal(attempts, 2);
   assert.deepEqual(retryDelays, [1_000]);
   assert.match(result.messages.at(-1)?.content ?? "", /recovered/);
+});
+
+test("first-activity timeout remains a failure when the terminated child closes cleanly", async () => {
+  let retries = 0;
+  const spawnChildProcess = adaptFakeSpawn(() => {
+    const child = createFakeProcess();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() {
+        queueMicrotask(() => child.emit("close", 0, null));
+        return true;
+      },
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "Detect a silent child", context: "fork" },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      firstActivityTimeoutMs: 5,
+      onRetry() { retries += 1; },
+      async waitForRetry() { return false; },
+    },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(retries, 1);
+  assert.match(result.messages.at(-1)?.content ?? "", /first child agent event/i);
 });
 
 test("teammate exhausts a primary model, falls back, and skips its open circuit on later runs", async () => {
@@ -1203,7 +1241,7 @@ test("teammate exhausts a primary model, falls back, and skips its open circuit 
   assert.equal(first.exitCode, 0);
   assert.deepEqual(first.attemptedModels, ["provider/primary", "provider/backup"]);
   assert.deepEqual(launchedModels, [
-    ...Array<string>(13).fill("provider/primary"),
+    ...Array<string>(11).fill("provider/primary"),
     "provider/backup",
   ]);
   assert.equal(breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
@@ -1398,7 +1436,7 @@ test("resolved model aliases are deduplicated before retry and breaker accountin
     async waitForRetry() { return true; },
   });
 
-  assert.equal(attempts, 13);
+  assert.equal(attempts, 11);
   assert.deepEqual(breaker.snapshot().find((entry) => entry.model === "provider/model"), {
     model: "provider/model",
     state: "CLOSED",
@@ -1407,7 +1445,7 @@ test("resolved model aliases are deduplicated before retry and breaker accountin
   });
 });
 
-test("teammate stops after the initial attempt and twelve transient retries", async () => {
+test("teammate stops after the initial attempt and ten transient retries", async () => {
   let attempts = 0;
   const retries: number[] = [];
   const spawnChildProcess = adaptFakeSpawn(() => {
@@ -1433,8 +1471,98 @@ test("teammate stops after the initial attempt and twelve transient retries", as
   );
 
   assert.equal(result.exitCode, 1);
-  assert.equal(attempts, 13);
-  assert.deepEqual(retries, Array.from({ length: 12 }, (_, index) => index + 1));
+  assert.equal(attempts, 11);
+  assert.deepEqual(retries, Array.from({ length: 10 }, (_, index) => index + 1));
+});
+
+test("retry budget is shared across model candidates", async () => {
+  const launchedModels: string[] = [];
+  const retries: number[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    const modelIndex = args.indexOf("--model");
+    launchedModels.push(args[modelIndex + 1]);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "Provider returned error: 503 unavailable" },
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "Bound retries across fallbacks",
+    model: "provider/primary",
+    fallbackModels: ["provider/backup"],
+    context: "fork",
+  }, {
+    baseCwd: process.cwd(),
+    modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+    spawnChildProcess,
+    onRetry(retry) { retries.push(retry.attempt); },
+    async waitForRetry() { return true; },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.deepEqual(retries, Array.from({ length: 10 }, (_, index) => index + 1));
+  assert.deepEqual(launchedModels, [
+    ...Array<string>(11).fill("provider/primary"),
+    "provider/backup",
+  ]);
+});
+
+test("a failed attempt with completed tools is not restarted or rerouted", async () => {
+  const launchedModels: string[] = [];
+  const retries: number[] = [];
+  const spawnChildProcess = adaptFakeSpawn((_command, args) => {
+    const modelIndex = args.indexOf("--model");
+    launchedModels.push(args[modelIndex + 1]);
+    const child = createFakeProcess();
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify({ type: "tool_execution_end", toolName: "write", isError: false })}\n`);
+      stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "Provider returned error: 503 unavailable" },
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  });
+
+  const result = await runSingleTeammate({
+    agent: "general",
+    task: "Do not repeat side effects",
+    model: "provider/primary",
+    fallbackModels: ["provider/backup"],
+    context: "fork",
+  }, {
+    baseCwd: process.cwd(),
+    modelCapabilities: [{ id: "provider/primary" }, { id: "provider/backup" }],
+    spawnChildProcess,
+    onRetry(retry) { retries.push(retry.attempt); },
+    async waitForRetry() { return true; },
+  });
+
+  assert.equal(result.exitCode, 1);
+  assert.equal(result.toolCount, 1);
+  assert.deepEqual(retries, []);
+  assert.deepEqual(launchedModels, ["provider/primary"]);
+  assert.match(result.messages.at(-1)?.content ?? "", /repeat side effects/i);
 });
 
 test("connection error remains retryable when an abnormal-exit diagnostic follows it", async () => {

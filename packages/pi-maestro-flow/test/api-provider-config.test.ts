@@ -139,7 +139,7 @@ test("registers configured providers and the /api-manager command", async (t) =>
   assert.ok(getModels("anthropic").every((model) => model.api === "anthropic-messages"));
 });
 
-test("runtime registration rejects remote HTTP provider and model URLs", (t) => {
+test("runtime registration warns on remote HTTP provider and model URLs but still accepts them", (t) => {
   const previous = process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV];
   t.after(() => {
     if (previous === undefined) delete process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV];
@@ -177,12 +177,15 @@ test("runtime registration rejects remote HTTP provider and model URLs", (t) => 
     },
   } as any, { modelsPath });
 
-  assert.equal(registered.get("maestro-openai")?.baseUrl, undefined);
-  assert.equal(registered.get("maestro-openai")?.models, undefined);
+  assert.equal(registered.get("maestro-openai")?.baseUrl, "http://198.51.100.10:8080/v1");
+  assert.deepEqual(
+    registered.get("maestro-openai")?.models.map((model: any) => model.id),
+    ["unsafe-provider-model"],
+  );
   assert.equal(registered.get("maestro-qwen")?.baseUrl, "https://dashscope.aliyuncs.com/compatible-mode/v1");
   assert.deepEqual(
     registered.get("maestro-qwen")?.models.map((model: any) => model.id),
-    ["safe-model"],
+    ["unsafe-model-override", "safe-model"],
   );
 });
 
@@ -191,11 +194,12 @@ test("API Manager retry defaults are enabled and preserve explicit overrides", a
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const settingsPath = join(tempDir, "settings.json");
 
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 12 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 10 });
   await ensureApiRetryDefaults(settingsPath);
   assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")).retry, {
     enabled: true,
-    maxRetries: 12,
+    maxRetries: 10,
+    baseDelayMs: 1_000,
   });
 
   writeFileSync(settingsPath, JSON.stringify({
@@ -211,7 +215,7 @@ test("API Manager retry defaults are enabled and preserve explicit overrides", a
   assert.equal(saved.theme, "custom");
   assert.deepEqual(saved.retry, {
     enabled: false,
-    maxRetries: 12,
+    maxRetries: 10,
     baseDelayMs: 3_000,
     provider: { maxRetries: 0, maxRetryDelayMs: 600_000 },
   });
@@ -236,8 +240,8 @@ test("API Manager retry save validates the shared cap and preserves sibling sett
     provider: { timeoutMs: 30_000 },
   });
   await assert.rejects(
-    () => saveApiRetrySettings({ enabled: true, maxRetries: 13 }, settingsPath),
-    /1-12/,
+    () => saveApiRetrySettings({ enabled: true, maxRetries: 11 }, settingsPath),
+    /1-10/,
   );
 });
 
@@ -264,42 +268,48 @@ test("/api-manager manages retry from commands and the interactive menu", async 
 
   assert.ok(sessionStart);
   await sessionStart!({}, baseContext);
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 12 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 10 });
 
   const manager = commands.get("api-manager");
   await manager.handler("retry off", baseContext);
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 12 });
-  await manager.handler("retry on 6", baseContext);
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 6 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 10 });
+  await manager.handler("retry on 4", baseContext);
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 4 });
   await manager.handler("retry show", baseContext);
   assert.match(notifications.at(-1) ?? "", /Provider 自动重试：开启/);
-  assert.match(notifications.at(-1) ?? "", /最大重试次数：6/);
+  assert.match(notifications.at(-1) ?? "", /最大重试次数：4/);
 
   const selections = ["Provider 自动重试", "关闭"];
   await manager.handler("", {
     ...baseContext,
     hasUI: true,
     ui: {
-      async select() { return selections.shift(); },
+      async select(_title: string, options: string[]) {
+        const wanted = selections.shift();
+        return options.find((option) => option === wanted || option.startsWith(wanted));
+      },
       async input() { throw new Error("disabled retry must not request a count"); },
       async confirm() { return true; },
       notify(message: string) { notifications.push(message); },
     },
   });
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 6 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 4 });
 
   const enableSelections = ["Provider 自动重试", "开启"];
   await manager.handler("", {
     ...baseContext,
     hasUI: true,
     ui: {
-      async select() { return enableSelections.shift(); },
-      async input() { return "8"; },
+      async select(_title: string, options: string[]) {
+        const wanted = enableSelections.shift();
+        return options.find((option) => option === wanted || option.startsWith(wanted));
+      },
+      async input() { return "5"; },
       async confirm() { return true; },
       notify(message: string) { notifications.push(message); },
     },
   });
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 8 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 5 });
 });
 
 test("validates custom API base URLs", (t) => {
@@ -314,7 +324,7 @@ test("validates custom API base URLs", (t) => {
   assert.equal(normalizeBaseUrl("http://localhost:8080/v1/"), "http://localhost:8080/v1");
   assert.equal(normalizeBaseUrl("http://127.23.45.67:8080/v1"), "http://127.23.45.67:8080/v1");
   assert.equal(normalizeBaseUrl("http://[::1]:8080/v1"), "http://[::1]:8080/v1");
-  assert.throws(() => normalizeBaseUrl("http://198.51.100.10:8080/v1"), /must use https/);
+  assert.equal(normalizeBaseUrl("http://198.51.100.10:8080/v1"), "http://198.51.100.10:8080/v1");
   assert.throws(() => normalizeBaseUrl("file:///tmp/api"), /http or https/);
   assert.throws(() => normalizeBaseUrl(""), /cannot be empty/);
 
@@ -398,6 +408,25 @@ test("saves Qwen as an OpenAI-compatible completions provider", async (t) => {
   });
   assert.equal(qwen.models[0].id, "qwen3.8-max-preview");
   assert.deepEqual(qwen.models[0].thinkingLevelMap, { off: null, xhigh: "max" });
+
+  qwen.compat.openRouterRouting = { allow_fallbacks: false };
+  qwen.compat.unknownForwardOption = "keep";
+  writeFileSync(modelsPath, JSON.stringify(saved));
+  await saveApiProviderSettings({
+    provider: "maestro-qwen",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    modelId: "qwen3.8-max-preview",
+    reasoning: true,
+    apiKey: "qwen-secret",
+    maxThinking: true,
+  }, modelsPath);
+  const updatedCompat = JSON.parse(readFileSync(modelsPath, "utf8")).providers["maestro-qwen"].compat;
+  assert.deepEqual(updatedCompat, {
+    supportsDeveloperRole: false,
+    thinkingFormat: "qwen",
+    openRouterRouting: { allow_fallbacks: false },
+    unknownForwardOption: "keep",
+  });
 });
 
 test("/api-manager creates or updates URL, model, reasoning, and API key", async (t) => {
@@ -552,6 +581,273 @@ test("/api-manager edits a concrete OpenAI model and shows its API format", asyn
   assert.deepEqual(rendered[0], ["model-a", "model-b", "➕ 新增 model…"]);
   assert.match(confirmations[0] ?? "", /API format：openai-responses/);
   assert.match(confirmations[0] ?? "", /其余 1 个 model/);
+});
+
+test("/api-manager form preloads an existing model and preserves its API key", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-form-edit-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://existing.example.com/v1",
+    modelId: "existing-model",
+    contextWindow: 333_000,
+    maxTokens: 64_000,
+    reasoning: true,
+    apiKey: "existing-secret-must-stay",
+  }, modelsPath);
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    setThinkingLevel() {},
+  } as any, { modelsPath });
+  let form = "";
+  await commands.get("api-manager").handler("set openai", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: {
+      refresh() {},
+      getAll() { return [{ thinkingLevelMap: { xhigh: "max" } }]; },
+    },
+    ui: {
+      async select(_title: string, options: string[]) {
+        assert.deepEqual(options, ["existing-model", "➕ 新增 model…"]);
+        return "existing-model";
+      },
+      async custom(factory: any) {
+        const overlay = factory(
+          { requestRender() {} },
+          { fg: (_role: string, text: string) => text, bold: (text: string) => text },
+          {},
+          () => undefined,
+        );
+        form = overlay.render(120).join("\n");
+        return {
+          values: {
+            provider: "maestro-openai",
+            api: "openai-responses",
+            baseUrl: "https://existing.example.com/v1",
+            modelId: "attempted-rename",
+            reasoning: true,
+            defaultThinking: "medium",
+            contextWindow: "333000",
+            maxTokens: "96000",
+            apiKey: "existing-secret-must-stay",
+          },
+        };
+      },
+      async confirm() { return true; },
+      notify() {},
+    },
+  });
+
+  assert.match(form, /https:\/\/existing\.example\.com\/v1/);
+  assert.match(form, /existing-model/);
+  assert.match(form, /333000/);
+  assert.match(form, /64000/);
+  assert.doesNotMatch(form, /existing-secret-must-stay/);
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  const provider = saved.providers["maestro-openai"];
+  assert.equal(provider.models[0].maxTokens, 96_000);
+  assert.equal(provider.models[0].contextWindow, 333_000);
+  assert.equal(provider.models[0].id, "existing-model");
+  assert.equal(provider.models.length, 1);
+  assert.equal(provider.models[0].thinkingLevelMap.xhigh, "xhigh");
+  assert.equal(provider.apiKey, "existing-secret-must-stay");
+});
+
+test("/api-manager form reconciles an incompatible global thinking default", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-form-thinking-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://existing.example.com/v1",
+    modelId: "non-reasoning-model",
+    reasoning: false,
+    apiKey: "existing-secret",
+  }, modelsPath);
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    setThinkingLevel() {},
+  } as any, { modelsPath });
+  let rendered = "";
+  await commands.get("api-manager").handler("set openai", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: { refresh() {}, getAll() { return []; } },
+    ui: {
+      async select() { return "non-reasoning-model"; },
+      async custom(factory: any) {
+        return await new Promise((resolve) => {
+          const overlay = factory(
+            { requestRender() {} },
+            { fg: (_role: string, text: string) => text, bold: (text: string) => text },
+            {},
+            resolve,
+          );
+          rendered = overlay.render(120).join("\n");
+          overlay.handleInput("\x13");
+        });
+      },
+      async confirm() { return true; },
+      notify() {},
+    },
+  });
+
+  assert.match(rendered, /默认思考强度\s+off/);
+  const defaults = JSON.parse(readFileSync(join(tempDir, "api-manager.json"), "utf8"));
+  assert.equal(defaults.modelDefaults["maestro-openai/non-reasoning-model"], "off");
+});
+
+test("loadApiProviderSettings returns advanced custom-channel form parameters", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-form-advanced-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  await saveApiProviderSettings({
+    provider: "advanced-proxy",
+    name: "Advanced Proxy",
+    api: "openai-completions",
+    baseUrl: "https://advanced.example.com/v1",
+    modelId: "advanced-model",
+    contextWindow: 200_000,
+    maxTokens: 32_000,
+    reasoning: true,
+    apiKey: "advanced-secret",
+    compat: { thinkingFormat: "deepseek", supportsDeveloperRole: false, unknownFlag: "keep" },
+    headers: { "X-Title": "pi", "X-Custom": "value" },
+    authHeader: false,
+  }, modelsPath);
+
+  const loaded = await loadApiProviderSettings("advanced-proxy", modelsPath, "advanced-model");
+  assert.equal(loaded.name, "Advanced Proxy");
+  assert.equal(loaded.api, "openai-completions");
+  assert.deepEqual(loaded.compat, {
+    thinkingFormat: "deepseek",
+    supportsDeveloperRole: false,
+    unknownFlag: "keep",
+  });
+  assert.deepEqual(loaded.headers, { "X-Title": "pi", "X-Custom": "value" });
+  assert.equal(loaded.authHeader, false);
+
+  await saveApiProviderSettings({
+    provider: "advanced-proxy",
+    baseUrl: "https://advanced.example.com/v1",
+    modelId: "sibling-model",
+    reasoning: false,
+    apiKey: "advanced-secret",
+    api: "openai-completions",
+    name: "Advanced Proxy",
+  }, modelsPath);
+  const afterSiblingSave = JSON.parse(readFileSync(modelsPath, "utf8")).providers["advanced-proxy"];
+  assert.deepEqual(afterSiblingSave.compat, {
+    thinkingFormat: "deepseek",
+    supportsDeveloperRole: false,
+    unknownFlag: "keep",
+  });
+  assert.deepEqual(afterSiblingSave.headers, { "X-Title": "pi", "X-Custom": "value" });
+  assert.equal(afterSiblingSave.authHeader, false);
+
+  await saveApiProviderSettings({
+    provider: "advanced-proxy",
+    baseUrl: "https://advanced.example.com/v1",
+    modelId: "sibling-model",
+    reasoning: false,
+    apiKey: "advanced-secret",
+    api: "openai-completions",
+    name: "Advanced Proxy",
+    replaceProviderOptions: true,
+  }, modelsPath);
+  const afterExplicitClear = JSON.parse(readFileSync(modelsPath, "utf8")).providers["advanced-proxy"];
+  assert.equal("compat" in afterExplicitClear, false);
+  assert.equal("headers" in afterExplicitClear, false);
+  assert.equal("authHeader" in afterExplicitClear, false);
+});
+
+test("/api-manager custom form preserves advanced parameters and unknown compat fields", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-custom-form-edit-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  await saveApiProviderSettings({
+    provider: "advanced-proxy",
+    name: "Advanced Proxy",
+    api: "openai-completions",
+    baseUrl: "https://advanced.example.com/v1",
+    modelId: "advanced-model",
+    contextWindow: 200_000,
+    maxTokens: 32_000,
+    reasoning: true,
+    apiKey: "advanced-secret-must-stay",
+    compat: { thinkingFormat: "deepseek", supportsDeveloperRole: false, unknownFlag: "keep" },
+    headers: { "X-Title": "pi" },
+    authHeader: false,
+  }, modelsPath);
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    setThinkingLevel() {},
+  } as any, { modelsPath, defaultsPath });
+  await commands.get("api-manager").handler("set advanced-proxy", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: { refresh() {}, getAll() { return []; } },
+    ui: {
+      async input(_title: string, initial: string) {
+        assert.equal(initial, "advanced-proxy");
+        return initial;
+      },
+      async select(_title: string, options: string[]) {
+        assert.deepEqual(options, ["advanced-model", "➕ 新增 model…"]);
+        return "advanced-model";
+      },
+      async custom() {
+        return {
+          values: {
+            provider: "advanced-proxy",
+            api: "openai-completions",
+            name: "Advanced Proxy",
+            baseUrl: "https://advanced.example.com/v1",
+            modelId: "attempted-custom-rename",
+            reasoning: true,
+            defaultThinking: "medium",
+            contextWindow: "200000",
+            maxTokens: "48000",
+            thinkingFormat: "deepseek",
+            supportsDeveloperRole: "false",
+            supportsReasoningEffort: "true",
+            maxTokensField: "",
+            headers: "{\"X-Title\":\"pi\"}",
+            authHeader: "false",
+            apiKey: "advanced-secret-must-stay",
+          },
+        };
+      },
+      async confirm() { return true; },
+      notify() {},
+    },
+  });
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8")).providers["advanced-proxy"];
+  assert.equal(saved.apiKey, "advanced-secret-must-stay");
+  assert.equal(saved.models[0].maxTokens, 48_000);
+  assert.equal(saved.models[0].id, "advanced-model");
+  assert.equal(saved.models.length, 1);
+  assert.deepEqual(saved.compat, {
+    thinkingFormat: "deepseek",
+    supportsDeveloperRole: false,
+    unknownFlag: "keep",
+    supportsReasoningEffort: true,
+  });
+  assert.deepEqual(saved.headers, { "X-Title": "pi" });
+  assert.equal(saved.authHeader, false);
 });
 
 test("/api-manager shows one concrete Anthropic model with anthropic-messages format", async (t) => {
@@ -907,7 +1203,8 @@ test("/api-manager lists and deletes one provider without changing DeepSeek", as
     ui: { notify(message: string) { notifications.push(message); } },
   });
   assert.match(notifications.at(-1) ?? "", /gpt-private/);
-  assert.match(notifications.at(-1) ?? "", /Anthropic \(Custom\)：未配置/);
+  assert.match(notifications.at(-1) ?? "", /maestro-openai\/gpt-private · format: openai-responses/);
+  assert.match(notifications.at(-1) ?? "", /Anthropic \(Custom\)）· 未配置/);
   assert.match(notifications.at(-1) ?? "", /Pi 全局默认思考强度：medium/);
   assert.doesNotMatch(notifications.at(-1) ?? "", /openai-secret-must-not-be-shown/);
 
@@ -1583,8 +1880,9 @@ test("/api-manager list shows custom channels without leaking API keys", async (
     ui: { notify(message: string) { notifications.push(message); } },
   });
   const output = notifications.at(-1) ?? "";
-  assert.match(output, /自定义渠道：/);
-  assert.match(output, /My Proxy（自定义·openai-completions·1）：my-model/);
+  assert.match(output, /API 模型（model 级配置）：/);
+  assert.match(output, /my-proxy\/my-model · format: openai-completions/);
+  assert.match(output, /my-proxy（My Proxy · 自定义） · format: openai-completions/);
   assert.doesNotMatch(output, /proxy-secret-must-not-be-shown/);
 });
 
@@ -1731,4 +2029,219 @@ test("saveApiProviderSettings writes headers and authHeader, and registration pa
   assert.deepEqual(registration.headers, { "X-Title": "pi", "HTTP-Referer": "https://pi.local" });
   assert.equal(registration.authHeader, false);
   assert.equal(registration.models[0].compat.thinkingFormat, "zai");
+});
+
+test("/api-manager no-arg configure lists every model globally and edits through one preloaded form", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-manager-global-edit-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://gateway.example.com/v1",
+    modelId: "model-a",
+    contextWindow: 111_000,
+    maxTokens: 32_000,
+    reasoning: true,
+    apiKey: "openai-secret",
+  }, modelsPath);
+  await saveApiProviderSettings({
+    provider: "maestro-qwen",
+    baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    modelId: "qwen-model",
+    reasoning: true,
+    apiKey: "qwen-secret",
+  }, modelsPath);
+  const qwenBefore = JSON.parse(readFileSync(modelsPath, "utf8")).providers["maestro-qwen"];
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    setThinkingLevel() {},
+  } as any, { modelsPath });
+
+  const selectCalls: Array<{ title: string; options: string[] }> = [];
+  let form = "";
+  await commands.get("api-manager").handler("", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: { refresh() {}, getAll() { return []; } },
+    ui: {
+      async select(title: string, options: string[]) {
+        selectCalls.push({ title, options });
+        if (title === "选择操作") return options.find((option) => option.startsWith("新增或修改 model"));
+        return "maestro-openai/model-a · format: openai-responses";
+      },
+      async custom(factory: any) {
+        const overlay = factory(
+          { requestRender() {} },
+          { fg: (_role: string, text: string) => text, bold: (text: string) => text },
+          {},
+          () => undefined,
+        );
+        form = overlay.render(120).join("\n");
+        return {
+          values: {
+            provider: "maestro-openai",
+            api: "openai-responses",
+            baseUrl: "https://gateway.example.com/v1",
+            modelId: "model-a",
+            reasoning: true,
+            defaultThinking: "medium",
+            contextWindow: "111000",
+            maxTokens: "48000",
+            apiKey: "openai-secret",
+          },
+        };
+      },
+      async confirm() { return true; },
+      notify() {},
+    },
+  });
+
+  // Model-centric navigation: one list shows every model; format is only an attribute.
+  const global = selectCalls.find((call) => call.title !== "选择操作");
+  assert.ok(global);
+  assert.ok(global!.options.includes("maestro-openai/model-a · format: openai-responses"));
+  assert.ok(global!.options.includes("maestro-qwen/qwen-model · format: openai-completions"));
+  assert.ok(global!.options.some((option) => option.startsWith("➕ 新增 model · OpenAI Responses (Custom)")));
+  assert.ok(global!.options.includes("➕ 新增自定义渠道…"));
+
+  // The single form renders the original model parameters, grouped by provider/model level.
+  assert.match(form, /修改 OpenAI Responses \(Custom\) \/ model-a/);
+  assert.match(form, /连接（Provider 级）/);
+  assert.match(form, /模型（Model 级）/);
+  assert.match(form, /https:\/\/gateway\.example\.com\/v1/);
+  assert.match(form, /111000/);
+  assert.match(form, /32000/);
+  assert.doesNotMatch(form, /openai-secret/);
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.equal(saved.providers["maestro-openai"].models[0].maxTokens, 48_000);
+  assert.deepEqual(saved.providers["maestro-qwen"], qwenBefore);
+});
+
+test("/api-manager adds a model through one form preloaded with provider-level parameters", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-manager-global-add-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://gateway.example.com/v1",
+    modelId: "model-a",
+    contextWindow: 111_000,
+    maxTokens: 32_000,
+    reasoning: true,
+    apiKey: "shared-secret",
+  }, modelsPath);
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    setThinkingLevel() {},
+  } as any, { modelsPath });
+
+  let form = "";
+  await commands.get("api-manager").handler("", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: { refresh() {}, getAll() { return []; } },
+    ui: {
+      async select(title: string, options: string[]) {
+        if (title === "选择操作") return options.find((option) => option.startsWith("新增或修改 model"));
+        return "➕ 新增 model · OpenAI Responses (Custom)（format: openai-responses）";
+      },
+      async custom(factory: any) {
+        const overlay = factory(
+          { requestRender() {} },
+          { fg: (_role: string, text: string) => text, bold: (text: string) => text },
+          {},
+          () => undefined,
+        );
+        form = overlay.render(120).join("\n");
+        return {
+          values: {
+            provider: "maestro-openai",
+            api: "openai-responses",
+            baseUrl: "https://gateway.example.com/v1",
+            modelId: "model-b",
+            reasoning: true,
+            defaultThinking: "medium",
+            contextWindow: "400000",
+            maxTokens: "128000",
+            apiKey: "shared-secret",
+          },
+        };
+      },
+      async confirm() { return true; },
+      notify() {},
+    },
+  });
+
+  // Add mode: editable Model ID (empty), provider-level Base URL/API key preloaded.
+  assert.match(form, /新增 OpenAI Responses \(Custom\) model/);
+  assert.match(form, /Model ID\s+未设置/);
+  assert.match(form, /https:\/\/gateway\.example\.com\/v1/);
+  assert.match(form, /sha\*+cret/);
+  assert.doesNotMatch(form, /shared-secret/);
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8")).providers["maestro-openai"];
+  assert.deepEqual(saved.models.map((model: any) => model.id), ["model-a", "model-b"]);
+  assert.equal(saved.models[0].contextWindow, 111_000);
+  assert.equal(saved.models[1].contextWindow, 400_000);
+  assert.equal(saved.models[1].maxTokens, 128_000);
+  assert.equal(saved.apiKey, "shared-secret");
+  const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  assert.equal(settings.defaultProvider, "maestro-openai");
+  assert.equal(settings.defaultModel, "model-b");
+});
+
+test("/api-manager no-arg delete removes only the globally selected model", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-manager-global-delete-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const base = {
+    provider: "maestro-openai",
+    baseUrl: "https://gateway.example.com/v1",
+    apiKey: "openai-secret",
+  };
+  await saveApiProviderSettings({ ...base, modelId: "model-a", reasoning: true }, modelsPath);
+  await saveApiProviderSettings({ ...base, modelId: "model-b", reasoning: true }, modelsPath);
+
+  const commands = new Map<string, any>();
+  let refreshes = 0;
+  registerApiProviderConfigs({
+    registerProvider() {},
+    unregisterProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+  } as any, { modelsPath });
+
+  const selectCalls: Array<{ title: string; options: string[] }> = [];
+  await commands.get("api-manager").handler("", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: { refresh() { refreshes += 1; } },
+    ui: {
+      async select(title: string, options: string[]) {
+        selectCalls.push({ title, options });
+        if (title === "选择操作") return options.find((option) => option.startsWith("删除 model"));
+        return "maestro-openai/model-b · format: openai-responses";
+      },
+      async confirm() { return true; },
+      notify() {},
+    },
+  });
+
+  const global = selectCalls.find((call) => call.title !== "选择操作");
+  assert.ok(global);
+  assert.deepEqual(global!.options, [
+    "maestro-openai/model-a · format: openai-responses",
+    "maestro-openai/model-b · format: openai-responses",
+  ]);
+
+  const saved = JSON.parse(readFileSync(modelsPath, "utf8")).providers["maestro-openai"];
+  assert.deepEqual(saved.models.map((model: any) => model.id), ["model-a"]);
+  assert.equal(saved.baseUrl, "https://gateway.example.com/v1");
+  assert.ok(refreshes >= 1);
 });
