@@ -581,17 +581,11 @@ function renderMultiResult(
 }
 
 // ---------------------------------------------------------------------------
-// Quiet mode — single-line summaries for the teammate tool stream
+// Quiet mode — preserve agent structure while suppressing message bodies
 // ---------------------------------------------------------------------------
 //
-// When cockpit quiet mode is on the whole tool surface collapses to one line
-// per call/result. The teammate tool is the noisy one (full progress tree,
-// child subtree, streaming tail, key hints); here it becomes:
-//   call:      "  ⋯ teammate @name (agent)" / "  ⋯ teammate N agents chain"
-//   streaming: "  ■ teammate 2/3 running · @focus using read"
-//   done:      "  ✓ teammate 3/3 done · 9.4k tokens"  (✗ + first error on fail)
-// The tree/dependency detail dropped here is still fully shown by cockpit's
-// Agents widget, which quiet mode never compresses, so no information is lost.
+// Quiet mode removes streamed/completed agent message bodies. Agent identity,
+// dependency topology, child nesting, status, and telemetry remain visible.
 
 function qLine(theme: Theme, markedGlyph: string, name: string, rest: string): string {
   const parts = [
@@ -614,6 +608,47 @@ function quietTopoLabel(tasks: TaskArg[]): string {
   return isLinearChain(tasks, taskNames) ? "chain" : "graph";
 }
 
+function quietPalette(theme: Theme): ProgressPalette {
+  return {
+    dim: (text) => theme.fg("dim", text),
+    accent: (text) => theme.fg("accent", text),
+    running: (text) => theme.fg("warning", text),
+    success: (text) => theme.fg("success", text),
+    error: (text) => theme.fg("error", text),
+    bold: (text) => theme.bold(text),
+  };
+}
+
+function appendQuietAgentTree(
+  lines: string[],
+  entries: AgentProgressSnapshot[],
+  childCalls: ChildAgentCallSnapshot[],
+  theme: Theme,
+): void {
+  const entryByTaskIndex = new Map(entries.map((entry) => [entry.taskIndex, entry]));
+  const childrenByParent = new Map<string, ChildAgentCallSnapshot[]>();
+  for (const child of childCalls) {
+    const key = child.parentCorrelationId ?? "";
+    const bucket = childrenByParent.get(key);
+    if (bucket) bucket.push(child);
+    else childrenByParent.set(key, [child]);
+  }
+
+  const taskCids = new Set(entries.map((entry) => entry.correlationId).filter(Boolean));
+  const childCids = new Set(childCalls.map((child) => child.correlationId));
+  for (const row of buildProgressTree(entries, quietPalette(theme))) {
+    lines.push(row.text);
+    const cid = entryByTaskIndex.get(row.taskIndex)?.correlationId;
+    if (cid) renderChildSubtree(childrenByParent.get(cid) ?? [], childrenByParent, "  ", theme, lines);
+  }
+
+  const rootOrphans = childCalls.filter((child) => {
+    const parent = child.parentCorrelationId;
+    return !parent || (!taskCids.has(parent) && !childCids.has(parent));
+  });
+  renderChildSubtree(rootOrphans, childrenByParent, "", theme, lines);
+}
+
 function renderQuietTeammateCall(args: Record<string, unknown>, theme: Theme): Component {
   const glyph = theme.fg("warning", quietStatusMark("running"));
   const tasks = (args.tasks as Array<Omit<TaskArg, "agent"> & { agent?: string }> | undefined)
@@ -621,7 +656,25 @@ function renderQuietTeammateCall(args: Record<string, unknown>, theme: Theme): C
   if (tasks?.length) {
     const topo = quietTopoLabel(tasks);
     const rest = `${tasks.length} agents${topo ? ` ${topo}` : ""}`;
-    return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
+    const taskNames = new Set(tasks.filter((task) => task.name).map((task) => task.name!));
+    const indexByName = new Map<string, number>();
+    tasks.forEach((task, index) => {
+      if (task.name) indexByName.set(task.name, index);
+    });
+    const progress: AgentProgressSnapshot[] = tasks.map((task, taskIndex) => ({
+      agent: task.agent,
+      ...(task.name ? { name: task.name } : {}),
+      correlationId: `preview-${taskIndex + 1}`,
+      taskIndex,
+      dependencies: extractDependencies(task.prompt, taskNames)
+        .map((name) => indexByName.get(name))
+        .filter((dependency): dependency is number => dependency !== undefined),
+      status: "pending",
+    }));
+    return dynamicComponent((w) => [
+      qLine(theme, glyph, "teammate", rest),
+      ...buildProgressTree(progress, quietPalette(theme)).map((row) => row.text),
+    ].map((line) => truncateToWidth(line, Math.max(1, w), "…")));
   }
   const agent = (args.agent as string | undefined) ?? "general";
   const name = args.name as string | undefined;
@@ -633,29 +686,39 @@ function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Them
   const details = result.details;
   const isError = (result as { isError?: boolean }).isError === true;
 
-  // Terminal results: one line, ✓/✗, done/failed counts + tokens or first error.
   if (details && details.results.length > 0) {
     const results = details.results;
     const ok = results.filter((r) => r.exitCode === 0).length;
     const total = results.length;
     const failed = total - ok;
     const totalTokens = results.reduce((sum, r) => sum + r.usage.inputTokens + r.usage.outputTokens, 0);
-    if (failed > 0 || isError) {
-      const firstFailed = results.find((r) => r.exitCode !== 0);
-      const err = firstFailed ? quietFirstError(firstFailed) : "failed";
-      const rest = total === 1
-        ? `${firstFailed?.agent ?? "agent"} failed · ${err}`
-        : `${failed}/${total} failed · ${err}`;
-      const glyph = theme.fg("error", quietStatusMark("failure"));
-      return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
-    }
-    const tokens = totalTokens > 0 ? ` · ${formatTokens(totalTokens)} tokens` : "";
-    const rest = total === 1 ? `${results[0].agent} done${tokens}` : `${ok}/${total} done${tokens}`;
-    const glyph = theme.fg("success", quietStatusMark("success"));
-    return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
+    const firstFailed = results.find((r) => r.exitCode !== 0);
+    const hasFailure = failed > 0 || isError;
+    const rest = hasFailure
+      ? `${failed || 1}/${total} failed · ${firstFailed ? quietFirstError(firstFailed) : "failed"}`
+      : `${ok}/${total} done${totalTokens > 0 ? ` · ${formatTokens(totalTokens)} tokens` : ""}`;
+    const glyph = theme.fg(hasFailure ? "error" : "success", quietStatusMark(hasFailure ? "failure" : "success"));
+
+    return dynamicComponent((w) => {
+      const lines = [qLine(theme, glyph, "teammate", rest)];
+      if (details.progress?.length) {
+        appendQuietAgentTree(lines, details.progress, details.childCalls ?? [], theme);
+      } else {
+        results.forEach((entry, index) => {
+          const icon = entry.exitCode === 0
+            ? theme.fg("success", quietStatusMark("success"))
+            : theme.fg("error", quietStatusMark("failure"));
+          const meta = statusMeta([
+            formatDuration(entry.durationMs),
+            `${formatTokens(entry.usage.inputTokens + entry.usage.outputTokens)} tokens`,
+          ], theme);
+          lines.push(`${theme.fg("dim", index === results.length - 1 ? "└" : "├")} ${icon} ${theme.bold(entry.agent)}${meta ? ` · ${meta}` : ""}`);
+        });
+      }
+      return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
+    });
   }
 
-  // Streaming: one aggregate line — no tree, no child subtree, no stream tail.
   const entries = details?.progress ?? [];
   const childCalls = details?.childCalls ?? [];
   const running = entries.filter((e) => e.status === "running" || e.status === "retrying").length
@@ -677,16 +740,13 @@ function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Them
         : `${completed}/${entries.length} done`;
 
   return dynamicComponent((w) => {
-    const focus = entries.length > 0
-      ? entries.find((e) => e.taskIndex === focusTaskIndex(entries)) ?? entries[0]
-      : undefined;
-    const parts = [stateText];
-    if (focus && w >= 20) {
-      parts.push(`@${focus.name ?? focus.agent}`);
-      const activeTool = focus.recentTools?.find((t) => t.status === "running");
-      if (activeTool) parts.push(`using ${activeTool.name}`);
-      else if (focus.lastMessage) parts.push("streaming");
+    const lines = [qLine(theme, glyph, "teammate", stateText)];
+    appendQuietAgentTree(lines, entries, childCalls, theme);
+    const focus = entries.find((entry) => entry.taskIndex === focusTaskIndex(entries));
+    const activeTool = focus?.recentTools?.find((tool) => tool.status === "running");
+    if (focus && activeTool) {
+      lines.push(`${theme.fg("dim", "»")} ${theme.fg("accent", String(focus.taskIndex + 1))} ${theme.fg("warning", "■")} using ${activeTool.name}`);
     }
-    return [truncateToWidth(qLine(theme, glyph, "teammate", parts.join(" · ")), Math.max(1, w), "…")];
+    return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
   });
 }
