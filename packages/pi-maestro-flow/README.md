@@ -55,7 +55,7 @@ After installation:
 | Command | Description |
 |---------|-------------|
 | `/permissions` | Inspect and manage permission rules; `/permissions yolo` enables bypass mode |
-| `/plan`, `Alt+P` | Enter durable Plan mode |
+| `/plan`, `Alt+Shift+P` | Enter durable Plan mode |
 | `/plan-model` | Select or disable a dedicated Plan model |
 | `/goal` | Goal lifecycle: `/goal stop`, `/goal resume`, `/goal clear` |
 | `/maestro-session` | Canonical Maestro Session management |
@@ -250,7 +250,7 @@ approval histories and transaction locks. On upgrade, the legacy workspace-level
 
 The full-screen editor supports line numbers, current-line highlighting,
 multiline cursor editing, `Ctrl+S` save, `Ctrl+Enter` confirm and `Esc` cancel.
-`/plan` and `Alt+P` remain available as human-facing aliases.
+`/plan` and `Alt+Shift+P` remain available as human-facing aliases.
 
 Plan mode can use a dedicated model while Act mode keeps the session model. Set
 `plan.model` to a configured `provider/model` reference in the user, project, or local
@@ -282,11 +282,11 @@ default -> acceptEdits -> dontAsk -> bypassPermissions -> default
 
 Pi uses `Shift+Tab` for effort/thinking-level cycling by default, and that action is a
 reserved host binding. During `npm install`, Maestro Flow creates or merges
-`~/.pi/agent/keybindings.json` so the original effort shortcut moves to `Shift+E`:
+`~/.pi/agent/keybindings.json` so the original effort shortcut moves to `Ctrl+Shift+E`:
 
 ```json
 {
-  "app.thinking.cycle": "shift+e"
+  "app.thinking.cycle": "ctrl+shift+e"
 }
 ```
 
@@ -294,7 +294,7 @@ The installer preserves all other shortcuts. If the existing file is invalid JSO
 is left unchanged and npm prints a warning. Run `/reload` after installation when Pi is
 already open. Pi then releases `Shift+Tab`, allowing the extension shortcut to handle
 approval-mode cycling. Plan is not part of this carousel; enter durable Plan mode
-through `/plan`, `Alt+P`, or the Plan tools exposed to the LLM. The approval values
+through `/plan`, `Alt+Shift+P`, or the Plan tools exposed to the LLM. The approval values
 control the permission engine and are also forwarded as `permission_mode` to
 Codex-style hooks. Permissions are application-level gates, not an operating-system
 sandbox.
