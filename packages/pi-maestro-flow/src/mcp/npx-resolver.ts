@@ -4,13 +4,17 @@ import { join, dirname, extname, resolve, sep } from "node:path";
 import { getAgentPath } from "./agent-dir.ts";
 import { spawn, spawnSync } from "node:child_process";
 
-const CACHE_VERSION = 1;
+// v2: cache keys are canonical (packageSpec/binName) instead of raw invocation
+// args, and entries carry packageDir so reuse can revalidate the on-disk
+// version. v1 entries are discarded on load.
+const CACHE_VERSION = 2;
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
 
 interface NpxCacheEntry {
   resolvedBin: string;
   resolvedAt: number;
   packageVersion?: string;
+  packageDir?: string;
   isJs: boolean;
 }
 
@@ -43,11 +47,27 @@ export async function resolveNpxBinary(
 
   if (!parsed) return null;
 
-  const cacheKey = JSON.stringify([command, ...args]);
+  // Without semver we cannot prove a cached install satisfies a range or tag
+  // ("^1.2.3", "latest", ...). Fail safe: let npx/npm itself resolve those.
+  const exactVersion = parseExactVersion(parsed.packageSpec);
+  if (!exactVersion) return null;
+
+  const cacheDir = getNpmCacheDir();
+  if (!cacheDir) return null;
+
+  // Binary identity is the resolved package spec plus selected bin, not the
+  // runtime argument vector: equivalent invocations with different server
+  // flags share one resolution while each keeps its own extraArgs.
+  const cacheKey = canonicalCacheKey(cacheDir, parsed.packageSpec, parsed.binName);
   const cache = loadCache();
   const cached = cache?.entries?.[cacheKey];
 
-  if (cached && Date.now() - cached.resolvedAt < CACHE_TTL_MS && existsSync(cached.resolvedBin)) {
+  if (
+    cached
+    && Date.now() - cached.resolvedAt < CACHE_TTL_MS
+    && existsSync(cached.resolvedBin)
+    && persistentEntryMatches(cached, exactVersion)
+  ) {
     return { binPath: cached.resolvedBin, extraArgs: parsed.extraArgs, isJs: cached.isJs };
   }
 
@@ -57,8 +77,18 @@ export async function resolveNpxBinary(
     return { binPath: resolved.resolvedBin, extraArgs: parsed.extraArgs, isJs: resolved.isJs };
   }
 
-  // Slow path: force npx cache population
-  await forceNpxCache(parsed.packageSpec);
+  // Slow path: force npx cache population. Concurrent misses for the same
+  // spec share one in-flight population; waiters re-resolve from disk after.
+  const flightKey = `${cacheDir}\u0000${parsed.packageSpec}`;
+  let flight = inflightPopulations.get(flightKey);
+  if (!flight) {
+    flight = cachePopulator(parsed.packageSpec)
+      .catch(() => undefined)
+      .finally(() => inflightPopulations.delete(flightKey));
+    inflightPopulations.set(flightKey, flight);
+  }
+  await flight;
+
   const resolvedAfterInstall = resolveFromNpmCache(parsed.packageSpec, parsed.binName);
   if (resolvedAfterInstall) {
     saveCacheEntry(cacheKey, resolvedAfterInstall);
@@ -66,6 +96,17 @@ export async function resolveNpxBinary(
   }
 
   return null;
+}
+
+const inflightPopulations = new Map<string, Promise<void>>();
+
+let cachePopulator: (packageSpec: string) => Promise<void> = forceNpxCache;
+
+/** Test only: swap the slow-path cache populator so tests never spawn npm. */
+export function setNpxCachePopulatorForTesting(
+  populator: ((packageSpec: string) => Promise<void>) | null
+): void {
+  cachePopulator = populator ?? forceNpxCache;
 }
 
 function parseNpxArgs(args: string[]): ParsedInvocation | null {
@@ -163,10 +204,13 @@ function resolveFromNpmCache(packageSpec: string, binName?: string): NpxCacheEnt
   const cacheDir = getNpmCacheDir();
   if (!cacheDir) return null;
 
+  const exactVersion = parseExactVersion(packageSpec);
+  if (!exactVersion) return null;
+
   const packageName = extractPackageName(packageSpec);
   if (!packageName) return null;
 
-  const packageDir = findCachedPackageDir(cacheDir, packageName);
+  const packageDir = findCachedPackageDir(cacheDir, packageName, exactVersion);
   if (!packageDir) return null;
 
   const packageJsonPath = join(packageDir, "package.json");
@@ -224,8 +268,50 @@ function resolveFromNpmCache(packageSpec: string, binName?: string): NpxCacheEnt
     resolvedBin,
     resolvedAt: Date.now(),
     packageVersion: pkg?.version,
+    packageDir,
     isJs,
   };
+}
+
+const EXACT_VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+
+function parseExactVersion(spec: string): string | null {
+  const packageName = extractPackageName(spec);
+  if (!packageName) return null;
+  const rest = spec.slice(packageName.length);
+  if (!rest.startsWith("@")) return null;
+  const version = rest.slice(1);
+  const normalized = version.startsWith("v") ? version.slice(1) : version;
+  return EXACT_VERSION_PATTERN.test(normalized) ? normalized : null;
+}
+
+function versionsEqual(a: string, b: string): boolean {
+  const normalize = (value: string) => (value.startsWith("v") ? value.slice(1) : value);
+  return normalize(a) === normalize(b);
+}
+
+function readPackageVersion(packageDir: string): string | null {
+  try {
+    const pkg = JSON.parse(readFileSync(join(packageDir, "package.json"), "utf-8")) as { version?: unknown };
+    return typeof pkg.version === "string" ? pkg.version : null;
+  } catch {
+    return null;
+  }
+}
+
+// A persistent entry is reusable only while the install it points at still
+// matches the requested exact version: npm may have replaced the _npx tree.
+function persistentEntryMatches(entry: NpxCacheEntry, exactVersion: string): boolean {
+  if (!entry.packageDir || !entry.packageVersion) return false;
+  if (!versionsEqual(entry.packageVersion, exactVersion)) return false;
+  const onDisk = readPackageVersion(entry.packageDir);
+  return onDisk !== null && versionsEqual(onDisk, exactVersion);
+}
+
+function canonicalCacheKey(cacheDir: string, packageSpec: string, binName: string | undefined): string {
+  const packageName = extractPackageName(packageSpec) ?? packageSpec;
+  const effectiveBin = binName ?? defaultBinName(packageName);
+  return JSON.stringify([cacheDir, packageSpec, effectiveBin]);
 }
 
 const FORCE_CACHE_TIMEOUT_MS = 30_000;
@@ -291,7 +377,7 @@ function defaultBinName(packageName: string): string {
   return packageName;
 }
 
-function findCachedPackageDir(cacheDir: string, packageName: string): string | null {
+function findCachedPackageDir(cacheDir: string, packageName: string, exactVersion: string): string | null {
   const npxDir = join(cacheDir, "_npx");
   if (!existsSync(npxDir)) return null;
 
@@ -310,7 +396,11 @@ function findCachedPackageDir(cacheDir: string, packageName: string): string | n
 
   for (const entry of candidates) {
     const pkgDir = join(npxDir, entry.name, "node_modules", ...packagePathParts);
-    if (existsSync(join(pkgDir, "package.json"))) {
+    if (!existsSync(join(pkgDir, "package.json"))) continue;
+    // The newest install is not necessarily the requested one: accept only a
+    // directory whose version matches the exact spec.
+    const version = readPackageVersion(pkgDir);
+    if (version !== null && versionsEqual(version, exactVersion)) {
       return pkgDir;
     }
   }
@@ -345,26 +435,29 @@ function detectJsBinary(binPath: string): boolean {
   }
 }
 
-let npmCacheDirCached: string | null | undefined;
+let npmCacheDirCached: { dir: string | null; envSource: string | undefined } | undefined;
 
 function getNpmCacheDir(): string | null {
-  if (npmCacheDirCached !== undefined) return npmCacheDirCached;
-  if (process.env.NPM_CONFIG_CACHE) {
-    npmCacheDirCached = process.env.NPM_CONFIG_CACHE;
-    return npmCacheDirCached;
+  const envSource = process.env.NPM_CONFIG_CACHE;
+  if (npmCacheDirCached && npmCacheDirCached.envSource === envSource) {
+    return npmCacheDirCached.dir;
+  }
+  if (envSource) {
+    npmCacheDirCached = { dir: envSource, envSource };
+    return envSource;
   }
   try {
     const result = spawnSync("npm", ["config", "get", "cache"], { encoding: "utf-8" });
     if (result.status === 0) {
       const path = String(result.stdout).trim();
-      npmCacheDirCached = path || null;
-      return npmCacheDirCached;
+      npmCacheDirCached = { dir: path || null, envSource };
+      return npmCacheDirCached.dir;
     }
   } catch {
-    npmCacheDirCached = null;
+    npmCacheDirCached = { dir: null, envSource };
     return null;
   }
-  npmCacheDirCached = null;
+  npmCacheDirCached = { dir: null, envSource };
   return null;
 }
 

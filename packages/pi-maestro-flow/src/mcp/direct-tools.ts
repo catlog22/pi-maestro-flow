@@ -285,7 +285,9 @@ export function createDirectToolExecutor(
 
     if (!state && initPromise) {
       try {
-        state = await initPromise;
+        const resolved = await initPromise;
+        const currentState = getState();
+        state = currentState ?? (getInitPromise() === initPromise ? resolved : null);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         return {

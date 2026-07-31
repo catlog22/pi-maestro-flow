@@ -41,6 +41,17 @@ interface ServerConnection {
   status: "connected" | "closed" | "needs-auth";
 }
 
+/**
+ * A manager-owned single-flight startup reservation. The startup is driven by
+ * a lifecycle controller owned by the manager (not by the first caller's
+ * signal), so one caller aborting its wait never cancels the shared startup.
+ * `close()` aborts the controller to fence the pending startup.
+ */
+interface PendingConnect {
+  promise: Promise<ServerConnection>;
+  controller: AbortController;
+}
+
 type UiStreamListener = (serverName: string, notification: ServerStreamResultPatchNotification["params"]) => void;
 
 async function closeResource(
@@ -58,7 +69,7 @@ async function closeResource(
 
 export class McpServerManager {
   private connections = new Map<string, ServerConnection>();
-  private connectPromises = new Map<string, Promise<ServerConnection>>();
+  private connectPromises = new Map<string, PendingConnect>();
   private uiStreamListeners = new Map<string, UiStreamListener>();
   private samplingConfig: ServerSamplingConfig | undefined;
   private elicitationConfig: ServerElicitationConfig | undefined;
@@ -110,9 +121,12 @@ export class McpServerManager {
 
   async connect(name: string, definition: ServerDefinition, signal?: AbortSignal): Promise<ServerConnection> {
     throwIfAborted(signal);
-    // Dedupe concurrent connection attempts
-    if (this.connectPromises.has(name)) {
-      return abortable(this.connectPromises.get(name)!, signal);
+    // Dedupe concurrent connection attempts. Every caller waits on the shared
+    // startup through its own signal, so one caller aborting never cancels the
+    // manager-owned startup for the others.
+    const pending = this.connectPromises.get(name);
+    if (pending) {
+      return abortable(pending.promise, signal);
     }
 
     // Reuse existing connection if healthy
@@ -122,19 +136,36 @@ export class McpServerManager {
       return existing;
     }
 
-    const promise = this.createConnection(name, definition, signal);
-    this.connectPromises.set(name, promise);
-
-    try {
-      const connection = await promise;
-      this.connections.set(name, connection);
-      return connection;
-    } finally {
-      this.connectPromises.delete(name);
-    }
+    // The startup is owned by a manager lifecycle controller, not by the first
+    // caller's signal. close() aborts this controller to fence the startup.
+    const controller = new AbortController();
+    const startup = this.createConnection(name, definition, controller.signal).then(
+      (connection) => {
+        if (this.connectPromises.get(name)?.controller !== controller) {
+          // Fenced by close(): reclaim the late resource and fail waiters rather
+          // than inserting into or overwriting a newer generation's registry.
+          void closeResource(connection.client, `${name} client`);
+          void closeResource(connection.transport, `${name} transport`);
+          throw new Error(`Server "${name}" was closed during startup.`);
+        }
+        this.connections.set(name, connection);
+        this.connectPromises.delete(name);
+        return connection;
+      },
+      (error) => {
+        if (this.connectPromises.get(name)?.controller === controller) {
+          this.connectPromises.delete(name);
+        }
+        throw error;
+      },
+    );
+    // Prevent an unhandled rejection when the startup is fenced with no waiters.
+    startup.catch(() => {});
+    this.connectPromises.set(name, { promise: startup, controller });
+    return abortable(startup, signal);
   }
 
-  private async createConnection(
+  protected async createConnection(
     name: string,
     definition: ServerDefinition,
     signal?: AbortSignal,
@@ -434,21 +465,33 @@ export class McpServerManager {
   }
 
   async close(name: string): Promise<void> {
+    // Generation-owned shutdown order: fence the visible connection first,
+    // then cancel/settle pending startup and reclaim both generations. A
+    // concurrent connect() must never reuse a connection close() already owns.
     const connection = this.connections.get(name);
-    if (!connection) return;
+    if (connection) {
+      connection.status = "closed";
+      this.connections.delete(name);
+      this.acceptedUrlElicitations.delete(name);
+    }
 
-    // Delete from map BEFORE async cleanup to prevent a race where a
-    // concurrent connect() creates a new connection that our deferred
-    // delete() would then remove, orphaning the new server process.
-    connection.status = "closed";
-    this.connections.delete(name);
-    this.acceptedUrlElicitations.delete(name);
+    const pending = this.connectPromises.get(name);
+    if (pending) {
+      // Fence: abort the manager-owned startup and drop the reservation so its
+      // completion can no longer insert into or overwrite the registry.
+      pending.controller.abort();
+      this.connectPromises.delete(name);
+      // Cancel/settle: wait for the fenced startup to reclaim its own resource.
+      await pending.promise.catch(() => {});
+    }
+
+    if (!connection) return;
     await closeResource(connection.client, `${name} client`);
     await closeResource(connection.transport, `${name} transport`);
   }
 
   async closeAll(): Promise<void> {
-    const names = [...this.connections.keys()];
+    const names = [...new Set([...this.connections.keys(), ...this.connectPromises.keys()])];
     await Promise.all(names.map(name => this.close(name)));
   }
 

@@ -47,6 +47,18 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     }
   }
 
+  async function awaitInitializedState(): Promise<McpExtensionState | null> {
+    if (state) return state;
+    const promise = initPromise;
+    if (!promise) return null;
+    const generation = lifecycleGeneration;
+    const resolved = await promise;
+    if (generation !== lifecycleGeneration) return state;
+    if (initPromise !== promise && state !== resolved) return state;
+    state ??= resolved;
+    return state;
+  }
+
   const earlyConfigPath = getConfigPathFromArgv();
   const earlyConfig = loadMcpConfig(earlyConfigPath);
   const earlyCache = loadMetadataCache();
@@ -163,7 +175,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       if (!state && initPromise) {
         try {
-          state = await initPromise;
+          state = await awaitInitializedState();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (ctx.hasUI) ctx.ui.notify(`MCP initialization failed: ${message}`, "error");
@@ -257,7 +269,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
 
       if (!state && initPromise) {
         try {
-          state = await initPromise;
+          state = await awaitInitializedState();
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (ctx.hasUI) ctx.ui.notify(`MCP initialization failed: ${message}`, "error");
@@ -327,7 +339,7 @@ export default function mcpAdapter(pi: ExtensionAPI) {
 
         if (!state && initPromise) {
           try {
-            state = await initPromise;
+            state = await awaitInitializedState();
           } catch (error) {
             const message = error instanceof Error ? error.message : String(error);
             return {
