@@ -595,6 +595,18 @@ function qLine(theme: Theme, markedGlyph: string, name: string, rest: string): s
   return `  ${markedGlyph} ${parts.join(" ")}`;
 }
 
+export function renderQuietTeammateAux(
+  name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started",
+  rest: string,
+  status: "running" | "success" | "failure",
+  theme: Theme,
+): Component | undefined {
+  if (!isQuietMode()) return undefined;
+  const tone = status === "failure" ? "error" : status === "success" ? "success" : "warning";
+  const glyph = theme.fg(tone, quietStatusMark(status));
+  return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, name, rest), Math.max(1, w), "…")]);
+}
+
 function quietFirstError(r: SingleResult): string {
   const text = r.messages[r.messages.length - 1]?.content ?? "";
   const line = (text.split("\n").find((l) => l.trim()) ?? "").trim();
@@ -656,25 +668,7 @@ function renderQuietTeammateCall(args: Record<string, unknown>, theme: Theme): C
   if (tasks?.length) {
     const topo = quietTopoLabel(tasks);
     const rest = `${tasks.length} agents${topo ? ` ${topo}` : ""}`;
-    const taskNames = new Set(tasks.filter((task) => task.name).map((task) => task.name!));
-    const indexByName = new Map<string, number>();
-    tasks.forEach((task, index) => {
-      if (task.name) indexByName.set(task.name, index);
-    });
-    const progress: AgentProgressSnapshot[] = tasks.map((task, taskIndex) => ({
-      agent: task.agent,
-      ...(task.name ? { name: task.name } : {}),
-      correlationId: `preview-${taskIndex + 1}`,
-      taskIndex,
-      dependencies: extractDependencies(task.prompt, taskNames)
-        .map((name) => indexByName.get(name))
-        .filter((dependency): dependency is number => dependency !== undefined),
-      status: "pending",
-    }));
-    return dynamicComponent((w) => [
-      qLine(theme, glyph, "teammate", rest),
-      ...buildProgressTree(progress, quietPalette(theme)).map((row) => row.text),
-    ].map((line) => truncateToWidth(line, Math.max(1, w), "…")));
+    return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
   }
   const agent = (args.agent as string | undefined) ?? "general";
   const name = args.name as string | undefined;

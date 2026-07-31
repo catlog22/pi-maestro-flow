@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { afterEach } from "node:test";
 import { isQuietMode, setQuietMode } from "../src/quiet-state.ts";
-import { renderTeammateCall, renderTeammateResult } from "../src/tui/render.ts";
+import { renderQuietTeammateAux, renderTeammateCall, renderTeammateResult } from "../src/tui/render.ts";
 import type { SingleResult } from "../src/shared/types.ts";
 
 // Identity theme strips color so assertions read the plain text the quiet
@@ -39,6 +39,26 @@ test("quiet flag mirror flips with setQuietMode", () => {
   assert.equal(isQuietMode(), false);
 });
 
+test("quiet auxiliary teammate surfaces use lifecycle rows without message bodies", () => {
+  setQuietMode(true);
+  const cases = [
+    ["teammate-started", "@parent spawned @child", "success"],
+    ["teammate-send", "@child · follow_up", "running"],
+    ["teammate-wait", "completed", "success"],
+    ["teammate-watch", "inspected", "success"],
+  ] as const;
+
+  for (const [name, rest, status] of cases) {
+    const rendered = renderQuietTeammateAux(name, rest, status, theme as never)?.render(100);
+    assert.equal(rendered?.length, 1);
+    assert.match(rendered?.[0] ?? "", new RegExp(name));
+    assert.ok((rendered?.[0] ?? "").includes(rest));
+  }
+
+  setQuietMode(false);
+  assert.equal(renderQuietTeammateAux("teammate-send", "SECRET_MESSAGE", "running", theme as never), undefined);
+});
+
 test("quiet single-task call is one line without key hints or tree glyphs", () => {
   setQuietMode(true);
   const rendered = renderTeammateCall({ agent: "general", name: "ping", prompt: "reply pong" }, theme as never, { expanded: true }).render(80);
@@ -49,7 +69,7 @@ test("quiet single-task call is one line without key hints or tree glyphs", () =
   assert.doesNotMatch(rendered[0], /[├└│]/);
 });
 
-test("quiet multi-task chain call keeps the named dependency tree without prompts or key hints", () => {
+test("quiet multi-task call leaves the named tree to the result component", () => {
   setQuietMode(true);
   const rendered = renderTeammateCall({
     tasks: [
@@ -58,13 +78,10 @@ test("quiet multi-task chain call keeps the named dependency tree without prompt
     ],
     background: false,
   }, theme as never, { expanded: true }).render(80);
-  assert.equal(rendered.length, 3);
+  assert.equal(rendered.length, 1);
   assert.match(rendered[0], /2 agents chain/);
-  assert.match(rendered[1], /@pkgs/);
-  assert.match(rendered[2], /@summary/);
-  assert.match(rendered[2], /← result #1/);
-  assert.doesNotMatch(rendered.join("\n"), /inspect packages|summarize/);
-  assert.doesNotMatch(rendered.join("\n"), /launched|Alt\+R/);
+  assert.doesNotMatch(rendered[0], /@pkgs|@summary|inspect packages|summarize/);
+  assert.doesNotMatch(rendered[0], /launched|Alt\+R/);
 });
 
 test("quiet streaming progress keeps agent and child trees but hides stream content", () => {
@@ -187,6 +204,13 @@ test("dot symbol mode applies to teammate running, success, and failure rows", (
     details: { mode: "single", results: [failedResult()] },
   }, { expanded: false }, theme as never).render(80);
   assert.match(failure[0], /^\s*!\s+teammate/);
+});
+
+test("started, send, wait, and watch are wired to the shared quiet renderer", () => {
+  const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  for (const name of ["teammate-started", "teammate-send", "teammate-wait", "teammate-watch"]) {
+    assert.match(source, new RegExp(`renderQuietTeammateAux\\(\\"${name}\\"`));
+  }
 });
 
 // Uniqueness guard (not a behaviour test): the ownership event is the single

@@ -63,6 +63,7 @@ import type {
   NormalizedTask,
 } from "../runs/execution.ts";
 import {
+  renderQuietTeammateAux,
   renderTeammateCall,
   renderTeammateResult,
 } from "../tui/render.ts";
@@ -1351,6 +1352,16 @@ export default function registerTeammateExtension(
   pi: ExtensionAPI,
   runtimeOptions: TeammateRuntimeOptions = {},
 ): void {
+  pi.registerMessageRenderer(
+    "teammate-started",
+    (message, _options, theme) => {
+      const content = typeof message.content === "string"
+        ? message.content.replace(/^●\s*/, "")
+        : "agent spawned";
+      return renderQuietTeammateAux("teammate-started", content, "success", theme as ExtensionContext["ui"]["theme"]);
+    },
+  );
+
   pi.registerMessageRenderer<Details | { result?: SingleResult }>(
     "teammate-complete",
     (message, options, theme) => {
@@ -2617,6 +2628,16 @@ export default function registerTeammateExtension(
         details: { delivered: true },
       };
     },
+
+    renderCall(args, theme) {
+      const mode = typeof args.mode === "string" ? args.mode : "follow_up";
+      return renderQuietTeammateAux("teammate-send", `@${String(args.to ?? "?")} · ${mode}`, "running", theme) as never;
+    },
+
+    renderResult(result, _options, theme) {
+      const failed = (result as { isError?: boolean }).isError === true || result.details?.delivered !== true;
+      return renderQuietTeammateAux("teammate-send", failed ? "delivery failed" : "delivered", failed ? "failure" : "success", theme) as never;
+    },
   };
 
   // =========================================================================
@@ -2695,6 +2716,16 @@ export default function registerTeammateExtension(
         details: { output },
       };
     },
+
+    renderCall(args, theme) {
+      const lines = typeof args.lines === "number" ? ` · ${args.lines} lines` : "";
+      return renderQuietTeammateAux("teammate-watch", `@${String(args.name ?? "?")}${lines}`, "running", theme) as never;
+    },
+
+    renderResult(result, _options, theme) {
+      const failed = (result as { isError?: boolean }).isError === true;
+      return renderQuietTeammateAux("teammate-watch", failed ? "inspection failed" : "inspected", failed ? "failure" : "success", theme) as never;
+    },
   };
 
   const waitTool: ToolDefinition<typeof TeammateWaitParams, { status: TeammateWaitStatus; output: string[] }> = {
@@ -2716,6 +2747,17 @@ export default function registerTeammateExtension(
         isError: result.status === "not-found" || result.status === "stalled" || result.status === "timeout" || result.status === "aborted",
         details: { status: result.status, output: result.output },
       };
+    },
+
+    renderCall(args, theme) {
+      const target = args.name ? `@${String(args.name)}` : `${String(args.waitMs ?? 0)}ms`;
+      return renderQuietTeammateAux("teammate-wait", target, "running", theme) as never;
+    },
+
+    renderResult(result, _options, theme) {
+      const status = result.details?.status ?? "timeout";
+      const failed = (result as { isError?: boolean }).isError === true;
+      return renderQuietTeammateAux("teammate-wait", status, failed ? "failure" : "success", theme) as never;
     },
   };
 
