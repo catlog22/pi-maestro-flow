@@ -1,6 +1,6 @@
 {
   "name": "pi-cockpit",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Responsive Maestro operations sidebar, fallback status widgets, and footer for Pi.",
   "type": "module",
   "keywords": [
