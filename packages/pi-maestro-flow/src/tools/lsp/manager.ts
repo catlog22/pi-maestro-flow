@@ -32,7 +32,7 @@ export class LspManager implements LspManagerLike {
     const errors: string[] = [];
     for (const config of configs) {
       try {
-        return await this.#getOrCreate(config, await findProjectRoot(absolute, cwd, config.rootMarkers), signal, timeoutMs, lifecycleSignal);
+        return await abortable(this.#getOrCreate(config, await findProjectRoot(absolute, cwd, config.rootMarkers), timeoutMs, lifecycleSignal), signal);
       } catch (error) {
         if (error instanceof Error && error.name === "AbortError") throw error;
         errors.push(`${config.name}: ${error instanceof Error ? error.message : String(error)}`);
@@ -48,7 +48,7 @@ export class LspManager implements LspManagerLike {
     const configured = await loadLspConfig(cwd);
     const relevant = (await Promise.all(configured.map(async (config) => ({ config, root: await workspaceRootForServer(config, cwd) }))))
       .filter((item): item is { config: LspServerConfig; root: string } => item.root !== undefined);
-    const settled = await Promise.allSettled(relevant.map(({ config, root }) => this.#getOrCreate(config, root, signal, timeoutMs, lifecycleSignal)));
+    const settled = await Promise.allSettled(relevant.map(({ config, root }) => abortable(this.#getOrCreate(config, root, timeoutMs, lifecycleSignal), signal)));
     for (let index = 0; index < settled.length; index += 1) {
       const item = settled[index]!;
       if (item.status === "fulfilled") clients.push(item.value);
@@ -125,39 +125,41 @@ export class LspManager implements LspManagerLike {
   #getOrCreate(
     config: LspServerConfig,
     root: string,
-    signal?: AbortSignal,
     timeoutMs = 20_000,
     lifecycleSignal = this.#lifecycle.signal,
   ): Promise<LspClientLike> {
+    if (lifecycleSignal.aborted) return Promise.reject(lifecycleAbortError());
     const key = `${config.name}\0${root}`;
     const existing = this.#clients.get(key);
     if (existing) return existing;
-    const combined = combineSignals(signal, lifecycleSignal);
+    // Startup is owned by the manager lifecycle signal only; individual callers
+    // abort their own wait via abortable() without cancelling the shared startup.
     let created: Promise<LspClientLike>;
-    created = this.clientFactory(config, root, combined.signal, timeoutMs, (error) => {
+    created = this.clientFactory(config, root, lifecycleSignal, timeoutMs, (error) => {
       if (this.#clients.get(key) === created) {
         this.#clients.delete(key);
         if (error) this.#errors.set(key, error.message);
         else this.#errors.delete(key);
       }
-      combined.dispose();
     }).then(async (client) => {
       if (this.#clients.get(key) !== created || lifecycleSignal.aborted) {
-        combined.dispose();
         await within(client.shutdown(), 3_000);
         throw lifecycleAbortError();
       }
       this.#errors.delete(key);
-      combined.dispose();
       return client;
     }).catch((error) => {
       if (this.#clients.get(key) === created) {
-        this.#errors.set(key, error instanceof Error ? error.message : String(error));
+        if (!lifecycleSignal.aborted) {
+          this.#errors.set(key, error instanceof Error ? error.message : String(error));
+        }
         this.#clients.delete(key);
       }
-      combined.dispose();
       throw error;
     });
+    // Prevent an unhandled rejection when no caller attaches a handler (e.g. a
+    // pre-aborted caller signal makes abortable() skip the shared promise).
+    created.catch(() => {});
     this.#clients.set(key, created);
     return created;
   }
@@ -186,17 +188,40 @@ async function workspaceRootForServer(config: LspServerConfig, cwd: string): Pro
   }
 }
 
-function combineSignals(...signals: Array<AbortSignal | undefined>): { signal: AbortSignal; dispose(): void } {
-  const controller = new AbortController();
-  const abort = () => controller.abort();
-  for (const signal of signals) {
-    if (signal?.aborted) controller.abort();
-    else signal?.addEventListener("abort", abort, { once: true });
-  }
-  return {
-    signal: controller.signal,
-    dispose() { for (const signal of signals) signal?.removeEventListener("abort", abort); },
-  };
+function abortable<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(callerAbortError());
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const cleanup = () => signal.removeEventListener("abort", onAbort);
+    const onAbort = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(callerAbortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(value);
+      },
+      (error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+function callerAbortError(): Error {
+  const error = new Error("LSP startup wait aborted.");
+  error.name = "AbortError";
+  return error;
 }
 
 async function within<T>(promise: Promise<T>, timeoutMs: number): Promise<T | undefined> {

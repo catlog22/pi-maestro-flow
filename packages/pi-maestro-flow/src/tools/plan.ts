@@ -73,8 +73,8 @@ interface PlanRuntimeOptions {
 }
 
 const STATUS_KEY = "mode";
-export const PLAN_TOGGLE_KEY = "alt+p";
-export const PLAN_TOGGLE_LABEL = altKey("P");
+export const PLAN_TOGGLE_KEY = "alt+shift+p";
+export const PLAN_TOGGLE_LABEL = altKey("Shift+P");
 const PROPOSED_PLAN_PATTERN = /<proposed_plan>\s*([\s\S]*?)\s*<\/proposed_plan>/i;
 
 const PLAN_ENTER_TOOL = "plan-enter";

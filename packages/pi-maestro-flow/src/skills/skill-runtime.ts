@@ -63,12 +63,16 @@ export class SkillRuntime {
     restored?: SkillActivationMetadata,
   ): Promise<SkillActivation> {
     const ordered = composeSkillBindings(bindings);
-    await this.loader.validateContext(context);
+    // One config read per activation, shared across validation and every
+    // binding load; each activation still reads fresh from disk.
+    const configSnapshot = await this.loader.loadConfig();
+    await this.loader.validateContext(context, configSnapshot);
     const loaded = await Promise.all(
       ordered.map(async (binding) => ({
         role: binding.role,
         skill: await this.loader.load(binding, context, {
           allowModelInvocationDisabled: restored !== undefined,
+          configSnapshot,
         }),
       })),
     );

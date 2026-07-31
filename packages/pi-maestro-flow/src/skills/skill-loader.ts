@@ -12,6 +12,7 @@ import {
 import {
   loadSkillConfig,
   renderSkillConfigDefaults,
+  type LoadedSkillConfig,
   type SkillPromptBudgets,
 } from "./skill-config.ts";
 import {
@@ -71,6 +72,13 @@ export interface TodoSkillLoaderOptions {
 
 export interface TodoSkillLoadOptions {
   allowModelInvocationDisabled?: boolean;
+  /**
+   * Activation-scoped config snapshot. SkillRuntime loads the skill config
+   * once per activation and shares it across every binding load, replacing
+   * 2*(N+1) config file reads per activation with 2. Each activation still
+   * reads fresh from disk, so external edits stay visible across activations.
+   */
+  configSnapshot?: LoadedSkillConfig;
 }
 
 interface RawFileSnapshot {
@@ -148,7 +156,7 @@ export class TodoSkillLoader {
     if (!name) throw new TodoSkillLoadError("E_SKILL_NOT_FOUND", "skill name is empty");
 
     const skill = await this.findSkill(name);
-    const { config, configHash } = await loadSkillConfig(this.cwd, this.agentDir);
+    const { config, configHash } = options.configSnapshot ?? await loadSkillConfig(this.cwd, this.agentDir);
     const configuredModelInvocation = config.skills[name]?.["disable-model-invocation"];
     if ((configuredModelInvocation ?? skill.disableModelInvocation) && !options.allowModelInvocationDisabled) {
       throw new TodoSkillLoadError(
@@ -229,8 +237,16 @@ export class TodoSkillLoader {
     });
   }
 
-  async validateContext(inlineContext: string): Promise<number> {
-    const { config } = await loadSkillConfig(this.cwd, this.agentDir);
+  /** Read the merged global/project skill config once for caller sharing. */
+  loadConfig(): Promise<LoadedSkillConfig> {
+    return loadSkillConfig(this.cwd, this.agentDir);
+  }
+
+  async validateContext(
+    inlineContext: string,
+    configSnapshot?: LoadedSkillConfig,
+  ): Promise<number> {
+    const { config } = configSnapshot ?? await loadSkillConfig(this.cwd, this.agentDir);
     const totalBytes = byteLength(inlineContext);
     assertTotalBudget(totalBytes, config.limits);
     return totalBytes;

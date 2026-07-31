@@ -172,8 +172,14 @@ export function registerPlanModelSelection(
   });
 
   pi.on("before_agent_start", async (_event, ctx) => {
+    // Outside Plan mode the configured value is never used, so checking the
+    // mode first keeps ordinary Act turns from probing the settings files.
+    if (!planModeActive()) {
+      await restore(ctx);
+      return;
+    }
     const reference = configuredModel(ctx.cwd, ctx.isProjectTrusted());
-    if (!planModeActive() || !reference) {
+    if (!reference) {
       await restore(ctx);
       return;
     }

@@ -19,6 +19,7 @@ interface LspConfigFile {
 }
 
 const cache = new Map<string, LspServerConfig[]>();
+const rootCache = new Map<string, Promise<string>>();
 let cacheGeneration = 0;
 
 export async function loadLspConfig(cwd: string): Promise<LspServerConfig[]> {
@@ -47,6 +48,7 @@ export async function loadLspConfig(cwd: string): Promise<LspServerConfig[]> {
 export function clearLspConfigCache(): void {
   cacheGeneration += 1;
   cache.clear();
+  rootCache.clear();
 }
 
 export function serversForFile(servers: LspServerConfig[], file: string): LspServerConfig[] {
@@ -58,9 +60,27 @@ export function serversForFile(servers: LspServerConfig[], file: string): LspSer
   }));
 }
 
-export async function findProjectRoot(file: string, cwd: string, markers: string[]): Promise<string> {
-  const floor = path.parse(path.resolve(cwd)).root;
-  let current = path.dirname(path.resolve(file));
+export function findProjectRoot(file: string, cwd: string, markers: string[]): Promise<string> {
+  const startDir = path.dirname(path.resolve(file));
+  const resolvedCwd = path.resolve(cwd);
+  const key = `${startDir}\0${resolvedCwd}\0${markers.join("\u0001")}`;
+  const existing = rootCache.get(key);
+  if (existing) return existing;
+  // Generation-owned cache: a walk that settles after a reload/shutdown must
+  // not repopulate the fresh generation's cache, so capture the generation and
+  // only delete our own entry if it still belongs to the current one.
+  const generation = cacheGeneration;
+  const promise = resolveProjectRoot(startDir, resolvedCwd, markers).catch((error) => {
+    if (generation === cacheGeneration && rootCache.get(key) === promise) rootCache.delete(key);
+    throw error;
+  });
+  rootCache.set(key, promise);
+  return promise;
+}
+
+async function resolveProjectRoot(startDir: string, resolvedCwd: string, markers: string[]): Promise<string> {
+  const floor = path.parse(resolvedCwd).root;
+  let current = startDir;
   while (true) {
     for (const marker of markers) {
       try {
@@ -69,7 +89,7 @@ export async function findProjectRoot(file: string, cwd: string, markers: string
       } catch {}
     }
     const parent = path.dirname(current);
-    if (current === parent || current === floor) return path.resolve(cwd);
+    if (current === parent || current === floor) return resolvedCwd;
     current = parent;
   }
 }

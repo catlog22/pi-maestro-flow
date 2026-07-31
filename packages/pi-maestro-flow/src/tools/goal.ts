@@ -202,6 +202,8 @@ let activeGoal: ActiveGoal | undefined;
 let goalRegistry: ActiveGoal[] = [];
 let extensionApi: ExtensionAPI | undefined;
 let onGoalStateChanged: (() => void) | undefined;
+let goalPanelOwnedExternally = false;
+let goalDisplayContext: GoalContext | undefined;
 let baseCwd = "";
 let continuationPending: ContinuationPending | undefined;
 let goalRecovery: {
@@ -358,6 +360,19 @@ export function setWorkflowCoordinator(coordinator: WorkflowCoordinator | undefi
   workflowCoordinator = coordinator;
 }
 
+/** Cooperatively withdraw or restore Flow's below-editor Goal panel. */
+export function setGoalPanelOwnership(ownedExternally: boolean, ctx?: GoalContext): void {
+  if (ctx) goalDisplayContext = ctx;
+  goalPanelOwnedExternally = ownedExternally;
+  const displayCtx = ctx ?? goalDisplayContext;
+  if (!displayCtx) return;
+  if (ownedExternally || !activeGoal) {
+    displayCtx.ui.setWidget?.(GOAL_WIDGET_KEY, undefined, { placement: "belowEditor" });
+    return;
+  }
+  updateGoalWidget(displayCtx, activeGoal, currentGoalPhase());
+}
+
 export function reconcileWorkflowGoal(snapshot: WorkflowSnapshot, ctx: GoalContext): ActiveGoal | undefined {
   const session = snapshot.session;
   if (snapshot.canonicalClaim?.status === "invalid") {
@@ -427,6 +442,7 @@ export async function onSessionStart(
   clearContinuation();
   clearRecovery();
   baseCwd = ctx.cwd;
+  goalDisplayContext = ctx;
   goalSessionId = currentSessionId(ctx);
   if (event.reason === "new" || event.reason === "fork") {
     goalRegistry = [];
@@ -453,6 +469,7 @@ export function onSessionShutdown(ctx: GoalContext) {
   clearContinuation();
   clearRecovery();
   clearGoalDisplay(ctx);
+  goalDisplayContext = undefined;
   clearCompletionTimer();
   clearElapsedTimer();
 }
@@ -2135,6 +2152,8 @@ function showCompletionStatus(ctx: GoalContext, goal: ActiveGoal) {
 }
 
 function updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: GoalWidgetPhase): void {
+  goalDisplayContext = ctx;
+  if (goalPanelOwnedExternally) return;
   const currentGoalId = goal.id;
   ctx.ui.setWidget?.(GOAL_WIDGET_KEY, (_tui, theme) => ({
     render(width: number): string[] {
@@ -2221,6 +2240,7 @@ function toDetailEntry(goal: ActiveGoal, todoSubject: string | undefined): GoalD
 }
 
 function clearGoalDisplay(ctx: GoalContext): void {
+  goalDisplayContext = ctx;
   ctx.ui.setStatus(STATUS_KEY, undefined);
   ctx.ui.setWidget?.(GOAL_WIDGET_KEY, undefined, { placement: "belowEditor" });
 }

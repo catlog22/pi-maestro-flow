@@ -210,6 +210,15 @@ export function createSmartSearchTool(runner: SmartSearchRunner = defaultRunner)
         } as AgentToolResult<SmartSearchDetails>;
       } catch (error) {
         if (signal?.aborted || isAbortError(error)) throw abortError();
+        if (isOptionalPackageMissing(error)) {
+          if (mode === "search") return executeNativeSearch(query, params, signal);
+          if (mode === "fetch") return executeNativeFetch(query, signal);
+          throw new Error(
+            `SmartSearch mode "${mode}" requires the optional Python CLI package @konbakuyomu/smart-search, which is not installed. ` +
+            "Install it with: npm install @konbakuyomu/smart-search (requires Python 3.10+). " +
+            'Alternatively, use { native: true } for search/fetch modes.',
+          );
+        }
         throw error instanceof Error ? error : new Error(String(error));
       }
     },
@@ -411,6 +420,13 @@ function isConfigError(reason: string): boolean {
   } catch {
     return reason.includes("config_error");
   }
+}
+
+function isOptionalPackageMissing(error: unknown): boolean {
+  return error instanceof Error
+    && "code" in error
+    && (error as NodeJS.ErrnoException).code === "MODULE_NOT_FOUND"
+    && error.message.includes("@konbakuyomu/smart-search");
 }
 
 function terminateProcessTree(child: { pid?: number; kill(): boolean }): void {

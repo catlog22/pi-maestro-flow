@@ -6,8 +6,12 @@ export const SWARM_STATUS_KEY = "maestro-swarm";
 let latestProjection: TeamSwarmProjection | undefined;
 let activeOverlay: SwarmOverlay | undefined;
 
-export function registerSwarmDisplay(pi: ExtensionAPI): void {
-  const refresh = (ctx: ExtensionContext) => refreshSwarmDisplay(ctx);
+export interface SwarmDisplayOptions {
+  onProjectionChange?: (projection: TeamSwarmProjection | undefined) => void;
+}
+
+export function registerSwarmDisplay(pi: ExtensionAPI, options: SwarmDisplayOptions = {}): void {
+  const refresh = (ctx: ExtensionContext) => refreshSwarmDisplay(ctx, options.onProjectionChange);
   pi.on("session_start", (_event, ctx) => { refresh(ctx); });
   pi.on("turn_start", (_event, ctx) => { refresh(ctx); });
   pi.on("tool_execution_end", (_event, ctx) => { refresh(ctx); });
@@ -27,15 +31,20 @@ export function registerSwarmDisplay(pi: ExtensionAPI): void {
   });
   pi.on("session_shutdown", (_event, ctx) => {
     latestProjection = undefined;
+    options.onProjectionChange?.(undefined);
     activeOverlay?.dispose();
     activeOverlay = undefined;
     ctx.ui.setStatus(SWARM_STATUS_KEY, undefined);
   });
 }
 
-export function refreshSwarmDisplay(ctx: ExtensionContext): TeamSwarmProjection | undefined {
+export function refreshSwarmDisplay(
+  ctx: ExtensionContext,
+  onProjectionChange?: (projection: TeamSwarmProjection | undefined) => void,
+): TeamSwarmProjection | undefined {
   const snapshot = loadLatestTeamSwarmProjection(ctx.cwd);
   latestProjection = snapshot;
+  onProjectionChange?.(snapshot);
   if (snapshot) {
     ctx.ui.setStatus(SWARM_STATUS_KEY, formatSwarmMonitorStatus(snapshot));
     activeOverlay?.update(snapshot);
