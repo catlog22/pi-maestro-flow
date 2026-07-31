@@ -15,4 +15,5 @@ export declare function renderTeammateCall(args: Record<string, unknown>, theme:
 export declare function renderTeammateResult(result: AgentToolResult<Details>, options: {
     expanded: boolean;
 }, theme: Theme): Component;
+export declare function renderQuietTeammateAux(name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started", rest: string, status: "running" | "success" | "failure", theme: Theme): Component | undefined;
 export {};

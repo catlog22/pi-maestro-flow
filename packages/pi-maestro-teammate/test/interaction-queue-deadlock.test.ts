@@ -83,10 +83,10 @@ test("an unanswered prompt stops holding its own child indefinitely", async () =
   assert.equal(queue.pendingCount(), 0);
 });
 
-test("a request queued behind an unanswered prompt is still bounded", async () => {
-  // The terminal is a single resource, so the second prompt legitimately never
-  // opens. What must not happen is its child waiting forever for an answer that
-  // is structurally unreachable — that is the nested hang.
+test("a request queued behind an unanswered prompt opens after the front timeout", async () => {
+  // The front request times out and aborts its dialog, so the serial terminal
+  // owner is released and the next request can actually open before its own
+  // arrival timeout settles it.
   const state = makeState();
   const first = addAgent(state, "first");
   const second = addAgent(state, "second");
@@ -102,7 +102,7 @@ test("a request queued behind an unanswered prompt is still bounded", async () =
 
   assert.equal(secondReplies.length, 1, "the queued request must be answered on its child's behalf");
   assert.equal(secondReplies[0].result?.action, "cancel");
-  assert.equal(opened.count, 1, "only the front request may seize the terminal");
+  assert.equal(opened.count, 2, "the next prompt opens once the stale front owner is aborted");
   assert.equal(queue.pendingCount(), 0);
 });
 
@@ -127,6 +127,43 @@ test("killing an agent settles its queued request instead of prompting for it", 
 
   await delay(20);
   assert.equal(opened.count, 1, "a killed agent's prompt must never open");
+});
+
+test("cancelling the front owner releases the terminal for the next prompt", async () => {
+  const state = makeState();
+  const first = addAgent(state, "first");
+  const second = addAgent(state, "second");
+  const opened: string[] = [];
+  const ctx = {
+    cwd: process.cwd(),
+    hasUI: true,
+    ui: {
+      select(_title: string, _options: string[], dialog?: { signal?: AbortSignal }) {
+        const owner = opened.length === 0 ? "first" : "second";
+        opened.push(owner);
+        if (owner === "second") return Promise.resolve("Deny");
+        return new Promise<string | undefined>((resolve) => {
+          dialog?.signal?.addEventListener("abort", () => resolve(undefined), { once: true });
+        });
+      },
+    },
+  } as never;
+  const queue = createTeammateInteractionQueue(stubPi, state, 1_000);
+  const firstReplies: Reply[] = [];
+  const secondReplies: Reply[] = [];
+
+  queue.enqueue(permissionEvent(first), (msg) => firstReplies.push(msg as Reply), ctx, first);
+  await delay(10);
+  queue.enqueue(permissionEvent(second), (msg) => secondReplies.push(msg as Reply), ctx, second);
+  assert.equal(queue.cancelForAgent(first, "The teammate was terminated."), 1);
+  await delay(30);
+
+  assert.deepEqual(opened, ["first", "second"]);
+  assert.equal(firstReplies.length, 1);
+  assert.equal(firstReplies[0].result?.action, "cancel");
+  assert.equal(secondReplies.length, 1);
+  assert.equal(secondReplies[0].result?.action, "deny");
+  assert.equal(queue.pendingCount(), 0);
 });
 
 test("a settled request is never answered twice", async () => {

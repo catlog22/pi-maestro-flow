@@ -11,7 +11,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import type { Writable } from "node:stream";
 import crossSpawn from "cross-spawn";
 import { type AgentConfig } from "../agents/agents.ts";
-import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
+import type { SingleResult, Usage, AgentProgress, AgentTerminalStatus } from "../shared/types.ts";
 import { type LeaseToken } from "./session-handoff.ts";
 import { type TeammateTaskType } from "../models/model-routing.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
@@ -91,7 +91,7 @@ export interface RunTeammateOptions {
     parentSessionFile?: string;
     initialLeaseToken?: LeaseToken | ((correlationId: string) => LeaseToken | undefined);
     onChildSpawned?: (stdin: import("node:stream").Writable, sendControl: (message: Record<string, unknown>) => boolean, sessionDir?: string, correlationId?: string) => void;
-    onTurnComplete?: (result: SingleResult) => void;
+    onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
     /** @internal Test seam for child lifecycle regression coverage. */
     spawnChildProcess?: typeof crossSpawn;
     /** @internal Test seam for retry scheduling. */

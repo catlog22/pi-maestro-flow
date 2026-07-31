@@ -97,6 +97,38 @@ test("agent widget distinguishes a Pi result-ready turn from a stalled agent", (
   assert.doesNotMatch(output, /stalled/);
 });
 
+test("agent widget prefers a woken live agent over its stale completed snapshot", () => {
+  const now = Date.now();
+  const agent = {
+    agent: "general",
+    name: "sleeper",
+    correlationId: "woken-agent",
+    startedAt: now - 90_000,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now,
+    status: "running" as const,
+    depth: 0,
+    sleepMs: 60_000,
+    progress: [{
+      agent: "general",
+      name: "sleeper",
+      correlationId: "woken-agent",
+      taskIndex: 0,
+      dependencies: [],
+      status: "completed" as const,
+      lastActivityAt: now - 60_000,
+    }],
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const output = renderAgentStatusWidget([agent], 120, theme).join("\n");
+
+  assert.match(output, /1 running/);
+  assert.match(output, /■ @sleeper/);
+  assert.doesNotMatch(output, /completed/);
+});
+
 test("agent widget freezes duration while an agent is sleeping", () => {
   const now = Date.now();
   const agent = {

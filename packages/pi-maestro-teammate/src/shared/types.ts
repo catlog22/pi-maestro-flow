@@ -13,6 +13,8 @@ export interface Usage {
 
 export interface SingleResult {
   agent: string;
+  /** Optional dispatch name shown in compact completion rows. */
+  name?: string;
   task: string;
   exitCode: number;
   messages: Array<{ role: string; content: string }>;
@@ -232,6 +234,12 @@ export interface TeammateState {
    */
   resultReadyNotified?: Set<string>;
   /**
+   * Teammate proxy requests reserved before the handler's first asynchronous
+   * boundary. Cancellation removes the reservation so the resumed request
+   * cannot register or spawn an agent after its caller has stopped waiting.
+   */
+  pendingProxyDispatchRequests?: Set<string>;
+  /**
    * Maps a child's proxy requestId to the agent this process created for it, so
    * that a child which stops waiting can have that agent torn down instead of
    * leaving it running with no consumer.
@@ -239,11 +247,13 @@ export interface TeammateState {
   proxyDispatchByRequest?: Map<string, string>;
 }
 
+export type AgentTerminalStatus = "completed" | "failed" | "terminated";
+
 export interface SettledAgentRecord {
   correlationId: string;
   agent: string;
   name?: string;
-  status: "completed" | "failed" | "terminated";
+  status: AgentTerminalStatus;
   settledAt: number;
   lastResult?: string;
   requestedModel?: string;

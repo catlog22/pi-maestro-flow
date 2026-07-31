@@ -14,6 +14,7 @@ afterEach(() => setQuietMode(false, "check"));
 function okResult(): SingleResult {
   return {
     agent: "scout",
+    name: "inspection",
     task: "inspect",
     exitCode: 0,
     messages: [{ role: "assistant", content: "complete output" }],
@@ -108,15 +109,16 @@ test("quiet streaming progress keeps agent and child trees but hides stream cont
         parentCorrelationId: "focus-agent",
         parentName: "focus",
         status: "running",
+        lastMessage: "CHILD_SECRET_TAIL",
+        recentTools: [{ name: "bash", status: "running" }],
       }],
     },
   }, { expanded: true }, theme as never).render(120);
-  assert.equal(rendered.length, 4);
+  assert.equal(rendered.length, 3);
   assert.match(rendered[0], /running/);
   assert.match(rendered[1], /@focus/);
   assert.match(rendered[2], /└─.*@review.*child agent/);
-  assert.match(rendered[3], /using read/);
-  assert.doesNotMatch(rendered.join("\n"), /SECRET_TAIL_TEXT/);
+  assert.doesNotMatch(rendered.join("\n"), /using|streaming|SECRET_TAIL_TEXT|CHILD_SECRET_TAIL/);
   assert.doesNotMatch(rendered.join("\n"), /Alt\+R/);
 });
 
@@ -135,17 +137,19 @@ test("quiet streaming progress retains a structural row on a narrow viewport", (
   assert.match(rendered[1], /^•\s+1/);
 });
 
-test("quiet completed single result keeps the agent row without its message body", () => {
+test("quiet completed single result is one concise named line without its message body", () => {
   setQuietMode(true);
   const rendered = renderTeammateResult({
     content: [{ type: "text", text: "complete output" }],
     details: { mode: "single", results: [okResult()] },
   }, { expanded: true }, theme as never).render(120);
-  assert.equal(rendered.length, 2);
+  assert.equal(rendered.length, 1);
   assert.match(rendered[0], /✓/);
-  assert.match(rendered[0], /1\/1 done/);
+  assert.match(rendered[0], /@inspection/);
+  assert.match(rendered[0], /\(scout\)/);
+  assert.match(rendered[0], /done/);
   assert.match(rendered[0], /30 tokens/);
-  assert.match(rendered[1], /scout/);
+  assert.doesNotMatch(rendered[0], /teammate|1\/1/);
   assert.doesNotMatch(rendered.join("\n"), /complete output|Alt\+R/);
 });
 
@@ -169,9 +173,30 @@ test("quiet completed result keeps named progress rows without completed message
       }],
     },
   }, { expanded: true }, theme as never).render(120);
-  assert.equal(rendered.length, 2);
-  assert.match(rendered[1], /@inspection.*\(scout\)/);
+  assert.equal(rendered.length, 1);
+  assert.match(rendered[0], /@inspection.*\(scout\)/);
   assert.doesNotMatch(rendered.join("\n"), /complete output/);
+});
+
+test("quiet completed graph is an unbacked one-line-per-agent list with dependencies", () => {
+  setQuietMode(true);
+  const first = okResult();
+  const second = { ...okResult(), agent: "reviewer", name: "review", correlationId: "review-correlation" };
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "done" }],
+    details: {
+      mode: "graph",
+      results: [first, second],
+      progress: [
+        { agent: "scout", name: "inspection", correlationId: first.correlationId, taskIndex: 0, dependencies: [], status: "completed" },
+        { agent: "reviewer", name: "review", correlationId: second.correlationId, taskIndex: 1, dependencies: [0], status: "completed" },
+      ],
+    },
+  }, { expanded: true }, theme as never).render(160);
+  assert.equal(rendered.length, 2);
+  assert.match(rendered[0], /@inspection.*\(scout\)/);
+  assert.match(rendered[1], /@review.*\(reviewer\).*← result #1/);
+  assert.doesNotMatch(rendered.join("\n"), /teammate|2\/2 done/);
 });
 
 test("quiet failed result keeps an agent row and a single error summary", () => {
@@ -180,11 +205,11 @@ test("quiet failed result keeps an agent row and a single error summary", () => 
     content: [{ type: "text", text: "boom error line" }],
     details: { mode: "single", results: [failedResult()] },
   }, { expanded: true }, theme as never).render(120);
-  assert.equal(rendered.length, 2);
+  assert.equal(rendered.length, 1);
   assert.match(rendered[0], /✕/);
+  assert.match(rendered[0], /@inspection/);
   assert.match(rendered[0], /failed/);
   assert.match(rendered[0], /boom error line/);
-  assert.match(rendered[1], /scout/);
   assert.doesNotMatch(rendered.join("\n"), /stack trace noise/);
 });
 
@@ -197,13 +222,13 @@ test("dot symbol mode applies to teammate running, success, and failure rows", (
     content: [{ type: "text", text: "complete output" }],
     details: { mode: "single", results: [okResult()] },
   }, { expanded: false }, theme as never).render(80);
-  assert.match(success[0], /^\s*●\s+teammate/);
+  assert.match(success[0], /^\s*●\s+@inspection/);
 
   const failure = renderTeammateResult({
     content: [{ type: "text", text: "boom error line" }],
     details: { mode: "single", results: [failedResult()] },
   }, { expanded: false }, theme as never).render(80);
-  assert.match(failure[0], /^\s*!\s+teammate/);
+  assert.match(failure[0], /^\s*!\s+@inspection/);
 });
 
 test("started, send, wait, and watch are wired to the shared quiet renderer", () => {
@@ -211,6 +236,12 @@ test("started, send, wait, and watch are wired to the shared quiet renderer", ()
   for (const name of ["teammate-started", "teammate-send", "teammate-wait", "teammate-watch"]) {
     assert.match(source, new RegExp(`renderQuietTeammateAux\\(\\"${name}\\"`));
   }
+});
+
+test("teammate dispatch and list use the self-rendered shell in root and nested paths", () => {
+  const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  assert.equal((source.match(/name: "teammate",[\s\S]{0,100}?renderShell: "self"/g) ?? []).length, 2);
+  assert.equal((source.match(/name: "teammate-list",[\s\S]{0,100}?renderShell: "self"/g) ?? []).length, 2);
 });
 
 // Uniqueness guard (not a behaviour test): the ownership event is the single

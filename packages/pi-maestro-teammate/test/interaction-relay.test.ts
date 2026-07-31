@@ -149,6 +149,38 @@ test("child IPC dispatch treats teammate interactions as reply-capable requests"
   assert.deepEqual(events, []);
 });
 
+test("child IPC dispatch routes proxy cancellation as a one-way control request", () => {
+  const requests: unknown[] = [];
+  const events: unknown[] = [];
+  const replies: unknown[] = [];
+  const message = { type: "teammate_proxy_cancel", requestId: "cancel-1", reason: "timeout" };
+
+  assert.equal(dispatchChildIpcMessage(
+    message,
+    (event) => requests.push(event),
+    (event) => events.push(event),
+    (reply) => replies.push(reply),
+  ), "request");
+  assert.deepEqual(requests, [message]);
+  assert.deepEqual(events, []);
+  assert.deepEqual(replies, [], "one-way cancellation must not synthesize a proxy result");
+});
+
+test("proxy cancellation without a request handler stays observable without replying", () => {
+  const events: unknown[] = [];
+  const replies: unknown[] = [];
+  const message = { type: "teammate_proxy_cancel", requestId: "cancel-unhandled" };
+
+  assert.equal(dispatchChildIpcMessage(
+    message,
+    undefined,
+    (event) => events.push(event),
+    (reply) => replies.push(reply),
+  ), "request");
+  assert.deepEqual(events, [message]);
+  assert.deepEqual(replies, []);
+});
+
 test("child IPC dispatch fails closed immediately when a direct runner omits its request handler", () => {
   const replies: any[] = [];
   const events: unknown[] = [];

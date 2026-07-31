@@ -70,6 +70,10 @@ export interface TeammateCompleteEvent {
   correlationId: string;
   exitCode: number;
   durationMs: number;
+  /** True when the agent entered sleeping (wakeable) state instead of being removed. */
+  wakeable?: boolean;
+  /** True when cancellation, rather than success/failure, ended the lifecycle. */
+  cancelled?: boolean;
 }
 
 /**

@@ -41,6 +41,7 @@ async function dispatchNested(
   state: TeammateState,
   parentCid: string,
   claimed?: Record<string, unknown>,
+  params: Record<string, unknown> = { tasks: [{ agent: "worker", prompt: "noop" }] },
 ): Promise<Record<string, unknown>> {
   let captured: Record<string, unknown> | undefined;
   await handleProxyRequest(
@@ -50,7 +51,7 @@ async function dispatchNested(
       type: "teammate_proxy_request",
       tool: "teammate",
       requestId: randomUUID(),
-      params: { tasks: [{ agent: "worker", prompt: "noop" }] },
+      params,
       ...claimed,
     },
     (msg) => { captured = msg as Record<string, unknown>; },
@@ -168,17 +169,23 @@ test("the active-agent budget counts live agents across the whole tree", () => {
   }
 });
 
-test("a proxied dispatch is rejected when the agent budget is exhausted", async () => {
+test("a proxied graph reserves every child slot before registration", async () => {
   const state = makeState();
   const parentCid = randomUUID();
   state.activeRuns.set(parentCid, makeAgent(parentCid, 0));
   const previous = process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS;
-  process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS = "1";
+  process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS = "2";
   try {
-    const reply = await dispatchNested(state, parentCid);
+    const reply = await dispatchNested(state, parentCid, undefined, {
+      tasks: [
+        { agent: "worker", prompt: "first" },
+        { agent: "worker", prompt: "second" },
+      ],
+    });
     const result = reply.result as { isError?: boolean; content: Array<{ text: string }> };
     assert.equal(result.isError, true);
-    assert.match(result.content[0].text, /agent budget exhausted/i);
+    assert.match(result.content[0].text, /2 more requested.*max 2/i);
+    assert.equal(state.activeRuns.size, 1, "rejection must happen before graph/task registration");
   } finally {
     if (previous === undefined) delete process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS;
     else process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS = previous;

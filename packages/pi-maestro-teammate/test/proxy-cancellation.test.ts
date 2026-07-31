@@ -1,9 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   cancelProxyDispatch,
   createChildProxyRequest,
+  handleProxyRequest,
   resolveChildProxyRequest,
   waitForTeammate,
   type ChildProxyPendingRequests,
@@ -118,11 +120,18 @@ test("cancelling a dispatch kills the agent it created and its subtree", () => {
     abortController: nested.abortController,
   });
   state.proxyDispatchByRequest = new Map([[requestId, nested.correlationId]]);
+  const cancelledInteractions: string[] = [];
+  state.cancelInteractions = (correlationId) => { cancelledInteractions.push(correlationId); };
+  state.resultReadyNotified = new Set([nested.correlationId, grandchild.correlationId]);
 
   const killed = cancelProxyDispatch(state, requestId);
   assert.ok(killed.includes(nested.correlationId));
   assert.ok(killed.includes(grandchild.correlationId), "an orphaned subtree goes with it");
   assert.equal(state.proxyDispatchByRequest.size, 0);
+  assert.deepEqual(new Set(cancelledInteractions), new Set([nested.correlationId, grandchild.correlationId]));
+  assert.equal(state.recentlySettled?.get(nested.correlationId)?.status, "terminated");
+  assert.equal(state.recentlySettled?.get(grandchild.correlationId)?.status, "terminated");
+  assert.equal(state.resultReadyNotified.size, 0);
 });
 
 test("an unknown or already-settled request cancels nothing", () => {
@@ -135,6 +144,45 @@ test("an unknown or already-settled request cancels nothing", () => {
   state.proxyDispatchByRequest = new Map([[randomUUID(), "already-gone"]]);
   assert.deepEqual(cancelProxyDispatch(state, [...state.proxyDispatchByRequest.keys()][0]), []);
   assert.equal(state.activeRuns.has(survivor.correlationId), true);
+});
+
+test("cancelling during proxy admission prevents registration and spawn", async () => {
+  const state = makeState();
+  const requestId = randomUUID();
+  const replies: unknown[] = [];
+  let spawns = 0;
+
+  const handling = handleProxyRequest(
+    {} as ExtensionAPI,
+    state,
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId,
+      params: {
+        tasks: [{ agent: "general", prompt: "must not launch" }],
+        background: false,
+      },
+    },
+    (message) => replies.push(message),
+    undefined,
+    [],
+    undefined,
+    undefined,
+    {
+      spawnChildProcess: (() => { spawns += 1; throw new Error("must not spawn"); }) as never,
+    },
+  );
+
+  assert.equal(state.pendingProxyDispatchRequests?.has(requestId), true);
+  assert.deepEqual(cancelProxyDispatch(state, requestId), []);
+  await handling;
+
+  assert.equal(spawns, 0);
+  assert.equal(state.activeRuns.size, 0);
+  assert.equal(state.proxyDispatchByRequest?.has(requestId) ?? false, false);
+  assert.equal(state.pendingProxyDispatchRequests?.has(requestId) ?? false, false);
+  assert.match(JSON.stringify(replies), /cancelled before launch/i);
 });
 
 // --- REL-5: a proxied wait must be interruptible ---------------------------

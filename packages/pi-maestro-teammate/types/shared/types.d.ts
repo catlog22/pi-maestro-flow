@@ -11,6 +11,8 @@ export interface Usage {
 }
 export interface SingleResult {
     agent: string;
+    /** Optional dispatch name shown in compact completion rows. */
+    name?: string;
     task: string;
     exitCode: number;
     messages: Array<{
@@ -239,11 +241,12 @@ export interface TeammateState {
      */
     proxyDispatchByRequest?: Map<string, string>;
 }
+export type AgentTerminalStatus = "completed" | "failed" | "terminated";
 export interface SettledAgentRecord {
     correlationId: string;
     agent: string;
     name?: string;
-    status: "completed" | "failed" | "terminated";
+    status: AgentTerminalStatus;
     settledAt: number;
     lastResult?: string;
     requestedModel?: string;

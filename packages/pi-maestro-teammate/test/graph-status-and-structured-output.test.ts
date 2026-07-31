@@ -1391,6 +1391,10 @@ test("nested teammate-send republishes a running lifecycle when it wakes an agen
   assert.equal(target.sleptAt, undefined);
   assert.equal(target.promptSeq, 2);
   assert.equal(emitted.filter(({ event }) => event === "teammate:started").length, 1);
+  const messageEvent = emitted.find(({ event }) => event === "teammate:message");
+  assert.equal(messageEvent?.payload.correlationId, target.correlationId);
+  assert.equal(messageEvent?.payload.mode, "prompt");
+  assert.equal(messageEvent?.payload.lastActivityAt, target.lastActivityAt);
   assert.match(JSON.stringify(reply), /queued after current turn/);
 
   await handleProxyRequest(

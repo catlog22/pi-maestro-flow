@@ -275,11 +275,15 @@ function childStateText(child: ChildAgentCallSnapshot): string {
   return STATUS_PRESENTATION[display].text;
 }
 
-function formatChildLine(child: ChildAgentCallSnapshot, theme: Theme): string {
+function formatChildLine(child: ChildAgentCallSnapshot, theme: Theme, hideActivity = false): string {
   const presentation = STATUS_PRESENTATION[child.status];
   const icon = theme.fg(presentation.tone, presentation.icon);
   const activeTool = child.recentTools?.find((tool) => tool.status === "running");
-  const activity = activeTool ? ` · using ${activeTool.name}` : child.lastMessage ? " · streaming" : "";
+  const activity = hideActivity
+    ? ""
+    : activeTool
+      ? ` · using ${activeTool.name}`
+      : child.lastMessage ? " · streaming" : "";
   const tokens = child.inputTokens !== undefined || child.outputTokens !== undefined
     ? ` · in ${child.inputTokens ?? 0} · out ${child.outputTokens ?? 0}`
     : "";
@@ -298,13 +302,14 @@ function renderChildSubtree(
   prefix: string,
   theme: Theme,
   out: string[],
+  hideActivity = false,
 ): void {
   children.forEach((child, index) => {
     const isLast = index === children.length - 1;
-    out.push(`${prefix}${theme.fg("dim", isLast ? "└─ " : "├─ ")}${formatChildLine(child, theme)}`);
+    out.push(`${prefix}${theme.fg("dim", isLast ? "└─ " : "├─ ")}${formatChildLine(child, theme, hideActivity)}`);
     const grandchildren = childrenByParent.get(child.correlationId);
     if (grandchildren?.length) {
-      renderChildSubtree(grandchildren, childrenByParent, prefix + theme.fg("dim", isLast ? "   " : "│  "), theme, out);
+      renderChildSubtree(grandchildren, childrenByParent, prefix + theme.fg("dim", isLast ? "   " : "│  "), theme, out, hideActivity);
     }
   });
 }
@@ -636,6 +641,7 @@ function appendQuietAgentTree(
   entries: AgentProgressSnapshot[],
   childCalls: ChildAgentCallSnapshot[],
   theme: Theme,
+  results: SingleResult[] = [],
 ): void {
   const entryByTaskIndex = new Map(entries.map((entry) => [entry.taskIndex, entry]));
   const childrenByParent = new Map<string, ChildAgentCallSnapshot[]>();
@@ -649,16 +655,37 @@ function appendQuietAgentTree(
   const taskCids = new Set(entries.map((entry) => entry.correlationId).filter(Boolean));
   const childCids = new Set(childCalls.map((child) => child.correlationId));
   for (const row of buildProgressTree(entries, quietPalette(theme))) {
-    lines.push(row.text);
+    const result = results[row.taskIndex];
+    const failure = result && result.exitCode !== 0
+      ? theme.fg("error", ` · ${quietFirstError(result)}`)
+      : "";
+    lines.push(`${row.text}${failure}`);
     const cid = entryByTaskIndex.get(row.taskIndex)?.correlationId;
-    if (cid) renderChildSubtree(childrenByParent.get(cid) ?? [], childrenByParent, "  ", theme, lines);
+    if (cid) renderChildSubtree(childrenByParent.get(cid) ?? [], childrenByParent, "  ", theme, lines, true);
   }
 
   const rootOrphans = childCalls.filter((child) => {
     const parent = child.parentCorrelationId;
     return !parent || (!taskCids.has(parent) && !childCids.has(parent));
   });
-  renderChildSubtree(rootOrphans, childrenByParent, "", theme, lines);
+  renderChildSubtree(rootOrphans, childrenByParent, "", theme, lines, true);
+}
+
+function quietResultLine(result: SingleResult, theme: Theme, fallbackName?: string): string {
+  const failed = result.exitCode !== 0;
+  const glyph = theme.fg(failed ? "error" : "success", quietStatusMark(failed ? "failure" : "success"));
+  const displayName = result.name ?? fallbackName ?? result.agent;
+  const label = result.name || fallbackName ? `@${displayName}` : displayName;
+  const role = displayName === result.agent ? "" : `(${result.agent})`;
+  const totalTokens = result.usage.inputTokens + result.usage.outputTokens;
+  const state = failed ? `failed · ${quietFirstError(result)}` : "done";
+  const rest = statusMeta([
+    role,
+    state,
+    formatDuration(result.durationMs),
+    totalTokens > 0 ? `${formatTokens(totalTokens)} tokens` : "",
+  ], theme);
+  return qLine(theme, glyph, label, rest);
 }
 
 function renderQuietTeammateCall(args: Record<string, unknown>, theme: Theme): Component {
@@ -678,36 +705,15 @@ function renderQuietTeammateCall(args: Record<string, unknown>, theme: Theme): C
 
 function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Theme): Component {
   const details = result.details;
-  const isError = (result as { isError?: boolean }).isError === true;
 
   if (details && details.results.length > 0) {
     const results = details.results;
-    const ok = results.filter((r) => r.exitCode === 0).length;
-    const total = results.length;
-    const failed = total - ok;
-    const totalTokens = results.reduce((sum, r) => sum + r.usage.inputTokens + r.usage.outputTokens, 0);
-    const firstFailed = results.find((r) => r.exitCode !== 0);
-    const hasFailure = failed > 0 || isError;
-    const rest = hasFailure
-      ? `${failed || 1}/${total} failed · ${firstFailed ? quietFirstError(firstFailed) : "failed"}`
-      : `${ok}/${total} done${totalTokens > 0 ? ` · ${formatTokens(totalTokens)} tokens` : ""}`;
-    const glyph = theme.fg(hasFailure ? "error" : "success", quietStatusMark(hasFailure ? "failure" : "success"));
-
     return dynamicComponent((w) => {
-      const lines = [qLine(theme, glyph, "teammate", rest)];
+      const lines: string[] = [];
       if (details.progress?.length) {
-        appendQuietAgentTree(lines, details.progress, details.childCalls ?? [], theme);
+        appendQuietAgentTree(lines, details.progress, details.childCalls ?? [], theme, results);
       } else {
-        results.forEach((entry, index) => {
-          const icon = entry.exitCode === 0
-            ? theme.fg("success", quietStatusMark("success"))
-            : theme.fg("error", quietStatusMark("failure"));
-          const meta = statusMeta([
-            formatDuration(entry.durationMs),
-            `${formatTokens(entry.usage.inputTokens + entry.usage.outputTokens)} tokens`,
-          ], theme);
-          lines.push(`${theme.fg("dim", index === results.length - 1 ? "└" : "├")} ${icon} ${theme.bold(entry.agent)}${meta ? ` · ${meta}` : ""}`);
-        });
+        results.forEach((entry) => lines.push(quietResultLine(entry, theme)));
       }
       return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
     });
@@ -736,11 +742,6 @@ function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Them
   return dynamicComponent((w) => {
     const lines = [qLine(theme, glyph, "teammate", stateText)];
     appendQuietAgentTree(lines, entries, childCalls, theme);
-    const focus = entries.find((entry) => entry.taskIndex === focusTaskIndex(entries));
-    const activeTool = focus?.recentTools?.find((tool) => tool.status === "running");
-    if (focus && activeTool) {
-      lines.push(`${theme.fg("dim", "»")} ${theme.fg("accent", String(focus.taskIndex + 1))} ${theme.fg("warning", "■")} using ${activeTool.name}`);
-    }
     return lines.map((line) => truncateToWidth(line, Math.max(1, w), "…"));
   });
 }

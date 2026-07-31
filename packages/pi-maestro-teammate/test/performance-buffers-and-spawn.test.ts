@@ -551,6 +551,31 @@ test("network retry policy reaches a ten-minute cap and rejects permanent failur
   assert.equal(classifyRetryError("Provider returned error: 503"), "provider");
   assert.equal(classifyRetryError("Invalid API key"), "non-retryable");
   assert.equal(classifyRetryError("context length exceeded"), "non-retryable");
+  assert.equal(
+    classifyRetryError("Timed out waiting for the first child agent event (agent=general, model=qwen, correlationId=abc, phase=first-activity); the child process started but did not report model activity."),
+    "network",
+    "first-activity timeout must be retryable",
+  );
+  assert.equal(
+    classifyRetryError("Teammate runtime error (phase=message_end, agent=planner, model=qwen, correlationId=abc): some provider issue"),
+    "provider",
+    "runtime error diagnostic wrapper must be retryable",
+  );
+  assert.equal(
+    classifyRetryError("Teammate child process exited abnormally (agent=general, correlationId=abc, exit=1, signal=SIGKILL, elapsed=5000ms, tools=3)."),
+    "network",
+    "abnormal child exit must be retryable",
+  );
+  assert.equal(
+    classifyRetryError("Teammate child process error (agent=general, model=qwen, correlationId=abc, phase=child-error): read EPIPE"),
+    "network",
+    "child process error wrapper must be retryable",
+  );
+  assert.equal(
+    classifyRetryError("Failed to spawn pi subprocess (agent=general, model=qwen, correlationId=abc, phase=spawn): ENOENT"),
+    "non-retryable",
+    "spawn failure must stay non-retryable",
+  );
 });
 
 test("Pi result-ready marker accepts only a final assistant turn with no tool work", () => {

@@ -20,7 +20,12 @@ import { Check, Errors } from "typebox/value";
 import crossSpawn from "cross-spawn";
 import { listAgentSummaries, resolveAgent, type AgentConfig } from "../agents/agents.ts";
 import { resolveReplyTo, type ReplyTarget } from "../shared/routing.ts";
-import type { SingleResult, Usage, AgentProgress } from "../shared/types.ts";
+import type {
+  SingleResult,
+  Usage,
+  AgentProgress,
+  AgentTerminalStatus,
+} from "../shared/types.ts";
 import { wrapLeasedMessage, type LeaseToken } from "./session-handoff.ts";
 import { applyModelRouting, type TeammateTaskType } from "../models/model-routing.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
@@ -127,7 +132,7 @@ export interface RunTeammateOptions {
     sessionDir?: string,
     correlationId?: string,
   ) => void;
-  onTurnComplete?: (result: SingleResult) => void;
+  onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
   /** @internal Test seam for child lifecycle regression coverage. */
   spawnChildProcess?: typeof crossSpawn;
   /** @internal Test seam for retry scheduling. */
@@ -1621,6 +1626,7 @@ export async function runSingleTeammate(
 
   const rejectWith = (content: string): SingleResult => ({
     agent: params.agent,
+    name: params.name,
     task: params.task ?? "",
     exitCode: 1,
     messages: [{ role: "system", content }],
@@ -1630,31 +1636,45 @@ export async function runSingleTeammate(
     durationMs: Date.now() - startTime,
   });
 
+  const publishTurnComplete = (
+    result: SingleResult,
+    terminalStatus?: AgentTerminalStatus,
+  ): void => {
+    try {
+      options.onTurnComplete?.(result, terminalStatus);
+    } catch {
+      // Completion observers must not change the model fallback outcome.
+    }
+  };
+
+  const rejectAndPublish = (
+    content: string,
+    terminalStatus?: AgentTerminalStatus,
+  ): SingleResult => {
+    const result = rejectWith(content);
+    publishTurnComplete(result, terminalStatus);
+    return result;
+  };
+
+  if (options.signal?.aborted) {
+    return rejectAndPublish("Teammate run aborted before launch.", "terminated");
+  }
+
   const containedCwd = resolveContainedCwd(params.cwd, options.baseCwd);
-  if ("error" in containedCwd) return rejectWith(containedCwd.error);
+  if ("error" in containedCwd) return rejectAndPublish(containedCwd.error);
   const cwd = containedCwd.cwd;
 
   if (params.outputSchema) {
     const schemaHazard = findStructuredOutputSchemaHazard(params.outputSchema);
-    if (schemaHazard) return rejectWith(schemaHazard);
+    if (schemaHazard) return rejectAndPublish(schemaHazard);
   }
 
   // AC4: Depth guard
   const depthCheck = checkDepthGuard(options.depth ?? getTeammateDepth());
   if (!depthCheck.allowed) {
-    return {
-      agent: params.agent,
-      task: params.task ?? "",
-      exitCode: 1,
-      messages: [{
-        role: "system",
-        content: `Teammate nesting depth exceeded: current=${depthCheck.current}, max=${depthCheck.max}. Prevent recursive fork-bomb.`,
-      }],
-      usage: emptyUsage(),
-      model: params.model ?? "unknown",
-      correlationId,
-      durationMs: Date.now() - startTime,
-    };
+    return rejectAndPublish(
+      `Teammate nesting depth exceeded: current=${depthCheck.current}, max=${depthCheck.max}. Prevent recursive fork-bomb.`,
+    );
   }
 
   // Resolve an exact discovered role. Silent generic fallback made misspelled
@@ -1662,19 +1682,9 @@ export async function runSingleTeammate(
   const agentConfig: AgentConfig | undefined = resolveAgent(cwd, params.agent);
   if (!agentConfig) {
     const available = listAgentSummaries(cwd).map((agent) => agent.name).join(", ");
-    return {
-      agent: params.agent,
-      task: params.task ?? "",
-      exitCode: 1,
-      messages: [{
-        role: "system",
-        content: `Unknown teammate agent "${params.agent}". Available agents: ${available || "(none)"}.`,
-      }],
-      usage: emptyUsage(),
-      model: params.model ?? "unknown",
-      correlationId,
-      durationMs: Date.now() - startTime,
-    };
+    return rejectAndPublish(
+      `Unknown teammate agent "${params.agent}". Available agents: ${available || "(none)"}.`,
+    );
   }
 
   // Resolve routing
@@ -1695,19 +1705,7 @@ export async function runSingleTeammate(
     }
     candidates.splice(0, candidates.length, ...new Set(candidates));
   } catch (error) {
-    return {
-      agent: params.agent,
-      task: params.task ?? "",
-      exitCode: 1,
-      messages: [{
-        role: "system",
-        content: error instanceof Error ? error.message : String(error),
-      }],
-      usage: emptyUsage(),
-      model: params.model ?? agentConfig.model ?? "unknown",
-      correlationId,
-      durationMs: Date.now() - startTime,
-    };
+    return rejectAndPublish(error instanceof Error ? error.message : String(error));
   }
 
   const breaker = options.modelCircuitBreaker ?? sharedModelCircuitBreaker;
@@ -1722,14 +1720,6 @@ export async function runSingleTeammate(
     : [undefined, ...implicitFallbacks];
   const attemptedModels: string[] = [];
   let lastResult: SingleResult | undefined;
-
-  const publishTurnComplete = (result: SingleResult): void => {
-    try {
-      options.onTurnComplete?.(result);
-    } catch {
-      // Completion observers must not change the model fallback outcome.
-    }
-  };
 
   for (const modelToUse of modelCandidates) {
     const acquisition = modelToUse ? breaker.acquireCandidate(modelToUse) : undefined;
@@ -1749,19 +1739,28 @@ export async function runSingleTeammate(
         // authoritative attempt; successful wakeable children then stay open
         // for later turn-complete callbacks.
         let completionState: "buffering" | "forwarding" | "discarded" = "buffering";
-        const pendingCompletions: SingleResult[] = [];
+        const pendingCompletions: Array<{
+          result: SingleResult;
+          terminalStatus?: AgentTerminalStatus;
+        }> = [];
         const attemptOptions: RunTeammateOptions = options.onTurnComplete
           ? {
               ...options,
-              onTurnComplete(result) {
-                if (completionState === "forwarding") publishTurnComplete(result);
-                else if (completionState === "buffering") pendingCompletions.push(result);
+              onTurnComplete(result, terminalStatus) {
+                const effectiveStatus = terminalStatus
+                  ?? (options.signal?.aborted ? "terminated" : undefined);
+                if (completionState === "forwarding") publishTurnComplete(result, effectiveStatus);
+                else if (completionState === "buffering") {
+                  pendingCompletions.push({ result, terminalStatus: effectiveStatus });
+                }
               },
             }
           : options;
         const commitCompletion = (): void => {
           completionState = "forwarding";
-          for (const result of pendingCompletions.splice(0)) publishTurnComplete(result);
+          for (const completion of pendingCompletions.splice(0)) {
+            publishTurnComplete(completion.result, completion.terminalStatus);
+          }
         };
         const discardCompletion = (): void => {
           completionState = "discarded";
@@ -1811,7 +1810,15 @@ export async function runSingleTeammate(
           error,
         });
         const ready = await (options.waitForRetry?.(delayMs, options.signal) ?? waitForRetryDelay(delayMs, options.signal));
-        if (!ready) break;
+        if (!ready) {
+          if (options.signal?.aborted) {
+            if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
+            candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
+            publishTurnComplete(candidateResult, "terminated");
+            return candidateResult;
+          }
+          break;
+        }
       }
 
       if (!candidateResult) {
@@ -1839,7 +1846,7 @@ export async function runSingleTeammate(
     publishTurnComplete(lastResult);
     return lastResult;
   }
-  return rejectWith(
+  return rejectAndPublish(
     `Teammate skipped every model candidate because their circuit breakers are open (agent=${params.agent}).`,
   );
 }
@@ -2085,8 +2092,9 @@ async function runSingleAttempt(
       if (schemaFile) cleanupFile(schemaFile);
       if (outputFile) cleanupFile(outputFile);
 
-      resolve({
+      const result: SingleResult = {
         agent: params.agent,
+        name: params.name,
         task: params.task ?? "",
         exitCode: 1,
         messages: [{
@@ -2099,7 +2107,15 @@ async function runSingleAttempt(
         model: state.resolvedModel,
         correlationId,
         durationMs: Date.now() - startTime,
-      });
+      };
+      state.initialResultPublished = true;
+      state.turnLifecycleSettled = true;
+      resolve(result);
+      try {
+        options.onTurnComplete?.(result);
+      } catch {
+        // Completion observers cannot prevent a terminal spawn failure from settling.
+      }
       return;
     }
 
@@ -2217,6 +2233,7 @@ async function runSingleAttempt(
 
       const turnResult: SingleResult = {
         agent: params.agent,
+        name: params.name,
         task: params.task ?? "",
         exitCode,
         messages: [...messages],
@@ -2266,6 +2283,7 @@ async function runSingleAttempt(
       state.initialResultPublished = true;
       resolve({
         agent: params.agent,
+        name: params.name,
         task: params.task ?? "",
         exitCode: 0,
         messages: [...messages],
@@ -2700,9 +2718,9 @@ async function runSingleAttempt(
       }
 
       if (!state.initialResultPublished) {
-        state.initialResultPublished = true;
-        resolve({
+        const result: SingleResult = {
           agent: params.agent,
+          name: params.name,
           task: params.task ?? "",
           exitCode,
           messages,
@@ -2712,7 +2730,16 @@ async function runSingleAttempt(
           durationMs: Date.now() - startTime,
           wakeable: false,
           structuredOutput,
-        });
+        };
+        state.initialResultPublished = true;
+        state.turnLifecycleSettled = true;
+        state.terminal = true;
+        resolve(result);
+        try {
+          options.onTurnComplete?.(result);
+        } catch {
+          // Completion observers cannot prevent process-close settlement.
+        }
       }
     });
 
@@ -2742,9 +2769,9 @@ async function runSingleAttempt(
       }
 
       if (!state.initialResultPublished) {
-        state.initialResultPublished = true;
-        resolve({
+        const result: SingleResult = {
           agent: params.agent,
+          name: params.name,
           task: params.task ?? "",
           exitCode: 1,
           messages: [{
@@ -2756,7 +2783,16 @@ async function runSingleAttempt(
           correlationId,
           durationMs: Date.now() - startTime,
           wakeable: false,
-        });
+        };
+        state.initialResultPublished = true;
+        state.turnLifecycleSettled = true;
+        state.terminal = true;
+        resolve(result);
+        try {
+          options.onTurnComplete?.(result);
+        } catch {
+          // Completion observers cannot prevent child-error settlement.
+        }
       }
     });
   });
@@ -2788,20 +2824,50 @@ export async function runGraph(
     if (tasks[i].name) indexByName.set(tasks[i].name!, i);
   }
 
+  const publishGraphRejection = (
+    message: string,
+    dependencies: number[][] = tasks.map(() => []),
+  ): SingleResult[] => tasks.map((task, index) => {
+    const result: SingleResult = {
+      agent: task.agent,
+      name: task.name,
+      task: task.prompt,
+      exitCode: 1,
+      messages: [{ role: "system", content: message }],
+      usage: emptyUsage(),
+      model: task.model ?? "unknown",
+      correlationId: taskCorrelationIds[index],
+      durationMs: 0,
+    };
+    const now = Date.now();
+    options.onProgress?.({
+      agent: task.agent,
+      name: task.name,
+      correlationId: taskCorrelationIds[index],
+      taskIndex: index,
+      dependencies: dependencies[index] ?? [],
+      status: "failed",
+      recentTools: [],
+      toolCount: 0,
+      tokens: 0,
+      durationMs: 0,
+      lastActivityAt: now,
+      startedAt: now,
+      lastMessage: message,
+    });
+    try {
+      options.onTurnComplete?.(result);
+    } catch {
+      // Validation observers cannot prevent the remaining graph tasks from settling.
+    }
+    return result;
+  });
+
   // Defensive validation for direct runGraph callers — the teammate tool
   // path already rejects these in normalizeTeammateParams.
   const refCheck = validateTaskReferences(tasks);
   if (refCheck.errors.length > 0) {
-    return tasks.map((t, index) => ({
-      agent: t.agent,
-      task: t.prompt,
-      exitCode: 1,
-      messages: [{ role: "system", content: refCheck.errors.join("\n") }],
-      usage: emptyUsage(),
-      model: t.model ?? "unknown",
-      correlationId: taskCorrelationIds[index],
-      durationMs: 0,
-    }));
+    return publishGraphRejection(refCheck.errors.join("\n"));
   }
 
   // Build dependency adjacency list — implicit {name} refs ∪ explicit dependsOn.
@@ -2811,16 +2877,7 @@ export async function runGraph(
   );
 
   if (hasCycle(deps)) {
-    return tasks.map((t, index) => ({
-      agent: t.agent,
-      task: t.prompt,
-      exitCode: 1,
-      messages: [{ role: "system", content: "Circular dependency detected in task graph" }],
-      usage: emptyUsage(),
-      model: t.model ?? "unknown",
-      correlationId: taskCorrelationIds[index],
-      durationMs: 0,
-    }));
+    return publishGraphRejection("Circular dependency detected in task graph", deps);
   }
 
   // Validate unique names
@@ -2830,16 +2887,7 @@ export async function runGraph(
   }
   for (const [name, count] of nameCount) {
     if (count > 1) {
-      return tasks.map((t, index) => ({
-        agent: t.agent,
-        task: t.prompt,
-        exitCode: 1,
-        messages: [{ role: "system", content: `Duplicate task name "${name}"` }],
-        usage: emptyUsage(),
-        model: t.model ?? "unknown",
-        correlationId: taskCorrelationIds[index],
-        durationMs: 0,
-      }));
+      return publishGraphRejection(`Duplicate task name "${name}"`, deps);
     }
   }
 
@@ -2932,22 +2980,38 @@ export async function runGraph(
     });
   }
 
+  function publishSyntheticFailure(
+    task: NormalizedTask,
+    taskIndex: number,
+    message: string,
+    terminalStatus?: AgentTerminalStatus,
+  ): void {
+    failed.add(taskIndex);
+    const result: SingleResult = {
+      agent: task.agent,
+      name: task.name,
+      task: task.prompt,
+      exitCode: 1,
+      messages: [{ role: "system", content: message }],
+      usage: emptyUsage(),
+      model: task.model ?? "unknown",
+      correlationId: taskCorrelationIds[taskIndex],
+      durationMs: 0,
+    };
+    results[taskIndex] = result;
+    reportTaskFailure(task, taskIndex, message);
+    try {
+      options.onTurnComplete?.(result, terminalStatus);
+    } catch {
+      // Synthetic lifecycle observers cannot block dependency propagation.
+    }
+  }
+
   const promises = tasks.map(async (task, idx) => {
     const depsOk = await waitForDeps(idx);
 
     if (!depsOk) {
-      failed.add(idx);
-      results[idx] = {
-        agent: task.agent,
-        task: task.prompt,
-        exitCode: 1,
-        messages: [{ role: "system", content: "Skipped: upstream dependency failed" }],
-        usage: emptyUsage(),
-        model: task.model ?? "unknown",
-        correlationId: taskCorrelationIds[idx],
-        durationMs: 0,
-      };
-      reportTaskFailure(task, idx, "Skipped: upstream dependency failed");
+      publishSyntheticFailure(task, idx, "Skipped: upstream dependency failed");
       notifyComplete(idx);
       return;
     }
@@ -2956,21 +3020,11 @@ export async function runGraph(
     try {
       resolvedTask = resolveVariables(task.prompt, outputs, taskNames);
     } catch (err) {
-      failed.add(idx);
-      results[idx] = {
-        agent: task.agent,
-        task: task.prompt,
-        exitCode: 1,
-        messages: [{
-          role: "system",
-          content: `Variable resolution failed: ${err instanceof Error ? err.message : String(err)}`,
-        }],
-        usage: emptyUsage(),
-        model: task.model ?? "unknown",
-        correlationId: taskCorrelationIds[idx],
-        durationMs: 0,
-      };
-      reportTaskFailure(task, idx, results[idx].messages[0].content);
+      publishSyntheticFailure(
+        task,
+        idx,
+        `Variable resolution failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       notifyComplete(idx);
       return;
     }
@@ -2978,6 +3032,10 @@ export async function runGraph(
     await acquire();
 
     try {
+      if (options.signal?.aborted) {
+        publishSyntheticFailure(task, idx, "Cancelled before child process launch.", "terminated");
+        return;
+      }
       const result = await runSingleTeammate(
         {
           agent: task.agent,
@@ -3019,21 +3077,11 @@ export async function runGraph(
         failed.add(idx);
       }
     } catch (err) {
-      failed.add(idx);
-      results[idx] = {
-        agent: task.agent,
-        task: resolvedTask,
-        exitCode: 1,
-        messages: [{
-          role: "system",
-          content: `Execution error: ${err instanceof Error ? err.message : String(err)}`,
-        }],
-        usage: emptyUsage(),
-        model: task.model ?? "unknown",
-        correlationId: taskCorrelationIds[idx],
-        durationMs: 0,
-      };
-      reportTaskFailure(task, idx, results[idx].messages[0].content);
+      publishSyntheticFailure(
+        task,
+        idx,
+        `Execution error: ${err instanceof Error ? err.message : String(err)}`,
+      );
     } finally {
       release();
       notifyComplete(idx);
@@ -3120,11 +3168,18 @@ export function dispatchChildIpcMessage(
   onEvent: RunTeammateOptions["onChildEvent"],
   reply: (message: unknown) => void,
 ): "request" | "event" {
-  if (message.type === "teammate_proxy_request" || message.type === "teammate_interaction_request") {
+  const requestType = message.type === "teammate_proxy_request"
+    || message.type === "teammate_interaction_request"
+    || message.type === "teammate_rpc_ui_request";
+  if (requestType || message.type === "teammate_proxy_cancel") {
     if (onRequest) onRequest(message, reply);
     else {
       onEvent?.(message);
-      replyUnhandledChildRequest(message, reply);
+      // Cancellation is a one-way control message. A synthetic proxy result
+      // would have no consumer and can race with request cleanup.
+      if (message.type !== "teammate_proxy_cancel") {
+        replyUnhandledChildRequest(message, reply);
+      }
     }
     return "request";
   }

@@ -8,7 +8,7 @@
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type LeaseToken } from "../runs/session-handoff.ts";
 import type { RunTeammateParams, RunTeammateOptions, RpcMessageMode } from "../runs/execution.ts";
-import type { TeammateState, AgentProgressSnapshot, ChildAgentCallSnapshot, ActiveAgent, SettledAgentRecord } from "../shared/types.ts";
+import type { TeammateState, AgentProgressSnapshot, ChildAgentCallSnapshot, ActiveAgent, AgentTerminalStatus, SettledAgentRecord } from "../shared/types.ts";
 import { type AgentSummary } from "../agents/agents.ts";
 import { type TeammateModelCapability } from "../models/model-catalog.ts";
 export declare const TEAMMATE_PROMPT_SNIPPET = "Dispatch bounded work to discovered teammate roles for parallel, sequential, or specialist execution.";
@@ -277,7 +277,7 @@ export declare function reclaimResultReadyAgents(state: TeammateState, now?: num
 export declare function enforceWakeableAgentBudget(state: TeammateState, now?: number): string[];
 export declare function nextWakeableAgentExpiryDelay(state: TeammateState, now?: number): number | undefined;
 export declare function hasTeammateWidgetWork(state: TeammateState, now?: number): boolean;
-export declare function settleAgent(state: TeammateState, correlationId: string, exitCode: number, lastResult?: string, wakeable?: boolean): void;
+export declare function settleAgent(state: TeammateState, correlationId: string, exitCode: number, lastResult?: string, wakeable?: boolean, terminalStatus?: AgentTerminalStatus): void;
 export declare function resolveAgentCorrelationId(state: TeammateState, target: string): string | undefined;
 /** How many settled agents stay recallable after leaving `activeRuns`. */
 export declare const SETTLED_AGENT_MEMO_LIMIT = 32;
@@ -310,8 +310,8 @@ export declare function bindAgentName(state: TeammateState, name: string, correl
 /** Drops failed tombstones past their retention window. */
 export declare function sweepFailedAgents(state: TeammateState, now?: number): string[];
 export declare function killAgentTree(state: TeammateState, correlationId: string): string[];
-export declare function handleChildInteractionRequest(pi: ExtensionAPI, state: TeammateState, event: Record<string, unknown>, reply: (msg: unknown) => void, ctx: ExtensionContext | null | undefined, fallbackCorrelationId?: string): Promise<void>;
-export declare function handleChildRpcUiRequest(event: Record<string, unknown>, reply: (msg: unknown) => void, ctx: ExtensionContext | null | undefined): Promise<void>;
+export declare function handleChildInteractionRequest(pi: ExtensionAPI, state: TeammateState, event: Record<string, unknown>, reply: (msg: unknown) => void, ctx: ExtensionContext | null | undefined, fallbackCorrelationId?: string, signal?: AbortSignal): Promise<void>;
+export declare function handleChildRpcUiRequest(event: Record<string, unknown>, reply: (msg: unknown) => void, ctx: ExtensionContext | null | undefined, signal?: AbortSignal): Promise<void>;
 export interface TeammateDirectChildRequestHandlerOptions {
     state?: TeammateState;
     fallbackCorrelationId?: string;

@@ -10,10 +10,10 @@ const NON_RETRYABLE_ERROR =
   /usage[_\s-]*limit|multi-auth rotation failed|unauthori[sz]ed|invalid api key|forbidden|invalid model|unknown model|context[_\s-]*length[_\s-]*exceeded|input exceeds the context window|schema[-\s]*valid|validation (?:failed|error)/i;
 
 const NETWORK_ERROR =
-  /\b(?:econnreset|econnrefused|ehostunreach|enotfound|eai_again|etimedout|socket hang up|fetch failed|network(?: error| request)?|connection (?:error|failed|failure|reset|refused|timed out|timeout|closed)|websocket closed|sse response headers timed out|headers timed out|tls|certificate)\b/i;
+  /\b(?:econnreset|econnrefused|ehostunreach|enotfound|eai_again|etimedout|socket hang up|fetch failed|network(?: error| request)?|connection (?:error|failed|failure|reset|refused|timed out|timeout|closed)|websocket closed|sse response headers timed out|headers timed out|tls|certificate|first.activity|exited abnormally|child process error)\b/i;
 
 const PROVIDER_ERROR =
-  /\b(?:429|5\d\d|rate limit(?:ed)?|capacity|overloaded|unavailable|provider returned error)\b/i;
+  /\b(?:429|5\d\d|rate limit(?:ed)?|capacity|overloaded|unavailable|provider returned error|teammate runtime error)\b/i;
 
 const FALLBACK_ONLY_ERROR =
   /\b(?:402|insufficient (?:balance|credits?)|credits? exhausted|billing quota)\b/i;
