@@ -95,10 +95,10 @@ Maestro Flow classifies intent and routes automatically: **simple tasks** run di
   - Orchestration: `maestro` · `goal` · `todo` · `run-control` · `plan-*`
   - Connectivity: `mcp` · `lsp` · `browser` · `smart_search` · `ffgrep`/`fffind`
   - Other: `bash_bg` · `ask-user-question` · `search_tool_bm25`
-- **63 skills** — workflow orchestration (maestro/ralph/companion/next), knowledge management (spec/knowhow/issue), team coordination (swarm/brainstorm/roadmap), UI design (impeccable/uidesign/motion), academic writing (10 scholar skills), skill tooling (generator/tuning/simplify)
+- **63 skills** (maintained by [Maestro Flow](https://github.com/catlog22/maestro-flow)) — spanning workflow orchestration, knowledge management, team coordination, UI design, academic writing, and skill tooling. Full catalog: [Maestro Flow skills directory](https://github.com/catlog22/maestro-flow/tree/main/skills)
 - **32 agent roles** — 7 built-in (explorer, planner, analyst, research, general, verifier, workflow) + 25 project-level (executor, reviewer, debugger, roadmapper…)
 
-Full tool parameters, the skill catalog, and workflow definitions live in the **[Usage Guide](docs/USAGE_EN.md)** and **[Maestro Flow](https://github.com/catlog22/maestro-flow)**.
+Full tool parameters and workflow definitions live in the **[Usage Guide](docs/USAGE_EN.md)**.
 
 ---
 

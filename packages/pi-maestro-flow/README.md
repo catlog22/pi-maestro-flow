@@ -20,7 +20,7 @@ Pi extension providing Maestro's workflow tools — the top-level entry of the t
 | **Workflow docs** | 87 | Installed from `maestro-flow` to `~/.maestro/workflows` |
 | **Templates** | 23 | Bundled template files |
 
-Skills (63) and agents (25) are in the project root `.pi/` directory, not in this package.
+Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flow)) and agents (25) are in the project root `.pi/` directory, not in this package.
 
 ## Prerequisites
 
@@ -97,17 +97,19 @@ Generated human-facing prompts use `maestro session start`, `maestro session don
 `maestro session chain edit`, and simple `--chain` commands. `session create --chain-file` is
 reserved for coordinator chains that require structured decision or decomposition data.
 
-## Skills Categories
+## Skills
 
-**Workflow orchestration:** `maestro`, `maestro-next`, `maestro-companion`, `maestro-ralph`, `maestro-fork`, `maestro-guard`, `maestro-session-seal`, `maestro-odyssey`, `maestro-merge`, `maestro-overlay`, `maestro-init`, `maestro-update`, `maestro-help`, `maestro-impeccable`
+63 skills are bundled in the canonical `.pi/skills/` directory and maintained by the [Maestro Flow](https://github.com/catlog22/maestro-flow) project. They span six categories:
 
-**Knowledge management:** `maestro-spec`, `maestro-knowhow`, `maestro-knowledge`, `maestro-learn`, `maestro-issue`, `codify-to-knowhow`
+| Category | Count | Examples |
+|----------|-------|---------|
+| Workflow orchestration | 14 | `maestro`, `maestro-next`, `maestro-ralph`, `maestro-companion`, `maestro-odyssey` |
+| Knowledge management | 6 | `maestro-spec`, `maestro-knowhow`, `maestro-knowledge`, `maestro-issue` |
+| Team orchestration | 25 | `team-swarm`, `team-brainstorm`, `team-roadmap-dev`, `team-review` |
+| Academic writing | 10 | `scholar-writing`, `scholar-rebuttal-pro`, `scholar-citation-verify` |
+| Skill tooling | 8 | `skill-generator`, `skill-tuning`, `skill-simplify` |
 
-**Team orchestration:** `team-lifecycle-v4`, `team-coordinate`, `team-executor`, `team-review`, `team-quality-assurance`, `team-testing`, `team-swarm`, `team-adversarial-swarm`, `team-brainstorm`, `team-planex`, `team-roadmap-dev`, `team-frontend`, `team-frontend-debug`, `team-ui-polish`, `team-uidesign`, `team-designer`, `team-interactive-craft`, `team-motion-design`, `team-visual-a11y`, `team-ux-improve`, `team-arch-opt`, `team-perf-opt`, `team-tech-debt`, `team-ultra-analyze`, `team-issue`
-
-**Academic writing:** `scholar-writing`, `scholar-review`, `scholar-experiment`, `scholar-thesis-docx`, `scholar-ideation`, `scholar-citation-verify`, `scholar-rebuttal-pro`, `scholar-publish`, `scholar-latex-organizer`, `scholar-anti-ai-writing`
-
-**Skill tooling:** `skill-generator`, `skill-iter-tune`, `skill-simplify`, `skill-tuning`, `workflow-skill-designer`, `prompt-generator`, `delegation-check`, `insight-challenge`
+Full skill catalog and source: [Maestro Flow skills directory](https://github.com/catlog22/maestro-flow/tree/main/skills).
 
 ## Tool Actions
 
@@ -401,7 +403,7 @@ so the normal Todo loader can re-inject the canonical skill after compaction.
 
 ## Project skills and teammate agents
 
-The npm package declares its canonical skill set through `pi.skills`, pointing to
+Skills are authored and maintained by the [Maestro Flow](https://github.com/catlog22/maestro-flow) project; this package bundles the canonical `.pi/skills/` tree as a Pi package resource. The npm package declares its skill set through `pi.skills`, pointing to
 the bundled `.pi/skills/` directory. In this repository the source set lives under
 `packages/pi-maestro-flow/.pi/skills`, while the root `.pi/settings.json` references
 that same directory for local development. Install the package through
@@ -527,7 +529,7 @@ MCP servers that require OAuth authentication are handled automatically: `/mcp-a
 
 pi-maestro-teammate (execution engine) and pi-cockpit (status UI)
 are dependencies and auto-register on postinstall.
-Skills (63) and agents (25) are in .pi/ at project root.
+Skills (63, by Maestro Flow) and agents (25) are in .pi/ at project root.
 ```
 
 ## License
