@@ -4,6 +4,7 @@ import type { ExtractedContent } from "./extract.ts";
 import type { SearchOptions, SearchResponse } from "./perplexity.ts";
 import { hasCredentialSource, redactCredential, resolveCredential } from "./credential-source.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const TAVILY_API_URL = "https://api.tavily.com/search";
 const CONFIG_PATH = getWebSearchConfigPath();
@@ -47,6 +48,12 @@ function loadConfig(): WebSearchConfig {
 		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
 	}
 }
+
+export function clearTavilyConfigCache(): void {
+	cachedConfig = null;
+}
+
+registerWebConfigInvalidator(clearTavilyConfigCache);
 
 async function getApiKey(signal?: AbortSignal): Promise<string | null> {
 	return resolveCredential({

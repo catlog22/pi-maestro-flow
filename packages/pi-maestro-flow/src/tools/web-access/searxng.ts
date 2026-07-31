@@ -3,6 +3,7 @@ import { activityMonitor } from "./activity.ts";
 import { fetchRemoteUrl, loadSsrfConfig } from "./ssrf-protection.ts";
 import type { SearchOptions, SearchResult, SearchResponse } from "./perplexity.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const CONFIG_PATH = getWebSearchConfigPath();
 const SEARCH_TIMEOUT_MS = 30_000;
@@ -45,6 +46,12 @@ function loadConfig(): WebSearchConfig {
 		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
 	}
 }
+
+export function clearSearXNGConfigCache(): void {
+	cachedConfig = null;
+}
+
+registerWebConfigInvalidator(clearSearXNGConfigCache);
 
 function normalizeBaseUrl(value: unknown): string | null {
 	if (typeof value !== "string") return null;

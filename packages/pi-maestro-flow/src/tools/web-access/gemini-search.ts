@@ -14,6 +14,7 @@ import { isSerpdiveAvailable, searchWithSerpdive } from "./serpdive.ts";
 import { isSearXNGAvailable, searchWithSearXNG } from "./searxng.ts";
 import { isAnySearchAvailable, searchWithAnySearch } from "./anysearch.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 export type SearchProvider = "auto" | "openai" | "brave" | "parallel" | "tavily" | "searxng" | "perplexity" | "gemini" | "exa" | "serpdive" | "anysearch";
 export type ResolvedSearchProvider = Exclude<SearchProvider, "auto">;
@@ -104,6 +105,12 @@ function getSearchConfig(): SearchConfig {
 	};
 	return cachedSearchConfig;
 }
+
+export function clearGeminiSearchConfigCache(): void {
+	cachedSearchConfig = null;
+}
+
+registerWebConfigInvalidator(clearGeminiSearchConfigCache);
 
 function normalizeSearchRouting(value: unknown): SearchRoutingConfig {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {

@@ -4,6 +4,7 @@ import { activityMonitor } from "./activity.ts";
 import type { SearchOptions, SearchResponse, SearchResult } from "./perplexity.ts";
 import { hasCredentialSource, redactCredential, resolveCredential } from "./credential-source.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const OPENAI_RESPONSES_URL = "https://api.openai.com/v1/responses";
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
@@ -49,6 +50,12 @@ function loadConfig(): WebSearchConfig {
 		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
 	}
 }
+
+export function clearOpenAIConfigCache(): void {
+	cachedConfig = null;
+}
+
+registerWebConfigInvalidator(clearOpenAIConfigCache);
 
 function normalizeDomain(value: string): string | null {
 	let input = value.trim().toLowerCase();

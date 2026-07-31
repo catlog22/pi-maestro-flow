@@ -3,6 +3,7 @@ import { activityMonitor } from "./activity.ts";
 import type { SearchOptions, SearchResult, SearchResponse } from "./perplexity.ts";
 import { hasCredentialSource, redactCredential, resolveCredential } from "./credential-source.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const BRAVE_API_URL = "https://api.search.brave.com/res/v1/web/search";
 const CONFIG_PATH = getWebSearchConfigPath();
@@ -35,6 +36,12 @@ function loadConfig(): WebSearchConfig {
 		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
 	}
 }
+
+export function clearBraveConfigCache(): void {
+	cachedConfig = null;
+}
+
+registerWebConfigInvalidator(clearBraveConfigCache);
 
 async function getApiKey(signal?: AbortSignal): Promise<string | null> {
 	return resolveCredential({

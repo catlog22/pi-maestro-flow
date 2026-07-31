@@ -4,6 +4,7 @@ import type { ExtractedContent, ExtractOptions } from "./extract.ts";
 import type { SearchOptions, SearchResponse } from "./perplexity.ts";
 import { hasCredentialSource, redactCredential, resolveCredential } from "./credential-source.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const PARALLEL_SEARCH_URL = "https://api.parallel.ai/v1/search";
 const PARALLEL_EXTRACT_URL = "https://api.parallel.ai/v1/extract";
@@ -72,6 +73,8 @@ function loadConfig(): WebSearchConfig {
 export function clearParallelConfigCache(): void {
 	cachedConfig = null;
 }
+
+registerWebConfigInvalidator(clearParallelConfigCache);
 
 function normalizeApiKey(value: unknown): string | null {
 	if (typeof value !== "string") return null;

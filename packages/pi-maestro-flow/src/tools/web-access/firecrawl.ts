@@ -4,6 +4,7 @@ import { redactCredential, resolveCredential } from "./credential-source.ts";
 import type { ExtractedContent, ExtractOptions } from "./extract.ts";
 import { validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const CONFIG_PATH = getWebSearchConfigPath();
 const DEFAULT_API_VERSION = "v2";
@@ -61,6 +62,8 @@ function loadConfig(): FirecrawlConfig {
 export function clearFirecrawlConfigCache(): void {
 	cachedConfig = null;
 }
+
+registerWebConfigInvalidator(clearFirecrawlConfigCache);
 
 function normalizeBaseUrl(value: unknown): string | null {
 	if (typeof value !== "string") return null;

@@ -1,6 +1,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { hasCredentialSource, redactCredential, resolveCredential } from "./credential-source.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const DEFAULT_API_HOST = "https://generativelanguage.googleapis.com";
 const API_VERSION = "v1beta";
@@ -32,6 +33,12 @@ function loadConfig(): GeminiApiConfig {
 		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
 	}
 }
+
+export function clearGeminiApiConfigCache(): void {
+	cachedConfig = null;
+}
+
+registerWebConfigInvalidator(clearGeminiApiConfigCache);
 
 function withTimeout(signal: AbortSignal | undefined, timeoutMs: number): AbortSignal {
 	const timeout = AbortSignal.timeout(timeoutMs);

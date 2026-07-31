@@ -4,6 +4,7 @@ import type { ExtractedContent } from "./extract.ts";
 import type { SearchOptions, SearchResponse } from "./perplexity.ts";
 import { redactCredential, resolveCredential } from "./credential-source.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const ANYSEARCH_API_URL = "https://api.anysearch.com/v1/search";
 const CONFIG_PATH = getWebSearchConfigPath();
@@ -55,6 +56,12 @@ function loadConfig(): WebSearchConfig {
 	cachedConfig = parsed as WebSearchConfig;
 	return cachedConfig;
 }
+
+export function clearAnySearchConfigCache(): void {
+	cachedConfig = null;
+}
+
+registerWebConfigInvalidator(clearAnySearchConfigCache);
 
 async function getApiKey(signal?: AbortSignal): Promise<string | null> {
 	return resolveCredential({

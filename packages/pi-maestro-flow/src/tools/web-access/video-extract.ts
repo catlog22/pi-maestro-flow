@@ -7,6 +7,7 @@ import { isGeminiWebAvailable, queryWithCookies } from "./gemini-web.ts";
 import { queryGeminiApiWithVideo, getApiKey, fetchGeminiApi, API_BASE, redactGeminiApiResponse } from "./gemini-api.ts";
 import { extractHeadingTitle, type ExtractedContent, type ExtractOptions, type FrameResult } from "./extract.ts";
 import { readExecError, trimErrorText, mapFfmpegError, getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const CONFIG_PATH = getWebSearchConfigPath();
 const UPLOAD_BASE = "https://generativelanguage.googleapis.com/upload/v1beta";
@@ -98,6 +99,12 @@ function loadVideoConfig(): VideoConfig {
 	};
 	return cachedVideoConfig;
 }
+
+export function clearVideoConfigCache(): void {
+	cachedVideoConfig = null;
+}
+
+registerWebConfigInvalidator(clearVideoConfigCache);
 
 export function isVideoFile(input: string): VideoFileInfo | null {
 	const config = loadVideoConfig();

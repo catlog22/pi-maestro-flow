@@ -6,6 +6,7 @@ import { isGeminiApiAvailable, queryGeminiApiWithVideo } from "./gemini-api.ts";
 import { isPerplexityAvailable, searchWithPerplexity } from "./perplexity.ts";
 import { extractHeadingTitle, type ExtractedContent, type FrameResult, type VideoFrame } from "./extract.ts";
 import { formatSeconds, readExecError, isTimeoutError, trimErrorText, mapFfmpegError, getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const CONFIG_PATH = getWebSearchConfigPath();
 
@@ -74,6 +75,12 @@ function loadYouTubeConfig(): YouTubeConfig {
 	};
 	return cachedConfig;
 }
+
+export function clearYouTubeConfigCache(): void {
+	cachedConfig = null;
+}
+
+registerWebConfigInvalidator(clearYouTubeConfigCache);
 
 export function isYouTubeURL(url: string): { isYouTube: boolean; videoId: string | null } {
 	try {

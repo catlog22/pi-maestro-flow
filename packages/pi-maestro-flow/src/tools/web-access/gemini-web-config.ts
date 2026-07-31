@@ -1,5 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const CONFIG_PATH = getWebSearchConfigPath();
 
@@ -38,6 +39,12 @@ function loadConfig(): GeminiWebConfig {
 	};
 	return cachedConfig;
 }
+
+export function clearGeminiWebConfigCache(): void {
+	cachedConfig = null;
+}
+
+registerWebConfigInvalidator(clearGeminiWebConfigCache);
 
 export function getChromeProfileFromConfig(): string | undefined {
 	return loadConfig().chromeProfile;

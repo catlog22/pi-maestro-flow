@@ -26,11 +26,11 @@ export function showGhHint(): void {
 	}
 }
 
-export async function checkRepoSize(owner: string, repo: string): Promise<number | null> {
+export async function checkRepoSize(owner: string, repo: string, signal?: AbortSignal): Promise<number | null> {
 	if (!(await checkGhAvailable())) return null;
 
 	return new Promise((resolve) => {
-		execFile("gh", ["api", `repos/${owner}/${repo}`, "--jq", ".size"], { timeout: 10000 }, (err, stdout) => {
+		execFile("gh", ["api", `repos/${owner}/${repo}`, "--jq", ".size"], { timeout: 10000, ...(signal ? { signal } : {}) }, (err, stdout) => {
 			if (err) {
 				resolve(null);
 				return;
@@ -41,11 +41,11 @@ export async function checkRepoSize(owner: string, repo: string): Promise<number
 	});
 }
 
-async function getDefaultBranch(owner: string, repo: string): Promise<string | null> {
+async function getDefaultBranch(owner: string, repo: string, signal?: AbortSignal): Promise<string | null> {
 	if (!(await checkGhAvailable())) return null;
 
 	return new Promise((resolve) => {
-		execFile("gh", ["api", `repos/${owner}/${repo}`, "--jq", ".default_branch"], { timeout: 10000 }, (err, stdout) => {
+		execFile("gh", ["api", `repos/${owner}/${repo}`, "--jq", ".default_branch"], { timeout: 10000, ...(signal ? { signal } : {}) }, (err, stdout) => {
 			if (err) {
 				resolve(null);
 				return;
@@ -56,14 +56,14 @@ async function getDefaultBranch(owner: string, repo: string): Promise<string | n
 	});
 }
 
-async function fetchTreeViaApi(owner: string, repo: string, ref: string): Promise<string | null> {
+async function fetchTreeViaApi(owner: string, repo: string, ref: string, signal?: AbortSignal): Promise<string | null> {
 	if (!(await checkGhAvailable())) return null;
 
 	return new Promise((resolve) => {
 		execFile(
 			"gh",
 			["api", `repos/${owner}/${repo}/git/trees/${ref}?recursive=1`, "--jq", ".tree[].path"],
-			{ timeout: 15000, maxBuffer: 5 * 1024 * 1024 },
+			{ timeout: 15000, maxBuffer: 5 * 1024 * 1024, ...(signal ? { signal } : {}) },
 			(err, stdout) => {
 				if (err) {
 					resolve(null);
@@ -82,14 +82,14 @@ async function fetchTreeViaApi(owner: string, repo: string, ref: string): Promis
 	});
 }
 
-async function fetchReadmeViaApi(owner: string, repo: string, ref: string): Promise<string | null> {
+async function fetchReadmeViaApi(owner: string, repo: string, ref: string, signal?: AbortSignal): Promise<string | null> {
 	if (!(await checkGhAvailable())) return null;
 
 	return new Promise((resolve) => {
 		execFile(
 			"gh",
 			["api", `repos/${owner}/${repo}/readme?ref=${ref}`, "--jq", ".content"],
-			{ timeout: 10000 },
+			{ timeout: 10000, ...(signal ? { signal } : {}) },
 			(err, stdout) => {
 				if (err) {
 					resolve(null);
@@ -106,14 +106,14 @@ async function fetchReadmeViaApi(owner: string, repo: string, ref: string): Prom
 	});
 }
 
-async function fetchFileViaApi(owner: string, repo: string, path: string, ref: string): Promise<string | null> {
+async function fetchFileViaApi(owner: string, repo: string, path: string, ref: string, signal?: AbortSignal): Promise<string | null> {
 	if (!(await checkGhAvailable())) return null;
 
 	return new Promise((resolve) => {
 		execFile(
 			"gh",
 			["api", `repos/${owner}/${repo}/contents/${path}?ref=${ref}`, "--jq", ".content"],
-			{ timeout: 10000, maxBuffer: 2 * 1024 * 1024 },
+			{ timeout: 10000, maxBuffer: 2 * 1024 * 1024, ...(signal ? { signal } : {}) },
 			(err, stdout) => {
 				if (err) {
 					resolve(null);
@@ -135,8 +135,9 @@ export async function fetchViaApi(
 	repo: string,
 	info: GitHubUrlInfo,
 	sizeNote?: string,
+	signal?: AbortSignal,
 ): Promise<ExtractedContent | null> {
-	const ref = info.ref || (await getDefaultBranch(owner, repo));
+	const ref = info.ref || (await getDefaultBranch(owner, repo, signal));
 	if (!ref) return null;
 
 	const lines: string[] = [];
@@ -146,7 +147,7 @@ export async function fetchViaApi(
 	}
 
 	if (info.type === "blob" && info.path) {
-		const content = await fetchFileViaApi(owner, repo, info.path, ref);
+		const content = await fetchFileViaApi(owner, repo, info.path, ref, signal);
 		if (!content) return null;
 
 		lines.push(`## ${info.path}`);
@@ -166,8 +167,8 @@ export async function fetchViaApi(
 	}
 
 	const [tree, readme] = await Promise.all([
-		fetchTreeViaApi(owner, repo, ref),
-		fetchReadmeViaApi(owner, repo, ref),
+		fetchTreeViaApi(owner, repo, ref, signal),
+		fetchReadmeViaApi(owner, repo, ref, signal),
 	]);
 
 	if (!tree && !readme) return null;

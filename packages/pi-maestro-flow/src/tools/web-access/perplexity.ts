@@ -3,6 +3,7 @@ import { activityMonitor } from "./activity.ts";
 import type { ExtractedContent } from "./extract.ts";
 import { hasCredentialSource, redactCredential, resolveCredential } from "./credential-source.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const PERPLEXITY_API_URL = "https://api.perplexity.ai/chat/completions";
 const CONFIG_PATH = getWebSearchConfigPath();
@@ -55,6 +56,12 @@ function loadConfig(): WebSearchConfig {
 		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
 	}
 }
+
+export function clearPerplexityConfigCache(): void {
+	cachedConfig = null;
+}
+
+registerWebConfigInvalidator(clearPerplexityConfigCache);
 
 async function getApiKey(signal?: AbortSignal): Promise<string> {
 	const key = await resolveCredential({

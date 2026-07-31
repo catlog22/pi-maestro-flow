@@ -5,6 +5,7 @@ import { activityMonitor } from "./activity.ts";
 import type { ExtractedContent } from "./extract.ts";
 import { checkGhAvailable, checkRepoSize, fetchViaApi, showGhHint } from "./github-api.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const CONFIG_PATH = getWebSearchConfigPath();
 
@@ -38,10 +39,20 @@ export interface GitHubUrlInfo {
 	type: "root" | "blob" | "tree";
 }
 
-interface CachedClone {
+export interface CachedClone {
 	localPath: string;
 	clonePromise: Promise<string | null>;
+	createdAt: number;
+	/** Full-SHA checkouts never move; branch/default-branch checkouts do. */
+	immutable: boolean;
+	/** False while the clone subprocess is still running. */
+	settled: boolean;
 }
+
+/** Mutable refs (branches, tags, default branch) expire; SHAs do not. */
+export const MOVING_REF_TTL_MS = 10 * 60 * 1000;
+
+let cloneClock: () => number = () => Date.now();
 
 interface GitHubCloneConfig {
 	enabled: boolean;
@@ -51,6 +62,42 @@ interface GitHubCloneConfig {
 }
 
 const cloneCache = new Map<string, CachedClone>();
+
+export function isCloneEntryFresh(entry: CachedClone, now: number): boolean {
+	return entry.immutable || now - entry.createdAt < MOVING_REF_TTL_MS;
+}
+
+export function lookupCloneCache(key: string): CachedClone | null {
+	const entry = cloneCache.get(key);
+	if (!entry) return null;
+	if (isCloneEntryFresh(entry, cloneClock())) return entry;
+	if (!entry.settled) return entry; // never evict an in-flight clone
+	cloneCache.delete(key);
+	try {
+		rmSync(entry.localPath, { recursive: true, force: true });
+	} catch {
+	}
+	return null;
+}
+
+/** Test only: control the freshness clock. Returns a restore function. */
+export function setCloneCacheClockForTesting(clock: () => number): () => void {
+	const previous = cloneClock;
+	cloneClock = clock;
+	return () => {
+		cloneClock = previous;
+	};
+}
+
+/** Test only: seed a cache entry without cloning. */
+export function seedCloneCacheForTesting(key: string, entry: CachedClone): void {
+	cloneCache.set(key, entry);
+}
+
+/** Test only: list current cache keys. */
+export function cloneCacheKeysForTesting(): string[] {
+	return [...cloneCache.keys()];
+}
 
 let cachedConfig: GitHubCloneConfig | null = null;
 
@@ -88,9 +135,12 @@ function loadGitHubConfig(): GitHubCloneConfig {
 	let raw: { githubClone?: { enabled?: unknown; maxRepoSizeMB?: unknown; cloneTimeoutSeconds?: unknown; clonePath?: unknown } };
 	try {
 		raw = JSON.parse(rawText) as { githubClone?: { enabled?: unknown; maxRepoSizeMB?: unknown; cloneTimeoutSeconds?: unknown; clonePath?: unknown } };
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
+	} catch {
+		// A torn or externally edited config must not take GitHub extraction down.
+		// Other web providers already degrade parse failures to an empty config;
+		// keep the same fail-soft boundary here and retry after invalidation.
+		cachedConfig = defaults;
+		return cachedConfig;
 	}
 
 	const gc = raw.githubClone ?? {};
@@ -102,6 +152,14 @@ function loadGitHubConfig(): GitHubCloneConfig {
 	};
 	return cachedConfig;
 }
+
+export function clearGitHubCloneConfigCache(): void {
+	cachedConfig = null;
+}
+
+// Config sync must refresh clone settings (clonePath, enabled, limits) but
+// must not wipe clones: that would force full reclones after every sync.
+registerWebConfigInvalidator(clearGitHubCloneConfigCache);
 
 const NON_CODE_SEGMENTS = new Set([
 	"issues", "pull", "pulls", "discussions", "releases", "wiki",
@@ -135,8 +193,9 @@ export function parseGitHubUrl(url: string): GitHubUrlInfo | null {
 		});
 	if (segments.length < 2) return null;
 
-	const owner = segments[0];
-	const repo = segments[1].replace(/\.git$/, "");
+	// GitHub owner/repo identity is case-insensitive; refs stay case-sensitive.
+	const owner = segments[0].toLowerCase();
+	const repo = segments[1].replace(/\.git$/, "").toLowerCase();
 
 	if (NON_CODE_SEGMENTS.has(segments[2]?.toLowerCase())) return null;
 
@@ -163,7 +222,7 @@ export function parseGitHubUrl(url: string): GitHubUrlInfo | null {
 	};
 }
 
-function cacheKey(owner: string, repo: string, ref?: string): string {
+export function cacheKey(owner: string, repo: string, ref?: string): string {
 	return ref ? `${owner}/${repo}@${ref}` : `${owner}/${repo}`;
 }
 
@@ -172,9 +231,9 @@ function cloneDir(config: GitHubCloneConfig, owner: string, repo: string, ref?: 
 	return join(config.clonePath, owner, dirName);
 }
 
-function execClone(args: string[], localPath: string, timeoutMs: number, signal?: AbortSignal): Promise<string | null> {
+function execClone(args: string[], localPath: string, timeoutMs: number): Promise<string | null> {
 	return new Promise((resolve) => {
-		const child = execFile(args[0], args.slice(1), { timeout: timeoutMs }, (err) => {
+		execFile(args[0], args.slice(1), { timeout: timeoutMs }, (err) => {
 			if (err) {
 				try {
 					rmSync(localPath, { recursive: true, force: true });
@@ -185,21 +244,17 @@ function execClone(args: string[], localPath: string, timeoutMs: number, signal?
 			}
 			resolve(localPath);
 		});
-
-		if (signal) {
-			const onAbort = () => child.kill();
-			signal.addEventListener("abort", onAbort, { once: true });
-			child.on("exit", () => signal.removeEventListener("abort", onAbort));
-		}
 	});
 }
 
+// The clone is shared through cloneCache: a single caller aborting must not
+// kill the subprocess other waiters depend on, so no caller signal is threaded
+// here. Per-caller aborts are threaded to the non-shared API calls instead.
 async function cloneRepo(
 	owner: string,
 	repo: string,
 	ref: string | undefined,
 	config: GitHubCloneConfig,
-	signal?: AbortSignal,
 ): Promise<string | null> {
 	const localPath = cloneDir(config, owner, repo, ref);
 
@@ -214,7 +269,7 @@ async function cloneRepo(
 	if (hasGh) {
 		const args = ["gh", "repo", "clone", `${owner}/${repo}`, localPath, "--", "--depth", "1", "--single-branch"];
 		if (ref) args.push("--branch", ref);
-		return execClone(args, localPath, timeoutMs, signal);
+		return execClone(args, localPath, timeoutMs);
 	}
 
 	showGhHint();
@@ -223,7 +278,7 @@ async function cloneRepo(
 	const args = ["git", "clone", "--depth", "1", "--single-branch"];
 	if (ref) args.push("--branch", ref);
 	args.push(gitUrl, localPath);
-	return execClone(args, localPath, timeoutMs, signal);
+	return execClone(args, localPath, timeoutMs);
 }
 
 function isBinaryFile(filePath: string): boolean {
@@ -511,7 +566,7 @@ async function awaitCachedClone(
 		const title = info.path ? `${owner}/${repo} - ${info.path}` : `${owner}/${repo}`;
 		return { url, title, content, error: null };
 	}
-	return fetchViaApi(url, owner, repo, info);
+	return fetchViaApi(url, owner, repo, info, undefined, signal);
 }
 
 export async function extractGitHub(
@@ -530,19 +585,19 @@ export async function extractGitHub(
 	const { owner, repo } = info;
 	const key = cacheKey(owner, repo, info.ref);
 
-	const cached = cloneCache.get(key);
+	const cached = lookupCloneCache(key);
 	if (cached) return awaitCachedClone(cached, url, owner, repo, info, signal);
 
 	if (info.refIsFullSha) {
 		if (signal?.aborted) return null;
 		const sizeNote = `Note: Commit SHA URLs use the GitHub API instead of cloning.`;
-		return fetchViaApi(url, owner, repo, info, sizeNote);
+		return fetchViaApi(url, owner, repo, info, sizeNote, signal);
 	}
 
 	const activityId = activityMonitor.logStart({ type: "fetch", url: `github.com/${owner}/${repo}` });
 
 	if (!forceClone) {
-		const sizeKB = await checkRepoSize(owner, repo);
+		const sizeKB = await checkRepoSize(owner, repo, signal);
 		if (signal?.aborted) {
 			activityMonitor.logComplete(activityId, 0);
 			return null;
@@ -558,7 +613,7 @@ export async function extractGitHub(
 					`Note: Repository is ${Math.round(sizeMB)}MB (threshold: ${config.maxRepoSizeMB}MB). ` +
 					`Showing API-fetched content instead of full clone. Ask the user if they'd like to clone the full repo -- ` +
 					`if yes, call fetch_content again with the same URL and add forceClone: true to the params.`;
-				const apiView = await fetchViaApi(url, owner, repo, info, sizeNote);
+				const apiView = await fetchViaApi(url, owner, repo, info, sizeNote, signal);
 				if (apiView) {
 					activityMonitor.logComplete(activityId, 200);
 					return apiView;
@@ -575,7 +630,7 @@ export async function extractGitHub(
 	}
 
 	// Re-check: another concurrent caller may have started a clone while we awaited the size check
-	const cachedAfterSizeCheck = cloneCache.get(key);
+	const cachedAfterSizeCheck = lookupCloneCache(key);
 	if (cachedAfterSizeCheck) {
 		const cachedResult = await awaitCachedClone(cachedAfterSizeCheck, url, owner, repo, info, signal);
 		if (signal?.aborted) {
@@ -588,11 +643,20 @@ export async function extractGitHub(
 		return cachedResult;
 	}
 
-	const clonePromise = cloneRepo(owner, repo, info.ref, config, signal);
 	const localPath = cloneDir(config, owner, repo, info.ref);
-	cloneCache.set(key, { localPath, clonePromise });
+	const entry: CachedClone = {
+		localPath,
+		clonePromise: Promise.resolve(null),
+		createdAt: cloneClock(),
+		immutable: info.refIsFullSha,
+		settled: false,
+	};
+	entry.clonePromise = cloneRepo(owner, repo, info.ref, config).finally(() => {
+		entry.settled = true;
+	});
+	cloneCache.set(key, entry);
 
-	const result = await clonePromise;
+	const result = await entry.clonePromise;
 	if (signal?.aborted) {
 		if (!result) cloneCache.delete(key);
 		activityMonitor.logComplete(activityId, 0);
@@ -606,7 +670,7 @@ export async function extractGitHub(
 			return null;
 		}
 
-		const apiFallback = await fetchViaApi(url, owner, repo, info);
+		const apiFallback = await fetchViaApi(url, owner, repo, info, undefined, signal);
 		if (apiFallback) {
 			activityMonitor.logComplete(activityId, 200);
 			return apiFallback;
@@ -623,12 +687,13 @@ export async function extractGitHub(
 }
 
 export function clearCloneCache(): void {
-	for (const entry of cloneCache.values()) {
+	for (const [key, entry] of [...cloneCache]) {
+		if (!entry.settled) continue; // never evict an in-flight clone
+		cloneCache.delete(key);
 		try {
 			rmSync(entry.localPath, { recursive: true, force: true });
 		} catch {
 		}
 	}
-	cloneCache.clear();
 	cachedConfig = null;
 }

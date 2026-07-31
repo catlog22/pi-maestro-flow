@@ -4,6 +4,7 @@ import type { ExtractedContent } from "./extract.ts";
 import type { SearchOptions, SearchResponse } from "./perplexity.ts";
 import { hasCredentialSource, redactCredential, resolveCredential } from "./credential-source.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
+import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
 const EXA_ANSWER_URL = "https://api.exa.ai/answer";
 const EXA_SEARCH_URL = "https://api.exa.ai/search";
@@ -68,6 +69,12 @@ function loadConfig(): WebSearchConfig {
 		throw new Error(`Failed to parse ${CONFIG_PATH}: ${message}`);
 	}
 }
+
+export function clearExaConfigCache(): void {
+	cachedConfig = null;
+}
+
+registerWebConfigInvalidator(clearExaConfigCache);
 
 async function getApiKey(signal?: AbortSignal): Promise<string | null> {
 	return resolveCredential({
