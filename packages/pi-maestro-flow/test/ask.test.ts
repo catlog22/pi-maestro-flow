@@ -145,7 +145,7 @@ test("single select keypad Enter uses two-stage confirmation", async () => {
   assert.deepEqual(result.details.answers[0].selected, ["A"]);
 });
 
-test("review can explicitly cancel instead of submitting", async () => {
+test("review uses up and down to choose submit or cancel", async () => {
   const harness = createHarness();
   const pending = executeAsk({
     questions: [{ question: "Choose one", options: [{ label: "A" }] }],
@@ -153,8 +153,10 @@ test("review can explicitly cancel instead of submitting", async () => {
 
   harness.handler?.("1");
   harness.handler?.("\r");
-  assert.match(harness.component?.render(80).join("\n") ?? "", /提交.*取消/);
-  harness.handler?.("\x1b[C");
+  const review = harness.component?.render(80).join("\n") ?? "";
+  assert.match(review, /提交\s*\n\s*取消/);
+  assert.match(review, /↑↓\/Tab 选择操作/);
+  harness.handler?.("\x1b[B");
   harness.handler?.("\r");
 
   const result = await pending;
@@ -300,9 +302,17 @@ test("multi-question review includes each full question and final option", async
   harness.handler?.("\r"); // Next.
   harness.handler?.("2");
   harness.handler?.("\r"); // Next.
-  const preview = harness.component?.render(100).join("\n") ?? "";
-  assert.match(preview, /First full question\?.*A/);
+  let preview = harness.component?.render(100).join("\n") ?? "";
+  assert.match(preview, /› 1\. First full question\?.*A/);
   assert.match(preview, /Second full question\?.*D/);
+  assert.match(preview, /←→ 切换问题/);
+
+  harness.handler?.("\x1b[C");
+  preview = harness.component?.render(100).join("\n") ?? "";
+  assert.match(preview, /› 2\. Second full question\?.*D/);
+  harness.handler?.("\x1b[D");
+  preview = harness.component?.render(100).join("\n") ?? "";
+  assert.match(preview, /› 1\. First full question\?.*A/);
   harness.handler?.("\x1bOM");
 
   const result = await pending;

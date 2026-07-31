@@ -494,31 +494,34 @@ async function showAskWizard(
         ];
         for (let i = 0; i < questions.length; i++) {
           const answer = collectAnswers()[i];
+          const active = i === reviewCursor;
           const chosen = answer.selected.map((label) => {
             const detail = answer.details?.[label];
             return detail ? `${label} (${detail})` : label;
           });
           const values = [...chosen, ...(answer.text ? [answer.text] : [])].join(" — ");
+          const marker = active ? theme.fg("success", "›") : " ";
+          const label = `${i + 1}. ${answer.question}`;
           lines.push(truncateToWidth(
-            `${theme.bold(`${i + 1}. ${answer.question}`)}  ${theme.fg("muted", values)}`,
+            `${marker} ${active ? theme.fg("success", theme.bold(label)) : theme.bold(label)}  ${theme.fg("muted", values)}`,
             width,
             "…",
           ));
         }
-        lines.push(renderSubmitActions(width));
-        lines.push(theme.fg("dim", actionFooter(width, ["Esc 返回", "←→/Tab 选择", "Enter 确认"])));
+        lines.push(...renderSubmitActions(width));
+        lines.push(theme.fg("dim", actionFooter(width, ["Esc 返回", "↑↓/Tab 选择操作", "←→ 切换问题", "Enter 确认"])));
         return lines.slice(0, 10);
       }
 
-      function renderSubmitActions(width: number): string {
-        return truncateToWidth(["提交", "取消"].map((label, index) => {
+      function renderSubmitActions(width: number): string[] {
+        return ["提交", "取消"].map((label, index) => {
           const active = submitActionCursor === index;
           const marker = active ? theme.fg("success", "›") : " ";
           const text = active
             ? theme.bg("selectedBg", theme.fg("success", theme.bold(` ${label} `)))
             : ` ${label} `;
-          return `${marker} ${text}`;
-        }).join("   "), width, "…");
+          return truncateToWidth(`${marker} ${text}`, width, "…");
+        });
       }
 
       function clampInt(value: number, min: number, max: number): number {
@@ -715,10 +718,10 @@ async function showAskWizard(
         const header: string[] = [
           breadcrumb(width),
           truncateToWidth(theme.bold("核对答案"), width, "…"),
-          renderSubmitActions(width),
+          ...renderSubmitActions(width),
         ];
         const footer: string[] = [
-          truncateToWidth(theme.fg("dim", actionFooter(width, ["Esc 返回", "←→/Tab 选择", "Enter 确认", "↑↓ 预览", "PgDn/Shift+↓ 滚动"])), width, "…"),
+          truncateToWidth(theme.fg("dim", actionFooter(width, ["Esc 返回", "↑↓/Tab 选择操作", "←→ 切换问题", "PgDn/Shift+↓ 滚动", "Enter 确认"])), width, "…"),
         ];
         const bodyBudget = clampInt(termRows() - header.length - footer.length - 9, 4, 18);
         const rightW = Math.max(34, Math.round(width * 0.55));
@@ -986,20 +989,20 @@ async function showAskWizard(
             done(submitActionCursor === 0 ? collectAnswers() : undefined);
           } else if (value === "\x1b") {
             enterStep(step - 1);
-          } else if (value === "h" || value === "\x1b[D" || value === "\x1bOD") {
+          } else if (value === "k" || value === "\x1b[A" || value === "\x1bOA") {
             submitActionCursor = 0;
             tui.requestRender();
-          } else if (value === "l" || value === "\x1b[C" || value === "\x1bOC") {
+          } else if (value === "j" || value === "\x1b[B" || value === "\x1bOB") {
             submitActionCursor = 1;
             tui.requestRender();
           } else if (value === "\t" || value === "\x1b[Z") {
             submitActionCursor = submitActionCursor === 0 ? 1 : 0;
             tui.requestRender();
-          } else if (value === "\x1b[A" || value === "\x1bOA" || value === "k") {
+          } else if (value === "h" || value === "\x1b[D" || value === "\x1bOD") {
             reviewCursor = Math.max(0, reviewCursor - 1);
             previewScroll = 0;
             tui.requestRender();
-          } else if (value === "\x1b[B" || value === "\x1bOB" || value === "j") {
+          } else if (value === "l" || value === "\x1b[C" || value === "\x1bOC") {
             reviewCursor = Math.min(questions.length - 1, reviewCursor + 1);
             previewScroll = 0;
             tui.requestRender();
