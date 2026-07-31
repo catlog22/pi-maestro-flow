@@ -277,7 +277,7 @@ session model. The command saves to `.pi/settings.local.json`.
 Maestro Flow registers `Shift+Tab` to cycle the hook approval mode in this order:
 
 ```text
-default -> acceptEdits -> plan -> dontAsk -> bypassPermissions -> default
+default -> acceptEdits -> dontAsk -> bypassPermissions -> default
 ```
 
 Pi uses `Shift+Tab` for effort/thinking-level cycling by default, and that action is a
@@ -293,7 +293,8 @@ reserved host binding. During `npm install`, Maestro Flow creates or merges
 The installer preserves all other shortcuts. If the existing file is invalid JSON, it
 is left unchanged and npm prints a warning. Run `/reload` after installation when Pi is
 already open. Pi then releases `Shift+Tab`, allowing the extension shortcut to handle
-approval-mode cycling. `plan` activates Maestro's durable Plan mode. The other values
+approval-mode cycling. Plan is not part of this carousel; enter durable Plan mode
+through `/plan`, `Alt+P`, or the Plan tools exposed to the LLM. The approval values
 control the permission engine and are also forwarded as `permission_mode` to
 Codex-style hooks. Permissions are application-level gates, not an operating-system
 sandbox.
@@ -307,8 +308,8 @@ intentionally disables Maestro's conflicting `Shift+Tab` shortcut.
 
 The statusline follows the effective approval mode. Wide terminals show labels such as
 `ACT · APPROVAL acceptEdits`; medium and narrow terminals progressively compact this to
-`ACT/acceptEdits` and `A/E`. Active or ready Plan mode always renders approval as `plan`,
-regardless of whether it was entered through `Shift+Tab`, `Alt+P`, or `/plan`.
+`ACT/acceptEdits` and `A/E`. Active or ready Plan mode has its own mode indicator, while
+YOLO remains visible because it is safety-relevant.
 
 ### Permission rules
 

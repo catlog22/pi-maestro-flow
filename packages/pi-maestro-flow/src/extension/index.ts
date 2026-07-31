@@ -204,11 +204,11 @@ interface MaestroState {
 }
 
 export const APPROVAL_MODE_CYCLE_KEY = "shift+tab";
-// Keep Plan in the same manual mode carousel as the other permission modes.
-// permissionController.setMode() owns the transition side effects so every
-// entry path (Shift+Tab, settings reload, and explicit mode changes) activates
-// or exits the durable Plan lifecycle consistently.
-export const APPROVAL_MODES: readonly PermissionMode[] = PERMISSION_MODES;
+// Plan is a separate durable workflow entered through /plan, Alt+P, or an LLM
+// plan tool. Shift+Tab only cycles permission-engine approval modes.
+export const APPROVAL_MODES: readonly PermissionMode[] = PERMISSION_MODES.filter(
+  (mode) => mode !== "plan",
+);
 
 export function nextApprovalMode(
   current: PermissionMode,
