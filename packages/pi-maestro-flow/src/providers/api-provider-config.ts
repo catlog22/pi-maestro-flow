@@ -19,6 +19,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
 import {
   EFFORT_LEVELS,
   EFFORT_STATUS_KEY,
@@ -27,6 +28,11 @@ import {
 } from "../effort-display.ts";
 import { readCompactionSettings } from "../compaction/compaction-settings.ts";
 import { deriveCompactionThreshold, type CompactionThresholdReason } from "../compaction/compaction-threshold.ts";
+import {
+  showApiModelEditor,
+  type ApiModelFormChoice,
+  type ApiModelFormValues,
+} from "../tui/api-model-editor.ts";
 
 export type ApiProviderId = "maestro-openai" | "maestro-qwen" | "maestro-anthropic";
 
@@ -63,6 +69,8 @@ export interface ApiProviderSettings {
   compat?: Record<string, unknown>;
   /** Max output tokens for custom channels. */
   maxTokens?: number;
+  /** Whether omitted custom-provider compat/headers/authHeader values should be cleared. */
+  replaceProviderOptions?: boolean;
   /** Custom request headers for custom channels. */
   headers?: Record<string, string>;
   /** Whether to send Authorization: Bearer. Undefined lets pi decide. */
@@ -121,7 +129,7 @@ type ApiProviderAction = "configure" | "delete" | "list" | "logout" | "reset" | 
 type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
-const API_RETRY_MAX_RETRIES = 12;
+const API_RETRY_MAX_RETRIES = NETWORK_RETRY_POLICY.maxRetries;
 const DEFAULT_API_RETRY_SETTINGS: Readonly<ApiRetrySettings> = Object.freeze({
   enabled: true,
   maxRetries: API_RETRY_MAX_RETRIES,
@@ -190,7 +198,7 @@ export function registerApiProviderConfigs(
 
   if (typeof pi.registerCommand !== "function") return;
   pi.registerCommand("api-manager", {
-    description: "增删查改 API 渠道（OpenAI / Qwen / Anthropic 预设 + 自定义渠道）",
+    description: "以 model 为中心增删查改 API 配置（单表单编辑；OpenAI / Qwen / Anthropic 预设 + 自定义渠道）",
     async handler(args, ctx) {
       try {
         await showApiProviderManager(pi, args, ctx, modelsPath, defaultsPath, settingsPath);
@@ -287,6 +295,9 @@ export async function loadApiProviderSettings(
     maxThinking: thinkingLevelMap.xhigh === "max" || thinkingLevelMap.max === "max",
     api: typeof config.api === "string" ? config.api : preset?.api,
     name: typeof config.name === "string" ? config.name : preset?.name,
+    compat: isRecord(config.compat) ? { ...config.compat } : undefined,
+    headers: isStringRecord(config.headers) ? { ...config.headers } : undefined,
+    authHeader: typeof config.authHeader === "boolean" ? config.authHeader : undefined,
     maxTokens: typeof model?.maxTokens === "number"
       ? model.maxTokens
       : preset?.maxTokens ?? 16_384,
@@ -313,6 +324,7 @@ export async function saveApiProviderSettings(
     maxTokens: settings.maxTokens === undefined
       ? undefined
       : positiveInteger(settings.maxTokens, "单次最大输出 maxTokens"),
+    replaceProviderOptions: settings.replaceProviderOptions === true,
     headers: settings.headers && Object.keys(settings.headers).length > 0 ? settings.headers : undefined,
     authHeader: settings.authHeader,
   };
@@ -385,8 +397,8 @@ export function normalizeBaseUrl(value: string): string {
     && !isLoopbackHostname(parsed.hostname)
     && process.env[ALLOW_INSECURE_PROVIDER_HTTP_ENV] !== "1"
   ) {
-    throw new Error(
-      `Remote Base URL must use https; set ${ALLOW_INSECURE_PROVIDER_HTTP_ENV}=1 to allow insecure HTTP explicitly`,
+    console.warn(
+      `[WARN] Remote Base URL uses insecure HTTP (${value}); set ${ALLOW_INSECURE_PROVIDER_HTTP_ENV}=1 to suppress this warning`,
     );
   }
   return normalized;
@@ -420,6 +432,9 @@ export async function saveApiRetrySettings(
         ...retry,
         enabled: settings.enabled,
         maxRetries,
+        baseDelayMs: isPositiveInteger(retry.baseDelayMs)
+          ? retry.baseDelayMs
+          : NETWORK_RETRY_POLICY.initialDelayMs,
       },
     }, settingsPath, exists);
   });
@@ -430,7 +445,11 @@ export async function ensureApiRetryDefaults(
 ): Promise<void> {
   const root = await readModelsRoot(settingsPath);
   const retry = isRecord(root.retry) ? root.retry : {};
-  if (typeof retry.enabled === "boolean" && isPositiveInteger(retry.maxRetries)) return;
+  if (
+    typeof retry.enabled === "boolean"
+    && isPositiveInteger(retry.maxRetries)
+    && isPositiveInteger(retry.baseDelayMs)
+  ) return;
   await saveApiRetrySettings({
     enabled: typeof retry.enabled === "boolean" ? retry.enabled : DEFAULT_API_RETRY_SETTINGS.enabled,
     maxRetries: isPositiveInteger(retry.maxRetries)
@@ -512,7 +531,7 @@ async function showApiProviderManager(
     ctx.ui.notify("/api-manager 交互菜单需要交互式 Pi 会话。", "warning");
     return;
   }
-  const action = parsed.action ?? await chooseAction(ctx);
+  const action = parsed.action ?? await chooseAction(ctx, settingsPath);
   if (!action) return;
   if (action === "list") {
     await listProviders(ctx, modelsPath, defaultsPath, settingsPath);
@@ -522,33 +541,61 @@ async function showApiProviderManager(
     await manageRetrySettings(ctx, settingsPath, parsed.retry);
     return;
   }
-  const target = parsed.target ?? (ctx.hasUI ? await chooseChannel(ctx, action, modelsPath, defaultsPath) : undefined);
-  if (!target) {
-    ctx.ui.notify("请指定渠道：openai、qwen、anthropic 或自定义渠道 id。", "warning");
-    return;
-  }
   if (action === "configure") {
     if (!ctx.hasUI) {
       ctx.ui.notify("/api-manager configure 需要交互式 Pi 会话。", "warning");
       return;
     }
-    if (target.kind === "preset") await configureProvider(pi, target.preset, ctx, modelsPath, defaultsPath);
-    else await configureCustomChannel(pi, ctx, modelsPath, defaultsPath, target.id || undefined);
+    if (parsed.target) {
+      if (parsed.target.kind === "preset") {
+        await configureProvider(pi, parsed.target.preset, ctx, modelsPath, defaultsPath);
+      } else {
+        await configureCustomChannel(pi, ctx, modelsPath, defaultsPath, parsed.target.id || undefined);
+      }
+      return;
+    }
+    const pick = await chooseModelGlobally(ctx, "configure", modelsPath, defaultsPath);
+    if (!pick) return;
+    await dispatchGlobalModelPick(pi, pick, "configure", ctx, modelsPath, defaultsPath);
+    return;
+  }
+  if (action === "show" || action === "delete") {
+    if (parsed.target) {
+      const ref = await resolveChannelRef(parsed.target, ctx, modelsPath);
+      if (!ref) return;
+      if (action === "show") {
+        await showProvider(ctx, ref.id, ref.name, modelsPath, defaultsPath);
+        return;
+      }
+      if (!ctx.hasUI) {
+        ctx.ui.notify(`/api-manager ${action} 需要交互式 Pi 会话。`, "warning");
+        return;
+      }
+      await deleteProvider(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath);
+      return;
+    }
+    if (!ctx.hasUI) {
+      ctx.ui.notify(`/api-manager ${action} 需要交互式 Pi 会话。`, "warning");
+      return;
+    }
+    const pick = await chooseModelGlobally(ctx, action, modelsPath, defaultsPath);
+    if (!pick) return;
+    await dispatchGlobalModelPick(pi, pick, action, ctx, modelsPath, defaultsPath);
+    return;
+  }
+  // logout / reset 是 Provider（连接）级操作，仍按渠道选择
+  const target = parsed.target ?? (ctx.hasUI ? await chooseProvider(ctx, modelsPath, defaultsPath) : undefined);
+  if (!target) {
+    ctx.ui.notify("请指定渠道：openai、qwen、anthropic 或自定义渠道 id。", "warning");
     return;
   }
   const ref = await resolveChannelRef(target, ctx, modelsPath);
   if (!ref) return;
-  if (action === "show") {
-    await showProvider(ctx, ref.id, ref.name, modelsPath, defaultsPath);
-    return;
-  }
   if (!ctx.hasUI) {
     ctx.ui.notify(`/api-manager ${action} 需要交互式 Pi 会话。`, "warning");
     return;
   }
-  if (action === "delete") {
-    await deleteProvider(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath);
-  } else if (action === "logout") {
+  if (action === "logout") {
     await removeProviderKey(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath);
   } else {
     await resetProvider(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath);
@@ -564,6 +611,33 @@ async function configureProvider(
 ): Promise<void> {
   const target = await chooseModelToConfigure(provider.id, provider.name, ctx, modelsPath);
   if (!target) return;
+  await configurePresetModelTarget(pi, provider, target, ctx, modelsPath, defaultsPath);
+}
+
+async function configurePresetModelTarget(
+  pi: ExtensionAPI,
+  provider: ProviderDefaults,
+  target: ConfigureModelTarget,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<void> {
+  if (supportsApiModelForm(ctx)) {
+    await configurePresetModelWithForm(pi, provider, ctx, modelsPath, defaultsPath, target.adding ? null : target.modelId);
+    return;
+  }
+  await configurePresetModelWithSteps(pi, provider, target, ctx, modelsPath, defaultsPath);
+}
+
+/** Legacy step-by-step fallback for hosts without the custom form overlay. */
+async function configurePresetModelWithSteps(
+  pi: ExtensionAPI,
+  provider: ProviderDefaults,
+  target: ConfigureModelTarget,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<void> {
   const current = await loadApiProviderSettings(provider.id, modelsPath, target.modelId);
   const maxThinking = current.maxThinking === true || runtimeSupportsMaxThinking(ctx);
   const baseUrlInput = await ctx.ui.input(`${provider.name} Base URL`, current.configured ? current.baseUrl : "");
@@ -677,9 +751,36 @@ async function configureCustomChannel(
     await configureProvider(pi, preset, ctx, modelsPath, defaultsPath);
     return;
   }
-  const currentDisplayName = await channelDisplayName(providerId, modelsPath);
-  const target = await chooseModelToConfigure(providerId, currentDisplayName, ctx, modelsPath);
+  const target = await chooseModelToConfigure(providerId, await channelDisplayName(providerId, modelsPath), ctx, modelsPath);
   if (!target) return;
+  await configureCustomModelTarget(pi, providerId, target, ctx, modelsPath, defaultsPath);
+}
+
+async function configureCustomModelTarget(
+  pi: ExtensionAPI,
+  providerId: string,
+  target: ConfigureModelTarget,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<void> {
+  if (supportsApiModelForm(ctx)) {
+    await configureCustomModelWithForm(pi, providerId, ctx, modelsPath, defaultsPath, target.adding ? null : target.modelId);
+    return;
+  }
+  await configureCustomModelWithSteps(pi, providerId, target, ctx, modelsPath, defaultsPath);
+}
+
+/** Legacy step-by-step fallback for hosts without the custom form overlay. */
+async function configureCustomModelWithSteps(
+  pi: ExtensionAPI,
+  providerId: string,
+  target: ConfigureModelTarget,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<void> {
+  const currentDisplayName = await channelDisplayName(providerId, modelsPath);
   const current = await loadApiProviderSettings(providerId, modelsPath, target.modelId);
   const apiOptions = current.api && KNOWN_APIS.includes(current.api)
     ? [current.api, ...KNOWN_APIS.filter((api) => api !== current.api)]
@@ -850,6 +951,456 @@ async function configureCustomChannel(
   );
 }
 
+async function configurePresetModelWithForm(
+  pi: ExtensionAPI,
+  provider: ProviderDefaults,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  defaultsPath: string,
+  modelId: string | null,
+): Promise<void> {
+  const adding = modelId === null;
+  const current = await loadApiProviderSettings(provider.id, modelsPath, modelId);
+  const maxThinking = adding
+    ? current.maxThinking === true || runtimeSupportsMaxThinking(ctx)
+    : current.maxThinking === true;
+  const existingModelIds = await configuredModelIds(provider.id, modelsPath);
+  const currentThinking = modelId
+    ? await loadModelThinkingDefault(provider.id, modelId, defaultsPath)
+      ?? currentDefaultThinkingLevel(ctx, modelsPath)
+    : currentDefaultThinkingLevel(ctx, modelsPath);
+  const result = await showApiModelEditor(ctx, {
+    title: adding ? `新增 ${provider.name} model` : `修改 ${provider.name} / ${modelId}`,
+    fields: [
+      { id: "connection-section", label: "连接（Provider 级）", kind: "section", value: "" },
+      { id: "provider", label: "Provider", kind: "readonly", value: provider.id },
+      { id: "api", label: "API format", kind: "readonly", value: provider.api },
+      { id: "baseUrl", label: "Base URL", kind: "text", value: current.baseUrl },
+      {
+        id: "apiKey",
+        label: "API key",
+        kind: "secret",
+        value: current.apiKey,
+        help: "API key 仅显示掩码；不编辑即可保留 models.json 中的当前值。",
+      },
+      { id: "model-section", label: "模型（Model 级）", kind: "section", value: "" },
+      {
+        id: "modelId",
+        label: "Model ID",
+        kind: adding ? "text" : "readonly",
+        value: adding ? (current.configured ? "" : provider.modelId) : current.modelId,
+        help: adding ? "新增 model：输入新的 model ID；同 Provider 共享 Base URL 与 API key" : undefined,
+      },
+      { id: "reasoning", label: "推理能力", kind: "toggle", value: current.reasoning },
+      {
+        id: "defaultThinking",
+        label: "默认思考强度",
+        kind: "choice",
+        value: reconcileFormThinkingLevel(provider.api, current.reasoning, currentThinking, maxThinking),
+        choices: thinkingFormChoices(provider.api, maxThinking),
+      },
+      { id: "contextWindow", label: "上下文窗口", kind: "number", value: String(current.contextWindow) },
+      { id: "maxTokens", label: "单次最大输出", kind: "number", value: String(current.maxTokens) },
+    ],
+    validate: (values) => validateApiModelForm(
+      values,
+      provider.api,
+      maxThinking,
+      adding ? existingModelIds : undefined,
+    ),
+  });
+  if (!result) return;
+
+  const baseUrl = normalizeBaseUrl(formText(result.values, "baseUrl"));
+  const nextModelId = modelId ?? required(formText(result.values, "modelId"), "Model ID");
+  const reasoning = formBoolean(result.values, "reasoning");
+  const defaultThinkingLevel = formThinkingLevel(result.values, "defaultThinking");
+  const contextWindow = positiveInteger(formText(result.values, "contextWindow"), "上下文窗口 contextWindow");
+  const maxTokens = positiveInteger(formText(result.values, "maxTokens"), "单次最大输出 maxTokens");
+  validateModelWindow(contextWindow, maxTokens);
+  const apiKey = required(formText(result.values, "apiKey"), "API key");
+  const siblingCount = existingModelIds.filter((id) => id !== nextModelId).length;
+  const next: ApiProviderSettings = {
+    provider: provider.id,
+    baseUrl,
+    modelId: nextModelId,
+    contextWindow,
+    maxTokens,
+    reasoning,
+    apiKey,
+    maxThinking,
+  };
+  const confirmed = await ctx.ui.confirm(
+    `保存 ${provider.name} API 配置？`,
+    modelSavePreview({
+      providerId: provider.id,
+      api: provider.api,
+      displayName: provider.name,
+      next,
+      defaultThinkingLevel,
+      siblingCount,
+      cwd: ctx.cwd,
+    }),
+  );
+  if (!confirmed) return;
+  const saveResult = await saveApiProviderSettings(next, modelsPath);
+  await saveModelThinkingDefault(provider.id, nextModelId, canonicalThinkingLevel(defaultThinkingLevel), defaultsPath);
+  await saveDefaultModelAndThinking(ctx, modelsPath, provider.id, nextModelId, defaultThinkingLevel);
+  reloadProviderRegistration(pi, ctx, provider.id, modelsPath);
+  applyThinkingLevelToActiveModel(pi, ctx, provider.id, nextModelId, canonicalThinkingLevel(defaultThinkingLevel));
+  notifySaved(
+    ctx,
+    provider.name,
+    saveResult,
+    `已保存；默认模型为 ${provider.id}/${nextModelId}，默认思考强度为 ${defaultThinkingLevel}`,
+  );
+}
+
+async function configureCustomModelWithForm(
+  pi: ExtensionAPI,
+  providerId: string,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  defaultsPath: string,
+  modelId: string | null,
+): Promise<void> {
+  const adding = modelId === null;
+  const current = await loadApiProviderSettings(providerId, modelsPath, modelId);
+  const displayName = current.name ?? providerId;
+  const maxThinking = adding
+    ? current.maxThinking === true || runtimeSupportsMaxThinking(ctx)
+    : current.maxThinking === true;
+  const currentApi = current.api ?? "openai-completions";
+  const existingModelIds = await configuredModelIds(providerId, modelsPath);
+  const currentThinking = modelId
+    ? await loadModelThinkingDefault(providerId, modelId, defaultsPath)
+      ?? currentDefaultThinkingLevel(ctx, modelsPath)
+    : currentDefaultThinkingLevel(ctx, modelsPath);
+  const compat = current.compat ?? {};
+  const result = await showApiModelEditor(ctx, {
+    title: adding ? `新增 ${displayName} model` : `修改 ${displayName} / ${modelId}`,
+    fields: [
+      { id: "connection-section", label: "连接（Provider 级）", kind: "section", value: "" },
+      { id: "provider", label: "Provider", kind: "readonly", value: providerId },
+      {
+        id: "api",
+        label: "API format",
+        kind: "choice",
+        value: currentApi,
+        choices: formChoicesWithCurrent(currentApi, KNOWN_APIS.map((api) => ({ label: api, value: api }))),
+      },
+      { id: "name", label: "渠道显示名称", kind: "text", value: current.name ?? providerId },
+      { id: "baseUrl", label: "Base URL", kind: "text", value: current.baseUrl },
+      {
+        id: "apiKey",
+        label: "API key",
+        kind: "secret",
+        value: current.apiKey,
+        help: "API key 仅显示掩码；不编辑即可保留 models.json 中的当前值。",
+      },
+      {
+        id: "headers",
+        label: "请求头 JSON",
+        kind: "secret",
+        value: JSON.stringify(current.headers ?? {}),
+        help: "请求头可能包含凭据，表单仅显示掩码；编辑时需输入完整 JSON 对象。",
+      },
+      {
+        id: "authHeader",
+        label: "Authorization",
+        kind: "choice",
+        value: triStateValue(current.authHeader),
+        choices: [
+          { label: "自动", value: "auto" },
+          { label: "Bearer", value: "true" },
+          { label: "不发送", value: "false" },
+        ],
+      },
+      { id: "compat-section", label: "兼容（format 级）", kind: "section", value: "" },
+      {
+        id: "thinkingFormat",
+        label: "Thinking format",
+        kind: "choice",
+        value: typeof compat.thinkingFormat === "string" ? compat.thinkingFormat : "",
+        choices: formChoicesWithCurrent(
+          typeof compat.thinkingFormat === "string" ? compat.thinkingFormat : "",
+          [{ label: "自动（按 URL 识别）", value: "" }, ...THINKING_FORMAT_OPTIONS.flatMap((entry) =>
+            entry.value ? [{ label: entry.label, value: entry.value }] : []
+          )],
+        ),
+      },
+      {
+        id: "supportsDeveloperRole",
+        label: "Developer 角色",
+        kind: "choice",
+        value: triStateValue(compat.supportsDeveloperRole),
+        choices: TRI_STATE_CHOICES,
+      },
+      {
+        id: "supportsReasoningEffort",
+        label: "Reasoning effort",
+        kind: "choice",
+        value: triStateValue(compat.supportsReasoningEffort),
+        choices: TRI_STATE_CHOICES,
+      },
+      {
+        id: "maxTokensField",
+        label: "输出请求字段",
+        kind: "choice",
+        value: typeof compat.maxTokensField === "string" ? compat.maxTokensField : "",
+        choices: formChoicesWithCurrent(
+          typeof compat.maxTokensField === "string" ? compat.maxTokensField : "",
+          [
+            { label: "自动", value: "" },
+            { label: "max_completion_tokens", value: "max_completion_tokens" },
+            { label: "max_tokens", value: "max_tokens" },
+          ],
+        ),
+      },
+      { id: "model-section", label: "模型（Model 级）", kind: "section", value: "" },
+      {
+        id: "modelId",
+        label: "Model ID",
+        kind: adding ? "text" : "readonly",
+        value: adding ? "" : current.modelId,
+        help: adding ? "新增 model：输入新的 model ID；同渠道共享 Base URL 与 API key" : undefined,
+      },
+      { id: "reasoning", label: "推理能力", kind: "toggle", value: current.reasoning },
+      {
+        id: "defaultThinking",
+        label: "默认思考强度",
+        kind: "choice",
+        value: reconcileFormThinkingLevel(currentApi, current.reasoning, currentThinking, maxThinking),
+        choices: thinkingFormChoices(currentApi, maxThinking),
+      },
+      { id: "contextWindow", label: "上下文窗口", kind: "number", value: String(current.contextWindow) },
+      { id: "maxTokens", label: "单次最大输出", kind: "number", value: String(current.maxTokens) },
+    ],
+    validate: (values) => {
+      const errors = validateApiModelForm(
+        values,
+        formText(values, "api"),
+        maxThinking,
+        adding ? existingModelIds : undefined,
+      );
+      try {
+        parseHeadersForm(formText(values, "headers"));
+      } catch (error) {
+        errors.push(errorMessage(error));
+      }
+      return errors;
+    },
+  });
+  if (!result) return;
+
+  const api = required(formText(result.values, "api"), "API type");
+  const nextDisplayName = formText(result.values, "name").trim() || providerId;
+  const baseUrl = normalizeBaseUrl(formText(result.values, "baseUrl"));
+  const nextModelId = modelId ?? required(formText(result.values, "modelId"), "Model ID");
+  const reasoning = formBoolean(result.values, "reasoning");
+  const defaultThinkingLevel = formThinkingLevel(result.values, "defaultThinking");
+  const contextWindow = positiveInteger(formText(result.values, "contextWindow"), "上下文窗口 contextWindow");
+  const maxTokens = positiveInteger(formText(result.values, "maxTokens"), "单次最大输出 maxTokens");
+  validateModelWindow(contextWindow, maxTokens);
+  const apiKey = required(formText(result.values, "apiKey"), "API key");
+  const headers = parseHeadersForm(formText(result.values, "headers"));
+  const nextCompat = { ...compat };
+  setOptionalCompatString(nextCompat, "thinkingFormat", formText(result.values, "thinkingFormat"));
+  setOptionalCompatBoolean(nextCompat, "supportsDeveloperRole", formText(result.values, "supportsDeveloperRole"));
+  setOptionalCompatBoolean(nextCompat, "supportsReasoningEffort", formText(result.values, "supportsReasoningEffort"));
+  setOptionalCompatString(nextCompat, "maxTokensField", formText(result.values, "maxTokensField"));
+  const authHeaderValue = formText(result.values, "authHeader");
+  const authHeader = authHeaderValue === "auto" ? undefined : authHeaderValue === "true";
+  const siblingCount = existingModelIds.filter((id) => id !== nextModelId).length;
+  const next: ApiProviderSettings = {
+    provider: providerId,
+    baseUrl,
+    modelId: nextModelId,
+    contextWindow,
+    maxTokens,
+    reasoning,
+    apiKey,
+    maxThinking,
+    api,
+    name: nextDisplayName,
+    compat: Object.keys(nextCompat).length > 0 ? nextCompat : undefined,
+    replaceProviderOptions: true,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
+    authHeader,
+  };
+  const confirmed = await ctx.ui.confirm(
+    `保存自定义渠道 ${nextDisplayName}？`,
+    [
+      modelSavePreview({
+        providerId,
+        api,
+        displayName: nextDisplayName,
+        next,
+        defaultThinkingLevel,
+        siblingCount,
+        cwd: ctx.cwd,
+      }),
+      `Compat：${next.compat ? JSON.stringify(next.compat) : "自动"}`,
+      `请求头：${Object.keys(headers).length > 0 ? Object.keys(headers).join(", ") : "无"}`,
+      `Authorization：${authHeader === undefined ? "自动" : authHeader ? "Bearer" : "关闭"}`,
+    ].join("\n"),
+  );
+  if (!confirmed) return;
+  const saveResult = await saveApiProviderSettings(next, modelsPath);
+  await saveModelThinkingDefault(providerId, nextModelId, canonicalThinkingLevel(defaultThinkingLevel), defaultsPath);
+  await saveDefaultModelAndThinking(ctx, modelsPath, providerId, nextModelId, defaultThinkingLevel);
+  await addManagedChannel(defaultsPath, providerId);
+  reloadProviderRegistration(pi, ctx, providerId, modelsPath);
+  applyThinkingLevelToActiveModel(pi, ctx, providerId, nextModelId, canonicalThinkingLevel(defaultThinkingLevel));
+  notifySaved(
+    ctx,
+    nextDisplayName,
+    saveResult,
+    `已保存自定义渠道；默认模型为 ${providerId}/${nextModelId}，默认思考强度为 ${defaultThinkingLevel}`,
+  );
+}
+
+interface ModelSavePreviewInput {
+  providerId: string;
+  api: string;
+  displayName: string;
+  next: ApiProviderSettings;
+  defaultThinkingLevel: ApiThinkingLevel;
+  siblingCount: number;
+  cwd: string;
+}
+
+function modelSavePreview(input: ModelSavePreviewInput): string {
+  return [
+    `Provider：${input.providerId}`,
+    `API format：${input.api}`,
+    `Base URL：${input.next.baseUrl}`,
+    `Model：${input.next.modelId}`,
+    `上下文窗口 contextWindow：${input.next.contextWindow?.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
+    `单次最大输出 maxTokens：${input.next.maxTokens?.toLocaleString("en-US")} Token`,
+    ...compactionPreviewLines(input.cwd, input.next.contextWindow ?? 0, input.next.maxTokens ?? 0),
+    `Reasoning：${input.next.reasoning ? "enabled" : "disabled"}`,
+    `Default thinking（Pi 全局）：${input.defaultThinkingLevel}`,
+    "Auth：stored API key",
+    ...(input.siblingCount > 0
+      ? [`Provider 级配置将同时用于其余 ${input.siblingCount} 个 model`]
+      : []),
+  ].join("\n");
+}
+
+const TRI_STATE_CHOICES: readonly ApiModelFormChoice[] = [
+  { label: "自动", value: "auto" },
+  { label: "支持", value: "true" },
+  { label: "不支持", value: "false" },
+];
+
+function supportsApiModelForm(ctx: ExtensionCommandContext): boolean {
+  return typeof (ctx.ui as { custom?: unknown }).custom === "function";
+}
+
+function thinkingFormChoices(_api: string, maxThinking: boolean): ApiModelFormChoice[] {
+  const levels: ApiThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+  if (maxThinking) levels.push("max");
+  return levels.map((level) => ({ label: level, value: level }));
+}
+
+function supportedThinkingFormValues(api: string, maxThinking: boolean): ApiThinkingLevel[] {
+  const levels: ApiThinkingLevel[] = api === "openai-responses"
+    ? ["minimal", "low", "medium", "high", "xhigh"]
+    : ["off", "minimal", "low", "medium", "high", "xhigh"];
+  if (maxThinking) levels.push("max");
+  return levels;
+}
+
+function reconcileFormThinkingLevel(
+  api: string,
+  reasoning: boolean,
+  current: ApiThinkingLevel,
+  maxThinking: boolean,
+): ApiThinkingLevel {
+  const supported: ApiThinkingLevel[] = reasoning ? supportedThinkingFormValues(api, maxThinking) : ["off"];
+  if (supported.includes(current)) return current;
+  return supported.includes(DEFAULT_THINKING_LEVEL) ? DEFAULT_THINKING_LEVEL : supported[0];
+}
+
+function formChoicesWithCurrent(current: string, choices: readonly ApiModelFormChoice[]): ApiModelFormChoice[] {
+  return choices.some((choice) => choice.value === current)
+    ? [...choices]
+    : [{ label: `${current}（当前）`, value: current }, ...choices];
+}
+
+function validateApiModelForm(
+  values: ApiModelFormValues,
+  api: string,
+  maxThinking: boolean,
+  duplicateModelIds?: readonly string[],
+): string[] {
+  const errors: string[] = [];
+  try {
+    normalizeBaseUrl(formText(values, "baseUrl"));
+    const modelId = required(formText(values, "modelId"), "Model ID");
+    if (duplicateModelIds?.includes(modelId)) {
+      errors.push(`Model ${modelId} 已存在；请返回列表选择该 model 进行修改`);
+    }
+    const contextWindow = positiveInteger(formText(values, "contextWindow"), "上下文窗口 contextWindow");
+    const maxTokens = positiveInteger(formText(values, "maxTokens"), "单次最大输出 maxTokens");
+    validateModelWindow(contextWindow, maxTokens);
+    required(formText(values, "apiKey"), "API key");
+    const reasoning = formBoolean(values, "reasoning");
+    const thinking = formThinkingLevel(values, "defaultThinking");
+    const supported: ApiThinkingLevel[] = reasoning ? supportedThinkingFormValues(api, maxThinking) : ["off"];
+    if (!supported.includes(thinking)) {
+      errors.push(`默认思考强度 ${thinking} 与当前 API / 推理能力不兼容`);
+    }
+  } catch (error) {
+    errors.push(errorMessage(error));
+  }
+  return errors;
+}
+
+function formText(values: ApiModelFormValues, id: string): string {
+  const value = values[id];
+  if (typeof value !== "string") throw new Error(`表单字段 ${id} 无效`);
+  return value;
+}
+
+function formBoolean(values: ApiModelFormValues, id: string): boolean {
+  const value = values[id];
+  if (typeof value !== "boolean") throw new Error(`表单字段 ${id} 无效`);
+  return value;
+}
+
+function formThinkingLevel(values: ApiModelFormValues, id: string): ApiThinkingLevel {
+  const value = formText(values, id);
+  if (!(value === "max" || isThinkingLevel(value))) throw new Error(`思考强度 ${value} 无效`);
+  return value;
+}
+
+function triStateValue(value: unknown): string {
+  return typeof value === "boolean" ? String(value) : "auto";
+}
+
+function setOptionalCompatString(target: Record<string, unknown>, key: string, value: string): void {
+  if (value) target[key] = value;
+  else delete target[key];
+}
+
+function setOptionalCompatBoolean(target: Record<string, unknown>, key: string, value: string): void {
+  if (value === "auto") delete target[key];
+  else target[key] = value === "true";
+}
+
+function parseHeadersForm(value: string): Record<string, string> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value || "{}");
+  } catch {
+    throw new Error("请求头 JSON 格式无效");
+  }
+  if (!isStringRecord(parsed)) throw new Error("请求头必须是字符串键值的 JSON 对象");
+  return { ...parsed };
+}
+
 async function removeProviderKey(
   pi: ExtensionAPI,
   providerId: string,
@@ -918,6 +1469,19 @@ async function deleteProvider(
     ? modelIds[0]
     : await ctx.ui.select(`选择要删除的 ${displayName} model`, modelIds);
   if (!modelId) return;
+  await deleteProviderModel(pi, providerId, displayName, modelId, ctx, modelsPath, defaultsPath);
+}
+
+async function deleteProviderModel(
+  pi: ExtensionAPI,
+  providerId: string,
+  displayName: string,
+  modelId: string,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<void> {
+  const modelIds = await configuredModelIds(providerId, modelsPath);
   const confirmed = await ctx.ui.confirm(
     `删除 ${displayName}/${modelId}？`,
     modelIds.length === 1
@@ -946,31 +1510,65 @@ async function listProviders(
   const root = await readModelsRoot(modelsPath);
   const retry = await loadApiRetrySettings(settingsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
-  const presetLines = PROVIDERS.map((provider) => {
-    const config = providers[provider.id];
-    if (!isRecord(config)) return `- ${provider.name}：未配置`;
-    const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
-    const modelIds = models.map((model) => model.id).filter((id): id is string => typeof id === "string");
-    return `- ${provider.name}（${modelIds.length}）：${modelIds.join(", ")} · ${authSource(config.apiKey)}`;
-  });
-  const customLines = managedChannelIdsSync(defaultsPath)
-    .flatMap((id) => {
-      const config = providers[id];
-      if (findPreset(id) || !isRecord(config)) return [];
-      const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
-      const modelIds = models.map((model) => model.id).filter((mid): mid is string => typeof mid === "string");
-      const name = typeof config.name === "string" && config.name ? config.name : id;
-      const api = typeof config.api === "string" ? config.api : "?";
-      return [`- ${name}（自定义·${api}·${modelIds.length}）：${modelIds.join(", ")} · ${authSource(config.apiKey)}`];
-    });
+  const modelLines: string[] = [];
+  const providerLines: string[] = [];
+  for (const preset of PROVIDERS) {
+    const config = providers[preset.id];
+    if (!isRecord(config)) {
+      providerLines.push(`- ${preset.id}（${preset.name}）· 未配置`);
+      continue;
+    }
+    const api = typeof config.api === "string" ? config.api : preset.api;
+    await appendListLines(config, preset.id, preset.name, api, false, modelLines, providerLines, defaultsPath);
+  }
+  for (const id of managedChannelIdsSync(defaultsPath)) {
+    if (findPreset(id) || !isRecord(providers[id])) continue;
+    const config = providers[id];
+    const name = typeof config.name === "string" && config.name ? config.name : id;
+    const api = typeof config.api === "string" ? config.api : "?";
+    await appendListLines(config, id, name, api, true, modelLines, providerLines, defaultsPath);
+  }
   ctx.ui.notify([
-    "API 渠道配置：",
-    ...presetLines,
-    ...(customLines.length > 0 ? ["自定义渠道：", ...customLines] : []),
+    "API 模型（model 级配置）：",
+    ...(modelLines.length > 0 ? modelLines : ["（尚未配置任何 model）"]),
+    "API 连接（provider 级配置）：",
+    ...providerLines,
     `Pi 全局默认思考强度：${currentDefaultThinkingLevel(ctx, modelsPath)}`,
     `Provider 自动重试：${retry.enabled ? "开启" : "关闭"} · 最大 ${retry.maxRetries} 次`,
     `文件：${modelsPath}`,
   ].join("\n"), "info");
+}
+
+async function appendListLines(
+  config: Record<string, unknown>,
+  providerId: string,
+  name: string,
+  api: string,
+  custom: boolean,
+  modelLines: string[],
+  providerLines: string[],
+  defaultsPath: string,
+): Promise<void> {
+  const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
+  for (const model of models) {
+    if (typeof model.id !== "string") continue;
+    const level = await loadModelThinkingDefault(providerId, model.id, defaultsPath);
+    modelLines.push([
+      `- ${providerId}/${model.id}`,
+      `format: ${api}`,
+      `ctx ${typeof model.contextWindow === "number" ? model.contextWindow.toLocaleString("en-US") : "?"}`,
+      `max ${typeof model.maxTokens === "number" ? model.maxTokens.toLocaleString("en-US") : "?"}`,
+      `reasoning=${model.reasoning === true ? "on" : "off"}`,
+      `default: ${level ?? "global"}`,
+    ].join(" · "));
+  }
+  providerLines.push([
+    `- ${providerId}（${name}${custom ? " · 自定义" : ""}）`,
+    `format: ${api}`,
+    typeof config.baseUrl === "string" ? config.baseUrl : "?",
+    authSource(config.apiKey),
+    `${models.length} model`,
+  ].join(" · "));
 }
 
 async function showProvider(
@@ -979,6 +1577,7 @@ async function showProvider(
   displayName: string,
   modelsPath: string,
   defaultsPath: string,
+  preferredModelId?: string,
 ): Promise<void> {
   const preset = findPreset(providerId);
   if (!await isProviderConfigured(providerId, modelsPath)) {
@@ -995,9 +1594,10 @@ async function showProvider(
     const modelIds = models
       .map((model) => model.id)
       .filter((id): id is string => typeof id === "string");
-    const modelId = modelIds.length === 1
-      ? modelIds[0]
-      : await ctx.ui.select(`选择要查看的 ${displayName} model`, modelIds);
+    const modelId = preferredModelId
+      ?? (modelIds.length === 1
+        ? modelIds[0]
+        : await ctx.ui.select(`选择要查看的 ${displayName} model`, modelIds));
     if (!modelId) return;
     const model = models.find((entry) => entry.id === modelId) ?? {};
     const level = await loadModelThinkingDefault(providerId, modelId, defaultsPath);
@@ -1085,10 +1685,18 @@ async function writeApiProviderSettings(
       ? currentModels.map((model, index) => index === existingIndex ? nextModel : model)
       : [...currentModels, nextModel],
   };
-  if (defaults.compat) nextProvider.compat = defaults.compat;
+  const preset = findPreset(settings.provider);
+  if (defaults.compat) {
+    nextProvider.compat = {
+      ...(isRecord(currentProvider.compat) ? currentProvider.compat : {}),
+      ...defaults.compat,
+    };
+  } else if (!preset && settings.replaceProviderOptions) delete nextProvider.compat;
   if (settings.name) nextProvider.name = settings.name;
   if (settings.headers && Object.keys(settings.headers).length > 0) nextProvider.headers = { ...settings.headers };
+  else if (!preset && settings.replaceProviderOptions) delete nextProvider.headers;
   if (settings.authHeader !== undefined) nextProvider.authHeader = settings.authHeader;
+  else if (!preset && settings.replaceProviderOptions) delete nextProvider.authHeader;
   providers[settings.provider] = nextProvider;
   const nextRoot = { ...root, providers };
 
@@ -1379,7 +1987,7 @@ function resolveTargetToken(value: string): ChannelTarget | undefined {
 
 function usageError(): Error {
   return new Error(
-    "用法：/api-manager list | retry [show|on [1-12]|off] | show|set|delete|logout|reset [openai|qwen|anthropic|<自定义渠道 id>|new]",
+    "用法：/api-manager list | retry [show|on [1-10]|off] | show|set|delete|logout|reset [openai|qwen|anthropic|<自定义渠道 id>|new]",
   );
 }
 
@@ -1401,26 +2009,140 @@ async function chooseModelToConfigure(
     : { modelId: choice, adding: false };
 }
 
-async function chooseChannel(
+async function chooseProvider(
   ctx: ExtensionCommandContext,
-  action: ApiProviderAction,
   modelsPath: string,
   defaultsPath: string,
 ): Promise<ChannelTarget | undefined> {
-  const options: Array<{ label: string; target: ChannelTarget }> = PROVIDERS.map((preset) => ({
-    label: `${preset.name} · ${preset.api}`,
-    target: { kind: "preset", preset },
-  }));
+  const options: Array<{ label: string; target: ChannelTarget }> = [];
+  for (const preset of PROVIDERS) {
+    if (!await isProviderConfigured(preset.id, modelsPath)) continue;
+    options.push({ label: preset.name, target: { kind: "preset", preset } });
+  }
   for (const id of managedChannelIdsSync(defaultsPath)) {
     if (findPreset(id) || !await isProviderConfigured(id, modelsPath)) continue;
     const name = await channelDisplayName(id, modelsPath);
     options.push({ label: `${name}（自定义）`, target: { kind: "custom", id } });
   }
-  if (action === "configure") {
-    options.push({ label: "➕ 新增自定义渠道…", target: { kind: "custom", id: "" } });
-  }
-  const choice = await ctx.ui.select("选择 API 渠道", options.map((entry) => entry.label));
+  if (options.length === 0) return undefined;
+  const choice = await ctx.ui.select("选择 Provider（连接级操作）", options.map((entry) => entry.label));
   return options.find((entry) => entry.label === choice)?.target;
+}
+
+type GlobalModelPick =
+  | { kind: "model"; providerId: string; modelId: string }
+  | { kind: "add-to"; providerId: string }
+  | { kind: "new-channel" };
+
+interface GlobalModelOption {
+  label: string;
+  pick: GlobalModelPick;
+}
+
+/** Model-centric picker: lists every configured model; format is shown only as an attribute. */
+async function chooseModelGlobally(
+  ctx: ExtensionCommandContext,
+  action: "configure" | "show" | "delete",
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<GlobalModelPick | undefined> {
+  const options = await buildGlobalModelOptions(action, modelsPath, defaultsPath);
+  if (options.length === 0) {
+    ctx.ui.notify("尚未配置任何 model。", "info");
+    return undefined;
+  }
+  const title = action === "configure"
+    ? "选择要修改的 model，或新增"
+    : action === "show"
+      ? "选择要查看的 model"
+      : "选择要删除的 model";
+  const choice = await ctx.ui.select(title, options.map((entry) => entry.label));
+  return options.find((entry) => entry.label === choice)?.pick;
+}
+
+async function buildGlobalModelOptions(
+  action: "configure" | "show" | "delete",
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<GlobalModelOption[]> {
+  const root = await readModelsRoot(modelsPath);
+  const providers = isRecord(root.providers) ? root.providers : {};
+  const options: GlobalModelOption[] = [];
+  for (const providerId of modelCentricChannelOrder(defaultsPath)) {
+    const config = providers[providerId];
+    if (!isRecord(config)) continue;
+    const preset = findPreset(providerId);
+    const api = typeof config.api === "string" ? config.api : preset?.api ?? "?";
+    const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
+    for (const model of models) {
+      if (typeof model.id !== "string") continue;
+      options.push({
+        label: `${providerId}/${model.id} · format: ${api}`,
+        pick: { kind: "model", providerId, modelId: model.id },
+      });
+    }
+  }
+  if (action !== "configure") return options;
+  for (const preset of PROVIDERS) {
+    options.push({
+      label: `➕ 新增 model · ${preset.name}（format: ${preset.api}）`,
+      pick: { kind: "add-to", providerId: preset.id },
+    });
+  }
+  for (const providerId of managedChannelIdsSync(defaultsPath)) {
+    if (findPreset(providerId) || !isRecord(providers[providerId])) continue;
+    const config = providers[providerId];
+    const name = typeof config.name === "string" && config.name ? config.name : providerId;
+    const api = typeof config.api === "string" ? config.api : "?";
+    options.push({
+      label: `➕ 新增 model · ${name}（自定义 · format: ${api}）`,
+      pick: { kind: "add-to", providerId },
+    });
+  }
+  options.push({ label: "➕ 新增自定义渠道…", pick: { kind: "new-channel" } });
+  return options;
+}
+
+/** Presets first, then managed custom channels; the listing order for model-centric views. */
+function modelCentricChannelOrder(defaultsPath: string): string[] {
+  return [
+    ...PROVIDERS.map((preset) => preset.id),
+    ...managedChannelIdsSync(defaultsPath).filter((id) => !findPreset(id)),
+  ];
+}
+
+async function dispatchGlobalModelPick(
+  pi: ExtensionAPI,
+  pick: GlobalModelPick,
+  action: "configure" | "show" | "delete",
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<void> {
+  if (pick.kind === "new-channel") {
+    await configureCustomChannel(pi, ctx, modelsPath, defaultsPath);
+    return;
+  }
+  if (pick.kind === "add-to") {
+    const preset = findPreset(pick.providerId);
+    const target: ConfigureModelTarget = { modelId: null, adding: true };
+    if (preset) await configurePresetModelTarget(pi, preset, target, ctx, modelsPath, defaultsPath);
+    else await configureCustomModelTarget(pi, pick.providerId, target, ctx, modelsPath, defaultsPath);
+    return;
+  }
+  const displayName = await channelDisplayName(pick.providerId, modelsPath);
+  if (action === "show") {
+    await showProvider(ctx, pick.providerId, displayName, modelsPath, defaultsPath, pick.modelId);
+    return;
+  }
+  if (action === "delete") {
+    await deleteProviderModel(pi, pick.providerId, displayName, pick.modelId, ctx, modelsPath, defaultsPath);
+    return;
+  }
+  const preset = findPreset(pick.providerId);
+  const target: ConfigureModelTarget = { modelId: pick.modelId, adding: false };
+  if (preset) await configurePresetModelTarget(pi, preset, target, ctx, modelsPath, defaultsPath);
+  else await configureCustomModelTarget(pi, pick.providerId, target, ctx, modelsPath, defaultsPath);
 }
 
 async function resolveChannelRef(
@@ -1452,15 +2174,22 @@ function normalizeChannelId(value: string): string {
   return id;
 }
 
-async function chooseAction(ctx: ExtensionCommandContext): Promise<ApiProviderAction | undefined> {
+async function chooseAction(
+  ctx: ExtensionCommandContext,
+  settingsPath: string,
+): Promise<ApiProviderAction | undefined> {
+  const retry = await loadApiRetrySettings(settingsPath);
   const choices: Array<{ action: ApiProviderAction; label: string }> = [
-    { action: "list", label: "查看全部渠道" },
-    { action: "retry", label: "Provider 自动重试" },
-    { action: "configure", label: "新增或修改具体 model" },
-    { action: "show", label: "查看具体 provider / model" },
-    { action: "delete", label: "删除渠道配置" },
-    { action: "logout", label: "注销渠道配置" },
-    { action: "reset", label: "重置为未配置" },
+    { action: "list", label: "查看全部 model 与渠道" },
+    { action: "configure", label: "新增或修改 model（单表单）" },
+    { action: "show", label: "查看 model 详情" },
+    { action: "delete", label: "删除 model" },
+    {
+      action: "retry",
+      label: `Provider 自动重试（当前：${retry.enabled ? `开启 · 最大 ${retry.maxRetries} 次` : "关闭"}）`,
+    },
+    { action: "logout", label: "注销渠道（Provider 级）" },
+    { action: "reset", label: "重置渠道（Provider 级）" },
   ];
   const choice = await ctx.ui.select("选择操作", choices.map((entry) => entry.label));
   return choices.find((entry) => entry.label === choice)?.action;

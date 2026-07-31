@@ -1,4 +1,5 @@
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join, dirname } from "node:path";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -24,6 +25,7 @@ import {
   type SmartSearchConfig,
   type WebAccessSyncMapping,
 } from "../tools/smart-search-config.ts";
+import { invalidateWebConfigCaches } from "../tools/web-access/web-config-cache.ts";
 interface SmartSearchConfigTheme {
   fg(role: string, text: string): string;
   bold(text: string): string;
@@ -130,8 +132,24 @@ export class WebAccessConfigSync implements WebAccessConfigSyncLike {
     }
     const dir = dirname(this.webSearchJsonPath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(this.webSearchJsonPath, JSON.stringify(web, null, 2) + "\n", "utf-8");
+    const temporaryPath = join(dir, `.web-search.json.${process.pid}.${randomUUID()}.tmp`);
+    try {
+      writeFileSync(temporaryPath, JSON.stringify(web, null, 2) + "\n", {
+        encoding: "utf8",
+        flag: "wx",
+        mode: 0o600,
+      });
+      renameSync(temporaryPath, this.webSearchJsonPath);
+    } catch (error) {
+      try {
+        unlinkSync(temporaryPath);
+      } catch {}
+      throw error;
+    }
     this.webConfig = web;
+    // Drop every memoized provider view of web-search.json so the next tool
+    // call resolves credentials/endpoints from the file we just wrote.
+    invalidateWebConfigCaches();
   }
 }
 
@@ -454,7 +472,7 @@ export class SmartSearchConfigOverlay implements Component, Focusable {
       return;
     }
     try {
-      (this.sync as WebAccessConfigSync).pushToWebConfig(this.config);
+      this.sync.pushToWebConfig(this.config);
       this.status = "Synced Smart Search → web-search.json";
       this.statusTone = "success";
     } catch (error) {

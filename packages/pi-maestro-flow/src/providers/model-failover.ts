@@ -208,8 +208,11 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     return undefined;
   };
 
-  pi.on("session_start", (_event, ctx) => {
-    config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
+  pi.on("session_start", () => {
+    // No config load here: nothing consumes `config` before the next
+    // before_agent_start, which reloads unconditionally and remains the
+    // external-edit visibility boundary. Loading at session start was always
+    // overwritten before use.
     active = undefined;
   });
 
