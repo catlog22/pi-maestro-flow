@@ -18,7 +18,14 @@ export function resolveBundledAgentsPath(
 ): string | undefined {
   if (!packageJsonPath) return undefined;
 
-  const agentsPath = join(dirname(packageJsonPath), "AGENTS.md");
+  const pkgDir = dirname(packageJsonPath);
+
+  // Prefer .pi/SYSTEM.md (canonical location after packaging);
+  // fall back to AGENTS.md at the package root for backward compat.
+  const systemMd = join(pkgDir, ".pi", "SYSTEM.md");
+  if (existsSync(systemMd)) return systemMd;
+
+  const agentsPath = join(pkgDir, "AGENTS.md");
   return existsSync(agentsPath) ? agentsPath : undefined;
 }
 

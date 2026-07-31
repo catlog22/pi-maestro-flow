@@ -10,14 +10,14 @@ import {
 } from "../scripts/configure-keybindings.mjs";
 
 const CHECK_LABEL = "检查当前快捷键冲突";
-const FIX_LABEL = "修复冲突：思考强度改为 Shift+E，Maestro 使用 Shift+Tab";
+const FIX_LABEL = "修复冲突：思考强度改为 Ctrl+Shift+E，Maestro 使用 Shift+Tab";
 const RESTORE_LABEL = "恢复 Pi 默认：思考强度使用 Shift+Tab";
 const THINKING_ACTION = "app.thinking.cycle";
 const DEFAULT_THINKING_KEY = "shift+tab";
 
 export const MAESTRO_GLOBAL_SHORTCUTS = [
   { key: "shift+tab", owner: "Maestro approval mode" },
-  { key: "alt+p", owner: "Maestro Plan mode" },
+  { key: "alt+shift+p", owner: "Maestro Plan mode" },
   { key: "alt+t", owner: "Maestro Todo panel" },
   { key: "alt+g", owner: "Maestro Goal center" },
   { key: "alt+r", owner: "Teammate agent view" },
@@ -117,7 +117,7 @@ function notifyUpdateResult(
       ctx.ui.notify(`${prefix}仍有 ${residual.length} 个冲突：${formatConflicts(residual)}`, "warning");
       return;
     }
-    ctx.ui.notify(`${prefix}执行 /reload 后：Shift+E 切换思考强度，Shift+Tab 切换 approval mode。未发现其他冲突。`, "info");
+    ctx.ui.notify(`${prefix}执行 /reload 后：Ctrl+Shift+E 切换思考强度，Shift+Tab 切换 approval mode。未发现其他冲突。`, "info");
     return;
   }
 

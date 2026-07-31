@@ -4,8 +4,9 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export const THINKING_CYCLE_KEY = "shift+e";
+export const THINKING_CYCLE_KEY = "ctrl+shift+e";
 export const THINKING_CYCLE_ACTION = "app.thinking.cycle";
+const LEGACY_THINKING_CYCLE_KEY = "shift+e";
 
 function readKeybindings(configPath) {
   if (!existsSync(configPath)) return { config: {} };
@@ -48,7 +49,11 @@ export function ensureMaestroKeybindings(
   }
 
   if (Array.isArray(current)) {
-    const next = current.filter((key) => typeof key !== "string" || key.toLowerCase() !== "shift+tab");
+    const next = current.filter((key) => {
+      if (typeof key !== "string") return true;
+      const normalized = key.toLowerCase();
+      return normalized !== "shift+tab" && normalized !== LEGACY_THINKING_CYCLE_KEY;
+    });
     if (!next.some((key) => typeof key === "string" && key.toLowerCase() === THINKING_CYCLE_KEY)) {
       next.unshift(THINKING_CYCLE_KEY);
     }
@@ -56,7 +61,11 @@ export function ensureMaestroKeybindings(
       return { status: "unchanged", configPath };
     }
     config[THINKING_CYCLE_ACTION] = next;
-  } else if (typeof current === "string" && current.toLowerCase() !== "shift+tab") {
+  } else if (
+    typeof current === "string"
+    && current.toLowerCase() !== "shift+tab"
+    && current.toLowerCase() !== LEGACY_THINKING_CYCLE_KEY
+  ) {
     config[THINKING_CYCLE_ACTION] = [THINKING_CYCLE_KEY, current];
   } else {
     config[THINKING_CYCLE_ACTION] = THINKING_CYCLE_KEY;
@@ -89,7 +98,7 @@ function run() {
       return;
     }
     if (result.status === "updated") {
-      console.log(`[pi-maestro-flow] Configured Shift+E effort cycling in ${result.configPath}`);
+      console.log(`[pi-maestro-flow] Configured Ctrl+Shift+E effort cycling in ${result.configPath}`);
     }
   } catch (error) {
     console.warn(`[pi-maestro-flow] Could not configure keybindings: ${error instanceof Error ? error.message : String(error)}`);

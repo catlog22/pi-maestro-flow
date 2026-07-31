@@ -1,4 +1,4 @@
-export const THINKING_CYCLE_KEY: "shift+e";
+export const THINKING_CYCLE_KEY: "ctrl+shift+e";
 export const THINKING_CYCLE_ACTION: "app.thinking.cycle";
 
 export type KeybindingUpdateResult =

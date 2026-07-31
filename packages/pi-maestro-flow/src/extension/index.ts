@@ -13,8 +13,8 @@
  * Also registers:
  *   - /goal command
  *   - /swarm bundled Skill activation + native teammate/MMAS dashboard
- *   - /plan command + Alt+P shortcut (Plan/Act mode toggle)
- *   - Shift+Tab approval-mode cycle (after remapping Pi effort cycling to Shift+E)
+ *   - /plan command + Alt+Shift+P shortcut (Plan/Act mode toggle)
+ *   - Shift+Tab approval-mode cycle (after remapping Pi effort cycling to Ctrl+Shift+E)
  *   - Dynamic LLM providers
  */
 
@@ -30,6 +30,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { buildSessionContext, copyToClipboard } from "@earendil-works/pi-coding-agent";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { CockpitUiOwnershipV1 } from "pi-cockpit/v1/events";
 import type { FlowToolResult } from "../tools/tool-result.ts";
 import { Text, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
@@ -46,6 +47,7 @@ import { executeExplore, type ExploreParams } from "../tools/explore.ts";
 import { executeDelegate, type DelegateParams } from "../tools/delegate.ts";
 import { executeMoa, type MoaParams } from "../tools/moa.ts";
 import { registerSwarmDisplay } from "../tools/swarm.ts";
+import { MaestroUiPublisher, registerMaestroUiQuery } from "../ui-projection.ts";
 import { registerMaestroProviders } from "../providers/provider-registry.ts";
 import { registerApiProviderConfigs } from "../providers/api-provider-config.ts";
 import { registerModelFailover } from "../providers/model-failover.ts";
@@ -69,6 +71,7 @@ import {
   reconcileWorkflowGoal,
   setWorkflowCoordinator,
   setGoalStateChangeListener,
+  setGoalPanelOwnership,
   type GoalParams as GoalActionParams,
 } from "../tools/goal.ts";
 import {
@@ -96,7 +99,7 @@ import {
 } from "../tools/todo.ts";
 import { WorkflowBridge, buildTodoMirrorSpecs } from "../session/bridge.ts";
 import { guiEnabled, startGuiSubsystem, registerGuiTool, isGuiToolAllowed, getGuiTool, createGuiEventForwarder, GUI_EVENTS, type GuiServerHandle, type GuiPermissionGateway } from "../gui/index.ts";
-import { loadLatestTeamSwarmProjection } from "../swarm/projection.ts";
+import { loadLatestTeamSwarmProjection, type TeamSwarmProjection } from "../swarm/projection.ts";
 import { RunCliAdapter } from "../session/cli-adapter.ts";
 import { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSnapshot } from "../session/types.ts";
@@ -205,7 +208,7 @@ interface MaestroState {
 }
 
 export const APPROVAL_MODE_CYCLE_KEY = "shift+tab";
-// Plan is a separate durable workflow entered through /plan, Alt+P, or an LLM
+// Plan is a separate durable workflow entered through /plan, Alt+Shift+P, or an LLM
 // plan tool. Shift+Tab only cycles permission-engine approval modes.
 export const APPROVAL_MODES: readonly PermissionMode[] = PERMISSION_MODES.filter(
   (mode) => mode !== "plan",
@@ -474,7 +477,10 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     guiEvents.emitDeduped(GUI_EVENTS.goalChanged, JSON.stringify(goal ?? null), goal);
   };
   setTodoStateChangeListener(updateTodoWidget);
-  setGoalStateChangeListener(emitGoalChanged);
+  setGoalStateChangeListener(() => {
+    emitGoalChanged();
+    publishMaestroUi();
+  });
   let childTodoMutationQueue: Promise<void> = Promise.resolve();
   let teammateRegistrationGeneration = 0;
   let teammateRegistrationDisposers: Array<() => void> = [];
@@ -521,6 +527,25 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let attachedWorkflowSessionId: string | undefined;
   let lastRunStates = new Map<string, string>();
   let workflowSessionOptedIn = true;
+  let approvalMode: PermissionMode = DEFAULT_PERMISSION_MODE;
+  let currentSwarmProjection: TeamSwarmProjection | undefined;
+  let maestroUiSessionActive = false;
+  const maestroUiPublisher = new MaestroUiPublisher({
+    read: () => ({
+      workflow: deriveWorkflowViewModel(workflowSnapshotForUi()),
+      goals: getGoalPanelEntries(),
+      currentGoalId: getActiveGoal()?.id,
+      swarm: currentSwarmProjection,
+      planMode: getPlanMode(),
+      approvalMode: effectivePermissionMode(approvalMode),
+    }),
+    emit: (event, snapshot) => pi.events.emit(event, snapshot),
+  });
+  registerMaestroUiQuery(pi.events, maestroUiPublisher, () => maestroUiSessionActive);
+
+  function publishMaestroUi(): void {
+    if (maestroUiSessionActive) maestroUiPublisher.publish();
+  }
 
   // Register dynamic providers from cli-tools.json
   try {
@@ -952,7 +977,12 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   initPlan(pi, { compactionArbiter, preferNewSession: shouldStartPlanExecutionInNewSession });
   registerPlanTools(pi);
   registerPlanCommand(pi);
-  registerSwarmDisplay(pi);
+  registerSwarmDisplay(pi, {
+    onProjectionChange(projection) {
+      currentSwarmProjection = projection;
+      publishMaestroUi();
+    },
+  });
 
   // === Language intelligence, browser control, and tool discovery ===
   registerIntelligenceTools(pi);
@@ -969,10 +999,10 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     },
   });
 
-  let approvalMode: PermissionMode = DEFAULT_PERMISSION_MODE;
   setPlanModeChangeListener((ctx) => {
     updateTodoWidget();
     syncApprovalModeStatus(ctx, approvalMode);
+    publishMaestroUi();
   });
   const permissionController = createPermissionController({
     async setMode(mode, ctx) {
@@ -980,6 +1010,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       if (mode !== "plan" && isPlanMode()) planExitMode(ctx);
       approvalMode = mode;
       syncApprovalModeStatus(ctx, approvalMode);
+      publishMaestroUi();
     },
   });
   pi.registerCommand("permissions", {
@@ -1001,6 +1032,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         if (configuredMode && configuredMode !== "plan" && isPlanMode()) planExitMode(ctx);
         if (configuredMode) approvalMode = configuredMode;
         syncApprovalModeStatus(ctx, approvalMode);
+        publishMaestroUi();
         ctx.ui.notify("权限配置已重新加载。", "info");
         return;
       }
@@ -1105,6 +1137,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     if (emitEvents && activateWorkflowSession) emitRunTransitions(next);
     else lastRunStates = new Map(next.session?.runs.map((run) => [run.runId, run.status]) ?? []);
     updateTodoWidget();
+    publishMaestroUi();
     return next;
   }
 
@@ -1497,8 +1530,9 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
 
   pi.events.on(COCKPIT_UI_OWNERSHIP_EVENT, (payload) => {
     if (!payload || typeof payload !== "object") return;
-    const ownership = payload as { todo?: unknown; todoExpanded?: unknown; quiet?: unknown; quietSymbols?: unknown };
+    const ownership = payload as Partial<CockpitUiOwnershipV1>;
     cockpitOwnsTodo = ownership.todo === true;
+    setGoalPanelOwnership(ownership.goal === true, widgetCtx);
     setQuietMode(ownership.quiet === true, ownership.quietSymbols);
     if (typeof ownership.todoExpanded === "boolean") {
       panelMode = ownership.todoExpanded ? "expanded" : "collapsed";
@@ -1526,6 +1560,8 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
 
   // === Session lifecycle ===
   pi.on("session_start", async (event, ctx) => {
+    maestroUiPublisher.beginSession();
+    maestroUiSessionActive = true;
     disposeTeammateSessionRegistrations();
     state.baseCwd = ctx.cwd;
     await inputHistorySessionStart(ctx);
@@ -1572,6 +1608,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     if (configuredMode) approvalMode = configuredMode;
     syncApprovalModeStatus(ctx, approvalMode);
     updateTodoWidget();
+    publishMaestroUi();
     activateTeammateSessionRegistrations(ctx);
     if (guiEnabled()) {
       guiServer?.close("session-restart");
@@ -1617,9 +1654,14 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    maestroUiSessionActive = false;
+    maestroUiPublisher.clear();
     disposeTeammateSessionRegistrations();
     await inputHistorySessionShutdown();
-    midTurnAutoCompaction.reset(ctx);
+    // Non-destructive: preserve the prune manifest and spill resources so a
+    // resumed session replays the identical transformed prefix. Destructive
+    // teardown stays with reset()/onCompact().
+    midTurnAutoCompaction.onSessionShutdown(ctx);
     compactionArbiter.reset();
     state.activeToolCalls.clear();
     widgetCtx?.ui.setWidget("todo-panel", undefined);

@@ -60,8 +60,8 @@ function run() {
     const result = installMaestroWorkflows();
     console.log(`[pi-maestro-flow] Installed Maestro workflows to ${result.targetDir} via ${result.mode}`);
   } catch (error) {
-    console.error(`[pi-maestro-flow] Workflow installation failed: ${error instanceof Error ? error.message : String(error)}`);
-    process.exitCode = 1;
+    console.warn(`[pi-maestro-flow] Workflow installation failed (non-fatal): ${error instanceof Error ? error.message : String(error)}`);
+    console.warn("[pi-maestro-flow] Run 'maestro install workflows' manually to complete setup.");
   }
 }
 
