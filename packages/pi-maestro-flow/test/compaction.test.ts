@@ -2496,6 +2496,51 @@ test("token estimate is content-aware: code denser and whitespace-heavy sparser 
   assert.ok(plainTokens > whitespaceTokens, "whitespace-heavy content (~6 chars/tok) must estimate fewer tokens than same-length plain content");
 });
 
+test("token estimate treats image content blocks as fixed ~1200 tokens, not base64 text", () => {
+  const base64Payload = "A".repeat(500_000); // ~500 KB of base64 — would be ~125K tokens if counted as text
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "img1", name: "read", arguments: {} }],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "img1",
+    toolName: "read",
+    content: [
+      { type: "image", data: base64Payload, mimeType: "image/png" },
+      { type: "text", text: "Read image file" },
+    ],
+    isError: false,
+  }] as never;
+  const estimate = estimateContextTokens(messages);
+  // 1 image × 1200 + small text overhead; must be far below 125K
+  assert.ok(estimate.trailingTokens < 5_000, `image tokens ${estimate.trailingTokens} must not count base64 as text`);
+  assert.ok(estimate.trailingTokens >= 1200, `must include at least the fixed image estimate`);
+});
+
+test("token estimate scales linearly with image count, ignoring data size", () => {
+  const small = "A".repeat(100);
+  const large = "A".repeat(1_000_000);
+  const mk = (data: string, count: number) => [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "c", name: "read", arguments: {} }],
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "c",
+    toolName: "read",
+    content: Array.from({ length: count }, () => ({ type: "image", data, mimeType: "image/png" })),
+    isError: false,
+  }] as never;
+  const smallOne = estimateContextTokens(mk(small, 1)).trailingTokens;
+  const largeOne = estimateContextTokens(mk(large, 1)).trailingTokens;
+  const smallThree = estimateContextTokens(mk(small, 3)).trailingTokens;
+  // Same image count → same estimate regardless of data size
+  assert.ok(Math.abs(smallOne - largeOne) < 50, `data size must not affect estimate: ${smallOne} vs ${largeOne}`);
+  // Three images ≈ 3× one image (plus small structural overhead)
+  assert.ok(smallThree > smallOne * 2, `three images must estimate more than double one image: ${smallThree} vs ${smallOne}`);
+});
+
 // --- F2: compaction failure circuit breaker ---
 
 test("compaction breaker trips after MAX consecutive failures and resets after the cooldown", () => {

@@ -55,6 +55,8 @@ const PROTECTED_TOOL_NAMES = new Set(["todo", "goal", "run-control", "ask-user-q
 const TOKEN_RATIO_CODE = 3.5;
 const TOKEN_RATIO_WHITESPACE_HEAVY = 6;
 const TOKEN_RATIO_DEFAULT = 4;
+/** Fixed token estimate per image content block, matching Pi's ESTIMATED_IMAGE_CHARS / 4. */
+const ESTIMATED_IMAGE_TOKENS = 1200;
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
 const OUTPUT_LIMIT_CONTINUE_PROMPT = "Your previous response was cut off at the model output token limit, and the context was just compacted to free room. Continue exactly from where the interrupted response stopped and complete it. Do not restart or wait for another user request.";
 const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
@@ -1357,8 +1359,33 @@ function estimateMessageTokens(message: AgentMessage): number {
   const key = message as unknown as object;
   const memoized = messageTokenMemo.get(key);
   if (memoized !== undefined) return memoized;
-  const serialized = JSON.stringify(message);
-  const tokens = Math.ceil(serialized.length / tokenCharsPerToken(serialized));
+
+  const content = (message as MessageRecord).content;
+  let imageCount = 0;
+  if (Array.isArray(content)) {
+    for (const block of content) {
+      if (block && typeof block === "object" && (block as { type?: unknown }).type === "image") imageCount++;
+    }
+  }
+
+  let tokens: number;
+  if (imageCount > 0) {
+    // Base64 image data must not be counted as text — Pi estimates ~1200 tokens
+    // per image regardless of resolution.  Build a lightweight copy with empty
+    // data fields so the ratio-based estimator only sees the textual payload.
+    const lightweight = {
+      ...message,
+      content: (content as Array<Record<string, unknown>>).map((block) =>
+        block?.type === "image" ? { type: "image", mimeType: block.mimeType, data: "" } : block,
+      ),
+    };
+    const serialized = JSON.stringify(lightweight);
+    tokens = Math.ceil(serialized.length / tokenCharsPerToken(serialized)) + imageCount * ESTIMATED_IMAGE_TOKENS;
+  } else {
+    const serialized = JSON.stringify(message);
+    tokens = Math.ceil(serialized.length / tokenCharsPerToken(serialized));
+  }
+
   messageTokenMemo.set(key, tokens);
   return tokens;
 }
