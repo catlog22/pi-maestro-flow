@@ -7,7 +7,10 @@ import test from "node:test";
 import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
 import registerMaestroExtension, {
+  CHINESE_RESPONSE_PROMPT,
+  appendChineseResponsePrompt,
   isWorkflowOptInCommand,
+  registerChineseResponseMode,
   shouldActivateWorkflowSession,
   shouldAttachWorkflowSession,
   shouldRestoreWorkflowGoal,
@@ -27,6 +30,53 @@ import {
   getTeammateChildToolBroker,
   getTeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
+
+test("Chinese response mode restores, persists, and appends its prompt once", async () => {
+  type Command = { handler: (args: string, ctx: ExtensionContext) => Promise<void> | void };
+  type Entry = { type: "custom"; customType: string; data: { enabled: boolean } };
+  const commands = new Map<string, Command>();
+  const sessionStartHandlers: Array<(event: unknown, ctx: ExtensionContext) => unknown> = [];
+  const beforeAgentStartHandlers: Array<(event: { systemPrompt: string }) => unknown> = [];
+  const entries: Entry[] = [{
+    type: "custom",
+    customType: "maestro-chinese-response-mode",
+    data: { enabled: true },
+  }];
+  const notifications: Array<{ message: string; type: string }> = [];
+  const api = {
+    registerCommand(name: string, command: Command) { commands.set(name, command); },
+    appendEntry(customType: string, data: { enabled: boolean }) {
+      entries.push({ type: "custom", customType, data });
+    },
+    on(event: string, handler: unknown) {
+      if (event === "session_start") {
+        sessionStartHandlers.push(handler as (event: unknown, ctx: ExtensionContext) => unknown);
+      } else if (event === "before_agent_start") {
+        beforeAgentStartHandlers.push(handler as (event: { systemPrompt: string }) => unknown);
+      }
+    },
+  } as unknown as ExtensionAPI;
+  const ctx = {
+    sessionManager: { getBranch: () => entries },
+    ui: { notify(message: string, type: string) { notifications.push({ message, type }); } },
+  } as unknown as ExtensionContext;
+
+  const mode = registerChineseResponseMode(api);
+  await sessionStartHandlers[0]?.({}, ctx);
+  assert.equal(mode.isEnabled(), true);
+
+  const injected = beforeAgentStartHandlers[0]?.({ systemPrompt: "base" }) as { systemPrompt: string };
+  assert.equal(injected.systemPrompt, `base\n\n${CHINESE_RESPONSE_PROMPT}`);
+  assert.equal(appendChineseResponsePrompt(injected.systemPrompt), injected.systemPrompt);
+  assert.match(injected.systemPrompt, /所有回复使用简体中文/);
+  assert.match(injected.systemPrompt, /使用中文提交信息/);
+
+  await commands.get("chinese")?.handler("off", ctx);
+  assert.equal(mode.isEnabled(), false);
+  assert.deepEqual(entries.at(-1)?.data, { enabled: false });
+  assert.equal(beforeAgentStartHandlers[0]?.({ systemPrompt: "base" }), undefined);
+  assert.match(notifications.at(-1)?.message ?? "", /已关闭/);
+});
 
 test("workspace extension path loads before runtime actions are bound", () => {
   const extensionUrl = new URL("../src/extension/index.ts", import.meta.url).href;

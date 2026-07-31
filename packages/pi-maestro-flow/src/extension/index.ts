@@ -24,6 +24,7 @@ import { registerCompanionPackages } from "../../scripts/register-companion-pack
 
 import type {
   ExtensionAPI,
+  ExtensionCommandContext,
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
@@ -347,6 +348,88 @@ function parseGoalActionParams(params: Record<string, unknown>): GoalActionParam
   };
 }
 
+const CHINESE_RESPONSE_STATE_ENTRY = "maestro-chinese-response-mode";
+const CHINESE_RESPONSE_PROMPT_MARKER = "<chinese_response_mode>";
+
+export const CHINESE_RESPONSE_PROMPT = `<chinese_response_mode>
+# 中文回复准则
+
+## 核心原则
+
+- 所有回复使用简体中文
+- 技术术语保留英文，首次出现可添加中文解释
+- 代码变量名保持英文，注释使用中文
+
+## 格式规范
+
+- 中英文/数字间加空格：\`使用 TypeScript 开发\`、\`共 3 个文件\`
+- 使用中文标点：，。！？：；
+- 代码/命令用反引号：\`npm install\`
+
+## Git Commit
+
+- 使用中文提交信息
+- 格式：\`类型: 简短描述\`
+- 类型：feat/fix/refactor/docs/test/chore
+
+## 保持英文
+
+- 代码文件内容
+- 错误信息和日志
+- 文件路径和命令
+</chinese_response_mode>`;
+
+export function appendChineseResponsePrompt(systemPrompt: string): string {
+  if (systemPrompt.includes(CHINESE_RESPONSE_PROMPT_MARKER)) return systemPrompt;
+  return `${systemPrompt}\n\n${CHINESE_RESPONSE_PROMPT}`;
+}
+
+export function registerChineseResponseMode(pi: ExtensionAPI): { isEnabled: () => boolean } {
+  let enabled = false;
+
+  pi.registerCommand("chinese", {
+    description: "切换中文回复模式，支持 on、off、status",
+    async handler(args, ctx) {
+      const action = args.trim().toLowerCase();
+      if (action === "status") {
+        ctx.ui.notify(`中文回复模式：${enabled ? "已开启" : "已关闭"}。`, "info");
+        return;
+      }
+      if (action && !["on", "off", "enable", "disable"].includes(action)) {
+        ctx.ui.notify("用法：/chinese [on|off|status]", "warning");
+        return;
+      }
+
+      enabled = action === "on" || action === "enable"
+        ? true
+        : action === "off" || action === "disable"
+          ? false
+          : !enabled;
+      pi.appendEntry(CHINESE_RESPONSE_STATE_ENTRY, { enabled });
+      ctx.ui.notify(`中文回复模式已${enabled ? "开启" : "关闭"}。`, "info");
+    },
+  });
+
+  pi.on("session_start", (_event, ctx) => {
+    const entries = ctx.sessionManager.getBranch() as Array<{
+      type?: string;
+      customType?: string;
+      data?: unknown;
+    }>;
+    const state = entries
+      .filter((entry) => entry.type === "custom" && entry.customType === CHINESE_RESPONSE_STATE_ENTRY)
+      .at(-1)?.data as { enabled?: unknown } | undefined;
+    enabled = state?.enabled === true;
+  });
+
+  pi.on("before_agent_start", (event) => {
+    if (!enabled) return undefined;
+    return { systemPrompt: appendChineseResponsePrompt(event.systemPrompt) };
+  });
+
+  return { isEnabled: () => enabled };
+}
+
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
   if (process.env.PI_TEAMMATE_CHILD === "1") {
     registerMaestroChildSurface(pi);
@@ -469,6 +552,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   }
 
   registerMaestroPackageResources(pi);
+  const chineseResponseMode = registerChineseResponseMode(pi);
   registerSkillManager(pi);
   registerCompactionSettingsCommand(pi);
 
@@ -1287,8 +1371,11 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     description: "Open the Goal control center — every goal with full details, switch/stop/resume/clear",
     async handler(_args, ctx) { await openGoalOverlay(ctx); },
   });
-  pi.registerCommand("sysprompt", {
-    description: "Inspect the active system prompt — mode, size, and key markers. Use 'full' to dump the whole prompt, 'reload' to re-read SYSTEM.md and resources.",
+  const systemPromptCommand: {
+    description: string;
+    handler: (args: string, ctx: ExtensionCommandContext) => Promise<void>;
+  } = {
+    description: "Inspect the active system prompt — mode, size, key markers, and Chinese response mode. Use 'full' to dump the whole prompt, 'reload' to re-read SYSTEM.md and resources.",
     async handler(args, ctx) {
       const sub = args.trim().toLowerCase();
       if (sub === "reload") {
@@ -1308,6 +1395,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       const summary = [
         `System prompt: ${prompt.length} chars / ${lines.length} lines`,
         `Mode: ${opts.customPrompt ? "customPrompt (SYSTEM.md or --system-prompt)" : "default base prompt"}`,
+        `Chinese response mode: ${chineseResponseMode.isEnabled() ? "enabled" : "disabled"}`,
         `First line: ${lines[0]?.slice(0, 90) ?? "(empty)"}`,
         `Markers:`,
         `  # Project Knowledge Gate       : ${has("# Project Knowledge Gate")}`,
@@ -1324,7 +1412,9 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       ].join("\n");
       ctx.ui.notify(summary, "info");
     },
-  });
+  };
+  pi.registerCommand("sysprompt", systemPromptCommand);
+  pi.registerCommand("systemprompt", systemPromptCommand);
 
   pi.registerCommand("export-session-info", {
     description:
