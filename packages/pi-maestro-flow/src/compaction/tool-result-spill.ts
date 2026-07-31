@@ -65,6 +65,32 @@ export async function spillToolResult(
   return { ok: true, path, preview, originalChars: content.length, hasMore };
 }
 
+/**
+ * Liveness check for a persisted spill path before a restored prune entry may
+ * advertise it. Mirrors the write-time defenses of spillToolResult: the path
+ * must sit inside this session's spill directory, be a regular non-symlink
+ * file, and resolve (realpath) back into the session root under tmpdir. A
+ * cleaned tmpdir, a foreign path, or a symlink planted at the expected name
+ * all fail so hydration can downgrade to the plain placeholder instead of
+ * pointing the model at a dead or attacker-controlled file.
+ */
+export async function validateSpillPath(sessionId: string, path: string): Promise<boolean> {
+  const root = join(tmpdir(), spillRootName(sessionId));
+  const dir = spillDir(sessionId);
+  if (!isInside(dir, path)) return false;
+  try {
+    const target = await lstat(path);
+    if (!target.isFile() || target.isSymbolicLink()) return false;
+    const realTmp = await realpath(tmpdir());
+    const realRoot = await realpath(root);
+    const realDir = await realpath(dir);
+    const realTarget = await realpath(path);
+    return isInside(realTmp, realRoot) && isInside(realRoot, realDir) && isInside(realDir, realTarget);
+  } catch {
+    return false;
+  }
+}
+
 async function ensurePrivateDirectory(path: string): Promise<boolean> {
   try {
     await mkdir(path, { mode: PRIVATE_DIRECTORY_MODE });

@@ -39,6 +39,7 @@ import {
   generatePreview,
   buildSpillReplacementText,
   cleanupSpillDir,
+  validateSpillPath,
 } from "./tool-result-spill.ts";
 
 const PROTECTED_THRESHOLD_CHARS = 500;
@@ -296,6 +297,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   onAgentEnd(ctx: ExtensionContext): Promise<void>;
   onOutputLimit(messages: AgentMessage[], ctx: ExtensionContext): Promise<void>;
   onCompact(completedOwner?: CompactionOwner): void;
+  onSessionShutdown(ctx?: ExtensionContext): void;
   reset(ctx?: ExtensionContext): void;
   refreshSettings(): void;
 } {
@@ -426,7 +428,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return undefined;
       }
       const capacityWindow = linkedThreshold.contextWindow;
-      hydrateRestoredPrunes(state, messages);
+      const downgraded = await hydrateRestoredPrunes(state, messages, generation);
+      if (state.generation !== generation) return undefined;
+      // A dead spill path was downgraded to the plain placeholder; persist the
+      // downgrade now so a crash before the end-of-cycle persist cannot resume
+      // into the old entry that advertised a nonexistent file.
+      if (downgraded) persistPruneManifest(pi, state);
       retainVisiblePrunes(state.pruneManifest, messages, state.restoredPrunes);
       if (!endsWithCompleteToolResultBatch(messages)) {
         clearPressureStatus(ctx);
@@ -438,7 +445,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ...settings,
         reserveTokens: linkedThreshold.effectiveReserveTokens,
       };
-      const manifestSizeBefore = state.pruneManifest.size;
+      const recordedBeforePolicy = new Set(state.pruneManifest.keys());
       let pressure = applyContextPressurePolicy(
         messages,
         capacityWindow,
@@ -447,9 +454,17 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.velocityTracker,
       );
       state.velocityTracker = pressure.velocityTracker;
-      const newPrunes = state.pruneManifest.size - manifestSizeBefore;
+      // Only entries recorded by THIS policy pass may still be escalated to
+      // spill. Entries recorded earlier (including a prior pass whose spill
+      // write failed) already published their replacement to the provider
+      // prefix; upgrading them later would mutate bytes the cache treats as
+      // stable for the rest of the epoch.
+      const newPruneCallIds = new Set<string>();
+      for (const callId of state.pruneManifest.keys()) {
+        if (!recordedBeforePolicy.has(callId)) newPruneCallIds.add(callId);
+      }
       if (pressure.prunedToolResults > 0 && state.sessionId) {
-        const upgraded = await upgradeNewPrunesWithSpill(messages, pressure.messages, state.pruneManifest, state.sessionId);
+        const upgraded = await upgradeNewPrunesWithSpill(messages, pressure.messages, state.pruneManifest, state.sessionId, newPruneCallIds);
         // reset()/onSessionStart may have run during that await, bumping the
         // generation and clearing the manifest. Writing our stale view back
         // would resurrect prunes for a session that no longer exists.
@@ -470,7 +485,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           );
         }
       }
-      observeCacheAttribution(state, messages, newPrunes);
+      observeCacheAttribution(state, messages, newPruneCallIds.size);
       updatePressureStatus(ctx, pressure, state.cacheDelta);
       persistPruneManifest(pi, state);
       if (pressure.action !== "compact") {
@@ -754,10 +769,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   return {
     onSessionStart(ctx) {
       state.generation += 1;
-      if (state.sessionId) void cleanupSpillDir(state.sessionId);
+      const nextSessionId = sessionIdOf(ctx);
+      // Resuming the same session must find its spill resources still on disk,
+      // so only a genuine session switch cleans the previous root.
+      // reset()/onCompact() remain the destructive cleanup paths.
+      if (state.sessionId && state.sessionId !== nextSessionId) void cleanupSpillDir(state.sessionId);
       releaseInFlight();
       state.pruneManifest.clear();
-      state.sessionId = sessionIdOf(ctx);
+      state.sessionId = nextSessionId;
       state.restoredPrunes = loadPersistedPrunes(ctx, state.sessionId);
       state.persistedPruneKey = pruneKey(state.restoredPrunes.values());
       state.settingsSnapshot = undefined;
@@ -786,6 +805,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         const settings = settingsFor(ctx);
         const linkedThreshold = await linkedThresholdFor(ctx, settings);
         if (generation !== state.generation) return { event, prunedToolResults: 0 };
+        // A resumed session can reach compaction before its first context
+        // evaluation; hydrate restored prunes so the projection replays the
+        // persisted replacements instead of raw historical tool output.
+        const downgraded = await hydrateRestoredPrunes(state, messages, generation);
+        if (state.generation !== generation) return { event, prunedToolResults: 0 };
+        if (downgraded) persistPruneManifest(pi, state);
         const contextWindow = linkedThreshold.usable
           ? linkedThreshold.contextWindow
           : ctx.model?.contextWindow
@@ -905,6 +930,17 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // projectCompactionInput persist.  reset() already does this; onCompact
       // was the only clear-path that skipped it.
       persistPruneManifest(pi, state);
+    },
+    onSessionShutdown(ctx) {
+      // Non-destructive: a normal shutdown must not tombstone the prune
+      // manifest. Release in-flight work and persist the current state so a
+      // resume replays the identical transformed prefix; session-scoped spill
+      // resources stay on disk for the bounded resume lifetime. reset() and
+      // onCompact() remain the paths that clear manifests and delete files.
+      state.generation += 1;
+      releaseInFlight();
+      persistPruneManifest(pi, state);
+      if (ctx) clearPressureStatus(ctx);
     },
     reset(ctx) {
       state.generation += 1;
@@ -1132,9 +1168,11 @@ function restorePruneReplacement(message: AgentMessage, persisted: PersistedPrun
     if (!persisted.spillPath) return undefined;
     return minimalSpillReplacement(message, persisted.spillPath);
   }
-  // A spill entry whose file is gone (cleaned tmpdir, failed write persisted by
-  // an older build) degrades to the plain placeholder rather than the pathless
-  // spill text, which would carry a 1.5K preview for no recoverability.
+  // hydrateRestoredPrunes validates spill liveness and downgrades dead paths
+  // to level "pruned" before reaching here, so a persisted spill entry with no
+  // path (cleaned tmpdir, failed write persisted by an older build) degrades
+  // to the plain placeholder rather than the pathless spill text, which would
+  // carry a 1.5K preview for no recoverability.
   if (!persisted.spillPath) return pruneToolResult(message);
   const text = extractTextContent(message);
   if (text.length < SPILL_THRESHOLD_CHARS) return undefined;
@@ -1157,28 +1195,70 @@ function restorePruneReplacement(message: AgentMessage, persisted: PersistedPrun
   } as AgentMessage;
 }
 
-function hydrateRestoredPrunes(state: AutoCompactionState, messages: AgentMessage[]): void {
-  if (state.restoredPrunes.size === 0) return;
-  const visibleIds = new Set<string>();
+async function hydrateRestoredPrunes(
+  state: AutoCompactionState,
+  messages: AgentMessage[],
+  generation: number,
+): Promise<boolean> {
+  if (state.restoredPrunes.size === 0) return false;
+  const visible: Array<{ callId: string; message: AgentMessage; persisted: PersistedPruneEntry }> = [];
   for (const message of messages) {
     const callId = toolResultCallId(message);
     if (!callId) continue;
     const persisted = state.restoredPrunes.get(callId);
     if (!persisted) continue;
-    visibleIds.add(callId);
-    const replacement = restorePruneReplacement(message, persisted);
+    visible.push({ callId, message, persisted });
+  }
+  if (visible.length === 0) return false;
+  // Validate every referenced spill path before publishing a restored
+  // replacement. An entry whose resource is dead or foreign is atomically
+  // downgraded to a plain prune, so the resumed prefix only advertises files
+  // that exist and never toggles between dead-path and recovered-path text
+  // within an epoch.
+  const resolved: Array<{ callId: string; message: AgentMessage; persisted: PersistedPruneEntry; downgraded?: boolean }> =
+    await Promise.all(visible.map(async (item) => {
+      if (!item.persisted.spillPath) return item;
+      const live = state.sessionId !== undefined
+        && await validateSpillPath(state.sessionId, item.persisted.spillPath);
+      if (live) return item;
+      return {
+        ...item,
+        persisted: {
+          callId: item.persisted.callId,
+          level: "pruned" as PruneLevel,
+          ...(item.persisted.introducedAtUsageEpoch !== undefined
+            ? { introducedAtUsageEpoch: item.persisted.introducedAtUsageEpoch }
+            : {}),
+        },
+        downgraded: true,
+      };
+    }));
+  // reset()/onSessionStart may have run during validation, bumping the
+  // generation. Publishing the stale view would resurrect prunes the new
+  // lifecycle deliberately cleared.
+  if (state.generation !== generation) return false;
+  let downgraded = false;
+  for (const item of resolved) {
+    if (item.downgraded) {
+      downgraded = true;
+      // Persist the downgrade, not just the in-memory entry: the caller
+      // writes this state so the next resume also sees the plain level.
+      state.restoredPrunes.set(item.callId, item.persisted);
+    }
+    const replacement = restorePruneReplacement(item.message, item.persisted);
     if (!replacement) continue;
-    const savedTokens = estimateMessageTokens(message) - estimateMessageTokens(replacement);
+    const savedTokens = estimateMessageTokens(item.message) - estimateMessageTokens(replacement);
     if (savedTokens <= 0) continue;
-    state.pruneManifest.set(callId, {
+    state.pruneManifest.set(item.callId, {
       replacement,
       savedTokens,
-      introducedAtUsageEpoch: persisted.introducedAtUsageEpoch,
-      spillPath: persisted.spillPath,
-      level: persisted.level,
+      introducedAtUsageEpoch: item.persisted.introducedAtUsageEpoch,
+      spillPath: item.persisted.spillPath,
+      level: item.persisted.level,
     });
   }
-  for (const callId of visibleIds) state.restoredPrunes.delete(callId);
+  for (const item of resolved) state.restoredPrunes.delete(item.callId);
+  return downgraded;
 }
 
 function persistPruneManifest(pi: ExtensionAPI, state: AutoCompactionState): void {
@@ -1629,6 +1709,7 @@ async function upgradeNewPrunesWithSpill(
   transformedMessages: AgentMessage[],
   pruneManifest: PruneManifest,
   sessionId: string,
+  newCallIds: Set<string>,
 ): Promise<{ tokenDelta: number; callIds: Set<string> }> {
   const callIds = new Set<string>();
   let tokenDelta = 0;
@@ -1640,7 +1721,7 @@ async function upgradeNewPrunesWithSpill(
   }
   for (let index = 0; index < transformedMessages.length; index++) {
     const callId = toolResultCallId(transformedMessages[index]);
-    if (!callId) continue;
+    if (!callId || !newCallIds.has(callId)) continue;
     const entry = pruneManifest.get(callId);
     if (!entry || entry.spillPath !== undefined) continue;
     const original = originalsByCallId.get(callId);
@@ -1655,7 +1736,11 @@ async function upgradeNewPrunesWithSpill(
       // The write failed, so the payload is not recoverable from disk and the
       // no-path replacement text is a 1.5K preview — strictly worse than the
       // pruned placeholder already in place. Keep the placeholder and leave
-      // spillPath unset so a later pass retries once the disk cooperates.
+      // spillPath unset. This entry is NOT retried on a later pass: only
+      // callIds recorded by the current policy pass are eligible above, so the
+      // plain replacement stays frozen for the rest of the compaction epoch
+      // even if the disk recovers. A background persist may still land the
+      // bytes, but provider-visible bytes never change mid-epoch.
       continue;
     }
     const replacementText = buildSpillReplacementText(spill, toolName);
