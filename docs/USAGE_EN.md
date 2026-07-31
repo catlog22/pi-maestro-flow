@@ -623,7 +623,7 @@ plan-enter()
 - `plan-confirm` (or `/plan approve`) commits the plan and restores Act tools
 - `plan-exit` abandons the plan and returns to Act mode
 
-**Toggle:** `Alt+P` or `/plan` to switch Plan/Act mode.
+**Toggle:** `Alt+Shift+P` or `/plan` to switch Plan/Act mode.
 
 ---
 

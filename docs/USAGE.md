@@ -623,7 +623,7 @@ plan-enter()
 - `plan-confirm`（或 `/plan approve`）提交计划并恢复 Act 工具
 - `plan-exit` 放弃计划返回 Act 模式
 
-**切换方式：** `Alt+P` 或 `/plan` 切换 Plan/Act 模式。
+**切换方式：** `Alt+Shift+P` 或 `/plan` 切换 Plan/Act 模式。
 
 ---
 

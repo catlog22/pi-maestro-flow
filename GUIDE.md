@@ -790,9 +790,8 @@ teammate-send({ to: "stuck", mode: "abort" })           // Kill
 teammate({ agent: "delegate", task: "...", timeoutMs: 120000 })
 ```
 
-### Alt/Option Shortcuts Don't Work (macOS)
-`Alt+P` / `Alt+T` / `Alt+G` (labeled `Option+P/T/G` on macOS) rely on the terminal sending `Esc+letter`. By default macOS terminals make Option produce special characters (π, †, ©) instead.
-**Fix:** enable "Use Option as Meta key" — iTerm2: *Settings → Profiles → Keys → Left/Right Option Key → Esc+*; Terminal.app: *Settings → Profiles → Keyboard → Use Option as Meta key*. Kitty / WezTerm / Ghostty work out of the box. `Shift+Tab` and `Ctrl+` shortcuts are unaffected.
+### Modified Alt/Option Shortcuts Don't Work
+`Alt+Shift+P` requires a terminal that reports combined modifiers through the Kitty keyboard protocol or CSI-u. `Alt+T` and `Alt+G` use ordinary Meta-key sequences. Kitty, WezTerm, and Ghostty support enhanced modified-key reporting; in other terminals use `/plan` when `Alt+Shift+P` is unavailable. For `Alt+T` and `Alt+G` on macOS, configure Option as Meta/Esc+ in the terminal keyboard settings.
 
 ### Long Session Context Overflow
 ```bash
