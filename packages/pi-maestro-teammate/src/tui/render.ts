@@ -1,14 +1,14 @@
 /**
  * TUI rendering for the teammate tool.
  *
- * renderCall: compact one-line launch summary for single/chain/graph
+ * renderCall: intentionally empty; result rendering owns the lifecycle surface
  * renderResult: real-time streaming for foreground, compact status for completed
  */
 
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
-  Box, type Component,
+  Box, Text, type Component,
   truncateToWidth,
   wrapTextWithAnsi,
 } from "@earendil-works/pi-tui";
@@ -17,8 +17,7 @@ import {
   effectiveDisplayStatus,
   idleSeconds,
 } from "../shared/agent-status.ts";
-import type { AgentProgressSnapshot, ChildAgentCallSnapshot, Details, SingleResult } from "../shared/types.ts";
-import { extractDependencies } from "../runs/execution.ts";
+import type { AgentProgressSnapshot, ChildAgentCallSnapshot, Details, SingleResult, Usage } from "../shared/types.ts";
 import { isQuietMode, quietStatusMark } from "../quiet-state.ts";
 import {
   buildProgressTree,
@@ -125,117 +124,67 @@ function formatTokens(count: number): string {
   return `${(count / 1_000_000).toFixed(2)}M`;
 }
 
+/**
+ * Cache telemetry for final and quiet summaries: read/write counters plus the
+ * read hit ratio over all processed input tokens. Only emitted when the
+ * provider reported cache activity, so cache-free summaries stay unchanged.
+ */
+function cacheUsageParts(
+  usage: Pick<Usage, "inputTokens" | "cacheReadTokens" | "cacheWriteTokens">,
+  format: (count: number) => string,
+): string[] {
+  const parts: string[] = [];
+  if (usage.cacheReadTokens > 0) parts.push(`${format(usage.cacheReadTokens)}cache-read`);
+  if (usage.cacheWriteTokens > 0) parts.push(`${format(usage.cacheWriteTokens)}cache-write`);
+  const processed = usage.inputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+  if (usage.cacheReadTokens > 0 && processed > 0) {
+    parts.push(`${Math.round((usage.cacheReadTokens / processed) * 100)}% cache hit`);
+  }
+  return parts;
+}
+
 // ---------------------------------------------------------------------------
 // renderCall — how the tool invocation appears in conversation
 // ---------------------------------------------------------------------------
 
-interface TaskArg {
-  agent: string;
-  name?: string;
-  prompt?: string;
-}
-
+// The result component owns teammate presentation for every lifecycle phase.
+// Keeping the call slot empty prevents launch summaries from duplicating live
+// progress and completed rows immediately below them.
 export function renderTeammateCall(
+  _args: Record<string, unknown>,
+  _theme: Theme,
+  _context?: { expanded?: boolean; isPartial?: boolean },
+): Component {
+  return dynamicComponent(() => []);
+}
+
+export function renderTeammateListCall(
   args: Record<string, unknown>,
   theme: Theme,
-  context?: { expanded?: boolean },
+  context?: { isPartial?: boolean },
 ): Component {
-  if (isQuietMode()) return renderQuietTeammateCall(args, theme);
-  const tasks = (args.tasks as Array<Omit<TaskArg, "agent"> & { agent?: string }> | undefined)
-    ?.map((task) => ({ ...task, agent: task.agent ?? (args.agent as string | undefined) ?? "general" }));
-  const isBg = args.background === true;
-
-  // Multi-task: tree with dependency topology
-  if (tasks?.length) {
-    return renderMultiTaskCall(tasks, isBg, args, theme, context?.expanded ?? false);
-  }
-
-  // Single agent
-  const agent = args.agent as string ?? "?";
-  const name = args.name as string | undefined;
-  const nameLabel = name ? `${theme.fg("accent", `@${name}`)} ` : "";
-  const agentLabel = name
-    ? theme.fg("dim", `(${agent})`)
-    : theme.fg("accent", agent);
-  const modeHint = isBg
-    ? theme.fg("dim", " [bg]")
-    : theme.fg("dim", " (Alt+B to detach)");
-
-  const header = `${theme.fg("success", "■")} ${nameLabel}${agentLabel}${modeHint}`;
-  return dynamicComponent((w) => [truncateToWidth(header, Math.max(1, w), "…")]);
+  if (context?.isPartial === false) return new Text("", 0, 0);
+  const view = typeof args.view === "string" ? args.view : "active";
+  return new Text(`  ${theme.fg("warning", "…")} ${theme.bold("teammate-list")} ${theme.fg("dim", view)}`, 0, 0);
 }
 
-function renderMultiTaskCall(
-  tasks: TaskArg[],
-  isBg: boolean,
-  args: Record<string, unknown>,
+export function renderTeammateListResult(
+  result: AgentToolResult<{ agents: unknown[] }>,
+  options: { isPartial?: boolean },
   theme: Theme,
-  expanded: boolean,
 ): Component {
-  const taskNames = new Set(tasks.filter((t) => t.name).map((t) => t.name!));
-  const hasDeps = tasks.some((t) => extractDependencies(t.prompt, taskNames).length > 0);
-
-  const modeWord = isBg ? "background" : "foreground";
-  const hint = isBg
-    ? theme.fg("dim", " (Alt+R to manage)")
-    : theme.fg("dim", " (Alt+B to detach)");
-
-  // Detect topology type
-  let topoLabel = "";
-  if (hasDeps) {
-    const allLinear = isLinearChain(tasks, taskNames);
-    topoLabel = allLinear ? " result chain" : " result graph";
-  }
-
-  const indexByName = new Map<string, number>();
-  tasks.forEach((task, index) => {
-    if (task.name) indexByName.set(task.name, index);
-  });
-  const dependenciesByIndex = tasks.map((task) =>
-    extractDependencies(task.prompt, taskNames)
-      .map((name) => indexByName.get(name))
-      .filter((dependency): dependency is number => dependency !== undefined)
-  );
-
-  const header = `${theme.fg("success", "■")} ${theme.bold(`${tasks.length}${topoLabel} ${modeWord} agents launched`)}${hint}`;
-  if (expanded) {
-    const progress: AgentProgressSnapshot[] = tasks.map((task, index) => ({
-      agent: task.agent,
-      ...(task.name ? { name: task.name } : {}),
-      correlationId: `preview-${index + 1}`,
-      taskIndex: index,
-      dependencies: dependenciesByIndex[index],
-      status: "pending",
-    }));
-    const palette: ProgressPalette = {
-      dim: (text) => theme.fg("dim", text),
-      accent: (text) => theme.fg("accent", text),
-      running: (text) => theme.fg("warning", text),
-      success: (text) => theme.fg("success", text),
-      error: (text) => theme.fg("error", text),
-      bold: (text) => theme.bold(text),
-    };
-    const tree = buildProgressTree(progress, palette);
-    return dynamicComponent((w) => [header, ...tree.map((row) => row.text)]
-      .map((line) => truncateToWidth(line, Math.max(1, w), "…")));
-  }
-  // 结果组件（前台流式 progress / 后台 ack 的 progress 快照）紧随调用行渲染，
-  // 已包含同一任务拓扑、依赖边与实时状态（后台还带 correlation id）。
-  // collapsed 调用仅保留启动摘要，避免相邻组件重复显示任务行。
-  // DAG 细节仍可在 expanded 调用视图与结果 progress 树中查看。
-  return dynamicComponent((w) => [
-    truncateToWidth(header, Math.max(1, w), "…"),
-  ]);
+  if (options.isPartial) return new Text("", 0, 0);
+  const text = typeof result.content === "string"
+    ? result.content
+    : result.content
+      .map((entry) => entry.type === "text" ? entry.text : "")
+      .filter(Boolean)
+      .join("\n");
+  return dynamicComponent((width) => text.split("\n").map((line) =>
+    truncateToWidth(line, Math.max(1, width), theme.fg("dim", "…"))
+  ));
 }
 
-function isLinearChain(tasks: TaskArg[], taskNames: Set<string>): boolean {
-  for (let i = 0; i < tasks.length; i++) {
-    const deps = extractDependencies(tasks[i].prompt, taskNames);
-    if (deps.length > 1) return false;
-    if (deps.length === 1 && i > 0 && deps[0] !== tasks[i - 1].name) return false;
-  }
-  return true;
-}
 
 // ---------------------------------------------------------------------------
 // renderResult — how the tool result appears in conversation
@@ -284,8 +233,13 @@ function formatChildLine(child: ChildAgentCallSnapshot, theme: Theme, hideActivi
     : activeTool
       ? ` · using ${activeTool.name}`
       : child.lastMessage ? " · streaming" : "";
+  const childCacheRead = child.cacheReadTokens ?? 0;
+  const childCacheWrite = child.cacheWriteTokens ?? 0;
   const tokens = child.inputTokens !== undefined || child.outputTokens !== undefined
     ? ` · in ${child.inputTokens ?? 0} · out ${child.outputTokens ?? 0}`
+      + (childCacheRead > 0 || childCacheWrite > 0
+        ? ` · cache ${childCacheRead}r/${childCacheWrite}w`
+        : "")
     : "";
   const durationMs = child.status === "running" && child.startedAt
     ? Math.max(child.durationMs ?? 0, Date.now() - child.startedAt)
@@ -385,8 +339,13 @@ function renderProgress(
     const resultReady = focusedDisplay === "result-ready";
     const stalled = focusedDisplay === "stalled";
     const focusedDurationMs = focused ? progressDurationMs(focused) : undefined;
+    const focusedCacheRead = focused?.cacheReadTokens ?? 0;
+    const focusedCacheWrite = focused?.cacheWriteTokens ?? 0;
     const focusedTokens = focused && (focused.inputTokens !== undefined || focused.outputTokens !== undefined)
       ? `in ${formatTokens(focused.inputTokens ?? 0)} · out ${formatTokens(focused.outputTokens ?? 0)}`
+        + (focusedCacheRead > 0 || focusedCacheWrite > 0
+          ? ` · cache ${formatTokens(focusedCacheRead)}r/${formatTokens(focusedCacheWrite)}w`
+          : "")
       : focused?.tokens
         ? `${formatTokens(focused.tokens)} tokens`
         : "";
@@ -500,6 +459,7 @@ function renderSingleResult(
     const usageParts: string[] = [];
     if (r.usage.inputTokens > 0) usageParts.push(`${formatTokens(r.usage.inputTokens)}in`);
     if (r.usage.outputTokens > 0) usageParts.push(`${formatTokens(r.usage.outputTokens)}out`);
+    usageParts.push(...cacheUsageParts(r.usage, formatTokens));
     if (r.usage.turns > 0) usageParts.push(`${r.usage.turns} turns`);
     if (usageParts.length > 0) {
       lines.push(truncateToWidth(theme.fg("dim", usageParts.join(" · ")), contentWidth, "…"));
@@ -619,12 +579,6 @@ function quietFirstError(r: SingleResult): string {
   return line.length > 60 ? `${line.slice(0, 59)}…` : line;
 }
 
-function quietTopoLabel(tasks: TaskArg[]): string {
-  const taskNames = new Set(tasks.filter((t) => t.name).map((t) => t.name!));
-  if (!tasks.some((t) => extractDependencies(t.prompt, taskNames).length > 0)) return "";
-  return isLinearChain(tasks, taskNames) ? "chain" : "graph";
-}
-
 function quietPalette(theme: Theme): ProgressPalette {
   return {
     dim: (text) => theme.fg("dim", text),
@@ -684,23 +638,9 @@ function quietResultLine(result: SingleResult, theme: Theme, fallbackName?: stri
     state,
     formatDuration(result.durationMs),
     totalTokens > 0 ? `${formatTokens(totalTokens)} tokens` : "",
+    ...cacheUsageParts(result.usage, formatTokens),
   ], theme);
   return qLine(theme, glyph, label, rest);
-}
-
-function renderQuietTeammateCall(args: Record<string, unknown>, theme: Theme): Component {
-  const glyph = theme.fg("warning", quietStatusMark("running"));
-  const tasks = (args.tasks as Array<Omit<TaskArg, "agent"> & { agent?: string }> | undefined)
-    ?.map((task) => ({ ...task, agent: task.agent ?? (args.agent as string | undefined) ?? "general" }));
-  if (tasks?.length) {
-    const topo = quietTopoLabel(tasks);
-    const rest = `${tasks.length} agents${topo ? ` ${topo}` : ""}`;
-    return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
-  }
-  const agent = (args.agent as string | undefined) ?? "general";
-  const name = args.name as string | undefined;
-  const rest = name ? `@${name} (${agent})` : agent;
-  return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", rest), Math.max(1, w), "…")]);
 }
 
 function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Theme): Component {

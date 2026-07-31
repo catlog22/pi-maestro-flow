@@ -82,8 +82,16 @@ export function buildProgressTree(
     const dependencyHint = entry.dependencies.length > 0
       ? palette.dim(` ← result${entry.dependencies.length === 1 ? "" : "s"} ${entry.dependencies.map((dependency) => `#${dependency + 1}`).join(", ")}`)
       : "";
+    const cacheRead = entry.cacheReadTokens ?? 0;
+    const cacheWrite = entry.cacheWriteTokens ?? 0;
     const tokenParts = entry.inputTokens !== undefined || entry.outputTokens !== undefined
-      ? [`in ${formatTokens(entry.inputTokens ?? 0)}`, `out ${formatTokens(entry.outputTokens ?? 0)}`]
+      ? [
+          `in ${formatTokens(entry.inputTokens ?? 0)}`,
+          `out ${formatTokens(entry.outputTokens ?? 0)}`,
+          ...(cacheRead > 0 || cacheWrite > 0
+            ? [`cache ${formatTokens(cacheRead)}r/${formatTokens(cacheWrite)}w`]
+            : []),
+        ]
       : entry.tokens
         ? [`${formatTokens(entry.tokens)} tok`]
         : [];

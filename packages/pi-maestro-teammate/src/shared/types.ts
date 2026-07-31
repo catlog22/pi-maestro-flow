@@ -22,6 +22,8 @@ export interface SingleResult {
   model: string;
   correlationId: string;
   durationMs: number;
+  /** Number of child tool completions observed before this result settled. */
+  toolCount?: number;
   /** Whether the child process remains available for teammate-send after this turn. */
   wakeable?: boolean;
   /**
@@ -47,6 +49,10 @@ export interface AgentProgress {
   tokens: number;
   inputTokens?: number;
   outputTokens?: number;
+  /** Provider prompt-cache reads accumulated by the child, mirrored from Usage. */
+  cacheReadTokens?: number;
+  /** Provider prompt-cache writes accumulated by the child, mirrored from Usage. */
+  cacheWriteTokens?: number;
   durationMs: number;
   lastActivityAt: number;
   startedAt: number;
@@ -72,6 +78,8 @@ export interface AgentProgressSnapshot {
   tokens?: number;
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   durationMs?: number;
   lastActivityAt?: number;
   /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
@@ -99,6 +107,8 @@ export interface ChildAgentCallSnapshot {
   lastMessage?: string;
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
 }
 
 export interface Details {
@@ -239,6 +249,8 @@ export interface TeammateState {
    * cannot register or spawn an agent after its caller has stopped waiting.
    */
   pendingProxyDispatchRequests?: Set<string>;
+  /** Parent identity for reservations that have not registered an agent yet. */
+  pendingProxyDispatchParents?: Map<string, string>;
   /**
    * Maps a child's proxy requestId to the agent this process created for it, so
    * that a child which stops waiting can have that agent torn down instead of

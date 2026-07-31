@@ -96,6 +96,8 @@ export interface RunTeammateOptions {
     spawnChildProcess?: typeof crossSpawn;
     /** @internal Test seam for retry scheduling. */
     waitForRetry?: (delayMs: number, signal?: AbortSignal) => Promise<boolean>;
+    /** @internal Test seam for the first child activity deadline. */
+    firstActivityTimeoutMs?: number;
     /** @internal Test seam for the result-ready grace period. */
     resultReadyGraceMs?: number;
     /** @internal Foreground wait window before the extension detaches a still-running task. */

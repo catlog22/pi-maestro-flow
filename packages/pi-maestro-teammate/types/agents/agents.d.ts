@@ -47,9 +47,24 @@ export declare function discoverAgents(cwd: string, homeDir?: string): AgentConf
  */
 export declare function resolveAgent(cwd: string, agentName: string): AgentConfig | undefined;
 /** Return resolved role metadata without exposing the role prompt body. */
-export declare function listAgentSummaries(cwd: string): AgentSummary[];
+export declare function listAgentSummaries(cwd: string, homeDir?: string): AgentSummary[];
 /** Format a compact, deterministic role catalog for teammate tool metadata. */
 export declare function formatAgentCatalog(cwd: string, maxRoles?: number, maxDescriptionLength?: number): string;
+/**
+ * Hit/miss counters for the role catalog cache, reset by
+ * {@link invalidateAgentCatalogCache}. Observability only; never consulted
+ * for cache decisions.
+ */
+export declare const agentCatalogCacheStats: {
+    hits: number;
+    misses: number;
+};
+/**
+ * Drop every cached catalog snapshot. Called when the extension re-registers
+ * (reload); cwd changes and role additions/edits invalidate themselves via the
+ * cache key and manifest signature respectively.
+ */
+export declare function invalidateAgentCatalogCache(): void;
 /** Build the compact role directory appended to the active parent prompt. */
 export declare function createAgentCatalogSnapshot(cwd: string, maxDescriptionLength?: number): AgentCatalogSnapshot;
 /** Replace an existing role directory or append a fresh one to the prompt. */

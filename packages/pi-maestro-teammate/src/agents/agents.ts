@@ -175,11 +175,14 @@ function isReservedAgentName(name: string): boolean {
   return isBuiltinAgentName(name);
 }
 
-/**
- * Discover all agent definitions, merged by priority:
- * project > user > builtin (name collisions: higher priority wins).
- */
-export function discoverAgents(cwd: string, homeDir = os.homedir()): AgentConfig[] {
+interface DiscoveryDirs {
+  legacyUserAgentsDir: string;
+  userAgentsDir: string;
+  projectPiAgentsDir: string | null;
+  projectCompatAgentsDir: string | null;
+}
+
+function resolveDiscoveryDirs(cwd: string, homeDir: string): DiscoveryDirs {
   const legacyUserAgentsDir = path.join(
     homeDir,
     ".pi",
@@ -206,6 +209,21 @@ export function discoverAgents(cwd: string, homeDir = os.homedir()): AgentConfig
     if (parentDir === currentDir) break;
     currentDir = parentDir;
   }
+
+  return { legacyUserAgentsDir, userAgentsDir, projectPiAgentsDir, projectCompatAgentsDir };
+}
+
+/**
+ * Discover all agent definitions, merged by priority:
+ * project > user > builtin (name collisions: higher priority wins).
+ */
+export function discoverAgents(cwd: string, homeDir = os.homedir()): AgentConfig[] {
+  const {
+    legacyUserAgentsDir,
+    userAgentsDir,
+    projectPiAgentsDir,
+    projectCompatAgentsDir,
+  } = resolveDiscoveryDirs(cwd, homeDir);
 
   const builtinByName = new Map(
     loadAgentsFromDir(BUILTIN_AGENTS_DIR, "builtin")
@@ -253,8 +271,8 @@ export function resolveAgent(
 }
 
 /** Return resolved role metadata without exposing the role prompt body. */
-export function listAgentSummaries(cwd: string): AgentSummary[] {
-  return discoverAgents(cwd)
+export function listAgentSummaries(cwd: string, homeDir = os.homedir()): AgentSummary[] {
+  return discoverAgents(cwd, homeDir)
     .map(({ name, description, source }) => ({ name, description, source }))
     .sort((left, right) => left.name.localeCompare(right.name));
 }
@@ -284,12 +302,93 @@ export function formatAgentCatalog(
   return lines.join("\n");
 }
 
+// ---------------------------------------------------------------------------
+// Turn-start catalog cache
+//
+// before_agent_start rebuilds the role catalog on every model turn, rereading
+// and reparsing every role Markdown file although the result is byte-identical
+// until a role is added, edited, or removed. The cache below keys an immutable
+// snapshot by resolved cwd/home plus a lightweight directory manifest (file
+// name, size, mtime), so unchanged turns only stat the role directories while
+// additions/edits invalidate themselves through the manifest. Output bytes are
+// identical to the uncached path; only the filesystem work changes.
+// ---------------------------------------------------------------------------
+
+interface AgentCatalogCacheEntry {
+  manifestSignature: string;
+  snapshot: AgentCatalogSnapshot;
+}
+
+const AGENT_CATALOG_CACHE_LIMIT = 16;
+const agentCatalogCache = new Map<string, AgentCatalogCacheEntry>();
+
+/**
+ * Hit/miss counters for the role catalog cache, reset by
+ * {@link invalidateAgentCatalogCache}. Observability only; never consulted
+ * for cache decisions.
+ */
+export const agentCatalogCacheStats = { hits: 0, misses: 0 };
+
+/**
+ * Drop every cached catalog snapshot. Called when the extension re-registers
+ * (reload); cwd changes and role additions/edits invalidate themselves via the
+ * cache key and manifest signature respectively.
+ */
+export function invalidateAgentCatalogCache(): void {
+  agentCatalogCache.clear();
+  agentCatalogCacheStats.hits = 0;
+  agentCatalogCacheStats.misses = 0;
+}
+
+function directoryManifestSignature(dir: string): string {
+  let entries: fs.Dirent[];
+  try {
+    entries = fs.readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return "absent";
+  }
+  const names = entries
+    .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
+    .map((entry) => entry.name)
+    .sort();
+  const parts: string[] = [];
+  for (const name of names) {
+    try {
+      const stats = fs.statSync(path.join(dir, name));
+      parts.push(`${name}:${stats.size}:${stats.mtimeMs}`);
+    } catch {
+      parts.push(`${name}:unreadable`);
+    }
+  }
+  return parts.join(",") || "empty";
+}
+
+function discoveryManifestSignature(dirs: DiscoveryDirs): string {
+  return [
+    `builtin=${directoryManifestSignature(BUILTIN_AGENTS_DIR)}`,
+    `legacyUser=${directoryManifestSignature(dirs.legacyUserAgentsDir)}`,
+    `user=${directoryManifestSignature(dirs.userAgentsDir)}`,
+    `projectPi=${dirs.projectPiAgentsDir ? directoryManifestSignature(dirs.projectPiAgentsDir) : "none"}`,
+    `projectCompat=${dirs.projectCompatAgentsDir ? directoryManifestSignature(dirs.projectCompatAgentsDir) : "none"}`,
+  ].join("|");
+}
+
 /** Build the compact role directory appended to the active parent prompt. */
 export function createAgentCatalogSnapshot(
   cwd: string,
   maxDescriptionLength = 160,
 ): AgentCatalogSnapshot {
-  const summaries = listAgentSummaries(cwd);
+  const homeDir = os.homedir();
+  const cacheKey = `${cwd}\0${homeDir}\0${maxDescriptionLength}`;
+  const manifestSignature = discoveryManifestSignature(resolveDiscoveryDirs(cwd, homeDir));
+  const cached = agentCatalogCache.get(cacheKey);
+  if (cached && cached.manifestSignature === manifestSignature) {
+    agentCatalogCacheStats.hits += 1;
+    return cached.snapshot;
+  }
+  agentCatalogCacheStats.misses += 1;
+
+  const summaries = listAgentSummaries(cwd, homeDir);
   const byName = new Map(summaries.map((agent) => [agent.name, agent]));
   const builtins = PUBLIC_BUILTIN_AGENT_NAMES
     .map((name) => byName.get(name))
@@ -322,12 +421,19 @@ export function createAgentCatalogSnapshot(
     AGENT_CATALOG_END_MARKER,
   );
 
-  return {
+  const snapshot: AgentCatalogSnapshot = {
     signature: summaries
       .map((agent) => `${agent.name}:${agent.source}:${agent.description}`)
       .join("\n"),
     systemPrompt: lines.join("\n"),
   };
+
+  if (agentCatalogCache.size >= AGENT_CATALOG_CACHE_LIMIT) {
+    const oldest = agentCatalogCache.keys().next();
+    if (!oldest.done) agentCatalogCache.delete(oldest.value);
+  }
+  agentCatalogCache.set(cacheKey, { manifestSignature, snapshot });
+  return snapshot;
 }
 
 /** Replace an existing role directory or append a fresh one to the prompt. */

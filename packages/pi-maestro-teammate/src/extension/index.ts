@@ -16,7 +16,7 @@ import type {
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool } from "../shared/gui-registry.ts";
-import { truncateToWidth } from "@earendil-works/pi-tui";
+import { Text, truncateToWidth } from "@earendil-works/pi-tui";
 import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams } from "./schemas.ts";
 import {
   runSingleTeammate,
@@ -65,6 +65,8 @@ import type {
 import {
   renderQuietTeammateAux,
   renderTeammateCall,
+  renderTeammateListCall,
+  renderTeammateListResult,
   renderTeammateResult,
 } from "../tui/render.ts";
 import { AttachOverlay } from "../tui/attach-overlay.ts";
@@ -108,6 +110,7 @@ import {
   appendAgentCatalog,
   discoverAgents,
   formatAgentCatalog,
+  invalidateAgentCatalogCache,
   listAgentSummaries,
   type AgentSummary,
 } from "../agents/agents.ts";
@@ -580,6 +583,8 @@ interface AgentWidgetRow {
   tokens: number;
   inputTokens?: number;
   outputTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
   startedAt: number;
   durationMs: number;
   lastActivityAt: number;
@@ -981,6 +986,8 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
         tokens: progress?.tokens ?? 0,
         inputTokens: progress?.inputTokens,
         outputTokens: progress?.outputTokens,
+        cacheReadTokens: progress?.cacheReadTokens,
+        cacheWriteTokens: progress?.cacheWriteTokens,
         startedAt: direct?.startedAt
           ?? (progress?.startedAt ? new Date(progress.startedAt).getTime() : active.startedAt),
         durationMs: direct
@@ -1106,7 +1113,13 @@ export function renderAgentStatusWidget(
           ? `retrying · ${row.action}`
         : row.action;
     const tokenMetrics = row.inputTokens !== undefined || row.outputTokens !== undefined
-      ? [`in ${compactMetric(row.inputTokens ?? 0)}`, `out ${compactMetric(row.outputTokens ?? 0)}`]
+      ? [
+          `in ${compactMetric(row.inputTokens ?? 0)}`,
+          `out ${compactMetric(row.outputTokens ?? 0)}`,
+          ...((row.cacheReadTokens ?? 0) > 0 || (row.cacheWriteTokens ?? 0) > 0
+            ? [`cache ${compactMetric(row.cacheReadTokens ?? 0)}r/${compactMetric(row.cacheWriteTokens ?? 0)}w`]
+            : []),
+        ]
       : row.tokens
         ? [`${row.direction} ${compactMetric(row.tokens)} tokens`]
         : [];
@@ -1218,6 +1231,7 @@ export interface PendingChildProxyRequest {
   timer: ReturnType<typeof setTimeout>;
   signal?: AbortSignal;
   abortHandler?: () => void;
+  cancelRoot?: (reason: "timeout" | "aborted") => void;
 }
 
 export type ChildProxyPendingRequests = Map<string, PendingChildProxyRequest>;
@@ -1274,6 +1288,7 @@ export function rejectAllChildProxyRequests(
   const pending = [...pendingRequests.values()];
   pendingRequests.clear();
   for (const request of pending) {
+    request.cancelRoot?.("aborted");
     clearTimeout(request.timer);
     if (request.signal && request.abortHandler) {
       request.signal.removeEventListener("abort", request.abortHandler);
@@ -1344,7 +1359,14 @@ export function createChildProxyRequest(
         rejectChildProxyRequest(pendingRequests, requestId, childProxyAbortError());
       }
       : undefined;
-    pendingRequests.set(requestId, { resolve, reject, timer, signal, abortHandler });
+    pendingRequests.set(requestId, {
+      resolve,
+      reject,
+      timer,
+      signal,
+      abortHandler,
+      cancelRoot: notifyRootGaveUp,
+    });
     if (signal && abortHandler) signal.addEventListener("abort", abortHandler, { once: true });
     if (signal?.aborted) abortHandler?.();
     if (!pendingRequests.has(requestId)) return;
@@ -1402,6 +1424,12 @@ export default function registerTeammateExtension(
   const isChild = process.env.PI_TEAMMATE_CHILD === "1";
   const currentDepth = isChild ? getTeammateDepth() : 0;
   const canDispatchNestedTeammate = !isChild || currentDepth < MAX_DEFAULT_DEPTH;
+
+  // A re-registered extension instance starts from a cold role catalog, so
+  // reload semantics stay identical to a fresh process. Session cwd switches
+  // and role additions/edits invalidate themselves via the cache key and the
+  // directory manifest signature.
+  invalidateAgentCatalogCache();
 
   // UCL: expose teammate tools to the GUI sidecar via the shared cross-extension
   // registry (globalThis symbol). Each extension owns a distinct registerTool, so
@@ -1680,6 +1708,12 @@ export default function registerTeammateExtension(
       async execute(_id: string, params: RunTeammateParams, signal: AbortSignal) {
         return proxyCall<Details>("teammate", params, signal);
       },
+      renderCall(args, theme, context) {
+        return renderTeammateCall(args, theme, context);
+      },
+      renderResult(result, options, theme) {
+        return renderTeammateResult(result, options, theme);
+      },
     };
     if (canDispatchNestedTeammate) pi.registerTool(proxyTeammateTool);
 
@@ -1705,6 +1739,12 @@ export default function registerTeammateExtension(
       parameters: TeammateListParams,
       async execute(_id: string, params: { view?: TeammateListView }, signal: AbortSignal) {
         return proxyCall<{ agents: unknown[] }>("teammate-list", params, signal);
+      },
+      renderCall(args, theme, context) {
+        return renderTeammateListCall(args, theme, context);
+      },
+      renderResult(result, options, theme) {
+        return renderTeammateListResult(result, options, theme);
       },
     });
 
@@ -2033,12 +2073,16 @@ export default function registerTeammateExtension(
         if (graphCompletionDelivered || !graphPublication) return;
         if (!taskCorrelationIds.every((taskId) => graphTerminalIds.has(taskId))) return;
         graphCompletionDelivered = true;
+        const terminalStatus = [...graphTerminalStatuses.values()].some(
+          (status) => status === "terminated",
+        ) ? "terminated" : undefined;
         settleAgent(
           state,
           correlationId,
           graphPublication.exitCode,
           graphPublication.summaries,
           graphPublication.wakeable,
+          terminalStatus,
         );
         emitComplete(
           pi,
@@ -2048,7 +2092,7 @@ export default function registerTeammateExtension(
           graphPublication.exitCode,
           graphPublication.totalDur,
           graphPublication.wakeable,
-          [...graphTerminalStatuses.values()].some((status) => status === "terminated"),
+          terminalStatus === "terminated",
         );
         if (graphCompletionNotificationRequested) {
           safeSendMessage(
@@ -2169,6 +2213,8 @@ export default function registerTeammateExtension(
               tokens: data.tokens,
               inputTokens: data.inputTokens,
               outputTokens: data.outputTokens,
+              cacheReadTokens: data.cacheReadTokens,
+              cacheWriteTokens: data.cacheWriteTokens,
               durationMs: data.durationMs,
               lastActivityAt: data.lastActivityAt,
               resultReadyAt: data.resultReadyAt,
@@ -2409,6 +2455,8 @@ export default function registerTeammateExtension(
                 tokens: result.usage.inputTokens + result.usage.outputTokens,
                 inputTokens: result.usage.inputTokens,
                 outputTokens: result.usage.outputTokens,
+                cacheReadTokens: result.usage.cacheReadTokens,
+                cacheWriteTokens: result.usage.cacheWriteTokens,
                 durationMs: result.durationMs,
                 ...(lifecyclePending && current?.resultReadyAt
                   ? { resultReadyAt: current.resultReadyAt }
@@ -2437,7 +2485,13 @@ export default function registerTeammateExtension(
                 wakeable: params.context !== "fork",
               }, true);
             }).catch((error) => {
-              killAgent(state, correlationId, undefined, "failed");
+              settleAgent(
+                state,
+                correlationId,
+                1,
+                error instanceof Error ? error.message : String(error),
+                false,
+              );
               notifyBackgroundFailure(pi, id, activeGraphMode, correlationId, error);
             });
           };
@@ -2563,7 +2617,13 @@ export default function registerTeammateExtension(
           runPromise.then((result) => {
             publishSingleResult(result, true);
           }).catch((error) => {
-            killAgent(state, correlationId, undefined, "failed");
+            settleAgent(
+              state,
+              correlationId,
+              1,
+              error instanceof Error ? error.message : String(error),
+              false,
+            );
             notifyBackgroundFailure(pi, id, agentLabel, correlationId, error);
           });
           const detachText = race.reason === "timeout"
@@ -2589,7 +2649,13 @@ export default function registerTeammateExtension(
         bgPromise.then((result) => {
           publishSingleResult(result, true);
         }).catch((error) => {
-          killAgent(state, correlationId, undefined, "failed");
+          settleAgent(
+            state,
+            correlationId,
+            1,
+            error instanceof Error ? error.message : String(error),
+            false,
+          );
           notifyBackgroundFailure(pi, id, agentLabel, correlationId, error);
         });
 
@@ -2746,12 +2812,14 @@ export default function registerTeammateExtension(
       };
     },
 
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
+      if (context.isPartial === false) return new Text("", 0, 0);
       const mode = typeof args.mode === "string" ? args.mode : "follow_up";
       return renderQuietTeammateAux("teammate-send", `@${String(args.to ?? "?")} · ${mode}`, "running", theme) as never;
     },
 
-    renderResult(result, _options, theme) {
+    renderResult(result, options, theme) {
+      if (options.isPartial) return new Text("", 0, 0);
       const failed = (result as { isError?: boolean }).isError === true || result.details?.delivered !== true;
       return renderQuietTeammateAux("teammate-send", failed ? "delivery failed" : "delivered", failed ? "failure" : "success", theme) as never;
     },
@@ -2795,6 +2863,14 @@ export default function registerTeammateExtension(
         details: { agents: entries },
       };
     },
+
+    renderCall(args, theme, context) {
+      return renderTeammateListCall(args, theme, context);
+    },
+
+    renderResult(result, options, theme) {
+      return renderTeammateListResult(result, options, theme);
+    },
   };
 
   // =========================================================================
@@ -2835,12 +2911,14 @@ export default function registerTeammateExtension(
       };
     },
 
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
+      if (context.isPartial === false) return new Text("", 0, 0);
       const lines = typeof args.lines === "number" ? ` · ${args.lines} lines` : "";
       return renderQuietTeammateAux("teammate-watch", `@${String(args.name ?? "?")}${lines}`, "running", theme) as never;
     },
 
-    renderResult(result, _options, theme) {
+    renderResult(result, options, theme) {
+      if (options.isPartial) return new Text("", 0, 0);
       const failed = (result as { isError?: boolean }).isError === true;
       return renderQuietTeammateAux("teammate-watch", failed ? "inspection failed" : "inspected", failed ? "failure" : "success", theme) as never;
     },
@@ -2867,12 +2945,14 @@ export default function registerTeammateExtension(
       };
     },
 
-    renderCall(args, theme) {
+    renderCall(args, theme, context) {
+      if (context.isPartial === false) return new Text("", 0, 0);
       const target = args.name ? `@${String(args.name)}` : `${String(args.waitMs ?? 0)}ms`;
       return renderQuietTeammateAux("teammate-wait", target, "running", theme) as never;
     },
 
-    renderResult(result, _options, theme) {
+    renderResult(result, options, theme) {
+      if (options.isPartial) return new Text("", 0, 0);
       const status = result.details?.status ?? "timeout";
       const failed = (result as { isError?: boolean }).isError === true;
       return renderQuietTeammateAux("teammate-wait", status, failed ? "failure" : "success", theme) as never;
@@ -4137,6 +4217,27 @@ function claimResultReadyNotice(state: TeammateState | undefined, correlationId:
   return true;
 }
 
+function watchTargetStalledAt(target: WatchTarget, state?: TeammateState): number {
+  const status = target.kind === "agent" ? target.agent.status : target.progress.status;
+  const lastActivityAt = target.kind === "agent"
+    ? target.agent.lastActivityAt
+    : target.progress.lastActivityAt ?? target.agent.lastActivityAt;
+  const idleCeiling = status === "pending"
+    ? TEAMMATE_PENDING_STALL_TIMEOUT_MS
+    : TEAMMATE_STALL_TIMEOUT_MS;
+  const baseStalledAt = lastActivityAt + idleCeiling;
+  if (status !== "retrying") return baseStalledAt;
+  const correlationId = target.kind === "agent"
+    ? target.agent.correlationId
+    : target.progress.correlationId;
+  const retry = target.kind === "agent"
+    ? target.agent.retry
+    : state?.activeRuns.get(correlationId)?.retry;
+  return retry
+    ? Math.max(baseStalledAt, retry.nextRetryAt + TEAMMATE_STALL_TIMEOUT_MS)
+    : baseStalledAt;
+}
+
 function statusForWatchTarget(
   target: WatchTarget,
   now = Date.now(),
@@ -4152,26 +4253,16 @@ function statusForWatchTarget(
   // not stalled. Reporting it as stalled told callers to terminate a healthy
   // agent; the wait's own timeout remains the backstop.
   if (target.kind === "agent" && (target.agent.pendingInteractions?.size ?? 0) > 0) return undefined;
-  const lastActivityAt = target.kind === "agent"
-    ? target.agent.lastActivityAt
-    : target.progress.lastActivityAt ?? target.agent.lastActivityAt;
-  // Every non-terminal status needs a stall ceiling, not just `running`. Graph
-  // tasks sit in `pending` until a concurrency slot frees up and stop
-  // refreshing lastActivityAt, so a `running`-only check left them with no
-  // terminating condition at all — the waiter then rescheduled forever.
-  // Queued work gets a longer ceiling: waiting on a dependency is expected.
-  const idleCeiling = status === "pending"
-    ? TEAMMATE_PENDING_STALL_TIMEOUT_MS
-    : TEAMMATE_STALL_TIMEOUT_MS;
-  if (now - lastActivityAt >= idleCeiling) return "stalled";
+  if (now >= watchTargetStalledAt(target, state)) return "stalled";
   return undefined;
 }
 
-function waitDelayForWatchTarget(target: WatchTarget, timeoutAt: number | undefined): number {
-  const lastActivityAt = target.kind === "agent"
-    ? target.agent.lastActivityAt
-    : target.progress.lastActivityAt ?? target.agent.lastActivityAt;
-  const stalledAt = lastActivityAt + TEAMMATE_STALL_TIMEOUT_MS;
+function waitDelayForWatchTarget(
+  target: WatchTarget,
+  timeoutAt: number | undefined,
+  state?: TeammateState,
+): number {
+  const stalledAt = watchTargetStalledAt(target, state);
   const nextAt = Math.min(stalledAt, timeoutAt ?? Number.POSITIVE_INFINITY);
   // A floor, not just a positive value: an already-elapsed deadline used to
   // clamp to 1ms, turning the waiter into a ~100Hz busy loop.
@@ -4256,7 +4347,7 @@ export function waitForTeammate(
       const currentStatus = statusForWatchTarget(resolved.match!, Date.now(), state);
       if (currentStatus) return finish(currentStatus);
       if (timeoutAt !== undefined && Date.now() >= timeoutAt) return finish("timeout");
-      waiter.timer = setTimeout(check, waitDelayForWatchTarget(resolved.match!, timeoutAt));
+      waiter.timer = setTimeout(check, waitDelayForWatchTarget(resolved.match!, timeoutAt, state));
     };
     if (signal) {
       waiter.signal = signal;
@@ -4534,6 +4625,7 @@ export function hasTeammateWidgetWork(
 ): boolean {
   return [...state.activeRuns.values()].some((agent) =>
     agent.status === "running"
+      || agent.status === "retrying"
       || (agent.status === "pending"
         && now - agent.lastActivityAt <= AGENT_WIDGET_IDLE_HIDE_MS)
       || (agent.status === "sleeping"
@@ -4543,6 +4635,48 @@ export function hasTeammateWidgetWork(
       || (agent.status === "failed"
         && now - (agent.failedAt ?? agent.lastActivityAt) <= FAILED_AGENT_RETENTION_MS)
   );
+}
+
+function terminateNestedDispatchesOwnedBy(
+  state: TeammateState,
+  parentCorrelationId: string,
+): string[] {
+  for (const [requestId, parentId] of state.pendingProxyDispatchParents ?? []) {
+    if (parentId !== parentCorrelationId) continue;
+    state.pendingProxyDispatchParents?.delete(requestId);
+    state.pendingProxyDispatchRequests?.delete(requestId);
+  }
+
+  const parent = state.activeRuns.get(parentCorrelationId);
+  const parentDepth = parent?.depth ?? -1;
+  const selected = new Set<string>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const agent of state.activeRuns.values()) {
+      const directlyNested = agent.spawnedBy === parentCorrelationId && agent.depth > parentDepth;
+      const nestedDescendant = agent.spawnedBy !== undefined && selected.has(agent.spawnedBy);
+      if ((!directlyNested && !nestedDescendant) || selected.has(agent.correlationId)) continue;
+      selected.add(agent.correlationId);
+      changed = true;
+    }
+  }
+  if (selected.size === 0) return [];
+
+  for (const [requestId, correlationId] of state.proxyDispatchByRequest ?? []) {
+    if (selected.has(correlationId)) state.proxyDispatchByRequest?.delete(requestId);
+  }
+  const controllers = new Set<AbortController>();
+  for (const correlationId of selected) {
+    const agent = state.activeRuns.get(correlationId);
+    if (agent) controllers.add(agent.abortController);
+  }
+  for (const controller of controllers) controller.abort();
+  for (const correlationId of selected) {
+    const agent = state.activeRuns.get(correlationId);
+    if (agent) killAgent(state, correlationId, agent.name, "terminated", false);
+  }
+  return [...selected];
 }
 
 export function settleAgent(
@@ -4580,6 +4714,7 @@ function settleAgentLifecycle(
 ): void {
   clearAgentResultReadyState(state, correlationId);
   if (terminalStatus === "terminated") {
+    terminateNestedDispatchesOwnedBy(state, correlationId);
     const agent = state.activeRuns.get(correlationId);
     if (agent && lastResult !== undefined) {
       agent.lastResult = truncateUtf8Tail(lastResult, AGENT_BUFFER_LIMITS.lastResultBytes);
@@ -4588,6 +4723,7 @@ function settleAgentLifecycle(
     return;
   }
   if (exitCode !== 0) {
+    terminateNestedDispatchesOwnedBy(state, correlationId);
     const agent = state.activeRuns.get(correlationId);
     if (agent && lastResult !== undefined) {
       agent.lastResult = truncateUtf8Tail(lastResult, AGENT_BUFFER_LIMITS.lastResultBytes);
@@ -4600,9 +4736,8 @@ function settleAgentLifecycle(
     return;
   }
   // Succeeded, but not wakeable — a fork hands its session to the parent and
-  // has nothing left to wake. It was folded into the failure branch, which
-  // resolved its waiters as `failed`; harmless while failure was invisible,
-  // and a red ✗ on a successful run now that it is not.
+  // has nothing left to wake. Its nested dispatches have no requester left.
+  terminateNestedDispatchesOwnedBy(state, correlationId);
   killAgent(state, correlationId, undefined, "completed", abortProcess);
 }
 
@@ -5519,7 +5654,11 @@ export function cancelProxyDispatch(
   requestId: string,
   reason = "the requesting teammate gave up waiting",
 ): string[] {
-  if (state.pendingProxyDispatchRequests?.delete(requestId)) return [];
+  if (state.pendingProxyDispatchRequests?.delete(requestId)) {
+    state.pendingProxyDispatchParents?.delete(requestId);
+    return [];
+  }
+  state.pendingProxyDispatchParents?.delete(requestId);
   const cid = state.proxyDispatchByRequest?.get(requestId);
   if (!cid) return [];
   state.proxyDispatchByRequest?.delete(requestId);
@@ -5598,9 +5737,12 @@ export async function handleProxyRequest(
   const reservesProxyDispatch = tool === "teammate" && typeof requestId === "string";
   if (reservesProxyDispatch) {
     (state.pendingProxyDispatchRequests ??= new Set()).add(requestId);
+    if (parentCid) (state.pendingProxyDispatchParents ??= new Map()).set(requestId, parentCid);
   }
   const abandonPendingProxyDispatch = (): void => {
-    if (reservesProxyDispatch) state.pendingProxyDispatchRequests?.delete(requestId);
+    if (!reservesProxyDispatch) return;
+    state.pendingProxyDispatchRequests?.delete(requestId);
+    state.pendingProxyDispatchParents?.delete(requestId);
   };
 
   if (await dispatchRegisteredChildTool(event, reply, state, parentCid)) {
@@ -5692,6 +5834,7 @@ export async function handleProxyRequest(
         : "";
 
       if (!state.pendingProxyDispatchRequests?.delete(requestId)) {
+        state.pendingProxyDispatchParents?.delete(requestId);
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{ type: "text", text: "Nested teammate dispatch cancelled before launch." }],
           isError: true,
@@ -5702,6 +5845,7 @@ export async function handleProxyRequest(
         }});
         return;
       }
+      state.pendingProxyDispatchParents?.delete(requestId);
 
       const taskNames = new Set(normalizedTasks?.filter((task) => task.name).map((task) => task.name!) ?? []);
       const taskIndexByName = new Map<string, number>();
@@ -5774,6 +5918,8 @@ export async function handleProxyRequest(
             recentTools: progress.recentTools,
             inputTokens: progress.inputTokens,
             outputTokens: progress.outputTokens,
+            cacheReadTokens: progress.cacheReadTokens,
+            cacheWriteTokens: progress.cacheWriteTokens,
             ...(progress.lastMessage ? { lastMessage: truncateUtf8Tail(progress.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) } : {}),
           } : {}),
           ...(!progress?.lastMessage && retryMessage
@@ -5921,6 +6067,8 @@ export async function handleProxyRequest(
           tokens: data.tokens,
           inputTokens: data.inputTokens,
           outputTokens: data.outputTokens,
+          cacheReadTokens: data.cacheReadTokens,
+          cacheWriteTokens: data.cacheWriteTokens,
           durationMs: data.durationMs,
           lastActivityAt: data.lastActivityAt,
           resultReadyAt: data.resultReadyAt,
@@ -5990,6 +6138,8 @@ export async function handleProxyRequest(
           tokens: entries.reduce((total, entry) => total + (entry.tokens ?? 0), 0),
           inputTokens: entries.reduce((total, entry) => total + (entry.inputTokens ?? 0), 0),
           outputTokens: entries.reduce((total, entry) => total + (entry.outputTokens ?? 0), 0),
+          cacheReadTokens: entries.reduce((total, entry) => total + (entry.cacheReadTokens ?? 0), 0),
+          cacheWriteTokens: entries.reduce((total, entry) => total + (entry.cacheWriteTokens ?? 0), 0),
           durationMs: Date.now() - activeAgent.startedAt,
           lastActivityAt: entries.reduce(
             (latest, entry) => Math.max(latest, entry.lastActivityAt ?? 0),
@@ -6143,6 +6293,8 @@ export async function handleProxyRequest(
               tokens: result.usage.inputTokens + result.usage.outputTokens,
               inputTokens: result.usage.inputTokens,
               outputTokens: result.usage.outputTokens,
+              cacheReadTokens: result.usage.cacheReadTokens,
+              cacheWriteTokens: result.usage.cacheWriteTokens,
               durationMs: result.durationMs,
               ...(lifecyclePending && current?.resultReadyAt
                 ? { resultReadyAt: current.resultReadyAt }
@@ -6207,7 +6359,13 @@ export async function handleProxyRequest(
           publishNestedCompletion(completed, true);
         }).catch((error) => {
           untrackDispatch();
-          killAgent(state, cid, undefined, "failed");
+          settleAgent(
+            state,
+            cid,
+            1,
+            error instanceof Error ? error.message : String(error),
+            false,
+          );
           reportChildStatus("failed");
           notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error);
         });
@@ -6227,7 +6385,13 @@ export async function handleProxyRequest(
 
         if (race.status === "failed") {
           untrackDispatch();
-          killAgent(state, cid, undefined, "failed");
+          settleAgent(
+            state,
+            cid,
+            1,
+            race.error instanceof Error ? race.error.message : String(race.error),
+            false,
+          );
           reportChildStatus("failed");
           emitNestedComplete(1);
           reply({ type: "teammate_proxy_result", requestId, result: {

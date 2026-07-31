@@ -137,6 +137,8 @@ export interface RunTeammateOptions {
   spawnChildProcess?: typeof crossSpawn;
   /** @internal Test seam for retry scheduling. */
   waitForRetry?: (delayMs: number, signal?: AbortSignal) => Promise<boolean>;
+  /** @internal Test seam for the first child activity deadline. */
+  firstActivityTimeoutMs?: number;
   /** @internal Test seam for the result-ready grace period. */
   resultReadyGraceMs?: number;
   /** @internal Foreground wait window before the extension detaches a still-running task. */
@@ -974,9 +976,9 @@ function isFallbackModelError(messages: Array<{ role: string; content: string }>
 }
 
 function resultFailureMessage(messages: Array<{ role: string; content: string }>): string {
-  const newestFirst = [...messages].reverse();
-  return newestFirst.find((message) => isRetryableProviderError(message.content))?.content
-    ?? newestFirst.find((message) => message.role === "system")?.content
+  const newestSystemFirst = messages.filter((message) => message.role === "system").reverse();
+  return newestSystemFirst.find((message) => isFallbackProviderError(message.content))?.content
+    ?? newestSystemFirst[0]?.content
     ?? messages.at(-1)?.content
     ?? "Unknown teammate failure";
 }
@@ -1398,6 +1400,8 @@ function createProgress(agent: string, startTime: number): AgentProgress {
     tokens: 0,
     inputTokens: 0,
     outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
     durationMs: 0,
     lastActivityAt: startTime,
     startedAt: startTime,
@@ -1720,6 +1724,7 @@ export async function runSingleTeammate(
     : [undefined, ...implicitFallbacks];
   const attemptedModels: string[] = [];
   let lastResult: SingleResult | undefined;
+  let totalRetryCount = 0;
 
   for (const modelToUse of modelCandidates) {
     const acquisition = modelToUse ? breaker.acquireCandidate(modelToUse) : undefined;
@@ -1727,7 +1732,9 @@ export async function runSingleTeammate(
 
     let settled = false;
     try {
-      const maxRetries = acquisition?.state === "HALF_OPEN" ? 0 : NETWORK_RETRY_POLICY.maxRetries;
+      const maxRetries = acquisition?.state === "HALF_OPEN"
+        ? 0
+        : Math.max(0, NETWORK_RETRY_POLICY.maxRetries - totalRetryCount);
       let retryCount = 0;
       let candidateResult: SingleResult | undefined;
 
@@ -1777,8 +1784,20 @@ export async function runSingleTeammate(
         }
         lastResult = candidateResult;
         const error = resultFailureMessage(candidateResult.messages);
-        const retryable = candidateResult.exitCode !== 0 && isRetryableProviderError(error);
-        const fallbackEligible = candidateResult.exitCode !== 0 && isFallbackProviderError(error);
+        const toolCount = candidateResult.toolCount ?? 0;
+        const restartIsSafe = toolCount === 0;
+        const retryableFailure = candidateResult.exitCode !== 0 && isRetryableProviderError(error);
+        const fallbackFailure = candidateResult.exitCode !== 0 && isFallbackProviderError(error);
+        const retryable = retryableFailure && restartIsSafe;
+        const fallbackEligible = fallbackFailure && restartIsSafe;
+        if (!restartIsSafe && fallbackFailure) {
+          candidateResult.messages.push({
+            role: "system",
+            content:
+              `Automatic retry and model fallback suppressed after ${toolCount} child tool `
+              + `call${toolCount === 1 ? "" : "s"}; restarting could repeat side effects.`,
+          });
+        }
 
         if (candidateResult.exitCode === 0) {
           if (acquisition?.allowed) { breaker.recordSuccess(acquisition); settled = true; }
@@ -1800,11 +1819,12 @@ export async function runSingleTeammate(
 
         discardCompletion();
         retryCount += 1;
-        const delayMs = retryDelayMs(retryCount);
+        totalRetryCount += 1;
+        const delayMs = retryDelayMs(totalRetryCount);
         options.onRetry?.({
           correlationId,
-          attempt: retryCount,
-          maxRetries,
+          attempt: totalRetryCount,
+          maxRetries: NETWORK_RETRY_POLICY.maxRetries,
           delayMs,
           nextRetryAt: Date.now() + delayMs,
           error,
@@ -1924,6 +1944,8 @@ interface AttemptState {
    */
   completedInputTokens: number;
   completedOutputTokens: number;
+  completedCacheReadTokens: number;
+  completedCacheWriteTokens: number;
   /** One-way latches; never reset. */
   receivedFirstActivity: boolean;
   initialResultPublished: boolean;
@@ -2052,6 +2074,8 @@ async function runSingleAttempt(
     resolvedModel: modelOverride ?? params.model ?? agentConfig.model ?? "unknown",
     completedInputTokens: 0,
     completedOutputTokens: 0,
+    completedCacheReadTokens: 0,
+    completedCacheWriteTokens: 0,
     receivedFirstActivity: false,
     initialResultPublished: false,
     terminal: false,
@@ -2064,8 +2088,12 @@ async function runSingleAttempt(
   const updateProgressUsage = (): void => {
     const inputTokens = state.completedInputTokens + usage.inputTokens + pendingMessageUsage.inputTokens;
     const outputTokens = state.completedOutputTokens + usage.outputTokens + pendingMessageUsage.outputTokens;
+    const cacheReadTokens = state.completedCacheReadTokens + usage.cacheReadTokens + pendingMessageUsage.cacheReadTokens;
+    const cacheWriteTokens = state.completedCacheWriteTokens + usage.cacheWriteTokens + pendingMessageUsage.cacheWriteTokens;
     progress.inputTokens = Math.max(progress.inputTokens ?? 0, inputTokens);
     progress.outputTokens = Math.max(progress.outputTokens ?? 0, outputTokens);
+    progress.cacheReadTokens = Math.max(progress.cacheReadTokens ?? 0, cacheReadTokens);
+    progress.cacheWriteTokens = Math.max(progress.cacheWriteTokens ?? 0, cacheWriteTokens);
     progress.tokens = progress.inputTokens + progress.outputTokens;
   };
 
@@ -2170,12 +2198,14 @@ async function runSingleAttempt(
         + `(agent=${params.agent}, model=${state.resolvedModel || "unknown"}, correlationId=${correlationId}, `
         + `phase=first-activity); the child process started but did not report model activity.`;
       state.lastContent = message;
+      state.runtimeFailure = message;
+      appendBoundedTranscriptMessage(messages, { role: "system", content: message });
       progress.status = "failed";
       progress.durationMs = Date.now() - startTime;
       progress.lastMessage = message;
       options.onProgress?.(progress);
       termination.terminate();
-    }, FIRST_ACTIVITY_TIMEOUT_MS);
+    }, options.firstActivityTimeoutMs ?? FIRST_ACTIVITY_TIMEOUT_MS);
 
     // Parse JSON lines from stdout
     const stdoutLines = createUtf8LineDecoder();
@@ -2241,6 +2271,7 @@ async function runSingleAttempt(
         model: state.resolvedModel,
         correlationId,
         durationMs: Date.now() - startTime,
+        toolCount: progress.toolCount,
         wakeable: !terminateChild,
         structuredOutput,
         attemptedModels: undefined,
@@ -2257,6 +2288,8 @@ async function runSingleAttempt(
       } finally {
         state.completedInputTokens = Math.max(state.completedInputTokens, progress.inputTokens ?? 0);
         state.completedOutputTokens = Math.max(state.completedOutputTokens, progress.outputTokens ?? 0);
+        state.completedCacheReadTokens = Math.max(state.completedCacheReadTokens, progress.cacheReadTokens ?? 0);
+        state.completedCacheWriteTokens = Math.max(state.completedCacheWriteTokens, progress.cacheWriteTokens ?? 0);
         releasePublishedTurnHistory(messages, progress, usage);
         state.lastContent = "";
         state.streamingText = "";
@@ -2291,6 +2324,7 @@ async function runSingleAttempt(
         model: state.resolvedModel,
         correlationId,
         durationMs: Date.now() - startTime,
+        toolCount: progress.toolCount,
         wakeable,
         lifecyclePending: true,
       });
@@ -2669,6 +2703,10 @@ async function runSingleAttempt(
       if (state.turnLifecycleSettled) return;
 
       const stderrTail = state.stderrBuffer.trim();
+      const finalContent = state.lastContent.trim();
+      if (finalContent && !messages.some((message) => message.content === finalContent)) {
+        appendDistinctAssistantMessage(messages, finalContent);
+      }
       let stderrAlreadyReported = false;
       if (messages.length === 0) {
         const content = state.lastContent.trim() || stderrTail || "(no output)";
@@ -2690,7 +2728,7 @@ async function runSingleAttempt(
         });
       }
 
-      const status = code === 0 ? "completed" : "failed";
+      const status = code === 0 && !state.runtimeFailure ? "completed" : "failed";
       progress.status = status;
       progress.durationMs = Date.now() - startTime;
       const lastMsg = messages[messages.length - 1]?.content;
@@ -2701,9 +2739,10 @@ async function runSingleAttempt(
       const structuredOutput = readStructuredOutput(true);
       if (schemaFile) cleanupFile(schemaFile);
 
-      const exitCode = code === 0 && params.outputSchema && structuredOutput === undefined
+      const processExitCode = state.runtimeFailure ? 1 : code ?? 1;
+      const exitCode = processExitCode === 0 && params.outputSchema && structuredOutput === undefined
         ? 1
-        : code ?? 1;
+        : processExitCode;
       if (exitCode !== 0 && params.outputSchema && structuredOutput === undefined) {
         appendStructuredOutputFailure();
         appendBoundedTranscriptMessage(messages, {
@@ -2728,6 +2767,7 @@ async function runSingleAttempt(
           model: state.resolvedModel,
           correlationId,
           durationMs: Date.now() - startTime,
+          toolCount: progress.toolCount,
           wakeable: false,
           structuredOutput,
         };
@@ -2782,6 +2822,7 @@ async function runSingleAttempt(
           model: state.resolvedModel,
           correlationId,
           durationMs: Date.now() - startTime,
+          toolCount: progress.toolCount,
           wakeable: false,
         };
         state.initialResultPublished = true;

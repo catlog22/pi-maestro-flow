@@ -146,6 +146,7 @@ export interface PendingChildProxyRequest {
     timer: ReturnType<typeof setTimeout>;
     signal?: AbortSignal;
     abortHandler?: () => void;
+    cancelRoot?: (reason: "timeout" | "aborted") => void;
 }
 export type ChildProxyPendingRequests = Map<string, PendingChildProxyRequest>;
 /** @internal Exported for lifecycle regression tests. */
