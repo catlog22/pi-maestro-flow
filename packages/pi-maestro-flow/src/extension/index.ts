@@ -1288,11 +1288,17 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     async handler(_args, ctx) { await openGoalOverlay(ctx); },
   });
   pi.registerCommand("sysprompt", {
-    description: "Inspect the active system prompt — mode, size, and key markers. Use 'full' to dump the whole prompt.",
+    description: "Inspect the active system prompt — mode, size, and key markers. Use 'full' to dump the whole prompt, 'reload' to re-read SYSTEM.md and resources.",
     async handler(args, ctx) {
+      const sub = args.trim().toLowerCase();
+      if (sub === "reload") {
+        await ctx.reload();
+        ctx.ui.notify("Reloaded extensions, skills, prompts, themes, and context files.", "info");
+        return;
+      }
       const prompt = ctx.getSystemPrompt();
       const opts = ctx.getSystemPromptOptions();
-      if (args.trim().toLowerCase() === "full") {
+      if (sub === "full") {
         ctx.ui.notify(prompt, "info");
         return;
       }
@@ -1304,9 +1310,13 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         `Mode: ${opts.customPrompt ? "customPrompt (SYSTEM.md or --system-prompt)" : "default base prompt"}`,
         `First line: ${lines[0]?.slice(0, 90) ?? "(empty)"}`,
         `Markers:`,
-        `  # Engineering Principles       : ${has("# Engineering Principles")}`,
-        `  # Task Tracking (todo)         : ${has("# Task Tracking (todo)")}`,
-        `  # Knowledge System             : ${has("# Knowledge System")}`,
+        `  # Project Knowledge Gate       : ${has("# Project Knowledge Gate")}`,
+        `  # Engineering                  : ${has("# Engineering")}`,
+        `  # Task Tracking                : ${has("# Task Tracking")}`,
+        `  # Plan Mode                    : ${has("# Plan Mode")}`,
+        `  # Tool Routing                 : ${has("# Tool Routing")}`,
+        `  # Teammates                    : ${has("# Teammates")}`,
+        `  # Knowledge Operations         : ${has("# Knowledge Operations")}`,
         `  Available tools: (default only): ${has("Available tools:")}`,
         `  <project_instructions>         : ${has("<project_instructions>")}`,
         `  <available_skills>             : ${has("<available_skills>")}`,
