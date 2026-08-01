@@ -93,6 +93,7 @@ interface Job {
   completionNotified: boolean;
   outputFinalized: boolean;
   cachedSnapshot?: BashBgJobSnapshot;
+  releaseProcess?: () => void;
   outputDrainTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -217,8 +218,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
   const maxActiveJobs = options.maxActiveJobs ?? MAX_ACTIVE_JOBS;
   const maxRetainedCompletedJobs = options.maxRetainedCompletedJobs ?? MAX_RETAINED_COMPLETED_JOBS;
   const maxLogBytes = options.maxLogBytes ?? MAX_LOG_BYTES;
-  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-bash-bg-"));
-  if (process.platform !== "win32") fs.chmodSync(baseDir, 0o700);
+  let baseDir = "";
   const jobs = new Map<string, Job>();
   const observationWaiters = new Map<string, Set<() => void>>();
   const observationCapabilities = { inspect: true, wait: true, cancel: true } as const;
@@ -296,10 +296,11 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     snapshot: (id, options) => observationSnapshot(id, options.detail, options.lines),
     wait: waitForObservation,
   };
-  const disposeObservationProvider = registerObservationProvider(bashObservationProvider);
-
   let counter = 0;
-  let disposed = false;
+  let runtimeGeneration = 0;
+  let disposed = true;
+  let disposeObservationProvider: (() => void) | undefined;
+  let disposeQueryListener: (() => void) | undefined;
   let snapshotTimer: ReturnType<typeof setTimeout> | undefined;
 
   const pruneCompletedJobs = (): void => {
@@ -315,6 +316,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
   };
 
   const publishSnapshot = (): void => {
+    if (disposed) return;
     if (snapshotTimer) {
       clearTimeout(snapshotTimer);
       snapshotTimer = undefined;
@@ -327,13 +329,24 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     pi.events.emit(BASH_BG_UPDATE_EVENT, payload);
   };
   const publishSnapshotSoon = (): void => {
-    if (snapshotTimer) return;
+    if (disposed || snapshotTimer) return;
     snapshotTimer = setTimeout(publishSnapshot, SNAPSHOT_THROTTLE_MS);
     snapshotTimer.unref?.();
   };
 
+  const initializeRuntime = (): void => {
+    if (!disposed) return;
+    runtimeGeneration += 1;
+    baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-bash-bg-"));
+    if (process.platform !== "win32") fs.chmodSync(baseDir, 0o700);
+    disposed = false;
+    disposeObservationProvider = registerObservationProvider(bashObservationProvider);
+    const queryDisposer = pi.events.on(BASH_BG_QUERY_EVENT, publishSnapshot);
+    disposeQueryListener = typeof queryDisposer === "function" ? queryDisposer : undefined;
+  };
+
   const notifyComplete = (job: Job): void => {
-    if (!job.background || job.completionNotified) return;
+    if (disposed || !job.background || job.completionNotified) return;
     job.completionNotified = true;
     const tail = tailOutput(job, 20);
     const status = jobStatus(job);
@@ -359,7 +372,8 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
   };
 
   const startJob = (command: string, workdir: string, background: boolean): Job => {
-    if (disposed) throw new Error("bash_bg is unavailable after session shutdown.");
+    if (disposed) throw new Error("bash_bg is unavailable outside an active session runtime.");
+    const generation = runtimeGeneration;
     const activeJobs = [...jobs.values()].filter((job) => !job.done).length;
     if (activeJobs >= maxActiveJobs) {
       throw new Error(`Too many active background jobs (${activeJobs}/${maxActiveJobs}). Wait for or stop an existing job.`);
@@ -407,6 +421,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     jobs.set(id, job);
     publishSnapshot();
     const append = (d: Buffer): void => {
+      if (disposed || generation !== runtimeGeneration) return;
       const remainingLogBytes = Math.max(0, maxLogBytes - job.logBytes);
       if (remainingLogBytes > 0) {
         const retained = d.byteLength <= remainingLogBytes ? d : d.subarray(0, remainingLogBytes);
@@ -423,15 +438,32 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       job.updatedAt = Date.now();
       publishSnapshotSoon();
     };
-    child.stdout?.on("data", append);
-    child.stderr?.on("data", append);
     let exitCode: number | null = null;
+    let processReleased = false;
+    let onExit: (code: number | null) => void;
+    let onClose: (code: number | null) => void;
+    let onError: (error: Error) => void;
+    const releaseProcess = (): void => {
+      if (processReleased) return;
+      processReleased = true;
+      child.stdout?.off("data", append);
+      child.stderr?.off("data", append);
+      child.off("exit", onExit);
+      child.off("close", onClose);
+      child.off("error", onError);
+      child.stdout?.destroy();
+      child.stderr?.destroy();
+      ws.end();
+      job.releaseProcess = undefined;
+    };
+    job.releaseProcess = releaseProcess;
     const markDone = (code: number | null): void => {
       if (job.done) return;
       job.done = true;
       job.exitCode = code;
       job.updatedAt = Date.now();
       job.finishedAt = job.updatedAt;
+      if (disposed || generation !== runtimeGeneration) return;
       publishSnapshot();
       for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();
     };
@@ -442,36 +474,46 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
         clearTimeout(job.outputDrainTimer);
         job.outputDrainTimer = undefined;
       }
-      child.stdout?.destroy();
-      child.stderr?.destroy();
-      ws.end();
+      releaseProcess();
+      if (disposed || generation !== runtimeGeneration) return;
       notifyComplete(job);
       pruneCompletedJobs();
       publishSnapshot();
     };
-    child.on("exit", (code) => {
+    onExit = (code) => {
       exitCode = code;
       // Process exit is the lifecycle boundary. Waiting indefinitely for close
       // misclassifies a finished shell as running when a descendant inherited
       // its stdout/stderr pipes.
       markDone(code);
+      if (disposed || generation !== runtimeGeneration) {
+        finalizeOutput();
+        return;
+      }
       job.outputDrainTimer = setTimeout(finalizeOutput, OUTPUT_DRAIN_GRACE_MS);
       job.outputDrainTimer.unref?.();
-    });
-    // Prefer the natural close event when the pipes drain promptly.
-    child.on("close", (code) => {
+    };
+    onClose = (code) => {
       markDone(code ?? exitCode);
       finalizeOutput();
-    });
-    child.on("error", (error) => {
+    };
+    onError = (error) => {
       append(Buffer.from(`\n${error.message}\n`));
       markDone(exitCode ?? -1);
       finalizeOutput();
-    });
+    };
+    child.stdout?.on("data", append);
+    child.stderr?.on("data", append);
+    child.on("exit", onExit);
+    child.on("close", onClose);
+    child.on("error", onError);
     // Do not let the child keep pi's loop alive; close still fires while pi is interactive.
     child.unref();
     return job;
   };
+
+  initializeRuntime();
+  pi.on("session_start", initializeRuntime);
 
   pi.registerTool({
     name: "bash_bg",
@@ -631,7 +673,6 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
 
   // Cockpit can subscribe after this tool is registered, then request the
   // authoritative in-memory snapshot without importing Flow internals.
-  const disposeQueryListener = pi.events.on(BASH_BG_QUERY_EVENT, publishSnapshot);
 
   // Re-announce running jobs after compaction: the in-memory registry survives in-process compaction, but the compacted summary may drop pending-job awareness.
   pi.on("session_compact", () => {
@@ -652,27 +693,42 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
   // Session end terminates background jobs (no orphans); completed results already persist as session messages, so resume keeps their history and output.
   pi.on("session_shutdown", () => {
     if (disposed) return;
-    disposed = true;
-    if (typeof disposeQueryListener === "function") disposeQueryListener();
-    if (typeof disposeObservationProvider === "function") disposeObservationProvider();
     if (snapshotTimer) {
       clearTimeout(snapshotTimer);
       snapshotTimer = undefined;
     }
+    const retiringBaseDir = baseDir;
     for (const job of jobs.values()) {
       job.background = false;
-      if (job.done) continue;
-      job.done = true; // suppress the kill-triggered 'close' notification
-      job.stopRequested = true;
-      job.exitCode = null;
-      job.updatedAt = Date.now();
-      job.finishedAt = job.updatedAt;
-      killTree(job.pid);
+      if (!job.done) {
+        job.done = true; // suppress the kill-triggered completion notification
+        job.stopRequested = true;
+        job.exitCode = null;
+        job.updatedAt = Date.now();
+        job.finishedAt = job.updatedAt;
+        killTree(job.pid);
+      }
+      if (job.outputDrainTimer) {
+        clearTimeout(job.outputDrainTimer);
+        job.outputDrainTimer = undefined;
+      }
+      job.releaseProcess?.();
+      job.releaseProcess = undefined;
+      job.outputFinalized = true;
+      job.cachedSnapshot = undefined;
       for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();
     }
     publishSnapshot();
+
+    disposed = true;
+    runtimeGeneration += 1;
+    if (typeof disposeQueryListener === "function") disposeQueryListener();
+    if (typeof disposeObservationProvider === "function") disposeObservationProvider();
+    disposeQueryListener = undefined;
+    disposeObservationProvider = undefined;
     jobs.clear();
     observationWaiters.clear();
-    try { fs.rmSync(baseDir, { recursive: true, force: true }); } catch { /* open Windows handles may finish after shutdown */ }
+    baseDir = "";
+    try { fs.rmSync(retiringBaseDir, { recursive: true, force: true }); } catch { /* open Windows handles may finish after shutdown */ }
   });
 }

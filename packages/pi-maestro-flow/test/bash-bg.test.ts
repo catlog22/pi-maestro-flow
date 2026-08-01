@@ -48,12 +48,13 @@ interface Harness {
 		options?: { triggerTurn?: boolean; deliverAs?: string };
 	}>;
 	shutdown: () => void;
+	startSession: () => void;
 }
 
 function createHarness(options: RegisterBashBgOptions = {}): Harness {
 	let registeredTool: ToolLike | undefined;
 	const eventHandlers = new Map<string, Array<(payload: unknown) => void>>();
-	const lifecycleHandlers = new Map<string, Array<() => void>>();
+	const lifecycleHandlers = new Map<string, Array<(event?: unknown) => void>>();
 	const snapshots: BashBgSnapshotPayload[] = [];
 	const messages: Harness["messages"] = [];
 	const emit = (channel: string, payload?: unknown): void => {
@@ -68,10 +69,12 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 			emit,
 			on(channel: string, handler: (payload: unknown) => void) {
 				eventHandlers.set(channel, [...(eventHandlers.get(channel) ?? []), handler]);
-				return () => undefined;
+				return () => {
+					eventHandlers.set(channel, (eventHandlers.get(channel) ?? []).filter((entry) => entry !== handler));
+				};
 			},
 		},
-		on(event: string, handler: () => void) {
+		on(event: string, handler: (event?: unknown) => void) {
 			lifecycleHandlers.set(event, [...(lifecycleHandlers.get(event) ?? []), handler]);
 		},
 		sendMessage(message: Harness["messages"][number]["message"], options?: Harness["messages"][number]["options"]) {
@@ -87,6 +90,9 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 		messages,
 		shutdown: () => {
 			for (const handler of lifecycleHandlers.get("session_shutdown") ?? []) handler();
+		},
+		startSession: () => {
+			for (const handler of lifecycleHandlers.get("session_start") ?? []) handler({ reason: "startup" });
 		},
 	};
 }
@@ -349,6 +355,33 @@ test("bash_bg bounds active processes, retained history, and private log bytes",
 	} finally {
 		harness.shutdown();
 		if (logPath) assert.equal(fs.existsSync(path.dirname(logPath)), false);
+	}
+});
+
+test("bash_bg teardown fences late callbacks and reinitializes for the next session", async () => {
+	const harness = createHarness();
+	try {
+		await harness.tool.execute("first-session", {
+			action: "start",
+			command: 'node -e "setTimeout(()=>console.log(\'late\'),500)"',
+		});
+		harness.shutdown();
+		const snapshotsAfterShutdown = harness.snapshots.length;
+		const messagesAfterShutdown = harness.messages.length;
+		await new Promise((resolve) => setTimeout(resolve, 700));
+		assert.equal(harness.snapshots.length, snapshotsAfterShutdown, "late child callbacks publish no snapshots");
+		assert.equal(harness.messages.length, messagesAfterShutdown, "late child callbacks send no completion turn");
+
+		harness.startSession();
+		const next = await harness.tool.execute("next-session", {
+			action: "run",
+			command: 'node -e "console.log(\'ready again\')"',
+			timeout: 2,
+		});
+		assert.equal(next.details?.exitCode, 0);
+		assert.match(next.content[0] && "text" in next.content[0] ? next.content[0].text : "", /ready again/);
+	} finally {
+		harness.shutdown();
 	}
 });
 
