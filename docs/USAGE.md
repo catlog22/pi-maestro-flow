@@ -992,30 +992,56 @@ teammate({
 
 ## 15. 配置参考
 
-### 模型路由（`.pi/teammate-models.json`）
+### 模型路由 Profile
+
+全局共享 Profile 保存在 `~/.pi/agent/teammate-models.json`：
 
 ```json
 {
-  "global": "deepseek/deepseek-v4-pro",
-  "mappings": {
-    "explore": "deepseek/deepseek-v4-flash",
-    "analysis": "deepseek/deepseek-v4-pro",
-    "development": "deepseek/deepseek-v4-pro",
-    "review": "deepseek/deepseek-v4-flash",
-    "testing": "deepseek/deepseek-v4-flash",
-    "planning": "deepseek/deepseek-v4-pro",
-    "debug": "deepseek/deepseek-v4-pro"
+  "version": 3,
+  "defaultProfile": "balanced",
+  "profiles": {
+    "balanced": {
+      "name": "均衡",
+      "mappings": {
+        "explore": "deepseek/deepseek-v4-flash",
+        "analysis": "deepseek/deepseek-v4-pro"
+      },
+      "fallbackMappings": {
+        "analysis": ["deepseek/deepseek-v4-flash"]
+      },
+      "thinkingLevels": {
+        "explore": "low",
+        "analysis": "high"
+      }
+    }
   }
 }
 ```
 
-通过 `Alt+M` 或 `/teammate-models` 交互式配置。
+项目文件 `.pi/teammate-models.json` 只持久化当前选择和可选兼容覆盖：
+
+```json
+{
+  "version": 3,
+  "activeProfile": "balanced",
+  "applyOverrides": false,
+  "overrides": {
+    "mappings": {},
+    "thinkingLevels": {}
+  }
+}
+```
+
+通过 `Alt+M` 或 `/teammate-models` 打开 Control Center。`Profiles` tab 支持激活、新建、复制、重命名、设为全局默认和删除；旧项目覆盖可恢复、提升为全局 Profile 或清除。切换 Profile 会停用但保留旧覆盖。v1/v2 配置读取时不会改盘，首次保存时无损迁移到 v3；项目引用缺失 Profile 时回退到全局默认项。
+
+路由来源优先级：启用的项目 overrides > 项目选中的全局 Profile > 全局默认 Profile。
 
 ### 项目级配置
 
 | 文件 | 用途 |
 |------|------|
-| `.pi/teammate-models.json` | 本项目的模型路由映射 |
+| `.pi/teammate-models.json` | 本项目的 active Profile 与可选兼容覆盖 |
 | `.pi/agents/` | 项目特定 Agent 定义 |
 | `.pi/settings.json` | Pi 设置覆盖 |
 
@@ -1023,7 +1049,7 @@ teammate({
 
 | 文件 | 用途 |
 |------|------|
-| `~/.pi/agent/teammate-models.json` | 全局模型路由默认值 |
+| `~/.pi/agent/teammate-models.json` | 跨项目共享的 Profile registry 与全局默认项 |
 | `~/.pi/agent/settings.json` | 全局 Pi 设置 |
 
 ---

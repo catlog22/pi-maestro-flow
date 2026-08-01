@@ -26,7 +26,8 @@ MCP/LSP/compaction subsystems, and GitHub clone cache TTL management.
 - `/api-manager` now operates on a global model picker instead of provider-first navigation
 - New `api-model-editor.ts`: single-form overlay for model editing (falls back to
   step-by-step prompts on hosts without custom form support)
-- Custom channels gain compat/headers/authHeader editing in the form
+- User-defined Providers gain compat/headers/authHeader editing in the form
+- Providers can be enabled or disabled without deleting URL, API key, or model configuration
 - `list` output restructured: model-level + provider-level lines
 - Insecure HTTP base URL downgraded from error to warning
 

@@ -992,30 +992,56 @@ teammate({
 
 ## 15. Configuration Reference
 
-### Model Routing (`.pi/teammate-models.json`)
+### Model Routing Profiles
+
+Shared Profiles are stored globally in `~/.pi/agent/teammate-models.json`:
 
 ```json
 {
-  "global": "deepseek/deepseek-v4-pro",
-  "mappings": {
-    "explore": "deepseek/deepseek-v4-flash",
-    "analysis": "deepseek/deepseek-v4-pro",
-    "development": "deepseek/deepseek-v4-pro",
-    "review": "deepseek/deepseek-v4-flash",
-    "testing": "deepseek/deepseek-v4-flash",
-    "planning": "deepseek/deepseek-v4-pro",
-    "debug": "deepseek/deepseek-v4-pro"
+  "version": 3,
+  "defaultProfile": "balanced",
+  "profiles": {
+    "balanced": {
+      "name": "Balanced",
+      "mappings": {
+        "explore": "deepseek/deepseek-v4-flash",
+        "analysis": "deepseek/deepseek-v4-pro"
+      },
+      "fallbackMappings": {
+        "analysis": ["deepseek/deepseek-v4-flash"]
+      },
+      "thinkingLevels": {
+        "explore": "low",
+        "analysis": "high"
+      }
+    }
   }
 }
 ```
 
-Configure interactively via `Alt+M` or `/teammate-models`.
+The project `.pi/teammate-models.json` persists only the active selection and optional compatibility overrides:
+
+```json
+{
+  "version": 3,
+  "activeProfile": "balanced",
+  "applyOverrides": false,
+  "overrides": {
+    "mappings": {},
+    "thinkingLevels": {}
+  }
+}
+```
+
+Open the Control Center with `Alt+M` or `/teammate-models`. The **Profiles** tab activates, creates, duplicates, renames, sets the global default, and deletes Profiles. Legacy project overrides can be restored, promoted to a global Profile, or cleared. Switching Profiles disables but preserves existing overrides. v1/v2 files are not rewritten on read and migrate losslessly on their first save; missing project Profile references fall back to the global default.
+
+Routing source precedence: enabled project overrides > project-selected global Profile > global default Profile.
 
 ### Project-Level Configuration
 
 | File | Purpose |
 |------|---------|
-| `.pi/teammate-models.json` | Model routing mappings for this project |
+| `.pi/teammate-models.json` | Active Profile and optional compatibility overrides for this project |
 | `.pi/agents/` | Project-specific agent definitions |
 | `.pi/settings.json` | Pi settings overrides |
 
@@ -1023,7 +1049,7 @@ Configure interactively via `Alt+M` or `/teammate-models`.
 
 | File | Purpose |
 |------|---------|
-| `~/.pi/agent/teammate-models.json` | Global model routing defaults |
+| `~/.pi/agent/teammate-models.json` | Cross-project Profile registry and global default |
 | `~/.pi/agent/settings.json` | Global Pi settings |
 
 ---

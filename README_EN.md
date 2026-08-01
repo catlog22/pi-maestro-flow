@@ -48,7 +48,7 @@ It ships as three plugins (install one, get all three):
 - 🔒 **Permission control** — 5 modes (YOLO enabled by default), fine-grained allow/ask/deny, child-process permission relay
 - 🪝 **Codex-compatible Hooks** — project-level hook system with a built-in installer and trust review
 - ⌨️ **Shortcut conflict manager** — automatically detect and resolve Shift+Tab and other keybinding conflicts
-- 👥 **32 agent roles** (7 built-in + 25 project-level) · 💡 **per-task thinking depth** (`off`→`xhigh`) · 🔌 **custom API channels**
+- 👥 **32 agent roles** (7 built-in + 25 project-level) · 💡 **per-task thinking depth** (`off`→`xhigh`) · 🔌 **custom API Providers**
 
 ```javascript
 // Flagship: parallel dispatch + DAG dependencies in a single call
