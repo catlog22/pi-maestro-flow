@@ -49,6 +49,7 @@ test("quiet auxiliary teammate surfaces use lifecycle rows without message bodie
     ["teammate-wait", "completed", "success"],
     ["teammate-watch", "inspected", "success"],
     ["teammate-monitor", "status @child", "success"],
+    ["observe", "all · 2/2 settled", "success"],
   ] as const;
 
   for (const [name, rest, status] of cases) {
@@ -327,17 +328,17 @@ test("dot symbol mode applies to teammate running, success, and failure rows", (
   assert.match(failure[0], /^\s*!\s+@inspection/);
 });
 
-test("started, send, wait, watch, and monitor are wired to the shared quiet renderer", () => {
+test("started, send, observe, wait, watch, and monitor are wired to the shared quiet renderer", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  for (const name of ["teammate-started", "teammate-send", "teammate-wait", "teammate-watch", "teammate-monitor"]) {
+  for (const name of ["teammate-started", "teammate-send", "observe", "teammate-wait", "teammate-watch", "teammate-monitor"]) {
     assert.match(source, new RegExp(`renderQuietTeammateAux\\(\\"${name}\\"`));
   }
 });
 
 test("auxiliary teammate renderers make call and result phases mutually exclusive", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.equal((source.match(/if \(context\.isPartial === false\) return new Text\("", 0, 0\);/g) ?? []).length, 4);
-  assert.equal((source.match(/if \(options\.isPartial\) return new Text\("", 0, 0\);/g) ?? []).length, 4);
+  assert.equal((source.match(/if \(context\.isPartial === false\) return new Text\("", 0, 0\);/g) ?? []).length, 5);
+  assert.equal((source.match(/if \(options\.isPartial\) return new Text\("", 0, 0\);/g) ?? []).length, 5);
 });
 
 test("root and nested self-rendered teammate tools share renderers", () => {

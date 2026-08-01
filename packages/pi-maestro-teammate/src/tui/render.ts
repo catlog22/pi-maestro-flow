@@ -581,7 +581,7 @@ function qLine(theme: Theme, markedGlyph: string, name: string, rest: string): s
 }
 
 export function renderQuietTeammateAux(
-  name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started" | "teammate-monitor",
+  name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started" | "teammate-monitor" | "observe",
   rest: string,
   status: "running" | "success" | "failure",
   theme: Theme,

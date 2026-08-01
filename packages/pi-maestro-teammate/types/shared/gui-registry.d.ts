@@ -19,4 +19,5 @@ export interface GuiToolEntry {
 }
 /** Locked UCL surface for the teammate package. */
 export declare function isGuiTeammateToolAllowed(name: string, owner: string): boolean;
+export declare function unregisterGuiTool(name: string, owner: string): void;
 export declare function registerGuiTool(def: ToolDefinition, owner: string): void;

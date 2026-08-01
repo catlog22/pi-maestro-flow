@@ -39,12 +39,16 @@ function registerAuxTools(): Map<string, ToolDefinition> {
     },
   });
   const savedChild = process.env.PI_TEAMMATE_CHILD;
+  const savedLegacyObservationTools = process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS;
   delete process.env.PI_TEAMMATE_CHILD;
+  process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS = "1";
   try {
     registerTeammateExtension(pi as unknown as ExtensionAPI);
   } finally {
     if (savedChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
     else process.env.PI_TEAMMATE_CHILD = savedChild;
+    if (savedLegacyObservationTools === undefined) delete process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS;
+    else process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS = savedLegacyObservationTools;
   }
   return tools;
 }
@@ -74,6 +78,25 @@ test("auxiliary tool renderers return a Component in both quiet modes (resume co
       result: {
         content: [{ type: "text", text: "settled" }],
         details: { status: "completed", output: ["settled"] },
+      },
+    },
+    {
+      name: "observe",
+      args: { action: "wait", targets: [{ kind: "teammate", id: "worker" }, { kind: "bash_bg", id: "bg-1" }] },
+      result: {
+        content: [{ type: "text", text: "2 targets: all" }],
+        details: {
+          output: ["2 targets: all"],
+          result: {
+            action: "wait",
+            reason: "all",
+            durationMs: 12,
+            observations: [
+              { target: { kind: "teammate", id: "worker" }, found: true, nativeStatus: "completed", phase: "settled", waitStatus: "completed", summary: "done", updatedAt: 1 },
+              { target: { kind: "bash_bg", id: "bg-1" }, found: true, nativeStatus: "completed", phase: "settled", waitStatus: "completed", summary: "done", updatedAt: 1 },
+            ],
+          },
+        },
       },
     },
     {

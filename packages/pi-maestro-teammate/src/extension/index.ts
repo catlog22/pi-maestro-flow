@@ -1,7 +1,7 @@
 /**
  * Teammate Extension Entry Point
  *
- * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status), teammate-wait
+ * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status), observe
  * TUI: Alt+R composer panel, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
@@ -15,21 +15,25 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
-import { isGuiTeammateToolAllowed, registerGuiTool } from "../shared/gui-registry.ts";
+import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams } from "./schemas.ts";
+import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
 import {
-  takeSnapshot,
-  barrierWait,
+  formatObserveResult,
+  observeTargets,
+  registerObservationProvider,
+  type ObserveParams as UnifiedObserveParams,
+  type ObserveResult,
+  type ObservationProvider,
+  type ObservationSnapshot,
+  type ObservationWaitStatus,
+} from "../public/v1/observation.ts";
+import {
   formatCompact,
   formatVerbose,
   formatHeader,
-  formatStatusBar,
   formatBarrierCompact,
   validateMonitorParams,
-  createMonitorModeState,
-  startMonitorMode,
-  stopMonitorMode,
   MONITOR_STATUS_KEY,
   MONITOR_DEFAULT_TIMEOUT_MS,
   MONITOR_DEFAULT_LINES,
@@ -46,8 +50,6 @@ import {
   ENGINE_TICK_MS,
   type MonitorTargetSnapshot,
   type MonitorParams,
-  type BarrierEntry,
-  type MonitorModeState,
   type MonitorEngineState,
   type MonitorSupervisionMode,
   type EngineAgentInfo,
@@ -183,8 +185,8 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "Set teammate concurrency explicitly for provider-safe fan-out; background defaults to false, so the call waits for results until completion or its foreground timeoutMs window, then moves unfinished work to background without terminating it.",
   'Use teammate with context: "fork" only when the child needs the current conversation history; fresh context is the default, and in multi-task mode prefer per-task fork over a top-level default.',
   "After teammate returns a background acknowledgement (explicit background, manual detach, or elapsed foreground window), normally end the current turn and wait for the automatic teammate-complete notification, which will trigger a new turn with the result.",
-  "Do not poll teammate-watch or teammate-list after starting background work; use teammate-watch only for a one-off inspection explicitly needed for debugging or requested by the user.",
-  "If the current turn must wait for an already-backgrounded result, call teammate-wait exactly once with the returned name or correlation ID and a bounded timeout; never loop teammate-watch.",
+  "Do not poll observe or teammate-list after starting background work; use observe action=status only for a one-off inspection explicitly needed for debugging or requested by the user.",
+  "If the current turn must wait for an already-backgrounded result, call observe exactly once with action=wait, a teammate target, and a bounded timeout.",
   "Use teammate-send for steering or follow-up while a teammate remains running or wakeable.",
   "Omit model to use teammate task-type model routing; an exact task-level provider/model overrides the top-level model, and the top-level model overrides automatic routing.",
 ];
@@ -253,15 +255,13 @@ Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] 
 
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
-For background work, wait for the automatic teammate-complete notification. Do not poll teammate-watch or teammate-list; if the current turn must wait, call teammate-wait once with the returned correlation ID.
+For background work, wait for the automatic teammate-complete notification. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }.
 
-## Monitoring
+## Observation
 
-Use teammate-monitor for multi-agent observation:
-- { action: "status", targets: [...] } — compact one-shot snapshot (one line per target)
-- { action: "wait", targets: [...], waitMode: "all" } — block until all targets settle
-
-Monitor mode is user-controlled via /monitor. For single-agent waits, prefer teammate-wait.
+Use observe for teammate and background Bash status or barrier waits:
+- { action: "status", targets: [{ kind: "teammate", id: "reviewer" }] } — one-shot snapshot
+- { action: "wait", targets: [{ kind: "teammate", id: "reviewer" }, { kind: "bash_bg", id: "bg-id" }], waitMode: "all" } — mixed barrier wait
 
 Configured task-type model routing for ${cwd}:
 ${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;
@@ -304,7 +304,19 @@ const TEAMMATE_WAIT_GUIDELINES = [
   "Treat result-ready as a usable teammate result; do not continue waiting only for agent_end lifecycle confirmation.",
 ];
 
-const TEAMMATE_MONITOR_DESCRIPTION = `Query the active monitor or block on a multi-agent barrier. Monitor mode is entered/exited by the user via /monitor.
+const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash targets through one status/wait interface.
+
+- "status": one-shot snapshot of every target
+- "wait": block on an all/any/count barrier with one request-level timeout
+
+Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
+const OBSERVE_SNIPPET = "Observe or wait for mixed teammate and background Bash targets.";
+const OBSERVE_GUIDELINES = [
+  "Use observe for mixed or multi-target status and waits; use one bounded wait instead of polling status.",
+  "Use detail=full only when recent output is required; summary is the compact default.",
+];
+
+const TEAMMATE_MONITOR_DESCRIPTION = `Observe multiple teammate targets or block on a multi-agent barrier. Persistent supervision is entered/exited separately via /monitor.
 
 - "status": one-shot compact snapshot of targets — non-blocking
 - "wait": block until barrier condition (all/any/count targets settle)
@@ -316,6 +328,10 @@ const TEAMMATE_MONITOR_GUIDELINES = [
   'Use action="wait" with waitMode="all" to block until all parallel agents complete before proceeding.',
   "Monitor mode is user-controlled via /monitor; this tool only queries and waits.",
 ];
+
+function exposeLegacyObservationTools(): boolean {
+  return process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS === "1";
+}
 
 const TEAMMATE_DEPTH_START_MARKER = "<teammate_nesting_context>";
 const TEAMMATE_DEPTH_END_MARKER = "</teammate_nesting_context>";
@@ -343,29 +359,34 @@ function appendTeammateDepthContext(systemPrompt: string, depth: number): string
 }
 
 function backgroundWaitGuidance(correlationId: string): string {
-  return `correlationId=${correlationId}. Automatic teammate-complete notification will trigger a new turn with the result. Do not poll teammate-watch or teammate-list. If this turn must consume the result, call teammate-wait exactly once with { name: "${correlationId}" }; otherwise end the turn now.`;
+  return `correlationId=${correlationId}. Automatic teammate-complete notification will trigger a new turn with the result. Do not poll observe or teammate-list. If this turn must consume the result, call observe exactly once with { action: "wait", targets: [{ kind: "teammate", id: "${correlationId}" }], timeoutMs: 600000 }; otherwise end the turn now.`;
 }
 
 function foregroundWaitWindowMs(
   tasks: ReadonlyArray<{ timeoutMs?: number }>,
   fallbackMs?: number,
-): number | undefined {
+): number {
   const configured = tasks
     .map((task) => task.timeoutMs)
     .filter((timeout): timeout is number => timeout !== undefined);
-  return configured.length > 0 ? Math.min(...configured) : fallbackMs;
+  // Never return undefined: an unbounded foreground deadline would make the
+  // tool call hang forever instead of detaching to background (P0a).
+  return configured.length > 0
+    ? Math.min(...configured)
+    : (fallbackMs ?? TEAMMATE_FOREGROUND_DEFAULT_TIMEOUT_MS);
 }
 
-function createForegroundDeadline(timeoutMs?: number): {
+function createForegroundDeadline(timeoutMs: number): {
   promise: Promise<"timeout">;
   dispose(): void;
 } {
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const promise = timeoutMs === undefined
-    ? new Promise<"timeout">(() => {})
-    : new Promise<"timeout">((resolve) => {
-        timer = setTimeout(() => resolve("timeout"), timeoutMs);
-      });
+  // timeoutMs is always resolved to a bounded number by foregroundWaitWindowMs
+  // (P0a); an undefined value here would be a never-resolving promise that
+  // hangs the foreground tool call instead of detaching to background.
+  const promise = new Promise<"timeout">((resolve) => {
+    timer = setTimeout(() => resolve("timeout"), timeoutMs);
+  });
   return {
     promise,
     dispose() {
@@ -403,6 +424,17 @@ export const TEAMMATE_WAIT_POLL_FLOOR_MS = 250;
  * must still terminate on its own.
  */
 export const TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS = 10 * 60_000;
+
+/**
+ * Foreground wait window when neither the task nor runtime options provide a
+ * timeout. Previously `undefined` here reached `createForegroundDeadline` as
+ * a never-resolving promise, so a foreground call whose child stayed alive
+ * without emitting a terminal event (or whose run promise never settled) hung
+ * the tool call indefinitely instead of detaching to background. The window is
+ * a detach bound, not a kill bound: on expiry the extension moves the run to
+ * background and returns the standard acknowledgement + guidance.
+ */
+export const TEAMMATE_FOREGROUND_DEFAULT_TIMEOUT_MS = TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS;
 
 /**
  * Ceiling on how long one relayed permission/question may hold a child agent
@@ -1504,6 +1536,9 @@ export default function registerTeammateExtension(
   // registry (globalThis symbol). Each extension owns a distinct registerTool, so
   // this capture is independent of pi-maestro-flow's. Root mode only.
   if (!isChild) {
+    for (const legacy of ["teammate-watch", "teammate-wait", "teammate-monitor"]) {
+      unregisterGuiTool(legacy, "pi-maestro-teammate");
+    }
     const originalRegisterTool = pi.registerTool.bind(pi);
     (pi as unknown as { registerTool: (tool: unknown) => unknown }).registerTool = (tool: unknown) => {
       const candidate = tool as { name?: unknown; execute?: unknown };
@@ -1766,6 +1801,33 @@ export default function registerTeammateExtension(
 
     installChildProxyCaller();
 
+    const proxyTeammateObservation = async (
+      action: "status" | "wait",
+      id: string,
+      options: { detail: "summary" | "tail" | "full"; lines: number; deadline?: number },
+      signal?: AbortSignal,
+    ): Promise<ObservationSnapshot> => {
+      const response = await proxyCall<{ output: string[]; result: ObserveResult }>("observe", {
+        action,
+        targets: [{ kind: "teammate", id }],
+        detail: options.detail,
+        lines: options.lines,
+        ...(action === "wait" ? {
+          waitMode: "all",
+          timeoutMs: Math.max(1, (options.deadline ?? Date.now() + MONITOR_DEFAULT_TIMEOUT_MS) - Date.now()),
+        } : {}),
+      }, signal);
+      const observation = response.details?.result.observations[0];
+      if (!observation) throw new Error(`Parent observe returned no teammate observation for "${id}".`);
+      return observation;
+    };
+    registerObservationProvider({
+      kind: "teammate",
+      capabilities: { inspect: true, wait: true, cancel: true, message: true, supervise: true },
+      snapshot: (id, options) => proxyTeammateObservation("status", id, options),
+      wait: (id, options) => proxyTeammateObservation("wait", id, options, options.signal),
+    });
+
     const proxyTeammateTool: ToolDefinition<typeof TeammateParams, Details> = {
       name: "teammate",
       label: "Teammate",
@@ -1817,41 +1879,66 @@ export default function registerTeammateExtension(
       },
     });
 
+    if (exposeLegacyObservationTools()) {
+      pi.registerTool({
+        name: "teammate-watch",
+        label: "Teammate Watch",
+        description: TEAMMATE_WATCH_DESCRIPTION,
+        promptSnippet: TEAMMATE_WATCH_SNIPPET,
+        promptGuidelines: TEAMMATE_WATCH_GUIDELINES,
+        parameters: TeammateWatchParams,
+        async execute(_id: string, params: { name: string; lines?: number }, signal: AbortSignal) {
+          return proxyCall<{ output: string[] }>("teammate-watch", params, signal);
+        },
+      });
+
+      pi.registerTool({
+        name: "teammate-wait",
+        label: "Teammate Wait",
+        description: TEAMMATE_WAIT_DESCRIPTION,
+        promptSnippet: TEAMMATE_WAIT_SNIPPET,
+        promptGuidelines: TEAMMATE_WAIT_GUIDELINES,
+        parameters: TeammateWaitParams,
+        async execute(_id: string, params: { name?: string; timeoutMs?: number; waitMs?: number }, signal: AbortSignal) {
+          return proxyCall<{ status: TeammateWaitStatus; output: string[] }>("teammate-wait", params, signal);
+        },
+      });
+    }
+
     pi.registerTool({
-      name: "teammate-watch",
-      label: "Teammate Watch",
-      description: TEAMMATE_WATCH_DESCRIPTION,
-      promptSnippet: TEAMMATE_WATCH_SNIPPET,
-      promptGuidelines: TEAMMATE_WATCH_GUIDELINES,
-      parameters: TeammateWatchParams,
-      async execute(_id: string, params: { name: string; lines?: number }, signal: AbortSignal) {
-        return proxyCall<{ output: string[] }>("teammate-watch", params, signal);
+      name: "observe",
+      label: "Observe",
+      description: OBSERVE_DESCRIPTION,
+      promptSnippet: OBSERVE_SNIPPET,
+      promptGuidelines: OBSERVE_GUIDELINES,
+      parameters: ObserveParams,
+      async execute(_id: string, params: UnifiedObserveParams, signal: AbortSignal) {
+        const result = await observeTargets(params, signal);
+        const output = formatObserveResult(result, params.detail === "full");
+        const failed = result.reason === "timeout"
+          || result.reason === "aborted"
+          || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
+        return {
+          content: [{ type: "text", text: output.join("\n") }],
+          isError: failed,
+          details: { output, result },
+        };
       },
     });
 
-    pi.registerTool({
-      name: "teammate-wait",
-      label: "Teammate Wait",
-      description: TEAMMATE_WAIT_DESCRIPTION,
-      promptSnippet: TEAMMATE_WAIT_SNIPPET,
-      promptGuidelines: TEAMMATE_WAIT_GUIDELINES,
-      parameters: TeammateWaitParams,
-      async execute(_id: string, params: { name?: string; timeoutMs?: number; waitMs?: number }, signal: AbortSignal) {
-        return proxyCall<{ status: TeammateWaitStatus; output: string[] }>("teammate-wait", params, signal);
-      },
-    });
-
-    pi.registerTool({
-      name: "teammate-monitor",
-      label: "Teammate Monitor",
-      description: TEAMMATE_MONITOR_DESCRIPTION,
-      promptSnippet: TEAMMATE_MONITOR_SNIPPET,
-      promptGuidelines: TEAMMATE_MONITOR_GUIDELINES,
-      parameters: TeammateMonitorParams,
-      async execute(_id: string, params: MonitorParams, signal: AbortSignal) {
-        return proxyCall<{ output: string[] }>("teammate-monitor", params, signal);
-      },
-    });
+    if (exposeLegacyObservationTools()) {
+      pi.registerTool({
+        name: "teammate-monitor",
+        label: "Teammate Monitor",
+        description: TEAMMATE_MONITOR_DESCRIPTION,
+        promptSnippet: TEAMMATE_MONITOR_SNIPPET,
+        promptGuidelines: TEAMMATE_MONITOR_GUIDELINES,
+        parameters: TeammateMonitorParams,
+        async execute(_id: string, params: MonitorParams, signal: AbortSignal) {
+          return proxyCall<{ output: string[] }>("teammate-monitor", params, signal);
+        },
+      });
+    }
 
     return; // Child mode done — skip root-mode registration
   }
@@ -2086,7 +2173,14 @@ export default function registerTeammateExtension(
           };
           state.activeRuns.set(childId, childAgent);
           if (task.name) bindAgentName(state, task.name, childId);
-          emitTeammateStarted(pi, childAgent);
+        });
+        // Register the whole graph before emitting any started event: a
+        // synchronous TEAMMATE_STARTED_EVENT listener re-entering admission
+        // would otherwise see only part of the graph counted and could pass
+        // the active-agent budget against a partial tally (P4).
+        normalizedTasks.forEach((task, index) => {
+          const childAgent = state.activeRuns.get(taskCorrelationIds[index]);
+          if (childAgent) emitTeammateStarted(pi, childAgent);
         });
       }
 
@@ -2117,7 +2211,7 @@ export default function registerTeammateExtension(
         );
         if (singleCompletionNotificationRequested) {
           const lastMessage = displayMessageForResult(singleTerminalResult);
-          safeSendMessage(
+          const delivered = safeSendMessage(
             pi,
             {
               customType: "teammate-complete",
@@ -2127,6 +2221,9 @@ export default function registerTeammateExtension(
             },
             { triggerTurn: true },
           );
+          if (!delivered) {
+            markSettledResultInspectable(state, correlationId);
+          }
         }
       };
       const publishSingleResult = (result: SingleResult, notify: boolean): void => {
@@ -2176,7 +2273,7 @@ export default function registerTeammateExtension(
           terminalStatus === "terminated",
         );
         if (graphCompletionNotificationRequested) {
-          safeSendMessage(
+          const delivered = safeSendMessage(
             pi,
             {
               customType: "teammate-complete",
@@ -2190,6 +2287,9 @@ export default function registerTeammateExtension(
             },
             { triggerTurn: true },
           );
+          if (!delivered) {
+            markSettledResultInspectable(state, correlationId);
+          }
         }
       };
       const publishGraphResult = (
@@ -2573,7 +2673,7 @@ export default function registerTeammateExtension(
                 error instanceof Error ? error.message : String(error),
                 false,
               );
-              notifyBackgroundFailure(pi, id, activeGraphMode, correlationId, error);
+              notifyBackgroundFailure(pi, id, activeGraphMode, correlationId, error, state);
             });
           };
 
@@ -2705,7 +2805,7 @@ export default function registerTeammateExtension(
               error instanceof Error ? error.message : String(error),
               false,
             );
-            notifyBackgroundFailure(pi, id, agentLabel, correlationId, error);
+            notifyBackgroundFailure(pi, id, agentLabel, correlationId, error, state);
           });
           const detachText = race.reason === "timeout"
             ? `■ @${singleTask.name ?? singleTask.agent} moved to background after ${waitMs}ms.`
@@ -2737,7 +2837,7 @@ export default function registerTeammateExtension(
             error instanceof Error ? error.message : String(error),
             false,
           );
-          notifyBackgroundFailure(pi, id, agentLabel, correlationId, error);
+          notifyBackgroundFailure(pi, id, agentLabel, correlationId, error, state);
         });
 
         return {
@@ -2973,23 +3073,17 @@ export default function registerTeammateExtension(
       _id: string,
       params: { name: string; lines?: number },
     ): Promise<TeammateToolResult<{ output: string[] }>> {
-      const lines = params.lines ?? 20;
-      const resolved = resolveWatchTarget(state, params.name);
-      if (!resolved.match) {
-        const suffix = resolved.available.length > 0
-          ? ` Available: ${resolved.available.join(", ")}`
-          : " No agents are available.";
-        return {
-          content: [{ type: "text", text: resolved.error ?? `Agent "${params.name}" not found.${suffix}` }],
-          isError: true,
-          details: { output: [] },
-        };
-      }
-      const output = buildWatchOutput(resolved.match, lines);
-
+      const observed = await observeTargets({
+        action: "status",
+        targets: [{ kind: "teammate", id: params.name }],
+        detail: "full",
+        lines: params.lines ?? 20,
+      });
+      const observation = observed.observations[0]!;
+      const output = observation.found ? (observation.detail ?? [observation.summary]) : [];
       return {
-        content: [{ type: "text", text: output.join("\n") }],
-        isError: false,
+        content: [{ type: "text", text: observation.found ? output.join("\n") : observation.summary }],
+        isError: !observation.found,
         details: { output },
       };
     },
@@ -3022,11 +3116,29 @@ export default function registerTeammateExtension(
       params: { name?: string; timeoutMs?: number; waitMs?: number },
       signal: AbortSignal,
     ): Promise<TeammateToolResult<{ status: TeammateWaitStatus; output: string[] }>> {
-      const result = await waitForTeammate(state, params, signal);
+      if (!params.name) {
+        const result = await waitForTeammate(state, params, signal);
+        return {
+          content: [{ type: "text", text: result.output.join("\n") }],
+          isError: result.status === "not-found" || result.status === "stalled" || result.status === "timeout" || result.status === "aborted",
+          details: { status: result.status, output: result.output },
+        };
+      }
+      const observed = await observeTargets({
+        action: "wait",
+        targets: [{ kind: "teammate", id: params.name }],
+        timeoutMs: params.timeoutMs,
+        detail: "full",
+        lines: 20,
+      }, signal);
+      const observation = observed.observations[0]!;
+      const status = observation.waitStatus as TeammateWaitStatus;
+      const output = observation.detail
+        ?? (status === "timeout" || status === "aborted" ? waitOutput(status, params.name) : [observation.summary]);
       return {
-        content: [{ type: "text", text: result.output.join("\n") }],
-        isError: result.status === "not-found" || result.status === "stalled" || result.status === "timeout" || result.status === "aborted",
-        details: { status: result.status, output: result.output },
+        content: [{ type: "text", text: output.join("\n") }],
+        isError: status === "not-found" || status === "stalled" || status === "timeout" || status === "aborted",
+        details: { status, output },
       };
     },
 
@@ -3050,7 +3162,6 @@ export default function registerTeammateExtension(
   // Monitor — persistent observation mode (user-entered) + LLM query tools
   // ---------------------------------------------------------------------------
 
-  const monitorMode: MonitorModeState = createMonitorModeState();
   const monitorEngine: MonitorEngineState = createEngineState();
 
   /** Build EngineAgentInfo from an ActiveAgent. */
@@ -3164,26 +3275,136 @@ export default function registerTeammateExtension(
     };
   }
 
-  /** Capture snapshots for all monitor targets. */
-  function captureMonitorSnapshot(verbose?: boolean): MonitorTargetSnapshot[] {
-    const targets = monitorMode.active ? monitorMode.targets : [];
-    return takeSnapshot(
-      (name, lines) => resolveMonitorTarget(name, lines, verbose ?? monitorMode.verbose),
-      targets,
-      MONITOR_DEFAULT_LINES,
-    );
+  const teammateObservationCapabilities = {
+    inspect: true,
+    wait: true,
+    cancel: true,
+    message: true,
+    supervise: true,
+  } as const;
+
+  function teammateSnapshot(id: string, detail: "summary" | "tail" | "full", lines: number): ObservationSnapshot {
+    const monitored = resolveMonitorTarget(id, lines, detail !== "summary");
+    if (!monitored.found) {
+      return {
+        target: { kind: "teammate", id },
+        found: false,
+        nativeStatus: "not-found",
+        phase: "unknown",
+        outcome: "failure",
+        waitStatus: "not-found",
+        summary: monitored.error ?? `Agent "${id}" not found.`,
+        updatedAt: Date.now(),
+        capabilities: teammateObservationCapabilities,
+        error: monitored.error,
+      };
+    }
+    const resolved = resolveWatchTarget(state, id);
+    const output = resolved.match
+      ? buildWatchOutput(resolved.match, lines)
+      : monitored.summary ? [monitored.summary] : [];
+    const nativeStatus = monitored.agentStatus ?? monitored.waitStatus ?? "unknown";
+    const settled = nativeStatus === "completed" || nativeStatus === "failed" || nativeStatus === "sleeping";
+    return {
+      target: { kind: "teammate", id },
+      found: true,
+      nativeStatus,
+      phase: settled ? "settled" : nativeStatus === "pending" ? "pending" : "active",
+      ...(nativeStatus === "failed" ? { outcome: "failure" as const } : settled ? { outcome: "success" as const } : {}),
+      ...(monitored.waitStatus ? { waitStatus: monitored.waitStatus as ObservationWaitStatus } : {}),
+      summary: monitored.summary || output.at(-1) || nativeStatus,
+      ...(detail === "summary" ? {} : { detail: output }),
+      updatedAt: Date.now(),
+      capabilities: teammateObservationCapabilities,
+    };
   }
 
-  /** Update the status bar with current monitor state. */
-  function syncMonitorStatus(ctx: ExtensionContext): void {
-    if (!monitorMode.active) {
-      ctx.ui.setStatus(MONITOR_STATUS_KEY, undefined);
-      return;
-    }
-    const snapshot = captureMonitorSnapshot();
-    monitorMode.lastSnapshot = snapshot;
-    ctx.ui.setStatus(MONITOR_STATUS_KEY, formatStatusBar(snapshot, monitorMode.startedAt));
+  function teammateWaitObservation(id: string, result: TeammateWaitResult): ObservationSnapshot {
+    const waitStatus: ObservationWaitStatus = result.status === "terminated"
+      ? "failed"
+      : result.status === "delayed"
+        ? "completed"
+        : result.status;
+    const phase = waitStatus === "completed" || waitStatus === "failed" || waitStatus === "result-ready"
+      ? "settled"
+      : waitStatus === "not-found" ? "unknown" : "active";
+    const outcome = waitStatus === "completed" || waitStatus === "result-ready"
+      ? "success"
+      : waitStatus === "stalled" ? "stalled"
+        : waitStatus === "aborted" ? "aborted"
+          : "failure";
+    return {
+      target: { kind: "teammate", id },
+      found: waitStatus !== "not-found",
+      nativeStatus: result.status,
+      phase,
+      outcome,
+      waitStatus,
+      summary: result.output[0] ?? result.status,
+      detail: result.output,
+      updatedAt: Date.now(),
+      capabilities: teammateObservationCapabilities,
+      ...(waitStatus === "not-found" ? { error: result.output[0] } : {}),
+    };
   }
+
+  const teammateObservationProvider: ObservationProvider = {
+    kind: "teammate",
+    capabilities: teammateObservationCapabilities,
+    snapshot: (id, options) => teammateSnapshot(id, options.detail, options.lines),
+    wait: async (id, options) => teammateWaitObservation(id, await waitForTeammate(state, {
+      name: id,
+      timeoutMs: Math.max(1, options.deadline - Date.now()),
+    }, options.signal)),
+  };
+  registerObservationProvider(teammateObservationProvider);
+
+  // --- LLM tool: observe (mixed provider status + wait) ---
+
+  const observeTool: ToolDefinition<typeof ObserveParams, { output: string[]; result: ObserveResult }> = {
+    name: "observe",
+    label: "Observe",
+    description: OBSERVE_DESCRIPTION,
+    promptSnippet: OBSERVE_SNIPPET,
+    promptGuidelines: OBSERVE_GUIDELINES,
+    parameters: ObserveParams,
+    async execute(
+      _id: string,
+      params: UnifiedObserveParams,
+      signal: AbortSignal,
+    ): Promise<TeammateToolResult<{ output: string[]; result: ObserveResult }>> {
+      const result = await observeTargets(params, signal);
+      const output = formatObserveResult(result, params.detail === "full");
+      const failed = result.reason === "timeout"
+        || result.reason === "aborted"
+        || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
+      return {
+        content: [{ type: "text", text: output.join("\n") }],
+        isError: failed,
+        details: { output, result },
+      };
+    },
+    renderCall(args, theme, context) {
+      if (context.isPartial === false) return new Text("", 0, 0);
+      const action = String(args.action ?? "status");
+      const count = Array.isArray(args.targets) ? args.targets.length : 0;
+      const targetLabel = `${count} target${count === 1 ? "" : "s"}`;
+      return renderQuietTeammateAux("observe", `${action} · ${targetLabel}`, "running", theme)
+        ?? auxToolCallFallback("observe", theme);
+    },
+    renderResult(result, options, theme) {
+      if (options.isPartial) return new Text("", 0, 0);
+      const observed = result.details?.result;
+      const failed = (result as { isError?: boolean }).isError === true;
+      const rest = observed
+        ? observed.action === "status"
+          ? `${observed.observations.length} target${observed.observations.length === 1 ? "" : "s"}`
+          : `${observed.reason} · ${observed.observations.filter((item) => item.waitStatus !== undefined).length}/${observed.observations.length} settled`
+        : failed ? "failed" : "completed";
+      return renderQuietTeammateAux("observe", rest, failed ? "failure" : "success", theme)
+        ?? auxToolResultFallback(result, theme);
+    },
+  };
 
   // --- LLM tool: teammate-monitor (status + wait only) ---
 
@@ -3209,48 +3430,44 @@ export default function registerTeammateExtension(
         };
       }
 
-      const startedAt = Date.now();
-      const lineCount = params.lines ?? MONITOR_DEFAULT_LINES;
       const verbose = params.verbose ?? false;
+      const observed = await observeTargets({
+        action: params.action,
+        targets: params.targets.map((id) => ({ kind: "teammate", id })),
+        detail: verbose ? "full" : "summary",
+        lines: params.lines ?? MONITOR_DEFAULT_LINES,
+        waitMode: params.waitMode,
+        waitCount: params.waitCount,
+        timeoutMs: params.timeoutMs ?? MONITOR_DEFAULT_TIMEOUT_MS,
+      }, signal);
 
-      // --- STATUS: compact snapshot ---
       if (params.action === "status") {
-        const snapshots = takeSnapshot(
-          (name, lines) => resolveMonitorTarget(name, lines, verbose),
-          params.targets,
-          lineCount,
-        );
+        const snapshots: MonitorTargetSnapshot[] = observed.observations.map((item) => ({
+          name: item.target.id,
+          found: item.found,
+          agentStatus: item.nativeStatus,
+          waitStatus: item.waitStatus,
+          summary: item.summary,
+          detail: item.detail,
+          error: item.error,
+        }));
         const output = [
           formatHeader(snapshots),
           ...(verbose ? formatVerbose(snapshots) : formatCompact(snapshots)),
         ];
-        return {
-          content: [{ type: "text", text: output.join("\n") }],
-          details: { output },
-        };
+        return { content: [{ type: "text", text: output.join("\n") }], details: { output } };
       }
 
-      // --- WAIT: barrier ---
-      const timeoutMs = params.timeoutMs ?? MONITOR_DEFAULT_TIMEOUT_MS;
-      const waitMode = params.waitMode ?? "all";
-      const waitCount = params.waitCount ?? 1;
-      const barrierAbort = new AbortController();
-
-      const onExternalAbort = () => barrierAbort.abort();
-      signal.addEventListener("abort", onExternalAbort, { once: true });
-
-      const entries: BarrierEntry[] = params.targets.map((name) => ({
-        name,
-        promise: waitForTeammate(state, { name, timeoutMs }, barrierAbort.signal),
-      }));
-
-      const { settled, exitReason } = await barrierWait(entries, waitMode, waitCount, barrierAbort);
-      signal.removeEventListener("abort", onExternalAbort);
-
-      const durationMs = Date.now() - startedAt;
-      const output = formatBarrierCompact(settled, exitReason, durationMs);
+      const settled = observed.observations
+        .filter((item) => item.waitStatus !== undefined)
+        .map((item) => ({
+          name: item.target.id,
+          status: item.waitStatus!,
+          output: item.detail ?? [item.summary],
+        }));
+      const output = formatBarrierCompact(settled, observed.reason, observed.durationMs);
       const errorStatuses = new Set(["failed", "error", "timeout", "aborted", "not-found", "stalled"]);
-      const hasFailure = settled.some((s) => errorStatuses.has(s.status));
+      const hasFailure = settled.some((item) => errorStatuses.has(item.status));
       return {
         content: [{ type: "text", text: output.join("\n") }],
         isError: hasFailure,
@@ -3281,9 +3498,12 @@ export default function registerTeammateExtension(
   pi.registerTool(tool);
   pi.registerTool(sendTool);
   pi.registerTool(listTool);
-  pi.registerTool(watchTool);
-  pi.registerTool(waitTool);
-  pi.registerTool(monitorTool);
+  pi.registerTool(observeTool);
+  if (exposeLegacyObservationTools()) {
+    pi.registerTool(watchTool);
+    pi.registerTool(waitTool);
+    pi.registerTool(monitorTool);
+  }
 
   // =========================================================================
   // Alt+R shortcut — attach overlay (user-facing TUI)
@@ -4189,7 +4409,6 @@ export default function registerTeammateExtension(
     stopWidgetTimer();
     stopWakeableEvictionTimer();
     stopEngine(monitorEngine);
-    stopMonitorMode(monitorMode);
     if (state.handoffSwitching && activeHandoff) {
       activeHandoff.shutdownObserved = true;
       widgetCtx = null;
@@ -4856,17 +5075,36 @@ function emitComplete(
  * already settled via settleAgent/killAgent plus eventBus emit (which is not
  * guarded), so drop the send instead of letting the throw escape into an
  * unhandled rejection that kills the pi process.
+ *
+ * Returns whether the message was actually delivered. Callers that rely on
+ * the notification as the only result channel (detached/background runs)
+ * should treat `false` as "settled state remains inspectable but the model
+ * was not turned": the result stays reachable through observe / the
+ * settled record, it just does not arrive as a new turn.
  */
 export function safeSendMessage(
   pi: ExtensionAPI,
   message: Parameters<ExtensionAPI["sendMessage"]>[0],
   options?: Parameters<ExtensionAPI["sendMessage"]>[1],
-): void {
+): boolean {
   try {
     pi.sendMessage(message, options);
+    return true;
   } catch (error) {
-    if (error instanceof Error && error.message.includes("extension ctx is stale")) return;
+    if (error instanceof Error && error.message.includes("extension ctx is stale")) {
+      // Not silent-by-design: a dropped notification is exactly the "finished
+      // but nothing came back" case that misreads as a hang. The completion
+      // event already fired and state is settled, so this is observability,
+      // not a delivery retry.
+      console.warn(
+        "[pi-maestro-teammate] deferred completion notification dropped: the extension "
+        + "ctx became stale (session switched/reloaded). The result is settled and "
+        + "inspectable via observe; it will not arrive as a new turn.",
+      );
+      return false;
+    }
     console.error("[pi-maestro-teammate] deferred sendMessage failed:", error);
+    return false;
   }
 }
 
@@ -4876,12 +5114,20 @@ export function notifyBackgroundFailure(
   agent: string,
   correlationId: string,
   error: unknown,
+  state?: TeammateState,
 ): void {
   const message =
     `Background teammate failed (agent=${agent}, correlationId=${correlationId}, phase=background-promise): `
     + `${error instanceof Error ? error.message : String(error)}`;
-  emitComplete(pi, id, agent, correlationId, 1, 0);
-  safeSendMessage(
+  emitComplete(
+    pi,
+    id,
+    agent,
+    correlationId,
+    1,
+    0,
+  );
+  const delivered = safeSendMessage(
     pi,
     {
       customType: "teammate-complete",
@@ -4890,6 +5136,26 @@ export function notifyBackgroundFailure(
     },
     { triggerTurn: true },
   );
+  if (!delivered && state) markSettledResultInspectable(state, correlationId);
+}
+
+/**
+ * When a deferred completion notification cannot reach the model (stale
+ * extension ctx after session switch/reload), the result must stay findable
+ * instead of vanishing with the same silence that reads as a hang. The agent
+ * record — sleeping for success, a two-minute failed tombstone otherwise —
+ * keeps its lastResult; this marker tells observe readers that the
+ * missing turn is a dropped notification, not a missing result.
+ */
+function markSettledResultInspectable(state: TeammateState, correlationId: string): void {
+  const agent = state.activeRuns.get(correlationId);
+  if (!agent) return;
+  agent.outputLog.push(
+    `[${new Date().toISOString().slice(11, 19)}] ! result settled; completion notification dropped `
+    + `(extension ctx stale). Inspect via this record / observe.`,
+  );
+  trimAgentBuffers(agent);
+  agent.lastActivityAt = Date.now();
 }
 
 function retireAgent(
@@ -5803,6 +6069,11 @@ export function createTeammateInteractionQueue(
       waiting.delete(key);
       interactionAbort.abort();
       releaseHandler();
+      // The handler may have recorded this request on the agent's pending set;
+      // settle() already does this for its own path, and keeping the reply path
+      // symmetric prevents a cleared prompt from pinning an agent as stalled.
+      const correlationId = correlationFor(event, fallbackCorrelationId);
+      state.activeRuns.get(correlationId ?? "")?.pendingInteractions?.delete(key);
       reply(msg);
     };
     const settle = (reason: string): void => {
@@ -5817,6 +6088,28 @@ export function createTeammateInteractionQueue(
       replyChildRequestFailure(event, reply, new Error(reason));
     };
     waiting.set(key, { correlationId: correlationFor(event, fallbackCorrelationId), settle });
+
+    // RPC UI requests (select/confirm/input/editor) wait on a human answer just
+    // like relayed permission prompts. Recording them on the owning agent's
+    // pending set makes statusForWatchTarget treat the wait as "awaiting
+    // response" instead of reporting the agent as stalled after 30s idle — an
+    // editor left open was previously both unstallable (no abort contract) and
+    // invisible to the stall exemption, so teammate-wait misreported it as
+    // stalled minutes before the 5-minute interaction timeout.
+    if (event.type === "teammate_rpc_ui_request") {
+      const rpcCorrelationId = correlationFor(event, fallbackCorrelationId);
+      const rpcAgent = rpcCorrelationId ? state.activeRuns.get(rpcCorrelationId) : undefined;
+      if (rpcAgent) {
+        rpcAgent.pendingInteractions ??= new Map();
+        rpcAgent.pendingInteractions.set(key, {
+          requestId: key,
+          interaction: `rpc:${typeof event.method === "string" ? event.method : "ui"}`,
+          createdAt: Date.now(),
+          payload: event,
+        });
+        rpcAgent.lastActivityAt = Date.now();
+      }
+    }
 
     // Armed on arrival, not on reaching the front of the queue: a request stuck
     // behind an unanswered prompt is exactly the case that must stay bounded,
@@ -5846,13 +6139,12 @@ export function createTeammateInteractionQueue(
               fallbackCorrelationId,
               interactionAbort.signal,
             );
-        // editor() has no abortable dialog contract. Do not release the serial
-        // terminal owner until that editor actually closes.
-        if (event.type === "teammate_rpc_ui_request" && event.method === "editor") {
-          await handler;
-        } else {
-          await Promise.race([handler, handlerCancelled]);
-        }
+        // editor() has no abortable dialog contract, but the serial queue must
+        // not stay captured by a dialog that never closes: race the handler so
+        // cancellation/timeout releases the tail and later interactions can
+        // open even while this editor stays up. A late editor close resolves
+        // the handler, whose guardedReply is then absorbed by the settled guard.
+        await Promise.race([handler, handlerCancelled]);
       } catch (error) {
         if (!settled) replyChildRequestFailure(event, guardedReply, error);
       } finally {
@@ -6126,6 +6418,12 @@ export function cancelProxyDispatch(
   requestId: string,
   reason = "the requesting teammate gave up waiting",
 ): string[] {
+  const observation = state.proxyObservationControllers?.get(requestId);
+  if (observation) {
+    state.proxyObservationControllers?.delete(requestId);
+    observation.abort(reason);
+    return [];
+  }
   if (state.pendingProxyDispatchRequests?.delete(requestId)) {
     state.pendingProxyDispatchParents?.delete(requestId);
     return [];
@@ -6140,6 +6438,43 @@ export function cancelProxyDispatch(
     `[${new Date().toISOString().slice(11, 19)}] ✗ cancelled: ${reason}.`,
   );
   return killAgentTree(state, cid);
+}
+
+function beginProxyObservation(
+  state: TeammateState,
+  requestId: string,
+  parentSignal?: AbortSignal,
+): { signal: AbortSignal; dispose(): void } {
+  const controller = new AbortController();
+  const previous = state.proxyObservationControllers?.get(requestId);
+  previous?.abort("proxy request replaced");
+  (state.proxyObservationControllers ??= new Map()).set(requestId, controller);
+  const onParentAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) controller.abort(parentSignal.reason);
+  else parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+  return {
+    signal: controller.signal,
+    dispose() {
+      parentSignal?.removeEventListener("abort", onParentAbort);
+      if (state.proxyObservationControllers?.get(requestId) === controller) {
+        state.proxyObservationControllers.delete(requestId);
+      }
+    },
+  };
+}
+
+async function withProxyObservation<T>(
+  state: TeammateState,
+  requestId: string,
+  parentSignal: AbortSignal | undefined,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const pending = beginProxyObservation(state, requestId, parentSignal);
+  try {
+    return await run(pending.signal);
+  } finally {
+    pending.dispose();
+  }
 }
 
 /** Records which agent a proxy request created, so a later give-up can find it. */
@@ -6456,7 +6791,7 @@ export async function handleProxyRequest(
         reportChildStatus(nestedPublication.exitCode === 0 ? "completed" : "failed");
         emitNestedComplete(nestedPublication.exitCode, wakeable, terminalStatus);
         if (nestedCompletionNotificationRequested) {
-          safeSendMessage(
+          const delivered = safeSendMessage(
             pi,
             {
               customType: "teammate-complete",
@@ -6470,6 +6805,9 @@ export async function handleProxyRequest(
             },
             { triggerTurn: true },
           );
+          if (!delivered) {
+            markSettledResultInspectable(state, cid);
+          }
         }
       };
       const publishNestedCompletion = (
@@ -6481,7 +6819,6 @@ export async function handleProxyRequest(
         deliverNestedCompletion();
       };
 
-      reportChildStatus("running");
       normalizedTasks?.forEach((task, index) => {
         const childId = taskCorrelationIds[index];
         const childAgent: ActiveAgent = {
@@ -6504,8 +6841,17 @@ export async function handleProxyRequest(
         };
         state.activeRuns.set(childId, childAgent);
         if (task.name) bindAgentName(state, task.name, childId);
-        emitTeammateStarted(pi, childAgent);
       });
+      // Same P4 ordering as the root path: the full graph is registered before
+      // any started event can re-enter admission synchronously.
+      normalizedTasks?.forEach((task, index) => {
+        const childAgent = state.activeRuns.get(taskCorrelationIds[index]);
+        if (childAgent) emitTeammateStarted(pi, childAgent);
+      });
+      // After the whole graph is registered: an onChildStatus callback can
+      // synchronously trigger further dispatches, which must see the complete
+      // live tally rather than an empty registry (P4).
+      reportChildStatus("running");
 
       const spawnerAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
       const spawnerLabel = spawnerAgent?.name ?? spawnerAgent?.agent ?? "proxy";
@@ -6839,7 +7185,7 @@ export async function handleProxyRequest(
             false,
           );
           reportChildStatus("failed");
-          notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error);
+          notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
         });
       };
 
@@ -6918,27 +7264,112 @@ export async function handleProxyRequest(
     }
 
     case "teammate-wait": {
-      // Without the requester's signal this wait outlived the agent that
-      // issued it: cancelling that agent left the poll running to its full
-      // timeout with no way to interrupt it.
-      const result = await waitForTeammate(
-        state,
-        {
-          name: typeof params.name === "string" ? params.name : undefined,
-          timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : undefined,
-          waitMs: typeof params.waitMs === "number" ? params.waitMs : undefined,
-        },
-        parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined,
-      );
+      const parentSignal = parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined;
+      const name = typeof params.name === "string" ? params.name : undefined;
+      const result = await withProxyObservation(state, requestId, parentSignal, async (proxySignal) => name
+        ? observeTargets({
+            action: "wait",
+            targets: [{ kind: "teammate", id: name }],
+            timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : undefined,
+            detail: "full",
+            lines: 20,
+          }, proxySignal).then((observed) => {
+            const observation = observed.observations[0]!;
+            return {
+              status: observation.waitStatus as TeammateWaitStatus,
+              output: observation.detail
+                ?? (observation.waitStatus === "timeout" || observation.waitStatus === "aborted"
+                  ? waitOutput(observation.waitStatus, name)
+                  : [observation.summary]),
+            };
+          })
+        : waitForTeammate(
+            state,
+            {
+              timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : undefined,
+              waitMs: typeof params.waitMs === "number" ? params.waitMs : undefined,
+            },
+            proxySignal,
+          ));
       reply({ type: "teammate_proxy_result", requestId, result: {
         content: [{ type: "text", text: result.output.join("\n") }],
-        // `stalled` belongs here too: the target stopped reporting, which is
-        // the outcome the caller most needs to act on.
         isError: result.status === "not-found"
           || result.status === "timeout"
           || result.status === "aborted"
           || result.status === "stalled",
         details: { status: result.status, output: result.output },
+      }});
+      return;
+    }
+
+    case "observe": {
+      if (!Check(ObserveParams, params)) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: "Invalid observe parameters received from child IPC." }],
+          isError: true,
+          details: { output: [] },
+        }});
+        return;
+      }
+      const result = await withProxyObservation(
+        state,
+        requestId,
+        parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined,
+        (proxySignal) => observeTargets(params as UnifiedObserveParams, proxySignal),
+      );
+      const output = formatObserveResult(result, params.detail === "full");
+      const failed = result.reason === "timeout"
+        || result.reason === "aborted"
+        || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: output.join("\n") }],
+        isError: failed,
+        details: { output, result },
+      }});
+      return;
+    }
+
+    case "teammate-monitor": {
+      if (!Check(TeammateMonitorParams, params)) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: "Invalid teammate-monitor parameters received from child IPC." }],
+          isError: true,
+          details: { output: [] },
+        }});
+        return;
+      }
+      const monitorParams = params as unknown as MonitorParams;
+      const validationError = validateMonitorParams(monitorParams);
+      if (validationError) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: validationError }],
+          isError: true,
+          details: { output: [validationError] },
+        }});
+        return;
+      }
+      const observed = await withProxyObservation(
+        state,
+        requestId,
+        parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined,
+        (proxySignal) => observeTargets({
+          action: monitorParams.action,
+          targets: monitorParams.targets.map((id) => ({ kind: "teammate", id })),
+          detail: monitorParams.verbose ? "full" : "summary",
+          lines: monitorParams.lines ?? MONITOR_DEFAULT_LINES,
+          waitMode: monitorParams.waitMode,
+          waitCount: monitorParams.waitCount,
+          timeoutMs: monitorParams.timeoutMs ?? MONITOR_DEFAULT_TIMEOUT_MS,
+        }, proxySignal),
+      );
+      const output = formatObserveResult(observed, monitorParams.verbose === true);
+      const failed = observed.reason === "timeout"
+        || observed.reason === "aborted"
+        || observed.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: output.join("\n") }],
+        isError: failed,
+        details: { output },
       }});
       return;
     }
@@ -7080,17 +7511,18 @@ export async function handleProxyRequest(
 
     case "teammate-watch": {
       const name = params.name as string;
-      const lineCount = (params.lines as number) ?? 20;
-      const resolved = resolveWatchTarget(state, name);
-      if (!resolved.match) {
-        reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: resolved.error ?? `Agent "${name}" not found.` }], isError: true, details: { output: [] },
-        }});
-        return;
-      }
-      const output = buildWatchOutput(resolved.match, lineCount);
+      const observed = await observeTargets({
+        action: "status",
+        targets: [{ kind: "teammate", id: name }],
+        detail: "full",
+        lines: (params.lines as number) ?? 20,
+      });
+      const observation = observed.observations[0]!;
+      const output = observation.found ? (observation.detail ?? [observation.summary]) : [];
       reply({ type: "teammate_proxy_result", requestId, result: {
-        content: [{ type: "text", text: output.join("\n") }], isError: false, details: { output },
+        content: [{ type: "text", text: observation.found ? output.join("\n") : observation.summary }],
+        isError: !observation.found,
+        details: { output },
       }});
       return;
     }

@@ -142,7 +142,7 @@ export interface AgentRetryState {
 
 export interface TeammateInteractionRecord {
   requestId: string;
-  interaction: "permission" | "question";
+  interaction: "permission" | "question" | `rpc:${string}`;
   createdAt: number;
   payload: Record<string, unknown>;
 }
@@ -257,6 +257,8 @@ export interface TeammateState {
    * leaving it running with no consumer.
    */
   proxyDispatchByRequest?: Map<string, string>;
+  /** Request-scoped cancellation for proxied observe/monitor/wait calls. */
+  proxyObservationControllers?: Map<string, AbortController>;
 }
 
 export type AgentTerminalStatus = "completed" | "failed" | "terminated";

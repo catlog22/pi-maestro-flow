@@ -27,7 +27,8 @@ const registryKey = Symbol.for("pi-maestro.gui-tool-registry");
 
 /** Locked UCL surface for the teammate package. */
 export function isGuiTeammateToolAllowed(name: string, owner: string): boolean {
-  return owner === "pi-maestro-teammate" && (name === "teammate" || name.startsWith("teammate-"));
+  return owner === "pi-maestro-teammate"
+    && (name === "teammate" || name === "observe" || name.startsWith("teammate-"));
 }
 
 function getRegistry(): GuiToolRegistry {
@@ -40,7 +41,12 @@ function getRegistry(): GuiToolRegistry {
   return registry;
 }
 
-const READ_ONLY_TOOLS = new Set(["teammate-list", "teammate-watch", "teammate-wait"]);
+const READ_ONLY_TOOLS = new Set(["teammate-list", "teammate-watch", "teammate-wait", "observe"]);
+
+export function unregisterGuiTool(name: string, owner: string): void {
+  const existing = getRegistry().tools.get(name);
+  if (existing?.owner === owner) getRegistry().tools.delete(name);
+}
 
 export function registerGuiTool(def: ToolDefinition, owner: string): void {
   if (!isGuiTeammateToolAllowed(def.name, owner)) return;

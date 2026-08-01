@@ -52,6 +52,10 @@
       "types": "./types/public/v1/model-routing.d.ts",
       "default": "./src/public/v1/model-routing.ts"
     },
+    "./v1/observation": {
+      "types": "./types/public/v1/observation.d.ts",
+      "default": "./src/public/v1/observation.ts"
+    },
     "./v1/progress-tree": {
       "types": "./types/public/v1/progress-tree.d.ts",
       "default": "./src/public/v1/progress-tree.ts"

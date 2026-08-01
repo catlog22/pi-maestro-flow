@@ -5,7 +5,7 @@ systemPromptMode: replace
 inheritProjectContext: true
 thinking: high
 taskType: planning
-tools: read, grep, find, ls, teammate, teammate-send, teammate-list, teammate-watch
+tools: read, grep, find, ls, teammate, teammate-send, teammate-list, observe
 inheritSkills: false
 ---
 

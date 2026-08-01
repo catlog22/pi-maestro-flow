@@ -1,7 +1,7 @@
 /**
  * Teammate Extension Entry Point
  *
- * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status), teammate-wait
+ * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status), observe
  * TUI: Alt+R composer panel, widget above editor, Alt+B foreground→background detach
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
@@ -43,6 +43,16 @@ export declare const TEAMMATE_WAIT_POLL_FLOOR_MS = 250;
  * must still terminate on its own.
  */
 export declare const TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS: number;
+/**
+ * Foreground wait window when neither the task nor runtime options provide a
+ * timeout. Previously `undefined` here reached `createForegroundDeadline` as
+ * a never-resolving promise, so a foreground call whose child stayed alive
+ * without emitting a terminal event (or whose run promise never settled) hung
+ * the tool call indefinitely instead of detaching to background. The window is
+ * a detach bound, not a kill bound: on expiry the extension moves the run to
+ * background and returns the standard acknowledgement + guidance.
+ */
+export declare const TEAMMATE_FOREGROUND_DEFAULT_TIMEOUT_MS: number;
 /**
  * Ceiling on how long one relayed permission/question may hold a child agent
  * before it is answered on the child's behalf. The terminal is a single shared
@@ -242,9 +252,15 @@ export declare function waitForTeammate(state: TeammateState, params: {
  * already settled via settleAgent/killAgent plus eventBus emit (which is not
  * guarded), so drop the send instead of letting the throw escape into an
  * unhandled rejection that kills the pi process.
+ *
+ * Returns whether the message was actually delivered. Callers that rely on
+ * the notification as the only result channel (detached/background runs)
+ * should treat `false` as "settled state remains inspectable but the model
+ * was not turned": the result stays reachable through observe / the
+ * settled record, it just does not arrive as a new turn.
  */
-export declare function safeSendMessage(pi: ExtensionAPI, message: Parameters<ExtensionAPI["sendMessage"]>[0], options?: Parameters<ExtensionAPI["sendMessage"]>[1]): void;
-export declare function notifyBackgroundFailure(pi: ExtensionAPI, id: string, agent: string, correlationId: string, error: unknown): void;
+export declare function safeSendMessage(pi: ExtensionAPI, message: Parameters<ExtensionAPI["sendMessage"]>[0], options?: Parameters<ExtensionAPI["sendMessage"]>[1]): boolean;
+export declare function notifyBackgroundFailure(pi: ExtensionAPI, id: string, agent: string, correlationId: string, error: unknown, state?: TeammateState): void;
 export declare function applyAgentRetryState(state: TeammateState, retry: {
     correlationId: string;
     attempt: number;

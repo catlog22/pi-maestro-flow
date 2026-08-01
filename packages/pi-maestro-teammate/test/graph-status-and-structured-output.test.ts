@@ -1306,7 +1306,7 @@ test("every teammate child explicitly loads the handoff bridge extension", () =>
 
 test("registered parent extensions and their interaction tools reach every teammate child", () => {
   const dispose = registerTeammateChildExtension("D:\\packages\\pi-maestro-flow\\src\\extension\\index.ts", {
-    tools: ["ask-user-question"],
+    tools: ["ask-user-question", "bash_bg"],
   });
   try {
     const args = buildPiArgs(
@@ -1317,7 +1317,9 @@ test("registered parent extensions and their interaction tools reach every teamm
     const extensionPaths = args.flatMap((arg, index) => arg === "--extension" ? [args[index + 1].replaceAll("\\", "/")] : []);
     assert.equal(extensionPaths.length, 2);
     assert.ok(extensionPaths.some((extensionPath) => extensionPath === "D:/packages/pi-maestro-flow/src/extension/index.ts"));
-    assert.match(args[args.indexOf("--tools") + 1], /(?:^|,)ask-user-question(?:,|$)/);
+    const childTools = args[args.indexOf("--tools") + 1];
+    assert.match(childTools, /(?:^|,)ask-user-question(?:,|$)/);
+    assert.match(childTools, /(?:^|,)bash_bg(?:,|$)/);
   } finally {
     dispose();
   }
@@ -1951,8 +1953,8 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   assert.match(source, /running in background\. \$\{backgroundWaitGuidance\(cid\)\}/);
   assert.match(source, /function backgroundWaitGuidance\(/);
   assert.equal(source.match(/backgroundWaitGuidance\(/g)?.length, 7);
-  assert.match(source, /Do not poll teammate-watch or teammate-list/);
-  assert.match(source, /call teammate-wait exactly once/);
+  assert.match(source, /Do not poll observe or teammate-list/);
+  assert.match(source, /call observe exactly once/);
   assert.match(source, /handleProxyRequest\([\s\S]*?publishChildCallStatus/);
   // A graph task must not inherit the parent's aggregate log: that showed every
   // sibling's output under whichever task the reader had selected.
@@ -2570,4 +2572,33 @@ test("Alt+R opens the native agent view without injecting a slash command", asyn
     message: "No active teammates. Start one with the teammate tool.",
     level: "warning",
   }]);
+});
+
+test("P0a: foreground wait window always resolves to a bounded deadline", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+
+  // The wait-window helper must never return undefined: an undefined value
+  // reached createForegroundDeadline as a never-resolving promise, so a
+  // foreground call could hang the tool indefinitely instead of detaching.
+  assert.match(
+    source,
+    /function foregroundWaitWindowMs\([\s\S]*?\): number \{/,
+    "foregroundWaitWindowMs must have a non-optional number return type",
+  );
+  assert.match(
+    source,
+    /return configured\.length > 0\s*\n\s*\?\s*Math\.min\(\.\.\.configured\)\s*\n\s*:\s*\(fallbackMs \?\? TEAMMATE_FOREGROUND_DEFAULT_TIMEOUT_MS\)/,
+    "an empty task timeout list must fall back to the bounded default window",
+  );
+
+  // The default must exist and be finite.
+  assert.match(source, /export const TEAMMATE_FOREGROUND_DEFAULT_TIMEOUT_MS = TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS/);
+
+  // All three foreground call sites (root single, root graph, proxy) pass the
+  // resolved window into the deadline constructor.
+  assert.equal(
+    source.match(/createForegroundDeadline\(waitMs\)/g)?.length ?? 0,
+    3,
+    "every foreground path must construct its deadline from the resolved waitMs",
+  );
 });

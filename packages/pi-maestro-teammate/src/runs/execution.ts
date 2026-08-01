@@ -1209,9 +1209,15 @@ export function buildPiArgs(
   }
 
   if (agentConfig.tools && agentConfig.tools.length > 0) {
-    const proxyTools = ["teammate", "teammate-send", "teammate-list", "teammate-watch"];
+    const hiddenLegacyObservationTools = ["teammate-watch", "teammate-wait", "teammate-monitor"];
+    const exposeLegacyObservationTools = process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS === "1";
+    const configuredTools = exposeLegacyObservationTools
+      ? agentConfig.tools
+      : agentConfig.tools.filter((tool) => !hiddenLegacyObservationTools.includes(tool));
+    const legacyObservationTools = exposeLegacyObservationTools ? hiddenLegacyObservationTools : [];
+    const proxyTools = ["teammate", "teammate-send", "teammate-list", "observe", ...legacyObservationTools];
     const inheritedTools = inheritedExtensions.flatMap((registration) => registration.tools);
-    const toolSet = new Set([...agentConfig.tools, ...proxyTools, ...inheritedTools]);
+    const toolSet = new Set([...configuredTools, ...proxyTools, ...inheritedTools]);
     if (schemaFile) toolSet.add("structured_output");
     args.push("--tools", [...toolSet].join(","));
   }
@@ -1833,9 +1839,25 @@ export async function runSingleTeammate(
         if (!ready) {
           if (options.signal?.aborted) {
             if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
-            candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
-            publishTurnComplete(candidateResult, "terminated");
-            return candidateResult;
+            // Return a cancellation result, not the preceding provider failure:
+            // the run was stopped by an explicit abort during backoff, so the
+            // caller must not read the stale ECONNRESET as the cause. exitCode
+            // stays non-zero (the run did not complete), and the terminal
+            // status is "terminated" so lifecycle/event/cancel semantics are
+            // preserved. The cancellation line leads the transcript (that is
+            // what displayMessageForResult shows first); the original provider
+            // diagnostics stay behind it for detail, not as the headline.
+            const cancelledResult: SingleResult = {
+              ...candidateResult,
+              exitCode: 1,
+              messages: [
+                { role: "system", content: "Teammate run cancelled during retry backoff." },
+                ...candidateResult.messages,
+              ],
+              attemptedModels: attemptedModels.length > 1 ? attemptedModels : undefined,
+            };
+            publishTurnComplete(cancelledResult, "terminated");
+            return cancelledResult;
           }
           break;
         }
@@ -3197,7 +3219,21 @@ export function sendChildIpcMessage(
 ): boolean {
   if (!child.connected) return false;
   try {
-    return child.send(message as never, () => {});
+    // The callback receives a non-null error for asynchronous delivery
+    // failures. It must not be silently dropped: a lost proxy result otherwise
+    // leaves the child caller waiting for the 30-minute proxy timeout while
+    // the parent believes the result was delivered. The child's own
+    // `process.once("disconnect")` rejects its pending requests when the
+    // channel actually tears down; this logs the window before that.
+    return child.send(message as never, (error) => {
+      if (error) {
+        console.error(
+          "[pi-maestro-teammate] child IPC send failed asynchronously",
+          error,
+          "type", (message as { type?: string }).type,
+        );
+      }
+    });
   } catch {
     return false;
   }

@@ -83,6 +83,7 @@ After the knowledge gate:
 | Project knowledge or workflow | Maestro bash CLI |
 | Known project symbol | `maestro search "<symbol>" --code` |
 | Multi-file code discovery | `teammate`, agent `explorer` |
+| Mixed teammate/background status or waits | `observe` with typed `{ kind, id }` targets |
 | Exact bounded text search | `rg` |
 | Delegated analysis/development/review/testing | `teammate` |
 | External model absent from teammate catalog | `model-availability`, then delegate fallback |
@@ -127,6 +128,9 @@ EXPECTED: file:line evidence and concise result
 
 Rules:
 
+- Use `observe` as the single observation interface for teammate agents and `bash_bg` jobs. Use `action: "status"` for a one-shot snapshot and `action: "wait"` with `all`, `any`, or `count` for a bounded barrier.
+- Targets are typed: `{ kind: "teammate", id: "<name-or-correlation-id>" }` or `{ kind: "bash_bg", id: "<job-id>" }`. Mixed target arrays are supported.
+- After a background teammate acknowledgement, normally end the turn and wait for the automatic completion notification. If the current turn must consume results, call `observe` exactly once with `action: "wait"`; do not poll `observe` or `teammate-list`.
 - `background: false` is the default and returns the result directly.
 - Use `background: true` only for independent work; wait for its completion notification before dependent work.
 - Put independent lanes in one `tasks` call. Use `{name}`, `{name.field}`, or `dependsOn` for DAG edges.
@@ -154,7 +158,7 @@ The user owns stop, resume, and clear lifecycle controls. Do not create a compet
 
 Use `bash` for ordinary commands whose output is needed now, including commands that take tens of seconds.
 
-Use `bash_bg run` when duration is uncertain: it returns inline if fast and backgrounds automatically if slow. Use `start` for servers, watchers, and other known long-lived processes. After backgrounding, wait for the completion notification or call `wait` once; do not poll.
+Use `bash_bg run` when duration is uncertain: it returns inline if fast and backgrounds automatically if slow. Use `start` for servers, watchers, and other known long-lived processes. After backgrounding, wait for the completion notification or call `observe` once with a `{ kind: "bash_bg", id: "<job-id>" }` target; do not poll.
 
 ## Shell Safety Rules
 

@@ -300,7 +300,41 @@ export const TeammateWaitParams = Type.Object({
 });
 
 // ---------------------------------------------------------------------------
-// Monitor — multi-agent observation and barrier wait
+// Observe — mixed multi-target observation and barrier wait
+// ---------------------------------------------------------------------------
+
+export const ObserveParams = Type.Object({
+  action: Type.Unsafe<"status" | "wait">({
+    type: "string",
+    enum: ["status", "wait"],
+    description: '"status" takes a one-shot snapshot; "wait" blocks on a multi-target barrier.',
+  }),
+  targets: Type.Array(
+    Type.Object({
+      kind: Type.String({ minLength: 1, description: 'Observation provider kind, such as "teammate" or "bash_bg".' }),
+      id: Type.String({ minLength: 1, description: "Provider-specific target name or id." }),
+    }, { additionalProperties: false }),
+    { minItems: 1, maxItems: 15, description: "Mixed targets to observe in the requested order." },
+  ),
+  detail: Type.Optional(Type.Unsafe<"summary" | "tail" | "full">({
+    type: "string",
+    enum: ["summary", "tail", "full"],
+    default: "summary",
+    description: "Observation detail level.",
+  })),
+  lines: Type.Optional(Type.Integer({ minimum: 1, maximum: 500, default: 20, description: "Recent detail lines per target." })),
+  waitMode: Type.Optional(Type.Unsafe<"all" | "any" | "count">({
+    type: "string",
+    enum: ["all", "any", "count"],
+    default: "all",
+    description: "Barrier mode for wait.",
+  })),
+  waitCount: Type.Optional(Type.Integer({ minimum: 1, description: "Targets required when waitMode is count." })),
+  timeoutMs: Type.Optional(Type.Integer({ minimum: 1, default: 600_000, description: "Request-level wait timeout in milliseconds." })),
+}, { additionalProperties: false });
+
+// ---------------------------------------------------------------------------
+// Monitor — teammate-compatible multi-agent observation and barrier wait
 // ---------------------------------------------------------------------------
 
 export const TeammateMonitorParams = Type.Object({

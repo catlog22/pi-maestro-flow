@@ -237,7 +237,7 @@ test("planner is the sole Plan author with an execution-ready document contract"
 
     const args = buildPiArgs(planner, { agent: "planner" }, "prompt.md");
     const childTools = args[args.indexOf("--tools") + 1].split(",");
-    for (const tool of ["read", "grep", "find", "ls", "teammate", "teammate-send", "teammate-list", "teammate-watch"]) {
+    for (const tool of ["read", "grep", "find", "ls", "teammate", "teammate-send", "teammate-list", "observe"]) {
       assert.ok(childTools.includes(tool), `planner child tool: ${tool}`);
     }
     for (const rootOnlyTool of ["plan-update", "plan-confirm"]) {
@@ -423,8 +423,8 @@ test("teammate prompt guidance names the tool and explains selection boundaries"
   assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /Do not use teammate/.test(guideline)));
   assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /context: "fork"/.test(guideline)));
   assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /automatic teammate-complete notification/i.test(guideline)));
-  assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /do not poll teammate-watch or teammate-list/i.test(guideline)));
-  assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /call teammate-wait exactly once/i.test(guideline)));
+  assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /do not poll observe or teammate-list/i.test(guideline)));
+  assert.ok(TEAMMATE_PROMPT_GUIDELINES.some((guideline) => /call observe exactly once/i.test(guideline)));
 });
 
 test("child Pi arguments honor prompt mode and resource inheritance", () => {
@@ -455,6 +455,30 @@ test("child Pi arguments honor prompt mode and resource inheritance", () => {
   assert.equal(appendArgs.includes("--system-prompt"), false);
   assert.equal(appendArgs.includes("--no-context-files"), false);
   assert.equal(appendArgs.includes("--no-skills"), false);
+});
+
+test("child Pi arguments hide legacy observation tools unless explicitly enabled", () => {
+  const previous = process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS;
+  const config = agentConfig({ tools: ["read", "teammate-watch", "teammate-wait", "teammate-monitor"] });
+  delete process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS;
+  try {
+    const hiddenArgs = buildPiArgs(config, { agent: "test-agent" }, "prompt.md");
+    const hiddenTools = hiddenArgs[hiddenArgs.indexOf("--tools") + 1].split(",");
+    assert.equal(hiddenTools.includes("observe"), true);
+    assert.equal(hiddenTools.includes("teammate-watch"), false);
+    assert.equal(hiddenTools.includes("teammate-wait"), false);
+    assert.equal(hiddenTools.includes("teammate-monitor"), false);
+
+    process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS = "1";
+    const legacyArgs = buildPiArgs(config, { agent: "test-agent" }, "prompt.md");
+    const legacyTools = legacyArgs[legacyArgs.indexOf("--tools") + 1].split(",");
+    assert.equal(legacyTools.includes("teammate-watch"), true);
+    assert.equal(legacyTools.includes("teammate-wait"), true);
+    assert.equal(legacyTools.includes("teammate-monitor"), true);
+  } finally {
+    if (previous === undefined) delete process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS;
+    else process.env.PI_TEAMMATE_LEGACY_OBSERVATION_TOOLS = previous;
+  }
 });
 
 test("frontmatter prompt modes flow through discovery into child Pi arguments", () => {
@@ -670,8 +694,10 @@ test("terminal depth child knows its level and has no teammate dispatch tool", (
     assert.equal(tools.has("teammate"), false);
     assert.equal(tools.has("teammate-send"), true);
     assert.equal(tools.has("teammate-list"), true);
-    assert.equal(tools.has("teammate-watch"), true);
-    assert.equal(tools.has("teammate-wait"), true);
+    assert.equal(tools.has("teammate-watch"), false);
+    assert.equal(tools.has("teammate-wait"), false);
+    assert.equal(tools.has("teammate-monitor"), false);
+    assert.equal(tools.has("observe"), true);
 
     assert.equal(beforeAgentStartHandlers.length, 1);
     const context = {
@@ -732,6 +758,10 @@ ${name} prompt.
   try {
     registerTeammateExtension(pi as unknown as ExtensionAPI);
     assert.equal(sessionStartHandlers.length, 1);
+    assert.equal(tools.has("observe"), true);
+    assert.equal(tools.has("teammate-watch"), false);
+    assert.equal(tools.has("teammate-wait"), false);
+    assert.equal(tools.has("teammate-monitor"), false);
 
     const context = (cwd: string) => ({
       cwd,

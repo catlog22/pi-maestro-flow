@@ -55,6 +55,7 @@ const LEAF_SUBPATHS = [
   "progress-tree.ts",
   "agents.ts",
   "model-routing.ts",
+  "observation.ts",
   "child-extensions.ts",
 ];
 
