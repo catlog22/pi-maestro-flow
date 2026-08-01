@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { AgentsStore, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SLEEPING_LINGER_MS, mapAgentStatus } from "../src/agents-store.ts";
+import { AgentsStore, COMPLETED_TOMBSTONE_MS, FAILED_LINGER_MS, SLEEPING_LINGER_MS, TERMINATED_LINGER_MS, mapAgentStatus } from "../src/agents-store.ts";
 
 test("started adds a running row with derived role and label", () => {
 	const s = new AgentsStore();
@@ -590,4 +590,63 @@ test("hasLingering includes sleeping rows so the redraw loop keeps running", () 
 	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
 	s.applyComplete({ correlationId: "c1", exitCode: 0, wakeable: true }, 1_000);
 	assert.equal(s.hasLingering(), true);
+});
+
+test("mapAgentStatus maps the teammate terminated state instead of defaulting to running", () => {
+	assert.equal(mapAgentStatus("terminated"), "terminated");
+	assert.equal(mapAgentStatus("unknown"), "running", "unknown values still fall back to running");
+});
+
+test("a terminated progress delta freezes the row instead of leaving it spinning", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor", name: "worker" }, 1);
+	s.applyMessage({ correlationId: "c1", agent: "executor", status: "terminated", lastActivityAt: 500 }, 500);
+	const row = s.snapshot(500)[0];
+	assert.equal(row.status, "terminated");
+	assert.equal(row.taskStatus, "terminated");
+	assert.equal(row.finishedAt, 500, "elapsed time must freeze at the terminal delta");
+	assert.equal(s.hasLingering(), true, "the terminated row keeps the redraw loop alive until pruned");
+});
+
+test("a cancelled completion is shown as terminated, not as a failure", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor", name: "worker" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 1, cancelled: true, durationMs: 400 }, 500);
+	const row = s.snapshot(500)[0];
+	assert.equal(row.status, "terminated", "cancelled runs carry exitCode 1 but are not failures");
+	assert.equal(row.failedAt, undefined, "no failed linger must be armed");
+	assert.equal(row.finishedAt, 401);
+	assert.equal(s.hasLingering(), true);
+});
+
+test("a terminated row expires after its linger window", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyComplete({ correlationId: "c1", exitCode: 1, cancelled: true }, 1_000);
+	assert.equal(s.size, 1);
+	s.snapshot(1_000 + TERMINATED_LINGER_MS - 1);
+	assert.equal(s.size, 1, "still visible just before expiry");
+	s.snapshot(1_000 + TERMINATED_LINGER_MS);
+	assert.equal(s.size, 0, "pruned after linger window");
+});
+
+test("resultReadyAt is ingested from progress and cleared when the snapshot drops it", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor", name: "worker" }, 1);
+	s.applyMessage({
+		correlationId: "c1",
+		agent: "executor",
+		status: "running",
+		progress: [{ correlationId: "c1", agent: "executor", taskIndex: 0, status: "running", resultReadyAt: 400, lastActivityAt: 400 }],
+	}, 400);
+	assert.equal(s.snapshot(400)[0].resultReadyAt, 400, "the transitional marker must survive ingestion");
+	s.applyMessage({
+		correlationId: "c1",
+		agent: "executor",
+		status: "completed",
+		progress: [{ correlationId: "c1", agent: "executor", taskIndex: 0, status: "completed", lastActivityAt: 500 }],
+	}, 500);
+	const row = s.snapshot(500)[0];
+	assert.equal(row.resultReadyAt, undefined, "a snapshot without resultReadyAt clears it");
+	assert.equal(row.status, "done");
 });

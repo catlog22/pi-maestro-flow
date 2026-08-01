@@ -20,7 +20,7 @@ export const TODO_TOOL_NAME = "todo";
 // appendEntry customType the todo tool persists after every mutation (tools/todo.ts:145).
 export const TODO_STATE_ENTRY_TYPE = "todo-state";
 
-export type AgentStatus = "pending" | "running" | "retrying" | "sleeping" | "done" | "failed";
+export type AgentStatus = "pending" | "running" | "retrying" | "sleeping" | "done" | "failed" | "terminated";
 
 export interface AgentRow {
 	correlationId: string;
@@ -35,6 +35,8 @@ export interface AgentRow {
 	/** Terminal wall-clock used to freeze elapsed time for completed/failed rows. */
 	finishedAt?: number;
 	lastActivityAt: number;
+	/** When the agent published its final result while lifecycle is still confirming (running). */
+	resultReadyAt?: number;
 	toolCount?: number;
 	tokens?: number;
 	inputTokens?: number;

@@ -75,3 +75,13 @@ __pycache__/
 # Misc
 nul
 .pi/model-failover.json
+
+# Reference clones (nested repos, not vendored)
+.references/
+
+# Team swarm runtime session artifacts
+.workflow/.team/
+
+# One-off tooling scratch
+add-imports.mjs
+idx-names.txt

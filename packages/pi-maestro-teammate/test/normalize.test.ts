@@ -165,3 +165,20 @@ test("background defaults to false and preserves explicit values", () => {
   normalizeTeammateParams(disabled);
   assert.equal(disabled.background, false);
 });
+
+test("maxNestingDepth accepts the full 0..ceiling range and rejects the rest", () => {
+  for (const value of [0, 1, 2]) {
+    const result = normalizeTeammateParams({ tasks: [{ prompt: "inspect" }], maxNestingDepth: value });
+    assert.equal(result.error, undefined, `maxNestingDepth ${value} must be accepted`);
+  }
+
+  for (const value of [-1, 3, 1.5]) {
+    const result = normalizeTeammateParams({ tasks: [{ prompt: "inspect" }], maxNestingDepth: value });
+    assert.match(result.error ?? "", /maxNestingDepth must be an integer between 0 and 2/);
+  }
+
+  // Omitted keeps the default: no error and no mutation.
+  const omitted: RunTeammateParams = { tasks: [{ prompt: "inspect" }] };
+  assert.equal(normalizeTeammateParams(omitted).error, undefined);
+  assert.equal(omitted.maxNestingDepth, undefined);
+});

@@ -78,6 +78,9 @@ import {
   sendRpcMessage,
   truncateUtf8Tail,
   checkDepthGuard,
+  dispatchAllowed,
+  agentDispatchBudget,
+  nestedChildMaxDispatchDepth,
   getTeammateDepth,
   MAX_DEFAULT_DEPTH,
   resolveMaxActiveAgents,
@@ -851,15 +854,23 @@ export async function handleProxyRequest(
       // would always read 0 here. The spawner's recorded depth is the only
       // authority for how deep the tree already is.
       const dispatchDepth = (parentCid ? state.activeRuns.get(parentCid)?.depth ?? 0 : 0) + 1;
+      const budgetParent = parentCid ? state.activeRuns.get(parentCid) : undefined;
+      const parentBudget = budgetParent ? agentDispatchBudget(budgetParent) : MAX_DEFAULT_DEPTH - 1;
       const depthCheck = checkDepthGuard(dispatchDepth);
-      if (!depthCheck.allowed) {
+      const budgetCheck = dispatchAllowed(parentBudget, dispatchDepth);
+      if (!depthCheck.allowed || !budgetCheck) {
         abandonPendingProxyDispatch();
         reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: `Teammate nesting depth exceeded: current=${depthCheck.current}, max=${depthCheck.max}. Prevent recursive fork-bomb.` }],
+          content: [{ type: "text", text: parentBudget === 0
+            ? "Teammate nesting is disabled for this agent: the parent dispatch set maxNestingDepth: 0. Complete the assigned work directly and do not attempt further delegation."
+            : `Teammate nesting depth exceeded: current=${depthCheck.current}, max=${depthCheck.max}. Prevent recursive fork-bomb.` }],
           isError: true, details: { mode: "single", results: [] },
         }});
         return;
       }
+      // The parent's budget is the hard cap; the call's own maxNestingDepth
+      // can only tighten it (0 forbids any further nesting below this call).
+      const childMaxDispatchDepth = nestedChildMaxDispatchDepth(parentBudget, dispatchDepth, p.maxNestingDepth);
 
       const routedParams = applyModelRouting(
         p,
@@ -977,6 +988,7 @@ export async function handleProxyRequest(
         requestedModel: normalizedTasks ? undefined : singleTask.model,
         spawnedBy: parentCid,
         depth: dispatchDepth,
+        maxDispatchDepth: childMaxDispatchDepth,
         status: "running",
         sleepMs: 0,
         lease: createChildLease(),
@@ -1152,6 +1164,7 @@ export async function handleProxyRequest(
           requestedModel: task.model,
           spawnedBy: cid,
           depth: dispatchDepth,
+          maxDispatchDepth: childMaxDispatchDepth,
           status: "pending",
           sleepMs: 0,
           lease: createChildLease(),
@@ -1313,6 +1326,7 @@ export async function handleProxyRequest(
         modelCapabilities,
         ...(normalizedTasks ? { taskCorrelationIds } : { correlationId: cid }),
         depth: dispatchDepth,
+        maxDispatchDepth: childMaxDispatchDepth,
         signal: abortCtrl.signal,
         ...(normalizedTasks ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
         parentSessionFile: spawnerAgent?.sessionFile ?? state.mainSessionFile,

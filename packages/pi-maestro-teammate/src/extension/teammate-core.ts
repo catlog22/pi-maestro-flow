@@ -288,6 +288,8 @@ Call form:
 Every dispatch uses a non-empty tasks array. Task-level values override top-level defaults. Tasks that omit agent inherit the top-level agent, then default to "general".
 Use {name} or {name.field} in a dependent task's prompt, or dependsOn: ["name"] for ordering without output injection.
 
+Nesting control: pass maxNestingDepth to limit how many levels of nested teammate dispatch the spawned agents may perform below themselves. maxNestingDepth: 0 forbids nested calls entirely — the assigned agents cannot dispatch teammates.
+
 Use an exact role name from the Available Teammate Agents section in the active system prompt. Unknown names are rejected.
 
 For background work, wait for the automatic teammate-complete notification. Do not poll observe or teammate-list; if the current turn must wait, call observe once with action="wait" and target { kind: "teammate", id: "<name-or-correlation-id>" }.
@@ -371,12 +373,21 @@ export function exposeLegacyObservationTools(): boolean {
 export const TEAMMATE_DEPTH_START_MARKER = "<teammate_nesting_context>";
 export const TEAMMATE_DEPTH_END_MARKER = "</teammate_nesting_context>";
 
-export function appendTeammateDepthContext(systemPrompt: string, depth: number): string {
+export function appendTeammateDepthContext(
+  systemPrompt: string,
+  depth: number,
+  maxDispatchDepth?: number,
+): string {
   const current = Math.max(0, Math.min(MAX_DEFAULT_DEPTH, depth));
-  const remaining = Math.max(0, MAX_DEFAULT_DEPTH - current);
+  // Budget is the absolute max record-depth this agent may dispatch at; the
+  // main agent's default is MAX-1 so remaining = MAX - depth as before.
+  const budget = maxDispatchDepth ?? MAX_DEFAULT_DEPTH - 1;
+  const remaining = Math.max(0, budget - current + 1);
   const role = current === 0 ? "main agent" : "teammate agent";
   const dispatchGuidance = remaining === 0
-    ? "This is the terminal teammate level. The teammate dispatch tool is intentionally unavailable; complete the assigned work directly and do not attempt further delegation."
+    ? maxDispatchDepth === 0
+      ? "The parent dispatch disabled nested teammate calls (maxNestingDepth: 0). The teammate dispatch tool is intentionally unavailable; complete the assigned work directly and do not attempt further delegation."
+      : "This is the terminal teammate level. The teammate dispatch tool is intentionally unavailable; complete the assigned work directly and do not attempt further delegation."
     : `You may delegate through the teammate tool for ${remaining} more level${remaining === 1 ? "" : "s"}.`;
   const depthContext = [
     TEAMMATE_DEPTH_START_MARKER,

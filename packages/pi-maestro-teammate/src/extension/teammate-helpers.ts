@@ -1110,6 +1110,7 @@ export const RESULT_READY_RECLAIM_MS = 3 * 60_000;
  */
 export function reclaimResultReadyAgents(
   state: TeammateState,
+  pi?: ExtensionAPI,
   now = Date.now(),
 ): string[] {
   const reclaimed: string[] = [];
@@ -1121,6 +1122,21 @@ export function reclaimResultReadyAgents(
       `${Math.round((now - agent.resultReadyAt) / 1000)}s; retiring.`,
     );
     retireAgent(state, correlationId, agent.lastResult);
+    // retireAgent flips the internal record to sleeping but publishes nothing,
+    // so delta-only consumers (the cockpit roster) would keep the row spinning
+    // as running for the rest of the session. Publish the completion the way a
+    // natural settle would: wakeable=true keeps the row visible as sleeping.
+    if (pi) {
+      emitComplete(
+        pi,
+        undefined,
+        agent.agent,
+        correlationId,
+        0,
+        Math.max(0, now - agent.startedAt),
+        true,
+      );
+    }
     reclaimed.push(correlationId);
   }
   return reclaimed;

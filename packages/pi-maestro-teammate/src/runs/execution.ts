@@ -515,6 +515,9 @@ function buildChildSpawnEnv(
     PI_TEAMMATE_CORRELATION_ID: correlationId,
     PI_TEAMMATE_REPLY_TO: replyTo,
   };
+  if (options.maxDispatchDepth !== undefined) {
+    spawnEnv.PI_TEAMMATE_MAX_DISPATCH_DEPTH = String(options.maxDispatchDepth);
+  }
   if (outputFile) {
     spawnEnv.PI_TEAMMATE_STRUCTURED_OUTPUT_PATH = outputFile;
     spawnEnv.PI_TEAMMATE_STRUCTURED_SCHEMA_PATH = schemaFile;

@@ -45,6 +45,12 @@ export interface RunTeammateParams {
     outputSchema?: Record<string, unknown>;
     concurrency?: number;
     maxAgents?: number;
+    /**
+     * How many levels of nested teammate dispatch the agents spawned by this
+     * call may perform below themselves. 0 forbids nested calls entirely;
+     * defaults to the global ceiling (MAX_DEFAULT_DEPTH).
+     */
+    maxNestingDepth?: number;
 }
 /** Parameters for the internal single-agent execution primitive. */
 export interface RunSingleTeammateParams {
@@ -77,6 +83,13 @@ export interface RunTeammateOptions {
      * fall back to the process environment.
      */
     depth?: number;
+    /**
+     * Absolute maximum depth the agents spawned by this dispatch may dispatch
+     * at (their children's record-depth ceiling). Computed by the caller from
+     * maxNestingDepth and the parent agent's own budget; carried into the child
+     * process via PI_TEAMMATE_MAX_DISPATCH_DEPTH.
+     */
+    maxDispatchDepth?: number;
     signal?: AbortSignal;
     onProgress?: (data: AgentProgress) => void;
     onRetry?: (retry: {
@@ -285,11 +298,34 @@ export declare function resolveMaxActiveAgents(): number;
  * Those paths pass `RunTeammateOptions.depth` instead.
  */
 export declare function getTeammateDepth(): number;
+/**
+ * Child-scoped nesting budget (absolute max dispatch depth). Only meaningful
+ * inside a spawned child process; callers MUST gate the read on `isChild`.
+ */
+export declare function getTeammateMaxDispatchDepth(): number;
 export declare function checkDepthGuard(depth: number): {
     allowed: boolean;
     current: number;
     max: number;
 };
+/**
+ * Absolute max dispatch depth for agents spawned by a root (depth-0) dispatch.
+ * `maxNestingDepth: 0` forbids nested calls entirely; the global ceiling caps
+ * any larger value, so under the current MAX only 0 vs 1+ are distinguishable.
+ */
+export declare function rootChildMaxDispatchDepth(maxNestingDepth?: number): number;
+/**
+ * Absolute max dispatch depth for agents spawned by a proxied dispatch from a
+ * parent with `parentBudget`, at `childDepth`. The parent's budget is the hard
+ * cap; the call's own `maxNestingDepth` may only tighten it further.
+ */
+export declare function nestedChildMaxDispatchDepth(parentBudget: number, childDepth: number, maxNestingDepth?: number): number;
+/** Whether a dispatch creating agents at `dispatchDepth` is allowed under `parentBudget`. */
+export declare function dispatchAllowed(parentBudget: number, dispatchDepth: number): boolean;
+/** Budget of an agent record that predates per-dispatch budgets: global ceiling. */
+export declare function agentDispatchBudget(agent: {
+    maxDispatchDepth?: number;
+}): number;
 export declare function getTeammateSessionRoot(parentSessionFile: string | null): string | undefined;
 export declare function buildModelCandidates(primary?: string, fallbacks?: string[]): string[];
 export declare function isFallbackModelError(messages: Array<{

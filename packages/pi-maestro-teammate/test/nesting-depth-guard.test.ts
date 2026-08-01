@@ -3,7 +3,16 @@ import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import { handleProxyRequest, checkActiveAgentBudget } from "../src/extension/index.ts";
-import { checkDepthGuard, MAX_DEFAULT_DEPTH } from "../src/runs/execution.ts";
+import { appendTeammateDepthContext } from "../src/extension/teammate-core.ts";
+import { parseProxyTeammateParams } from "../src/extension/teammate-proxy.ts";
+import {
+  checkDepthGuard,
+  MAX_DEFAULT_DEPTH,
+  rootChildMaxDispatchDepth,
+  nestedChildMaxDispatchDepth,
+  dispatchAllowed,
+  agentDispatchBudget,
+} from "../src/runs/execution.ts";
 import type { ActiveAgent, TeammateState } from "../src/shared/types.ts";
 
 function makeState(): TeammateState {
@@ -215,4 +224,133 @@ test("P4: root and proxy graphs register every task before emitting started even
     /\/\/ After the whole graph is registered: an onChildStatus callback can\s*\n\s*\/\/ synchronously trigger further dispatches[\s\S]*?reportChildStatus\("running"\);/,
   );
   assert.ok(statusAfter, "proxy onChildStatus must fire after full registration");
+});
+
+// ---------------------------------------------------------------------------
+// Per-dispatch nesting budget (maxNestingDepth)
+// ---------------------------------------------------------------------------
+
+test("root dispatch budgets: 0 forbids nesting, default keeps the global ceiling", () => {
+  assert.equal(rootChildMaxDispatchDepth(), MAX_DEFAULT_DEPTH - 1);
+  assert.equal(rootChildMaxDispatchDepth(0), 0);
+  assert.equal(rootChildMaxDispatchDepth(1), 1);
+  assert.equal(rootChildMaxDispatchDepth(MAX_DEFAULT_DEPTH), MAX_DEFAULT_DEPTH - 1);
+  assert.equal(rootChildMaxDispatchDepth(99), MAX_DEFAULT_DEPTH - 1);
+});
+
+test("nested budgets shrink along the chain and never exceed the parent's", () => {
+  // Default parent budget at the first nesting level leaves no room below.
+  assert.equal(nestedChildMaxDispatchDepth(1, 1), 0);
+  assert.equal(nestedChildMaxDispatchDepth(1, 1, 1), 0);
+  assert.equal(nestedChildMaxDispatchDepth(1, 1, 0), 0);
+  // A larger parent budget passes through, clamped by the global ceiling.
+  assert.equal(nestedChildMaxDispatchDepth(2, 1, 2), 1);
+  assert.equal(nestedChildMaxDispatchDepth(2, 1, 1), 1);
+  // Exhausted budgets stay at the floor even when the call re-grants.
+  assert.equal(nestedChildMaxDispatchDepth(0, 1, 2), 0);
+});
+
+test("dispatchAllowed respects both the parent budget and the global ceiling", () => {
+  assert.equal(dispatchAllowed(1, 0), true);
+  assert.equal(dispatchAllowed(1, 1), true);
+  assert.equal(dispatchAllowed(1, 2), false);
+  assert.equal(dispatchAllowed(0, 1), false);
+  // The global ceiling caps oversized budgets the same way checkDepthGuard does.
+  assert.equal(dispatchAllowed(99, MAX_DEFAULT_DEPTH), false);
+});
+
+test("legacy agent records fall back to the global ceiling budget", () => {
+  assert.equal(agentDispatchBudget({}), MAX_DEFAULT_DEPTH - 1);
+  assert.equal(agentDispatchBudget({ maxDispatchDepth: 0 }), 0);
+});
+
+test("a proxied dispatch from a maxNestingDepth-0 parent is rejected as disabled", async () => {
+  const state = makeState();
+  const parentCid = randomUUID();
+  state.activeRuns.set(parentCid, makeAgent(parentCid, 0, { maxDispatchDepth: 0 }));
+
+  const reply = await dispatchNested(state, parentCid);
+  const result = reply.result as { isError?: boolean; content: Array<{ text: string }> };
+
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /maxNestingDepth: 0/i);
+  assert.doesNotMatch(result.content[0].text, /nesting depth exceeded/i);
+  assert.equal(state.activeRuns.size, 1, "a rejected dispatch must not register an agent");
+});
+
+test("a budget-0 parent at the ceiling still reports the nesting prohibition", async () => {
+  const state = makeState();
+  const parentCid = randomUUID();
+  state.activeRuns.set(parentCid, makeAgent(parentCid, MAX_DEFAULT_DEPTH - 1, { maxDispatchDepth: 0 }));
+
+  const reply = await dispatchNested(state, parentCid);
+  const result = reply.result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /maxNestingDepth: 0/i);
+});
+
+test("a legacy ceiling parent keeps the original depth-exceeded message", async () => {
+  const state = makeState();
+  const parentCid = randomUUID();
+  state.activeRuns.set(parentCid, makeAgent(parentCid, MAX_DEFAULT_DEPTH - 1));
+
+  const reply = await dispatchNested(state, parentCid);
+  const result = reply.result as { isError?: boolean; content: Array<{ text: string }> };
+  assert.equal(result.isError, true);
+  assert.match(result.content[0].text, /nesting depth exceeded/i);
+  assert.doesNotMatch(result.content[0].text, /maxNestingDepth/i);
+});
+
+test("a parent with budget 1 at depth 0 is not rejected by the budget", async () => {
+  const state = makeState();
+  const parentCid = randomUUID();
+  state.activeRuns.set(parentCid, makeAgent(parentCid, 0, { maxDispatchDepth: 1 }));
+
+  const reply = await dispatchNested(state, parentCid);
+  const result = reply.result as { isError?: boolean; content: Array<{ text: string }> };
+  // The stub environment may fail the dispatch for unrelated reasons (agent
+  // resolution), but never with a budget message.
+  if (result.isError) {
+    assert.doesNotMatch(result.content[0].text, /nesting depth exceeded|maxNestingDepth: 0/i);
+  }
+});
+
+test("proxy parameter parsing carries maxNestingDepth through", () => {
+  assert.equal(parseProxyTeammateParams({ tasks: [{ prompt: "noop" }], maxNestingDepth: 0 })?.maxNestingDepth, 0);
+  assert.equal(parseProxyTeammateParams({ tasks: [{ prompt: "noop" }], maxNestingDepth: 2 })?.maxNestingDepth, 2);
+});
+
+test("out-of-range maxNestingDepth is rejected with the unified normalization message", async () => {
+  // Range validation lives only in normalizeTeammateParams (coding-009): the
+  // proxy path must surface the same message as the root path.
+  for (const value of [3, -1]) {
+    const state = makeState();
+    const parentCid = randomUUID();
+    state.activeRuns.set(parentCid, makeAgent(parentCid, 0));
+
+    const reply = await dispatchNested(state, parentCid, undefined, {
+      tasks: [{ agent: "worker", prompt: "noop" }],
+      maxNestingDepth: value,
+    });
+    const result = reply.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(result.isError, true);
+    assert.match(result.content[0].text, /maxNestingDepth must be an integer between 0 and 2/);
+    assert.equal(state.activeRuns.size, 1, "rejection must happen before agent registration");
+  }
+});
+
+test("depth context prompt reports a disabled nesting budget explicitly", () => {
+  const disabled = appendTeammateDepthContext("base", 1, 0);
+  assert.match(disabled, /maxNestingDepth: 0/i);
+  assert.match(disabled, /intentionally unavailable/i);
+
+  // Legacy signature keeps the previous remaining-depth semantics.
+  const main = appendTeammateDepthContext("base", 0);
+  assert.match(main, /Remaining teammate depth: 2/);
+  assert.match(main, /delegate through the teammate tool for 2 more levels/);
+  const firstLevel = appendTeammateDepthContext("base", 1);
+  assert.match(firstLevel, /Remaining teammate depth: 1/);
+  const terminal = appendTeammateDepthContext("base", 2);
+  assert.match(terminal, /terminal teammate level/i);
+  assert.doesNotMatch(terminal, /maxNestingDepth: 0/i);
 });

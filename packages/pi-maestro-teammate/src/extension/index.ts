@@ -79,8 +79,10 @@ import {
   truncateUtf8Tail,
   checkDepthGuard,
   getTeammateDepth,
+  getTeammateMaxDispatchDepth,
   MAX_DEFAULT_DEPTH,
   resolveMaxActiveAgents,
+  rootChildMaxDispatchDepth,
   isStructuredOutputSettlementDiagnostic,
 } from "../runs/execution.ts";
 import {
@@ -286,7 +288,12 @@ export default function registerTeammateExtension(
 
   const isChild = process.env.PI_TEAMMATE_CHILD === "1";
   const currentDepth = isChild ? getTeammateDepth() : 0;
-  const canDispatchNestedTeammate = !isChild || currentDepth < MAX_DEFAULT_DEPTH;
+  // Child env depth is record depth + 1; the child may dispatch iff its record
+  // depth stays under its budget, i.e. envDepth <= maxDispatchDepth. A budget
+  // of 0 (maxNestingDepth: 0 dispatch) hides the proxy tool entirely.
+  const currentMaxDispatchDepth = isChild ? getTeammateMaxDispatchDepth() : undefined;
+  const canDispatchNestedTeammate = !isChild
+    || currentDepth <= (currentMaxDispatchDepth ?? MAX_DEFAULT_DEPTH - 1);
 
   // A re-registered extension instance starts from a cold role catalog, so
   // reload semantics stay identical to a fresh process. Session cwd switches
@@ -328,7 +335,7 @@ export default function registerTeammateExtension(
   ): { systemPrompt: string } => {
     const withModels = appendModelCatalog(event.systemPrompt, refreshModelCatalog(ctx));
     const withAgents = appendAgentCatalog(withModels, ctx.cwd);
-    return { systemPrompt: appendTeammateDepthContext(withAgents, currentDepth) };
+    return { systemPrompt: appendTeammateDepthContext(withAgents, currentDepth, currentMaxDispatchDepth) };
   };
 
   // =========================================================================
@@ -958,6 +965,9 @@ export default function registerTeammateExtension(
         };
       }
       const singleTask = normalizedTasks[0];
+      // Agents spawned by this root dispatch may dispatch at most
+      // maxNestingDepth levels below themselves (0 forbids nested calls).
+      const childMaxDispatchDepth = rootChildMaxDispatchDepth(params.maxNestingDepth);
       const singleRunParams = {
         agent: singleTask.agent,
         task: singleTask.prompt,
@@ -1050,6 +1060,7 @@ export default function registerTeammateExtension(
         replyTo: params.reply_to,
         // Root-tool dispatches start the tree.
         depth: 0,
+        maxDispatchDepth: childMaxDispatchDepth,
         status: "running",
         sleepMs: 0,
         lease: createChildLease(),
@@ -1105,6 +1116,7 @@ export default function registerTeammateExtension(
             // Graph tasks belong to their dispatch, so they share its depth;
             // a teammate call made *by* one of them is what advances it.
             depth: activeAgent.depth,
+            maxDispatchDepth: childMaxDispatchDepth,
             status: "pending",
             sleepMs: 0,
             lease: createChildLease(),
@@ -1255,6 +1267,7 @@ export default function registerTeammateExtension(
           ...(isSingle ? { correlationId } : {}),
           ...(isMultiTask ? { taskCorrelationIds } : {}),
           depth: activeAgent.depth,
+          maxDispatchDepth: childMaxDispatchDepth,
           signal: abortController.signal,
           ...(isMultiTask ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
           parentSessionFile,
@@ -3353,8 +3366,9 @@ export default function registerTeammateExtension(
     stopWakeableEvictionTimer();
     widgetTimer = setInterval(() => {
       // A result-ready zombie keeps hasTeammateWidgetWork true, so this tick is
-      // exactly where it stays reachable until reclaimed.
-      reclaimResultReadyAgents(state);
+      // exactly where it stays reachable until reclaimed. Publishing the
+      // retirement keeps delta-only consumers (cockpit roster) in sync.
+      reclaimResultReadyAgents(state, pi);
       sweepFailedAgents(state);
       enforceWakeableAgentBudget(state);
       if (!hasTeammateWidgetWork(state)) {

@@ -1,0 +1,165 @@
+{
+  "ant_id": "ANT-1-3",
+  "iteration": 1,
+  "path": [
+    "deferred-intent",
+    "extension-wiring",
+    "nested-session",
+    "budget-guard"
+  ],
+  "score": 0.9999999999999999,
+  "self_score": 0.88,
+  "candidate_solution": {
+    "type": "object",
+    "summary": "Split session-local compaction protection from parent-owned workflow lifecycle and register it in teammate children.",
+    "content": {
+      "findings": [
+        {
+          "id": "CF-CHILD-DEFERRED-INTENT",
+          "interaction": [
+            "teammate child spawn/inherited extension",
+            "Maestro extension child fencing",
+            "output-limit deferred intent settlement"
+          ],
+          "triage": "live",
+          "severity": "medium",
+          "description": "Every teammate process receives PI_TEAMMATE_CHILD=1 and explicitly loads the inherited Maestro extension, but the extension immediately returns after registering the child surface. That surface has no context, agent_end, or agent_settled hooks, so a length-truncated teammate response never enters onOutputLimit and never reaches settlePendingOutputLimit. The parent may therefore consume a partial teammate result without the compaction-and-continue recovery that root sessions receive.",
+          "side_a_evidence": [
+            "packages/pi-maestro-teammate/src/runs/execution.ts:500",
+            "packages/pi-maestro-teammate/src/runs/execution-infra.ts:1179"
+          ],
+          "side_b_evidence": [
+            "packages/pi-maestro-flow/src/extension/index.ts:490",
+            "packages/pi-maestro-flow/src/extension/index.ts:2013",
+            "packages/pi-maestro-flow/src/compaction/auto-compaction.ts:1028",
+            "packages/pi-maestro-flow/src/compaction/auto-compaction.ts:990"
+          ],
+          "invariant_broken": "A length-truncated session that is eligible for pressure recovery must either settle its stored output-limit intent or explicitly report that recovery is unavailable.",
+          "minimal_fix": "Extract a child-safe, session-local compaction registration that owns its own CompactionArbiter and auto-compaction state, then call it from registerMaestroChildSurface. Register only compaction hooks (session_start/context/before_provider_request/agent_end/agent_settled/session_before_compact/session_compact/session_shutdown); continue excluding parent-owned Workflow, Goal, Plan, and root Todo lifecycle hooks.",
+          "test_gap": "Extend the PI_TEAMMATE_CHILD extension harness to emit a high-pressure length agent_end followed by agent_settled and assert that child-local compact plus continuation occurs. The current test only asserts that agent_end is absent, conflating parent Goal ownership with all session-local end-of-turn behavior."
+        },
+        {
+          "id": "CF-CHILD-K2-GUARD",
+          "interaction": [
+            "teammate child extension fencing",
+            "provider request budget invariant",
+            "native/no-op compaction pressure path"
+          ],
+          "triage": "risk",
+          "severity": "high",
+          "known_issue": "K2 derivative",
+          "description": "K2 is fixed for root sessions by disableInvalidBudgetThinking plus before_provider_request wiring, but the PI_TEAMMATE_CHILD early return omits that hook. A child that reaches the same clamped Anthropic payload can still send max_tokens <= budget_tokens and receive a deterministic provider error. Static wiring proves exposure; this review did not reproduce the upstream Pi clamp in a live child, so triage remains risk rather than live.",
+          "side_a_evidence": [
+            "packages/pi-maestro-flow/src/compaction/auto-compaction.ts:195",
+            "packages/pi-maestro-flow/src/extension/index.ts:1852",
+            "packages/pi-maestro-flow/test/compaction.test.ts:795"
+          ],
+          "side_b_evidence": [
+            "packages/pi-maestro-flow/src/extension/index.ts:490",
+            "packages/pi-maestro-flow/src/extension/index.ts:2013",
+            "packages/pi-maestro-flow/test/extension-tools.test.ts:555"
+          ],
+          "invariant_broken": "Anthropic budget_tokens must be at least 1024 and strictly less than max_tokens in every provider request, independent of root or child session ownership.",
+          "minimal_fix": "At minimum, register a child before_provider_request hook that calls disableInvalidBudgetThinking. This guard has no parent-owned state and can be shared immediately even before the larger child compaction surface is extracted.",
+          "test_gap": "In child mode, emit before_provider_request with max_tokens=1 and budget_tokens=1024 and assert thinking is disabled."
+        },
+        {
+          "id": "CF-DEFERRED-NATIVE-HANDOFF",
+          "interaction": [
+            "output-limit deferred intent",
+            "native compaction owner arbitration"
+          ],
+          "triage": "fixed",
+          "severity": "medium",
+          "description": "The root-session handoff is closed: onCompact snapshots whether a native completion should continue a pending output-limit response before clearing state, while session_compact captures the arbiter owner before complete(). Existing tests cover both yielding before settlement and continuing after native completion.",
+          "side_a_evidence": [
+            "packages/pi-maestro-flow/src/compaction/auto-compaction.ts:1079",
+            "packages/pi-maestro-flow/test/compaction.test.ts:2384",
+            "packages/pi-maestro-flow/test/compaction.test.ts:2505"
+          ],
+          "side_b_evidence": [
+            "packages/pi-maestro-flow/src/extension/index.ts:1805",
+            "packages/pi-maestro-flow/src/compaction/compaction-arbiter.ts:92"
+          ],
+          "minimal_fix": "No root-path code change; preserve the owner-before-complete ordering and port the same invariant into any child-local compaction registration."
+        }
+      ],
+      "known_issue_assessment": [
+        {
+          "id": "K1",
+          "triage": "fixed",
+          "severity": "low",
+          "assessment": "The obsolete native /swarm execution path no longer calls sendUserMessage with /skill:name; current swarm.ts is display-only and tells the user to invoke the skill directly. Permission parsing also accepts file_path and path. The underlying SDK expansion behavior may remain, but the cited integration path is gone.",
+          "evidence": [
+            "packages/pi-maestro-flow/src/tools/swarm.ts:13",
+            "packages/pi-maestro-flow/src/permissions/policy.ts:236"
+          ]
+        },
+        {
+          "id": "K2",
+          "triage": "risk",
+          "severity": "high",
+          "assessment": "Fixed in the root hook chain, but a derivative exposure remains in teammate children because child registration omits before_provider_request.",
+          "evidence": [
+            "packages/pi-maestro-flow/src/compaction/auto-compaction.ts:195",
+            "packages/pi-maestro-flow/src/extension/index.ts:1852",
+            "packages/pi-maestro-flow/src/extension/index.ts:490"
+          ]
+        },
+        {
+          "id": "K3",
+          "triage": "fixed",
+          "severity": "low",
+          "assessment": "onCompact now persists the cleared prune manifest immediately, preventing stale prune entries from surviving a close before the next evaluate.",
+          "evidence": [
+            "packages/pi-maestro-flow/src/compaction/auto-compaction.ts:1105"
+          ]
+        },
+        {
+          "id": "K4",
+          "triage": "fixed",
+          "severity": "low",
+          "assessment": "session_before_compact now calls commitProjectedCompactionInput before createMaestroCompaction, keeping Pi's fallback closure aligned with the projected preparation.",
+          "evidence": [
+            "packages/pi-maestro-flow/src/compaction/auto-compaction.ts:304",
+            "packages/pi-maestro-flow/src/extension/index.ts:1792"
+          ]
+        },
+        {
+          "id": "K5",
+          "triage": "fixed",
+          "severity": "low",
+          "assessment": "The proposed shared compaction root cause remains refuted; claude_model_required is an independent remote routing issue and no compaction cooperation edge was found for it in this path.",
+          "evidence": [
+            ".workflow/sessions/20260801-team-swarm-compaction-gaps-20260801-100217/runs/20260801-001-team-swarm/work/team/swarm-config.json:55"
+          ]
+        }
+      ],
+      "verification": {
+        "command": "node --experimental-transform-types --test --test-name-pattern=output-limit|provider request hook|teammate child registers test/compaction.test.ts test/extension-tools.test.ts",
+        "result": "14 passed, 0 failed",
+        "interpretation": "Root deferred/native behavior and current child hook omission are both reproducible; no child-specific compaction or budget-guard test exists."
+      }
+    }
+  },
+  "evidence": [
+    "deferred-intent::extension-wiring A/B: packages/pi-maestro-flow/src/compaction/auto-compaction.ts:1028 <-> packages/pi-maestro-flow/src/extension/index.ts:1875",
+    "packages/pi-maestro-flow/src/compaction/auto-compaction.ts:782",
+    "packages/pi-maestro-flow/src/compaction/auto-compaction.ts:990",
+    "packages/pi-maestro-flow/src/extension/index.ts:1884",
+    "extension-wiring::nested-session A/B: packages/pi-maestro-flow/src/extension/index.ts:490 <-> packages/pi-maestro-teammate/src/runs/execution.ts:500",
+    "packages/pi-maestro-teammate/src/runs/execution-infra.ts:1179",
+    "packages/pi-maestro-flow/src/extension/index.ts:2013",
+    "packages/pi-maestro-flow/test/extension-tools.test.ts:555",
+    "nested-session::budget-guard A/B: packages/pi-maestro-flow/src/extension/index.ts:2013 <-> packages/pi-maestro-flow/src/compaction/auto-compaction.ts:195",
+    "packages/pi-maestro-flow/src/extension/index.ts:1852",
+    "packages/pi-maestro-flow/test/compaction.test.ts:795",
+    "packages/pi-maestro-flow/test/compaction.test.ts:833",
+    "native handoff fixed A/B: packages/pi-maestro-flow/src/compaction/auto-compaction.ts:1079 <-> packages/pi-maestro-flow/src/extension/index.ts:1805",
+    "K3 fixed: packages/pi-maestro-flow/src/compaction/auto-compaction.ts:1105",
+    "K4 fixed: packages/pi-maestro-flow/src/compaction/auto-compaction.ts:304 <-> packages/pi-maestro-flow/src/extension/index.ts:1792",
+    "K1 integration fixed: packages/pi-maestro-flow/src/tools/swarm.ts:13",
+    "K1 dialect fixed: packages/pi-maestro-flow/src/permissions/policy.ts:236"
+  ],
+  "updated_at": 1785579898.5426998
+}

@@ -187,15 +187,17 @@ function buildAgentTree(rows: readonly AgentRow[], glyphs: IconGlyphs): AgentTre
 }
 
 function agentGlyph(
-	status: AgentRow["status"],
+	status: AgentRow["status"] | "result-ready",
 	glyphs: IconGlyphs,
 	spin: string,
 ): { glyph: string; color: ThemeColor; label?: string } {
 	if (status === "failed") return { glyph: glyphs.cross, color: "error" };
+	if (status === "terminated") return { glyph: glyphs.cross, color: "warning", label: "terminated" };
 	if (status === "done") return { glyph: glyphs.check, color: "success" };
 	if (status === "pending") return { glyph: glyphs.pending, color: "dim", label: "pending" };
 	if (status === "sleeping") return { glyph: glyphs.dotIdle, color: "warning", label: "sleeping" };
 	if (status === "retrying") return { glyph: spin, color: "warning", label: "retrying" };
+	if (status === "result-ready") return { glyph: glyphs.pending, color: "dim", label: "result-ready" };
 	return { glyph: spin, color: "accent" };
 }
 
@@ -235,6 +237,7 @@ export function renderAgents(
 	const agentDropRank = (status: string): number => {
 		if (status === "running" || status === "retrying") return 60;
 		if (status === "failed") return 50;
+		if (status === "terminated") return 45;
 		if (status === "pending") return 30;
 		if (status === "sleeping") return 20;
 		return 10; // completed, unknown
@@ -255,7 +258,12 @@ export function renderAgents(
 	// Identity (tree position, state, role, task) outranks telemetry (tool, tail,
 	// counts) so the row still answers "who is doing what" at 40 columns.
 	const lines = visible.map(({ row: r, prefix }) => {
-		const status = agentGlyph(r.status, g, spin);
+		// A published result with an unconfirmed lifecycle is no longer actively
+		// working: stop the spinner so the row reads as "done, wrapping up".
+		const effectiveStatus = r.status === "running" && r.resultReadyAt !== undefined
+			? "result-ready"
+			: r.status;
+		const status = agentGlyph(effectiveStatus, g, spin);
 		const rc = roleColor(r.role);
 		const segs: PrioritizedSegment[] = [
 			{ text: theme.fg("dim", prefix), priority: 100, clippable: false },

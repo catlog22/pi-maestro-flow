@@ -233,6 +233,33 @@ test("an agent stuck running with a published result is eventually retired", () 
   assert.equal(state.activeRuns.get(cid)?.lastResult, "the answer");
 });
 
+test("retiring a reclaimed agent publishes a complete event so cockpit rows converge", () => {
+  const state = makeState();
+  const startedAt = Date.now();
+  const cid = addAgent(state, "orphan", {
+    startedAt,
+    resultReadyAt: startedAt + 1_000,
+    lastResult: "the answer",
+  }).correlationId;
+  const events: Array<{ channel: string; payload: unknown }> = [];
+  const pi = {
+    events: {
+      emit(channel: string, payload: unknown) {
+        events.push({ channel, payload });
+      },
+    },
+  } as never;
+
+  assert.deepEqual(reclaimResultReadyAgents(state, pi, startedAt + RESULT_READY_RECLAIM_MS + 1_000), [cid]);
+  const complete = events.find((e) => e.channel === TEAMMATE_COMPLETE_EVENT);
+  assert.ok(complete, "a reclaim must publish TEAMMATE_COMPLETE_EVENT");
+  const payload = complete.payload as Record<string, unknown>;
+  assert.equal(payload.correlationId, cid);
+  assert.equal(payload.exitCode, 0);
+  assert.equal(payload.wakeable, true, "wakeable=true keeps the row visible as sleeping in the cockpit");
+  assert.equal(payload.cancelled, undefined);
+});
+
 test("an agent whose result was just published is left alone", () => {
   const state = makeState();
   addAgent(state, "fresh", { resultReadyAt: Date.now() });

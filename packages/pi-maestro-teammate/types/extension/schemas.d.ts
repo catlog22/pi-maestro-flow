@@ -45,6 +45,7 @@ export declare const TeammateParams: Type.TObject<{
     }>>;
     concurrency: Type.TOptional<Type.TInteger>;
     maxAgents: Type.TOptional<Type.TInteger>;
+    maxNestingDepth: Type.TOptional<Type.TInteger>;
     outputSchema: Type.TOptional<Type.TUnsafe<unknown>>;
     background: Type.TOptional<Type.TBoolean>;
     context: Type.TOptional<Type.TUnsafe<"fresh" | "fork">>;

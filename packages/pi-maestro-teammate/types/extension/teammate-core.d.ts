@@ -44,7 +44,7 @@ export declare const TEAMMATE_MONITOR_GUIDELINES: string[];
 export declare function exposeLegacyObservationTools(): boolean;
 export declare const TEAMMATE_DEPTH_START_MARKER = "<teammate_nesting_context>";
 export declare const TEAMMATE_DEPTH_END_MARKER = "</teammate_nesting_context>";
-export declare function appendTeammateDepthContext(systemPrompt: string, depth: number): string;
+export declare function appendTeammateDepthContext(systemPrompt: string, depth: number, maxDispatchDepth?: number): string;
 export declare function backgroundWaitGuidance(correlationId: string): string;
 export declare function foregroundWaitWindowMs(tasks: ReadonlyArray<{
     timeoutMs?: number;

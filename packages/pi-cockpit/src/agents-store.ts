@@ -40,6 +40,8 @@ export interface ProgressPayload {
 	completedAt?: number | string;
 	durationMs?: number;
 	lastActivityAt?: number | string;
+	/** Published when the agent produced its final result but lifecycle is still confirming. */
+	resultReadyAt?: number | string;
 	recentTools?: Array<string | { name?: string; status?: string }>;
 	toolCount?: number;
 	tokens?: number;
@@ -68,7 +70,7 @@ export interface MessagePayload {
 	progress?: ProgressPayload[];
 }
 export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exitCode">
-	& Partial<Pick<TeammateCompleteEvent, "durationMs" | "wakeable">>;
+	& Partial<Pick<TeammateCompleteEvent, "durationMs" | "wakeable" | "cancelled">>;
 
 /**
  * How long a failed agent stays on screen after it completes.
@@ -85,6 +87,14 @@ export const FAILED_LINGER_MS = 30_000;
  * when an idle agent stops occupying screen space.
  */
 export const SLEEPING_LINGER_MS = 60_000;
+
+/**
+ * How long a terminated (cancelled/aborted) row stays on screen after it ends.
+ *
+ * Shorter than a failure: cancellation is expected, but the user should still
+ * see the × long enough to read which agent was taken down.
+ */
+export const TERMINATED_LINGER_MS = 15_000;
 
 /**
  * How long a completed agent's tombstone suppresses self-healing.
@@ -121,6 +131,8 @@ export function mapAgentStatus(status: unknown): AgentStatus {
 			return "done";
 		case "failed":
 			return "failed";
+		case "terminated":
+			return "terminated";
 		case "running":
 		default:
 			return "running";
@@ -260,8 +272,11 @@ export class AgentsStore {
 		if (typeof p.status === "string") {
 			row.taskStatus = p.status;
 			row.status = mapAgentStatus(p.status);
-			if (row.status === "done" || row.status === "failed") row.finishedAt ??= now;
-			else delete row.finishedAt;
+			if (row.status === "done" || row.status === "failed" || row.status === "terminated") {
+				row.finishedAt ??= now;
+			} else {
+				delete row.finishedAt;
+			}
 		}
 		if (typeof p.taskIndex === "number") row.taskIndex = p.taskIndex;
 		if (Array.isArray(p.dependencies)) row.dependencies = [...p.dependencies];
@@ -281,10 +296,20 @@ export class AgentsStore {
 			// only evidence of the failure disappeared in the same frame it appeared.
 			// Successes still vanish immediately — the work has simply moved on.
 			const row = this.roster.get(id);
+			const cancelledById = id === p.correlationId && p.cancelled === true;
 			const failedByExitCode = id === p.correlationId
 				&& Number.isFinite(p.exitCode)
 				&& p.exitCode !== 0;
-			if (row && (row.status === "failed" || failedByExitCode)) {
+			if (row && (cancelledById || row.status === "terminated")) {
+				// Cancelled/terminated runs carry exitCode 1 but are not failures:
+				// a user abort or a result-ready reclaim must not light the red ✗.
+				row.status = "terminated";
+				row.taskStatus = "terminated";
+				row.finishedAt = terminalTime(row, id === p.correlationId ? p : {}, now);
+				row.lastActivityAt = now;
+				delete row.activeTool;
+				delete row.failedAt;
+			} else if (row && (row.status === "failed" || failedByExitCode)) {
 				row.status = "failed";
 				row.taskStatus = "failed";
 				row.finishedAt = terminalTime(row, id === p.correlationId ? p : {}, now);
@@ -307,11 +332,14 @@ export class AgentsStore {
 		}
 	}
 
-	/** Drop failed or expired sleeping rows that have had their time on screen. Returns true if any went. */
+	/** Drop failed, terminated or expired sleeping rows that have had their time on screen. Returns true if any went. */
 	prune(now = Date.now()): boolean {
 		let changed = false;
 		for (const [id, row] of this.roster) {
 			if (row.failedAt !== undefined && now - row.failedAt >= FAILED_LINGER_MS) {
+				this.roster.delete(id);
+				changed = true;
+			} else if (row.status === "terminated" && row.finishedAt !== undefined && now - row.finishedAt >= TERMINATED_LINGER_MS) {
 				this.roster.delete(id);
 				changed = true;
 			} else if (row.status === "sleeping" && row.finishedAt !== undefined && now - row.finishedAt >= SLEEPING_LINGER_MS) {
@@ -325,10 +353,11 @@ export class AgentsStore {
 		return changed;
 	}
 
-	/** True while a failed or sleeping row is still counting down, so the redraw loop must run. */
+	/** True while a failed, terminated or sleeping row is still counting down, so the redraw loop must run. */
 	hasLingering(): boolean {
 		for (const row of this.roster.values()) {
 			if (row.failedAt !== undefined) return true;
+			if (row.status === "terminated") return true;
 			if (row.status === "sleeping") return true;
 		}
 		return false;
@@ -367,12 +396,15 @@ export class AgentsStore {
 		if (typeof p.status === "string") {
 			row.taskStatus = p.status;
 			row.status = mapAgentStatus(p.status);
-			if (row.status === "done" || row.status === "failed") {
+			if (row.status === "done" || row.status === "failed" || row.status === "terminated") {
 				row.finishedAt = terminalTime(row, p, now);
 			} else {
 				delete row.finishedAt;
 			}
 		}
+		row.resultReadyAt = p.resultReadyAt === undefined
+			? undefined
+			: normalizeStartedAt(p.resultReadyAt, now);
 		row.taskIndex = p.taskIndex;
 		row.dependencies = Array.isArray(p.dependencies) ? [...p.dependencies] : [];
 		row.lastActivityAt = normalizeStartedAt(p.lastActivityAt, now);

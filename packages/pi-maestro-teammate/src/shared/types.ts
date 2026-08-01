@@ -210,6 +210,13 @@ export interface ActiveAgent {
    * a process-scoped environment variable cannot carry it.
    */
   depth: number;
+  /**
+   * Absolute max record-depth this agent may dispatch at (its children's
+   * ceiling). Root dispatches set it from maxNestingDepth; proxied dispatches
+   * subtract one from the parent's budget. Agents with budget 0 cannot call
+   * the teammate tool at all. Absent on legacy records: global ceiling.
+   */
+  maxDispatchDepth?: number;
   status: AgentStatus;
   retry?: AgentRetryState;
   /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */

@@ -160,6 +160,13 @@ export const TeammateParams = Type.Object({
     }),
   ),
 
+  maxNestingDepth: Type.Optional(
+    Type.Integer({
+      description:
+        "How many levels of nested teammate dispatch the agents spawned by this call may perform below themselves. 0 forbids nested calls entirely: the assigned agents cannot dispatch teammates. Defaults to the global ceiling (range 0..2 enforced by normalization).",
+    }),
+  ),
+
   // === Structured Output (default for tasks without their own) ===
 
   outputSchema: Type.Optional(
