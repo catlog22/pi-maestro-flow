@@ -1,0 +1,1778 @@
+/**
+ * Teammate Extension Entry Point
+ *
+ * Tools: teammate (dispatch), teammate-send (RPC message injection), teammate-list (status), observe
+ * TUI: Alt+R composer panel, widget above editor, Alt+B foreground→background detach
+ * Mode: RPC subprocess — stdin open for steer/follow_up/abort
+ */
+
+import { randomUUID } from "node:crypto";
+import type {
+  ExtensionAPI,
+  ExtensionCommandContext,
+  ExtensionContext,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import { Check } from "typebox/value";
+import { isGuiTeammateToolAllowed, registerGuiTool, unregisterGuiTool } from "../shared/gui-registry.ts";
+import { Text, truncateToWidth } from "@earendil-works/pi-tui";
+import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams, ObserveParams } from "./schemas.ts";
+import {
+  formatObserveResult,
+  observeTargets,
+  registerObservationProvider,
+  type ObserveParams as UnifiedObserveParams,
+  type ObserveResult,
+  type ObservationProvider,
+  type ObservationSnapshot,
+  type ObservationWaitStatus,
+} from "../public/v1/observation.ts";
+import {
+  formatCompact,
+  formatVerbose,
+  formatHeader,
+  formatBarrierCompact,
+  validateMonitorParams,
+  MONITOR_STATUS_KEY,
+  MONITOR_DEFAULT_TIMEOUT_MS,
+  MONITOR_DEFAULT_LINES,
+  createEngineState,
+  startEngine,
+  stopEngine,
+  addBinding,
+  removeBinding,
+  clearBindings,
+  formatEngineStatusBar,
+  buildAutoAnalysisPrompt,
+  buildCustomAnalysisPrompt,
+  parseAnalysisResult,
+  ENGINE_TICK_MS,
+  type MonitorTargetSnapshot,
+  type MonitorParams,
+  type MonitorEngineState,
+  type MonitorSupervisionMode,
+  type EngineAgentInfo,
+  type AnalysisResult,
+} from "./monitor.ts";
+import {
+  createWorkspacePeerCommandConsumer,
+  createWorkspacePeerRuntime,
+  discoverWorkspacePeers,
+  resolveWorkspaceTarget,
+  sendWorkspacePeerCommand,
+  type WorkspaceAgentSnapshot,
+  type WorkspaceOwnerSnapshot,
+  type WorkspaceOwnerState,
+  type WorkspacePeerCommandConsumer,
+  type WorkspacePeerPublisher,
+  type WorkspaceResolvedTarget,
+  type WorkspaceSettledSnapshot,
+} from "./workspace-peers.ts";
+import {
+  runSingleTeammate,
+  runGraph,
+  normalizeTeammateParams,
+  inferGraphMode,
+  taskDependencyNames,
+  sendRpcMessage,
+  truncateUtf8Tail,
+  checkDepthGuard,
+  getTeammateDepth,
+  MAX_DEFAULT_DEPTH,
+  resolveMaxActiveAgents,
+  isStructuredOutputSettlementDiagnostic,
+} from "../runs/execution.ts";
+import {
+  confirmChildReloaded,
+  confirmParked,
+  canChildWrite,
+  buildFenceRecoveryMessages,
+  cancelPark,
+  createChildLease,
+  fenceLease,
+  leaseToken,
+  handoffBarrierReached,
+  isSessionPathContained,
+  leaseSelection,
+  requestHandback,
+  requestPark,
+  recoverChild,
+  restoreMainOwnership,
+  sameLeaseSelection,
+  sameLeaseToken,
+  transitionLeaseIfCurrent,
+  transferToMain,
+  unwrapLeasedMessage,
+  type LeaseSelection,
+  type LeaseToken,
+} from "../runs/session-handoff.ts";
+import type {
+  RunTeammateParams,
+  RunTeammateOptions,
+  RpcMessageMode,
+  NormalizedTask,
+} from "../runs/execution.ts";
+import {
+  auxToolCallFallback,
+  auxToolResultFallback,
+  renderQuietTeammateAux,
+  renderTeammateCall,
+  renderTeammateListCall,
+  renderTeammateListResult,
+  renderTeammateResult,
+} from "../tui/render.ts";
+import { AttachOverlay } from "../tui/attach-overlay.ts";
+import {
+  BracketedPasteDecoder,
+  removeLastGrapheme,
+  sanitizeSingleLineInput,
+  type DecodedInputToken,
+} from "../tui/input-text.ts";
+import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
+import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
+import type {
+  Details,
+  TeammateState,
+  AgentProgress,
+  AgentProgressSnapshot,
+  ChildAgentCallSnapshot,
+  ActiveAgent,
+  AgentStatus,
+  AgentTerminalStatus,
+  MessageEnvelope,
+  SettledAgentRecord,
+  SingleResult,
+  TeammateInteractionRecord,
+} from "../shared/types.ts";
+
+type TeammateToolResult<T> = AgentToolResult<T> & { isError?: boolean };
+
+function isTeammateToolResult(value: unknown): value is TeammateToolResult<unknown> {
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  return Array.isArray(record.content)
+    && Object.prototype.hasOwnProperty.call(record, "details")
+    && (record.isError === undefined || typeof record.isError === "boolean");
+}
+import {
+  TEAMMATE_COMPLETE_EVENT,
+  TEAMMATE_STARTED_EVENT,
+  TEAMMATE_MESSAGE_EVENT,
+} from "../shared/types.ts";
+import {
+  appendAgentCatalog,
+  discoverAgents,
+  formatAgentCatalog,
+  invalidateAgentCatalogCache,
+  listAgentSummaries,
+  type AgentSummary,
+} from "../agents/agents.ts";
+import {
+  appendModelCatalog,
+  createModelCatalogSnapshot,
+  type ModelCatalogSnapshot,
+  type TeammateModelCapability,
+} from "../models/model-catalog.ts";
+import {
+  applyModelRouting,
+  formatModelRoutingConfig,
+  parseTeammateTaskType,
+  type TeammateTaskType,
+} from "../models/model-routing.ts";
+import type { TeammateThinkingInput } from "../shared/thinking.ts";
+import {
+  getTeammateChildToolBroker,
+  getTeammatePermissionBroker,
+  registerTeammateChildProxyCaller,
+} from "../runs/child-extensions.ts";
+import { setQuietMode } from "../quiet-state.ts";
+
+import {
+  AGENT_BUFFER_LIMITS,
+  AGENT_WIDGET_IDLE_HIDE_MS,
+  LIVE_AGENT_STATUSES,
+  TEAMMATE_INTERACTION_QUEUE_LIMIT,
+  TEAMMATE_INTERACTION_TIMEOUT_MS,
+  TEAMMATE_PENDING_STALL_TIMEOUT_MS,
+  TEAMMATE_STALL_TIMEOUT_MS,
+  TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS,
+  TEAMMATE_WAIT_POLL_FLOOR_MS,
+  WAKEABLE_AGENT_BUDGET,
+  aggregateGraphStructuredOutput,
+  appendAgentProgressLine,
+  backgroundWaitGuidance,
+  canProxySendTo,
+  checkActiveAgentBudget,
+  createForegroundDeadline,
+  createProgressFlushGate,
+  displayMessageForResult,
+  emitTeammateStarted,
+  foregroundWaitWindowMs,
+  formatRetryDelay,
+  handleChildLifecycleEvent,
+  resolveProxyParentCorrelationId,
+  summarizeGraphResults,
+  trimAgentBuffers,
+  wakeSleepingAgent,
+} from "./index.ts";
+import type { TeammateRuntimeOptions } from "./index.ts";
+
+// Cross-imports from teammate-helpers.ts (settlement, wait, list/watch)
+import {
+  settleTeammateWaiters, waitForTeammate, waitOutput, statusForWatchTarget,
+  settleAgent, settleGraphTaskAgent, settleAgentLifecycle,
+  recordSettledAgent, findSettledAgent, retireAgent,
+  killAgent, killAgentTree, releaseAgentMemory, sweepFailedAgents,
+  terminateNestedDispatchesOwnedBy, enforceWakeableAgentBudget,
+  reclaimResultReadyAgents, nextWakeableAgentExpiryDelay,
+  terminateAndRemoveWakeableCohort, wakeableAgentCohorts,
+  applyAgentRetryState, applyAgentResultReadyState, clearAgentResultReadyState,
+  markSettledResultInspectable, hasTeammateWidgetWork,
+  emitComplete, safeSendMessage, notifyBackgroundFailure,
+  bindAgentName, removeAgentFromRegistry, resolveAgentCorrelationId,
+  agentActiveMs, ts, buildAgentList, buildRoleList,
+  handleChildInteractionRequest, handleChildRpcUiRequest,
+  claimResultReadyNotice, watchTargetStalledAt,
+} from "./teammate-helpers.ts";
+import type {
+  RelayedQuestion, RelayedQuestionOption, TeammateInteractionQueue,
+  TeammateListView, TeammateWaitStatus, TeammateWaitResult,
+  WatchTarget, AgentTargetSelector, ListedAgent,
+  PendingTeammateWaiter, WakeableAgentCohort,
+} from "./teammate-helpers.ts";
+
+
+/**
+ * Builds the serial queue that relays child permission/question requests to the
+ * human. Serialization is deliberate — `ctx.ui.select` owns the terminal, so two
+ * concurrent prompts would fight over it — but every entry is bounded and
+ * cancellable, because the failure it guards against is a nested one: a parent
+ * agent waits on a child, that child waits on a prompt, and that prompt waits
+ * behind an unattended prompt belonging to an unrelated agent. Answering on the
+ * child's behalf after a timeout keeps that chain from becoming permanent.
+ */
+export function createTeammateInteractionQueue(
+  pi: ExtensionAPI,
+  state: TeammateState,
+  timeoutMs: number = TEAMMATE_INTERACTION_TIMEOUT_MS,
+): TeammateInteractionQueue {
+  interface Waiter {
+    correlationId?: string;
+    settle: (reason: string) => void;
+  }
+  let tail: Promise<void> = Promise.resolve();
+  const waiting = new Map<string, Waiter>();
+
+  const keyFor = (event: Record<string, unknown>): string => {
+    if (typeof event.requestId === "string") return event.requestId;
+    if (typeof event.id === "string") return event.id;
+    return randomUUID();
+  };
+
+  const correlationFor = (
+    event: Record<string, unknown>,
+    fallbackCorrelationId?: string,
+  ): string | undefined => (
+    typeof event.correlationId === "string" ? event.correlationId : fallbackCorrelationId
+  );
+
+  const enqueue: TeammateInteractionQueue["enqueue"] = (
+    event,
+    reply,
+    ctx,
+    fallbackCorrelationId,
+  ) => {
+    const key = keyFor(event);
+    if (waiting.size >= TEAMMATE_INTERACTION_QUEUE_LIMIT) {
+      replyChildRequestFailure(
+        event,
+        reply,
+        new Error(
+          `Too many teammate interactions are already waiting for an answer (${waiting.size}). ` +
+          `Answer the pending prompts, then retry.`,
+        ),
+      );
+      return;
+    }
+
+    let settled = false;
+    const interactionAbort = new AbortController();
+    let releaseHandler!: () => void;
+    const handlerCancelled = new Promise<void>((resolve) => { releaseHandler = resolve; });
+    const guardedReply = (msg: unknown): void => {
+      if (settled) return;
+      settled = true;
+      waiting.delete(key);
+      interactionAbort.abort();
+      releaseHandler();
+      // The handler may have recorded this request on the agent's pending set;
+      // settle() already does this for its own path, and keeping the reply path
+      // symmetric prevents a cleared prompt from pinning an agent as stalled.
+      const correlationId = correlationFor(event, fallbackCorrelationId);
+      state.activeRuns.get(correlationId ?? "")?.pendingInteractions?.delete(key);
+      reply(msg);
+    };
+    const settle = (reason: string): void => {
+      if (settled) return;
+      const correlationId = correlationFor(event, fallbackCorrelationId);
+      const agent = correlationId ? state.activeRuns.get(correlationId) : undefined;
+      agent?.pendingInteractions?.delete(key);
+      settled = true;
+      waiting.delete(key);
+      interactionAbort.abort();
+      releaseHandler();
+      replyChildRequestFailure(event, reply, new Error(reason));
+    };
+    waiting.set(key, { correlationId: correlationFor(event, fallbackCorrelationId), settle });
+
+    // RPC UI requests (select/confirm/input/editor) wait on a human answer just
+    // like relayed permission prompts. Recording them on the owning agent's
+    // pending set makes statusForWatchTarget treat the wait as "awaiting
+    // response" instead of reporting the agent as stalled after 30s idle — an
+    // editor left open was previously both unstallable (no abort contract) and
+    // invisible to the stall exemption, so teammate-wait misreported it as
+    // stalled minutes before the 5-minute interaction timeout.
+    if (event.type === "teammate_rpc_ui_request") {
+      const rpcCorrelationId = correlationFor(event, fallbackCorrelationId);
+      const rpcAgent = rpcCorrelationId ? state.activeRuns.get(rpcCorrelationId) : undefined;
+      if (rpcAgent) {
+        rpcAgent.pendingInteractions ??= new Map();
+        rpcAgent.pendingInteractions.set(key, {
+          requestId: key,
+          interaction: `rpc:${typeof event.method === "string" ? event.method : "ui"}`,
+          createdAt: Date.now(),
+          payload: event,
+        });
+        rpcAgent.lastActivityAt = Date.now();
+      }
+    }
+
+    // Armed on arrival, not on reaching the front of the queue: a request stuck
+    // behind an unanswered prompt is exactly the case that must stay bounded,
+    // and a timer that only starts at the front would never fire for it.
+    const timer = setTimeout(
+      () => settle(
+        `No answer within ${Math.round(timeoutMs / 1000)}s; the teammate was told to cancel. ` +
+        `The prompt may still be open if you want to answer it.`,
+      ),
+      timeoutMs,
+    );
+    timer.unref?.();
+
+    tail = tail.then(async () => {
+      // Settled while queued — cancelled or timed out, so do not seize the
+      // terminal on its behalf.
+      if (settled) return;
+      try {
+        const handler = event.type === "teammate_rpc_ui_request"
+          ? handleChildRpcUiRequest(event, guardedReply, ctx, interactionAbort.signal)
+          : handleChildInteractionRequest(
+              pi,
+              state,
+              event,
+              guardedReply,
+              ctx,
+              fallbackCorrelationId,
+              interactionAbort.signal,
+            );
+        // editor() has no abortable dialog contract, but the serial queue must
+        // not stay captured by a dialog that never closes: race the handler so
+        // cancellation/timeout releases the tail and later interactions can
+        // open even while this editor stays up. A late editor close resolves
+        // the handler, whose guardedReply is then absorbed by the settled guard.
+        await Promise.race([handler, handlerCancelled]);
+      } catch (error) {
+        if (!settled) replyChildRequestFailure(event, guardedReply, error);
+      } finally {
+        clearTimeout(timer);
+        // A handler that returned without replying would otherwise leave the
+        // child waiting forever on a request nothing will ever answer.
+        settle("The interaction handler returned without an answer.");
+      }
+    });
+  };
+
+  return {
+    enqueue,
+    cancelForAgent(correlationId, reason) {
+      let cancelled = 0;
+      for (const waiter of [...waiting.values()]) {
+        if (waiter.correlationId !== correlationId) continue;
+        waiter.settle(reason);
+        cancelled += 1;
+      }
+      return cancelled;
+    },
+    pendingCount: () => waiting.size,
+  };
+}
+
+export function replyChildRequestFailure(
+  event: Record<string, unknown>,
+  reply: (msg: unknown) => void,
+  error: unknown,
+): void {
+  if (event.type === "teammate_rpc_ui_request") {
+    reply({
+      type: "extension_ui_response",
+      id: typeof event.id === "string" ? event.id : randomUUID(),
+      cancelled: true,
+    });
+    return;
+  }
+  reply({
+    type: "teammate_interaction_response",
+    requestId: typeof event.requestId === "string" ? event.requestId : randomUUID(),
+    result: {
+      action: "cancel",
+      error: error instanceof Error ? error.message : String(error),
+    },
+  });
+}
+
+export async function showRelayedPermission(
+  ctx: ExtensionContext,
+  agentLabel: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const toolName = typeof payload.toolName === "string" ? payload.toolName : "unknown tool";
+  const reason = typeof payload.reason === "string" ? payload.reason : "User approval required.";
+  const detail = interactionDetail(payload.input);
+  const choice = await ctx.ui.select(
+    `@${agentLabel} requests ${toolName}\n\n${detail}\n\n${reason}`,
+    ["Allow once", "Always allow", "Deny"],
+    { signal },
+  );
+  if (choice === "Allow once") return { action: "allow_once" };
+  if (choice === "Always allow") return { action: "always_allow" };
+  return { action: "deny" };
+}
+
+export async function showRelayedQuestions(
+  ctx: ExtensionContext,
+  agentLabel: string,
+  payload: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<Record<string, unknown>> {
+  const questions = Array.isArray(payload.questions)
+    ? payload.questions.filter(isRecord).map(normalizeRelayedQuestion).filter((q): q is RelayedQuestion => Boolean(q))
+    : [];
+  if (questions.length === 0) return { action: "cancel", error: "No valid questions" };
+
+  const answers: Array<{
+    question: string;
+    header?: string;
+    selected: string[];
+    text?: string;
+  }> = [];
+  for (let index = 0; index < questions.length; index++) {
+    const question = questions[index];
+    const title = `@${agentLabel} · ${question.header ?? `Question ${index + 1}`}\n${question.question}`;
+    const options = question.options ?? [];
+    if (options.length === 0) {
+      const text = await ctx.ui.input(title, "Enter response", { signal });
+      if (text === undefined) return { action: "cancel" };
+      answers.push({
+        question: question.question,
+        ...(question.header ? { header: question.header } : {}),
+        selected: [],
+        ...(text.trim() ? { text: text.trim() } : {}),
+      });
+      continue;
+    }
+
+    const normalizedOptions = options.some((option) => option.label === "None of the above")
+      ? options
+      : [...options, { label: "None of the above" }];
+    const selected = question.multiSelect
+      ? await selectMultiple(ctx, title, normalizedOptions, signal)
+      : await selectOne(ctx, title, normalizedOptions, signal);
+    if (!selected) return { action: "cancel" };
+    let text: string | undefined;
+    if (selected.includes("None of the above")) {
+      const custom = await ctx.ui.input(
+        title,
+        "What would you like instead? (optional)",
+        { signal },
+      );
+      if (custom === undefined) return { action: "cancel" };
+      text = custom.trim() || undefined;
+    }
+    answers.push({
+      question: question.question,
+      ...(question.header ? { header: question.header } : {}),
+      selected,
+      ...(text ? { text } : {}),
+    });
+  }
+  return { action: "answer", answers };
+}
+
+export async function selectOne(
+  ctx: ExtensionContext,
+  title: string,
+  options: RelayedQuestionOption[],
+  signal?: AbortSignal,
+): Promise<string[] | undefined> {
+  const labels = options.map((option, index) => `${index + 1}. ${option.label}${option.description ? ` — ${option.description}` : ""}`);
+  const choice = await ctx.ui.select(title, labels, { signal });
+  const index = choice ? labels.indexOf(choice) : -1;
+  return index >= 0 ? [options[index].label] : undefined;
+}
+
+export async function selectMultiple(
+  ctx: ExtensionContext,
+  title: string,
+  options: RelayedQuestionOption[],
+  signal?: AbortSignal,
+): Promise<string[] | undefined> {
+  const selected = new Set<number>();
+  while (true) {
+    const labels = options.map((option, index) =>
+      `${selected.has(index) ? "[x]" : "[ ]"} ${index + 1}. ${option.label}`
+    );
+    const done = `Done (${selected.size})`;
+    const choice = await ctx.ui.select(title, [...labels, done], { signal });
+    if (choice === undefined) return undefined;
+    if (choice === done) {
+      return [...selected].sort((a, b) => a - b).map((index) => options[index].label);
+    }
+    const index = labels.indexOf(choice);
+    if (index < 0) continue;
+    if (options[index].label === "None of the above") {
+      selected.clear();
+      selected.add(index);
+    } else {
+      const noneIndex = options.findIndex((option) => option.label === "None of the above");
+      if (noneIndex >= 0) selected.delete(noneIndex);
+      if (selected.has(index)) selected.delete(index);
+      else selected.add(index);
+    }
+  }
+}
+
+export function normalizeRelayedQuestion(value: Record<string, unknown>): RelayedQuestion | undefined {
+  if (typeof value.question !== "string" || !value.question.trim()) return undefined;
+  const options = Array.isArray(value.options)
+    ? value.options.filter(isRecord).flatMap((option) =>
+      typeof option.label === "string"
+        ? [{
+            label: option.label,
+            ...(typeof option.description === "string" ? { description: option.description } : {}),
+          }]
+        : []
+    )
+    : undefined;
+  return {
+    question: value.question,
+    ...(typeof value.header === "string" ? { header: value.header } : {}),
+    ...(options ? { options } : {}),
+    ...(value.multiSelect === true ? { multiSelect: true } : {}),
+  };
+}
+
+export function replyInteraction(
+  reply: (msg: unknown) => void,
+  requestId: string,
+  result: Record<string, unknown>,
+): void {
+  reply({ type: "teammate_interaction_response", requestId, result });
+}
+
+export function interactionDetail(value: unknown): string {
+  if (!isRecord(value)) return "{}";
+  const raw = typeof value.command === "string"
+    ? value.command
+    : typeof value.path === "string"
+      ? value.path
+      : typeof value.file_path === "string"
+        ? value.file_path
+        : JSON.stringify(value);
+  return raw.length > 500 ? `${raw.slice(0, 497)}...` : raw;
+}
+
+export function questionSummary(value: unknown): string {
+  if (!Array.isArray(value)) return "No questions";
+  return value.filter(isRecord).map((question, index) =>
+    `${index + 1}. ${typeof question.question === "string" ? question.question : "Invalid question"}`
+  ).join("\n");
+}
+
+export function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+// ===========================================================================
+// Flat model: handle proxy requests from child processes
+// ===========================================================================
+
+export async function dispatchRegisteredChildTool(
+  event: Record<string, unknown>,
+  reply: (message: unknown) => void,
+  state?: TeammateState,
+  verifiedCorrelationId?: string,
+): Promise<boolean> {
+  const toolName = typeof event.tool === "string" ? event.tool : "";
+  const broker = getTeammateChildToolBroker(toolName);
+  if (!broker) return false;
+  // Brokers act on `actor`, so it must be the identity this process verified,
+  // not the one the child asked to be seen as.
+  const correlationId = verifiedCorrelationId
+    ?? resolveProxyParentCorrelationId(event, undefined, state)
+    ?? "unknown";
+  const active = state?.activeRuns.get(correlationId);
+  const input = isRecord(event.params) ? event.params : {};
+  const result = await broker({
+    toolName,
+    input,
+    actor: {
+      correlationId,
+      ...(active?.name ? { name: active.name } : {}),
+      ...(active?.agent ? { agent: active.agent } : {}),
+    },
+  });
+  reply({
+    type: "teammate_proxy_result",
+    requestId: typeof event.requestId === "string" ? event.requestId : randomUUID(),
+    result,
+  });
+  return true;
+}
+
+/**
+ * Cancels the agent a proxy request created, once its requester gave up.
+ *
+ * The nested dispatch runs in this process while the child that asked for it
+ * waits over IPC. If that wait ends first — its 30-minute ceiling, or the child
+ * itself being aborted — nothing used to tell this side, and the agent kept
+ * running with no consumer and nobody left to settle it. Returns the ids of the
+ * agents torn down.
+ */
+export function cancelProxyDispatch(
+  state: TeammateState,
+  requestId: string,
+  reason = "the requesting teammate gave up waiting",
+): string[] {
+  const observation = state.proxyObservationControllers?.get(requestId);
+  if (observation) {
+    state.proxyObservationControllers?.delete(requestId);
+    observation.abort(reason);
+    return [];
+  }
+  if (state.pendingProxyDispatchRequests?.delete(requestId)) {
+    state.pendingProxyDispatchParents?.delete(requestId);
+    return [];
+  }
+  state.pendingProxyDispatchParents?.delete(requestId);
+  const cid = state.proxyDispatchByRequest?.get(requestId);
+  if (!cid) return [];
+  state.proxyDispatchByRequest?.delete(requestId);
+  const agent = state.activeRuns.get(cid);
+  if (!agent) return [];
+  agent.outputLog.push(
+    `[${new Date().toISOString().slice(11, 19)}] ✗ cancelled: ${reason}.`,
+  );
+  return killAgentTree(state, cid);
+}
+
+export function beginProxyObservation(
+  state: TeammateState,
+  requestId: string,
+  parentSignal?: AbortSignal,
+): { signal: AbortSignal; dispose(): void } {
+  const controller = new AbortController();
+  const previous = state.proxyObservationControllers?.get(requestId);
+  previous?.abort("proxy request replaced");
+  (state.proxyObservationControllers ??= new Map()).set(requestId, controller);
+  const onParentAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) controller.abort(parentSignal.reason);
+  else parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+  return {
+    signal: controller.signal,
+    dispose() {
+      parentSignal?.removeEventListener("abort", onParentAbort);
+      if (state.proxyObservationControllers?.get(requestId) === controller) {
+        state.proxyObservationControllers.delete(requestId);
+      }
+    },
+  };
+}
+
+export async function withProxyObservation<T>(
+  state: TeammateState,
+  requestId: string,
+  parentSignal: AbortSignal | undefined,
+  run: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const pending = beginProxyObservation(state, requestId, parentSignal);
+  try {
+    return await run(pending.signal);
+  } finally {
+    pending.dispose();
+  }
+}
+
+/** Records which agent a proxy request created, so a later give-up can find it. */
+export function trackProxyDispatch(state: TeammateState, requestId: string, correlationId: string): void {
+  (state.proxyDispatchByRequest ??= new Map()).set(requestId, correlationId);
+}
+
+/** Parse untrusted child IPC parameters before they enter shared normalization. */
+export function parseProxyTeammateParams(
+  params: Record<string, unknown>,
+): RunTeammateParams | undefined {
+  if (!Check(TeammateParams, params)) return undefined;
+  return {
+    ...params,
+    taskType: parseTeammateTaskType(params.taskType),
+    thinking: parseThinkingInput(params.thinking),
+    outputSchema: parseOutputSchema(params.outputSchema),
+    tasks: params.tasks.map((task) => ({
+      ...task,
+      taskType: parseTeammateTaskType(task.taskType),
+      thinking: parseThinkingInput(task.thinking),
+      outputSchema: parseOutputSchema(task.outputSchema),
+    })),
+  };
+}
+
+export function parseThinkingInput(value: unknown): TeammateThinkingInput | undefined {
+  if (
+    value === "off"
+    || value === "minimal"
+    || value === "low"
+    || value === "medium"
+    || value === "high"
+    || value === "xhigh"
+    || value === "max"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+export function parseOutputSchema(value: unknown): Record<string, unknown> | undefined {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  return value as Record<string, unknown>;
+}
+
+export async function handleProxyRequest(
+  pi: ExtensionAPI,
+  state: TeammateState,
+  event: Record<string, unknown>,
+  reply: (msg: unknown) => void,
+  spawnedBy?: string,
+  modelCapabilities: readonly TeammateModelCapability[] = [],
+  onInteraction?: (
+    event: Record<string, unknown>,
+    reply: (message: unknown) => void,
+    correlationId: string,
+  ) => void,
+  onChildStatus?: (child: ChildAgentCallSnapshot) => void,
+  runtimeOptions: TeammateRuntimeOptions = {},
+): Promise<void> {
+  const tool = event.tool as string;
+  const requestId = event.requestId as string;
+  const params = event.params as Record<string, unknown>;
+  const parentCid = resolveProxyParentCorrelationId(event, spawnedBy, state);
+  const reservesProxyDispatch = tool === "teammate" && typeof requestId === "string";
+  if (reservesProxyDispatch) {
+    (state.pendingProxyDispatchRequests ??= new Set()).add(requestId);
+    if (parentCid) (state.pendingProxyDispatchParents ??= new Map()).set(requestId, parentCid);
+  }
+  const abandonPendingProxyDispatch = (): void => {
+    if (!reservesProxyDispatch) return;
+    state.pendingProxyDispatchRequests?.delete(requestId);
+    state.pendingProxyDispatchParents?.delete(requestId);
+  };
+
+  if (await dispatchRegisteredChildTool(event, reply, state, parentCid)) {
+    abandonPendingProxyDispatch();
+    return;
+  }
+
+  switch (tool) {
+    case "teammate": {
+      const p = parseProxyTeammateParams(params);
+      if (!p) {
+        abandonPendingProxyDispatch();
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: "Invalid teammate parameters received from child IPC." }],
+          isError: true,
+          details: { mode: "single", results: [] },
+        }});
+        return;
+      }
+      const cid = randomUUID();
+
+      // Nested dispatches execute inside this process, so PI_TEAMMATE_DEPTH
+      // would always read 0 here. The spawner's recorded depth is the only
+      // authority for how deep the tree already is.
+      const dispatchDepth = (parentCid ? state.activeRuns.get(parentCid)?.depth ?? 0 : 0) + 1;
+      const depthCheck = checkDepthGuard(dispatchDepth);
+      if (!depthCheck.allowed) {
+        abandonPendingProxyDispatch();
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Teammate nesting depth exceeded: current=${depthCheck.current}, max=${depthCheck.max}. Prevent recursive fork-bomb.` }],
+          isError: true, details: { mode: "single", results: [] },
+        }});
+        return;
+      }
+
+      const routedParams = applyModelRouting(
+        p,
+        state.baseCwd || process.cwd(),
+        modelCapabilities.map((model) => model.id),
+      );
+
+      // Normalize (shared with the root tool execute path). The root process is
+      // the routing authority because the child catalog can be stale or scoped.
+      const normalization = normalizeTeammateParams(routedParams);
+      if (normalization.error) {
+        abandonPendingProxyDispatch();
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: normalization.error }],
+          isError: true, details: { mode: "single", results: [] },
+        }});
+        return;
+      }
+      const allTasks = normalization.tasks;
+      const budget = checkActiveAgentBudget(state, allTasks.length);
+      if (!budget.allowed) {
+        abandonPendingProxyDispatch();
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{
+            type: "text",
+            text: `Teammate agent budget exhausted: ${budget.active} agents are already live; `
+              + `${allTasks.length} more requested (max ${budget.max}). `
+              + "Wait for running agents to settle, or raise PI_TEAMMATE_MAX_ACTIVE_AGENTS.",
+          }],
+          isError: true,
+          details: {
+            mode: normalization.isMultiTask ? inferGraphMode(allTasks) : "single",
+            results: [],
+          },
+        }});
+        return;
+      }
+      const singleTask = allTasks[0];
+      const normalizedTasks = normalization.isMultiTask ? allTasks : null;
+      const singleRunParams = {
+        agent: singleTask.agent,
+        task: singleTask.prompt,
+        taskType: singleTask.taskType,
+        name: singleTask.name,
+        reply_to: routedParams.reply_to,
+        context: singleTask.context,
+        model: singleTask.model,
+        fallbackModels: singleTask.fallbackModels,
+        thinking: singleTask.thinking,
+        cwd: singleTask.cwd,
+        outputSchema: singleTask.outputSchema,
+      };
+      const warningPrefix = normalization.warnings.length
+        ? normalization.warnings.map((w) => `[warn] ${w}`).join("\n") + "\n\n"
+        : "";
+
+      if (!state.pendingProxyDispatchRequests?.delete(requestId)) {
+        state.pendingProxyDispatchParents?.delete(requestId);
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: "Nested teammate dispatch cancelled before launch." }],
+          isError: true,
+          details: {
+            mode: normalization.isMultiTask ? inferGraphMode(allTasks) : "single",
+            results: [],
+          },
+        }});
+        return;
+      }
+      state.pendingProxyDispatchParents?.delete(requestId);
+
+      const taskNames = new Set(normalizedTasks?.filter((task) => task.name).map((task) => task.name!) ?? []);
+      const taskIndexByName = new Map<string, number>();
+      normalizedTasks?.forEach((task, index) => {
+        if (task.name) taskIndexByName.set(task.name, index);
+      });
+      const taskCorrelationIds: string[] = normalizedTasks?.map(() => randomUUID()) ?? [];
+      const progressState = new Map<number, AgentProgressSnapshot>();
+      normalizedTasks?.forEach((task, index) => {
+        progressState.set(index, {
+          agent: task.agent,
+          ...(task.name ? { name: task.name } : {}),
+          correlationId: taskCorrelationIds[index],
+          taskIndex: index,
+          dependencies: taskDependencyNames(task, taskNames)
+            .map((name) => taskIndexByName.get(name))
+            .filter((dependency): dependency is number => dependency !== undefined),
+          status: "pending",
+          requestedModel: task.model,
+        });
+      });
+      const progressSnapshot = (): AgentProgressSnapshot[] =>
+        [...progressState.values()].sort((left, right) => left.taskIndex - right.taskIndex);
+      const pendingProgressByTask = new Map<number, AgentProgress>();
+
+      const abortCtrl = new AbortController();
+      const activeAgent: ActiveAgent = {
+        agent: normalizedTasks ? `graph(${normalizedTasks.length})` : singleTask.agent,
+        name: normalizedTasks ? undefined : singleTask.name,
+        correlationId: cid,
+        startedAt: Date.now(),
+        abortController: abortCtrl,
+        inbox: [],
+        outputLog: [],
+        lastActivityAt: Date.now(),
+        requestedModel: normalizedTasks ? undefined : singleTask.model,
+        spawnedBy: parentCid,
+        depth: dispatchDepth,
+        status: "running",
+        sleepMs: 0,
+        lease: createChildLease(),
+        promptSeq: 1,
+        expectsStructuredOutput: normalizedTasks
+          ? p.outputSchema !== undefined
+          : singleTask.outputSchema !== undefined,
+        ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
+      };
+      state.activeRuns.set(cid, activeAgent);
+      trackProxyDispatch(state, requestId, cid);
+      if (!normalizedTasks && singleTask.name) bindAgentName(state, singleTask.name, cid);
+
+      const parentAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
+      const reportChildStatus = (
+        status: ChildAgentCallSnapshot["status"],
+        progress?: AgentProgress,
+        retryMessage?: string,
+      ): void => {
+        onChildStatus?.({
+          agent: activeAgent.agent,
+          ...(!normalizedTasks && singleTask.name ? { name: singleTask.name } : {}),
+          correlationId: cid,
+          ...(parentCid ? { parentCorrelationId: parentCid } : {}),
+          ...(parentAgent ? { parentName: parentAgent.name ?? parentAgent.agent } : {}),
+          startedAt: activeAgent.startedAt,
+          status,
+          ...(progress ? {
+            durationMs: progress.durationMs,
+            lastActivityAt: progress.lastActivityAt,
+            resultReadyAt: progress.resultReadyAt,
+            recentTools: progress.recentTools,
+            inputTokens: progress.inputTokens,
+            outputTokens: progress.outputTokens,
+            cacheReadTokens: progress.cacheReadTokens,
+            cacheWriteTokens: progress.cacheWriteTokens,
+            ...(progress.lastMessage ? { lastMessage: truncateUtf8Tail(progress.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) } : {}),
+          } : {}),
+          ...(!progress?.lastMessage && retryMessage
+            ? { lastMessage: truncateUtf8Tail(retryMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
+            : {}),
+        });
+      };
+
+      /**
+       * Publishes the same lifecycle event a root dispatch publishes. Nested
+       * dispatches never did, so the widget timer, the wakeable budget and the
+       * cockpit row all kept treating them as live for the rest of the session.
+       */
+      const emitNestedComplete = (
+        exitCode: number,
+        wakeable?: boolean,
+        terminalStatus?: AgentTerminalStatus,
+      ): void => {
+        emitComplete(
+          pi,
+          requestId,
+          activeAgent.agent,
+          cid,
+          exitCode,
+          Date.now() - activeAgent.startedAt,
+          wakeable,
+          terminalStatus === "terminated",
+        );
+      };
+
+      interface NestedCompletion {
+        resultPayload: unknown;
+        summary: string;
+        exitCode: number;
+        mode: "single" | "parallel" | "chain" | "graph";
+        results: SingleResult[];
+        progress: AgentProgressSnapshot[] | undefined;
+        lifecyclePending: boolean;
+      }
+      const nestedGraphTerminalIds = new Set<string>();
+      const nestedGraphTerminalStatuses = new Map<string, AgentTerminalStatus | undefined>();
+      let nestedSingleTerminal = false;
+      let nestedSingleTerminalStatus: AgentTerminalStatus | undefined;
+      let nestedPublication: NestedCompletion | undefined;
+      let nestedCompletionNotificationRequested = false;
+      let nestedCompletionDelivered = false;
+      const deliverNestedCompletion = (): void => {
+        if (nestedCompletionDelivered || !nestedPublication) return;
+        if (normalizedTasks) {
+          if (!taskCorrelationIds.every((taskId) => nestedGraphTerminalIds.has(taskId))) return;
+        } else if (!nestedSingleTerminal) {
+          return;
+        }
+        nestedCompletionDelivered = true;
+        const wakeable = p.context !== "fork";
+        const terminalStatus = normalizedTasks
+          ? [...nestedGraphTerminalStatuses.values()].some((status) => status === "terminated")
+            ? "terminated"
+            : undefined
+          : nestedSingleTerminalStatus;
+        settleAgent(state, cid, nestedPublication.exitCode, nestedPublication.summary, wakeable, terminalStatus);
+        reportChildStatus(nestedPublication.exitCode === 0 ? "completed" : "failed");
+        emitNestedComplete(nestedPublication.exitCode, wakeable, terminalStatus);
+        if (nestedCompletionNotificationRequested) {
+          const delivered = safeSendMessage(
+            pi,
+            {
+              customType: "teammate-complete",
+              content: nestedPublication.summary,
+              display: true,
+              details: {
+                mode: nestedPublication.mode,
+                results: nestedPublication.results,
+                ...(nestedPublication.progress ? { progress: nestedPublication.progress } : {}),
+              },
+            },
+            { triggerTurn: true },
+          );
+          if (!delivered) {
+            markSettledResultInspectable(state, cid);
+          }
+        }
+      };
+      const publishNestedCompletion = (
+        publication: NestedCompletion,
+        notify: boolean,
+      ): void => {
+        nestedPublication ??= publication;
+        nestedCompletionNotificationRequested ||= notify;
+        deliverNestedCompletion();
+      };
+
+      normalizedTasks?.forEach((task, index) => {
+        const childId = taskCorrelationIds[index];
+        const childAgent: ActiveAgent = {
+          agent: task.agent,
+          name: task.name,
+          correlationId: childId,
+          startedAt: Date.now(),
+          abortController: abortCtrl,
+          inbox: [],
+          outputLog: [],
+          lastActivityAt: Date.now(),
+          requestedModel: task.model,
+          spawnedBy: cid,
+          depth: dispatchDepth,
+          status: "pending",
+          sleepMs: 0,
+          lease: createChildLease(),
+          promptSeq: 1,
+          expectsStructuredOutput: (task.outputSchema ?? p.outputSchema) !== undefined,
+        };
+        state.activeRuns.set(childId, childAgent);
+        if (task.name) bindAgentName(state, task.name, childId);
+      });
+      // Same P4 ordering as the root path: the full graph is registered before
+      // any started event can re-enter admission synchronously.
+      normalizedTasks?.forEach((task, index) => {
+        const childAgent = state.activeRuns.get(taskCorrelationIds[index]);
+        if (childAgent) emitTeammateStarted(pi, childAgent);
+      });
+      // After the whole graph is registered: an onChildStatus callback can
+      // synchronously trigger further dispatches, which must see the complete
+      // live tally rather than an empty registry (P4).
+      reportChildStatus("running");
+
+      const spawnerAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
+      const spawnerLabel = spawnerAgent?.name ?? spawnerAgent?.agent ?? "proxy";
+      safeSendMessage(
+        pi,
+        {
+          customType: "teammate-started",
+          content: `● @${spawnerLabel} spawned @${singleTask.name ?? activeAgent.agent}`,
+          display: true,
+        },
+        { triggerTurn: true },
+      );
+      emitTeammateStarted(pi, activeAgent);
+
+      const processProxyProgress = (data: AgentProgress) => {
+        const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
+        if (taskIndex < 0) return;
+        const existing = progressState.get(taskIndex);
+        const correlationId = data.correlationId ?? existing?.correlationId ?? taskCorrelationIds[taskIndex];
+        const progressName = data.name ?? existing?.name;
+        const entry: AgentProgressSnapshot = {
+          agent: data.agent,
+          ...(progressName ? { name: progressName } : {}),
+          correlationId,
+          taskIndex,
+          dependencies: data.dependencies ?? existing?.dependencies ?? [],
+          status: data.status,
+          startedAt: new Date(data.startedAt).toISOString(),
+          recentTools: data.recentTools,
+          toolCount: data.toolCount,
+          tokens: data.tokens,
+          inputTokens: data.inputTokens,
+          outputTokens: data.outputTokens,
+          cacheReadTokens: data.cacheReadTokens,
+          cacheWriteTokens: data.cacheWriteTokens,
+          durationMs: data.durationMs,
+          lastActivityAt: data.lastActivityAt,
+          resultReadyAt: data.resultReadyAt,
+          requestedModel: data.requestedModel ?? existing?.requestedModel,
+          resolvedModel: data.resolvedModel ?? existing?.resolvedModel,
+          attemptedModels: data.attemptedModels ?? existing?.attemptedModels,
+          ...(data.lastMessage
+            ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
+            : {}),
+          ...(data.status === "completed" || data.status === "failed"
+            ? { completedAt: new Date().toISOString() }
+            : {}),
+        };
+        progressState.set(taskIndex, entry);
+        if (data.resultReadyAt !== undefined) {
+          applyAgentResultReadyState(state, {
+            correlationId: entry.correlationId,
+            resultReadyAt: data.resultReadyAt,
+          });
+        } else {
+          clearAgentResultReadyState(state, entry.correlationId);
+        }
+        activeAgent.lastActivityAt = Date.now();
+
+        const childAgent = state.activeRuns.get(correlationId);
+        if (childAgent) {
+          childAgent.requestedModel = entry.requestedModel ?? childAgent.requestedModel;
+          childAgent.resolvedModel = entry.resolvedModel ?? childAgent.resolvedModel;
+          childAgent.attemptedModels = entry.attemptedModels ?? childAgent.attemptedModels;
+        }
+        if (childAgent && childAgent !== activeAgent) {
+          childAgent.lastActivityAt = Date.now();
+          childAgent.status = data.status === "completed" ? "sleeping" : data.status;
+          if (data.status === "running") childAgent.retry = undefined;
+          if (data.lastMessage) {
+            const lastLine = data.lastMessage.split("\n").pop()?.trim();
+            if (lastLine) {
+              const shortId = correlationId.slice(0, 8);
+              const marker = data.name ? `@${data.name}#${shortId}` : `${data.agent}#${shortId}`;
+              const line = truncateUtf8Tail(
+                `${marker} │ ${lastLine}`,
+                AGENT_BUFFER_LIMITS.logLineBytes,
+              );
+              childAgent.outputLog = [line];
+              activeAgent.outputLog.push(line);
+              trimAgentBuffers(childAgent, childAgent.status === "sleeping");
+              trimAgentBuffers(activeAgent);
+            }
+          }
+        }
+      };
+      // Aggregate the graph's task progress into one childCall snapshot so the
+      // parent sees advancing activity. Without this the parent's record stayed
+      // frozen at its initial "running" and every nested graph rendered as
+      // stalled 30s after launch.
+      const aggregateTaskProgress = (): AgentProgress | undefined => {
+        const entries = [...progressState.values()];
+        if (entries.length === 0) return undefined;
+        const running = entries.find((entry) => entry.status === "running");
+        return {
+          agent: activeAgent.agent,
+          ...(!normalizedTasks && singleTask.name ? { name: singleTask.name } : {}),
+          correlationId: cid,
+          status: "running",
+          recentTools: running?.recentTools ?? [],
+          toolCount: entries.reduce((total, entry) => total + (entry.toolCount ?? 0), 0),
+          tokens: entries.reduce((total, entry) => total + (entry.tokens ?? 0), 0),
+          inputTokens: entries.reduce((total, entry) => total + (entry.inputTokens ?? 0), 0),
+          outputTokens: entries.reduce((total, entry) => total + (entry.outputTokens ?? 0), 0),
+          cacheReadTokens: entries.reduce((total, entry) => total + (entry.cacheReadTokens ?? 0), 0),
+          cacheWriteTokens: entries.reduce((total, entry) => total + (entry.cacheWriteTokens ?? 0), 0),
+          durationMs: Date.now() - activeAgent.startedAt,
+          lastActivityAt: entries.reduce(
+            (latest, entry) => Math.max(latest, entry.lastActivityAt ?? 0),
+            activeAgent.startedAt,
+          ),
+          startedAt: activeAgent.startedAt,
+          ...(running?.lastMessage ? { lastMessage: running.lastMessage } : {}),
+        };
+      };
+
+      // Created unconditionally. The single-task branch used to bypass the gate
+      // and publish on every streaming token, which drove a full parent-side
+      // re-render per delta — the dominant cost of nested dispatches.
+      const proxyProgressFlushGate = createProgressFlushGate(() => {
+        const pending = [...pendingProgressByTask.values()];
+        pendingProgressByTask.clear();
+        if (normalizedTasks) {
+          for (const data of pending) processProxyProgress(data);
+          activeAgent.progress = progressSnapshot();
+          reportChildStatus("running", aggregateTaskProgress());
+          return;
+        }
+        const latest = pending[pending.length - 1];
+        if (!latest) return;
+        reportChildStatus(
+          latest.status === "completed" ? "completed" : latest.status === "failed" ? "failed" : "running",
+          latest,
+        );
+      });
+
+      const runOpts: RunTeammateOptions = {
+        ...runtimeOptions,
+        baseCwd: state.baseCwd,
+        modelCapabilities,
+        ...(normalizedTasks ? { taskCorrelationIds } : { correlationId: cid }),
+        depth: dispatchDepth,
+        signal: abortCtrl.signal,
+        parentSessionFile: spawnerAgent?.sessionFile ?? state.mainSessionFile,
+        initialLeaseToken: (childId: string) => {
+          const target = state.activeRuns.get(childId) ?? activeAgent;
+          return target.lease ? leaseToken(target.lease) : undefined;
+        },
+        onChildSpawned: (stdin, sendControl, sessionDir, childId) => {
+          const target = childId ? state.activeRuns.get(childId) ?? activeAgent : activeAgent;
+          target.stdin = stdin;
+          target.sendControl = sendControl;
+          target.sessionDir = sessionDir;
+          target.status = "running";
+          target.retry = undefined;
+          target.resultReadyAt = undefined;
+          if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
+        },
+        onChildEvent: (childEvent) => handleChildLifecycleEvent(state, childEvent),
+        onRetry: (retry) => {
+          applyAgentRetryState(state, retry);
+          reportChildStatus(
+            "retrying",
+            undefined,
+            `retry ${retry.attempt}/${retry.maxRetries} in ${formatRetryDelay(retry.delayMs)}: ${retry.error}`,
+          );
+        },
+        onTurnComplete: (result, terminalStatus) => {
+          const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
+          target.resolvedModel = target.resolvedModel ?? result.model;
+          if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
+          const lastMessage = displayMessageForResult(result);
+          const settle = normalizedTasks ? settleGraphTaskAgent : settleAgent;
+          settle(
+            state,
+            result.correlationId,
+            result.exitCode,
+            lastMessage,
+            result.wakeable !== false,
+            terminalStatus,
+          );
+          if (normalizedTasks) {
+            nestedGraphTerminalIds.add(result.correlationId);
+            nestedGraphTerminalStatuses.set(result.correlationId, terminalStatus);
+          } else {
+            nestedSingleTerminal = true;
+            nestedSingleTerminalStatus = terminalStatus;
+          }
+          if (result.correlationId === cid) {
+            reportChildStatus(result.exitCode === 0 ? "completed" : "failed");
+          }
+          deliverNestedCompletion();
+        },
+        onProgress: (data) => {
+          // Refreshed on every branch. This is the only input to every stall
+          // verdict (the status widget, teammate-wait, teammate-list), and the
+          // single-task path never wrote it — so the most common nested shape
+          // reported itself stalled after 30s of healthy work.
+          activeAgent.lastActivityAt = Date.now();
+
+          if (!normalizedTasks) {
+            if (data.resultReadyAt !== undefined) {
+              applyAgentResultReadyState(state, { correlationId: cid, resultReadyAt: data.resultReadyAt });
+            } else {
+              clearAgentResultReadyState(state, cid);
+            }
+            if (data.lastMessage) appendAgentProgressLine(activeAgent, data, cid);
+            pendingProgressByTask.set(0, data);
+            proxyProgressFlushGate.mark(data.status === "completed" || data.status === "failed");
+            return;
+          }
+          const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
+          if (taskIndex < 0) return;
+          pendingProgressByTask.set(taskIndex, data);
+          proxyProgressFlushGate.mark(data.status === "completed" || data.status === "failed");
+        },
+        onChildRequest: (evt, rep) => {
+          if (evt.type === "teammate_interaction_request" || evt.type === "teammate_rpc_ui_request") {
+            onInteraction?.(evt, rep, cid);
+            return;
+          }
+          if (evt.type === "teammate_proxy_cancel" && typeof evt.requestId === "string") {
+            cancelProxyDispatch(state, evt.requestId);
+            return;
+          }
+          handleProxyRequest(pi, state, evt, rep, cid, modelCapabilities, onInteraction, onChildStatus, runtimeOptions);
+        },
+      };
+
+      const executeNested = async () => {
+        if (normalizedTasks) {
+          const mode = inferGraphMode(normalizedTasks);
+          let results: SingleResult[];
+          try {
+            results = await runGraph(normalizedTasks, p.concurrency ?? 4, runOpts);
+          } finally {
+            proxyProgressFlushGate?.flush();
+            proxyProgressFlushGate?.dispose();
+          }
+          const hasError = results.some((r) => r.exitCode !== 0);
+          const summaries = summarizeGraphResults(results, normalizedTasks);
+          const structuredOutput = aggregateGraphStructuredOutput(results, normalizedTasks);
+          results.forEach((result, index) => {
+            const current = progressState.get(index);
+            const lifecyclePending = result.lifecyclePending === true;
+            progressState.set(index, {
+              agent: result.agent,
+              ...(normalizedTasks![index]?.name ? { name: normalizedTasks![index].name } : {}),
+              correlationId: result.correlationId,
+              taskIndex: index,
+              dependencies: current?.dependencies ?? [],
+              status: lifecyclePending ? "running" : result.exitCode === 0 ? "completed" : "failed",
+              ...(current?.startedAt ? { startedAt: current.startedAt } : {}),
+              ...(!lifecyclePending ? { completedAt: new Date().toISOString() } : {}),
+              recentTools: current?.recentTools ?? [],
+              toolCount: current?.toolCount ?? 0,
+              tokens: result.usage.inputTokens + result.usage.outputTokens,
+              inputTokens: result.usage.inputTokens,
+              outputTokens: result.usage.outputTokens,
+              cacheReadTokens: result.usage.cacheReadTokens,
+              cacheWriteTokens: result.usage.cacheWriteTokens,
+              durationMs: result.durationMs,
+              ...(lifecyclePending && current?.resultReadyAt
+                ? { resultReadyAt: current.resultReadyAt }
+                : {}),
+              lastMessage: displayMessageForResult(result),
+            });
+          });
+          const progress = progressSnapshot();
+          activeAgent.progress = progress;
+          return {
+            resultPayload: {
+              content: [{ type: "text", text: warningPrefix + summaries }],
+              isError: hasError,
+              details: {
+                mode,
+                results,
+                progress,
+                ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+              },
+            },
+            summary: summaries,
+            exitCode: hasError ? 1 : 0,
+            mode,
+            results,
+            progress,
+            lifecyclePending: results.some((result) => result.lifecyclePending === true),
+          };
+        }
+
+        const result = await runSingleTeammate(singleRunParams, runOpts);
+        const lastMsg = displayMessageForResult(result);
+        return {
+          resultPayload: {
+            content: [{ type: "text", text: warningPrefix + lastMsg }],
+            isError: result.exitCode !== 0,
+            details: {
+              mode: "single",
+              results: [result],
+              ...(result.structuredOutput !== undefined ? { structuredOutput: result.structuredOutput } : {}),
+            },
+          },
+          summary: lastMsg,
+          exitCode: result.exitCode,
+          mode: "single" as const,
+          results: [result],
+          progress: undefined,
+          lifecyclePending: result.lifecyclePending === true,
+        };
+      };
+
+      // Once the dispatch reaches its own terminal handling, a late cancel must
+      // not tear down an agent that already settled (or, worse, an unrelated
+      // one that reused the id).
+      const untrackDispatch = () => state.proxyDispatchByRequest?.delete(requestId);
+      const nestedPromise = executeNested();
+      const mode = normalizedTasks ? inferGraphMode(normalizedTasks) : "single";
+      const runningLabel = singleTask.name ?? activeAgent.agent;
+
+      const completeNestedInBackground = (): void => {
+        void nestedPromise.then((completed) => {
+          untrackDispatch();
+          publishNestedCompletion(completed, true);
+        }).catch((error) => {
+          untrackDispatch();
+          settleAgent(
+            state,
+            cid,
+            1,
+            error instanceof Error ? error.message : String(error),
+            false,
+          );
+          reportChildStatus("failed");
+          notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
+        });
+      };
+
+      if (p.background === false) {
+        const waitMs = foregroundWaitWindowMs(allTasks, runtimeOptions.foregroundMaxRunMs);
+        const deadline = createForegroundDeadline(waitMs);
+        const race = await Promise.race([
+          nestedPromise.then(
+            (completed) => ({ status: "completed" as const, completed }),
+            (error: unknown) => ({ status: "failed" as const, error }),
+          ),
+          deadline.promise.then(() => ({ status: "timeout" as const })),
+        ]);
+        deadline.dispose();
+
+        if (race.status === "failed") {
+          untrackDispatch();
+          settleAgent(
+            state,
+            cid,
+            1,
+            race.error instanceof Error ? race.error.message : String(race.error),
+            false,
+          );
+          reportChildStatus("failed");
+          emitNestedComplete(1);
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{
+              type: "text",
+              text: `Nested teammate failed: ${race.error instanceof Error ? race.error.message : String(race.error)}`,
+            }],
+            isError: true,
+            details: { mode, results: [] },
+          }});
+          return;
+        }
+
+        if (race.status === "completed") {
+          const completed = race.completed;
+          untrackDispatch();
+          publishNestedCompletion(completed, false);
+          reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
+          return;
+        }
+
+        completeNestedInBackground();
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{
+            type: "text",
+            text: `${warningPrefix}@${runningLabel} moved to background after ${waitMs}ms. ${backgroundWaitGuidance(cid)}`,
+          }],
+          isError: false,
+          details: {
+            mode,
+            results: [],
+            ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
+          },
+        }});
+        return;
+      }
+
+      completeNestedInBackground();
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{
+          type: "text",
+          text: `${warningPrefix}@${runningLabel} running in background. ${backgroundWaitGuidance(cid)}`,
+        }],
+        isError: false,
+        details: {
+          mode,
+          results: [],
+          ...(normalizedTasks ? { progress: progressSnapshot() } : {}),
+        },
+      }});
+      return;
+    }
+
+    case "teammate-wait": {
+      const parentSignal = parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined;
+      const name = typeof params.name === "string" ? params.name : undefined;
+      const result = await withProxyObservation(state, requestId, parentSignal, async (proxySignal) => name
+        ? observeTargets({
+            action: "wait",
+            targets: [{ kind: "teammate", id: name }],
+            timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : undefined,
+            detail: "full",
+            lines: 20,
+          }, proxySignal).then((observed) => {
+            const observation = observed.observations[0]!;
+            return {
+              status: observation.waitStatus as TeammateWaitStatus,
+              output: observation.detail
+                ?? (observation.waitStatus === "timeout" || observation.waitStatus === "aborted"
+                  ? waitOutput(observation.waitStatus, name)
+                  : [observation.summary]),
+            };
+          })
+        : waitForTeammate(
+            state,
+            {
+              timeoutMs: typeof params.timeoutMs === "number" ? params.timeoutMs : undefined,
+              waitMs: typeof params.waitMs === "number" ? params.waitMs : undefined,
+            },
+            proxySignal,
+          ));
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: result.output.join("\n") }],
+        isError: result.status === "not-found"
+          || result.status === "timeout"
+          || result.status === "aborted"
+          || result.status === "stalled",
+        details: { status: result.status, output: result.output },
+      }});
+      return;
+    }
+
+    case "observe": {
+      if (!Check(ObserveParams, params)) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: "Invalid observe parameters received from child IPC." }],
+          isError: true,
+          details: { output: [] },
+        }});
+        return;
+      }
+      const result = await withProxyObservation(
+        state,
+        requestId,
+        parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined,
+        (proxySignal) => observeTargets(params as UnifiedObserveParams, proxySignal),
+      );
+      const output = formatObserveResult(result, params.detail === "full");
+      const failed = result.reason === "timeout"
+        || result.reason === "aborted"
+        || result.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: output.join("\n") }],
+        isError: failed,
+        details: { output, result },
+      }});
+      return;
+    }
+
+    case "teammate-monitor": {
+      if (!Check(TeammateMonitorParams, params)) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: "Invalid teammate-monitor parameters received from child IPC." }],
+          isError: true,
+          details: { output: [] },
+        }});
+        return;
+      }
+      const monitorParams = params as unknown as MonitorParams;
+      const validationError = validateMonitorParams(monitorParams);
+      if (validationError) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: validationError }],
+          isError: true,
+          details: { output: [validationError] },
+        }});
+        return;
+      }
+      const observed = await withProxyObservation(
+        state,
+        requestId,
+        parentCid ? state.activeRuns.get(parentCid)?.abortController.signal : undefined,
+        (proxySignal) => observeTargets({
+          action: monitorParams.action,
+          targets: monitorParams.targets.map((id) => ({ kind: "teammate", id })),
+          detail: monitorParams.verbose ? "full" : "summary",
+          lines: monitorParams.lines ?? MONITOR_DEFAULT_LINES,
+          waitMode: monitorParams.waitMode,
+          waitCount: monitorParams.waitCount,
+          timeoutMs: monitorParams.timeoutMs ?? MONITOR_DEFAULT_TIMEOUT_MS,
+        }, proxySignal),
+      );
+      const output = formatObserveResult(observed, monitorParams.verbose === true);
+      const failed = observed.reason === "timeout"
+        || observed.reason === "aborted"
+        || observed.observations.some((item) => !item.found || item.outcome === "failure" || item.outcome === "stalled");
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: output.join("\n") }],
+        isError: failed,
+        details: { output },
+      }});
+      return;
+    }
+
+    case "teammate-send": {
+      const to = params.to as string;
+      const message = (params.message as string | undefined) ?? "";
+      const requestedMode = (params.mode as RpcMessageMode) ?? "follow_up";
+
+      if (!message && requestedMode !== "abort") {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `"message" is required for mode "${requestedMode}".` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+
+      const cid = resolveAgentCorrelationId(state, to);
+      if (!cid) {
+        const available = Array.from(state.namedAgents.keys());
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Agent "${to}" not found. ${available.length > 0 ? `Available: ${available.join(", ")}` : "No named agents."}` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+
+      const authority = canProxySendTo(state, parentCid, cid, requestedMode);
+      if (!authority.allowed) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{
+            type: "text",
+            text: `Cannot ${requestedMode === "abort" ? "abort" : "message"} "${to}": ${authority.reason}.`,
+          }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+
+      const agent = state.activeRuns.get(cid);
+      if (agent && requestedMode === "abort") {
+        if (agent.stdin?.writable && canChildWrite(agent.lease)) {
+          sendRpcMessage(agent.stdin, message, "abort", agent.lease ? leaseToken(agent.lease) : undefined);
+        }
+        const terminated = killAgentTree(state, cid);
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{
+            type: "text",
+            text: `Agent "${to}" aborted; terminated ${terminated.length} agent${terminated.length === 1 ? "" : "s"} in its subtree.`,
+          }],
+          isError: false,
+          details: { delivered: true },
+        }});
+        return;
+      }
+      if (!agent?.stdin?.writable) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Agent "${to}" is no longer running.` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+      const writableLease = agent.lease;
+      if (!writableLease || !canChildWrite(writableLease)) {
+        const ownership = writableLease
+          ? `${writableLease.owner} (${writableLease.state})`
+          : "an unavailable lease";
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Agent "${to}" is currently owned by ${ownership}.` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+      const mode: RpcMessageMode = agent.status === "sleeping" && requestedMode !== "abort"
+        ? "prompt"
+        : requestedMode;
+      const sent = sendRpcMessage(agent.stdin, message, mode, agent.lease ? leaseToken(agent.lease) : undefined);
+      if (!sent) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Failed to send message to "${to}".` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
+      const now = Date.now();
+      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+      wakeSleepingAgent(pi, agent, now);
+      agent.inbox.push({ id: randomUUID(), from: spawnedBy ?? "proxy", to, kind: mode === "abort" ? "notification" : "task", payload: message, timestamp: now });
+      agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);
+      trimAgentBuffers(agent);
+      agent.lastActivityAt = now;
+
+      pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+        correlationId: cid,
+        from: "caller",
+        to,
+        mode,
+        message,
+        lastActivityAt: now,
+        isSend: true,
+      });
+
+      // Notify main session TUI
+      const senderAgent = spawnedBy ? state.activeRuns.get(spawnedBy) : undefined;
+      const senderLabel = senderAgent?.name ?? senderAgent?.agent ?? "agent";
+      safeSendMessage(
+        pi,
+        {
+          customType: "teammate-message",
+          content: `● @${senderLabel} → @${to} (${mode}): ${message.slice(0, 120)}`,
+          display: true,
+        },
+        { triggerTurn: true },
+      );
+
+      const modeLabel = mode === "steer" ? "interrupted + injected" : mode === "abort" ? "aborted" : "queued after current turn";
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: `Message ${modeLabel} for "${to}".` }],
+        isError: false, details: { delivered: true },
+      }});
+      return;
+    }
+
+    case "teammate-list": {
+      const view = ((params.view as TeammateListView | undefined) ?? "active");
+      if (view === "roles") {
+        const { entries, text } = buildRoleList(state.baseCwd || process.cwd());
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text }], isError: false, details: { agents: entries },
+        }});
+        return;
+      }
+      const { entries, text } = buildAgentList(state, view);
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text }], isError: false, details: { agents: entries },
+      }});
+      return;
+    }
+
+    case "teammate-watch": {
+      const name = params.name as string;
+      const observed = await observeTargets({
+        action: "status",
+        targets: [{ kind: "teammate", id: name }],
+        detail: "full",
+        lines: (params.lines as number) ?? 20,
+      });
+      const observation = observed.observations[0]!;
+      const output = observation.found ? (observation.detail ?? [observation.summary]) : [];
+      reply({ type: "teammate_proxy_result", requestId, result: {
+        content: [{ type: "text", text: observation.found ? output.join("\n") : observation.summary }],
+        isError: !observation.found,
+        details: { output },
+      }});
+      return;
+    }
+  }
+
+  reply({
+    type: "teammate_proxy_result",
+    requestId,
+    result: {
+      content: [{ type: "text", text: `Unsupported teammate child proxy tool: ${tool}` }],
+      isError: true,
+    },
+  });
+}
+
+

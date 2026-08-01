@@ -166,7 +166,7 @@ test("one progress flush applies every task delta but publishes one full graph s
 });
 
 test("root graph progress wiring projects and broadcasts only after the batch is applied", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
   const rootStart = source.indexOf("const pendingByTask = new Map<number, AgentProgress>();");
   const rootEnd = source.indexOf("onChildRequest:", rootStart);
   assert.ok(rootStart >= 0 && rootEnd > rootStart);
@@ -269,7 +269,7 @@ test("widget work ignores pending agents after the grace period measured from la
 });
 
 test("root progress cleanup flushes then disposes on success, error, and termination", async () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
   const teammateToolStart = source.indexOf("const tool: ToolDefinition<typeof TeammateParams");
   const executeStart = source.indexOf("async execute(", teammateToolStart);
   const executeEnd = source.indexOf("renderCall(args", executeStart);
@@ -309,7 +309,7 @@ test("root progress cleanup flushes then disposes on success, error, and termina
 });
 
 test("proxy graph progress batches burst snapshots and synchronously publishes terminal state", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
   const proxyStart = source.indexOf("const pendingProgressByTask = new Map<number, AgentProgress>();");
   const proxyEnd = source.indexOf("onChildRequest:", proxyStart);
   assert.ok(proxyStart >= 0 && proxyEnd > proxyStart);
