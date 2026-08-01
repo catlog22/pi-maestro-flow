@@ -57,15 +57,20 @@ export async function executeAsk(
   }
 
   if (isTeammateChild()) {
-    const relayed = await requestTeammateInteraction<{
+    const relay = await requestTeammateInteraction<{
       action: "answer" | "cancel";
       answers?: AskAnswer[];
     }>("question", { questions });
-    if (relayed?.action === "answer" && Array.isArray(relayed.answers)) {
+    if (!relay.ok) {
+      const detail = relay.error ? `: ${relay.error}` : "";
+      return askError(`Teammate questionnaire relay ${relay.reason}${detail}.`);
+    }
+    const relayed = relay.result;
+    if (relayed.action === "answer" && Array.isArray(relayed.answers)) {
       return askSuccess(relayed.answers);
     }
-    if (relayed?.action === "cancel") return cancelledAsk();
-    return askError("The parent session did not answer the teammate questionnaire.");
+    if (relayed.action === "cancel") return cancelledAsk();
+    return askError("The parent session returned an invalid teammate questionnaire response.");
   }
 
   if (!ctx.hasUI) {

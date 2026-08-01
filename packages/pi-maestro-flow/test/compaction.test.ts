@@ -283,6 +283,25 @@ test("compaction operation finalization is idempotent and operation-scoped", () 
   assert.equal(arbiter.observeStart(request).allowed, false, "a finalized operation cannot be resurrected");
 });
 
+test("extension compaction leases start their timeout only for the matching observation", async () => {
+  const arbiter = new CompactionArbiter(5);
+  const lease = arbiter.request("output-limit");
+  assert.ok(lease);
+  const request = compactionRequestFromInstructions(lease.tagInstructions("summary"));
+
+  const stale = arbiter.observeStart({ owner: "output-limit", id: lease.operationId + 1 });
+  assert.equal(stale.allowed, false);
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(arbiter.currentOwner(), "output-limit", "a mismatched observation cannot expire the lease");
+
+  const observed = arbiter.observeStart(request);
+  assert.equal(observed.allowed, true);
+  assert.equal(arbiter.currentOwner(), "output-limit");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(arbiter.currentOwner(), undefined);
+  assert.equal(observed.finalize("success"), false, "a timed-out lease cannot settle again");
+});
+
 test("compaction arbiter preserves output-limit ownership through instruction tags", () => {
   const arbiter = new CompactionArbiter();
   const outputLimit = arbiter.request("output-limit");

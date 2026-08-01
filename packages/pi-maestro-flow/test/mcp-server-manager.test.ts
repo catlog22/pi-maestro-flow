@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { McpLifecycleManager } from "../src/mcp/lifecycle.ts";
 import { McpServerManager } from "../src/mcp/server-manager.ts";
 import type { ServerDefinition } from "../src/mcp/types.ts";
 
@@ -120,6 +121,147 @@ test("MCP close reclaims a late resource that settles after fencing", async () =
 
   assert.equal(manager.getConnection("A"), undefined, "late startup must not overwrite the registry");
   assert.equal(manager.closes, 2, "late client and transport are reclaimed");
+});
+
+test("MCP keep-alive reconnects use bounded backoff, notify once, and reset after success", async () => {
+  let now = 0;
+  let attempts = 0;
+  let connected = false;
+  let shouldFail = true;
+  const reconnects: string[] = [];
+  const failures: Array<{ attempt: number; nextRetryAt: number }> = [];
+  const manager = {
+    getConnection() { return connected ? { status: "connected" } : undefined; },
+    async connect() {
+      attempts += 1;
+      if (shouldFail) throw new Error("server unavailable");
+      connected = true;
+      return { status: "connected" };
+    },
+    isIdle() { return false; },
+    async close() {},
+    async closeAll() {},
+  } as unknown as McpServerManager;
+  const lifecycle = new McpLifecycleManager(manager, {
+    now: () => now,
+    reconnectBaseDelayMs: 100,
+    reconnectMaxDelayMs: 1_000,
+    reconnectFailureNotifyThreshold: 3,
+  });
+  lifecycle.markKeepAlive("A", definition);
+  lifecycle.setReconnectCallback((name) => reconnects.push(name));
+  lifecycle.setReconnectFailureCallback((event) => {
+    failures.push({ attempt: event.attempt, nextRetryAt: event.nextRetryAt });
+  });
+
+  await lifecycle.runHealthCheck(); // failure 1; next at 100
+  await lifecycle.runHealthCheck(); // backoff suppresses duplicate
+  assert.equal(attempts, 1);
+
+  now = 100;
+  await lifecycle.runHealthCheck(); // failure 2; next at 300
+  now = 299;
+  await lifecycle.runHealthCheck();
+  assert.equal(attempts, 2);
+
+  now = 300;
+  await lifecycle.runHealthCheck(); // failure 3; notify; next at 700
+  assert.equal(attempts, 3);
+  assert.deepEqual(failures, [{ attempt: 3, nextRetryAt: 700 }]);
+
+  shouldFail = false;
+  now = 700;
+  await lifecycle.runHealthCheck();
+  assert.deepEqual(reconnects, ["A"]);
+
+  connected = false;
+  shouldFail = true;
+  now = 800;
+  await lifecycle.runHealthCheck();
+  assert.equal(attempts, 5, "a successful reconnect resets the failure/backoff sequence");
+  assert.equal(failures.length, 1, "a new failure sequence does not inherit the old notification state");
+});
+
+test("MCP keep-alive treats needs-auth as a failed reconnect", async () => {
+  const failures: string[] = [];
+  const reconnects: string[] = [];
+  const manager = {
+    getConnection() { return { status: "needs-auth" }; },
+    async connect() { return { status: "needs-auth" }; },
+    isIdle() { return false; },
+    async close() {},
+    async closeAll() {},
+  } as unknown as McpServerManager;
+  const lifecycle = new McpLifecycleManager(manager, {
+    reconnectFailureNotifyThreshold: 1,
+  });
+  lifecycle.markKeepAlive("A", definition);
+  lifecycle.setReconnectCallback((name) => reconnects.push(name));
+  lifecycle.setReconnectFailureCallback((event) => failures.push(event.error.message));
+
+  await lifecycle.runHealthCheck();
+
+  assert.deepEqual(reconnects, []);
+  assert.deepEqual(failures, ["server reported needs-auth"]);
+});
+
+test("MCP health checks are single-flight while a reconnect is pending", async () => {
+  let attempts = 0;
+  let resolveConnect!: () => void;
+  const pending = new Promise<void>((resolve) => { resolveConnect = resolve; });
+  const manager = {
+    getConnection() { return undefined; },
+    async connect() {
+      attempts += 1;
+      await pending;
+      return { status: "connected" };
+    },
+    isIdle() { return false; },
+    async close() {},
+    async closeAll() {},
+  } as unknown as McpServerManager;
+  const lifecycle = new McpLifecycleManager(manager);
+  lifecycle.markKeepAlive("A", definition);
+
+  const first = lifecycle.runHealthCheck();
+  const overlapping = lifecycle.runHealthCheck();
+  assert.equal(attempts, 1);
+  resolveConnect();
+  await Promise.all([first, overlapping]);
+  assert.equal(attempts, 1);
+});
+
+test("MCP graceful shutdown drains and fences an in-flight health check", async () => {
+  let resolveConnect!: () => void;
+  const pending = new Promise<void>((resolve) => { resolveConnect = resolve; });
+  let reconnects = 0;
+  let closes = 0;
+  let closeAlls = 0;
+  const manager = {
+    getConnection() { return undefined; },
+    async connect() {
+      await pending;
+      return { status: "connected" };
+    },
+    isIdle() { return false; },
+    async close() { closes += 1; },
+    async closeAll() { closeAlls += 1; },
+  } as unknown as McpServerManager;
+  const lifecycle = new McpLifecycleManager(manager);
+  lifecycle.markKeepAlive("A", definition);
+  lifecycle.setReconnectCallback(() => { reconnects += 1; });
+
+  const check = lifecycle.runHealthCheck();
+  let shutdownSettled = false;
+  const shutdown = lifecycle.gracefulShutdown().then(() => { shutdownSettled = true; });
+  await Promise.resolve();
+  assert.equal(closeAlls, 1);
+  assert.equal(shutdownSettled, false, "shutdown waits for the admitted health check");
+
+  resolveConnect();
+  await Promise.all([check, shutdown]);
+  assert.equal(reconnects, 0, "stale reconnect must not publish after shutdown");
+  assert.equal(closes, 1, "a connection returned after the close fence is reclaimed");
 });
 
 test("MCP closeAll fences pending startups that are not yet in the registry", async () => {

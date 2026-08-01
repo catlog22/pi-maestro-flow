@@ -76,7 +76,7 @@ export function createPermissionController(options: {
       // child has no local terminal. The parent owns the live mode, session
       // rules, hooks, persistence, and any user prompt.
       if (isTeammateChild()) {
-        const relayed = await requestTeammateInteraction<{
+        const relay = await requestTeammateInteraction<{
           action: "allow_once" | "deny";
           reason?: string;
           updatedInput?: Record<string, unknown>;
@@ -85,11 +85,19 @@ export function createPermissionController(options: {
           toolName: call.toolName,
           input: call.input,
         });
-        if (relayed?.updatedInput) replaceRecord(call.input, relayed.updatedInput);
-        if (relayed?.action === "allow_once") return;
+        if (!relay.ok) {
+          const detail = relay.error ? `: ${relay.error}` : "";
+          return {
+            block: true,
+            reason: `Permission relay ${relay.reason}${detail}.`,
+          };
+        }
+        const relayed = relay.result;
+        if (relayed.updatedInput) replaceRecord(call.input, relayed.updatedInput);
+        if (relayed.action === "allow_once") return;
         return {
           block: true,
-          reason: relayed?.reason ?? "Permission could not be authorized by the parent session.",
+          reason: relayed.reason ?? "Permission was denied by the parent session.",
         };
       }
 

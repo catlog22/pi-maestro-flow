@@ -7,6 +7,77 @@ import { handleChildInteractionRequest } from "pi-maestro-teammate/v1/extension"
 import { dispatchChildIpcMessage } from "pi-maestro-teammate/v1/execution";
 import { registerTeammatePermissionBroker } from "pi-maestro-teammate/v1/child-extensions";
 import type { ActiveAgent, TeammateState } from "pi-maestro-teammate/v1/types";
+import { requestTeammateInteraction } from "../src/permissions/teammate-relay.ts";
+
+test("teammate relay reports synchronous IPC send failures explicitly", async () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const sendDescriptor = Object.getOwnPropertyDescriptor(process, "send");
+  process.env.PI_TEAMMATE_CHILD = "1";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    value() { throw new Error("IPC channel closed"); },
+  });
+  try {
+    const result = await requestTeammateInteraction("question", {}, 50);
+    assert.deepEqual(result, {
+      ok: false,
+      reason: "send-failed",
+      error: "IPC channel closed",
+    });
+  } finally {
+    if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor);
+    else delete (process as typeof process & { send?: unknown }).send;
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+  }
+});
+
+test("teammate relay reports asynchronous IPC callback failures explicitly", async () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const sendDescriptor = Object.getOwnPropertyDescriptor(process, "send");
+  process.env.PI_TEAMMATE_CHILD = "1";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    value(_message: unknown, callback: (error: Error | null) => void) {
+      queueMicrotask(() => callback(new Error("IPC callback failed")));
+      return true;
+    },
+  });
+  try {
+    const result = await requestTeammateInteraction("permission", {}, 50);
+    assert.deepEqual(result, {
+      ok: false,
+      reason: "send-failed",
+      error: "IPC callback failed",
+    });
+  } finally {
+    if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor);
+    else delete (process as typeof process & { send?: unknown }).send;
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+  }
+});
+
+test("teammate relay reports response timeout separately from send failure", async () => {
+  const previousChild = process.env.PI_TEAMMATE_CHILD;
+  const sendDescriptor = Object.getOwnPropertyDescriptor(process, "send");
+  process.env.PI_TEAMMATE_CHILD = "1";
+  Object.defineProperty(process, "send", {
+    configurable: true,
+    value() { return true; },
+  });
+  const keepAlive = setTimeout(() => {}, 50);
+  try {
+    const result = await requestTeammateInteraction("question", {}, 5);
+    assert.deepEqual(result, { ok: false, reason: "timeout" });
+  } finally {
+    clearTimeout(keepAlive);
+    if (sendDescriptor) Object.defineProperty(process, "send", sendDescriptor);
+    else delete (process as typeof process & { send?: unknown }).send;
+    if (previousChild === undefined) delete process.env.PI_TEAMMATE_CHILD;
+    else process.env.PI_TEAMMATE_CHILD = previousChild;
+  }
+});
 
 test("real teammate child IPC resumes permission and AskUserQuestion calls", async () => {
   const child = fork(new URL("./fixtures/teammate-interaction-child.ts", import.meta.url), {

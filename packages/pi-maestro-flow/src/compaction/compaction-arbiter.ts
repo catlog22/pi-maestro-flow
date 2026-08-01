@@ -43,6 +43,8 @@ export type CompactionTrigger =
 
 export type CompactionOutcome = "success" | "cancel" | "error" | "timeout";
 
+export const COMPACTION_LEASE_TIMEOUT_MS = 5 * 60_000;
+
 export interface CompactionLease {
   readonly owner: CompactionRequestOwner;
   readonly operationId: number;
@@ -82,6 +84,8 @@ export class CompactionArbiter {
   private nextId = 0;
   private active?: ActiveCompaction;
 
+  constructor(private readonly leaseTimeoutMs = COMPACTION_LEASE_TIMEOUT_MS) {}
+
   request(owner: CompactionRequestOwner, trigger?: CompactionTrigger): CompactionLease | undefined {
     if (this.active) return undefined;
     const id = ++this.nextId;
@@ -104,12 +108,16 @@ export class CompactionArbiter {
     }
     if (this.active) {
       const observed = this.active;
+      const allowed = request !== undefined
+        && observed.owner === request.owner
+        && observed.id === request.id;
       // Extension-triggered compactions arrive without a cleanup/timeout.
-      // Arm the same bounded deadline as native compactions so a hung
-      // compaction promise cannot hold the lease indefinitely.
-      if (!observed.cleanup) {
+      // Arm the same bounded deadline as native compactions only after the
+      // matching request starts; a stale/mismatched observation must not
+      // shorten the legitimate lease's lifetime.
+      if (allowed && !observed.cleanup) {
         const release = () => this.finalize(observed.id, "timeout");
-        const timeout = setTimeout(release, 5 * 60_000);
+        const timeout = setTimeout(release, this.leaseTimeoutMs);
         timeout.unref?.();
         signal?.addEventListener("abort", release, { once: true });
         observed.cleanup = () => {
@@ -120,9 +128,7 @@ export class CompactionArbiter {
       return {
         operationId: observed.id,
         owner: observed.owner,
-        allowed: request !== undefined
-          && observed.owner === request.owner
-          && observed.id === request.id,
+        allowed,
         trigger: observed.trigger,
         finalize: (outcome) => this.finalize(observed.id, outcome),
         releaseIfNative: () => {
@@ -147,7 +153,7 @@ export class CompactionArbiter {
         id,
         owner: "native",
       };
-      const timeout = setTimeout(release, 5 * 60_000);
+      const timeout = setTimeout(release, this.leaseTimeoutMs);
       timeout.unref?.();
       signal?.addEventListener("abort", release, { once: true });
       this.active.cleanup = () => {

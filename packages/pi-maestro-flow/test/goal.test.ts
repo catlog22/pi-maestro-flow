@@ -13,6 +13,7 @@ import {
   getGoalCompactionSnapshot,
   getCurrentGoal,
   getGoalList,
+  getGoalPanelEntries,
   goalArgumentCompletions,
   initGoal,
   isRetryableGoalFailure,
@@ -2487,6 +2488,40 @@ test("transient Goal provider failures share the bounded retry status projection
 
     assert.equal(getActiveGoal()?.status, "active");
     assert.ok(statuses.includes("retrying 1/10"));
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("Goal compaction retries project retrying state with the compaction breaker budget", async () => {
+  initGoal({ appendEntry() {} } as never);
+  const statuses: string[] = [];
+  const ctx = createContext({
+    isIdle: () => false,
+    ui: {
+      notify() {},
+      setStatus(_key, value) { if (value) statuses.push(value); },
+    },
+  });
+  onSessionStart(ctx);
+
+  try {
+    await executeGoal({ action: "create", objective: "Recover from context overflow" }, ctx);
+    await onAgentEnd({
+      messages: [{
+        role: "assistant",
+        stopReason: "error",
+        errorMessage: "context_length_exceeded",
+        content: [],
+      }],
+    }, ctx);
+
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.ok(statuses.includes("retrying 1/3"));
+    const detail = getGoalPanelEntries().find((entry) => entry.id === getActiveGoal()?.id);
+    assert.equal(detail?.retryAttempt, 1);
+    assert.equal(detail?.retryMaxRetries, 3);
   } finally {
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);

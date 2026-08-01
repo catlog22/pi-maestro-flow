@@ -1,9 +1,15 @@
 import { randomUUID } from "node:crypto";
 
 interface PendingInteraction {
-  resolve: (result: unknown | undefined) => void;
+  resolve: (result: unknown) => void;
   timer: ReturnType<typeof setTimeout>;
 }
+
+export type TeammateInteractionFailureReason = "unavailable" | "timeout" | "send-failed";
+
+export type TeammateInteractionResult<T> =
+  | { ok: true; result: T }
+  | { ok: false; reason: TeammateInteractionFailureReason; error?: string };
 
 interface RelayState {
   installed: boolean;
@@ -20,20 +26,26 @@ export async function requestTeammateInteraction<T>(
   interaction: "permission" | "question",
   payload: Record<string, unknown>,
   timeoutMs = 10 * 60_000,
-): Promise<T | undefined> {
-  if (!isTeammateChild()) return undefined;
+): Promise<TeammateInteractionResult<T>> {
+  if (!isTeammateChild()) return { ok: false, reason: "unavailable" };
   const state = relayState();
   installListener(state);
   const requestId = randomUUID();
-  return new Promise<T | undefined>((resolve) => {
-    const timer = setTimeout(() => {
+  return new Promise<TeammateInteractionResult<T>>((resolve) => {
+    let settled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const finish = (result: TeammateInteractionResult<T>) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
       state.pending.delete(requestId);
-      resolve(undefined);
-    }, timeoutMs);
+      resolve(result);
+    };
+    timer = setTimeout(() => finish({ ok: false, reason: "timeout" }), timeoutMs);
     timer.unref?.();
     state.pending.set(requestId, {
       timer,
-      resolve: (result) => resolve(result as T | undefined),
+      resolve: (result) => finish({ ok: true, result: result as T }),
     });
     try {
       process.send?.({
@@ -42,11 +54,17 @@ export async function requestTeammateInteraction<T>(
         interaction,
         correlationId: process.env.PI_TEAMMATE_CORRELATION_ID,
         payload,
+      }, (error) => {
+        if (error) {
+          finish({ ok: false, reason: "send-failed", error: error.message });
+        }
       });
-    } catch {
-      clearTimeout(timer);
-      state.pending.delete(requestId);
-      resolve(undefined);
+    } catch (error) {
+      finish({
+        ok: false,
+        reason: "send-failed",
+        error: error instanceof Error ? error.message : String(error),
+      });
     }
   });
 }

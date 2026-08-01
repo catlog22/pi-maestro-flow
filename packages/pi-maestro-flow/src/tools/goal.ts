@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
+import { MAX_CONSECUTIVE_COMPACTION_FAILURES } from "../compaction/pressure-telemetry.ts";
 import type { WorkflowCoordinator } from "../session/coordinator.ts";
 import { activeWorkflowRun, type WorkflowSession, type WorkflowSnapshot } from "../session/types.ts";
 import {
@@ -1221,18 +1222,17 @@ function isPiRetry(event: unknown, goalId: string): boolean {
 }
 
 function markGoalRecovery(goalId: string, kind: "compaction_retry" | "provider_retry"): void {
-  if (kind === "compaction_retry") {
-    goalRecovery = { goalId, kind };
-    return;
-  }
+  const maxRetries = kind === "compaction_retry"
+    ? MAX_CONSECUTIVE_COMPACTION_FAILURES
+    : NETWORK_RETRY_POLICY.maxRetries;
   const previousAttempt = goalRecovery?.goalId === goalId && goalRecovery.kind === kind
     ? goalRecovery.attempt ?? 0
     : 0;
   goalRecovery = {
     goalId,
     kind,
-    attempt: Math.min(previousAttempt + 1, NETWORK_RETRY_POLICY.maxRetries),
-    maxRetries: NETWORK_RETRY_POLICY.maxRetries,
+    attempt: Math.min(previousAttempt + 1, maxRetries),
+    maxRetries,
   };
 }
 
@@ -1277,7 +1277,7 @@ export function currentGoalPhase(): GoalWidgetPhase {
   const goal = activeGoal;
   if (!goal) return "normal";
   if (goal.status === "active" && verificationInFlight?.goalId === goal.id) return "verifying";
-  if (goalRecovery?.goalId === goal.id && goalRecovery.kind === "provider_retry") return "retrying";
+  if (goalRecovery?.goalId === goal.id) return "retrying";
   if (goal.status === "active"
     && (goalLoopOwner?.goalId !== goal.id || goalLoopOwner.epoch !== goalLifecycleEpoch)) return "waiting";
   return "normal";
@@ -1390,10 +1390,10 @@ function toDetailEntry(goal: ActiveGoal, todoSubject: string | undefined): GoalD
     verificationFailures: goal.verificationFailures,
     acceptance: goal.acceptance,
     workflowSessionId: goal.workflowSessionId,
-    retryAttempt: goalRecovery?.goalId === goal.id && goalRecovery.kind === "provider_retry"
+    retryAttempt: goalRecovery?.goalId === goal.id
       ? goalRecovery.attempt
       : undefined,
-    retryMaxRetries: goalRecovery?.goalId === goal.id && goalRecovery.kind === "provider_retry"
+    retryMaxRetries: goalRecovery?.goalId === goal.id
       ? goalRecovery.maxRetries
       : undefined,
     ...(todoSubject ? { todoSubject } : {}),

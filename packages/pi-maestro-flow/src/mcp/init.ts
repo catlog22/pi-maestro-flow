@@ -215,6 +215,17 @@ export async function initializeMcp(
     updateStatusBar(state);
   });
 
+  lifecycle.setReconnectFailureCallback(({ serverName, attempt, nextRetryAt, error }) => {
+    state.failureTracker.set(serverName, Date.now());
+    updateStatusBar(state);
+    const retrySeconds = Math.max(1, Math.ceil((nextRetryAt - Date.now()) / 1000));
+    state.ui?.notify(
+      `MCP: ${serverName} reconnect failed ${attempt} consecutive times; `
+      + `next retry in ${retrySeconds}s: ${error.message}`,
+      "warning",
+    );
+  });
+
   lifecycle.setIdleShutdownCallback((serverName) => {
     const idleMinutes = getEffectiveIdleTimeoutMinutes(state, serverName);
     logger.debug(`${serverName} shut down (idle ${idleMinutes}m)`);
