@@ -83,6 +83,33 @@ function formatCwd(cwd: string): string {
 	return rel === "" ? "~" : `~${sep}${rel}`;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function isStartedPayload(value: unknown): value is StartedPayload {
+	return isRecord(value)
+		&& typeof value.correlationId === "string"
+		&& value.correlationId.length > 0
+		&& typeof value.agent === "string";
+}
+
+function isProgressPayload(value: unknown): value is MessagePayload {
+	return isRecord(value)
+		&& value.isSend !== true
+		&& value.isInteraction !== true
+		&& typeof value.correlationId === "string"
+		&& value.correlationId.length > 0;
+}
+
+function isCompletePayload(value: unknown): value is CompletePayload {
+	return isRecord(value)
+		&& typeof value.correlationId === "string"
+		&& value.correlationId.length > 0
+		&& typeof value.exitCode === "number"
+		&& Number.isFinite(value.exitCode);
+}
+
 export default function (pi: ExtensionAPI): void {
 	const agents = new AgentsStore();
 	const bashBg = new BashBgStore();
@@ -494,16 +521,19 @@ export default function (pi: ExtensionAPI): void {
 	};
 
 	// --- teammate lifecycle (custom event bus; subscribed once for the extension lifetime) ---
-	pi.events.on(TEAMMATE_STARTED_EVENT, (d) => {
-		agents.applyStarted(d as StartedPayload);
+	pi.events.on(TEAMMATE_STARTED_EVENT, (payload) => {
+		if (!isStartedPayload(payload)) return;
+		agents.applyStarted(payload);
 		req();
 	});
-	pi.events.on(TEAMMATE_MESSAGE_EVENT, (d) => {
-		agents.applyMessage(d as MessagePayload);
+	pi.events.on(TEAMMATE_MESSAGE_EVENT, (payload) => {
+		if (!isProgressPayload(payload)) return;
+		agents.applyMessage(payload);
 		req();
 	});
-	pi.events.on(TEAMMATE_COMPLETE_EVENT, (d) => {
-		agents.applyComplete(d as CompletePayload);
+	pi.events.on(TEAMMATE_COMPLETE_EVENT, (payload) => {
+		if (!isCompletePayload(payload)) return;
+		agents.applyComplete(payload);
 		// A failure that arrives after the session went idle still needs a loop to
 		// expire it, so the tick is re-evaluated rather than assumed to be running.
 		syncTick();

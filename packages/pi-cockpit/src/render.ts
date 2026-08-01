@@ -1,4 +1,5 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
+import { effectiveAgentStatus, type AgentDisplayStatus } from "./agents-store.ts";
 import type { AgentRow, TodoItem, ViewMode } from "./types.ts";
 import type { IconGlyphs } from "./icons.ts";
 import { composeByPriority, fitLineByPriority, type PriorityGroup, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
@@ -15,8 +16,15 @@ export const NARROW_WIDTH = 40;
 // segment. Long chains collapse to a count instead of pushing the task off the row.
 const MAX_LISTED_DEPENDENCIES = 3;
 
-function formatDependencies(dependencies: readonly number[], glyphs: IconGlyphs): string {
-	const listed = dependencies.slice(0, MAX_LISTED_DEPENDENCIES).map((d) => `#${d + 1}`).join(",");
+function formatDependencies(
+	dependencies: readonly number[],
+	glyphs: IconGlyphs,
+	labelsByIndex: ReadonlyMap<number, string>,
+): string {
+	const listed = dependencies.slice(0, MAX_LISTED_DEPENDENCIES).map((dependency) => {
+		const label = labelsByIndex.get(dependency);
+		return label ? `@${label}` : `#${dependency + 1}`;
+	}).join(",");
 	const rest = dependencies.length - MAX_LISTED_DEPENDENCIES;
 	return `${glyphs.depArrow} ${listed}${rest > 0 ? `,+${rest}` : ""}`;
 }
@@ -187,17 +195,18 @@ function buildAgentTree(rows: readonly AgentRow[], glyphs: IconGlyphs): AgentTre
 }
 
 function agentGlyph(
-	status: AgentRow["status"] | "result-ready",
+	status: AgentDisplayStatus,
 	glyphs: IconGlyphs,
 	spin: string,
 ): { glyph: string; color: ThemeColor; label?: string } {
 	if (status === "failed") return { glyph: glyphs.cross, color: "error" };
+	if (status === "stalled") return { glyph: glyphs.cross, color: "error", label: "stalled" };
 	if (status === "terminated") return { glyph: glyphs.cross, color: "warning", label: "terminated" };
 	if (status === "done") return { glyph: glyphs.check, color: "success" };
 	if (status === "pending") return { glyph: glyphs.pending, color: "dim", label: "pending" };
 	if (status === "sleeping") return { glyph: glyphs.dotIdle, color: "warning", label: "sleeping" };
 	if (status === "retrying") return { glyph: spin, color: "warning", label: "retrying" };
-	if (status === "result-ready") return { glyph: glyphs.pending, color: "dim", label: "result-ready" };
+	if (status === "result-ready") return { glyph: glyphs.check, color: "success", label: "result ready" };
 	return { glyph: spin, color: "accent" };
 }
 
@@ -215,8 +224,12 @@ export function renderAgents(
 	const ell = theme.fg("dim", g.ellipsis);
 
 	if (mode === "compact") {
-		const active = rows.filter((row) => row.status === "running" || row.status === "retrying").length;
-		const head = `${theme.fg("text", String(rows.length))} ${theme.fg("muted", "agents")}${active ? theme.fg("dim", `${g.separator}${active} active`) : ""}`;
+		const displayStatuses = rows.map((row) => effectiveAgentStatus(row, opts.now));
+		const active = displayStatuses.filter((status) => status === "running" || status === "retrying").length;
+		const stalled = displayStatuses.filter((status) => status === "stalled").length;
+		const head = `${theme.fg("text", String(rows.length))} ${theme.fg("muted", "agents")}`
+			+ (active ? theme.fg("dim", `${g.separator}${active} active`) : "")
+			+ (stalled ? theme.fg("error", `${g.separator}${stalled} stalled`) : "");
 		const tails = rows
 			.filter((r) => r.tail)
 			.map((r) => `${theme.fg(roleColor(r.role), r.role)}${theme.fg("dim", ":")} ${theme.fg("dim", r.tail)}`);
@@ -257,12 +270,14 @@ export function renderAgents(
 	// Priorities, not concatenation order, decide what survives a narrow terminal.
 	// Identity (tree position, state, role, task) outranks telemetry (tool, tail,
 	// counts) so the row still answers "who is doing what" at 40 columns.
+	const dependencyLabels = new Map<number, string>();
+	for (const row of rows) {
+		if (row.taskIndex === undefined) continue;
+		const label = row.name || row.role || row.agent;
+		if (label) dependencyLabels.set(row.taskIndex, label);
+	}
 	const lines = visible.map(({ row: r, prefix }) => {
-		// A published result with an unconfirmed lifecycle is no longer actively
-		// working: stop the spinner so the row reads as "done, wrapping up".
-		const effectiveStatus = r.status === "running" && r.resultReadyAt !== undefined
-			? "result-ready"
-			: r.status;
+		const effectiveStatus = effectiveAgentStatus(r, now);
 		const status = agentGlyph(effectiveStatus, g, spin);
 		const rc = roleColor(r.role);
 		const segs: PrioritizedSegment[] = [
@@ -277,11 +292,28 @@ export function renderAgents(
 			segs.push({ text: theme.fg("muted", formatDuration((r.finishedAt ?? now) - r.startedAt)), priority: 70, clippable: false });
 		}
 		if (r.dependencies?.length) {
-			segs.push({ text: theme.fg("dim", formatDependencies(r.dependencies, g)), priority: 60, clippable: false });
+			segs.push({ text: theme.fg("dim", formatDependencies(r.dependencies, g, dependencyLabels)), priority: 60, clippable: false });
 		}
+		if (r.error) segs.push({ text: theme.fg("error", r.error), priority: 55, minWidth: 8 });
 		if (r.activeTool) segs.push({ text: theme.fg("accent", `tool ${r.activeTool}`), priority: 50, minWidth: 8 });
 		if (r.tail) segs.push({ text: theme.fg("dim", r.tail), priority: 40, minWidth: 8 });
+		const model = r.resolvedModel ?? r.requestedModel;
+		if (model) {
+			const fallback = r.requestedModel && r.resolvedModel && r.requestedModel !== r.resolvedModel;
+			segs.push({
+				text: theme.fg(fallback ? "warning" : "muted", fallback ? `model ${r.requestedModel}→${r.resolvedModel}` : `model ${model}`),
+				priority: 25,
+				minWidth: 8,
+			});
+		}
 		if (r.toolCount !== undefined) segs.push({ text: theme.fg("muted", `${r.toolCount} tools`), priority: 20, clippable: false });
+		if ((r.cacheReadTokens ?? 0) > 0 || (r.cacheWriteTokens ?? 0) > 0) {
+			segs.push({
+				text: theme.fg("muted", `cache ${formatAgentMetric(r.cacheReadTokens ?? 0)}r/${formatAgentMetric(r.cacheWriteTokens ?? 0)}w`),
+				priority: 15,
+				clippable: false,
+			});
+		}
 		if (r.inputTokens !== undefined || r.outputTokens !== undefined) {
 			const usage = `in ${formatAgentMetric(r.inputTokens ?? 0)}${g.separator}out ${formatAgentMetric(r.outputTokens ?? 0)}`;
 			segs.push({ text: theme.fg("muted", usage), priority: 10, clippable: false });

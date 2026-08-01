@@ -1228,7 +1228,10 @@ export async function handleProxyRequest(
           ...(data.lastMessage
             ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
             : {}),
-          ...(data.status === "completed" || data.status === "failed"
+          ...((data.status === "failed" || data.status === "retrying") && data.lastMessage
+            ? { error: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
+            : {}),
+          ...(data.status === "completed" || data.status === "failed" || data.status === "terminated"
             ? { completedAt: new Date().toISOString() }
             : {}),
         };
@@ -1270,6 +1273,57 @@ export async function handleProxyRequest(
           }
         }
       };
+
+      const publishProxyProgress = (data: AgentProgress): void => {
+        const taskIndex = data.taskIndex ?? taskCorrelationIds.indexOf(data.correlationId ?? "");
+        const existing = taskIndex >= 0 ? progressState.get(taskIndex) : undefined;
+        const taskCorrelationId = data.correlationId ?? existing?.correlationId ?? cid;
+        const task: AgentProgressSnapshot = existing ?? {
+          agent: data.agent,
+          ...(data.name ? { name: data.name } : {}),
+          correlationId: taskCorrelationId,
+          taskIndex: taskIndex >= 0 ? taskIndex : 0,
+          dependencies: data.dependencies ?? [],
+          status: data.status,
+          startedAt: new Date(data.startedAt).toISOString(),
+          recentTools: data.recentTools,
+          toolCount: data.toolCount,
+          tokens: data.tokens,
+          inputTokens: data.inputTokens,
+          outputTokens: data.outputTokens,
+          cacheReadTokens: data.cacheReadTokens,
+          cacheWriteTokens: data.cacheWriteTokens,
+          durationMs: data.durationMs,
+          lastActivityAt: data.lastActivityAt,
+          resultReadyAt: data.resultReadyAt,
+          requestedModel: data.requestedModel,
+          resolvedModel: data.resolvedModel,
+          attemptedModels: data.attemptedModels,
+          ...(data.lastMessage
+            ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
+            : {}),
+          ...((data.status === "failed" || data.status === "retrying") && data.lastMessage
+            ? { error: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
+            : {}),
+          ...(data.status === "completed" || data.status === "failed" || data.status === "terminated"
+            ? { completedAt: new Date().toISOString() }
+            : {}),
+        };
+        const currentProgress = normalizedTasks ? progressSnapshot() : [task];
+        pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+          ...task,
+          correlationId: cid,
+          taskCorrelationId,
+          progress: currentProgress,
+        });
+      };
+
+      const childCallStatusForProgress = (status: AgentProgress["status"]): ChildAgentCallSnapshot["status"] => {
+        if (status === "completed" || status === "failed" || status === "terminated" || status === "retrying") {
+          return status;
+        }
+        return "running";
+      };
       // Aggregate the graph's task progress into one childCall snapshot so the
       // parent sees advancing activity. Without this the parent's record stayed
       // frozen at its initial "running" and every nested graph rendered as
@@ -1306,18 +1360,17 @@ export async function handleProxyRequest(
       const proxyProgressFlushGate = createProgressFlushGate(() => {
         const pending = [...pendingProgressByTask.values()];
         pendingProgressByTask.clear();
+        const latest = pending[pending.length - 1];
+        if (!latest) return;
         if (normalizedTasks) {
           for (const data of pending) processProxyProgress(data);
           activeAgent.progress = progressSnapshot();
+          publishProxyProgress(latest);
           reportChildStatus("running", aggregateTaskProgress());
           return;
         }
-        const latest = pending[pending.length - 1];
-        if (!latest) return;
-        reportChildStatus(
-          latest.status === "completed" ? "completed" : latest.status === "failed" ? "failed" : "running",
-          latest,
-        );
+        publishProxyProgress(latest);
+        reportChildStatus(childCallStatusForProgress(latest.status), latest);
       });
 
       const runOpts: RunTeammateOptions = {
@@ -1454,6 +1507,10 @@ export async function handleProxyRequest(
               cacheReadTokens: result.usage.cacheReadTokens,
               cacheWriteTokens: result.usage.cacheWriteTokens,
               durationMs: result.durationMs,
+              requestedModel: current?.requestedModel,
+              resolvedModel: result.model,
+              attemptedModels: result.attemptedModels ?? current?.attemptedModels,
+              ...(resultIsError(result) ? { error: displayMessageForResult(result) } : {}),
               ...(lifecyclePending && current?.resultReadyAt
                 ? { resultReadyAt: current.resultReadyAt }
                 : {}),

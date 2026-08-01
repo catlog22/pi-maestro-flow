@@ -1965,6 +1965,12 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   assert.match(source, /childToolLines/);
   assert.match(source, /const deliverNestedCompletion = \(\): void => \{[\s\S]*?reportChildStatus\(terminalStatus === "terminated"/);
   assert.match(source, /reportChildStatus\("running"\)/);
+  assert.match(
+    source,
+    /const publishProxyProgress = \(data: AgentProgress\): void => \{[\s\S]*?pi\.events\.emit\(TEAMMATE_MESSAGE_EVENT,[\s\S]*?progress: currentProgress/,
+    "nested progress must reach the shared event bus used by cockpit",
+  );
+  assert.match(source, /publishProxyProgress\(latest\);[\s\S]*?reportChildStatus/);
   assert.match(source, /progress: currentProgress,[\s\S]*?childCalls: \[\.\.\.childCalls\.values\(\)\]/);
   assert.doesNotMatch(source, /spawned @\$\{p\.name \?\? p\.agent\}/);
 });

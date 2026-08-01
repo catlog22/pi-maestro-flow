@@ -1364,7 +1364,10 @@ export default function registerTeammateExtension(
               ...(data.lastMessage
                 ? { lastMessage: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
                 : {}),
-              ...(data.status === "completed" || data.status === "failed"
+              ...((data.status === "failed" || data.status === "retrying") && data.lastMessage
+                ? { error: truncateUtf8Tail(data.lastMessage, AGENT_BUFFER_LIMITS.lastResultBytes) }
+                : {}),
+              ...(data.status === "completed" || data.status === "failed" || data.status === "terminated"
                 ? { completedAt: new Date().toISOString() }
                 : {}),
             };
@@ -1598,6 +1601,10 @@ export default function registerTeammateExtension(
                 cacheReadTokens: result.usage.cacheReadTokens,
                 cacheWriteTokens: result.usage.cacheWriteTokens,
                 durationMs: result.durationMs,
+                requestedModel: current?.requestedModel,
+                resolvedModel: result.model,
+                attemptedModels: result.attemptedModels ?? current?.attemptedModels,
+                ...(resultIsError(result) ? { error: displayMessageForResult(result) } : {}),
                 ...(lifecyclePending && current?.resultReadyAt
                   ? { resultReadyAt: current.resultReadyAt }
                   : {}),

@@ -1,6 +1,6 @@
-// Cross-extension event names broadcast by pi-maestro-teammate.
-// Hard-coded strings (stable contract; see pi-maestro-teammate/src/shared/types.ts:184-186)
-// so this package needs no import path into the teammate package.
+// Cross-extension event names from pi-maestro-teammate's versioned public
+// contract. They remain literal here so Cockpit can still load standalone when
+// the optional teammate peer is absent; payload types are imported from /v1.
 export const TEAMMATE_STARTED_EVENT = "teammate:started";
 export const TEAMMATE_MESSAGE_EVENT = "teammate:message";
 export const TEAMMATE_COMPLETE_EVENT = "teammate:complete";
@@ -41,6 +41,13 @@ export interface AgentRow {
 	tokens?: number;
 	inputTokens?: number;
 	outputTokens?: number;
+	cacheReadTokens?: number;
+	cacheWriteTokens?: number;
+	/** Latest provider/runtime diagnostic from the authoritative progress snapshot. */
+	error?: string;
+	requestedModel?: string;
+	resolvedModel?: string;
+	attemptedModels?: string[];
 	taskStatus?: string;
 	activeTool?: string;
 	taskIndex?: number;

@@ -18,7 +18,7 @@
  *   - `publishProgress`, the `teammate-send` tool, the attach overlay, and
  *     `handleChildInteractionRequest` -> {@link TeammateMessageEvent}
  */
-import type { AgentProgressSnapshot, AgentProgressStatus, AgentStatus } from "../../shared/types.ts";
+import type { AgentProgressSnapshot, AgentStatus } from "../../shared/types.ts";
 export { TEAMMATE_COMPLETE_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_STARTED_EVENT, } from "../../shared/types.ts";
 /** Tool identity of one child tool call, as reported inside a progress payload. */
 export interface TeammateEventTool {
@@ -40,6 +40,8 @@ export interface TeammateStartedEvent {
     spawnedBy?: string;
     /** Epoch milliseconds. */
     startedAt: number;
+    /** Epoch milliseconds of the latest observed activity. */
+    lastActivityAt?: number;
     status: AgentStatus;
     /** Tool-call id; present only when the run was started by a root `teammate` call. */
     id?: string;
@@ -67,20 +69,12 @@ export interface TeammateCompleteEvent {
  * `progress` carries the full snapshot of every task in the run, so a receiver
  * can rebuild an entire graph view from a single event.
  */
-export interface TeammateProgressMessageEvent {
+export interface TeammateProgressMessageEvent extends Omit<AgentProgressSnapshot, "correlationId"> {
     /** `correlationId` of the run that owns the graph. */
     correlationId: string;
-    agent: string;
-    name?: string;
     /** `correlationId` of the individual task the delta belongs to. */
     taskCorrelationId: string;
-    taskIndex: number;
-    dependencies: number[];
-    status: AgentProgressStatus;
-    toolCount: number;
-    tokens: number;
-    recentTools: TeammateEventTool[];
-    lastMessage?: string;
+    /** Full authoritative snapshot for the run, including all graph tasks. */
     progress: AgentProgressSnapshot[];
     isSend?: undefined;
     isInteraction?: undefined;
@@ -96,6 +90,8 @@ export interface TeammateSendMessageEvent {
     to: string;
     mode: "steer" | "follow_up" | "abort";
     message: string;
+    /** Epoch milliseconds of the send operation. */
+    lastActivityAt?: number;
     isSend: true;
     isInteraction?: undefined;
 }

@@ -1,5 +1,6 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { effectiveAgentStatus } from "./agents-store.ts";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import { resolveGlyphs, type IconGlyphs, type IconMode } from "./icons.ts";
 import { composeByPriority, type PriorityGroup } from "./layout.ts";
@@ -42,7 +43,8 @@ function finiteCount(value: number): number {
 
 function statusVisual(status: string, glyphs: IconGlyphs): { glyph: string; color: ThemeColor } {
 	const normalized = clean(status).toLowerCase();
-	if (/fail|error|blocked/.test(normalized)) return { glyph: glyphs.cross, color: "error" };
+	if (/fail|error|blocked|stalled/.test(normalized)) return { glyph: glyphs.cross, color: "error" };
+	if (/terminate|cancel/.test(normalized)) return { glyph: glyphs.cross, color: "warning" };
 	if (/complete|completed|done|success|passed|ready/.test(normalized)) {
 		return { glyph: glyphs.check, color: "success" };
 	}
@@ -62,11 +64,15 @@ function paintedStatus(status: string, theme: Theme, glyphs: IconGlyphs): string
 function compactCounts(values: ReadonlyArray<{ status: string }>, sep: string): string {
 	const active = values.filter((item) => /running|retry|stopping|progress|active/i.test(item.status)).length;
 	const failed = values.filter((item) => /fail|error|blocked/i.test(item.status)).length;
+	const stalled = values.filter((item) => /stalled/i.test(item.status)).length;
+	const terminated = values.filter((item) => /terminate|cancel/i.test(item.status)).length;
 	const done = values.filter((item) => /complete|completed|done|success/i.test(item.status)).length;
 	return [
 		`${values.length} total`,
 		active > 0 ? `${active} active` : "",
 		failed > 0 ? `${failed} failed` : "",
+		stalled > 0 ? `${stalled} stalled` : "",
+		terminated > 0 ? `${terminated} terminated` : "",
 		done > 0 ? `${done} done` : "",
 	].filter(Boolean).join(sep);
 }
@@ -167,18 +173,36 @@ function agentRows(
 ): string[] {
 	if (rows.length === 0) return [];
 	const ordered = [...rows].sort((a, b) => {
-		const active = (row: AgentRow) => row.status === "running" || row.status === "retrying" ? 0 : row.status === "failed" ? 1 : 2;
+		const active = (row: AgentRow) => {
+			const status = effectiveAgentStatus(row, now);
+			return status === "running" || status === "retrying" ? 0 : status === "stalled" || status === "failed" ? 1 : 2;
+		};
 		return active(a) - active(b) || b.lastActivityAt - a.lastActivityAt || a.correlationId.localeCompare(b.correlationId);
 	});
-	const summary = compactCounts(ordered, glyphs.separator);
+	const summary = compactCounts(ordered.map((row) => ({ status: effectiveAgentStatus(row, now) })), glyphs.separator);
 	const visible = compact ? ordered.slice(0, 1) : ordered;
 	return [theme.fg("muted", summary), ...visible.map((row) => {
+		const displayStatus = effectiveAgentStatus(row, now);
 		const label = clean(row.name) || clean(row.role) || clean(row.agent) || "agent";
 		const task = clean(row.task);
-		const live = row.status === "running" || row.status === "retrying";
+		const live = displayStatus === "running" || displayStatus === "retrying";
 		const elapsed = hideLiveDuration && live ? "" : formatDuration((row.finishedAt ?? now) - row.startedAt);
-		let line = `${paintedStatus(row.status, theme, glyphs)}${glyphs.separator}${theme.fg("syntaxFunction", label)}`
-			+ (task ? `${glyphs.separator}${task}` : "");
+		const action = row.error
+			? `error ${clean(row.error)}`
+			: row.activeTool
+				? `tool ${clean(row.activeTool)}`
+				: clean(row.tail);
+		const telemetry = [
+			row.dependencies?.length ? `${row.dependencies.length} deps` : "",
+			row.toolCount !== undefined ? `${row.toolCount} tools` : "",
+			row.inputTokens !== undefined || row.outputTokens !== undefined
+				? `in ${formatAgentMetric(row.inputTokens ?? 0)}/out ${formatAgentMetric(row.outputTokens ?? 0)}`
+				: row.tokens !== undefined ? `${formatAgentMetric(row.tokens)} tok` : "",
+		].filter(Boolean).join(glyphs.separator);
+		let line = `${paintedStatus(displayStatus, theme, glyphs)}${glyphs.separator}${theme.fg("syntaxFunction", label)}`
+			+ (task ? `${glyphs.separator}${task}` : "")
+			+ (action ? `${glyphs.separator}${action}` : "")
+			+ (telemetry ? theme.fg("muted", `${glyphs.separator}${telemetry}`) : "");
 		if (elapsed !== "") line += theme.fg("dim", `${glyphs.separator}${elapsed}`);
 		return line;
 	})];

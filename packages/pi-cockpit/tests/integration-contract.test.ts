@@ -118,10 +118,20 @@ test("Cockpit acquires the footer before installing and releases it before defer
 	);
 });
 
-test("Cockpit teammate event names stay aligned with the public v1 contract", () => {
+test("Cockpit teammate event names and payload ingestion stay aligned with the public v1 contract", () => {
 	assert.equal(TEAMMATE_STARTED_EVENT, PUBLIC_TEAMMATE_STARTED_EVENT);
 	assert.equal(TEAMMATE_MESSAGE_EVENT, PUBLIC_TEAMMATE_MESSAGE_EVENT);
 	assert.equal(TEAMMATE_COMPLETE_EVENT, PUBLIC_TEAMMATE_COMPLETE_EVENT);
+	const storeSource = readFileSync(new URL("../src/agents-store.ts", import.meta.url), "utf8");
+	const cockpitSource = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
+	const teammateEventsSource = readFileSync(
+		new URL("../../pi-maestro-teammate/src/public/v1/events.ts", import.meta.url),
+		"utf8",
+	);
+	assert.match(storeSource, /TeammateProgressMessageEvent[\s\S]*AgentProgressSnapshot/);
+	assert.match(teammateEventsSource, /TeammateProgressMessageEvent extends Omit<AgentProgressSnapshot/);
+	assert.match(cockpitSource, /value\.isSend !== true[\s\S]*value\.isInteraction !== true/);
+	assert.doesNotMatch(cockpitSource, /agents\.apply(?:Started|Message|Complete)\([^\n]* as /);
 });
 
 test("Cockpit consumes Maestro snapshots and emits versioned queries at session start and dock acquisition", () => {

@@ -171,6 +171,44 @@ test("compact mode activates at 35 columns or from configuration density", () =>
 	assert.doesNotMatch(configured, /Add tests/);
 });
 
+test("agent sidebar rows expose live action and telemetry changes", () => {
+	const base = { ...agents[0], activeTool: "read", toolCount: 2, inputTokens: 1_200, outputTokens: 40 };
+	const first = render({ maestro: undefined, todos: [], jobs: [], agents: [base], width: 100, height: 8 }).join("\n");
+	const second = render({
+		maestro: undefined,
+		todos: [],
+		jobs: [],
+		agents: [{ ...base, activeTool: undefined, tail: "waiting for tests", toolCount: 3 }],
+		width: 100,
+		height: 8,
+	}).join("\n");
+	assert.match(first, /tool read/);
+	assert.match(first, /2 tools/);
+	assert.match(first, /in 1.2k\/out 40/);
+	assert.match(second, /waiting for tests/);
+	assert.match(second, /3 tools/);
+	assert.notEqual(first, second, "telemetry-only progress must visibly repaint the sidebar");
+});
+
+test("agent sidebar distinguishes stalled and terminated states", () => {
+	const text = render({
+		maestro: undefined,
+		todos: [],
+		jobs: [],
+		agents: [
+			{ ...agents[0], correlationId: "stalled", lastActivityAt: 1 },
+			{ ...agents[0], correlationId: "terminated", status: "terminated", finishedAt: 5_000 },
+		],
+		width: 64,
+		height: 10,
+		now: 40_000,
+	}).join("\n");
+	assert.match(text, /1 stalled/);
+	assert.match(text, /1 terminated/);
+	assert.match(text, /stalled/);
+	assert.match(text, /terminated/);
+});
+
 test("hostile control characters are stripped and every line remains width bounded", () => {
 	const hostileTodos: TodoItem[] = [{
 		id: "bad",

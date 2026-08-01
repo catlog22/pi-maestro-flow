@@ -592,6 +592,66 @@ test("hasLingering includes sleeping rows so the redraw loop keeps running", () 
 	assert.equal(s.hasLingering(), true);
 });
 
+test("message variants without an agent correlation never create ghost rows", () => {
+	const s = new AgentsStore();
+	s.applyMessage({ agent: "executor", status: "running", isInteraction: true }, 1_000);
+	assert.equal(s.size, 0);
+});
+
+test("send variants do not overwrite the agent progress tail", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "c1", agent: "executor" }, 1);
+	s.applyMessage({ correlationId: "c1", lastMessage: "building" }, 100);
+	s.applyMessage({ correlationId: "c1", isSend: true, message: "abort now" }, 200);
+	assert.equal(s.snapshot(200)[0].tail, "building");
+	assert.equal(s.snapshot(200)[0].lastActivityAt, 100, "send receipts are not progress activity");
+});
+
+test("wakeable graph completion only sleeps the owning container", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "root", agent: "graph(1)" }, 1);
+	s.applyStarted({ correlationId: "child", agent: "executor", spawnedBy: "root" }, 2);
+	s.applyComplete({ correlationId: "root", exitCode: 0, wakeable: true }, 1_000);
+	assert.equal(s.snapshot(1_000).find((row) => row.correlationId === "root")?.status, "sleeping");
+	assert.equal(s.has("child"), false, "container wakeability must not turn completed descendants into sleepers");
+});
+
+test("full progress snapshots project and clear diagnostic telemetry", () => {
+	const s = new AgentsStore();
+	s.applyStarted({ correlationId: "root", agent: "graph(1)" }, 1);
+	s.applyMessage({
+		correlationId: "root",
+		progress: [{
+			correlationId: "child",
+			agent: "executor",
+			taskIndex: 0,
+			status: "retrying",
+			cacheReadTokens: 120,
+			cacheWriteTokens: 4,
+			error: "provider timeout",
+			requestedModel: "primary",
+			resolvedModel: "fallback",
+			attemptedModels: ["primary", "fallback"],
+		}],
+	}, 100);
+	let row = s.snapshot(100).find((candidate) => candidate.correlationId === "child")!;
+	assert.equal(row.cacheReadTokens, 120);
+	assert.equal(row.cacheWriteTokens, 4);
+	assert.equal(row.error, "provider timeout");
+	assert.equal(row.resolvedModel, "fallback");
+	assert.deepEqual(row.attemptedModels, ["primary", "fallback"]);
+
+	s.applyMessage({
+		correlationId: "root",
+		progress: [{ correlationId: "child", agent: "executor", taskIndex: 0, status: "running" }],
+	}, 200);
+	row = s.snapshot(200).find((candidate) => candidate.correlationId === "child")!;
+	assert.equal(row.error, undefined);
+	assert.equal(row.requestedModel, undefined);
+	assert.equal(row.resolvedModel, undefined);
+	assert.equal(row.attemptedModels, undefined);
+});
+
 test("mapAgentStatus maps the teammate terminated state instead of defaulting to running", () => {
 	assert.equal(mapAgentStatus("terminated"), "terminated");
 	assert.equal(mapAgentStatus("unknown"), "running", "unknown values still fall back to running");

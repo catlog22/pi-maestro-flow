@@ -7,6 +7,7 @@ import { DEFAULT_CONFIG, type AgentRow, type TodoItem } from "../src/types.ts";
 
 const theme = { fg: (_color: string, text: string) => text } as Theme;
 const tui = {} as TUI;
+const ACTIVE_AT = Date.now();
 const todos: TodoItem[] = [
 	{ id: "1", subject: "implement ownership", status: "in_progress", blockedBy: [], skills: [] },
 	{ id: "2", subject: "verify UI", status: "pending", blockedBy: [], skills: [] },
@@ -40,7 +41,7 @@ test("row-leading status glyphs are static and ignore the animation flag", () =>
 			status: "running",
 			tail: "",
 			startedAt: 1,
-			lastActivityAt: 1,
+			lastActivityAt: ACTIVE_AT,
 		}],
 		getConfig: () => nerd,
 		isRunning: () => true,
@@ -84,7 +85,7 @@ test("agent-area widget excludes graph dispatch containers from rows and running
 		status: "running",
 		tail: "",
 		startedAt: 1,
-		lastActivityAt: 1,
+		lastActivityAt: ACTIVE_AT,
 		...overrides,
 	});
 	const component = makeAgentWidget({
@@ -112,7 +113,7 @@ test("static mode passes hideLiveDuration through to the agent rows", () => {
 		status: "running",
 		tail: "",
 		startedAt: 1,
-		lastActivityAt: 1,
+		lastActivityAt: ACTIVE_AT,
 	});
 	const make = (staticMode: boolean) => makeAgentWidget({
 		getAgents: () => [row()],
@@ -137,7 +138,7 @@ test("quiet mode keeps the roster expanded but drops the live streaming tail", (
 		status: "running",
 		tail: "reading tokens.ts",
 		startedAt: 1,
-		lastActivityAt: 1,
+		lastActivityAt: ACTIVE_AT,
 		...overrides,
 	});
 	const make = (quiet: boolean) => makeAgentWidget({
@@ -168,7 +169,7 @@ test("agent-area widget bridges nested graph descendants to the nearest visible 
 		status: "running",
 		tail: "",
 		startedAt: 1,
-		lastActivityAt: 1,
+		lastActivityAt: ACTIVE_AT,
 		...overrides,
 	});
 	const component = makeAgentWidget({

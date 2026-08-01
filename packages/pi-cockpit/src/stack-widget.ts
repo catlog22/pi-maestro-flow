@@ -1,6 +1,7 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { effectiveAgentStatus } from "./agents-store.ts";
 import { renderAgents, renderTodos, type PaintTheme, type WidthUtils } from "./render.ts";
 import { fitLineByPriority, type PrioritizedSegment } from "./layout.ts";
 import { resolveGlyphs } from "./icons.ts";
@@ -111,10 +112,13 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 					: Math.max(1, panel - 1);
 				const opts = { glyphs: g, spin, now, maxRows: rosterRows, hideLiveDuration: cfg.staticMode };
 				const dot = theme.fg(running ? "success" : "muted", running ? g.dotRunning : g.dotIdle);
-				const failedCount = agents.filter((a) => a.status === "failed").length;
-				const runCount = agents.filter((a) => a.status === "running" || a.status === "retrying").length;
-				const pendingCount = agents.filter((a) => a.status === "pending").length;
-				const sleepingCount = agents.filter((a) => a.status === "sleeping").length;
+				const displayStatuses = agents.map((agent) => effectiveAgentStatus(agent, now));
+				const failedCount = displayStatuses.filter((status) => status === "failed").length;
+				const terminatedCount = displayStatuses.filter((status) => status === "terminated").length;
+				const stalledCount = displayStatuses.filter((status) => status === "stalled").length;
+				const runCount = displayStatuses.filter((status) => status === "running" || status === "retrying").length;
+				const pendingCount = displayStatuses.filter((status) => status === "pending").length;
+				const sleepingCount = displayStatuses.filter((status) => status === "sleeping").length;
 				// This header owns the roster summary, so compact mode must not print
 				// its own count line right underneath saying the same thing.
 				const headerSegs: PrioritizedSegment[] = [
@@ -124,6 +128,8 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				if (failedCount) {
 					headerSegs.push({ text: theme.fg("error", `${failedCount} failed`), priority: 95, clippable: false });
 				}
+				if (stalledCount) headerSegs.push({ text: theme.fg("error", `${stalledCount} stalled`), priority: 94, clippable: false });
+				if (terminatedCount) headerSegs.push({ text: theme.fg("warning", `${terminatedCount} terminated`), priority: 85, clippable: false });
 				if (runCount) headerSegs.push({ text: theme.fg("dim", `${runCount} running`), priority: 80, clippable: false });
 				if (pendingCount) headerSegs.push({ text: theme.fg("dim", `${pendingCount} pending`), priority: 60, clippable: false });
 				if (sleepingCount) headerSegs.push({ text: theme.fg("dim", `${sleepingCount} sleeping`), priority: 50, clippable: false });

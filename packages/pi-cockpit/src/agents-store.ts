@@ -1,4 +1,9 @@
-import type { TeammateCompleteEvent } from "pi-maestro-teammate/v1/events";
+import type {
+	TeammateCompleteEvent,
+	TeammateProgressMessageEvent,
+	TeammateStartedEvent,
+} from "pi-maestro-teammate/v1/events";
+import type { AgentProgressSnapshot } from "pi-maestro-teammate/v1/types";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
 import type { AgentRow, AgentStatus } from "./types.ts";
 
@@ -19,56 +24,26 @@ function truncateTail(raw: string): string {
 	return flat.length > TAIL_MAX ? flat.slice(0, TAIL_MAX - 1) + "…" : flat;
 }
 
-// Shapes mirror what pi-maestro-teammate emits on pi.events (teammate/.../index.ts:378/1636/3420).
-export interface StartedPayload {
-	correlationId: string;
-	agent: string;
-	name?: string;
-	spawnedBy?: string;
-	startedAt?: number | string;
-	lastActivityAt?: number | string;
-	status?: string;
-}
-export interface ProgressPayload {
-	agent: string;
-	name?: string;
-	correlationId: string;
-	taskIndex: number;
-	dependencies?: number[];
-	status?: string;
-	startedAt?: number | string;
-	completedAt?: number | string;
-	durationMs?: number;
-	lastActivityAt?: number | string;
-	/** Published when the agent produced its final result but lifecycle is still confirming. */
-	resultReadyAt?: number | string;
-	recentTools?: Array<string | { name?: string; status?: string }>;
-	toolCount?: number;
-	tokens?: number;
-	inputTokens?: number;
-	outputTokens?: number;
-	lastMessage?: string;
-}
-export interface MessagePayload {
-	correlationId: string;
-	taskCorrelationId?: string;
-	// Present on progress/interaction deltas (teammate/.../index.ts publishProgress);
-	// absent on send deltas. Used to self-heal a row when `started` was missed.
-	agent?: string;
-	name?: string;
-	taskIndex?: number;
-	dependencies?: number[];
-	message?: string;
-	lastMessage?: string;
-	recentTools?: Array<string | { name?: string; status?: string }>;
-	toolCount?: number;
-	tokens?: number;
-	inputTokens?: number;
-	outputTokens?: number;
-	status?: string;
-	lastActivityAt?: number | string;
+// Store inputs are compatibility-relaxed projections of the versioned public
+// contract. The event boundary validates discriminators and identifiers; the
+// optional fields let older teammate versions continue to feed the same store.
+export type StartedPayload = Pick<TeammateStartedEvent, "correlationId" | "agent">
+	& Partial<Omit<TeammateStartedEvent, "correlationId" | "agent" | "startedAt">>
+	& { startedAt?: number | string };
+export type ProgressPayload = Pick<AgentProgressSnapshot, "correlationId" | "agent" | "taskIndex">
+	& Partial<Omit<AgentProgressSnapshot, "correlationId" | "agent" | "taskIndex" | "startedAt" | "completedAt">>
+	& { startedAt?: number | string; completedAt?: number | string };
+export type MessagePayload = Partial<Omit<
+	TeammateProgressMessageEvent,
+	"progress" | "recentTools" | "isSend" | "isInteraction"
+>> & {
 	progress?: ProgressPayload[];
-}
+	recentTools?: Array<string | { name?: string; status?: string }>;
+	isSend?: boolean;
+	isInteraction?: boolean;
+	/** Compatibility with pre-v1 progress deltas; discriminated send events are ignored. */
+	message?: string;
+};
 export type CompletePayload = Pick<TeammateCompleteEvent, "correlationId" | "exitCode">
 	& Partial<Pick<TeammateCompleteEvent, "durationMs" | "wakeable" | "cancelled">>;
 
@@ -139,6 +114,15 @@ export function mapAgentStatus(status: unknown): AgentStatus {
 	}
 }
 
+export const AGENT_STALL_TIMEOUT_MS = 30_000;
+export type AgentDisplayStatus = AgentStatus | "result-ready" | "stalled";
+
+export function effectiveAgentStatus(row: AgentRow, now: number = Date.now()): AgentDisplayStatus {
+	if (row.status !== "running") return row.status;
+	if (row.resultReadyAt !== undefined) return "result-ready";
+	return now - row.lastActivityAt >= AGENT_STALL_TIMEOUT_MS ? "stalled" : "running";
+}
+
 function normalizeStartedAt(value: number | string | undefined, fallback: number): number {
 	if (typeof value === "number" && Number.isFinite(value)) return value;
 	if (typeof value === "string") {
@@ -161,7 +145,7 @@ function terminalTime(
 	return row.finishedAt ?? now;
 }
 
-function latestTool(tools: MessagePayload["recentTools"]): string | undefined {
+function latestTool(tools: Array<string | { name?: string; status?: string }> | undefined): string | undefined {
 	if (!tools?.length) return undefined;
 	const tool = tools.find((candidate) => typeof candidate === "object" && candidate?.status === "running")
 		?? tools.at(-1);
@@ -199,6 +183,7 @@ export class AgentsStore {
 	}
 
 	applyStarted(p: StartedPayload, now: number = Date.now()): void {
+		if (typeof p.correlationId !== "string" || p.correlationId.length === 0) return;
 		const id = p.correlationId;
 		// An explicit start is authoritative: a woken or re-dispatched agent
 		// reuses its correlationId and must reappear even if an earlier run was
@@ -222,15 +207,22 @@ export class AgentsStore {
 					? { parentCorrelationId: prev.parentCorrelationId }
 					: {}),
 		};
-		if (row.status !== "done" && row.status !== "failed") delete row.finishedAt;
+		if (row.status !== "done" && row.status !== "failed" && row.status !== "terminated") delete row.finishedAt;
 		this.roster.set(id, row);
 	}
 
 	applyMessage(p: MessagePayload, now = Date.now()): void {
+		if (p.isSend === true || p.isInteraction === true) return;
+		if (typeof p.correlationId !== "string" || p.correlationId.length === 0) return;
 		if (p.progress) {
-			for (const progress of p.progress) this.applyProgress(p.correlationId, progress, now);
+			for (const progress of p.progress) {
+				if (typeof progress.correlationId !== "string" || progress.correlationId.length === 0) continue;
+				this.applyProgress(p.correlationId, progress, now);
+			}
 		}
-		const targetId = p.taskCorrelationId ?? p.correlationId;
+		const targetId = typeof p.taskCorrelationId === "string" && p.taskCorrelationId.length > 0
+			? p.taskCorrelationId
+			: p.correlationId;
 		const parentId = p.taskCorrelationId && p.taskCorrelationId !== p.correlationId
 			? p.correlationId
 			: undefined;
@@ -258,7 +250,7 @@ export class AgentsStore {
 		if (!row) return;
 		const progressActivity = p.progress?.find((progress) => progress.correlationId === targetId)?.lastActivityAt;
 		row.lastActivityAt = normalizeStartedAt(p.lastActivityAt ?? progressActivity, now);
-		const tail = p.message ?? p.lastMessage;
+		const tail = p.lastMessage ?? p.message;
 		if (typeof tail === "string" && tail.length > 0) row.tail = truncateTail(tail);
 		if (p.recentTools) {
 			const tool = latestTool(p.recentTools);
@@ -269,6 +261,14 @@ export class AgentsStore {
 		if (typeof p.tokens === "number") row.tokens = p.tokens;
 		if (typeof p.inputTokens === "number") row.inputTokens = p.inputTokens;
 		if (typeof p.outputTokens === "number") row.outputTokens = p.outputTokens;
+		if (typeof p.cacheReadTokens === "number") row.cacheReadTokens = p.cacheReadTokens;
+		if (typeof p.cacheWriteTokens === "number") row.cacheWriteTokens = p.cacheWriteTokens;
+		if (typeof p.error === "string") row.error = truncateTail(p.error);
+		if (typeof p.requestedModel === "string") row.requestedModel = clean(p.requestedModel);
+		if (typeof p.resolvedModel === "string") row.resolvedModel = clean(p.resolvedModel);
+		if (Array.isArray(p.attemptedModels)) {
+			row.attemptedModels = p.attemptedModels.map((model) => clean(model)).filter(Boolean);
+		}
 		if (typeof p.status === "string") {
 			row.taskStatus = p.status;
 			row.status = mapAgentStatus(p.status);
@@ -283,6 +283,7 @@ export class AgentsStore {
 	}
 
 	applyComplete(p: CompletePayload, now = Date.now()): void {
+		if (typeof p.correlationId !== "string" || p.correlationId.length === 0) return;
 		const pending = [p.correlationId];
 		const visited = new Set<string>();
 		while (pending.length > 0) {
@@ -316,7 +317,7 @@ export class AgentsStore {
 				row.failedAt = now;
 				row.lastActivityAt = now;
 				delete row.activeTool;
-			} else if (row && p.wakeable && p.exitCode === 0) {
+			} else if (row && id === p.correlationId && p.wakeable && p.exitCode === 0) {
 				// A wakeable agent enters sleeping state after completion.
 				// Keep the row visible so the user can see it is idle but recallable.
 				row.status = "sleeping";
@@ -417,6 +418,16 @@ export class AgentsStore {
 		if (typeof p.tokens === "number") row.tokens = p.tokens;
 		if (typeof p.inputTokens === "number") row.inputTokens = p.inputTokens;
 		if (typeof p.outputTokens === "number") row.outputTokens = p.outputTokens;
+		row.cacheReadTokens = p.cacheReadTokens;
+		row.cacheWriteTokens = p.cacheWriteTokens;
+		if (p.error === undefined) delete row.error;
+		else row.error = truncateTail(p.error);
+		if (p.requestedModel === undefined) delete row.requestedModel;
+		else row.requestedModel = clean(p.requestedModel);
+		if (p.resolvedModel === undefined) delete row.resolvedModel;
+		else row.resolvedModel = clean(p.resolvedModel);
+		if (p.attemptedModels === undefined) delete row.attemptedModels;
+		else row.attemptedModels = p.attemptedModels.map((model) => clean(model)).filter(Boolean);
 		if (typeof p.lastMessage === "string" && p.lastMessage.length > 0) {
 			row.tail = truncateTail(p.lastMessage);
 		}

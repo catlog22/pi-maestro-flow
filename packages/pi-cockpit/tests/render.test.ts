@@ -11,7 +11,7 @@ const utils: WidthUtils = {
 	clip: (s, w, e) => (s.length <= w ? s : s.slice(0, Math.max(0, w - e.length)) + e),
 };
 const glyphs = resolveGlyphs("nerd");
-const opts = { glyphs, spin: "⠋" };
+const opts = { glyphs, spin: "⠋", now: 1 };
 
 function agent(over: Partial<AgentRow> = {}): AgentRow {
 	return {
@@ -165,6 +165,42 @@ test("renderAgents list includes teammate tool and input/output metrics", () => 
 test("renderAgents falls back to compact aggregate tokens", () => {
 	const line = renderAgents([agent({ tokens: 900 })], "list", 120, theme, utils, opts)[0];
 	assert.match(line, /0.9k tok/);
+});
+
+test("renderAgents derives stalled and result-ready display states without mutating lifecycle status", () => {
+	const stalled = renderAgents([
+		agent({ task: "silent task", status: "running", lastActivityAt: 1 }),
+	], "list", 120, theme, utils, { ...opts, now: 30_001 })[0];
+	assert.match(stalled, /stalled/);
+	assert.doesNotMatch(stalled, /⠋/);
+
+	const ready = renderAgents([
+		agent({ task: "returned task", status: "running", lastActivityAt: 1, resultReadyAt: 20_000 }),
+	], "list", 120, theme, utils, { ...opts, now: 30_001 })[0];
+	assert.match(ready, /result ready/);
+	assert.doesNotMatch(ready, /stalled|⠋/);
+});
+
+test("renderAgents labels result dependencies with agent names when available", () => {
+	const lines = renderAgents([
+		agent({ correlationId: "producer", name: "research", taskIndex: 0, task: "collect" }),
+		agent({ correlationId: "consumer", name: "writer", taskIndex: 1, dependencies: [0], task: "draft" }),
+	], "list", 120, theme, utils, opts);
+	assert.match(lines.find((line) => line.includes("draft"))!, /← @research/);
+});
+
+test("renderAgents exposes cache, fallback model, and provider diagnostics", () => {
+	const line = renderAgents([agent({
+		status: "retrying",
+		error: "provider timeout",
+		requestedModel: "primary",
+		resolvedModel: "fallback",
+		cacheReadTokens: 1_200,
+		cacheWriteTokens: 10,
+	})], "list", 180, theme, utils, opts)[0];
+	assert.match(line, /provider timeout/);
+	assert.match(line, /model primary→fallback/);
+	assert.match(line, /cache 1.2kr\/10w/);
 });
 
 test("renderAgents list caps at 6 visible + overflow", () => {
