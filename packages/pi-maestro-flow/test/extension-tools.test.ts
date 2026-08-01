@@ -9,6 +9,7 @@ import { matchesKey, visibleWidth } from "@earendil-works/pi-tui";
 import registerMaestroExtension, {
   CHINESE_RESPONSE_PROMPT,
   appendChineseResponsePrompt,
+  chineseGlobalStatePath,
   isWorkflowOptInCommand,
   registerChineseResponseMode,
   shouldActivateWorkflowSession,
@@ -32,20 +33,16 @@ import {
   getTeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
 
-test("Chinese response mode restores, persists, and appends its prompt once", async () => {
-  type Command = { handler: (args: string, ctx: ExtensionContext) => Promise<void> | void };
-  type Entry = { type: "custom"; customType: string; data: { enabled: boolean } };
-  const commands = new Map<string, Command>();
+type ChineseCommand = { handler: (args: string, ctx: ExtensionContext) => Promise<void> | void };
+type ChineseEntry = { type: "custom"; customType: string; data: { enabled: boolean } };
+
+function createChineseHarness(entries: ChineseEntry[], cwd: string, homeDir: string) {
+  const commands = new Map<string, ChineseCommand>();
   const sessionStartHandlers: Array<(event: unknown, ctx: ExtensionContext) => unknown> = [];
   const beforeAgentStartHandlers: Array<(event: { systemPrompt: string }) => unknown> = [];
-  const entries: Entry[] = [{
-    type: "custom",
-    customType: "maestro-chinese-response-mode",
-    data: { enabled: true },
-  }];
   const notifications: Array<{ message: string; type: string }> = [];
   const api = {
-    registerCommand(name: string, command: Command) { commands.set(name, command); },
+    registerCommand(name: string, command: ChineseCommand) { commands.set(name, command); },
     appendEntry(customType: string, data: { enabled: boolean }) {
       entries.push({ type: "custom", customType, data });
     },
@@ -58,25 +55,68 @@ test("Chinese response mode restores, persists, and appends its prompt once", as
     },
   } as unknown as ExtensionAPI;
   const ctx = {
+    cwd,
     sessionManager: { getBranch: () => entries },
     ui: { notify(message: string, type: string) { notifications.push({ message, type }); } },
   } as unknown as ExtensionContext;
+  const mode = registerChineseResponseMode(api, { homeDir });
+  return { commands, sessionStartHandlers, beforeAgentStartHandlers, notifications, ctx, mode };
+}
 
-  const mode = registerChineseResponseMode(api);
-  await sessionStartHandlers[0]?.({}, ctx);
-  assert.equal(mode.isEnabled(), true);
+test("Chinese response mode restores, persists, and appends its prompt once", async () => {
+  const home = mkdtempSync(join(tmpdir(), "chinese-home-"));
+  const entries: ChineseEntry[] = [{
+    type: "custom",
+    customType: "maestro-chinese-response-mode",
+    data: { enabled: true },
+  }];
+  const h = createChineseHarness(entries, process.cwd(), home);
+  await h.sessionStartHandlers[0]?.({}, h.ctx);
+  assert.equal(h.mode.isEnabled(), true);
 
-  const injected = beforeAgentStartHandlers[0]?.({ systemPrompt: "base" }) as { systemPrompt: string };
+  const injected = h.beforeAgentStartHandlers[0]?.({ systemPrompt: "base" }) as { systemPrompt: string };
   assert.equal(injected.systemPrompt, `base\n\n${CHINESE_RESPONSE_PROMPT}`);
   assert.equal(appendChineseResponsePrompt(injected.systemPrompt), injected.systemPrompt);
   assert.match(injected.systemPrompt, /所有回复使用简体中文/);
   assert.match(injected.systemPrompt, /使用中文提交信息/);
 
-  await commands.get("chinese")?.handler("off", ctx);
-  assert.equal(mode.isEnabled(), false);
+  await h.commands.get("chinese")?.handler("off", h.ctx);
+  assert.equal(h.mode.isEnabled(), false);
   assert.deepEqual(entries.at(-1)?.data, { enabled: false });
-  assert.equal(beforeAgentStartHandlers[0]?.({ systemPrompt: "base" }), undefined);
-  assert.match(notifications.at(-1)?.message ?? "", /已关闭/);
+  assert.deepEqual(JSON.parse(readFileSync(chineseGlobalStatePath(home), "utf8")), { version: 1, enabled: false });
+  assert.equal(h.beforeAgentStartHandlers[0]?.({ systemPrompt: "base" }), undefined);
+  assert.match(h.notifications.at(-1)?.message ?? "", /已关闭/);
+});
+
+test("Chinese response mode stays enabled globally across workspaces", async () => {
+  const home = mkdtempSync(join(tmpdir(), "chinese-global-"));
+  const workspaceA = join(home, "workspace-a");
+  const workspaceB = join(home, "workspace-b");
+
+  // Fresh session without a global state file starts disabled.
+  const h1 = createChineseHarness([], workspaceA, home);
+  await h1.sessionStartHandlers[0]?.({}, h1.ctx);
+  assert.equal(h1.mode.isEnabled(), false);
+
+  // Toggle on writes the global state file.
+  await h1.commands.get("chinese")?.handler("on", h1.ctx);
+  assert.equal(h1.mode.isEnabled(), true);
+  assert.deepEqual(JSON.parse(readFileSync(chineseGlobalStatePath(home), "utf8")), { version: 1, enabled: true });
+
+  // A different workspace with a fresh empty session restores the global state.
+  const h2 = createChineseHarness([], workspaceB, home);
+  await h2.sessionStartHandlers[0]?.({}, h2.ctx);
+  assert.equal(h2.mode.isEnabled(), true);
+  const injected = h2.beforeAgentStartHandlers[0]?.({ systemPrompt: "base" }) as { systemPrompt: string };
+  assert.match(injected.systemPrompt, /所有回复使用简体中文/);
+
+  // Toggle off updates the global state; the next fresh session anywhere starts disabled.
+  await h2.commands.get("chinese")?.handler("off", h2.ctx);
+  assert.equal(h2.mode.isEnabled(), false);
+  assert.deepEqual(JSON.parse(readFileSync(chineseGlobalStatePath(home), "utf8")), { version: 1, enabled: false });
+  const h3 = createChineseHarness([], workspaceA, home);
+  await h3.sessionStartHandlers[0]?.({}, h3.ctx);
+  assert.equal(h3.mode.isEnabled(), false);
 });
 
 test("workspace extension path loads before runtime actions are bound", () => {

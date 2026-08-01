@@ -18,6 +18,9 @@
  *   - Dynamic LLM providers
  */
 
+import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { registerCompanionPackages } from "../../scripts/register-companion-packages.mjs";
@@ -50,6 +53,7 @@ import { registerSwarmDisplay } from "../tools/swarm.ts";
 import { MaestroUiPublisher, registerMaestroUiQuery } from "../ui-projection.ts";
 import { registerMaestroProviders } from "../providers/provider-registry.ts";
 import { registerApiProviderConfigs } from "../providers/api-provider-config.ts";
+import { registerExploreConfigManager } from "../providers/explore-config-manager.ts";
 import { registerModelFailover } from "../providers/model-failover.ts";
 import registerMcpAdapter from "../mcp/index.ts";
 import {
@@ -173,6 +177,8 @@ import {
 import {
   commitProjectedCompactionInput,
   createMidTurnAutoCompaction,
+  shouldCancelCompletedTurnThreshold,
+  shouldPreserveCompletedTurn,
 } from "../compaction/auto-compaction.ts";
 import {
   CompactionArbiter,
@@ -185,6 +191,7 @@ import { registerSkillManager } from "../skills/skill-manager.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
 import { registerFff } from "../tools/fff.ts";
 import { registerBashBg } from "../tools/bash-bg.ts";
+import { registerLoop } from "../tools/loop.ts";
 import { registerModelAvailability } from "../tools/model-availability.ts";
 import {
   proxyTeammateChildTool,
@@ -352,7 +359,40 @@ function parseGoalActionParams(params: Record<string, unknown>): GoalActionParam
 }
 
 const CHINESE_RESPONSE_STATE_ENTRY = "maestro-chinese-response-mode";
+const CHINESE_GLOBAL_STATE_FILE = "maestro-chinese-response-mode.json";
 const CHINESE_RESPONSE_PROMPT_MARKER = "<chinese_response_mode>";
+
+export function chineseGlobalStatePath(homeDir: string): string {
+  return join(homeDir, ".pi", CHINESE_GLOBAL_STATE_FILE);
+}
+
+/** Load the global chinese mode state, or undefined when absent/invalid. */
+export function loadChineseGlobalState(homeDir: string): boolean | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(chineseGlobalStatePath(homeDir), "utf8"));
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      const enabled = (parsed as { enabled?: unknown }).enabled;
+      if (typeof enabled === "boolean") return enabled;
+    }
+  } catch {
+    // Missing or malformed state falls back to the session branch.
+  }
+  return undefined;
+}
+
+/** Persist the global chinese mode state (atomic write, last toggle wins). */
+export function saveChineseGlobalState(enabled: boolean, homeDir: string): void {
+  const filePath = chineseGlobalStatePath(homeDir);
+  mkdirSync(dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify({ version: 1, enabled }, null, 2)}\n`, "utf8");
+    renameSync(temporary, filePath);
+  } catch (error) {
+    try { rmSync(temporary, { force: true }); } catch { /* best effort */ }
+    throw error;
+  }
+}
 
 export const CHINESE_RESPONSE_PROMPT = `<chinese_response_mode>
 # 中文回复准则
@@ -387,8 +427,12 @@ export function appendChineseResponsePrompt(systemPrompt: string): string {
   return `${systemPrompt}\n\n${CHINESE_RESPONSE_PROMPT}`;
 }
 
-export function registerChineseResponseMode(pi: ExtensionAPI): { isEnabled: () => boolean } {
+export function registerChineseResponseMode(
+  pi: ExtensionAPI,
+  options: { homeDir?: string } = {},
+): { isEnabled: () => boolean } {
   let enabled = false;
+  const stateHomeDir = options.homeDir ?? homedir();
 
   pi.registerCommand("chinese", {
     description: "切换中文回复模式，支持 on、off、status",
@@ -409,11 +453,21 @@ export function registerChineseResponseMode(pi: ExtensionAPI): { isEnabled: () =
           ? false
           : !enabled;
       pi.appendEntry(CHINESE_RESPONSE_STATE_ENTRY, { enabled });
-      ctx.ui.notify(`中文回复模式已${enabled ? "开启" : "关闭"}。`, "info");
+      try {
+        saveChineseGlobalState(enabled, stateHomeDir);
+        ctx.ui.notify(`中文回复模式已${enabled ? "开启" : "关闭"}（全局持久化）。`, "info");
+      } catch {
+        ctx.ui.notify(`中文回复模式已${enabled ? "开启" : "关闭"}，但全局配置保存失败。`, "warning");
+      }
     },
   });
 
   pi.on("session_start", (_event, ctx) => {
+    const globalState = loadChineseGlobalState(stateHomeDir);
+    if (globalState !== undefined) {
+      enabled = globalState;
+      return;
+    }
     const entries = ctx.sessionManager.getBranch() as Array<{
       type?: string;
       customType?: string;
@@ -530,6 +584,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let approvalMode: PermissionMode = DEFAULT_PERMISSION_MODE;
   let currentSwarmProjection: TeamSwarmProjection | undefined;
   let maestroUiSessionActive = false;
+  let preserveCompletedTurnFromNativeThreshold = false;
   const maestroUiPublisher = new MaestroUiPublisher({
     read: () => ({
       workflow: deriveWorkflowViewModel(workflowSnapshotForUi()),
@@ -550,6 +605,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   // Register dynamic providers from cli-tools.json
   try {
     registerApiProviderConfigs(pi);
+    registerExploreConfigManager(pi);
     registerMaestroProviders(pi);
   } catch (error) {
     // Provider registration failures should not block extension load
@@ -988,6 +1044,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   registerIntelligenceTools(pi);
   registerFff(pi);
   registerBashBg(pi);
+  registerLoop(pi);
   registerModelAvailability(pi);
   registerKeybindingsCommand(pi);
 
@@ -1566,6 +1623,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     state.baseCwd = ctx.cwd;
     await inputHistorySessionStart(ctx);
     compactionArbiter.reset();
+    preserveCompletedTurnFromNativeThreshold = false;
     midTurnAutoCompaction.onSessionStart(ctx);
     todoRootContext = ctx;
     widgetCtx = ctx;
@@ -1657,12 +1715,15 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     maestroUiSessionActive = false;
     maestroUiPublisher.clear();
     disposeTeammateSessionRegistrations();
+    // Fence callbacks and leases before the first await so teardown cannot
+    // enqueue continuation work into the departing session.
+    midTurnAutoCompaction.onSessionShutdown(ctx);
+    preserveCompletedTurnFromNativeThreshold = false;
+    compactionArbiter.reset();
     await inputHistorySessionShutdown();
     // Non-destructive: preserve the prune manifest and spill resources so a
     // resumed session replays the identical transformed prefix. Destructive
     // teardown stays with reset()/onCompact().
-    midTurnAutoCompaction.onSessionShutdown(ctx);
-    compactionArbiter.reset();
     state.activeToolCalls.clear();
     widgetCtx?.ui.setWidget("todo-panel", undefined);
     widgetCtx = undefined;
@@ -1686,8 +1747,18 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
+    const request = compactionRequestFromInstructions(event.customInstructions);
+    if (shouldCancelCompletedTurnThreshold(
+      event.reason,
+      preserveCompletedTurnFromNativeThreshold,
+      request !== undefined,
+      Boolean(ctx.hasPendingMessages?.()),
+    )) {
+      preserveCompletedTurnFromNativeThreshold = false;
+      return { cancel: true };
+    }
     const observed = compactionArbiter.observeStart(
-      compactionRequestFromInstructions(event.customInstructions),
+      request,
       event.signal,
     );
     if (!observed.allowed) return { cancel: true };
@@ -1734,7 +1805,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   pi.on("session_compact", async (event, ctx) => {
     const completedOwner = compactionArbiter.currentOwner();
     compactionArbiter.complete();
-    midTurnAutoCompaction.onCompact(completedOwner);
+    midTurnAutoCompaction.onCompact(completedOwner, ctx);
     // Clear the non-persistent Plan replacement before any async subsystem can
     // enqueue a continuation or fail. The persisted compaction is now canonical.
     onCompactPlan(ctx);
@@ -1803,6 +1874,10 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     await step("Todo", () => onAgentEndTodo());
     await step("Output-limit compaction", () =>
       midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx));
+    preserveCompletedTurnFromNativeThreshold = shouldPreserveCompletedTurn(
+      event.messages as AgentMessage[],
+      Boolean(ctx.hasPendingMessages?.()),
+    );
     await step("Todo widget", () => updateTodoWidget());
   });
 
@@ -1814,6 +1889,8 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
         `Settled context compaction failed: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
+    } finally {
+      preserveCompletedTurnFromNativeThreshold = false;
     }
   });
 
@@ -1837,6 +1914,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   // Hook denial runs after Plan's advisory tool_call pass and before the interactive prompt.
   const hookAdapter = registerCodexHookAdapter(pi, {
     getPermissionMode: () => effectivePermissionMode(approvalMode),
+    onCompactionCancelled: () => compactionArbiter.complete(),
   });
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {
     const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
