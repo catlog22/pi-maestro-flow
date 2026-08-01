@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 <purpose>
@@ -16,8 +16,8 @@ Supports `--sync` mode to pull latest main changes into an active worktree.
 </purpose>
 
 <deferred_reading>
-- [worktrees.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktrees.json) — read when updating registry
-- [worktree-scope.json](~/.pi/agent/packages/pi-maestro-flow/templates/worktree-scope.json) — read when writing scope marker
+- [worktrees.json](~/.maestro/templates/worktrees.json) — read when updating registry
+- [worktree-scope.json](~/.maestro/templates/worktree-scope.json) — read when writing scope marker
 </deferred_reading>
 
 <context>
@@ -31,7 +31,7 @@ Modes (`Fork` / `Sync`), flags (`--session`, `--base`, `--sync`), session resolu
 </context>
 
 <execution>
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/fork.md' completely.
+Follow '~/.maestro/workflows/fork.md' completely.
 
 Fork and sync algorithm steps are defined in workflow `fork.md`.
 

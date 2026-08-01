@@ -7,17 +7,17 @@ session-mode: none
 ---
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 <deferred_reading>
-- [odyssey-base.md](~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-base.md) — read after mode resolved for shared back-half (A_INTAKE, A_RESUME, GENERALIZE → DISCOVER → RECORD → END)
-- [odyssey-debug.md](~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-debug.md) — read when mode=debug
-- [odyssey-improve.md](~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-improve.md) — read when mode=improve
-- [odyssey-planex.md](~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-planex.md) — read when mode=planex
-- [odyssey-review.md](~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-review.md) — read when mode=review
-- [odyssey-security.md](~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-security.md) — read when mode=security
-- [odyssey-ui.md](~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-ui.md) — read when mode=ui
+- [odyssey-base.md](~/.maestro/workflows/odyssey-base.md) — read after mode resolved for shared back-half (A_INTAKE, A_RESUME, GENERALIZE → DISCOVER → RECORD → END)
+- [odyssey-debug.md](~/.maestro/workflows/odyssey-debug.md) — read when mode=debug
+- [odyssey-improve.md](~/.maestro/workflows/odyssey-improve.md) — read when mode=improve
+- [odyssey-planex.md](~/.maestro/workflows/odyssey-planex.md) — read when mode=planex
+- [odyssey-review.md](~/.maestro/workflows/odyssey-review.md) — read when mode=review
+- [odyssey-security.md](~/.maestro/workflows/odyssey-security.md) — read when mode=security
+- [odyssey-ui.md](~/.maestro/workflows/odyssey-ui.md) — read when mode=ui
 </deferred_reading>
 
 <purpose>
@@ -130,7 +130,7 @@ All base invariants apply (evidence append-only, session-as-state, phase goal tr
 </invariants>
 
 <task_tracking>
-~/.pi/agent/packages/pi-maestro-flow/workflows/task-tracking.md
+~/.maestro/workflows/task-tracking.md
 </task_tracking>
 
 <self_iteration>
@@ -166,7 +166,7 @@ Mode-specific phase gates (Discovery, Audit, FIX, VERIFY/CONFIRM) are defined in
 | E001 | error | No target / no requirement (planex) / no issue (debug) | Provide target or -c |
 | E002 | error | Target path not found | Check path |
 | E003 | error | -c mode mismatch (resumed session is different mode) | Use correct --mode or omit -c |
-| E004 | error | Mode workflow file not found (~/.pi/agent/packages/pi-maestro-flow/workflows/odyssey-{mode}.md) | Verify workflow installation or select another mode |
+| E004 | error | Mode workflow file not found (~/.maestro/workflows/odyssey-{mode}.md) | Verify workflow installation or select another mode |
 | W001 | warning | No relevant git history / no dependency manifest / no design system | Proceed with defaults |
 | W002 | warning | Some dimension agents failed / 3 retries exhausted | Partial coverage / INCONCLUSIVE |
 | W003 | warning | Archaeology agent or delegate failure (debug/review) | Proceed with available results, log failed agent |

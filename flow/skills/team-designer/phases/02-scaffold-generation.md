@@ -1,6 +1,6 @@
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 # Phase 2: Scaffold Generation
 
@@ -45,7 +45,7 @@ session-mode: run
 ---
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode-lite.md
+~/.maestro/workflows/run-mode-lite.md
 </required_reading>
 ```
 

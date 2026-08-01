@@ -1,6 +1,6 @@
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 1: Repo Understanding
 

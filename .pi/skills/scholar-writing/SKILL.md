@@ -7,7 +7,7 @@ session-mode: none
 ---
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 
 # Scholar Writing
@@ -16,7 +16,7 @@ End-to-end workflow for writing publication-ready ML/AI papers from research rep
 
 ## Run Lifecycle
 
-Follow `~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md`. If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them and do NOT call `maestro run create --platform pi`. Otherwise self-start before Phase 1:
+Follow `~/.maestro/workflows/run-mode.md`. If an orchestrator injected `run_id` / `run_dir` in the birth packet, use them and do NOT call `maestro run create --platform pi`. Otherwise self-start before Phase 1:
 
 ```bash
 maestro run start "<short phrase>" --cmd scholar-writing --session <YYYYMMDD-scholar-writing-{topic}> --platform pi

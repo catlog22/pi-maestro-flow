@@ -12,9 +12,9 @@ Entry point; downstream: step `roadmap` or step `brainstorm`.
 </purpose>
 
 <deferred_reading>
-- [project.md](~/.pi/agent/packages/pi-maestro-flow/templates/project.md) — read when generating project description
-- [state.json](~/.pi/agent/packages/pi-maestro-flow/templates/state.json) — read when creating initial state
-- [config.json](~/.pi/agent/packages/pi-maestro-flow/templates/config.json) — read when creating workflow configuration
+- [project.md](~/.maestro/templates/project.md) — read when generating project description
+- [state.json](~/.maestro/templates/state.json) — read when creating initial state
+- [config.json](~/.maestro/templates/config.json) — read when creating workflow configuration
 </deferred_reading>
 
 <context>
@@ -37,12 +37,12 @@ Check for `.workflow/state.json` -- loads context if project already initialized
 1. **Idempotent init** — re-running init on an already-initialized project MUST detect existing `.workflow/` and warn (E002); NEVER silently overwrite existing state
 2. **Scope guard** — init MUST only make initialization decisions; NEVER prejudge roadmap structure, plan scope, or implementation details
 3. **All artifacts required** — init MUST NOT report completion until project.md, state.json, and config.json all exist; missing artifacts MUST be created before exit
-4. **Template-driven** — deferred templates (project.md, state.json, config.json) MUST be read from `~/.pi/agent/packages/pi-maestro-flow/templates/` and customized; NEVER generate from scratch without template
+4. **Template-driven** — deferred templates (project.md, state.json, config.json) MUST be read from `~/.maestro/templates/` and customized; NEVER generate from scratch without template
 5. **Interview writes back** — all interactive decisions MUST be written to project.md/config.json before proceeding to research or completion; NEVER leave decisions unrecorded
 </invariants>
 
 <interview_protocol>
-Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md standard.
+Follows ~/.maestro/workflows/interview-mechanics.md standard.
 
 **Interaction mode**: convergent menu-driven
 **Decision tree** (strict order): project type (greenfield / existing codebase onboarding) → tech stack detection and confirmation → directory structure preferences → initial configuration (specs categories, wiki bootstrap)
@@ -76,7 +76,7 @@ Follows ~/.pi/agent/packages/pi-maestro-flow/workflows/interview-mechanics.md st
 1. Check if `.workflow/` already exists — if so, load state and warn (E002 for greenfield conflicts)
 2. Validate `--from` source is accessible if provided
 
-Follow '~/.pi/agent/packages/pi-maestro-flow/workflows/init.md' completely.
+Follow '~/.maestro/workflows/init.md' completely.
 
 ### Artifact Verification (before completion)
 
@@ -137,7 +137,7 @@ Note: roadmap step is responsible for creating `state.json.sessions[]` entries a
 | E001 | error | No arguments provided when -y requires @ reference | Check arguments format, re-run with correct input |
 | E002 | error | .workflow/ already exists (greenfield init) | Use --from to import existing state, or remove .workflow/ to start fresh |
 | E003 | error | Context source not found (--from / --from-brainstorm) | Check arguments format, re-run with correct input |
-| E004 | error | Template file missing in ~/.pi/agent/packages/pi-maestro-flow/templates/ | Run maestro-update to restore templates |
+| E004 | error | Template file missing in ~/.maestro/templates/ | Run maestro-update to restore templates |
 | E005 | warning | .workflow/ already exists (existing codebase onboarding) | Merge with existing state or overwrite; user chooses via user prompt |
 | W001 | warning | Research agent failed, continuing with partial results | Retry research or proceed with partial results |
 </error_codes>

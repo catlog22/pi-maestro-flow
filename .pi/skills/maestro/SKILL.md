@@ -7,8 +7,8 @@ session-mode: none
 ---
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
-~/.pi/agent/packages/pi-maestro-flow/workflows/orchestrator-run-loop.md
+~/.maestro/workflows/run-mode.md
+~/.maestro/workflows/orchestrator-run-loop.md
 ~/.maestro/prepare/maestro.md
 </required_reading>
 
@@ -23,8 +23,8 @@ Pi mirrors canonical Session/Run state automatically:
 </host_mirror>
 
 <deferred_reading>
-- [maestro.md](~/.pi/agent/packages/pi-maestro-flow/workflows/maestro.md) — read before initial intent classification
-- [ralph-amend-goal.md](~/.pi/agent/packages/pi-maestro-flow/workflows/ralph-amend-goal.md) — read only for `--amend`
+- [maestro.md](~/.maestro/workflows/maestro.md) — read before initial intent classification
+- [ralph-amend-goal.md](~/.maestro/workflows/ralph-amend-goal.md) — read only for `--amend`
 </deferred_reading>
 
 <purpose>

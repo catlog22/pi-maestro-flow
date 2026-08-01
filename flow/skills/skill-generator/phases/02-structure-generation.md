@@ -1,6 +1,6 @@
 
 <required_reading>
-~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md
+~/.maestro/workflows/run-mode.md
 </required_reading>
 # Phase 2: Structure Generation
 
@@ -106,7 +106,7 @@ Autonomous + Memory Strategy:
 // generators (dir + artifacts); 'none' for stateless skills.
 const sessionMode = config.session_mode || 'run';
 const requiredReading = sessionMode === 'run'
-  ? `<required_reading>\n~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md\n</required_reading>\n\n`
+  ? `<required_reading>\n~/.maestro/workflows/run-mode.md\n</required_reading>\n\n`
   : '';
 
 const skillMdTemplate = `---
@@ -136,7 +136,7 @@ ${generateExecutionFlow(config)}
 
 ## Directory Setup
 
-${sessionMode === 'run' ? `> **Run lifecycle** (see \`~/.pi/agent/packages/pi-maestro-flow/workflows/run-mode.md\`): if an orchestrator injected \`run_id\` / \`run_dir\` in the birth packet, use them and do NOT call \`maestro run create --platform pi\`. Otherwise self-start: \`maestro run start "..." --cmd ${config.skill_name} --session <YYYYMMDD-${config.skill_name}-{topic}> --platform pi\` (session slug ASCII-only, ≤64 chars). Write formal artifacts under \`{run_dir}/outputs/\`. Close with \`maestro run check {run_id}\` → repair gates → \`maestro session done {run_id}\`.\n\n` : ''}\`\`\`javascript
+${sessionMode === 'run' ? `> **Run lifecycle** (see \`~/.maestro/workflows/run-mode.md\`): if an orchestrator injected \`run_id\` / \`run_dir\` in the birth packet, use them and do NOT call \`maestro run create --platform pi\`. Otherwise self-start: \`maestro run start "..." --cmd ${config.skill_name} --session <YYYYMMDD-${config.skill_name}-{topic}> --platform pi\` (session slug ASCII-only, ≤64 chars). Write formal artifacts under \`{run_dir}/outputs/\`. Close with \`maestro run check {run_id}\` → repair gates → \`maestro session done {run_id}\`.\n\n` : ''}\`\`\`javascript
 const workDir = \`\${run_dir}/outputs\`;
 
 Bash(\`mkdir -p "\${workDir}"\`);

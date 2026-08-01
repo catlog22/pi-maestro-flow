@@ -39,7 +39,7 @@
 
 ```
 1. Locate command in catalog.json commands[] by name
-2. Read the source file (e.g., "../../commands/maestro-ralph.md"; steps resolve to "~/.pi/agent/packages/pi-maestro-flow/workflows/<step>.md")
+2. Read the source file (e.g., "../../commands/maestro-ralph.md"; steps resolve to "~/.maestro/workflows/<step>.md")
 3. Extract key sections:
    - <purpose> content
    - argument-hint
