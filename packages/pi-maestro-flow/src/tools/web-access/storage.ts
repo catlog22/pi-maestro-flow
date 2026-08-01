@@ -3,6 +3,7 @@ import type { ExtractedContent } from "./extract.ts";
 import type { SearchResult } from "./perplexity.ts";
 
 const CACHE_TTL_MS = 60 * 60 * 1000;
+export const MAX_STORED_RESULTS = 50;
 
 export interface QueryResultData {
 	query: string;
@@ -23,19 +24,48 @@ export interface StoredSearchData {
 
 const storedResults = new Map<string, StoredSearchData>();
 
+function isFresh(data: StoredSearchData, now: number): boolean {
+	return now - data.timestamp < CACHE_TTL_MS;
+}
+
+function pruneResults(now = Date.now()): void {
+	for (const [id, data] of storedResults) {
+		if (!isFresh(data, now)) storedResults.delete(id);
+	}
+	while (storedResults.size > MAX_STORED_RESULTS) {
+		const oldest = storedResults.keys().next();
+		if (oldest.done) break;
+		storedResults.delete(oldest.value);
+	}
+}
+
 export function generateId(): string {
 	return Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 }
 
 export function storeResult(id: string, data: StoredSearchData): void {
+	const now = Date.now();
+	pruneResults(now);
+	if (!isFresh(data, now)) return;
+	storedResults.delete(id);
 	storedResults.set(id, data);
+	pruneResults(now);
 }
 
 export function getResult(id: string): StoredSearchData | null {
-	return storedResults.get(id) ?? null;
+	const data = storedResults.get(id);
+	if (!data) return null;
+	if (!isFresh(data, Date.now())) {
+		storedResults.delete(id);
+		return null;
+	}
+	storedResults.delete(id);
+	storedResults.set(id, data);
+	return data;
 }
 
 export function getAllResults(): StoredSearchData[] {
+	pruneResults();
 	return Array.from(storedResults.values());
 }
 
@@ -66,8 +96,8 @@ export function restoreFromSession(ctx: ExtensionContext): void {
 	for (const entry of ctx.sessionManager.getBranch()) {
 		if (entry.type === "custom" && entry.customType === "web-search-results") {
 			const data = entry.data;
-			if (isValidStoredData(data) && now - data.timestamp < CACHE_TTL_MS) {
-				storedResults.set(data.id, data);
+			if (isValidStoredData(data) && isFresh(data, now)) {
+				storeResult(data.id, data);
 			}
 		}
 	}
