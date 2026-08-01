@@ -8,6 +8,7 @@
 // those three surfaces — they add information without costing a single row.
 
 import type { AgentRow, BashBgJob, TodoItem } from "./types.ts";
+import { formatThinkingDuration } from "./thinking-timer.ts";
 
 export interface AmbientState {
 	todos: readonly TodoItem[];
@@ -16,6 +17,10 @@ export interface AmbientState {
 	running: boolean;
 	cwd?: string;
 	activeTool?: string;
+	workingStartedAt?: number;
+	hideLiveDuration?: boolean;
+	/** Separator glyph between label and elapsed time (e.g. " · "). */
+	separator?: string;
 }
 
 function liveAgents(agents: readonly AgentRow[]): AgentRow[] {
@@ -31,15 +36,19 @@ function failedJobs(jobs: readonly BashBgJob[]): BashBgJob[] {
 }
 
 /**
- * The streaming loader line.
+ * The streaming working line.
  *
- * Keep the host's default "Working" label, elapsed time and interrupt hint.
- * Only replace the label while a foreground tool is actively executing.
+ * Cockpit hides the host indicator and renders the active state with a live
+ * elapsed value, matching the compact folded-thinking label.
  */
-export function workingMessage(state: AmbientState): string | undefined {
-	if (state.activeTool) return state.activeTool;
-	if (state.running) return "working";
-	return undefined;
+export function workingMessage(state: AmbientState, now = Date.now()): string | undefined {
+	const label = state.activeTool ?? (state.running ? "working" : undefined);
+	if (!label) return undefined;
+	const sep = state.separator ?? " ";
+	const text = (state.hideLiveDuration || state.workingStartedAt === undefined)
+		? label
+		: `${label}${sep}${formatThinkingDuration(now - state.workingStartedAt)}`;
+	return `\x1b[3m${text}\x1b[23m`;
 }
 
 /**

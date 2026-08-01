@@ -343,7 +343,7 @@ function todoPaint(status: TodoItem["status"], glyphs: IconGlyphs): TodoPaint {
 		return { glyph: glyphs.check, glyphColor: "success", subjectColor: "dim", struck: true };
 	}
 	if (status === "in_progress") {
-		return { glyph: glyphs.todoActive, glyphColor: "warning", subjectColor: "text", bold: true };
+		return { glyph: " ", glyphColor: "warning", subjectColor: "text", bold: true };
 	}
 	if (status === "blocked") {
 		return { glyph: glyphs.blocked, glyphColor: "error", subjectColor: "error" };

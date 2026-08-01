@@ -8,8 +8,6 @@ export interface IconGlyphs {
 	cross: string;
 	pending: string;
 	blocked: string;
-	/** In-progress marker for todo rows — a hollow rectangle, never a spinner. */
-	todoActive: string;
 	barDone: string;
 	barActive: string;
 	barPending: string;
@@ -59,7 +57,6 @@ const NERD_GLYPHS: IconGlyphs = {
 	// are different states and must not share a glyph.
 	pending: "○",
 	blocked: "!",
-	todoActive: "□",
 	barDone: "█",
 	barActive: "▓",
 	barPending: "░",
@@ -93,7 +90,6 @@ const ASCII_GLYPHS: IconGlyphs = {
 	cross: "x",
 	pending: "o",
 	blocked: "!",
-	todoActive: "[]",
 	barDone: "#",
 	barActive: "+",
 	barPending: "-",

@@ -230,7 +230,8 @@ test("renderTodos list: summary first + sorted rows + glyphs", () => {
 	assert.ok(summary.includes("Todo"));
 	assert.ok(summary.includes("»"));
 	// ordered by status priority (active first), then creation order
-	assert.ok(lines[1].includes("□"));  // #1 in_progress
+	assert.doesNotMatch(lines[1], /□/, "#1 in_progress carries no box marker");
+	assert.ok(lines[1].includes("task 1"), "#1 in_progress still renders its subject");
 	assert.ok(lines[2].includes("!"));  // #2 blocked
 	assert.ok(lines[3].includes("○"));  // #3 pending
 	assert.ok(lines[4].includes("✓"));  // #0 completed
@@ -256,7 +257,7 @@ test("renderTodos paints status on hue, weight and strikethrough", () => {
 	// The running row is the only one carrying weight, and it owns warning — accent
 	// stays reserved for role identity.
 	assert.ok(lines[1].includes("<b>[text]task 1[/]</b>"));
-	assert.ok(lines[1].includes("[warning]□[/]"));
+	assert.ok(lines[1].includes("[warning] [/]"), "in-progress leading glyph is a coloured space, not a box");
 	assert.ok(!lines[1].includes("[accent]"));
 	assert.ok(lines[2].includes("[error]!"));
 	assert.ok(lines[3].includes("[accent]○[/]"));
@@ -295,7 +296,8 @@ test("renderTodos collapsed line includes running state, member count and assign
 	const line = renderTodos([running, pending], "list", 160, theme, utils, { ...opts, expanded: false })[0];
 	assert.match(line, /1 running/);
 	assert.match(line, /2 members/);
-	assert.match(line, /□ @executor implement/);
+	assert.match(line, /@executor implement/);
+	assert.doesNotMatch(line, /□/, "the next-task pointer drops the box marker");
 });
 
 test("renderTodos mirrors actor, primary skill and blocked dependency details", () => {
@@ -314,7 +316,8 @@ test("renderTodos mirrors actor, primary skill and blocked dependency details", 
 	const line = lines.find((candidate) => candidate.includes("verify"))!;
 	assert.match(line, /@root→@executor/);
 	assert.match(line, /\/team-testing \+1/);
-	assert.match(line, /← □ implement/);
+	assert.match(line, /←\s+implement/);
+	assert.doesNotMatch(line, /□/, "blocked dependency reference drops the box marker");
 	assert.match(line, /← \? \?/);
 });
 

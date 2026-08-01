@@ -26,8 +26,8 @@ test("row-leading status glyphs are static and ignore the animation flag", () =>
 		isAnimating: () => true,
 	})(tui, theme).render(120);
 	const todoText = todoLines.join("\n");
-	assert.match(todoText, /□/, "in-progress task shows the hollow rectangle");
-	assert.doesNotMatch(todoText, /●/, "todo rows never use the filled dot");
+	assert.doesNotMatch(todoText, /□/, "todo rows carry no box marker");
+	assert.match(todoText, /implement ownership/, "in-progress task still renders its subject");
 	assert.doesNotMatch(todoText, BRAILLE, "the in-progress glyph never spins");
 
 	const agentLines = makeAgentWidget({

@@ -39,12 +39,42 @@ test("workingMessage preserves the host default when no foreground tool runs", (
 	})), undefined);
 });
 
-test("workingMessage shows only the active foreground tool name", () => {
+test("workingMessage shows only the active foreground tool name without a start time", () => {
 	assert.equal(workingMessage(state({
 		activeTool: "edit",
 		todos: [todo({ status: "in_progress", subject: "ship the widget" })],
 		agents: [agent({ role: "reviewer", activeTool: "grep" })],
-	})), "edit");
+	})), "\x1b[3medit\x1b[23m");
+});
+
+test("workingMessage renders the active state with a thinking-style elapsed", () => {
+	assert.equal(workingMessage(state({ running: true, workingStartedAt: 1_000 }), 4_200), "\x1b[3mworking 3.2s\x1b[23m");
+	assert.equal(workingMessage(state({
+		running: true,
+		activeTool: "teammate-wait",
+		workingStartedAt: 1_000,
+	}), 66_400), "\x1b[3mteammate-wait 1m05s\x1b[23m");
+});
+
+test("workingMessage uses the separator glyph between label and elapsed", () => {
+	assert.equal(workingMessage(state({ running: true, workingStartedAt: 1_000, separator: " · " }), 4_200), "\x1b[3mworking · 3.2s\x1b[23m");
+	assert.equal(workingMessage(state({
+		running: true,
+		activeTool: "observe",
+		workingStartedAt: 1_000,
+		separator: " · ",
+	}), 37_000), "\x1b[3mobserve · 36s\x1b[23m");
+});
+
+test("workingMessage omits a frozen elapsed in static mode", () => {
+	const staticState = state({
+		running: true,
+		activeTool: "teammate-wait",
+		workingStartedAt: 1_000,
+		hideLiveDuration: true,
+	});
+	assert.equal(workingMessage(staticState, 4_200), "\x1b[3mteammate-wait\x1b[23m");
+	assert.equal(workingMessage(staticState, 66_400), "\x1b[3mteammate-wait\x1b[23m");
 });
 
 test("title falls back to the bare workspace when nothing is happening", () => {

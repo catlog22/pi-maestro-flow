@@ -95,7 +95,8 @@ export default function (pi: ExtensionAPI): void {
 	let dockEffectiveVisible = false;
 	let surfaceState: CockpitSurfaceState = "disabled";
 	let running = false;
-	const activeTools = new Map<string, string>();
+	let runningStartedAt: number | undefined;
+	const activeTools = new Map<string, { name: string; startedAt: number }>();
 	let tick: ReturnType<typeof setInterval> | undefined;
 	// Persisted rather than toasted: a config that failed to load silently downgrades
 	// the whole session to defaults, so it belongs in a slot that does not scroll away.
@@ -158,13 +159,17 @@ export default function (pi: ExtensionAPI): void {
 				ctx.ui.setStatus(COCKPIT_STATUS_KEY, undefined);
 				return;
 			}
+			const activeTool = [...activeTools.values()].at(-1);
 			const state: AmbientState = {
 				todos: todos.snapshot(),
 				agents: agents.snapshot(),
 				jobs: bashBg.snapshot(),
 				running,
 				cwd: formatCwd(ctx.sessionManager.getCwd()),
-				activeTool: [...activeTools.values()].at(-1),
+				activeTool: activeTool?.name,
+				workingStartedAt: activeTool?.startedAt ?? runningStartedAt,
+				hideLiveDuration: config.staticMode,
+				separator: ` ${g.separator} `,
 			};
 			ctx.ui.setWorkingMessage(workingMessage(state));
 			ctx.ui.setTitle(titleFor(state, { ok: g.check, fail: g.cross }, g.separator));
@@ -394,6 +399,7 @@ export default function (pi: ExtensionAPI): void {
 			// Leaving these set would strand a title and a status line owned by an
 			// extension that is no longer painting anything.
 			ctx.ui.setWorkingMessage(undefined);
+			ctx.ui.setWorkingIndicator();
 			ctx.ui.setStatus(COCKPIT_STATUS_KEY, undefined);
 		} catch {
 			// ambient surfaces are best-effort
@@ -408,6 +414,7 @@ export default function (pi: ExtensionAPI): void {
 			uninstallUi(ctx);
 			return;
 		}
+		ctx.ui.setWorkingIndicator({ frames: [] });
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			capturedTui = tui;
 			let observedWidth = tui.terminal.columns;
@@ -521,7 +528,7 @@ export default function (pi: ExtensionAPI): void {
 
 	// --- foreground tool label + todo changes ---
 	pi.on("tool_execution_start", (e) => {
-		activeTools.set(e.toolCallId, e.toolName);
+		activeTools.set(e.toolCallId, { name: e.toolName, startedAt: Date.now() });
 		req();
 	});
 	pi.on("tool_execution_end", (e, ctx) => {
@@ -600,6 +607,7 @@ export default function (pi: ExtensionAPI): void {
 		pi.events.emit(COCKPIT_UI_OWNERSHIP_EVENT, released);
 		lastCtx = undefined;
 		running = false;
+		runningStartedAt = undefined;
 		activeTools.clear();
 		thinkingTimer.reset();
 		invalidateUsageCache();
@@ -610,11 +618,13 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("agent_start", () => {
 		running = true;
+		runningStartedAt = Date.now();
 		startTick();
 		req();
 	});
 	pi.on("agent_end", () => {
 		running = false;
+		runningStartedAt = undefined;
 		activeTools.clear();
 		thinkingTimer.stop();
 		syncTick();
