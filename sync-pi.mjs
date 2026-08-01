@@ -9,7 +9,7 @@
  *
  *   Phase 1  convert.mjs        copy .claude → flow/  (full recursive copy)
  *   Phase 2  convert-pi.mjs     Claude patterns → pi  (in-place rewrite)
- *   Phase 3  convert-paths.mjs  ~/.maestro/* → pi package paths
+ *   Phase 3  convert-paths.mjs  legacy package paths → ~/.maestro paths
  *
  * Usage:
  *   node sync-pi.mjs                 # sync flow/ and verify
@@ -87,13 +87,12 @@ if (!existsSync(SRC)) {
   process.exit(1);
 }
 
-// Phase 2 honours PI_MAESTRO_CONVERT_DST; pass it so an override stays
-// consistent. Phases 1 & 3 currently hardcode flow/ in their own source.
+// Phases 2 and 3 honour the destination override. Phase 1 still writes flow/.
 runPhase('Phase 1 (copy .claude → flow)', 'convert.mjs');
 runPhase('Phase 2 (Claude → pi rewrite)', 'convert-pi.mjs', {
   PI_MAESTRO_CONVERT_DST: DST,
 });
-runPhase('Phase 3 (path rewrite)', 'convert-paths.mjs');
+runPhase('Phase 3 (normalize Maestro paths)', 'convert-paths.mjs');
 
 // ---------------------------------------------------------------------------
 // Verification — every skill subfolder must be fully ported
