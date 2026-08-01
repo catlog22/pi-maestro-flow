@@ -50,9 +50,9 @@ export * from "./execution-infra.ts";
 import {
   EXECUTION_BUFFER_LIMITS,
   FIRST_ACTIVITY_TIMEOUT_MS,
+  OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS,
   RESULT_READY_GRACE_MS,
   STRUCTURED_OUTPUT_SETTLEMENT_DIAGNOSTICS,
-  acquireRetryPersistenceGuard,
   addUsageSnapshot,
   appendBoundedTranscriptMessage,
   appendDistinctAssistantMessage,
@@ -61,7 +61,6 @@ import {
   buildModelCandidates,
   buildPiArgs,
   checkDepthGuard,
-  childSettingsPath,
   cleanupFile,
   correlationSessionDirectoryName,
   createChildTerminationController,
@@ -300,14 +299,18 @@ export async function runSingleTeammate(
         const restartIsSafe = toolCount === 0;
         const retryableFailure = candidateResult.exitCode !== 0 && isRetryableProviderError(error);
         const fallbackFailure = candidateResult.exitCode !== 0 && isFallbackProviderError(error);
+        // Same-model restart retry requires a clean slate (no tool calls);
+        // Pi core handles in-process provider retry for the general case.
+        // Model fallback is always allowed: a different model restarting
+        // from the original prompt is safer than certain failure.
         const retryable = retryableFailure && restartIsSafe;
-        const fallbackEligible = fallbackFailure && restartIsSafe;
-        if (!restartIsSafe && fallbackFailure) {
+        const fallbackEligible = fallbackFailure;
+        if (fallbackEligible && !restartIsSafe) {
           candidateResult.messages.push({
             role: "system",
             content:
-              `Automatic retry and model fallback suppressed after ${toolCount} child tool `
-              + `call${toolCount === 1 ? "" : "s"}; restarting could repeat side effects.`,
+              `Model fallback after ${toolCount} child tool `
+              + `call${toolCount === 1 ? "" : "s"}; the next model candidate restarts from the original prompt.`,
           });
         }
 
@@ -469,6 +472,10 @@ interface AttemptState {
    * second settlement for the same turn.
    */
   turnLifecycleSettled: boolean;
+  /** Last assistant stop reason observed for this turn. */
+  lastAssistantStopReason?: string;
+  /** A length-truncated turn is waiting for child-local compaction and continuation. */
+  outputLimitRecoveryPending: boolean;
 
   // --- Attempt-scoped: survive turns for the lifetime of a wakeable child. ---
   resolvedModel: string;
@@ -495,6 +502,7 @@ interface AttemptState {
 interface AttemptTimers {
   firstActivity?: ReturnType<typeof setTimeout>;
   resultReadyGrace?: ReturnType<typeof setTimeout>;
+  outputLimitRecovery?: ReturnType<typeof setTimeout>;
 }
 
 /** Environment handed to the pi child: identity, depth diagnostics and file seams. */
@@ -610,6 +618,8 @@ async function runSingleAttempt(
     runtimeFailure: undefined,
     turnToolCount: 0,
     turnLifecycleSettled: false,
+    lastAssistantStopReason: undefined,
+    outputLimitRecoveryPending: false,
     resolvedModel: modelOverride ?? params.model ?? agentConfig.model ?? "unknown",
     completedInputTokens: 0,
     completedOutputTokens: 0,
@@ -688,12 +698,10 @@ async function runSingleAttempt(
 
     if (child.stdin) guardChildStdin(child.stdin);
 
-    // Teammate owns retry and model failover for child runs. Disable Pi's inner
-    // retry loop first so one provider failure cannot multiply both budgets.
-    if (child.stdin) {
-      releaseRetryPersistenceGuard = acquireRetryPersistenceGuard(childSettingsPath(spawnEnv));
-      writeChildStdinLine(child.stdin, JSON.stringify({ type: "set_auto_retry", enabled: false }));
-    }
+    // Pi core keeps its in-process provider retry enabled. It handles
+    // transient network/provider errors without restarting the child, so
+    // tool calls already executed are never repeated. Teammate owns model
+    // fallback across candidates at the process level.
 
     // RPC mode: stdin stays open for bidirectional messaging.
     // Send initial prompt via RPC command.
@@ -729,6 +737,7 @@ async function runSingleAttempt(
     const clearAllTimers = (): void => {
       if (timers.firstActivity) clearTimeout(timers.firstActivity);
       if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
+      if (timers.outputLimitRecovery) clearTimeout(timers.outputLimitRecovery);
     };
     timers.firstActivity = setTimeout(() => {
       if (state.initialResultPublished || state.receivedFirstActivity) return;
@@ -838,6 +847,8 @@ async function runSingleAttempt(
         state.structuredOutputValidationFailure = undefined;
         state.reportedRuntimeErrors.clear();
         state.runtimeFailure = undefined;
+        state.lastAssistantStopReason = undefined;
+        state.outputLimitRecoveryPending = false;
         resetUsage(pendingMessageUsage);
         if (terminateChild) {
           state.terminal = true;
@@ -916,6 +927,23 @@ async function runSingleAttempt(
       timers.resultReadyGrace.unref?.();
     }
 
+    function armOutputLimitRecoveryDeadline(): void {
+      if (state.terminal || state.turnLifecycleSettled || timers.outputLimitRecovery) return;
+      const deadlineMs = options.outputLimitRecoveryTimeoutMs ?? OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS;
+      timers.outputLimitRecovery = setTimeout(() => {
+        timers.outputLimitRecovery = undefined;
+        if (state.terminal || state.turnLifecycleSettled || !state.outputLimitRecoveryPending) return;
+        state.outputLimitRecoveryPending = false;
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content:
+            `Teammate output-limit recovery did not continue within ${deadlineMs}ms `
+            + `(agent=${params.agent}, correlationId=${correlationId}); the partial response was not accepted as success.`,
+        });
+        completeTurn(readStructuredOutput(true), true, 1);
+      }, deadlineMs);
+    }
+
     function appendStructuredOutputFailure(): void {
       if (!state.structuredOutputValidationFailure) return;
       if (!messages.some((message) => message.content === state.structuredOutputValidationFailure)) {
@@ -952,7 +980,15 @@ async function runSingleAttempt(
 
     /** A new agent loop starts: the previous turn's settlement no longer applies. */
     function onTurnBoundary(): void {
+      if (state.outputLimitRecoveryPending) {
+        state.outputLimitRecoveryPending = false;
+        if (timers.outputLimitRecovery) {
+          clearTimeout(timers.outputLimitRecovery);
+          timers.outputLimitRecovery = undefined;
+        }
+      }
       state.turnLifecycleSettled = false;
+      state.lastAssistantStopReason = undefined;
       state.runtimeFailure = undefined;
       progress.status = "running";
       progress.resultReadyAt = undefined;
@@ -1116,6 +1152,7 @@ async function runSingleAttempt(
     function onTurnEnd(event: JsonLineEvent): void {
       const msg = event.message as Record<string, unknown> | undefined;
       if (msg?.role === "assistant") {
+        if (typeof msg.stopReason === "string") state.lastAssistantStopReason = msg.stopReason;
         const text = extractTextContent({ type: "turn_end", message: msg });
         if (text && appendDistinctAssistantMessage(messages, text)) {
           state.lastContent = text;
@@ -1140,9 +1177,26 @@ async function runSingleAttempt(
       }
     }
 
-    /** Pi's authoritative end-of-agent event — the lifecycle settles here. */
+    /** Pi's authoritative end-of-agent event. Length truncation waits for recovery. */
     function onAgentEnd(event: JsonLineEvent): void {
       recordRuntimeEventError(event, "agent_end");
+      const eventMessages = Array.isArray(event.messages) ? event.messages : [];
+      let stopReason = state.lastAssistantStopReason;
+      for (let index = eventMessages.length - 1; index >= 0; index -= 1) {
+        const message = eventMessages[index];
+        if (!message || typeof message !== "object" || (message as Record<string, unknown>).role !== "assistant") continue;
+        const candidate = (message as Record<string, unknown>).stopReason;
+        if (typeof candidate === "string") stopReason = candidate;
+        break;
+      }
+      if (stopReason === "length") {
+        state.outputLimitRecoveryPending = true;
+        progress.status = "running";
+        progress.resultReadyAt = undefined;
+        options.onProgress?.(progress);
+        armOutputLimitRecoveryDeadline();
+        return;
+      }
       const structuredOutput = readStructuredOutput(false);
       if (params.outputSchema && structuredOutput === undefined) {
         appendStructuredOutputFailure();
@@ -1177,8 +1231,8 @@ async function runSingleAttempt(
       ["message_end", onAssistantMessage],
       ["assistant", onAssistantMessage],
       ["message_update", onMessageUpdate],
-      ["response", (event) => {
-        if (event.command === "set_auto_retry") releaseRetryPersistenceGuard();
+      ["response", () => {
+        // Pi retry is no longer disabled by the parent; nothing to release.
       }],
       ["tool_execution_start", onToolStart],
       ["tool_execution_end", onToolCompleted],
@@ -1240,6 +1294,21 @@ async function runSingleAttempt(
       // A lifecycle event may have been present in the final decoded stdout
       // chunk, or terminal structured output may have initiated this close.
       if (state.turnLifecycleSettled) return;
+
+      // A length-truncated turn is waiting for child-local continuation; if
+      // the child exits instead, the partial response must not settle as
+      // success. This also covers a child that closes before the recovery
+      // deadline could fire — close already cleared that timer above.
+      if (state.outputLimitRecoveryPending) {
+        state.outputLimitRecoveryPending = false;
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content:
+            `Teammate child exited before output-limit recovery could continue `
+            + `(agent=${params.agent}, correlationId=${correlationId}); the partial response was not accepted as success.`,
+        });
+        state.runtimeFailure = "output-limit recovery interrupted by child exit";
+      }
 
       const stderrTail = state.stderrBuffer.trim();
       const finalContent = state.lastContent.trim();

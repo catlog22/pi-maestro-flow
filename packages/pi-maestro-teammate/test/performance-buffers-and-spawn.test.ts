@@ -1041,7 +1041,7 @@ test("process error after result publication fails lifecycle without retracting 
   assert.match(completions[0].messages.at(-1)?.content ?? "", /late transport failure/);
 });
 
-test("child RPC disables Pi auto-retry before sending the initial prompt", async () => {
+test("child RPC sends the prompt without disabling Pi auto-retry", async () => {
   let written = "";
   const spawnChildProcess = adaptFakeSpawn(() => {
     const child = createFakeProcess();
@@ -1066,10 +1066,9 @@ test("child RPC disables Pi auto-retry before sending the initial prompt", async
   );
   assert.equal(result.exitCode, 0);
   const commands = written.trim().split("\n").map((line) => JSON.parse(line));
-  assert.deepEqual(commands.slice(0, 2), [
-    { type: "set_auto_retry", enabled: false },
-    { type: "prompt", message: "Do the work" },
-  ]);
+  assert.equal(commands.some((c: Record<string, unknown>) => c.type === "set_auto_retry"), false,
+    "Pi auto-retry must stay enabled; the parent no longer disables it");
+  assert.deepEqual(commands[0], { type: "prompt", message: "Do the work" });
 });
 
 test("concurrent child retry overrides restore the original global setting once", async () => {
@@ -1505,7 +1504,7 @@ test("retry budget is shared across model candidates", async () => {
   ]);
 });
 
-test("a failed attempt with completed tools is not restarted or rerouted", async () => {
+test("a failed attempt with completed tools falls back to the next model", async () => {
   const launchedModels: string[] = [];
   const retries: number[] = [];
   const spawnChildProcess = adaptFakeSpawn((_command, args) => {
@@ -1545,9 +1544,10 @@ test("a failed attempt with completed tools is not restarted or rerouted", async
 
   assert.equal(result.exitCode, 1);
   assert.equal(result.toolCount, 1);
-  assert.deepEqual(retries, []);
-  assert.deepEqual(launchedModels, ["provider/primary"]);
-  assert.match(result.messages.at(-1)?.content ?? "", /repeat side effects/i);
+  assert.deepEqual(retries, [], "same-model restart retry is suppressed after tool calls");
+  assert.deepEqual(launchedModels, ["provider/primary", "provider/backup"],
+    "model fallback must proceed even after tool calls");
+  assert.match(result.messages.at(-1)?.content ?? "", /Model fallback/i);
 });
 
 test("connection error remains retryable when an abnormal-exit diagnostic follows it", async () => {
