@@ -33,6 +33,7 @@ import {
   type ApiModelFormChoice,
   type ApiModelFormValues,
 } from "../tui/api-model-editor.ts";
+import { showVisionDelegationManager } from "./vision-assist.ts";
 
 export type ApiProviderId = "maestro-openai" | "maestro-qwen" | "maestro-anthropic";
 
@@ -144,7 +145,7 @@ export interface ApiRetrySettings {
   maxRetries: number;
 }
 
-export type ApiProviderAction = "configure" | "delete" | "disable" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle";
+export type ApiProviderAction = "configure" | "delete" | "disable" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle" | "vision";
 export type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -592,8 +593,16 @@ async function showApiProviderManager(
     ctx.ui.notify("/api-manager 交互菜单需要交互式 Pi 会话。", "warning");
     return;
   }
-  const action = parsed.action ?? await chooseAction(ctx, settingsPath);
+  const action = parsed.action ?? await chooseAction(ctx, settingsPath, dirname(modelsPath));
   if (!action) return;
+  if (action === "vision") {
+    if (!ctx.hasUI) {
+      ctx.ui.notify("/api-manager vision 需要交互式 Pi 会话；状态查看可使用 /vision status。", "warning");
+      return;
+    }
+    await showVisionDelegationManager(ctx, dirname(modelsPath));
+    return;
+  }
   if (action === "list") {
     await listProviders(ctx, modelsPath, defaultsPath, settingsPath);
     return;

@@ -33,6 +33,8 @@ export interface VisionDelegationConfig {
   maxImageBytes: number;
 }
 
+export type VisionManagerContext = Pick<ExtensionContext, "ui" | "model" | "modelRegistry">;
+
 export interface VisionDelegationOptions {
   agentDir?: string;
   completeFn?: typeof complete;
@@ -208,6 +210,7 @@ export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelega
   const cache = new VisionCache(config.cache.maxEntries);
   let restoreForText = true;
   let previousMultimodal: boolean | undefined;
+  let previousEnabled = config.enabled;
 
   const syncTools = (model: Model<Api> | undefined, sessionBoundary = false): void => {
     const controller = toolController(pi);
@@ -215,15 +218,16 @@ export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelega
     const active = controller.getActiveTools();
     const present = active.includes(DESCRIBE_IMAGE_TOOL_NAME);
     if (sessionBoundary) restoreForText = present;
-    else if (previousMultimodal === false) restoreForText = present;
+    else if (config.enabled && previousEnabled && previousMultimodal === false) restoreForText = present;
     const multimodal = isMultimodalModel(model);
     if (!config.enabled || multimodal) {
-      if (config.enabled && present) restoreForText = true;
+      if (present) restoreForText = true;
       if (present) controller.setActiveTools(active.filter((name) => name !== DESCRIBE_IMAGE_TOOL_NAME));
     } else if (restoreForText && !present) {
       controller.setActiveTools([...new Set([...active, DESCRIBE_IMAGE_TOOL_NAME])]);
     }
     previousMultimodal = multimodal;
+    previousEnabled = config.enabled;
   };
 
   pi.on("session_start", (_event, ctx) => {
@@ -239,6 +243,9 @@ export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelega
   });
   pi.on("before_agent_start", (event, ctx) => {
     config = loadVisionDelegationConfig(agentDir);
+    cache.configure(config.cache.maxEntries);
+    if (!config.cache.enabled) cache.clear();
+    syncTools(ctx.model);
     const guidance = visionDelegationPrompt(ctx.model, config);
     if (!guidance) return undefined;
     return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
@@ -366,20 +373,46 @@ export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelega
   });
 }
 
+export async function showVisionDelegationManager(
+  ctx: VisionManagerContext,
+  agentDir = getAgentDir(),
+): Promise<void> {
+  let config = loadVisionDelegationConfig(agentDir);
+  const configPath = getVisionDelegationConfigPath(agentDir);
+  await showVisionManager(ctx, config, configPath, (next, messageText) => {
+    config = next;
+    saveVisionDelegationConfig(config, agentDir);
+    ctx.ui.notify(messageText, "info");
+  });
+}
+
 async function showVisionManager(
-  ctx: ExtensionContext,
+  ctx: VisionManagerContext,
   initial: VisionDelegationConfig,
   configPath: string,
   save: (config: VisionDelegationConfig, message: string) => void,
 ): Promise<void> {
   let current = initial;
+  const availableAtOpen = new Set(availableVisionModelReferences(ctx));
+  const unavailable = [current.visionModel, ...current.fallbackModels]
+    .filter((reference): reference is string => typeof reference === "string" && reference.length > 0)
+    .filter((reference) => !availableAtOpen.has(reference));
+  if (unavailable.length > 0) {
+    ctx.ui.notify(
+      `Vision 配置引用了不可用或已取消多模态能力的模型：${[...new Set(unavailable)].join(", ")}。请重新选择。`,
+      "warning",
+    );
+  }
   while (true) {
     const choice = await ctx.ui.select("Vision 委托设置", [
       "查看状态",
       current.enabled ? "停用 Vision 委托" : "启用 Vision 委托",
       "选择 Vision 模型",
-      "选择 Fallback 模型",
+      "编辑 Fallback 模型链",
       current.cache.enabled ? "关闭缓存" : "开启缓存",
+      "设置缓存容量",
+      "设置重试次数",
+      "设置超时时间",
       "编辑分析系统提示",
       "完成",
     ]);
@@ -393,14 +426,48 @@ async function showVisionManager(
       if (selected === "自动检测") delete next.visionModel; else next.visionModel = selected;
       current = next; save(current, `Vision model: ${current.visionModel ?? "auto-detect"}.`); continue;
     }
-    if (choice === "选择 Fallback 模型") {
-      const references = availableVisionModelReferences(ctx).filter((reference) => reference !== current.visionModel);
-      const selected = await ctx.ui.select("选择 Vision fallback", ["清除", ...references]);
-      if (!selected) continue;
-      current = { ...current, fallbackModels: selected === "清除" ? [] : [selected] };
-      save(current, `Vision fallback: ${current.fallbackModels[0] ?? "none"}.`); continue;
+    if (choice === "编辑 Fallback 模型链") {
+      const available = new Set(availableVisionModelReferences(ctx).filter((reference) => reference !== current.visionModel));
+      const input = await ctx.ui.input("Vision fallback 模型链（逗号分隔，按顺序回退）", current.fallbackModels.join(", "));
+      if (input === undefined) continue;
+      const references = [...new Set(input.split(",").map((reference) => reference.trim()).filter(Boolean))];
+      const invalid = references.find((reference) => !available.has(reference));
+      if (invalid) {
+        ctx.ui.notify(`模型 ${invalid} 不可用、非多模态，或已被选为首选 Vision 模型。`, "warning");
+        continue;
+      }
+      current = { ...current, fallbackModels: references };
+      save(current, `Vision fallback: ${current.fallbackModels.join(", ") || "none"}.`);
+      continue;
     }
     if (choice.endsWith("缓存")) { current = { ...current, cache: { ...current.cache, enabled: !current.cache.enabled } }; save(current, `Vision cache ${current.cache.enabled ? "enabled" : "disabled"}.`); continue; }
+    if (choice === "设置缓存容量") {
+      const input = await ctx.ui.input("Vision 缓存最大条目数（1-1000）", String(current.cache.maxEntries));
+      if (input === undefined) continue;
+      const value = Number(input);
+      if (!Number.isInteger(value) || value < 1 || value > 1_000) { ctx.ui.notify("缓存容量必须是 1-1000 的整数。", "warning"); continue; }
+      current = { ...current, cache: { ...current.cache, maxEntries: value } };
+      save(current, `Vision cache capacity: ${value}.`);
+      continue;
+    }
+    if (choice === "设置重试次数") {
+      const input = await ctx.ui.input("每个 Vision 模型最大重试次数（0-10）", String(current.maxRetries));
+      if (input === undefined) continue;
+      const value = Number(input);
+      if (!Number.isInteger(value) || value < 0 || value > 10) { ctx.ui.notify("重试次数必须是 0-10 的整数。", "warning"); continue; }
+      current = { ...current, maxRetries: value };
+      save(current, `Vision retries: ${value}.`);
+      continue;
+    }
+    if (choice === "设置超时时间") {
+      const input = await ctx.ui.input("单次 Vision 请求超时（毫秒，1000-300000）", String(current.timeoutMs));
+      if (input === undefined) continue;
+      const value = Number(input);
+      if (!Number.isInteger(value) || value < 1_000 || value > 300_000) { ctx.ui.notify("超时时间必须是 1000-300000 毫秒的整数。", "warning"); continue; }
+      current = { ...current, timeoutMs: value };
+      save(current, `Vision timeout: ${value}ms.`);
+      continue;
+    }
     if (choice === "编辑分析系统提示") {
       const edited = await ctx.ui.editor("Vision 分析系统提示", current.customPrompt ?? "");
       if (edited === undefined) continue;
@@ -411,11 +478,11 @@ async function showVisionManager(
   }
 }
 
-function availableVisionModelReferences(ctx: ExtensionContext): string[] {
+function availableVisionModelReferences(ctx: VisionManagerContext): string[] {
   return ctx.modelRegistry.getAvailable().filter(isMultimodalModel).map((model) => `${model.provider}/${model.id}`);
 }
 
-function requireAvailableVisionModel(ctx: ExtensionContext, reference: string): void {
+function requireAvailableVisionModel(ctx: VisionManagerContext, reference: string): void {
   if (!modelReference(reference)) throw new Error(`Invalid model reference: ${reference}`);
   if (!availableVisionModelReferences(ctx).includes(reference)) throw new Error(`Model ${reference} is unavailable or not marked multimodal in API Manager`);
 }

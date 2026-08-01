@@ -55,6 +55,13 @@ test("tool gating follows model capability and preserves user-disabled state", (
     assert.deepEqual(runtime.active, ["read"]);
     runtime.handlers.get("model_select")?.({ model: text });
     assert.deepEqual(runtime.active, ["read", DESCRIBE_IMAGE_TOOL_NAME]);
+    const enabled = loadVisionDelegationConfig(dir);
+    saveVisionDelegationConfig({ ...enabled, enabled: false }, dir);
+    runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, { model: text });
+    assert.deepEqual(runtime.active, ["read"]);
+    saveVisionDelegationConfig({ ...enabled, enabled: true }, dir);
+    runtime.handlers.get("before_agent_start")?.({ systemPrompt: "base" }, { model: text });
+    assert.deepEqual(runtime.active, ["read", DESCRIBE_IMAGE_TOOL_NAME]);
     runtime.setActive(["read"]);
     runtime.handlers.get("model_select")?.({ model: vision });
     runtime.handlers.get("model_select")?.({ model: text });
@@ -104,6 +111,44 @@ test("/vision typed commands show status and persist multimodal routing", async 
     await command.handler("off", ctx);
     saved = loadVisionDelegationConfig(dir);
     assert.equal(saved.enabled, false);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("interactive Vision manager edits complete policy and warns about stale model capabilities", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vision-manager-"));
+  try {
+    const initial = loadVisionDelegationConfig(dir);
+    saveVisionDelegationConfig({ ...initial, visionModel: "p/vision", fallbackModels: ["p/stale"] }, dir);
+    const runtime = harness(dir, async () => assistant("unused"));
+    const text = model("p", "text", false);
+    const models = [text, model("p", "vision", true), model("p", "fallback-a", true), model("p", "fallback-b", true)];
+    const actions = ["编辑 Fallback 模型链", "设置缓存容量", "设置重试次数", "设置超时时间", "完成"];
+    const notifications: Array<{ message: string; level?: string }> = [];
+    let actionIndex = 0;
+    const ctx = {
+      cwd: dir,
+      hasUI: true,
+      model: text,
+      modelRegistry: registry(models),
+      ui: {
+        async select(title: string) { return title === "Vision 委托设置" ? actions[actionIndex++] : undefined; },
+        async input(title: string) {
+          if (title.startsWith("Vision fallback")) return "p/fallback-a, p/fallback-b";
+          if (title.startsWith("Vision 缓存")) return "77";
+          if (title.startsWith("每个 Vision")) return "2";
+          if (title.startsWith("单次 Vision")) return "45000";
+          return undefined;
+        },
+        notify(message: string, level?: string) { notifications.push({ message, level }); },
+      },
+    } as any;
+    await runtime.commands.get("vision").handler("", ctx);
+    const saved = loadVisionDelegationConfig(dir);
+    assert.deepEqual(saved.fallbackModels, ["p/fallback-a", "p/fallback-b"]);
+    assert.equal(saved.cache.maxEntries, 77);
+    assert.equal(saved.maxRetries, 2);
+    assert.equal(saved.timeoutMs, 45_000);
+    assert.ok(notifications.some((entry) => entry.level === "warning" && entry.message.includes("p/stale")));
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 

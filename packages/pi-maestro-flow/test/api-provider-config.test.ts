@@ -2501,6 +2501,7 @@ test("/api-manager no-arg configure lists every model globally and edits through
 
   // Model-centric navigation: one list shows every model; format is only an attribute.
   assert.ok(selectCalls[0]?.options.includes("启用或停用 Provider"));
+  assert.ok(selectCalls[0]?.options.some((option) => option.startsWith("Vision 多模态策略")));
   const global = selectCalls.find((call) => call.title !== "选择操作");
   assert.ok(global);
   assert.ok(global!.options.some((option) => option.includes("maestro-openai / model-a")));
@@ -2603,6 +2604,48 @@ test("/api-manager adds a second model to the same Provider through the new-mode
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
   assert.equal(settings.defaultProvider, "maestro-openai");
   assert.equal(settings.defaultModel, "model-b");
+});
+
+test("/api-manager manages Vision routing and only offers multimodal models", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-manager-vision-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    setThinkingLevel() {},
+  } as any, { modelsPath });
+
+  const imageModel = { provider: "vision-provider", id: "vision-model", input: ["text", "image"] };
+  const textModel = { provider: "text-provider", id: "text-model", input: ["text"] };
+  const selectCalls: Array<{ title: string; options: string[] }> = [];
+  let visionMenuCalls = 0;
+  await commands.get("api-manager").handler("", {
+    cwd: tempDir,
+    hasUI: true,
+    model: textModel,
+    modelRegistry: { getAvailable() { return [textModel, imageModel]; } },
+    ui: {
+      async select(title: string, options: string[]) {
+        selectCalls.push({ title, options });
+        if (title === "选择操作") return options.find((option) => option.startsWith("Vision 多模态策略"));
+        if (title === "Vision 委托设置") {
+          visionMenuCalls += 1;
+          return visionMenuCalls === 1 ? "选择 Vision 模型" : "完成";
+        }
+        if (title === "选择多模态 Vision 模型") return "vision-provider/vision-model";
+        return undefined;
+      },
+      notify() {},
+    },
+  });
+
+  const picker = selectCalls.find((call) => call.title === "选择多模态 Vision 模型");
+  assert.deepEqual(picker?.options, ["自动检测", "vision-provider/vision-model"]);
+  const saved = JSON.parse(readFileSync(join(tempDir, "vision-delegation.json"), "utf8"));
+  assert.equal(saved.visionModel, "vision-provider/vision-model");
+  assert.equal(saved.enabled, true);
 });
 
 test("/api-manager creates multiple models in one form submission from a comma-separated Model ID list", async (t) => {
