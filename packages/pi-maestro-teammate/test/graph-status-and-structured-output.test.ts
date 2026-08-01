@@ -1118,10 +1118,11 @@ test("native teammate status widget yields while another surface owns agent disp
 test("root and proxy graph normalization share one implementation that preserves thinking", () => {
   const indexSource = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
   const executionSource = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8");
+  const executionInfraSource = fs.readFileSync(new URL("../src/runs/execution-infra.ts", import.meta.url), "utf-8");
 
   // The shared normalizer parses task thinking after applying the top-level default.
-  assert.match(executionSource, /thinking:\s*parseTeammateThinkingLevel\(task\.thinking \?\? params\.thinking\)/);
-  assert.doesNotMatch(executionSource, /params\.chain/);
+  assert.match(executionInfraSource, /thinking:\s*parseTeammateThinkingLevel\(task\.thinking \?\? params\.thinking\)/);
+  assert.doesNotMatch(executionInfraSource, /params\.chain/);
 
   // Root and proxy paths both call the shared normalizer; the root process also
   // applies authoritative model routing before normalizing proxied input.

@@ -10,18 +10,15 @@ import {
   TodoSkillLoader,
   type TodoSkillConfig,
 } from "../skills/skill-loader.ts";
-import {
-  composeSkillBindings,
-  type LoadedTodoSkillBinding,
-  type TodoSkillBinding,
-  type TodoSkillRole,
+import type {
+  LoadedTodoSkillBinding,
+  TodoSkillBinding,
+  TodoSkillRole,
 } from "../skills/skill-composer.ts";
 import {
   SkillRuntime,
   type AnySkillActivation,
-  type DegradedSkillActivation,
   type SkillActivation,
-  type SkillActivationBindingMetadata,
   type SkillActivationMetadata,
 } from "../skills/skill-runtime.ts";
 import {
@@ -30,6 +27,32 @@ import {
   type TodoTaskOrigin,
 } from "../session/types.ts";
 import type { TodoUpdateField } from "./todo-contract.ts";
+import {
+  TODO_STATE_VERSION,
+  assertTodoGeneration,
+  configureTodoSerialization,
+  isTodoMutation,
+  loadTasksFromSession,
+  persist,
+} from "./todo-serialization.ts";
+import {
+  activateTask,
+  activationMetadata,
+  assertActiveSkillStack,
+  clearCommittedSkillSnapshots,
+  clearSkillSnapshot,
+  cloneActivationBinding,
+  configureTodoSkillEngine,
+  createActiveSkillMessage,
+  createContextInjectionAnchor,
+  degradedActivation,
+  formatSkillBinding,
+  normalizeSkillBindings,
+  normalizeTodoParams,
+  requireSkillRuntime,
+  resolveContextInjectionAnchor,
+  type RunSkillInjection,
+} from "./todo-skill-engine.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -147,9 +170,6 @@ export interface TodoContext {
 // State
 // ---------------------------------------------------------------------------
 
-const TODO_STATE_ENTRY_TYPE = "todo-state";
-const TODO_STATE_VERSION = 5;
-
 let tasks: Map<string, TodoTask> = new Map();
 let nextTaskId = 0;
 let knownActors: Map<string, TodoActorRef> = new Map([[ROOT_TODO_ACTOR.id, ROOT_TODO_ACTOR]]);
@@ -158,27 +178,25 @@ let onTodoStateChanged: (() => void) | undefined;
 let skillLoader: TodoSkillLoader | undefined;
 let skillRuntime: SkillRuntime | undefined;
 let activeSkillSnapshots: Map<string, SkillActivation> = new Map();
-interface ContextInjectionAnchor {
-  index: number;
-  previousMessage?: AgentMessage;
-  previousFingerprint?: string;
-}
-
-type RunSkillInjection = {
-  taskId: string;
-  stackRevision: string;
-  channel: "system";
-} | {
-  taskId: string;
-  stackRevision: string;
-  channel: "context";
-  anchor: ContextInjectionAnchor;
-};
-
 let runSkillInjection: RunSkillInjection | undefined;
 let todoRevision = 0;
 let todoGeneration = 0;
 let todoMutationQueue: Promise<void> = Promise.resolve();
+
+configureTodoSerialization({
+  getExtensionApi: () => extensionApi,
+  getTasks: () => tasks,
+  getTodoGeneration: () => todoGeneration,
+  rootActor: ROOT_TODO_ACTOR,
+});
+configureTodoSkillEngine({
+  getSkillRuntime: () => skillRuntime,
+  getActiveSkillSnapshots: () => activeSkillSnapshots,
+  getRunSkillInjection: () => runSkillInjection,
+  setRunSkillInjection: (injection) => {
+    runSkillInjection = injection;
+  },
+});
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -1163,51 +1181,9 @@ export function detachTasksFromGoal(goalId: string): number {
   return detached;
 }
 
-/**
- * Drop bindings to Goals that no longer exist, at the session-load boundary.
- *
- * Mirrors {@link normalizeLoadedDependencies}, which does the same for `blockedBy`. Goal state
- * is session-scoped (it clears its registry when the persisted sessionId does not match, and on
- * new/fork), while Todo state is not, so a fork or resume can bring every task back carrying a
- * goalId whose Goal is gone. Nothing validates goalId on the write path either, so a task can
- * also be created against an id that never existed.
- *
- * Safe to resolve Goals here: goalSessionStart runs before todoSessionStart (extension/index.ts),
- * so the registry is already populated.
- */
-function normalizeLoadedGoalBindings(state: Map<string, TodoTask>): void {
-  for (const task of state.values()) {
-    if (!task.goalId) continue;
-    if (getGoalById(task.goalId)) continue;
-    delete task.goalId;
-  }
-}
-
-function normalizeLoadedDependencies(state: Map<string, TodoTask>): void {
-  for (const task of state.values()) {
-    const seen = new Set<string>();
-    task.blockedBy = task.blockedBy.filter((depId) => {
-      if (seen.has(depId)) return false;
-      seen.add(depId);
-      const dependency = state.get(depId);
-      return dependency?.status !== "completed" && dependency?.status !== "deleted";
-    });
-    if (task.status === "pending" || task.status === "blocked") {
-      task.status = deriveDependencyStatus(task.blockedBy);
-    }
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Persistence
 // ---------------------------------------------------------------------------
-
-function persist(state: Map<string, TodoTask> = tasks): void {
-  extensionApi?.appendEntry?.(TODO_STATE_ENTRY_TYPE, {
-    version: TODO_STATE_VERSION,
-    tasks: Object.fromEntries(state),
-  });
-}
 
 function commitTodoState(
   nextTasks: Map<string, TodoTask>,
@@ -1223,41 +1199,9 @@ export function setTodoStateChangeListener(listener: (() => void) | undefined): 
   onTodoStateChanged = listener;
 }
 
-function loadTasksFromSession(ctx: TodoContext): Map<string, TodoTask> {
-  const sm = ctx.sessionManager as {
-    getBranch?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
-    getEntries?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
-  } | undefined;
-  const entries = sm?.getBranch?.() ?? sm?.getEntries?.() ?? [];
-  const entry = entries
-    .filter((e) => e.type === "custom" && e.customType === TODO_STATE_ENTRY_TYPE)
-    .pop();
-  const data = asRecord(entry?.data);
-  const rawTasks = asRecord(data?.tasks);
-  if (!rawTasks) return new Map();
-  const loaded = new Map<string, TodoTask>();
-  for (const [id, rawTask] of Object.entries(rawTasks)) {
-    loaded.set(id, normalizeLoadedTask(id, rawTask));
-  }
-  normalizeLoadedDependencies(loaded);
-  normalizeLoadedGoalBindings(loaded);
-  return loaded;
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-function isTodoMutation(action: TodoParams["action"]): boolean {
-  return action !== "list" && action !== "get";
-}
-
-function assertTodoGeneration(generation: number): void {
-  if (generation !== todoGeneration) {
-    throw new Error("Todo session changed while the mutation was pending; retry against the active session.");
-  }
-}
-
 interface AsyncTodoMutationCheck {
   generation: number;
   revision: number;
@@ -1365,26 +1309,6 @@ function mirrorActivationStillValid(before: TodoTask, after: TodoTask): boolean 
     && JSON.stringify(before.skills) === JSON.stringify(after.skills);
 }
 
-function requireSkillRuntime(): SkillRuntime {
-  if (!skillRuntime) throw new Error("todo skill runtime is not initialized");
-  return skillRuntime;
-}
-
-function activateTask(task: TodoTask): Promise<SkillActivation> {
-  return requireSkillRuntime().activate(task.skills, task.context ?? "");
-}
-
-function activationMetadata(activation: SkillActivation): SkillActivationMetadata {
-  return {
-    activationId: activation.activationId,
-    stackRevision: activation.stackRevision,
-    activatedAt: activation.activatedAt,
-    validatedAt: activation.validatedAt,
-    state: activation.state,
-    bindings: activation.bindings.map(cloneActivationBinding),
-  };
-}
-
 async function ensureSkillActivation(task: TodoTask): Promise<AnySkillActivation> {
   const cached = activeSkillSnapshots.get(task.id);
   // Without the `cached &&` guard, a task with no cached snapshot and no
@@ -1443,171 +1367,6 @@ async function ensureSkillActivation(task: TodoTask): Promise<AnySkillActivation
   }
   activeSkillSnapshots.set(current.id, activation);
   return activation;
-}
-
-function clearSkillSnapshot(taskId?: string): void {
-  if (taskId) activeSkillSnapshots.delete(taskId);
-  else activeSkillSnapshots.clear();
-  if (!taskId || runSkillInjection?.taskId === taskId) runSkillInjection = undefined;
-}
-
-function clearCommittedSkillSnapshots(taskIds: ReadonlySet<string>): void {
-  if (taskIds.size === 0) return;
-  for (const taskId of taskIds) activeSkillSnapshots.delete(taskId);
-  if (runSkillInjection && taskIds.has(runSkillInjection.taskId)) runSkillInjection = undefined;
-}
-
-function createActiveSkillMessage(task: TodoTask, activation: AnySkillActivation): AgentMessage {
-  return {
-    role: "custom",
-    customType: "todo-active-skill",
-    content: renderActivationPrompt(task, activation),
-    // Skill prompts are injection noise, but a degraded stack is a failure the user
-    // needs to see — todo.ts has no notify channel of its own (TodoContext.ui only
-    // carries setStatus), and this message is already on its way to the transcript.
-    display: activation.state === "degraded",
-    details: {
-      taskId: task.id,
-      activationId: activation.activationId,
-      stackRevision: activation.stackRevision,
-    },
-    timestamp: activation.activatedAt,
-  } as AgentMessage;
-}
-
-function createContextInjectionAnchor(messages: AgentMessage[]): ContextInjectionAnchor {
-  const previousMessage = messages.at(-1);
-  return {
-    index: messages.length,
-    ...(previousMessage ? {
-      previousMessage,
-      previousFingerprint: contextMessageFingerprint(previousMessage),
-    } : {}),
-  };
-}
-
-function resolveContextInjectionAnchor(
-  messages: AgentMessage[],
-  anchor: ContextInjectionAnchor,
-): ContextInjectionAnchor {
-  if (anchor.index === 0) return anchor;
-  const previousMessage = messages[anchor.index - 1];
-  if (previousMessage === anchor.previousMessage
-    || (previousMessage && contextMessageFingerprint(previousMessage) === anchor.previousFingerprint)) return anchor;
-  return createContextInjectionAnchor(messages);
-}
-
-function contextMessageFingerprint(message: AgentMessage): string {
-  return createHash("sha256").update(JSON.stringify(message)).digest("hex");
-}
-
-/**
- * Stand-in activation for a task whose skills can no longer be loaded.
- *
- * Fail-open, because the only caller that matters runs inside the `context` hook on
- * every turn — failing closed there wedges the session. But fail-open silently would
- * drop the skill's constraints without the model ever knowing, so the whole payload is
- * a warning block telling it exactly that.
- *
- * Deliberately not cached and not persisted: `stackRevision` is per-task and constant,
- * so it never collides with a real revision, and the next turn re-attempts the real
- * load.
- */
-function degradedActivation(task: TodoTask, error: unknown): DegradedSkillActivation {
-  const now = Date.now();
-  return {
-    activationId: task.skillActivation?.activationId ?? `degraded-${task.id}`,
-    stackRevision: `degraded:${task.id}`,
-    activatedAt: now,
-    validatedAt: now,
-    state: "degraded",
-    bindings: [],
-    skills: [],
-    prompt: renderDegradedPrompt(task, error),
-  };
-}
-
-function renderDegradedPrompt(task: TodoTask, error: unknown): string {
-  const names = task.skills.map((binding) => binding.name).join(", ") || "(none)";
-  return [
-    "<active_skill_stack_unavailable>",
-    `Todo task #${task.id} declares skills (${names}) but they could not be loaded: ${errorText(error)}`,
-    "Their instructions are NOT in effect. Do not assume any skill constraint, checklist, or workflow applies.",
-    "Fix the skill files, or move the task back to pending and re-activate it, before relying on skill-scoped behavior.",
-    "</active_skill_stack_unavailable>",
-  ].join("\n");
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function renderActivationPrompt(task: TodoTask, activation: AnySkillActivation): string {
-  if (activation.state === "active" || activation.state === "degraded") return activation.prompt;
-  return [
-    "<active_skill_stack_stale>",
-    `Todo task #${task.id} skill files changed after activation.`,
-    "Do not continue the previous skill workflow until the task is moved back to pending and activated again.",
-    "</active_skill_stack_stale>",
-  ].join("\n");
-}
-
-function assertActiveSkillStack(task: TodoTask, activation: AnySkillActivation): void {
-  if (activation.state === "active") return;
-  // A degraded stack already carries its own warning block in the injected content.
-  // Throwing here would defeat the fallback that produced it.
-  if (activation.state === "degraded") return;
-  throw new Error(
-    `Todo task #${task.id} skill activation is stale. Move the task back to pending and reactivate it before continuing the Run.`,
-  );
-}
-
-function cloneActivationBinding(binding: SkillActivationBindingMetadata): SkillActivationBindingMetadata {
-  return {
-    ...binding,
-    requiredFiles: [...binding.requiredFiles],
-    deferredFiles: [...binding.deferredFiles],
-  };
-}
-
-function normalizeSkillConfig(skill: TodoSkillConfig): TodoSkillConfig {
-  const name = skill.name.trim();
-  if (!name) throw new Error("skill.name must be non-empty");
-  const args = skill.args?.trim();
-  return { name, ...(args ? { args } : {}) };
-}
-
-function normalizeSkillBinding(skill: TodoSkillBinding): TodoSkillBinding {
-  if (!isSkillRole(skill.role)) throw new Error(`Invalid skill role: ${String(skill.role)}`);
-  return { ...normalizeSkillConfig(skill), role: skill.role };
-}
-
-function normalizeSkillBindings(skills: readonly TodoSkillBinding[]): TodoSkillBinding[] {
-  return composeSkillBindings(skills.map(normalizeSkillBinding));
-}
-
-function normalizeTodoParams(input: TodoParamsInput): TodoParams {
-  const { skill: legacySkill, ...params } = input;
-  if (params.id) params.id = params.id.replace(/^#+/, "");
-  if (params.skills !== undefined) {
-    return {
-      ...params,
-      skills: params.skills === null ? null : normalizeSkillBindings(params.skills),
-    };
-  }
-  if (legacySkill !== undefined) {
-    return {
-      ...params,
-      skills: legacySkill === null
-        ? null
-        : [{ ...normalizeSkillConfig(legacySkill), role: "primary" }],
-    };
-  }
-  return params;
-}
-
-function formatSkillBinding(binding: TodoSkillBinding): string {
-  return `${binding.role}:${binding.name}${binding.args ? ` ${binding.args}` : ""}`;
 }
 
 function cloneActor(actor: TodoActorRef): TodoActorRef {
@@ -1716,257 +1475,6 @@ function findActiveTask(assigneeId: string, excludeId?: string): TodoTask | unde
       && task.assignee.id === assigneeId
       && task.id !== excludeId,
   );
-}
-
-function normalizeLoadedTask(id: string, raw: unknown): TodoTask {
-  const task = asRecord(raw) ?? {};
-  const contextParts: string[] = [];
-  if (typeof task.context === "string" && task.context) contextParts.push(task.context);
-
-  const skills = readSkillBindings(task.skills);
-  if (skills.length === 0) appendLegacySkill(skills, task.skill);
-  const legacyInject = Array.isArray(task.inject) ? task.inject : [];
-  for (const item of legacyInject) {
-    const entry = asRecord(item);
-    if (!entry || typeof entry.source !== "string") continue;
-    if (entry.type === "skill" && skills.length === 0) {
-      appendLegacySkill(skills, { name: entry.source });
-    } else if (entry.type === "text") {
-      contextParts.push(wrapLegacyBlock(typeof entry.tag === "string" ? entry.tag : "content", entry.source));
-    } else if (entry.type === "file") {
-      contextParts.push(wrapLegacyBlock("legacy_file_reference", entry.source));
-    }
-  }
-
-  const legacyInjection = asRecord(task.injection);
-  if (legacyInjection) {
-    if (skills.length === 0 && typeof legacyInjection.skillRef === "string") {
-      appendLegacySkill(skills, { name: legacyInjection.skillRef });
-    }
-    appendLegacyValue(contextParts, "legacy_goal_context", legacyInjection.goalContext);
-    appendLegacyValue(contextParts, "step_context", legacyInjection.stepContext);
-    appendLegacyValue(contextParts, "boundary_contract", legacyInjection.boundaryContract);
-    if (Array.isArray(legacyInjection.deferredReads)) {
-      const paths = legacyInjection.deferredReads.filter((value): value is string => typeof value === "string");
-      if (paths.length > 0) contextParts.push(wrapLegacyBlock("deferred_reads", paths.join("\n")));
-    }
-  }
-
-  const legacyLoad = asRecord(task.load);
-  if (legacyLoad && typeof legacyLoad.source === "string") {
-    if (legacyLoad.type === "skill" && skills.length === 0) {
-      appendLegacySkill(skills, { name: legacyLoad.source });
-    }
-    else if (legacyLoad.type === "text") contextParts.push(legacyLoad.source);
-    else if (legacyLoad.type === "file") contextParts.push(wrapLegacyBlock("legacy_file_reference", legacyLoad.source));
-  }
-
-  const completion = asRecord(task.completion);
-  const summary = typeof task.summary === "string"
-    ? task.summary
-    : typeof completion?.summary === "string"
-      ? completion.summary
-      : undefined;
-  const status = isTaskStatus(task.status) ? task.status : "pending";
-  const blockedBy = Array.isArray(task.blockedBy)
-    ? task.blockedBy.filter((value): value is string => typeof value === "string")
-    : [];
-  const now = Date.now();
-  const skillActivation = readSkillActivation(task.skillActivation);
-  const legacySkillActivation = skillActivation ?? readLegacySkillActivation(id, task.skillLoad, skills);
-  const origin = readTodoOrigin(task.origin);
-  const createdBy = readTodoActor(task.createdBy) ?? cloneActor(ROOT_TODO_ACTOR);
-  const assignee = readTodoActor(task.assignee) ?? cloneActor(ROOT_TODO_ACTOR);
-
-  return {
-    id: typeof task.id === "string" ? task.id : id,
-    subject: typeof task.subject === "string" ? task.subject : `Task ${id}`,
-    ...(typeof task.description === "string" ? { description: task.description } : {}),
-    status,
-    blockedBy,
-    skills,
-    ...(contextParts.length > 0 ? { context: contextParts.join("\n\n") } : {}),
-    ...(legacySkillActivation ? { skillActivation: legacySkillActivation } : {}),
-    ...(summary ? { summary } : {}),
-    ...(origin ? { origin } : {}),
-    ...(typeof task.planHandoffKey === "string" ? { planHandoffKey: task.planHandoffKey } : {}),
-    ...(typeof task.goalId === "string" ? { goalId: task.goalId } : {}),
-    createdBy,
-    assignee,
-    createdAt: typeof task.createdAt === "number" ? task.createdAt : now,
-    updatedAt: typeof task.updatedAt === "number" ? task.updatedAt : now,
-  };
-}
-
-function readTodoOrigin(value: unknown): TodoTaskOrigin | undefined {
-  const origin = asRecord(value);
-  if (!origin || typeof origin.sessionId !== "string" || typeof origin.step !== "string") return undefined;
-  return {
-    sessionId: origin.sessionId,
-    step: origin.step,
-    ...(typeof origin.sessionGeneration === "string" ? { sessionGeneration: origin.sessionGeneration } : {}),
-    ...(typeof origin.runId === "string" ? { runId: origin.runId } : {}),
-    ...(typeof origin.runSeq === "string" ? { runSeq: origin.runSeq } : {}),
-  };
-}
-
-function readTodoActor(value: unknown): TodoActorRef | undefined {
-  const actor = asRecord(value);
-  if (
-    !actor
-    || (actor.kind !== "root" && actor.kind !== "teammate")
-    || typeof actor.id !== "string"
-    || !actor.id
-    || typeof actor.label !== "string"
-    || !actor.label
-  ) return undefined;
-  return {
-    kind: actor.kind,
-    id: actor.id,
-    label: actor.label,
-    ...(typeof actor.agentType === "string" ? { agentType: actor.agentType } : {}),
-  };
-}
-
-function readSkillBindings(value: unknown): TodoSkillBinding[] {
-  if (!Array.isArray(value)) return [];
-  const bindings: TodoSkillBinding[] = [];
-  for (const item of value) {
-    const binding = readSkillBinding(item);
-    if (binding) bindings.push(binding);
-  }
-  return bindings;
-}
-
-function readSkillBinding(value: unknown): TodoSkillBinding | undefined {
-  const skill = asRecord(value);
-  if (!skill || typeof skill.name !== "string" || !skill.name.trim()) return undefined;
-  if (!isSkillRole(skill.role)) return undefined;
-  return normalizeSkillBinding({
-    name: skill.name,
-    role: skill.role,
-    ...(typeof skill.args === "string" ? { args: skill.args } : {}),
-  });
-}
-
-function readSkillConfig(value: unknown): TodoSkillConfig | undefined {
-  const skill = asRecord(value);
-  if (!skill || typeof skill.name !== "string" || !skill.name.trim()) return undefined;
-  return normalizeSkillConfig({
-    name: skill.name,
-    ...(typeof skill.args === "string" ? { args: skill.args } : {}),
-  });
-}
-
-function appendLegacySkill(bindings: TodoSkillBinding[], value: unknown): void {
-  const skill = readSkillConfig(value);
-  if (skill) bindings.push({ ...skill, role: "primary" });
-}
-
-function readSkillActivation(value: unknown): SkillActivationMetadata | undefined {
-  const record = asRecord(value);
-  if (
-    !record
-    || typeof record.activationId !== "string"
-    || typeof record.stackRevision !== "string"
-    || typeof record.activatedAt !== "number"
-    || typeof record.validatedAt !== "number"
-    || !["active", "stale"].includes(String(record.state))
-  ) return undefined;
-  const bindings = readActivationBindings(record.bindings);
-  return {
-    activationId: record.activationId,
-    stackRevision: record.stackRevision,
-    activatedAt: record.activatedAt,
-    validatedAt: record.validatedAt,
-    state: record.state as SkillActivationMetadata["state"],
-    bindings,
-  };
-}
-
-function readActivationBindings(value: unknown): SkillActivationBindingMetadata[] {
-  if (!Array.isArray(value)) return [];
-  const bindings: SkillActivationBindingMetadata[] = [];
-  for (const item of value) {
-    const record = asRecord(item);
-    if (
-      !record
-      || !isSkillRole(record.role)
-      || typeof record.name !== "string"
-      || typeof record.filePath !== "string"
-    ) continue;
-    bindings.push({
-      role: record.role,
-      name: record.name,
-      ...(typeof record.args === "string" ? { args: record.args } : {}),
-      filePath: record.filePath,
-      contentHash: typeof record.contentHash === "string" ? record.contentHash : "",
-      configHash: typeof record.configHash === "string" ? record.configHash : "",
-      requiredReadingHash: typeof record.requiredReadingHash === "string" ? record.requiredReadingHash : "",
-      compiledKey: typeof record.compiledKey === "string" ? record.compiledKey : "",
-      requiredFiles: stringArray(record.requiredFiles),
-      deferredFiles: stringArray(record.deferredFiles),
-      totalBytes: typeof record.totalBytes === "number" ? record.totalBytes : 0,
-    });
-  }
-  return bindings;
-}
-
-function readLegacySkillActivation(
-  taskId: string,
-  value: unknown,
-  skills: readonly TodoSkillBinding[],
-): SkillActivationMetadata | undefined {
-  const record = asRecord(value);
-  const primary = skills.find((skill) => skill.role === "primary") ?? skills[0];
-  if (!record || !primary || typeof record.filePath !== "string") return undefined;
-  const activatedAt = typeof record.loadedAt === "string" ? Date.parse(record.loadedAt) : Date.now();
-  return {
-    activationId: `legacy-${taskId}`,
-    stackRevision: "",
-    activatedAt: Number.isFinite(activatedAt) ? activatedAt : Date.now(),
-    validatedAt: Number.isFinite(activatedAt) ? activatedAt : Date.now(),
-    state: "stale",
-    bindings: [{
-      role: primary.role,
-      name: primary.name,
-      ...(primary.args ? { args: primary.args } : {}),
-      filePath: record.filePath,
-      contentHash: "",
-      configHash: "",
-      requiredReadingHash: "",
-      compiledKey: "",
-      requiredFiles: stringArray(record.requiredFiles),
-      deferredFiles: stringArray(record.deferredFiles),
-      totalBytes: typeof record.totalBytes === "number" ? record.totalBytes : 0,
-    }],
-  };
-}
-
-function appendLegacyValue(parts: string[], tag: string, value: unknown): void {
-  if (typeof value === "string" && value) parts.push(wrapLegacyBlock(tag, value));
-}
-
-function wrapLegacyBlock(tag: string, value: string): string {
-  return `<${tag}>\n${value}\n</${tag}>`;
-}
-
-function stringArray(value: unknown): string[] {
-  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
-}
-
-function isTaskStatus(value: unknown): value is TaskStatus {
-  return ["pending", "in_progress", "completed", "blocked", "deleted"].includes(String(value));
-}
-
-function isSkillRole(value: unknown): value is TodoSkillRole {
-  return ["primary", "guard", "support"].includes(String(value));
-}
-
-function asRecord(value: unknown): Record<string, unknown> | undefined {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : undefined;
 }
 
 function snapshotDetails(action: string, error?: string): TodoResultDetails {

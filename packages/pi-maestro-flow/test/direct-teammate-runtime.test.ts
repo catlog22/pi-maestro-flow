@@ -49,7 +49,7 @@ test("direct teammate options install the parent-authoritative request bridge", 
 });
 
 test("every non-Swarm direct teammate consumer uses the shared options factory", () => {
-  for (const relative of ["delegate.ts", "explore.ts", "moa.ts", "goal.ts"]) {
+  for (const relative of ["delegate.ts", "explore.ts", "moa.ts", "goal-verification.ts"]) {
     const source = readFileSync(new URL(`../src/tools/${relative}`, import.meta.url), "utf8");
     assert.match(source, /createDirectTeammateRunOptions\(/, relative);
   }
