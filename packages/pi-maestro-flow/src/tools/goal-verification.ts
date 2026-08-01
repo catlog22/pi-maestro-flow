@@ -18,6 +18,7 @@ interface RunTeammateParams {
 }
 interface RunTeammateOptions {
   baseCwd: string;
+  signal?: AbortSignal;
   onChildRequest?: (event: Record<string, unknown>, reply: (message: unknown) => void) => void;
 }
 interface TeammateResult {
@@ -138,6 +139,38 @@ function getGoalVerificationBridge(): GoalVerificationBridge {
 // Verifier — spawns a teammate subprocess for independent verification
 // ---------------------------------------------------------------------------
 
+/** @internal Runs the verifier under an owned deadline that aborts its child tree. */
+export async function runTeammateVerifierWithDeadline(
+  runTeammateFn: RunTeammateFn,
+  params: RunTeammateParams,
+  options: RunTeammateOptions,
+  timeoutMs: number,
+): Promise<TeammateResult[] | TeammateResult> {
+  const controller = new AbortController();
+  const parentSignal = options.signal;
+  const onParentAbort = () => controller.abort(parentSignal?.reason);
+  if (parentSignal?.aborted) onParentAbort();
+  else parentSignal?.addEventListener("abort", onParentAbort, { once: true });
+
+  const timeoutError = new Error(`Goal verifier timed out after ${timeoutMs}ms.`);
+  let timer: ReturnType<typeof setTimeout>;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      controller.abort(timeoutError);
+      reject(timeoutError);
+    }, timeoutMs);
+  });
+  const execution = runTeammateFn(params, { ...options, signal: controller.signal });
+  execution.catch(() => {});
+
+  try {
+    return await Promise.race([execution, deadline]);
+  } finally {
+    clearTimeout(timer!);
+    parentSignal?.removeEventListener("abort", onParentAbort);
+  }
+}
+
 async function runVerifier(
   goal: ActiveGoal,
   completionSummary: string,
@@ -205,7 +238,12 @@ async function runVerifier(
   );
 
   try {
-    const verifierResult = await runTeammateFn(verifierParams(verifyTask, VERIFIER_TIMEOUT_MS), options);
+    const verifierResult = await runTeammateVerifierWithDeadline(
+      runTeammateFn,
+      verifierParams(verifyTask, VERIFIER_TIMEOUT_MS),
+      options,
+      VERIFIER_TIMEOUT_MS,
+    );
     const result = Array.isArray(verifierResult) ? verifierResult[0] : verifierResult;
     if (!result) {
       return { status: "error", pass: false, reasoning: "Verifier returned no teammate result", evidence: [] };
