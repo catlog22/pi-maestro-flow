@@ -17,7 +17,42 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Check } from "typebox/value";
 import { isGuiTeammateToolAllowed, registerGuiTool } from "../shared/gui-registry.ts";
 import { Text, truncateToWidth } from "@earendil-works/pi-tui";
-import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams } from "./schemas.ts";
+import { TeammateParams, TeammateSendParams, TeammateListParams, TeammateWatchParams, TeammateWaitParams, TeammateMonitorParams } from "./schemas.ts";
+import {
+  takeSnapshot,
+  barrierWait,
+  formatCompact,
+  formatVerbose,
+  formatHeader,
+  formatStatusBar,
+  formatBarrierCompact,
+  validateMonitorParams,
+  createMonitorModeState,
+  startMonitorMode,
+  stopMonitorMode,
+  MONITOR_STATUS_KEY,
+  MONITOR_DEFAULT_TIMEOUT_MS,
+  MONITOR_DEFAULT_LINES,
+  createEngineState,
+  startEngine,
+  stopEngine,
+  addBinding,
+  removeBinding,
+  clearBindings,
+  formatEngineStatusBar,
+  buildAutoAnalysisPrompt,
+  buildCustomAnalysisPrompt,
+  parseAnalysisResult,
+  ENGINE_TICK_MS,
+  type MonitorTargetSnapshot,
+  type MonitorParams,
+  type BarrierEntry,
+  type MonitorModeState,
+  type MonitorEngineState,
+  type MonitorSupervisionMode,
+  type EngineAgentInfo,
+  type AnalysisResult,
+} from "./monitor.ts";
 import {
   runSingleTeammate,
   runGraph,
@@ -63,6 +98,8 @@ import type {
   NormalizedTask,
 } from "../runs/execution.ts";
 import {
+  auxToolCallFallback,
+  auxToolResultFallback,
   renderQuietTeammateAux,
   renderTeammateCall,
   renderTeammateListCall,
@@ -77,6 +114,7 @@ import {
   type DecodedInputToken,
 } from "../tui/input-text.ts";
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
+import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
 import type {
   Details,
   TeammateState,
@@ -217,6 +255,14 @@ Use an exact role name from the Available Teammate Agents section in the active 
 
 For background work, wait for the automatic teammate-complete notification. Do not poll teammate-watch or teammate-list; if the current turn must wait, call teammate-wait once with the returned correlation ID.
 
+## Monitoring
+
+Use teammate-monitor for multi-agent observation:
+- { action: "status", targets: [...] } — compact one-shot snapshot (one line per target)
+- { action: "wait", targets: [...], waitMode: "all" } — block until all targets settle
+
+Monitor mode is user-controlled via /monitor. For single-agent waits, prefer teammate-wait.
+
 Configured task-type model routing for ${cwd}:
 ${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;
 }
@@ -256,6 +302,19 @@ const TEAMMATE_WAIT_SNIPPET = "Wait once for a teammate result or for a bounded 
 const TEAMMATE_WAIT_GUIDELINES = [
   "Call teammate-wait exactly once with a returned name or correlation ID and a bounded timeout instead of repeatedly calling teammate-watch.",
   "Treat result-ready as a usable teammate result; do not continue waiting only for agent_end lifecycle confirmation.",
+];
+
+const TEAMMATE_MONITOR_DESCRIPTION = `Query the active monitor or block on a multi-agent barrier. Monitor mode is entered/exited by the user via /monitor.
+
+- "status": one-shot compact snapshot of targets — non-blocking
+- "wait": block until barrier condition (all/any/count targets settle)
+
+Output is compact by default (one line per target). Use verbose for detail.`;
+const TEAMMATE_MONITOR_SNIPPET = "Query monitor snapshot or block on a multi-agent barrier.";
+const TEAMMATE_MONITOR_GUIDELINES = [
+  "Use teammate-monitor for multi-agent observation and barrier waits; for a single agent, prefer teammate-wait.",
+  'Use action="wait" with waitMode="all" to block until all parallel agents complete before proceeding.',
+  "Monitor mode is user-controlled via /monitor; this tool only queries and waits.",
 ];
 
 const TEAMMATE_DEPTH_START_MARKER = "<teammate_nesting_context>";
@@ -934,11 +993,21 @@ function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
         .map((dependency) => dependency.name ?? `task ${dependency.taskIndex + 1}`);
       const runningTool = progress?.recentTools?.find((tool) => tool.status === "running");
       const progressStatus = progress?.status;
-      const status = direct?.status === "sleeping" || (!direct && active.status === "sleeping")
+      // Settled lifecycle state outranks the progress snapshot: dispatch paths
+      // keep lifecycle-pending tasks "running" for the admission gate and never
+      // rewrite the snapshot back once the lifecycle confirms. A settled direct
+      // record (or a completed container after the child record was pruned) is
+      // the authoritative terminal state; the snapshot only leads while live.
+      const directStatus = direct?.status;
+      const status = directStatus === "sleeping" || (!direct && active.status === "sleeping")
         ? "sleeping"
-        : direct && LIVE_AGENT_STATUSES.has(direct.status) && progressStatus === "completed"
-          ? direct.status
-          : progressStatus ?? direct?.status ?? active.status;
+        : directStatus === "completed" || directStatus === "failed"
+          ? directStatus
+          : !direct && active.status === "completed"
+            ? active.status
+            : direct && LIVE_AGENT_STATUSES.has(direct.status) && progressStatus === "completed"
+              ? direct.status
+              : progressStatus ?? directStatus ?? active.status;
       const action = runningTool
         ? toolAction(runningTool.name)
         : status === "running" && (progress?.resultReadyAt ?? direct?.resultReadyAt) !== undefined
@@ -1769,6 +1838,18 @@ export default function registerTeammateExtension(
       parameters: TeammateWaitParams,
       async execute(_id: string, params: { name?: string; timeoutMs?: number; waitMs?: number }, signal: AbortSignal) {
         return proxyCall<{ status: TeammateWaitStatus; output: string[] }>("teammate-wait", params, signal);
+      },
+    });
+
+    pi.registerTool({
+      name: "teammate-monitor",
+      label: "Teammate Monitor",
+      description: TEAMMATE_MONITOR_DESCRIPTION,
+      promptSnippet: TEAMMATE_MONITOR_SNIPPET,
+      promptGuidelines: TEAMMATE_MONITOR_GUIDELINES,
+      parameters: TeammateMonitorParams,
+      async execute(_id: string, params: MonitorParams, signal: AbortSignal) {
+        return proxyCall<{ output: string[] }>("teammate-monitor", params, signal);
       },
     });
 
@@ -2815,13 +2896,15 @@ export default function registerTeammateExtension(
     renderCall(args, theme, context) {
       if (context.isPartial === false) return new Text("", 0, 0);
       const mode = typeof args.mode === "string" ? args.mode : "follow_up";
-      return renderQuietTeammateAux("teammate-send", `@${String(args.to ?? "?")} · ${mode}`, "running", theme) as never;
+      return renderQuietTeammateAux("teammate-send", `@${String(args.to ?? "?")} · ${mode}`, "running", theme)
+        ?? auxToolCallFallback("teammate-send", theme);
     },
 
     renderResult(result, options, theme) {
       if (options.isPartial) return new Text("", 0, 0);
       const failed = (result as { isError?: boolean }).isError === true || result.details?.delivered !== true;
-      return renderQuietTeammateAux("teammate-send", failed ? "delivery failed" : "delivered", failed ? "failure" : "success", theme) as never;
+      return renderQuietTeammateAux("teammate-send", failed ? "delivery failed" : "delivered", failed ? "failure" : "success", theme)
+        ?? auxToolResultFallback(result, theme);
     },
   };
 
@@ -2914,13 +2997,15 @@ export default function registerTeammateExtension(
     renderCall(args, theme, context) {
       if (context.isPartial === false) return new Text("", 0, 0);
       const lines = typeof args.lines === "number" ? ` · ${args.lines} lines` : "";
-      return renderQuietTeammateAux("teammate-watch", `@${String(args.name ?? "?")}${lines}`, "running", theme) as never;
+      return renderQuietTeammateAux("teammate-watch", `@${String(args.name ?? "?")}${lines}`, "running", theme)
+        ?? auxToolCallFallback("teammate-watch", theme);
     },
 
     renderResult(result, options, theme) {
       if (options.isPartial) return new Text("", 0, 0);
       const failed = (result as { isError?: boolean }).isError === true;
-      return renderQuietTeammateAux("teammate-watch", failed ? "inspection failed" : "inspected", failed ? "failure" : "success", theme) as never;
+      return renderQuietTeammateAux("teammate-watch", failed ? "inspection failed" : "inspected", failed ? "failure" : "success", theme)
+        ?? auxToolResultFallback(result, theme);
     },
   };
 
@@ -2948,14 +3033,244 @@ export default function registerTeammateExtension(
     renderCall(args, theme, context) {
       if (context.isPartial === false) return new Text("", 0, 0);
       const target = args.name ? `@${String(args.name)}` : `${String(args.waitMs ?? 0)}ms`;
-      return renderQuietTeammateAux("teammate-wait", target, "running", theme) as never;
+      return renderQuietTeammateAux("teammate-wait", target, "running", theme)
+        ?? auxToolCallFallback("teammate-wait", theme);
     },
 
     renderResult(result, options, theme) {
       if (options.isPartial) return new Text("", 0, 0);
       const status = result.details?.status ?? "timeout";
       const failed = (result as { isError?: boolean }).isError === true;
-      return renderQuietTeammateAux("teammate-wait", status, failed ? "failure" : "success", theme) as never;
+      return renderQuietTeammateAux("teammate-wait", status, failed ? "failure" : "success", theme)
+        ?? auxToolResultFallback(result, theme);
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+  // Monitor — persistent observation mode (user-entered) + LLM query tools
+  // ---------------------------------------------------------------------------
+
+  const monitorMode: MonitorModeState = createMonitorModeState();
+  const monitorEngine: MonitorEngineState = createEngineState();
+
+  /** Build EngineAgentInfo from an ActiveAgent. */
+  function buildEngineAgentInfo(correlationId: string): EngineAgentInfo | undefined {
+    const agent = state.activeRuns.get(correlationId);
+    if (!agent) return undefined;
+    const label = agent.name ?? correlationId.slice(0, 8);
+    const objective = agent.inbox.length > 0 ? agent.inbox[0].payload.slice(0, 500) : "";
+    return {
+      correlationId,
+      name: label,
+      status: agent.status,
+      idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
+      outputTail: agent.outputLog.slice(-20),
+      objective,
+      hasPendingInteractions: (agent.pendingInteractions?.size ?? 0) > 0,
+    };
+  }
+
+  /** Start the monitor engine with wired callbacks. */
+  function startMonitorEngine(ctx: ExtensionContext): void {
+    startEngine(monitorEngine, {
+      getAgentInfo: buildEngineAgentInfo,
+      sendIntervention: (cid, message, mode) => {
+        const agent = state.activeRuns.get(cid);
+        if (!agent?.stdin) return false;
+        sendRpcMessage(agent.stdin, message, mode);
+        agent.outputLog.push(`[monitor] ${mode}: ${message.slice(0, 100)}`);
+        return true;
+      },
+      onStatusUpdate: (text) => ctx.ui.setStatus(MONITOR_STATUS_KEY, text),
+      notifyMain: (message) => {
+        safeSendMessage(pi, {
+          customType: "teammate-message",
+          content: `[monitor] ${message}`,
+          display: true,
+          details: { source: "monitor" },
+        }, { triggerTurn: false });
+      },
+      analyze: async (binding, info) => {
+        const prompt = binding.mode === "custom" && binding.customPrompt
+          ? buildCustomAnalysisPrompt(binding.customPrompt, info.objective, info.outputTail)
+          : buildAutoAnalysisPrompt(info.objective, info.outputTail);
+        try {
+          const result = await runSingleTeammate(
+            { agent: "analyst", task: prompt, thinking: "low", timeoutMs: 30_000 },
+            { baseCwd: state.baseCwd || process.cwd(), depth: 0 },
+          );
+          const text = result.messages[result.messages.length - 1]?.content ?? "";
+          return parseAnalysisResult(text);
+        } catch {
+          return undefined; // Analysis failure never blocks the monitor
+        }
+      },
+    });
+    ctx.ui.setStatus(MONITOR_STATUS_KEY, formatEngineStatusBar(monitorEngine));
+  }
+
+  /** Stop the monitor engine and clear status. */
+  function stopMonitorEngine(ctx: ExtensionContext): void {
+    stopEngine(monitorEngine);
+    clearBindings(monitorEngine);
+    ctx.ui.setStatus(MONITOR_STATUS_KEY, undefined);
+  }
+
+  /** Resolve a single target name into a compact MonitorTargetSnapshot. */
+  function resolveMonitorTarget(name: string, lines: number, verbose?: boolean): MonitorTargetSnapshot {
+    const resolved = resolveWatchTarget(state, name);
+    if (!resolved.match) {
+      const settledRecord = findSettledAgent(state, name);
+      if (settledRecord) {
+        const agoSeconds = Math.round((Date.now() - settledRecord.settledAt) / 1000);
+        const firstLine = settledRecord.lastResult ? settledRecord.lastResult.split("\n")[0] : "";
+        return {
+          name: settledRecord.name ?? name,
+          found: true,
+          agentStatus: settledRecord.status === "failed" ? "failed" : "completed",
+          waitStatus: settledRecord.status === "failed" ? "failed" : "completed",
+          idleSeconds: agoSeconds,
+          summary: firstLine.slice(0, 80),
+        };
+      }
+      return {
+        name,
+        found: false,
+        error: resolved.error ?? `not found.${resolved.available.length ? ` Available: ${resolved.available.join(", ")}` : ""}`,
+        summary: "",
+      };
+    }
+    const target = resolved.match;
+    const agent = target.agent;
+    const label = target.kind === "agent"
+      ? (agent.name ?? agent.correlationId.slice(0, 8))
+      : (target.progress.name ?? target.progress.correlationId.slice(0, 8));
+    const agentStatus = target.kind === "agent" ? agent.status : target.progress.status;
+    const lastActivityAt = target.kind === "agent" ? agent.lastActivityAt : (target.progress.lastActivityAt ?? agent.lastActivityAt);
+    const idleSeconds = Math.round((Date.now() - lastActivityAt) / 1000);
+    const watchOutput = buildWatchOutput(target, lines);
+    const waitStatus = statusForWatchTarget(target, Date.now(), state);
+    // Compact summary: last meaningful output line
+    const logLines = watchOutput.slice(2);
+    const summary = logLines.length > 0 ? logLines[logLines.length - 1].slice(0, 80) : "";
+    return {
+      name: label,
+      found: true,
+      agentStatus,
+      waitStatus,
+      idleSeconds,
+      summary,
+      detail: verbose ? logLines : undefined,
+    };
+  }
+
+  /** Capture snapshots for all monitor targets. */
+  function captureMonitorSnapshot(verbose?: boolean): MonitorTargetSnapshot[] {
+    const targets = monitorMode.active ? monitorMode.targets : [];
+    return takeSnapshot(
+      (name, lines) => resolveMonitorTarget(name, lines, verbose ?? monitorMode.verbose),
+      targets,
+      MONITOR_DEFAULT_LINES,
+    );
+  }
+
+  /** Update the status bar with current monitor state. */
+  function syncMonitorStatus(ctx: ExtensionContext): void {
+    if (!monitorMode.active) {
+      ctx.ui.setStatus(MONITOR_STATUS_KEY, undefined);
+      return;
+    }
+    const snapshot = captureMonitorSnapshot();
+    monitorMode.lastSnapshot = snapshot;
+    ctx.ui.setStatus(MONITOR_STATUS_KEY, formatStatusBar(snapshot, monitorMode.startedAt));
+  }
+
+  // --- LLM tool: teammate-monitor (status + wait only) ---
+
+  const monitorTool: ToolDefinition<typeof TeammateMonitorParams, { output: string[] }> = {
+    name: "teammate-monitor",
+    label: "Teammate Monitor",
+    description: TEAMMATE_MONITOR_DESCRIPTION,
+    promptSnippet: TEAMMATE_MONITOR_SNIPPET,
+    promptGuidelines: TEAMMATE_MONITOR_GUIDELINES,
+    parameters: TeammateMonitorParams,
+
+    async execute(
+      _id: string,
+      params: MonitorParams,
+      signal: AbortSignal,
+    ): Promise<TeammateToolResult<{ output: string[] }>> {
+      const validationError = validateMonitorParams(params);
+      if (validationError) {
+        return {
+          content: [{ type: "text", text: validationError }],
+          isError: true,
+          details: { output: [validationError] },
+        };
+      }
+
+      const startedAt = Date.now();
+      const lineCount = params.lines ?? MONITOR_DEFAULT_LINES;
+      const verbose = params.verbose ?? false;
+
+      // --- STATUS: compact snapshot ---
+      if (params.action === "status") {
+        const snapshots = takeSnapshot(
+          (name, lines) => resolveMonitorTarget(name, lines, verbose),
+          params.targets,
+          lineCount,
+        );
+        const output = [
+          formatHeader(snapshots),
+          ...(verbose ? formatVerbose(snapshots) : formatCompact(snapshots)),
+        ];
+        return {
+          content: [{ type: "text", text: output.join("\n") }],
+          details: { output },
+        };
+      }
+
+      // --- WAIT: barrier ---
+      const timeoutMs = params.timeoutMs ?? MONITOR_DEFAULT_TIMEOUT_MS;
+      const waitMode = params.waitMode ?? "all";
+      const waitCount = params.waitCount ?? 1;
+      const barrierAbort = new AbortController();
+
+      const onExternalAbort = () => barrierAbort.abort();
+      signal.addEventListener("abort", onExternalAbort, { once: true });
+
+      const entries: BarrierEntry[] = params.targets.map((name) => ({
+        name,
+        promise: waitForTeammate(state, { name, timeoutMs }, barrierAbort.signal),
+      }));
+
+      const { settled, exitReason } = await barrierWait(entries, waitMode, waitCount, barrierAbort);
+      signal.removeEventListener("abort", onExternalAbort);
+
+      const durationMs = Date.now() - startedAt;
+      const output = formatBarrierCompact(settled, exitReason, durationMs);
+      const errorStatuses = new Set(["failed", "error", "timeout", "aborted", "not-found", "stalled"]);
+      const hasFailure = settled.some((s) => errorStatuses.has(s.status));
+      return {
+        content: [{ type: "text", text: output.join("\n") }],
+        isError: hasFailure,
+        details: { output },
+      };
+    },
+
+    renderCall(args, theme, context) {
+      if (context.isPartial === false) return new Text("", 0, 0);
+      const action = String(args.action ?? "status");
+      const targets = Array.isArray(args.targets) ? (args.targets as string[]).join(", ") : "";
+      return renderQuietTeammateAux("teammate-monitor", `${action} ${targets}`, "running", theme)
+        ?? auxToolCallFallback("teammate-monitor", theme);
+    },
+
+    renderResult(result, options, theme) {
+      if (options.isPartial) return new Text("", 0, 0);
+      const failed = (result as { isError?: boolean }).isError === true;
+      return renderQuietTeammateAux("teammate-monitor", failed ? "failed" : "ok", failed ? "failure" : "success", theme)
+        ?? auxToolResultFallback(result, theme);
     },
   };
 
@@ -2968,6 +3283,7 @@ export default function registerTeammateExtension(
   pi.registerTool(listTool);
   pi.registerTool(watchTool);
   pi.registerTool(waitTool);
+  pi.registerTool(monitorTool);
 
   // =========================================================================
   // Alt+R shortcut — attach overlay (user-facing TUI)
@@ -3270,7 +3586,8 @@ export default function registerTeammateExtension(
             requestRender();
           } else if (data === "\x7f" || data === "\b") {
             if (query.length > 0) { query = removeLastGrapheme(query); cursor = 0; requestRender(); }
-          } else {
+          } else if (!data.startsWith("\x1b")) {
+            // 忽略导航/功能键转义序列，避免残渣混入搜索文本。
             const input = sanitizeSingleLineInput(data);
             if (input) {
               query += input;
@@ -3564,6 +3881,157 @@ export default function registerTeammateExtension(
     },
   });
 
+  // ---------------------------------------------------------------------------
+  // /monitor — user-only monitor mode lifecycle
+  // ---------------------------------------------------------------------------
+
+  pi.registerCommand("monitor", {
+    description: "Monitor: /monitor <targets...> [auto|custom:<prompt>] | /monitor exit | /monitor [status]",
+    getArgumentCompletions(prefix: string) {
+      const agents = [...state.activeRuns.values()].map((a) => ({
+        value: a.name ?? a.correlationId.slice(0, 8),
+        label: a.name ?? a.correlationId.slice(0, 8),
+        description: `${a.agent} · ${a.status}`,
+      }));
+      const commands = [
+        { value: "exit", label: "exit", description: "Stop monitoring and clear bindings" },
+        { value: "status", label: "status", description: "Show bindings and snapshot" },
+        { value: "auto", label: "auto", description: "Auto supervision mode" },
+        { value: "custom:", label: "custom:<prompt>", description: "Custom prompt supervision" },
+      ];
+      const all = [...commands, ...agents];
+      const matches = all.filter((c) => c.value.startsWith(prefix.trimStart()));
+      return matches.length > 0 ? matches : null;
+    },
+    async handler(args: string, ctx) {
+      const trimmed = args.trim();
+
+      // /monitor (no args) — open TUI overlay
+      if (trimmed === "" || trimmed === "ui") {
+        const sessions: MonitorSessionRow[] = [...state.activeRuns.values()].map((a) => ({
+          correlationId: a.correlationId,
+          displayName: a.name ?? a.correlationId.slice(0, 8),
+          agentRole: a.agent,
+          status: a.status,
+          idleSeconds: Math.round((Date.now() - a.lastActivityAt) / 1000),
+          bound: monitorEngine.bindings.has(a.correlationId),
+        }));
+
+        const result = await showMonitorOverlay(ctx, {
+          getSessions: () => sessions,
+        });
+
+        if (!result) return; // cancelled
+
+        // Apply selections
+        let bound = 0;
+        for (const cid of result.selected) {
+          const agent = state.activeRuns.get(cid);
+          if (!agent) continue;
+          const displayName = agent.name ?? cid.slice(0, 8);
+          const res = addBinding(monitorEngine, cid, displayName, result.mode, result.customPrompt);
+          if (res.ok) bound++;
+        }
+
+        if (bound > 0) {
+          if (!monitorEngine.running) startMonitorEngine(ctx);
+          else ctx.ui.setStatus(MONITOR_STATUS_KEY, formatEngineStatusBar(monitorEngine));
+          ctx.ui.notify(`Monitoring ${bound} session${bound === 1 ? "" : "s"} (${result.mode})`, "info");
+        } else {
+          ctx.ui.notify("No new bindings created.", "warning");
+        }
+        return;
+      }
+
+      // /monitor exit — stop engine and clear bindings
+      if (trimmed === "exit" || trimmed === "stop") {
+        if (!monitorEngine.running) {
+          ctx.ui.notify("Monitor is not active.", "warning");
+          return;
+        }
+        stopMonitorEngine(ctx);
+        ctx.ui.notify("Monitor stopped.", "info");
+        return;
+      }
+
+      // /monitor status — show bindings + snapshot
+      if (trimmed === "status") {
+        if (!monitorEngine.running && monitorEngine.bindings.size === 0) {
+          ctx.ui.notify("Monitor is not active. Use /monitor <targets...> to start.", "warning");
+          return;
+        }
+        const bindingLines = [...monitorEngine.bindings.values()].map((b) => {
+          const icon = b.driftDetected ? "▲" : "✓";
+          const fixes = b.interventions.length;
+          return `  ${icon} @${b.displayName} ${b.mode}${fixes ? ` · ${fixes} fixes` : ""}`;
+        });
+        const lines = [
+          `MONITOR ${monitorEngine.running ? "active" : "idle"} · ${monitorEngine.bindings.size} bindings`,
+          ...bindingLines,
+        ];
+        ctx.ui.notify(lines.join("\n"), "info");
+        return;
+      }
+
+      // /monitor <targets...> [auto|custom:<prompt>] — create bindings and start engine
+      // Split at custom: boundary to support multi-word prompts
+      let mode: MonitorSupervisionMode = "auto";
+      let customPrompt: string | undefined;
+      let targetPart = trimmed;
+
+      const customIdx = trimmed.indexOf("custom:");
+      if (customIdx >= 0) {
+        mode = "custom";
+        customPrompt = trimmed.slice(customIdx + 7).trim();
+        targetPart = trimmed.slice(0, customIdx).trim();
+      } else if (trimmed.endsWith(" auto") || trimmed === "auto") {
+        targetPart = trimmed.replace(/\s*auto$/, "").trim();
+      }
+
+      const targets = targetPart.split(/\s+/).filter((t) => t && t !== "auto");
+
+      if (targets.length === 0) {
+        ctx.ui.notify("Usage: /monitor <target1> [target2 ...] [auto|custom:<prompt>]", "warning");
+        return;
+      }
+
+      // Resolve targets to correlationIds and create bindings
+      let bound = 0;
+      const errors: string[] = [];
+      for (const name of targets) {
+        const resolved = resolveWatchTarget(state, name);
+        if (!resolved.match) {
+          errors.push(`${name}: not found`);
+          continue;
+        }
+        const cid = resolved.match.kind === "agent"
+          ? resolved.match.agent.correlationId
+          : resolved.match.progress.correlationId;
+        const displayName = resolved.match.kind === "agent"
+          ? (resolved.match.agent.name ?? cid.slice(0, 8))
+          : (resolved.match.progress.name ?? cid.slice(0, 8));
+        const result = addBinding(monitorEngine, cid, displayName, mode, customPrompt);
+        if (result.ok) bound++;
+        else errors.push(result.error ?? `${name}: unknown error`);
+      }
+
+      if (bound === 0) {
+        ctx.ui.notify(`No bindings created. ${errors.join("; ")}`, "warning");
+        return;
+      }
+
+      // Start engine if not running
+      if (!monitorEngine.running) {
+        startMonitorEngine(ctx);
+      } else {
+        ctx.ui.setStatus(MONITOR_STATUS_KEY, formatEngineStatusBar(monitorEngine));
+      }
+
+      const modeLabel = mode === "custom" ? `custom: ${customPrompt?.slice(0, 40)}` : "auto";
+      ctx.ui.notify(`Monitoring ${bound} session${bound === 1 ? "" : "s"} (${modeLabel})${errors.length ? ` · ${errors.length} errors` : ""}`, "info");
+    },
+  });
+
   // =========================================================================
   // TUI — only in parent mode (child processes have no terminal)
   // =========================================================================
@@ -3720,6 +4188,8 @@ export default function registerTeammateExtension(
   pi.on("session_shutdown", () => {
     stopWidgetTimer();
     stopWakeableEvictionTimer();
+    stopEngine(monitorEngine);
+    stopMonitorMode(monitorMode);
     if (state.handoffSwitching && activeHandoff) {
       activeHandoff.shutdownObserved = true;
       widgetCtx = null;
@@ -3893,7 +4363,9 @@ export function buildAgentList(
         spawnedBy: cid,
         depth: depth + 1,
         treePrefix: `${descendantsPrefix}${isLast ? "└─ " : "├─ "}`,
-        status: progress.status,
+        // A completed container means every task succeeded; trust it over a
+        // lifecycle-pending snapshot that was never rewritten back to terminal.
+        status: entry.status === "completed" ? "completed" : progress.status,
         taskIndex: progress.taskIndex,
         dependencies: progress.dependencies,
         toolCount: progress.toolCount,

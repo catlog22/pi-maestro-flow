@@ -7,11 +7,17 @@ import {
   type ControlCenterActiveAgent,
 } from "../src/tui/model-mapping-overlay.ts";
 import type { AgentConfig } from "../src/agents/agents.ts";
+import type { ModelRoutingState } from "../src/models/model-routing.ts";
 
 const theme = {
   fg: (_role: string, text: string) => text,
   bold: (text: string) => text,
 };
+
+function assertNoInjectedControls(line: string): void {
+  assert.doesNotMatch(line, /[\x00-\x09\x0b-\x1a\x1c-\x1f\x7f-\x9f]/);
+  assert.doesNotMatch(line, /\x1b(?!\[0m)/);
+}
 
 function agent(name: string, source: AgentConfig["source"] = "project"): AgentConfig {
   return {
@@ -37,6 +43,43 @@ function active(id: string, status: ControlCenterActiveAgent["status"] = "runnin
     startedAt: Date.now() - 2_000,
     inboxCount: 1,
     taskCount: 2,
+  };
+}
+
+function profileState(overridesEnabled = false): ModelRoutingState {
+  return {
+    global: {
+      version: 3,
+      defaultProfile: "balanced",
+      profiles: {
+        balanced: {
+          name: "Balanced",
+          mappings: { explore: "openai/gpt-5" },
+          fallbackMappings: { explore: ["anthropic/sonnet"] },
+          thinkingLevels: { explore: "medium" },
+        },
+        fast: {
+          name: "Fast",
+          mappings: { explore: "missing/fast" },
+          thinkingLevels: { explore: "low" },
+        },
+      },
+    },
+    project: {
+      version: 3,
+      activeProfile: "fast",
+      applyOverrides: overridesEnabled,
+      overrides: { mappings: { explore: "anthropic/sonnet" }, thinkingLevels: {} },
+    },
+    config: {
+      version: 3,
+      profileId: "fast",
+      profileName: "Fast",
+      projectOverridesEnabled: overridesEnabled,
+      mappings: { explore: overridesEnabled ? "anthropic/sonnet" : "missing/fast" },
+      thinkingLevels: { explore: "low" },
+    },
+    requestedProfile: "fast",
   };
 }
 
@@ -145,7 +188,7 @@ test("thinking routing supports inherit, all Pi levels, save errors, and narrow 
   }
   center.handleInput("\x1b[B");
   center.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(savedThinking, [{ taskType: "explore", thinking: "off" }]);
 
   let attempts = 0;
@@ -159,11 +202,11 @@ test("thinking routing supports inherit, all Pi levels, save errors, and narrow 
   }).center;
   failed.handleInput("\x1b[1;5C");
   failed.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 25));
   assert.match(failed.render(90).join("\n"), /Save failed.*thinking read-only/);
   assert.match(failed.render(90).join("\n"), /Thinking/);
   failed.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(retried, [null]);
 
   const inherited = makeCenter({
@@ -172,7 +215,7 @@ test("thinking routing supports inherit, all Pi levels, save errors, and narrow 
   inherited.center.handleInput("\x1b[1;5C");
   for (let index = 0; index < 5; index++) inherited.center.handleInput("\x1b[A");
   inherited.center.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(inherited.savedThinking, [{ taskType: "explore", thinking: null }]);
 });
 
@@ -191,6 +234,46 @@ test("routing filter still accepts t-prefixed text and every view fits widths 1 
   for (let width = 1; width <= 120; width++) {
     assert.ok(model.render(width).every((line) => visibleWidth(line) <= width));
   }
+});
+
+test("control center removes terminal controls from every untrusted display path", async () => {
+  const state = profileState();
+  state.global.profiles.fast.name = "\x1b[2JFast\nforged";
+  state.config.profileName = "\x1b]52;c;payload\x07Fast";
+  const unsafeAgent = {
+    ...agent("unsafe\x1b[2Jrole"),
+    description: "line one\nline two\x1b]52;c;payload\x07",
+    model: "model\x1b[2J",
+  };
+  const unsafeActive = {
+    ...active("run\x1b[2J"),
+    agent: "worker\nforged",
+    name: "name\x1b]52;c;payload\x07",
+  };
+  const { center } = makeCenter({
+    state,
+    initialTab: "profiles",
+    agents: [unsafeAgent],
+    activeAgents: [unsafeActive],
+    availableModels: [{ id: "provider/unsafe\x1b[2J", reasoning: true, thinkingLevels: ["low"] }],
+  });
+  const rendered: string[] = [];
+  rendered.push(...center.render(100));
+  center.handleInput("\t");
+  rendered.push(...center.render(100));
+  center.handleInput("\t");
+  rendered.push(...center.render(100));
+  center.handleInput("\t");
+  rendered.push(...center.render(100));
+  for (const line of rendered) assertNoInjectedControls(line);
+
+  const failed = makeCenter({
+    saveMapping: () => { throw new Error("failed\n\x1b]52;c;payload\x07"); },
+  }).center;
+  failed.handleInput("\r");
+  failed.handleInput("\r");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  for (const line of failed.render(100)) assertNoInjectedControls(line);
 });
 
 test("thinking picker shows the full depth range and marks model capability limits", () => {
@@ -227,7 +310,7 @@ test("unsupported persisted thinking remains visible but cannot be saved", async
   center.handleInput("\x1b[1;5C");
   assert.match(center.render(90).join("\n"), /does not support this level/);
   center.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(savedThinking, []);
   assert.match(center.render(90).join("\n"), /Unsupported/);
 });
@@ -247,7 +330,7 @@ test("model routing is reversible and saves inline", async () => {
   center.handleInput("\r");
   center.handleInput("\x1b[B");
   center.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(saved, [{ taskType: "explore", model: "anthropic/sonnet" }]);
   assert.match(center.render(90).join("\n"), /Saved/);
 });
@@ -257,7 +340,7 @@ test("model routing continues into thinking depth for the associated model", asy
   center.handleInput("\r");
   center.handleInput("\x1b[B");
   center.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 25));
 
   assert.deepEqual(saved, [{ taskType: "explore", model: "anthropic/sonnet" }]);
   const thinkingPicker = center.render(90).join("\n");
@@ -267,7 +350,7 @@ test("model routing continues into thinking depth for the associated model", asy
 
   center.handleInput("\x1b[B");
   center.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 25));
   assert.deepEqual(savedThinking, [{ taskType: "explore", thinking: "off" }]);
   assert.match(center.render(90).join("\n"), /Saved · explore thinking → off/);
 });
@@ -278,11 +361,38 @@ test("model routing keeps the editor open when persistence fails", async () => {
   });
   center.handleInput("\r");
   center.handleInput("\r");
-  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 25));
   assert.match(center.render(90).join("\n"), /Save failed.*read-only project/);
   center.handleInput("\x1b");
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.match(center.render(90).join("\n"), /Routing 7/);
+});
+
+test("profiles tab exposes global state and returns a reversible management action", () => {
+  const { center, closed } = makeCenter({ state: profileState(), initialTab: "profiles" });
+  const view = center.render(100).join("\n");
+  assert.match(view, /Profiles 2/);
+  assert.match(view, /Balanced/);
+  assert.match(view, /default/);
+  assert.match(view, /Enter manage/);
+  assert.match(view, /Project overrides · preserved \/ disabled/);
+  for (let width = 1; width <= 120; width++) {
+    assert.ok(center.render(width).every((line) => visibleWidth(line) <= width));
+  }
+  center.handleInput("\x1b[B");
+  center.handleInput("\r");
+  assert.deepEqual(closed, [{ kind: "manage-profile", profileId: "fast", profileQuery: "", tab: "profiles" }]);
+});
+
+test("routing edits the active global Profile while surfacing runtime project overrides", () => {
+  const { center } = makeCenter({ state: profileState(true) });
+  const routing = center.render(100).join("\n");
+  assert.match(routing, /Fast · overrides on/);
+  assert.match(routing, /missing\/fast/);
+  assert.match(routing, /Fallbacks · none/);
+  assert.match(routing, /Project overrides are active at runtime/);
+  center.handleInput("\r");
+  assert.match(center.render(100).join("\n"), /missing\/fast.*active/);
 });
 
 test("attach overlay accepts pasted messages and keeps a focused tab visible", async () => {
@@ -311,7 +421,7 @@ test("attach overlay accepts pasted messages and keeps a focused tab visible", a
     overlay.handleInput("pasted teammate message");
     assert.match(overlay.render(80, 16).join("\n"), /pasted teammate message/);
     overlay.handleInput("\r");
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 25));
     assert.deepEqual(sent, ["pasted teammate message"]);
   } finally {
     overlay.dispose();

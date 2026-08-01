@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { buildProgressTree, selectPriorityProgressRows } from "../src/tui/progress-tree.ts";
 import { renderTeammateCall, renderTeammateResult } from "../src/tui/render.ts";
-import type { SingleResult } from "../src/shared/types.ts";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { Details, SingleResult } from "../src/shared/types.ts";
 
 const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
 
@@ -55,6 +56,31 @@ test("expanded multi-task call leaves DAG rendering to progress", () => {
   }, theme as never, { expanded: true }).render(80);
 
   assert.deepEqual(rendered, []);
+});
+
+test("expanded multi-result rows trust results over lifecycle-pending progress snapshots", () => {
+  const first = makeResult();
+  const second = { ...makeResult(), agent: "reviewer", correlationId: "review-correlation" };
+  const final: AgentToolResult<Details> = {
+    content: [{ type: "text", text: "done" }],
+    details: {
+      mode: "parallel",
+      results: [first, second],
+      // Both dispatch paths rewrite lifecycle-pending tasks back to "running"
+      // for the live admission gate; the terminal expanded rows must still
+      // agree with the "2/2 completed" header derived from results.
+      progress: [
+        { agent: "scout", correlationId: first.correlationId, taskIndex: 0, dependencies: [], status: "running", resultReadyAt: Date.now() },
+        { agent: "reviewer", correlationId: second.correlationId, taskIndex: 1, dependencies: [], status: "running", resultReadyAt: Date.now() },
+      ],
+    },
+  };
+  const rendered = renderTeammateResult(final, { expanded: true }, theme as never).render(160);
+  const joined = rendered.join("\n");
+  assert.match(joined, /2\/2 completed/);
+  assert.match(joined, /✓ completed scout/);
+  assert.match(joined, /✓ completed reviewer/);
+  assert.doesNotMatch(joined, /■ running/);
 });
 
 test("completed teammate results expose the expand affordance", () => {

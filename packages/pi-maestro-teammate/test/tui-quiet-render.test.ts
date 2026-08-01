@@ -2,8 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test, { afterEach } from "node:test";
 import { isQuietMode, setQuietMode } from "../src/quiet-state.ts";
-import { renderQuietTeammateAux, renderTeammateCall, renderTeammateListCall, renderTeammateListResult, renderTeammateResult } from "../src/tui/render.ts";
-import type { SingleResult } from "../src/shared/types.ts";
+import { auxToolCallFallback, auxToolResultFallback, renderQuietTeammateAux, renderTeammateCall, renderTeammateListCall, renderTeammateListResult, renderTeammateResult } from "../src/tui/render.ts";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { Details, SingleResult } from "../src/shared/types.ts";
 
 // Identity theme strips color so assertions read the plain text the quiet
 // renderer emits (two spaces + glyph + name + rest).
@@ -47,6 +48,7 @@ test("quiet auxiliary teammate surfaces use lifecycle rows without message bodie
     ["teammate-send", "@child · follow_up", "running"],
     ["teammate-wait", "completed", "success"],
     ["teammate-watch", "inspected", "success"],
+    ["teammate-monitor", "status @child", "success"],
   ] as const;
 
   for (const [name, rest, status] of cases) {
@@ -58,6 +60,21 @@ test("quiet auxiliary teammate surfaces use lifecycle rows without message bodie
 
   setQuietMode(false);
   assert.equal(renderQuietTeammateAux("teammate-send", "SECRET_MESSAGE", "running", theme as never), undefined);
+});
+
+test("auxiliary tool fallbacks are total Components mirroring host default rendering", () => {
+  const call = auxToolCallFallback("teammate-send", theme as never);
+  assert.equal(typeof call.render, "function");
+  assert.deepEqual(call.render(80).map((line) => line.trimEnd()), ["teammate-send"]);
+
+  const result = auxToolResultFallback({
+    content: [{ type: "text", text: "Message delivered." }, { type: "text", text: "Second line." }],
+  } as never, theme as never);
+  assert.deepEqual(result.render(80).map((line) => line.trimEnd()), ["Message delivered.", "Second line."]);
+
+  const empty = auxToolResultFallback({ content: [] } as never, theme as never);
+  assert.equal(typeof empty.render, "function");
+  assert.deepEqual(empty.render(80), []);
 });
 
 test("quiet single-task call leaves all rendering to the result component", () => {
@@ -210,6 +227,74 @@ test("quiet completed graph is an unbacked one-line-per-agent list with dependen
   assert.doesNotMatch(rendered.join("\n"), /teammate|2\/2 done/);
 });
 
+test("quiet completed graph trusts results over lifecycle-pending progress snapshots", () => {
+  setQuietMode(true);
+  const first = okResult();
+  const second = { ...okResult(), agent: "reviewer", name: "review", correlationId: "review-correlation" };
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "done" }],
+    details: {
+      mode: "parallel",
+      results: [first, second],
+      // executeGraph rewrites lifecycle-pending tasks back to "running" for the
+      // live admission gate; the terminal quiet row must show the real outcome.
+      progress: [
+        { agent: "scout", name: "inspection", correlationId: first.correlationId, taskIndex: 0, dependencies: [], status: "running", resultReadyAt: Date.now() },
+        { agent: "reviewer", name: "review", correlationId: second.correlationId, taskIndex: 1, dependencies: [], status: "running", resultReadyAt: Date.now() },
+      ],
+    },
+  }, { expanded: false }, theme as never).render(160);
+  assert.equal(rendered.length, 2);
+  assert.match(rendered[0], /✓ completed @inspection/);
+  assert.match(rendered[1], /✓ completed @review/);
+  assert.doesNotMatch(rendered.join("\n"), /running|result ready/);
+});
+
+test("quiet completed graph marks failed results even when the snapshot is still running", () => {
+  setQuietMode(true);
+  const failed = failedResult();
+  const rendered = renderTeammateResult({
+    content: [{ type: "text", text: "boom" }],
+    details: {
+      mode: "parallel",
+      results: [failed],
+      progress: [
+        { agent: "scout", name: "inspection", correlationId: failed.correlationId, taskIndex: 0, dependencies: [], status: "running" },
+      ],
+    },
+  }, { expanded: false }, theme as never).render(160);
+  assert.equal(rendered.length, 1);
+  assert.match(rendered[0], /✗ failed @inspection/);
+  assert.match(rendered[0], /boom error line/);
+  assert.doesNotMatch(rendered[0], /running/);
+});
+
+test("quiet single background ack keeps a running mark instead of a false completion", () => {
+  setQuietMode(true);
+  const ack: AgentToolResult<Details> = {
+    content: [{ type: "text", text: "■ @ping running in background. Use teammate-wait to settle." }],
+    details: { mode: "single", results: [] },
+  };
+  const rendered = renderTeammateResult(ack, { expanded: false }, theme as never).render(120);
+  assert.equal(rendered.length, 1);
+  assert.match(rendered[0], /^\s*…\s+teammate @ping running in background/);
+  assert.doesNotMatch(rendered[0], /✓|child agents/);
+});
+
+test("quiet rejected dispatch shows a failure mark, not a success", () => {
+  setQuietMode(true);
+  // pi attaches isError to tool results at runtime; the declared type does not
+  // carry it, so the cast keeps the literal honest without an excess property.
+  const rejection = {
+    content: [{ type: "text", text: "Teammate agent budget exhausted: 8 agents are already live" }],
+    isError: true,
+    details: { mode: "single", results: [] },
+  } as AgentToolResult<Details>;
+  const rendered = renderTeammateResult(rejection, { expanded: false }, theme as never).render(120);
+  assert.match(rendered[0], /✕ teammate Teammate agent budget exhausted/);
+  assert.doesNotMatch(rendered[0], /✓|child agents/);
+});
+
 test("quiet failed result keeps an agent row and a single error summary", () => {
   setQuietMode(true);
   const rendered = renderTeammateResult({
@@ -242,17 +327,17 @@ test("dot symbol mode applies to teammate running, success, and failure rows", (
   assert.match(failure[0], /^\s*!\s+@inspection/);
 });
 
-test("started, send, wait, and watch are wired to the shared quiet renderer", () => {
+test("started, send, wait, watch, and monitor are wired to the shared quiet renderer", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  for (const name of ["teammate-started", "teammate-send", "teammate-wait", "teammate-watch"]) {
+  for (const name of ["teammate-started", "teammate-send", "teammate-wait", "teammate-watch", "teammate-monitor"]) {
     assert.match(source, new RegExp(`renderQuietTeammateAux\\(\\"${name}\\"`));
   }
 });
 
 test("auxiliary teammate renderers make call and result phases mutually exclusive", () => {
   const source = readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf8");
-  assert.equal((source.match(/if \(context\.isPartial === false\) return new Text\("", 0, 0\);/g) ?? []).length, 3);
-  assert.equal((source.match(/if \(options\.isPartial\) return new Text\("", 0, 0\);/g) ?? []).length, 3);
+  assert.equal((source.match(/if \(context\.isPartial === false\) return new Text\("", 0, 0\);/g) ?? []).length, 4);
+  assert.equal((source.match(/if \(options\.isPartial\) return new Text\("", 0, 0\);/g) ?? []).length, 4);
 });
 
 test("root and nested self-rendered teammate tools share renderers", () => {

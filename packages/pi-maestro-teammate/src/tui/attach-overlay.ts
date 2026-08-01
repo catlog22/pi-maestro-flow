@@ -410,6 +410,13 @@ export class AttachOverlay implements Component, Focusable {
         this.cursor = previousGraphemeBoundary(this.draft, this.cursor);
       } else if (matchesKey(data, Key.right)) {
         this.cursor = nextGraphemeBoundary(this.draft, this.cursor);
+      } else if (matchesKey(data, Key.up) || matchesKey(data, Key.down)
+        || matchesKey(data, Key.home) || matchesKey(data, Key.end)
+        || matchesKey(data, Key.pageUp) || matchesKey(data, Key.pageDown)
+        || matchesKey(data, Key.delete)) {
+        // 忽略导航/功能键，避免转义序列残渣（如 `[A`）混入文本。
+      } else if (data.startsWith("\x1b")) {
+        // 兜底：丢弃以 ESC 开头的未识别序列（拆分到达的 CSI/SS3 残渣）。
       } else {
         this.insertDraft(sanitizeSingleLineInput(data));
       }

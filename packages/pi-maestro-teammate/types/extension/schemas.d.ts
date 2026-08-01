@@ -71,3 +71,12 @@ export declare const TeammateWaitParams: Type.TObject<{
     timeoutMs: Type.TOptional<Type.TInteger>;
     waitMs: Type.TOptional<Type.TInteger>;
 }>;
+export declare const TeammateMonitorParams: Type.TObject<{
+    action: Type.TUnsafe<"status" | "wait">;
+    targets: Type.TArray<Type.TString>;
+    waitMode: Type.TOptional<Type.TUnsafe<"count" | "all" | "any">>;
+    waitCount: Type.TOptional<Type.TInteger>;
+    timeoutMs: Type.TOptional<Type.TInteger>;
+    lines: Type.TOptional<Type.TInteger>;
+    verbose: Type.TOptional<Type.TBoolean>;
+}>;

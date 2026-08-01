@@ -185,22 +185,55 @@ project .pi/agents > project .agents > ~/.agents > legacy user directory > bundl
 
 `taskType` is optional role metadata and may be a built-in type or a custom lower-case identifier such as `security-audit`. Explicit task-level or top-level values override it; otherwise routing uses the resolved role's YAML type, may infer a built-in type from the role name or prompt, or leaves it unset. `tools` accepts a comma-separated value or YAML-style list and is normalized to Pi tool IDs.
 
-## Model Routing
+## Model Routing Profiles
 
-Configure task-type defaults with `Alt+M`, `/teammate-models`, project `.pi/teammate-models.json`, or global `~/.pi/agent/teammate-models.json`. The Control Center automatically combines built-in task types, types declared by currently discovered built-in/project/user agents, and types already present in routing configuration. Each type can select both an authenticated model and a model-supported thinking depth.
+Configure task-type defaults with `Alt+M` or `/teammate-models`. The Control Center's **Profiles** tab manages named routing Profiles shared by every project. Its **Routing** tab edits the active global Profile and combines built-in task types, discovered agent types, and types already present in that Profile.
+
+Global Profiles are stored in `~/.pi/agent/teammate-models.json`:
 
 ```json
 {
-  "version": 2,
-  "mappings": {
-    "explore": "provider/fast-model",
-    "analysis": "provider/deep-model"
-  },
-  "thinkingLevels": {
-    "explore": "low",
-    "analysis": "high"
+  "version": 3,
+  "defaultProfile": "balanced",
+  "profiles": {
+    "balanced": {
+      "name": "Balanced",
+      "mappings": {
+        "explore": "provider/fast-model",
+        "analysis": "provider/deep-model"
+      },
+      "fallbackMappings": {
+        "analysis": ["provider/backup-model"]
+      },
+      "thinkingLevels": {
+        "explore": "low",
+        "analysis": "high"
+      }
+    }
   }
 }
+```
+
+Each project persists its active Profile and optional compatibility overrides in `.pi/teammate-models.json`:
+
+```json
+{
+  "version": 3,
+  "activeProfile": "balanced",
+  "applyOverrides": false,
+  "overrides": {
+    "mappings": {},
+    "thinkingLevels": {}
+  }
+}
+```
+
+Profile IDs remain stable when display names are renamed. Switching Profiles disables but preserves existing project overrides; the Profiles menu can restore, promote, or clear them. Global and project v1/v2 files are read without being rewritten and migrate losslessly on their first save. A missing project Profile falls back to the global default and is reported in the Control Center.
+
+Routing source precedence:
+
+```text
+project overrides (when enabled) > active global Profile > global default Profile
 ```
 
 Model precedence:

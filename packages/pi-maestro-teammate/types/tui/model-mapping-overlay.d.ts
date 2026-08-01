@@ -2,9 +2,9 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type Component, type Focusable } from "@earendil-works/pi-tui";
 import type { AgentConfig } from "../agents/agents.ts";
 import type { TeammateModelCapability } from "../models/model-catalog.ts";
-import { type ModelRoutingConfig, type TeammateTaskType } from "../models/model-routing.ts";
+import { type ModelRoutingRules, type ModelRoutingState, type TeammateTaskType } from "../models/model-routing.ts";
 import { type TeammateThinkingLevel } from "../shared/thinking.ts";
-type ControlCenterTab = "routing" | "roles" | "active";
+export type ControlCenterTab = "profiles" | "routing" | "roles" | "active";
 export interface ControlCenterActiveAgent {
     correlationId: string;
     agent: string;
@@ -18,24 +18,47 @@ interface ControlCenterTheme {
     fg(role: string, text: string): string;
     bold(text: string): string;
 }
-interface ControlCenterAction {
+export type ControlCenterAction = {
     kind: "open-agent";
     correlationId: string;
     tab: ControlCenterTab;
-}
+} | {
+    kind: "reload";
+    tab: ControlCenterTab;
+} | {
+    kind: "manage-profile";
+    profileId: string;
+    profileQuery: string;
+    tab: ControlCenterTab;
+};
 export interface TeammateControlCenterOptions {
     agents?: readonly AgentConfig[];
     activeAgents?: readonly ControlCenterActiveAgent[];
     onOpenAgent?: (correlationId: string) => Promise<void>;
+    globalFilePath?: string;
+}
+interface LegacyControlCenterConfig extends ModelRoutingRules {
+    version: 2 | 3;
+    profileId?: string;
+    profileName?: string;
+    projectOverridesEnabled?: boolean;
 }
 interface TeammateControlCenterParams {
     cwd: string;
     availableModels: readonly TeammateModelCapability[];
     agents: readonly AgentConfig[];
     activeAgents: readonly ControlCenterActiveAgent[];
-    config: ModelRoutingConfig;
+    state?: ModelRoutingState;
+    config?: LegacyControlCenterConfig;
     theme: ControlCenterTheme;
     initialTab?: ControlCenterTab;
+    initialProfileId?: string;
+    initialProfileQuery?: string;
+    initialStatusText?: string;
+    initialStatusTone?: "dim" | "success" | "error";
+    initialSaving?: boolean;
+    readOnly?: boolean;
+    globalFilePath?: string;
     requestRender: () => void;
     close: (action: ControlCenterAction | null) => void;
     saveMapping?: (taskType: TeammateTaskType, model: string | null) => void;
@@ -56,8 +79,11 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private statusTone;
     private readonly pasteDecoder;
     private pasteFlushTimer;
+    private persistenceTimer;
     private lastWidth;
+    private readonly state;
     private config;
+    private readonly profileIds;
     private readonly models;
     private readonly modelCapabilities;
     private readonly agents;
@@ -76,6 +102,7 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private activateThinkingSelection;
     private handleModelInput;
     private taskTypeMeta;
+    private filteredProfileIds;
     private filteredTaskTypes;
     private filteredRoles;
     private filteredActiveAgents;
@@ -86,6 +113,7 @@ export declare class TeammateControlCenter implements Component, Focusable {
     private renderMain;
     private renderModels;
     private renderListRows;
+    private unavailableModels;
     private itemLine;
     private detailLines;
     private emptyState;

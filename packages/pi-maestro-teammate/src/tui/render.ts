@@ -17,7 +17,7 @@ import {
   effectiveDisplayStatus,
   idleSeconds,
 } from "../shared/agent-status.ts";
-import type { AgentProgressSnapshot, ChildAgentCallSnapshot, Details, SingleResult, Usage } from "../shared/types.ts";
+import type { AgentProgressSnapshot, AgentProgressStatus, ChildAgentCallSnapshot, Details, SingleResult, Usage } from "../shared/types.ts";
 import { isQuietMode, quietStatusMark } from "../quiet-state.ts";
 import {
   buildProgressTree,
@@ -513,7 +513,7 @@ function renderMultiResult(
         error: (text) => theme.fg("error", text),
         bold: (text) => theme.bold(text),
       };
-      for (const row of buildProgressTree(details.progress, palette)) {
+      for (const row of buildProgressTree(settleProgressFromResults(details.progress, results), palette)) {
         lines.push(truncateToWidth(row.text, contentWidth, "…"));
         const result = results[row.taskIndex];
         const message = result?.messages[result.messages.length - 1]?.content ?? "";
@@ -545,6 +545,26 @@ function renderMultiResult(
   });
 }
 
+/**
+ * Published results outrank progress snapshots in terminal views. Lifecycle
+ * confirmation lags result publication, and both dispatch paths keep
+ * lifecycle-pending tasks "running" for the live admission gate; rows rendered
+ * from a final snapshot would otherwise rewrite completed tasks back to a
+ * running mark under a header that already counts them as completed.
+ */
+function settleProgressFromResults(
+  entries: AgentProgressSnapshot[],
+  results: SingleResult[],
+): AgentProgressSnapshot[] {
+  if (results.length === 0) return entries;
+  return entries.map((entry) => {
+    const result = results[entry.taskIndex];
+    if (!result) return entry;
+    const status: AgentProgressStatus = result.exitCode === 0 ? "completed" : "failed";
+    return entry.status === status ? entry : { ...entry, status };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Quiet mode — preserve agent structure while suppressing message bodies
 // ---------------------------------------------------------------------------
@@ -561,7 +581,7 @@ function qLine(theme: Theme, markedGlyph: string, name: string, rest: string): s
 }
 
 export function renderQuietTeammateAux(
-  name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started",
+  name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started" | "teammate-monitor",
   rest: string,
   status: "running" | "success" | "failure",
   theme: Theme,
@@ -570,6 +590,30 @@ export function renderQuietTeammateAux(
   const tone = status === "failure" ? "error" : status === "success" ? "success" : "warning";
   const glyph = theme.fg(tone, quietStatusMark(status));
   return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, name, rest), Math.max(1, w), "…")]);
+}
+
+/**
+ * Host-contract fallbacks for auxiliary tool renderers when quiet mode is off.
+ * pi's ToolExecutionComponent addChild()s whatever renderCall/renderResult
+ * return and only guards against throws, so renderQuietTeammateAux's quiet-only
+ * undefined must never leak into a tool slot — Box.render would call
+ * child.render on undefined and kill pi with an uncaughtException. This is the
+ * exact state every /resume history render sees: pi renders resumed history
+ * before session_start, while the Cockpit-driven quiet mirror is still false.
+ * The fallbacks mirror the host's own default call/result rendering.
+ */
+export function auxToolCallFallback(name: string, theme: Theme): Component {
+  return new Text(theme.fg("toolTitle", theme.bold(name)), 0, 0);
+}
+
+export function auxToolResultFallback(result: AgentToolResult<unknown>, theme: Theme): Component {
+  const text = typeof result.content === "string"
+    ? result.content
+    : result.content
+      .map((entry) => entry.type === "text" ? entry.text : "")
+      .filter(Boolean)
+      .join("\n");
+  return new Text(text ? theme.fg("toolOutput", text) : "", 0, 0);
 }
 
 function quietFirstError(r: SingleResult): string {
@@ -597,7 +641,8 @@ function appendQuietAgentTree(
   theme: Theme,
   results: SingleResult[] = [],
 ): void {
-  const entryByTaskIndex = new Map(entries.map((entry) => [entry.taskIndex, entry]));
+  const effectiveEntries = settleProgressFromResults(entries, results);
+  const entryByTaskIndex = new Map(effectiveEntries.map((entry) => [entry.taskIndex, entry]));
   const childrenByParent = new Map<string, ChildAgentCallSnapshot[]>();
   for (const child of childCalls) {
     const key = child.parentCorrelationId ?? "";
@@ -608,7 +653,7 @@ function appendQuietAgentTree(
 
   const taskCids = new Set(entries.map((entry) => entry.correlationId).filter(Boolean));
   const childCids = new Set(childCalls.map((child) => child.correlationId));
-  for (const row of buildProgressTree(entries, quietPalette(theme))) {
+  for (const row of buildProgressTree(effectiveEntries, quietPalette(theme))) {
     const result = results[row.taskIndex];
     const failure = result && result.exitCode !== 0
       ? theme.fg("error", ` · ${quietFirstError(result)}`)
@@ -661,6 +706,28 @@ function renderQuietTeammateResult(result: AgentToolResult<Details>, theme: Them
 
   const entries = details?.progress ?? [];
   const childCalls = details?.childCalls ?? [];
+
+  // No topology at all: a single background ack, a detach, or a rejected
+  // dispatch. Mirror the non-quiet content preview — the mark must reflect the
+  // ack or error, never a completion the dispatch has not earned (the old
+  // fallback printed a success glyph plus "0 child agents" for both a running
+  // background agent and an isError budget rejection).
+  if (entries.length === 0 && childCalls.length === 0) {
+    const content = typeof result.content === "string"
+      ? result.content
+      : result.content
+        .map((entry) => entry.type === "text" ? entry.text : "")
+        .filter(Boolean)
+        .join("\n");
+    const isError = (result as { isError?: boolean }).isError === true;
+    const glyph = theme.fg(
+      isError ? "error" : "warning",
+      quietStatusMark(isError ? "failure" : "running"),
+    );
+    const preview = (content.split("\n")[0] ?? "").replace(/^■\s*/, "");
+    return dynamicComponent((w) => [truncateToWidth(qLine(theme, glyph, "teammate", preview), Math.max(1, w), "…")]);
+  }
+
   const running = entries.filter((e) => e.status === "running" || e.status === "retrying").length
     + childCalls.filter((c) => c.status === "running" || c.status === "retrying").length;
   const failed = entries.filter((e) => e.status === "failed").length

@@ -33,6 +33,85 @@ test("agent widget keeps recent failed work and the latest live edge visible in 
   assert.match(compact, /■ @worker-8/);
 });
 
+test("agent widget trusts a settled lifecycle over a lifecycle-pending progress snapshot", () => {
+  const now = Date.now();
+  // The dispatch path rewrote this task back to "running" (lifecyclePending)
+  // for the admission gate; the child record has since settled failed and its
+  // tombstone is still visible. The row must not read as running.
+  const parent = {
+    agent: "graph",
+    correlationId: "parent",
+    startedAt: now - 60_000,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now - 5_000,
+    status: "failed" as const,
+    failedAt: now - 5_000,
+    depth: 0,
+    sleepMs: 0,
+    progress: [{
+      agent: "worker",
+      name: "w1",
+      correlationId: "w1",
+      taskIndex: 0,
+      dependencies: [],
+      status: "running" as const,
+      resultReadyAt: now - 6_000,
+      lastActivityAt: now - 5_000,
+    }],
+  };
+  const child = {
+    agent: "worker",
+    name: "w1",
+    correlationId: "w1",
+    spawnedBy: "parent",
+    startedAt: now - 60_000,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now - 5_000,
+    status: "failed" as const,
+    failedAt: now - 5_000,
+    depth: 0,
+    sleepMs: 0,
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const output = renderAgentStatusWidget([parent, child], 120, theme).join("\n");
+  assert.match(output, /w1.*failed/);
+  assert.doesNotMatch(output, /running|lifecycle pending/);
+});
+
+test("agent widget reads a completed container as terminal when the child record is pruned", () => {
+  const now = Date.now();
+  const parent = {
+    agent: "graph",
+    correlationId: "parent",
+    startedAt: now - 60_000,
+    abortController: new AbortController(),
+    inbox: [],
+    outputLog: [],
+    lastActivityAt: now - 5_000,
+    status: "completed" as const,
+    depth: 0,
+    sleepMs: 0,
+    progress: [{
+      agent: "worker",
+      name: "w1",
+      correlationId: "w1",
+      taskIndex: 0,
+      dependencies: [],
+      status: "running" as const,
+      resultReadyAt: now - 6_000,
+      lastActivityAt: now - 5_000,
+    }],
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const output = renderAgentStatusWidget([parent], 120, theme).join("\n");
+  assert.match(output, /w1.*completed/);
+  assert.doesNotMatch(output, /running|lifecycle pending/);
+});
+
 test("agent widget keeps duration, split tokens, and stalled state visible", () => {
   const now = Date.now();
   const parent = {

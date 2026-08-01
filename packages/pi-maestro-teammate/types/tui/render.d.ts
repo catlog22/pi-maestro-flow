@@ -24,5 +24,17 @@ export declare function renderTeammateListResult(result: AgentToolResult<{
 export declare function renderTeammateResult(result: AgentToolResult<Details>, options: {
     expanded: boolean;
 }, theme: Theme): Component;
-export declare function renderQuietTeammateAux(name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started", rest: string, status: "running" | "success" | "failure", theme: Theme): Component | undefined;
+export declare function renderQuietTeammateAux(name: "teammate-send" | "teammate-wait" | "teammate-watch" | "teammate-started" | "teammate-monitor", rest: string, status: "running" | "success" | "failure", theme: Theme): Component | undefined;
+/**
+ * Host-contract fallbacks for auxiliary tool renderers when quiet mode is off.
+ * pi's ToolExecutionComponent addChild()s whatever renderCall/renderResult
+ * return and only guards against throws, so renderQuietTeammateAux's quiet-only
+ * undefined must never leak into a tool slot — Box.render would call
+ * child.render on undefined and kill pi with an uncaughtException. This is the
+ * exact state every /resume history render sees: pi renders resumed history
+ * before session_start, while the Cockpit-driven quiet mirror is still false.
+ * The fallbacks mirror the host's own default call/result rendering.
+ */
+export declare function auxToolCallFallback(name: string, theme: Theme): Component;
+export declare function auxToolResultFallback(result: AgentToolResult<unknown>, theme: Theme): Component;
 export {};

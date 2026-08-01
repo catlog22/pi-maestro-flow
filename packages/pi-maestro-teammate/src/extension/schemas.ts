@@ -298,3 +298,60 @@ export const TeammateWaitParams = Type.Object({
   additionalProperties: false,
   description: "Provide name for an agent wait or waitMs for a fixed delay.",
 });
+
+// ---------------------------------------------------------------------------
+// Monitor — multi-agent observation and barrier wait
+// ---------------------------------------------------------------------------
+
+export const TeammateMonitorParams = Type.Object({
+  action: Type.Unsafe<"status" | "wait">({
+    type: "string",
+    enum: ["status", "wait"],
+    description:
+      'Operation: "status" one-shot multi-target snapshot (non-blocking); "wait" block until barrier condition is met. Monitor mode is entered/exited by the user via /monitor command.',
+  }),
+  targets: Type.Array(
+    Type.String({ minLength: 1 }),
+    {
+      minItems: 1,
+      maxItems: 15,
+      description:
+        "Agent names, @name, name#id-prefix, or correlation ID prefixes to monitor.",
+    },
+  ),
+  waitMode: Type.Optional(
+    Type.Unsafe<"all" | "any" | "count">({
+      type: "string",
+      enum: ["all", "any", "count"],
+      default: "all",
+      description:
+        'Barrier mode (wait action): "all" wait for every target, "any" wait for the first, "count" wait for k targets.',
+    }),
+  ),
+  waitCount: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      description: "Number of targets to wait for when waitMode is 'count'.",
+    }),
+  ),
+  timeoutMs: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      default: 600_000,
+      description: "Maximum wait time in milliseconds for the wait action (default: 600000).",
+    }),
+  ),
+  lines: Type.Optional(
+    Type.Integer({
+      minimum: 1,
+      default: 3,
+      description: "Recent output lines per target (default: 3).",
+    }),
+  ),
+  verbose: Type.Optional(
+    Type.Boolean({
+      default: false,
+      description: "Include full watch output per target (default: false).",
+    }),
+  ),
+}, { additionalProperties: false });
