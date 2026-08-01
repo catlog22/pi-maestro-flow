@@ -2897,6 +2897,11 @@ function compactionPreviewLines(projectRoot: string, contextWindow: number, maxT
       `配置阈值：${configuredThreshold.toLocaleString("en-US")} Token；${providerThresholdReason(model.reason)}`,
     );
   }
+  if (model.soft && model.soft.outputConstrained && model.soft.truncationPointTokens !== undefined) {
+    lines.push(
+      `提醒：模型输出上限使响应钳制点（${model.soft.truncationPointTokens.toLocaleString("en-US")} Token，${((model.soft.truncationPointTokens / contextWindow) * 100).toFixed(0)}%）早于硬阈值，自动剪枝已提前至截断点。`,
+    );
+  }
   if (model.soft && !model.soft.nudgeReachable) {
     lines.push("提醒：当前硬压缩阈值早于软提醒，软提醒不可达。");
   } else if (model.soft && !model.soft.pruneReachable) {

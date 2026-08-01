@@ -492,7 +492,7 @@ export function registerLoop(pi: ExtensionAPI): void {
       : "";
     const content = typeof msg.content === "string" ? msg.content.split("\n").slice(1).join(" ") : "";
     const summary = content.length > 80 ? `${content.slice(0, 77)}…` : content;
-    return new Text(`${theme.fg("info", "⟳")} ${theme.fg("dim", label)}${theme.fg("dim", progress)} ${summary}`, 0, 0);
+    return new Text(`${theme.fg("muted", "⟳")} ${theme.fg("dim", label)}${theme.fg("dim", progress)} ${summary}`, 0, 0);
   });
 
   // Restore persisted loops on session resume/reload; discover independent

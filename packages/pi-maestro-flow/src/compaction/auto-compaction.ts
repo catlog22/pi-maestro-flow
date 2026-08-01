@@ -73,7 +73,7 @@ export type CompactionSettings = Pick<
   "enabled" | "reserveTokens" | "keepRecentTokens" | "model"
 > & { soft?: EffectiveCompactionSettings["soft"] };
 
-interface ContextEstimate {
+export interface ContextEstimate {
   tokens: number;
   usageTokens: number;
   trailingTokens: number;
@@ -173,6 +173,17 @@ export interface ContextPressureResult {
 }
 
 /**
+ * Pre-derived soft band boundaries in absolute tokens. When provided, the
+ * policy uses these instead of recomputing ratios against the window, so the
+ * output-budget-aware bands from the threshold model drive the runtime.
+ */
+export interface SoftPressureBands {
+  nudgeTokens: number;
+  pruneTokens: number;
+  pruneTargetTokens: number;
+}
+
+/**
  * Anthropic budget-based thinking has two hard request invariants:
  * the budget is at least 1024 tokens and remains below max_tokens.
  *
@@ -229,7 +240,7 @@ interface PendingOutputLimitIntent {
   threshold: number;
 }
 
-interface AutoCompactionState {
+export interface AutoCompactionState {
   running: boolean;
   generation: number;
   nextOwner: number;
@@ -253,6 +264,10 @@ interface AutoCompactionState {
   breaker: CompactionBreakerState;
   breakerNotified: boolean;
   turnCount: number;
+  /** Consecutive completed turns whose threshold intent was deferred instead of run. */
+  highPressureDroppedTurns: number;
+  /** Dedup key for one-shot pressure notifications; cleared when pressure falls back. */
+  lastNotifyKey?: string;
   outputLimitCompactions: number;
   outputLimitBreakerNotified: boolean;
   /** Provider usage epoch the cache ratio below was sampled at. */
@@ -270,7 +285,7 @@ interface AutoCompactionDependencies {
   arbiter?: CompactionArbiter;
 }
 
-interface MessageRecord {
+export interface MessageRecord {
   role?: unknown;
   content?: unknown;
   toolCallId?: unknown;
@@ -317,6 +332,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     breaker: resetCompactionBreaker(),
     breakerNotified: false,
     turnCount: 0,
+    highPressureDroppedTurns: 0,
     outputLimitCompactions: 0,
     outputLimitBreakerNotified: false,
   };
@@ -383,12 +399,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.pendingOutputLimitIntent = undefined;
     state.lastTriggerKey = undefined;
     state.lastNoCompactableKey = undefined;
+    state.highPressureDroppedTurns = 0;
+    state.lastNotifyKey = undefined;
     state.internalsWarningShown = false;
   }
   function resetCycleState(): void {
     state.velocityTracker = EMPTY_VELOCITY_TRACKER;
     state.breaker = resetCompactionBreaker();
     state.breakerNotified = false;
+    state.highPressureDroppedTurns = 0;
+    state.lastNotifyKey = undefined;
     state.outputLimitCompactions = 0;
     state.outputLimitBreakerNotified = false;
     state.cacheEpoch = undefined;
@@ -456,6 +476,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         ...settings,
         reserveTokens: linkedThreshold.effectiveReserveTokens,
       };
+      const softBands: SoftPressureBands | undefined = linkedThreshold.soft
+        ? {
+            nudgeTokens: linkedThreshold.soft.nudgeTokens,
+            pruneTokens: linkedThreshold.soft.pruneTokens,
+            pruneTargetTokens: linkedThreshold.soft.pruneTargetTokens,
+          }
+        : undefined;
       const recordedBeforePolicy = new Set(state.pruneManifest.keys());
       let pressure = applyContextPressurePolicy(
         messages,
@@ -463,8 +490,19 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         effectiveSettings,
         state.pruneManifest,
         state.velocityTracker,
+        false,
+        softBands,
       );
       state.velocityTracker = pressure.velocityTracker;
+      // One-shot early warning at the nudge band, which is display-only: tell the
+      // user compaction is approaching while there is still room to act.
+      if (pressure.band === "nudge" && softBands && state.lastNotifyKey !== `nudge:${linkedThreshold.thresholdTokens}`) {
+        state.lastNotifyKey = `nudge:${linkedThreshold.thresholdTokens}`;
+        ctx.ui.notify(
+          `Context is at ${Math.round((pressure.estimatedTokens / capacityWindow) * 100)}% — nearing the compaction threshold (${linkedThreshold.thresholdTokens.toLocaleString("en-US")} tokens). Long responses may be truncated; consider /compact or reducing scope.`,
+          "warning",
+        );
+      }
       // Only entries recorded by THIS policy pass may still be escalated to
       // spill. Entries recorded earlier (including a prior pass whose spill
       // write failed) already published their replacement to the provider
@@ -485,6 +523,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           upgraded.tokenDelta,
           capacityWindow,
           effectiveSettings,
+          softBands,
         );
         if (pressure.band === "critical" && upgraded.callIds.size > 0) {
           const minimized = compactNewSpilledPrunes(pressure.messages, state.pruneManifest, upgraded.callIds);
@@ -493,6 +532,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             minimized.tokenDelta,
             capacityWindow,
             effectiveSettings,
+            softBands,
           );
         }
       }
@@ -503,8 +543,42 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       persistPruneManifest(pi, state);
       if (pressure.action !== "compact") {
         state.lastNoCompactableKey = undefined;
-        state.pendingIntent = undefined;
         state.lastTriggerKey = undefined;
+        state.highPressureDroppedTurns = 0;
+        // Escalation: pruning ran (or found nothing) yet the estimate still sits
+        // within 3% of the hard trigger. Queue the intent now instead of letting
+        // the next request run against a clamped output budget — the prune band
+        // is already pulled down to the truncation point when the output ceiling
+        // binds, so reaching this window means pruning cannot relieve pressure.
+        const escalate = pressure.action === "prune"
+          && pressure.estimatedTokens >= pressure.thresholdTokens - Math.floor(capacityWindow * 0.03);
+        if (escalate) {
+          const estimate = estimateContextTokens(pressure.messages);
+          const triggerKey = `${estimate.tokens}:${pressure.thresholdTokens}:${messages.length}`;
+          if (state.pendingIntent?.triggerKey !== triggerKey) {
+            const contextExhausted = estimate.tokens >= ctx.model.contextWindow;
+            state.pendingIntent = {
+              generation,
+              triggerKey,
+              estimate,
+              linkedThreshold,
+              settings,
+              effectiveSettings,
+              contextExhausted,
+            };
+            state.lastTriggerKey = triggerKey;
+            if (contextExhausted) ctx.abort();
+            if (state.lastNotifyKey !== `escalate:${triggerKey}`) {
+              state.lastNotifyKey = `escalate:${triggerKey}`;
+              ctx.ui.notify(
+                `Context remains near the compaction threshold after pruning (${estimate.tokens.toLocaleString("en-US")}/${pressure.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after this turn; responses may be truncated until then.`,
+                "warning",
+              );
+            }
+          }
+        } else {
+          state.pendingIntent = undefined;
+        }
         return pressure.prunedToolResults > 0 ? pressure.messages : undefined;
       }
       const estimate = estimateContextTokens(pressure.messages);
@@ -865,6 +939,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           ? linkedThreshold.contextWindow
           : ctx.model?.contextWindow
             ?? Math.max(1, event.preparation.tokensBefore + event.preparation.settings.reserveTokens);
+        const softBands: SoftPressureBands | undefined = linkedThreshold.usable && linkedThreshold.soft
+          ? {
+              nudgeTokens: linkedThreshold.soft.nudgeTokens,
+              pruneTokens: linkedThreshold.soft.pruneTokens,
+              pruneTargetTokens: linkedThreshold.soft.pruneTargetTokens,
+            }
+          : undefined;
         const pressure = applyContextPressurePolicy(
           messages,
           contextWindow,
@@ -874,6 +955,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           state.pruneManifest,
           state.velocityTracker,
           true,
+          softBands,
         );
         persistPruneManifest(pi, state);
         if (pressure.prunedToolResults === 0) {
@@ -913,11 +995,27 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         const needsContinuation = pending?.contextExhausted || Boolean(ctx.hasPendingMessages?.());
         if (pending && !needsContinuation) {
           // A settled, non-exhausted loop may have completed the user's task.
-          // Preserve its full transcript; the next turn will re-evaluate pressure.
-          state.pendingIntent = undefined;
-          state.lastNoCompactableKey = undefined;
-          if (state.lastTriggerKey === pending.triggerKey) state.lastTriggerKey = undefined;
+          // Preserve its transcript once; if the session keeps running above the
+          // threshold, run the deferred compaction at the second completed turn
+          // so proactive compaction still happens before the provider clamps
+          // outputs into truncation. The intent is kept (not cleared) so a pure
+          // Q&A turn that never runs the pressure policy can still settle it.
+          state.highPressureDroppedTurns += 1;
+          if (state.highPressureDroppedTurns >= 2) {
+            state.highPressureDroppedTurns = 0;
+            await settlePendingCompaction(ctx);
+          } else {
+            state.lastNoCompactableKey = undefined;
+            if (state.lastNotifyKey !== `defer:${pending.triggerKey}`) {
+              state.lastNotifyKey = `defer:${pending.triggerKey}`;
+              ctx.ui.notify(
+                `Context is above the compaction threshold (${pending.estimate.tokens.toLocaleString("en-US")}/${pending.linkedThreshold.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after the next completed turn; responses may be truncated until then.`,
+                "warning",
+              );
+            }
+          }
         } else {
+          state.highPressureDroppedTurns = 0;
           await settlePendingCompaction(ctx);
         }
       }
@@ -937,7 +1035,21 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return;
       }
       const usage = ctx.getContextUsage?.();
-      const threshold = settings.soft?.pruneRatio ?? DEFAULT_OUTPUT_LIMIT_RATIO;
+      // Gate follows the derived prune band (which the threshold model pulls down
+      // to the output-clamp truncation point when maxTokens binds), so a length
+      // stop after the output budget shrank still compacts instead of being
+      // dismissed as "below the window-ratio prune band".
+      const derivedGate = typeof ctx.model?.contextWindow === "number"
+        ? deriveCompactionThreshold({
+            reserveTokens: settings.reserveTokens,
+            contextWindow: ctx.model.contextWindow,
+            modelMaxTokens: ctx.model.maxTokens,
+            soft: settings.soft,
+          })
+        : undefined;
+      const threshold = derivedGate?.usable && derivedGate.soft
+        ? derivedGate.soft.pruneTokens / derivedGate.contextWindow
+        : settings.soft?.pruneRatio ?? DEFAULT_OUTPUT_LIMIT_RATIO;
       if (!usage || usage.percent == null || usage.percent / 100 < threshold) {
         state.pendingOutputLimitIntent = undefined;
         return;
@@ -1064,6 +1176,7 @@ export function applyContextPressurePolicy(
   pruneManifest: PruneManifest = new Map(),
   velocityTracker: VelocityTracker = EMPTY_VELOCITY_TRACKER,
   compactionPending = false,
+  softBands?: SoftPressureBands,
 ): ContextPressureResult {
   const thresholdTokens = contextWindow - settings.reserveTokens;
   const applied = applyRecordedPrunes(messages, pruneManifest);
@@ -1082,6 +1195,8 @@ export function applyContextPressurePolicy(
   const criticalRatio = thresholdTokens / contextWindow;
   const initialRatio = initial / contextWindow;
   const initiallyCritical = initial > thresholdTokens;
+  const nudgeTokens = softBands?.nudgeTokens ?? Math.ceil(contextWindow * soft.nudgeRatio);
+  const pruneTokens = softBands?.pruneTokens ?? Math.ceil(contextWindow * soft.pruneRatio);
 
   // Velocity is sampled on the pre-new-prune effective estimate so recorded
   // prunes stay accounted for and pruning does not create false slopes. Off by
@@ -1096,10 +1211,10 @@ export function applyContextPressurePolicy(
     velocityEscalate = shouldVelocityEscalate(velocity, soft, initialRatio);
   }
 
-  if (!settings.enabled || (!compactionPending && !initiallyCritical && !velocityEscalate && (!soft.enabled || initialRatio < soft.nudgeRatio))) {
+  if (!settings.enabled || (!compactionPending && !initiallyCritical && !velocityEscalate && (!soft.enabled || initial < nudgeTokens))) {
     return pressureResult({ messages: transformed, band: "normal", estimatedTokens: initial, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
   }
-  if (!compactionPending && soft.enabled && !initiallyCritical && !velocityEscalate && initialRatio < soft.pruneRatio) {
+  if (!compactionPending && soft.enabled && !initiallyCritical && !velocityEscalate && initial < pruneTokens) {
     return pressureResult({ messages: transformed, band: "nudge", estimatedTokens: initial, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
   }
 
@@ -1113,7 +1228,7 @@ export function applyContextPressurePolicy(
   if (soft.enabled) {
     if (transformed === messages) transformed = [...messages];
     const frontierStart = protectedFrontierStart(transformed, settings.keepRecentTokens);
-    const pruneTarget = Math.min(thresholdTokens, Math.floor(contextWindow * soft.pruneTargetRatio));
+    const pruneTarget = Math.min(thresholdTokens, softBands?.pruneTargetTokens ?? Math.floor(contextWindow * soft.pruneTargetRatio));
     const usageEpoch = latestProviderUsageEpoch(messages);
     // Cache gate: a prune kills the provider's cached prefix from its index to
     // the end, so below the critical band a prune run must reclaim enough tokens
@@ -1137,7 +1252,15 @@ export function applyContextPressurePolicy(
   }
   const estimatedTokens = Math.max(0, initial - newlySavedTokens);
   const ratio = estimatedTokens / contextWindow;
-  const band = derivePressureBand({ ratio, criticalRatio, prunedToolResults, soft });
+  const band = derivePressureBand({
+    ratio,
+    criticalRatio,
+    prunedToolResults,
+    soft,
+    softBands: softBands !== undefined
+      ? { nudgeRatio: nudgeTokens / contextWindow, pruneRatio: pruneTokens / contextWindow }
+      : undefined,
+  });
   return pressureResult({ messages: transformed, band, estimatedTokens, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
 }
 
@@ -1429,7 +1552,20 @@ export function shouldCompactMidTurn(input: {
   if (!input.settings.enabled || input.contextWindow <= input.settings.reserveTokens) return false;
   if (!endsWithCompleteToolResultBatch(input.messages)) return false;
   const effectiveSettings = { ...input.settings, reserveTokens: effectiveReserveTokens(input.settings, input.contextWindow, input.modelMaxTokens) };
-  return applyContextPressurePolicy(input.messages, input.contextWindow, effectiveSettings).band === "critical";
+  const derived = deriveCompactionThreshold({
+    reserveTokens: input.settings.reserveTokens,
+    contextWindow: input.contextWindow,
+    modelMaxTokens: input.modelMaxTokens,
+    soft: input.settings.soft,
+  });
+  const softBands = derived.usable && derived.soft
+    ? {
+        nudgeTokens: derived.soft.nudgeTokens,
+        pruneTokens: derived.soft.pruneTokens,
+        pruneTargetTokens: derived.soft.pruneTargetTokens,
+      }
+    : undefined;
+  return applyContextPressurePolicy(input.messages, input.contextWindow, effectiveSettings, undefined, undefined, false, softBands).band === "critical";
 }
 
 export function estimateContextTokens(messages: AgentMessage[]): ContextEstimate {
@@ -1464,7 +1600,7 @@ export function endsWithCompleteToolResultBatch(messages: AgentMessage[]): boole
     && callIds.every((id) => resultIds.includes(id));
 }
 
-function assistantUsage(message: AgentMessage): { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number } | undefined {
+export function assistantUsage(message: AgentMessage): { input: number; output: number; cacheRead: number; cacheWrite: number; totalTokens?: number } | undefined {
   const record = message as MessageRecord;
   if (record.role !== "assistant" || record.stopReason === "aborted" || record.stopReason === "error") return undefined;
   if (!record.usage || typeof record.usage !== "object") return undefined;
@@ -1483,7 +1619,7 @@ function assistantUsage(message: AgentMessage): { input: number; output: number;
   };
 }
 
-function latestProviderUsageEpoch(messages: AgentMessage[]): string | undefined {
+export function latestProviderUsageEpoch(messages: AgentMessage[]): string | undefined {
   for (let index = messages.length - 1; index >= 0; index--) {
     const message = messages[index];
     const usage = assistantUsage(message);
@@ -1517,7 +1653,7 @@ function finiteNumber(value: unknown): number | undefined {
  */
 const messageTokenMemo = new WeakMap<object, number>();
 
-function estimateMessageTokens(message: AgentMessage): number {
+export function estimateMessageTokens(message: AgentMessage): number {
   const key = message as unknown as object;
   const memoized = messageTokenMemo.get(key);
   if (memoized !== undefined) return memoized;
@@ -1736,7 +1872,7 @@ function evictableBulkToolResult(message: AgentMessage): AgentMessage | undefine
   } as AgentMessage;
 }
 
-function pruneToolResult(message: AgentMessage): AgentMessage | undefined {
+export function pruneToolResult(message: AgentMessage): AgentMessage | undefined {
   return replaceableToolResult(message) ?? evictableBulkToolResult(message);
 }
 
@@ -1841,488 +1977,50 @@ async function upgradeNewPrunesWithSpill(
   return { tokenDelta, callIds };
 }
 
-const REDUNDANCY_PATTERN_PREFIX_CHARS = 120;
-
-/**
- * Dedup key for a tool result: tool name plus a prefix of its text content.
- * Error results and content-less results have no key (never treated as redundant).
- */
-export function toolResultPatternKey(message: AgentMessage): string | undefined {
-  const record = message as MessageRecord;
-  if (record.role !== "toolResult" || record.isError === true) return undefined;
-  if (typeof record.toolName !== "string") return undefined;
-  const content = record.content;
-  let text = "";
-  if (typeof content === "string") {
-    text = content;
-  } else if (Array.isArray(content)) {
-    for (const block of content) {
-      const blockText = (block as { text?: unknown } | null)?.text;
-      if (typeof blockText === "string") text += blockText;
-    }
-  }
-  if (text.length === 0) return undefined;
-  return `${record.toolName}:${text.slice(0, REDUNDANCY_PATTERN_PREFIX_CHARS)}`;
-}
-
-/**
- * Groups tool results by content pattern in one pass, oldest occurrence first.
- *
- * Sole definition of the redundancy rule: for any pattern occurring more than
- * once, every occurrence except the LAST entry of its bucket is redundant. Both
- * consumers below derive from this so the rule cannot drift between them.
- */
-function bucketByPattern(messages: AgentMessage[]): Map<string, Array<{ callId: string; tokens: number }>> {
-  const byPattern = new Map<string, Array<{ callId: string; tokens: number }>>();
-  for (const message of messages) {
-    const callId = toolResultCallId(message);
-    if (!callId) continue;
-    const key = toolResultPatternKey(message);
-    if (!key) continue;
-    const entry = { callId, tokens: estimateMessageTokens(message) };
-    const bucket = byPattern.get(key);
-    if (bucket) bucket.push(entry);
-    else byPattern.set(key, [entry]);
-  }
-  return byPattern;
-}
-
-/**
- * Call ids of stale duplicate tool results. Prune ordering stays latest-first
- * for cache-prefix retention; this signal is telemetry and a hook for future
- * importance-aware eviction, and must never drive prune order.
- */
-export function redundantToolResultCallIds(messages: AgentMessage[]): Set<string> {
-  const redundant = new Set<string>();
-  for (const bucket of bucketByPattern(messages).values()) {
-    for (let index = 0; index < bucket.length - 1; index++) redundant.add(bucket[index].callId);
-  }
-  return redundant;
-}
-
-interface PressureResultInput {
-  messages: AgentMessage[];
-  band: ContextPressureBand;
-  estimatedTokens: number;
-  contextWindow: number;
-  thresholdTokens: number;
-  prunedToolResults: number;
-  savedTokens: number;
-  velocityTracker: VelocityTracker;
-  velocity: VelocityInfo;
-}
-
-function pressureResult(input: PressureResultInput): ContextPressureResult {
-  const { messages, band, estimatedTokens, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker, velocity } = input;
-  // The common low-pressure path skips the telemetry scan entirely.
-  const decision: ContextDecision = band === "normal"
-    ? { band, action: "none", reasons: [] }
-    : decideContextAction(band, computeContextSignals({ messages, estimatedTokens, contextWindow, thresholdTokens }));
-  const reasons = [...decision.reasons];
-  if (band === "critical" && prunedToolResults > 0) {
-    reasons.push("prune-insufficient");
-  }
-  if (band !== "normal" && velocity.slope !== undefined) {
-    const epochs = velocity.epochsToCritical !== undefined ? `,${velocity.epochsToCritical.toFixed(1)}ep` : "";
-    reasons.push(`velocity:${Math.round(velocity.slope)}/ep${epochs}`);
-  }
-  return {
-    messages,
-    band,
-    estimatedTokens,
-    thresholdTokens,
-    prunedToolResults,
-    savedTokens,
-    action: decision.action,
-    reasons,
-    velocityTracker,
-    velocity,
-  };
-}
-
-function adjustPressureAfterReplacementChange(
-  pressure: ContextPressureResult,
-  tokenDelta: number,
-  contextWindow: number,
-  settings: CompactionSettings,
-): ContextPressureResult {
-  if (tokenDelta === 0) return pressure;
-  const estimatedTokens = Math.max(0, pressure.estimatedTokens + tokenDelta);
-  const soft = settings.soft ?? DEFAULT_SOFT_COMPACTION;
-  const band = derivePressureBand({
-    ratio: estimatedTokens / contextWindow,
-    criticalRatio: pressure.thresholdTokens / contextWindow,
-    prunedToolResults: pressure.prunedToolResults,
-    soft,
-  });
-  return pressureResult({
-    messages: pressure.messages,
-    band,
-    estimatedTokens,
-    contextWindow,
-    thresholdTokens: pressure.thresholdTokens,
-    prunedToolResults: pressure.prunedToolResults,
-    savedTokens: Math.max(0, pressure.savedTokens - tokenDelta),
-    velocityTracker: pressure.velocityTracker,
-    velocity: pressure.velocity,
-  });
-}
-
-/** Final band derivation, extracted verbatim so it can be unit-tested in isolation. */
-export function derivePressureBand(input: {
-  ratio: number;
-  criticalRatio: number;
-  prunedToolResults: number;
-  soft: SoftCompactionSettings;
-}): ContextPressureBand {
-  const { ratio, criticalRatio, prunedToolResults, soft } = input;
-  if (ratio > criticalRatio) return "critical";
-  if (prunedToolResults > 0) return "auto-prune";
-  if (ratio >= soft.pruneRatio) return "auto-prune";
-  if (ratio >= soft.nudgeRatio) return "nudge";
-  return "normal";
-}
-
-/**
- * The two token aggregates the telemetry needs. Everything here depends only on
- * the messages, never on the current estimate, so the pressure-dependent ratios
- * stay in computeContextSignals.
- *
- * This used to be four separate full traversals (prunable classification,
- * redundancy counting, redundancy marking, redundant-token summing), each
- * re-running extractTextContent 2-3x per tool result — all of it to render a
- * status string. Now two traversals that share one memoized token estimate.
- *
- * Deliberately NOT folded into a single loop: that would inline the redundancy
- * rule here and leave redundantToolResultCallIds as a second, drifting copy of
- * it. With estimateMessageTokens memoized the extra walk costs a pointer chase,
- * not a re-serialization — the expensive part H5 removed is already gone.
- */
-function scanContextTokens(messages: AgentMessage[]): { prunableTokens: number; redundantTokens: number } {
-  let prunableTokens = 0;
-  for (const message of messages) {
-    // pruneToolResult is replaceable ?? evictableBulk — one classification
-    // instead of evaluating both selectors independently.
-    if (pruneToolResult(message)) prunableTokens += estimateMessageTokens(message);
-  }
-  let redundantTokens = 0;
-  for (const bucket of bucketByPattern(messages).values()) {
-    for (let index = 0; index < bucket.length - 1; index++) redundantTokens += bucket[index].tokens;
-  }
-  return { prunableTokens, redundantTokens };
-}
-
-export function computeContextSignals(input: {
-  messages: AgentMessage[];
-  estimatedTokens: number;
-  contextWindow: number;
-  thresholdTokens: number;
-}): ContextSignals {
-  const { messages, estimatedTokens, contextWindow, thresholdTokens } = input;
-  const fullnessRatio = contextWindow > 0 ? estimatedTokens / contextWindow : 0;
-  const criticalGap = thresholdTokens - estimatedTokens;
-  const { prunableTokens, redundantTokens } = scanContextTokens(messages);
-  const prunableFraction = estimatedTokens > 0 ? Math.min(1, prunableTokens / estimatedTokens) : 0;
-  const redundantFraction = estimatedTokens > 0 ? Math.min(1, redundantTokens / estimatedTokens) : 0;
-  return { fullnessRatio, criticalGap, prunableFraction, redundantFraction, cacheHitRatio: latestCacheHitRatio(messages) };
-}
-
-/**
- * Maps a band to its action and telemetry reasons. Phase 2 velocity escalation
- * will live here; with velocity disabled this is a pure band→action projection.
- */
-export function decideContextAction(band: ContextPressureBand, signals: ContextSignals): ContextDecision {
-  const action: ContextAction = band === "critical" ? "compact" : band === "auto-prune" ? "prune" : "none";
-  const reasons: string[] = [];
-  if (signals.prunableFraction > 0) reasons.push(`prunable:${Math.round(signals.prunableFraction * 100)}%`);
-  if (signals.redundantFraction && signals.redundantFraction > 0) reasons.push(`redundant:${Math.round(signals.redundantFraction * 100)}%`);
-  if (signals.cacheHitRatio !== undefined) reasons.push(`cache:${Math.round(signals.cacheHitRatio * 100)}%`);
-  return { band, action, reasons };
-}
-
-/**
- * Prompt-cache hit ratio for one usage record.
- *
- * The denominator is every prompt token the provider billed: `input` (fresh,
- * uncached), `cacheRead` (hit) and `cacheWrite` (cache creation — a MISS that
- * had to be written). Omitting cacheWrite overstates the hit rate precisely on
- * the epoch after a prune, when the invalidated prefix is re-billed as cache
- * creation — i.e. it blinds the one metric meant to expose prune damage.
- * Matches the statusline and cockpit denominators.
- */
-export function cacheHitRatio(usage: { input: number; cacheRead: number; cacheWrite: number }): number | undefined {
-  const promptTokens = usage.input + usage.cacheRead + usage.cacheWrite;
-  return promptTokens > 0 ? usage.cacheRead / promptTokens : undefined;
-}
-
-function latestCacheHitRatio(messages: AgentMessage[]): number | undefined {
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const usage = assistantUsage(messages[index]);
-    if (!usage) continue;
-    return cacheHitRatio(usage);
-  }
-  return undefined;
-}
-
-export const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
-export const COMPACTION_BREAKER_COOLDOWN_TURNS = 5;
-
-export interface CompactionBreakerState {
-  consecutiveFailures: number;
-  trippedAtTurn?: number;
-}
-
-export function resetCompactionBreaker(): CompactionBreakerState {
-  return { consecutiveFailures: 0 };
-}
-
-/** Record a failed compaction; trip the breaker once failures reach the cap. */
-export function recordCompactionFailure(
-  breaker: CompactionBreakerState,
-  turnCount: number,
-): CompactionBreakerState {
-  const consecutiveFailures = breaker.consecutiveFailures + 1;
-  const trippedAtTurn = consecutiveFailures >= MAX_CONSECUTIVE_COMPACTION_FAILURES
-    ? breaker.trippedAtTurn ?? turnCount
-    : breaker.trippedAtTurn;
-  return { consecutiveFailures, trippedAtTurn };
-}
-
-/**
- * Report whether a compaction attempt is allowed. While the breaker is open
- * (tripped within the cooldown window) attempts are skipped; once the cooldown
- * elapses the breaker resets and the next attempt proceeds.
- */
-export function compactionBreakerAllows(
-  breaker: CompactionBreakerState,
-  turnCount: number,
-): { allowed: boolean; breaker: CompactionBreakerState } {
-  if (breaker.trippedAtTurn === undefined) return { allowed: true, breaker };
-  if (turnCount - breaker.trippedAtTurn >= COMPACTION_BREAKER_COOLDOWN_TURNS) {
-    return { allowed: true, breaker: resetCompactionBreaker() };
-  }
-  return { allowed: false, breaker };
-}
-
-const VELOCITY_SAMPLE_CAP = 4;
-export const EMPTY_VELOCITY_TRACKER: VelocityTracker = { samples: [] };
-
-/**
- * Append a per-epoch context-size sample (deduped by epoch, capped) and report
- * the resulting trend. Pure: returns a new tracker, never mutates the input.
- */
-export function observeVelocity(
-  tracker: VelocityTracker,
-  observation: { epoch: string | undefined; tokens: number },
-): { tracker: VelocityTracker; slope: number | undefined; robustGrowth: boolean } {
-  const samples = tracker.samples;
-  if (observation.epoch === undefined
-    || (samples.length > 0 && samples[samples.length - 1].epoch === observation.epoch)) {
-    return { tracker, slope: medianSlope(samples), robustGrowth: hasRobustGrowth(samples) };
-  }
-  const next = [...samples, { epoch: observation.epoch, tokens: observation.tokens }];
-  while (next.length > VELOCITY_SAMPLE_CAP) next.shift();
-  const updated = { samples: next };
-  return { tracker: updated, slope: medianSlope(next), robustGrowth: hasRobustGrowth(next) };
-}
-
-export function buildVelocityInfo(
-  observed: { slope: number | undefined; robustGrowth: boolean },
-  criticalGap: number,
-): VelocityInfo {
-  const epochsToCritical = observed.slope !== undefined && observed.slope > 0
-    ? Math.max(0, criticalGap) / observed.slope
-    : undefined;
-  return { slope: observed.slope, robustGrowth: observed.robustGrowth, epochsToCritical };
-}
-
-export function shouldVelocityEscalate(
-  info: VelocityInfo,
-  soft: SoftCompactionSettings,
-  fullnessRatio: number,
-): boolean {
-  const velocity = soft.velocity;
-  if (!velocity?.enabled) return false;
-  if (fullnessRatio < velocity.minFullness) return false;
-  if (!info.robustGrowth) return false;
-  if (info.epochsToCritical === undefined) return false;
-  return info.epochsToCritical <= velocity.epochsToCritical;
-}
-
-function medianSlope(samples: VelocitySample[]): number | undefined {
-  if (samples.length < 3) return undefined;
-  const diffs: number[] = [];
-  for (let index = 1; index < samples.length; index++) {
-    diffs.push(samples[index].tokens - samples[index - 1].tokens);
-  }
-  const sorted = [...diffs].sort((a, b) => a - b);
-  return sorted[Math.floor(sorted.length / 2)];
-}
-
-function hasRobustGrowth(samples: VelocitySample[]): boolean {
-  let consecutive = 0;
-  for (let index = 1; index < samples.length; index++) {
-    if (samples[index].tokens > samples[index - 1].tokens) {
-      consecutive += 1;
-      if (consecutive >= 2) return true;
-    } else {
-      consecutive = 0;
-    }
-  }
-  return false;
-}
-
-/**
- * Attribute cache-ratio movement to pruning.
- *
- * A prune's bill arrives one epoch late: it changes the request prefix now, and
- * the provider reports the resulting cache miss on the NEXT usage record. So
- * when a new epoch lands, if prunes were introduced during the epoch that just
- * closed, the ratio delta is exactly what that pruning cost (or saved). This is
- * the only longitudinal cache signal — the raw ratio alone cannot tell you
- * whether a prune helped.
- */
-function observeCacheAttribution(state: AutoCompactionState, messages: AgentMessage[], newPrunes: number): void {
-  const epoch = latestProviderUsageEpoch(messages);
-  const ratio = latestCacheHitRatio(messages);
-  if (epoch !== state.cacheEpoch) {
-    const attributedDelta = state.prunedDuringEpoch !== undefined
-      && state.prunedDuringEpoch === state.cacheEpoch
-      && state.cacheRatio !== undefined
-      && ratio !== undefined
-      ? ratio - state.cacheRatio
-      : undefined;
-    // Keep a real attribution pending until the next pressure-status update.
-    // Unrelated epochs must not overwrite it before it can be displayed.
-    if (attributedDelta !== undefined) state.cacheDelta = attributedDelta;
-    state.cacheEpoch = epoch;
-    state.cacheRatio = ratio;
-    state.prunedDuringEpoch = undefined;
-  }
-  if (newPrunes > 0) state.prunedDuringEpoch = epoch;
-}
-
-function updatePressureStatus(ctx: ExtensionContext, pressure: ContextPressureResult, cacheDelta?: number): void {
-  if (pressure.band === "normal") {
-    clearPressureStatus(ctx);
-    return;
-  }
-  // Show what pruning actually reclaimed, not just how many results it touched.
-  const pruned = pressure.prunedToolResults > 0
-    ? ` -${pressure.prunedToolResults}${pressure.savedTokens > 0 ? `/-${formatTokens(pressure.savedTokens)}` : ""}`
-    : "";
-  const attribution = cacheDelta !== undefined && Math.abs(cacheDelta) >= 0.01
-    ? [`cacheD:${cacheDelta > 0 ? "+" : ""}${Math.round(cacheDelta * 100)}%`]
-    : [];
-  const allReasons = [...pressure.reasons, ...attribution];
-  const reasons = allReasons.length > 0 ? ` ${allReasons.join(" ")}` : "";
-  ctx.ui.setStatus(
-    COMPACTION_STATUS_KEY,
-    `CTX ${pressure.band.toUpperCase()} ${pressure.estimatedTokens}/${pressure.thresholdTokens}${pruned}${reasons}`,
-  );
-}
-
-function formatTokens(tokens: number): string {
-  return tokens < 1_000 ? String(tokens) : `${(tokens / 1_000).toFixed(1)}k`;
-}
-
-function publishIdleStatus(ctx: ExtensionContext, enabled: boolean): void {
-  ctx.ui.setStatus(COMPACTION_MODE_STATUS_KEY, autoCompactionIdleStatus(enabled));
-}
-
-function clearPressureStatus(ctx: ExtensionContext): void {
-  ctx.ui.setStatus(COMPACTION_STATUS_KEY, undefined);
-}
-
-function roleOf(message: AgentMessage | undefined): string | undefined {
-  return (message as MessageRecord | undefined)?.role as string | undefined;
-}
-
-function assistantToolCallIds(message: AgentMessage): string[] | undefined {
-  const content = (message as MessageRecord).content;
-  if (!Array.isArray(content)) return [];
-  const ids: string[] = [];
-  for (const block of content) {
-    if (!block || typeof block !== "object" || (block as { type?: unknown }).type !== "toolCall") continue;
-    const id = (block as { id?: unknown }).id;
-    if (typeof id !== "string") return undefined;
-    ids.push(id);
-  }
-  return ids;
-}
-
-function toolResultCallId(message: AgentMessage): string | undefined {
-  const record = message as MessageRecord;
-  return record.role === "toolResult" && typeof record.toolCallId === "string" ? record.toolCallId : undefined;
-}
-
-export function finalAssistantStopReason(messages: AgentMessage[]): string | undefined {
-  for (let index = messages.length - 1; index >= 0; index--) {
-    const record = messages[index] as MessageRecord;
-    if (record.role !== "assistant") continue;
-    return typeof record.stopReason === "string" ? record.stopReason : undefined;
-  }
-  return undefined;
-}
-
-export function shouldPreserveCompletedTurn(
-  messages: AgentMessage[],
-  hasPendingMessages: boolean,
-): boolean {
-  return finalAssistantStopReason(messages) === "stop" && !hasPendingMessages;
-}
-
-export function shouldCancelCompletedTurnThreshold(
-  reason: string | undefined,
-  preserveCompletedTurn: boolean,
-  hasOwnedRequest: boolean,
-  hasPendingMessages = false,
-): boolean {
-  return reason === "threshold" && preserveCompletedTurn && !hasOwnedRequest && !hasPendingMessages;
-}
-
-function buildOutputLimitInstructions(
-  usage: { percent: number | null; tokens: number | null; contextWindow: number },
-  reserveTokens: number,
-): string {
-  // Both figures are nullable on ContextUsage; percent used to be typed as a
-  // plain number here, which rendered "NaN%" whenever it was actually null.
-  const percent = usage.percent === null ? "unknown" : `${Math.round(usage.percent)}%`;
-  return [
-    "This compaction was triggered because the previous assistant response was truncated at the model output token limit while context pressure was high.",
-    "Preserve the exact current objective, completed work, modified files, and the interrupted response's intent so execution can resume and complete the truncated output immediately.",
-    `Context usage: ${usage.tokens ?? "unknown"}/${usage.contextWindow} tokens (${percent}); reserve: ${reserveTokens}.`,
-  ].join("\n");
-}
-
-/**
- * Durable mid-turn trigger metadata derived from the same threshold model that
- * drives the trigger itself, so the recorded effective threshold and reason can
- * never drift from what actually fired. Undefined only when the context window
- * is unusable, in which case no honest trigger can be recorded.
- */
-function buildMidTurnTrigger(input: {
-  estimatedTokens: number;
-  threshold: CompactionThresholdDerivation;
-  configuredReserveTokens: number;
-}): CompactionTrigger {
-  const derivation = input.threshold;
-  return {
-    owner: "mid-turn",
-    estimatedTokens: input.estimatedTokens,
-    contextWindow: derivation.contextWindow,
-    effectiveThresholdTokens: derivation.thresholdTokens,
-    configuredThresholdTokens: derivation.contextWindow - derivation.configuredReserveTokens,
-    effectiveReserveTokens: derivation.effectiveReserveTokens,
-    configuredReserveTokens: derivation.configuredReserveTokens,
-    reason: derivation.reason,
-  };
-}
-
-function buildMidTurnInstructions(estimate: ContextEstimate, contextWindow: number, reserveTokens: number): string {
-  return [
-    "This compaction was triggered at a completed tool-result checkpoint inside an active agent turn.",
-    "Preserve the exact current objective, completed tool results, pending tool work, modified files, and the next action so execution can resume immediately.",
-    `Estimated context: ${estimate.tokens}/${contextWindow} tokens; reserve: ${reserveTokens}; trailing since last usage: ${estimate.trailingTokens}.`,
-  ].join("\n");
-}
+// --- Extracted to pressure-telemetry.ts ---
+import {
+  adjustPressureAfterReplacementChange,
+  assistantToolCallIds,
+  buildMidTurnInstructions,
+  buildMidTurnTrigger,
+  buildOutputLimitInstructions,
+  buildVelocityInfo,
+  cacheHitRatio,
+  clearPressureStatus,
+  compactionBreakerAllows,
+  COMPACTION_BREAKER_COOLDOWN_TURNS,
+  computeContextSignals,
+  decideContextAction,
+  derivePressureBand,
+  EMPTY_VELOCITY_TRACKER,
+  finalAssistantStopReason,
+  formatTokens,
+  latestCacheHitRatio,
+  MAX_CONSECUTIVE_COMPACTION_FAILURES,
+  observeCacheAttribution,
+  observeVelocity,
+  pressureResult,
+  publishIdleStatus,
+  recordCompactionFailure,
+  redundantToolResultCallIds,
+  resetCompactionBreaker,
+  roleOf,
+  scanContextTokens,
+  shouldCancelCompletedTurnThreshold,
+  shouldPreserveCompletedTurn,
+  shouldVelocityEscalate,
+  toolResultCallId,
+  toolResultPatternKey,
+  updatePressureStatus,
+  type CompactionBreakerState,
+} from "./pressure-telemetry.ts";
+export {
+  cacheHitRatio, compactionBreakerAllows, COMPACTION_BREAKER_COOLDOWN_TURNS,
+  computeContextSignals, decideContextAction, derivePressureBand,
+  EMPTY_VELOCITY_TRACKER, finalAssistantStopReason,
+  MAX_CONSECUTIVE_COMPACTION_FAILURES, observeVelocity, buildVelocityInfo,
+  recordCompactionFailure, redundantToolResultCallIds, resetCompactionBreaker,
+  shouldPreserveCompletedTurn, shouldCancelCompletedTurnThreshold,
+  shouldVelocityEscalate, toolResultPatternKey,
+};
+export type { CompactionBreakerState } from "./pressure-telemetry.ts";

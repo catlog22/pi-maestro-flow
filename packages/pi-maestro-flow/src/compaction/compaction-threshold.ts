@@ -15,6 +15,20 @@
 export const MIN_RESERVE_RATIO = 0.05;
 export const SUMMARY_OUTPUT_RATIO = 0.8;
 
+/**
+ * Safety tokens Pi subtracts from the remaining context when it clamps each
+ * request's output budget (pi-ai CONTEXT_SAFETY_TOKENS). Below the truncation
+ * point the model can no longer emit its full maxTokens in one response.
+ */
+export const OUTPUT_CLAMP_SAFETY_TOKENS = 4096;
+
+/**
+ * Prune-target margin below the truncation point when the output budget binds:
+ * pruning reclaims enough that a full-size response fits again, not just enough
+ * to sit exactly at the clamp boundary.
+ */
+export const OUTPUT_CLAMP_BAND_MARGIN_RATIO = 0.03;
+
 /** Output budget used by the checkpoint summarizer. */
 export function summaryOutputTokenLimit(reserveTokens: number, modelMaxTokens?: number): number {
   const configuredLimit = Math.max(1, Math.floor(reserveTokens * SUMMARY_OUTPUT_RATIO));
@@ -58,6 +72,14 @@ export interface SoftThresholdDerivation {
   pruneReachable: boolean;
   /** False when the prune target sits at or above the compaction trigger. */
   pruneTargetReachable: boolean;
+  /**
+   * Input fullness where Pi clamps the request's output budget below the model
+   * maxTokens: window - maxTokens - safety. Undefined when the output ceiling
+   * is unknown or cannot bind (e.g. maxTokens >= window).
+   */
+  truncationPointTokens?: number;
+  /** True when the output budget binds before the strict compaction trigger. */
+  outputConstrained: boolean;
 }
 
 /** Degraded state when no usable context window exists. */
@@ -146,13 +168,41 @@ export function deriveCompactionThreshold(input: CompactionThresholdInput): Comp
     const nudgeTokens = Math.ceil(contextWindow * input.soft.nudgeRatio);
     const pruneTokens = Math.ceil(contextWindow * input.soft.pruneRatio);
     const pruneTargetTokens = Math.min(thresholdTokens, Math.floor(contextWindow * input.soft.pruneTargetRatio));
+    let truncationPointTokens: number | undefined;
+    if (typeof input.modelMaxTokens === "number" && input.modelMaxTokens > 0) {
+      const candidate = contextWindow - input.modelMaxTokens - OUTPUT_CLAMP_SAFETY_TOKENS;
+      if (candidate > 0) truncationPointTokens = candidate;
+    }
+    const outputConstrained = truncationPointTokens !== undefined
+      && truncationPointTokens < thresholdTokens;
+    let effectiveNudge = nudgeTokens;
+    let effectivePrune = pruneTokens;
+    let effectivePruneTarget = pruneTargetTokens;
+    if (outputConstrained && truncationPointTokens !== undefined) {
+      // The output budget binds before the window ratio bands: pull the soft
+      // bands down to the truncation point so pruning starts before responses
+      // can be clamped, and target a reclaim depth that restores full output
+      // headroom. The band ordering nudge < prune and the prune-target gap are
+      // preserved so the runtime loops still behave.
+      effectivePrune = Math.min(pruneTokens, truncationPointTokens);
+      effectivePruneTarget = Math.min(
+        pruneTargetTokens,
+        Math.max(0, truncationPointTokens - Math.floor(contextWindow * OUTPUT_CLAMP_BAND_MARGIN_RATIO)),
+      );
+      effectiveNudge = Math.min(
+        nudgeTokens,
+        Math.max(0, effectivePrune - Math.ceil(contextWindow * 0.02)),
+      );
+    }
     derivation.soft = {
-      nudgeTokens,
-      pruneTokens,
-      pruneTargetTokens,
-      nudgeReachable: nudgeTokens <= thresholdTokens,
-      pruneReachable: pruneTokens <= thresholdTokens,
-      pruneTargetReachable: pruneTargetTokens < thresholdTokens,
+      nudgeTokens: effectiveNudge,
+      pruneTokens: effectivePrune,
+      pruneTargetTokens: effectivePruneTarget,
+      nudgeReachable: effectiveNudge <= thresholdTokens,
+      pruneReachable: effectivePrune <= thresholdTokens,
+      pruneTargetReachable: effectivePruneTarget < thresholdTokens,
+      truncationPointTokens,
+      outputConstrained,
     };
   }
   return derivation;

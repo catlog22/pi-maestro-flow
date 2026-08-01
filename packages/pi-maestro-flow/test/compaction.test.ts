@@ -552,6 +552,7 @@ test("pressure policy honors custom soft nudgeRatio when classifying bands", () 
 test("mid-turn guard preserves a completed loop when only the summary-model threshold was crossed", async () => {
   let aborted = 0;
   let compacted = 0;
+  const notifications: string[] = [];
   const statuses = new Map<string, string | undefined>();
   const compactionModel = {
     provider: "maestro-qwen",
@@ -591,7 +592,7 @@ test("mid-turn guard preserves a completed loop when only the summary-model thre
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: {
       setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
-      notify() {},
+      notify(message: string) { notifications.push(message); },
     },
   } as never;
 
@@ -599,8 +600,13 @@ test("mid-turn guard preserves a completed loop when only the summary-model thre
   assert.equal(aborted, 0, "below the session window, the current provider turn is not interrupted");
   assert.equal(compacted, 0, "context hook only queues the compaction intent");
   await guard.onAgentEnd(ctx);
-  assert.equal(compacted, 0, "normal task completion must preserve the uncompressed transcript");
-  assert.equal(statuses.get(COMPACTION_STATUS_KEY), undefined, "discarded intent returns pressure status to idle");
+  assert.equal(compacted, 0, "the first completed turn preserves the uncompressed transcript");
+  assert.equal(notifications.length, 1, "one-shot warning announces the deferred compaction");
+  assert.match(notifications[0] ?? "", /after the next completed turn/);
+  assert.ok(
+    statuses.get(COMPACTION_STATUS_KEY)?.includes("CRITICAL"),
+    "pressure status stays visible while the intent is deferred",
+  );
 });
 
 test("mid-turn guard re-evaluates non-exhausted pressure without compacting completed loops", async () => {
@@ -631,9 +637,14 @@ test("mid-turn guard re-evaluates non-exhausted pressure without compacting comp
   await guard.onAgentEnd(ctx);
   assert.ok(result);
   assert.equal(aborted, 0);
-  assert.equal(compacted, 0);
-  assert.equal(notifications.length, 0, "normal completion does not prepare or warn about a compaction it will not run");
-  assert.equal(statuses.get("maestro-auto-compact"), undefined);
+  assert.equal(compacted, 0, "no compactable history keeps the transcript uncompressed");
+  assert.equal(notifications.length, 2, "a defer warning, then a no-compactable warning on the second completed turn");
+  assert.match(notifications[0] ?? "", /after the next completed turn/);
+  assert.match(notifications[1] ?? "", /no compactable history/);
+  assert.ok(
+    statuses.get("maestro-auto-compact")?.includes("CRITICAL"),
+    "the no-compactable pressure status stays visible so the user knows the trigger is live",
+  );
 });
 
 test("completed-loop discard clears a stale no-compactable marker", async () => {
@@ -666,13 +677,80 @@ test("completed-loop discard clears a stale no-compactable marker", async () => 
   pending = false;
   await guard.evaluate(pressureToolBatch(), ctx);
   await guard.onAgentEnd(ctx);
-  assert.equal(statuses.get(COMPACTION_STATUS_KEY), undefined, "normal completion clears the prior failed-attempt status");
+  assert.equal(notifications.length, 2, "the first completed turn above the threshold warns once");
+  assert.match(notifications[1] ?? "", /after the next completed turn/);
+  assert.ok(
+    statuses.get(COMPACTION_STATUS_KEY)?.includes("CRITICAL"),
+    "the deferred intent keeps the pressure status visible",
+  );
 
   pending = true;
   await guard.evaluate(pressureToolBatch(), ctx);
   await guard.onAgentEnd(ctx);
-  assert.equal(notifications.length, 2, "cleared marker does not suppress a later real continuation warning");
+  assert.equal(notifications.length, 3, "cleared marker does not suppress a later real continuation warning");
   assert.equal(compacted, 0);
+});
+
+test("mid-turn guard compacts at the second completed turn above the threshold", async () => {
+  let aborted = 0;
+  let compacted = 0;
+  const notifications: string[] = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { aborted++; },
+    compact() { compacted++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify(message: string) { notifications.push(message); },
+    },
+  } as never;
+  const messages = pressureToolBatch();
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 0, "the first completed turn above the threshold preserves the transcript");
+  assert.equal(notifications.length, 1, "the first turn only warns once");
+  await guard.evaluate(messages, ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compacted, 1, "the second consecutive completed turn above the threshold compacts");
+  assert.equal(notifications.length, 1, "the compaction turn does not re-warn");
+  assert.equal(aborted, 0, "below the full window no abort is needed");
+});
+
+test("applyContextPressurePolicy honors output-clamp derived soft bands", () => {
+  const window = 400_000;
+  const settings = {
+    enabled: true,
+    reserveTokens: 20_000,
+    keepRecentTokens: 20_000,
+    soft: {
+      enabled: true,
+      nudgeRatio: 0.7,
+      pruneRatio: 0.8,
+      pruneTargetRatio: 0.7,
+      velocity: { enabled: false, epochsToCritical: 3, minFullness: 0.7 },
+      cache: { enabled: true },
+    },
+  };
+  const bands = { nudgeTokens: 259_904, pruneTokens: 267_904, pruneTargetTokens: 255_904 };
+  // ~270K estimated input: below the default 80% band (320K) but above the
+  // output-clamp-derived prune band (~268K) — pruning must engage early.
+  const messages = highUsageToolBatch(270_000);
+  assert.equal(
+    applyContextPressurePolicy(messages, window, settings).band,
+    "normal",
+    "the default window-ratio band stays normal at ~67%",
+  );
+  assert.equal(
+    applyContextPressurePolicy(messages, window, settings, undefined, undefined, false, bands).band,
+    "auto-prune",
+    "the output-clamp band pulls pruning down to the truncation point",
+  );
 });
 
 test("mid-turn guard aborts when no compactable history remains after exhausting the model window", async () => {
@@ -2016,12 +2094,14 @@ test("deriveCompactionThreshold lets a 400K model compact near 380K with dynamic
   assert.equal(model.thresholdPercent, 95);
   assert.equal(model.reason, "ratio-floor");
   assert.ok(model.soft);
-  assert.equal(model.soft.nudgeTokens, 280_000);
+  assert.equal(model.soft.nudgeTokens, 259_904);
+  assert.equal(model.soft.pruneTokens, 267_904);
+  assert.equal(model.soft.pruneTargetTokens, 255_904);
   assert.equal(model.soft.nudgeReachable, true);
-  assert.equal(model.soft.pruneTokens, 320_000);
   assert.equal(model.soft.pruneReachable, true);
-  assert.equal(model.soft.pruneTargetTokens, 280_000);
   assert.equal(model.soft.pruneTargetReachable, true);
+  assert.equal(model.soft.outputConstrained, true);
+  assert.equal(model.soft.truncationPointTokens, 267_904);
 
   const explicit370K = deriveCompactionThreshold({
     reserveTokens: 30_000,
