@@ -1,0 +1,667 @@
+import { createHash } from "node:crypto";
+import { lookup as dnsLookup } from "node:dns/promises";
+import { existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { request as httpRequest, type IncomingMessage } from "node:http";
+import { request as httpsRequest } from "node:https";
+import { extname, isAbsolute, join, resolve } from "node:path";
+import type { AgentToolResult } from "@earendil-works/pi-agent-core";
+import type { Api, Model } from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai/compat";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isRetryableProviderError } from "pi-maestro-teammate/v1/retry";
+import { Type } from "typebox";
+import { loadSsrfConfig, validateRemoteUrl } from "../tools/web-access/ssrf-protection.ts";
+
+export const DESCRIBE_IMAGE_TOOL_NAME = "describe_image";
+export const VISION_DELEGATION_CONFIG_FILE = "vision-delegation.json";
+export const DEFAULT_VISION_ANALYSIS_PROMPT =
+  "Describe this image concisely, focusing on visible content, text, diagrams, UI elements, and layout.";
+
+const MAX_RETRY_BACKOFF_MS = 8_000;
+const SUPPORTED_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
+
+export interface VisionDelegationConfig {
+  enabled: boolean;
+  visionModel?: string;
+  customPrompt?: string;
+  cache: { enabled: boolean; maxEntries: number };
+  fallbackModels: string[];
+  maxRetries: number;
+  retryBackoffMs: number;
+  timeoutMs: number;
+  maxImageBytes: number;
+}
+
+export interface VisionDelegationOptions {
+  agentDir?: string;
+  completeFn?: typeof complete;
+}
+
+export interface AttachedImageInput {
+  data: string;
+  mimeType: string;
+}
+
+export interface VisionAnalysisResult {
+  text: string;
+  model: string;
+  cached: boolean;
+}
+
+export interface AnalyzeAttachedImageOptions extends VisionDelegationOptions {
+  prompt?: string;
+  signal?: AbortSignal;
+}
+
+interface LoadedImage extends AttachedImageInput {
+  sourceHash: string;
+  source: string;
+}
+
+interface CachedResult {
+  text: string;
+  model: string;
+}
+
+interface ToolController {
+  getActiveTools(): string[];
+  setActiveTools(names: string[]): void;
+}
+
+type VisionToolResult = AgentToolResult<unknown> & { isError?: boolean };
+
+export const DEFAULT_VISION_DELEGATION_CONFIG: Readonly<VisionDelegationConfig> = {
+  enabled: true,
+  cache: { enabled: true, maxEntries: 50 },
+  fallbackModels: [],
+  maxRetries: 2,
+  retryBackoffMs: 500,
+  timeoutMs: 30_000,
+  maxImageBytes: 20 * 1024 * 1024,
+};
+
+class VisionCache {
+  private readonly values = new Map<string, CachedResult>();
+  constructor(private maxEntries: number) {}
+  configure(maxEntries: number): void { this.maxEntries = maxEntries; this.evict(); }
+  clear(): void { this.values.clear(); }
+  get(key: string): CachedResult | undefined {
+    const value = this.values.get(key);
+    if (!value) return undefined;
+    this.values.delete(key);
+    this.values.set(key, value);
+    return value;
+  }
+  set(key: string, value: CachedResult): void { this.values.delete(key); this.values.set(key, value); this.evict(); }
+  private evict(): void {
+    while (this.values.size > this.maxEntries) {
+      const oldest = this.values.keys().next().value as string | undefined;
+      if (!oldest) return;
+      this.values.delete(oldest);
+    }
+  }
+}
+
+const attachedCaches = new Map<string, VisionCache>();
+
+export function isMultimodalModel(model: Pick<Model<Api>, "input"> | undefined): boolean {
+  return model?.input?.includes("image") === true;
+}
+
+export function getVisionDelegationConfigPath(agentDir = getAgentDir()): string {
+  return join(agentDir, VISION_DELEGATION_CONFIG_FILE);
+}
+
+export function loadVisionDelegationConfig(agentDir = getAgentDir()): VisionDelegationConfig {
+  const defaults = defaultConfig();
+  const path = getVisionDelegationConfigPath(agentDir);
+  if (!existsSync(path)) return defaults;
+  let parsed: unknown;
+  try { parsed = JSON.parse(readFileSync(path, "utf8")); } catch { return defaults; }
+  if (!record(parsed)) return defaults;
+  const cache = record(parsed.cache) ? parsed.cache : {};
+  return {
+    enabled: typeof parsed.enabled === "boolean" ? parsed.enabled : defaults.enabled,
+    ...(modelReference(parsed.visionModel) ? { visionModel: parsed.visionModel.trim() } : {}),
+    ...(typeof parsed.customPrompt === "string" && parsed.customPrompt.trim() ? { customPrompt: parsed.customPrompt.trim() } : {}),
+    cache: {
+      enabled: typeof cache.enabled === "boolean" ? cache.enabled : defaults.cache.enabled,
+      maxEntries: integer(cache.maxEntries, defaults.cache.maxEntries, 1, 1_000),
+    },
+    fallbackModels: modelReferences(parsed.fallbackModels),
+    maxRetries: integer(parsed.maxRetries, defaults.maxRetries, 0, 10),
+    retryBackoffMs: integer(parsed.retryBackoffMs, defaults.retryBackoffMs, 0, MAX_RETRY_BACKOFF_MS),
+    timeoutMs: integer(parsed.timeoutMs, defaults.timeoutMs, 1_000, 300_000),
+    maxImageBytes: integer(parsed.maxImageBytes, defaults.maxImageBytes, 1_024, 64 * 1024 * 1024),
+  };
+}
+
+export function saveVisionDelegationConfig(config: VisionDelegationConfig, agentDir = getAgentDir()): string {
+  const path = getVisionDelegationConfigPath(agentDir);
+  mkdirSync(resolve(agentDir), { recursive: true, mode: 0o700 });
+  const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(temporary, `${JSON.stringify(normalizeConfig(config), null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
+    renameSync(temporary, path);
+  } catch (error) {
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+  return path;
+}
+
+export function visionDelegationPrompt(
+  model: Pick<Model<Api>, "provider" | "id" | "input"> | undefined,
+  config: VisionDelegationConfig,
+): string | undefined {
+  if (!config.enabled || isMultimodalModel(model)) return undefined;
+  return [
+    "## Vision capability",
+    "The active primary model is text-only.",
+    `Use ${DESCRIBE_IMAGE_TOOL_NAME} to inspect image paths or URLs through ${config.visionModel ?? "an available multimodal model"}.`,
+    "Do not claim to have inspected an image until delegated analysis succeeds.",
+  ].join("\n");
+}
+
+export function formatVisionDelegationStatus(
+  config: VisionDelegationConfig,
+  model: Pick<Model<Api>, "provider" | "id" | "input"> | undefined,
+  configPath: string,
+): string {
+  const activeModel = model ? `${model.provider}/${model.id}` : "(none)";
+  const mode = isMultimodalModel(model) ? "native" : config.enabled ? "delegate" : "disabled";
+  return [
+    "Vision delegation:",
+    `  enabled: ${config.enabled}`,
+    `  active model: ${activeModel}`,
+    `  mode: ${mode}`,
+    `  vision model: ${config.visionModel ?? "auto-detect"}`,
+    `  fallback models: ${config.fallbackModels.join(", ") || "(none)"}`,
+    `  cache: ${config.cache.enabled ? `on (max ${config.cache.maxEntries})` : "off"}`,
+    `  retries: ${config.maxRetries}`,
+    `  timeout: ${config.timeoutMs}ms`,
+    `  custom prompt: ${config.customPrompt ? "configured" : "default"}`,
+    `  file: ${configPath}`,
+  ].join("\n");
+}
+
+export async function analyzeAttachedImage(
+  ctx: ExtensionContext,
+  input: AttachedImageInput,
+  options: AnalyzeAttachedImageOptions = {},
+): Promise<VisionAnalysisResult> {
+  const agentDir = options.agentDir ?? getAgentDir();
+  const config = loadVisionDelegationConfig(agentDir);
+  if (!config.enabled) throw new Error("Vision delegation is disabled");
+  const image = normalizeAttachedImage(input, config.maxImageBytes);
+  const cache = attachedCaches.get(agentDir) ?? new VisionCache(config.cache.maxEntries);
+  attachedCaches.set(agentDir, cache);
+  cache.configure(config.cache.maxEntries);
+  return delegateImage(ctx, image, options.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, options.signal, options.completeFn ?? complete);
+}
+
+export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelegationOptions = {}): void {
+  const agentDir = options.agentDir ?? getAgentDir();
+  const completeFn = options.completeFn ?? complete;
+  let config = loadVisionDelegationConfig(agentDir);
+  const cache = new VisionCache(config.cache.maxEntries);
+  let restoreForText = true;
+  let previousMultimodal: boolean | undefined;
+
+  const syncTools = (model: Model<Api> | undefined, sessionBoundary = false): void => {
+    const controller = toolController(pi);
+    if (!controller) return;
+    const active = controller.getActiveTools();
+    const present = active.includes(DESCRIBE_IMAGE_TOOL_NAME);
+    if (sessionBoundary) restoreForText = present;
+    else if (previousMultimodal === false) restoreForText = present;
+    const multimodal = isMultimodalModel(model);
+    if (!config.enabled || multimodal) {
+      if (config.enabled && present) restoreForText = true;
+      if (present) controller.setActiveTools(active.filter((name) => name !== DESCRIBE_IMAGE_TOOL_NAME));
+    } else if (restoreForText && !present) {
+      controller.setActiveTools([...new Set([...active, DESCRIBE_IMAGE_TOOL_NAME])]);
+    }
+    previousMultimodal = multimodal;
+  };
+
+  pi.on("session_start", (_event, ctx) => {
+    config = loadVisionDelegationConfig(agentDir);
+    cache.configure(config.cache.maxEntries);
+    cache.clear();
+    syncTools(ctx.model, true);
+  });
+  pi.on("model_select", (event) => {
+    config = loadVisionDelegationConfig(agentDir);
+    cache.configure(config.cache.maxEntries);
+    syncTools(event.model);
+  });
+  pi.on("before_agent_start", (event, ctx) => {
+    config = loadVisionDelegationConfig(agentDir);
+    const guidance = visionDelegationPrompt(ctx.model, config);
+    if (!guidance) return undefined;
+    return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
+  });
+  pi.on("session_shutdown", () => cache.clear());
+
+  const persist = (ctx: ExtensionContext, messageText: string): void => {
+    saveVisionDelegationConfig(config, agentDir);
+    syncTools(ctx.model);
+    ctx.ui.notify(messageText, "info");
+  };
+
+  pi.registerCommand("vision", {
+    description: "Configure capability-aware multimodal image delegation",
+    handler: async (args, ctx) => {
+      config = loadVisionDelegationConfig(agentDir);
+      cache.configure(config.cache.maxEntries);
+      const values = args.trim().split(/\s+/).filter(Boolean);
+      const action = values[0]?.toLowerCase();
+      if (!action) {
+        if (!ctx.hasUI) {
+          ctx.ui.notify(formatVisionDelegationStatus(config, ctx.model, getVisionDelegationConfigPath(agentDir)), "info");
+          return;
+        }
+        await showVisionManager(ctx, config, getVisionDelegationConfigPath(agentDir), (next, messageText) => {
+          config = next;
+          cache.configure(config.cache.maxEntries);
+          if (!config.cache.enabled) cache.clear();
+          persist(ctx, messageText);
+        });
+        return;
+      }
+      if (action === "show" || action === "status") {
+        ctx.ui.notify(formatVisionDelegationStatus(config, ctx.model, getVisionDelegationConfigPath(agentDir)), "info");
+        return;
+      }
+      if (action === "on" || action === "off") {
+        config = { ...config, enabled: action === "on" };
+        persist(ctx, `Vision delegation ${config.enabled ? "enabled" : "disabled"}.`);
+        return;
+      }
+      if (action === "model") {
+        const reference = values.slice(1).join(" ").trim();
+        if (!reference || reference === "auto" || reference === "clear") {
+          const next = { ...config };
+          delete next.visionModel;
+          config = next;
+          persist(ctx, "Vision model set to auto-detect.");
+          return;
+        }
+        requireAvailableVisionModel(ctx, reference);
+        config = { ...config, visionModel: reference };
+        persist(ctx, `Vision model set to ${reference}.`);
+        return;
+      }
+      if (action === "fallback") {
+        const raw = values.slice(1).join(" ").trim();
+        if (!raw || raw === "clear") config = { ...config, fallbackModels: [] };
+        else {
+          const references = raw.split(",").map((value) => value.trim()).filter(Boolean);
+          for (const reference of references) requireAvailableVisionModel(ctx, reference);
+          config = { ...config, fallbackModels: [...new Set(references)] };
+        }
+        persist(ctx, `Vision fallback models: ${config.fallbackModels.join(", ") || "none"}.`);
+        return;
+      }
+      if (action === "cache") {
+        const value = values[1]?.toLowerCase();
+        if (value === "clear") {
+          cache.clear();
+          ctx.ui.notify("Vision cache cleared.", "info");
+          return;
+        }
+        if (value !== "on" && value !== "off") throw new Error("Usage: /vision cache on|off|clear");
+        config = { ...config, cache: { ...config.cache, enabled: value === "on" } };
+        if (!config.cache.enabled) cache.clear();
+        persist(ctx, `Vision cache ${config.cache.enabled ? "enabled" : "disabled"}.`);
+        return;
+      }
+      if (action === "prompt") {
+        const value = values.slice(1).join(" ").trim();
+        const next = { ...config };
+        if (!value || value === "clear") delete next.customPrompt;
+        else next.customPrompt = value;
+        config = next;
+        persist(ctx, `Vision custom prompt ${config.customPrompt ? "updated" : "cleared"}.`);
+        return;
+      }
+      if (action === "retries" || action === "timeout") {
+        const number = Number(values[1]);
+        if (!Number.isInteger(number)) throw new Error(`Usage: /vision ${action} <integer>`);
+        config = action === "retries"
+          ? { ...config, maxRetries: integer(number, config.maxRetries, 0, 10) }
+          : { ...config, timeoutMs: integer(number, config.timeoutMs, 1_000, 300_000) };
+        persist(ctx, `Vision ${action} updated.`);
+        return;
+      }
+      throw new Error("Usage: /vision [show|on|off|model <provider/model|auto>|fallback <refs|clear>|cache on|off|clear|prompt <text|clear>|retries <0-10>|timeout <ms>]");
+    },
+  });
+
+  pi.registerTool({
+    name: DESCRIBE_IMAGE_TOOL_NAME,
+    label: "Describe Image",
+    description: "Analyze a local image, data URL, or DNS-pinned SSRF-validated HTTP(S) image through a multimodal helper when the primary model is text-only.",
+    promptSnippet: "Analyze an image through a multimodal helper model.",
+    promptGuidelines: ["Use describe_image when the active model cannot inspect an image natively."],
+    parameters: Type.Object({
+      image_path: Type.String({ minLength: 1, description: "Local path, data URL, or HTTP(S) image URL." }),
+      prompt: Type.Optional(Type.String({ minLength: 1, description: "Analysis question or focus." })),
+    }),
+    async execute(_id, params, signal, _onUpdate, ctx): Promise<VisionToolResult> {
+      config = loadVisionDelegationConfig(agentDir);
+      cache.configure(config.cache.maxEntries);
+      if (!config.enabled) return toolError("Vision delegation is disabled. Use /vision on to enable it.", "disabled");
+      if (isMultimodalModel(ctx.model)) return toolError("The active model supports images natively.", "native_model");
+      try {
+        const image = await loadImage(params.image_path, ctx.cwd, config.maxImageBytes, signal);
+        const result = await delegateImage(ctx, image, params.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, signal, completeFn);
+        return { content: [{ type: "text", text: result.text }], details: { mode: "delegate", ...result, source: image.source } };
+      } catch (error) {
+        return toolError(`Vision delegation failed: ${message(error)}`, error instanceof Error && error.name === "AbortError" ? "aborted" : "vision_error");
+      }
+    },
+  });
+}
+
+async function showVisionManager(
+  ctx: ExtensionContext,
+  initial: VisionDelegationConfig,
+  configPath: string,
+  save: (config: VisionDelegationConfig, message: string) => void,
+): Promise<void> {
+  let current = initial;
+  while (true) {
+    const choice = await ctx.ui.select("Vision 委托设置", [
+      "查看状态",
+      current.enabled ? "停用 Vision 委托" : "启用 Vision 委托",
+      "选择 Vision 模型",
+      "选择 Fallback 模型",
+      current.cache.enabled ? "关闭缓存" : "开启缓存",
+      "编辑分析系统提示",
+      "完成",
+    ]);
+    if (!choice || choice === "完成") return;
+    if (choice === "查看状态") { ctx.ui.notify(formatVisionDelegationStatus(current, ctx.model, configPath), "info"); continue; }
+    if (choice.includes("Vision 委托")) { current = { ...current, enabled: !current.enabled }; save(current, `Vision delegation ${current.enabled ? "enabled" : "disabled"}.`); continue; }
+    if (choice === "选择 Vision 模型") {
+      const selected = await ctx.ui.select("选择多模态 Vision 模型", ["自动检测", ...availableVisionModelReferences(ctx)]);
+      if (!selected) continue;
+      const next = { ...current };
+      if (selected === "自动检测") delete next.visionModel; else next.visionModel = selected;
+      current = next; save(current, `Vision model: ${current.visionModel ?? "auto-detect"}.`); continue;
+    }
+    if (choice === "选择 Fallback 模型") {
+      const references = availableVisionModelReferences(ctx).filter((reference) => reference !== current.visionModel);
+      const selected = await ctx.ui.select("选择 Vision fallback", ["清除", ...references]);
+      if (!selected) continue;
+      current = { ...current, fallbackModels: selected === "清除" ? [] : [selected] };
+      save(current, `Vision fallback: ${current.fallbackModels[0] ?? "none"}.`); continue;
+    }
+    if (choice.endsWith("缓存")) { current = { ...current, cache: { ...current.cache, enabled: !current.cache.enabled } }; save(current, `Vision cache ${current.cache.enabled ? "enabled" : "disabled"}.`); continue; }
+    if (choice === "编辑分析系统提示") {
+      const edited = await ctx.ui.editor("Vision 分析系统提示", current.customPrompt ?? "");
+      if (edited === undefined) continue;
+      const next = { ...current };
+      if (edited.trim()) next.customPrompt = edited.trim(); else delete next.customPrompt;
+      current = next; save(current, `Vision custom prompt ${current.customPrompt ? "updated" : "cleared"}.`);
+    }
+  }
+}
+
+function availableVisionModelReferences(ctx: ExtensionContext): string[] {
+  return ctx.modelRegistry.getAvailable().filter(isMultimodalModel).map((model) => `${model.provider}/${model.id}`);
+}
+
+function requireAvailableVisionModel(ctx: ExtensionContext, reference: string): void {
+  if (!modelReference(reference)) throw new Error(`Invalid model reference: ${reference}`);
+  if (!availableVisionModelReferences(ctx).includes(reference)) throw new Error(`Model ${reference} is unavailable or not marked multimodal in API Manager`);
+}
+
+async function delegateImage(
+  ctx: ExtensionContext,
+  image: LoadedImage,
+  prompt: string,
+  config: VisionDelegationConfig,
+  cache: VisionCache,
+  signal: AbortSignal | undefined,
+  completeFn: typeof complete,
+): Promise<VisionAnalysisResult> {
+  const references = candidateReferences(ctx, config);
+  if (references.length === 0) throw new Error("no multimodal model is available");
+  const key = createHash("sha256").update(JSON.stringify({ image: image.sourceHash, prompt, system: config.customPrompt ?? "", references })).digest("hex");
+  if (config.cache.enabled) {
+    const hit = cache.get(key);
+    if (hit) return { ...hit, cached: true };
+  }
+  const result = await callCandidates(ctx, references, image, prompt, config, signal, completeFn);
+  if (config.cache.enabled) cache.set(key, result);
+  return { ...result, cached: false };
+}
+
+async function callCandidates(
+  ctx: ExtensionContext,
+  references: string[],
+  image: LoadedImage,
+  prompt: string,
+  config: VisionDelegationConfig,
+  signal: AbortSignal | undefined,
+  completeFn: typeof complete,
+): Promise<CachedResult> {
+  const failures: string[] = [];
+  for (const reference of references) {
+    if (signal?.aborted) throw aborted();
+    const [provider, id] = splitReference(reference);
+    const model = ctx.modelRegistry.find(provider, id);
+    if (!model || !isMultimodalModel(model)) { failures.push(`${reference}: unavailable or text-only`); continue; }
+    const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+    if (!auth.ok) { failures.push(`${reference}: authentication unavailable (${auth.error})`); continue; }
+    for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
+      const guard = completionGuard(signal, config.timeoutMs);
+      try {
+        const running = Promise.resolve().then(() => completeFn(model, {
+          systemPrompt: config.customPrompt,
+          messages: [{ role: "user", content: [
+            { type: "image", data: image.data, mimeType: image.mimeType },
+            { type: "text", text: prompt },
+          ], timestamp: Date.now() }],
+        }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: Math.min(model.maxTokens, 8_192), signal: guard.signal }));
+        void running.catch(() => undefined);
+        const response = await Promise.race([running, guard.deadline]);
+        return { text: assistantText(response), model: reference };
+      } catch (error) {
+        if (signal?.aborted) throw aborted();
+        const retryable = error instanceof VisionTimeoutError || isRetryableProviderError(message(error));
+        if (!retryable || attempt === config.maxRetries) { failures.push(`${reference}: ${message(error)}`); break; }
+        await delay(Math.min(config.retryBackoffMs * 2 ** attempt, MAX_RETRY_BACKOFF_MS), signal);
+      } finally { guard.dispose(); }
+    }
+  }
+  throw new Error(`no vision model succeeded (${failures.join("; ")})`);
+}
+
+function candidateReferences(ctx: ExtensionContext, config: VisionDelegationConfig): string[] {
+  const configured = [config.visionModel, ...config.fallbackModels].filter((value): value is string => typeof value === "string");
+  const automatic = ctx.modelRegistry.getAvailable().filter(isMultimodalModel).map((model) => `${model.provider}/${model.id}`);
+  return [...new Set([...configured, ...automatic])];
+}
+
+async function loadImage(source: string, cwd: string, maxBytes: number, signal?: AbortSignal): Promise<LoadedImage> {
+  const value = source.trim();
+  if (!value) throw new Error("image_path is empty");
+  let bytes: Buffer;
+  let mimeType: string | undefined;
+  let normalizedSource = value;
+  if (value.startsWith("data:")) {
+    const match = /^data:([^;,]+);base64,(.+)$/s.exec(value);
+    if (!match) throw new Error("image data URL must use base64 encoding");
+    mimeType = normalizeMime(match[1]);
+    bytes = Buffer.from(match[2], "base64");
+    normalizedSource = "data-url";
+  } else if (/^https?:\/\//i.test(value)) {
+    const remote = await remoteImage(value, maxBytes, signal);
+    bytes = remote.bytes;
+    mimeType = remote.mimeType;
+  } else {
+    const file = isAbsolute(value) ? value : resolve(cwd, value);
+    const stat = statSync(file);
+    if (!stat.isFile()) throw new Error(`image path is not a file: ${file}`);
+    if (stat.size > maxBytes) throw new Error(`image exceeds ${formatBytes(maxBytes)} limit`);
+    bytes = await readFile(file);
+    mimeType = extensionMime(extname(file));
+    normalizedSource = file;
+  }
+  if (signal?.aborted) throw aborted();
+  if (!bytes.length || bytes.length > maxBytes) throw new Error(`image is empty or exceeds ${formatBytes(maxBytes)} limit`);
+  mimeType = magicMime(bytes) ?? mimeType;
+  if (!mimeType || !SUPPORTED_MIME_TYPES.has(mimeType)) throw new Error("unsupported image format");
+  return { data: bytes.toString("base64"), mimeType, sourceHash: hash(bytes), source: normalizedSource };
+}
+
+function normalizeAttachedImage(input: AttachedImageInput, maxBytes: number): LoadedImage {
+  const mimeType = normalizeMime(input.mimeType);
+  const bytes = Buffer.from(input.data, "base64");
+  if (!mimeType || !SUPPORTED_MIME_TYPES.has(mimeType)) throw new Error(`unsupported attached image MIME type: ${input.mimeType}`);
+  if (!bytes.length || bytes.length > maxBytes) throw new Error(`attached image is empty or exceeds ${formatBytes(maxBytes)} limit`);
+  return { ...input, mimeType, sourceHash: hash(bytes), source: "attached-image" };
+}
+
+async function remoteImage(source: string, maxBytes: number, signal?: AbortSignal): Promise<{ bytes: Buffer; mimeType?: string }> {
+  let url = new URL(source);
+  const ssrf = loadSsrfConfig();
+  for (let redirects = 0; redirects <= 5; redirects += 1) {
+    const addresses = await dnsLookup(url.hostname, { all: true, verbatim: true });
+    if (!addresses.length) throw new Error(`image host ${url.hostname} resolved to no addresses`);
+    await validateRemoteUrl(url, { allowRanges: ssrf.allowRanges, trustEnvProxy: false, lookup: async () => addresses });
+    const response = await pinnedRequest(url, addresses[0].address, addresses[0].family, signal);
+    const status = response.statusCode ?? 0;
+    if ([301, 302, 303, 307, 308].includes(status) && typeof response.headers.location === "string") {
+      response.resume();
+      if (redirects === 5) throw new Error("too many redirects fetching image URL");
+      url = new URL(response.headers.location, url);
+      continue;
+    }
+    if (status < 200 || status >= 300) { response.resume(); throw new Error(`image URL returned HTTP ${status}`); }
+    const length = Number(Array.isArray(response.headers["content-length"]) ? response.headers["content-length"]?.[0] : response.headers["content-length"]);
+    if (Number.isFinite(length) && length > maxBytes) { response.destroy(); throw new Error(`image exceeds ${formatBytes(maxBytes)} limit`); }
+    const rawType = response.headers["content-type"];
+    const contentType = Array.isArray(rawType) ? rawType[0] : rawType;
+    return { bytes: await boundedResponse(response, maxBytes, signal), mimeType: normalizeMime(contentType?.split(";", 1)[0]) };
+  }
+  throw new Error("too many redirects fetching image URL");
+}
+
+function pinnedRequest(url: URL, address: string, family: number, signal?: AbortSignal): Promise<IncomingMessage> {
+  return new Promise((resolveResponse, reject) => {
+    const request = (url.protocol === "https:" ? httpsRequest : httpRequest)({
+      protocol: url.protocol,
+      hostname: address,
+      family,
+      port: url.port ? Number(url.port) : undefined,
+      method: "GET",
+      path: `${url.pathname}${url.search}`,
+      headers: { Host: url.host, Accept: "image/*" },
+      signal,
+      ...(url.protocol === "https:" ? { servername: url.hostname } : {}),
+    }, resolveResponse);
+    request.once("error", reject);
+    request.end();
+  });
+}
+
+async function boundedResponse(response: IncomingMessage, maxBytes: number, signal?: AbortSignal): Promise<Buffer> {
+  const chunks: Buffer[] = [];
+  let total = 0;
+  try {
+    for await (const raw of response) {
+      if (signal?.aborted) throw aborted();
+      const chunk = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+      total += chunk.length;
+      if (total > maxBytes) { response.destroy(); throw new Error(`image exceeds ${formatBytes(maxBytes)} limit`); }
+      chunks.push(chunk);
+    }
+  } catch (error) { response.destroy(); throw error; }
+  return Buffer.concat(chunks, total);
+}
+
+class VisionTimeoutError extends Error {
+  constructor(ms: number) { super(`vision request timed out after ${ms}ms`); this.name = "VisionTimeoutError"; }
+}
+
+function completionGuard(parent: AbortSignal | undefined, ms: number): { signal: AbortSignal; deadline: Promise<never>; dispose(): void } {
+  const controller = new AbortController();
+  let rejectDeadline: (error: Error) => void = () => undefined;
+  const deadline = new Promise<never>((_resolve, reject) => { rejectDeadline = reject; });
+  const onAbort = () => { controller.abort(parent?.reason); rejectDeadline(aborted()); };
+  if (parent?.aborted) queueMicrotask(onAbort); else parent?.addEventListener("abort", onAbort, { once: true });
+  const timer = setTimeout(() => { const error = new VisionTimeoutError(ms); controller.abort(error); rejectDeadline(error); }, ms);
+  return { signal: controller.signal, deadline, dispose() { clearTimeout(timer); parent?.removeEventListener("abort", onAbort); } };
+}
+
+async function delay(ms: number, signal?: AbortSignal): Promise<void> {
+  if (ms <= 0) return;
+  await new Promise<void>((resolveDelay, reject) => {
+    if (signal?.aborted) return reject(aborted());
+    let timer: ReturnType<typeof setTimeout>;
+    const cleanup = () => signal?.removeEventListener("abort", onAbort);
+    const onAbort = () => { clearTimeout(timer); cleanup(); reject(aborted()); };
+    timer = setTimeout(() => { cleanup(); resolveDelay(); }, ms);
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function assistantText(response: Awaited<ReturnType<typeof complete>>): string {
+  if (response.stopReason === "error" || response.stopReason === "aborted") throw new Error(response.errorMessage ?? `vision model stopped with ${response.stopReason}`);
+  const text = response.content.flatMap((block) => block.type === "text" ? [block.text] : []).join("\n\n").trim();
+  if (!text) throw new Error("vision model returned no text content");
+  return text;
+}
+
+function toolController(pi: ExtensionAPI): ToolController | undefined {
+  const candidate = pi as Partial<ToolController>;
+  return typeof candidate.getActiveTools === "function" && typeof candidate.setActiveTools === "function" ? candidate as ToolController : undefined;
+}
+
+function toolError(text: string, code: string): VisionToolResult {
+  return { content: [{ type: "text", text }], details: { mode: "delegate", error: code }, isError: true };
+}
+
+function defaultConfig(): VisionDelegationConfig {
+  return { enabled: true, cache: { enabled: true, maxEntries: 50 }, fallbackModels: [], maxRetries: 2, retryBackoffMs: 500, timeoutMs: 30_000, maxImageBytes: 20 * 1024 * 1024 };
+}
+
+function normalizeConfig(config: VisionDelegationConfig): VisionDelegationConfig {
+  return {
+    enabled: config.enabled === true,
+    ...(modelReference(config.visionModel) ? { visionModel: config.visionModel.trim() } : {}),
+    ...(config.customPrompt?.trim() ? { customPrompt: config.customPrompt.trim() } : {}),
+    cache: { enabled: config.cache?.enabled !== false, maxEntries: integer(config.cache?.maxEntries, 50, 1, 1_000) },
+    fallbackModels: modelReferences(config.fallbackModels),
+    maxRetries: integer(config.maxRetries, 2, 0, 10),
+    retryBackoffMs: integer(config.retryBackoffMs, 500, 0, MAX_RETRY_BACKOFF_MS),
+    timeoutMs: integer(config.timeoutMs, 30_000, 1_000, 300_000),
+    maxImageBytes: integer(config.maxImageBytes, 20 * 1024 * 1024, 1_024, 64 * 1024 * 1024),
+  };
+}
+
+function modelReferences(value: unknown): string[] { return Array.isArray(value) ? [...new Set(value.filter(modelReference).map((v) => v.trim()))] : []; }
+function modelReference(value: unknown): value is string { if (typeof value !== "string") return false; const slash = value.trim().indexOf("/"); return slash > 0 && slash < value.trim().length - 1; }
+function splitReference(value: string): [string, string] { const slash = value.indexOf("/"); return [value.slice(0, slash), value.slice(slash + 1)]; }
+function integer(value: unknown, fallback: number, min: number, max: number): number { return typeof value === "number" && Number.isInteger(value) ? Math.min(max, Math.max(min, value)) : fallback; }
+function normalizeMime(value: string | undefined): string | undefined { if (!value) return undefined; const lower = value.toLowerCase(); return lower === "image/jpg" ? "image/jpeg" : lower; }
+function extensionMime(value: string): string | undefined { return ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" } as Record<string, string>)[value.toLowerCase()]; }
+function magicMime(bytes: Buffer): string | undefined {
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) return "image/png";
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return "image/jpeg";
+  const prefix = bytes.subarray(0, 6).toString("ascii");
+  if (prefix === "GIF87a" || prefix === "GIF89a") return "image/gif";
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString("ascii") === "RIFF" && bytes.subarray(8, 12).toString("ascii") === "WEBP") return "image/webp";
+  return undefined;
+}
+function hash(bytes: Buffer): string { return createHash("sha256").update(bytes).digest("hex"); }
+function formatBytes(bytes: number): string { return `${Math.ceil(bytes / 1024 / 1024)}MB`; }
+function message(error: unknown): string { return error instanceof Error ? error.message : String(error); }
+function aborted(): Error { const error = new Error("Vision delegation aborted"); error.name = "AbortError"; return error; }
+function record(value: unknown): value is Record<string, unknown> { return typeof value === "object" && value !== null && !Array.isArray(value); }

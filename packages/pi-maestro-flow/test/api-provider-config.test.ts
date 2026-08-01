@@ -95,6 +95,44 @@ test("adds multiple models under one Provider and deletes only the selected mode
   assert.equal(saved.providers["maestro-openai"], undefined);
 });
 
+test("persists explicit multimodal capability and preserves it when omitted", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-multimodal-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const base = {
+    provider: "maestro-openai" as const,
+    baseUrl: "https://gateway.example.com/v1",
+    apiKey: "secret",
+  };
+
+  await saveApiProviderSettings({
+    ...base,
+    modelId: "text-only",
+    reasoning: true,
+    multimodal: false,
+  }, modelsPath);
+  await saveApiProviderSettings({
+    ...base,
+    modelId: "vision",
+    reasoning: true,
+    multimodal: true,
+  }, modelsPath);
+
+  let saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(saved.providers["maestro-openai"].models[0].input, ["text"]);
+  assert.deepEqual(saved.providers["maestro-openai"].models[1].input, ["text", "image"]);
+  assert.equal((await loadApiProviderSettings("maestro-openai", modelsPath, "text-only")).multimodal, false);
+  assert.equal((await loadApiProviderSettings("maestro-openai", modelsPath, "vision")).multimodal, true);
+
+  await saveApiProviderSettings({
+    ...base,
+    modelId: "text-only",
+    reasoning: false,
+  }, modelsPath);
+  saved = JSON.parse(readFileSync(modelsPath, "utf8"));
+  assert.deepEqual(saved.providers["maestro-openai"].models[0].input, ["text"]);
+});
+
 test("keeps Providers flat when the same API format uses different URLs", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-flat-format-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
@@ -577,6 +615,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   const selectAnswers = [
     "启用：minimal / low / medium / high / xhigh / max",
     "max",
+    "启用：支持图片输入",
   ];
   const selectOptions: string[][] = [];
   const notifications: Array<{ type: string; message: string }> = [];
@@ -677,7 +716,7 @@ test("/api-manager edits a concrete OpenAI model and shows its API format", asyn
     setThinkingLevel() {},
   } as any, { modelsPath });
   const inputs = ["https://gateway.example.com/v1", "model-a", "333000", "64000", "openai-secret"];
-  const selections = ["model-a", "关闭：仅 off", "off"];
+  const selections = ["model-a", "关闭：仅 off", "off", "启用：支持图片输入"];
   const rendered: string[][] = [];
   const confirmations: string[] = [];
   await commands.get("api-manager").handler("set openai", {
@@ -1048,6 +1087,7 @@ test("/api-manager qwen creates an OpenAI-compatible provider and default model"
   const selectAnswers = [
     "启用：off / minimal / low / medium / high / xhigh / max",
     "high",
+    "启用：支持图片输入",
   ];
   const selectOptions: string[][] = [];
   const command = commands.get("api-manager");
@@ -1912,6 +1952,7 @@ test("/api-manager creates a user-defined Provider with a free-form id and chose
     "支持",
     "max_tokens",
     "强制 Bearer（authHeader=true）",
+    "启用：支持图片输入",
   ];
   const notifications: Array<{ type: string; message: string }> = [];
   const command = commands.get("api-manager");
@@ -2114,6 +2155,7 @@ test("/api-manager leaves compat/headers unset on the auto path so pi detects xa
     "自动（按 URL 识别，推荐）",
     "自动（按 URL 识别）",
     "自动（按 URL 识别）",
+    "启用：支持图片输入",
   ];
   const confirmAnswers = [false, true];
   const command = commands.get("api-manager");

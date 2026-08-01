@@ -72,6 +72,8 @@ export interface ApiProviderSettings {
   modelId: string;
   contextWindow?: number;
   reasoning: boolean;
+  /** Whether the model supports multimodal input (text + image). Derived from model.input array. */
+  multimodal?: boolean;
   apiKey: string;
   maxThinking?: boolean;
   /** API protocol. Required for user-defined Providers; presets derive it from PROVIDERS. */
@@ -325,6 +327,7 @@ export async function loadApiProviderSettings(
       ? model.contextWindow
       : preset?.contextWindow ?? 128_000,
     reasoning: typeof model?.reasoning === "boolean" ? model.reasoning : true,
+    multimodal: Array.isArray(model?.input) ? model.input.includes("image") : true,
     apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
     maxThinking: thinkingLevelMap.xhigh === "max" || thinkingLevelMap.max === "max",
     api,
@@ -350,6 +353,7 @@ export async function saveApiProviderSettings(
       ? undefined
       : positiveInteger(settings.contextWindow, "上下文窗口 contextWindow"),
     reasoning: settings.reasoning,
+    multimodal: settings.multimodal,
     apiKey: required(settings.apiKey ?? "", "API key config"),
     maxThinking: settings.maxThinking === true,
     api: settings.api,
@@ -767,6 +771,14 @@ async function configurePresetModelWithSteps(
   const keyInput = await ctx.ui.input(`${provider.name} API key`, "");
   if (keyInput === undefined) return;
   const apiKey = required(keyInput, "API key");
+  const multimodalChoice = await ctx.ui.select(
+    "多模态（视觉）支持",
+    current.multimodal !== false
+      ? ["启用：支持图片输入", "关闭：仅文本"]
+      : ["关闭：仅文本", "启用：支持图片输入"],
+  );
+  if (!multimodalChoice) return;
+  const multimodal = multimodalChoice.startsWith("启用");
 
   const confirmed = await ctx.ui.confirm(
     `保存 ${provider.name} API 配置？`,
@@ -779,6 +791,7 @@ async function configurePresetModelWithSteps(
       `单次最大输出 maxTokens：${maxTokens.toLocaleString("en-US")} Token`,
       ...compactionPreviewLines(ctx.cwd, contextWindow, maxTokens),
       `Reasoning：${reasoningChoice === enabledLabel ? "enabled" : "disabled"}`,
+      `多模态（视觉）：${multimodal ? "enabled" : "disabled"}`,
       `Default thinking（当前 model）：${defaultThinkingLevel}`,
       "Auth：stored API key",
     ].join("\n"),
@@ -794,6 +807,7 @@ async function configurePresetModelWithSteps(
       contextWindow,
       maxTokens,
       reasoning,
+      multimodal,
       apiKey,
       maxThinking,
     };
@@ -1006,6 +1020,14 @@ async function configureCustomModelWithSteps(
   const keyInput = await ctx.ui.input(`${displayName} API key`, "");
   if (keyInput === undefined) return;
   const apiKey = required(keyInput, "API key");
+  const multimodalChoice = await ctx.ui.select(
+    "多模态（视觉）支持",
+    current.multimodal !== false
+      ? ["启用：支持图片输入", "关闭：仅文本"]
+      : ["关闭：仅文本", "启用：支持图片输入"],
+  );
+  if (!multimodalChoice) return;
+  const multimodal = multimodalChoice.startsWith("启用");
 
   const confirmed = await ctx.ui.confirm(
     `保存 Provider ${displayName}？`,
@@ -1018,6 +1040,7 @@ async function configureCustomModelWithSteps(
       `单次最大输出 maxTokens：${maxTokens.toLocaleString("en-US")} Token`,
       ...compactionPreviewLines(ctx.cwd, contextWindow, maxTokens),
       `Reasoning：${reasoning ? "enabled" : "disabled"}`,
+      `多模态（视觉）：${multimodal ? "enabled" : "disabled"}`,
       `Default thinking（当前 model）：${defaultThinkingLevel}`,
       `Compat：${compat ? JSON.stringify(compat) : "自动"}`,
       `请求头：${Object.keys(headers).length > 0 ? Object.keys(headers).join(", ") : "无"}`,
@@ -1035,6 +1058,7 @@ async function configureCustomModelWithSteps(
       contextWindow,
       maxTokens,
       reasoning,
+      multimodal,
       apiKey,
       maxThinking,
       api,
@@ -1120,6 +1144,13 @@ async function configurePresetModelWithForm(
       },
       { id: "contextWindow", label: "上下文窗口", kind: "number", value: String(current.contextWindow) },
       { id: "maxTokens", label: "单次最大输出", kind: "number", value: String(current.maxTokens) },
+      {
+        id: "multimodal",
+        label: "多模态（视觉）",
+        kind: "toggle",
+        value: current.multimodal !== false,
+        help: "开启时写入 input: [text, image]；关闭时写入 input: [text]，用于视觉委托能力判断。",
+      },
     ],
     validate: (values) => validateApiModelForm(
       values,
@@ -1136,6 +1167,7 @@ async function configurePresetModelWithForm(
     : parseModelIdList(formText(result.values, "modelId"));
   const targetProviderId = provider.id;
   const reasoning = formBoolean(result.values, "reasoning");
+  const multimodal = formBooleanOrDefault(result.values, "multimodal", current.multimodal !== false);
   const defaultThinkingLevel = formThinkingLevel(result.values, "defaultThinking");
   const contextWindow = positiveInteger(formText(result.values, "contextWindow"), "上下文窗口 contextWindow");
   const maxTokens = positiveInteger(formText(result.values, "maxTokens"), "单次最大输出 maxTokens");
@@ -1152,6 +1184,7 @@ async function configurePresetModelWithForm(
       contextWindow,
       maxTokens,
       reasoning,
+      multimodal,
       defaultThinkingLevel,
       cwd: ctx.cwd,
     }),
@@ -1166,6 +1199,7 @@ async function configurePresetModelWithForm(
       contextWindow,
       maxTokens,
       reasoning,
+      multimodal,
       apiKey,
       maxThinking,
     };
@@ -1318,6 +1352,13 @@ async function configureCustomModelWithForm(
       },
       { id: "contextWindow", label: "上下文窗口", kind: "number", value: String(current.contextWindow) },
       { id: "maxTokens", label: "单次最大输出", kind: "number", value: String(current.maxTokens) },
+      {
+        id: "multimodal",
+        label: "多模态（视觉）",
+        kind: "toggle",
+        value: current.multimodal !== false,
+        help: "开启时写入 input: [text, image]；关闭时写入 input: [text]，用于视觉委托能力判断。",
+      },
     ],
     validate: (values) => {
       const errors = validateApiModelForm(
@@ -1344,6 +1385,7 @@ async function configureCustomModelWithForm(
     : parseModelIdList(formText(result.values, "modelId"));
   const targetProviderId = providerId;
   const reasoning = formBoolean(result.values, "reasoning");
+  const multimodal = formBooleanOrDefault(result.values, "multimodal", current.multimodal !== false);
   const defaultThinkingLevel = formThinkingLevel(result.values, "defaultThinking");
   const contextWindow = positiveInteger(formText(result.values, "contextWindow"), "上下文窗口 contextWindow");
   const maxTokens = positiveInteger(formText(result.values, "maxTokens"), "单次最大输出 maxTokens");
@@ -1369,6 +1411,7 @@ async function configureCustomModelWithForm(
         contextWindow,
         maxTokens,
         reasoning,
+        multimodal,
         defaultThinkingLevel,
         cwd: ctx.cwd,
       }),
@@ -1387,6 +1430,7 @@ async function configureCustomModelWithForm(
       contextWindow,
       maxTokens,
       reasoning,
+      multimodal,
       apiKey,
       maxThinking,
       api,
@@ -1432,6 +1476,7 @@ interface ModelSavePreviewInput {
   contextWindow: number;
   maxTokens: number;
   reasoning: boolean;
+  multimodal: boolean;
   defaultThinkingLevel: ApiThinkingLevel;
   cwd: string;
 }
@@ -1446,6 +1491,7 @@ function modelSavePreview(input: ModelSavePreviewInput): string {
     `单次最大输出 maxTokens：${input.maxTokens.toLocaleString("en-US")} Token`,
     ...compactionPreviewLines(input.cwd, input.contextWindow, input.maxTokens),
     `Reasoning：${input.reasoning ? "enabled" : "disabled"}`,
+    `多模态（视觉）：${input.multimodal ? "enabled" : "disabled"}`,
     `Default thinking（当前 model）：${input.defaultThinkingLevel}`,
     "Auth：stored API key",
     "隔离：同 Provider 下所有模型共享 URL 与 API key",
@@ -1543,6 +1589,11 @@ function formBoolean(values: ApiModelFormValues, id: string): boolean {
   const value = values[id];
   if (typeof value !== "boolean") throw new Error(`表单字段 ${id} 无效`);
   return value;
+}
+
+function formBooleanOrDefault(values: ApiModelFormValues, id: string, fallback: boolean): boolean {
+  const value = values[id];
+  return typeof value === "boolean" ? value : fallback;
 }
 
 function formThinkingLevel(values: ApiModelFormValues, id: string): ApiThinkingLevel {
@@ -1809,6 +1860,7 @@ async function appendListLines(
       `ctx ${typeof model.contextWindow === "number" ? model.contextWindow.toLocaleString("en-US") : "?"}`,
       `max ${typeof model.maxTokens === "number" ? model.maxTokens.toLocaleString("en-US") : "?"}`,
       `reasoning=${model.reasoning === true ? "on" : "off"}`,
+      `vision=${Array.isArray(model.input) && model.input.includes("image") ? "on" : "off"}`,
       `default: ${level ?? "global"}`,
     ].join(" · "));
   }
@@ -1866,6 +1918,7 @@ async function showProvider(
         ? compactionPreviewLines(ctx.cwd, model.contextWindow, model.maxTokens)
         : []),
       `Reasoning：${model.reasoning === true ? "enabled" : "disabled"}`,
+      `多模态（视觉）：${Array.isArray(model.input) && model.input.includes("image") ? "enabled" : "disabled"}`,
       `Default thinking：${level ?? "global"}`,
       `Auth：${authSource(config.apiKey)}`,
       `文件：${modelsPath}`,
@@ -1875,7 +1928,7 @@ async function showProvider(
   const modelLines = await Promise.all(models.map(async (model) => {
     const id = typeof model.id === "string" ? model.id : "<invalid>";
     const level = id === "<invalid>" ? undefined : await loadModelThinkingDefault(providerId, id, defaultsPath);
-    return `- ${id} · reasoning=${model.reasoning === true ? "enabled" : "disabled"} · default=${level ?? "global"}`;
+    return `- ${id} · reasoning=${model.reasoning === true ? "enabled" : "disabled"} · vision=${Array.isArray(model.input) && model.input.includes("image") ? "on" : "off"} · default=${level ?? "global"}`;
   }));
   ctx.ui.notify([
     displayName,
@@ -1914,12 +1967,20 @@ async function writeApiProviderSettings(
   const maxTokens = settings.maxTokens
     ?? (typeof existingModel.maxTokens === "number" ? existingModel.maxTokens : defaults.maxTokens);
   validateModelWindow(contextWindow, maxTokens);
+  const input = settings.multimodal === undefined
+    ? Array.isArray(existingModel.input)
+        && existingModel.input.every((value) => value === "text" || value === "image")
+      ? [...existingModel.input]
+      : ["text", "image"]
+    : settings.multimodal
+      ? ["text", "image"]
+      : ["text"];
   const nextModel: Record<string, unknown> = {
     ...existingModel,
     id: settings.modelId,
     name: typeof existingModel.name === "string" ? existingModel.name : settings.modelId,
     reasoning: settings.reasoning,
-    input: Array.isArray(existingModel.input) ? existingModel.input : ["text", "image"],
+    input,
     contextWindow,
     maxTokens,
   };

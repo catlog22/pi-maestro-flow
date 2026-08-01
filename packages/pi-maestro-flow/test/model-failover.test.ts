@@ -14,15 +14,20 @@ import {
 
 type Handler = (event: any, ctx: ExtensionContext) => unknown;
 
-function harness(cwd: string, breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 })) {
+function harness(
+  cwd: string,
+  breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 }),
+  options: { multimodal?: string[]; visionAnalyzer?: any } = {},
+) {
   const handlers = new Map<string, Handler[]>();
   const commands: string[] = [];
   const selected: string[] = [];
   const notifications: string[] = [];
+  const multimodal = new Set(options.multimodal ?? []);
   const models = [
-    { provider: "provider", id: "primary" },
-    { provider: "provider", id: "backup" },
-    { provider: "provider", id: "last" },
+    { provider: "provider", id: "primary", input: multimodal.has("provider/primary") ? ["text", "image"] : ["text"] },
+    { provider: "provider", id: "backup", input: multimodal.has("provider/backup") ? ["text", "image"] : ["text"] },
+    { provider: "provider", id: "last", input: multimodal.has("provider/last") ? ["text", "image"] : ["text"] },
   ];
   const ctx = {
     cwd,
@@ -48,9 +53,16 @@ function harness(cwd: string, breaker = new ModelCircuitBreaker({ threshold: 1, 
     },
   } as unknown as ExtensionAPI;
 
-  registerModelFailover(pi, { breaker, homeDir: path.join(cwd, "home") });
+  registerModelFailover(pi, {
+    breaker,
+    homeDir: path.join(cwd, "home"),
+    visionAgentDir: path.join(cwd, "home", ".pi", "agent"),
+    ...(options.visionAnalyzer ? { visionAnalyzer: options.visionAnalyzer } : {}),
+  });
   const emit = async (event: string, payload: any = {}) => {
-    for (const handler of handlers.get(event) ?? []) await handler({ type: event, ...payload }, ctx);
+    let result: unknown;
+    for (const handler of handlers.get(event) ?? []) result = await handler({ type: event, ...payload }, ctx);
+    return result;
   };
   return { breaker, commands, ctx, emit, notifications, selected };
 }
@@ -102,6 +114,50 @@ test("model failover config merges global and project chains without accepting m
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
+});
+
+test("attached images prefer a healthy multimodal fallback", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-vision-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup", "provider/last"] } });
+    let delegated = 0;
+    const runtime = harness(cwd, undefined, {
+      multimodal: ["provider/last"],
+      visionAnalyzer: async () => { delegated += 1; return { text: "unused", model: "helper/vision", cached: false }; },
+    });
+    await runtime.emit("session_start");
+    const result = await runtime.emit("before_agent_start", {
+      prompt: "inspect",
+      images: [{ type: "image", data: Buffer.from("image").toString("base64"), mimeType: "image/png" }],
+    });
+    assert.equal(result, undefined);
+    assert.deepEqual(runtime.selected, ["provider/last"]);
+    assert.equal(delegated, 0);
+    assert.match(runtime.notifications[0] ?? "", /multimodal provider\/last/);
+    await runtime.emit("session_shutdown");
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("attached images inject delegated analysis when the configured chain is text-only", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-helper-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+    let delegated = 0;
+    const runtime = harness(cwd, undefined, {
+      visionAnalyzer: async () => { delegated += 1; return { text: "A disabled checkbox is visible.", model: "helper/vision", cached: false }; },
+    });
+    await runtime.emit("session_start");
+    const result = await runtime.emit("before_agent_start", {
+      prompt: "inspect",
+      images: [{ type: "image", data: Buffer.from("image").toString("base64"), mimeType: "image/png" }],
+    }) as { message?: { customType?: string; content?: string; display?: boolean } };
+    assert.equal(delegated, 1);
+    assert.equal(result.message?.customType, "maestro-vision-analysis");
+    assert.equal(result.message?.display, false);
+    assert.match(result.message?.content ?? "", /disabled checkbox/);
+    assert.deepEqual(runtime.selected, []);
+    await runtime.emit("session_shutdown");
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
 });
 
 test("retryable agent failure switches model before Pi performs its own continuation", async () => {

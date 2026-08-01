@@ -28,6 +28,7 @@ interface FailoverTheme {
 export interface ModelFailoverOverlayParams {
   cwd: string;
   models: readonly string[];
+  multimodalModels?: readonly string[];
   currentModel?: string;
   config: ModelFailoverConfig;
   health: readonly ModelCircuitSnapshot[];
@@ -60,6 +61,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
   private readonly config: ModelFailoverConfig;
   private readonly primaries: string[];
   private readonly health = new Map<string, ModelCircuitSnapshot>();
+  private readonly multimodalModels = new Set<string>();
 
   constructor(private readonly params: ModelFailoverOverlayParams) {
     this.config = {
@@ -74,6 +76,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
       ...params.models,
     ])];
     for (const entry of params.health) this.health.set(entry.model, entry);
+    for (const model of params.multimodalModels ?? []) this.multimodalModels.add(model);
   }
 
   invalidate(): void {}
@@ -210,7 +213,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
     return models.slice(start, start + MAX_VISIBLE).map((model, offset) => {
       const selected = start + offset === this.primarySelected;
       const current = model === this.params.currentModel ? " current" : "";
-      return fit(`${selected && this.pane === "primary" ? this.params.theme.fg("accent", "›") : " "} ${selected ? this.params.theme.bold(model) : model}${this.params.theme.fg("dim", current)} ${this.healthBadge(model)}`, width);
+      return fit(`${selected && this.pane === "primary" ? this.params.theme.fg("accent", "›") : " "} ${selected ? this.params.theme.bold(model) : model}${this.params.theme.fg("dim", current)} ${this.capabilityBadge(model)} ${this.healthBadge(model)}`, width);
     });
   }
 
@@ -225,7 +228,7 @@ export class ModelFailoverOverlay implements Component, Focusable {
       const state = row.included
         ? this.params.theme.fg("success", `${row.priority}.`)
         : this.params.theme.fg("dim", "○");
-      return fit(`${marker} ${state} ${selected ? this.params.theme.bold(row.model) : row.model} ${this.healthBadge(row.model)}`, width);
+      return fit(`${marker} ${state} ${selected ? this.params.theme.bold(row.model) : row.model} ${this.capabilityBadge(row.model)} ${this.healthBadge(row.model)}`, width);
     });
   }
 
@@ -356,6 +359,10 @@ export class ModelFailoverOverlay implements Component, Focusable {
     return "已同步";
   }
 
+  private capabilityBadge(model: string): string {
+    return this.multimodalModels.has(model) ? this.params.theme.fg("accent", "[vision]") : "";
+  }
+
   private healthBadge(model: string): string {
     const health = this.health.get(model);
     if (!health) return "";
@@ -399,10 +406,14 @@ export async function showModelFailoverOverlay(
 ): Promise<boolean> {
   const available = ctx.modelRegistry.getAvailable();
   const models = available.map((model) => `${model.provider}/${model.id}`);
+  const multimodalModels = available
+    .filter((model) => model.input.includes("image"))
+    .map((model) => `${model.provider}/${model.id}`);
   const currentModel = ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
   return ctx.ui.custom<boolean>((tui, theme, _keybindings, done) => new ModelFailoverOverlay({
     cwd: ctx.cwd,
     models,
+    multimodalModels,
     currentModel,
     config: loadModelFailoverConfig(ctx.cwd),
     health: breaker.snapshot(),

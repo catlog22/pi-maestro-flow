@@ -21,6 +21,7 @@ function createOverlay(overrides: Partial<ConstructorParameters<typeof ModelFail
   return new ModelFailoverOverlay({
     cwd: "D:/workspace",
     models: ["provider/primary", "provider/backup", "provider/last"],
+    multimodalModels: ["provider/last"],
     currentModel: "provider/primary",
     config: {
       enabled: false,
@@ -58,6 +59,7 @@ test("model failover TUI renders without overflow from tiny through wide termina
   const rendered = overlay.render(100).join("\n");
   assert.match(rendered, /模型故障转移/);
   assert.match(rendered, /provider\/primary/);
+  assert.match(rendered, /\[vision\]/);
   assert.match(rendered, /OPEN/);
 });
 

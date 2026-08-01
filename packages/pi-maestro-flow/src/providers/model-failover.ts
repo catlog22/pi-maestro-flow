@@ -4,6 +4,12 @@ import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+  analyzeAttachedImage,
+  isMultimodalModel,
+  registerVisionDelegation,
+  type AttachedImageInput,
+} from "./vision-assist.ts";
+import {
   isRetryableProviderError,
   sharedModelCircuitBreaker,
   type AcquiredModelCandidate,
@@ -29,6 +35,8 @@ interface ActiveModelRun {
 export interface ModelFailoverOptions {
   breaker?: ModelCircuitBreaker;
   homeDir?: string;
+  visionAgentDir?: string;
+  visionAnalyzer?: typeof analyzeAttachedImage;
 }
 
 const CONFIG_FILE = "model-failover.json";
@@ -137,6 +145,29 @@ function availableModels(ctx: ExtensionContext): Map<string, ReturnType<Extensio
   return new Map(ctx.modelRegistry.getAvailable().map((model) => [`${model.provider}/${model.id}`, model]));
 }
 
+function attachedImages(event: unknown): AttachedImageInput[] {
+  if (!isRecord(event) || !Array.isArray(event.images)) return [];
+  return event.images.flatMap((image) =>
+    isRecord(image) && typeof image.data === "string" && typeof image.mimeType === "string"
+      ? [{ data: image.data, mimeType: image.mimeType }]
+      : []
+  );
+}
+
+function prioritizeMultimodalChain(
+  chain: string[],
+  models: Map<string, ReturnType<ExtensionContext["modelRegistry"]["getAvailable"]>[number]>,
+): string[] {
+  return [
+    ...chain.filter((reference) => isMultimodalModel(models.get(reference))),
+    ...chain.filter((reference) => !isMultimodalModel(models.get(reference))),
+  ];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function formatModelHealth(breaker: ModelCircuitBreaker): string {
   const snapshots = breaker.snapshot();
   if (snapshots.length === 0) return "No model health observations in this Pi process.";
@@ -148,7 +179,9 @@ export function formatModelHealth(breaker: ModelCircuitBreaker): string {
 }
 
 export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOptions = {}): void {
+  if (typeof (pi as { registerTool?: unknown }).registerTool === "function") registerVisionDelegation(pi);
   const breaker = options.breaker ?? sharedModelCircuitBreaker;
+  const visionAnalyzer = options.visionAnalyzer ?? analyzeAttachedImage;
   let active: ActiveModelRun | undefined;
   let config = emptyConfig();
 
@@ -216,7 +249,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     active = undefined;
   });
 
-  pi.on("before_agent_start", async (_event, ctx) => {
+  pi.on("before_agent_start", async (event, ctx) => {
     config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
     if (active && !active.failureRecorded) breaker.releaseCandidate(active.acquisition);
     active = undefined;
@@ -224,21 +257,54 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
 
     const current = modelKey(ctx.model);
     if (!current) return;
-    const chain = [...new Set([current, ...(config.fallbackModels[current] ?? [])])];
-    const acquisition = breaker.acquireCandidate(current);
-    if (acquisition.allowed) {
-      active = {
-        chain,
-        index: 0,
-        model: current,
-        acquisition,
-        used: false,
-        failureRecorded: false,
-      };
-      return;
+    const baseChain = [...new Set([current, ...(config.fallbackModels[current] ?? [])])];
+    const images = attachedImages(event);
+    let injectedMessage: { message: { customType: string; content: string; display: boolean } } | undefined;
+
+    if (images.length > 0 && !isMultimodalModel(ctx.model)) {
+      const models = availableModels(ctx);
+      const visionChain = prioritizeMultimodalChain(baseChain, models);
+      if (visionChain.some((reference) => isMultimodalModel(models.get(reference)))) {
+        const preferred = await selectCandidate(ctx, visionChain, 0);
+        if (preferred && isMultimodalModel(models.get(preferred.model))) {
+          active = preferred;
+          ctx.ui.notify(`Attached image detected; switched from text-only ${current} to multimodal ${preferred.model}.`, "info");
+          return;
+        }
+      }
+
+      const analyses: string[] = [];
+      for (const [index, image] of images.entries()) {
+        try {
+          const result = await visionAnalyzer(ctx, image, {
+            agentDir: options.visionAgentDir,
+            prompt: `Analyze attached image ${index + 1} for the primary coding agent. Extract visible text, structure, UI state, diagrams, and details relevant to the user's request.`,
+          });
+          analyses.push(`### Attached image ${index + 1} (${result.model})\n${result.text}`);
+        } catch (error) {
+          ctx.ui.notify(`Automatic vision analysis failed for attached image ${index + 1}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+        }
+      }
+      if (analyses.length > 0) {
+        injectedMessage = {
+          message: {
+            customType: "maestro-vision-analysis",
+            content: ["Automatic multimodal analysis for the text-only primary model:", ...analyses].join("\n\n"),
+            display: false,
+          },
+        };
+      }
     }
 
-    const fallback = await selectCandidate(ctx, chain, 1);
+    const chain = images.length > 0 ? prioritizeMultimodalChain(baseChain, availableModels(ctx)) : baseChain;
+    const currentIndex = chain.indexOf(current);
+    const acquisition = breaker.acquireCandidate(current);
+    if (acquisition.allowed) {
+      active = { chain, index: currentIndex >= 0 ? currentIndex : 0, model: current, acquisition, used: false, failureRecorded: false };
+      return injectedMessage;
+    }
+
+    const fallback = await selectCandidate(ctx, chain, 0);
     if (fallback) {
       active = fallback;
       ctx.ui.notify(`Model circuit open for ${current}; switched to ${fallback.model}.`, "warning");
@@ -249,6 +315,7 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         "warning",
       );
     }
+    return injectedMessage;
   });
 
   pi.on("turn_start", () => {
