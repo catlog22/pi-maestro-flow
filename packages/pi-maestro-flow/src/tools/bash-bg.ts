@@ -11,12 +11,15 @@ import {
 } from "pi-maestro-teammate/v1/observation";
 import { toolCallLine, toolResultLine, resultFirstLine } from "../quiet-render.ts";
 import { Type } from "typebox";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 
 const MAX_TAIL_BYTES = 64 * 1024;
+const MAX_LOG_BYTES = 16 * 1024 * 1024;
+const MAX_ACTIVE_JOBS = 16;
+const MAX_RETAINED_COMPLETED_JOBS = 64;
 const MAX_SNAPSHOT_TAIL_LINES = 200;
 const SNAPSHOT_THROTTLE_MS = 100;
 const OUTPUT_DRAIN_GRACE_MS = 100;
@@ -80,13 +83,16 @@ interface Job {
   exitCode: number | null;
   done: boolean;
   stopRequested: boolean;
-  child: ChildProcess;
   tail: string;
   tailTruncated: boolean;
   outputBytes: number;
+  logBytes: number;
+  logLimitBytes: number;
+  logTruncated: boolean;
   background: boolean;
   completionNotified: boolean;
   outputFinalized: boolean;
+  cachedSnapshot?: BashBgJobSnapshot;
   outputDrainTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -109,7 +115,7 @@ function tailOutput(job: Job, lines: number): TailOutput {
   const allLines = content.split("\n");
   return {
     text: allLines.slice(-lines).join("\n"),
-    truncated: job.tailTruncated || allLines.length > lines,
+    truncated: job.tailTruncated || job.logTruncated || allLines.length > lines,
   };
 }
 
@@ -120,7 +126,8 @@ function jobStatus(job: Job): BashBgJobStatus {
 }
 
 function jobSnapshot(job: Job): BashBgJobSnapshot {
-  return {
+  if (job.outputFinalized && job.cachedSnapshot) return job.cachedSnapshot;
+  const snapshot: BashBgJobSnapshot = {
     id: job.id,
     command: job.command,
     cwd: job.cwd,
@@ -134,6 +141,8 @@ function jobSnapshot(job: Job): BashBgJobSnapshot {
     outputBytes: job.outputBytes,
     logPath: job.outFile,
   };
+  if (job.outputFinalized) job.cachedSnapshot = snapshot;
+  return snapshot;
 }
 
 function shellQuote(value: string): string {
@@ -150,7 +159,11 @@ function viewLogCommand(job: Job): string {
 }
 
 function logAccess(job: Job): string {
-  return `log: ${job.outFile}\nview: ${viewLogCommand(job)}`;
+  return [
+    `log: ${job.outFile}`,
+    ...(job.logTruncated ? [`log retention: truncated at ${job.logLimitBytes} bytes`] : []),
+    `view: ${viewLogCommand(job)}`,
+  ].join("\n");
 }
 
 function appendLogAccess(text: string, job: Job, truncated: boolean): string {
@@ -194,8 +207,18 @@ function killTree(pid: number): void {
  *
  * Output is captured via pipes (inherited-fd stdio breaks under pi's jiti loader).
  */
-export function registerBashBg(pi: ExtensionAPI): void {
-  const baseDir = path.join(os.tmpdir(), "pi-bash-bg");
+export interface RegisterBashBgOptions {
+  maxActiveJobs?: number;
+  maxRetainedCompletedJobs?: number;
+  maxLogBytes?: number;
+}
+
+export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions = {}): void {
+  const maxActiveJobs = options.maxActiveJobs ?? MAX_ACTIVE_JOBS;
+  const maxRetainedCompletedJobs = options.maxRetainedCompletedJobs ?? MAX_RETAINED_COMPLETED_JOBS;
+  const maxLogBytes = options.maxLogBytes ?? MAX_LOG_BYTES;
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-bash-bg-"));
+  if (process.platform !== "win32") fs.chmodSync(baseDir, 0o700);
   const jobs = new Map<string, Job>();
   const observationWaiters = new Map<string, Set<() => void>>();
   const observationCapabilities = { inspect: true, wait: true, cancel: true } as const;
@@ -273,11 +296,21 @@ export function registerBashBg(pi: ExtensionAPI): void {
     snapshot: (id, options) => observationSnapshot(id, options.detail, options.lines),
     wait: waitForObservation,
   };
-  registerObservationProvider(bashObservationProvider);
+  const disposeObservationProvider = registerObservationProvider(bashObservationProvider);
 
   let counter = 0;
+  let disposed = false;
   let snapshotTimer: ReturnType<typeof setTimeout> | undefined;
-  fs.mkdirSync(baseDir, { recursive: true });
+
+  const pruneCompletedJobs = (): void => {
+    const completed = [...jobs.values()]
+      .filter((job) => job.done && job.outputFinalized)
+      .sort((a, b) => (a.finishedAt ?? a.updatedAt) - (b.finishedAt ?? b.updatedAt));
+    while (completed.length > maxRetainedCompletedJobs) {
+      const evicted = completed.shift();
+      if (evicted) jobs.delete(evicted.id);
+    }
+  };
 
   const publishSnapshot = (): void => {
     if (snapshotTimer) {
@@ -324,16 +357,30 @@ export function registerBashBg(pi: ExtensionAPI): void {
   };
 
   const startJob = (command: string, workdir: string, background: boolean): Job => {
+    if (disposed) throw new Error("bash_bg is unavailable after session shutdown.");
+    const activeJobs = [...jobs.values()].filter((job) => !job.done).length;
+    if (activeJobs >= maxActiveJobs) {
+      throw new Error(`Too many active background jobs (${activeJobs}/${maxActiveJobs}). Wait for or stop an existing job.`);
+    }
     const id = `bg-${(++counter).toString(36)}-${Date.now().toString(36)}`;
     const outFile = path.join(baseDir, `${id}.log`);
+    const logFd = fs.openSync(outFile, "wx", 0o600);
+    const ws = fs.createWriteStream(outFile, { fd: logFd, autoClose: true });
     const shellConfig = getShellConfig();
-    const child = spawn(shellConfig.shell, [...shellConfig.args, command], {
-      cwd: workdir,
-      detached: process.platform !== "win32",
-      env: process.env,
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    let child: ReturnType<typeof spawn>;
+    try {
+      child = spawn(shellConfig.shell, [...shellConfig.args, command], {
+        cwd: workdir,
+        detached: process.platform !== "win32",
+        env: process.env,
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+      });
+    } catch (error) {
+      ws.destroy();
+      fs.rmSync(outFile, { force: true });
+      throw error;
+    }
     const job: Job = {
       id,
       command,
@@ -345,19 +392,26 @@ export function registerBashBg(pi: ExtensionAPI): void {
       exitCode: null,
       done: false,
       stopRequested: false,
-      child,
       tail: "",
       tailTruncated: false,
       outputBytes: 0,
+      logBytes: 0,
+      logLimitBytes: maxLogBytes,
+      logTruncated: false,
       background,
       completionNotified: false,
       outputFinalized: false,
     };
     jobs.set(id, job);
     publishSnapshot();
-    const ws = fs.createWriteStream(outFile);
     const append = (d: Buffer): void => {
-      ws.write(d);
+      const remainingLogBytes = Math.max(0, maxLogBytes - job.logBytes);
+      if (remainingLogBytes > 0) {
+        const retained = d.byteLength <= remainingLogBytes ? d : d.subarray(0, remainingLogBytes);
+        ws.write(retained);
+        job.logBytes += retained.byteLength;
+      }
+      if (d.byteLength > remainingLogBytes) job.logTruncated = true;
       job.tail += d.toString("utf8");
       if (job.tail.length > MAX_TAIL_BYTES) {
         job.tail = job.tail.slice(-MAX_TAIL_BYTES);
@@ -389,8 +443,9 @@ export function registerBashBg(pi: ExtensionAPI): void {
       child.stdout?.destroy();
       child.stderr?.destroy();
       ws.end();
-      publishSnapshot();
       notifyComplete(job);
+      pruneCompletedJobs();
+      publishSnapshot();
     };
     child.on("exit", (code) => {
       exitCode = code;
@@ -574,7 +629,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
 
   // Cockpit can subscribe after this tool is registered, then request the
   // authoritative in-memory snapshot without importing Flow internals.
-  pi.events.on(BASH_BG_QUERY_EVENT, publishSnapshot);
+  const disposeQueryListener = pi.events.on(BASH_BG_QUERY_EVENT, publishSnapshot);
 
   // Re-announce running jobs after compaction: the in-memory registry survives in-process compaction, but the compacted summary may drop pending-job awareness.
   pi.on("session_compact", () => {
@@ -594,6 +649,10 @@ export function registerBashBg(pi: ExtensionAPI): void {
 
   // Session end terminates background jobs (no orphans); completed results already persist as session messages, so resume keeps their history and output.
   pi.on("session_shutdown", () => {
+    if (disposed) return;
+    disposed = true;
+    disposeQueryListener();
+    disposeObservationProvider();
     if (snapshotTimer) {
       clearTimeout(snapshotTimer);
       snapshotTimer = undefined;
@@ -610,5 +669,8 @@ export function registerBashBg(pi: ExtensionAPI): void {
       for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();
     }
     publishSnapshot();
+    jobs.clear();
+    observationWaiters.clear();
+    try { fs.rmSync(baseDir, { recursive: true, force: true }); } catch { /* open Windows handles may finish after shutdown */ }
   });
 }

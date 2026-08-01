@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { ExtensionAPI, Theme, ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -8,6 +10,7 @@ import {
 	type BashBgDetails,
 	type BashBgJobSnapshot,
 	type BashBgSnapshotPayload,
+	type RegisterBashBgOptions,
 	registerBashBg,
 } from "../src/tools/bash-bg.ts";
 import { setQuietMode } from "../src/quiet-state.ts";
@@ -47,7 +50,7 @@ interface Harness {
 	shutdown: () => void;
 }
 
-function createHarness(): Harness {
+function createHarness(options: RegisterBashBgOptions = {}): Harness {
 	let registeredTool: ToolLike | undefined;
 	const eventHandlers = new Map<string, Array<(payload: unknown) => void>>();
 	const lifecycleHandlers = new Map<string, Array<() => void>>();
@@ -75,7 +78,7 @@ function createHarness(): Harness {
 			messages.push({ message, options });
 		},
 	} as unknown as ExtensionAPI;
-	registerBashBg(api);
+	registerBashBg(api, options);
 	assert.ok(registeredTool);
 	return {
 		tool: registeredTool,
@@ -300,6 +303,51 @@ test("bash_bg publishes running, completion, failure and killed snapshots", asyn
 		assert.equal(harness.snapshots.at(-1)?.jobs.length, 3);
 	} finally {
 		harness.shutdown();
+	}
+});
+
+test("bash_bg bounds active processes, retained history, and private log bytes", async () => {
+	const harness = createHarness({ maxActiveJobs: 1, maxRetainedCompletedJobs: 1, maxLogBytes: 64 });
+	let logPath: string | undefined;
+	try {
+		const running = await harness.tool.execute("quota-running", {
+			action: "start",
+			command: 'node -e "setTimeout(()=>{},5000)"',
+		});
+		await assert.rejects(
+			harness.tool.execute("quota-rejected", { action: "start", command: 'node -e "process.exit(0)"' }),
+			/Too many active background jobs \(1\/1\)/,
+		);
+		const runningId = running.details?.jobId;
+		assert.ok(runningId);
+		await harness.tool.execute("quota-kill", { action: "kill", jobId: runningId });
+		await waitForStatus(harness.snapshots, runningId, "killed");
+
+		const capped = await harness.tool.execute("capped-log", {
+			action: "run",
+			command: 'node -e "process.stdout.write(\'x\'.repeat(256))"',
+			timeout: 2,
+			tail: 1,
+		});
+		logPath = capped.details?.logPath;
+		assert.ok(logPath, "a disk-truncated log exposes its retained path");
+		assert.ok(fs.statSync(logPath).size <= 64);
+		assert.match(path.basename(path.dirname(logPath)), /^pi-bash-bg-/);
+		if (process.platform !== "win32") {
+			assert.equal(fs.statSync(path.dirname(logPath)).mode & 0o777, 0o700);
+			assert.equal(fs.statSync(logPath).mode & 0o777, 0o600);
+		}
+
+		const newest = await harness.tool.execute("history-newest", {
+			action: "run",
+			command: 'node -e "console.log(\'newest\')"',
+			timeout: 2,
+		});
+		harness.emit(BASH_BG_QUERY_EVENT);
+		assert.deepEqual(harness.snapshots.at(-1)?.jobs.map((job) => job.id), [newest.details?.jobId]);
+	} finally {
+		harness.shutdown();
+		if (logPath) assert.equal(fs.existsSync(path.dirname(logPath)), false);
 	}
 });
 
