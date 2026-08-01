@@ -64,6 +64,7 @@ import {
   onSessionStart as goalSessionStart,
   onSessionShutdown as goalSessionShutdown,
   onBeforeCompact as goalBeforeCompact,
+  onCompactionCancelled as goalCompactionCancelled,
   onCompact as goalCompact,
   onInput as goalInput,
   onBeforeAgentStart as goalBeforeAgentStart,
@@ -85,6 +86,7 @@ import {
 } from "../tools/ask.ts";
 import {
   initTodo,
+  isolateTodoForTeammateAttach,
   executeTodo,
   formatTodoActorSelector,
   getVisibleTasks,
@@ -248,6 +250,7 @@ const TODO_TOGGLE_KEY = "alt+t";
 const TODO_TOGGLE_LABEL = altKey("T");
 const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
 const COCKPIT_TODO_TOGGLE_EVENT = "cockpit:toggle-todo";
+const TEAMMATE_ATTACH_ENTRY = "maestro-teammate-attach";
 const GOAL_OVERLAY_KEY = "alt+g";
 const GOAL_OVERLAY_LABEL = altKey("G");
 
@@ -585,6 +588,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let currentSwarmProjection: TeamSwarmProjection | undefined;
   let maestroUiSessionActive = false;
   let preserveCompletedTurnFromNativeThreshold = false;
+  let teammateAttachTodoIsolated = false;
   const maestroUiPublisher = new MaestroUiPublisher({
     read: () => ({
       workflow: deriveWorkflowViewModel(workflowSnapshotForUi()),
@@ -1624,7 +1628,8 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     await inputHistorySessionStart(ctx);
     compactionArbiter.reset();
     preserveCompletedTurnFromNativeThreshold = false;
-    midTurnAutoCompaction.onSessionStart(ctx);
+    teammateAttachTodoIsolated = false;
+    midTurnAutoCompaction.onSessionStart(ctx, event);
     todoRootContext = ctx;
     widgetCtx = ctx;
     panelMode = "collapsed";
@@ -1762,49 +1767,62 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       event.signal,
     );
     if (!observed.allowed) return { cancel: true };
-    return await runObservedCompaction(observed, async () => {
-      goalBeforeCompact(ctx);
-      const cleanContextRequest = observed.trigger?.owner === "plan-handoff"
-        && observed.trigger.reason === "clean-context"
-        && event.customInstructions?.includes(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER)
-        ? consumePlanCleanContextCompaction()
-        : undefined;
-      if (observed.trigger?.owner === "plan-handoff" && observed.trigger.reason === "clean-context") {
-        if (!cleanContextRequest) {
-          ctx.ui.notify("Approved Plan context reset was cancelled because its payload was unavailable.", "warning");
-          return { cancel: true };
+    try {
+      const result = await runObservedCompaction(observed, async () => {
+        goalBeforeCompact(ctx);
+        const cleanContextRequest = observed.trigger?.owner === "plan-handoff"
+          && observed.trigger.reason === "clean-context"
+          && event.customInstructions?.includes(PLAN_CLEAN_CONTEXT_COMPACTION_MARKER)
+          ? consumePlanCleanContextCompaction()
+          : undefined;
+        if (observed.trigger?.owner === "plan-handoff" && observed.trigger.reason === "clean-context") {
+          if (!cleanContextRequest) {
+            ctx.ui.notify("Approved Plan context reset was cancelled because its payload was unavailable.", "warning");
+            return { cancel: true };
+          }
+          const compaction = await runWithCompactionStatus(event, ctx, () =>
+            createMaestroCompaction(event, ctx, {
+              getWorkflowIdentity: () => workflowRecoveryIdentity(),
+              trigger: observed.trigger,
+              summaryOverride: cleanContextRequest.summary,
+              firstKeptEntryIdOverride: cleanContextRequest.firstKeptEntryId,
+            }), observed);
+          return compaction?.compaction ? compaction : { cancel: true };
         }
-        const result = await runWithCompactionStatus(event, ctx, () =>
+
+        applyPlanContextToCompaction(
+          event.preparation,
+          buildSessionContext(event.branchEntries).messages,
+        );
+
+        const projected = await midTurnAutoCompaction.projectCompactionInput(event, ctx);
+        commitProjectedCompactionInput(event, projected);
+        return await runWithCompactionStatus(event, ctx, () =>
           createMaestroCompaction(event, ctx, {
             getWorkflowIdentity: () => workflowRecoveryIdentity(),
             trigger: observed.trigger,
-            summaryOverride: cleanContextRequest.summary,
-            firstKeptEntryIdOverride: cleanContextRequest.firstKeptEntryId,
+            summaryInputTokens: projected.estimatedInputTokens,
           }), observed);
-        return result?.compaction ? result : { cancel: true };
+      });
+      if (result?.cancel) {
+        observed.finalize("cancel");
+        goalCompactionCancelled(ctx);
       }
-
-      applyPlanContextToCompaction(
-        event.preparation,
-        buildSessionContext(event.branchEntries).messages,
+      return result;
+    } catch (error) {
+      observed.finalize("error");
+      goalCompactionCancelled(ctx);
+      ctx.ui.notify(
+        `Compaction failed before host fallback: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
       );
-
-      const projected = await midTurnAutoCompaction.projectCompactionInput(event, ctx);
-      // Pi's default fallback closes over the original preparation object. Keep
-      // it in sync so a failed custom summary cannot resurrect raw tool output.
-      commitProjectedCompactionInput(event, projected);
-      return await runWithCompactionStatus(event, ctx, () =>
-        createMaestroCompaction(event, ctx, {
-          getWorkflowIdentity: () => workflowRecoveryIdentity(),
-          trigger: observed.trigger,
-          summaryInputTokens: projected.estimatedInputTokens,
-        }), observed);
-    });
+      return { cancel: true };
+    }
   });
 
   pi.on("session_compact", async (event, ctx) => {
     const completedOwner = compactionArbiter.currentOwner();
-    compactionArbiter.complete();
+    compactionArbiter.complete("success");
     midTurnAutoCompaction.onCompact(completedOwner, ctx);
     // Clear the non-persistent Plan replacement before any async subsystem can
     // enqueue a continuation or fail. The persisted compaction is now canonical.
@@ -1841,6 +1859,13 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   });
 
   pi.on("context", async (event, ctx) => {
+    if (!teammateAttachTodoIsolated) {
+      const branch = ctx.sessionManager.getBranch() as Array<{ type?: string; customType?: string }>;
+      if (branch.some((entry) => entry.type === "custom" && entry.customType === TEAMMATE_ATTACH_ENTRY)) {
+        isolateTodoForTeammateAttach();
+        teammateAttachTodoIsolated = true;
+      }
+    }
     const planResult = onContextPlan(event.messages);
     const todoResult = await onContextTodo(planResult?.messages ?? event.messages);
     const messages = todoResult?.messages ?? planResult?.messages ?? event.messages;
@@ -1869,11 +1894,11 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     };
     await step("Plan", () => onAgentEndPlan(event, ctx));
     await step("Workflow refresh", () => refreshWorkflow(ctx, true));
+    await step("Output-limit compaction", () =>
+      midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx));
     await step("Goal", () => goalAgentEnd(event, ctx));
     await step("Goal change event", () => emitGoalChanged());
     await step("Todo", () => onAgentEndTodo());
-    await step("Output-limit compaction", () =>
-      midTurnAutoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx));
     preserveCompletedTurnFromNativeThreshold = shouldPreserveCompletedTurn(
       event.messages as AgentMessage[],
       Boolean(ctx.hasPendingMessages?.()),
@@ -1914,7 +1939,10 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
   // Hook denial runs after Plan's advisory tool_call pass and before the interactive prompt.
   const hookAdapter = registerCodexHookAdapter(pi, {
     getPermissionMode: () => effectivePermissionMode(approvalMode),
-    onCompactionCancelled: () => compactionArbiter.complete(),
+    onCompactionCancelled: () => {
+      compactionArbiter.complete("cancel");
+      goalCompactionCancelled();
+    },
   });
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {
     const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
@@ -2011,6 +2039,57 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
  * parent Pi session may own the canonical continuation lease.
  */
 function registerMaestroChildSurface(pi: ExtensionAPI): void {
+  const compactionArbiter = new CompactionArbiter();
+  const autoCompaction = createMidTurnAutoCompaction(pi, { arbiter: compactionArbiter });
+
+  pi.on("session_start", (event, ctx) => {
+    autoCompaction.onSessionStart(ctx, event);
+  });
+  pi.on("context", async (event, ctx) => {
+    const messages = await autoCompaction.evaluate(event.messages, ctx);
+    return messages ? { messages } : undefined;
+  });
+  pi.on("before_provider_request", (event, ctx) =>
+    autoCompaction.beforeProviderRequest(event.payload, ctx));
+  pi.on("agent_end", async (event, ctx) => {
+    await autoCompaction.onOutputLimit(event.messages as AgentMessage[], ctx);
+  });
+  pi.on("agent_settled", async (_event, ctx) => {
+    await autoCompaction.onAgentEnd(ctx);
+  });
+  pi.on("session_before_compact", async (event, ctx) => {
+    const request = compactionRequestFromInstructions(event.customInstructions);
+    const observed = compactionArbiter.observeStart(request, event.signal);
+    if (!observed.allowed) return { cancel: true };
+    try {
+      const projected = await autoCompaction.projectCompactionInput(event, ctx);
+      commitProjectedCompactionInput(event, projected);
+      const result = await runObservedCompaction(observed, () =>
+        createMaestroCompaction(event, ctx, {
+          trigger: observed.trigger,
+          summaryInputTokens: projected.estimatedInputTokens,
+        }));
+      if (result?.cancel) observed.finalize("cancel");
+      return result;
+    } catch (error) {
+      observed.finalize("error");
+      ctx.ui.notify(
+        `Child compaction failed before provider recovery: ${error instanceof Error ? error.message : String(error)}`,
+        "warning",
+      );
+      return { cancel: true };
+    }
+  });
+  pi.on("session_compact", (_event, ctx) => {
+    const completedOwner = compactionArbiter.currentOwner();
+    compactionArbiter.complete("success");
+    autoCompaction.onCompact(completedOwner, ctx);
+  });
+  pi.on("session_shutdown", (_event, ctx) => {
+    autoCompaction.onSessionShutdown(ctx);
+    compactionArbiter.reset();
+  });
+
   registerAskUserQuestionTool(pi);
   registerBashBg(pi);
   const todoProxyTool: ToolDefinition<typeof TodoToolParams> = {

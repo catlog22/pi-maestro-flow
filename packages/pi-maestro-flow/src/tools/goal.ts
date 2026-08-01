@@ -137,6 +137,7 @@ let goalPanelOwnedExternally = false;
 let goalDisplayContext: GoalContext | undefined;
 let baseCwd = "";
 let continuationPending: ContinuationPending | undefined;
+let suspendedContinuation: ContinuationPending | undefined;
 let goalRecovery: {
   goalId: string;
   kind: "compaction_retry" | "provider_retry";
@@ -427,12 +428,27 @@ export function onSessionShutdown(ctx: GoalContext) {
 export function onBeforeCompact(ctx: GoalContext) {
   if (!activeGoal || activeGoal.status !== "active") return;
   updateUsage(activeGoal, ctx);
-  cancelContinuation();
+  suspendedContinuation = continuationPending ? { ...continuationPending } : undefined;
   persistGoal(activeGoal);
   updateStatusLine(ctx, activeGoal);
 }
 
+export function onCompactionCancelled(ctx?: GoalContext) {
+  const displayCtx = ctx ?? goalDisplayContext;
+  const suspended = suspendedContinuation;
+  suspendedContinuation = undefined;
+  if (suspended && !continuationPending && activeGoal?.id === suspended.goalId) {
+    continuationPending = suspended;
+    if (!isWorkflowContinuationMarker(suspended.marker)) issuedGoalMarkers.add(suspended.marker);
+  }
+  if (activeGoal?.status === "active" && displayCtx) {
+    persistGoal(activeGoal);
+    updateStatusLine(displayCtx, activeGoal);
+  }
+}
+
 export async function onCompact(event: unknown, ctx: GoalContext) {
+  suspendedContinuation = undefined;
   if (!activeGoal || activeGoal.status !== "active") {
     clearRecovery();
     return;
@@ -1145,10 +1161,12 @@ function cancelContinuation() {
     }
   }
   continuationPending = undefined;
+  suspendedContinuation = undefined;
 }
 
 function clearContinuation() {
   continuationPending = undefined;
+  suspendedContinuation = undefined;
   issuedGoalMarkers.clear();
 }
 
@@ -1169,6 +1187,7 @@ function markDelivered(prompt: string) {
   if (!marker) return;
   if (!isWorkflowContinuationMarker(marker)) issuedGoalMarkers.delete(marker);
   if (continuationPending?.marker === marker) continuationPending = undefined;
+  if (suspendedContinuation?.marker === marker) suspendedContinuation = undefined;
 }
 function isWorkflowContinuationMarker(marker: string): boolean {
   return marker.includes("maestro-workflow-continuation:");

@@ -18,6 +18,8 @@ import {
   isRetryableGoalFailure,
   onAgentEnd,
   onBeforeAgentStart,
+  onBeforeCompact,
+  onCompactionCancelled,
   onCompact,
   onInput,
   parseVerifierOutput,
@@ -590,6 +592,37 @@ test("compaction continuation is isolated across consecutive Goal session lifecy
   } finally {
     await executeGoalCommand({ action: "clear" }, second);
     onSessionShutdown(second);
+  }
+});
+
+test("Goal continuation remains queued once across compaction cancel", async () => {
+  const sent: string[] = [];
+  initGoal({
+    appendEntry() {},
+    sendMessage(message: { content: string }) { sent.push(message.content); },
+  } as never);
+  const ctx = createContext({
+    isIdle: () => true,
+    hasPendingMessages: () => false,
+  });
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    await executeGoal({ action: "create", objective: "Keep continuation transactional" }, ctx);
+    assert.equal(sent.length, 1);
+    onBeforeAgentStart({ prompt: sent[0]! });
+    await onAgentEnd({ messages: [{ role: "assistant", stopReason: "stop", content: [] }] }, ctx);
+    assert.equal(sent.length, 2);
+    const continuation = sent[1]!;
+    assert.match(continuation, /maestro-goal-continuation/);
+
+    onBeforeCompact(ctx);
+    onCompactionCancelled(ctx);
+    assert.equal(sent.length, 2, "cancel must not drop or duplicate the queued continuation");
+    assert.deepEqual(onInput({ source: "extension", text: continuation }), { action: "handled" });
+    assert.deepEqual(onInput({ source: "extension", text: continuation }), { action: "handled" });
+  } finally {
+    await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
   }
 });
 

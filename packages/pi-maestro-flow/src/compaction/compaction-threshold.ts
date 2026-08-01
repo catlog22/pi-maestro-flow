@@ -28,6 +28,9 @@ export const OUTPUT_CLAMP_SAFETY_TOKENS = 4096;
  * to sit exactly at the clamp boundary.
  */
 export const OUTPUT_CLAMP_BAND_MARGIN_RATIO = 0.03;
+export const SUMMARY_CAPACITY_MARGIN_TOKENS = 4_096;
+export const MIN_SUMMARY_OUTPUT_TOKENS = 1_024;
+export const SUMMARY_MINIMUM_HEADROOM_TOKENS = SUMMARY_CAPACITY_MARGIN_TOKENS + MIN_SUMMARY_OUTPUT_TOKENS;
 
 /** Output budget used by the checkpoint summarizer. */
 export function summaryOutputTokenLimit(reserveTokens: number, modelMaxTokens?: number): number {
@@ -129,6 +132,8 @@ export interface LinkedCompactionThresholdInput {
   sessionMaxTokens?: number;
   compactionContextWindow?: number;
   compactionMaxTokens?: number;
+  /** Apply fixed summary headroom only when a separate summary model is configured. */
+  enforceCompactionHeadroom?: boolean;
   soft?: CompactionThresholdInput["soft"];
 }
 
@@ -223,13 +228,18 @@ export function deriveLinkedCompactionThreshold(
     modelMaxTokens: input.sessionMaxTokens,
     soft: input.soft,
   });
+  const compactionReserve = input.enforceCompactionHeadroom
+    && input.compactionContextWindow !== undefined
+    && input.compactionContextWindow > SUMMARY_MINIMUM_HEADROOM_TOKENS
+    ? Math.max(input.reserveTokens, SUMMARY_MINIMUM_HEADROOM_TOKENS)
+    : input.reserveTokens;
   if (!session.usable || input.compactionContextWindow === undefined
-    || input.compactionContextWindow <= input.reserveTokens) {
+    || input.compactionContextWindow <= compactionReserve) {
     return { ...session, limiter: "session" };
   }
 
   const compaction = deriveCompactionThreshold({
-    reserveTokens: input.reserveTokens,
+    reserveTokens: compactionReserve,
     contextWindow: input.compactionContextWindow,
     modelMaxTokens: summaryOutputTokenLimit(input.reserveTokens, input.compactionMaxTokens),
     soft: input.soft,

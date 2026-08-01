@@ -749,13 +749,13 @@ export interface AgentWidgetTheme {
 export async function switchConversationSession(
   ctx: Pick<ExtensionCommandContext, "switchSession">,
   sessionFile: string,
-  onSwitched: () => Promise<void> | void,
+  onSwitched: (ctx: ExtensionCommandContext) => Promise<void> | void,
 ): Promise<void> {
   let switched = false;
   const result = await ctx.switchSession(sessionFile, {
-    withSession: async () => {
+    withSession: async (sessionCtx) => {
       switched = true;
-      await onSwitched();
+      await onSwitched(sessionCtx as ExtensionCommandContext);
     },
   });
   if (result.cancelled || !switched) {

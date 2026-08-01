@@ -426,7 +426,7 @@ test("extension registers LSP, browser, and BM25 discovery", async () => {
   };
   const goalCallComponent = renderGoalCall(goalArgs, goalTheme);
   const call = goalCallComponent.render(120).map((line) => line.trimEnd());
-  assert.match(call[0] ?? "", /^  ⋯ goal create/);
+  assert.match(call[0] ?? "", /^  [⋯…] goal create/);
   const goalResult = {
     content: [{ type: "text", text: "Goal started: 完成 Git 仓库配置整理" }],
     isError: false,
@@ -553,9 +553,26 @@ test("teammate child registers interaction, local Bash, and parent-permission su
   }
 
   assert.deepEqual(tools.map((tool) => tool.name), ["ask-user-question", "bash_bg", "todo"]);
-  assert.deepEqual([...handlers.keys()], ["session_compact", "session_shutdown", "tool_call"]);
-  assert.equal(handlers.has("session_start"), false, "child must not compete for the Workflow continuation lease");
-  assert.equal(handlers.has("agent_end"), false, "child must not drive the parent Goal continuation loop");
+  assert.deepEqual([...handlers.keys()], [
+    "session_start",
+    "context",
+    "before_provider_request",
+    "agent_end",
+    "agent_settled",
+    "session_before_compact",
+    "session_compact",
+    "session_shutdown",
+    "tool_call",
+  ]);
+  assert.equal(handlers.has("before_agent_start"), false, "child must not own parent Goal/Todo/Workflow startup");
+  const guardedPayload = await handlers.get("before_provider_request")?.[0]?.({
+    type: "before_provider_request",
+    payload: { max_tokens: 1, thinking: { type: "enabled", budget_tokens: 1024 } },
+  }, { ui: { notify() {} } } as ExtensionContext);
+  assert.deepEqual(guardedPayload, {
+    max_tokens: 1,
+    thinking: { type: "disabled" },
+  });
   const structuredOutputDecision = await handlers.get("tool_call")?.[0]?.({
     type: "tool_call",
     toolName: "structured_output",

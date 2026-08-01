@@ -114,6 +114,8 @@ export interface RunTeammateOptions {
     firstActivityTimeoutMs?: number;
     /** @internal Test seam for the result-ready grace period. */
     resultReadyGraceMs?: number;
+    /** @internal Test seam for child output-limit compaction/continuation recovery. */
+    outputLimitRecoveryTimeoutMs?: number;
     /** @internal Foreground wait window before the extension detaches a still-running task. */
     foregroundMaxRunMs?: number;
 }
@@ -390,6 +392,7 @@ export declare function cleanupFile(filePath: string): void;
 export declare function createProgress(agent: string, startTime: number): AgentProgress;
 export declare const CHILD_TERMINATION_GRACE_MS = 5000;
 export declare const RESULT_READY_GRACE_MS = 60000;
+export declare const OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS: number;
 export declare const FIRST_ACTIVITY_TIMEOUT_MS = 120000;
 /**
  * Resolve `params.cwd` relative to the session directory while permitting an

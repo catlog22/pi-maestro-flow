@@ -156,6 +156,8 @@ export interface RunTeammateOptions {
   firstActivityTimeoutMs?: number;
   /** @internal Test seam for the result-ready grace period. */
   resultReadyGraceMs?: number;
+  /** @internal Test seam for child output-limit compaction/continuation recovery. */
+  outputLimitRecoveryTimeoutMs?: number;
   /** @internal Foreground wait window before the extension detaches a still-running task. */
   foregroundMaxRunMs?: number;
 }
@@ -1492,6 +1494,11 @@ export const CHILD_TERMINATION_GRACE_MS = 5_000;
 // lifecycle confirmation (agent_end/close) is this late, so aggregation never
 // blocks indefinitely on a missing terminal event.
 export const RESULT_READY_GRACE_MS = 60_000;
+
+// Output-limit recovery includes a summary provider round-trip and may outlive
+// the short result-publication grace window. It is still bounded so a child
+// that cannot compact reports the partial result as a failure instead of hanging.
+export const OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS = 5 * 60_000;
 
 // Child startup is an infrastructure boundary, independent of the caller's
 // foreground wait window. A process that never emits any event is not useful

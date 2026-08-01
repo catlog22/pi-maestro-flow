@@ -148,7 +148,7 @@ export interface AgentWidgetTheme {
     fg(name: string, text: string): string;
     bold(text: string): string;
 }
-export declare function switchConversationSession(ctx: Pick<ExtensionCommandContext, "switchSession">, sessionFile: string, onSwitched: () => Promise<void> | void): Promise<void>;
+export declare function switchConversationSession(ctx: Pick<ExtensionCommandContext, "switchSession">, sessionFile: string, onSwitched: (ctx: ExtensionCommandContext) => Promise<void> | void): Promise<void>;
 export interface AgentWidgetRow {
     correlationId: string;
     parentCorrelationId?: string;

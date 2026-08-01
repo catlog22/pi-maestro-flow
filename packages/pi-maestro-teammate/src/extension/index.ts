@@ -3082,7 +3082,14 @@ export default function registerTeammateExtension(
       activeHandoff = handoff;
       state.handoffSwitching = true;
       try {
-        await switchConversationSession(ctx, agent.sessionFile, async () => {
+        await switchConversationSession(ctx, agent.sessionFile, async (sessionCtx) => {
+            (sessionCtx.sessionManager as unknown as {
+              appendCustomEntry(customType: string, data: unknown): string;
+            }).appendCustomEntry("maestro-teammate-attach", {
+              version: 1,
+              correlationId: agent.correlationId,
+              attachedAt: Date.now(),
+            });
             if (activeHandoff === handoff) activeHandoff = undefined;
             state.handoffSwitching = false;
         });

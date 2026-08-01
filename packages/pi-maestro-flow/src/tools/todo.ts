@@ -238,6 +238,27 @@ export function onSessionShutdown(ctx: TodoContext): void {
   ctx.ui.setStatus("todo", undefined);
 }
 
+export function isolateTodoForTeammateAttach(): void {
+  let changed = false;
+  const next = new Map(tasks);
+  for (const [id, task] of next) {
+    if (task.status !== "in_progress" || task.assignee.id !== ROOT_TODO_ACTOR.id || task.skills.length === 0) continue;
+    next.set(id, {
+      ...task,
+      status: "pending",
+      skillActivation: undefined,
+      updatedAt: Date.now(),
+    });
+    changed = true;
+  }
+  if (!changed) return;
+  tasks = next;
+  activeSkillSnapshots.clear();
+  runSkillInjection = undefined;
+  persist(tasks);
+  markTodoChanged();
+}
+
 export function getVisibleTasks(): TodoTask[] {
   const visible = [...tasks.values()].filter((t) => t.status !== "deleted");
   visible.sort((a, b) => a.createdAt - b.createdAt);

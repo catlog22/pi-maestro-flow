@@ -40,6 +40,7 @@ import {
   SPILL_THRESHOLD_CHARS,
   SPILL_PREVIEW_CHARS,
   spillToolResult,
+  spillPath as resolveSpillPath,
   generatePreview,
   buildSpillReplacementText,
   cleanupSpillDir,
@@ -69,6 +70,7 @@ const OUTPUT_LIMIT_CONTINUE_PROMPT = "Your previous response was cut off at the 
 const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
 export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
+const PENDING_INTENT_ENTRY_TYPE = "maestro-auto-compaction-intent";
 const PRUNE_STATE_VERSION = 4;
 
 export type CompactionSettings = Pick<
@@ -226,6 +228,7 @@ export interface AutoCompactionState {
   /** Per-guard writer namespace prevents one live owner deleting another's spill. */
   writerId: string;
   persistedPruneKey?: string;
+  persistedIntentKey?: string;
   settingsSnapshot?: CompactionSettings;
   settingsCwd?: string;
   velocityTracker: VelocityTracker;
@@ -528,7 +531,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           && pressure.estimatedTokens >= pressure.thresholdTokens
             - Math.floor(capacityWindow * OUTPUT_CLAMP_BAND_MARGIN_RATIO);
         if (escalate) {
-          const estimate = estimateContextTokens(pressure.messages);
+          const estimate = { ...estimateContextTokens(pressure.messages), tokens: pressure.estimatedTokens };
           const triggerKey = `${estimate.tokens}:${pressure.thresholdTokens}:${messages.length}`;
           if (state.pendingIntent?.triggerKey !== triggerKey) {
             const contextExhausted = estimate.tokens >= ctx.model.contextWindow;
@@ -542,6 +545,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
               contextExhausted,
             };
             state.lastTriggerKey = triggerKey;
+            persistPendingIntent(pi, state);
             if (contextExhausted) ctx.abort();
             // Dedup on the stable threshold, not the volatile triggerKey
             // (tokens + message count change every evaluation within a turn).
@@ -555,10 +559,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           }
         } else {
           state.pendingIntent = undefined;
+          persistPendingIntent(pi, state);
         }
         return pressure.prunedToolResults > 0 ? pressure.messages : undefined;
       }
-      const estimate = estimateContextTokens(pressure.messages);
+      const estimate = { ...estimateContextTokens(pressure.messages), tokens: pressure.estimatedTokens };
       const thresholdTokens = pressure.thresholdTokens;
 
       const triggerKey = `${estimate.tokens}:${thresholdTokens}:${messages.length}`;
@@ -578,6 +583,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         contextExhausted,
       };
       state.lastTriggerKey = triggerKey;
+      persistPendingIntent(pi, state);
       if (contextExhausted) {
         // An actually overflowing request must never fall through to the
         // provider while waiting for the settled-phase compaction owner.
@@ -592,12 +598,14 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     if (!sameSettings(settingsFor(ctx), intent.settings)) {
       state.pendingIntent = undefined;
       state.lastTriggerKey = undefined;
+      persistPendingIntent(pi, state);
       return;
     }
 
     const clearPending = () => {
       if (state.pendingIntent === intent) state.pendingIntent = undefined;
       if (state.lastTriggerKey === intent.triggerKey) state.lastTriggerKey = undefined;
+      persistPendingIntent(pi, state);
     };
     const notifyBreakerPaused = () => {
       if (state.breakerNotified) return;
@@ -886,6 +894,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.pruneManifest.clear();
       state.sessionId = nextSessionId;
       state.restoredPrunes = loadPersistedPrunes(ctx, state.sessionId, event?.reason === "fork");
+      state.pendingIntent = loadPersistedIntent(ctx, state.sessionId, state.generation);
+      state.persistedIntentKey = pendingIntentKey(state.pendingIntent);
       state.persistedPruneKey = pruneKey(state.restoredPrunes.values());
       state.settingsSnapshot = undefined;
       state.settingsCwd = undefined;
@@ -1099,6 +1109,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // projectCompactionInput persist.  reset() already does this; onCompact
       // was the only clear-path that skipped it.
       persistPruneManifest(pi, state);
+      persistPendingIntent(pi, state);
       if (continueOutputLimit) {
         try {
           pi.sendUserMessage(OUTPUT_LIMIT_CONTINUE_PROMPT, { deliverAs: "followUp" });
@@ -1114,8 +1125,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // resources stay on disk for the bounded resume lifetime. reset() and
       // onCompact() remain the paths that clear manifests and delete files.
       state.generation += 1;
+      const parkedIntent = state.pendingIntent;
       releaseInFlight();
+      state.pendingIntent = parkedIntent
+        ? { ...parkedIntent, generation: state.generation }
+        : undefined;
       persistPruneManifest(pi, state);
+      persistPendingIntent(pi, state);
       if (ctx) clearPressureStatus(ctx);
     },
     reset(ctx) {
@@ -1130,6 +1146,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       resetCycleState();
       state.turnCount = 0;
       persistPruneManifest(pi, state);
+      persistPendingIntent(pi, state);
       if (ctx) {
         clearPressureStatus(ctx);
         ctx.ui.setStatus(COMPACTION_MODE_STATUS_KEY, undefined);
@@ -1209,6 +1226,7 @@ export function applyContextPressurePolicy(
   // identical-replacement rule). Three prior sessions paid for this guarantee —
   // see the prefix-stability tests before weakening it.
   let newlySavedTokens = 0;
+  let cacheGateActive = false;
   if (soft.enabled) {
     if (transformed === messages) transformed = [...messages];
     const frontierStart = protectedFrontierStart(transformed, settings.keepRecentTokens);
@@ -1219,9 +1237,9 @@ export function applyContextPressurePolicy(
     // to pay for the prefix it invalidates. Past critical, relieving pressure
     // dominates — a full compaction would invalidate everything anyway plus cost
     // an LLM call — so the gate is bypassed and every candidate is applied.
-    const suffixTokens = soft.cache.enabled && !initiallyCritical && !compactionPending
-      ? suffixTokenSums(transformed)
-      : undefined;
+    cacheGateActive = soft.cache.enabled && !initiallyCritical && !compactionPending
+      && latestCacheHitRatio(messages) !== undefined;
+    const suffixTokens = cacheGateActive ? suffixTokenSums(transformed) : undefined;
     // Graduated eviction, cheapest/most-reversible first: pass 1 strips replayable
     // tools (re-runnable); pass 2 strips bulk data tools (bash/edit/write) only if
     // pressure persists. Control tools (e.g. todo) are in neither set and survive.
@@ -1229,7 +1247,17 @@ export function applyContextPressurePolicy(
     newlySavedTokens += replayable.savedTokens;
     savedTokens += replayable.savedTokens;
     prunedToolResults += replayable.prunedToolResults;
-    const bulk = runPrunePass({ transformed, pruneManifest, frontierStart, pruneTarget, effectiveTokens: replayable.effectiveTokens, usageEpoch, selector: evictableBulkToolResult, suffixTokens });
+    const bulk = runPrunePass({
+      transformed,
+      pruneManifest,
+      frontierStart,
+      pruneTarget,
+      effectiveTokens: replayable.effectiveTokens,
+      usageEpoch,
+      selector: evictableBulkToolResult,
+      suffixTokens,
+      priorSavings: replayable.savedTokens,
+    });
     newlySavedTokens += bulk.savedTokens;
     savedTokens += bulk.savedTokens;
     prunedToolResults += bulk.prunedToolResults;
@@ -1245,7 +1273,11 @@ export function applyContextPressurePolicy(
       ? { nudgeRatio: nudgeTokens / contextWindow, pruneRatio: pruneTokens / contextWindow }
       : undefined,
   });
-  return pressureResult({ messages: transformed, band, estimatedTokens, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
+  const result = pressureResult({ messages: transformed, band, estimatedTokens, contextWindow, thresholdTokens, prunedToolResults, savedTokens, velocityTracker: nextTracker, velocity });
+  if (cacheGateActive && newlySavedTokens === 0 && !initiallyCritical) {
+    return { ...result, action: "none", reasons: [...result.reasons, "cache-veto"] };
+  }
+  return result;
 }
 
 function applyRecordedPrunes(messages: AgentMessage[], pruneManifest: PruneManifest): AppliedPrunes {
@@ -1465,12 +1497,60 @@ function persistPruneManifest(pi: ExtensionAPI, state: AutoCompactionState): voi
     pi.appendEntry(PRUNE_STATE_ENTRY_TYPE, {
       version: PRUNE_STATE_VERSION,
       sessionId: state.sessionId,
-      prunes,
+      prunes: prunes.map(({ spillPath: _spillPath, ...entry }) => ({
+        ...entry,
+        hasSpill: _spillPath !== undefined,
+      })),
     });
   } catch {
     return;
   }
   state.persistedPruneKey = nextKey;
+}
+
+function pendingIntentKey(intent: PendingCompactionIntent | undefined): string {
+  if (!intent) return "null";
+  return JSON.stringify({
+    triggerKey: intent.triggerKey,
+    estimate: intent.estimate,
+    linkedThreshold: intent.linkedThreshold,
+    settings: intent.settings,
+    effectiveSettings: intent.effectiveSettings,
+    contextExhausted: intent.contextExhausted,
+  });
+}
+
+function persistPendingIntent(pi: ExtensionAPI, state: AutoCompactionState): void {
+  const key = pendingIntentKey(state.pendingIntent);
+  if (key === state.persistedIntentKey || !pi.appendEntry) return;
+  pi.appendEntry(PENDING_INTENT_ENTRY_TYPE, {
+    version: 1,
+    sessionId: state.sessionId,
+    pending: state.pendingIntent ? JSON.parse(key) : null,
+  });
+  state.persistedIntentKey = key;
+}
+
+function loadPersistedIntent(
+  ctx: ExtensionContext,
+  sessionId: string | undefined,
+  generation: number,
+): PendingCompactionIntent | undefined {
+  const manager = ctx.sessionManager as {
+    getBranch?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
+    getEntries?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
+  } | undefined;
+  const entries = manager?.getBranch?.() ?? manager?.getEntries?.() ?? [];
+  const entry = entries.filter((candidate) => candidate.type === "custom"
+    && candidate.customType === PENDING_INTENT_ENTRY_TYPE).pop();
+  const data = entry?.data as { version?: unknown; sessionId?: unknown; pending?: unknown } | undefined;
+  if (!data || data.version !== 1 || data.sessionId !== sessionId || !data.pending || typeof data.pending !== "object") {
+    return undefined;
+  }
+  const pending = data.pending as Omit<PendingCompactionIntent, "generation">;
+  if (typeof pending.triggerKey !== "string" || !pending.estimate || !pending.linkedThreshold
+    || !pending.settings || !pending.effectiveSettings) return undefined;
+  return { ...pending, generation };
 }
 
 function loadPersistedPrunes(
@@ -1501,7 +1581,9 @@ function loadPersistedPrunes(
       restored.set(record.callId, {
         callId: record.callId,
         level: record.level,
-        ...(typeof record.spillPath === "string" ? { spillPath: record.spillPath } : {}),
+        ...(data.version === 4 && record.hasSpill === true && typeof record.writerId === "string"
+          ? { spillPath: resolveSpillPath(String(data.sessionId ?? sessionId ?? "unknown"), record.callId, record.writerId) }
+          : typeof record.spillPath === "string" ? { spillPath: record.spillPath } : {}),
         ...(typeof record.introducedAtUsageEpoch === "string" ? { introducedAtUsageEpoch: record.introducedAtUsageEpoch } : {}),
         ...(typeof record.contentDigest === "string" ? { contentDigest: record.contentDigest } : {}),
         ...(typeof record.writerId === "string" ? { writerId: record.writerId } : {}),
@@ -1742,6 +1824,8 @@ interface PrunePassInput {
   effectiveTokens: number;
   usageEpoch: string | undefined;
   selector: (message: AgentMessage) => AgentMessage | undefined;
+  /** Savings already committed by an earlier pass in the same plan. */
+  priorSavings?: number;
   /** Suffix token sums of the pre-prune array; index i holds tokens[i..end]. */
   suffixTokens?: number[];
 }
@@ -1783,8 +1867,9 @@ export function cacheWorthwhileDepth(
   candidates: Array<{ index: number; saved: number }>,
   suffixTokens: number[],
   minRatio: number = CACHE_PRUNE_MIN_SAVINGS_RATIO,
+  initialSavings: number = 0,
 ): number {
-  let cumulative = 0;
+  let cumulative = initialSavings;
   let depth = 0;
   for (let position = 0; position < candidates.length; position++) {
     cumulative += candidates[position].saved;
@@ -1796,7 +1881,7 @@ export function cacheWorthwhileDepth(
 }
 
 function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolResults: number; effectiveTokens: number } {
-  const { transformed, pruneManifest, frontierStart, pruneTarget, usageEpoch, selector, suffixTokens } = input;
+  const { transformed, pruneManifest, frontierStart, pruneTarget, usageEpoch, selector, suffixTokens, priorSavings = 0 } = input;
   let effectiveTokens = input.effectiveTokens;
 
   // Phase 1 — collect candidates newest-first without mutating anything. The
@@ -1822,7 +1907,9 @@ function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolR
   // Phase 2 — when the cache gate is active, trim the run to the deepest depth
   // that still pays for the prefix it invalidates. Without suffixTokens every
   // candidate is applied, which is byte-for-byte the historical behavior.
-  const depth = suffixTokens ? cacheWorthwhileDepth(candidates, suffixTokens) : candidates.length;
+  const depth = suffixTokens
+    ? cacheWorthwhileDepth(candidates, suffixTokens, CACHE_PRUNE_MIN_SAVINGS_RATIO, priorSavings)
+    : candidates.length;
 
   let savedTokens = 0;
   let prunedToolResults = 0;

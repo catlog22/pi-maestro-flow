@@ -41,8 +41,11 @@ export type CompactionTrigger =
   | OutputLimitCompactionTrigger
   | PlanHandoffCompactionTrigger;
 
+export type CompactionOutcome = "success" | "cancel" | "error" | "timeout";
+
 export interface CompactionLease {
   readonly owner: CompactionRequestOwner;
+  readonly operationId: number;
   readonly trigger?: CompactionTrigger;
   tagInstructions(instructions: string): string;
   release(): void;
@@ -54,9 +57,11 @@ export interface CompactionRequest {
 }
 
 export interface ObservedCompaction {
+  readonly operationId: number;
   readonly owner: CompactionOwner;
   readonly allowed: boolean;
   readonly trigger?: CompactionTrigger;
+  finalize(outcome: CompactionOutcome): boolean;
   releaseIfNative(): void;
 }
 
@@ -83,9 +88,10 @@ export class CompactionArbiter {
     this.active = { id, owner, trigger };
     return {
       owner,
+      operationId: id,
       trigger,
       tagInstructions: (instructions) => tagCompactionInstructions({ owner, id }, instructions),
-      release: () => this.release(id),
+      release: () => this.finalize(id, "cancel"),
     };
   }
 
@@ -98,28 +104,45 @@ export class CompactionArbiter {
     }
     if (this.active) {
       const observed = this.active;
+      // Extension-triggered compactions arrive without a cleanup/timeout.
+      // Arm the same bounded deadline as native compactions so a hung
+      // compaction promise cannot hold the lease indefinitely.
+      if (!observed.cleanup) {
+        const release = () => this.finalize(observed.id, "timeout");
+        const timeout = setTimeout(release, 5 * 60_000);
+        timeout.unref?.();
+        signal?.addEventListener("abort", release, { once: true });
+        observed.cleanup = () => {
+          clearTimeout(timeout);
+          signal?.removeEventListener("abort", release);
+        };
+      }
       return {
+        operationId: observed.id,
         owner: observed.owner,
         allowed: request !== undefined
           && observed.owner === request.owner
           && observed.id === request.id,
         trigger: observed.trigger,
+        finalize: (outcome) => this.finalize(observed.id, outcome),
         releaseIfNative: () => {
-          if (observed.owner === "native") this.release(observed.id);
+          if (observed.owner === "native") this.finalize(observed.id, "cancel");
         },
       };
     }
     if (request) {
       return {
+        operationId: request.id,
         owner: request.owner,
         allowed: false,
         trigger: undefined,
+        finalize: () => false,
         releaseIfNative() {},
       };
     }
     if (!this.active) {
       const id = ++this.nextId;
-      const release = () => this.release(id);
+      const release = () => this.finalize(id, "timeout");
       this.active = {
         id,
         owner: "native",
@@ -134,18 +157,20 @@ export class CompactionArbiter {
     }
     const observed = this.active;
     return {
+      operationId: observed.id,
       owner: observed.owner,
       allowed: true,
       trigger: observed.trigger,
+      finalize: (outcome) => this.finalize(observed.id, outcome),
       releaseIfNative: () => {
-        if (observed.owner === "native") this.release(observed.id);
+        if (observed.owner === "native") this.finalize(observed.id, "cancel");
       },
     };
   }
 
-  complete(): void {
-    this.active?.cleanup?.();
-    this.active = undefined;
+  complete(outcome: CompactionOutcome = "success"): boolean {
+    if (!this.active) return false;
+    return this.finalize(this.active.id, outcome);
   }
 
   reset(): void {
@@ -158,10 +183,15 @@ export class CompactionArbiter {
     return this.active?.owner;
   }
 
-  private release(id: number): void {
-    if (this.active?.id !== id) return;
+  currentOperationId(): number | undefined {
+    return this.active?.id;
+  }
+
+  private finalize(id: number, _outcome: CompactionOutcome): boolean {
+    if (this.active?.id !== id) return false;
     this.active.cleanup?.();
     this.active = undefined;
+    return true;
   }
 }
 
@@ -172,7 +202,7 @@ export async function runObservedCompaction<T>(
   try {
     return await run();
   } catch (error) {
-    observed.releaseIfNative();
+    observed.finalize("error");
     throw error;
   }
 }

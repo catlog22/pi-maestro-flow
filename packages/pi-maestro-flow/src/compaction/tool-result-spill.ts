@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { chmod, lstat, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { isAbsolute, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
 export const SPILL_THRESHOLD_CHARS = 8_000;
 export const SPILL_PREVIEW_CHARS = 1_500;
@@ -17,22 +17,27 @@ export interface SpillResult {
   hasMore: boolean;
 }
 
-export function spillDir(sessionId: string): string {
-  return join(tmpdir(), spillRootName(sessionId), SPILL_SUBDIR);
+export function spillDir(sessionId: string, writerId?: string): string {
+  const root = join(tmpdir(), spillRootName(sessionId));
+  return writerId
+    ? join(root, `writer-${pathToken(writerId)}`, SPILL_SUBDIR)
+    : join(root, SPILL_SUBDIR);
 }
 
-export function spillPath(sessionId: string, callId: string): string {
-  return join(spillDir(sessionId), `${pathToken(callId)}.txt`);
+export function spillPath(sessionId: string, callId: string, writerId?: string): string {
+  return join(spillDir(sessionId, writerId), `${pathToken(callId)}.txt`);
 }
 
 export async function spillToolResult(
   sessionId: string,
   callId: string,
   content: string,
+  writerId?: string,
 ): Promise<SpillResult> {
   const root = join(tmpdir(), spillRootName(sessionId));
-  const dir = spillDir(sessionId);
-  const path = spillPath(sessionId, callId);
+  const dir = spillDir(sessionId, writerId);
+  const ownerRoot = writerId ? dirname(dir) : root;
+  const path = spillPath(sessionId, callId, writerId);
   const { preview, hasMore } = generatePreview(content, SPILL_PREVIEW_CHARS);
   const failure: SpillResult = { ok: false, path: "", preview, originalChars: content.length, hasMore };
 
@@ -43,7 +48,9 @@ export async function spillToolResult(
   }
 
   try {
-    if (!await ensurePrivateDirectory(root) || !await ensurePrivateDirectory(dir)) return failure;
+    if (!await ensurePrivateDirectory(root)
+      || (ownerRoot !== root && !await ensurePrivateDirectory(ownerRoot))
+      || !await ensurePrivateDirectory(dir)) return failure;
     const realTmp = await realpath(tmpdir());
     const realRoot = await realpath(root);
     const realDir = await realpath(dir);
@@ -74,9 +81,9 @@ export async function spillToolResult(
  * all fail so hydration can downgrade to the plain placeholder instead of
  * pointing the model at a dead or attacker-controlled file.
  */
-export async function validateSpillPath(sessionId: string, path: string): Promise<boolean> {
+export async function validateSpillPath(sessionId: string, path: string, writerId?: string): Promise<boolean> {
   const root = join(tmpdir(), spillRootName(sessionId));
-  const dir = spillDir(sessionId);
+  const dir = spillDir(sessionId, writerId);
   if (!isInside(dir, path)) return false;
   try {
     const target = await lstat(path);
@@ -144,8 +151,9 @@ export function buildSpillReplacementText(result: SpillResult, toolName: string)
   ].filter(Boolean).join("\n");
 }
 
-export async function cleanupSpillDir(sessionId: string): Promise<void> {
-  const root = join(tmpdir(), spillRootName(sessionId));
+export async function cleanupSpillDir(sessionId: string, writerId?: string): Promise<void> {
+  const sessionRoot = join(tmpdir(), spillRootName(sessionId));
+  const root = writerId ? join(sessionRoot, `writer-${pathToken(writerId)}`) : sessionRoot;
   // Defense in depth: never let a crafted sessionId escape tmpdir into a
   // recursive force rm.
   if (!isInside(tmpdir(), root)) {
@@ -177,18 +185,13 @@ function safeToken(value: string): string {
 }
 
 /**
- * Path-safe *and injective* encoding of an untrusted id.
+ * Path-safe encoding of an untrusted id.
  *
- * safeToken alone is lossy: it collapses character classes and truncates to 16
- * chars, so two distinct ids can land on one filename. That is harmless for the
- * human-facing knowhow filename it was written for, but not here — spill files
- * are keyed storage, and spillToolResult treats EEXIST as "already persisted",
- * which on a collision would hand back a different call's payload. The digest
- * restores the one-to-one mapping while the readable prefix keeps the directory
- * greppable by eye.
+ * Keep the full SHA-256 digest: keyed spill storage must not rely on a 32-bit
+ * prefix, and the readable token is diagnostic only.
  */
 function pathToken(value: string): string {
-  return `${safeToken(value)}-${createHash("sha1").update(value).digest("hex").slice(0, 8)}`;
+  return `${safeToken(value)}-${createHash("sha256").update(value).digest("hex")}`;
 }
 
 function spillRootName(sessionId: string): string {

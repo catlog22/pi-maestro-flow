@@ -1,5 +1,17 @@
 # 压缩剪枝系统跨流程配合缺口：Swarm 最佳解综合
 
+## Post-review 修复状态（2026-08-01）
+
+本文件保留 sealed Run 的原始发现正文；以下为独立复核与后续实现后的权威状态修正。
+
+- **CF-04**：由 `live/high` 修正为 `risk/high`；已升级 manifest v4，以 `callId + SHA-256 contentDigest` 校验 transcript identity，并对重复 callId 采用 newest-only candidate。
+- **CF-05**：当前 Pi runtime 会重建 extension，原 `live/high` 路径不可达；仍已移除 session-start 的破坏性 previous-root cleanup，覆盖复用 guard 的替代宿主风险。
+- **CF-01～CF-30**：对应修复已落地到 Flow/Teammate，包括 child-safe compaction、payload guard、operation finalization、settings/threshold、manifest/spill、cache/pressure、checkpoint/Todo attach。
+- **CF-31～CF-34**：作为负向不变量保留并纳入回归套件。
+- 原候选 `KDC-0d939dd9a1460700` 含旧分类和旧优先级，保持 pending/not-promotable；不得据此直接 promote。
+
+修复后的 high 口径为 `8 live/high + 3 risk/high`；CF-05 记录为 current-host refuted / defensive hardening，不计入 live/risk high。
+
 ## 1. 执行摘要
 
 本轮只审查跨流程配合边，不重复 20260728 已完成的单流程正确性审查。目标是识别压缩、剪枝、扩展钩子、状态持久化、provider 请求、Goal/Todo/Plan 以及会话/嵌套会话之间的状态丢失、顺序违规、所有权冲突和交接遗漏。

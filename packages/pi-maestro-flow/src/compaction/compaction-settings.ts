@@ -406,8 +406,8 @@ export async function saveCompactionScope(
 function normalizeCompactionRecord(compaction: Record<string, unknown>): Record<string, unknown> {
   const result = { ...compaction };
   const hard = isRecord(result.hard) ? { ...result.hard } : {};
-  if (result.reserveTokens !== undefined) { hard.reserveTokens = result.reserveTokens; delete result.reserveTokens; }
-  if (result.keepRecentTokens !== undefined) { hard.keepRecentTokens = result.keepRecentTokens; delete result.keepRecentTokens; }
+  if (result.reserveTokens !== undefined) hard.reserveTokens = result.reserveTokens;
+  if (result.keepRecentTokens !== undefined) hard.keepRecentTokens = result.keepRecentTokens;
   if (Object.keys(hard).length > 0) result.hard = hard;
   return result;
 }
@@ -419,8 +419,14 @@ async function patchSettingsFile(path: string, patch: CompactionConfigPatch): Pr
   if (patch.model !== undefined) compaction.model = patch.model;
   if (patch.reserveTokens !== undefined || patch.keepRecentTokens !== undefined) {
     const hard = isRecord(compaction.hard) ? { ...compaction.hard } : {};
-    if (patch.reserveTokens !== undefined) hard.reserveTokens = patch.reserveTokens;
-    if (patch.keepRecentTokens !== undefined) hard.keepRecentTokens = patch.keepRecentTokens;
+    if (patch.reserveTokens !== undefined) {
+      hard.reserveTokens = patch.reserveTokens;
+      compaction.reserveTokens = patch.reserveTokens;
+    }
+    if (patch.keepRecentTokens !== undefined) {
+      hard.keepRecentTokens = patch.keepRecentTokens;
+      compaction.keepRecentTokens = patch.keepRecentTokens;
+    }
     compaction.hard = hard;
   }
   if (patch.soft !== undefined) {
@@ -463,10 +469,20 @@ async function replaceKnownFieldsInSettingsFile(path: string, values: Compaction
   // Native compact routing was removed; clear any stale setting on save.
   delete compaction.endpoint;
   const hard = isRecord(compaction.hard) ? { ...compaction.hard } : {};
-  if (values.reserveTokens === undefined) delete hard.reserveTokens;
-  else hard.reserveTokens = values.reserveTokens;
-  if (values.keepRecentTokens === undefined) delete hard.keepRecentTokens;
-  else hard.keepRecentTokens = values.keepRecentTokens;
+  if (values.reserveTokens === undefined) {
+    delete hard.reserveTokens;
+    delete compaction.reserveTokens;
+  } else {
+    hard.reserveTokens = values.reserveTokens;
+    compaction.reserveTokens = values.reserveTokens;
+  }
+  if (values.keepRecentTokens === undefined) {
+    delete hard.keepRecentTokens;
+    delete compaction.keepRecentTokens;
+  } else {
+    hard.keepRecentTokens = values.keepRecentTokens;
+    compaction.keepRecentTokens = values.keepRecentTokens;
+  }
   if (Object.keys(hard).length === 0) delete compaction.hard;
   else compaction.hard = hard;
   if (values.soft !== undefined) {

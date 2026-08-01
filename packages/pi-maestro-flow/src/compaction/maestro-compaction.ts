@@ -28,7 +28,11 @@ import type {
   CompactionTrigger,
 } from "./compaction-arbiter.ts";
 import { readEffectiveCompactionSettings } from "./compaction-settings.ts";
-import { summaryOutputTokenLimit } from "./compaction-threshold.ts";
+import {
+  MIN_SUMMARY_OUTPUT_TOKENS,
+  SUMMARY_CAPACITY_MARGIN_TOKENS,
+  summaryOutputTokenLimit,
+} from "./compaction-threshold.ts";
 
 const DETAILS_KIND = "maestro-session-checkpoint";
 const DETAILS_VERSION = 3;
@@ -37,9 +41,44 @@ const LEGACY_DETAILS_VERSION = 1;
 const PRIVATE_DIRECTORY_MODE = 0o700;
 const PRIVATE_FILE_MODE = 0o600;
 const resolvedCompactionModels = new WeakMap<object, Map<string, Model<Api>>>();
-export const SUMMARY_CAPACITY_MARGIN_TOKENS = 4_096;
+export { MIN_SUMMARY_OUTPUT_TOKENS, SUMMARY_CAPACITY_MARGIN_TOKENS } from "./compaction-threshold.ts";
 export const SUMMARY_REQUEST_PROTOCOL_TOKENS = 64;
-export const MIN_SUMMARY_OUTPUT_TOKENS = 1_024;
+
+/**
+ * Enforce the final Anthropic budget-thinking invariants after Pi has clamped
+ * max_tokens. The same transform guards agent requests and direct compaction
+ * summary completions, which bypass extension provider hooks.
+ */
+export function disableInvalidBudgetThinking(payload: unknown): unknown {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return payload;
+  const record = payload as Record<string, unknown>;
+  const maxTokens = record.max_tokens;
+  const thinking = record.thinking;
+  if (
+    typeof maxTokens !== "number"
+    || !Number.isSafeInteger(maxTokens)
+    || typeof thinking !== "object"
+    || thinking === null
+    || Array.isArray(thinking)
+  ) {
+    return payload;
+  }
+  const thinkingRecord = thinking as Record<string, unknown>;
+  if (thinkingRecord.type !== "enabled") return payload;
+  const budget = thinkingRecord.budget_tokens;
+  if (
+    typeof budget === "number"
+    && Number.isSafeInteger(budget)
+    && budget >= 1_024
+    && budget < maxTokens
+  ) {
+    return payload;
+  }
+  return {
+    ...record,
+    thinking: { type: "disabled" },
+  };
+}
 
 export class CompactionCapacityError extends Error {
   constructor(message: string) {
@@ -182,6 +221,7 @@ export function buildSummaryCompletionOptions(input: {
   return {
     ...input,
     cacheRetention: "none" as const,
+    onPayload: disableInvalidBudgetThinking,
   };
 }
 
@@ -352,7 +392,7 @@ export async function createMaestroCompaction(
   dependencies: CreateCompactionDependencies = {},
 ): Promise<SessionBeforeCompactResult | undefined> {
   const model = ctx.model;
-  if (!model) return undefined;
+  if (!model) return { cancel: true };
 
   const now = dependencies.now?.() ?? new Date();
   const checkpointId = dependencies.checkpointId?.() ?? randomUUID();
@@ -394,7 +434,7 @@ export async function createMaestroCompaction(
 
   if (dependencies.summaryOverride !== undefined) {
     const summary = dependencies.summaryOverride.trim();
-    if (!summary) return undefined;
+    if (!summary) return { cancel: true };
     return {
       compaction: {
         summary,
@@ -420,17 +460,23 @@ export async function createMaestroCompaction(
       : await completeWithCurrentModel(prompt, event, ctx, dependencies.summaryInputTokens);
     if (response.stopReason === "error") {
       ctx.ui.notify(
-        `Maestro compaction summary failed; falling back to Pi summarization: ${response.errorMessage || "Unknown provider error"}`,
+        `Maestro compaction summary failed; compaction was cancelled before Pi's unguarded fallback: ${response.errorMessage || "Unknown provider error"}`,
         "warning",
       );
-      return undefined;
+      return { cancel: true };
     }
     const summary = response.content
       .filter((part) => part.type === "text" && typeof part.text === "string")
       .map((part) => part.text)
       .join("\n")
       .trim();
-    if (!summary) return undefined;
+    if (!summary) {
+      ctx.ui.notify(
+        "Maestro compaction summary was empty; compaction was cancelled before Pi's unguarded fallback.",
+        "warning",
+      );
+      return { cancel: true };
+    }
 
     return {
       compaction: {
@@ -441,12 +487,11 @@ export async function createMaestroCompaction(
       },
     };
   } catch (error) {
-    if (error instanceof CompactionCapacityError) throw error;
     ctx.ui.notify(
-      `Maestro compaction summary failed; falling back to Pi summarization: ${error instanceof Error ? error.message : String(error)}`,
+      `Maestro compaction summary failed; compaction was cancelled before Pi's unguarded fallback: ${error instanceof Error ? error.message : String(error)}`,
       "warning",
     );
-    return undefined;
+    return { cancel: true };
   }
 }
 
@@ -493,7 +538,15 @@ export async function persistMaestroCompactionKnowhow(
   ctx: ExtensionContext,
   dependencies: PersistCompactionDependencies = {},
 ): Promise<string | undefined> {
-  const details = asMaestroDetails(event.compactionEntry.details);
+  const branch = (ctx.sessionManager as { getBranch?: () => Array<{ type?: string; details?: unknown }> }).getBranch?.() ?? [];
+  const requestedDetails = asMaestroDetails(event.compactionEntry.details);
+  const latestEntry = [...branch].reverse().find((entry) => {
+    if (entry.type !== "compaction") return false;
+    const details = asMaestroDetails(entry.details);
+    return requestedDetails ? details?.checkpointId === requestedDetails.checkpointId : details !== undefined;
+  }) as SessionCompactEvent["compactionEntry"] | undefined;
+  const canonicalEvent = latestEntry ? { ...event, compactionEntry: latestEntry } : event;
+  const details = asMaestroDetails(canonicalEvent.compactionEntry.details);
   if (!details) return undefined;
   if (details.sessionId !== ctx.sessionManager.getSessionId()) return undefined;
 
@@ -505,7 +558,7 @@ export async function persistMaestroCompactionKnowhow(
   const knowhowDir = dirname(outputPath);
   await ensureDir(knowhowDir, { recursive: true, mode: PRIVATE_DIRECTORY_MODE });
   await assertPrivateDirectoryInsideWorkspace(ctx.cwd, knowhowDir);
-  const content = renderKnowhowCopy(event, details);
+  const content = renderKnowhowCopy(canonicalEvent, details);
   if (await secureExistingKnowhowFile(outputPath)) return outputPath;
   try {
     await write(outputPath, content, { encoding: "utf8", flag: "wx", mode: PRIVATE_FILE_MODE });
@@ -548,9 +601,10 @@ function collectCurrentReferencePaths(
     ...event.preparation.fileOps.edited,
   ]);
   const paths: Array<{ path: string; role: "read" | "modified" }> = [];
-  for (const path of modified) paths.push({ path, role: "modified" });
+  const keep = (path: string) => !/[\\/](?:pi-spill-[^\\/]+|tool-spill)[\\/]/i.test(path);
+  for (const path of modified) if (keep(path)) paths.push({ path, role: "modified" });
   for (const path of event.preparation.fileOps.read) {
-    if (!modified.has(path)) paths.push({ path, role: "read" });
+    if (!modified.has(path) && keep(path)) paths.push({ path, role: "read" });
   }
   return paths;
 }
@@ -751,7 +805,15 @@ export async function resolveConfiguredCompactionModel(
 ): Promise<Model<Api>> {
   if (!reference) return currentModel;
   const cached = cachedCompactionModel(reference, currentModel, ctx);
-  if (cached) return cached;
+  if (cached) {
+    try {
+      const auth = await ctx.modelRegistry.getApiKeyAndHeaders(cached);
+      if (auth.ok && auth.apiKey) return cached;
+    } catch {
+      // Re-resolve below so credential changes cannot leave a stale threshold model.
+    }
+    invalidateCompactionModel(reference, currentModel, ctx);
+  }
   const separator = reference.indexOf("/");
   const provider = separator > 0 ? reference.slice(0, separator) : "";
   const modelId = separator > 0 ? reference.slice(separator + 1) : "";

@@ -259,7 +259,7 @@ test("compaction arbiter serializes extension requests while only observing nati
   assert.equal(arbiter.currentOwner(), undefined);
 });
 
-test("runObservedCompaction releases native ownership when projection fails", async () => {
+test("runObservedCompaction finalizes ownership when projection fails", async () => {
   const arbiter = new CompactionArbiter();
   const native = arbiter.observeStart();
   await assert.rejects(
@@ -267,6 +267,20 @@ test("runObservedCompaction releases native ownership when projection fails", as
     /projection failed/,
   );
   assert.equal(arbiter.currentOwner(), undefined);
+});
+
+test("compaction operation finalization is idempotent and operation-scoped", () => {
+  const arbiter = new CompactionArbiter();
+  const lease = arbiter.request("output-limit");
+  assert.ok(lease);
+  const request = compactionRequestFromInstructions(lease.tagInstructions("summary"));
+  const observed = arbiter.observeStart(request);
+  assert.equal(observed.operationId, lease.operationId);
+  assert.equal(observed.finalize("cancel"), true);
+  assert.equal(observed.finalize("error"), false, "a terminal operation cannot finalize twice");
+  assert.equal(arbiter.currentOwner(), undefined);
+  assert.equal(arbiter.currentOperationId(), undefined);
+  assert.equal(arbiter.observeStart(request).allowed, false, "a finalized operation cannot be resurrected");
 });
 
 test("compaction arbiter preserves output-limit ownership through instruction tags", () => {
@@ -853,6 +867,22 @@ test("provider request hook returns the guarded payload and explains the degrada
   }]);
 });
 
+test("direct compaction completion applies the final payload guard", async () => {
+  const options = buildSummaryCompletionOptions({
+    apiKey: "test",
+    maxTokens: 1,
+    signal: new AbortController().signal,
+  });
+  const payload = {
+    max_tokens: 1,
+    thinking: { type: "enabled", budget_tokens: 1_024 },
+  };
+  assert.deepEqual(await options.onPayload(payload), {
+    max_tokens: 1,
+    thinking: { type: "disabled" },
+  });
+});
+
 test("mid-turn compaction yields when native or plan compaction owns the arbiter", async () => {
   const arbiter = new CompactionArbiter();
   const native = arbiter.observeStart();
@@ -1321,7 +1351,8 @@ test("session switch fences evaluation awaiting linked-model authentication", as
 test("prune manifest persistence retries after appendEntry fails", async () => {
   let appendAttempts = 0;
   const guard = createMidTurnAutoCompaction({
-    appendEntry() {
+    appendEntry(type: string) {
+      if (type !== "maestro-auto-prune-state") return;
       appendAttempts += 1;
       if (appendAttempts === 1) throw new Error("persist failed");
     },
@@ -1633,6 +1664,42 @@ test("mid-turn guard restores persisted prunes before the first resumed provider
   guard.onSessionStart(ctx);
   const resumed = await guard.evaluate(messages, ctx);
   assert.match(JSON.stringify(resumed?.[1]), /stale large output/);
+});
+
+test("custom compaction cancels instead of entering Pi's unguarded summary fallback", async () => {
+  const notifications: string[] = [];
+  const result = await createMaestroCompaction(
+    {
+      preparation: {
+        firstKeptEntryId: "kept",
+        messagesToSummarize: [],
+        turnPrefixMessages: [],
+        isSplitTurn: false,
+        tokensBefore: 1200,
+        fileOps: { read: new Set<string>(), written: new Set<string>(), edited: new Set<string>() },
+        settings: { enabled: true, reserveTokens: 1000, keepRecentTokens: 100 },
+      },
+      branchEntries: [],
+      signal: new AbortController().signal,
+      type: "session_before_compact",
+    } as never,
+    {
+      cwd: "D:\\repo",
+      model: { id: "faux", maxTokens: 2000 },
+      sessionManager: { getSessionId: () => "session-cancel" },
+      ui: { notify(message: string) { notifications.push(message); } },
+    } as never,
+    {
+      completeSummary: async () => ({
+        stopReason: "error",
+        errorMessage: "provider rejected summary",
+        content: [],
+      }),
+    },
+  );
+
+  assert.deepEqual(result, { cancel: true });
+  assert.match(notifications[0] ?? "", /cancelled before Pi's unguarded fallback/);
 });
 
 test("clean-context compaction bypasses summarization and keeps no old provider messages", async () => {
@@ -2232,6 +2299,37 @@ test("output-limit guard compacts and continues when a length stop hits high con
   assert.equal(sent.length, 1);
   assert.match(sent[0] ?? "", /output token limit/);
   assert.match(sent[0] ?? "", /Continue/);
+});
+
+test("output-limit capture uses the linked summary-model absolute threshold", async () => {
+  let compactCalls = 0;
+  const summaryModel = { provider: "summary", id: "small", contextWindow: 50_000, maxTokens: 8_000 };
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 5_000,
+      keepRecentTokens: 1_000,
+      model: "summary/small",
+    }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { provider: "session", id: "large", contextWindow: 100_000, maxTokens: 16_000 },
+    modelRegistry: {
+      find() { return summaryModel; },
+      async getApiKeyAndHeaders() { return { ok: true, apiKey: "test" }; },
+    },
+    getContextUsage: () => ({ tokens: 50_000, contextWindow: 100_000, percent: 50 }),
+    hasPendingMessages: () => false,
+    compact() { compactCalls += 1; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(compactCalls, 1, "50K usage exceeds the linked 50K-model gate despite only filling half the session window");
 });
 
 test("output-limit compaction failure queues a bounded recovery turn", async () => {
@@ -3315,7 +3413,7 @@ test("L2 spill replacement is byte-identical after a session-state restore", asy
   const firstReplacement = JSON.stringify(first?.[1]);
   assert.match(firstReplacement, /<persisted-output>/);
   const persisted = appended.at(-1);
-  assert.equal((persisted?.data as { version?: number }).version, 3);
+  assert.equal((persisted?.data as { version?: number }).version, 4);
 
   const resumedGuard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
     readSettings: () => settings,
@@ -3370,6 +3468,7 @@ test("L2 token growth is re-accounted before choosing the critical L4 replacemen
   const ctx = {
     cwd: "D:\\repo",
     model: { contextWindow: 6_000 },
+    abort() {},
     sessionManager: { getSessionId: () => "boundary-spill-session", getBranch: () => [] },
     ui: { setStatus() {}, notify() {} },
   } as never;
@@ -3432,7 +3531,7 @@ test("L4 minimal replacement remains byte-identical across turns and restore", a
   ] as never, ctx);
   assert.equal(JSON.stringify(second?.[1]), firstReplacement);
 
-  const persisted = appended.at(-1);
+  const persisted = appended.findLast((entry) => entry.type === "maestro-auto-prune-state");
   const restoredGuard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, dependencies);
   const restoredCtx = {
     ...ctx,

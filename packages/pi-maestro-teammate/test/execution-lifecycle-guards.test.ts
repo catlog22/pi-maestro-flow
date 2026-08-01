@@ -139,6 +139,111 @@ test("REL-4: a prompt agent_end still settles before the lifecycle deadline fire
   assert.equal(handle!.killed(), false, "a fresh teammate stays wakeable after agent_end");
 });
 
+test("output-limit: length agent_end is not accepted as a successful teammate result", async () => {
+  let handle: FakeChildHandle | undefined;
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      const message = {
+        role: "assistant",
+        stopReason: "length",
+        content: [{ type: "text", text: "partial response" }],
+      };
+      handle!.stdout.write(line({ type: "message_end", message }));
+      handle!.stdout.write(line({ type: "turn_end", message, toolResults: [] }));
+      handle!.stdout.write(line({ type: "agent_end", messages: [message] }));
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "truncate", context: "fresh" },
+    { baseCwd: process.cwd(), spawnChildProcess, outputLimitRecoveryTimeoutMs: 40 },
+  );
+
+  assert.equal(result.exitCode, 1);
+  assert.ok(result.messages.some((message) => message.content === "partial response"));
+  assert.match(result.messages.at(-1)?.content ?? "", /partial response was not accepted as success/);
+  assert.equal(handle!.killed(), true);
+});
+
+test("output-limit: a continuation loop replaces length settlement with one final success", async () => {
+  let handle: FakeChildHandle | undefined;
+  const completions: SingleResult[] = [];
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      const partial = {
+        role: "assistant",
+        stopReason: "length",
+        content: [{ type: "text", text: "partial response" }],
+      };
+      handle!.stdout.write(line({ type: "turn_end", message: partial, toolResults: [] }));
+      handle!.stdout.write(line({ type: "agent_end", messages: [partial] }));
+      setTimeout(() => {
+        const final = {
+          role: "assistant",
+          stopReason: "stop",
+          content: [{ type: "text", text: "continued and complete" }],
+        };
+        handle!.stdout.write(line({ type: "agent_start" }));
+        handle!.stdout.write(line({ type: "turn_end", message: final, toolResults: [] }));
+        handle!.stdout.write(line({ type: "agent_end", messages: [final] }));
+      }, 10);
+    });
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "recover", context: "fresh" },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      outputLimitRecoveryTimeoutMs: 80,
+      onTurnComplete: (entry) => completions.push(entry),
+    },
+  );
+
+  assert.equal(result.exitCode, 0);
+  assert.ok(result.messages.some((message) => message.content === "partial response"));
+  assert.ok(result.messages.some((message) => message.content === "continued and complete"));
+  await delay(120);
+  assert.equal(completions.length, 1);
+  assert.equal(handle!.killed(), false, "fresh agents remain wakeable after the recovered turn");
+});
+
+test("output-limit: a child exit during recovery is not a success", async () => {
+  let handle: FakeChildHandle | undefined;
+  const spawnChildProcess = (() => {
+    handle = createFakeChild();
+    queueMicrotask(() => {
+      const partial = {
+        role: "assistant",
+        stopReason: "length",
+        content: [{ type: "text", text: "partial response" }],
+      };
+      handle!.stdout.write(line({ type: "message_end", message: partial }));
+      handle!.stdout.write(line({ type: "turn_end", message: partial, toolResults: [] }));
+      handle!.stdout.write(line({ type: "agent_end", messages: [partial] }));
+    });
+    // The child exits cleanly (code 0) instead of continuing: the truncated
+    // response must not be accepted as success. The delay lets the parent
+    // process the agent_end and arm the recovery window first.
+    setTimeout(() => handle!.close(0, null), 30);
+    return handle!.child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "truncate then exit", context: "fresh" },
+    { baseCwd: process.cwd(), spawnChildProcess, outputLimitRecoveryTimeoutMs: 2_000 },
+  );
+
+  assert.equal(result.exitCode, 1, "a truncated response cut short by child exit must fail");
+  assert.ok(result.messages.some((message) => message.content === "partial response"));
+  assert.match(result.messages.at(-1)?.content ?? "", /not accepted as success/);
+  assert.equal(handle!.killed(), false, "an already-exited child needs no kill");
+});
+
 // ---------------------------------------------------------------------------
 // OBS-6 / OBS-7 — terminal conditions must leave evidence
 // ---------------------------------------------------------------------------

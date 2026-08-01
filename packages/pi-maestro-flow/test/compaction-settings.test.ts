@@ -145,6 +145,8 @@ test("compaction writes preserve unknown keys and unset restores inheritance", a
     assert.deepEqual(project, {
       model: "test-model",
       compaction: {
+        reserveTokens: 10_000,
+        keepRecentTokens: 8_000,
         projectOption: "keep",
         hard: { reserveTokens: 10_000, keepRecentTokens: 8_000 },
         enabled: true,
@@ -156,6 +158,7 @@ test("compaction writes preserve unknown keys and unset restores inheritance", a
     assert.deepEqual(project, {
       model: "test-model",
       compaction: {
+        keepRecentTokens: 8_000,
         projectOption: "keep",
         hard: { keepRecentTokens: 8_000 },
         enabled: true,
@@ -181,6 +184,8 @@ test("compaction writes are atomic and serialized per settings path", async () =
     assert.deepEqual(await readJson(settingsPath), {
       compaction: {
         enabled: false,
+        reserveTokens: 9_000,
+        keepRecentTokens: 7_000,
         hard: { reserveTokens: 9_000, keepRecentTokens: 7_000 },
       },
     });
@@ -334,6 +339,7 @@ test("compaction scope writes persist the soft group and preserve it when absent
     let project = await readJson(resolveProjectSettingsPath(fixture.projectDir));
     assert.deepEqual(project, {
       compaction: {
+        reserveTokens: 12_000,
         hard: { reserveTokens: 12_000 },
         soft: { enabled: true, nudgeRatio: 0.5, pruneRatio: 0.7, pruneTargetRatio: 0.5 },
       },
@@ -342,6 +348,7 @@ test("compaction scope writes persist the soft group and preserve it when absent
     project = await readJson(resolveProjectSettingsPath(fixture.projectDir));
     assert.deepEqual(project, {
       compaction: {
+        reserveTokens: 13_000,
         hard: { reserveTokens: 13_000 },
         soft: { enabled: true, nudgeRatio: 0.5, pruneRatio: 0.7, pruneTargetRatio: 0.5 },
       },

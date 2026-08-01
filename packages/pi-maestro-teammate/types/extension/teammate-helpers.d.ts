@@ -168,7 +168,7 @@ export declare const RESULT_READY_RECLAIM_MS: number;
  * neither live nor settled: it never reaches a `sleeping` cohort, so the
  * wakeable budget cannot evict it, and it holds an active-agent slot forever.
  */
-export declare function reclaimResultReadyAgents(state: TeammateState, now?: number): string[];
+export declare function reclaimResultReadyAgents(state: TeammateState, pi?: ExtensionAPI, now?: number): string[];
 export declare function enforceWakeableAgentBudget(state: TeammateState, now?: number): string[];
 export declare function nextWakeableAgentExpiryDelay(state: TeammateState, now?: number): number | undefined;
 export declare function hasTeammateWidgetWork(state: TeammateState, now?: number): boolean;
