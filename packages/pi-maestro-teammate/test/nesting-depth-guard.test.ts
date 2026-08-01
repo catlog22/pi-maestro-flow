@@ -194,7 +194,7 @@ test("a proxied graph reserves every child slot before registration", async () =
 });
 
 test("P4: root and proxy graphs register every task before emitting started events", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
 
   // Both registration loops must finish the full graph before any synchronous
   // TEAMMATE_STARTED_EVENT emit, so a listener re-entering admission sees the

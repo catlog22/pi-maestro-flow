@@ -1084,7 +1084,7 @@ test("foreground nested proxy updates preserve the two allowed teammate levels",
 });
 
 test("root and proxy teammate initialization use their own request params", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
   const rootStart = source.indexOf("const activeAgent: ActiveAgent = {");
   const rootEnd = source.indexOf("state.activeRuns.set(correlationId, activeAgent);", rootStart);
   assert.ok(rootStart >= 0 && rootEnd > rootStart);
@@ -1107,7 +1107,7 @@ test("root and proxy teammate initialization use their own request params", () =
 });
 
 test("native teammate status widget yields while another surface owns agent display", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
   assert.match(source, /pi\.events\.on\(COCKPIT_UI_OWNERSHIP_EVENT[\s\S]*?cockpitOwnsAgents = .*?\.agents === true/);
   assert.match(source, /const foregroundToolRuns = new Set<string>\(\)/);
   assert.match(source, /if \(params\.background === false\) \{[\s\S]*?foregroundToolRuns\.add\(correlationId\)[\s\S]*?updateAgentWidget\(\)/);
@@ -1116,7 +1116,7 @@ test("native teammate status widget yields while another surface owns agent disp
 });
 
 test("root and proxy graph normalization share one implementation that preserves thinking", () => {
-  const indexSource = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const indexSource = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
   const executionSource = fs.readFileSync(new URL("../src/runs/execution.ts", import.meta.url), "utf-8");
   const executionInfraSource = fs.readFileSync(new URL("../src/runs/execution-infra.ts", import.meta.url), "utf-8");
 
@@ -1147,7 +1147,7 @@ test("v1 execution entrypoint exposes an explicit stable whitelist", async () =>
 });
 
 test("child lifecycle commit wins over a later handback failure recovery", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
   const handlerStart = source.indexOf("export function handleChildLifecycleEvent(");
   const registrationStart = source.indexOf("export default function registerTeammateExtension(");
   assert.ok(handlerStart >= 0 && handlerStart < registrationStart);
@@ -1504,7 +1504,7 @@ test("awaited handoff transitions reject stale selections and transition no-ops"
 });
 
 test("teammate-session revalidates the complete lease after each awaited selection boundary", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
   const start = source.indexOf("async function handleTeammateSession(");
   const end = source.indexOf("async function showTeammateControlCenter(", start);
   assert.ok(start >= 0 && end > start);
@@ -1920,7 +1920,7 @@ test("retrying agents remain distinct from sleeping and expose retry metadata", 
 });
 
 test("nested proxy preserves parentage, graph children, and explicit background semantics", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
   assert.equal(source.match(/emitTeammateStarted\(pi, childAgent\)/g)?.length, 2);
   // A graph task child names itself so its siblings stay distinguishable, and
   // that claim is honoured because it resolves inside the spawner's subtree.
@@ -2576,7 +2576,7 @@ test("Alt+R opens the native agent view without injecting a slash command", asyn
 });
 
 test("P0a: foreground wait window always resolves to a bounded deadline", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8");
 
   // The wait-window helper must never return undefined: an undefined value
   // reached createForegroundDeadline as a never-resolving promise, so a
