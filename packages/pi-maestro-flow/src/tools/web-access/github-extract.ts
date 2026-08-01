@@ -51,6 +51,7 @@ export interface CachedClone {
 
 /** Mutable refs (branches, tags, default branch) expire; SHAs do not. */
 export const MOVING_REF_TTL_MS = 10 * 60 * 1000;
+export const MAX_CLONE_CACHE_ENTRIES = 8;
 
 let cloneClock: () => number = () => Date.now();
 
@@ -63,6 +64,25 @@ interface GitHubCloneConfig {
 
 const cloneCache = new Map<string, CachedClone>();
 
+function removeCloneEntry(key: string, entry: CachedClone): void {
+	cloneCache.delete(key);
+	try {
+		rmSync(entry.localPath, { recursive: true, force: true });
+	} catch {
+	}
+}
+
+function enforceCloneCacheLimit(
+	maxEntries = MAX_CLONE_CACHE_ENTRIES,
+	protectedKey?: string,
+): void {
+	while (cloneCache.size > maxEntries) {
+		const candidate = [...cloneCache].find(([key, entry]) => key !== protectedKey && entry.settled);
+		if (!candidate) return;
+		removeCloneEntry(candidate[0], candidate[1]);
+	}
+}
+
 export function isCloneEntryFresh(entry: CachedClone, now: number): boolean {
 	return entry.immutable || now - entry.createdAt < MOVING_REF_TTL_MS;
 }
@@ -70,13 +90,13 @@ export function isCloneEntryFresh(entry: CachedClone, now: number): boolean {
 export function lookupCloneCache(key: string): CachedClone | null {
 	const entry = cloneCache.get(key);
 	if (!entry) return null;
-	if (isCloneEntryFresh(entry, cloneClock())) return entry;
-	if (!entry.settled) return entry; // never evict an in-flight clone
-	cloneCache.delete(key);
-	try {
-		rmSync(entry.localPath, { recursive: true, force: true });
-	} catch {
+	if (isCloneEntryFresh(entry, cloneClock())) {
+		cloneCache.delete(key);
+		cloneCache.set(key, entry);
+		return entry;
 	}
+	if (!entry.settled) return entry; // never evict an in-flight clone
+	removeCloneEntry(key, entry);
 	return null;
 }
 
@@ -92,6 +112,11 @@ export function setCloneCacheClockForTesting(clock: () => number): () => void {
 /** Test only: seed a cache entry without cloning. */
 export function seedCloneCacheForTesting(key: string, entry: CachedClone): void {
 	cloneCache.set(key, entry);
+}
+
+/** Test only: apply a deterministic cache bound. */
+export function enforceCloneCacheLimitForTesting(maxEntries: number): void {
+	enforceCloneCacheLimit(maxEntries);
 }
 
 /** Test only: list current cache keys. */
@@ -653,6 +678,7 @@ export async function extractGitHub(
 	};
 	entry.clonePromise = cloneRepo(owner, repo, info.ref, config).finally(() => {
 		entry.settled = true;
+		enforceCloneCacheLimit(MAX_CLONE_CACHE_ENTRIES, key);
 	});
 	cloneCache.set(key, entry);
 
@@ -689,11 +715,7 @@ export async function extractGitHub(
 export function clearCloneCache(): void {
 	for (const [key, entry] of [...cloneCache]) {
 		if (!entry.settled) continue; // never evict an in-flight clone
-		cloneCache.delete(key);
-		try {
-			rmSync(entry.localPath, { recursive: true, force: true });
-		} catch {
-		}
+		removeCloneEntry(key, entry);
 	}
 	cachedConfig = null;
 }

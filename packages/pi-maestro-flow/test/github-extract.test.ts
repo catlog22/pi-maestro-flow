@@ -117,6 +117,30 @@ test("mutable refs expire after the bounded TTL; immutable SHAs stay stable", ()
 	}
 });
 
+test("settled clone cache enforces an LRU capacity and reclaims directories", () => {
+	gh.clearCloneCache();
+	const entries = [0, 1, 2].map((index) => {
+		const key = `owner/repo-${index}@sha`;
+		const localPath = makeFakeClone(`lru-${index}`, `clone ${index}`);
+		gh.seedCloneCacheForTesting(key, {
+			localPath,
+			clonePromise: Promise.resolve(localPath),
+			createdAt: Date.now(),
+			immutable: true,
+			settled: true,
+		});
+		return { key, localPath };
+	});
+
+	assert.ok(gh.lookupCloneCache(entries[0].key), "a hit refreshes LRU order");
+	gh.enforceCloneCacheLimitForTesting(2);
+
+	assert.deepEqual(gh.cloneCacheKeysForTesting(), [entries[2].key, entries[0].key]);
+	assert.equal(existsSync(entries[1].localPath), false, "the oldest settled directory is reclaimed");
+	assert.equal(existsSync(entries[0].localPath), true);
+	gh.clearCloneCache();
+});
+
 test("stale in-flight clones are never evicted", () => {
 	let now = 5_000_000;
 	const restoreClock = gh.setCloneCacheClockForTesting(() => now);
