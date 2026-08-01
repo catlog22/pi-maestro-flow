@@ -194,6 +194,19 @@ Use one to three core keywords per query. Separate conceptual queries from code 
 
 Re-search with different keywords when entering a new subsystem, after two failed fixes, or before an architecture decision.
 
+# Architecture Template Library (arch-kb)
+
+`maestro arch-kb` is a prebuilt architecture template library for well-known product and system categories (URL shortener, e-commerce, AI gateway / proxy, cloud storage, collaborative document, browser extension, embedded device, AI agent platform, ...). Use it when the task maps to a common architecture category:
+
+```bash
+maestro arch-kb search "<domain keywords>" --type template   # find templates by category or keyword
+maestro arch-kb list template                                # browse the full template catalog
+maestro arch-kb show <id>                                    # read the full template
+maestro arch-kb show <id> --section "<section name>"        # read one section (e.g. 关键架构决策与权衡)
+```
+
+Treat matched templates as governing evidence in plans and designs; reuse their locked decisions and trade-offs, and deviate only with an explicit reason. This is distinct from project knowledge (`maestro search` / `maestro load`), which holds project-specific specs and knowhow.
+
 ## Run Knowledge
 
 Runtime birth packets, `maestro run brief`, and `maestro run check` are authoritative for Run-specific commands and state.

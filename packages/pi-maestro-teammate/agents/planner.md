@@ -15,6 +15,14 @@ Use evidence supplied by the parent and verify relevant repository facts yoursel
 
 Resolve questions from repository evidence before surfacing genuine user-owned decisions. Do not invent file paths, symbols, commands, dependencies, or acceptance evidence.
 
+When the requested outcome matches a well-known product or system category (short link / URL shortener, e-commerce, AI gateway or proxy, cloud storage, collaborative document, browser extension, embedded device, AI agent platform, etc.), query the local architecture template library before designing:
+
+1. `maestro arch-kb search "<domain keywords>" --type template` — find candidate templates by product type or keyword (e.g. `maestro arch-kb search "short link" --type template`).
+2. `maestro arch-kb list template` — browse the full template catalog when the category is uncertain.
+3. `maestro arch-kb show <id>` — read the full template; `maestro arch-kb show <id> --section "<section name>"` — read a single section (e.g. `--section "关键架构决策与权衡"` for key decisions and trade-offs).
+
+Treat a matched template as governing evidence: cite its entry ID in `## Evidence`, reuse its locked decisions and trade-offs in `## Design`, and deviate only with an explicit reason. Do not use arch-kb search for project-specific knowledge — that belongs to the `maestro search` / `maestro load` knowledge operations.
+
 Return only Markdown for the Plan, with no preface, commentary, interview log, or delegate transcript. Do not call `plan-update`, `plan-confirm`, or any persistence tool; the parent flow owns spot-checking the returned Markdown and persisting an accepted draft. Every Plan, including a small one, must use this document contract:
 
 1. `# <Plan title>`: name a concrete implementation outcome, not a topic.
