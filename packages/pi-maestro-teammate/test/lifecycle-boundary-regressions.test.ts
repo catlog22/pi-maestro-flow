@@ -43,6 +43,7 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   ];
   let teammate: RegisteredTool | undefined;
   const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const messages: Array<Record<string, unknown>> = [];
   const hooks = new Map<string, Array<(...args: any[]) => unknown>>();
   const commands = new Map<string, { handler: (args: string, ctx: any) => Promise<void> | void }>();
   const pi = new Proxy({
@@ -62,7 +63,7 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
     registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> | void }) {
       commands.set(name, command);
     },
-    sendMessage() {},
+    sendMessage(message: Record<string, unknown>) { messages.push(message); },
   }, {
     get(target, property) {
       if (property in target) return target[property as keyof typeof target];
@@ -71,7 +72,7 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   });
   registerTeammateExtension(pi as unknown as ExtensionAPI, runtimeOptions);
   assert.ok(teammate);
-  return { teammate, emitted, hooks, commands };
+  return { teammate, emitted, messages, hooks, commands };
 }
 
 function context(): Record<string, unknown> {
@@ -546,6 +547,49 @@ test("proxy graph waits for every terminal task and preserves physical lifecycle
   assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 1);
 });
 
+test("nested omitted background uses the normalized foreground default", async () => {
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const messages: Array<Record<string, unknown>> = [];
+  const replies: Array<Record<string, unknown>> = [];
+  const state = createProxyState();
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined, kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout.write(`${JSON.stringify(resultReadyTurn("foreground result"))}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  await handleProxyRequest(
+    createProxyPi(emitted, messages),
+    state,
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId: "default-foreground",
+      params: { tasks: [{ agent: "general", name: "foreground", prompt: "return directly" }] },
+    },
+    (reply) => replies.push(reply as Record<string, unknown>),
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess, foregroundMaxRunMs: 500 },
+  );
+
+  assert.equal(replies.length, 1);
+  const result = replies[0].result as { content: Array<{ text: string }> };
+  assert.match(result.content[0].text, /foreground result/);
+  assert.doesNotMatch(result.content[0].text, /running in background|moved to background/);
+  assert.equal(messages.some((message) => message.customType === "teammate-complete"), false);
+});
+
 test("mixed nested graph settlement preserves successful sibling wakeability", async () => {
   const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const state = createProxyState();
@@ -804,6 +848,115 @@ test("conversation switch treats a cancelled replacement as failure", async () =
     /cancelled before replacement completed/i,
   );
   assert.equal(switched, false);
+});
+
+test("session shutdown fences delayed root completion from the replacement session", async () => {
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined, kill() { return true; },
+    });
+    queueMicrotask(() => stdout!.write(`${JSON.stringify(resultReadyTurn("old root result"))}\n`));
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const { teammate, emitted, messages, hooks } = createHarness({
+    spawnChildProcess,
+    resultReadyGraceMs: 500,
+  });
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  state.currentSessionId = "session-A";
+  state.sessionGeneration = 1;
+
+  const acknowledgement = await teammate.execute(
+    "old-root-call",
+    { tasks: [{ agent: "general", name: "old-root", prompt: "finish after shutdown" }], background: true },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  assert.match(acknowledgement.content[0].text, /running in background/);
+  await delay(30);
+
+  const shutdown = hooks.get("session_shutdown")?.[0];
+  assert.ok(shutdown);
+  await shutdown();
+  state.currentSessionId = "session-B";
+  stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await delay(40);
+
+  assert.equal(emitted.some(({ event }) => event === "teammate:complete"), false);
+  assert.equal(messages.some((message) => message.customType === "teammate-complete"), false);
+});
+
+test("session shutdown fences delayed nested completion from the replacement session", async () => {
+  const { hooks } = createHarness();
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  state.currentSessionId = "session-A";
+  state.sessionGeneration = 1;
+  const observation = new AbortController();
+  state.proxyObservationControllers = new Map([["old-observation", observation]]);
+  state.pendingProxyDispatchRequests = new Set(["old-pending-request"]);
+  state.pendingProxyDispatchParents = new Map([["old-pending-request", "old-parent"]]);
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const messages: Array<Record<string, unknown>> = [];
+  const replies: Array<Record<string, unknown>> = [];
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined, kill() { return true; },
+    });
+    queueMicrotask(() => stdout!.write(`${JSON.stringify(resultReadyTurn("old result"))}\n`));
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  await handleProxyRequest(
+    createProxyPi(emitted, messages),
+    state,
+    {
+      type: "teammate_proxy_request",
+      tool: "teammate",
+      requestId: "old-session-request",
+      params: {
+        tasks: [{ agent: "general", name: "old-session-agent", prompt: "finish after shutdown" }],
+        background: true,
+      },
+    },
+    (reply) => replies.push(reply as Record<string, unknown>),
+    undefined,
+    [],
+    undefined,
+    undefined,
+    { spawnChildProcess, resultReadyGraceMs: 500 },
+  );
+  await delay(30);
+  assert.match(String((replies[0].result as { content: Array<{ text: string }> }).content[0].text), /running in background/);
+
+  const shutdown = hooks.get("session_shutdown")?.[0];
+  assert.ok(shutdown);
+  await shutdown();
+  state.currentSessionId = "session-B";
+  assert.equal(state.sessionGeneration, 2);
+  assert.equal(observation.signal.aborted, true);
+  assert.equal(state.proxyObservationControllers?.size, 0);
+  assert.equal(state.pendingProxyDispatchRequests?.size, 0);
+  assert.equal(state.pendingProxyDispatchParents?.size, 0);
+
+  stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await delay(40);
+
+  assert.equal(emitted.some(({ event }) => event === "teammate:complete"), false);
+  assert.equal(messages.some((message) => message.customType === "teammate-complete"), false);
+  assert.equal(state.proxyDispatchByRequest?.has("old-session-request") ?? false, false);
 });
 
 test("handoff shutdown is compensated when session replacement then fails", async () => {

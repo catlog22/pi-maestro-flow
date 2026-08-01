@@ -82,6 +82,7 @@ import {
   MAX_DEFAULT_DEPTH,
   resolveMaxActiveAgents,
   isStructuredOutputSettlementDiagnostic,
+  type ChildReclamationOutcome,
 } from "../runs/execution.ts";
 import {
   confirmChildReloaded,
@@ -741,6 +742,10 @@ export function statusForWatchTarget(
   const resultReadyAt = target.kind === "agent" ? target.agent.resultReadyAt : target.progress.resultReadyAt;
   const targetCid = target.kind === "agent" ? target.agent.correlationId : target.progress.correlationId;
   if (resultReadyAt !== undefined && claimResultReadyNotice(state, targetCid)) return "result-ready";
+  // A published result remains live until agent_end/close/error confirms its
+  // lifecycle. Once the one-shot result-ready notice has been consumed, do not
+  // reinterpret that confirmation window as an idle stall.
+  if (resultReadyAt !== undefined) return undefined;
   // An agent blocked on a relayed permission or question is waiting on a human,
   // not stalled. Reporting it as stalled told callers to terminate a healthy
   // agent; the wait's own timeout remains the backstop.
@@ -754,7 +759,10 @@ export function waitDelayForWatchTarget(
   timeoutAt: number | undefined,
   state?: TeammateState,
 ): number {
-  const stalledAt = watchTargetStalledAt(target, state);
+  const resultReadyAt = target.kind === "agent" ? target.agent.resultReadyAt : target.progress.resultReadyAt;
+  const stalledAt = resultReadyAt === undefined
+    ? watchTargetStalledAt(target, state)
+    : Number.POSITIVE_INFINITY;
   const nextAt = Math.min(stalledAt, timeoutAt ?? Number.POSITIVE_INFINITY);
   // A floor, not just a positive value: an already-elapsed deadline used to
   // clamp to 1ms, turning the waiter into a ~100Hz busy loop.
@@ -962,6 +970,31 @@ export function markSettledResultInspectable(state: TeammateState, correlationId
   );
   trimAgentBuffers(agent);
   agent.lastActivityAt = Date.now();
+}
+
+export function recordChildReclamationOutcome(
+  state: TeammateState,
+  correlationId: string,
+  outcome: ChildReclamationOutcome,
+): void {
+  if (outcome.status === "reclaimed") return;
+  const diagnostic =
+    `Child process reclamation ended unreaped (correlationId=${correlationId}, `
+    + `forced=${outcome.forced}, reason=${outcome.reason}).`;
+  const agent = state.activeRuns.get(correlationId);
+  if (agent) {
+    agent.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ! ${diagnostic}`);
+    agent.lastActivityAt = Date.now();
+    trimAgentBuffers(agent);
+  }
+  const settled = state.recentlySettled?.get(correlationId);
+  if (settled) {
+    settled.lastResult = truncateUtf8Tail(
+      [settled.lastResult, diagnostic].filter(Boolean).join("\n"),
+      AGENT_BUFFER_LIMITS.lastResultBytes,
+    );
+  }
+  console.error(`[pi-maestro-teammate] ${diagnostic}`);
 }
 
 export function retireAgent(

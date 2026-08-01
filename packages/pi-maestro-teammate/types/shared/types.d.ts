@@ -231,6 +231,8 @@ export interface ActiveAgent {
 export interface TeammateState {
     baseCwd: string;
     currentSessionId: string | null;
+    /** Monotonic owner token for async work admitted by the current session. */
+    sessionGeneration?: number;
     mainSessionFile?: string;
     handoffSwitching?: boolean;
     activeRuns: Map<string, ActiveAgent>;

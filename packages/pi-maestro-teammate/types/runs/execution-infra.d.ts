@@ -106,6 +106,8 @@ export interface RunTeammateOptions {
     initialLeaseToken?: LeaseToken | ((correlationId: string) => LeaseToken | undefined);
     onChildSpawned?: (stdin: import("node:stream").Writable, sendControl: (message: Record<string, unknown>) => boolean, sessionDir?: string, correlationId?: string) => void;
     onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
+    /** Physical child-process reclamation, independent of logical turn settlement. */
+    onReclamationOutcome?: (correlationId: string, outcome: ChildReclamationOutcome) => void;
     /** @internal Test seam for child lifecycle regression coverage. */
     spawnChildProcess?: typeof crossSpawn;
     /** @internal Test seam for retry scheduling. */
@@ -419,12 +421,24 @@ export declare function isRiskyRegexSource(source: string): boolean;
  * silently dropping keywords, so a valid schema still validates exactly as before.
  */
 export declare function findStructuredOutputSchemaHazard(schema: Record<string, unknown>): string | undefined;
+export type ChildReclamationOutcome = {
+    status: "reclaimed";
+    forced: boolean;
+} | {
+    status: "unreaped";
+    forced: boolean;
+    reason: "delivery-failed" | "exit-unconfirmed" | "cleanup-before-exit";
+};
 export interface ChildTerminationController {
+    /** Bounded physical-process outcome, separate from logical turn settlement. */
+    readonly outcome: Promise<ChildReclamationOutcome>;
     terminate(): void;
     cleanup(): void;
 }
 export interface ChildTerminationOptions {
     graceMs?: number;
+    /** Bound after the forced attempt for exit/tree-cleanup acknowledgement. */
+    reclamationTimeoutMs?: number;
     platform?: NodeJS.Platform;
     spawnProcess?: typeof spawn;
 }

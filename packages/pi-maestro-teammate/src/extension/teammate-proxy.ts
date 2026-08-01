@@ -235,7 +235,7 @@ import {
   reclaimResultReadyAgents, nextWakeableAgentExpiryDelay,
   terminateAndRemoveWakeableCohort, wakeableAgentCohorts,
   applyAgentRetryState, applyAgentResultReadyState, clearAgentResultReadyState,
-  markSettledResultInspectable, hasTeammateWidgetWork,
+  markSettledResultInspectable, recordChildReclamationOutcome, hasTeammateWidgetWork,
   emitComplete, safeSendMessage, notifyBackgroundFailure, replyProxyFailure,
   bindAgentName, removeAgentFromRegistry, resolveAgentCorrelationId,
   agentActiveMs, ts, buildAgentList, buildRoleList,
@@ -804,6 +804,9 @@ export async function handleProxyRequest(
   const tool = event.tool as string;
   const requestId = event.requestId as string;
   const params = event.params as Record<string, unknown>;
+  const dispatchGeneration = state.sessionGeneration ?? 0;
+  const ownsDispatchGeneration = (): boolean =>
+    (state.sessionGeneration ?? 0) === dispatchGeneration;
   const parentCid = resolveProxyParentCorrelationId(event, spawnedBy, state);
   const reservesProxyDispatch = tool === "teammate" && typeof requestId === "string";
   if (reservesProxyDispatch) {
@@ -1095,6 +1098,10 @@ export async function handleProxyRequest(
         const lifecycleTerminal = normalizedTasks
           ? taskCorrelationIds.every((taskId) => nestedGraphTerminalIds.has(taskId))
           : nestedSingleTerminal;
+        if (!ownsDispatchGeneration()) {
+          if (lifecycleTerminal) finishProxyDispatchTracking();
+          return;
+        }
         if (state.cancelledProxyDispatches?.get(requestId) === cid) {
           if (lifecycleTerminal) finishProxyDispatchTracking();
           return;
@@ -1411,6 +1418,9 @@ export async function handleProxyRequest(
             `retry ${retry.attempt}/${retry.maxRetries} in ${formatRetryDelay(retry.delayMs)}: ${retry.error}`,
           );
         },
+        onReclamationOutcome: (childId, outcome) => {
+          recordChildReclamationOutcome(state, childId, outcome);
+        },
         onTurnComplete: (result, terminalStatus) => {
           const canonicalStatus = terminalStatusForResult(result, terminalStatus);
           result.terminalStatus = canonicalStatus;
@@ -1591,6 +1601,10 @@ export async function handleProxyRequest(
 
       const completeNestedInBackground = (): void => {
         void nestedPromise.then((completed) => {
+          if (!ownsDispatchGeneration()) {
+            finishProxyDispatchTracking();
+            return;
+          }
           if (state.cancelledProxyDispatches?.get(requestId) === cid) {
             finishProxyDispatchTracking();
             return;
@@ -1598,13 +1612,13 @@ export async function handleProxyRequest(
           publishNestedCompletion(completed, true);
         }).catch((error) => {
           const cancelled = finishProxyDispatchTracking();
-          if (cancelled) return;
+          if (cancelled || !ownsDispatchGeneration()) return;
           settleNestedExecutionFailure(error);
           notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
         });
       };
 
-      if (p.background === false) {
+      if (routedParams.background === false) {
         const waitMs = foregroundWaitWindowMs(allTasks, runtimeOptions.foregroundMaxRunMs);
         const deadline = createForegroundDeadline(waitMs);
         const race = await Promise.race([
@@ -1618,7 +1632,7 @@ export async function handleProxyRequest(
 
         if (race.status === "failed") {
           const cancelled = finishProxyDispatchTracking();
-          if (cancelled) return;
+          if (cancelled || !ownsDispatchGeneration()) return;
           const failureMessage = settleNestedExecutionFailure(race.error);
           emitNestedComplete(1);
           reply({ type: "teammate_proxy_result", requestId, result: {
@@ -1634,6 +1648,10 @@ export async function handleProxyRequest(
 
         if (race.status === "completed") {
           const completed = race.completed;
+          if (!ownsDispatchGeneration()) {
+            finishProxyDispatchTracking();
+            return;
+          }
           if (state.cancelledProxyDispatches?.get(requestId) === cid) {
             finishProxyDispatchTracking();
             return;
@@ -1643,6 +1661,10 @@ export async function handleProxyRequest(
           return;
         }
 
+        if (!ownsDispatchGeneration()) {
+          finishProxyDispatchTracking();
+          return;
+        }
         completeNestedInBackground();
         reply({ type: "teammate_proxy_result", requestId, result: {
           content: [{

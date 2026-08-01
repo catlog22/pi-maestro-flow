@@ -148,6 +148,11 @@ export interface RunTeammateOptions {
     correlationId?: string,
   ) => void;
   onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
+  /** Physical child-process reclamation, independent of logical turn settlement. */
+  onReclamationOutcome?: (
+    correlationId: string,
+    outcome: ChildReclamationOutcome,
+  ) => void;
   /** @internal Test seam for child lifecycle regression coverage. */
   spawnChildProcess?: typeof crossSpawn;
   /** @internal Test seam for retry scheduling. */
@@ -1601,13 +1606,25 @@ export function findStructuredOutputSchemaHazard(
   return visit(schema, 0);
 }
 
+export type ChildReclamationOutcome =
+  | { status: "reclaimed"; forced: boolean }
+  | {
+      status: "unreaped";
+      forced: boolean;
+      reason: "delivery-failed" | "exit-unconfirmed" | "cleanup-before-exit";
+    };
+
 export interface ChildTerminationController {
+  /** Bounded physical-process outcome, separate from logical turn settlement. */
+  readonly outcome: Promise<ChildReclamationOutcome>;
   terminate(): void;
   cleanup(): void;
 }
 
 export interface ChildTerminationOptions {
   graceMs?: number;
+  /** Bound after the forced attempt for exit/tree-cleanup acknowledgement. */
+  reclamationTimeoutMs?: number;
   platform?: NodeJS.Platform;
   spawnProcess?: typeof spawn;
 }
@@ -1618,32 +1635,92 @@ export function createChildTerminationController(
   options: ChildTerminationOptions = {},
 ): ChildTerminationController {
   const graceMs = options.graceMs ?? CHILD_TERMINATION_GRACE_MS;
+  const reclamationTimeoutMs = options.reclamationTimeoutMs ?? graceMs;
   const platform = options.platform ?? process.platform;
   const spawnProcess = options.spawnProcess ?? spawn;
   let exitObserved = child.exitCode !== null || child.signalCode !== null;
   let terminationStarted = false;
+  let forced = false;
   let windowsTreeCleanupConfirmed = false;
   let forceTimer: ReturnType<typeof setTimeout> | undefined;
+  let confirmationTimer: ReturnType<typeof setTimeout> | undefined;
+  let outcomeSettled = false;
+  let resolveOutcome!: (outcome: ChildReclamationOutcome) => void;
+  const outcome = new Promise<ChildReclamationOutcome>((resolve) => {
+    resolveOutcome = resolve;
+  });
 
+  const settleOutcome = (value: ChildReclamationOutcome): void => {
+    if (outcomeSettled) return;
+    outcomeSettled = true;
+    resolveOutcome(value);
+  };
   const clearForceTimer = (): void => {
     if (!forceTimer) return;
     clearTimeout(forceTimer);
     forceTimer = undefined;
   };
-  const onExit = (): void => {
-    exitObserved = true;
-    if (platform !== "win32") clearForceTimer();
+  const clearConfirmationTimer = (): void => {
+    if (!confirmationTimer) return;
+    clearTimeout(confirmationTimer);
+    confirmationTimer = undefined;
   };
   const isAlive = (): boolean =>
     !exitObserved && child.exitCode === null && child.signalCode === null;
-  const killDirect = (signal: NodeJS.Signals): void => {
-    if (!isAlive()) return;
-    try { child.kill(signal); } catch { /* process already exited */ }
+  const markReclaimed = (): void => {
+    clearForceTimer();
+    clearConfirmationTimer();
+    settleOutcome({ status: "reclaimed", forced });
+  };
+  const onExit = (): void => {
+    exitObserved = true;
+    if (platform !== "win32" || !terminationStarted || windowsTreeCleanupConfirmed) {
+      markReclaimed();
+    }
+  };
+  const armExitConfirmation = (): void => {
+    clearConfirmationTimer();
+    confirmationTimer = setTimeout(() => {
+      confirmationTimer = undefined;
+      if (platform === "win32" && terminationStarted && !windowsTreeCleanupConfirmed) {
+        settleOutcome({ status: "unreaped", forced: true, reason: "exit-unconfirmed" });
+      } else if (!isAlive()) markReclaimed();
+      else settleOutcome({ status: "unreaped", forced: true, reason: "exit-unconfirmed" });
+    }, reclamationTimeoutMs);
+    confirmationTimer.unref?.();
+  };
+  const killDirect = (signal: NodeJS.Signals): boolean => {
+    if (!isAlive()) {
+      markReclaimed();
+      return true;
+    }
+    try {
+      const delivered = child.kill(signal);
+      if (!isAlive()) markReclaimed();
+      else if (!delivered && signal === "SIGKILL") {
+        settleOutcome({ status: "unreaped", forced: true, reason: "delivery-failed" });
+      }
+      return delivered;
+    } catch {
+      if (!isAlive()) {
+        markReclaimed();
+        return true;
+      }
+      if (signal === "SIGKILL") {
+        settleOutcome({ status: "unreaped", forced: true, reason: "delivery-failed" });
+      }
+      return false;
+    }
   };
   const killWindowsTree = (force: boolean): void => {
     if (windowsTreeCleanupConfirmed) return;
+    forced ||= force;
+    const fallbackDirect = (): void => {
+      const delivered = killDirect(force ? "SIGKILL" : "SIGTERM");
+      if (force && delivered && isAlive()) armExitConfirmation();
+    };
     if (!child.pid) {
-      killDirect(force ? "SIGKILL" : "SIGTERM");
+      fallbackDirect();
       return;
     }
     try {
@@ -1652,39 +1729,67 @@ export function createChildTerminationController(
         ["/PID", String(child.pid), "/T", ...(force ? ["/F"] : [])],
         { windowsHide: true, stdio: "ignore", shell: false },
       );
-      killer.once("error", () => killDirect(force ? "SIGKILL" : "SIGTERM"));
+      let fallbackStarted = false;
+      const fallbackOnce = (): void => {
+        if (fallbackStarted) return;
+        fallbackStarted = true;
+        fallbackDirect();
+      };
+      killer.once("error", fallbackOnce);
       killer.once("close", (code) => {
-        if (code !== 0) return;
+        if (code !== 0) {
+          fallbackOnce();
+          return;
+        }
         windowsTreeCleanupConfirmed = true;
-        clearForceTimer();
+        markReclaimed();
       });
+      if (force) armExitConfirmation();
     } catch {
-      killDirect(force ? "SIGKILL" : "SIGTERM");
+      fallbackDirect();
     }
   };
 
   child.once("exit", onExit);
+  if (exitObserved) markReclaimed();
   return {
+    outcome,
     terminate(): void {
-      if (terminationStarted || !isAlive()) return;
+      if (terminationStarted) return;
+      if (!isAlive()) {
+        markReclaimed();
+        return;
+      }
       terminationStarted = true;
       if (platform === "win32") killWindowsTree(false);
       else killDirect("SIGTERM");
       if (platform !== "win32" && !isAlive()) return;
       forceTimer = setTimeout(() => {
         forceTimer = undefined;
+        forced = true;
         if (platform === "win32") {
           if (!windowsTreeCleanupConfirmed) killWindowsTree(true);
           return;
         }
-        if (!isAlive()) return;
-        killDirect("SIGKILL");
+        if (!isAlive()) {
+          markReclaimed();
+          return;
+        }
+        const delivered = killDirect("SIGKILL");
+        if (delivered && isAlive()) armExitConfirmation();
       }, graceMs);
+      forceTimer.unref?.();
     },
     cleanup(): void {
       child.removeListener("exit", onExit);
+      if (!isAlive() && (platform !== "win32" || !terminationStarted || windowsTreeCleanupConfirmed)) {
+        markReclaimed();
+      }
       if (platform !== "win32" || !terminationStarted || windowsTreeCleanupConfirmed) {
         clearForceTimer();
+      }
+      if (terminationStarted && isAlive() && !forceTimer && !confirmationTimer) {
+        settleOutcome({ status: "unreaped", forced, reason: "cleanup-before-exit" });
       }
     },
   };

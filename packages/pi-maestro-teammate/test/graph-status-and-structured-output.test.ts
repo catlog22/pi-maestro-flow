@@ -1951,7 +1951,8 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   // Every name binding goes through the one helper that reports collisions.
   assert.equal(source.match(/state\.namedAgents\.set\(/g)?.length, 1, "only bindAgentName may write the name map");
   assert.match(source, /normalizedTasks \? \{ taskCorrelationIds \} : \{ correlationId: cid \}/);
-  assert.match(source, /if \(p\.background === false\) \{[\s\S]*?createForegroundDeadline\(waitMs\)[\s\S]*?completeNestedInBackground\(\)/);
+  assert.match(source, /if \(routedParams\.background === false\) \{[\s\S]*?createForegroundDeadline\(waitMs\)[\s\S]*?completeNestedInBackground\(\)/);
+  assert.doesNotMatch(source, /if \(p\.background === false\)/);
   assert.match(source, /running in background\. \$\{backgroundWaitGuidance\(cid\)\}/);
   assert.match(source, /function backgroundWaitGuidance\(/);
   assert.equal(source.match(/backgroundWaitGuidance\(/g)?.length, 7);

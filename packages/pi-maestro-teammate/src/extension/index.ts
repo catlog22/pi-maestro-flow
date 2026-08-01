@@ -722,6 +722,7 @@ export default function registerTeammateExtension(
   const state: TeammateState = (rootGlobals[registryKey] as TeammateState | undefined) ?? {
     baseCwd: "",
     currentSessionId: null,
+    sessionGeneration: 0,
     activeRuns: new Map(),
     namedAgents: new Map(),
   };
@@ -933,6 +934,9 @@ export default function registerTeammateExtension(
         details: { mode: "single", results: [] },
       });
       if (signal.aborted) return cancelledBeforeStart();
+      const dispatchGeneration = state.sessionGeneration ?? 0;
+      const ownsDispatchGeneration = (): boolean =>
+        (state.sessionGeneration ?? 0) === dispatchGeneration;
 
       const baseCwd = (params.cwd ?? state.baseCwd) || ctx.cwd;
       params = applyModelRouting(
@@ -1150,6 +1154,10 @@ export default function registerTeammateExtension(
       let singleCompletionNotificationRequested = false;
       let singleCompletionDelivered = false;
       const deliverSingleCompletion = (): void => {
+        if (!ownsDispatchGeneration()) {
+          singleCompletionDelivered = true;
+          return;
+        }
         if (singleCompletionDelivered || !singlePublishedResult || !singleTerminalResult) return;
         singleCompletionDelivered = true;
         emitComplete(
@@ -1205,6 +1213,10 @@ export default function registerTeammateExtension(
       let graphCompletionNotificationRequested = false;
       let graphCompletionDelivered = false;
       const deliverGraphCompletion = (): void => {
+        if (!ownsDispatchGeneration()) {
+          graphCompletionDelivered = true;
+          return;
+        }
         if (graphCompletionDelivered || !graphPublication) return;
         if (!taskCorrelationIds.every((taskId) => graphTerminalIds.has(taskId))) return;
         graphCompletionDelivered = true;
@@ -1297,6 +1309,9 @@ export default function registerTeammateExtension(
           },
           onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent(state, event),
           onRetry: (retry) => applyAgentRetryState(state, retry),
+          onReclamationOutcome: (childId, outcome) => {
+            recordChildReclamationOutcome(state, childId, outcome);
+          },
           onTurnComplete: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => {
             const canonicalStatus = terminalStatusForResult(result, terminalStatus);
             result.terminalStatus = canonicalStatus;
@@ -1623,6 +1638,7 @@ export default function registerTeammateExtension(
           };
 
           const failGraphDispatch = (error: unknown): void => {
+            if (!ownsDispatchGeneration()) return;
             const message = error instanceof Error ? error.message : String(error);
             abortController.abort(error);
             taskCorrelationIds.forEach((taskId) => {
@@ -1778,8 +1794,10 @@ export default function registerTeammateExtension(
           // Manual and timed detach share the same background completion path.
           detached = true;
           runPromise.then((result) => {
+            if (!ownsDispatchGeneration()) return;
             publishSingleResult(result, true);
           }).catch((error) => {
+            if (!ownsDispatchGeneration()) return;
             settleAgent(
               state,
               correlationId,
@@ -1810,8 +1828,10 @@ export default function registerTeammateExtension(
         );
 
         bgPromise.then((result) => {
+          if (!ownsDispatchGeneration()) return;
           publishSingleResult(result, true);
         }).catch((error) => {
+          if (!ownsDispatchGeneration()) return;
           settleAgent(
             state,
             correlationId,
@@ -2954,6 +2974,18 @@ export default function registerTeammateExtension(
   }
 
   function teardownRootSession(): void {
+    // Fence every continuation admitted by the outgoing session before any
+    // visible registry or process cleanup. Late promises may release their own
+    // request records, but cannot publish events or turns into the next session.
+    state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
+    for (const controller of state.proxyObservationControllers?.values() ?? []) {
+      controller.abort("teammate session ended");
+    }
+    state.proxyObservationControllers?.clear();
+    state.pendingProxyDispatchRequests?.clear();
+    state.pendingProxyDispatchParents?.clear();
+    state.proxyDispatchByRequest?.clear();
+    state.cancelledProxyDispatches?.clear();
     stopWidgetTimer();
     stopWakeableEvictionTimer();
     for (const [cid, run] of [...state.activeRuns]) {
@@ -3461,6 +3493,7 @@ export default function registerTeammateExtension(
   // =========================================================================
 
   pi.on("session_start", (_event, ctx) => {
+    state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
     widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
     refreshModelCatalog(ctx);
@@ -3521,6 +3554,7 @@ import {
   killAgent,
   killAgentTree,
   markSettledResultInspectable,
+  recordChildReclamationOutcome,
   nextWakeableAgentExpiryDelay,
   notifyBackgroundFailure,
   progressDurationMs,

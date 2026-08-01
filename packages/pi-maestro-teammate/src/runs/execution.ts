@@ -293,7 +293,9 @@ export async function runSingleTeammate(
           throw error;
         }
         lastResult = candidateResult;
-        candidateResult.terminalStatus ??= candidateResult.exitCode === 0 ? "completed" : "failed";
+        if (candidateResult.lifecyclePending !== true) {
+          candidateResult.terminalStatus ??= candidateResult.exitCode === 0 ? "completed" : "failed";
+        }
         const error = resultFailureMessage(candidateResult.messages);
         const toolCount = candidateResult.toolCount ?? 0;
         const restartIsSafe = toolCount === 0;
@@ -726,6 +728,9 @@ async function runSingleAttempt(
     options.onProgress?.(progress);
 
     const termination = createChildTerminationController(child);
+    void termination.outcome.then((outcome) => {
+      options.onReclamationOutcome?.(correlationId, outcome);
+    });
 
     // Handle abort signal
     const unbindTerminationSignal = bindChildTerminationSignal(termination, options.signal);
@@ -793,11 +798,12 @@ async function runSingleAttempt(
       structuredOutput: unknown,
       terminateChild: boolean,
       exitCode = 0,
+      terminalStatus: AgentTerminalStatus = exitCode === 0 ? "completed" : "failed",
     ): void {
       if (state.terminal || state.turnLifecycleSettled) return;
       releaseRetryPersistenceGuard();
       state.turnLifecycleSettled = true;
-      progress.status = exitCode === 0 ? "completed" : "failed";
+      progress.status = terminalStatus;
       progress.resultReadyAt = undefined;
       progress.durationMs = Date.now() - startTime;
       if (messages.length === 0 && state.lastContent) {
@@ -823,13 +829,14 @@ async function runSingleAttempt(
         wakeable: !terminateChild,
         structuredOutput,
         attemptedModels: undefined,
+        terminalStatus,
       };
       if (!state.initialResultPublished) {
         state.initialResultPublished = true;
         resolve(turnResult);
       }
       try {
-        options.onTurnComplete?.(turnResult);
+        options.onTurnComplete?.(turnResult, terminalStatus);
       } catch {
         // Completion observers must not strand a child after the result has
         // already been published to the caller.
@@ -902,7 +909,7 @@ async function runSingleAttempt(
             + `(agent=${params.agent}, correlationId=${correlationId}, tools=${progress.toolCount}, `
             + `turnTools=${state.turnToolCount}); the child process was terminated.`,
         });
-        completeTurn(readStructuredOutput(true), true, 0);
+        completeTurn(readStructuredOutput(true), true, 0, "terminated");
       }, deadlineMs);
       timers.resultReadyGrace.unref?.();
     }
@@ -1441,6 +1448,11 @@ async function runSingleAttempt(
           options.onTurnComplete?.(result);
         } catch {
           // Completion observers cannot prevent child-error settlement.
+        } finally {
+          // A logical child-process error is not proof that the OS process has
+          // exited. Retain reclamation ownership through the termination
+          // controller and publish its bounded outcome separately.
+          termination.terminate();
         }
       }
     });

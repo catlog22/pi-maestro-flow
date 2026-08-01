@@ -6,6 +6,7 @@
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type ChildReclamationOutcome } from "../runs/execution.ts";
 import type { RunTeammateOptions } from "../runs/execution.ts";
 import type { TeammateState, AgentProgressSnapshot, ActiveAgent, AgentTerminalStatus, SettledAgentRecord } from "../shared/types.ts";
 import { type AgentSummary } from "../agents/agents.ts";
@@ -129,6 +130,7 @@ export declare function notifyBackgroundFailure(pi: ExtensionAPI, id: string, ag
  * missing turn is a dropped notification, not a missing result.
  */
 export declare function markSettledResultInspectable(state: TeammateState, correlationId: string): void;
+export declare function recordChildReclamationOutcome(state: TeammateState, correlationId: string, outcome: ChildReclamationOutcome): void;
 export declare function retireAgent(state: TeammateState, correlationId: string, lastResult?: string): void;
 export declare function applyAgentRetryState(state: TeammateState, retry: {
     correlationId: string;

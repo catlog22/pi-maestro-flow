@@ -15,6 +15,13 @@ export declare const TEAMMATE_PROMPT_GUIDELINES: string[];
 export declare function terminalStatusForResult(result: SingleResult, callbackStatus?: AgentTerminalStatus): AgentTerminalStatus;
 export declare function resultIsError(result: SingleResult): boolean;
 export declare function aggregateTerminalStatus(results: readonly SingleResult[]): AgentTerminalStatus;
+/**
+ * Aggregates per-task lifecycle statuses recorded at terminal time. Graph
+ * publications now carry publish-time results (the release boundary), so
+ * container settlement and completion events derive their truth here instead
+ * of from the publication.
+ */
+export declare function aggregateTerminalStatuses(statuses: Iterable<AgentTerminalStatus | undefined>): AgentTerminalStatus;
 export declare function displayMessageForResult(result: SingleResult): string;
 export declare function summarizeGraphResults(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): string;
 export declare function aggregateGraphStructuredOutput(results: readonly SingleResult[], tasks: readonly NormalizedTask[]): Record<string, unknown> | undefined;

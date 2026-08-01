@@ -275,13 +275,19 @@ test("an agent whose result was just published is left alone", () => {
 
 test("result-ready is reported once, then the wait waits for the real terminal state", async () => {
   const state = makeState();
-  const agent = addAgent(state, "worker", { resultReadyAt: Date.now() });
+  const resultReadyAt = Date.now();
+  const agent = addAgent(state, "worker", {
+    resultReadyAt,
+    lastActivityAt: resultReadyAt - TEAMMATE_STALL_TIMEOUT_MS - 1_000,
+  });
 
   const first = await waitForTeammate(state, { name: "worker" });
   assert.equal(first.status, "result-ready");
 
   // Waiting again is how a caller asks for the terminal state. Handing back
-  // `result-ready` forever meant `completed` was unreachable.
+  // `result-ready` forever meant `completed` was unreachable. The old activity
+  // timestamp must not turn the still-valid lifecycle confirmation window into
+  // a false stall after that one-shot notice is consumed.
   const second = await waitForTeammate(state, { name: "worker", timeoutMs: 120 });
   assert.equal(second.status, "timeout");
 

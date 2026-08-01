@@ -102,12 +102,13 @@ test("REL-4: a silent child after result-ready settles on the lifecycle deadline
 
   await delay(160);
 
-  assert.equal(completions.length, 1, "lifecycle must be confirmed by the deadline");
+  assert.equal(completions.length, 1, "lifecycle must be bounded by the deadline");
   assert.equal(completions[0].exitCode, 0, "the deadline must not retract a published success");
+  assert.equal(completions[0].terminalStatus, "terminated", "missing lifecycle confirmation is not a completed lifecycle");
   assert.match(completions[0].messages.at(-1)?.content ?? "", /never confirmed its lifecycle within 40ms/);
   assert.match(completions[0].messages.at(-1)?.content ?? "", /agent=general/);
   assert.equal(handle!.killed(), true, "the wedged child must be terminated");
-  assert.equal(progress.at(-1)?.status, "completed");
+  assert.equal(progress.at(-1)?.status, "terminated");
   assert.equal(progress.at(-1)?.resultReadyAt, undefined);
 });
 

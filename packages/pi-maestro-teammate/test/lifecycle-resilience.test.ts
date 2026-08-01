@@ -38,7 +38,40 @@ test("child termination escalates once only while the real process state is aliv
   termination.terminate();
   termination.terminate();
   assert.deepEqual(child.signals, ["SIGTERM"]);
-  await delay(15);
+  const outcome = await Promise.race([
+    termination.outcome,
+    delay(100).then(() => { throw new Error("termination outcome timed out"); }),
+  ]);
+  assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
+  assert.deepEqual(outcome, {
+    status: "unreaped",
+    forced: true,
+    reason: "exit-unconfirmed",
+  });
+  termination.cleanup();
+});
+
+test("failed TERM and KILL delivery reports an unreaped outcome", async () => {
+  const child = new FakeChild();
+  child.kill = (signal: NodeJS.Signals = "SIGTERM") => {
+    child.signals.push(signal);
+    return false;
+  };
+  const termination = createChildTerminationController(child as unknown as ChildProcess, {
+    graceMs: 5,
+    platform: "linux",
+  });
+
+  termination.terminate();
+  const outcome = await Promise.race([
+    termination.outcome,
+    delay(100).then(() => { throw new Error("termination outcome timed out"); }),
+  ]);
+  assert.deepEqual(outcome, {
+    status: "unreaped",
+    forced: true,
+    reason: "delivery-failed",
+  });
   assert.deepEqual(child.signals, ["SIGTERM", "SIGKILL"]);
   termination.cleanup();
 });
@@ -62,6 +95,7 @@ test("child exit state and exit event cancel force-kill escalation", async () =>
   termination.terminate();
   exiting.signalCode = "SIGTERM";
   exiting.emit("exit", null, "SIGTERM");
+  assert.deepEqual(await termination.outcome, { status: "reclaimed", forced: false });
   await delay(15);
   assert.deepEqual(exiting.signals, ["SIGTERM"]);
   termination.cleanup();
@@ -91,6 +125,7 @@ test("Windows force tree cleanup survives root exit before graceful taskkill com
   }) as unknown as typeof import("node:child_process").spawn;
   const termination = createChildTerminationController(child as unknown as ChildProcess, {
     graceMs: 5,
+    reclamationTimeoutMs: 50,
     platform: "win32",
     spawnProcess,
   });
@@ -111,7 +146,37 @@ test("Windows force tree cleanup survives root exit before graceful taskkill com
     shell: false,
   });
   killers[1].emit("close", 0);
+  assert.deepEqual(await termination.outcome, { status: "reclaimed", forced: true });
   assert.deepEqual(child.signals, []);
+  termination.cleanup();
+});
+
+test("Windows forced taskkill timeout reports an unreaped outcome", async () => {
+  const child = new FakeChild();
+  const killers: EventEmitter[] = [];
+  const spawnProcess = (() => {
+    const killer = new EventEmitter();
+    killers.push(killer);
+    return killer;
+  }) as unknown as typeof import("node:child_process").spawn;
+  const termination = createChildTerminationController(child as unknown as ChildProcess, {
+    graceMs: 5,
+    reclamationTimeoutMs: 10,
+    platform: "win32",
+    spawnProcess,
+  });
+
+  termination.terminate();
+  const outcome = await Promise.race([
+    termination.outcome,
+    delay(100).then(() => { throw new Error("Windows termination outcome timed out"); }),
+  ]);
+  assert.equal(killers.length, 2);
+  assert.deepEqual(outcome, {
+    status: "unreaped",
+    forced: true,
+    reason: "exit-unconfirmed",
+  });
   termination.cleanup();
 });
 
@@ -131,6 +196,7 @@ test("Windows confirmed graceful tree cleanup cancels force escalation", async (
 
   termination.terminate();
   killers[0].emit("close", 0);
+  assert.deepEqual(await termination.outcome, { status: "reclaimed", forced: false });
   child.signalCode = "SIGTERM";
   child.emit("exit", null, "SIGTERM");
   termination.cleanup();
@@ -143,6 +209,7 @@ test("pre-aborted child termination signal is applied immediately after binding"
   controller.abort();
   let terminations = 0;
   const unbind = bindChildTerminationSignal({
+    outcome: Promise.resolve({ status: "reclaimed", forced: false }),
     terminate() { terminations += 1; },
     cleanup() {},
   }, controller.signal);
