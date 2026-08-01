@@ -62,6 +62,7 @@ interface AdapterOptions {
   getPermissionMode?: () => PermissionMode;
   trustFilePath?: string;
   isTeammateChild?: () => boolean;
+  onCompactionCancelled?: () => void;
 }
 
 interface HookState {
@@ -445,7 +446,10 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
       ...turnInput("PreCompact", ctx, state, getPermissionMode()),
       trigger: "auto",
     }, ctx);
-    if (outputs.some(hasContinueFalse)) return { cancel: true };
+    if (outputs.some(hasContinueFalse)) {
+      options.onCompactionCancelled?.();
+      return { cancel: true };
+    }
   });
 
   pi.on("session_compact", async (_event, ctx) => {

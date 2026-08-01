@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { effectiveReserveTokens } from "./compaction-threshold.ts";
 
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
@@ -253,7 +254,7 @@ export function resolveEffectiveCompactionSettings(
 export function validateCompactionPatch(
   patch: CompactionConfigPatch,
   contextWindow?: number,
-  maxTokens?: number,
+  modelMaxTokens?: number,
 ): CompactionValidation {
   const errors: string[] = [];
   const warnings: string[] = [];
@@ -279,13 +280,10 @@ export function validateCompactionPatch(
       errors.push(`reserveTokens (${rt}) must be less than contextWindow (${contextWindow})`);
     }
     if (contextWindow !== undefined && rt < contextWindow) {
-      const threshold = contextWindow - rt;
+      const threshold = contextWindow - effectiveReserveTokens({ reserveTokens: rt }, contextWindow, modelMaxTokens);
       const kr = patch.keepRecentTokens;
       if (kr !== undefined && kr >= threshold) {
         warnings.push(`keepRecentTokens (${kr}) >= thresholdTokens (${threshold}): little compressible history`);
-      }
-      if (maxTokens !== undefined && rt < maxTokens) {
-        warnings.push(`reserveTokens (${rt}) < maxTokens (${maxTokens}): may not leave enough room for a single response`);
       }
     }
   }

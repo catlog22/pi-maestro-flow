@@ -27,7 +27,7 @@ test("compaction TUI renders safely at narrow, boundary, and wide widths", () =>
   }
   assert.match(overlay.render(80).join("\n"), /Maestro 压缩设置/);
   assert.match(overlay.render(80).join("\n"), /压缩阈值/);
-  assert.match(overlay.render(80).join("\n"), /实际 >270,000 \/ 300,000 \(90\.0%\)/);
+  assert.match(overlay.render(80).join("\n"), /实际 >285,000 \/ 300,000 \(95\.0%\)/);
   assert.match(overlay.render(80).join("\n"), /配置阈值 · 290,000 Token \(96\.7%\)/);
   assert.match(overlay.render(20).join("\n"), /Esc关闭 Enter修改/);
   overlay.handleInput("\r");
@@ -44,7 +44,7 @@ test("compaction TUI supports direct threshold editing, scope tabs, toggle, inhe
   });
 
   overlay.handleInput("U");
-  assert.match(overlay.render(80).join("\n"), /实际硬压缩阈值 · 实际 >270,000 \/ 300,000 \(90\.0%\) · 继承自用户/);
+  assert.match(overlay.render(80).join("\n"), /实际硬压缩阈值 · 实际 >280,000 \/ 300,000 \(93\.3%\) · 继承自用户/);
   assert.match(overlay.render(80).join("\n"), /配置阈值 · 280,000 Token \(93\.3%\)/);
   assert.match(overlay.render(20).join("\n"), /Esc关闭 Ctrl\+S保存/);
   overlay.handleInput("\x1b[B");
@@ -109,7 +109,9 @@ test("compaction TUI validates inline and uses layered Esc without saving", asyn
   for (let index = 0; index < 6; index++) overlay.handleInput("\x7f");
   overlay.handleInput("299999");
   overlay.handleInput("\r");
-  assert.match(overlay.render(80).join("\n"), /△ 提醒/);
+  const nearLimit = overlay.render(80).join("\n");
+  assert.match(nearLimit, /实际 >285,000 \/ 300,000 \(95\.0%\)/);
+  assert.doesNotMatch(nearLimit, /△ 提醒/);
   assert.equal(saves, 0);
 
   overlay.handleInput("\x1b");
@@ -132,11 +134,11 @@ test("compaction TUI shows the stepwise effective-reserve derivation while editi
   const rendered = overlay.render(80).join("\n");
   assert.match(rendered, /配置阈值 · 290,000 \/ 300,000 Token/);
   assert.match(rendered, /配置预留 · 10,000 Token/);
-  assert.match(rendered, /窗口 10% 底线 · 30,000 Token/);
-  assert.match(rendered, /阈值输出预算 · 16,000 Token/);
-  assert.match(rendered, /实际安全预留 · 30,000 Token/);
-  assert.match(rendered, /实际硬压缩 · 超过 270,000 Token \(90\.0%\)/);
-  assert.match(rendered, /生效原因 · 窗口 10% 安全底线下调/);
+  assert.match(rendered, /窗口 5% 底线 · 15,000 Token/);
+  assert.match(rendered, /模型输出上限 · 16,000 Token · 按剩余窗口动态收缩/);
+  assert.match(rendered, /实际安全预留 · 15,000 Token/);
+  assert.match(rendered, /实际硬压缩 · 超过 285,000 Token \(95\.0%\)/);
+  assert.match(rendered, /生效原因 · 窗口 5% 安全底线下调/);
 });
 
 test("compaction TUI localizes the absolute reserve ceiling", () => {
@@ -225,14 +227,15 @@ test("compaction TUI pressure preview derives from the effective soft ratios", (
   assert.match(overlay.render(120).join("\n"), /软阶段 · 提醒 150,000 \(50\.0%\) 可达 · 裁剪 195,000 \(65\.0%\) 可达/);
 });
 
-test("compaction TUI exposes max-output-capped hard pressure before unreachable soft stages", () => {
+test("compaction TUI treats maxTokens as a dynamically clamped output ceiling", () => {
   const overlay = createOverlay({ contextWindow: 250_000, maxTokens: 250_000 });
   const rendered = overlay.render(120).join("\n");
-  assert.match(rendered, /实际硬压缩阈值 · 实际 >25,000 \/ 250,000 \(10\.0%\)/);
+  assert.match(rendered, /实际硬压缩阈值 · 实际 >237,500 \/ 250,000 \(95\.0%\)/);
   assert.match(rendered, /配置阈值 · 240,000 Token \(96\.0%\)/);
-  assert.match(rendered, /实际安全预留 · 225,000 Token · 模型最大输出过大，安全预留封顶为窗口 90%/);
-  assert.match(rendered, /提醒 175,000 \(70\.0%\) 不可达/);
-  assert.match(rendered, /裁剪 200,000 \(80\.0%\) 不可达 · 硬压缩会先触发/);
+  assert.match(rendered, /实际安全预留 · 12,500 Token · 窗口 5% 安全底线下调/);
+  assert.match(rendered, /模型输出上限 · 250,000 Token · 按剩余窗口动态收缩/);
+  assert.match(rendered, /提醒 175,000 \(70\.0%\) 可达/);
+  assert.match(rendered, /裁剪 200,000 \(80\.0%\) 可达/);
 });
 
 test("compaction TUI selects a compaction model from the catalog and saves it", async () => {
@@ -249,7 +252,7 @@ test("compaction TUI selects a compaction model from the catalog and saves it", 
   overlay.handleInput("\x1b[B"); // -> second catalog model (qwen)
   overlay.handleInput("\r");
   assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max-preview · 项目/);
-  assert.match(overlay.render(80).join("\n"), /实际 >108,000 \/ 120,000 \(90\.0%\)/);
+  assert.match(overlay.render(80).join("\n"), /实际 >110,000 \/ 120,000 \(91\.7%\)/);
   overlay.handleInput("\x13");
   await flushAsync();
   const projectSave = saves.find((save) => save.scope === "project");

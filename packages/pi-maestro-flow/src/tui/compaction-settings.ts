@@ -297,8 +297,8 @@ export class CompactionSettingsOverlay implements Component, Focusable {
           if (model.usable) {
             const maxTokens = this.thresholdOutputLimit(model, reserve);
             rows.push(
-              fitLine(`窗口 10% 底线 · ${formatNumber(model.ratioFloorTokens)} Token`, inner),
-              fitLine(`阈值输出预算 · ${formatNumber(maxTokens ?? 0)} Token`, inner),
+              fitLine(`窗口 5% 底线 · ${formatNumber(model.ratioFloorTokens)} Token`, inner),
+              fitLine(`模型输出上限 · ${formatNumber(maxTokens ?? 0)} Token · 按剩余窗口动态收缩`, inner),
               fitLine(`实际安全预留 · ${formatNumber(model.effectiveReserveTokens)} Token`, inner),
               this.params.theme.fg("accent", fitLine(
                 `实际硬压缩 · 超过 ${formatNumber(model.thresholdTokens)} Token (${formatPercent(model.thresholdTokens, contextWindow)})`,
@@ -551,7 +551,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
           width,
         ),
         fitLine(`容量来源 · ${thresholdLimiterLabel(model)}`, width),
-        fitLine(`阈值输出预算 · ${formatNumber(maxTokens ?? 0)} Token`, width),
+        fitLine(`模型输出上限 · ${formatNumber(maxTokens ?? 0)} Token · 按剩余窗口动态收缩`, width),
       );
       if (safeWidth >= 40) rows.push(fitLine(this.pressurePreview(model), width));
     } else {
@@ -836,7 +836,7 @@ function thresholdLimiterLabel(model: LinkedCompactionThresholdModel): string {
 
 function thresholdReasonLabel(reason: CompactionThresholdReason): string {
   if (reason === "configured") return "由配置预留决定";
-  if (reason === "ratio-floor") return "窗口 10% 安全底线下调";
+  if (reason === "ratio-floor") return "窗口 5% 安全底线下调";
   if (reason === "max-output") return "模型最大输出保护下调";
   return "模型最大输出过大，安全预留封顶为窗口 90%";
 }

@@ -6,13 +6,13 @@
  */
 
 /**
- * Minimum context-window fraction kept free when neither the configured reserve
- * nor the model's max output demand more. A fixed absolute reserve (e.g. 16K)
- * sits dangerously close to 100% on large windows — 400K would only trigger
- * compaction past 95.9% — so this ratio floor keeps compaction starting around
- * 90% regardless of window size.
+ * Minimum context-window fraction kept free when the configured reserve is
+ * smaller. Pi dynamically clamps each request's output limit to the remaining
+ * context capacity, so the model's maximum output is not reserved in full.
+ * Five percent still leaves meaningful room for a response and estimator drift
+ * without forcing large-window models to compact far before capacity.
  */
-export const MIN_RESERVE_RATIO = 0.1;
+export const MIN_RESERVE_RATIO = 0.05;
 export const SUMMARY_OUTPUT_RATIO = 0.8;
 
 /** Output budget used by the checkpoint summarizer. */
@@ -25,29 +25,21 @@ export function summaryOutputTokenLimit(reserveTokens: number, modelMaxTokens?: 
 
 /**
  * Derive the reserve that drives the proactive compaction trigger from the
- * model's real limits:
- * - the configured reserve (the user's compaction ceiling), used as the initial floor;
- * - a ratio of the context window, so large windows still keep output room;
- * - the model's maximum single-response output, so the trigger never sits closer
- *   to the limit than one full response and a max-size response cannot truncate
- *   against the context window.
- * The max-output term is capped below the window so compaction always retains a
- * usable recent context and never disables itself.
+ * configured reserve and a modest context-window floor. modelMaxTokens remains
+ * in the public signature for compatibility, but it is an upper bound rather
+ * than capacity consumed by every response; Pi shrinks it dynamically against
+ * the request's actual remaining context.
  */
 export function effectiveReserveTokens(
   settings: { reserveTokens: number },
   contextWindow: number,
-  modelMaxTokens?: number,
+  _modelMaxTokens?: number,
 ): number {
   const ratioFloor = Math.floor(contextWindow * MIN_RESERVE_RATIO);
-  let reserve = Math.max(settings.reserveTokens, ratioFloor);
-  if (typeof modelMaxTokens === "number" && modelMaxTokens > reserve) {
-    reserve = Math.min(modelMaxTokens, contextWindow - ratioFloor);
-  }
-  return reserve;
+  return Math.max(settings.reserveTokens, ratioFloor);
 }
 
-/** Which input settled the effective reserve. */
+/** Which input settled the effective reserve. Legacy max-output values remain for telemetry compatibility. */
 export type CompactionThresholdReason =
   | "configured"
   | "ratio-floor"
@@ -135,12 +127,9 @@ export function deriveCompactionThreshold(input: CompactionThresholdInput): Comp
   const ratioFloorTokens = Math.floor(contextWindow * MIN_RESERVE_RATIO);
   const effective = effectiveReserveTokens({ reserveTokens: configuredReserveTokens }, contextWindow, input.modelMaxTokens);
   const thresholdTokens = contextWindow - effective;
-  let reason: CompactionThresholdReason;
-  if (typeof input.modelMaxTokens === "number" && input.modelMaxTokens > Math.max(configuredReserveTokens, ratioFloorTokens)) {
-    reason = effective >= contextWindow - ratioFloorTokens ? "max-output-capped" : "max-output";
-  } else {
-    reason = ratioFloorTokens > configuredReserveTokens ? "ratio-floor" : "configured";
-  }
+  const reason: CompactionThresholdReason = ratioFloorTokens > configuredReserveTokens
+    ? "ratio-floor"
+    : "configured";
   const derivation: CompactionThresholdDerivation = {
     usable: true,
     contextWindow,
@@ -171,9 +160,9 @@ export function deriveCompactionThreshold(input: CompactionThresholdInput): Comp
 
 /**
  * Select the earliest safe trigger required by either the active session model
- * or the configured summary model. The summary side reserves only the output
- * budget the compaction request actually sends, rather than the model's full
- * general-purpose response limit.
+ * or the configured summary model. Output ceilings do not move the trigger:
+ * both Pi and the summary path fit the actual output budget to remaining
+ * capacity before dispatch.
  */
 export function deriveLinkedCompactionThreshold(
   input: LinkedCompactionThresholdInput,

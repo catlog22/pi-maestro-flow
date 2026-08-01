@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   ContextUsage,
@@ -59,6 +60,8 @@ const TOKEN_RATIO_DEFAULT = 4;
 /** Fixed token estimate per image content block, matching Pi's ESTIMATED_IMAGE_CHARS / 4. */
 const ESTIMATED_IMAGE_TOKENS = 1200;
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
+const COMPACTION_RETRY_PROMPT = "Automatic compaction failed after the request was stopped because the context was exhausted. Retry compaction, then continue the interrupted task. Do not restart or wait for another user request.";
+const OUTPUT_LIMIT_RETRY_PROMPT = "Automatic compaction failed after the previous response was cut off at the model output token limit. Retry compaction, then continue exactly where the interrupted response stopped. Do not restart or wait for another user request.";
 const OUTPUT_LIMIT_CONTINUE_PROMPT = "Your previous response was cut off at the model output token limit, and the context was just compacted to free room. Continue exactly from where the interrupted response stopped and complete it. Do not restart or wait for another user request.";
 const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
 export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
@@ -231,6 +234,8 @@ interface AutoCompactionState {
   generation: number;
   nextOwner: number;
   activeOwner?: number;
+  /** Logical request owner, independent of whether an arbiter lease exists. */
+  activeRequestOwner?: CompactionOwner;
   activeLease?: CompactionLease;
   pendingIntent?: PendingCompactionIntent;
   pendingOutputLimitIntent?: PendingOutputLimitIntent;
@@ -296,7 +301,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   beforeProviderRequest(payload: unknown, ctx: ExtensionContext): unknown | undefined;
   onAgentEnd(ctx: ExtensionContext): Promise<void>;
   onOutputLimit(messages: AgentMessage[], ctx: ExtensionContext): Promise<void>;
-  onCompact(completedOwner?: CompactionOwner): void;
+  onCompact(completedOwner?: CompactionOwner, ctx?: ExtensionContext): void;
   onSessionShutdown(ctx?: ExtensionContext): void;
   reset(ctx?: ExtensionContext): void;
   refreshSettings(): void;
@@ -371,6 +376,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   function releaseInFlight(): void {
     state.running = false;
     state.activeOwner = undefined;
+    state.activeRequestOwner = undefined;
     state.activeLease?.release();
     state.activeLease = undefined;
     state.pendingIntent = undefined;
@@ -435,6 +441,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // into the old entry that advertised a nonexistent file.
       if (downgraded) persistPruneManifest(pi, state);
       retainVisiblePrunes(state.pruneManifest, messages, state.restoredPrunes);
+      // The first post-prune cache bill may arrive on a final assistant-text
+      // response, which is not a complete tool-result batch. Advance attribution
+      // before that gate so a later tool turn cannot be misattributed to the
+      // original prune epoch.
+      observeCacheAttribution(state, messages, 0);
       if (!endsWithCompleteToolResultBatch(messages)) {
         clearPressureStatus(ctx);
         const stable = applyRecordedPrunes(messages, state.pruneManifest);
@@ -486,7 +497,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         }
       }
       observeCacheAttribution(state, messages, newPruneCallIds.size);
-      updatePressureStatus(ctx, pressure, state.cacheDelta);
+      const attributedCacheDelta = state.cacheDelta;
+      updatePressureStatus(ctx, pressure, attributedCacheDelta);
+      state.cacheDelta = undefined;
       persistPruneManifest(pi, state);
       if (pressure.action !== "compact") {
         state.lastNoCompactableKey = undefined;
@@ -530,34 +543,45 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (state.pendingIntent === intent) state.pendingIntent = undefined;
       if (state.lastTriggerKey === intent.triggerKey) state.lastTriggerKey = undefined;
     };
+    const notifyBreakerPaused = () => {
+      if (state.breakerNotified) return;
+      state.breakerNotified = true;
+      ctx.ui.notify(
+        `Mid-turn compaction paused after ${state.breaker.consecutiveFailures} consecutive failures; it can retry after ${COMPACTION_BREAKER_COOLDOWN_TURNS} subsequent turns.`,
+        "warning",
+      );
+    };
     const breakerCheck = compactionBreakerAllows(state.breaker, state.turnCount);
     if (state.breaker.trippedAtTurn !== undefined && breakerCheck.breaker.trippedAtTurn === undefined) {
       state.breakerNotified = false;
     }
     state.breaker = breakerCheck.breaker;
     if (!breakerCheck.allowed) {
-      if (!state.breakerNotified) {
-        state.breakerNotified = true;
-        ctx.ui.notify(
-          `Mid-turn compaction paused after ${state.breaker.consecutiveFailures} consecutive failures; retrying after ${COMPACTION_BREAKER_COOLDOWN_TURNS} turns.`,
-          "warning",
-        );
-      }
+      notifyBreakerPaused();
       clearPending();
       return;
     }
+
+    const recoverBeforeSubmission = (error: unknown, message: string) => {
+      if (intent.generation !== state.generation) return;
+      state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
+      clearPressureStatus(ctx);
+      ctx.ui.notify(`${message}: ${error instanceof Error ? error.message : String(error)}`, "warning");
+      clearPending();
+      if (!intent.contextExhausted || state.breaker.trippedAtTurn !== undefined || ctx.hasPendingMessages?.()) return;
+      try {
+        pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
+      } catch (recoveryError) {
+        ctx.ui.notify(`Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
+      }
+    };
 
     let internals: PiCompactionInternals;
     try {
       internals = await loadInternals();
     } catch (error) {
-      if (intent.generation !== state.generation) return;
-      clearPressureStatus(ctx);
-      if (!state.internalsWarningShown) {
-        state.internalsWarningShown = true;
-        ctx.ui.notify(`Mid-turn compaction disabled: ${error instanceof Error ? error.message : String(error)}`, "warning");
-      }
-      clearPending();
+      if (!state.internalsWarningShown) state.internalsWarningShown = true;
+      recoverBeforeSubmission(error, "Mid-turn compaction disabled");
       return;
     }
     if (intent.generation !== state.generation || state.running) return;
@@ -571,9 +595,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     try {
       preparation = internals.prepareCompaction(branch, intent.settings);
     } catch (error) {
-      clearPressureStatus(ctx);
-      ctx.ui.notify(`Mid-turn compaction preparation failed: ${error instanceof Error ? error.message : String(error)}`, "warning");
-      clearPending();
+      recoverBeforeSubmission(error, "Mid-turn compaction preparation failed");
       return;
     }
     if (!preparation) {
@@ -613,6 +635,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     }
     clearPending();
     state.running = true;
+    state.activeRequestOwner = "mid-turn";
     state.activeLease = lease;
     const owner = ++state.nextOwner;
     state.activeOwner = owner;
@@ -621,11 +644,26 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       state.breaker = recordCompactionFailure(state.breaker, state.turnCount);
       state.running = false;
       state.activeOwner = undefined;
+      state.activeRequestOwner = undefined;
       state.lastTriggerKey = undefined;
       state.activeLease?.release();
       state.activeLease = undefined;
       clearPressureStatus(ctx);
       ctx.ui.notify(`Mid-turn compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+      if (!intent.contextExhausted) return;
+      if (state.breaker.trippedAtTurn !== undefined) {
+        notifyBreakerPaused();
+        return;
+      }
+      if (ctx.hasPendingMessages?.()) return;
+      try {
+        pi.sendUserMessage(COMPACTION_RETRY_PROMPT, { deliverAs: "followUp" });
+      } catch (recoveryError) {
+        ctx.ui.notify(
+          `Mid-turn compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+          "error",
+        );
+      }
     };
     try {
       ctx.ui.setStatus(COMPACTION_STATUS_KEY, formatCompactionStatus({
@@ -648,6 +686,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           state.breakerNotified = false;
           state.running = false;
           state.activeOwner = undefined;
+          state.activeRequestOwner = undefined;
           state.lastTriggerKey = undefined;
           state.activeLease?.release();
           state.activeLease = undefined;
@@ -730,6 +769,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     clearPending();
     state.outputLimitCompactions += 1;
     state.running = true;
+    state.activeRequestOwner = "output-limit";
     state.activeLease = lease;
     const owner = ++state.nextOwner;
     state.activeOwner = owner;
@@ -738,9 +778,18 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (state.activeOwner !== owner) return;
       state.running = false;
       state.activeOwner = undefined;
+      state.activeRequestOwner = undefined;
       state.activeLease?.release();
       state.activeLease = undefined;
       ctx.ui.notify(`Output-limit compaction failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+      if (state.outputLimitCompactions >= MAX_OUTPUT_LIMIT_COMPACTIONS || ctx.hasPendingMessages?.()) return;
+      state.pendingOutputLimitIntent = intent;
+      try {
+        pi.sendUserMessage(OUTPUT_LIMIT_RETRY_PROMPT, { deliverAs: "followUp" });
+      } catch (recoveryError) {
+        state.pendingOutputLimitIntent = undefined;
+        ctx.ui.notify(`Output-limit compaction recovery failed: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`, "error");
+      }
     };
     try {
       ctx.compact({
@@ -749,6 +798,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           if (state.activeOwner !== owner) return;
           state.running = false;
           state.activeOwner = undefined;
+          state.activeRequestOwner = undefined;
           state.activeLease?.release();
           state.activeLease = undefined;
           if (ctx.hasPendingMessages?.()) return;
@@ -858,7 +908,19 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     async onAgentEnd(ctx) {
       state.turnCount += 1;
       const outputLimitPending = await settlePendingOutputLimit(ctx);
-      if (!state.running && !outputLimitPending) await settlePendingCompaction(ctx);
+      if (!state.running && !outputLimitPending) {
+        const pending = state.pendingIntent;
+        const needsContinuation = pending?.contextExhausted || Boolean(ctx.hasPendingMessages?.());
+        if (pending && !needsContinuation) {
+          // A settled, non-exhausted loop may have completed the user's task.
+          // Preserve its full transcript; the next turn will re-evaluate pressure.
+          state.pendingIntent = undefined;
+          state.lastNoCompactableKey = undefined;
+          if (state.lastTriggerKey === pending.triggerKey) state.lastTriggerKey = undefined;
+        } else {
+          await settlePendingCompaction(ctx);
+        }
+      }
       if (!state.running && !state.pendingIntent && !state.pendingOutputLimitIntent) {
         state.settingsSnapshot = undefined;
         publishIdleStatus(ctx, settingsFor(ctx).enabled);
@@ -902,9 +964,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         threshold,
       };
     },
-    onCompact(completedOwner) {
+    onCompact(completedOwner, ctx) {
+      const continueOutputLimit = state.pendingOutputLimitIntent !== undefined
+        && completedOwner === "native"
+        && !ctx?.hasPendingMessages?.();
       state.generation += 1;
-      const activeRequestOwner = state.activeLease?.owner;
+      const activeRequestOwner = state.activeRequestOwner;
       const wasPreempted = activeRequestOwner !== undefined
         && completedOwner !== undefined
         && completedOwner !== activeRequestOwner;
@@ -930,6 +995,13 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // projectCompactionInput persist.  reset() already does this; onCompact
       // was the only clear-path that skipped it.
       persistPruneManifest(pi, state);
+      if (continueOutputLimit) {
+        try {
+          pi.sendUserMessage(OUTPUT_LIMIT_CONTINUE_PROMPT, { deliverAs: "followUp" });
+        } catch (error) {
+          ctx?.ui.notify(`Output-limit continuation failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+        }
+      }
     },
     onSessionShutdown(ctx) {
       // Non-destructive: a normal shutdown must not tombstone the prune
@@ -1413,10 +1485,20 @@ function assistantUsage(message: AgentMessage): { input: number; output: number;
 
 function latestProviderUsageEpoch(messages: AgentMessage[]): string | undefined {
   for (let index = messages.length - 1; index >= 0; index--) {
-    const usage = assistantUsage(messages[index]);
+    const message = messages[index];
+    const usage = assistantUsage(message);
     if (!usage) continue;
-    const record = messages[index] as MessageRecord & { timestamp?: unknown };
-    return `${index}:${String(record.timestamp ?? "")}:${JSON.stringify(usage)}`;
+    const record = message as MessageRecord & { timestamp?: unknown };
+    const usageKey = JSON.stringify(usage);
+    const timestamp = record.timestamp;
+    const epoch = (typeof timestamp === "number" || (typeof timestamp === "string" && timestamp.length > 0))
+      ? `timestamp:${String(timestamp)}:${usageKey}`
+      : `message:${createHash("sha256").update(JSON.stringify({
+        content: record.content,
+        stopReason: record.stopReason,
+        usage,
+      })).digest("hex")}`;
+    return epoch;
   }
   return undefined;
 }
@@ -2104,12 +2186,15 @@ function observeCacheAttribution(state: AutoCompactionState, messages: AgentMess
   const epoch = latestProviderUsageEpoch(messages);
   const ratio = latestCacheHitRatio(messages);
   if (epoch !== state.cacheEpoch) {
-    state.cacheDelta = state.prunedDuringEpoch !== undefined
+    const attributedDelta = state.prunedDuringEpoch !== undefined
       && state.prunedDuringEpoch === state.cacheEpoch
       && state.cacheRatio !== undefined
       && ratio !== undefined
       ? ratio - state.cacheRatio
       : undefined;
+    // Keep a real attribution pending until the next pressure-status update.
+    // Unrelated epochs must not overwrite it before it can be displayed.
+    if (attributedDelta !== undefined) state.cacheDelta = attributedDelta;
     state.cacheEpoch = epoch;
     state.cacheRatio = ratio;
     state.prunedDuringEpoch = undefined;
@@ -2171,13 +2256,29 @@ function toolResultCallId(message: AgentMessage): string | undefined {
   return record.role === "toolResult" && typeof record.toolCallId === "string" ? record.toolCallId : undefined;
 }
 
-function finalAssistantStopReason(messages: AgentMessage[]): string | undefined {
+export function finalAssistantStopReason(messages: AgentMessage[]): string | undefined {
   for (let index = messages.length - 1; index >= 0; index--) {
     const record = messages[index] as MessageRecord;
     if (record.role !== "assistant") continue;
     return typeof record.stopReason === "string" ? record.stopReason : undefined;
   }
   return undefined;
+}
+
+export function shouldPreserveCompletedTurn(
+  messages: AgentMessage[],
+  hasPendingMessages: boolean,
+): boolean {
+  return finalAssistantStopReason(messages) === "stop" && !hasPendingMessages;
+}
+
+export function shouldCancelCompletedTurnThreshold(
+  reason: string | undefined,
+  preserveCompletedTurn: boolean,
+  hasOwnedRequest: boolean,
+  hasPendingMessages = false,
+): boolean {
+  return reason === "threshold" && preserveCompletedTurn && !hasOwnedRequest && !hasPendingMessages;
 }
 
 function buildOutputLimitInstructions(

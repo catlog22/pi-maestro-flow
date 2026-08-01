@@ -219,8 +219,16 @@ test("compaction validation separates hard errors from warnings", () => {
     keepRecentTokens: 95_000,
   }, 100_000, 20_000);
   assert.equal(result.errors.length, 0);
+  assert.equal(result.warnings.length, 1);
   assert.match(result.warnings[0] ?? "", /little compressible history/);
-  assert.match(result.warnings[1] ?? "", /single response/);
+
+  const runtimeFloor = validateCompactionPatch({
+    reserveTokens: 16_384,
+    keepRecentTokens: 381_000,
+  }, 400_000, 128_000);
+  assert.match(runtimeFloor.warnings[0] ?? "", /thresholdTokens \(380000\)/,
+    "validation must use the same five-percent floor as the displayed/runtime threshold");
+
   assert.match(validateCompactionPatch({ reserveTokens: 10_000 }).warnings[0] ?? "", /validation skipped/);
 });
 

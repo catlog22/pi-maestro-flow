@@ -48,6 +48,8 @@ import {
   recordCompactionFailure,
   redundantToolResultCallIds,
   resetCompactionBreaker,
+  shouldCancelCompletedTurnThreshold,
+  shouldPreserveCompletedTurn,
   shouldCompactMidTurn,
   shouldVelocityEscalate,
   toolResultPatternKey,
@@ -547,7 +549,7 @@ test("pressure policy honors custom soft nudgeRatio when classifying bands", () 
   assert.equal(raised.band, "normal");
 });
 
-test("mid-turn guard links its trigger to a smaller configured compaction model", async () => {
+test("mid-turn guard preserves a completed loop when only the summary-model threshold was crossed", async () => {
   let aborted = 0;
   let compacted = 0;
   const statuses = new Map<string, string | undefined>();
@@ -593,15 +595,15 @@ test("mid-turn guard links its trigger to a smaller configured compaction model"
     },
   } as never;
 
-  await guard.evaluate(highUsageToolBatch(370_000), ctx);
+  await guard.evaluate(highUsageToolBatch(390_000), ctx);
   assert.equal(aborted, 0, "below the session window, the current provider turn is not interrupted");
   assert.equal(compacted, 0, "context hook only queues the compaction intent");
   await guard.onAgentEnd(ctx);
-  assert.equal(compacted, 1, "settled phase submits the queued compaction");
-  assert.match(statuses.get(COMPACTION_STATUS_KEY) ?? "", /COMPACT 370030\/360000/);
+  assert.equal(compacted, 0, "normal task completion must preserve the uncompressed transcript");
+  assert.equal(statuses.get(COMPACTION_STATUS_KEY), undefined, "discarded intent returns pressure status to idle");
 });
 
-test("mid-turn guard preserves a no-compactable request while it remains below the model window", async () => {
+test("mid-turn guard re-evaluates non-exhausted pressure without compacting completed loops", async () => {
   let aborted = 0;
   let compacted = 0;
   const notifications: string[] = [];
@@ -630,8 +632,47 @@ test("mid-turn guard preserves a no-compactable request while it remains below t
   assert.ok(result);
   assert.equal(aborted, 0);
   assert.equal(compacted, 0);
+  assert.equal(notifications.length, 0, "normal completion does not prepare or warn about a compaction it will not run");
+  assert.equal(statuses.get("maestro-auto-compact"), undefined);
+});
+
+test("completed-loop discard clears a stale no-compactable marker", async () => {
+  let pending = true;
+  let compacted = 0;
+  const notifications: string[] = [];
+  const statuses = new Map<string, string | undefined>();
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => undefined }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() {},
+    hasPendingMessages: () => pending,
+    compact() { compacted++; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
+      notify(message: string) { notifications.push(message); },
+    },
+  } as never;
+
+  await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.onAgentEnd(ctx);
   assert.equal(notifications.length, 1);
-  assert.match(statuses.get("maestro-auto-compact") ?? "", /CRITICAL/);
+  assert.match(statuses.get(COMPACTION_STATUS_KEY) ?? "", /CRITICAL/);
+
+  pending = false;
+  await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(statuses.get(COMPACTION_STATUS_KEY), undefined, "normal completion clears the prior failed-attempt status");
+
+  pending = true;
+  await guard.evaluate(pressureToolBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  assert.equal(notifications.length, 2, "cleared marker does not suppress a later real continuation warning");
+  assert.equal(compacted, 0);
 });
 
 test("mid-turn guard aborts when no compactable history remains after exhausting the model window", async () => {
@@ -802,6 +843,7 @@ test("mid-turn guard clears its trigger key after compaction failure", async () 
     cwd: "D:\\repo",
     model: { contextWindow: 1_000 },
     abort() { abortCalls++; },
+    hasPendingMessages: () => true,
     compact(options: { onError(error: Error): void }) { compactCalls++; onError = options.onError; },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify() {} },
@@ -816,6 +858,79 @@ test("mid-turn guard clears its trigger key after compaction failure", async () 
   assert.equal(abortCalls, 0);
 });
 
+test("mid-turn guard retries exhausted compaction failures until the breaker trips", async () => {
+  const callbacks: Array<{ onError(error: Error): void }> = [];
+  const sent: Array<{ message: string; options: unknown }> = [];
+  const notifications: Array<{ message: string; level: string | undefined }> = [];
+  let aborted = 0;
+  let pending = false;
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string, options: unknown) {
+      sent.push({ message, options });
+      pending = true;
+    },
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { aborted++; },
+    hasPendingMessages: () => pending,
+    compact(options: { onError(error: Error): void }) { callbacks.push(options); },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify(message: string, level: string | undefined) { notifications.push({ message, level }); },
+    },
+  } as never;
+
+  for (let attempt = 0; attempt < MAX_CONSECUTIVE_COMPACTION_FAILURES; attempt++) {
+    pending = false; // Simulate the prior recovery follow-up entering the agent loop.
+    await guard.evaluate(highUsageToolBatch(1_100), ctx);
+    await guard.onAgentEnd(ctx);
+    callbacks.at(-1)?.onError(new Error(`failure ${attempt + 1}`));
+  }
+
+  assert.equal(aborted, MAX_CONSECUTIVE_COMPACTION_FAILURES);
+  assert.equal(callbacks.length, MAX_CONSECUTIVE_COMPACTION_FAILURES);
+  assert.equal(sent.length, MAX_CONSECUTIVE_COMPACTION_FAILURES - 1, "the tripping failure must not queue another retry");
+  assert.ok(sent.every(({ message }) => /compaction failed.*context was exhausted/i.test(message)));
+  assert.ok(sent.every(({ options }) => JSON.stringify(options) === JSON.stringify({ deliverAs: "followUp" })));
+  const paused = notifications.filter(({ message }) => /compaction paused/.test(message));
+  assert.equal(paused.length, 1);
+  assert.equal(paused[0]?.level, "warning");
+});
+
+test("mid-turn guard does not duplicate exhausted-failure recovery when a message is pending", async () => {
+  const sent: string[] = [];
+  let aborted = 0;
+  let onError: ((error: Error) => void) | undefined;
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { aborted++; },
+    hasPendingMessages: () => true,
+    compact(options: { onError(error: Error): void }) { onError = options.onError; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.evaluate(highUsageToolBatch(1_100), ctx);
+  await guard.onAgentEnd(ctx);
+  onError?.(new Error("failed"));
+
+  assert.equal(aborted, 1);
+  assert.deepEqual(sent, []);
+});
+
 test("mid-turn guard settles state when compact throws synchronously", async () => {
   let attempts = 0;
   const notifications: string[] = [];
@@ -827,6 +942,7 @@ test("mid-turn guard settles state when compact throws synchronously", async () 
     cwd: "D:\\repo",
     model: { contextWindow: 1_000 },
     abort() {},
+    hasPendingMessages: () => true,
     compact() { attempts++; throw new Error("sync failure"); },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
@@ -850,6 +966,7 @@ test("mid-turn guard restores idle state on agent end but preserves active compa
     cwd: "D:\\repo",
     model: { contextWindow: 1_000 },
     abort() {},
+    hasPendingMessages: () => true,
     compact(options: { onComplete(): void }) { complete = options.onComplete; },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus(key: string, value: string | undefined) { statuses.set(key, value); }, notify() {} },
@@ -1794,7 +1911,7 @@ test("linked compaction threshold follows the tighter summary-model window", () 
   assert.ok(smallerSummaryModel.usable);
   assert.equal(smallerSummaryModel.limiter, "compaction");
   assert.equal(smallerSummaryModel.contextWindow, 400_000);
-  assert.equal(smallerSummaryModel.thresholdTokens, 360_000);
+  assert.equal(smallerSummaryModel.thresholdTokens, 380_000);
 
   const largerSummaryModel = deriveLinkedCompactionThreshold({
     reserveTokens: 16_384,
@@ -1805,7 +1922,7 @@ test("linked compaction threshold follows the tighter summary-model window", () 
   });
   assert.ok(largerSummaryModel.usable);
   assert.equal(largerSummaryModel.limiter, "session");
-  assert.equal(largerSummaryModel.thresholdTokens, 272_000);
+  assert.equal(largerSummaryModel.thresholdTokens, 380_000);
   const oversizedReserve = deriveLinkedCompactionThreshold({
     reserveTokens: 150_000,
     sessionContextWindow: 1_000_000,
@@ -1833,6 +1950,21 @@ test("summary request budget shrinks at the boundary and fails closed before ove
     contextWindow: 400_000,
     modelMaxTokens: 128_000,
   }), 12_288);
+  assert.equal(fitSummaryOutputBudget({
+    tokensBefore: 353_400,
+    reserveTokens: 16_384,
+    contextWindow: 372_000,
+    modelMaxTokens: 128_000,
+  }), 13_107, "the optimized 372K trigger still leaves the configured summary budget");
+  assert.throws(
+    () => fitSummaryOutputBudget({
+      tokensBefore: 370_000,
+      reserveTokens: 16_384,
+      contextWindow: 372_000,
+      modelMaxTokens: 128_000,
+    }),
+    (error: unknown) => error instanceof CompactionCapacityError && /stopped locally/.test(error.message),
+  );
   assert.throws(
     () => fitSummaryOutputBudget({
       tokensBefore: 395_000,
@@ -1844,15 +1976,15 @@ test("summary request budget shrinks at the boundary and fails closed before ove
   );
 });
 
-test("effective reserve integrates context window, configured ceiling, and max output", () => {
-  assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 8_000), 40_000, "ratio floor dominates when max output is small");
-  assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 64_000), 64_000, "max output dominates to guarantee room for a full response");
-  assert.equal(effectiveReserveTokens({ reserveTokens: 80_000 }, 400_000, 64_000), 80_000, "explicit larger configured ceiling is honored");
-  assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 900_000), 360_000, "max output is capped below the window so compaction stays enabled");
+test("effective reserve uses configured headroom and a five-percent floor, not the model output ceiling", () => {
+  assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 8_000), 20_000);
+  assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 64_000), 20_000);
+  assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 900_000), 20_000);
+  assert.equal(effectiveReserveTokens({ reserveTokens: 80_000 }, 400_000, 64_000), 80_000, "explicit larger configured reserve is honored");
   assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 100_000), 16_384, "small window keeps the absolute reserve");
 });
 
-test("deriveCompactionThreshold caps max output and marks every soft band unreachable on a small window", () => {
+test("deriveCompactionThreshold does not pre-reserve an oversized model output ceiling", () => {
   const model = deriveCompactionThreshold({
     reserveTokens: 16_384,
     contextWindow: 250_000,
@@ -1860,18 +1992,18 @@ test("deriveCompactionThreshold caps max output and marks every soft band unreac
     soft: DEFAULT_SOFT_COMPACTION,
   });
   assert.ok(model.usable);
-  assert.equal(model.effectiveReserveTokens, 225_000);
-  assert.equal(model.thresholdTokens, 25_000);
-  assert.equal(model.thresholdPercent, 10);
-  assert.equal(model.reason, "max-output-capped");
+  assert.equal(model.effectiveReserveTokens, 16_384);
+  assert.equal(model.thresholdTokens, 233_616);
+  assert.equal(model.thresholdPercent, 93);
+  assert.equal(model.reason, "configured");
   assert.ok(model.soft);
-  assert.equal(model.soft.nudgeReachable, false, "nudge sits far above the 10% trigger");
-  assert.equal(model.soft.pruneReachable, false);
-  assert.equal(model.soft.pruneTargetTokens, 25_000);
-  assert.equal(model.soft.pruneTargetReachable, false, "prune target collapses onto the trigger");
+  assert.equal(model.soft.nudgeReachable, true);
+  assert.equal(model.soft.pruneReachable, true);
+  assert.equal(model.soft.pruneTargetTokens, 175_000);
+  assert.equal(model.soft.pruneTargetReachable, true);
 });
 
-test("deriveCompactionThreshold flags the soft nudge unreachable when max output dominates a large window", () => {
+test("deriveCompactionThreshold lets a 400K model compact near 380K with dynamic output clamping", () => {
   const model = deriveCompactionThreshold({
     reserveTokens: 16_384,
     contextWindow: 400_000,
@@ -1879,29 +2011,10 @@ test("deriveCompactionThreshold flags the soft nudge unreachable when max output
     soft: DEFAULT_SOFT_COMPACTION,
   });
   assert.ok(model.usable);
-  assert.equal(model.thresholdTokens, 272_000);
-  assert.equal(model.thresholdPercent, 68);
-  assert.equal(model.reason, "max-output");
-  assert.ok(model.soft);
-  assert.equal(model.soft.nudgeTokens, 280_000);
-  assert.equal(model.soft.nudgeReachable, false, "280K nudge sits above the 272K trigger");
-  assert.equal(model.soft.pruneTokens, 320_000);
-  assert.equal(model.soft.pruneReachable, false);
-  assert.equal(model.soft.pruneTargetTokens, 272_000);
-  assert.equal(model.soft.pruneTargetReachable, false);
-});
-
-test("deriveCompactionThreshold keeps soft bands reachable when the trigger sits high enough", () => {
-  const model = deriveCompactionThreshold({
-    reserveTokens: 16_384,
-    contextWindow: 400_000,
-    modelMaxTokens: 64_000,
-    soft: DEFAULT_SOFT_COMPACTION,
-  });
-  assert.ok(model.usable);
-  assert.equal(model.thresholdTokens, 336_000);
-  assert.equal(model.thresholdPercent, 84);
-  assert.equal(model.reason, "max-output");
+  assert.equal(model.effectiveReserveTokens, 20_000);
+  assert.equal(model.thresholdTokens, 380_000);
+  assert.equal(model.thresholdPercent, 95);
+  assert.equal(model.reason, "ratio-floor");
   assert.ok(model.soft);
   assert.equal(model.soft.nudgeTokens, 280_000);
   assert.equal(model.soft.nudgeReachable, true);
@@ -1909,6 +2022,28 @@ test("deriveCompactionThreshold keeps soft bands reachable when the trigger sits
   assert.equal(model.soft.pruneReachable, true);
   assert.equal(model.soft.pruneTargetTokens, 280_000);
   assert.equal(model.soft.pruneTargetReachable, true);
+
+  const explicit370K = deriveCompactionThreshold({
+    reserveTokens: 30_000,
+    contextWindow: 400_000,
+    modelMaxTokens: 128_000,
+  });
+  assert.ok(explicit370K.usable);
+  assert.equal(explicit370K.effectiveReserveTokens, 30_000);
+  assert.equal(explicit370K.thresholdTokens, 370_000);
+  assert.equal(explicit370K.reason, "configured");
+});
+
+test("deriveCompactionThreshold keeps safe headroom on the current 372K model", () => {
+  const model = deriveCompactionThreshold({
+    reserveTokens: 16_384,
+    contextWindow: 372_000,
+    modelMaxTokens: 128_000,
+  });
+  assert.ok(model.usable);
+  assert.equal(model.effectiveReserveTokens, 18_600);
+  assert.equal(model.thresholdTokens, 353_400);
+  assert.equal(model.reason, "ratio-floor");
 });
 
 test("deriveCompactionThreshold uses the first integer token that can reach a fractional soft ratio", () => {
@@ -1928,8 +2063,8 @@ test("deriveCompactionThreshold uses the first integer token that can reach a fr
 test("deriveCompactionThreshold reports configured and ratio-floor reasons", () => {
   const ratio = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: 400_000 });
   assert.ok(ratio.usable);
-  assert.equal(ratio.effectiveReserveTokens, 40_000);
-  assert.equal(ratio.thresholdTokens, 360_000);
+  assert.equal(ratio.effectiveReserveTokens, 20_000);
+  assert.equal(ratio.thresholdTokens, 380_000);
   assert.equal(ratio.reason, "ratio-floor");
   const configured = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: 100_000 });
   assert.ok(configured.usable);
@@ -1939,7 +2074,7 @@ test("deriveCompactionThreshold reports configured and ratio-floor reasons", () 
   const explicit = deriveCompactionThreshold({ reserveTokens: 80_000, contextWindow: 400_000, modelMaxTokens: 64_000 });
   assert.ok(explicit.usable);
   assert.equal(explicit.effectiveReserveTokens, 80_000);
-  assert.equal(explicit.reason, "configured", "larger configured ceiling beats max output");
+  assert.equal(explicit.reason, "configured");
 });
 
 test("deriveCompactionThreshold degrades without a usable context window", () => {
@@ -1959,35 +2094,34 @@ test("deriveCompactionThreshold degrades without a usable context window", () =>
 test("compaction trigger is strict: an estimate exactly at the derived threshold does not compact", () => {
   const model = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: 400_000, modelMaxTokens: 64_000 });
   assert.ok(model.usable);
-  assert.equal(model.thresholdTokens, 336_000);
+  assert.equal(model.thresholdTokens, 380_000);
   assert.equal(model.trigger, "strictly-above-threshold");
   const settings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 10 };
   const trailing = estimateContextTokens(highUsageToolBatch(0)).tokens;
-  const exact = highUsageToolBatch(336_000 - trailing);
-  assert.equal(estimateContextTokens(exact).tokens, 336_000, "sanity: estimate lands exactly on the trigger");
+  const exact = highUsageToolBatch(380_000 - trailing);
+  assert.equal(estimateContextTokens(exact).tokens, 380_000, "sanity: estimate lands exactly on the trigger");
   assert.equal(
     shouldCompactMidTurn({ messages: exact, contextWindow: 400_000, settings, modelMaxTokens: 64_000 }),
     false,
     "estimate exactly at the threshold is not exceeded, so no compaction",
   );
   assert.equal(
-    shouldCompactMidTurn({ messages: highUsageToolBatch(336_001 - trailing), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }),
+    shouldCompactMidTurn({ messages: highUsageToolBatch(380_001 - trailing), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }),
     true,
     "one token above the threshold compacts",
   );
 });
 
-test("shouldCompactMidTurn triggers around 90% on a large window instead of hugging the limit", () => {
+test("shouldCompactMidTurn triggers around 95% on a large window", () => {
   const settings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 10 };
-  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(368_000), contextWindow: 400_000, settings }), true, "92% now compacts proactively");
-  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(340_000), contextWindow: 400_000, settings }), false, "85% stays below the proactive threshold");
+  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(385_000), contextWindow: 400_000, settings }), true, "96.25% exceeds the proactive threshold");
+  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(370_000), contextWindow: 400_000, settings }), false, "92.5% stays below the proactive threshold");
 });
 
-test("shouldCompactMidTurn reserves room for the model max output", () => {
+test("shouldCompactMidTurn treats model max output as a dynamic ceiling", () => {
   const settings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 10 };
-  // 400K window, maxTokens 64K → effective reserve 64K → trigger at 336K (84%).
-  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(350_000), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }), true, "87.5% exceeds the max-output-aware trigger");
-  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(330_000), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }), false, "82.5% stays below the max-output-aware trigger");
+  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(385_000), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }), true);
+  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(350_000), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }), false);
 });
 
 test("output-limit guard compacts and continues when a length stop hits high context pressure", async () => {
@@ -2018,6 +2152,59 @@ test("output-limit guard compacts and continues when a length stop hits high con
   assert.equal(sent.length, 1);
   assert.match(sent[0] ?? "", /output token limit/);
   assert.match(sent[0] ?? "", /Continue/);
+});
+
+test("output-limit compaction failure queues a bounded recovery turn", async () => {
+  const sent: string[] = [];
+  let fail: ((error: Error) => void) | undefined;
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000 },
+    getContextUsage: () => ({ tokens: 376_000, contextWindow: 400_000, percent: 94 }),
+    hasPendingMessages: () => false,
+    compact(options: { onError(error: Error): void }) { fail = options.onError; },
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  await guard.onAgentEnd(ctx);
+  fail?.(new Error("provider failed"));
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0] ?? "", /Automatic compaction failed/);
+});
+
+test("exhausted pre-submission failure queues recovery", async () => {
+  const sent: string[] = [];
+  let aborted = 0;
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    loadInternals: async () => { throw new Error("internals unavailable"); },
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 1_000 },
+    abort() { aborted++; },
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.evaluate(highUsageToolBatch(1_100), ctx);
+  await guard.onAgentEnd(ctx);
+
+  assert.equal(aborted, 1);
+  assert.equal(sent.length, 1);
+  assert.match(sent[0] ?? "", /context was exhausted/);
 });
 
 test("output-limit guard ignores a length stop below the pressure threshold", async () => {
@@ -2063,8 +2250,9 @@ test("output-limit guard ignores a normal stop and resets its breaker", async ()
   assert.equal(compactCalls, 2, "a normal stop resets the breaker so the next length stop compacts again");
 });
 
-test("output-limit guard stops compacting after the breaker cap", async () => {
+test("output-limit guard stops compacting after the breaker cap across compact lifecycle events", async () => {
   let compactCalls = 0;
+  let complete: (() => void) | undefined;
   const notifications: string[] = [];
   const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
     loadInternals: async () => ({ prepareCompaction: () => ({ messagesToSummarize: [{}] }) }),
@@ -2075,16 +2263,20 @@ test("output-limit guard stops compacting after the breaker cap", async () => {
     model: { contextWindow: 400_000 },
     getContextUsage: () => ({ tokens: 376_000, contextWindow: 400_000, percent: 94 }),
     hasPendingMessages: () => false,
-    compact(options: { onComplete(): void }) { compactCalls++; options.onComplete(); },
+    compact(options: { onComplete(): void }) { compactCalls++; complete = options.onComplete; },
     sessionManager: { getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify(message: string) { notifications.push(message); } },
   } as never;
+
+  for (let attempt = 0; attempt < MAX_OUTPUT_LIMIT_COMPACTIONS; attempt++) {
+    await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+    await guard.onAgentEnd(ctx);
+    guard.onCompact();
+    complete?.();
+  }
   await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
   await guard.onAgentEnd(ctx);
-  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
-  await guard.onAgentEnd(ctx);
-  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
-  await guard.onAgentEnd(ctx);
+
   assert.equal(compactCalls, MAX_OUTPUT_LIMIT_COMPACTIONS);
   assert.equal(notifications.length, 1);
   assert.match(notifications[0] ?? "", /output token limit/i);
@@ -2207,6 +2399,52 @@ function lengthTruncatedBatch(stopReason = "length") {
   }] as never;
 }
 
+test("completed-turn native threshold gate only cancels the immediate unowned threshold", () => {
+  const completed = [{
+    role: "assistant",
+    content: [{ type: "text", text: "done" }],
+    stopReason: "stop",
+  }] as never;
+  const truncated = [{
+    role: "assistant",
+    content: [{ type: "text", text: "partial" }],
+    stopReason: "length",
+  }] as never;
+
+  assert.equal(shouldPreserveCompletedTurn(completed, false), true);
+  assert.equal(shouldPreserveCompletedTurn(completed, true), false);
+  assert.equal(shouldPreserveCompletedTurn(truncated, false), false);
+  assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, false), true);
+  assert.equal(shouldCancelCompletedTurnThreshold("overflow", true, false), false);
+  assert.equal(shouldCancelCompletedTurnThreshold("manual", true, false), false);
+  assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, true), false);
+  assert.equal(shouldCancelCompletedTurnThreshold("threshold", false, false), false);
+  assert.equal(shouldCancelCompletedTurnThreshold("threshold", true, false, true), false);
+});
+
+test("native compaction continues a pending output-limited response", async () => {
+  const sent: string[] = [];
+  const guard = createMidTurnAutoCompaction({
+    sendUserMessage(message: string) { sent.push(message); },
+  } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 100, keepRecentTokens: 100 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 400_000 },
+    getContextUsage: () => ({ tokens: 376_000, contextWindow: 400_000, percent: 94 }),
+    hasPendingMessages: () => false,
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  await guard.onOutputLimit(lengthTruncatedBatch(), ctx);
+  guard.onCompact("native", ctx);
+
+  assert.equal(sent.length, 1);
+  assert.match(sent[0] ?? "", /output token limit/);
+});
+
 test("derivePressureBand reproduces the historical band classification", () => {
   const soft = DEFAULT_SOFT_COMPACTION; // nudgeRatio 0.7, pruneRatio 0.8
   const criticalRatio = 0.9;
@@ -2263,6 +2501,131 @@ test("cache hit ratio counts cacheWrite as a miss, not as absent", () => {
   assert.equal(signals.cacheHitRatio, 0.3);
   assert.equal(cacheHitRatio({ input: 100, cacheRead: 300, cacheWrite: 600 }), 0.3);
   assert.equal(cacheHitRatio({ input: 0, cacheRead: 0, cacheWrite: 0 }), undefined);
+});
+
+test("cache attribution samples final-text epochs before a later tool batch", async () => {
+  const statuses = new Map<string, string | undefined>();
+  const settings = {
+    enabled: true,
+    reserveTokens: 1_000,
+    keepRecentTokens: 100,
+    soft: { ...DEFAULT_SOFT_COMPACTION, cache: { enabled: false } },
+  };
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
+    readSettings: () => settings,
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 20_000 },
+    sessionManager: { getBranch: () => [] },
+    ui: {
+      setStatus(key: string, value: string | undefined) { statuses.set(key, value); },
+      notify() {},
+    },
+  } as never;
+  const oldPrefix = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }],
+  }, {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }],
+    isError: false,
+  }];
+  const firstToolEpoch = [...oldPrefix, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "first", name: "read", arguments: {} }],
+    timestamp: 1,
+    usage: { input: 3_400, output: 0, cacheRead: 13_600, cacheWrite: 0, totalTokens: 17_000, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "first",
+    toolName: "read",
+    content: [{ type: "text", text: "small".repeat(100) }],
+    isError: false,
+  }];
+  const finalTextEpoch = [...firstToolEpoch, {
+    role: "assistant",
+    content: [{ type: "text", text: "done" }],
+    timestamp: 2,
+    usage: { input: 10_000, output: 0, cacheRead: 10_000, cacheWrite: 0, totalTokens: 20_000, cost: { total: 0 } },
+  }];
+  const laterToolEpoch = [...finalTextEpoch, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "later", name: "read", arguments: {} }],
+    timestamp: 3,
+    usage: { input: 15_300, output: 0, cacheRead: 1_700, cacheWrite: 0, totalTokens: 17_000, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "later",
+    toolName: "read",
+    content: [{ type: "text", text: "small" }],
+    isError: false,
+  }];
+
+  await guard.evaluate(firstToolEpoch as never, ctx);
+  await guard.evaluate(finalTextEpoch as never, ctx);
+  await guard.evaluate(laterToolEpoch as never, ctx);
+
+  const status = statuses.get(COMPACTION_STATUS_KEY) ?? "";
+  assert.match(status, /cache:10%/);
+  assert.match(status, /cacheD:-30%/, "the final-text epoch's prune cost is retained until the next pressure status");
+  assert.doesNotMatch(status, /cacheD:-70%/, "the later tool epoch must not be compared with the pre-final-text prune epoch");
+});
+
+test("provider usage epoch stays stable when an earlier frame message disappears", async () => {
+  const statuses: string[] = [];
+  const settings = {
+    enabled: true,
+    reserveTokens: 1_000,
+    keepRecentTokens: 100,
+    soft: { ...DEFAULT_SOFT_COMPACTION, cache: { enabled: false } },
+  };
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
+    readSettings: () => settings,
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    sessionManager: { getBranch: () => [] },
+    ui: {
+      setStatus(key: string, value: string | undefined) {
+        if (key === COMPACTION_STATUS_KEY && value) statuses.push(value);
+      },
+      notify() {},
+    },
+  } as never;
+  const frame = [{
+    role: "user",
+    content: [{ type: "text", text: "temporary prefix" }],
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old-shift", name: "read", arguments: {} }],
+  }, {
+    role: "toolResult",
+    toolCallId: "old-shift",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(16_000) }],
+    isError: false,
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "latest-shift", name: "read", arguments: {} }],
+    usage: { input: 8_700, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 8_700, cost: { total: 0 } },
+  }, {
+    role: "toolResult",
+    toolCallId: "latest-shift",
+    toolName: "read",
+    content: [{ type: "text", text: "small" }],
+    isError: false,
+  }];
+
+  await guard.evaluate(frame as never, ctx);
+  await guard.evaluate(frame.slice(1) as never, ctx);
+
+  assert.equal(statuses.length, 2);
+  const estimate = (status: string) => status.match(/^CTX \S+ (\d+)\//)?.[1];
+  assert.equal(estimate(statuses[1]), estimate(statuses[0]), "moving the same usage record must not acknowledge pending prune savings");
 });
 
 test("computeContextSignals reports unknown cache hit ratio without usable usage", () => {
