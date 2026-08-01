@@ -207,6 +207,9 @@ import {
   createForegroundDeadline,
   createProgressFlushGate,
   displayMessageForResult,
+  terminalStatusForResult,
+  resultIsError,
+  aggregateTerminalStatus,
   emitTeammateStarted,
   foregroundWaitWindowMs,
   formatRetryDelay,
@@ -221,7 +224,7 @@ import type { TeammateRuntimeOptions } from "./index.ts";
 // Cross-imports from teammate-helpers.ts (settlement, wait, list/watch)
 import {
   settleTeammateWaiters, waitForTeammate, waitOutput, statusForWatchTarget,
-  settleAgent, settleGraphTaskAgent, settleAgentLifecycle,
+  settleAgent, settleGraphContainerAgent, settleGraphTaskAgent, settleAgentLifecycle,
   recordSettledAgent, findSettledAgent, retireAgent,
   killAgent, killAgentTree, releaseAgentMemory, sweepFailedAgents,
   terminateNestedDispatchesOwnedBy, enforceWakeableAgentBudget,
@@ -229,7 +232,7 @@ import {
   terminateAndRemoveWakeableCohort, wakeableAgentCohorts,
   applyAgentRetryState, applyAgentResultReadyState, clearAgentResultReadyState,
   markSettledResultInspectable, hasTeammateWidgetWork,
-  emitComplete, safeSendMessage, notifyBackgroundFailure,
+  emitComplete, safeSendMessage, notifyBackgroundFailure, replyProxyFailure,
   bindAgentName, removeAgentFromRegistry, resolveAgentCorrelationId,
   agentActiveMs, ts, buildAgentList, buildRoleList,
   handleChildInteractionRequest, handleChildRpcUiRequest,
@@ -300,29 +303,40 @@ export function createTeammateInteractionQueue(
     const interactionAbort = new AbortController();
     let releaseHandler!: () => void;
     const handlerCancelled = new Promise<void>((resolve) => { releaseHandler = resolve; });
-    const guardedReply = (msg: unknown): void => {
-      if (settled) return;
+    const finishSettlement = (): void => {
       settled = true;
       waiting.delete(key);
       interactionAbort.abort();
       releaseHandler();
-      // The handler may have recorded this request on the agent's pending set;
-      // settle() already does this for its own path, and keeping the reply path
-      // symmetric prevents a cleared prompt from pinning an agent as stalled.
       const correlationId = correlationFor(event, fallbackCorrelationId);
       state.activeRuns.get(correlationId ?? "")?.pendingInteractions?.delete(key);
-      reply(msg);
+    };
+    const failDelivery = (error: unknown): void => {
+      const correlationId = correlationFor(event, fallbackCorrelationId);
+      finishSettlement();
+      if (!correlationId || !state.activeRuns.has(correlationId)) return;
+      const message = `Teammate interaction reply delivery failed: ${error instanceof Error ? error.message : String(error)}`;
+      settleAgent(state, correlationId, 1, message, false);
+    };
+    const guardedReply = (msg: unknown): void => {
+      if (settled) return;
+      try {
+        reply(msg);
+      } catch (error) {
+        failDelivery(error);
+        return;
+      }
+      finishSettlement();
     };
     const settle = (reason: string): void => {
       if (settled) return;
-      const correlationId = correlationFor(event, fallbackCorrelationId);
-      const agent = correlationId ? state.activeRuns.get(correlationId) : undefined;
-      agent?.pendingInteractions?.delete(key);
-      settled = true;
-      waiting.delete(key);
-      interactionAbort.abort();
-      releaseHandler();
-      replyChildRequestFailure(event, reply, new Error(reason));
+      try {
+        replyChildRequestFailure(event, reply, new Error(reason));
+      } catch (error) {
+        failDelivery(error);
+        return;
+      }
+      finishSettlement();
     };
     waiting.set(key, { correlationId: correlationFor(event, fallbackCorrelationId), settle });
 
@@ -668,7 +682,10 @@ export function cancelProxyDispatch(
   state.pendingProxyDispatchParents?.delete(requestId);
   const cid = state.proxyDispatchByRequest?.get(requestId);
   if (!cid) return [];
-  state.proxyDispatchByRequest?.delete(requestId);
+  if (state.proxyDispatchByRequest?.get(requestId) === cid) {
+    state.proxyDispatchByRequest.delete(requestId);
+  }
+  (state.cancelledProxyDispatches ??= new Map()).set(requestId, cid);
   const agent = state.activeRuns.get(cid);
   if (!agent) return [];
   agent.outputLog.push(
@@ -763,7 +780,7 @@ export async function handleProxyRequest(
   pi: ExtensionAPI,
   state: TeammateState,
   event: Record<string, unknown>,
-  reply: (msg: unknown) => void,
+  rawReply: (msg: unknown) => void,
   spawnedBy?: string,
   modelCapabilities: readonly TeammateModelCapability[] = [],
   onInteraction?: (
@@ -774,12 +791,33 @@ export async function handleProxyRequest(
   onChildStatus?: (child: ChildAgentCallSnapshot) => void,
   runtimeOptions: TeammateRuntimeOptions = {},
 ): Promise<void> {
+  let replied = false;
+  const reply = (message: unknown): void => {
+    if (replied) return;
+    rawReply(message);
+    replied = true;
+  };
   const tool = event.tool as string;
   const requestId = event.requestId as string;
   const params = event.params as Record<string, unknown>;
   const parentCid = resolveProxyParentCorrelationId(event, spawnedBy, state);
   const reservesProxyDispatch = tool === "teammate" && typeof requestId === "string";
   if (reservesProxyDispatch) {
+    const duplicate = state.pendingProxyDispatchRequests?.has(requestId)
+      || state.proxyDispatchByRequest?.has(requestId)
+      || state.cancelledProxyDispatches?.has(requestId);
+    if (duplicate) {
+      reply({
+        type: "teammate_proxy_result",
+        requestId,
+        result: {
+          content: [{ type: "text", text: `Duplicate in-flight teammate proxy requestId: ${requestId}` }],
+          isError: true,
+          details: { mode: "single", results: [] },
+        },
+      });
+      return;
+    }
     (state.pendingProxyDispatchRequests ??= new Set()).add(requestId);
     if (parentCid) (state.pendingProxyDispatchParents ??= new Map()).set(requestId, parentCid);
   }
@@ -789,12 +827,13 @@ export async function handleProxyRequest(
     state.pendingProxyDispatchParents?.delete(requestId);
   };
 
-  if (await dispatchRegisteredChildTool(event, reply, state, parentCid)) {
-    abandonPendingProxyDispatch();
-    return;
-  }
+  try {
+    if (await dispatchRegisteredChildTool(event, reply, state, parentCid)) {
+      abandonPendingProxyDispatch();
+      return;
+    }
 
-  switch (tool) {
+    switch (tool) {
     case "teammate": {
       const p = parseProxyTeammateParams(params);
       if (!p) {
@@ -916,12 +955,22 @@ export async function handleProxyRequest(
       const pendingProgressByTask = new Map<number, AgentProgress>();
 
       const abortCtrl = new AbortController();
+      const taskAbortControllers = normalizedTasks?.map(() => new AbortController()) ?? [];
+      for (const taskController of taskAbortControllers) {
+        abortCtrl.signal.addEventListener(
+          "abort",
+          () => taskController.abort(abortCtrl.signal.reason),
+          { once: true },
+        );
+      }
       const activeAgent: ActiveAgent = {
         agent: normalizedTasks ? `graph(${normalizedTasks.length})` : singleTask.agent,
         name: normalizedTasks ? undefined : singleTask.name,
         correlationId: cid,
         startedAt: Date.now(),
         abortController: abortCtrl,
+        ...(normalizedTasks ? { graphAbortController: abortCtrl } : {}),
+        ownsChildProcess: !normalizedTasks,
         inbox: [],
         outputLog: [],
         lastActivityAt: Date.now(),
@@ -942,12 +991,20 @@ export async function handleProxyRequest(
       if (!normalizedTasks && singleTask.name) bindAgentName(state, singleTask.name, cid);
 
       const parentAgent = parentCid ? state.activeRuns.get(parentCid) : undefined;
+      const nestedChildCalls = new Map<string, ChildAgentCallSnapshot>();
+      const publishNestedChildStatus = (child: ChildAgentCallSnapshot): void => {
+        nestedChildCalls.set(child.correlationId, {
+          ...nestedChildCalls.get(child.correlationId),
+          ...child,
+        });
+        onChildStatus?.(child);
+      };
       const reportChildStatus = (
         status: ChildAgentCallSnapshot["status"],
         progress?: AgentProgress,
         retryMessage?: string,
       ): void => {
-        onChildStatus?.({
+        publishNestedChildStatus({
           agent: activeAgent.agent,
           ...(!normalizedTasks && singleTask.name ? { name: singleTask.name } : {}),
           correlationId: cid,
@@ -984,7 +1041,7 @@ export async function handleProxyRequest(
       ): void => {
         emitComplete(
           pi,
-          requestId,
+          undefined,
           activeAgent.agent,
           cid,
           exitCode,
@@ -1010,22 +1067,43 @@ export async function handleProxyRequest(
       let nestedPublication: NestedCompletion | undefined;
       let nestedCompletionNotificationRequested = false;
       let nestedCompletionDelivered = false;
+      const finishProxyDispatchTracking = (): boolean => {
+        const cancelled = state.cancelledProxyDispatches?.get(requestId) === cid;
+        if (state.proxyDispatchByRequest?.get(requestId) === cid) {
+          state.proxyDispatchByRequest.delete(requestId);
+        }
+        if (cancelled) {
+          state.cancelledProxyDispatches?.delete(requestId);
+          if (state.cancelledProxyDispatches?.size === 0) state.cancelledProxyDispatches = undefined;
+        }
+        return cancelled;
+      };
       const deliverNestedCompletion = (): void => {
-        if (nestedCompletionDelivered || !nestedPublication) return;
-        if (normalizedTasks) {
-          if (!taskCorrelationIds.every((taskId) => nestedGraphTerminalIds.has(taskId))) return;
-        } else if (!nestedSingleTerminal) {
+        const lifecycleTerminal = normalizedTasks
+          ? taskCorrelationIds.every((taskId) => nestedGraphTerminalIds.has(taskId))
+          : nestedSingleTerminal;
+        if (state.cancelledProxyDispatches?.get(requestId) === cid) {
+          if (lifecycleTerminal) finishProxyDispatchTracking();
           return;
         }
+        if (nestedCompletionDelivered || !nestedPublication || !lifecycleTerminal) return;
         nestedCompletionDelivered = true;
         const wakeable = p.context !== "fork";
         const terminalStatus = normalizedTasks
-          ? [...nestedGraphTerminalStatuses.values()].some((status) => status === "terminated")
-            ? "terminated"
-            : undefined
-          : nestedSingleTerminalStatus;
-        settleAgent(state, cid, nestedPublication.exitCode, nestedPublication.summary, wakeable, terminalStatus);
-        reportChildStatus(nestedPublication.exitCode === 0 ? "completed" : "failed");
+          ? aggregateTerminalStatus(nestedPublication.results)
+          : nestedSingleTerminalStatus ?? aggregateTerminalStatus(nestedPublication.results);
+        const settleContainer = normalizedTasks ? settleGraphContainerAgent : settleAgent;
+        settleContainer(
+          state,
+          cid,
+          nestedPublication.exitCode,
+          nestedPublication.summary,
+          wakeable,
+          terminalStatus,
+        );
+        reportChildStatus(terminalStatus === "terminated"
+          ? "terminated"
+          : terminalStatus === "failed" ? "failed" : "completed");
         emitNestedComplete(nestedPublication.exitCode, wakeable, terminalStatus);
         if (nestedCompletionNotificationRequested) {
           const delivered = safeSendMessage(
@@ -1038,6 +1116,7 @@ export async function handleProxyRequest(
                 mode: nestedPublication.mode,
                 results: nestedPublication.results,
                 ...(nestedPublication.progress ? { progress: nestedPublication.progress } : {}),
+                ...(nestedChildCalls.size > 0 ? { childCalls: [...nestedChildCalls.values()] } : {}),
               },
             },
             { triggerTurn: true },
@@ -1046,6 +1125,7 @@ export async function handleProxyRequest(
             markSettledResultInspectable(state, cid);
           }
         }
+        finishProxyDispatchTracking();
       };
       const publishNestedCompletion = (
         publication: NestedCompletion,
@@ -1063,7 +1143,9 @@ export async function handleProxyRequest(
           name: task.name,
           correlationId: childId,
           startedAt: Date.now(),
-          abortController: abortCtrl,
+          abortController: taskAbortControllers[index],
+          graphAbortController: abortCtrl,
+          ownsChildProcess: true,
           inbox: [],
           outputLog: [],
           lastActivityAt: Date.now(),
@@ -1232,6 +1314,7 @@ export async function handleProxyRequest(
         ...(normalizedTasks ? { taskCorrelationIds } : { correlationId: cid }),
         depth: dispatchDepth,
         signal: abortCtrl.signal,
+        ...(normalizedTasks ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
         parentSessionFile: spawnerAgent?.sessionFile ?? state.mainSessionFile,
         initialLeaseToken: (childId: string) => {
           const target = state.activeRuns.get(childId) ?? activeAgent;
@@ -1257,6 +1340,8 @@ export async function handleProxyRequest(
           );
         },
         onTurnComplete: (result, terminalStatus) => {
+          const canonicalStatus = terminalStatusForResult(result, terminalStatus);
+          result.terminalStatus = canonicalStatus;
           const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
           target.resolvedModel = target.resolvedModel ?? result.model;
           if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
@@ -1268,17 +1353,19 @@ export async function handleProxyRequest(
             result.exitCode,
             lastMessage,
             result.wakeable !== false,
-            terminalStatus,
+            canonicalStatus,
           );
           if (normalizedTasks) {
             nestedGraphTerminalIds.add(result.correlationId);
-            nestedGraphTerminalStatuses.set(result.correlationId, terminalStatus);
+            nestedGraphTerminalStatuses.set(result.correlationId, canonicalStatus);
           } else {
             nestedSingleTerminal = true;
-            nestedSingleTerminalStatus = terminalStatus;
+            nestedSingleTerminalStatus = canonicalStatus;
           }
           if (result.correlationId === cid) {
-            reportChildStatus(result.exitCode === 0 ? "completed" : "failed");
+            reportChildStatus(canonicalStatus === "terminated"
+              ? "terminated"
+              : canonicalStatus === "failed" ? "failed" : "completed");
           }
           deliverNestedCompletion();
         },
@@ -1314,7 +1401,9 @@ export async function handleProxyRequest(
             cancelProxyDispatch(state, evt.requestId);
             return;
           }
-          handleProxyRequest(pi, state, evt, rep, cid, modelCapabilities, onInteraction, onChildStatus, runtimeOptions);
+          handleProxyRequest(
+            pi, state, evt, rep, cid, modelCapabilities, onInteraction, publishNestedChildStatus, runtimeOptions,
+          );
         },
       };
 
@@ -1328,7 +1417,7 @@ export async function handleProxyRequest(
             proxyProgressFlushGate?.flush();
             proxyProgressFlushGate?.dispose();
           }
-          const hasError = results.some((r) => r.exitCode !== 0);
+          const hasError = results.some(resultIsError);
           const summaries = summarizeGraphResults(results, normalizedTasks);
           const structuredOutput = aggregateGraphStructuredOutput(results, normalizedTasks);
           results.forEach((result, index) => {
@@ -1340,7 +1429,7 @@ export async function handleProxyRequest(
               correlationId: result.correlationId,
               taskIndex: index,
               dependencies: current?.dependencies ?? [],
-              status: lifecyclePending ? "running" : result.exitCode === 0 ? "completed" : "failed",
+              status: lifecyclePending ? "running" : terminalStatusForResult(result),
               ...(current?.startedAt ? { startedAt: current.startedAt } : {}),
               ...(!lifecyclePending ? { completedAt: new Date().toISOString() } : {}),
               recentTools: current?.recentTools ?? [],
@@ -1368,6 +1457,7 @@ export async function handleProxyRequest(
                 results,
                 progress,
                 ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+                ...(nestedChildCalls.size > 0 ? { childCalls: [...nestedChildCalls.values()] } : {}),
               },
             },
             summary: summaries,
@@ -1384,11 +1474,12 @@ export async function handleProxyRequest(
         return {
           resultPayload: {
             content: [{ type: "text", text: warningPrefix + lastMsg }],
-            isError: result.exitCode !== 0,
+            isError: resultIsError(result),
             details: {
               mode: "single",
               results: [result],
               ...(result.structuredOutput !== undefined ? { structuredOutput: result.structuredOutput } : {}),
+              ...(nestedChildCalls.size > 0 ? { childCalls: [...nestedChildCalls.values()] } : {}),
             },
           },
           summary: lastMsg,
@@ -1400,28 +1491,39 @@ export async function handleProxyRequest(
         };
       };
 
-      // Once the dispatch reaches its own terminal handling, a late cancel must
-      // not tear down an agent that already settled (or, worse, an unrelated
-      // one that reused the id).
-      const untrackDispatch = () => state.proxyDispatchByRequest?.delete(requestId);
+      const settleNestedExecutionFailure = (error: unknown): string => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (normalizedTasks) {
+          abortCtrl.abort(error);
+          taskCorrelationIds.forEach((taskId) => {
+            if (nestedGraphTerminalIds.has(taskId)) return;
+            nestedGraphTerminalIds.add(taskId);
+            nestedGraphTerminalStatuses.set(taskId, "terminated");
+            settleGraphTaskAgent(state, taskId, 1, message, false, "terminated");
+          });
+          settleGraphContainerAgent(state, cid, 1, message, false);
+        } else {
+          settleAgent(state, cid, 1, message, false);
+        }
+        reportChildStatus("failed");
+        return message;
+      };
+
       const nestedPromise = executeNested();
       const mode = normalizedTasks ? inferGraphMode(normalizedTasks) : "single";
       const runningLabel = singleTask.name ?? activeAgent.agent;
 
       const completeNestedInBackground = (): void => {
         void nestedPromise.then((completed) => {
-          untrackDispatch();
+          if (state.cancelledProxyDispatches?.get(requestId) === cid) {
+            finishProxyDispatchTracking();
+            return;
+          }
           publishNestedCompletion(completed, true);
         }).catch((error) => {
-          untrackDispatch();
-          settleAgent(
-            state,
-            cid,
-            1,
-            error instanceof Error ? error.message : String(error),
-            false,
-          );
-          reportChildStatus("failed");
+          const cancelled = finishProxyDispatchTracking();
+          if (cancelled) return;
+          settleNestedExecutionFailure(error);
           notifyBackgroundFailure(pi, requestId, activeAgent.agent, cid, error, state);
         });
       };
@@ -1439,20 +1541,14 @@ export async function handleProxyRequest(
         deadline.dispose();
 
         if (race.status === "failed") {
-          untrackDispatch();
-          settleAgent(
-            state,
-            cid,
-            1,
-            race.error instanceof Error ? race.error.message : String(race.error),
-            false,
-          );
-          reportChildStatus("failed");
+          const cancelled = finishProxyDispatchTracking();
+          if (cancelled) return;
+          const failureMessage = settleNestedExecutionFailure(race.error);
           emitNestedComplete(1);
           reply({ type: "teammate_proxy_result", requestId, result: {
             content: [{
               type: "text",
-              text: `Nested teammate failed: ${race.error instanceof Error ? race.error.message : String(race.error)}`,
+              text: `Nested teammate failed: ${failureMessage}`,
             }],
             isError: true,
             details: { mode, results: [] },
@@ -1462,7 +1558,10 @@ export async function handleProxyRequest(
 
         if (race.status === "completed") {
           const completed = race.completed;
-          untrackDispatch();
+          if (state.cancelledProxyDispatches?.get(requestId) === cid) {
+            finishProxyDispatchTracking();
+            return;
+          }
           publishNestedCompletion(completed, false);
           reply({ type: "teammate_proxy_result", requestId, result: completed.resultPayload });
           return;
@@ -1647,6 +1746,13 @@ export async function handleProxyRequest(
       }
 
       const agent = state.activeRuns.get(cid);
+      if (agent && !LIVE_AGENT_STATUSES.has(agent.status)) {
+        reply({ type: "teammate_proxy_result", requestId, result: {
+          content: [{ type: "text", text: `Agent "${to}" is already ${agent.status} and cannot receive commands.` }],
+          isError: true, details: { delivered: false },
+        }});
+        return;
+      }
       if (agent && requestedMode === "abort") {
         if (agent.stdin?.writable && canChildWrite(agent.lease)) {
           sendRpcMessage(agent.stdin, message, "abort", agent.lease ? leaseToken(agent.lease) : undefined);
@@ -1765,14 +1871,23 @@ export async function handleProxyRequest(
     }
   }
 
-  reply({
-    type: "teammate_proxy_result",
-    requestId,
-    result: {
-      content: [{ type: "text", text: `Unsupported teammate child proxy tool: ${tool}` }],
-      isError: true,
-    },
-  });
+    reply({
+      type: "teammate_proxy_result",
+      requestId,
+      result: {
+        content: [{ type: "text", text: `Unsupported teammate child proxy tool: ${tool}` }],
+        isError: true,
+      },
+    });
+  } catch (error) {
+    abandonPendingProxyDispatch();
+    if (replied) return;
+    try {
+      replyProxyFailure(event, reply, error);
+    } catch (deliveryError) {
+      console.error("[pi-maestro-teammate] failed to deliver proxy error envelope", deliveryError);
+    }
+  }
 }
 
 

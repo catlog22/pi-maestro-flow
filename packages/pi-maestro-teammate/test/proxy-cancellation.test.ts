@@ -6,6 +6,7 @@ import {
   cancelProxyDispatch,
   createChildProxyRequest,
   handleProxyRequest,
+  killAgentTree,
   rejectAllChildProxyRequests,
   resolveChildProxyRequest,
   waitForTeammate,
@@ -154,6 +155,20 @@ test("cancelling a dispatch kills the agent it created and its subtree", () => {
   assert.equal(state.resultReadyNotified.size, 0);
 });
 
+test("task abort follows descendants without expanding through controller identity", () => {
+  const state = makeState();
+  const task = addAgent(state, "task");
+  const sibling = addAgent(state, "sibling", { abortController: task.abortController });
+  const descendant = addAgent(state, "descendant", { spawnedBy: task.correlationId });
+  const requestId = randomUUID();
+  state.proxyDispatchByRequest = new Map([[requestId, descendant.correlationId]]);
+
+  const killed = new Set(killAgentTree(state, task.correlationId));
+  assert.deepEqual(killed, new Set([task.correlationId, descendant.correlationId]));
+  assert.equal(state.activeRuns.has(sibling.correlationId), true);
+  assert.equal(state.cancelledProxyDispatches?.get(requestId), descendant.correlationId);
+});
+
 test("an unknown or already-settled request cancels nothing", () => {
   const state = makeState();
   assert.deepEqual(cancelProxyDispatch(state, randomUUID()), []);
@@ -164,6 +179,24 @@ test("an unknown or already-settled request cancels nothing", () => {
   state.proxyDispatchByRequest = new Map([[randomUUID(), "already-gone"]]);
   assert.deepEqual(cancelProxyDispatch(state, [...state.proxyDispatchByRequest.keys()][0]), []);
   assert.equal(state.activeRuns.has(survivor.correlationId), true);
+});
+
+test("duplicate in-flight proxy requestId is rejected without replacing ownership", async () => {
+  const state = makeState();
+  const requestId = randomUUID();
+  state.pendingProxyDispatchRequests = new Set([requestId]);
+  const replies: any[] = [];
+  await handleProxyRequest(
+    {} as ExtensionAPI, state,
+    { type: "teammate_proxy_request", tool: "teammate", requestId, params: {
+      tasks: [{ agent: "general", prompt: "duplicate" }], background: true,
+    } },
+    (message) => replies.push(message), undefined, [],
+  );
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].result.isError, true);
+  assert.match(replies[0].result.content[0].text, /duplicate in-flight/i);
+  assert.equal(state.pendingProxyDispatchRequests.has(requestId), true);
 });
 
 test("cancelling during proxy admission prevents registration and spawn", async () => {

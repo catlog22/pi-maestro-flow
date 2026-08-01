@@ -207,6 +207,23 @@ export const TEAMMATE_PROMPT_GUIDELINES = [
   "Omit model to use teammate task-type model routing; an exact task-level provider/model overrides the top-level model, and the top-level model overrides automatic routing.",
 ];
 
+export function terminalStatusForResult(
+  result: SingleResult,
+  callbackStatus?: AgentTerminalStatus,
+): AgentTerminalStatus {
+  return callbackStatus ?? result.terminalStatus ?? (result.exitCode === 0 ? "completed" : "failed");
+}
+
+export function resultIsError(result: SingleResult): boolean {
+  return terminalStatusForResult(result) === "failed";
+}
+
+export function aggregateTerminalStatus(results: readonly SingleResult[]): AgentTerminalStatus {
+  if (results.some((result) => terminalStatusForResult(result) === "failed")) return "failed";
+  if (results.some((result) => terminalStatusForResult(result) === "terminated")) return "terminated";
+  return "completed";
+}
+
 export function displayMessageForResult(result: SingleResult): string {
   const lastMessage = result.messages.at(-1)?.content
     ?? (result.structuredOutput !== undefined
@@ -234,7 +251,9 @@ export function summarizeGraphResults(results: readonly SingleResult[], tasks: r
   return results
     .map((result, index) => (
       `[${result.agent}${tasks[index]?.name ? `/${tasks[index].name}` : ""}] `
-      + `${result.exitCode === 0 ? "OK" : "FAIL"}: ${displayMessageForResult(result)}`
+      + `${terminalStatusForResult(result) === "completed"
+        ? "OK"
+        : terminalStatusForResult(result) === "terminated" ? "TERMINATED" : "FAIL"}: ${displayMessageForResult(result)}`
     ))
     .join("\n\n");
 }
@@ -507,7 +526,7 @@ export function buildWorkspaceOwnerState(
   for (const agent of state.activeRuns.values()) {
     const summary = agent.lastResult?.split("\n", 1)[0]
       ?? [...agent.outputLog].reverse().find((line) => typeof line === "string" && line.trim().length > 0);
-    if (agent.status === "completed" || agent.status === "failed") {
+    if (agent.status === "completed" || agent.status === "failed" || agent.status === "terminated") {
       settledById.set(agent.correlationId, {
         correlationId: agent.correlationId,
         ...(agent.name ? { name: agent.name } : {}),
@@ -541,7 +560,7 @@ export function buildWorkspaceOwnerState(
       correlationId: record.correlationId,
       ...(record.name ? { name: record.name } : {}),
       agent: record.agent,
-      status: record.status === "completed" ? "completed" : "failed",
+      status: record.status,
       settledAt: record.settledAt,
       ...(record.lastResult ? { summary: truncateUtf8Tail(record.lastResult.split("\n", 1)[0], 8_192) } : {}),
     });
@@ -573,9 +592,8 @@ export function checkActiveAgentBudget(
 ): { allowed: boolean; active: number; max: number } {
   let active = 0;
   for (const agent of state.activeRuns.values()) {
-    // Graph aggregate rows own registry/UI state but never own a child process;
-    // their task records carry the actual process reservations.
-    if (LIVE_AGENT_STATUSES.has(agent.status) && agent.progress === undefined) active += 1;
+    const ownsChildProcess = agent.ownsChildProcess ?? agent.progress === undefined;
+    if (LIVE_AGENT_STATUSES.has(agent.status) && ownsChildProcess) active += 1;
   }
   const max = resolveMaxActiveAgents();
   return { allowed: active + additional <= max, active, max };
@@ -752,6 +770,7 @@ export interface AgentWidgetRow {
   durationMs: number;
   lastActivityAt: number;
   resultReadyAt?: number;
+  pendingInteractions: number;
   parentLabel?: string;
   resultLabels?: string[];
 }
@@ -1103,9 +1122,10 @@ export function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
       // record (or a completed container after the child record was pruned) is
       // the authoritative terminal state; the snapshot only leads while live.
       const directStatus = direct?.status;
+      const pendingInteractions = direct?.pendingInteractions?.size ?? 0;
       const status = directStatus === "sleeping" || (!direct && active.status === "sleeping")
         ? "sleeping"
-        : directStatus === "completed" || directStatus === "failed"
+        : directStatus === "completed" || directStatus === "failed" || directStatus === "terminated"
           ? directStatus
           : !direct && active.status === "completed"
             ? active.status
@@ -1114,6 +1134,8 @@ export function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
               : progressStatus ?? directStatus ?? active.status;
       const action = runningTool
         ? toolAction(runningTool.name)
+        : pendingInteractions > 0
+          ? `awaiting ${pendingInteractions} prompt${pendingInteractions === 1 ? "" : "s"}`
         : status === "running" && (progress?.resultReadyAt ?? direct?.resultReadyAt) !== undefined
           ? "result returned; lifecycle pending"
         : status === "sleeping"
@@ -1128,6 +1150,8 @@ export function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
             ? "waiting for dependencies"
             : status === "failed"
               ? "failed"
+              : status === "terminated"
+                ? "terminated"
               : status === "completed"
                 ? "completed"
                 : progress?.lastMessage
@@ -1140,7 +1164,12 @@ export function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
           label: direct?.name ?? existing.label,
           agent: direct?.agent ?? existing.agent,
           status,
-          action: status === "sleeping" ? "sleeping" : existing.action,
+          pendingInteractions,
+          action: status === "sleeping"
+            ? "sleeping"
+            : pendingInteractions > 0
+              ? `awaiting ${pendingInteractions} prompt${pendingInteractions === 1 ? "" : "s"}`
+              : existing.action,
           startedAt: direct?.startedAt ?? existing.startedAt,
           ...(direct?.spawnedBy ? { parentCorrelationId: direct.spawnedBy } : {}),
           ...(parent ? { parentLabel: labelFor(parent) } : {}),
@@ -1173,6 +1202,7 @@ export function agentWidgetRows(agents: ActiveAgent[]): AgentWidgetRow[] {
                 ? Math.max(progress.durationMs ?? 0, progressDurationMs(progress, active))
                 : agentActiveMs(active),
         lastActivityAt: progress?.lastActivityAt ?? direct?.lastActivityAt ?? active.lastActivityAt,
+        pendingInteractions,
         ...(status === "running" && (progress?.resultReadyAt ?? direct?.resultReadyAt)
           ? { resultReadyAt: progress?.resultReadyAt ?? direct?.resultReadyAt }
           : {}),
@@ -1238,6 +1268,7 @@ export function renderAgentStatusWidget(
     if (row.status === "retrying") return theme.fg("warning", "↻");
     if (row.status === "sleeping") return theme.fg("warning", "◉");
     if (row.status === "failed") return theme.fg("error", "✗");
+    if (row.status === "terminated") return theme.fg("warning", "×");
     if (row.status === "completed") return theme.fg("muted", "✓");
     return theme.fg("dim", "□");
   };
@@ -1257,12 +1288,14 @@ export function renderAgentStatusWidget(
   const sleeping = rows.filter((row) => row.status === "sleeping").length;
   const pending = rows.filter((row) => row.status === "pending").length;
   const failedCount = rows.filter((row) => row.status === "failed").length;
+  const terminatedCount = rows.filter((row) => row.status === "terminated").length;
   const summary = [
     runningCount ? `${runningCount} running` : "",
     retryingCount ? `${retryingCount} retrying` : "",
     sleeping ? `${sleeping} sleeping` : "",
     pending ? `${pending} pending` : "",
     failedCount ? `${failedCount} failed` : "",
+    terminatedCount ? `${terminatedCount} terminated` : "",
   ].filter(Boolean).join(" · ");
   const lines = [truncateToWidth(
     `${theme.bold("Agents")}  ${theme.fg("dim", `${summary} · Alt+R`)}`,
@@ -1275,7 +1308,10 @@ export function renderAgentStatusWidget(
     const now = Date.now();
     const duration = `${Math.max(0, Math.floor(row.durationMs / 1000))}s`;
     const idleMs = Math.max(0, now - row.lastActivityAt);
-    const stalled = row.status === "running" && row.resultReadyAt === undefined && idleMs >= TEAMMATE_STALL_TIMEOUT_MS;
+    const stalled = row.status === "running"
+      && row.resultReadyAt === undefined
+      && row.pendingInteractions === 0
+      && idleMs >= TEAMMATE_STALL_TIMEOUT_MS;
     const state = row.resultReadyAt !== undefined && row.status === "running"
       ? "result returned; lifecycle pending"
       : stalled

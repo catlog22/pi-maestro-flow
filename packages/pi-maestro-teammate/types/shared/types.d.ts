@@ -32,10 +32,12 @@ export interface SingleResult {
      * its authoritative lifecycle confirmation (`agent_end`, close, or error).
      */
     lifecyclePending?: boolean;
+    /** Canonical lifecycle outcome; cancellation must not be inferred from exitCode. */
+    terminalStatus?: AgentTerminalStatus;
     structuredOutput?: unknown;
     attemptedModels?: string[];
 }
-export type AgentProgressStatus = "pending" | "running" | "retrying" | "completed" | "failed";
+export type AgentProgressStatus = "pending" | "running" | "retrying" | "completed" | "failed" | "terminated";
 export interface AgentProgress {
     agent: string;
     name?: string;
@@ -100,7 +102,7 @@ export interface ChildAgentCallSnapshot {
     correlationId: string;
     parentCorrelationId?: string;
     parentName?: string;
-    status: "running" | "retrying" | "completed" | "failed";
+    status: "running" | "retrying" | "completed" | "failed" | "terminated";
     startedAt?: number;
     durationMs?: number;
     lastActivityAt?: number;
@@ -133,7 +135,7 @@ export interface MessageEnvelope {
     payload: string;
     timestamp: number;
 }
-export type AgentStatus = "pending" | "running" | "retrying" | "sleeping" | "completed" | "failed";
+export type AgentStatus = "pending" | "running" | "retrying" | "sleeping" | "completed" | "failed" | "terminated";
 export interface AgentRetryState {
     attempt: number;
     maxRetries: number;
@@ -152,6 +154,10 @@ export interface ActiveAgent {
     correlationId: string;
     startedAt: number;
     abortController: AbortController;
+    /** Shared graph cancellation scope; `abortController` remains task/process-local. */
+    graphAbortController?: AbortController;
+    /** Explicit process ownership; graph containers are registry-only. */
+    ownsChildProcess?: boolean;
     stdin?: import("node:stream").Writable;
     sendControl?: (message: Record<string, unknown>) => boolean;
     sessionId?: string;
@@ -258,6 +264,8 @@ export interface TeammateState {
      * leaving it running with no consumer.
      */
     proxyDispatchByRequest?: Map<string, string>;
+    /** Cancellation fences retained until the matching nested promise settles. */
+    cancelledProxyDispatches?: Map<string, string>;
     /** Request-scoped cancellation for proxied observe/monitor/wait calls. */
     proxyObservationControllers?: Map<string, AbortController>;
 }

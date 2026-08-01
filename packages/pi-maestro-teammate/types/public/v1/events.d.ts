@@ -51,8 +51,8 @@ export interface TeammateStartedEvent {
  * must be read from the last `teammate:message` tail.
  */
 export interface TeammateCompleteEvent {
-    /** Tool-call id of the dispatch that owned this run. */
-    id: string;
+    /** Tool-call id when a root tool call owns the dispatch; absent for nested IPC. */
+    id?: string;
     agent: string;
     correlationId: string;
     exitCode: number;

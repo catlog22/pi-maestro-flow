@@ -82,6 +82,23 @@ test("agent widget trusts a settled lifecycle over a lifecycle-pending progress 
   assert.doesNotMatch(output, /running|lifecycle pending/);
 });
 
+test("agent widget shows pending interaction instead of stalled", () => {
+  const now = Date.now();
+  const agent = {
+    agent: "worker", name: "awaiting-human", correlationId: "awaiting-human",
+    startedAt: now - 90_000, abortController: new AbortController(),
+    inbox: [], outputLog: [], lastActivityAt: now - 60_000,
+    status: "running" as const, depth: 0, sleepMs: 0,
+    pendingInteractions: new Map([["question-1", {
+      requestId: "question-1", interaction: "question" as const, createdAt: now, payload: {},
+    }]]),
+  };
+  const theme = { fg: (_name: string, text: string) => text, bold: (text: string) => text };
+  const output = renderAgentStatusWidget([agent], 120, theme).join("\n");
+  assert.match(output, /awaiting 1 prompt/);
+  assert.doesNotMatch(output, /stalled/);
+});
+
 test("agent widget reads a completed container as terminal when the child record is pruned", () => {
   const now = Date.now();
   const parent = {

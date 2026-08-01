@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
 
-const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8")
+  + fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8");
 
 test("agent log trimming rejects sparse entries before reading their length", () => {
   assert.match(source, /if \(typeof line !== "string"\) return false;/);

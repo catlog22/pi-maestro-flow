@@ -134,8 +134,12 @@ export async function runSingleTeammate(
     result: SingleResult,
     terminalStatus?: AgentTerminalStatus,
   ): void => {
+    const canonicalStatus = terminalStatus
+      ?? result.terminalStatus
+      ?? (result.exitCode === 0 ? "completed" : "failed");
+    result.terminalStatus = canonicalStatus;
     try {
-      options.onTurnComplete?.(result, terminalStatus);
+      options.onTurnComplete?.(result, canonicalStatus);
     } catch {
       // Completion observers must not change the model fallback outcome.
     }
@@ -216,7 +220,24 @@ export async function runSingleTeammate(
   let lastResult: SingleResult | undefined;
   let totalRetryCount = 0;
 
+  const cancelAtBoundary = (phase: string): SingleResult => {
+    const previousMessages = lastResult?.messages ?? [];
+    const result: SingleResult = {
+      ...(lastResult ?? rejectWith(`Teammate run cancelled ${phase}.`)),
+      exitCode: 1,
+      messages: [
+        { role: "system", content: `Teammate run cancelled ${phase}.` },
+        ...previousMessages,
+      ],
+      attemptedModels: attemptedModels.length > 1 ? attemptedModels : undefined,
+      terminalStatus: "terminated",
+    };
+    publishTurnComplete(result, "terminated");
+    return result;
+  };
+
   for (const modelToUse of modelCandidates) {
+    if (options.signal?.aborted) return cancelAtBoundary("before model candidate launch");
     const acquisition = modelToUse ? breaker.acquireCandidate(modelToUse) : undefined;
     if (acquisition && !acquisition.allowed) continue;
 
@@ -273,6 +294,7 @@ export async function runSingleTeammate(
           throw error;
         }
         lastResult = candidateResult;
+        candidateResult.terminalStatus ??= candidateResult.exitCode === 0 ? "completed" : "failed";
         const error = resultFailureMessage(candidateResult.messages);
         const toolCount = candidateResult.toolCount ?? 0;
         const restartIsSafe = toolCount === 0;
@@ -339,6 +361,7 @@ export async function runSingleTeammate(
                 ...candidateResult.messages,
               ],
               attemptedModels: attemptedModels.length > 1 ? attemptedModels : undefined,
+              terminalStatus: "terminated",
             };
             publishTurnComplete(cancelledResult, "terminated");
             return cancelledResult;
@@ -347,6 +370,10 @@ export async function runSingleTeammate(
         }
       }
 
+      if (options.signal?.aborted) {
+        if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
+        return cancelAtBoundary("during model fallback handoff");
+      }
       if (!candidateResult) {
         if (acquisition?.allowed) { breaker.releaseCandidate(acquisition); settled = true; }
         continue;
@@ -367,6 +394,7 @@ export async function runSingleTeammate(
     }
   }
 
+  if (options.signal?.aborted) return cancelAtBoundary("during model fallback handoff");
   if (lastResult) {
     lastResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
     publishTurnComplete(lastResult);
@@ -522,7 +550,9 @@ function bindChildIpcRelay(
           })
         : undefined,
       (reply) => {
-        sendChildIpcMessage(child, reply as Record<string, unknown>);
+        if (!sendChildIpcMessage(child, reply as Record<string, unknown>)) {
+          throw new Error("Child IPC channel rejected the reply envelope.");
+        }
       },
     );
   });
@@ -1385,23 +1415,28 @@ export async function runGraph(
       model: task.model ?? "unknown",
       correlationId: taskCorrelationIds[index],
       durationMs: 0,
+      terminalStatus: "failed",
     };
     const now = Date.now();
-    options.onProgress?.({
-      agent: task.agent,
-      name: task.name,
-      correlationId: taskCorrelationIds[index],
-      taskIndex: index,
-      dependencies: dependencies[index] ?? [],
-      status: "failed",
-      recentTools: [],
-      toolCount: 0,
-      tokens: 0,
-      durationMs: 0,
-      lastActivityAt: now,
-      startedAt: now,
-      lastMessage: message,
-    });
+    try {
+      options.onProgress?.({
+        agent: task.agent,
+        name: task.name,
+        correlationId: taskCorrelationIds[index],
+        taskIndex: index,
+        dependencies: dependencies[index] ?? [],
+        status: "failed",
+        recentTools: [],
+        toolCount: 0,
+        tokens: 0,
+        durationMs: 0,
+        lastActivityAt: now,
+        startedAt: now,
+        lastMessage: message,
+      });
+    } catch {
+      // Progress observers are advisory and cannot interrupt graph settlement.
+    }
     try {
       options.onTurnComplete?.(result);
     } catch {
@@ -1508,23 +1543,32 @@ export async function runGraph(
     }
   }
 
-  function reportTaskFailure(task: NormalizedTask, taskIndex: number, message: string): void {
+  function reportTaskFailure(
+    task: NormalizedTask,
+    taskIndex: number,
+    message: string,
+    terminalStatus?: AgentTerminalStatus,
+  ): void {
     const now = Date.now();
-    options.onProgress?.({
-      agent: task.agent,
-      name: task.name,
-      correlationId: taskCorrelationIds[taskIndex],
-      taskIndex,
-      dependencies: deps[taskIndex],
-      status: "failed",
-      recentTools: [],
-      toolCount: 0,
-      tokens: 0,
-      durationMs: 0,
-      lastActivityAt: now,
-      startedAt: now,
-      lastMessage: message,
-    });
+    try {
+      options.onProgress?.({
+        agent: task.agent,
+        name: task.name,
+        correlationId: taskCorrelationIds[taskIndex],
+        taskIndex,
+        dependencies: deps[taskIndex],
+        status: terminalStatus === "terminated" ? "terminated" : "failed",
+        recentTools: [],
+        toolCount: 0,
+        tokens: 0,
+        durationMs: 0,
+        lastActivityAt: now,
+        startedAt: now,
+        lastMessage: message,
+      });
+    } catch {
+      // Progress observers are advisory and cannot interrupt graph settlement.
+    }
   }
 
   function publishSyntheticFailure(
@@ -1544,11 +1588,12 @@ export async function runGraph(
       model: task.model ?? "unknown",
       correlationId: taskCorrelationIds[taskIndex],
       durationMs: 0,
+      terminalStatus: terminalStatus ?? "failed",
     };
     results[taskIndex] = result;
-    reportTaskFailure(task, taskIndex, message);
+    reportTaskFailure(task, taskIndex, message, terminalStatus);
     try {
-      options.onTurnComplete?.(result, terminalStatus);
+      options.onTurnComplete?.(result, result.terminalStatus);
     } catch {
       // Synthetic lifecycle observers cannot block dependency propagation.
     }
@@ -1583,7 +1628,11 @@ export async function runGraph(
         publishSyntheticFailure(task, idx, "Cancelled before child process launch.", "terminated");
         return;
       }
-      const result = await runSingleTeammate(
+
+      let terminalResult: SingleResult | undefined;
+      let resolveTerminal!: (result: SingleResult) => void;
+      const terminal = new Promise<SingleResult>((resolve) => { resolveTerminal = resolve; });
+      const publishedResult = await runSingleTeammate(
         {
           agent: task.agent,
           task: resolvedTask,
@@ -1597,17 +1646,37 @@ export async function runGraph(
         {
           ...options,
           correlationId: taskCorrelationIds[idx],
+          signal: options.taskSignals?.[idx] ?? options.signal,
           onProgress: options.onProgress
-            ? (data) => options.onProgress?.({
-                ...data,
-                name: task.name,
-                correlationId: taskCorrelationIds[idx],
-                taskIndex: idx,
-                dependencies: deps[idx],
-              })
+            ? (data) => {
+                try {
+                  options.onProgress?.({
+                    ...data,
+                    name: task.name,
+                    correlationId: taskCorrelationIds[idx],
+                    taskIndex: idx,
+                    dependencies: deps[idx],
+                  });
+                } catch {
+                  // Progress observers are advisory and cannot interrupt graph settlement.
+                }
+              }
             : undefined,
+          onTurnComplete(result, terminalStatus) {
+            try {
+              options.onTurnComplete?.(result, terminalStatus);
+            } finally {
+              if (!terminalResult) {
+                terminalResult = result;
+                resolveTerminal(result);
+              }
+            }
+          },
         },
       );
+      const result = publishedResult.lifecyclePending === true
+        ? await terminal
+        : terminalResult ?? publishedResult;
       results[idx] = result;
 
       if (result.exitCode === 0) {
@@ -1703,22 +1772,27 @@ export function sendChildIpcMessage(
 ): boolean {
   if (!child.connected) return false;
   try {
-    // The callback receives a non-null error for asynchronous delivery
-    // failures. It must not be silently dropped: a lost proxy result otherwise
-    // leaves the child caller waiting for the 30-minute proxy timeout while
-    // the parent believes the result was delivered. The child's own
-    // `process.once("disconnect")` rejects its pending requests when the
-    // channel actually tears down; this logs the window before that.
-    return child.send(message as never, (error) => {
-      if (error) {
-        console.error(
-          "[pi-maestro-teammate] child IPC send failed asynchronously",
-          error,
-          "type", (message as { type?: string }).type,
-        );
+    child.send(message as never, (error) => {
+      if (!error) return;
+      console.error(
+        "[pi-maestro-teammate] child IPC send failed asynchronously",
+        error,
+        "type", (message as { type?: string }).type,
+      );
+      try {
+        if (child.connected) child.disconnect();
+      } catch {
+        // Process lifecycle remains the final settlement signal.
       }
     });
+    // false means backpressure, not rejection; callback confirms delivery.
+    return true;
   } catch {
+    try {
+      if (child.connected) child.disconnect();
+    } catch {
+      // Best effort.
+    }
     return false;
   }
 }
@@ -1733,13 +1807,36 @@ export function dispatchChildIpcMessage(
     || message.type === "teammate_interaction_request"
     || message.type === "teammate_rpc_ui_request";
   if (requestType || message.type === "teammate_proxy_cancel") {
-    if (onRequest) onRequest(message, reply);
-    else {
+    if (onRequest) {
+      try {
+        onRequest(message, reply);
+      } catch (error) {
+        try {
+          onEvent?.({
+            type: "teammate_reply_delivery_failed",
+            requestId: message.requestId,
+            error: error instanceof Error ? error.message : String(error),
+          });
+        } catch {
+          // Child input cannot escape the parent event loop.
+        }
+      }
+    } else {
       onEvent?.(message);
-      // Cancellation is a one-way control message. A synthetic proxy result
-      // would have no consumer and can race with request cleanup.
       if (message.type !== "teammate_proxy_cancel") {
-        replyUnhandledChildRequest(message, reply);
+        try {
+          replyUnhandledChildRequest(message, reply);
+        } catch (error) {
+          try {
+            onEvent?.({
+              type: "teammate_reply_delivery_failed",
+              requestId: message.requestId,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          } catch {
+            // Failed reply remains contained in the child IPC callback.
+          }
+        }
       }
     }
     return "request";

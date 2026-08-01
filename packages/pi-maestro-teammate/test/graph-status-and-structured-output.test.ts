@@ -1076,7 +1076,8 @@ test("foreground nested proxy updates preserve the two allowed teammate levels",
     assert.match(rendered, /  └─ .*@child/);
   } finally {
     rootStdout?.write(`${JSON.stringify({ type: "agent_end" })}\n`);
-    await execution;
+    const result = await execution;
+    assert.ok((result.details?.childCalls?.length ?? 0) >= 1, "terminal details retain nested topology");
     delete (globalThis as typeof globalThis & Record<symbol, unknown>)[
       Symbol.for("pi-maestro-teammate.root-registry")
     ];
@@ -1962,7 +1963,7 @@ test("nested proxy preserves parentage, graph children, and explicit background 
   assert.doesNotMatch(source, /outputLog = \[\.\.\.activeAgent\.outputLog\]/);
   assert.match(source, /childStreamingLineIdx/);
   assert.match(source, /childToolLines/);
-  assert.match(source, /const deliverNestedCompletion = \(\): void => \{[\s\S]*?reportChildStatus\(nestedPublication\.exitCode === 0 \? "completed" : "failed"\)/);
+  assert.match(source, /const deliverNestedCompletion = \(\): void => \{[\s\S]*?reportChildStatus\(terminalStatus === "terminated"/);
   assert.match(source, /reportChildStatus\("running"\)/);
   assert.match(source, /progress: currentProgress,[\s\S]*?childCalls: \[\.\.\.childCalls\.values\(\)\]/);
   assert.doesNotMatch(source, /spawned @\$\{p\.name \?\? p\.agent\}/);

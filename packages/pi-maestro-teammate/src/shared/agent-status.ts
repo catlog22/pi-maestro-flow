@@ -40,6 +40,7 @@ export const STATUS_PRESENTATION: Readonly<Record<AgentStatus, StatusPresentatio
   sleeping: { icon: "◉", text: "sleeping", tone: "warning" },
   completed: { icon: "✓", text: "completed", tone: "success" },
   failed: { icon: "✗", text: "failed", tone: "error" },
+  terminated: { icon: "×", text: "terminated", tone: "warning" },
 });
 
 export const DERIVED_STATUS_PRESENTATION: Readonly<Record<DerivedDisplayStatus, StatusPresentation>> = Object.freeze({
@@ -80,6 +81,7 @@ export function effectiveDisplayStatus(
     case "sleeping":
     case "completed":
     case "failed":
+    case "terminated":
       return status;
     default:
       return unhandledStatus(status);

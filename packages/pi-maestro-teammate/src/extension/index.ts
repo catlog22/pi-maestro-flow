@@ -223,8 +223,12 @@ import {
   checkActiveAgentBudget,
   emitTeammateStarted,
   displayMessageForResult,
+  terminalStatusForResult,
+  resultIsError,
+  aggregateTerminalStatus,
   handleChildLifecycleEvent,
   AGENT_BUFFER_LIMITS,
+  LIVE_AGENT_STATUSES,
   createProgressFlushGate,
   flushProgressBatch,
   runWithProgressFlushCleanup,
@@ -1006,7 +1010,17 @@ export default function registerTeammateExtension(
       const correlationId = randomUUID();
 
       const abortController = new AbortController();
-      const abortForward = () => abortController.abort();
+      const taskAbortControllers = isMultiTask
+        ? normalizedTasks.map(() => new AbortController())
+        : [];
+      for (const taskController of taskAbortControllers) {
+        abortController.signal.addEventListener(
+          "abort",
+          () => taskController.abort(abortController.signal.reason),
+          { once: true },
+        );
+      }
+      const abortForward = () => abortController.abort(signal.reason);
       signal.addEventListener("abort", abortForward, { once: true });
       if (signal.aborted) {
         signal.removeEventListener("abort", abortForward);
@@ -1027,6 +1041,8 @@ export default function registerTeammateExtension(
         correlationId,
         startedAt: Date.now(),
         abortController,
+        ...(isMultiTask ? { graphAbortController: abortController } : {}),
+        ownsChildProcess: !isMultiTask,
         inbox: [],
         outputLog: [],
         lastActivityAt: Date.now(),
@@ -1078,7 +1094,9 @@ export default function registerTeammateExtension(
             name: task.name,
             correlationId: childId,
             startedAt: Date.now(),
-            abortController,
+            abortController: taskAbortControllers[index],
+            graphAbortController: abortController,
+            ownsChildProcess: true,
             inbox: [],
             outputLog: [],
             lastActivityAt: Date.now(),
@@ -1139,7 +1157,11 @@ export default function registerTeammateExtension(
               customType: "teammate-complete",
               content: lastMessage,
               display: true,
-              details: { mode: "single", results: [singleTerminalResult] },
+              details: {
+                mode: "single",
+                results: [singleTerminalResult],
+                ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
+              },
             },
             { triggerTurn: true },
           );
@@ -1173,10 +1195,8 @@ export default function registerTeammateExtension(
         if (graphCompletionDelivered || !graphPublication) return;
         if (!taskCorrelationIds.every((taskId) => graphTerminalIds.has(taskId))) return;
         graphCompletionDelivered = true;
-        const terminalStatus = [...graphTerminalStatuses.values()].some(
-          (status) => status === "terminated",
-        ) ? "terminated" : undefined;
-        settleAgent(
+        const terminalStatus = aggregateTerminalStatus(graphPublication.results);
+        settleGraphContainerAgent(
           state,
           correlationId,
           graphPublication.exitCode,
@@ -1205,6 +1225,7 @@ export default function registerTeammateExtension(
                 mode: graphPublication.mode,
                 results: graphPublication.results,
                 progress: graphPublication.progress,
+                ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
               },
             },
             { triggerTurn: true },
@@ -1235,6 +1256,7 @@ export default function registerTeammateExtension(
           ...(isMultiTask ? { taskCorrelationIds } : {}),
           depth: activeAgent.depth,
           signal: abortController.signal,
+          ...(isMultiTask ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
           parentSessionFile,
           initialLeaseToken: (childId: string) => {
           const target = state.activeRuns.get(childId) ?? activeAgent;
@@ -1258,6 +1280,8 @@ export default function registerTeammateExtension(
           onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent(state, event),
           onRetry: (retry) => applyAgentRetryState(state, retry),
           onTurnComplete: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => {
+            const canonicalStatus = terminalStatusForResult(result, terminalStatus);
+            result.terminalStatus = canonicalStatus;
             const target = state.activeRuns.get(result.correlationId) ?? activeAgent;
             target.resolvedModel = target.resolvedModel ?? result.model;
             if (result.attemptedModels) target.attemptedModels = [...result.attemptedModels];
@@ -1269,15 +1293,15 @@ export default function registerTeammateExtension(
               result.exitCode,
               lastMessage,
               result.wakeable !== false,
-              terminalStatus,
+              canonicalStatus,
             );
             if (isMultiTask) {
               graphTerminalIds.add(result.correlationId);
-              graphTerminalStatuses.set(result.correlationId, terminalStatus);
+              graphTerminalStatuses.set(result.correlationId, canonicalStatus);
               deliverGraphCompletion();
             } else if (!singleTerminalResult) {
               singleTerminalResult = result;
-              singleTerminalStatus = terminalStatus;
+              singleTerminalStatus = canonicalStatus;
               deliverSingleCompletion();
             }
           },
@@ -1532,7 +1556,7 @@ export default function registerTeammateExtension(
               progressFlushGate,
             );
 
-            const hasError = results.some((r) => r.exitCode !== 0);
+            const hasError = results.some(resultIsError);
             const totalDur = activeGraphMode === "chain"
               ? results.reduce((s, r) => s + r.durationMs, 0)
               : Math.max(...results.map((r) => r.durationMs), 0);
@@ -1550,7 +1574,7 @@ export default function registerTeammateExtension(
                 correlationId: result.correlationId,
                 taskIndex: index,
                 dependencies: current?.dependencies ?? [],
-                status: lifecyclePending ? "running" : result.exitCode === 0 ? "completed" : "failed",
+                status: lifecyclePending ? "running" : terminalStatusForResult(result),
                 ...(current?.startedAt ? { startedAt: current.startedAt } : {}),
                 ...(!lifecyclePending ? { completedAt: new Date().toISOString() } : {}),
                 recentTools: current?.recentTools ?? [],
@@ -1573,11 +1597,24 @@ export default function registerTeammateExtension(
             return { results, hasError, totalDur, summaries, structuredOutput, progress };
           };
 
+          const failGraphDispatch = (error: unknown): void => {
+            const message = error instanceof Error ? error.message : String(error);
+            abortController.abort(error);
+            taskCorrelationIds.forEach((taskId) => {
+              if (graphTerminalIds.has(taskId)) return;
+              graphTerminalIds.add(taskId);
+              graphTerminalStatuses.set(taskId, "terminated");
+              settleGraphTaskAgent(state, taskId, 1, message, false, "terminated");
+            });
+            settleGraphContainerAgent(state, correlationId, 1, message, false);
+            notifyBackgroundFailure(pi, id, activeGraphMode, correlationId, error, state);
+          };
+
           const completeGraphInBackground = (
             bgPromise: ReturnType<typeof executeGraph>,
           ): void => {
             void bgPromise.then(({ results, summaries, progress, totalDur }) => {
-              const exitCode = results.some((result) => result.exitCode !== 0) ? 1 : 0;
+              const exitCode = aggregateTerminalStatus(results) === "completed" ? 0 : 1;
               publishGraphResult({
                 results,
                 summaries,
@@ -1588,14 +1625,7 @@ export default function registerTeammateExtension(
                 wakeable: params.context !== "fork",
               }, true);
             }).catch((error) => {
-              settleAgent(
-                state,
-                correlationId,
-                1,
-                error instanceof Error ? error.message : String(error),
-                false,
-              );
-              notifyBackgroundFailure(pi, id, activeGraphMode, correlationId, error, state);
+              failGraphDispatch(error);
             });
           };
 
@@ -1635,6 +1665,7 @@ export default function registerTeammateExtension(
                   results,
                   progress,
                   ...(structuredOutput !== undefined ? { structuredOutput } : {}),
+                  ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
                 },
               };
             }
@@ -1704,13 +1735,17 @@ export default function registerTeammateExtension(
             if (!result) throw new Error("Foreground teammate finished without a result.");
             publishSingleResult(result, false);
             const lastMessage = displayMessageForResult(result);
-            const details: Details = { mode: "single", results: [result] };
+            const details: Details = {
+              mode: "single",
+              results: [result],
+              ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
+            };
             if (result.structuredOutput !== undefined) {
               details.structuredOutput = result.structuredOutput;
             }
             return {
               content: [{ type: "text", text: warningPrefix + lastMessage }],
-              isError: result.exitCode !== 0,
+              isError: resultIsError(result),
               details,
             };
           }
@@ -1830,6 +1865,13 @@ export default function registerTeammateExtension(
       }
 
       const agent = state.activeRuns.get(cid);
+      if (agent && !LIVE_AGENT_STATUSES.has(agent.status)) {
+        return {
+          content: [{ type: "text", text: `Agent "${params.to}" is already ${agent.status} and cannot receive commands.` }],
+          isError: true,
+          details: { delivered: false },
+        };
+      }
       if (agent && requestedMode === "abort") {
         if (agent.stdin?.writable && canChildWrite(agent.lease)) {
           sendRpcMessage(agent.stdin, message, "abort", agent.lease ? leaseToken(agent.lease) : undefined);
@@ -2205,8 +2247,8 @@ export default function registerTeammateExtension(
         return {
           name: settledRecord.name ?? name,
           found: true,
-          agentStatus: settledRecord.status === "failed" ? "failed" : "completed",
-          waitStatus: settledRecord.status === "failed" ? "failed" : "completed",
+          agentStatus: settledRecord.status,
+          waitStatus: settledRecord.status,
           idleSeconds: agoSeconds,
           summary: firstLine.slice(0, 80),
         };
@@ -2271,13 +2313,19 @@ export default function registerTeammateExtension(
       ? buildWatchOutput(resolved.match, lines)
       : monitored.summary ? [monitored.summary] : [];
     const nativeStatus = monitored.agentStatus ?? monitored.waitStatus ?? "unknown";
-    const settled = nativeStatus === "completed" || nativeStatus === "failed" || nativeStatus === "sleeping";
+    const settled = nativeStatus === "completed"
+      || nativeStatus === "failed"
+      || nativeStatus === "terminated"
+      || nativeStatus === "sleeping";
     return {
       target: { kind: "teammate", id },
       found: true,
       nativeStatus,
       phase: settled ? "settled" : nativeStatus === "pending" ? "pending" : "active",
-      ...(nativeStatus === "failed" ? { outcome: "failure" as const } : settled ? { outcome: "success" as const } : {}),
+      ...(nativeStatus === "failed"
+        ? { outcome: "failure" as const }
+        : nativeStatus === "terminated" ? { outcome: "aborted" as const }
+          : settled ? { outcome: "success" as const } : {}),
       ...(monitored.waitStatus ? { waitStatus: monitored.waitStatus as ObservationWaitStatus } : {}),
       summary: monitored.summary || output.at(-1) || nativeStatus,
       ...(detail === "summary" ? {} : { detail: output }),
@@ -2287,18 +2335,19 @@ export default function registerTeammateExtension(
   }
 
   function teammateWaitObservation(id: string, result: TeammateWaitResult): ObservationSnapshot {
-    const waitStatus: ObservationWaitStatus = result.status === "terminated"
-      ? "failed"
-      : result.status === "delayed"
-        ? "completed"
-        : result.status;
-    const phase = waitStatus === "completed" || waitStatus === "failed" || waitStatus === "result-ready"
+    const waitStatus: ObservationWaitStatus = result.status === "delayed"
+      ? "completed"
+      : result.status;
+    const phase = waitStatus === "completed"
+      || waitStatus === "failed"
+      || waitStatus === "terminated"
+      || waitStatus === "result-ready"
       ? "settled"
       : waitStatus === "not-found" ? "unknown" : "active";
     const outcome = waitStatus === "completed" || waitStatus === "result-ready"
       ? "success"
       : waitStatus === "stalled" ? "stalled"
-        : waitStatus === "aborted" ? "aborted"
+        : waitStatus === "aborted" || waitStatus === "terminated" ? "aborted"
           : "failure";
     return {
       target: { kind: "teammate", id },
@@ -3447,6 +3496,7 @@ import {
   resolveWatchTarget,
   safeSendMessage,
   settleAgent,
+  settleGraphContainerAgent,
   settleGraphTaskAgent,
   statusForWatchTarget,
   sweepFailedAgents,

@@ -1,10 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { PassThrough } from "node:stream";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   createTeammateDirectChildRequestHandler,
   handleChildInteractionRequest,
   handleChildRpcUiRequest,
+  handleProxyRequest,
   checkActiveAgentBudget,
   resolveAgentCorrelationId,
   settleAgent,
@@ -209,6 +211,17 @@ test("child IPC dispatch fails closed immediately when a direct runner omits its
   assert.equal(replies[1].result.isError, true);
 });
 
+test("unhandled child request reply failure cannot escape the IPC callback", () => {
+  const events: Array<Record<string, unknown>> = [];
+  assert.doesNotThrow(() => dispatchChildIpcMessage(
+    { type: "teammate_proxy_request", requestId: "closed-channel", tool: "todo" },
+    undefined,
+    (event) => events.push(event),
+    () => { throw new Error("channel closed"); },
+  ));
+  assert.equal(events[1].type, "teammate_reply_delivery_failed");
+});
+
 test("headless main session denies permission interactions", async () => {
   const { state, agent } = createState();
   const { pi } = createPi();
@@ -322,6 +335,28 @@ test("direct execution child bridge dispatches registered extension tools with t
   }
 });
 
+test("root proxy bridge converts broker rejection into one error envelope", async () => {
+  const { pi } = createPi();
+  const { state, agent } = createState();
+  const replies: any[] = [];
+  const unregister = registerTeammateChildToolBroker("rejecting-tool", async () => {
+    throw new Error("broker rejected request");
+  });
+  try {
+    await handleProxyRequest(
+      pi, state,
+      { type: "teammate_proxy_request", requestId: "broker-rejection", correlationId: agent.correlationId, tool: "rejecting-tool", params: {} },
+      (message) => replies.push(message), agent.correlationId,
+    );
+  } finally {
+    unregister();
+  }
+
+  assert.equal(replies.length, 1);
+  assert.equal(replies[0].result.isError, true);
+  assert.match(replies[0].result.content[0].text, /broker rejected request/);
+});
+
 test("child extension registration replacement is generation-owned and old disposal cannot remove the replacement", () => {
   const path = "D:/extensions/flow.ts";
   const disposeOld = registerTeammateChildExtension(path, { tools: ["old-tool"] });
@@ -417,10 +452,23 @@ test("terminal failures stay visible for their retention window, then are swept"
   // the status the widget filter drops. The run that needed attention was the
   // one that disappeared.
   const failed = createState();
+  let handoffResolved: boolean | undefined;
+  failed.agent.stdin = new PassThrough();
+  failed.agent.sendControl = () => true;
+  failed.agent.pendingInteractions = new Map();
+  failed.agent.pendingHandoff = {
+    nonce: "pending",
+    resolve(value) { handoffResolved = value; },
+    timer: setTimeout(() => {}, 60_000),
+  };
   settleAgent(failed.state, failed.agent.correlationId, 1, "boom");
   assert.equal(failed.agent.status, "failed");
   assert.equal(failed.state.activeRuns.size, 1, "the failure stays on screen");
   assert.equal(typeof failed.agent.failedAt, "number");
+  assert.equal(failed.agent.stdin, undefined);
+  assert.equal(failed.agent.sendControl, undefined);
+  assert.equal(failed.agent.pendingHandoff, undefined);
+  assert.equal(handoffResolved, false);
   assert.equal(
     resolveAgentCorrelationId(failed.state, failed.agent.correlationId.slice(0, 8)),
     failed.agent.correlationId,
@@ -445,6 +493,31 @@ test("terminal failures stay visible for their retention window, then are swept"
     resolveAgentCorrelationId(successful.state, successful.agent.correlationId.slice(0, 8)),
     successful.agent.correlationId,
   );
+});
+
+test("explicit process ownership excludes graph containers from admission", () => {
+  const { state, agent } = createState();
+  agent.ownsChildProcess = false;
+  assert.equal(checkActiveAgentBudget(state).active, 0);
+  agent.ownsChildProcess = true;
+  assert.equal(checkActiveAgentBudget(state).active, 1);
+});
+
+test("terminal tombstone remains inspectable but rejects proxy commands", async () => {
+  const { state, agent } = createState();
+  settleAgent(state, agent.correlationId, 1, "failed terminal");
+  const { pi } = createPi();
+  const replies: any[] = [];
+  await handleProxyRequest(
+    pi, state,
+    { type: "teammate_proxy_request", requestId: "terminal-send", tool: "teammate-send", params: {
+      to: agent.name, mode: "abort", message: "stop",
+    } },
+    (message) => replies.push(message), undefined,
+  );
+  assert.equal(replies[0].result.isError, true);
+  assert.match(replies[0].result.content[0].text, /already failed/i);
+  assert.equal(state.activeRuns.get(agent.correlationId)?.status, "failed");
 });
 
 test("a fork that succeeded is not reported as a failure", () => {

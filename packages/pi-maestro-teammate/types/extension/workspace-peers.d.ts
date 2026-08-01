@@ -10,7 +10,7 @@ export declare const MAX_COMMAND_FILE_BYTES: number;
 export declare const MAX_RESPONSE_FILE_BYTES: number;
 export declare const MAX_COMMAND_MESSAGE_BYTES: number;
 export type WorkspaceAgentStatus = "pending" | "running" | "retrying" | "sleeping";
-export type WorkspaceSettledStatus = "completed" | "failed";
+export type WorkspaceSettledStatus = "completed" | "failed" | "terminated";
 export type WorkspacePeerCommandAction = "steer" | "follow_up";
 export type WorkspacePeerResponseStatus = "accepted" | "rejected" | "error" | "expired";
 export interface WorkspacePeerPaths {

@@ -35,7 +35,7 @@ const CORRELATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 export type WorkspaceAgentStatus = "pending" | "running" | "retrying" | "sleeping";
-export type WorkspaceSettledStatus = "completed" | "failed";
+export type WorkspaceSettledStatus = "completed" | "failed" | "terminated";
 export type WorkspacePeerCommandAction = "steer" | "follow_up";
 export type WorkspacePeerResponseStatus = "accepted" | "rejected" | "error" | "expired";
 

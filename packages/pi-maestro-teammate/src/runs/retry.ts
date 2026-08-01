@@ -16,7 +16,7 @@ const NETWORK_ERROR =
   /\b(?:econnreset|econnrefused|econnaborted|enetunreach|enetdown|ehostunreach|enotfound|eai_again|etimedout|epipe|socket hang up|fetch failed|getaddrinfo|network(?: error| request)?|connection (?:error|failed|failure|reset|refused|lost|timed out|timeout|closed)|other side closed|upstream connect|reset before headers|request timed out|timed out waiting|websocket (?:closed|error)|sse response headers timed out|headers timed out|stream ended (?:without|before)|http2 request did not get a response)\b/i;
 
 const PROVIDER_ERROR =
-  /\b(?:429|500|502|503|504|524|rate[_\s-]*limit(?:ed|_error)?|too many requests|capacity|overloaded(?:_error)?|service[_\s-]*unavailable|provider returned error|server[_\s-]*error|internal[_\s-]*error|resource[_\s-]*exhausted)\b/i;
+  /\b(?:429|500|502|503|504|524|rate[_\s-]*limit(?:ed|[_\s-]*exceeded|[_\s-]*error)?|too many requests|capacity|overloaded(?:_error)?|service[_\s-]*unavailable|provider returned error|server[_\s-]*error|internal[_\s-]*error|resource[_\s-]*exhausted)\b/i;
 
 export function classifyRetryError(message: string | undefined): RetryErrorKind {
   if (!message || NON_RETRYABLE_ERROR.test(message)) return "non-retryable";

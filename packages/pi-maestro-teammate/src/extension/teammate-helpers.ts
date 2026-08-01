@@ -733,10 +733,11 @@ export function statusForWatchTarget(
   target: WatchTarget,
   now = Date.now(),
   state?: TeammateState,
-): Extract<TeammateWaitStatus, "completed" | "failed" | "result-ready" | "stalled"> | undefined {
+): Extract<TeammateWaitStatus, "completed" | "failed" | "terminated" | "result-ready" | "stalled"> | undefined {
   const status = target.kind === "agent" ? target.agent.status : target.progress.status;
   if (status === "sleeping" || status === "completed") return "completed";
   if (status === "failed") return "failed";
+  if (status === "terminated") return "terminated";
   const resultReadyAt = target.kind === "agent" ? target.agent.resultReadyAt : target.progress.resultReadyAt;
   const targetCid = target.kind === "agent" ? target.agent.correlationId : target.progress.correlationId;
   if (resultReadyAt !== undefined && claimResultReadyNotice(state, targetCid)) return "result-ready";
@@ -793,7 +794,7 @@ export function waitForTeammate(
       const agoSeconds = Math.round((Date.now() - settledRecord.settledAt) / 1000);
       const label = settledRecord.name ?? settledRecord.agent;
       return Promise.resolve({
-        status: settledRecord.status === "failed" ? "failed" : "completed",
+        status: settledRecord.status,
         output: [
           `@${label} already ${settledRecord.status} ${agoSeconds}s ago; it is no longer running.`,
           ...(settledRecord.lastResult ? [settledRecord.lastResult] : []),
@@ -822,10 +823,14 @@ export function waitForTeammate(
   byAgent.set(correlationId, waiters);
   return new Promise((resolve) => {
     const waiter: PendingTeammateWaiter = { resolve };
-    const finish = (status: "completed" | "failed" | "result-ready" | "stalled" | "timeout" | "aborted") => {
+    const finish = (status: "completed" | "failed" | "terminated" | "result-ready" | "stalled" | "timeout" | "aborted") => {
       clearWaiter(waiters, waiter);
       if (waiters.size === 0) byAgent.delete(correlationId);
-      const output = status === "result-ready" || status === "stalled" || status === "completed" || status === "failed"
+      const output = status === "result-ready"
+        || status === "stalled"
+        || status === "completed"
+        || status === "failed"
+        || status === "terminated"
         ? [...waitOutput(status, params.name), ...buildWatchOutput(resolved.match!, 20)]
         : waitOutput(status, params.name);
       resolve({ status, output });
@@ -852,7 +857,7 @@ export function waitForTeammate(
 
 export function emitComplete(
   pi: ExtensionAPI,
-  id: string,
+  id: string | undefined,
   agent: string,
   correlationId: string,
   exitCode: number,
@@ -861,7 +866,8 @@ export function emitComplete(
   cancelled?: boolean,
 ): void {
   pi.events.emit(TEAMMATE_COMPLETE_EVENT, {
-    id, agent, correlationId, exitCode, durationMs,
+    ...(id ? { id } : {}),
+    agent, correlationId, exitCode, durationMs,
     ...(wakeable !== undefined ? { wakeable } : {}),
     ...(cancelled !== undefined ? { cancelled } : {}),
   });
@@ -1057,9 +1063,13 @@ export interface WakeableAgentCohort {
 export function wakeableAgentCohorts(state: TeammateState): WakeableAgentCohort[] {
   const byController = new Map<AbortController, ActiveAgent[]>();
   for (const agent of state.activeRuns.values()) {
-    const cohort = byController.get(agent.abortController) ?? [];
+    // Failed tombstones retain diagnostics only; they do not own a process and
+    // must not pin otherwise-sleeping graph members out of eviction.
+    if (agent.status === "failed" || agent.status === "completed") continue;
+    const controller = agent.graphAbortController ?? agent.abortController;
+    const cohort = byController.get(controller) ?? [];
     cohort.push(agent);
-    byController.set(agent.abortController, cohort);
+    byController.set(controller, cohort);
   }
   const namedIds = new Set(state.namedAgents.values());
   return [...byController.entries()]
@@ -1175,6 +1185,19 @@ export function hasTeammateWidgetWork(
   );
 }
 
+export function fenceProxyDispatchesForAgents(
+  state: TeammateState,
+  selected: ReadonlySet<string>,
+): void {
+  for (const [requestId, correlationId] of state.proxyDispatchByRequest ?? []) {
+    if (!selected.has(correlationId)) continue;
+    if (state.proxyDispatchByRequest?.get(requestId) === correlationId) {
+      state.proxyDispatchByRequest.delete(requestId);
+    }
+    (state.cancelledProxyDispatches ??= new Map()).set(requestId, correlationId);
+  }
+}
+
 export function terminateNestedDispatchesOwnedBy(
   state: TeammateState,
   parentCorrelationId: string,
@@ -1201,9 +1224,7 @@ export function terminateNestedDispatchesOwnedBy(
   }
   if (selected.size === 0) return [];
 
-  for (const [requestId, correlationId] of state.proxyDispatchByRequest ?? []) {
-    if (selected.has(correlationId)) state.proxyDispatchByRequest?.delete(requestId);
-  }
+  fenceProxyDispatchesForAgents(state, selected);
   const controllers = new Set<AbortController>();
   for (const correlationId of selected) {
     const agent = state.activeRuns.get(correlationId);
@@ -1236,8 +1257,21 @@ export function settleGraphTaskAgent(
   wakeable = true,
   terminalStatus?: AgentTerminalStatus,
 ): void {
-  // graph task 与容器共享 controller；task 自然结算只收敛自身状态，
-  // cohort cancellation 仍由 graph 容器或显式 killAgentTree 拥有。
+  // A graph member owns a task-local process controller. Natural settlement
+  // converges only this registry record; graph cancellation is container-owned.
+  settleAgentLifecycle(state, correlationId, exitCode, lastResult, wakeable, false, terminalStatus);
+}
+
+export function settleGraphContainerAgent(
+  state: TeammateState,
+  correlationId: string,
+  exitCode: number,
+  lastResult?: string,
+  wakeable = true,
+  terminalStatus?: AgentTerminalStatus,
+): void {
+  // The container owns no child process. Natural aggregate settlement must not
+  // fan out cancellation to successful wakeable graph members.
   settleAgentLifecycle(state, correlationId, exitCode, lastResult, wakeable, false, terminalStatus);
 }
 
@@ -1389,6 +1423,7 @@ export function killAgent(
     agent.failedAt = Date.now();
     agent.lastActivityAt = Date.now();
     trimAgentBuffers(agent, true);
+    releaseAgentMemory(agent);
     return;
   }
 
@@ -1462,25 +1497,19 @@ export function killAgentTree(
   let changed = true;
   while (changed) {
     changed = false;
-    const controllers = new Set(
-      [...selected]
-        .map((id) => state.activeRuns.get(id)?.abortController)
-        .filter((controller): controller is AbortController => controller !== undefined),
-    );
     for (const agent of state.activeRuns.values()) {
       if (
-        selected.has(agent.correlationId)
-        || (agent.spawnedBy && selected.has(agent.spawnedBy))
-        || controllers.has(agent.abortController)
+        !selected.has(agent.correlationId)
+        && agent.spawnedBy
+        && selected.has(agent.spawnedBy)
       ) {
-        if (!selected.has(agent.correlationId)) {
-          selected.add(agent.correlationId);
-          changed = true;
-        }
+        selected.add(agent.correlationId);
+        changed = true;
       }
     }
   }
 
+  fenceProxyDispatchesForAgents(state, selected);
   const controllers = new Set<AbortController>();
   for (const id of selected) {
     const agent = state.activeRuns.get(id);

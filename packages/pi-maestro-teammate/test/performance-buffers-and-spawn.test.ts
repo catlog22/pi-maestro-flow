@@ -166,7 +166,7 @@ test("one progress flush applies every task delta but publishes one full graph s
 });
 
 test("root graph progress wiring projects and broadcasts only after the batch is applied", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8");
   const rootStart = source.indexOf("const pendingByTask = new Map<number, AgentProgress>();");
   const rootEnd = source.indexOf("onChildRequest:", rootStart);
   assert.ok(rootStart >= 0 && rootEnd > rootStart);
@@ -269,7 +269,7 @@ test("widget work ignores pending agents after the grace period measured from la
 });
 
 test("root progress cleanup flushes then disposes on success, error, and termination", async () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8");
   const teammateToolStart = source.indexOf("const tool: ToolDefinition<typeof TeammateParams");
   const executeStart = source.indexOf("async execute(", teammateToolStart);
   const executeEnd = source.indexOf("renderCall(args", executeStart);
@@ -309,7 +309,7 @@ test("root progress cleanup flushes then disposes on success, error, and termina
 });
 
 test("proxy graph progress batches burst snapshots and synchronously publishes terminal state", () => {
-  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8");
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-helpers.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-proxy.ts", import.meta.url), "utf-8") + fs.readFileSync(new URL("../src/extension/teammate-core.ts", import.meta.url), "utf-8");
   const proxyStart = source.indexOf("const pendingProgressByTask = new Map<number, AgentProgress>();");
   const proxyEnd = source.indexOf("onChildRequest:", proxyStart);
   assert.ok(proxyStart >= 0 && proxyEnd > proxyStart);
@@ -697,7 +697,7 @@ test("final turn_end publishes a wakeable result before agent_end settles lifecy
   assert.equal(killed, false, "fresh teammate must remain wakeable after lifecycle confirmation");
 });
 
-test("four parallel teammates return after final turn_end without waiting for agent_end", async () => {
+test("parallel graph waits for authoritative lifecycle after result publication", async () => {
   const stdoutStreams: PassThrough[] = [];
   let killed = 0;
   let spawnIndex = 0;
@@ -735,31 +735,34 @@ test("four parallel teammates return after final turn_end without waiting for ag
     return child;
   });
 
-  const results = await Promise.race([
-    runGraph(
-      Array.from({ length: 4 }, (_, index) => ({
-        agent: "general",
-        prompt: `parallel task ${index}`,
-        name: `parallel_${index}`,
-        context: "fresh" as const,
-        timeoutMs: 2_000,
-      })),
-      4,
-      { baseCwd: process.cwd(), spawnChildProcess },
-    ),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("parallel result publication timed out")), 500)),
-  ]);
+  let graphSettled = false;
+  const graphPromise = runGraph(
+    Array.from({ length: 4 }, (_, index) => ({
+      agent: "general",
+      prompt: `parallel task ${index}`,
+      name: `parallel_${index}`,
+      context: "fresh" as const,
+      timeoutMs: 2_000,
+    })),
+    4,
+    { baseCwd: process.cwd(), spawnChildProcess },
+  ).then((results) => {
+    graphSettled = true;
+    return results;
+  });
 
+  await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(spawnIndex, 4);
+  assert.equal(graphSettled, false, "result-ready must not settle the graph");
+  assert.equal(killed, 0);
+  for (const stream of stdoutStreams) stream.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+
+  const results = await graphPromise;
   assert.deepEqual(
     results.map((result) => result.messages.at(-1)?.content).sort(),
     ["parallel-0", "parallel-1", "parallel-2", "parallel-3"],
   );
-  assert.equal(results.every((result) => result.lifecyclePending === true), true);
-  assert.equal(killed, 0);
-
-  for (const stream of stdoutStreams) stream.write(`${JSON.stringify({ type: "agent_end" })}\n`);
-  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(results.every((result) => result.lifecyclePending !== true), true);
   assert.equal(killed, 0);
 });
 
@@ -791,6 +794,7 @@ test("runGraph forwards each task model and thinking level to child CLI argument
         },
         toolResults: [],
       })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
     });
     return child;
   });
@@ -858,6 +862,7 @@ test("public runTeammate rejects unavailable configured models before child laun
         message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "done" }] },
         toolResults: [],
       })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
     });
     return child;
   });
@@ -879,7 +884,7 @@ test("public runTeammate rejects unavailable configured models before child laun
   }
 });
 
-test("DAG dependencies advance on result publication instead of agent_end", async () => {
+test("DAG dependencies wait for authoritative upstream lifecycle", async () => {
   const stdoutStreams: PassThrough[] = [];
   let spawnIndex = 0;
   const spawnChildProcess = adaptFakeSpawn(() => {
@@ -888,56 +893,36 @@ test("DAG dependencies advance on result publication instead of agent_end", asyn
     const stdout = new PassThrough();
     stdoutStreams.push(stdout);
     Object.assign(child, {
-      stdin: new PassThrough(),
-      stdout,
-      stderr: new PassThrough(),
-      connected: false,
-      exitCode: null,
-      signalCode: null,
-      pid: undefined,
-      kill() { return true; },
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined, kill() { return true; },
     });
     queueMicrotask(() => {
       const answer = index === 0 ? "seed result" : "dependent result";
-      stdout.write(`${JSON.stringify({
-        type: "message_end",
-        message: { role: "assistant", content: [{ type: "text", text: answer }] },
-      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "message_end", message: {
+        role: "assistant", content: [{ type: "text", text: answer }],
+      } })}\n`);
       stdout.write(`${JSON.stringify({
         type: "turn_end",
-        message: {
-          role: "assistant",
-          stopReason: "stop",
-          content: [{ type: "text", text: answer }],
-        },
+        message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: answer }] },
         toolResults: [],
       })}\n`);
     });
     return child;
   });
 
-  const results = await Promise.race([
-    runGraph(
-      [
-        { agent: "general", prompt: "produce seed", name: "seed", context: "fresh", timeoutMs: 2_000 },
-        {
-          agent: "general",
-          prompt: "consume {seed}",
-          name: "dependent",
-          dependsOn: ["seed"],
-          context: "fresh",
-          timeoutMs: 2_000,
-        },
-      ],
-      2,
-      { baseCwd: process.cwd(), spawnChildProcess },
-    ),
-    new Promise<never>((_, reject) => setTimeout(() => reject(new Error("DAG result publication timed out")), 500)),
-  ]);
+  const graph = runGraph([
+    { agent: "general", prompt: "produce seed", name: "seed", context: "fresh", timeoutMs: 2_000 },
+    { agent: "general", prompt: "consume {seed}", name: "dependent", dependsOn: ["seed"], context: "fresh", timeoutMs: 2_000 },
+  ], 2, { baseCwd: process.cwd(), spawnChildProcess });
 
-  assert.equal(spawnIndex, 2, "dependent task must start before upstream agent_end");
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(spawnIndex, 1, "dependent waits for upstream agent_end");
+  stdoutStreams[0].write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(spawnIndex, 2);
+  stdoutStreams[1].write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  const results = await graph;
   assert.deepEqual(results.map((result) => result.messages.at(-1)?.content), ["seed result", "dependent result"]);
-  for (const stream of stdoutStreams) stream.write(`${JSON.stringify({ type: "agent_end" })}\n`);
 });
 
 test("process close after result publication confirms lifecycle exactly once", async () => {
@@ -1710,7 +1695,7 @@ test("fresh agents publish follow-up turns while fork agents terminate after the
   assert.equal(forkKilled, true);
 });
 
-test("recursive abort removes descendants and every agent sharing their process controller", () => {
+test("recursive abort follows descendants without expanding through controller identity", () => {
   const root = activeAgent();
   root.correlationId = "root";
   const child = activeAgent();
@@ -1728,10 +1713,11 @@ test("recursive abort removes descendants and every agent sharing their process 
   state.namedAgents.set("child-name", "child");
 
   const terminated = new Set(killAgentTree(state, "root"));
-  assert.deepEqual(terminated, new Set(["root", "child", "shared", "grandchild"]));
+  assert.deepEqual(terminated, new Set(["root", "child", "grandchild"]));
   assert.equal(root.abortController.signal.aborted, true);
   assert.equal(child.abortController.signal.aborted, true);
   assert.equal(grandchild.abortController.signal.aborted, true);
+  assert.equal(state.activeRuns.has("shared"), true);
   assert.equal(state.activeRuns.has("unrelated"), true);
   assert.equal(state.namedAgents.has("child-name"), false);
 });

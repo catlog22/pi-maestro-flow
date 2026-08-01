@@ -151,10 +151,12 @@ test("pre-aborted child termination signal is applied immediately after binding"
   unbind();
 });
 
-test("fire-and-forget child IPC sends absorb asynchronous channel errors", async () => {
+test("child IPC async delivery failure disconnects the channel", async () => {
   let callbackInstalled = false;
+  let disconnects = 0;
+  let connected = true;
   const child = {
-    connected: true,
+    get connected() { return connected; },
     send(_message: unknown, callback: (error: Error | null) => void) {
       callbackInstalled = typeof callback === "function";
       queueMicrotask(() => callback(Object.assign(new Error("channel closed"), {
@@ -162,14 +164,31 @@ test("fire-and-forget child IPC sends absorb asynchronous channel errors", async
       })));
       return true;
     },
+    disconnect() { connected = false; disconnects += 1; },
   } as unknown as ChildProcess;
 
   assert.equal(sendChildIpcMessage(child, { type: "late_reply" }), true);
   await delay(0);
   assert.equal(callbackInstalled, true);
+  assert.equal(disconnects, 1);
 
   const disconnectedChild = { connected: false } as unknown as ChildProcess;
   assert.equal(sendChildIpcMessage(disconnectedChild, { type: "after_disconnect" }), false);
+});
+
+test("child IPC backpressure still counts as an accepted envelope", async () => {
+  let callbackCompleted = false;
+  const child = {
+    connected: true,
+    send(_message: unknown, callback: (error: Error | null) => void) {
+      queueMicrotask(() => { callbackCompleted = true; callback(null); });
+      return false;
+    },
+  } as unknown as ChildProcess;
+
+  assert.equal(sendChildIpcMessage(child, { type: "backpressure" }), true);
+  await delay(0);
+  assert.equal(callbackCompleted, true);
 });
 
 test("child proxy response wins exactly once over a late send callback error", async () => {

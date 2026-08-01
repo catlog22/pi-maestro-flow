@@ -46,7 +46,7 @@ export interface ControlCenterActiveAgent {
   correlationId: string;
   agent: string;
   name?: string;
-  status: "pending" | "running" | "retrying" | "sleeping" | "completed" | "failed";
+  status: "pending" | "running" | "retrying" | "sleeping" | "completed" | "failed" | "terminated";
   startedAt: number;
   inboxCount: number;
   taskCount: number;

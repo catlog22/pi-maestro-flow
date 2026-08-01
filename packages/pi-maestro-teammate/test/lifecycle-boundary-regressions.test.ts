@@ -5,9 +5,12 @@ import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import registerTeammateExtension, {
+  cancelProxyDispatch,
+  enforceWakeableAgentBudget,
   handleProxyRequest,
   settleAgent,
   switchConversationSession,
+  waitForTeammate,
   type TeammateRuntimeOptions,
 } from "../src/extension/index.ts";
 import {
@@ -93,13 +96,16 @@ function resultReadyTurn(text: string): Record<string, unknown> {
 
 const delay = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
-function createProxyPi(emitted: Array<{ event: string; payload: Record<string, unknown> }>): ExtensionAPI {
+function createProxyPi(
+  emitted: Array<{ event: string; payload: Record<string, unknown> }>,
+  messages: Array<Record<string, unknown>> = [],
+): ExtensionAPI {
   return new Proxy({
     events: {
       on() { return () => {}; },
       emit(event: string, payload: Record<string, unknown>) { emitted.push({ event, payload }); },
     },
-    sendMessage() {},
+    sendMessage(message: Record<string, unknown>) { messages.push(message); },
   }, {
     get(target, property) {
       if (property in target) return target[property as keyof typeof target];
@@ -161,6 +167,30 @@ test("a terminal requester reclaims nested dispatches and pending admissions", (
   assert.equal(state.pendingProxyDispatchParents.has("pending-request"), false);
   assert.equal(state.proxyDispatchByRequest.has("running-request"), false);
   assert.equal(state.recentlySettled?.get("nested")?.status, "terminated");
+});
+
+test("failed graph tombstone does not pin sleeping sibling eviction", () => {
+  const state = createProxyState();
+  const graphController = new AbortController();
+  const now = Date.now();
+  const failed: ActiveAgent = {
+    agent: "general", name: "failed", correlationId: "failed-task", startedAt: now - 10_000,
+    abortController: new AbortController(), graphAbortController: graphController,
+    inbox: [], outputLog: [], lastActivityAt: now - 10_000, failedAt: now,
+    depth: 0, status: "failed", sleepMs: 0,
+  };
+  const sleeping: ActiveAgent = {
+    agent: "general", name: "sleeping", correlationId: "sleeping-task", startedAt: now - 10_000,
+    abortController: new AbortController(), graphAbortController: graphController,
+    inbox: [], outputLog: [], lastActivityAt: 0, sleptAt: 0,
+    depth: 0, status: "sleeping", sleepMs: 0,
+  };
+  state.activeRuns.set(failed.correlationId, failed);
+  state.activeRuns.set(sleeping.correlationId, sleeping);
+
+  assert.deepEqual(enforceWakeableAgentBudget(state, now), [sleeping.correlationId]);
+  assert.equal(state.activeRuns.has(failed.correlationId), true);
+  assert.equal(state.activeRuns.has(sleeping.correlationId), false);
 });
 
 test("root teammate rejects a pre-aborted dispatch before registration or spawn", async () => {
@@ -345,6 +375,54 @@ test("root cycle rejection settles every graph task and aggregate without spawni
   );
 });
 
+test("mixed root graph settlement does not abort successful sibling controllers", async () => {
+  let spawnIndex = 0;
+  let graphSignal: AbortSignal | undefined;
+  let taskSignals: AbortSignal[] = [];
+  const spawnChildProcess = (() => {
+    const index = spawnIndex++;
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      if (index === 0) stdout.write(`${JSON.stringify(resultReadyTurn("successful sibling"))}\n`);
+      else stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "Invalid API key" },
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const { teammate } = createHarness({
+    spawnChildProcess,
+    onRunOptionsCreated(options) {
+      graphSignal = options.signal;
+      taskSignals = options.taskSignals ?? [];
+    },
+  });
+
+  const result = await teammate.execute(
+    "mixed-controller-scope",
+    { tasks: [
+      { agent: "general", name: "successful", prompt: "succeed" },
+      { agent: "general", name: "failed", prompt: "fail" },
+    ], background: false },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+
+  assert.equal(result.isError, true);
+  assert.equal(taskSignals.length, 2);
+  assert.equal(graphSignal?.aborted, false);
+  assert.equal(taskSignals.every((signal) => !signal.aborted), true);
+});
+
 test("proxy single emits complete only after result-ready lifecycle confirmation", async () => {
   const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const state = createProxyState();
@@ -393,7 +471,9 @@ test("proxy single emits complete only after result-ready lifecycle confirmation
   stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
   await delay(40);
 
-  assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 1);
+  const completed = emitted.filter(({ event }) => event === "teammate:complete");
+  assert.equal(completed.length, 1);
+  assert.equal("id" in completed[0].payload, false, "nested IPC requestId is not a root tool-call id");
 });
 
 test("proxy graph waits for every terminal task and preserves physical lifecycle identity", async () => {
@@ -422,7 +502,7 @@ test("proxy graph waits for every terminal task and preserves physical lifecycle
     return child;
   }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
 
-  await handleProxyRequest(
+  const handling = handleProxyRequest(
     createProxyPi(emitted),
     state,
     {
@@ -445,6 +525,7 @@ test("proxy graph waits for every terminal task and preserves physical lifecycle
     { spawnChildProcess, resultReadyGraceMs: 500 },
   );
 
+  await delay(30);
   assert.equal(children.length, 2);
   assert.deepEqual(
     [...state.activeRuns.values()]
@@ -460,8 +541,91 @@ test("proxy graph waits for every terminal task and preserves physical lifecycle
   assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 0);
 
   children[1].stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await handling;
   await delay(40);
   assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 1);
+});
+
+test("mixed nested graph settlement preserves successful sibling wakeability", async () => {
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const state = createProxyState();
+  let spawnIndex = 0;
+  const spawnChildProcess = (() => {
+    const index = spawnIndex++;
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      if (index === 0) stdout.write(`${JSON.stringify(resultReadyTurn("nested success"))}\n`);
+      else stdout.write(`${JSON.stringify({
+        type: "message_end",
+        message: { role: "assistant", stopReason: "error", errorMessage: "Invalid API key" },
+      })}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  await handleProxyRequest(
+    createProxyPi(emitted), state,
+    { type: "teammate_proxy_request", tool: "teammate", requestId: "nested-mixed", params: {
+      tasks: [
+        { agent: "general", name: "nested-success", prompt: "succeed" },
+        { agent: "general", name: "nested-failure", prompt: "fail" },
+      ],
+      background: false,
+    } },
+    () => {}, undefined, [], undefined, undefined, { spawnChildProcess },
+  );
+
+  const successful = [...state.activeRuns.values()].find((agent) => agent.name === "nested-success");
+  const failed = [...state.activeRuns.values()].find((agent) => agent.name === "nested-failure");
+  assert.equal(successful?.status, "sleeping");
+  assert.equal(successful?.abortController.signal.aborted, false);
+  assert.equal(failed?.status, "failed");
+  assert.equal(failed?.abortController.signal.aborted, false);
+});
+
+test("cancelling a nested background dispatch fences late completion publication", async () => {
+  const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
+  const messages: Array<Record<string, unknown>> = [];
+  const state = createProxyState();
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout, stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => stdout!.write(`${JSON.stringify(resultReadyTurn("late result"))}\n`));
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const requestId = "cancelled-background";
+
+  await handleProxyRequest(
+    createProxyPi(emitted, messages), state,
+    { type: "teammate_proxy_request", tool: "teammate", requestId, params: {
+      tasks: [{ agent: "general", name: "late", prompt: "finish later" }], background: true,
+    } },
+    () => {}, undefined, [], undefined, undefined,
+    { spawnChildProcess, resultReadyGraceMs: 500 },
+  );
+
+  await delay(30);
+  assert.ok(state.proxyDispatchByRequest?.has(requestId));
+  assert.equal(cancelProxyDispatch(state, requestId).length, 1);
+  stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await delay(40);
+
+  assert.equal(emitted.some(({ event }) => event === "teammate:complete"), false);
+  assert.equal(messages.some((message) => message.customType === "teammate-complete"), false);
+  assert.equal(state.cancelledProxyDispatches?.has(requestId) ?? false, false);
 });
 
 test("root retry cancellation records terminated state and a cancelled complete event", async () => {
@@ -501,7 +665,8 @@ test("root retry cancellation records terminated state and a cancelled complete 
     context(),
   );
 
-  assert.equal(result.isError, true);
+  assert.equal(result.isError, false);
+  assert.equal(result.details.results[0].terminalStatus, "terminated");
   assert.equal(spawns, 1);
   const completed = emitted.filter(({ event }) => event === "teammate:complete");
   assert.equal(completed.length, 1);
@@ -553,7 +718,8 @@ test("root graph retry cancellation keeps aggregate event and registry terminal 
     context(),
   );
 
-  assert.equal(result.isError, true);
+  assert.equal(result.isError, false);
+  assert.equal(result.details.results.every((entry) => entry.terminalStatus === "terminated"), true);
   const completed = emitted.filter(({ event }) => event === "teammate:complete");
   assert.equal(completed.length, 1);
   assert.equal(completed[0].payload.cancelled, true);
@@ -612,6 +778,17 @@ test("root DAG skip writes failed settled history for the never-spawned task", a
   ] as TeammateState;
   assert.equal([...state.recentlySettled?.values() ?? []].find((entry) => entry.name === "dependent")?.status, "failed");
   assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 1);
+});
+
+test("settled wait preserves terminated instead of reducing it", async () => {
+  const state = createProxyState();
+  state.recentlySettled = new Map([["terminated-agent", {
+    correlationId: "terminated-agent", agent: "general", name: "cancelled",
+    status: "terminated", settledAt: Date.now(), lastResult: "cancelled by requester",
+  }]]);
+  const result = await waitForTeammate(state, { name: "cancelled", timeoutMs: 100 });
+  assert.equal(result.status, "terminated");
+  assert.match(result.output.join("\n"), /already terminated/);
 });
 
 test("conversation switch treats a cancelled replacement as failure", async () => {

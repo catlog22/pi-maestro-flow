@@ -225,6 +225,26 @@ test("an auto-approved request settles without consuming the queue", async () =>
   assert.equal(queue.pendingCount(), 0, "the queue must release the slot once answered");
 });
 
+test("interaction reply transport failure marks the owning agent failed", async () => {
+  const state = makeState();
+  const cid = addAgent(state, "delivery-owner");
+  state.activeRuns.get(cid)!.expectsStructuredOutput = true;
+  const queue = createTeammateInteractionQueue(stubPi, state, 60_000);
+
+  queue.enqueue(
+    structuredOutputRequest(cid),
+    () => { throw new Error("reply channel closed"); },
+    unansweredCtx({ count: 0 }),
+    cid,
+  );
+  await delay(20);
+
+  const agent = state.activeRuns.get(cid);
+  assert.equal(queue.pendingCount(), 0);
+  assert.equal(agent?.status, "failed");
+  assert.match(agent?.lastResult ?? "", /reply delivery failed.*channel closed/i);
+});
+
 test("an agent without a schema cannot reach the structured_output grant", async () => {
   // The tool name is whatever the child says it is. The auto-approval exists
   // because a headless child has no UI to approve with — not as a way for any

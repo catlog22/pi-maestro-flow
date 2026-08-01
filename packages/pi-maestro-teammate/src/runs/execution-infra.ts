@@ -106,6 +106,8 @@ export interface RunTeammateOptions {
   modelCircuitBreaker?: ModelCircuitBreaker;
   correlationId?: string;
   taskCorrelationIds?: string[];
+  /** Task-local cancellation signals for graph members; `signal` remains graph-wide. */
+  taskSignals?: AbortSignal[];
   /**
    * Nesting depth of the dispatch being run. Callers that own the agent tree
    * (the teammate extension) always pass this; direct callers may omit it and

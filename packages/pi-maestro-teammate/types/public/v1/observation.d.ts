@@ -3,7 +3,7 @@ export type ObservationDetail = "summary" | "tail" | "full";
 export type ObservationWaitMode = "all" | "any" | "count";
 export type ObservationPhase = "pending" | "active" | "settled" | "unknown";
 export type ObservationOutcome = "success" | "failure" | "stalled" | "aborted";
-export type ObservationWaitStatus = "completed" | "failed" | "result-ready" | "stalled" | "timeout" | "aborted" | "not-found";
+export type ObservationWaitStatus = "completed" | "failed" | "terminated" | "result-ready" | "stalled" | "timeout" | "aborted" | "not-found";
 export interface ObservationTarget {
     kind: string;
     id: string;

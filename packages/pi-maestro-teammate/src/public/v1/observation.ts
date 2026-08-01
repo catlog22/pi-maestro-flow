@@ -6,6 +6,7 @@ export type ObservationOutcome = "success" | "failure" | "stalled" | "aborted";
 export type ObservationWaitStatus =
   | "completed"
   | "failed"
+  | "terminated"
   | "result-ready"
   | "stalled"
   | "timeout"

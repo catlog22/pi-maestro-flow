@@ -309,22 +309,21 @@ test("rebinding a name whose holder is gone is not a collision", () => {
 
 // --- REL-6: a failed cohort member blocked every sibling from retiring -----
 
-test("a failed graph task stops blocking its cohort once swept", () => {
+test("a failed graph tombstone does not block sleeping sibling eviction", () => {
   const state = makeState();
   const controller = new AbortController();
   const ok = addAgent(state, "task-a", { abortController: controller, status: "sleeping", sleptAt: Date.now() });
   const bad = addAgent(state, "task-b", { abortController: controller, status: "failed", failedAt: Date.now() });
 
-  // Cohorts retire only when every member is sleeping, so one never-spawned
-  // task pinned the whole graph in activeRuns for the session.
-  assert.equal(enforceWakeableAgentBudget(state, Date.now() + WAKEABLE_AGENT_BUDGET.namedTtlMs + 1).length, 0);
+  const evicted = enforceWakeableAgentBudget(
+    state,
+    Date.now() + WAKEABLE_AGENT_BUDGET.namedTtlMs + 1,
+  );
+  assert.ok(evicted.includes(ok.correlationId));
+  assert.equal(state.activeRuns.has(bad.correlationId), true, "diagnostic tombstone remains visible");
 
   const now = Date.now() + FAILED_AGENT_RETENTION_MS + 1;
   assert.deepEqual(sweepFailedAgents(state, now), [bad.correlationId]);
-  assert.ok(
-    enforceWakeableAgentBudget(state, now + WAKEABLE_AGENT_BUDGET.namedTtlMs).includes(ok.correlationId),
-    "the surviving sibling can now retire",
-  );
 });
 
 // --- ARCH-3: nested dispatches never published their lifecycle -------------
@@ -359,7 +358,7 @@ test("a nested dispatch publishes the completion event root dispatches publish",
   );
 
   assert.equal(events.length, 1, "exactly one completion event per nested dispatch");
-  assert.equal(events[0].id, "req-nested");
+  assert.equal("id" in events[0], false, "nested IPC requestId is not a tool-call id");
   assert.equal(typeof events[0].correlationId, "string");
   assert.notEqual(events[0].correlationId, parent.correlationId, "the event names the nested agent");
   assert.equal(typeof events[0].durationMs, "number");

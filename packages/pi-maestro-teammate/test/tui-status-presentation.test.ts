@@ -44,7 +44,7 @@ function activeAgent(overrides: Partial<ActiveAgent> = {}): ActiveAgent {
 test("status presentation covers every canonical status exactly once", () => {
   assert.deepEqual(
     Object.keys(STATUS_PRESENTATION).sort(),
-    ["completed", "failed", "pending", "retrying", "running", "sleeping"],
+    ["completed", "failed", "pending", "retrying", "running", "sleeping", "terminated"],
   );
   // retrying must be visually distinct from both pending and completed.
   assert.notEqual(STATUS_PRESENTATION.retrying.icon, STATUS_PRESENTATION.pending.icon);
@@ -72,7 +72,7 @@ test("effective display status derives result-ready and stalled from the shared 
     "result-ready",
   );
   // Non-running statuses are shown verbatim, never re-derived.
-  for (const status of ["pending", "retrying", "sleeping", "completed", "failed"] as const) {
+  for (const status of ["pending", "retrying", "sleeping", "completed", "failed", "terminated"] as const) {
     assert.equal(effectiveDisplayStatus(status, undefined, now - 600_000, now), status);
   }
   assert.equal(idleSeconds(now - 90_000, now), 90);
