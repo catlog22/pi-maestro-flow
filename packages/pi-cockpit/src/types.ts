@@ -91,6 +91,18 @@ export type ViewMode = "list" | "compact";
 
 export type QuietSymbolMode = "check" | "dot";
 
+/**
+ * Colour grouping for compact Quiet tool rows. Each mode re-maps the seven
+ * built-in tools onto existing theme slots, so it works across every theme
+ * without new colour definitions and is orthogonal to the theme accent.
+ * - classic: the original syntax-slot mapping (bash/read/ls share one hue).
+ * - family: three operation families — inspect / mutate / execute.
+ * - readwrite: cool reads vs warm writes, bash set apart.
+ * - search: splits discovery into view (read/ls) vs search (grep/find).
+ * - mono: single hue ramped by lightness; colourblind-safe, quietest look.
+ */
+export type ToolPaletteMode = "classic" | "family" | "readwrite" | "search" | "mono";
+
 export type IconMode = "auto" | "nerd" | "ascii";
 
 export type SidebarMode = "auto" | "on" | "off";
@@ -119,6 +131,8 @@ export interface CockpitConfig {
 	quietMode: boolean;
 	/** Lifecycle glyph set used by compact Quiet tool rows. */
 	quietSymbols: QuietSymbolMode;
+	/** Colour grouping applied to compact Quiet tool names. */
+	toolPalette: ToolPaletteMode;
 	agentsMode: ViewMode;
 	todoMode: ViewMode;
 	todoExpanded: boolean;
@@ -136,11 +150,12 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	enabled: true,
 	quietMode: false,
 	quietSymbols: "check",
+	toolPalette: "family",
 	agentsMode: "list",
 	todoMode: "list",
 	todoExpanded: false,
 	hideNativeAgents: true,
 	icons: { mode: "auto" },
-	sidebar: { mode: "auto", width: 40, density: "comfortable" },
+	sidebar: { mode: "off", width: 40, density: "comfortable" },
 	theme: "",
 };

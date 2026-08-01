@@ -28,13 +28,13 @@ export function renderBashBgSummary(
 	const current = active[0];
 	const stopping = active.filter((job) => job.status === "stopping").length;
 	const running = active.length - stopping;
+	const g = options.glyphs;
 	const counts = [
 		running ? `${running} running` : "",
 		stopping ? `${stopping} stopping` : "",
-	].filter(Boolean).join(" · ");
+	].filter(Boolean).join(g.separator);
 	const statusColor: ThemeColor = stopping > 0 ? "warning" : "accent";
 	const elapsed = formatDuration(options.now - current.startedAt);
-	const g = options.glyphs;
 	const segments: PrioritizedSegment[] = [
 		{
 			text: theme.fg(statusColor, current.status === "stopping" ? g.blocked : options.spin),

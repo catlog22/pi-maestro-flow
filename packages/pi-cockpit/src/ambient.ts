@@ -49,16 +49,16 @@ export function workingMessage(state: AmbientState): string | undefined {
  * which one needs them. Failure outranks progress, because that is the state that
  * actually requires a human.
  */
-export function titleFor(state: AmbientState, marks: { ok: string; fail: string }): string {
-	const base = state.cwd ? `pi · ${state.cwd}` : "pi";
+export function titleFor(state: AmbientState, marks: { ok: string; fail: string }, sep = " - "): string {
+	const base = state.cwd ? `pi${sep}${state.cwd}` : "pi";
 	const broken = failedAgents(state.agents).length + failedJobs(state.jobs).length;
-	if (broken > 0) return `${marks.fail} ${base} · ${broken} failed`;
+	if (broken > 0) return `${marks.fail} ${base}${sep}${broken} failed`;
 	if (state.running) {
 		const live = liveAgents(state.agents).length;
-		return live > 0 ? `${base} · ${live} agents` : `${base} · working`;
+		return live > 0 ? `${base}${sep}${live} agents` : `${base}${sep}working`;
 	}
 	const jobs = state.jobs.filter((job) => job.status === "running").length;
-	if (jobs > 0) return `${base} · ${jobs} bg`;
+	if (jobs > 0) return `${base}${sep}${jobs} bg`;
 	return base;
 }
 

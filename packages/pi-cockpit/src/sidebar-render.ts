@@ -1,7 +1,8 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { sanitizeExtensionStatusText } from "./extension-status.ts";
-import { resolveGlyphs, type IconGlyphs } from "./icons.ts";
+import { resolveGlyphs, type IconGlyphs, type IconMode } from "./icons.ts";
+import { composeByPriority, type PriorityGroup } from "./layout.ts";
 import type { MaestroUiStateSnapshotV1 } from "./public/v1/events.ts";
 import { formatAgentMetric, formatDuration } from "./render.ts";
 import type { AgentRow, BashBgJob, CockpitConfig, TodoItem } from "./types.ts";
@@ -19,9 +20,16 @@ export interface SidebarRenderInput {
 	resizing?: boolean;
 }
 
+type SidebarSectionTitle = "Workflow" | "Goal" | "Tasks" | "Agents" | "Jobs" | "Swarm";
+
 interface SidebarSection {
-	title: "Workflow" | "Goal" | "Tasks" | "Agents" | "Jobs" | "Swarm";
+	title: SidebarSectionTitle;
 	rows: string[];
+}
+
+/** Sidebar group extends the shared PriorityGroup with a section association. */
+interface SidebarGroup extends PriorityGroup {
+	section: SidebarSectionTitle;
 }
 
 function clean(value: string | undefined): string {
@@ -51,7 +59,7 @@ function paintedStatus(status: string, theme: Theme, glyphs: IconGlyphs): string
 	return `${theme.fg(visual.color, visual.glyph)} ${safeStatus}`;
 }
 
-function compactCounts(values: ReadonlyArray<{ status: string }>): string {
+function compactCounts(values: ReadonlyArray<{ status: string }>, sep: string): string {
 	const active = values.filter((item) => /running|retry|stopping|progress|active/i.test(item.status)).length;
 	const failed = values.filter((item) => /fail|error|blocked/i.test(item.status)).length;
 	const done = values.filter((item) => /complete|completed|done|success/i.test(item.status)).length;
@@ -60,7 +68,7 @@ function compactCounts(values: ReadonlyArray<{ status: string }>): string {
 		active > 0 ? `${active} active` : "",
 		failed > 0 ? `${failed} failed` : "",
 		done > 0 ? `${done} done` : "",
-	].filter(Boolean).join(" · ");
+	].filter(Boolean).join(sep);
 }
 
 function workflowRows(
@@ -71,22 +79,22 @@ function workflowRows(
 ): string[] {
 	const workflow = maestro?.workflow;
 	if (!workflow) return [];
-	const session = `${clean(workflow.session.label) || clean(workflow.session.id)} · ${paintedStatus(workflow.session.status, theme, glyphs)}`;
+	const session = `${clean(workflow.session.label) || clean(workflow.session.id)}${glyphs.separator}${paintedStatus(workflow.session.status, theme, glyphs)}`;
 	const chain = workflow.chain;
 	const gates = workflow.gates;
 	const progress = `${finiteCount(chain.completed)}/${finiteCount(chain.total)} done`
-		+ (chain.running > 0 ? ` · ${finiteCount(chain.running)} running` : "")
-		+ (chain.pending > 0 ? ` · ${finiteCount(chain.pending)} pending` : "");
+		+ (chain.running > 0 ? `${glyphs.separator}${finiteCount(chain.running)} running` : "")
+		+ (chain.pending > 0 ? `${glyphs.separator}${finiteCount(chain.pending)} pending` : "");
 	const gateText = `${finiteCount(gates.passed)}/${finiteCount(gates.total)} gates`
-		+ ((gates.failed ?? 0) > 0 ? ` · ${finiteCount(gates.failed ?? 0)} failed` : "");
+		+ ((gates.failed ?? 0) > 0 ? `${glyphs.separator}${finiteCount(gates.failed ?? 0)} failed` : "");
 	if (compact) {
 		const run = workflow.run
-			? `${paintedStatus(workflow.run.status, theme, glyphs)} · ${clean(workflow.run.command)}`
+			? `${paintedStatus(workflow.run.status, theme, glyphs)}${glyphs.separator}${clean(workflow.run.command)}`
 			: progress;
 		return [session, run];
 	}
 	const rows = [session];
-	if (workflow.run) rows.push(`${paintedStatus(workflow.run.status, theme, glyphs)} · ${clean(workflow.run.command)}`);
+	if (workflow.run) rows.push(`${paintedStatus(workflow.run.status, theme, glyphs)}${glyphs.separator}${clean(workflow.run.command)}`);
 	rows.push(theme.fg("muted", progress), theme.fg((gates.failed ?? 0) > 0 ? "error" : "muted", gateText));
 	if (workflow.next) rows.push(`${theme.fg("dim", "Next")} ${clean(workflow.next)}`);
 	return rows;
@@ -103,14 +111,14 @@ function goalRows(
 		?? maestro.goals.find((candidate) => /running|active|progress|pause/i.test(candidate.status))
 		?? maestro.goals[0];
 	const objective = clean(goal.objective) || clean(goal.id);
-	const status = `${paintedStatus(goal.status, theme, glyphs)} · iteration ${finiteCount(goal.iteration)}`;
+	const status = `${paintedStatus(goal.status, theme, glyphs)}${glyphs.separator}iteration ${finiteCount(goal.iteration)}`;
 	if (compact) return [objective, status];
 	const tokens = goal.tokenBudget === undefined
 		? `${formatAgentMetric(goal.tokensUsed)} tokens`
 		: `${formatAgentMetric(goal.tokensUsed)}/${formatAgentMetric(goal.tokenBudget)} tokens`;
-	const rows = [theme.bold(objective), status, theme.fg("muted", `${tokens} · ${formatDuration(goal.timeUsedSeconds * 1_000)}`)];
+	const rows = [theme.bold(objective), status, theme.fg("muted", `${tokens}${glyphs.separator}${formatDuration(goal.timeUsedSeconds * 1_000)}`)];
 	if (goal.pauseReason) rows.push(`${theme.fg("warning", glyphs.dotIdle)} ${clean(goal.pauseReason)}`);
-	if (maestro.goals.length > 1) rows.push(theme.fg("dim", `${maestro.goals.length} goals · current ${clean(goal.id)}`));
+	if (maestro.goals.length > 1) rows.push(theme.fg("dim", `${maestro.goals.length} goals${glyphs.separator}current ${clean(goal.id)}`));
 	return rows;
 }
 
@@ -132,8 +140,8 @@ function taskRows(
 	const active = items.filter((item) => item.status === "in_progress").length;
 	const blocked = items.filter((item) => item.status === "blocked").length;
 	const summary = `${done}/${items.length} done`
-		+ (active > 0 ? ` · ${active} active` : "")
-		+ (blocked > 0 ? ` · ${blocked} blocked` : "");
+		+ (active > 0 ? `${glyphs.separator}${active} active` : "")
+		+ (blocked > 0 ? `${glyphs.separator}${blocked} blocked` : "");
 	const ordered = [...items].sort((a, b) => TODO_RANK[a.status] - TODO_RANK[b.status] || a.id.localeCompare(b.id));
 	const visible = compact ? ordered.slice(0, 1) : ordered;
 	return [theme.fg(blocked > 0 ? "warning" : "muted", summary), ...visible.map((item) => {
@@ -161,15 +169,15 @@ function agentRows(
 		const active = (row: AgentRow) => row.status === "running" || row.status === "retrying" ? 0 : row.status === "failed" ? 1 : 2;
 		return active(a) - active(b) || b.lastActivityAt - a.lastActivityAt || a.correlationId.localeCompare(b.correlationId);
 	});
-	const summary = compactCounts(ordered);
+	const summary = compactCounts(ordered, glyphs.separator);
 	const visible = compact ? ordered.slice(0, 1) : ordered;
 	return [theme.fg("muted", summary), ...visible.map((row) => {
 		const label = clean(row.name) || clean(row.role) || clean(row.agent) || "agent";
 		const task = clean(row.task);
 		const elapsed = formatDuration((row.finishedAt ?? now) - row.startedAt);
-		return `${paintedStatus(row.status, theme, glyphs)} · ${theme.fg("syntaxFunction", label)}`
-			+ (task ? ` · ${task}` : "")
-			+ theme.fg("dim", ` · ${elapsed}`);
+		return `${paintedStatus(row.status, theme, glyphs)}${glyphs.separator}${theme.fg("syntaxFunction", label)}`
+			+ (task ? `${glyphs.separator}${task}` : "")
+			+ theme.fg("dim", `${glyphs.separator}${elapsed}`);
 	})];
 }
 
@@ -181,13 +189,13 @@ function jobRows(
 	now: number,
 ): string[] {
 	if (jobs.length === 0) return [];
-	const summary = compactCounts(jobs);
+	const summary = compactCounts(jobs, glyphs.separator);
 	const visible = compact ? jobs.slice(0, 1) : jobs;
 	return [theme.fg("muted", summary), ...visible.map((job) => {
 		const command = clean(job.command) || clean(job.id);
 		const elapsed = formatDuration((job.finishedAt ?? now) - job.startedAt);
-		const exit = job.exitCode === null ? "" : ` · exit ${job.exitCode}`;
-		return `${paintedStatus(job.status, theme, glyphs)} · ${command}${theme.fg("dim", ` · ${elapsed}${exit}`)}`;
+		const exit = job.exitCode === null ? "" : `${glyphs.separator}exit ${job.exitCode}`;
+		return `${paintedStatus(job.status, theme, glyphs)}${glyphs.separator}${command}${theme.fg("dim", `${glyphs.separator}${elapsed}${exit}`)}`;
 	})];
 }
 
@@ -200,15 +208,15 @@ function swarmRows(
 	const swarm = maestro?.swarm;
 	if (!swarm) return [];
 	const objective = clean(swarm.objective) || clean(swarm.sessionId);
-	const iteration = `${paintedStatus(swarm.status, theme, glyphs)} · iteration ${finiteCount(swarm.iteration)}/${finiteCount(swarm.maxIterations)}`;
+	const iteration = `${paintedStatus(swarm.status, theme, glyphs)}${glyphs.separator}iteration ${finiteCount(swarm.iteration)}/${finiteCount(swarm.maxIterations)}`;
 	const workers = `${swarm.workers.length} workers`
-		+ (swarm.workers.length > 0 ? ` · ${compactCounts(swarm.workers)}` : "");
+		+ (swarm.workers.length > 0 ? `${glyphs.separator}${compactCounts(swarm.workers, glyphs.separator)}` : "");
 	if (compact) return [objective, iteration];
 	const rows = [theme.bold(objective), iteration, theme.fg("muted", workers)];
 	if (swarm.best) {
 		const summary = clean(swarm.best.summary);
 		rows.push(`${theme.fg("success", `${glyphs.check} best ${swarm.best.score}`)}`
-			+ (summary ? ` · ${summary}` : ""));
+			+ (summary ? `${glyphs.separator}${summary}` : ""));
 	}
 	return rows;
 }
@@ -217,21 +225,95 @@ function fit(value: string, width: number): string {
 	return truncateToWidth(value, Math.max(0, width), "");
 }
 
-function sectionTitle(title: SidebarSection["title"], theme: Theme, width: number): string {
+function sectionTitle(title: SidebarSectionTitle, theme: Theme, width: number): string {
 	return fit(theme.bold(theme.fg("syntaxFunction", title)), width);
 }
 
-function allocatedRows(section: SidebarSection, count: number, theme: Theme, glyphs: IconGlyphs, width: number): string[] {
-	if (count >= section.rows.length) return section.rows.slice(0, count).map((row) => fit(row, width));
-	if (count <= 0) return [];
-	const hidden = section.rows.length - count;
-	if (count === 1) {
-		return [fit(`${section.rows[0]} ${theme.fg("dim", `${glyphs.ellipsis} +${hidden}`)}`, width)];
+/**
+ * Convert flat sections into priority-annotated groups.
+ * Each section header is required; content rows get ascending dropRank
+ * so later/less-important rows are dropped first under height pressure.
+ */
+function sectionsToGroups(sections: readonly SidebarSection[]): SidebarGroup[] {
+	const groups: SidebarGroup[] = [];
+	// Base priority per section (higher = more important, dropped later).
+	const sectionBase: Record<SidebarSectionTitle, number> = {
+		Workflow: 60,
+		Goal: 50,
+		Tasks: 45,
+		Agents: 40,
+		Jobs: 35,
+		Swarm: 30,
+	};
+	for (const section of sections) {
+		if (section.rows.length === 0) continue;
+		const base = sectionBase[section.title];
+		for (let i = 0; i < section.rows.length; i++) {
+			const row = section.rows[i];
+			if (row === undefined) continue;
+			// Two-tier priority: section summaries (row 0) use the section's base
+			// rank (>= 30), ensuring breadth-first composition — all sections show
+			// their summary before any section gains detail rows.  Detail rows
+			// (i > 0) always rank below the lowest section summary so they are
+			// dropped first under height pressure.
+			const dropRank = i === 0 ? base : 20 - i;
+			groups.push({
+				name: `${section.title}:${i}`,
+				section: section.title,
+				rows: [row],
+				required: false,
+				dropRank,
+			});
+		}
 	}
-	return [
-		...section.rows.slice(0, count - 1).map((row) => fit(row, width)),
-		fit(theme.fg("dim", `${glyphs.ellipsis} ${hidden + 1} more`), width),
-	];
+	return groups;
+}
+
+/** Cost = content rows + one header line per distinct surviving section. */
+function sectionAwareCost(groups: readonly PriorityGroup[]): number {
+	const sidebarGroups = groups as readonly SidebarGroup[];
+	let lines = 0;
+	let lastSection: SidebarSectionTitle | undefined;
+	for (const group of sidebarGroups) {
+		if (group.section !== lastSection) {
+			lines += 1; // section header
+			lastSection = group.section;
+		}
+		lines += group.rows.length;
+	}
+	return lines;
+}
+
+/** Render surviving groups with section headers inserted on section boundaries. */
+function renderGroups(
+	groups: readonly SidebarGroup[],
+	theme: Theme,
+	glyphs: IconGlyphs,
+	contentWidth: number,
+	height: number,
+): string[] {
+	const output: string[] = [];
+	let lastSection: SidebarSectionTitle | undefined;
+	for (const group of groups) {
+		if (output.length >= height) break;
+		if (group.section !== lastSection) {
+			output.push(sectionTitle(group.section, theme, contentWidth));
+			lastSection = group.section;
+		}
+		for (const row of group.rows) {
+			if (output.length >= height) break;
+			output.push(fit(row, contentWidth));
+		}
+	}
+	// Append a "more" indicator if groups were dropped.
+	const totalContentRows = groups.reduce((sum, g) => sum + g.rows.length, 0);
+	if (output.length < totalContentRows + new Set(groups.map((g) => g.section)).size) {
+		const hidden = totalContentRows + new Set(groups.map((g) => g.section)).size - output.length;
+		if (hidden > 0 && output.length < height) {
+			output.push(fit(theme.fg("dim", `${glyphs.ellipsis} ${hidden} more`), contentWidth));
+		}
+	}
+	return output;
 }
 
 function layoutSections(
@@ -241,35 +323,17 @@ function layoutSections(
 	glyphs: IconGlyphs,
 	contentWidth: number,
 ): string[] {
-	let remaining = Math.max(0, height);
-	const allocations = sections.map((section) => ({ section, rows: 0 }));
-	const included: typeof allocations = [];
-	for (const allocation of allocations) {
-		if (remaining < 2) break;
-		allocation.rows = 1;
-		remaining -= 2;
-		included.push(allocation);
-	}
-	for (const allocation of included) {
-		const wanted = Math.max(0, allocation.section.rows.length - allocation.rows);
-		const granted = Math.min(wanted, remaining);
-		allocation.rows += granted;
-		remaining -= granted;
-	}
-	const output: string[] = [];
-	for (const allocation of included) {
-		output.push(sectionTitle(allocation.section.title, theme, contentWidth));
-		output.push(...allocatedRows(allocation.section, allocation.rows, theme, glyphs, contentWidth));
-	}
-	return output;
+	const groups = sectionsToGroups(sections);
+	const composed = composeByPriority(groups, height, sectionAwareCost) as SidebarGroup[];
+	return renderGroups(composed, theme, glyphs, contentWidth, height);
 }
 
-function dockRows(rows: readonly string[], width: number, height: number, theme: Theme, resizing: boolean): string[] {
+function dockRows(rows: readonly string[], width: number, height: number, theme: Theme, resizing: boolean, glyphs: IconGlyphs): string[] {
 	const safeWidth = Math.max(0, Math.trunc(width));
 	const safeHeight = Math.max(0, Math.trunc(height));
 	if (safeWidth <= 0 || safeHeight <= 0) return [];
 	const contentWidth = Math.max(0, safeWidth - 2);
-	const divider = theme.fg(resizing ? "warning" : "borderMuted", "│");
+	const divider = theme.fg(resizing ? "warning" : "borderMuted", glyphs.box.vertical);
 	return Array.from({ length: safeHeight }, (_, index) => {
 		const content = fit(rows[index] ?? "", contentWidth);
 		const padding = " ".repeat(Math.max(0, contentWidth - visibleWidth(content)));
@@ -296,7 +360,7 @@ export function renderSidebar(input: SidebarRenderInput): string[] {
 	];
 	const sections = candidates.filter((section) => section.rows.length > 0);
 	const content = layoutSections(sections, height, theme, glyphs, Math.max(0, width - 2));
-	return dockRows(content, width, height, theme, input.resizing === true);
+	return dockRows(content, width, height, theme, input.resizing === true, glyphs);
 }
 
 export function renderSidebarError(
@@ -305,8 +369,9 @@ export function renderSidebarError(
 	height: number,
 	theme: Theme,
 	resizing = false,
+	iconMode: IconMode = "ascii",
 ): string[] {
 	const message = clean(error instanceof Error ? error.message : String(error)) || "render failed";
 	const rows = [theme.bold(theme.fg("error", "Cockpit sidebar")), theme.fg("error", message)];
-	return dockRows(rows, width, height, theme, resizing);
+	return dockRows(rows, width, height, theme, resizing, resolveGlyphs(iconMode));
 }

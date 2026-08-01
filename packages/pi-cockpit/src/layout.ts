@@ -127,3 +127,55 @@ export function fitLineByPriority(
 export function visibleStart(selected: number, length: number, size: number): number {
 	return Math.max(0, Math.min(selected - Math.floor(size / 2), Math.max(0, length - size)));
 }
+
+// --- Vertical-axis priority composition ---
+//
+// fitSegmentsByPriority handles the horizontal axis (segments on one line).
+// composeByPriority handles the vertical axis (rows across a panel).  Both
+// share the same greedy-drop-lowest-first strategy; the vertical variant
+// operates on multi-row groups and accepts a pluggable cost function so
+// callers can account for section headers, separators, or other overhead.
+
+/**
+ * A prioritized group of rows for vertical budget composition.
+ * Lower dropRank = dropped first when the budget is insufficient.
+ * required groups are never dropped.
+ */
+export interface PriorityGroup {
+	name: string;
+	rows: string[];
+	required: boolean;
+	dropRank: number;
+}
+
+const defaultCost = (groups: readonly PriorityGroup[]): number =>
+	groups.reduce((sum, g) => sum + g.rows.length, 0);
+
+/**
+ * Iteratively drop lowest-priority groups until the cost fits the budget.
+ * Vertical-axis counterpart of fitSegmentsByPriority.
+ *
+ * @param groups  Candidate groups (empty-row groups are pre-filtered).
+ * @param budget  Maximum allowed cost (e.g. terminal rows).
+ * @param cost    Optional cost function; defaults to total row count.
+ */
+export function composeByPriority(
+	groups: PriorityGroup[],
+	budget: number,
+	cost: (groups: readonly PriorityGroup[]) => number = defaultCost,
+): PriorityGroup[] {
+	let candidate = groups.filter((g) => g.rows.length > 0);
+	while (cost(candidate) > budget) {
+		let dropIndex = -1;
+		let dropRank = Number.POSITIVE_INFINITY;
+		for (let i = 0; i < candidate.length; i++) {
+			const g = candidate[i];
+			if (!g || g.required || g.dropRank >= dropRank) continue;
+			dropRank = g.dropRank;
+			dropIndex = i;
+		}
+		if (dropIndex === -1) break;
+		candidate = candidate.filter((_, i) => i !== dropIndex);
+	}
+	return candidate;
+}

@@ -53,7 +53,7 @@ export function createSidebarComponent(options: SidebarComponentOptions): Compon
 			} catch (error) {
 				reportRenderError(error);
 				try {
-					return renderSidebarError(error, width, height, options.theme, resizing);
+					return renderSidebarError(error, width, height, options.theme, resizing, options.getConfig().icons.mode);
 				} catch {
 					return [truncateToWidth("Cockpit sidebar unavailable", Math.max(1, width), "")];
 				}
@@ -83,6 +83,10 @@ export interface SidebarControllerOptions {
 	getJobs(): readonly BashBgJob[];
 	getConfig(): CockpitConfig;
 	now?(): number;
+	/** When true the sidebar runs its own periodic redraw (duration ticks, spinners). */
+	shouldAnimate?(): boolean;
+	/** Interval for the sidebar's own animation timer. Defaults to 1000ms. */
+	animationIntervalMs?: number;
 	onResizeCommit?(width: number): void | Promise<void>;
 	onVisibilityChange?(visible: boolean): void;
 	onEffectiveWidthChange?(width: number): void;
@@ -94,10 +98,13 @@ export interface SidebarControllerOptions {
 export function createSidebarController(options: SidebarControllerOptions): SidebarController {
 	let enabled = false;
 	let disposed = false;
+	let generation = 0;
 	let overlayPending = false;
 	let requestOverlayRender: (() => void) | undefined;
 	let splitRequestRender: (() => void) | undefined;
 	let overlayHandle: OverlayHandle | undefined;
+	let animationTimer: ReturnType<typeof setInterval> | undefined;
+	const animationIntervalMs = Math.max(1, Math.trunc(options.animationIntervalMs ?? 1_000));
 	const schedule = options.schedule ?? queueMicrotask;
 
 	const reportError = (error: unknown): void => {
@@ -119,6 +126,24 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 			reportError(error);
 			return false;
 		}
+	};
+
+	// --- Animation timer (pi-atelier syncAnimation pattern) ---
+	const stopAnimation = (): void => {
+		if (!animationTimer) return;
+		clearInterval(animationTimer);
+		animationTimer = undefined;
+	};
+	const syncAnimation = (): void => {
+		if (!enabled || options.shouldAnimate?.() !== true || !requestOverlayRender) {
+			stopAnimation();
+			return;
+		}
+		if (animationTimer) return;
+		animationTimer = setInterval(() => {
+			safely(() => requestOverlayRender?.());
+		}, animationIntervalMs);
+		animationTimer.unref?.();
 	};
 
 	let initialWidth = DEFAULT_SIDEBAR_WIDTH;
@@ -161,6 +186,8 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 	const hide = (): void => {
 		if (!enabled && !split.isEnabled()) return;
 		enabled = false;
+		generation += 1;
+		stopAnimation();
 		safely(split.cancelResize);
 		safely(() => overlayHandle?.setHidden(true));
 		safely(split.hide);
@@ -173,14 +200,18 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 			return;
 		}
 		enabled = true;
+		const currentGeneration = ++generation;
 		if (!safely(split.show)) {
 			enabled = false;
+			generation += 1;
+			stopAnimation();
 			safely(split.hide);
 			return;
 		}
 		if (overlayHandle) {
 			safely(() => overlayHandle?.setHidden(false));
 			requestOverlayRender?.();
+			syncAnimation();
 			return;
 		}
 		if (overlayPending) return;
@@ -191,6 +222,8 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 					const attached = safely(() => split.attach(tui));
 					if (!attached) {
 						enabled = false;
+						generation += 1;
+						stopAnimation();
 						safely(split.hide);
 					} else {
 						splitRequestRender = () => tui.requestRender();
@@ -222,19 +255,35 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 							safely(() => handle.hide());
 							return;
 						}
+						// Cockpit reuses the overlay handle across show/hide cycles
+						// (setHidden, not destroy), so a handle delivered after hide()
+						// is kept and marked hidden for a later show() to reuse.  The
+						// generation guard lives in the pending .finally() instead, where
+						// a stale settle must not reset the new cycle's enabled flag.
 						overlayHandle = handle;
 						if (!enabled) safely(() => handle.setHidden(true));
+						else syncAnimation();
 					},
 				},
 			);
-			void pending.catch((error: unknown) => {
-				overlayPending = false;
-				reportError(error);
-			});
+			void pending
+				.catch((error: unknown) => {
+					overlayPending = false;
+					reportError(error);
+				})
+				.finally(() => {
+					if (generation !== currentGeneration) return;
+					overlayPending = false;
+					enabled = false;
+					stopAnimation();
+				});
 		} catch (error) {
 			overlayPending = false;
-			enabled = false;
-			safely(split.hide);
+			if (generation === currentGeneration) {
+				enabled = false;
+				stopAnimation();
+				safely(split.hide);
+			}
 			reportError(error);
 		}
 	};
@@ -253,11 +302,13 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 		requestRender() {
 			safely(() => requestOverlayRender?.());
 			safely(split.requestRender);
+			syncAnimation();
 		},
 		dispose() {
 			if (disposed) return;
 			hide();
 			disposed = true;
+			stopAnimation();
 			safely(() => overlayHandle?.hide());
 			clearOverlayCallbacks();
 			safely(split.dispose);

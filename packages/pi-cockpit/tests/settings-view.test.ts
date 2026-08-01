@@ -46,6 +46,24 @@ test("quiet symbols cycle between check and dot modes", () => {
 	assert.equal(applyRow(dotted, "quietSymbols").quietSymbols, "check");
 });
 
+test("tool palette cycles through every grouping and is reachable by accel", () => {
+	const row = buildRows(DEFAULT_CONFIG).find((candidate) => candidate.key === "toolPalette");
+	assert.equal(row?.accel, "p");
+	assert.equal(row?.value, "family");
+	let config = DEFAULT_CONFIG;
+	const seen = new Set<string>();
+	for (let i = 0; i < 5; i++) {
+		config = applyRow(config, "toolPalette");
+		seen.add(config.toolPalette);
+	}
+	assert.deepEqual([...seen].sort(), ["classic", "family", "mono", "readwrite", "search"]);
+});
+
+test("tool palette sits right after the quiet trio it belongs with", () => {
+	const keys = buildRows(DEFAULT_CONFIG).map((row) => row.key);
+	assert.equal(keys[keys.indexOf("thinkingFold") + 1], "toolPalette");
+});
+
 test("thinking fold is a pass-through: applyRow leaves config untouched", () => {
 	assert.equal(applyRow(DEFAULT_CONFIG, "thinkingFold"), DEFAULT_CONFIG);
 });
@@ -73,13 +91,13 @@ test("sidebar rows expose the mode and density cycles", () => {
 	assert.deepEqual(
 		rows.filter((row) => row.key.startsWith("sidebar")).map((row) => [row.key, row.value, row.next]),
 		[
-			["sidebarMode", "auto", "on"],
+			["sidebarMode", "off", "auto"],
 			["sidebarDensity", "comfortable", "compact"],
 		],
 	);
-	const on = applyRow(DEFAULT_CONFIG, "sidebarMode");
-	assert.equal(on.sidebar.mode, "on");
-	assert.equal(applyRow(applyRow(on, "sidebarMode"), "sidebarMode").sidebar.mode, "auto");
+	const auto = applyRow(DEFAULT_CONFIG, "sidebarMode");
+	assert.equal(auto.sidebar.mode, "auto");
+	assert.equal(applyRow(applyRow(auto, "sidebarMode"), "sidebarMode").sidebar.mode, "off");
 	const compact = applyRow(DEFAULT_CONFIG, "sidebarDensity");
 	assert.equal(compact.sidebar.density, "compact");
 	assert.equal(applyRow(compact, "sidebarDensity").sidebar.density, "comfortable");

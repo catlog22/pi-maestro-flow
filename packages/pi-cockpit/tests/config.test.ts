@@ -16,11 +16,23 @@ test("quietSymbols accepts supported modes and rejects unknown values", () => {
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { quietSymbols: null }).quietSymbols, "check");
 });
 
+test("toolPalette accepts supported modes and rejects unknown values", () => {
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { toolPalette: "mono" }).toolPalette, "mono");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { toolPalette: "classic" }).toolPalette, "classic");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { toolPalette: "search" }).toolPalette, "search");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { toolPalette: "neon" }).toolPalette, "family");
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { toolPalette: null }).toolPalette, "family");
+});
+
+test("legacy config without toolPalette keeps the family default", () => {
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { quietMode: true }).toolPalette, "family");
+});
+
 test("legacy config without sidebar keeps sidebar defaults", () => {
 	const config = mergeConfig(DEFAULT_CONFIG, { enabled: false, todoMode: "compact" });
 	assert.equal(config.enabled, false);
 	assert.equal(config.todoMode, "compact");
-	assert.deepEqual(config.sidebar, { mode: "auto", width: 40, density: "comfortable" });
+	assert.deepEqual(config.sidebar, { mode: "off", width: 40, density: "comfortable" });
 	assert.notEqual(config.sidebar, DEFAULT_CONFIG.sidebar);
 });
 

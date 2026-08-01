@@ -72,6 +72,60 @@ test("both symbol modes have an ASCII fallback", () => {
 	assert.match(renderResult(bash, { command: "pwd" }, "exit code: 1"), /^  ! bash/);
 });
 
+test("tool palette re-maps tool name colours by operation family", () => {
+	// bold wraps the name in a sentinel so fg can tell the tool name apart from
+	// the mark/arg/summary and record which colour slot it was painted with.
+	const colorTheme = {
+		bold: (text: string) => `\x01${text}\x01`,
+		fg: (name: string, text: string) =>
+			text.startsWith("\x01") ? `${name}:${text.replaceAll("\x01", "")}` : text,
+	};
+	const args = { command: "x", pattern: "x", path: "." };
+	const cases: Array<[CockpitConfig["toolPalette"], string, string]> = [
+		["classic", "bash", "syntaxFunction"],
+		["classic", "grep", "syntaxKeyword"],
+		["family", "grep", "syntaxType"],
+		["family", "edit", "syntaxKeyword"],
+		["family", "bash", "syntaxString"],
+		["readwrite", "bash", "syntaxVariable"],
+		["search", "grep", "syntaxString"],
+		["search", "read", "syntaxType"],
+		["mono", "read", "syntaxComment"],
+		["mono", "edit", "toolOutput"],
+		["mono", "bash", "text"],
+	];
+	for (const [palette, tool, slot] of cases) {
+		const tools = install(() => ({
+			...DEFAULT_CONFIG,
+			quietSymbols: "check",
+			icons: { mode: "nerd" },
+			toolPalette: palette,
+		}));
+		const rendered = line(tools.get(tool).renderCall(args, colorTheme, { args, isPartial: true }));
+		assert.ok(
+			rendered.includes(`${slot}:${tool}`),
+			`${palette}/${tool} expected slot ${slot}, rendered: ${rendered}`,
+		);
+	}
+});
+
+test("an unknown palette falls back to the classic colour map", () => {
+	const colorTheme = {
+		bold: (text: string) => `\x01${text}\x01`,
+		fg: (name: string, text: string) =>
+			text.startsWith("\x01") ? `${name}:${text.replaceAll("\x01", "")}` : text,
+	};
+	const args = { command: "x" };
+	const tools = install(() => ({
+		...DEFAULT_CONFIG,
+		quietSymbols: "check",
+		icons: { mode: "nerd" },
+		toolPalette: "nope" as CockpitConfig["toolPalette"],
+	}));
+	const rendered = line(tools.get("bash").renderCall(args, colorTheme, { args, isPartial: true }));
+	assert.ok(rendered.includes("syntaxFunction:bash"), rendered);
+});
+
 test("search and file summaries use compact units", () => {
 	const tools = install(() => ({ ...DEFAULT_CONFIG, quietSymbols: "check", icons: { mode: "nerd" } }));
 	assert.equal(

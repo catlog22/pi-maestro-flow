@@ -162,7 +162,7 @@ export default function (pi: ExtensionAPI): void {
 				activeTool: [...activeTools.values()].at(-1),
 			};
 			ctx.ui.setWorkingMessage(workingMessage(state));
-			ctx.ui.setTitle(titleFor(state, { ok: g.check, fail: g.cross }));
+			ctx.ui.setTitle(titleFor(state, { ok: g.check, fail: g.cross }, g.separator));
 			ctx.ui.setStatus(COCKPIT_STATUS_KEY, statusText(configProblem, g.blocked));
 		} catch {
 			// ambient surfaces are best-effort; never let them break a render
@@ -319,6 +319,7 @@ export default function (pi: ExtensionAPI): void {
 			getAgents: () => agents.snapshot(),
 			getJobs: () => bashBg.snapshot(),
 			getConfig: () => config,
+			shouldAnimate: () => running || bashBg.hasActive() || agents.hasLingering(),
 			onVisibilityChange: (visible) => {
 				dockEffectiveVisible = visible;
 				const activeCtx = lastCtx;
@@ -384,11 +385,25 @@ export default function (pi: ExtensionAPI): void {
 			capturedTui = tui;
 			let observedWidth = tui.terminal.columns;
 			const widthTimer = setInterval(() => {
-				const nextWidth = tui.terminal.columns;
-				if (!Number.isFinite(nextWidth) || nextWidth <= 0 || nextWidth === observedWidth) return;
-				observedWidth = nextWidth;
-				tui.invalidate();
-				tui.requestRender(true);
+				try {
+					const nextWidth = tui.terminal.columns;
+					if (!Number.isFinite(nextWidth) || nextWidth <= 0 || nextWidth === observedWidth) return;
+					observedWidth = nextWidth;
+					// Deliberately skip tui.invalidate(): upstream pi 0.83.0 has a bug
+					// where ToolExecutionComponent.updateDisplay() can push undefined
+					// into Container.children (renderer returns undefined for a
+					// "working" tool).  Container.invalidate() then does
+					// `child.invalidate?.()` on that undefined child → TypeError →
+					// uncaughtException in this timer callback → pi process exit.
+					// requestRender(true) already clears previousLines and forces a
+					// full re-render with the new width, which is all we need here.
+					tui.requestRender(true);
+				} catch {
+					// Last-resort guard: a synchronous exception in this timer
+					// callback would become an uncaughtException and kill the pi
+					// process.  Swallow it so the session survives; the next tick
+					// will retry.
+				}
 			}, WIDTH_POLL_INTERVAL_MS);
 			widthTimer.unref?.();
 			const unsubscribeBranch = footerData.onBranchChange(() => tui.requestRender());

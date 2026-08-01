@@ -12,6 +12,7 @@ import type {
 	QuietSymbolMode,
 	SidebarDensity,
 	SidebarMode,
+	ToolPaletteMode,
 	ViewMode,
 } from "./types.ts";
 
@@ -33,6 +34,7 @@ export interface SettingsRow {
 
 const VIEW_MODES: ViewMode[] = ["list", "compact"];
 const QUIET_SYMBOL_MODES: QuietSymbolMode[] = ["check", "dot"];
+const TOOL_PALETTE_MODES: ToolPaletteMode[] = ["family", "readwrite", "search", "mono", "classic"];
 const ICON_MODES: IconMode[] = ["auto", "nerd", "ascii"];
 const SIDEBAR_MODES: SidebarMode[] = ["auto", "on", "off"];
 const SIDEBAR_DENSITIES: SidebarDensity[] = ["comfortable", "compact"];
@@ -89,6 +91,16 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			label: "thinking fold",
 			value: thinkingHidden ? "hidden" : "visible",
 			next: thinkingHidden ? "visible" : "hidden",
+		},
+		{
+			// Colour grouping for the compact Quiet tool rows. Placed after the
+			// quiet trio rather than inside it: it only matters when quiet mode is
+			// on, and the mode/symbol/thinking order above is a tested invariant.
+			key: "toolPalette",
+			accel: "p",
+			label: "tool palette",
+			value: config.toolPalette,
+			next: cycle(TOOL_PALETTE_MODES, config.toolPalette),
 		},
 		{
 			key: "agentsMode",
@@ -165,6 +177,8 @@ export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
 			return { ...config, quietMode: !config.quietMode };
 		case "quietSymbols":
 			return { ...config, quietSymbols: cycle(QUIET_SYMBOL_MODES, config.quietSymbols) };
+		case "toolPalette":
+			return { ...config, toolPalette: cycle(TOOL_PALETTE_MODES, config.toolPalette) };
 		case "agentsMode":
 			return { ...config, agentsMode: cycle(VIEW_MODES, config.agentsMode) };
 		case "todoMode":

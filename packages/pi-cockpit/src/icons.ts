@@ -14,6 +14,8 @@ export interface IconGlyphs {
 	arrow: string;
 	/** Points at a dependency/upstream ("blocked by", "waits on"). */
 	depArrow: string;
+	/** Creator-to-assignee transfer indicator in actor labels. */
+	transferArrow: string;
 	/** Tree connectors. Routed through the glyph set so ascii mode stays ascii. */
 	treeBranch: string;
 	treeLast: string;
@@ -60,6 +62,7 @@ const NERD_GLYPHS: IconGlyphs = {
 	barPending: "░",
 	arrow: "»",
 	depArrow: "←",
+	transferArrow: "→",
 	treeBranch: "├─",
 	treeLast: "└─",
 	treeVertical: "│ ",
@@ -92,7 +95,8 @@ const ASCII_GLYPHS: IconGlyphs = {
 	barPending: "-",
 	arrow: ">",
 	depArrow: "<-",
-	treeBranch: "|-",
+	transferArrow: "->",
+	treeBranch: "|",
 	treeLast: "`-",
 	treeVertical: "| ",
 	treeSpace: "  ",

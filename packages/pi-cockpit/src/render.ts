@@ -1,7 +1,7 @@
 import type { Theme, ThemeColor } from "@earendil-works/pi-coding-agent";
 import type { AgentRow, TodoItem, ViewMode } from "./types.ts";
 import type { IconGlyphs } from "./icons.ts";
-import { fitLineByPriority, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
+import { composeByPriority, fitLineByPriority, type PriorityGroup, type PrioritizedSegment, type WidthUtils } from "./layout.ts";
 import { fitRows } from "./viewport.ts";
 
 // Re-exported for existing importers; the shared implementation lives in layout.ts.
@@ -208,7 +208,7 @@ export function renderAgents(
 
 	if (mode === "compact") {
 		const active = rows.filter((row) => row.status === "running" || row.status === "retrying").length;
-		const head = `${theme.fg("text", String(rows.length))} ${theme.fg("muted", "agents")}${active ? theme.fg("dim", ` · ${active} active`) : ""}`;
+		const head = `${theme.fg("text", String(rows.length))} ${theme.fg("muted", "agents")}${active ? theme.fg("dim", `${g.separator}${active} active`) : ""}`;
 		const tails = rows
 			.filter((r) => r.tail)
 			.map((r) => `${theme.fg(roleColor(r.role), r.role)}${theme.fg("dim", ":")} ${theme.fg("dim", r.tail)}`);
@@ -224,8 +224,26 @@ export function renderAgents(
 	// it; maxRows is a hard ceiling on everything this call emits, marker included.
 	const widthCap = width < NARROW_WIDTH ? 3 : 6;
 	const budget = Math.min(widthCap + 1, opts.maxRows ?? Number.POSITIVE_INFINITY);
-	const { visible: visibleCount, hidden } = fitRows(tree.length, budget);
-	const visible = tree.slice(0, visibleCount);
+	// Priority-based vertical composition: running/retrying agents survive height
+	// pressure longer than sleeping/completed ones (pi-atelier dropRank pattern).
+	const agentDropRank = (status: string): number => {
+		if (status === "running" || status === "retrying") return 60;
+		if (status === "failed") return 50;
+		if (status === "pending") return 30;
+		if (status === "sleeping") return 20;
+		return 10; // completed, unknown
+	};
+	const agentGroups: PriorityGroup[] = tree.map((entry, i) => ({
+		name: `agent:${i}`,
+		rows: ["placeholder"], // content rendered after composition
+		required: false,
+		dropRank: agentDropRank(entry.row.status),
+	}));
+	// Reserve 1 row for the overflow marker when truncation occurs.
+	const composedAgents = composeByPriority(agentGroups, Math.max(1, budget - 1));
+	const visibleIndices = new Set(composedAgents.map((g) => Number(g.name.split(":")[1])));
+	const visible = tree.filter((_, i) => visibleIndices.has(i));
+	const hidden = tree.length - visible.length;
 
 	// Priorities, not concatenation order, decide what survives a narrow terminal.
 	// Identity (tree position, state, role, task) outranks telemetry (tool, tail,
@@ -248,7 +266,7 @@ export function renderAgents(
 		if (r.tail) segs.push({ text: theme.fg("dim", r.tail), priority: 40, minWidth: 8 });
 		if (r.toolCount !== undefined) segs.push({ text: theme.fg("muted", `${r.toolCount} tools`), priority: 20, clippable: false });
 		if (r.inputTokens !== undefined || r.outputTokens !== undefined) {
-			const usage = `in ${formatAgentMetric(r.inputTokens ?? 0)} · out ${formatAgentMetric(r.outputTokens ?? 0)}`;
+			const usage = `in ${formatAgentMetric(r.inputTokens ?? 0)}${g.separator}out ${formatAgentMetric(r.outputTokens ?? 0)}`;
 			segs.push({ text: theme.fg("muted", usage), priority: 10, clippable: false });
 		} else if (r.tokens !== undefined) {
 			segs.push({ text: theme.fg("muted", `${formatAgentMetric(r.tokens)} tok`), priority: 10, clippable: false });
@@ -292,11 +310,11 @@ function todoActorLabel(actor: NonNullable<TodoItem["assignee"]>, items: readonl
 	return `${actor.label}#${actor.id}`;
 }
 
-function todoActor(item: TodoItem, items: readonly TodoItem[]): string {
+function todoActor(item: TodoItem, items: readonly TodoItem[], transferArrow: string): string {
 	if (!item.assignee) return "";
 	const assigned = `@${todoActorLabel(item.assignee, items)}`;
 	if (!item.createdBy || item.createdBy.id === item.assignee.id) return assigned;
-	return `@${todoActorLabel(item.createdBy, items)}→${assigned}`;
+	return `@${todoActorLabel(item.createdBy, items)}${transferArrow}${assigned}`;
 }
 
 // One table for the whole todo surface: the summary's next-task label and the
@@ -391,7 +409,7 @@ export function renderTodos(
 	const next = ordered.find((it) => it.status !== "completed" && it.status !== "blocked" && it.blockedBy.length === 0);
 	if (next) {
 		const np = todoPaint(next.status, g, spin);
-		const nactor = todoActor(next, items);
+		const nactor = todoActor(next, items, g.transferArrow);
 		const ntext = `${g.arrow} ${theme.fg(np.glyphColor, np.glyph)}${nactor ? ` ${theme.fg("mdLink", nactor)}` : ""} ${todoSubject(np, next.subject, theme)}`;
 		summarySegs.push({ text: ntext, priority: 20, clippable: false });
 	}
@@ -404,16 +422,32 @@ export function renderTodos(
 
 	if (!expanded) return [summaryLine];
 	// The summary line is already spent, so the task rows compete for what is left.
+	// Priority-based vertical composition: in_progress tasks survive height pressure
+	// longer than completed ones (pi-atelier dropRank pattern).
 	const budget = Math.min(
 		TODO_MAX_VISIBLE + 1,
 		opts.maxRows !== undefined ? opts.maxRows - 1 : Number.POSITIVE_INFINITY,
 	);
-	const { visible: visibleCount, hidden } = fitRows(ordered.length, budget);
-	const visible = ordered.slice(0, visibleCount);
+	const todoDropRank = (status: string): number => {
+		if (status === "in_progress") return 60;
+		if (status === "blocked") return 50;
+		if (status === "pending") return 30;
+		return 10; // completed
+	};
+	const todoGroups: PriorityGroup[] = ordered.map((item, i) => ({
+		name: `todo:${i}`,
+		rows: ["placeholder"],
+		required: false,
+		dropRank: todoDropRank(item.status),
+	}));
+	const composedTodos = composeByPriority(todoGroups, Math.max(1, budget - 1));
+	const visibleTodoIndices = new Set(composedTodos.map((g) => Number(g.name.split(":")[1])));
+	const visible = ordered.filter((_, i) => visibleTodoIndices.has(i));
+	const hidden = ordered.length - visible.length;
 	const rows: string[] = [summaryLine];
 	for (const it of visible) {
 		const paint = todoPaint(it.status, g, spin);
-		const actor = todoActor(it, items);
+		const actor = todoActor(it, items, g.transferArrow);
 		const segments = [`  ${theme.fg(paint.glyphColor, paint.glyph)}`];
 		if (actor) segments.push(theme.fg("mdLink", actor));
 		segments.push(todoSubject(paint, it.subject, theme));
@@ -425,7 +459,7 @@ export function renderTodos(
 			for (const dependencyId of it.blockedBy) {
 				const dependency = items.find((candidate) => candidate.id === dependencyId);
 				const depGlyph = dependency ? todoPaint(dependency.status, g, spin).glyph : "?";
-				segments.push(theme.fg("dim", `← ${depGlyph} ${dependency?.subject ?? "?"}`));
+				segments.push(theme.fg("dim", `${g.depArrow} ${depGlyph} ${dependency?.subject ?? "?"}`));
 			}
 		}
 		rows.push(utils.clip(segments.join(" "), width, ell));

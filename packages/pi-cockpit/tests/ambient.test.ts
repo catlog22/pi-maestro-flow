@@ -48,7 +48,7 @@ test("workingMessage shows only the active foreground tool name", () => {
 });
 
 test("title falls back to the bare workspace when nothing is happening", () => {
-	assert.equal(titleFor(state({ cwd: "~/work/pi" }), MARKS), "pi · ~/work/pi");
+	assert.equal(titleFor(state({ cwd: "~/work/pi" }), MARKS), "pi - ~/work/pi");
 	assert.equal(titleFor(state(), MARKS), "pi");
 });
 
@@ -59,16 +59,16 @@ test("failure outranks progress in the tab title and carries a glyph", () => {
 		agents: [agent(), agent({ agent: "b", status: "failed" })],
 		jobs: [job({ id: "j2", status: "completed", exitCode: 1 })],
 	}), MARKS);
-	assert.equal(title, "✗ pi · ~/work/pi · 2 failed");
+	assert.equal(title, "✗ pi - ~/work/pi - 2 failed");
 });
 
 test("a running session reports live agents, an idle one reports background jobs", () => {
 	assert.equal(
 		titleFor(state({ cwd: "~/w", running: true, agents: [agent()] }), MARKS),
-		"pi · ~/w · 1 agents",
+		"pi - ~/w - 1 agents",
 	);
-	assert.equal(titleFor(state({ cwd: "~/w", running: true }), MARKS), "pi · ~/w · working");
-	assert.equal(titleFor(state({ cwd: "~/w", jobs: [job()] }), MARKS), "pi · ~/w · 1 bg");
+	assert.equal(titleFor(state({ cwd: "~/w", running: true }), MARKS), "pi - ~/w - working");
+	assert.equal(titleFor(state({ cwd: "~/w", jobs: [job()] }), MARKS), "pi - ~/w - 1 bg");
 });
 
 test("statusText only occupies the slot when there is a real problem", () => {

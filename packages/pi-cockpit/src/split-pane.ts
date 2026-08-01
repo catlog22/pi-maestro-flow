@@ -4,6 +4,7 @@
  */
 import { matchesKey } from "@earendil-works/pi-tui";
 import type { OverlayOptions, TUI } from "@earendil-works/pi-tui";
+import { attachViewportStability, type ViewportStabilityPatch } from "./viewport-stability.ts";
 
 const ENABLE_MOUSE = "\u001b[?1002h\u001b[?1006h";
 const DISABLE_MOUSE = "\u001b[?1006l\u001b[?1002l";
@@ -107,6 +108,7 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 	let tui: TUI | undefined;
 	let originalRender: RenderFunction | undefined;
 	let wrappedRender: RenderFunction | undefined;
+	let viewportStability: ViewportStabilityPatch | undefined;
 	let enabled = false;
 	let disposed = false;
 	let resizing = false;
@@ -217,6 +219,7 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 		if (existing) throw new Error("Cockpit split pane is already attached to this TUI");
 
 		tui = nextTui;
+		viewportStability = attachViewportStability(nextTui);
 		originalRender = nextTui.render;
 		const previousRender = nextTui.render;
 		wrappedRender = function (this: TUI, terminalWidth: number): string[] {
@@ -367,6 +370,8 @@ export function createSplitPaneController(options: SplitPaneControllerOptions = 
 			disposed = true;
 			enabled = false;
 			if (tui && originalRender && tui.render === wrappedRender) tui.render = originalRender;
+			viewportStability?.detach();
+			viewportStability = undefined;
 			requestRender();
 			tui = undefined;
 			originalRender = undefined;
