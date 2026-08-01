@@ -13,7 +13,7 @@ const FALLBACK_ONLY_ERROR =
   /\b(?:402|insufficient[_\s-]*(?:quota|balance|credits?)|credits? exhausted|billing quota|quota exceeded|out of budget)\b/i;
 
 const NETWORK_ERROR =
-  /\b(?:econnreset|econnrefused|econnaborted|enetunreach|enetdown|ehostunreach|enotfound|eai_again|etimedout|epipe|socket hang up|fetch failed|getaddrinfo|network(?: error| request)?|connection (?:error|failed|failure|reset|refused|lost|timed out|timeout|closed)|other side closed|upstream connect|reset before headers|request timed out|timed out waiting|websocket (?:closed|error)|sse response headers timed out|headers timed out|stream ended (?:without|before)|http2 request did not get a response)\b/i;
+  /\b(?:econnreset|econnrefused|econnaborted|enetunreach|enetdown|ehostunreach|enotfound|eai_again|etimedout|epipe|socket hang up|fetch failed|failed to fetch|getaddrinfo|network(?: ?error| request)?|connection (?:error|failed|failure|reset|refused|lost|timed out|timeout|closed|terminated)|other side closed|upstream connect|reset before headers|request timed out|timed out waiting|signal timed out|(?:web)?socket (?:was )?(?:closed|error)|sse response headers timed out|headers timed out|stream ended (?:without|before)|http2 request did not get a response)\b/i;
 
 const PROVIDER_ERROR =
   /\b(?:429|500|502|503|504|524|rate[_\s-]*limit(?:ed|[_\s-]*exceeded|[_\s-]*error)?|too many requests|capacity|overloaded(?:_error)?|service[_\s-]*unavailable|provider returned error|server[_\s-]*error|internal[_\s-]*error|resource[_\s-]*exhausted)\b/i;
