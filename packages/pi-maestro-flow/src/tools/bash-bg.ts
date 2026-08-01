@@ -308,7 +308,9 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       .sort((a, b) => (a.finishedAt ?? a.updatedAt) - (b.finishedAt ?? b.updatedAt));
     while (completed.length > maxRetainedCompletedJobs) {
       const evicted = completed.shift();
-      if (evicted) jobs.delete(evicted.id);
+      if (!evicted) continue;
+      jobs.delete(evicted.id);
+      try { fs.rmSync(evicted.outFile, { force: true }); } catch { /* best effort for externally held log handles */ }
     }
   };
 
@@ -651,8 +653,8 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
   pi.on("session_shutdown", () => {
     if (disposed) return;
     disposed = true;
-    disposeQueryListener();
-    disposeObservationProvider();
+    if (typeof disposeQueryListener === "function") disposeQueryListener();
+    if (typeof disposeObservationProvider === "function") disposeObservationProvider();
     if (snapshotTimer) {
       clearTimeout(snapshotTimer);
       snapshotTimer = undefined;

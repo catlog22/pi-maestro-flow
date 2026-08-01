@@ -345,6 +345,7 @@ test("bash_bg bounds active processes, retained history, and private log bytes",
 		});
 		harness.emit(BASH_BG_QUERY_EVENT);
 		assert.deepEqual(harness.snapshots.at(-1)?.jobs.map((job) => job.id), [newest.details?.jobId]);
+		assert.equal(fs.existsSync(logPath), false, "evicting completed history reclaims its log file");
 	} finally {
 		harness.shutdown();
 		if (logPath) assert.equal(fs.existsSync(path.dirname(logPath)), false);
