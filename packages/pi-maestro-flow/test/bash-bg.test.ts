@@ -11,6 +11,11 @@ import {
 	registerBashBg,
 } from "../src/tools/bash-bg.ts";
 import { setQuietMode } from "../src/quiet-state.ts";
+import {
+	observeTargets,
+	registerObservationProvider,
+	type ObservationProvider,
+} from "pi-maestro-teammate/v1/observation";
 
 interface ToolLike {
 	execute(
@@ -294,6 +299,91 @@ test("bash_bg publishes running, completion, failure and killed snapshots", asyn
 		assert.equal(harness.snapshots.length, beforeQuery + 1);
 		assert.equal(harness.snapshots.at(-1)?.jobs.length, 3);
 	} finally {
+		harness.shutdown();
+	}
+});
+
+test("bash_bg observation wait settles when session shutdown kills the job", async () => {
+	const harness = createHarness();
+	try {
+		const started = await harness.tool.execute("shutdown-observe", {
+			action: "start",
+			command: 'node -e "setTimeout(()=>{},5000)"',
+		});
+		const jobId = started.details?.jobId;
+		assert.ok(jobId);
+		const waiting = observeTargets({
+			action: "wait",
+			targets: [{ kind: "bash_bg", id: jobId }],
+			timeoutMs: 2_000,
+		});
+		setTimeout(() => harness.shutdown(), 25);
+		const result = await waiting;
+		assert.equal(result.reason, "all");
+		assert.equal(result.observations[0]?.nativeStatus, "killed");
+		assert.equal(result.observations[0]?.waitStatus, "failed");
+	} finally {
+		harness.shutdown();
+	}
+});
+
+test("observe waits for mixed teammate and bash_bg targets through one barrier", async () => {
+	const harness = createHarness();
+	const teammateProvider: ObservationProvider = {
+		kind: "teammate",
+		capabilities: { inspect: true, wait: true, message: true, supervise: true },
+		snapshot: (id) => ({
+			target: { kind: "teammate", id },
+			found: true,
+			nativeStatus: "running",
+			phase: "active",
+			summary: "reviewing",
+			updatedAt: Date.now(),
+		}),
+		wait: async (id) => ({
+			target: { kind: "teammate", id },
+			found: true,
+			nativeStatus: "completed",
+			phase: "settled",
+			outcome: "success",
+			waitStatus: "completed",
+			summary: "review complete",
+			updatedAt: Date.now(),
+		}),
+	};
+	const disposeTeammate = registerObservationProvider(teammateProvider);
+	try {
+		const started = await harness.tool.execute("mixed-observe", {
+			action: "start",
+			command: 'node -e "setTimeout(()=>console.log(\'built\'),150)"',
+		});
+		const jobId = started.details?.jobId;
+		assert.ok(jobId);
+
+		const status = await observeTargets({
+			action: "status",
+			targets: [
+				{ kind: "teammate", id: "reviewer" },
+				{ kind: "bash_bg", id: jobId },
+			],
+		});
+		assert.deepEqual(status.observations.map((item) => item.target.kind), ["teammate", "bash_bg"]);
+		assert.equal(status.observations[1]?.found, true);
+
+		const waited = await observeTargets({
+			action: "wait",
+			waitMode: "all",
+			timeoutMs: 2_000,
+			targets: [
+				{ kind: "teammate", id: "reviewer" },
+				{ kind: "bash_bg", id: jobId },
+			],
+		});
+		assert.equal(waited.reason, "all");
+		assert.deepEqual(waited.observations.map((item) => item.waitStatus), ["completed", "completed"]);
+		assert.match(waited.observations[1]?.summary ?? "", /built|completed/);
+	} finally {
+		disposeTeammate();
 		harness.shutdown();
 	}
 });

@@ -54,6 +54,7 @@ const READ_ONLY_TOOLS = new Set([
   "teammate-list",
   "teammate-watch",
   "teammate-wait",
+  "observe",
   "ask-user-question",
   "search_tool_bm25",
 ]);

@@ -527,12 +527,13 @@ test("root teammate authority is fenced on session start and disposed on shutdow
   assert.match(source, /pi\.events\.on\(TEAMMATE_STARTED_EVENT[\s\S]*?registerTodoActor\(actor\)/);
 });
 
-test("teammate child registers only interaction and parent-permission surfaces", async () => {
+test("teammate child registers interaction, local Bash, and parent-permission surfaces", async () => {
   const tools: ToolDefinition[] = [];
   const handlers = new Map<string, Array<(...args: unknown[]) => unknown>>();
   const api = new Proxy({} as ExtensionAPI, {
     get(_target, property) {
       if (property === "registerTool") return (tool: ToolDefinition) => { tools.push(tool); };
+      if (property === "events") return { on: () => () => undefined, emit: () => undefined };
       if (property === "on") return (event: string, handler: (...args: unknown[]) => unknown) => {
         const list = handlers.get(event) ?? [];
         list.push(handler);
@@ -551,8 +552,8 @@ test("teammate child registers only interaction and parent-permission surfaces",
     else process.env.PI_TEAMMATE_CHILD = previous;
   }
 
-  assert.deepEqual(tools.map((tool) => tool.name), ["ask-user-question", "todo"]);
-  assert.deepEqual([...handlers.keys()], ["tool_call"]);
+  assert.deepEqual(tools.map((tool) => tool.name), ["ask-user-question", "bash_bg", "todo"]);
+  assert.deepEqual([...handlers.keys()], ["session_compact", "session_shutdown", "tool_call"]);
   assert.equal(handlers.has("session_start"), false, "child must not compete for the Workflow continuation lease");
   assert.equal(handlers.has("agent_end"), false, "child must not drive the parent Goal continuation loop");
   const structuredOutputDecision = await handlers.get("tool_call")?.[0]?.({

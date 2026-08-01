@@ -46,6 +46,7 @@ const ALWAYS_ALLOWED_TOOLS = new Set([
   "teammate-send",
   "teammate-list",
   "teammate-watch",
+  "observe",
   "goal",
   "todo",
   "plan-enter",

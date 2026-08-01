@@ -1960,7 +1960,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       // Teammates run in separate Pi processes. This registration is scoped to
       // the live root session so a reload cannot retain a stale child surface.
       nextDisposers.push(registerTeammateChildExtension(teammateExtensionPath, {
-        tools: ["ask-user-question", "todo"],
+        tools: ["ask-user-question", "todo", "bash_bg"],
       }));
       nextDisposers.push(registerTeammateChildToolBroker("todo", async (request) => {
         if (generation !== teammateRegistrationGeneration || todoRootContext !== ctx) {
@@ -2012,6 +2012,7 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
  */
 function registerMaestroChildSurface(pi: ExtensionAPI): void {
   registerAskUserQuestionTool(pi);
+  registerBashBg(pi);
   const todoProxyTool: ToolDefinition<typeof TodoToolParams> = {
     name: "todo",
     label: "Todo",

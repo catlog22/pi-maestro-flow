@@ -2,6 +2,13 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { getShellConfig } from "@earendil-works/pi-coding-agent";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Text } from "@earendil-works/pi-tui";
+import {
+  observeTargets,
+  registerObservationProvider,
+  type ObservationProvider,
+  type ObservationSnapshot,
+  type ObservationWaitOptions,
+} from "pi-maestro-teammate/v1/observation";
 import { toolCallLine, toolResultLine, resultFirstLine } from "../quiet-render.ts";
 import { Type } from "typebox";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -190,6 +197,84 @@ function killTree(pid: number): void {
 export function registerBashBg(pi: ExtensionAPI): void {
   const baseDir = path.join(os.tmpdir(), "pi-bash-bg");
   const jobs = new Map<string, Job>();
+  const observationWaiters = new Map<string, Set<() => void>>();
+  const observationCapabilities = { inspect: true, wait: true, cancel: true } as const;
+
+  const observationSnapshot = (
+    id: string,
+    detail: "summary" | "tail" | "full",
+    lines: number,
+    waitStatus?: "timeout" | "aborted",
+  ): ObservationSnapshot => {
+    const job = jobs.get(id);
+    if (!job) {
+      return {
+        target: { kind: "bash_bg", id },
+        found: false,
+        nativeStatus: "not-found",
+        phase: "unknown",
+        outcome: "failure",
+        waitStatus: "not-found",
+        summary: `Unknown jobId: ${id}`,
+        updatedAt: Date.now(),
+        capabilities: observationCapabilities,
+        error: `Unknown jobId: ${id}`,
+      };
+    }
+    const status = jobStatus(job);
+    const terminal = job.done;
+    const output = tailOutput(job, lines).text;
+    return {
+      target: { kind: "bash_bg", id },
+      found: true,
+      nativeStatus: status,
+      phase: terminal ? "settled" : "active",
+      ...(terminal ? { outcome: status === "completed" ? "success" as const : "failure" as const } : {}),
+      ...(terminal ? { waitStatus: status === "completed" ? "completed" as const : "failed" as const } : waitStatus ? { waitStatus } : {}),
+      summary: `${job.command} (${status}${job.exitCode === null ? "" : `, exit ${job.exitCode}`})`,
+      ...(detail === "summary" ? {} : { detail: [
+        `command: ${job.command}`,
+        `cwd: ${job.cwd}`,
+        ...(output ? output.split("\n") : ["(empty)"]),
+      ] }),
+      updatedAt: job.updatedAt,
+      capabilities: observationCapabilities,
+    };
+  };
+
+  const waitForObservation = (id: string, options: ObservationWaitOptions): Promise<ObservationSnapshot> => {
+    const current = observationSnapshot(id, options.detail, options.lines);
+    if (!current.found || current.phase === "settled") return Promise.resolve(current);
+    return new Promise((resolve) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const waiters = observationWaiters.get(id) ?? new Set<() => void>();
+      observationWaiters.set(id, waiters);
+      const finish = (waitStatus?: "timeout" | "aborted"): void => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        options.signal.removeEventListener("abort", onAbort);
+        waiters.delete(onDone);
+        if (waiters.size === 0) observationWaiters.delete(id);
+        resolve(observationSnapshot(id, options.detail, options.lines, waitStatus));
+      };
+      const onDone = () => finish();
+      const onAbort = () => finish("aborted");
+      waiters.add(onDone);
+      options.signal.addEventListener("abort", onAbort, { once: true });
+      timer = setTimeout(() => finish("timeout"), Math.max(1, options.deadline - Date.now()));
+    });
+  };
+
+  const bashObservationProvider: ObservationProvider = {
+    kind: "bash_bg",
+    capabilities: observationCapabilities,
+    snapshot: (id, options) => observationSnapshot(id, options.detail, options.lines),
+    wait: waitForObservation,
+  };
+  registerObservationProvider(bashObservationProvider);
+
   let counter = 0;
   let snapshotTimer: ReturnType<typeof setTimeout> | undefined;
   fs.mkdirSync(baseDir, { recursive: true });
@@ -292,6 +377,7 @@ export function registerBashBg(pi: ExtensionAPI): void {
       job.updatedAt = Date.now();
       job.finishedAt = job.updatedAt;
       publishSnapshot();
+      for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();
     };
     const finalizeOutput = (): void => {
       if (job.outputFinalized) return;
@@ -411,6 +497,12 @@ export function registerBashBg(pi: ExtensionAPI): void {
       if (!job) throw new Error(`Unknown jobId: ${params.jobId}`);
 
       if (params.action === "status") {
+        await observeTargets({
+          action: "status",
+          targets: [{ kind: "bash_bg", id: job.id }],
+          detail: "full",
+          lines: tailCount,
+        }, signal);
         const state = job.done ? `${jobStatus(job)} (exit ${job.exitCode})` : jobStatus(job);
         const out = tailOutput(job, tailCount);
         const text = `job ${job.id}: ${state}\ncommand: ${job.command}\noutput (tail):\n${out.text || "(empty)"}`;
@@ -434,11 +526,14 @@ export function registerBashBg(pi: ExtensionAPI): void {
       }
 
       const timeoutMs = (params.timeout ?? 30) * 1000;
-      const deadline = Date.now() + timeoutMs;
-      while (!job.done && Date.now() < deadline) {
-        if (signal?.aborted) throw new Error("aborted");
-        await new Promise((resolve) => setTimeout(resolve, 250));
-      }
+      const observed = await observeTargets({
+        action: "wait",
+        targets: [{ kind: "bash_bg", id: job.id }],
+        detail: "full",
+        lines: tailCount,
+        timeoutMs,
+      }, signal);
+      if (observed.reason === "aborted") throw new Error("aborted");
       const state = job.done
         ? `${jobStatus(job)} (exit ${job.exitCode})`
         : `${jobStatus(job)} after ${Math.round(timeoutMs / 1000)}s`;
@@ -512,6 +607,8 @@ export function registerBashBg(pi: ExtensionAPI): void {
       job.updatedAt = Date.now();
       job.finishedAt = job.updatedAt;
       killTree(job.pid);
+      for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();
     }
+    publishSnapshot();
   });
 }
