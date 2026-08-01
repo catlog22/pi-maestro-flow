@@ -642,7 +642,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.match(confirmations[0] ?? "", /预计实际硬压缩：上下文超过 380,000 Token/);
   assert.match(confirmations[0] ?? "", /受上下文窗口 5% 安全底线下调/);
   assert.doesNotMatch(confirmations[0] ?? "", /软提醒不可达|软裁剪/);
-  assert.match(notifications.at(-1)?.message ?? "", /模型身份为 maestro-openai\/gpt-5\.4/);
+  assert.match(notifications.at(-1)?.message ?? "", /已保存 1 个模型：maestro-openai\/gpt-5\.4/);
   assert.equal(notifications.at(-1)?.type, "info");
 });
 
@@ -1968,7 +1968,7 @@ test("/api-manager creates a user-defined Provider with a free-form id and chose
   assert.equal(registrations.at(-1)?.config.authHeader, true);
   assert.equal(registrations.at(-1)?.config.models[0].compat.thinkingFormat, "deepseek");
   assert.equal(registrations.at(-1)?.config.models[0].id, "my-model");
-  assert.match(notifications.at(-1)?.message ?? "", /已保存 Provider；模型身份为 my-proxy\/my-model/);
+  assert.match(notifications.at(-1)?.message ?? "", /已保存 1 个模型：my-proxy\/my-model/);
 });
 
 test("startup registers legacy managedChannels entries as user-defined Providers", async (t) => {
@@ -2561,6 +2561,141 @@ test("/api-manager adds a second model to the same Provider through the new-mode
   const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
   assert.equal(settings.defaultProvider, "maestro-openai");
   assert.equal(settings.defaultModel, "model-b");
+});
+
+test("/api-manager creates multiple models in one form submission from a comma-separated Model ID list", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-manager-batch-models-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://gateway.example.com/v1",
+    modelId: "model-a",
+    contextWindow: 111_000,
+    maxTokens: 32_000,
+    reasoning: true,
+    apiKey: "shared-secret",
+  }, modelsPath);
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+    setThinkingLevel() {},
+  } as any, { modelsPath, defaultsPath });
+
+  let confirmDetails = "";
+  await commands.get("api-manager").handler("", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: { refresh() {}, getAll() { return []; } },
+    ui: {
+      async select(title: string, options: string[]) {
+        if (title === "选择操作") return options.find((option) => option.startsWith("新增或修改模型"));
+        if (title === "新增模型到哪个 Provider？") {
+          return options.find((option) => option.includes("Provider ID: maestro-openai"));
+        }
+        return options.find((option) => option.includes("➕ 新增模型…"));
+      },
+      async custom() {
+        return {
+          values: {
+            provider: "maestro-openai",
+            api: "openai-responses",
+            baseUrl: "https://gateway.example.com/v1",
+            modelId: "model-b, model-c",
+            reasoning: true,
+            defaultThinking: "medium",
+            contextWindow: "400000",
+            maxTokens: "128000",
+            apiKey: "shared-secret",
+          },
+        };
+      },
+      async confirm(_title: string, details: string) {
+        confirmDetails = details;
+        return true;
+      },
+      notify() {},
+    },
+  });
+
+  // One submission created both models; the preview listed them as a batch.
+  assert.match(confirmDetails, /Model：model-b, model-c/);
+  const providers = JSON.parse(readFileSync(modelsPath, "utf8")).providers;
+  assert.deepEqual(providers["maestro-openai"].models.map((model: any) => model.id), ["model-a", "model-b", "model-c"]);
+  for (const model of providers["maestro-openai"].models) {
+    assert.equal(model.contextWindow, model.id === "model-a" ? 111_000 : 400_000);
+    assert.equal(model.maxTokens, model.id === "model-a" ? 32_000 : 128_000);
+  }
+  assert.equal(providers["maestro-openai"].apiKey, "shared-secret");
+  // First new model became the default; every model got its own thinking default.
+  const settings = JSON.parse(readFileSync(join(tempDir, "settings.json"), "utf8"));
+  assert.equal(settings.defaultProvider, "maestro-openai");
+  assert.equal(settings.defaultModel, "model-b");
+  const defaults = JSON.parse(readFileSync(defaultsPath, "utf8")).modelDefaults;
+  assert.equal(defaults["maestro-openai/model-b"], "medium");
+  assert.equal(defaults["maestro-openai/model-c"], "medium");
+});
+
+test("Model ID list validation rejects duplicates and models that already exist", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-model-list-validate-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const modelsPath = join(tempDir, "models.json");
+  const defaultsPath = join(tempDir, "api-manager.json");
+  await saveApiProviderSettings({
+    provider: "maestro-openai",
+    baseUrl: "https://gateway.example.com/v1",
+    modelId: "model-a",
+    contextWindow: 111_000,
+    maxTokens: 32_000,
+    reasoning: true,
+    apiKey: "secret",
+  }, modelsPath);
+
+  const commands = new Map<string, any>();
+  registerApiProviderConfigs({
+    registerProvider() {},
+    registerCommand(name: string, command: any) { commands.set(name, command); },
+  } as any, { modelsPath, defaultsPath });
+  let validate: (values: Record<string, string | boolean>) => string[] | undefined;
+  await commands.get("api-manager").handler("configure maestro-openai", {
+    cwd: tempDir,
+    hasUI: true,
+    modelRegistry: { refresh() {}, getAll() { return []; } },
+    ui: {
+      async select(_title: string, options: string[]) {
+        return options.find((option) => option === "➕ 新增模型…");
+      },
+      async custom(factory: any) {
+        const overlay = factory(
+          { requestRender() {} },
+          { fg: (_role: string, text: string) => text, bold: (text: string) => text },
+          {},
+          () => undefined,
+        );
+        validate = (overlay as any).params.validate;
+        return undefined;
+      },
+      notify() {},
+    },
+  });
+  assert.ok(validate);
+  const base = {
+    provider: "maestro-openai",
+    api: "openai-responses",
+    baseUrl: "https://gateway.example.com/v1",
+    reasoning: true,
+    defaultThinking: "medium",
+    contextWindow: "400000",
+    maxTokens: "128000",
+    apiKey: "secret",
+  };
+  assert.deepEqual(validate({ ...base, modelId: "model-b, model-b" }), ["Model ID model-b 重复；每个模型只能出现一次"]);
+  assert.deepEqual(validate({ ...base, modelId: "model-a, model-b" }), ["Model model-a 已存在；请返回列表选择该 model 进行修改"]);
+  assert.deepEqual(validate({ ...base, modelId: "" }), ["Model ID 不能为空"]);
+  assert.deepEqual(validate({ ...base, modelId: "model-b, model-c" }), []);
 });
 
 test("new Provider flow rejects an occupied identity without loading its credentials", async (t) => {

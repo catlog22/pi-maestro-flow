@@ -727,7 +727,8 @@ async function configurePresetModelWithSteps(
     target.adding ? "" : current.configured ? current.modelId : provider.modelId,
   );
   if (modelInput === undefined) return;
-  const modelId = required(modelInput, "Model ID");
+  const modelIds = parseModelIdList(modelInput);
+  if (modelIds.length === 0) throw new Error("Model ID 不能为空");
   const targetProviderId = provider.id;
   const maxSuffix = maxThinking ? " / max" : "";
   const enabledLabel = provider.api === "openai-responses"
@@ -743,7 +744,7 @@ async function configurePresetModelWithSteps(
     ctx,
     provider.api,
     reasoningChoice === enabledLabel,
-    await loadModelThinkingDefault(targetProviderId, modelId, defaultsPath)
+    await loadModelThinkingDefault(targetProviderId, modelIds[0], defaultsPath)
       ?? currentDefaultThinkingLevel(ctx, modelsPath),
     maxThinking,
   );
@@ -767,54 +768,59 @@ async function configurePresetModelWithSteps(
   if (keyInput === undefined) return;
   const apiKey = required(keyInput, "API key");
 
-  const next: ApiProviderSettings = {
-    provider: targetProviderId,
-    baseUrl,
-    modelId,
-    contextWindow,
-    maxTokens,
-    reasoning: reasoningChoice === enabledLabel,
-    apiKey,
-    maxThinking,
-  };
   const confirmed = await ctx.ui.confirm(
     `保存 ${provider.name} API 配置？`,
     [
       `Provider：${targetProviderId}`,
       `API format：${apiFormatLabel(provider.api)}`,
-      `Base URL：${next.baseUrl}`,
-      `Model：${next.modelId}`,
-      `上下文窗口 contextWindow：${next.contextWindow?.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
-      `单次最大输出 maxTokens：${next.maxTokens?.toLocaleString("en-US")} Token`,
+      `Base URL：${baseUrl}`,
+      `Model：${modelIds.join(", ")}`,
+      `上下文窗口 contextWindow：${contextWindow.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
+      `单次最大输出 maxTokens：${maxTokens.toLocaleString("en-US")} Token`,
       ...compactionPreviewLines(ctx.cwd, contextWindow, maxTokens),
-      `Reasoning：${next.reasoning ? "enabled" : "disabled"}`,
+      `Reasoning：${reasoningChoice === enabledLabel ? "enabled" : "disabled"}`,
       `Default thinking（当前 model）：${defaultThinkingLevel}`,
       "Auth：stored API key",
     ].join("\n"),
   );
   if (!confirmed) return;
-  const result = await saveApiProviderSettings(next, modelsPath);
-  await saveModelThinkingDefault(
-    targetProviderId,
-    next.modelId,
-    canonicalThinkingLevel(defaultThinkingLevel),
-    defaultsPath,
-  );
-  await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, next.modelId, target.modelId === null);
+  const reasoning = reasoningChoice === enabledLabel;
+  let result: SaveApiProviderResult | undefined;
+  for (const [index, nextModelId] of modelIds.entries()) {
+    const next: ApiProviderSettings = {
+      provider: targetProviderId,
+      baseUrl,
+      modelId: nextModelId,
+      contextWindow,
+      maxTokens,
+      reasoning,
+      apiKey,
+      maxThinking,
+    };
+    result = await saveApiProviderSettings(next, modelsPath);
+    await saveModelThinkingDefault(
+      targetProviderId,
+      nextModelId,
+      canonicalThinkingLevel(defaultThinkingLevel),
+      defaultsPath,
+    );
+    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, target.modelId === null);
+  }
   if (!findPreset(targetProviderId)) await addManagedProvider(defaultsPath, targetProviderId);
   reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
   applyThinkingLevelToActiveModel(
     pi,
     ctx,
     targetProviderId,
-    next.modelId,
+    modelIds[0],
     canonicalThinkingLevel(defaultThinkingLevel),
   );
+  if (!result) throw new Error("API Provider settings were not written");
   notifySaved(
     ctx,
     provider.name,
     result,
-    `已保存；模型身份为 ${targetProviderId}/${next.modelId}，默认思考强度为 ${defaultThinkingLevel}`,
+    `已保存 ${modelIds.length} 个模型：${modelIds.map((id) => `${targetProviderId}/${id}`).join(", ")}，默认思考强度为 ${defaultThinkingLevel}`,
   );
 }
 
@@ -900,7 +906,8 @@ async function configureCustomModelWithSteps(
     target.adding ? "" : current.configured ? current.modelId : "",
   );
   if (modelInput === undefined) return;
-  const modelId = required(modelInput, "Model ID");
+  const modelIds = parseModelIdList(modelInput);
+  if (modelIds.length === 0) throw new Error("Model ID 不能为空");
   const targetProviderId = providerId;
   const maxThinking = current.maxThinking === true || runtimeSupportsMaxThinking(ctx);
   const maxSuffix = maxThinking ? " / max" : "";
@@ -918,7 +925,7 @@ async function configureCustomModelWithSteps(
     ctx,
     api,
     reasoning,
-    await loadModelThinkingDefault(targetProviderId, modelId, defaultsPath)
+    await loadModelThinkingDefault(targetProviderId, modelIds[0], defaultsPath)
       ?? currentDefaultThinkingLevel(ctx, modelsPath),
     maxThinking,
   );
@@ -1000,32 +1007,17 @@ async function configureCustomModelWithSteps(
   if (keyInput === undefined) return;
   const apiKey = required(keyInput, "API key");
 
-  const next: ApiProviderSettings = {
-    provider: targetProviderId,
-    baseUrl,
-    modelId,
-    contextWindow,
-    maxTokens,
-    reasoning,
-    apiKey,
-    maxThinking,
-    api,
-    name: displayName,
-    compat,
-    headers: Object.keys(headers).length > 0 ? headers : undefined,
-    authHeader,
-  };
   const confirmed = await ctx.ui.confirm(
     `保存 Provider ${displayName}？`,
     [
       `Provider ID：${targetProviderId}`,
       `API format：${apiFormatLabel(api)}`,
-      `Base URL：${next.baseUrl}`,
-      `Model：${next.modelId}`,
-      `上下文窗口 contextWindow：${next.contextWindow?.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
-      `单次最大输出 maxTokens：${next.maxTokens?.toLocaleString("en-US")} Token`,
+      `Base URL：${baseUrl}`,
+      `Model：${modelIds.join(", ")}`,
+      `上下文窗口 contextWindow：${contextWindow.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
+      `单次最大输出 maxTokens：${maxTokens.toLocaleString("en-US")} Token`,
       ...compactionPreviewLines(ctx.cwd, contextWindow, maxTokens),
-      `Reasoning：${next.reasoning ? "enabled" : "disabled"}`,
+      `Reasoning：${reasoning ? "enabled" : "disabled"}`,
       `Default thinking（当前 model）：${defaultThinkingLevel}`,
       `Compat：${compat ? JSON.stringify(compat) : "自动"}`,
       `请求头：${Object.keys(headers).length > 0 ? Object.keys(headers).join(", ") : "无"}`,
@@ -1034,28 +1026,47 @@ async function configureCustomModelWithSteps(
     ].join("\n"),
   );
   if (!confirmed) return;
-  const result = await saveApiProviderSettings(next, modelsPath);
-  await saveModelThinkingDefault(
-    targetProviderId,
-    modelId,
-    canonicalThinkingLevel(defaultThinkingLevel),
-    defaultsPath,
-  );
-  await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, modelId, target.modelId === null);
+  let result: SaveApiProviderResult | undefined;
+  for (const [index, nextModelId] of modelIds.entries()) {
+    const next: ApiProviderSettings = {
+      provider: targetProviderId,
+      baseUrl,
+      modelId: nextModelId,
+      contextWindow,
+      maxTokens,
+      reasoning,
+      apiKey,
+      maxThinking,
+      api,
+      name: displayName,
+      compat,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
+      authHeader,
+    };
+    result = await saveApiProviderSettings(next, modelsPath);
+    await saveModelThinkingDefault(
+      targetProviderId,
+      nextModelId,
+      canonicalThinkingLevel(defaultThinkingLevel),
+      defaultsPath,
+    );
+    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, target.modelId === null);
+  }
   await addManagedProvider(defaultsPath, targetProviderId);
   reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
   applyThinkingLevelToActiveModel(
     pi,
     ctx,
     targetProviderId,
-    modelId,
+    modelIds[0],
     canonicalThinkingLevel(defaultThinkingLevel),
   );
+  if (!result) throw new Error("API Provider settings were not written");
   notifySaved(
     ctx,
     displayName,
     result,
-    `已保存 Provider；模型身份为 ${targetProviderId}/${modelId}，默认思考强度为 ${defaultThinkingLevel}`,
+    `已保存 ${modelIds.length} 个模型：${modelIds.map((id) => `${targetProviderId}/${id}`).join(", ")}，默认思考强度为 ${defaultThinkingLevel}`,
   );
 }
 
@@ -1097,6 +1108,7 @@ async function configurePresetModelWithForm(
         label: "Model ID",
         kind: adding ? "text" : "readonly",
         value: adding ? (current.configured ? "" : provider.modelId) : current.modelId,
+        help: adding ? "多个 Model ID 用逗号分隔，一次新增多个模型（其余字段作为模板应用到每个模型）" : undefined,
       },
       { id: "reasoning", label: "推理能力", kind: "toggle", value: current.reasoning },
       {
@@ -1119,7 +1131,9 @@ async function configurePresetModelWithForm(
   if (!result) return;
 
   const baseUrl = normalizeBaseUrl(formText(result.values, "baseUrl"));
-  const nextModelId = modelId ?? required(formText(result.values, "modelId"), "Model ID");
+  const nextModelIds = modelId
+    ? [modelId]
+    : parseModelIdList(formText(result.values, "modelId"));
   const targetProviderId = provider.id;
   const reasoning = formBoolean(result.values, "reasoning");
   const defaultThinkingLevel = formThinkingLevel(result.values, "defaultThinking");
@@ -1127,50 +1141,58 @@ async function configurePresetModelWithForm(
   const maxTokens = positiveInteger(formText(result.values, "maxTokens"), "单次最大输出 maxTokens");
   validateModelWindow(contextWindow, maxTokens);
   const apiKey = required(formText(result.values, "apiKey"), "API key");
-  const next: ApiProviderSettings = {
-    provider: targetProviderId,
-    baseUrl,
-    modelId: nextModelId,
-    contextWindow,
-    maxTokens,
-    reasoning,
-    apiKey,
-    maxThinking,
-  };
   const confirmed = await ctx.ui.confirm(
     `保存 ${provider.name} API 配置？`,
     modelSavePreview({
       providerId: targetProviderId,
       api: provider.api,
       displayName: provider.name,
-      next,
+      baseUrl,
+      modelIds: nextModelIds,
+      contextWindow,
+      maxTokens,
+      reasoning,
       defaultThinkingLevel,
       cwd: ctx.cwd,
     }),
   );
   if (!confirmed) return;
-  const saveResult = await saveApiProviderSettings(next, modelsPath);
-  await saveModelThinkingDefault(
-    targetProviderId,
-    nextModelId,
-    canonicalThinkingLevel(defaultThinkingLevel),
-    defaultsPath,
-  );
-  await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, adding);
+  let saveResult: SaveApiProviderResult | undefined;
+  for (const [index, nextModelId] of nextModelIds.entries()) {
+    const next: ApiProviderSettings = {
+      provider: targetProviderId,
+      baseUrl,
+      modelId: nextModelId,
+      contextWindow,
+      maxTokens,
+      reasoning,
+      apiKey,
+      maxThinking,
+    };
+    saveResult = await saveApiProviderSettings(next, modelsPath);
+    await saveModelThinkingDefault(
+      targetProviderId,
+      nextModelId,
+      canonicalThinkingLevel(defaultThinkingLevel),
+      defaultsPath,
+    );
+    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, adding);
+  }
   if (!findPreset(targetProviderId)) await addManagedProvider(defaultsPath, targetProviderId);
   reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
   applyThinkingLevelToActiveModel(
     pi,
     ctx,
     targetProviderId,
-    nextModelId,
+    nextModelIds[0],
     canonicalThinkingLevel(defaultThinkingLevel),
   );
+  if (!saveResult) throw new Error("API Provider settings were not written");
   notifySaved(
     ctx,
     provider.name,
     saveResult,
-    `已保存；模型身份为 ${targetProviderId}/${nextModelId}，默认思考强度为 ${defaultThinkingLevel}`,
+    `已保存 ${nextModelIds.length} 个模型：${nextModelIds.map((id) => `${targetProviderId}/${id}`).join(", ")}，默认思考强度为 ${defaultThinkingLevel}`,
   );
 }
 
@@ -1284,6 +1306,7 @@ async function configureCustomModelWithForm(
         label: "Model ID",
         kind: adding ? "text" : "readonly",
         value: adding ? "" : current.modelId,
+        help: adding ? "多个 Model ID 用逗号分隔，一次新增多个模型（其余字段作为模板应用到每个模型）" : undefined,
       },
       { id: "reasoning", label: "推理能力", kind: "toggle", value: current.reasoning },
       {
@@ -1316,7 +1339,9 @@ async function configureCustomModelWithForm(
   const api = required(formText(result.values, "api"), "API type");
   const nextDisplayName = formText(result.values, "name").trim() || providerId;
   const baseUrl = normalizeBaseUrl(formText(result.values, "baseUrl"));
-  const nextModelId = modelId ?? required(formText(result.values, "modelId"), "Model ID");
+  const nextModelIds = modelId
+    ? [modelId]
+    : parseModelIdList(formText(result.values, "modelId"));
   const targetProviderId = providerId;
   const reasoning = formBoolean(result.values, "reasoning");
   const defaultThinkingLevel = formThinkingLevel(result.values, "defaultThinking");
@@ -1332,22 +1357,6 @@ async function configureCustomModelWithForm(
   setOptionalCompatString(nextCompat, "maxTokensField", formText(result.values, "maxTokensField"));
   const authHeaderValue = formText(result.values, "authHeader");
   const authHeader = authHeaderValue === "auto" ? undefined : authHeaderValue === "true";
-  const next: ApiProviderSettings = {
-    provider: targetProviderId,
-    baseUrl,
-    modelId: nextModelId,
-    contextWindow,
-    maxTokens,
-    reasoning,
-    apiKey,
-    maxThinking,
-    api,
-    name: nextDisplayName,
-    compat: Object.keys(nextCompat).length > 0 ? nextCompat : undefined,
-    replaceProviderOptions: true,
-    headers: Object.keys(headers).length > 0 ? headers : undefined,
-    authHeader,
-  };
   const confirmed = await ctx.ui.confirm(
     `保存 Provider ${nextDisplayName}？`,
     [
@@ -1355,38 +1364,62 @@ async function configureCustomModelWithForm(
         providerId: targetProviderId,
         api,
         displayName: nextDisplayName,
-        next,
+        baseUrl,
+        modelIds: nextModelIds,
+        contextWindow,
+        maxTokens,
+        reasoning,
         defaultThinkingLevel,
         cwd: ctx.cwd,
       }),
-      `Compat：${next.compat ? JSON.stringify(next.compat) : "自动"}`,
+      `Compat：${nextCompat && Object.keys(nextCompat).length > 0 ? JSON.stringify(nextCompat) : "自动"}`,
       `请求头：${Object.keys(headers).length > 0 ? Object.keys(headers).join(", ") : "无"}`,
       `Authorization：${authHeader === undefined ? "自动" : authHeader ? "Bearer" : "关闭"}`,
     ].join("\n"),
   );
   if (!confirmed) return;
-  const saveResult = await saveApiProviderSettings(next, modelsPath);
-  await saveModelThinkingDefault(
-    targetProviderId,
-    nextModelId,
-    canonicalThinkingLevel(defaultThinkingLevel),
-    defaultsPath,
-  );
-  await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, adding);
+  let saveResult: SaveApiProviderResult | undefined;
+  for (const [index, nextModelId] of nextModelIds.entries()) {
+    const next: ApiProviderSettings = {
+      provider: targetProviderId,
+      baseUrl,
+      modelId: nextModelId,
+      contextWindow,
+      maxTokens,
+      reasoning,
+      apiKey,
+      maxThinking,
+      api,
+      name: nextDisplayName,
+      compat: Object.keys(nextCompat).length > 0 ? nextCompat : undefined,
+      replaceProviderOptions: true,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
+      authHeader,
+    };
+    saveResult = await saveApiProviderSettings(next, modelsPath);
+    await saveModelThinkingDefault(
+      targetProviderId,
+      nextModelId,
+      canonicalThinkingLevel(defaultThinkingLevel),
+      defaultsPath,
+    );
+    if (index === 0) await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, adding);
+  }
   await addManagedProvider(defaultsPath, targetProviderId);
   reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
   applyThinkingLevelToActiveModel(
     pi,
     ctx,
     targetProviderId,
-    nextModelId,
+    nextModelIds[0],
     canonicalThinkingLevel(defaultThinkingLevel),
   );
+  if (!saveResult) throw new Error("API Provider settings were not written");
   notifySaved(
     ctx,
     nextDisplayName,
     saveResult,
-    `已保存 Provider；模型身份为 ${targetProviderId}/${nextModelId}，默认思考强度为 ${defaultThinkingLevel}`,
+    `已保存 ${nextModelIds.length} 个模型：${nextModelIds.map((id) => `${targetProviderId}/${id}`).join(", ")}，默认思考强度为 ${defaultThinkingLevel}`,
   );
 }
 
@@ -1394,7 +1427,11 @@ interface ModelSavePreviewInput {
   providerId: string;
   api: string;
   displayName: string;
-  next: ApiProviderSettings;
+  baseUrl: string;
+  modelIds: string[];
+  contextWindow: number;
+  maxTokens: number;
+  reasoning: boolean;
   defaultThinkingLevel: ApiThinkingLevel;
   cwd: string;
 }
@@ -1403,16 +1440,21 @@ function modelSavePreview(input: ModelSavePreviewInput): string {
   return [
     `Provider：${input.providerId}`,
     `API format：${apiFormatLabel(input.api)}`,
-    `Base URL：${input.next.baseUrl}`,
-    `Model：${input.next.modelId}`,
-    `上下文窗口 contextWindow：${input.next.contextWindow?.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
-    `单次最大输出 maxTokens：${input.next.maxTokens?.toLocaleString("en-US")} Token`,
-    ...compactionPreviewLines(input.cwd, input.next.contextWindow ?? 0, input.next.maxTokens ?? 0),
-    `Reasoning：${input.next.reasoning ? "enabled" : "disabled"}`,
+    `Base URL：${input.baseUrl}`,
+    `Model：${input.modelIds.join(", ")}`,
+    `上下文窗口 contextWindow：${input.contextWindow.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
+    `单次最大输出 maxTokens：${input.maxTokens.toLocaleString("en-US")} Token`,
+    ...compactionPreviewLines(input.cwd, input.contextWindow, input.maxTokens),
+    `Reasoning：${input.reasoning ? "enabled" : "disabled"}`,
     `Default thinking（当前 model）：${input.defaultThinkingLevel}`,
     "Auth：stored API key",
     "隔离：同 Provider 下所有模型共享 URL 与 API key",
   ].join("\n");
+}
+
+/** Split a comma-separated Model ID list (form array input) into non-empty IDs. */
+function parseModelIdList(value: string): string[] {
+  return value.split(",").map((id) => id.trim()).filter((id) => id.length > 0);
 }
 
 const TRI_STATE_CHOICES: readonly ApiModelFormChoice[] = [
@@ -1465,9 +1507,15 @@ function validateApiModelForm(
   const errors: string[] = [];
   try {
     normalizeBaseUrl(formText(values, "baseUrl"));
-    const modelId = required(formText(values, "modelId"), "Model ID");
-    if (duplicateModelIds?.includes(modelId)) {
-      errors.push(`Model ${modelId} 已存在；请返回列表选择该 model 进行修改`);
+    const modelIds = parseModelIdList(formText(values, "modelId"));
+    if (modelIds.length === 0) throw new Error("Model ID 不能为空");
+    const seen = new Set<string>();
+    for (const modelId of modelIds) {
+      if (seen.has(modelId)) errors.push(`Model ID ${modelId} 重复；每个模型只能出现一次`);
+      seen.add(modelId);
+      if (duplicateModelIds?.includes(modelId)) {
+        errors.push(`Model ${modelId} 已存在；请返回列表选择该 model 进行修改`);
+      }
     }
     const contextWindow = positiveInteger(formText(values, "contextWindow"), "上下文窗口 contextWindow");
     const maxTokens = positiveInteger(formText(values, "maxTokens"), "单次最大输出 maxTokens");

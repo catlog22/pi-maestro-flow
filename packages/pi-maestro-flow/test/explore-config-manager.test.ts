@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import {
   existsSync,
   mkdtempSync,
@@ -10,6 +11,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   loadExploreConfigState,
   registerExploreConfigManager,
@@ -145,6 +147,58 @@ test("edits a legacy endpoint through the structured form and migrates losslessl
   assert.match(notifications.at(-1)?.message ?? "", /已迁移到 api\.json/);
 });
 
+test("manages the legacy root-level endpoint as default without changing CLI semantics", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-explore-manager-legacy-default-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "api.json");
+  const legacyPath = join(dir, "api-explore.json");
+  writeFileSync(legacyPath, JSON.stringify({
+    baseUrl: "https://old-default.example.com/v1",
+    apiKey: "default-secret",
+    model: "old-default-model",
+    format: "openai",
+    maxTurns: 7,
+    rootSentinel: true,
+    endpoints: {
+      sibling: { baseUrl: "https://sibling.example.com/v1", apiKey: "sibling-secret", model: "sibling-model" },
+    },
+  }));
+  const command = createHarness(configPath, legacyPath);
+  const listed = createContext();
+  await command.handler("list", listed.ctx);
+  assert.match(listed.notifications.at(-1)?.message ?? "", /default · old-default-model/);
+
+  const edited = createContext({
+    async custom() {
+      return {
+        values: {
+          endpoint: "default",
+          baseUrl: "https://new-default.example.com/v1",
+          model: "new-default-model",
+          format: "openai-responses",
+          apiKey: "default-secret",
+          maxTurns: "",
+          concurrency: "",
+          extraBody: "{\"effort\":\"high\"}",
+        },
+      };
+    },
+    async confirm() { return true; },
+  });
+  await command.handler("edit default", edited.ctx);
+
+  const saved = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.equal(saved.baseUrl, "https://new-default.example.com/v1");
+  assert.equal(saved.apiKey, "default-secret");
+  assert.equal(saved.model, "new-default-model");
+  assert.equal(saved.format, "openai-responses");
+  assert.deepEqual(saved.extraBody, { effort: "high" });
+  assert.equal(saved.maxTurns, 7);
+  assert.equal(saved.rootSentinel, true);
+  assert.equal(saved.endpoints.default, undefined);
+  assert.equal(saved.endpoints.sibling.model, "sibling-model");
+});
+
 test("adds and deletes endpoints while preserving siblings and creating a backup", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-explore-manager-crud-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -226,7 +280,7 @@ test("updates Explore runtime defaults and preserves endpoint configuration", as
   assert.equal(saved.endpoints.flash.apiKey, "secret");
 });
 
-test("malformed canonical config blocks fallback and is never overwritten", async (t) => {
+test("malformed canonical config follows CLI fallback without overwriting either file", async (t) => {
   const dir = mkdtempSync(join(tmpdir(), "pi-explore-manager-malformed-"));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
   const configPath = join(dir, "api.json");
@@ -239,17 +293,28 @@ test("malformed canonical config blocks fallback and is never overwritten", asyn
     },
   }));
 
-  await assert.rejects(
-    () => loadExploreConfigState(configPath, legacyPath),
-    /Cannot parse/,
-  );
+  const state = await loadExploreConfigState(configPath, legacyPath);
+  assert.equal(state.source, "legacy");
+  assert.match(state.warning ?? "", /api\.json 无效/);
 
   const command = createHarness(configPath, legacyPath);
   const { ctx, notifications } = createContext();
   await command.handler("list", ctx);
   assert.equal(readFileSync(configPath, "utf8"), malformed);
-  assert.match(notifications.at(-1)?.message ?? "", /Cannot parse/);
-  assert.equal(notifications.at(-1)?.level, "error");
+  assert.match(notifications.at(-1)?.message ?? "", /当前 CLI 回退到 legacy/);
+  assert.match(notifications.at(-1)?.message ?? "", /fallback/);
+});
+
+test("malformed canonical config without a valid fallback is rejected", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-explore-manager-malformed-only-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "api.json");
+  const legacyPath = join(dir, "api-explore.json");
+  const malformed = "{ not-json";
+  writeFileSync(configPath, malformed);
+
+  await assert.rejects(() => loadExploreConfigState(configPath, legacyPath), /Cannot parse/);
+  assert.equal(readFileSync(configPath, "utf8"), malformed);
 });
 
 test("rejects invalid endpoint names and tree depths without writing", async (t) => {
@@ -284,4 +349,201 @@ test("rejects invalid endpoint names and tree depths without writing", async (t)
   await command.handler("defaults", defaults.ctx);
   assert.equal(existsSync(configPath), false);
   assert.match(defaults.notifications.at(-1)?.message ?? "", /Tree depth 必须在 1-6/);
+});
+
+test("normalizes interactive endpoint names before collision checks", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-explore-manager-name-collision-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "api.json");
+  const legacyPath = join(dir, "api-explore.json");
+  const before = JSON.stringify({
+    endpoints: {
+      flash: { baseUrl: "https://flash.example.com/v1", apiKey: "secret", model: "flash-model", sentinel: true },
+    },
+  });
+  writeFileSync(configPath, before);
+  const command = createHarness(configPath, legacyPath);
+  let customCalled = false;
+  const { ctx, notifications } = createContext({
+    async input() { return " flash "; },
+    async custom() { customCalled = true; return undefined; },
+  });
+
+  await command.handler("add", ctx);
+  assert.equal(customCalled, false);
+  assert.equal(readFileSync(configPath, "utf8"), before);
+  assert.match(notifications.at(-1)?.message ?? "", /flash 已存在/);
+});
+
+test("serializes the complete read-modify-write transaction for concurrent additions", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-explore-manager-concurrent-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "api.json");
+  const legacyPath = join(dir, "api-explore.json");
+  const command = createHarness(configPath, legacyPath);
+  let arrivals = 0;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const contextFor = (name: string) => createContext({
+    async custom() {
+      arrivals += 1;
+      if (arrivals === 2) release();
+      await gate;
+      return {
+        values: {
+          endpoint: name,
+          baseUrl: `https://${name}.example.com/v1`,
+          model: `${name}-model`,
+          format: "openai",
+          apiKey: `${name}-secret`,
+          maxTurns: "",
+          concurrency: "",
+          extraBody: "",
+        },
+      };
+    },
+    async confirm() { return true; },
+  }).ctx;
+
+  await Promise.all([
+    command.handler("add alpha", contextFor("alpha")),
+    command.handler("add beta", contextFor("beta")),
+  ]);
+
+  const saved = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.equal(saved.endpoints.alpha.model, "alpha-model");
+  assert.equal(saved.endpoints.beta.model, "beta-model");
+});
+
+test("headless mode permits read commands only and command parsing is strict", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-explore-manager-headless-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "api.json");
+  const legacyPath = join(dir, "api-explore.json");
+  writeFileSync(configPath, JSON.stringify({
+    endpoints: {
+      flash: { baseUrl: "https://flash.example.com/v1", apiKey: "secret", model: "flash-model" },
+    },
+  }));
+  const command = createHarness(configPath, legacyPath);
+  const notifications: string[] = [];
+  const ctx = {
+    hasUI: false,
+    ui: { notify(message: string) { notifications.push(message); } },
+  } as any;
+
+  await command.handler("add blocked", ctx);
+  assert.match(notifications.at(-1) ?? "", /需要交互式 TUI/);
+  await command.handler("show", ctx);
+  assert.match(notifications.at(-1) ?? "", /请指定 endpoint/);
+  await command.handler("LIST ignored", ctx);
+  assert.match(notifications.at(-1) ?? "", /用法/);
+  await command.handler("SHOW flash", ctx);
+  assert.match(notifications.at(-1) ?? "", /Model：flash-model/);
+  assert.doesNotMatch(notifications.at(-1) ?? "", /secret/);
+});
+
+test("fallback editor preserves extraBody without exposing it as an input default", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-explore-manager-fallback-secret-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "api.json");
+  const legacyPath = join(dir, "api-explore.json");
+  writeFileSync(configPath, JSON.stringify({
+    endpoints: {
+      flash: {
+        baseUrl: "https://flash.example.com/v1",
+        apiKey: "api-secret",
+        model: "flash-model",
+        format: "openai",
+        extraBody: { token: "body-secret" },
+      },
+    },
+  }));
+  const command = createHarness(configPath, legacyPath);
+  const inputDefaults: string[] = [];
+  const { ctx } = createContext({
+    async input(title: string, initial: string) {
+      inputDefaults.push(initial);
+      if (title === "API key（留空保留当前值）") return "";
+      return initial;
+    },
+    async select(title: string, options: string[]) {
+      if (title === "Format") return options[0];
+      if (title === "Extra body JSON") return "保留当前值";
+      return undefined;
+    },
+    async confirm() { return true; },
+  });
+
+  await command.handler("edit flash", ctx);
+  assert.equal(inputDefaults.some((value) => value.includes("body-secret")), false);
+  const saved = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.deepEqual(saved.endpoints.flash.extraBody, { token: "body-secret" });
+});
+
+test("cross-process additions share the canonical file lock", async (t) => {
+  const dir = mkdtempSync(join(tmpdir(), "pi-explore-manager-process-lock-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const configPath = join(dir, "api.json");
+  const legacyPath = join(dir, "api-explore.json");
+  const workerPath = join(dir, "worker.mjs");
+  const modulePath = fileURLToPath(new URL("../src/providers/explore-config-manager.ts", import.meta.url));
+  writeFileSync(workerPath, [
+    'import { existsSync, writeFileSync } from "node:fs";',
+    'import { join } from "node:path";',
+    'import { pathToFileURL } from "node:url";',
+    'const [configPath, legacyPath, name, modulePath, barrierDir] = process.argv.slice(2);',
+    'const { registerExploreConfigManager } = await import(pathToFileURL(modulePath).href);',
+    'let command;',
+    'registerExploreConfigManager({ registerCommand(_name, value) { command = value; } }, { configPath, legacyPath });',
+    'await command.handler(`add ${name}`, {',
+    '  hasUI: true,',
+    '  ui: {',
+    '    async custom() {',
+    '      writeFileSync(join(barrierDir, `ready-${name}`), "");',
+    '      while (!existsSync(join(barrierDir, "go"))) await new Promise((resolve) => setTimeout(resolve, 5));',
+    '      return { values: { endpoint: name, baseUrl: `https://${name}.example.com/v1`, model: `${name}-model`, format: "openai", apiKey: `${name}-secret`, maxTurns: "", concurrency: "", extraBody: "" } };',
+    '    },',
+    '    async confirm() { return true; },',
+    '    notify(message, level) { if (level === "error") throw new Error(message); },',
+    '  },',
+    '});',
+  ].join("\n"));
+
+  const startWorker = (name: string) => {
+    const child = spawn(process.execPath, [
+      "--experimental-transform-types",
+      workerPath,
+      configPath,
+      legacyPath,
+      name,
+      modulePath,
+      dir,
+    ], { stdio: ["ignore", "pipe", "pipe"] });
+    let output = "";
+    child.stdout.on("data", (chunk) => { output += String(chunk); });
+    child.stderr.on("data", (chunk) => { output += String(chunk); });
+    return new Promise<void>((resolve, reject) => {
+      child.on("error", reject);
+      child.on("close", (code) => code === 0 ? resolve() : reject(new Error(`${name} exited ${code}: ${output}`)));
+    });
+  };
+
+  const alpha = startWorker("alpha");
+  const beta = startWorker("beta");
+  const deadline = Date.now() + 10_000;
+  while ((!existsSync(join(dir, "ready-alpha")) || !existsSync(join(dir, "ready-beta"))) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const alphaReady = existsSync(join(dir, "ready-alpha"));
+  const betaReady = existsSync(join(dir, "ready-beta"));
+  writeFileSync(join(dir, "go"), "");
+  assert.ok(alphaReady, "alpha worker did not reach the mutation barrier");
+  assert.ok(betaReady, "beta worker did not reach the mutation barrier");
+  await Promise.all([alpha, beta]);
+
+  const saved = JSON.parse(readFileSync(configPath, "utf8"));
+  assert.equal(saved.endpoints.alpha.model, "alpha-model");
+  assert.equal(saved.endpoints.beta.model, "beta-model");
+  assert.equal(existsSync(`${configPath}.lock`), false);
 });

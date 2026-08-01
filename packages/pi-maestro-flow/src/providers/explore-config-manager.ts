@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import {
+  chmod,
   copyFile,
   mkdir,
   open,
@@ -7,8 +8,9 @@ import {
   rename,
   unlink,
 } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -45,6 +47,7 @@ export interface ExploreConfigState {
   root: ExploreConfigRoot;
   source: "canonical" | "legacy" | "none";
   activePath: string;
+  warning?: string;
 }
 
 export interface RegisterExploreConfigOptions {
@@ -60,15 +63,24 @@ const FORMATS: readonly ApiModelFormChoice[] = [
   { label: "OpenAI Responses", value: "openai-responses" },
 ];
 
+const LOCK_STALE_MS = 5_000;
 const mutationQueues = new Map<string, Promise<void>>();
+const properLockfile = createRequire(import.meta.url)("proper-lockfile") as {
+  lock(filePath: string, options: {
+    realpath: boolean;
+    stale: number;
+    update: number;
+    retries: { retries: number; factor: number; minTimeout: number; maxTimeout: number; randomize: boolean };
+  }): Promise<() => Promise<void>>;
+};
 
 export function registerExploreConfigManager(
   pi: ExtensionAPI,
   options: RegisterExploreConfigOptions = {},
 ): void {
   if (typeof pi.registerCommand !== "function") return;
-  const configPath = options.configPath ?? join(homedir(), ".maestro", "api.json");
-  const legacyPath = options.legacyPath ?? join(homedir(), ".maestro", "api-explore.json");
+  const configPath = mutationPath(options.configPath ?? join(homedir(), ".maestro", "api.json"));
+  const legacyPath = resolve(options.legacyPath ?? join(homedir(), ".maestro", "api-explore.json"));
 
   pi.registerCommand("explore-manager", {
     description: "管理 Maestro Explore API endpoints",
@@ -86,10 +98,23 @@ export async function loadExploreConfigState(
   configPath = join(homedir(), ".maestro", "api.json"),
   legacyPath = join(homedir(), ".maestro", "api-explore.json"),
 ): Promise<ExploreConfigState> {
-  const canonical = await readConfigIfPresent(configPath);
-  if (canonical) return { root: canonical, source: "canonical", activePath: configPath };
+  let canonicalError: string | undefined;
+  try {
+    const canonical = await readConfigIfPresent(configPath);
+    if (canonical) return { root: canonical, source: "canonical", activePath: configPath };
+  } catch (error) {
+    canonicalError = errorMessage(error);
+  }
   const legacy = await readConfigIfPresent(legacyPath);
-  if (legacy) return { root: legacy, source: "legacy", activePath: legacyPath };
+  if (legacy) {
+    return {
+      root: legacy,
+      source: "legacy",
+      activePath: legacyPath,
+      warning: canonicalError ? `api.json 无效，当前 CLI 回退到 legacy：${canonicalError}` : undefined,
+    };
+  }
+  if (canonicalError) throw new Error(canonicalError);
   return { root: {}, source: "none", activePath: configPath };
 }
 
@@ -105,13 +130,25 @@ async function showExploreConfigManager(
 
   if (!action) {
     if (tokens.length > 0) {
-      ctx.ui.notify("用法：/explore-manager [list|add|edit|show|delete|defaults] [endpoint]", "warning");
+      notifyExploreUsage(ctx);
       return;
     }
     if (!ctx.hasUI) action = "list";
     else action = await chooseAction(ctx);
   }
   if (!action) return;
+  if (tokens.length > 2 || ((action === "list" || action === "defaults") && tokens.length > 1)) {
+    notifyExploreUsage(ctx);
+    return;
+  }
+  if (!ctx.hasUI && action !== "list" && action !== "show") {
+    ctx.ui.notify(`Explore ${action} 需要交互式 TUI。`, "warning");
+    return;
+  }
+  if (!ctx.hasUI && action === "show" && !endpointName) {
+    ctx.ui.notify("无 UI 模式下请指定 endpoint：/explore-manager show <endpoint>", "warning");
+    return;
+  }
 
   if (action === "list") {
     await listEndpoints(ctx, configPath, legacyPath);
@@ -131,26 +168,27 @@ async function showExploreConfigManager(
     endpointName = await ctx.ui.input("Endpoint 名称", "");
   }
   if (!endpointName) return;
+  if (action === "add") endpointName = normalizeEndpointName(endpointName);
 
   if (action === "show") {
     showEndpoint(ctx, endpointName, endpoints.get(endpointName), state);
     return;
   }
   if (action === "delete") {
-    await deleteEndpoint(ctx, endpointName, endpoints, state, configPath);
+    await deleteEndpoint(ctx, endpointName, endpoints, configPath, legacyPath);
     return;
   }
 
   const exists = endpoints.has(endpointName);
   if (action === "add" && exists) {
-    ctx.ui.notify(`Endpoint ${endpointName} 已存在，请使用 edit。`, "warning");
+    ctx.ui.notify(`Endpoint ${displayText(endpointName)} 已存在，请使用 edit。`, "warning");
     return;
   }
   if (action === "edit" && !exists) {
-    ctx.ui.notify(`Endpoint ${endpointName} 不存在。`, "warning");
+    ctx.ui.notify(`Endpoint ${displayText(endpointName)} 不存在。`, "warning");
     return;
   }
-  await configureEndpoint(ctx, endpointName, endpoints, state, configPath, action === "add");
+  await configureEndpoint(ctx, endpointName, endpoints, configPath, legacyPath, action === "add");
 }
 
 async function chooseAction(ctx: ExtensionCommandContext): Promise<ExploreManagerAction | undefined> {
@@ -177,6 +215,7 @@ async function listEndpoints(
     "Maestro Explore endpoints：",
     `配置文件：${displayText(state.activePath)}${state.source === "legacy" ? "（legacy，保存后迁移）" : ""}`,
   ];
+  if (state.warning) lines.push(`警告：${displayText(state.warning)}`);
   if (endpoints.size === 0) lines.push("- 未配置");
   for (const [name, value] of endpoints) {
     const endpoint = isRecord(value) ? value : {};
@@ -239,13 +278,13 @@ async function configureEndpoint(
   ctx: ExtensionCommandContext,
   endpointName: string,
   endpoints: Map<string, unknown>,
-  state: ExploreConfigState,
   configPath: string,
+  legacyPath: string,
   adding: boolean,
 ): Promise<void> {
-  const normalizedName = normalizeEndpointName(endpointName);
+  const storageName = adding ? normalizeEndpointName(endpointName) : endpointName;
   const current = isRecord(endpoints.get(endpointName)) ? endpoints.get(endpointName) as Record<string, unknown> : {};
-  const initialFormat = normalizeFormat(stringValue(current.format) || "openai");
+  const initialFormat = stringValue(current.format) || "openai";
   let values: ApiModelFormValues | undefined;
 
   if (ctx.hasUI && typeof ctx.ui.custom === "function") {
@@ -253,7 +292,7 @@ async function configureEndpoint(
       title: `${adding ? "新增" : "修改"} Explore endpoint`,
       fields: [
         { id: "connection-section", label: "连接", kind: "section", value: "" },
-        { id: "endpoint", label: "Endpoint", kind: "readonly", value: normalizedName },
+        { id: "endpoint", label: "Endpoint", kind: "readonly", value: displayText(storageName) },
         { id: "baseUrl", label: "Base URL", kind: "text", value: stringValue(current.baseUrl) },
         { id: "model", label: "Model", kind: "text", value: stringValue(current.model) },
         { id: "format", label: "Format", kind: "choice", value: initialFormat, choices: formatChoices(initialFormat) },
@@ -267,22 +306,38 @@ async function configureEndpoint(
     });
     values = result?.values;
   } else {
-    values = await collectEndpointWithSteps(ctx, normalizedName, current, initialFormat);
+    values = await collectEndpointWithSteps(ctx, storageName, current, initialFormat);
   }
   if (!values) return;
 
-  const nextEndpoint = endpointFromValues(values, current);
+  const preview = endpointFromValues(values, current);
   const confirmed = await ctx.ui.confirm(
-    `${adding ? "新增" : "保存"} ${normalizedName}？`,
-    `${nextEndpoint.model} · ${nextEndpoint.format ?? "openai"} · ${nextEndpoint.baseUrl}`,
+    `${adding ? "新增" : "保存"} ${displayText(storageName)}？`,
+    `${displayText(preview.model)} · ${preview.format ?? "openai"} · ${displayText(preview.baseUrl)}`,
   );
   if (!confirmed) return;
 
-  endpoints.set(normalizedName, nextEndpoint);
-  const nextRoot = { ...state.root, endpoints: Object.fromEntries(endpoints) };
-  await writeCanonicalConfig(configPath, nextRoot);
-  const migrated = state.source === "legacy" ? "，已迁移到 api.json" : "";
-  ctx.ui.notify(`Explore endpoint ${normalizedName} 已保存${migrated}。`, "info");
+  const source = await mutateCanonicalConfig(configPath, legacyPath, (latestRoot) => {
+    const latestEndpoints = endpointMap(latestRoot);
+    if (adding && latestEndpoints.has(storageName)) {
+      throw new Error(`Endpoint ${displayText(storageName)} 已存在`);
+    }
+    if (!adding && !latestEndpoints.has(storageName)) {
+      throw new Error(`Endpoint ${displayText(storageName)} 已被删除`);
+    }
+    const latestCurrent = isRecord(latestEndpoints.get(storageName))
+      ? latestEndpoints.get(storageName) as Record<string, unknown>
+      : {};
+    const nextEndpoint = endpointFromValues(values!, latestCurrent);
+    if (!adding && storageName === "default" && hasLegacyDefaultEndpoint(latestRoot)) {
+      return applyLegacyDefaultEndpoint(latestRoot, nextEndpoint);
+    }
+    const storedEndpoints = storedEndpointMap(latestRoot);
+    storedEndpoints.set(storageName, nextEndpoint);
+    return { ...latestRoot, endpoints: Object.fromEntries(storedEndpoints) };
+  });
+  const migrated = source === "legacy" ? "，已迁移到 api.json" : "";
+  ctx.ui.notify(`Explore endpoint ${displayText(storageName)} 已保存${migrated}。`, "info");
 }
 
 async function collectEndpointWithSteps(
@@ -304,11 +359,22 @@ async function collectEndpointWithSteps(
   if (maxTurns === undefined) return undefined;
   const concurrency = await ctx.ui.input("Concurrency（空为默认）", optionalIntegerValue(current.concurrency));
   if (concurrency === undefined) return undefined;
-  const extraBody = await ctx.ui.input(
-    "Extra body JSON（空为未设置）",
-    isRecord(current.extraBody) ? JSON.stringify(current.extraBody) : "",
-  );
-  if (extraBody === undefined) return undefined;
+  let extraBody = isRecord(current.extraBody) ? JSON.stringify(current.extraBody) : "";
+  if (extraBody) {
+    const mode = await ctx.ui.select("Extra body JSON", ["保留当前值", "替换", "清空"]);
+    if (mode === undefined) return undefined;
+    if (mode === "替换") {
+      const replacement = await ctx.ui.input("Extra body JSON", "");
+      if (replacement === undefined) return undefined;
+      extraBody = replacement;
+    } else if (mode === "清空") {
+      extraBody = "";
+    }
+  } else {
+    const replacement = await ctx.ui.input("Extra body JSON（空为未设置）", "");
+    if (replacement === undefined) return undefined;
+    extraBody = replacement;
+  }
   const values: ApiModelFormValues = {
     endpoint: endpointName,
     baseUrl,
@@ -328,19 +394,31 @@ async function deleteEndpoint(
   ctx: ExtensionCommandContext,
   endpointName: string,
   endpoints: Map<string, unknown>,
-  state: ExploreConfigState,
   configPath: string,
+  legacyPath: string,
 ): Promise<void> {
   if (!endpoints.has(endpointName)) {
-    ctx.ui.notify(`Endpoint ${endpointName} 不存在。`, "warning");
+    ctx.ui.notify(`Endpoint ${displayText(endpointName)} 不存在。`, "warning");
     return;
   }
-  const confirmed = await ctx.ui.confirm("删除 Explore endpoint？", endpointName);
+  const confirmed = await ctx.ui.confirm("删除 Explore endpoint？", displayText(endpointName));
   if (!confirmed) return;
-  endpoints.delete(endpointName);
-  await writeCanonicalConfig(configPath, { ...state.root, endpoints: Object.fromEntries(endpoints) });
-  const migrated = state.source === "legacy" ? "，其余配置已迁移到 api.json" : "";
-  ctx.ui.notify(`Explore endpoint ${endpointName} 已删除${migrated}。`, "info");
+  const source = await mutateCanonicalConfig(configPath, legacyPath, (latestRoot) => {
+    const latestEndpoints = endpointMap(latestRoot);
+    if (!latestEndpoints.has(endpointName)) {
+      throw new Error(`Endpoint ${displayText(endpointName)} 已被删除`);
+    }
+    if (endpointName === "default" && hasLegacyDefaultEndpoint(latestRoot)) {
+      return removeLegacyDefaultEndpoint(latestRoot);
+    }
+    const storedEndpoints = storedEndpointMap(latestRoot);
+    if (!storedEndpoints.delete(endpointName)) {
+      throw new Error(`Endpoint ${displayText(endpointName)} 已被删除`);
+    }
+    return { ...latestRoot, endpoints: Object.fromEntries(storedEndpoints) };
+  });
+  const migrated = source === "legacy" ? "，其余配置已迁移到 api.json" : "";
+  ctx.ui.notify(`Explore endpoint ${displayText(endpointName)} 已删除${migrated}。`, "info");
 }
 
 async function configureDefaults(
@@ -374,12 +452,23 @@ async function configureDefaults(
   }
   if (!values) return;
 
-  const next = { ...state.root };
-  setOptionalInteger(next, "maxTurns", values.maxTurns, "Max turns");
-  setOptionalInteger(next, "concurrency", values.concurrency, "Concurrency");
-  setOptionalInteger(next, "treeDepth", values.treeDepth, "Tree depth", 6);
-  await writeCanonicalConfig(configPath, next);
-  const migrated = state.source === "legacy" ? "，已迁移到 api.json" : "";
+  const preview = { ...state.root };
+  setOptionalInteger(preview, "maxTurns", values.maxTurns, "Max turns");
+  setOptionalInteger(preview, "concurrency", values.concurrency, "Concurrency");
+  setOptionalInteger(preview, "treeDepth", values.treeDepth, "Tree depth", 6);
+  const confirmed = await ctx.ui.confirm(
+    "保存 Explore 运行默认值？",
+    `maxTurns=${integerLabel(preview.maxTurns)} · concurrency=${integerLabel(preview.concurrency)} · treeDepth=${integerLabel(preview.treeDepth)}`,
+  );
+  if (!confirmed) return;
+  const source = await mutateCanonicalConfig(configPath, legacyPath, (latestRoot) => {
+    const next = { ...latestRoot };
+    setOptionalInteger(next, "maxTurns", values!.maxTurns, "Max turns");
+    setOptionalInteger(next, "concurrency", values!.concurrency, "Concurrency");
+    setOptionalInteger(next, "treeDepth", values!.treeDepth, "Tree depth", 6);
+    return next;
+  });
+  const migrated = source === "legacy" ? "，已迁移到 api.json" : "";
   ctx.ui.notify(`Explore 运行默认值已保存${migrated}。`, "info");
 }
 
@@ -444,45 +533,130 @@ async function readConfigIfPresent(path: string): Promise<ExploreConfigRoot | un
   return parsed as ExploreConfigRoot;
 }
 
+async function mutateCanonicalConfig(
+  configPath: string,
+  legacyPath: string,
+  mutation: (root: ExploreConfigRoot) => ExploreConfigRoot,
+): Promise<ExploreConfigState["source"]> {
+  let source: ExploreConfigState["source"] = "none";
+  await serializeMutation(configPath, async () => {
+    const latest = await loadExploreConfigState(configPath, legacyPath);
+    source = latest.source;
+    await writeCanonicalConfig(configPath, mutation(latest.root));
+  });
+  return source;
+}
+
 async function writeCanonicalConfig(path: string, root: ExploreConfigRoot): Promise<void> {
-  await serializeMutation(path, async () => {
-    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
-    let existed = false;
-    try {
-      await readFile(path);
-      existed = true;
-    } catch (error) {
-      if (!isNodeError(error) || error.code !== "ENOENT") throw error;
-    }
-    if (existed) {
-      await copyFile(path, `${path}.bak-${Date.now()}-${randomUUID()}`);
-    }
-    const tempPath = `${path}.tmp-${randomUUID()}`;
-    let handle: Awaited<ReturnType<typeof open>> | undefined;
-    try {
-      handle = await open(tempPath, "wx", 0o600);
-      await handle.writeFile(`${JSON.stringify(root, null, 2)}\n`, "utf8");
-      await handle.close();
-      handle = undefined;
-      await rename(tempPath, path);
-    } finally {
-      await handle?.close().catch(() => undefined);
-      await unlink(tempPath).catch(() => undefined);
-    }
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  let existed = false;
+  try {
+    await readFile(path);
+    existed = true;
+  } catch (error) {
+    if (!isNodeError(error) || error.code !== "ENOENT") throw error;
+  }
+  if (existed) {
+    const backupPath = `${path}.bak-${Date.now()}-${randomUUID()}`;
+    await copyFile(path, backupPath);
+    await chmod(backupPath, 0o600);
+  }
+  const tempPath = `${path}.tmp-${randomUUID()}`;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(tempPath, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(root, null, 2)}\n`, "utf8");
+    await handle.close();
+    handle = undefined;
+    await rename(tempPath, path);
+  } finally {
+    await handle?.close().catch(() => undefined);
+    await unlink(tempPath).catch(() => undefined);
+  }
+}
+
+function serializeMutation(filePath: string, mutate: () => Promise<void>): Promise<void> {
+  const key = mutationPath(filePath);
+  const previous = mutationQueues.get(key) ?? Promise.resolve();
+  const mutation = previous.catch(() => undefined).then(() => withMutationLock(key, mutate));
+  const settled = mutation.then(() => undefined, () => undefined);
+  mutationQueues.set(key, settled);
+  return mutation.finally(() => {
+    if (mutationQueues.get(key) === settled) mutationQueues.delete(key);
   });
 }
 
-function serializeMutation(path: string, mutation: () => Promise<void>): Promise<void> {
-  const previous = mutationQueues.get(path) ?? Promise.resolve();
-  const current = previous.catch(() => undefined).then(mutation);
-  mutationQueues.set(path, current);
-  return current.finally(() => {
-    if (mutationQueues.get(path) === current) mutationQueues.delete(path);
+async function withMutationLock(filePath: string, mutate: () => Promise<void>): Promise<void> {
+  await mkdir(dirname(filePath), { recursive: true, mode: 0o700 });
+  const release = await properLockfile.lock(filePath, {
+    realpath: false,
+    stale: LOCK_STALE_MS,
+    update: 1_000,
+    retries: {
+      retries: 200,
+      factor: 1,
+      minTimeout: 15,
+      maxTimeout: 50,
+      randomize: true,
+    },
   });
+  try {
+    await mutate();
+  } finally {
+    await release();
+  }
+}
+
+function mutationPath(filePath: string): string {
+  const path = resolve(filePath);
+  return process.platform === "win32" ? path.toLowerCase() : path;
+}
+
+function storedEndpointMap(root: ExploreConfigRoot): Map<string, unknown> {
+  return new Map(isRecord(root.endpoints) ? Object.entries(root.endpoints) : []);
 }
 
 function endpointMap(root: ExploreConfigRoot): Map<string, unknown> {
-  return new Map(isRecord(root.endpoints) ? Object.entries(root.endpoints) : []);
+  const endpoints = storedEndpointMap(root);
+  if (hasLegacyDefaultEndpoint(root)) endpoints.set("default", legacyDefaultEndpoint(root));
+  return endpoints;
+}
+
+function hasLegacyDefaultEndpoint(root: ExploreConfigRoot): boolean {
+  return Boolean(stringValue(root.baseUrl) || stringValue(root.apiKey) || stringValue(root.model));
+}
+
+function legacyDefaultEndpoint(root: ExploreConfigRoot): Record<string, unknown> {
+  return {
+    baseUrl: stringValue(root.baseUrl),
+    apiKey: stringValue(root.apiKey),
+    model: stringValue(root.model),
+    ...(typeof root.format === "string" ? { format: root.format } : {}),
+    ...(isRecord(root.extraBody) ? { extraBody: root.extraBody } : {}),
+  };
+}
+
+function applyLegacyDefaultEndpoint(root: ExploreConfigRoot, endpoint: ExploreEndpointConfig): ExploreConfigRoot {
+  const next: ExploreConfigRoot = {
+    ...root,
+    baseUrl: endpoint.baseUrl,
+    apiKey: endpoint.apiKey,
+    model: endpoint.model,
+    format: endpoint.format,
+  };
+  if (endpoint.extraBody) next.extraBody = endpoint.extraBody;
+  else delete next.extraBody;
+  return next;
+}
+
+function removeLegacyDefaultEndpoint(root: ExploreConfigRoot): ExploreConfigRoot {
+  const next = { ...root };
+  delete next.baseUrl;
+  delete next.apiKey;
+  delete next.model;
+  delete next.format;
+  delete next.extraBody;
+  return next;
 }
 
 function normalizeEndpointName(value: string): string {
@@ -587,14 +761,19 @@ function isNodeError(error: unknown): error is NodeJS.ErrnoException {
   return error instanceof Error && "code" in error;
 }
 
+function notifyExploreUsage(ctx: ExtensionCommandContext): void {
+  ctx.ui.notify("用法：/explore-manager [list|add|edit|show|delete|defaults] [endpoint]", "warning");
+}
+
 function actionFromArg(value: string | undefined): ExploreManagerAction | undefined {
-  if (!value) return undefined;
-  if (value === "list" || value === "ls") return "list";
-  if (value === "add" || value === "new") return "add";
-  if (value === "edit" || value === "set" || value === "update") return "edit";
-  if (value === "show" || value === "get") return "show";
-  if (value === "delete" || value === "remove") return "delete";
-  if (value === "defaults" || value === "default") return "defaults";
+  const action = value?.toLowerCase();
+  if (!action) return undefined;
+  if (action === "list" || action === "ls") return "list";
+  if (action === "add" || action === "new") return "add";
+  if (action === "edit" || action === "set" || action === "update") return "edit";
+  if (action === "show" || action === "get") return "show";
+  if (action === "delete" || action === "remove") return "delete";
+  if (action === "defaults" || action === "default") return "defaults";
   return undefined;
 }
 
