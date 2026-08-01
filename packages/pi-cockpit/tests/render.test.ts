@@ -48,6 +48,28 @@ test("renderAgents list includes connector, role, task and tail", () => {
 	assert.ok(line.includes("⠋")); // running spinner
 });
 
+test("renderAgents hideLiveDuration drops the live elapsed but keeps frozen durations", () => {
+	const rows = [
+		agent({ correlationId: "live", task: "live task", status: "running", startedAt: 1_000 }),
+		agent({ correlationId: "done", task: "done task", status: "done", startedAt: 1_000, finishedAt: 66_000, tail: "" }),
+	];
+	const plain = renderAgents(rows, "list", 120, theme, utils, { ...opts, now: 900_000 });
+	assert.match(plain.find((l) => l.includes("live task"))!, /14m 59s/);
+	assert.match(plain.find((l) => l.includes("done task"))!, /1m 5s/);
+	const staticLines = renderAgents(rows, "list", 120, theme, utils, { ...opts, now: 900_000, hideLiveDuration: true });
+	assert.doesNotMatch(staticLines.find((l) => l.includes("live task"))!, /14m 59s/);
+	assert.match(staticLines.find((l) => l.includes("done task"))!, /1m 5s/, "frozen duration on a done row survives");
+});
+
+test("renderAgents static output is stable across now and covers retrying", () => {
+	const retrying = agent({ correlationId: "r", task: "retry task", status: "retrying", startedAt: 1_000 });
+	const a = renderAgents([retrying], "list", 120, theme, utils, { ...opts, now: 60_000, hideLiveDuration: true });
+	const b = renderAgents([retrying], "list", 120, theme, utils, { ...opts, now: 90_000, hideLiveDuration: true });
+	assert.equal(a[0], b[0], "static rows do not drift with now");
+	assert.doesNotMatch(a[0], /\d+s/, "no live elapsed on a retrying row");
+	assert.match(a[0], /retrying/, "the retrying state itself stays visible");
+});
+
 test("renderAgents freezes completed duration at finishedAt", () => {
 	const completed = agent({ status: "done", startedAt: 1_000, finishedAt: 66_000 });
 	const first = renderAgents([completed], "list", 120, theme, utils, { ...opts, now: 100_000 })[0];
@@ -208,7 +230,7 @@ test("renderTodos list: summary first + sorted rows + glyphs", () => {
 	assert.ok(summary.includes("Todo"));
 	assert.ok(summary.includes("»"));
 	// ordered by status priority (active first), then creation order
-	assert.ok(lines[1].includes("⠋"));  // #1 in_progress
+	assert.ok(lines[1].includes("□"));  // #1 in_progress
 	assert.ok(lines[2].includes("!"));  // #2 blocked
 	assert.ok(lines[3].includes("○"));  // #3 pending
 	assert.ok(lines[4].includes("✓"));  // #0 completed
@@ -234,7 +256,7 @@ test("renderTodos paints status on hue, weight and strikethrough", () => {
 	// The running row is the only one carrying weight, and it owns warning — accent
 	// stays reserved for role identity.
 	assert.ok(lines[1].includes("<b>[text]task 1[/]</b>"));
-	assert.ok(lines[1].includes("[warning]⠋[/]"));
+	assert.ok(lines[1].includes("[warning]□[/]"));
 	assert.ok(!lines[1].includes("[accent]"));
 	assert.ok(lines[2].includes("[error]!"));
 	assert.ok(lines[3].includes("[accent]○[/]"));
@@ -273,7 +295,7 @@ test("renderTodos collapsed line includes running state, member count and assign
 	const line = renderTodos([running, pending], "list", 160, theme, utils, { ...opts, expanded: false })[0];
 	assert.match(line, /1 running/);
 	assert.match(line, /2 members/);
-	assert.match(line, /⠋ @executor implement/);
+	assert.match(line, /□ @executor implement/);
 });
 
 test("renderTodos mirrors actor, primary skill and blocked dependency details", () => {
@@ -292,7 +314,7 @@ test("renderTodos mirrors actor, primary skill and blocked dependency details", 
 	const line = lines.find((candidate) => candidate.includes("verify"))!;
 	assert.match(line, /@root→@executor/);
 	assert.match(line, /\/team-testing \+1/);
-	assert.match(line, /← ⠋ implement/);
+	assert.match(line, /← □ implement/);
 	assert.match(line, /← \? \?/);
 });
 

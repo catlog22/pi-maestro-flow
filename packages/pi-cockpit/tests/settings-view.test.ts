@@ -29,6 +29,16 @@ test("thinking fold row mirrors pi's live state and advertises its inverse", () 
 	assert.equal(visible?.next, "hidden");
 });
 
+test("static mode row cycles on/off and is reachable by accel", () => {
+	const row = buildRows(DEFAULT_CONFIG).find((candidate) => candidate.key === "staticMode");
+	assert.deepEqual(
+		{ value: row?.value, next: row?.next, accel: row?.accel },
+		{ value: "off", next: "on", accel: "m" },
+	);
+	assert.equal(applyRow(DEFAULT_CONFIG, "staticMode").staticMode, true);
+	assert.equal(applyRow(applyRow(DEFAULT_CONFIG, "staticMode"), "staticMode").staticMode, false);
+});
+
 test("quiet controls stay grouped in mode, symbol, thinking order", () => {
 	const keys = buildRows(DEFAULT_CONFIG, { thinkingHidden: false }).map((row) => row.key);
 	const start = keys.indexOf("quietMode");

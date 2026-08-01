@@ -3,7 +3,7 @@ import type { TUI } from "@earendil-works/pi-tui";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { renderAgents, renderTodos, type PaintTheme, type WidthUtils } from "./render.ts";
 import { fitLineByPriority, type PrioritizedSegment } from "./layout.ts";
-import { resolveGlyphs, spinFrame } from "./icons.ts";
+import { resolveGlyphs } from "./icons.ts";
 import { panelRows } from "./viewport.ts";
 import type { AgentRow, CockpitConfig, TodoItem } from "./types.ts";
 
@@ -63,12 +63,10 @@ export function makeTodoWidget(deps: TodoWidgetDeps) {
 				const todos = deps.getTodos();
 				if (todos.length === 0) return [];
 				const g = resolveGlyphs(cfg.icons.mode);
-				const now = Date.now();
-				const spin = spinFrame(g, now, deps.isAnimating?.() ?? true);
+				// Todo row glyphs come from the glyph table (a hollow rectangle for
+				// in-progress), never the animation clock — see render.ts todoPaint.
 				const opts = {
 					glyphs: g,
-					spin,
-					now,
 					expanded: cfg.todoExpanded,
 					maxRows: panelRows(terminalRows(tui)),
 				};
@@ -102,8 +100,8 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 					: roster;
 				const g = resolveGlyphs(cfg.icons.mode);
 				const now = Date.now();
-				const animating = deps.isAnimating?.() ?? true;
-				const spin = spinFrame(g, now, animating);
+				// Row-leading status glyphs never spin (see todo widget above).
+				const spin = g.dotRunning;
 				const running = deps.isRunning();
 
 				// The panel budget covers the roster header and its rows.
@@ -111,7 +109,7 @@ export function makeAgentWidget(deps: AgentWidgetDeps) {
 				const rosterRows = panel === undefined
 					? undefined
 					: Math.max(1, panel - 1);
-				const opts = { glyphs: g, spin, now, maxRows: rosterRows };
+				const opts = { glyphs: g, spin, now, maxRows: rosterRows, hideLiveDuration: cfg.staticMode };
 				const dot = theme.fg(running ? "success" : "muted", running ? g.dotRunning : g.dotIdle);
 				const failedCount = agents.filter((a) => a.status === "failed").length;
 				const runCount = agents.filter((a) => a.status === "running" || a.status === "retrying").length;

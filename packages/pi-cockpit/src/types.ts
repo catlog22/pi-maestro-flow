@@ -118,6 +118,16 @@ export interface SidebarConfig {
 export interface CockpitConfig {
 	enabled: boolean;
 	/**
+	 * Static mode: suppress the 250ms animation/redraw loop and the live pieces it
+	 * drives. Spinners freeze to static markers, running agents and background jobs
+	 * drop their live elapsed time, and token usage totals refresh at most once per
+	 * throttle window instead of on every message. Event-driven state changes
+	 * (agent start/message/complete, tool start/end) still repaint immediately;
+	 * only the periodic churn is removed. Failed rows still linger their readable
+	 * window — that retention is a correctness requirement, not animation.
+	 */
+	staticMode: boolean;
+	/**
 	 * Quiet mode: compress built-in tool calls to one-line lifecycle summaries and
 	 * fold thinking blocks. The lifecycle glyph set is selected by quietSymbols.
 	 * The fold drives pi's native thinking toggle, so pi owns and persists the
@@ -148,6 +158,7 @@ export interface CockpitConfig {
 
 export const DEFAULT_CONFIG: CockpitConfig = {
 	enabled: true,
+	staticMode: false,
 	quietMode: false,
 	quietSymbols: "check",
 	toolPalette: "family",

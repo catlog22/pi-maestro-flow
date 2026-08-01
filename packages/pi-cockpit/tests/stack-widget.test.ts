@@ -12,6 +12,46 @@ const todos: TodoItem[] = [
 	{ id: "2", subject: "verify UI", status: "pending", blockedBy: [], skills: [] },
 ];
 
+test("row-leading status glyphs are static and ignore the animation flag", () => {
+	// Nerd glyphs make the distinction unambiguous: the spinner frames are braille
+	// characters that never appear in ordinary task text, while the static marker
+	// is a filled dot. Forcing isAnimating() true proves the row glyph no longer
+	// follows the animation clock — only the host working line keeps a spinner.
+	const BRAILLE = /[⠋⠙⠹⠦⠇]/;
+	const nerd = { ...DEFAULT_CONFIG, icons: { mode: "nerd" as const } };
+
+	const todoLines = makeTodoWidget({
+		getTodos: () => todos,
+		getConfig: () => ({ ...nerd, todoExpanded: true }),
+		isAnimating: () => true,
+	})(tui, theme).render(120);
+	const todoText = todoLines.join("\n");
+	assert.match(todoText, /□/, "in-progress task shows the hollow rectangle");
+	assert.doesNotMatch(todoText, /●/, "todo rows never use the filled dot");
+	assert.doesNotMatch(todoText, BRAILLE, "the in-progress glyph never spins");
+
+	const agentLines = makeAgentWidget({
+		getAgents: () => [{
+			correlationId: "worker",
+			agent: "explorer",
+			name: undefined,
+			role: "explorer",
+			task: "inspect auth",
+			status: "running",
+			tail: "",
+			startedAt: 1,
+			lastActivityAt: 1,
+		}],
+		getConfig: () => nerd,
+		isRunning: () => true,
+		isAnimating: () => true,
+	})(tui, theme).render(120);
+	const agentText = agentLines.join("\n");
+	assert.match(agentText, /●/, "running agent shows the filled dot");
+	assert.doesNotMatch(agentText, /□/, "agents keep the dot, not the todo marker");
+	assert.doesNotMatch(agentText, BRAILLE, "the running glyph never spins");
+});
+
 test("expanded Todo widget has one summary followed directly by task rows", () => {
 	const component = makeTodoWidget({
 		getTodos: () => todos,
@@ -60,6 +100,31 @@ test("agent-area widget excludes graph dispatch containers from rows and running
 	assert.match(lines[0], /2 running/);
 	assert.doesNotMatch(lines[0], /3 running/);
 	assert.equal(lines.filter((line) => /first|second/.test(line)).length, 2);
+});
+
+test("static mode passes hideLiveDuration through to the agent rows", () => {
+	const row = (): AgentRow => ({
+		correlationId: "worker",
+		agent: "explorer",
+		name: undefined,
+		role: "explorer",
+		task: "inspect auth",
+		status: "running",
+		tail: "",
+		startedAt: 1,
+		lastActivityAt: 1,
+	});
+	const make = (staticMode: boolean) => makeAgentWidget({
+		getAgents: () => [row()],
+		getConfig: () => ({ ...DEFAULT_CONFIG, staticMode }),
+		isRunning: () => true,
+		isAnimating: () => !staticMode,
+	})(tui, theme);
+
+	const dynamic = make(false).render(120);
+	assert.match(dynamic[1], /\d+s/, "dynamic mode shows the live elapsed");
+	const statik = make(true).render(120);
+	assert.doesNotMatch(statik[1], /\d+s/, "static mode hides the live elapsed");
 });
 
 test("quiet mode keeps the roster expanded but drops the live streaming tail", () => {

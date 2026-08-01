@@ -9,7 +9,9 @@
 // mcp, lsp, ...) cannot be compressed this way: registerTool is first-name-wins and
 // replaces the whole definition, and the public API exposes neither a render-only
 // hook nor a handle to the original execute — re-registering them would break their
-// execution, so they keep their default rendering.
+// execution, so Cockpit does not re-register them. Self-rendering extension
+// tools such as `observe` consume Cockpit's quiet ownership event in their owner
+// extension and provide their own compact shell.
 //
 // Registered at session_start when config.quietMode is true. Because tools cannot
 // be unregistered, toggling quiet mode off requires /reload or a new session.

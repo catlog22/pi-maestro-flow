@@ -12,7 +12,7 @@ export interface SidebarRenderInput {
 	todos: readonly TodoItem[];
 	agents: readonly AgentRow[];
 	jobs: readonly BashBgJob[];
-	config: Pick<CockpitConfig, "sidebar" | "icons">;
+	config: Pick<CockpitConfig, "sidebar" | "icons" | "staticMode">;
 	width: number;
 	height: number;
 	theme: Theme;
@@ -163,6 +163,7 @@ function agentRows(
 	theme: Theme,
 	glyphs: IconGlyphs,
 	now: number,
+	hideLiveDuration: boolean,
 ): string[] {
 	if (rows.length === 0) return [];
 	const ordered = [...rows].sort((a, b) => {
@@ -174,10 +175,12 @@ function agentRows(
 	return [theme.fg("muted", summary), ...visible.map((row) => {
 		const label = clean(row.name) || clean(row.role) || clean(row.agent) || "agent";
 		const task = clean(row.task);
-		const elapsed = formatDuration((row.finishedAt ?? now) - row.startedAt);
-		return `${paintedStatus(row.status, theme, glyphs)}${glyphs.separator}${theme.fg("syntaxFunction", label)}`
-			+ (task ? `${glyphs.separator}${task}` : "")
-			+ theme.fg("dim", `${glyphs.separator}${elapsed}`);
+		const live = row.status === "running" || row.status === "retrying";
+		const elapsed = hideLiveDuration && live ? "" : formatDuration((row.finishedAt ?? now) - row.startedAt);
+		let line = `${paintedStatus(row.status, theme, glyphs)}${glyphs.separator}${theme.fg("syntaxFunction", label)}`
+			+ (task ? `${glyphs.separator}${task}` : "");
+		if (elapsed !== "") line += theme.fg("dim", `${glyphs.separator}${elapsed}`);
+		return line;
 	})];
 }
 
@@ -187,15 +190,19 @@ function jobRows(
 	theme: Theme,
 	glyphs: IconGlyphs,
 	now: number,
+	hideLiveDuration: boolean,
 ): string[] {
 	if (jobs.length === 0) return [];
 	const summary = compactCounts(jobs, glyphs.separator);
 	const visible = compact ? jobs.slice(0, 1) : jobs;
 	return [theme.fg("muted", summary), ...visible.map((job) => {
 		const command = clean(job.command) || clean(job.id);
-		const elapsed = formatDuration((job.finishedAt ?? now) - job.startedAt);
+		const live = job.status === "running" || job.status === "stopping";
+		const elapsed = hideLiveDuration && live ? "" : formatDuration((job.finishedAt ?? now) - job.startedAt);
 		const exit = job.exitCode === null ? "" : `${glyphs.separator}exit ${job.exitCode}`;
-		return `${paintedStatus(job.status, theme, glyphs)}${glyphs.separator}${command}${theme.fg("dim", `${glyphs.separator}${elapsed}${exit}`)}`;
+		let line = `${paintedStatus(job.status, theme, glyphs)}${glyphs.separator}${command}`;
+		if (elapsed !== "" || exit !== "") line += theme.fg("dim", `${glyphs.separator}${elapsed}${exit}`);
+		return line;
 	})];
 }
 
@@ -350,12 +357,13 @@ export function renderSidebar(input: SidebarRenderInput): string[] {
 	const glyphs = resolveGlyphs(input.config.icons.mode);
 	const compact = width <= 35 || input.config.sidebar.density === "compact";
 	const now = Number.isFinite(input.now) ? input.now : 0;
+	const hideLiveDuration = input.config.staticMode === true;
 	const candidates: SidebarSection[] = [
 		{ title: "Workflow", rows: workflowRows(input.maestro, compact, theme, glyphs) },
 		{ title: "Goal", rows: goalRows(input.maestro, compact, theme, glyphs) },
 		{ title: "Tasks", rows: taskRows(input.todos, compact, theme, glyphs) },
-		{ title: "Agents", rows: agentRows(input.agents, compact, theme, glyphs, now) },
-		{ title: "Jobs", rows: jobRows(input.jobs, compact, theme, glyphs, now) },
+		{ title: "Agents", rows: agentRows(input.agents, compact, theme, glyphs, now, hideLiveDuration) },
+		{ title: "Jobs", rows: jobRows(input.jobs, compact, theme, glyphs, now, hideLiveDuration) },
 		{ title: "Swarm", rows: swarmRows(input.maestro, compact, theme, glyphs) },
 	];
 	const sections = candidates.filter((section) => section.rows.length > 0);

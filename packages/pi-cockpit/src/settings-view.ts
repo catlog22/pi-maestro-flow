@@ -69,6 +69,13 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			next: config.enabled ? "off" : "on",
 		},
 		{
+			key: "staticMode",
+			accel: "m",
+			label: "static mode",
+			value: config.staticMode ? "on" : "off",
+			next: config.staticMode ? "off" : "on",
+		},
+		{
 			key: "quietMode",
 			accel: "q",
 			label: "quiet (reload)",
@@ -173,6 +180,8 @@ export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
 	switch (key) {
 		case "enabled":
 			return { ...config, enabled: !config.enabled };
+		case "staticMode":
+			return { ...config, staticMode: !config.staticMode };
 		case "quietMode":
 			return { ...config, quietMode: !config.quietMode };
 		case "quietSymbols":

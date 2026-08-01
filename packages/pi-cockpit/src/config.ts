@@ -32,6 +32,7 @@ export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 		: base.sidebar.width;
 	return {
 		enabled: typeof o.enabled === "boolean" ? o.enabled : base.enabled,
+		staticMode: typeof o.staticMode === "boolean" ? o.staticMode : base.staticMode,
 		quietMode: typeof o.quietMode === "boolean" ? o.quietMode : base.quietMode,
 		quietSymbols: isQuietSymbolMode(o.quietSymbols) ? o.quietSymbols : base.quietSymbols,
 		toolPalette: isToolPaletteMode(o.toolPalette) ? o.toolPalette : base.toolPalette,

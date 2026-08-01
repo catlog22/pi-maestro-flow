@@ -5,6 +5,7 @@ import {
 	renderFooter,
 	getUsageTotals,
 	invalidateUsageCache,
+	setUsageThrottle,
 	fmtTokens,
 	renderBar,
 	type FooterParts,
@@ -36,6 +37,36 @@ function parts(over: Partial<FooterParts> = {}): FooterParts {
 		...over,
 	};
 }
+
+test("getUsageTotals throttles recompute inside the configured window", (t) => {
+	invalidateUsageCache();
+	setUsageThrottle(() => 10_000);
+	t.after(() => {
+		setUsageThrottle(() => 0);
+		invalidateUsageCache();
+	});
+	const entry = (input: number): unknown => ({
+		type: "message",
+		message: { role: "assistant", usage: { input, output: 1 } },
+	});
+	const entriesA = [entry(10)];
+	const entriesB = [entry(10), entry(20)];
+	const entriesC = [entry(10), entry(20), entry(15)];
+
+	// First computation lands immediately.
+	assert.equal(getUsageTotals(entriesA, 1_000).input, 10);
+	// Changed entries inside the window keep the previous totals on screen.
+	assert.equal(getUsageTotals(entriesB, 5_000).input, 10);
+	assert.equal(getUsageTotals(entriesB, 6_000).input, 10, "same key stays throttled inside the window");
+	// Just before the window elapses, still stale.
+	assert.equal(getUsageTotals(entriesB, 10_999).input, 10);
+	// The same key past the window must recompute — it may not stay stale forever.
+	assert.equal(getUsageTotals(entriesB, 11_000).input, 30);
+	assert.equal(getUsageTotals(entriesB, 20_000).input, 30, "recomputed totals are cached");
+	// A newer key past the new window recomputes from all entries.
+	assert.equal(getUsageTotals(entriesC, 26_000).input, 45);
+	assert.equal(getUsageTotals(entriesC, 30_000).input, 45);
+});
 
 test("getUsageTotals sums assistant usage and skips the rest", () => {
 	invalidateUsageCache();

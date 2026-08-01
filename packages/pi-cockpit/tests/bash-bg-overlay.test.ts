@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { visibleWidth } from "@earendil-works/pi-tui";
-import { BashBgOverlay } from "../src/bash-bg-overlay.ts";
+import { BashBgOverlay, REFRESH_ACK_MS } from "../src/bash-bg-overlay.ts";
 import type { BashBgJob, BashBgStatus } from "../src/types.ts";
 import { resolveGlyphs } from "../src/icons.ts";
 
@@ -45,6 +45,27 @@ function overlay(jobs: BashBgJob[]) {
 	return { component, counts: () => ({ renders, refreshes, closes }) };
 }
 
+test("hideLiveDuration drops the live duration from the job row but keeps the command", () => {
+	const j = job("job-1", "running");
+	const component = new BashBgOverlay({
+		getJobs: () => [j],
+		requestRender: () => {},
+		requestRefresh: () => {},
+		close: () => {},
+		theme,
+		glyphs: resolveGlyphs("nerd"),
+		hideLiveDuration: true,
+	});
+	const lines = component.render(100).join("\n");
+	assert.match(lines, /job-1/, "the row itself stays");
+	assert.doesNotMatch(lines, /10s/, "the live duration is hidden");
+
+	// Detail view: the Duration field disappears for the live job as well.
+	component.handleInput("\r");
+	const detail = component.render(100).join("\n");
+	assert.doesNotMatch(detail, /^Duration|Duration:/m);
+});
+
 test("wide center shows concurrent lifecycle counts and selected job details", () => {
 	const { component } = overlay([
 		job("run", "running"),
@@ -83,6 +104,18 @@ test("Enter opens detailed output tail and Esc returns before closing", () => {
 	assert.match(component.render(80).join("\n"), /Enter detail/);
 	component.handleInput("\x1b");
 	assert.equal(counts().closes, 1);
+});
+
+test("the refresh acknowledgement expires on its own after the window", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout", "Date"] });
+	const { component, counts } = overlay([job("run", "running")]);
+	component.handleInput("\x12");
+	assert.match(component.render(60).join("\n"), /refreshing/);
+	const before = counts().renders;
+	t.mock.timers.tick(REFRESH_ACK_MS + 50);
+	assert.ok(counts().renders > before, "ack expiry schedules its own repaint");
+	assert.doesNotMatch(component.render(60).join("\n"), /refreshing/, "ack is gone without any event");
+	t.mock.timers.reset();
 });
 
 test("keyboard navigation wraps and refresh requests a new authoritative snapshot", () => {

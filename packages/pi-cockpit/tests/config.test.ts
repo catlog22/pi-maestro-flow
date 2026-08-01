@@ -3,6 +3,22 @@ import test from "node:test";
 import { mergeConfig } from "../src/config.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";
 
+test("staticMode merges as a boolean and keeps the default", () => {
+	assert.equal(DEFAULT_CONFIG.staticMode, false);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, {}).staticMode, false);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { staticMode: true }).staticMode, true);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { staticMode: "yes" }).staticMode, false);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { staticMode: null }).staticMode, false);
+});
+
+test("staticMode invalid values fall back to the caller's base", () => {
+	const enabledBase = { ...DEFAULT_CONFIG, staticMode: true };
+	assert.equal(mergeConfig(enabledBase, {}).staticMode, true);
+	assert.equal(mergeConfig(enabledBase, { staticMode: "no" }).staticMode, true);
+	assert.equal(mergeConfig(enabledBase, { staticMode: null }).staticMode, true);
+	assert.equal(mergeConfig(enabledBase, { staticMode: false }).staticMode, false);
+});
+
 test("legacy config without quietSymbols keeps the check default", () => {
 	const config = mergeConfig(DEFAULT_CONFIG, { quietMode: true });
 	assert.equal(config.quietMode, true);

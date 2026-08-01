@@ -97,6 +97,39 @@ function render(overrides: Partial<Parameters<typeof renderSidebar>[0]> = {}): s
 	});
 }
 
+test("static mode hides live durations without trailing separators but keeps frozen ones", () => {
+	const lines = render({
+		config: { ...DEFAULT_CONFIG, staticMode: true },
+		agents: [
+			agents[0],
+			{
+				correlationId: "agent-done",
+				agent: "general",
+				name: "finished",
+				role: "general",
+				task: "Frozen audit",
+				status: "done",
+				tail: "",
+				startedAt: 1_000,
+				lastActivityAt: 2_000,
+				finishedAt: 6_000,
+			},
+		],
+		jobs: [
+			jobs[0],
+			{ ...jobs[0], id: "job-done", command: "npm run lint", status: "completed", exitCode: 0, finishedAt: 6_000 },
+		],
+	});
+	const agentLine = lines.find((line) => line.includes("builder"))!;
+	assert.doesNotMatch(agentLine, /10s/, "live agent duration is hidden");
+	assert.ok(!agentLine.trimEnd().endsWith("|"), "no trailing separator on the live agent row");
+	assert.match(lines.find((line) => line.includes("Frozen audit"))!, /5s/, "frozen duration on a done row survives");
+	const jobLine = lines.find((line) => line.includes("npm test"))!;
+	assert.doesNotMatch(jobLine, /10s/, "live job duration is hidden");
+	assert.ok(!jobLine.trimEnd().endsWith("|"), "no trailing separator on the live job row");
+	assert.match(lines.find((line) => line.includes("npm run lint"))!, /5s/, "frozen duration on a completed job survives");
+});
+
 test("renders all non-empty read-only sections with one full-height left divider", () => {
 	const lines = render();
 	const text = lines.join("\n");

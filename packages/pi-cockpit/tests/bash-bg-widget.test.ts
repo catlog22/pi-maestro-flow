@@ -31,6 +31,31 @@ function running(overrides: Partial<BashBgJob> = {}): BashBgJob {
 	};
 }
 
+test("hideLiveDuration drops the live elapsed but keeps status, counts and hint", () => {
+	const line = renderBashBgSummary([running()], 100, theme, utils, { ...options, hideLiveDuration: true })[0];
+	assert.match(line, /BG/);
+	assert.match(line, /1 running/);
+	assert.doesNotMatch(line, /10s/);
+	assert.match(line, /Alt\+J details/);
+});
+
+test("hideLiveDuration also covers stopping jobs and keeps the static line stable", () => {
+	const stopping = renderBashBgSummary(
+		[running({ status: "stopping" })],
+		100,
+		theme,
+		utils,
+		{ ...options, hideLiveDuration: true },
+	)[0];
+	assert.match(stopping, /stopping/);
+	assert.doesNotMatch(stopping, /\d+s/, "no live elapsed on a stopping job");
+	assert.equal(
+		renderBashBgSummary([running()], 100, theme, utils, { ...options, hideLiveDuration: true, now: 100_000 })[0],
+		renderBashBgSummary([running()], 100, theme, utils, { ...options, hideLiveDuration: true, now: 200_000 })[0],
+		"static output does not drift with now",
+	);
+});
+
 test("summary shows only active count, duration and detail shortcut", () => {
 	const line = renderBashBgSummary(
 		[running({ id: "bg-2", startedAt: 4_000 }), running()],

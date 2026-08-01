@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
 import type { TUI } from "@earendil-works/pi-tui";
-import { resolveGlyphs, spinFrame } from "../src/icons.ts";
+import { resolveGlyphs } from "../src/icons.ts";
 import {
 	ThinkingFoldTimer,
 	findThinkingLabelTargets,
@@ -39,6 +39,7 @@ interface HarnessOptions {
 	hidden?: boolean;
 	enabled?: boolean;
 	settleMs?: number;
+	static?: boolean;
 }
 
 interface Harness {
@@ -48,6 +49,7 @@ interface Harness {
 	renderCalls: () => number;
 	setHidden: (hidden: boolean) => void;
 	setEnabled: (enabled: boolean) => void;
+	setStatic: (staticMode: boolean) => void;
 	setBaseLabel: (label: string | undefined) => void;
 }
 
@@ -55,6 +57,7 @@ const makeHarness = (options: HarnessOptions = {}): Harness => {
 	let nowMs = 1_000;
 	let hidden = options.hidden ?? true;
 	let enabled = options.enabled ?? true;
+	let staticMode = options.static === true;
 	let baseLabel: string | undefined = options.baseLabel === undefined ? "thoughts" : options.baseLabel;
 	let renders = 0;
 	const global: (string | undefined)[] = [];
@@ -67,6 +70,7 @@ const makeHarness = (options: HarnessOptions = {}): Harness => {
 		getGlyphs: () => GLYPHS,
 		isThinkingHidden: () => hidden,
 		isEnabled: () => enabled,
+		isStatic: () => staticMode,
 		setGlobalLabel: (label) => {
 			global.push(label);
 		},
@@ -85,6 +89,9 @@ const makeHarness = (options: HarnessOptions = {}): Harness => {
 		},
 		setEnabled: (value) => {
 			enabled = value;
+		},
+		setStatic: (value) => {
+			staticMode = value;
 		},
 		setBaseLabel: (label) => {
 			baseLabel = label;
@@ -126,19 +133,19 @@ test("formatThinkingDuration formats tenths, seconds and minutes", () => {
 	assert.equal(formatThinkingDuration(3_600_000), "60m00s");
 });
 
-test("a thinking run animates only the newest row and settles its actual duration", () => {
+test("a thinking run ticks a live elapsed with no spinner and settles its duration", () => {
 	const older = fakeTarget();
 	const current = fakeTarget();
 	const h = makeHarness({ tui: fakeTui(older, current) });
 
 	h.timer.onAssistantMessageEvent(ev("thinking_start"));
 	assert.equal(current.labels.length, 1, "first frame paints immediately");
-	assert.equal(current.labels[0], `${spinFrame(GLYPHS, 1_000)} thinking 0.0s`);
+	assert.equal(current.labels[0], "thinking 0.0s", "no spinner prefix on the live label");
 	assert.equal(older.labels.length, 0, "earlier messages are never touched");
 
 	h.advance(3_200);
 	h.timer.tick();
-	assert.equal(current.labels.at(-1), `${spinFrame(GLYPHS, 4_200)} thinking 3.2s`);
+	assert.equal(current.labels.at(-1), "thinking 3.2s");
 	assert.ok(h.renderCalls() >= 2, "instance writes schedule paints");
 
 	h.advance(5_200);
@@ -161,7 +168,6 @@ test("message_end settles an interrupted run while the row is still mounted", ()
 	h.timer.onAssistantMessageEnd();
 	assert.equal(current.labels.at(-1), `thoughts${GLYPHS.separator}5.2s`);
 
-	// The late thinking_end for the same run must not repaint.
 	const painted = current.labels.length;
 	h.timer.onAssistantMessageEvent(ev("thinking_end"));
 	assert.equal(current.labels.length, painted);
@@ -175,7 +181,7 @@ test("stop() drops an active run without settling a duration", () => {
 	h.advance(2_000);
 	h.timer.tick();
 	h.timer.stop();
-	assert.match(current.labels.at(-1) ?? "", /thinking 2\.0s$/, "last paint stays an animation frame");
+	assert.match(current.labels.at(-1) ?? "", /thinking 2\.0s$/, "last paint stays a live frame");
 
 	const painted = current.labels.length;
 	h.advance(2_000);
@@ -184,69 +190,48 @@ test("stop() drops an active run without settling a duration", () => {
 	assert.equal(current.labels.length, painted, "nothing settles after stop");
 });
 
-test("unfolded thinking is left alone", () => {
+test("static mode keeps a stable label and still settles the real duration", () => {
 	const current = fakeTarget();
-	const h = makeHarness({ tui: fakeTui(current), hidden: false });
+	const h = makeHarness({ tui: fakeTui(current), static: true });
 
 	h.timer.onAssistantMessageEvent(ev("thinking_start"));
-	h.advance(2_000);
+	assert.equal(current.labels.length, 1, "one paint at begin, no ticker");
+	assert.equal(current.labels[0], "thoughts", "stable base label, no spinner, no live elapsed");
+
+	h.advance(3_200);
 	h.timer.tick();
+	assert.equal(current.labels.length, 1, "static mode never ticks a live elapsed");
+
+	h.advance(5_200);
 	h.timer.onAssistantMessageEvent(ev("thinking_end"));
-	assert.equal(current.labels.length, 0);
-	assert.equal(h.global.length, 0);
+	assert.equal(current.labels.at(-1), `thoughts${GLYPHS.separator}${formatThinkingDuration(8_400)}`);
 });
 
-test("disabling cockpit stops an active run", () => {
+test("syncMode resumes ticking when static turns off mid-run and freezes it when turning on", () => {
 	const current = fakeTarget();
-	const h = makeHarness({ tui: fakeTui(current) });
+	const h = makeHarness({ tui: fakeTui(current), static: true });
 
 	h.timer.onAssistantMessageEvent(ev("thinking_start"));
-	h.setEnabled(false);
-	h.timer.onAssistantMessageEvent(ev("thinking_delta"));
+	assert.equal(current.labels[0], "thoughts");
 
-	const painted = current.labels.length;
-	h.advance(2_000);
+	// static -> dynamic: the run that began without a ticker starts ticking.
+	h.setStatic(false);
+	h.timer.syncMode();
+	assert.equal(current.labels.at(-1), "thinking 0.0s", "first live frame paints immediately");
+	h.advance(3_200);
+	h.timer.syncMode();
+	assert.equal(current.labels.at(-1), "thinking 3.2s");
+
+	// dynamic -> static: the stable label replaces the live frame and stays.
+	h.setStatic(true);
+	h.timer.syncMode();
+	assert.equal(current.labels.at(-1), "thoughts");
+	h.advance(1_000);
 	h.timer.tick();
-	assert.equal(current.labels.length, painted);
-});
+	assert.equal(current.labels.at(-1), "thoughts", "frozen after the toggle");
 
-test("without reachable components the global label carries animation and settle", async () => {
-	const h = makeHarness({ tui: fakeTui(fakeComponent()), settleMs: 25 });
-
-	h.timer.onAssistantMessageEvent(ev("thinking_start"));
-	assert.equal(h.global[0], `${spinFrame(GLYPHS, 1_000)} thinking 0.0s`);
-
-	h.advance(8_400);
+	// The run still settles its real duration at the end.
+	h.advance(4_200);
 	h.timer.onAssistantMessageEvent(ev("thinking_end"));
-	assert.equal(h.global.at(-1), `thoughts${GLYPHS.separator}8.4s`);
-
-	await new Promise((resolve) => setTimeout(resolve, 80));
-	assert.equal(h.global.at(-1), "thoughts", "base label returns once the settle window passes");
-});
-
-test("reset() cancels a pending global restore", async () => {
-	const h = makeHarness({ tui: undefined, settleMs: 25 });
-
-	h.timer.onAssistantMessageEvent(ev("thinking_start"));
-	h.advance(1_000);
-	h.timer.onAssistantMessageEvent(ev("thinking_end"));
-	const writes = h.global.length;
-
-	h.timer.reset();
-	await new Promise((resolve) => setTimeout(resolve, 80));
-	assert.equal(h.global.length, writes, "no restore fires across a session boundary");
-});
-
-test("the settle restore follows the base label that is current at restore time", async () => {
-	const h = makeHarness({ tui: undefined, settleMs: 25 });
-
-	h.timer.onAssistantMessageEvent(ev("thinking_start"));
-	h.advance(1_000);
-	h.timer.onAssistantMessageEvent(ev("thinking_end"));
-	// Quiet mode toggles off while the final label lingers: the restore must
-	// hand the label back to pi's default, not to the stale quiet label.
-	h.setBaseLabel(undefined);
-
-	await new Promise((resolve) => setTimeout(resolve, 80));
-	assert.equal(h.global.at(-1), undefined);
+	assert.equal(current.labels.at(-1), `thoughts${GLYPHS.separator}${formatThinkingDuration(8_400)}`);
 });

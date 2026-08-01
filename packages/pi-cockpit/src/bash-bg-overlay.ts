@@ -24,14 +24,18 @@ export interface BashBgOverlayParams {
 	glyphs: IconGlyphs;
 	/** Live terminal height, so the card can use the space it already reserves. */
 	getTerminalRows?: () => number | undefined;
+	/** Static mode: hide live durations on running/stopping jobs, like the footer line. */
+	hideLiveDuration?: boolean;
 }
 
 // Rows the card spends on itself: two borders, header, separator, help line.
 const CARD_CHROME_ROWS = 5;
 
 // How long the header keeps acknowledging a manual refresh. The snapshot arrives
-// asynchronously, so without this the keypress looks like it did nothing.
-const REFRESH_ACK_MS = 1_500;
+// asynchronously, so without this the keypress looks like it did nothing. The ack
+// must also expire on its own: when the main redraw loop is stopped (static mode)
+// no unrelated event may come along to repaint it away.
+export const REFRESH_ACK_MS = 1_500;
 
 type BashBgOverlayMode = "list" | "detail";
 
@@ -41,11 +45,15 @@ export class BashBgOverlay implements Component, Focusable {
 	private selected = 0;
 	private selectedId: string | undefined;
 	private refreshedAt = 0;
+	private ackTimer: ReturnType<typeof setTimeout> | undefined;
 
 	constructor(private readonly params: BashBgOverlayParams) {}
 
 	invalidate(): void {}
-	dispose(): void {}
+	dispose(): void {
+		if (this.ackTimer) clearTimeout(this.ackTimer);
+		this.ackTimer = undefined;
+	}
 
 	handleInput(data: string): void {
 		if (data === "\x1b") {
@@ -71,8 +79,15 @@ export class BashBgOverlay implements Component, Focusable {
 		}
 		if (data === "\x12" || data === "\x1b[15~") {
 			// Ctrl+R / F5 — refresh is acknowledged immediately even though the
-			// authoritative snapshot only arrives later.
+			// authoritative snapshot only arrives later. Schedule the ack's own
+			// expiry so it disappears even without any follow-up repaint.
 			this.refreshedAt = Date.now();
+			if (this.ackTimer) clearTimeout(this.ackTimer);
+			this.ackTimer = setTimeout(() => {
+				this.ackTimer = undefined;
+				this.params.requestRender();
+			}, REFRESH_ACK_MS);
+			this.ackTimer.unref?.();
 			this.params.requestRefresh();
 			this.params.requestRender();
 		}
@@ -153,12 +168,16 @@ export class BashBgOverlay implements Component, Focusable {
 
 	private jobRow(job: BashBgJob, selected: boolean, width: number): string {
 		const visual = jobVisual(job.status, this.params.glyphs);
-		const duration = formatDuration((job.finishedAt ?? Date.now()) - job.startedAt);
 		const sep = this.params.glyphs.separator;
+		const live = job.status === "running" || job.status === "stopping";
+		const duration = this.params.hideLiveDuration && live
+			? ""
+			: formatDuration((job.finishedAt ?? Date.now()) - job.startedAt);
 		const exit = job.exitCode === null ? "" : `${sep}exit ${job.exitCode}`;
+		const meta = duration !== "" || exit !== "" ? `${duration}${exit}${sep}` : "";
 		return fitLine(
 			`${selected ? this.params.glyphs.selectMarker : " "} ${this.params.theme.fg(visual.color, visual.glyph)} `
-			+ `${this.orderOf(job)}${sep}${job.status}${sep}${duration}${exit}${sep}${oneLine(job.command)}`,
+			+ `${this.orderOf(job)}${sep}${job.status}${sep}${meta}${oneLine(job.command)}`,
 			width,
 		);
 	}
@@ -167,10 +186,14 @@ export class BashBgOverlay implements Component, Focusable {
 		if (!job) return [fitLine(this.emptyState(), width)];
 		const visual = jobVisual(job.status, this.params.glyphs);
 		const theme = this.params.theme;
+		const live = job.status === "running" || job.status === "stopping";
+		const durationField = this.params.hideLiveDuration && live
+			? []
+			: [field("Duration", formatDuration((job.finishedAt ?? Date.now()) - job.startedAt), width)];
 		const lines: string[] = [
 			fitLine(`${theme.fg(visual.color, theme.bold(`${visual.glyph} ${job.id}`))}${this.params.glyphs.separator}${job.status}`, width),
 			field("PID", String(job.pid), width),
-			field("Duration", formatDuration((job.finishedAt ?? Date.now()) - job.startedAt), width),
+			...durationField,
 			field("Started", formatTimestamp(job.startedAt), width),
 			field("Updated", formatTimestamp(job.updatedAt), width),
 			field("Exit", job.exitCode === null ? this.params.glyphs.dotIdle : String(job.exitCode), width),

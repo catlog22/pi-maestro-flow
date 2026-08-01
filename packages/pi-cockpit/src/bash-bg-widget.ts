@@ -13,6 +13,8 @@ export interface BashBgRenderOptions {
 	now: number;
 	/** Overrides the advertised overlay shortcut when the binding differs. */
 	hint?: string;
+	/** Static mode: drop the live elapsed on running/stopping jobs. */
+	hideLiveDuration?: boolean;
 }
 
 export function renderBashBgSummary(
@@ -34,7 +36,6 @@ export function renderBashBgSummary(
 		stopping ? `${stopping} stopping` : "",
 	].filter(Boolean).join(g.separator);
 	const statusColor: ThemeColor = stopping > 0 ? "warning" : "accent";
-	const elapsed = formatDuration(options.now - current.startedAt);
 	const segments: PrioritizedSegment[] = [
 		{
 			text: theme.fg(statusColor, current.status === "stopping" ? g.blocked : options.spin),
@@ -43,8 +44,11 @@ export function renderBashBgSummary(
 		},
 		{ text: theme.fg("muted", "BG"), priority: 95, clippable: false },
 		{ text: theme.fg(statusColor, counts), priority: 90, clippable: false },
-		{ text: theme.fg("dim", elapsed), priority: 80, clippable: false },
-		{ text: theme.fg("dim", `${options.hint ?? DEFAULT_BASH_BG_HINT} details`), priority: 70, clippable: false },
 	];
+	if (!options.hideLiveDuration) {
+		const elapsed = formatDuration(options.now - current.startedAt);
+		segments.push({ text: theme.fg("dim", elapsed), priority: 80, clippable: false });
+	}
+	segments.push({ text: theme.fg("dim", `${options.hint ?? DEFAULT_BASH_BG_HINT} details`), priority: 70, clippable: false });
 	return [fitLineByPriority(segments, width, utils, theme.fg("dim", g.separator), g.ellipsis)];
 }

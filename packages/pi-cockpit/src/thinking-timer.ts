@@ -17,7 +17,7 @@
 
 import type { AssistantMessageEvent } from "@earendil-works/pi-ai";
 import type { TUI } from "@earendil-works/pi-tui";
-import { ANIMATION_PERIOD_MS, spinFrame, type IconGlyphs } from "./icons.ts";
+import { ANIMATION_PERIOD_MS, type IconGlyphs } from "./icons.ts";
 
 /**
  * Duck-typed AssistantMessageComponent: the two public setters pi gives it.
@@ -77,6 +77,8 @@ export interface ThinkingTimerOptions {
 	/** Effective hideThinkingBlock — labels only render while thinking is folded. */
 	isThinkingHidden: () => boolean;
 	isEnabled: () => boolean;
+	/** Static mode: keep a stable label (no live ticker); duration settles at end. */
+	isStatic?: () => boolean;
 	/** Global label fallback for when no component instance is reachable. */
 	setGlobalLabel: (label: string | undefined) => void;
 	now?: () => number;
@@ -121,10 +123,28 @@ export class ThinkingFoldTimer {
 	/** One animation frame. The internal interval drives it; tests call it directly. */
 	tick(): void {
 		if (this.#startedAt === undefined) return;
+		// Static mode keeps a stable label; the live elapsed only ticks when not static.
+		if (this.#options.isStatic?.()) return;
 		const now = this.#now();
-		const glyphs = this.#options.getGlyphs();
-		const label = `${spinFrame(glyphs, now)} thinking ${formatThinkingDuration(now - (this.#startedAt ?? now))}`;
+		// No spinner prefix: the thinking row shows a live elapsed without any
+		// animated indicator (the host working line is the only spinner left).
+		const label = `thinking ${formatThinkingDuration(now - (this.#startedAt ?? now))}`;
 		this.#paint(label);
+	}
+
+	/** Re-evaluate the label policy after a static-mode toggle mid-run. */
+	syncMode(): void {
+		if (this.#startedAt === undefined) return;
+		if (this.#options.isStatic?.()) {
+			this.#clearTimers();
+			this.#paint(this.#options.getBaseLabel() ?? "thinking");
+			return;
+		}
+		if (!this.#ticker) {
+			this.#ticker = setInterval(() => this.tick(), ANIMATION_PERIOD_MS);
+			this.#ticker.unref?.();
+		}
+		this.tick();
 	}
 
 	/** The agent stopped: drop the run without settling a duration. */
@@ -146,6 +166,11 @@ export class ThinkingFoldTimer {
 		// rendered, so there is nothing to animate and no duration to keep.
 		if (!this.#options.isThinkingHidden()) return;
 		this.#startedAt = this.#now();
+		if (this.#options.isStatic?.()) {
+			// Static mode: a stable label, no live ticker; #finish settles the duration.
+			this.#paint(this.#options.getBaseLabel() ?? "thinking");
+			return;
+		}
 		if (!this.#ticker) {
 			this.#ticker = setInterval(() => this.tick(), ANIMATION_PERIOD_MS);
 			this.#ticker.unref?.();

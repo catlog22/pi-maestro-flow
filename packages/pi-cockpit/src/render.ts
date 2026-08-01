@@ -41,6 +41,12 @@ export interface RenderOpts {
 	now?: number;
 	expanded?: boolean;
 	/**
+	 * Static mode: drop the live elapsed segment on running/retrying rows so the
+	 * line cannot drift between event-driven repaints. Frozen durations on
+	 * completed/failed rows are kept — they no longer move.
+	 */
+	hideLiveDuration?: boolean;
+	/**
 	 * How the user actually toggles the todo panel. `alt+t` is registered by
 	 * pi-maestro-flow, which forwards to cockpit through COCKPIT_TODO_TOGGLE_EVENT,
 	 * so it is accurate in the shipped pairing. A standalone install without that
@@ -258,7 +264,10 @@ export function renderAgents(
 		if (status.label) segs.push({ text: theme.fg(status.color, status.label), priority: 95, clippable: false });
 		segs.push({ text: theme.fg(rc, r.role), priority: 90 });
 		if (r.task) segs.push({ text: r.task, priority: 80, minWidth: 6 });
-		segs.push({ text: theme.fg("muted", formatDuration((r.finishedAt ?? now) - r.startedAt)), priority: 70, clippable: false });
+		const live = r.status === "running" || r.status === "retrying";
+		if (!(opts.hideLiveDuration && live)) {
+			segs.push({ text: theme.fg("muted", formatDuration((r.finishedAt ?? now) - r.startedAt)), priority: 70, clippable: false });
+		}
 		if (r.dependencies?.length) {
 			segs.push({ text: theme.fg("dim", formatDependencies(r.dependencies, g)), priority: 60, clippable: false });
 		}
@@ -329,12 +338,12 @@ interface TodoPaint {
 	struck?: boolean;
 }
 
-function todoPaint(status: TodoItem["status"], glyphs: IconGlyphs, spin: string): TodoPaint {
+function todoPaint(status: TodoItem["status"], glyphs: IconGlyphs): TodoPaint {
 	if (status === "completed") {
 		return { glyph: glyphs.check, glyphColor: "success", subjectColor: "dim", struck: true };
 	}
 	if (status === "in_progress") {
-		return { glyph: spin, glyphColor: "warning", subjectColor: "text", bold: true };
+		return { glyph: glyphs.todoActive, glyphColor: "warning", subjectColor: "text", bold: true };
 	}
 	if (status === "blocked") {
 		return { glyph: glyphs.blocked, glyphColor: "error", subjectColor: "error" };
@@ -359,7 +368,6 @@ export function renderTodos(
 	if (items.length === 0) return [];
 	const g = opts.glyphs;
 	const ell = theme.fg("dim", g.ellipsis);
-	const spin = opts.spin ?? "~";
 	const expanded = opts.expanded !== false;
 	const toggleHint = opts.toggleHint ?? DEFAULT_TOGGLE_HINT;
 
@@ -408,7 +416,7 @@ export function renderTodos(
 	);
 	const next = ordered.find((it) => it.status !== "completed" && it.status !== "blocked" && it.blockedBy.length === 0);
 	if (next) {
-		const np = todoPaint(next.status, g, spin);
+		const np = todoPaint(next.status, g);
 		const nactor = todoActor(next, items, g.transferArrow);
 		const ntext = `${g.arrow} ${theme.fg(np.glyphColor, np.glyph)}${nactor ? ` ${theme.fg("mdLink", nactor)}` : ""} ${todoSubject(np, next.subject, theme)}`;
 		summarySegs.push({ text: ntext, priority: 20, clippable: false });
@@ -446,7 +454,7 @@ export function renderTodos(
 	const hidden = ordered.length - visible.length;
 	const rows: string[] = [summaryLine];
 	for (const it of visible) {
-		const paint = todoPaint(it.status, g, spin);
+		const paint = todoPaint(it.status, g);
 		const actor = todoActor(it, items, g.transferArrow);
 		const segments = [`  ${theme.fg(paint.glyphColor, paint.glyph)}`];
 		if (actor) segments.push(theme.fg("mdLink", actor));
@@ -458,7 +466,7 @@ export function renderTodos(
 		if (it.status === "blocked" && it.blockedBy.length > 0) {
 			for (const dependencyId of it.blockedBy) {
 				const dependency = items.find((candidate) => candidate.id === dependencyId);
-				const depGlyph = dependency ? todoPaint(dependency.status, g, spin).glyph : "?";
+				const depGlyph = dependency ? todoPaint(dependency.status, g).glyph : "?";
 				segments.push(theme.fg("dim", `${g.depArrow} ${depGlyph} ${dependency?.subject ?? "?"}`));
 			}
 		}

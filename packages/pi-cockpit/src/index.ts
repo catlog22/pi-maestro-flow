@@ -12,10 +12,11 @@ import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
 import { ensureThinkingFolded, readHideThinkingBlock } from "./thinking-fold.ts";
 import { ThinkingFoldTimer } from "./thinking-timer.ts";
+import { shouldAnimateFrames, shouldAnimateSidebar, shouldRunTick, type TickPolicyState } from "./tick-policy.ts";
 import { TodoStore } from "./todo-store.ts";
 import { makeTodoWidget, makeAgentWidget, terminalRows } from "./stack-widget.ts";
 import { activeThemeName, ThemePicker } from "./theme-picker.ts";
-import { getUsageTotals, invalidateUsageCache, renderFooter, type PaintTheme, type WidthUtils } from "./footer.ts";
+import { getUsageTotals, invalidateUsageCache, renderFooter, setUsageThrottle, type PaintTheme, type WidthUtils } from "./footer.ts";
 import { collectExtensionStatuses } from "./extension-status.ts";
 import { ANIMATION_PERIOD_MS, resolveGlyphs, spinFrame } from "./icons.ts";
 import { ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
@@ -47,6 +48,8 @@ const BASH_BG_OVERLAY_KEY = "alt+j";
 const SIDEBAR_RESIZE_KEY = "ctrl+shift+r";
 const COCKPIT_STATUS_KEY = "cockpit";
 const WIDTH_POLL_INTERVAL_MS = 250;
+// Static mode keeps token totals fresh enough without recomputing on every message.
+const USAGE_REFRESH_THROTTLE_MS = 10_000;
 // Quiet mode's rename of pi's hidden-thinking label. The live thinking timer
 // derives its final "thoughts · 8.4s" labels from the same word.
 const QUIET_THINKING_LABEL = "thoughts";
@@ -109,14 +112,15 @@ export default function (pi: ExtensionAPI): void {
 	// AgentSession construction — before renderInitialMessages runs.
 	ensureConfigExists();
 	config = loadConfig();
+	// Reads config live, so toggling static mode re-throttles without re-registering.
+	setUsageThrottle(() => (config.staticMode ? USAGE_REFRESH_THROTTLE_MS : 0));
 	if (config.quietMode) {
 		registerQuietTools(pi, () => config);
 		quietToolsRegistered = true;
 	}
 
-	// Live labels for folded thinking rows: a spinner with running elapsed
-	// time while the model thinks, then the actual duration once it settles.
-	// Pi owns the fold; this only renames the label it already renders.
+	// Live elapsed for folded thinking rows — no spinner, just a running timer
+	// while the model thinks, then the settled duration. Pi owns the fold.
 	const thinkingTimer = new ThinkingFoldTimer({
 		getTui: () => capturedTui,
 		requestRender: () => {
@@ -130,6 +134,7 @@ export default function (pi: ExtensionAPI): void {
 		getGlyphs: () => resolveGlyphs(config.icons.mode),
 		isThinkingHidden: () => (lastCtx ? readHideThinkingBlock(lastCtx.cwd) : false),
 		isEnabled: () => config.enabled,
+		isStatic: () => config.staticMode,
 		setGlobalLabel: (label) => {
 			const ctx = lastCtx;
 			if (!ctx || !isTuiContext(ctx)) return;
@@ -178,18 +183,39 @@ export default function (pi: ExtensionAPI): void {
 			// tui may be gone between sessions
 		}
 	};
+	const policy = (): TickPolicyState => ({
+		staticMode: config.staticMode,
+		running,
+		bashActive: bashBg.hasActive(),
+		lingering: agents.hasLingering(),
+		ticking: tick !== undefined,
+	});
 	// True only while a redraw loop is actually running; widgets use it to avoid
 	// painting a frozen spinner frame that reads as a hung UI.
-	const isAnimating = (): boolean => tick !== undefined && (running || bashBg.hasActive());
+	const isAnimating = (): boolean => shouldAnimateFrames(policy());
 	// A failed agent lingers for a while after it completes, and the loop has to
 	// outlive the session that produced it — otherwise the row would sit there
-	// until some unrelated event happened to expire it.
-	const needsTick = (): boolean => running || bashBg.hasActive() || agents.hasLingering();
+	// until some unrelated event happened to expire it. Static mode still keeps
+	// that loop alive: failure retention is correctness, not animation. What it
+	// drops is the running/job churn that used to repaint every quarter second.
+	const needsTick = (): boolean => shouldRunTick(policy());
 	const startTick = (): void => {
 		if (tick) return;
 		tick = setInterval(() => {
-			if (needsTick()) req();
-			else syncTick();
+			if (needsTick()) {
+				// Static mode keeps the loop alive only so lingering rows can expire
+				// (prune is read-driven). The rows themselves are static, so skip the
+				// full repaint and repaint just once when a prune removed something.
+				if (config.staticMode) {
+					const before = agents.size;
+					agents.snapshot();
+					if (agents.size !== before) req();
+				} else {
+					req();
+				}
+			} else {
+				syncTick();
+			}
 		}, ANIMATION_PERIOD_MS);
 		tick.unref?.();
 	};
@@ -267,6 +293,7 @@ export default function (pi: ExtensionAPI): void {
 		}
 	};
 
+
 	const clearWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(STACK_WIDGET_KEY, undefined);
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
@@ -319,7 +346,7 @@ export default function (pi: ExtensionAPI): void {
 			getAgents: () => agents.snapshot(),
 			getJobs: () => bashBg.snapshot(),
 			getConfig: () => config,
-			shouldAnimate: () => running || bashBg.hasActive() || agents.hasLingering(),
+			shouldAnimate: () => shouldAnimateSidebar(policy()),
 			onVisibilityChange: (visible) => {
 				dockEffectiveVisible = visible;
 				const activeCtx = lastCtx;
@@ -424,6 +451,7 @@ export default function (pi: ExtensionAPI): void {
 							glyphs,
 							spin: spinFrame(glyphs, now, isAnimating()),
 							now,
+							hideLiveDuration: config.staticMode,
 						},
 					)[0];
 					return renderFooter({
@@ -593,15 +621,15 @@ export default function (pi: ExtensionAPI): void {
 		req();
 	});
 
-	// --- live labels for folded thinking rows ---
+	// --- live elapsed for folded thinking rows ---
 	pi.on("message_update", (e) => {
 		thinkingTimer.onAssistantMessageEvent(e.assistantMessageEvent);
 	});
 
 	// --- redraw triggers for the footer's live data ---
 	pi.on("message_end", (e, ctx) => {
-		// Settle an interrupted thinking run: message_end fires for aborted
-		// and failed messages too, while the row is still mounted.
+		// Settle an interrupted thinking run: message_end fires for aborted and
+		// failed messages too, while the row is still mounted.
 		if (e.message.role === "assistant") thinkingTimer.onAssistantMessageEnd();
 		invalidateUsageCache();
 		if (isTuiContext(ctx)) req();
@@ -624,6 +652,7 @@ export default function (pi: ExtensionAPI): void {
 				close: () => done(undefined),
 				theme,
 				glyphs: resolveGlyphs(config.icons.mode),
+				hideLiveDuration: config.staticMode,
 				getTerminalRows: () => terminalRows(tui),
 			}), {
 			overlay: true,
@@ -730,6 +759,23 @@ export default function (pi: ExtensionAPI): void {
 		req();
 	};
 
+	const setStaticMode = (target: boolean): boolean => {
+		if (config.staticMode === target) return true;
+		config = { ...config, staticMode: target };
+		const result = saveConfig(config);
+		if (!result.ok) {
+			configProblem = `static mode save failed: ${result.error ?? "unknown error"}`;
+		} else if (configProblem?.startsWith("static mode save failed:")) {
+			configProblem = undefined;
+		}
+		// Restart or stop the animation loop for the new mode: turning static on
+		// must kill a running tick, turning it off must revive one mid-run.
+		syncTick();
+		thinkingTimer.syncMode();
+		req();
+		return result.ok;
+	};
+
 	pi.registerShortcut(BASH_BG_OVERLAY_KEY, {
 		description: "Open background Bash jobs — live status, command, cwd, duration and output tail",
 		async handler(ctx) {
@@ -756,6 +802,7 @@ export default function (pi: ExtensionAPI): void {
 			const candidates = [
 				"quiet", "quiet on", "quiet off", "bg", "jobs", "todo", "todo expand", "todo collapse",
 				"sidebar", "sidebar auto", "sidebar on", "sidebar off", "sidebar resize",
+				"static", "static on", "static off",
 			];
 			const matches = candidates.filter((c) => c.startsWith(query));
 			return matches.length > 0 ? matches.map((c) => ({ value: c, label: c })) : null;
@@ -810,6 +857,28 @@ export default function (pi: ExtensionAPI): void {
 				req();
 				return;
 			}
+			if (action === "static" || action === "static toggle") {
+				const ok = setStaticMode(!config.staticMode);
+				ctx.ui.notify(
+					ok
+						? `Cockpit static mode ${config.staticMode ? "on — live updates reduced" : "off"}`
+						: "Cockpit static mode kept for this session; save failed",
+					ok ? "info" : "warning",
+				);
+				return;
+			}
+			if (action === "static on" || action === "static off") {
+				const target = action === "static on";
+				if (config.staticMode === target) return;
+				const ok = setStaticMode(target);
+				ctx.ui.notify(
+					ok
+						? `Cockpit static mode ${target ? "on — live updates reduced" : "off"}`
+						: "Cockpit static mode kept for this session; save failed",
+					ok ? "info" : "warning",
+				);
+				return;
+			}
 			await openSettings(ctx);
 		},
 	});
@@ -836,6 +905,7 @@ export default function (pi: ExtensionAPI): void {
 			const apply = (key: string): void => {
 				const wasEnabled = config.enabled;
 				const wasQuiet = config.quietMode;
+				const wasStatic = config.staticMode;
 				const wasSidebarMode = config.sidebar.mode;
 				if (key === "theme") {
 					// Delegate: the picker previews live and reverts on Esc, neither of
@@ -884,6 +954,10 @@ export default function (pi: ExtensionAPI): void {
 				}
 				if (wasQuiet !== config.quietMode) {
 					applyQuietMode(ctx, wasQuiet, config.quietMode);
+				}
+				if (wasStatic !== config.staticMode) {
+					syncTick();
+					thinkingTimer.syncMode();
 				}
 				req();
 			};

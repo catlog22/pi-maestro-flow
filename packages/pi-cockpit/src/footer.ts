@@ -42,7 +42,21 @@ export function emptyTotals(): UsageTotals {
 	return { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, latestCacheHitRate: undefined };
 }
 
-let usageCache: { key: string; totals: UsageTotals } | undefined;
+interface UsageCacheEntry {
+	key: string;
+	totals: UsageTotals;
+	computedAt: number;
+}
+
+let usageCache: UsageCacheEntry | undefined;
+// Static mode lowers the token refresh cadence. The getter reads live config so
+// a toggle applies on the next render without re-registering.
+let usageThrottleMs: (() => number) | undefined;
+
+/** Set the wall-clock throttle for token totals; 0/undefined means uncapped. */
+export function setUsageThrottle(getMs: () => number): void {
+	usageThrottleMs = getMs;
+}
 
 function entryIdentity(entry: unknown): string {
 	const e = entry as {
@@ -77,9 +91,18 @@ export function invalidateUsageCache(): void {
 }
 
 // Sum assistant-message usage across session entries (shape: entry.message.usage).
-export function getUsageTotals(entries: readonly unknown[]): UsageTotals {
+export function getUsageTotals(entries: readonly unknown[], now: number = Date.now()): UsageTotals {
 	const key = entriesKey(entries);
 	if (usageCache && usageCache.key === key) return usageCache.totals;
+	const throttleMs = Math.max(0, usageThrottleMs?.() ?? 0);
+	if (throttleMs > 0 && usageCache && now - usageCache.computedAt < throttleMs) {
+		// Within the window: keep the previous totals on screen. The cache entry is
+		// deliberately left untouched (key and computedAt stay put) so a later call
+		// past the window with these same entries still mismatches the cached key
+		// and recomputes — rebinding the new key here would pin stale totals to it
+		// forever, since the key-match fast path above would then win every time.
+		return usageCache.totals;
+	}
 
 	const t = emptyTotals();
 	for (const e of entries) {
@@ -98,7 +121,7 @@ export function getUsageTotals(entries: readonly unknown[]): UsageTotals {
 			}
 		}
 	}
-	usageCache = { key, totals: t };
+	usageCache = { key, totals: t, computedAt: now };
 	return t;
 }
 
