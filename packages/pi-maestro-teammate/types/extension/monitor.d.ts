@@ -139,7 +139,7 @@ export interface EngineCallbacks {
     /** Get current info for a monitored agent. Returns undefined if gone. */
     getAgentInfo: (correlationId: string) => EngineAgentInfo | undefined;
     /** Send an intervention message to an agent. */
-    sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up") => boolean;
+    sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>;
     /** Update the status bar text. */
     onStatusUpdate: (statusText: string | undefined) => void;
     /** Notify the main session (e.g., interaction needed). */

@@ -122,6 +122,158 @@ test("outer timeout is bounded and leaves target lifecycle active", async () => 
   }
 });
 
+test("count settles in completion order and aborts only unfinished observation waits", async () => {
+  let slowAborted = false;
+  const delayedProvider = (kind: string, delayMs: number) => provider(kind, (id, options) => new Promise((resolve) => {
+    const timer = setTimeout(() => resolve(snapshot(kind, id, "completed")), delayMs);
+    options.signal.addEventListener("abort", () => {
+      clearTimeout(timer);
+      if (kind === "test-count-slow") slowAborted = true;
+      resolve(snapshot(kind, id));
+    }, { once: true });
+  }));
+  const disposeSlow = registerObservationProvider(delayedProvider("test-count-slow", 5_000));
+  const disposeFast = registerObservationProvider(delayedProvider("test-count-fast", 5));
+  const disposeMedium = registerObservationProvider(delayedProvider("test-count-medium", 20));
+  try {
+    const result = await observeTargets({
+      action: "wait",
+      waitMode: "count",
+      waitCount: 2,
+      timeoutMs: 1_000,
+      targets: [
+        { kind: "test-count-slow", id: "slow" },
+        { kind: "test-count-fast", id: "fast" },
+        { kind: "test-count-medium", id: "medium" },
+      ],
+    });
+    assert.equal(result.reason, "count");
+    assert.deepEqual(result.observations.map((item) => item.target.id), ["slow", "fast", "medium"]);
+    assert.deepEqual(result.observations.map((item) => item.waitStatus), [undefined, "completed", "completed"]);
+    assert.equal(result.observations[0]?.phase, "active");
+    assert.equal(slowAborted, true);
+  } finally {
+    disposeSlow();
+    disposeFast();
+    disposeMedium();
+  }
+});
+
+test("external abort reaches an in-flight provider without converting target lifecycle to terminal", async () => {
+  let providerAborted = false;
+  const dispose = registerObservationProvider(provider("test-external-abort", (id, options) => new Promise((resolve) => {
+    options.signal.addEventListener("abort", () => {
+      providerAborted = true;
+      resolve(snapshot("test-external-abort", id));
+    }, { once: true });
+  })));
+  const controller = new AbortController();
+  try {
+    const waiting = observeTargets({
+      action: "wait",
+      targets: [{ kind: "test-external-abort", id: "still-running" }],
+      timeoutMs: 60_000,
+    }, controller.signal);
+    await Promise.resolve();
+    controller.abort();
+    const result = await waiting;
+    assert.equal(result.reason, "aborted");
+    assert.equal(result.observations[0]?.phase, "active");
+    assert.equal(result.observations[0]?.waitStatus, "aborted");
+    assert.equal(providerAborted, true);
+  } finally {
+    dispose();
+  }
+});
+
+test("abort before provider startup prevents the queued wait from running", async () => {
+  let waitCalls = 0;
+  const dispose = registerObservationProvider(provider("test-pre-start-abort", async (id) => {
+    waitCalls += 1;
+    return snapshot("test-pre-start-abort", id, "completed");
+  }));
+  const controller = new AbortController();
+  try {
+    const waiting = observeTargets({
+      action: "wait",
+      targets: [{ kind: "test-pre-start-abort", id: "not-started" }],
+      timeoutMs: 60_000,
+    }, controller.signal);
+    controller.abort();
+    const result = await waiting;
+    await Promise.resolve();
+    assert.equal(result.reason, "aborted");
+    assert.equal(waitCalls, 0);
+  } finally {
+    dispose();
+  }
+});
+
+test("all treats provider failures and unknown kinds as settled while preserving error identity", async () => {
+  const dispose = registerObservationProvider(provider("test-reject", async () => {
+    throw new Error("provider exploded");
+  }));
+  try {
+    const result = await observeTargets({
+      action: "wait",
+      waitMode: "all",
+      timeoutMs: 1_000,
+      targets: [
+        { kind: "test-reject", id: "broken" },
+        { kind: "missing-provider", id: "unknown" },
+      ],
+    });
+    assert.equal(result.reason, "all");
+    assert.deepEqual(result.observations.map((item) => item.waitStatus), ["failed", "not-found"]);
+    assert.deepEqual(result.observations.map((item) => item.found), [false, false]);
+    assert.match(result.observations[0]?.error ?? "", /provider exploded/);
+    assert.match(result.observations[1]?.error ?? "", /No observation provider/);
+  } finally {
+    dispose();
+  }
+});
+
+test("duplicate targets remain positional and invoke the provider independently", async () => {
+  let waits = 0;
+  const dispose = registerObservationProvider(provider("test-duplicate", async (id) => {
+    waits += 1;
+    return snapshot("test-duplicate", id, "completed");
+  }));
+  try {
+    const result = await observeTargets({
+      action: "wait",
+      waitMode: "all",
+      targets: [
+        { kind: "test-duplicate", id: "same" },
+        { kind: "test-duplicate", id: "same" },
+      ],
+      timeoutMs: 1_000,
+    });
+    assert.equal(result.reason, "all");
+    assert.equal(waits, 2);
+    assert.equal(result.observations.length, 2);
+    assert.deepEqual(result.observations.map((item) => item.target.id), ["same", "same"]);
+  } finally {
+    dispose();
+  }
+});
+
+test("count validation rejects missing and out-of-range thresholds", async () => {
+  await assert.rejects(
+    observeTargets({ action: "wait", waitMode: "count", targets: [{ kind: "test", id: "one" }] }),
+    /waitCount must be between 1 and the number of targets/,
+  );
+  await assert.rejects(
+    observeTargets({
+      action: "wait",
+      waitMode: "count",
+      waitCount: 2,
+      targets: [{ kind: "test", id: "one" }],
+    }),
+    /waitCount must be between 1 and the number of targets/,
+  );
+});
+
 test("provider disposal cannot remove a newer replacement", () => {
   const first = provider("test-replace", async (id) => snapshot("test-replace", id));
   const second = provider("test-replace", async (id) => snapshot("test-replace", id));

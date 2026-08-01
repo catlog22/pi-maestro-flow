@@ -361,7 +361,7 @@ export interface EngineCallbacks {
   /** Get current info for a monitored agent. Returns undefined if gone. */
   getAgentInfo: (correlationId: string) => EngineAgentInfo | undefined;
   /** Send an intervention message to an agent. */
-  sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up") => boolean;
+  sendIntervention: (correlationId: string, message: string, mode: "steer" | "follow_up") => boolean | Promise<boolean>;
   /** Update the status bar text. */
   onStatusUpdate: (statusText: string | undefined) => void;
   /** Notify the main session (e.g., interaction needed). */
@@ -561,7 +561,7 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
     }
 
     if (heuristic.needsIntervention && heuristic.message && canIntervene(binding, now)) {
-      const sent = cb.sendIntervention(cid, heuristic.message, "steer");
+      const sent = await cb.sendIntervention(cid, heuristic.message, "steer");
       if (sent) {
         recordIntervention(binding, heuristic.reason!, heuristic.message, "steer");
         interventionCount++;
@@ -575,7 +575,7 @@ export async function engineTick(engine: MonitorEngineState): Promise<number> {
       if (result) {
         binding.driftDetected = result.status === "drift";
         if (result.status === "drift" && result.action === "send" && result.message && canIntervene(binding, now)) {
-          const sent = cb.sendIntervention(cid, result.message, "steer");
+          const sent = await cb.sendIntervention(cid, result.message, "steer");
           if (sent) {
             recordIntervention(binding, binding.mode === "custom" ? "custom" : "drift", result.message, "steer");
             interventionCount++;

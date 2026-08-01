@@ -13,6 +13,8 @@ export interface MonitorSessionRow {
     agentRole: string;
     status: string;
     idleSeconds: number;
+    /** Session/owner source; "local" for the current root process. */
+    source?: string;
     /** Whether this session already has a monitor binding. */
     bound: boolean;
 }

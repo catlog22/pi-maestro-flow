@@ -216,12 +216,15 @@ export async function observeTargets(params: ObserveParams, signal?: AbortSignal
     params.targets.forEach((target, index) => {
       const provider = getObservationProvider(target.kind);
       const wait = provider
-        ? Promise.resolve().then(() => provider.wait(target.id, {
-            detail: options.detail,
-            lines: options.lines,
-            deadline,
-            signal: controller.signal,
-          })).catch((error) => failedObservation(target, error))
+        ? Promise.resolve().then(() => {
+            if (controller.signal.aborted) return pendingObservation(target);
+            return provider.wait(target.id, {
+              detail: options.detail,
+              lines: options.lines,
+              deadline,
+              signal: controller.signal,
+            });
+          }).catch((error) => failedObservation(target, error))
         : Promise.resolve(unavailable(target, "not-found", `No observation provider for kind \"${target.kind}\".`));
 
       void wait.then((observation) => {

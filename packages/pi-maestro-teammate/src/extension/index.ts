@@ -56,6 +56,20 @@ import {
   type AnalysisResult,
 } from "./monitor.ts";
 import {
+  createWorkspacePeerCommandConsumer,
+  createWorkspacePeerRuntime,
+  discoverWorkspacePeers,
+  resolveWorkspaceTarget,
+  sendWorkspacePeerCommand,
+  type WorkspaceAgentSnapshot,
+  type WorkspaceOwnerSnapshot,
+  type WorkspaceOwnerState,
+  type WorkspacePeerCommandConsumer,
+  type WorkspacePeerPublisher,
+  type WorkspaceResolvedTarget,
+  type WorkspaceSettledSnapshot,
+} from "./workspace-peers.ts";
+import {
   runSingleTeammate,
   runGraph,
   normalizeTeammateParams,
@@ -480,6 +494,62 @@ function appendAgentProgressLine(
     truncateUtf8Tail(`${marker} │ ${lastLine}`, AGENT_BUFFER_LIMITS.logLineBytes),
   );
   trimAgentBuffers(agent);
+}
+
+export function buildWorkspaceOwnerState(
+  state: TeammateState,
+  sessionName?: string,
+): WorkspaceOwnerState {
+  const agents: WorkspaceAgentSnapshot[] = [];
+  const settledById = new Map<string, WorkspaceSettledSnapshot>();
+  for (const agent of state.activeRuns.values()) {
+    const summary = agent.lastResult?.split("\n", 1)[0]
+      ?? [...agent.outputLog].reverse().find((line) => typeof line === "string" && line.trim().length > 0);
+    if (agent.status === "completed" || agent.status === "failed") {
+      settledById.set(agent.correlationId, {
+        correlationId: agent.correlationId,
+        ...(agent.name ? { name: agent.name } : {}),
+        agent: agent.agent,
+        status: agent.status,
+        settledAt: agent.failedAt ?? agent.sleptAt ?? agent.lastActivityAt,
+        ...(summary ? { summary: truncateUtf8Tail(summary, 8_192) } : {}),
+      });
+      continue;
+    }
+    agents.push({
+      correlationId: agent.correlationId,
+      ...(agent.name ? { name: agent.name } : {}),
+      agent: agent.agent,
+      status: agent.status,
+      startedAt: agent.startedAt,
+      lastActivityAt: agent.lastActivityAt,
+      ...(agent.resultReadyAt === undefined ? {} : { resultReadyAt: agent.resultReadyAt }),
+      ...(summary ? { summary: truncateUtf8Tail(summary, 8_192) } : {}),
+      ...(agent.inbox[0]?.payload ? { objective: truncateUtf8Tail(agent.inbox[0].payload, 8_192) } : {}),
+      outputTail: agent.outputLog.slice(-20).map((line) => truncateUtf8Tail(line, 8_192)),
+      pendingInteractions: agent.pendingInteractions?.size ?? 0,
+      depth: agent.depth,
+      ...(agent.spawnedBy ? { parentCorrelationId: agent.spawnedBy } : {}),
+      wakeable: agent.status === "sleeping",
+    });
+  }
+  for (const record of state.recentlySettled?.values() ?? []) {
+    if (agents.some((agent) => agent.correlationId === record.correlationId)) continue;
+    settledById.set(record.correlationId, {
+      correlationId: record.correlationId,
+      ...(record.name ? { name: record.name } : {}),
+      agent: record.agent,
+      status: record.status === "completed" ? "completed" : "failed",
+      settledAt: record.settledAt,
+      ...(record.lastResult ? { summary: truncateUtf8Tail(record.lastResult.split("\n", 1)[0], 8_192) } : {}),
+    });
+  }
+  return {
+    agents,
+    settled: [...settledById.values()],
+    ...(state.currentSessionId ? { sessionId: state.currentSessionId } : {}),
+    ...(sessionName ? { sessionName } : {}),
+  };
 }
 
 /** Agents that still hold (or are about to hold) a child process. */
@@ -1961,6 +2031,170 @@ export default function registerTeammateExtension(
   state.cancelInteractions = (correlationId, reason) =>
     void interactionQueue.cancelForAgent(correlationId, reason);
 
+  let workspacePeerPublisher: WorkspacePeerPublisher | undefined;
+  let workspacePeerConsumer: WorkspacePeerCommandConsumer | undefined;
+  let workspacePeerSessionName: string | undefined;
+  let workspacePeerOwners: WorkspaceOwnerSnapshot[] = [];
+  let workspacePeerRefresh: Promise<WorkspaceOwnerSnapshot[]> | undefined;
+  let workspacePeerLifecycle = Promise.resolve();
+
+  const markWorkspacePeerDirty = (): void => workspacePeerPublisher?.markDirty();
+
+  const refreshWorkspacePeerOwners = async (): Promise<WorkspaceOwnerSnapshot[]> => {
+    if (workspacePeerRefresh) return workspacePeerRefresh;
+    const publisher = workspacePeerPublisher;
+    if (!publisher) return [];
+    workspacePeerRefresh = discoverWorkspacePeers(publisher.identity, { cleanupStale: true })
+      .then((result) => {
+        workspacePeerOwners = result.peers;
+        return workspacePeerOwners;
+      })
+      .catch((error) => {
+        console.error("[pi-maestro-teammate] workspace peer discovery failed:", error);
+        return workspacePeerOwners;
+      })
+      .finally(() => {
+        workspacePeerRefresh = undefined;
+      });
+    return workspacePeerRefresh;
+  };
+
+  const workspaceBindingKey = (target: WorkspaceResolvedTarget): string => target.scope === "local"
+    ? target.agent.correlationId
+    : `${target.ownerId}:${target.agent.correlationId}`;
+
+  const targetForWorkspaceBinding = (bindingKey: string): WorkspaceResolvedTarget | undefined => {
+    const publisher = workspacePeerPublisher;
+    if (!publisher) return undefined;
+    const separator = bindingKey.indexOf(":");
+    if (separator === 32) {
+      const ownerId = bindingKey.slice(0, separator);
+      const correlationId = bindingKey.slice(separator + 1);
+      const owner = workspacePeerOwners.find((candidate) => candidate.ownerId === ownerId);
+      const agent = owner?.agents.find((candidate) => candidate.correlationId === correlationId)
+        ?? owner?.settled.find((candidate) => candidate.correlationId === correlationId);
+      if (!owner || !agent) return undefined;
+      return {
+        scope: "remote",
+        ownerId,
+        ownerNonce: owner.ownerNonce,
+        state: owner.agents.includes(agent as WorkspaceAgentSnapshot) ? "active" : "settled",
+        agent,
+      };
+    }
+    const localState = buildWorkspaceOwnerState(state, workspacePeerSessionName);
+    const agent = localState.agents.find((candidate) => candidate.correlationId === bindingKey)
+      ?? localState.settled?.find((candidate) => candidate.correlationId === bindingKey);
+    if (!agent) return undefined;
+    return {
+      scope: "local",
+      ownerId: publisher.identity.ownerId,
+      ownerNonce: publisher.identity.ownerNonce,
+      state: localState.agents.includes(agent as WorkspaceAgentSnapshot) ? "active" : "settled",
+      agent,
+    };
+  };
+
+  const resolveWorkspaceMonitorTarget = (query: string): WorkspaceResolvedTarget | undefined => {
+    const publisher = workspacePeerPublisher;
+    if (!publisher) return undefined;
+    try {
+      return resolveWorkspaceTarget(
+        query,
+        publisher.identity,
+        buildWorkspaceOwnerState(state, workspacePeerSessionName),
+        workspacePeerOwners,
+      );
+    } catch {
+      return undefined;
+    }
+  };
+
+  const deliverLocalAgentMessage = (
+    correlationId: string,
+    targetLabel: string,
+    message: string,
+    requestedMode: "steer" | "follow_up",
+  ): { delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean } => {
+    const agent = state.activeRuns.get(correlationId);
+    if (!agent?.stdin?.writable) return { delivered: false, error: `Agent "${targetLabel}" is no longer running.` };
+    if (!agent.lease || !canChildWrite(agent.lease)) {
+      const ownership = agent.lease ? `${agent.lease.owner} (${agent.lease.state})` : "an unavailable lease";
+      return { delivered: false, error: `Agent "${targetLabel}" is currently owned by ${ownership}.` };
+    }
+    const mode: RpcMessageMode = agent.status === "sleeping" ? "prompt" : requestedMode;
+    const sent = sendRpcMessage(agent.stdin, message, mode, leaseToken(agent.lease));
+    if (!sent) return { delivered: false, error: `Failed to send message to "${targetLabel}".` };
+
+    const now = Date.now();
+    if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+    const wasSleeping = wakeSleepingAgent(pi, agent, now);
+    agent.inbox.push({
+      id: randomUUID(),
+      from: "caller",
+      to: targetLabel,
+      kind: "task",
+      payload: message,
+      timestamp: now,
+    });
+    agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);
+    trimAgentBuffers(agent);
+    agent.lastActivityAt = now;
+    pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+      correlationId,
+      from: "caller",
+      to: targetLabel,
+      mode,
+      message,
+      lastActivityAt: now,
+      isSend: true,
+    });
+    markWorkspacePeerDirty();
+    return { delivered: true, mode, wasSleeping };
+  };
+
+  const stopWorkspacePeers = async (): Promise<void> => {
+    const consumer = workspacePeerConsumer;
+    const publisher = workspacePeerPublisher;
+    workspacePeerConsumer = undefined;
+    workspacePeerPublisher = undefined;
+    workspacePeerOwners = [];
+    await consumer?.stop().catch(() => undefined);
+    await publisher?.stop().catch(() => undefined);
+  };
+
+  const startWorkspacePeers = (ctx: ExtensionContext): void => {
+    const cwd = ctx.cwd;
+    workspacePeerSessionName = ctx.sessionManager?.getSessionName?.() ?? undefined;
+    workspacePeerLifecycle = workspacePeerLifecycle
+      .then(async () => {
+        await stopWorkspacePeers();
+        const publisher = createWorkspacePeerRuntime({
+          cwd,
+          getState: () => buildWorkspaceOwnerState(state, workspacePeerSessionName),
+        });
+        await publisher.start();
+        workspacePeerPublisher = publisher;
+        const consumer = createWorkspacePeerCommandConsumer(publisher.identity, (command) => {
+          const target = state.activeRuns.get(command.targetCorrelationId);
+          if (!target) return { status: "rejected" as const, message: "target agent is not owned by this session" };
+          const delivered = deliverLocalAgentMessage(
+            command.targetCorrelationId,
+            target.name ?? command.targetCorrelationId.slice(0, 8),
+            command.message,
+            command.action,
+          );
+          return delivered.delivered
+            ? { status: "accepted" as const, message: delivered.mode ?? command.action }
+            : { status: "rejected" as const, message: delivered.error ?? "message was not delivered" };
+        });
+        consumer.start();
+        workspacePeerConsumer = consumer;
+        await refreshWorkspacePeerOwners();
+      })
+      .catch((error) => console.error("[pi-maestro-teammate] workspace peer runtime failed:", error));
+  };
+
   const enqueueChildInteraction = (
     event: Record<string, unknown>,
     reply: (msg: unknown) => void,
@@ -2925,6 +3159,7 @@ export default function registerTeammateExtension(
           isSend: true,
         });
         const terminated = killAgentTree(state, cid);
+        markWorkspacePeerDirty();
         return {
           content: [{
             type: "text",
@@ -2934,60 +3169,26 @@ export default function registerTeammateExtension(
           details: { delivered: true },
         };
       }
-      if (!agent?.stdin?.writable) {
-        state.namedAgents.delete(params.to);
-        return {
-          content: [{ type: "text", text: `Agent "${params.to}" is no longer running.` }],
-          isError: true,
-          details: { delivered: false },
-        };
-      }
-
-      const writableLease = agent.lease;
-      if (!writableLease || !canChildWrite(writableLease)) {
-        const ownership = writableLease
-          ? `${writableLease.owner} (${writableLease.state})`
-          : "an unavailable lease";
-        return {
-          content: [{ type: "text", text: `Agent "${params.to}" is currently owned by ${ownership}.` }],
-          isError: true,
-          details: { delivered: false },
-        };
-      }
-
-      const mode: RpcMessageMode = agent.status === "sleeping" && requestedMode !== "abort"
-        ? "prompt"
-        : requestedMode;
-      const sent = sendRpcMessage(agent.stdin, message, mode, agent.lease ? leaseToken(agent.lease) : undefined);
-      if (!sent) {
-        return {
-          content: [{ type: "text", text: `Failed to send message to "${params.to}".` }],
-          isError: true,
-          details: { delivered: false },
-        };
-      }
-
-      const now = Date.now();
-      if (mode === "prompt") agent.promptSeq = (agent.promptSeq ?? 0) + 1;
-      const wasSleeping = mode !== "abort" && wakeSleepingAgent(pi, agent, now);
-      agent.inbox.push({ id: randomUUID(), from: "caller", to: params.to, kind: mode === "abort" ? "notification" : "task", payload: message, timestamp: now });
-      agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ ${mode}: ${message.slice(0, 100)}`);
-      trimAgentBuffers(agent);
-      agent.lastActivityAt = now;
-
-      pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
-        correlationId: cid,
-        from: "caller",
-        to: params.to,
-        mode,
+      const delivery = deliverLocalAgentMessage(
+        cid,
+        params.to,
         message,
-        lastActivityAt: now,
-        isSend: true,
-      });
+        requestedMode === "steer" ? "steer" : "follow_up",
+      );
+      if (!delivery.delivered) {
+        if (!state.activeRuns.get(cid)?.stdin?.writable) state.namedAgents.delete(params.to);
+        return {
+          content: [{ type: "text", text: delivery.error ?? `Failed to send message to "${params.to}".` }],
+          isError: true,
+          details: { delivered: false },
+        };
+      }
 
-      const modeLabel = wasSleeping ? "woken up + prompt" : mode === "steer" ? "interrupted + injected" : "queued after current turn";
+      const modeLabel = delivery.wasSleeping
+        ? "woken up + prompt"
+        : delivery.mode === "steer" ? "interrupted + injected" : "queued after current turn";
       return {
-        content: [{ type: "text", text: `Message ${modeLabel} for "${params.to}".${wasSleeping ? " Agent woken up." : ""}` }],
+        content: [{ type: "text", text: `Message ${modeLabel} for "${params.to}".${delivery.wasSleeping ? " Agent woken up." : ""}` }],
         isError: false,
         details: { delivered: true },
       };
@@ -3038,7 +3239,53 @@ export default function registerTeammateExtension(
           details: { agents: entries },
         };
       }
-      const { entries, text } = buildAgentList(state, view);
+      await workspacePeerLifecycle;
+      await refreshWorkspacePeerOwners();
+      const local = buildAgentList(state, view);
+      const remoteEntries = workspacePeerOwners.flatMap((owner) => {
+        const active = owner.agents
+          .filter((agent) => view !== "named" || Boolean(agent.name))
+          .map((agent) => ({
+            agent: agent.agent,
+            name: agent.name,
+            correlationId: agent.correlationId,
+            status: agent.status,
+            startedAt: new Date(agent.startedAt).toISOString(),
+            durationMs: Math.max(0, Date.now() - agent.startedAt),
+            idleMs: Math.max(0, Date.now() - agent.lastActivityAt),
+            depth: agent.depth ?? 0,
+            parentCorrelationId: agent.parentCorrelationId,
+            ownerId: owner.ownerId,
+            sessionId: owner.sessionId,
+            sessionName: owner.sessionName,
+            source: "workspace-peer",
+          }));
+        if (view !== "all") return active;
+        return [...active, ...owner.settled.map((agent) => ({
+          agent: agent.agent,
+          name: agent.name,
+          correlationId: agent.correlationId,
+          status: agent.status,
+          startedAt: new Date(agent.settledAt).toISOString(),
+          durationMs: 0,
+          idleMs: Math.max(0, Date.now() - agent.settledAt),
+          depth: 0,
+          ownerId: owner.ownerId,
+          sessionId: owner.sessionId,
+          sessionName: owner.sessionName,
+          source: "workspace-peer",
+        }))];
+      });
+      const remoteText = remoteEntries.map((entry) => {
+        const icon = entry.status === "failed" ? "✗" : entry.status === "completed" ? "✓" : "●";
+        const identity = entry.name ? `[${entry.agent}] name="${entry.name}"` : `[${entry.agent}]`;
+        const source = entry.sessionName ?? `owner ${entry.ownerId.slice(0, 8)}`;
+        return `${icon} ${identity} · id=${entry.correlationId.slice(0, 8)} · ${entry.status} · workspace peer ${source}`;
+      }).join("\n");
+      const text = remoteEntries.length === 0
+        ? local.text
+        : local.entries.length === 0 ? remoteText : `${local.text}\n${remoteText}`;
+      const entries = [...local.entries, ...remoteEntries];
 
       return {
         content: [{ type: "text", text }],
@@ -3163,34 +3410,64 @@ export default function registerTeammateExtension(
   // ---------------------------------------------------------------------------
 
   const monitorEngine: MonitorEngineState = createEngineState();
+  let monitorPeerRefreshTimer: ReturnType<typeof setInterval> | undefined;
 
-  /** Build EngineAgentInfo from an ActiveAgent. */
-  function buildEngineAgentInfo(correlationId: string): EngineAgentInfo | undefined {
-    const agent = state.activeRuns.get(correlationId);
-    if (!agent) return undefined;
-    const label = agent.name ?? correlationId.slice(0, 8);
-    const objective = agent.inbox.length > 0 ? agent.inbox[0].payload.slice(0, 500) : "";
+  /** Build EngineAgentInfo from a local agent or a cached remote snapshot. */
+  function buildEngineAgentInfo(bindingKey: string): EngineAgentInfo | undefined {
+    const localAgent = state.activeRuns.get(bindingKey);
+    if (localAgent) {
+      const label = localAgent.name ?? bindingKey.slice(0, 8);
+      const objective = localAgent.inbox.length > 0 ? localAgent.inbox[0].payload.slice(0, 500) : "";
+      return {
+        correlationId: bindingKey,
+        name: label,
+        status: localAgent.status,
+        idleSeconds: Math.round((Date.now() - localAgent.lastActivityAt) / 1000),
+        outputTail: localAgent.outputLog.slice(-20),
+        objective,
+        hasPendingInteractions: (localAgent.pendingInteractions?.size ?? 0) > 0,
+      };
+    }
+    const target = targetForWorkspaceBinding(bindingKey);
+    if (!target || target.scope !== "remote") return undefined;
+    const remote = target.agent;
+    if (target.state === "settled" && remote.status !== "failed") return undefined;
+    const owner = workspacePeerOwners.find((candidate) => candidate.ownerId === target.ownerId);
     return {
-      correlationId,
-      name: label,
-      status: agent.status,
-      idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
-      outputTail: agent.outputLog.slice(-20),
-      objective,
-      hasPendingInteractions: (agent.pendingInteractions?.size ?? 0) > 0,
+      correlationId: bindingKey,
+      name: remote.name ?? remote.correlationId.slice(0, 8),
+      status: remote.status,
+      idleSeconds: Math.round((Date.now() - ("lastActivityAt" in remote ? remote.lastActivityAt : remote.settledAt)) / 1000),
+      outputTail: "outputTail" in remote ? (remote.outputTail ?? []) : remote.summary ? [remote.summary] : [],
+      objective: "objective" in remote ? (remote.objective ?? "") : "",
+      hasPendingInteractions: "pendingInteractions" in remote && (remote.pendingInteractions ?? 0) > 0,
+      ...(owner?.sessionName ? { name: `${remote.name ?? remote.correlationId.slice(0, 8)} [${owner.sessionName}]` } : {}),
     };
   }
 
   /** Start the monitor engine with wired callbacks. */
   function startMonitorEngine(ctx: ExtensionContext): void {
+    if (monitorPeerRefreshTimer) clearInterval(monitorPeerRefreshTimer);
+    void refreshWorkspacePeerOwners();
+    monitorPeerRefreshTimer = setInterval(() => void refreshWorkspacePeerOwners(), 5_000);
+    monitorPeerRefreshTimer.unref?.();
     startEngine(monitorEngine, {
       getAgentInfo: buildEngineAgentInfo,
-      sendIntervention: (cid, message, mode) => {
-        const agent = state.activeRuns.get(cid);
-        if (!agent?.stdin) return false;
-        sendRpcMessage(agent.stdin, message, mode);
-        agent.outputLog.push(`[monitor] ${mode}: ${message.slice(0, 100)}`);
-        return true;
+      sendIntervention: async (bindingKey, message, mode) => {
+        const target = targetForWorkspaceBinding(bindingKey);
+        if (!target || target.state !== "active") return false;
+        if (target.scope === "local") {
+          return deliverLocalAgentMessage(
+            target.agent.correlationId,
+            target.agent.name ?? target.agent.correlationId.slice(0, 8),
+            message,
+            mode,
+          ).delivered;
+        }
+        const publisher = workspacePeerPublisher;
+        if (!publisher) return false;
+        const result = await sendWorkspacePeerCommand(publisher.identity, target, mode, message);
+        return result.response?.status === "accepted";
       },
       onStatusUpdate: (text) => ctx.ui.setStatus(MONITOR_STATUS_KEY, text),
       notifyMain: (message) => {
@@ -3222,6 +3499,8 @@ export default function registerTeammateExtension(
 
   /** Stop the monitor engine and clear status. */
   function stopMonitorEngine(ctx: ExtensionContext): void {
+    if (monitorPeerRefreshTimer) clearInterval(monitorPeerRefreshTimer);
+    monitorPeerRefreshTimer = undefined;
     stopEngine(monitorEngine);
     clearBindings(monitorEngine);
     ctx.ui.setStatus(MONITOR_STATUS_KEY, undefined);
@@ -4105,13 +4384,39 @@ export default function registerTeammateExtension(
   // /monitor — user-only monitor mode lifecycle
   // ---------------------------------------------------------------------------
 
+  function monitorSessionRows(): MonitorSessionRow[] {
+    const localRows: MonitorSessionRow[] = [...state.activeRuns.values()].map((agent) => ({
+      correlationId: agent.correlationId,
+      displayName: agent.name ?? agent.correlationId.slice(0, 8),
+      agentRole: agent.agent,
+      status: agent.status,
+      idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
+      bound: monitorEngine.bindings.has(agent.correlationId),
+      source: "local",
+    }));
+    const remoteRows = workspacePeerOwners.flatMap((owner) => owner.agents.map((agent) => {
+      const key = `${owner.ownerId}:${agent.correlationId}`;
+      return {
+        correlationId: key,
+        displayName: agent.name ?? agent.correlationId.slice(0, 8),
+        agentRole: agent.agent,
+        status: agent.status,
+        idleSeconds: Math.round((Date.now() - agent.lastActivityAt) / 1000),
+        bound: monitorEngine.bindings.has(key),
+        source: owner.sessionName ?? `remote:${owner.ownerId.slice(0, 6)}`,
+      } satisfies MonitorSessionRow;
+    }));
+    return [...localRows, ...remoteRows];
+  }
+
   pi.registerCommand("monitor", {
     description: "Monitor: /monitor <targets...> [auto|custom:<prompt>] | /monitor exit | /monitor [status]",
     getArgumentCompletions(prefix: string) {
-      const agents = [...state.activeRuns.values()].map((a) => ({
-        value: a.name ?? a.correlationId.slice(0, 8),
-        label: a.name ?? a.correlationId.slice(0, 8),
-        description: `${a.agent} · ${a.status}`,
+      void refreshWorkspacePeerOwners();
+      const agents = monitorSessionRows().map((agent) => ({
+        value: agent.displayName,
+        label: agent.displayName,
+        description: `${agent.agentRole} · ${agent.status}${agent.source === "local" ? "" : ` · ${agent.source}`}`,
       }));
       const commands = [
         { value: "exit", label: "exit", description: "Stop monitoring and clear bindings" },
@@ -4125,17 +4430,12 @@ export default function registerTeammateExtension(
     },
     async handler(args: string, ctx) {
       const trimmed = args.trim();
+      await workspacePeerLifecycle;
 
       // /monitor (no args) — open TUI overlay
       if (trimmed === "" || trimmed === "ui") {
-        const sessions: MonitorSessionRow[] = [...state.activeRuns.values()].map((a) => ({
-          correlationId: a.correlationId,
-          displayName: a.name ?? a.correlationId.slice(0, 8),
-          agentRole: a.agent,
-          status: a.status,
-          idleSeconds: Math.round((Date.now() - a.lastActivityAt) / 1000),
-          bound: monitorEngine.bindings.has(a.correlationId),
-        }));
+        await refreshWorkspacePeerOwners();
+        const sessions = monitorSessionRows();
 
         const result = await showMonitorOverlay(ctx, {
           getSessions: () => sessions,
@@ -4145,11 +4445,14 @@ export default function registerTeammateExtension(
 
         // Apply selections
         let bound = 0;
-        for (const cid of result.selected) {
-          const agent = state.activeRuns.get(cid);
-          if (!agent) continue;
-          const displayName = agent.name ?? cid.slice(0, 8);
-          const res = addBinding(monitorEngine, cid, displayName, result.mode, result.customPrompt);
+        for (const bindingKey of result.selected) {
+          const target = targetForWorkspaceBinding(bindingKey);
+          if (!target || target.state !== "active") continue;
+          const owner = target.scope === "remote"
+            ? workspacePeerOwners.find((candidate) => candidate.ownerId === target.ownerId)
+            : undefined;
+          const displayName = `${target.agent.name ?? target.agent.correlationId.slice(0, 8)}${owner ? ` [${owner.sessionName ?? "remote"}]` : ""}`;
+          const res = addBinding(monitorEngine, bindingKey, displayName, result.mode, result.customPrompt);
           if (res.ok) bound++;
         }
 
@@ -4215,22 +4518,22 @@ export default function registerTeammateExtension(
         return;
       }
 
-      // Resolve targets to correlationIds and create bindings
+      // Resolve targets across the current workspace and create bindings.
+      await refreshWorkspacePeerOwners();
       let bound = 0;
       const errors: string[] = [];
       for (const name of targets) {
-        const resolved = resolveWatchTarget(state, name);
-        if (!resolved.match) {
-          errors.push(`${name}: not found`);
+        const target = resolveWorkspaceMonitorTarget(name);
+        if (!target || target.state !== "active") {
+          errors.push(`${name}: not found or settled`);
           continue;
         }
-        const cid = resolved.match.kind === "agent"
-          ? resolved.match.agent.correlationId
-          : resolved.match.progress.correlationId;
-        const displayName = resolved.match.kind === "agent"
-          ? (resolved.match.agent.name ?? cid.slice(0, 8))
-          : (resolved.match.progress.name ?? cid.slice(0, 8));
-        const result = addBinding(monitorEngine, cid, displayName, mode, customPrompt);
+        const bindingKey = workspaceBindingKey(target);
+        const owner = target.scope === "remote"
+          ? workspacePeerOwners.find((candidate) => candidate.ownerId === target.ownerId)
+          : undefined;
+        const displayName = `${target.agent.name ?? target.agent.correlationId.slice(0, 8)}${owner ? ` [${owner.sessionName ?? "remote"}]` : ""}`;
+        const result = addBinding(monitorEngine, bindingKey, displayName, mode, customPrompt);
         if (result.ok) bound++;
         else errors.push(result.error ?? `${name}: unknown error`);
       }
@@ -4366,10 +4669,12 @@ export default function registerTeammateExtension(
     updateAgentWidget();
   });
   pi.events.on(TEAMMATE_STARTED_EVENT, () => {
+    markWorkspacePeerDirty();
     updateAgentWidget();
     startWidgetTimer();
   });
   pi.events.on(TEAMMATE_COMPLETE_EVENT, () => {
+    markWorkspacePeerDirty();
     setTimeout(() => {
       enforceWakeableAgentBudget(state);
       updateAgentWidget();
@@ -4379,6 +4684,7 @@ export default function registerTeammateExtension(
       }
     }, 100);
   });
+  pi.events.on(TEAMMATE_MESSAGE_EVENT, markWorkspacePeerDirty);
 
   // =========================================================================
   // Session lifecycle — agents live until session ends
@@ -4394,6 +4700,7 @@ export default function registerTeammateExtension(
     const sessionFile = ctx.sessionManager?.getSessionFile?.();
     const isAgentSession = Array.from(state.activeRuns.values()).some((agent) => agent.sessionFile === sessionFile);
     if (sessionFile && !isAgentSession) state.mainSessionFile = sessionFile;
+    startWorkspacePeers(ctx);
   });
 
   pi.on("before_agent_start", injectTeammateContext);
@@ -4402,12 +4709,16 @@ export default function registerTeammateExtension(
     widgetCtx = ctx;
     state.baseCwd = ctx.cwd;
     state.currentSessionId = ctx.sessionManager?.getSessionId() ?? null;
+    workspacePeerSessionName = ctx.sessionManager?.getSessionName?.() ?? undefined;
+    markWorkspacePeerDirty();
     updateAgentWidget();
   });
 
   pi.on("session_shutdown", () => {
     stopWidgetTimer();
     stopWakeableEvictionTimer();
+    if (monitorPeerRefreshTimer) clearInterval(monitorPeerRefreshTimer);
+    monitorPeerRefreshTimer = undefined;
     stopEngine(monitorEngine);
     if (state.handoffSwitching && activeHandoff) {
       activeHandoff.shutdownObserved = true;
@@ -4415,6 +4726,7 @@ export default function registerTeammateExtension(
       state.currentSessionId = null;
       return;
     }
+    workspacePeerLifecycle = workspacePeerLifecycle.then(stopWorkspacePeers);
     teardownRootSession();
   });
 } // end if (!isChild)

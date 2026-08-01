@@ -385,6 +385,27 @@ test("engineTick removes gone agents and intervenes on stalled", async () => {
   assert.match(sent[0].msg, /stalled/);
 });
 
+test("engineTick awaits asynchronous intervention acknowledgement", async () => {
+  const engine = createEngineState();
+  let acknowledged = false;
+  addBinding(engine, "remote-owner:cid", "remote", "auto");
+  engine.callbacks = {
+    getAgentInfo: () => engineInfo("remote", "running", 120),
+    sendIntervention: async () => {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      acknowledged = true;
+      return true;
+    },
+    onStatusUpdate: () => {},
+    notifyMain: () => {},
+  };
+
+  const count = await engineTick(engine);
+  assert.equal(acknowledged, true);
+  assert.equal(count, 1);
+  assert.equal(engine.bindings.get("remote-owner:cid")?.interventions.length, 1);
+});
+
 test("engineTick notifies main for failed agents", async () => {
   const engine = createEngineState();
   const notified: string[] = [];

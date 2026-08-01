@@ -36,6 +36,11 @@ export interface WorkspaceAgentSnapshot {
     lastActivityAt: number;
     resultReadyAt?: number;
     summary?: string;
+    objective?: string;
+    outputTail?: string[];
+    pendingInteractions?: number;
+    depth?: number;
+    parentCorrelationId?: string;
     wakeable?: boolean;
 }
 export interface WorkspaceSettledSnapshot {
@@ -49,6 +54,8 @@ export interface WorkspaceSettledSnapshot {
 export interface WorkspaceOwnerState {
     agents: readonly WorkspaceAgentSnapshot[];
     settled?: readonly WorkspaceSettledSnapshot[];
+    sessionId?: string;
+    sessionName?: string;
 }
 export interface WorkspaceOwnerSnapshot {
     version: typeof WORKSPACE_PEER_PROTOCOL_VERSION;
@@ -59,6 +66,8 @@ export interface WorkspaceOwnerSnapshot {
     ownerNonce: string;
     pid: number;
     publishedAt: number;
+    sessionId?: string;
+    sessionName?: string;
     agents: WorkspaceAgentSnapshot[];
     settled: WorkspaceSettledSnapshot[];
 }

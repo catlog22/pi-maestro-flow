@@ -6,6 +6,7 @@
  * Mode: RPC subprocess — stdin open for steer/follow_up/abort
  */
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { type WorkspaceOwnerState } from "./workspace-peers.ts";
 import { type LeaseToken } from "../runs/session-handoff.ts";
 import type { RunTeammateParams, RunTeammateOptions, RpcMessageMode } from "../runs/execution.ts";
 import type { TeammateState, AgentProgressSnapshot, ChildAgentCallSnapshot, ActiveAgent, AgentTerminalStatus, SettledAgentRecord } from "../shared/types.ts";
@@ -72,6 +73,7 @@ export declare const WAKEABLE_AGENT_BUDGET: Readonly<{
     anonymousTtlMs: number;
     namedTtlMs: number;
 }>;
+export declare function buildWorkspaceOwnerState(state: TeammateState, sessionName?: string): WorkspaceOwnerState;
 /**
  * Bounds the whole dispatch tree, not a single call. `maxAgents` caps one
  * dispatch's task count, so nesting multiplies rather than adds: without this

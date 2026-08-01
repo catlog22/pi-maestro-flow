@@ -21,6 +21,8 @@ export interface MonitorSessionRow {
   agentRole: string;
   status: string;
   idleSeconds: number;
+  /** Session/owner source; "local" for the current root process. */
+  source?: string;
   /** Whether this session already has a monitor binding. */
   bound: boolean;
 }
@@ -91,8 +93,9 @@ export class MonitorOverlay {
       const icon = statusIcon(s.status);
       const idle = s.status === "running" ? `${s.idleSeconds}s` : "—";
       const boundTag = s.bound ? dim(" [MON]") : "";
+      const sourceTag = s.source && s.source !== "local" ? dim(` [${s.source}]`) : "";
 
-      const row = ` ${pointer} ${check} ${icon} ${s.displayName}  ${dim(s.status)}  ${dim(idle)}  ${dim(s.agentRole)}${boundTag}`;
+      const row = ` ${pointer} ${check} ${icon} ${s.displayName}  ${dim(s.status)}  ${dim(idle)}  ${dim(s.agentRole)}${sourceTag}${boundTag}`;
       lines.push(this.frameLine(isCursor ? accent(row) : row, inner, dim));
     }
 

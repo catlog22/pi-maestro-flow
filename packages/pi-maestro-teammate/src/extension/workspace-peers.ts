@@ -378,7 +378,7 @@ function validateAgent(value: unknown): WorkspaceAgentSnapshot | undefined {
     || !["pending", "running", "retrying", "sleeping"].includes(String(value.status))
     || !boundedInteger(value.startedAt)
     || !boundedInteger(value.lastActivityAt)
-    || !optional(value.name, safeName)
+    || !optional(value.name, (candidate): candidate is string => boundedString(candidate, 256))
     || !optional(value.resultReadyAt, boundedInteger)
     || !optional(value.summary, (candidate): candidate is string => boundedString(candidate, MAX_SUMMARY))
     || !optional(value.objective, (candidate): candidate is string => boundedString(candidate, MAX_SUMMARY))
@@ -413,7 +413,7 @@ function validateSettled(value: unknown): WorkspaceSettledSnapshot | undefined {
     || !boundedString(value.agent, 64)
     || !["completed", "failed"].includes(String(value.status))
     || !boundedInteger(value.settledAt)
-    || !optional(value.name, safeName)
+    || !optional(value.name, (candidate): candidate is string => boundedString(candidate, 256))
     || !optional(value.summary, (candidate): candidate is string => boundedString(candidate, MAX_SUMMARY))) return undefined;
   return {
     correlationId: value.correlationId,
