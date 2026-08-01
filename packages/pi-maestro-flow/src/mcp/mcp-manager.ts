@@ -145,6 +145,8 @@ export class McpManagerOverlay implements Component, Focusable {
         this.params.requestRender();
         return;
       }
+      // 忽略导航/功能键，避免转义序列残渣混入筛选文本。
+      if (data.startsWith("\x1b")) return;
       const printable = sanitizeSingleLineInput(data);
       if (!printable) return;
       this.query += printable;

@@ -127,12 +127,18 @@ export class MaestroHookInstallerOverlay implements Component, Focusable {
       return;
     }
     if (this.filterActive) {
+      if (matchesKey(data, Key.up)) return this.move(-1);
+      if (matchesKey(data, Key.down)) return this.move(1);
+      if (matchesKey(data, Key.pageUp)) return this.move(-MAX_VISIBLE);
+      if (matchesKey(data, Key.pageDown)) return this.move(MAX_VISIBLE);
       if (matchesKey(data, Key.backspace) || data === "\b" || data === "\x7f") {
         this.query = removeLastGrapheme(this.query);
         this.selected = 0;
         this.params.requestRender();
         return;
       }
+      // 忽略导航/功能键，避免转义序列残渣混入筛选文本。
+      if (data.startsWith("\x1b")) return;
       const printable = sanitizeSingleLineInput(data);
       if (!printable) return;
       this.query += printable;

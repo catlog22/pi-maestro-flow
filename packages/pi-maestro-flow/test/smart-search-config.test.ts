@@ -122,6 +122,34 @@ test("Smart Search TUI uses nested Esc semantics, saves edits, and stays width-s
   assert.equal(closed, 1);
 });
 
+test("Smart Search TUI ignores arrow/function keys while editing a value", async () => {
+  const saved: Array<Record<string, unknown | undefined>> = [];
+  const store = createStore({ XAI_MODEL: "grok" }, async (patch) => {
+    saved.push(patch);
+    return { XAI_MODEL: patch.XAI_MODEL };
+  });
+  const overlay = new SmartSearchConfigOverlay({
+    config: { XAI_MODEL: "grok" },
+    store,
+    theme,
+    initialKey: "XAI_MODEL",
+    requestRender() {},
+    close() {},
+  });
+
+  overlay.handleInput("\r"); // 进入编辑模式
+  overlay.handleInput("\x15"); // Ctrl+U 清空预填充的 draft
+  overlay.handleInput("\x1b[A"); // 上
+  overlay.handleInput("\x1b[B"); // 下
+  overlay.handleInput("\x1b[C"); // 右
+  overlay.handleInput("\x1b[D"); // 左
+  overlay.handleInput("\x1b[3~"); // Delete
+  overlay.handleInput("grok-4");
+  overlay.handleInput("\r");
+  await flushAsync();
+  assert.deepEqual(saved, [{ XAI_MODEL: "grok-4" }]);
+});
+
 test("Smart Search TUI decodes bracketed paste and Ctrl+U unsets secret keys", async () => {
   const saved: Array<Record<string, unknown | undefined>> = [];
   let config: SmartSearchConfig = { XAI_API_KEY: "old-secret", XAI_MODEL: "old" };
