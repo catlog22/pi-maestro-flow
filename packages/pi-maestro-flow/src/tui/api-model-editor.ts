@@ -5,6 +5,7 @@ import {
   visibleWidth,
   type Component,
   type Focusable,
+  type KeyId,
 } from "@earendil-works/pi-tui";
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -53,6 +54,16 @@ export interface ApiModelEditorOverlayParams {
 const MAX_VISIBLE_FIELDS = 12;
 const CTRL_S = "\x13";
 const CTRL_U = "\x15";
+
+// 编辑模式下忽略的导航/编辑/功能键：其转义序列（如 `\x1b[A`）若被当作文本追加，
+// sanitize 后会把 `[A`、`[3~` 之类残渣混入输入（例如 URL 字段按方向键出现乱码）。
+const IGNORED_EDIT_KEYS: readonly KeyId[] = [
+  Key.up, Key.down, Key.left, Key.right,
+  Key.home, Key.end, Key.pageUp, Key.pageDown,
+  Key.delete, Key.insert, Key.clear,
+  Key.f1, Key.f2, Key.f3, Key.f4, Key.f5, Key.f6,
+  Key.f7, Key.f8, Key.f9, Key.f10, Key.f11, Key.f12,
+];
 
 export class ApiModelEditorOverlay implements Component, Focusable {
   focused = false;
@@ -205,6 +216,10 @@ export class ApiModelEditorOverlay implements Component, Focusable {
       this.notice = "";
       return;
     }
+    // 忽略导航/功能键，避免转义序列残渣混入文本。
+    if (IGNORED_EDIT_KEYS.some((key) => matchesKey(data, key))) return;
+    // 兜底：丢弃以 ESC 开头的未识别序列（拆分到达的 CSI/SS3 残渣）。
+    if (data.startsWith("\x1b")) return;
     const printable = sanitizeSingleLineInput(data);
     if (!printable) return;
     this.secretClearOnCommit = false;

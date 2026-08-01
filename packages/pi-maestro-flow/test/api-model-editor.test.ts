@@ -173,6 +173,46 @@ test("API model form renders section headers, skips them in navigation, and excl
   assert.deepEqual(result?.values, { baseUrl: "https://a.example.com", modelId: "m2" });
 });
 
+test("API model form ignores navigation/function keys while editing a text field", () => {
+  let result: ApiModelEditorResult | undefined;
+  const overlay = createOverlay([
+    { id: "baseUrl", label: "Base URL", kind: "text", value: "https://gateway.example.com" },
+  ], { done(value) { result = value; } });
+
+  overlay.render(80);
+  overlay.handleInput("\r"); // 进入编辑模式
+  overlay.handleInput("\x1b[A"); // 上
+  overlay.handleInput("\x1b[B"); // 下
+  overlay.handleInput("\x1b[C"); // 右
+  overlay.handleInput("\x1b[D"); // 左
+  overlay.handleInput("\x1b[3~"); // Delete
+  overlay.handleInput("\x1b[5~"); // PageUp
+  overlay.handleInput("\x1bOP"); // F1
+  overlay.handleInput("/v1");
+  overlay.handleInput("\r");
+  overlay.handleInput("\x13");
+
+  assert.equal(result?.values.baseUrl, "https://gateway.example.com/v1");
+  assert.doesNotMatch(overlay.render(80).join("\n"), /\[A/);
+});
+
+test("API model form drops unrecognized ESC-prefixed sequences in edit mode", () => {
+  let result: ApiModelEditorResult | undefined;
+  const overlay = createOverlay([
+    { id: "baseUrl", label: "Base URL", kind: "text", value: "" },
+  ], { done(value) { result = value; } });
+
+  overlay.render(80);
+  overlay.handleInput("\r");
+  overlay.handleInput("\x1b[1;5A"); // 未识别的修饰方向键序列
+  overlay.handleInput("\x1b[?25l"); // 光标隐藏（SM/RM）
+  overlay.handleInput("https://a.example.com");
+  overlay.handleInput("\r");
+  overlay.handleInput("\x13");
+
+  assert.equal(result?.values.baseUrl, "https://a.example.com");
+});
+
 test("API model form with unchanged sections is not dirty and cancels with a single Esc", async () => {
   const results: Array<ApiModelEditorResult | undefined> = [];
   const overlay = createOverlay([

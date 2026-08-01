@@ -37,8 +37,9 @@ import {
 export type ApiProviderId = "maestro-openai" | "maestro-qwen" | "maestro-anthropic";
 
 /**
- * API protocols accepted by pi's provider contract (KnownApi). Custom channels
- * may pick any of these; the three built-in presets fix their own protocol.
+ * API protocols accepted by pi's provider contract (KnownApi). A Provider
+ * chooses one protocol; multiple Providers may use the same protocol with
+ * independent URLs, API keys, and model sets.
  */
 export const KNOWN_APIS: readonly string[] = [
   "openai-completions",
@@ -52,8 +53,20 @@ export const KNOWN_APIS: readonly string[] = [
   "google-vertex",
 ];
 
+const API_FORMAT_NAMES: Readonly<Record<string, string>> = Object.freeze({
+  "openai-completions": "OpenAI Chat Completions",
+  "openai-responses": "OpenAI Responses",
+  "anthropic-messages": "Anthropic Messages",
+  "google-generative-ai": "Google Generative AI",
+  "azure-openai-responses": "Azure OpenAI Responses",
+  "openai-codex-responses": "OpenAI Codex Responses",
+  "mistral-conversations": "Mistral Conversations",
+  "bedrock-converse-stream": "Amazon Bedrock Converse Stream",
+  "google-vertex": "Google Vertex AI",
+});
+
 export interface ApiProviderSettings {
-  /** Provider id: a built-in preset id or any user-defined channel id. */
+  /** Provider id used by Pi to qualify models and isolate URL/API key configuration. */
   provider: string;
   baseUrl: string;
   modelId: string;
@@ -61,17 +74,17 @@ export interface ApiProviderSettings {
   reasoning: boolean;
   apiKey: string;
   maxThinking?: boolean;
-  /** API protocol. Required for custom channels; presets derive it from PROVIDERS. */
+  /** API protocol. Required for user-defined Providers; presets derive it from PROVIDERS. */
   api?: string;
-  /** Display name for custom channels. */
+  /** Optional Provider display name. */
   name?: string;
-  /** Provider-level compat (e.g. qwen thinking format) for custom channels. */
+  /** Provider-level protocol compatibility options. */
   compat?: Record<string, unknown>;
-  /** Max output tokens for custom channels. */
+  /** Max output tokens for user-defined Providers. */
   maxTokens?: number;
-  /** Whether omitted custom-provider compat/headers/authHeader values should be cleared. */
+  /** Whether omitted Provider compat/headers/authHeader values should be cleared. */
   replaceProviderOptions?: boolean;
-  /** Custom request headers for custom channels. */
+  /** Custom request headers for this Provider. */
   headers?: Record<string, string>;
   /** Whether to send Authorization: Bearer. Undefined lets pi decide. */
   authHeader?: boolean;
@@ -92,7 +105,11 @@ const THINKING_FORMAT_OPTIONS: ReadonlyArray<{ label: string; value?: string }> 
 ];
 
 const AUTO_LABEL = "自动（按 URL 识别）";
-const ADD_MODEL_LABEL = "➕ 新增 model…";
+
+function apiFormatLabel(api: string): string {
+  const name = API_FORMAT_NAMES[api];
+  return name ? `${name} (${api})` : api;
+}
 
 interface LoadedApiProviderSettings extends ApiProviderSettings {
   configured: boolean;
@@ -125,7 +142,7 @@ export interface ApiRetrySettings {
   maxRetries: number;
 }
 
-type ApiProviderAction = "configure" | "delete" | "list" | "logout" | "reset" | "retry" | "show";
+type ApiProviderAction = "configure" | "delete" | "disable" | "enable" | "list" | "logout" | "reset" | "retry" | "show" | "toggle";
 type ApiThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 const DEFAULT_THINKING_LEVEL: ApiThinkingLevel = "medium";
@@ -138,7 +155,7 @@ const DEFAULT_API_RETRY_SETTINGS: Readonly<ApiRetrySettings> = Object.freeze({
 const PROVIDERS: readonly ProviderDefaults[] = [
   {
     id: "maestro-openai",
-    name: "OpenAI Responses (Custom)",
+    name: "OpenAI Responses",
     api: "openai-responses",
     baseUrl: "https://api.openai.com/v1",
     modelId: "gpt-5.4",
@@ -147,7 +164,7 @@ const PROVIDERS: readonly ProviderDefaults[] = [
   },
   {
     id: "maestro-qwen",
-    name: "Qwen Compatible (Custom)",
+    name: "Qwen · OpenAI Chat Completions",
     api: "openai-completions",
     baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     modelId: "qwen3.8-max-preview",
@@ -160,7 +177,7 @@ const PROVIDERS: readonly ProviderDefaults[] = [
   },
   {
     id: "maestro-anthropic",
-    name: "Anthropic (Custom)",
+    name: "Anthropic Messages",
     api: "anthropic-messages",
     baseUrl: "https://api.anthropic.com",
     modelId: "claude-sonnet-4-5",
@@ -172,9 +189,9 @@ const PROVIDERS: readonly ProviderDefaults[] = [
 const mutationQueues = new Map<string, Promise<void>>();
 
 /**
- * Register custom OpenAI Responses, Qwen-compatible, and Anthropic providers through Pi's
- * documented models.json contract. /api-manager manages the provider config and
- * models.json API key without requiring changes to Pi itself.
+ * Register API Providers through Pi's documented models.json contract. A Provider
+ * owns provider-level connection config (URL, API key, format, headers, auth) and
+ * hosts one or more models; models under the same Provider share that connection.
  */
 export function registerApiProviderConfigs(
   pi: ExtensionAPI,
@@ -190,15 +207,15 @@ export function registerApiProviderConfigs(
         pi.registerProvider(provider.id, configuredProviderRegistration(provider.id, modelsPath));
       }
     }
-    for (const id of managedChannelIdsSync(defaultsPath)) {
-      if (findPreset(id) || !hasConfiguredProviderSync(id, modelsPath)) continue;
+    for (const id of managedProviderIdsSync(defaultsPath)) {
+      if (findPreset(id) || !hasEnabledProviderSync(id, modelsPath)) continue;
       pi.registerProvider(id, configuredProviderRegistration(id, modelsPath));
     }
   }
 
   if (typeof pi.registerCommand !== "function") return;
   pi.registerCommand("api-manager", {
-    description: "以 model 为中心增删查改 API 配置（单表单编辑；OpenAI / Qwen / Anthropic 预设 + 自定义渠道）",
+    description: "管理 API 模型与 Provider 配置",
     async handler(args, ctx) {
       try {
         await showApiProviderManager(pi, args, ctx, modelsPath, defaultsPath, settingsPath);
@@ -282,6 +299,23 @@ export async function loadApiProviderSettings(
       ? models.find((entry) => entry.id === modelId)
       : models[0];
   const thinkingLevelMap = isRecord(model?.thinkingLevelMap) ? model.thinkingLevelMap : {};
+  // Legacy model-level overrides are still read during migration; canonical API Manager
+  // entries keep connection/format fields on the Provider because Provider is the model identity.
+  const api = typeof model?.api === "string"
+    ? model.api
+    : typeof config.api === "string"
+      ? config.api
+      : preset?.api;
+  const compat = isRecord(model?.compat)
+    ? { ...model.compat }
+    : isRecord(config.compat)
+      ? { ...config.compat }
+      : undefined;
+  const headers = isStringRecord(model?.headers)
+    ? { ...model.headers }
+    : isStringRecord(config.headers)
+      ? { ...config.headers }
+      : undefined;
   return {
     configured,
     provider,
@@ -293,10 +327,10 @@ export async function loadApiProviderSettings(
     reasoning: typeof model?.reasoning === "boolean" ? model.reasoning : true,
     apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
     maxThinking: thinkingLevelMap.xhigh === "max" || thinkingLevelMap.max === "max",
-    api: typeof config.api === "string" ? config.api : preset?.api,
+    api,
     name: typeof config.name === "string" ? config.name : preset?.name,
-    compat: isRecord(config.compat) ? { ...config.compat } : undefined,
-    headers: isStringRecord(config.headers) ? { ...config.headers } : undefined,
+    compat,
+    headers,
     authHeader: typeof config.authHeader === "boolean" ? config.authHeader : undefined,
     maxTokens: typeof model?.maxTokens === "number"
       ? model.maxTokens
@@ -309,7 +343,7 @@ export async function saveApiProviderSettings(
   modelsPath = join(getAgentDir(), "models.json"),
 ): Promise<SaveApiProviderResult> {
   const normalized: ApiProviderSettings = {
-    provider: settings.provider,
+    provider: normalizeChannelId(settings.provider),
     baseUrl: normalizeBaseUrl(settings.baseUrl),
     modelId: required(settings.modelId, "Model ID"),
     contextWindow: settings.contextWindow === undefined
@@ -333,6 +367,25 @@ export async function saveApiProviderSettings(
     result = await writeApiProviderSettings(normalized, modelsPath);
   });
   if (!result) throw new Error("API Provider settings were not written");
+  return result;
+}
+
+export async function setApiProviderEnabled(
+  provider: string,
+  enabled: boolean,
+  modelsPath = join(getAgentDir(), "models.json"),
+): Promise<SaveApiProviderResult> {
+  let result: SaveApiProviderResult | undefined;
+  await serializeMutation(modelsPath, async () => {
+    const exists = await fileExists(modelsPath);
+    const root = await readModelsRoot(modelsPath);
+    const providers = isRecord(root.providers) ? { ...root.providers } : {};
+    const current = isRecord(providers[provider]) ? { ...providers[provider] } : undefined;
+    if (!current) throw new Error(`Provider ${provider} is not configured`);
+    providers[provider] = { ...current, enabled };
+    result = await writeModelsRoot({ ...root, providers }, modelsPath, exists);
+  });
+  if (!result) throw new Error("API Provider state was not written");
   return result;
 }
 
@@ -364,7 +417,11 @@ export async function deleteApiProviderModelSettings(
     const providers = isRecord(root.providers) ? { ...root.providers } : {};
     const config = isRecord(providers[provider]) ? { ...providers[provider] } : undefined;
     if (!config) throw new Error(`Provider ${provider} is not configured`);
-    const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
+    const rawModels = Array.isArray(config.models) ? config.models : [];
+    if (rawModels.some((model) => !isRecord(model) || typeof model.id !== "string")) {
+      throw new Error(`Provider ${provider} contains malformed model entries; refusing a lossy delete`);
+    }
+    const models = rawModels as Record<string, unknown>[];
     const remaining = models.filter((model) => model.id !== modelId);
     if (remaining.length === models.length) throw new Error(`Model ${modelId} is not configured`);
     if (remaining.length === 0) delete providers[provider];
@@ -541,6 +598,20 @@ async function showApiProviderManager(
     await manageRetrySettings(ctx, settingsPath, parsed.retry);
     return;
   }
+  if (action === "enable" || action === "disable" || action === "toggle") {
+    if (!ctx.hasUI && !parsed.target) {
+      ctx.ui.notify(`/api-manager ${action} 需要指定 Provider ID。`, "warning");
+      return;
+    }
+    const target = parsed.target ?? await chooseProvider(ctx, modelsPath, defaultsPath);
+    if (!target) return;
+    const ref = await resolveChannelRef(target, ctx, modelsPath);
+    if (!ref) return;
+    const current = await isProviderEnabled(ref.id, modelsPath);
+    const enabled = action === "enable" ? true : action === "disable" ? false : !current;
+    await toggleProvider(pi, ref.id, ref.name, enabled, ctx, modelsPath);
+    return;
+  }
   if (action === "configure") {
     if (!ctx.hasUI) {
       ctx.ui.notify("/api-manager configure 需要交互式 Pi 会话。", "warning");
@@ -550,13 +621,21 @@ async function showApiProviderManager(
       if (parsed.target.kind === "preset") {
         await configureProvider(pi, parsed.target.preset, ctx, modelsPath, defaultsPath);
       } else {
-        await configureCustomChannel(pi, ctx, modelsPath, defaultsPath, parsed.target.id || undefined);
+        const requireNew = parsed.target.id === "";
+        await configureCustomChannel(
+          pi,
+          ctx,
+          modelsPath,
+          defaultsPath,
+          parsed.target.id || undefined,
+          requireNew,
+        );
       }
       return;
     }
     const pick = await chooseModelGlobally(ctx, "configure", modelsPath, defaultsPath);
     if (!pick) return;
-    await dispatchGlobalModelPick(pi, pick, "configure", ctx, modelsPath, defaultsPath);
+    await dispatchGlobalModelPick(pi, pick, "configure", ctx, modelsPath, defaultsPath, settingsPath);
     return;
   }
   if (action === "show" || action === "delete") {
@@ -571,7 +650,7 @@ async function showApiProviderManager(
         ctx.ui.notify(`/api-manager ${action} 需要交互式 Pi 会话。`, "warning");
         return;
       }
-      await deleteProvider(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath);
+      await deleteProvider(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath, settingsPath);
       return;
     }
     if (!ctx.hasUI) {
@@ -580,13 +659,13 @@ async function showApiProviderManager(
     }
     const pick = await chooseModelGlobally(ctx, action, modelsPath, defaultsPath);
     if (!pick) return;
-    await dispatchGlobalModelPick(pi, pick, action, ctx, modelsPath, defaultsPath);
+    await dispatchGlobalModelPick(pi, pick, action, ctx, modelsPath, defaultsPath, settingsPath);
     return;
   }
-  // logout / reset 是 Provider（连接）级操作，仍按渠道选择
+  // logout / reset 是 Provider（URL/key）级操作。
   const target = parsed.target ?? (ctx.hasUI ? await chooseProvider(ctx, modelsPath, defaultsPath) : undefined);
   if (!target) {
-    ctx.ui.notify("请指定渠道：openai、qwen、anthropic 或自定义渠道 id。", "warning");
+    ctx.ui.notify("请指定 Provider：openai、qwen、anthropic 或用户定义的 Provider ID。", "warning");
     return;
   }
   const ref = await resolveChannelRef(target, ctx, modelsPath);
@@ -596,9 +675,9 @@ async function showApiProviderManager(
     return;
   }
   if (action === "logout") {
-    await removeProviderKey(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath);
+    await removeProviderKey(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath, settingsPath);
   } else {
-    await resetProvider(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath);
+    await resetProvider(pi, ref.id, ref.name, ctx, modelsPath, defaultsPath, settingsPath);
   }
 }
 
@@ -649,8 +728,7 @@ async function configurePresetModelWithSteps(
   );
   if (modelInput === undefined) return;
   const modelId = required(modelInput, "Model ID");
-  const siblingCount = (await configuredModelIds(provider.id, modelsPath))
-    .filter((id) => id !== modelId).length;
+  const targetProviderId = provider.id;
   const maxSuffix = maxThinking ? " / max" : "";
   const enabledLabel = provider.api === "openai-responses"
     ? `启用：minimal / low / medium / high / xhigh${maxSuffix}`
@@ -665,7 +743,7 @@ async function configurePresetModelWithSteps(
     ctx,
     provider.api,
     reasoningChoice === enabledLabel,
-    await loadModelThinkingDefault(provider.id, modelId, defaultsPath)
+    await loadModelThinkingDefault(targetProviderId, modelId, defaultsPath)
       ?? currentDefaultThinkingLevel(ctx, modelsPath),
     maxThinking,
   );
@@ -678,7 +756,7 @@ async function configurePresetModelWithSteps(
   if (contextWindowInput === undefined) return;
   const contextWindow = positiveInteger(contextWindowInput, "上下文窗口 contextWindow");
   const maxTokensInput = await ctx.ui.input(
-    `${provider.name} 单次最大输出 maxTokens（值越大，安全压缩可能越早）`,
+    `${provider.name} 单次最大输出 maxTokens（运行时按剩余窗口动态收缩）`,
     String(current.maxTokens ?? provider.maxTokens),
   );
   if (maxTokensInput === undefined) return;
@@ -690,7 +768,7 @@ async function configurePresetModelWithSteps(
   const apiKey = required(keyInput, "API key");
 
   const next: ApiProviderSettings = {
-    provider: provider.id,
+    provider: targetProviderId,
     baseUrl,
     modelId,
     contextWindow,
@@ -702,37 +780,41 @@ async function configurePresetModelWithSteps(
   const confirmed = await ctx.ui.confirm(
     `保存 ${provider.name} API 配置？`,
     [
-      `Provider：${provider.id}`,
-      `API format：${provider.api}`,
+      `Provider：${targetProviderId}`,
+      `API format：${apiFormatLabel(provider.api)}`,
       `Base URL：${next.baseUrl}`,
       `Model：${next.modelId}`,
       `上下文窗口 contextWindow：${next.contextWindow?.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
       `单次最大输出 maxTokens：${next.maxTokens?.toLocaleString("en-US")} Token`,
       ...compactionPreviewLines(ctx.cwd, contextWindow, maxTokens),
       `Reasoning：${next.reasoning ? "enabled" : "disabled"}`,
-      `Default thinking（Pi 全局）：${defaultThinkingLevel}`,
+      `Default thinking（当前 model）：${defaultThinkingLevel}`,
       "Auth：stored API key",
-      ...(siblingCount > 0
-        ? [`Provider 级 URL / API key 将同时用于其余 ${siblingCount} 个 model`]
-        : []),
     ].join("\n"),
   );
   if (!confirmed) return;
   const result = await saveApiProviderSettings(next, modelsPath);
   await saveModelThinkingDefault(
-    provider.id,
+    targetProviderId,
     next.modelId,
     canonicalThinkingLevel(defaultThinkingLevel),
     defaultsPath,
   );
-  await saveDefaultModelAndThinking(ctx, modelsPath, provider.id, next.modelId, defaultThinkingLevel);
-  reloadProviderRegistration(pi, ctx, provider.id, modelsPath);
-  applyThinkingLevelToActiveModel(pi, ctx, provider.id, next.modelId, canonicalThinkingLevel(defaultThinkingLevel));
+  await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, next.modelId, target.modelId === null);
+  if (!findPreset(targetProviderId)) await addManagedProvider(defaultsPath, targetProviderId);
+  reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
+  applyThinkingLevelToActiveModel(
+    pi,
+    ctx,
+    targetProviderId,
+    next.modelId,
+    canonicalThinkingLevel(defaultThinkingLevel),
+  );
   notifySaved(
     ctx,
     provider.name,
     result,
-    `已保存；默认模型为 ${provider.id}/${next.modelId}，默认思考强度为 ${defaultThinkingLevel}`,
+    `已保存；模型身份为 ${targetProviderId}/${next.modelId}，默认思考强度为 ${defaultThinkingLevel}`,
   );
 }
 
@@ -742,13 +824,29 @@ async function configureCustomChannel(
   modelsPath: string,
   defaultsPath: string,
   initialId?: string,
+  requireNew = false,
 ): Promise<void> {
-  const idInput = await ctx.ui.input("自定义渠道 ID（provider id）", initialId ?? "");
+  const idInput = await ctx.ui.input("Provider ID", initialId ?? "");
   if (idInput === undefined) return;
   const providerId = normalizeChannelId(idInput);
+  if (requireNew && (findPreset(providerId) || await isProviderConfigured(providerId, modelsPath))) {
+    ctx.ui.notify(`Provider ID ${providerId} 已存在；新建操作不会修改已有 Provider。`, "warning");
+    return;
+  }
   const preset = findPreset(providerId);
   if (preset) {
     await configureProvider(pi, preset, ctx, modelsPath, defaultsPath);
+    return;
+  }
+  if (requireNew) {
+    await configureCustomModelTarget(
+      pi,
+      providerId,
+      { modelId: null, adding: true },
+      ctx,
+      modelsPath,
+      defaultsPath,
+    );
     return;
   }
   const target = await chooseModelToConfigure(providerId, await channelDisplayName(providerId, modelsPath), ctx, modelsPath);
@@ -785,10 +883,13 @@ async function configureCustomModelWithSteps(
   const apiOptions = current.api && KNOWN_APIS.includes(current.api)
     ? [current.api, ...KNOWN_APIS.filter((api) => api !== current.api)]
     : [...KNOWN_APIS];
-  const apiChoice = await ctx.ui.select("API format", apiOptions);
+  const apiLabels = apiOptions.map(apiFormatLabel);
+  const apiChoice = await ctx.ui.select("API format", apiLabels);
   if (!apiChoice) return;
-  const api = apiChoice;
-  const nameInput = await ctx.ui.input("渠道显示名称", current.name ?? providerId);
+  const api = apiOptions.find((candidate) => apiFormatLabel(candidate) === apiChoice)
+    ?? (apiOptions.includes(apiChoice) ? apiChoice : undefined);
+  if (!api) return;
+  const nameInput = await ctx.ui.input("Provider 显示名称", current.name ?? providerId);
   if (nameInput === undefined) return;
   const displayName = nameInput.trim() || providerId;
   const baseUrlInput = await ctx.ui.input(`${displayName} Base URL`, current.configured ? current.baseUrl : "");
@@ -800,8 +901,7 @@ async function configureCustomModelWithSteps(
   );
   if (modelInput === undefined) return;
   const modelId = required(modelInput, "Model ID");
-  const siblingCount = (await configuredModelIds(providerId, modelsPath))
-    .filter((id) => id !== modelId).length;
+  const targetProviderId = providerId;
   const maxThinking = current.maxThinking === true || runtimeSupportsMaxThinking(ctx);
   const maxSuffix = maxThinking ? " / max" : "";
   const enabledLabel = api === "openai-responses"
@@ -818,7 +918,7 @@ async function configureCustomModelWithSteps(
     ctx,
     api,
     reasoning,
-    await loadModelThinkingDefault(providerId, modelId, defaultsPath)
+    await loadModelThinkingDefault(targetProviderId, modelId, defaultsPath)
       ?? currentDefaultThinkingLevel(ctx, modelsPath),
     maxThinking,
   );
@@ -830,7 +930,7 @@ async function configureCustomModelWithSteps(
   if (contextWindowInput === undefined) return;
   const contextWindow = positiveInteger(contextWindowInput, "上下文窗口 contextWindow");
   const maxTokensInput = await ctx.ui.input(
-    `${displayName} 单次最大输出 maxTokens（值越大，安全压缩可能越早）`,
+    `${displayName} 单次最大输出 maxTokens（运行时按剩余窗口动态收缩）`,
     String(current.configured ? current.maxTokens : 16_384),
   );
   if (maxTokensInput === undefined) return;
@@ -901,7 +1001,7 @@ async function configureCustomModelWithSteps(
   const apiKey = required(keyInput, "API key");
 
   const next: ApiProviderSettings = {
-    provider: providerId,
+    provider: targetProviderId,
     baseUrl,
     modelId,
     contextWindow,
@@ -916,38 +1016,46 @@ async function configureCustomModelWithSteps(
     authHeader,
   };
   const confirmed = await ctx.ui.confirm(
-    `保存自定义渠道 ${displayName}？`,
+    `保存 Provider ${displayName}？`,
     [
-      `Provider ID：${providerId}`,
-      `API 协议：${api}`,
+      `Provider ID：${targetProviderId}`,
+      `API format：${apiFormatLabel(api)}`,
       `Base URL：${next.baseUrl}`,
       `Model：${next.modelId}`,
       `上下文窗口 contextWindow：${next.contextWindow?.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
       `单次最大输出 maxTokens：${next.maxTokens?.toLocaleString("en-US")} Token`,
       ...compactionPreviewLines(ctx.cwd, contextWindow, maxTokens),
       `Reasoning：${next.reasoning ? "enabled" : "disabled"}`,
-      `Default thinking（Pi 全局）：${defaultThinkingLevel}`,
+      `Default thinking（当前 model）：${defaultThinkingLevel}`,
       `Compat：${compat ? JSON.stringify(compat) : "自动"}`,
       `请求头：${Object.keys(headers).length > 0 ? Object.keys(headers).join(", ") : "无"}`,
       `Authorization：${authHeader === undefined ? "自动" : authHeader ? "Bearer" : "关闭"}`,
       "Auth：stored API key",
-      ...(siblingCount > 0
-        ? [`Provider 级 API format / URL / API key 将同时用于其余 ${siblingCount} 个 model`]
-        : []),
     ].join("\n"),
   );
   if (!confirmed) return;
   const result = await saveApiProviderSettings(next, modelsPath);
-  await saveModelThinkingDefault(providerId, modelId, canonicalThinkingLevel(defaultThinkingLevel), defaultsPath);
-  await saveDefaultModelAndThinking(ctx, modelsPath, providerId, modelId, defaultThinkingLevel);
-  await addManagedChannel(defaultsPath, providerId);
-  reloadProviderRegistration(pi, ctx, providerId, modelsPath);
-  applyThinkingLevelToActiveModel(pi, ctx, providerId, modelId, canonicalThinkingLevel(defaultThinkingLevel));
+  await saveModelThinkingDefault(
+    targetProviderId,
+    modelId,
+    canonicalThinkingLevel(defaultThinkingLevel),
+    defaultsPath,
+  );
+  await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, modelId, target.modelId === null);
+  await addManagedProvider(defaultsPath, targetProviderId);
+  reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
+  applyThinkingLevelToActiveModel(
+    pi,
+    ctx,
+    targetProviderId,
+    modelId,
+    canonicalThinkingLevel(defaultThinkingLevel),
+  );
   notifySaved(
     ctx,
     displayName,
     result,
-    `已保存自定义渠道；默认模型为 ${providerId}/${modelId}，默认思考强度为 ${defaultThinkingLevel}`,
+    `已保存 Provider；模型身份为 ${targetProviderId}/${modelId}，默认思考强度为 ${defaultThinkingLevel}`,
   );
 }
 
@@ -970,11 +1078,11 @@ async function configurePresetModelWithForm(
       ?? currentDefaultThinkingLevel(ctx, modelsPath)
     : currentDefaultThinkingLevel(ctx, modelsPath);
   const result = await showApiModelEditor(ctx, {
-    title: adding ? `新增 ${provider.name} model` : `修改 ${provider.name} / ${modelId}`,
+    title: adding ? `新增 ${provider.name} 模型` : `修改 ${provider.name} / ${modelId}`,
     fields: [
-      { id: "connection-section", label: "连接（Provider 级）", kind: "section", value: "" },
+      { id: "connection-section", label: "连接（Provider / URL 级）", kind: "section", value: "" },
       { id: "provider", label: "Provider", kind: "readonly", value: provider.id },
-      { id: "api", label: "API format", kind: "readonly", value: provider.api },
+      { id: "api", label: "API format", kind: "readonly", value: apiFormatLabel(provider.api) },
       { id: "baseUrl", label: "Base URL", kind: "text", value: current.baseUrl },
       {
         id: "apiKey",
@@ -989,7 +1097,6 @@ async function configurePresetModelWithForm(
         label: "Model ID",
         kind: adding ? "text" : "readonly",
         value: adding ? (current.configured ? "" : provider.modelId) : current.modelId,
-        help: adding ? "新增 model：输入新的 model ID；同 Provider 共享 Base URL 与 API key" : undefined,
       },
       { id: "reasoning", label: "推理能力", kind: "toggle", value: current.reasoning },
       {
@@ -1013,15 +1120,15 @@ async function configurePresetModelWithForm(
 
   const baseUrl = normalizeBaseUrl(formText(result.values, "baseUrl"));
   const nextModelId = modelId ?? required(formText(result.values, "modelId"), "Model ID");
+  const targetProviderId = provider.id;
   const reasoning = formBoolean(result.values, "reasoning");
   const defaultThinkingLevel = formThinkingLevel(result.values, "defaultThinking");
   const contextWindow = positiveInteger(formText(result.values, "contextWindow"), "上下文窗口 contextWindow");
   const maxTokens = positiveInteger(formText(result.values, "maxTokens"), "单次最大输出 maxTokens");
   validateModelWindow(contextWindow, maxTokens);
   const apiKey = required(formText(result.values, "apiKey"), "API key");
-  const siblingCount = existingModelIds.filter((id) => id !== nextModelId).length;
   const next: ApiProviderSettings = {
-    provider: provider.id,
+    provider: targetProviderId,
     baseUrl,
     modelId: nextModelId,
     contextWindow,
@@ -1033,26 +1140,37 @@ async function configurePresetModelWithForm(
   const confirmed = await ctx.ui.confirm(
     `保存 ${provider.name} API 配置？`,
     modelSavePreview({
-      providerId: provider.id,
+      providerId: targetProviderId,
       api: provider.api,
       displayName: provider.name,
       next,
       defaultThinkingLevel,
-      siblingCount,
       cwd: ctx.cwd,
     }),
   );
   if (!confirmed) return;
   const saveResult = await saveApiProviderSettings(next, modelsPath);
-  await saveModelThinkingDefault(provider.id, nextModelId, canonicalThinkingLevel(defaultThinkingLevel), defaultsPath);
-  await saveDefaultModelAndThinking(ctx, modelsPath, provider.id, nextModelId, defaultThinkingLevel);
-  reloadProviderRegistration(pi, ctx, provider.id, modelsPath);
-  applyThinkingLevelToActiveModel(pi, ctx, provider.id, nextModelId, canonicalThinkingLevel(defaultThinkingLevel));
+  await saveModelThinkingDefault(
+    targetProviderId,
+    nextModelId,
+    canonicalThinkingLevel(defaultThinkingLevel),
+    defaultsPath,
+  );
+  await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, adding);
+  if (!findPreset(targetProviderId)) await addManagedProvider(defaultsPath, targetProviderId);
+  reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
+  applyThinkingLevelToActiveModel(
+    pi,
+    ctx,
+    targetProviderId,
+    nextModelId,
+    canonicalThinkingLevel(defaultThinkingLevel),
+  );
   notifySaved(
     ctx,
     provider.name,
     saveResult,
-    `已保存；默认模型为 ${provider.id}/${nextModelId}，默认思考强度为 ${defaultThinkingLevel}`,
+    `已保存；模型身份为 ${targetProviderId}/${nextModelId}，默认思考强度为 ${defaultThinkingLevel}`,
   );
 }
 
@@ -1078,18 +1196,21 @@ async function configureCustomModelWithForm(
     : currentDefaultThinkingLevel(ctx, modelsPath);
   const compat = current.compat ?? {};
   const result = await showApiModelEditor(ctx, {
-    title: adding ? `新增 ${displayName} model` : `修改 ${displayName} / ${modelId}`,
+    title: adding ? `新增 ${displayName} 模型` : `修改 ${displayName} / ${modelId}`,
     fields: [
-      { id: "connection-section", label: "连接（Provider 级）", kind: "section", value: "" },
+      { id: "connection-section", label: "连接（Provider / URL 级）", kind: "section", value: "" },
       { id: "provider", label: "Provider", kind: "readonly", value: providerId },
       {
         id: "api",
         label: "API format",
         kind: "choice",
         value: currentApi,
-        choices: formChoicesWithCurrent(currentApi, KNOWN_APIS.map((api) => ({ label: api, value: api }))),
+        choices: formChoicesWithCurrent(
+          currentApi,
+          KNOWN_APIS.map((api) => ({ label: apiFormatLabel(api), value: api })),
+        ),
       },
-      { id: "name", label: "渠道显示名称", kind: "text", value: current.name ?? providerId },
+      { id: "name", label: "Provider 显示名称", kind: "text", value: current.name ?? providerId },
       { id: "baseUrl", label: "Base URL", kind: "text", value: current.baseUrl },
       {
         id: "apiKey",
@@ -1163,7 +1284,6 @@ async function configureCustomModelWithForm(
         label: "Model ID",
         kind: adding ? "text" : "readonly",
         value: adding ? "" : current.modelId,
-        help: adding ? "新增 model：输入新的 model ID；同渠道共享 Base URL 与 API key" : undefined,
       },
       { id: "reasoning", label: "推理能力", kind: "toggle", value: current.reasoning },
       {
@@ -1197,6 +1317,7 @@ async function configureCustomModelWithForm(
   const nextDisplayName = formText(result.values, "name").trim() || providerId;
   const baseUrl = normalizeBaseUrl(formText(result.values, "baseUrl"));
   const nextModelId = modelId ?? required(formText(result.values, "modelId"), "Model ID");
+  const targetProviderId = providerId;
   const reasoning = formBoolean(result.values, "reasoning");
   const defaultThinkingLevel = formThinkingLevel(result.values, "defaultThinking");
   const contextWindow = positiveInteger(formText(result.values, "contextWindow"), "上下文窗口 contextWindow");
@@ -1211,9 +1332,8 @@ async function configureCustomModelWithForm(
   setOptionalCompatString(nextCompat, "maxTokensField", formText(result.values, "maxTokensField"));
   const authHeaderValue = formText(result.values, "authHeader");
   const authHeader = authHeaderValue === "auto" ? undefined : authHeaderValue === "true";
-  const siblingCount = existingModelIds.filter((id) => id !== nextModelId).length;
   const next: ApiProviderSettings = {
-    provider: providerId,
+    provider: targetProviderId,
     baseUrl,
     modelId: nextModelId,
     contextWindow,
@@ -1229,15 +1349,14 @@ async function configureCustomModelWithForm(
     authHeader,
   };
   const confirmed = await ctx.ui.confirm(
-    `保存自定义渠道 ${nextDisplayName}？`,
+    `保存 Provider ${nextDisplayName}？`,
     [
       modelSavePreview({
-        providerId,
+        providerId: targetProviderId,
         api,
         displayName: nextDisplayName,
         next,
         defaultThinkingLevel,
-        siblingCount,
         cwd: ctx.cwd,
       }),
       `Compat：${next.compat ? JSON.stringify(next.compat) : "自动"}`,
@@ -1247,16 +1366,27 @@ async function configureCustomModelWithForm(
   );
   if (!confirmed) return;
   const saveResult = await saveApiProviderSettings(next, modelsPath);
-  await saveModelThinkingDefault(providerId, nextModelId, canonicalThinkingLevel(defaultThinkingLevel), defaultsPath);
-  await saveDefaultModelAndThinking(ctx, modelsPath, providerId, nextModelId, defaultThinkingLevel);
-  await addManagedChannel(defaultsPath, providerId);
-  reloadProviderRegistration(pi, ctx, providerId, modelsPath);
-  applyThinkingLevelToActiveModel(pi, ctx, providerId, nextModelId, canonicalThinkingLevel(defaultThinkingLevel));
+  await saveModelThinkingDefault(
+    targetProviderId,
+    nextModelId,
+    canonicalThinkingLevel(defaultThinkingLevel),
+    defaultsPath,
+  );
+  await saveDefaultModelAndThinking(ctx, modelsPath, targetProviderId, nextModelId, adding);
+  await addManagedProvider(defaultsPath, targetProviderId);
+  reloadProviderRegistration(pi, ctx, targetProviderId, modelsPath);
+  applyThinkingLevelToActiveModel(
+    pi,
+    ctx,
+    targetProviderId,
+    nextModelId,
+    canonicalThinkingLevel(defaultThinkingLevel),
+  );
   notifySaved(
     ctx,
     nextDisplayName,
     saveResult,
-    `已保存自定义渠道；默认模型为 ${providerId}/${nextModelId}，默认思考强度为 ${defaultThinkingLevel}`,
+    `已保存 Provider；模型身份为 ${targetProviderId}/${nextModelId}，默认思考强度为 ${defaultThinkingLevel}`,
   );
 }
 
@@ -1266,25 +1396,22 @@ interface ModelSavePreviewInput {
   displayName: string;
   next: ApiProviderSettings;
   defaultThinkingLevel: ApiThinkingLevel;
-  siblingCount: number;
   cwd: string;
 }
 
 function modelSavePreview(input: ModelSavePreviewInput): string {
   return [
     `Provider：${input.providerId}`,
-    `API format：${input.api}`,
+    `API format：${apiFormatLabel(input.api)}`,
     `Base URL：${input.next.baseUrl}`,
     `Model：${input.next.modelId}`,
     `上下文窗口 contextWindow：${input.next.contextWindow?.toLocaleString("en-US")} Token（输入+输出总量，本地注册值）`,
     `单次最大输出 maxTokens：${input.next.maxTokens?.toLocaleString("en-US")} Token`,
     ...compactionPreviewLines(input.cwd, input.next.contextWindow ?? 0, input.next.maxTokens ?? 0),
     `Reasoning：${input.next.reasoning ? "enabled" : "disabled"}`,
-    `Default thinking（Pi 全局）：${input.defaultThinkingLevel}`,
+    `Default thinking（当前 model）：${input.defaultThinkingLevel}`,
     "Auth：stored API key",
-    ...(input.siblingCount > 0
-      ? [`Provider 级配置将同时用于其余 ${input.siblingCount} 个 model`]
-      : []),
+    "隔离：同 Provider 下所有模型共享 URL 与 API key",
   ].join("\n");
 }
 
@@ -1408,6 +1535,7 @@ async function removeProviderKey(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
   if (!await isProviderConfigured(providerId, modelsPath)) {
     ctx.ui.notify(`${displayName} 尚未配置，无需注销。`, "info");
@@ -1415,15 +1543,52 @@ async function removeProviderKey(
   }
   const confirmed = await ctx.ui.confirm(
     `注销 ${displayName}？`,
-    "将删除该渠道的 Base URL、models 和 API key；重新新增必须显式输入独立 URL 和 API key。",
+    "将删除该 Provider 的 Base URL、models 和 API key；重新新增必须显式输入独立 URL 和 API key。",
   );
   if (!confirmed) return;
+  const modelIds = await configuredModelIds(providerId, modelsPath);
   const result = await deleteApiProviderSettings(providerId, modelsPath);
   await deleteProviderThinkingDefaults(providerId, defaultsPath);
-  await removeManagedChannel(defaultsPath, providerId);
+  for (const modelId of modelIds) {
+    await clearDeletedDefaultModel(settingsPath, providerId, modelId);
+  }
+  await removeManagedProvider(defaultsPath, providerId);
   pi.unregisterProvider(providerId);
   ctx.modelRegistry.refresh();
   notifySaved(ctx, displayName, result, "已注销；连接配置和 API key 已移除");
+}
+
+async function toggleProvider(
+  pi: ExtensionAPI,
+  providerId: string,
+  displayName: string,
+  enabled: boolean,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+): Promise<void> {
+  if (!await isProviderConfigured(providerId, modelsPath)) {
+    ctx.ui.notify(`${displayName} 尚未配置。`, "warning");
+    return;
+  }
+  const current = await isProviderEnabled(providerId, modelsPath);
+  if (current === enabled) {
+    ctx.ui.notify(`${displayName} 已经${enabled ? "启用" : "停用"}。`, "info");
+    return;
+  }
+  if (ctx.hasUI) {
+    const confirmed = await ctx.ui.confirm(
+      `${enabled ? "启用" : "停用"} ${displayName}？`,
+      enabled
+        ? "将重新注册该 Provider，其 models 会恢复到 /model。"
+        : "将从运行时移除该 Provider 的 models，但保留 URL、API key 和全部模型配置。",
+    );
+    if (!confirmed) return;
+  }
+  const result = await setApiProviderEnabled(providerId, enabled, modelsPath);
+  if (enabled) pi.registerProvider(providerId, configuredProviderRegistration(providerId, modelsPath));
+  else pi.unregisterProvider(providerId);
+  ctx.modelRegistry.refresh();
+  notifySaved(ctx, displayName, result, enabled ? "已启用；models 已恢复到 /model" : "已停用；配置仍完整保留");
 }
 
 async function resetProvider(
@@ -1433,6 +1598,7 @@ async function resetProvider(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
   if (!await isProviderConfigured(providerId, modelsPath)) {
     ctx.ui.notify(`${displayName} 尚未配置，无需重置。`, "info");
@@ -1440,12 +1606,16 @@ async function resetProvider(
   }
   const confirmed = await ctx.ui.confirm(
     `重置 ${displayName}？`,
-    "将清除该渠道的连接配置、models、API key 和思考强度默认值；不会写入环境变量占位。",
+    "将清除该 Provider 的连接配置、models、API key 和思考强度默认值；不会写入环境变量占位。",
   );
   if (!confirmed) return;
+  const modelIds = await configuredModelIds(providerId, modelsPath);
   const result = await deleteApiProviderSettings(providerId, modelsPath);
   await deleteProviderThinkingDefaults(providerId, defaultsPath);
-  await removeManagedChannel(defaultsPath, providerId);
+  for (const modelId of modelIds) {
+    await clearDeletedDefaultModel(settingsPath, providerId, modelId);
+  }
+  await removeManagedProvider(defaultsPath, providerId);
   await saveDefaultThinkingLevel(ctx, modelsPath, DEFAULT_THINKING_LEVEL);
   pi.unregisterProvider(providerId);
   ctx.modelRegistry.refresh();
@@ -1459,6 +1629,7 @@ async function deleteProvider(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
   if (!await isProviderConfigured(providerId, modelsPath)) {
     ctx.ui.notify(`${displayName} 尚未配置，无需删除。`, "info");
@@ -1467,9 +1638,18 @@ async function deleteProvider(
   const modelIds = await configuredModelIds(providerId, modelsPath);
   const modelId = modelIds.length === 1
     ? modelIds[0]
-    : await ctx.ui.select(`选择要删除的 ${displayName} model`, modelIds);
+    : await ctx.ui.select(`选择要删除的 ${displayName} 模型`, modelIds);
   if (!modelId) return;
-  await deleteProviderModel(pi, providerId, displayName, modelId, ctx, modelsPath, defaultsPath);
+  await deleteProviderModel(
+    pi,
+    providerId,
+    displayName,
+    modelId,
+    ctx,
+    modelsPath,
+    defaultsPath,
+    settingsPath,
+  );
 }
 
 async function deleteProviderModel(
@@ -1480,19 +1660,19 @@ async function deleteProviderModel(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
   const modelIds = await configuredModelIds(providerId, modelsPath);
   const confirmed = await ctx.ui.confirm(
     `删除 ${displayName}/${modelId}？`,
-    modelIds.length === 1
-      ? "这是最后一个 model，渠道配置也会一并删除；其他渠道不受影响。"
-      : "只删除所选 model；同渠道的其他 model 与连接配置会保留。",
+    "将删除该模型；同一 Provider 的其他模型与连接配置不受影响。",
   );
   if (!confirmed) return;
   const result = await deleteApiProviderModelSettings(providerId, modelId, modelsPath);
   await deleteModelThinkingDefault(providerId, modelId, defaultsPath);
+  await clearDeletedDefaultModel(settingsPath, providerId, modelId);
   if (modelIds.length === 1) {
-    await removeManagedChannel(defaultsPath, providerId);
+    await removeManagedProvider(defaultsPath, providerId);
     pi.unregisterProvider(providerId);
   } else {
     reloadProviderRegistration(pi, ctx, providerId, modelsPath);
@@ -1519,19 +1699,39 @@ async function listProviders(
       continue;
     }
     const api = typeof config.api === "string" ? config.api : preset.api;
-    await appendListLines(config, preset.id, preset.name, api, false, modelLines, providerLines, defaultsPath);
+    await appendListLines(
+      config,
+      preset.id,
+      preset.name,
+      api,
+      false,
+      providerEnabled(config),
+      modelLines,
+      providerLines,
+      defaultsPath,
+    );
   }
-  for (const id of managedChannelIdsSync(defaultsPath)) {
+  for (const id of managedProviderIdsSync(defaultsPath)) {
     if (findPreset(id) || !isRecord(providers[id])) continue;
     const config = providers[id];
     const name = typeof config.name === "string" && config.name ? config.name : id;
     const api = typeof config.api === "string" ? config.api : "?";
-    await appendListLines(config, id, name, api, true, modelLines, providerLines, defaultsPath);
+    await appendListLines(
+      config,
+      id,
+      name,
+      api,
+      true,
+      providerEnabled(config),
+      modelLines,
+      providerLines,
+      defaultsPath,
+    );
   }
   ctx.ui.notify([
-    "API 模型（model 级配置）：",
-    ...(modelLines.length > 0 ? modelLines : ["（尚未配置任何 model）"]),
-    "API 连接（provider 级配置）：",
+    "API 模型（平铺展示）：",
+    ...(modelLines.length > 0 ? modelLines : ["（尚未配置任何模型）"]),
+    "Providers（URL / API key 级配置）：",
     ...providerLines,
     `Pi 全局默认思考强度：${currentDefaultThinkingLevel(ctx, modelsPath)}`,
     `Provider 自动重试：${retry.enabled ? "开启" : "关闭"} · 最大 ${retry.maxRetries} 次`,
@@ -1545,6 +1745,7 @@ async function appendListLines(
   name: string,
   api: string,
   custom: boolean,
+  enabled: boolean,
   modelLines: string[],
   providerLines: string[],
   defaultsPath: string,
@@ -1553,9 +1754,10 @@ async function appendListLines(
   for (const model of models) {
     if (typeof model.id !== "string") continue;
     const level = await loadModelThinkingDefault(providerId, model.id, defaultsPath);
+    const modelApi = typeof model.api === "string" ? model.api : api;
     modelLines.push([
       `- ${providerId}/${model.id}`,
-      `format: ${api}`,
+      `format: ${apiFormatLabel(modelApi)}`,
       `ctx ${typeof model.contextWindow === "number" ? model.contextWindow.toLocaleString("en-US") : "?"}`,
       `max ${typeof model.maxTokens === "number" ? model.maxTokens.toLocaleString("en-US") : "?"}`,
       `reasoning=${model.reasoning === true ? "on" : "off"}`,
@@ -1563,8 +1765,9 @@ async function appendListLines(
     ].join(" · "));
   }
   providerLines.push([
-    `- ${providerId}（${name}${custom ? " · 自定义" : ""}）`,
-    `format: ${api}`,
+    `- ${providerId}（${name}${custom ? " · 用户定义" : ""}）`,
+    enabled ? "启用" : "停用",
+    `format: ${apiFormatLabel(api)}`,
     typeof config.baseUrl === "string" ? config.baseUrl : "?",
     authSource(config.apiKey),
     `${models.length} model`,
@@ -1597,14 +1800,16 @@ async function showProvider(
     const modelId = preferredModelId
       ?? (modelIds.length === 1
         ? modelIds[0]
-        : await ctx.ui.select(`选择要查看的 ${displayName} model`, modelIds));
+        : await ctx.ui.select(`选择要查看的 ${displayName} 模型`, modelIds));
     if (!modelId) return;
     const model = models.find((entry) => entry.id === modelId) ?? {};
     const level = await loadModelThinkingDefault(providerId, modelId, defaultsPath);
+    const modelApi = typeof model.api === "string" ? model.api : api;
     ctx.ui.notify([
       displayName,
-      `Provider ID：${providerId}`,
-      `API format：${api}`,
+      `Provider：${providerId}`,
+      `Provider 状态：${providerEnabled(config) ? "启用" : "停用"}`,
+      `API format：${apiFormatLabel(modelApi)}`,
       `Base URL：${typeof config.baseUrl === "string" ? config.baseUrl : preset?.baseUrl ?? ""}`,
       `Model：${modelId}`,
       `上下文窗口 contextWindow：${typeof model.contextWindow === "number" ? model.contextWindow.toLocaleString("en-US") : "?"} Token（输入+输出总量，本地注册值）`,
@@ -1615,7 +1820,6 @@ async function showProvider(
       `Reasoning：${model.reasoning === true ? "enabled" : "disabled"}`,
       `Default thinking：${level ?? "global"}`,
       `Auth：${authSource(config.apiKey)}`,
-      `同 Provider 其他 models：${Math.max(0, modelIds.length - 1)}`,
       `文件：${modelsPath}`,
     ].join("\n"), "info");
     return;
@@ -1627,8 +1831,9 @@ async function showProvider(
   }));
   ctx.ui.notify([
     displayName,
-    `Provider ID：${providerId}`,
-    `API format：${api}`,
+    `Provider：${providerId}`,
+    `Provider 状态：${providerEnabled(config) ? "启用" : "停用"}`,
+    `API format：${apiFormatLabel(api)}`,
     `Base URL：${typeof config.baseUrl === "string" ? config.baseUrl : preset?.baseUrl ?? ""}`,
     `Models（${models.length}）：`,
     ...modelLines,
@@ -1648,9 +1853,12 @@ async function writeApiProviderSettings(
   const providers = isRecord(root.providers) ? { ...root.providers } : {};
   const currentEntry = providers[settings.provider];
   const currentProvider = isRecord(currentEntry) ? { ...currentEntry } : {};
-  const currentModels = Array.isArray(currentProvider.models)
-    ? currentProvider.models.filter(isRecord)
-    : [];
+  const preset = findPreset(settings.provider);
+  const rawModels = Array.isArray(currentProvider.models) ? currentProvider.models : [];
+  if (rawModels.some((model) => !isRecord(model) || typeof model.id !== "string")) {
+    throw new Error(`Provider ${settings.provider} contains malformed model entries; refusing a lossy save`);
+  }
+  const currentModels = rawModels as Record<string, unknown>[];
   const existingIndex = currentModels.findIndex((model) => model.id === settings.modelId);
   const existingModel = existingIndex >= 0 ? currentModels[existingIndex] : {};
   const contextWindow = settings.contextWindow
@@ -1667,6 +1875,11 @@ async function writeApiProviderSettings(
     contextWindow,
     maxTokens,
   };
+  // Connection/format fields are Provider-level; model entries keep only model-specific settings.
+  delete nextModel.api;
+  delete nextModel.baseUrl;
+  delete nextModel.compat;
+  delete nextModel.headers;
   if (settings.reasoning) {
     const thinkingLevelMap: Record<string, string | null> = defaults.api === "anthropic-messages"
       ? { xhigh: "high" }
@@ -1676,31 +1889,48 @@ async function writeApiProviderSettings(
   } else {
     delete nextModel.thinkingLevelMap;
   }
+
+  const existingCompat = isRecord(existingModel.compat)
+    ? materializeProviderCompat(currentProvider.compat, existingModel.compat)
+    : isRecord(currentProvider.compat)
+      ? { ...currentProvider.compat }
+      : undefined;
+  const existingHeaders = isStringRecord(existingModel.headers)
+    ? { ...existingModel.headers }
+    : isStringRecord(currentProvider.headers)
+      ? { ...currentProvider.headers }
+      : undefined;
+  const nextModels = existingIndex >= 0
+    ? currentModels.map((model, index) => index === existingIndex ? nextModel : model)
+    : [...currentModels, nextModel];
   const nextProvider: Record<string, unknown> = {
     ...currentProvider,
     baseUrl: settings.baseUrl,
     api: defaults.api,
     apiKey: settings.apiKey,
-    models: existingIndex >= 0
-      ? currentModels.map((model, index) => index === existingIndex ? nextModel : model)
-      : [...currentModels, nextModel],
+    models: nextModels,
   };
-  const preset = findPreset(settings.provider);
   if (defaults.compat) {
-    nextProvider.compat = {
-      ...(isRecord(currentProvider.compat) ? currentProvider.compat : {}),
-      ...defaults.compat,
-    };
-  } else if (!preset && settings.replaceProviderOptions) delete nextProvider.compat;
+    nextProvider.compat = preset
+      ? { ...(existingCompat ?? {}), ...defaults.compat }
+      : { ...defaults.compat };
+  } else if (!preset && settings.replaceProviderOptions) {
+    delete nextProvider.compat;
+  } else if (existingCompat) {
+    nextProvider.compat = existingCompat;
+  }
   if (settings.name) nextProvider.name = settings.name;
-  if (settings.headers && Object.keys(settings.headers).length > 0) nextProvider.headers = { ...settings.headers };
-  else if (!preset && settings.replaceProviderOptions) delete nextProvider.headers;
+  if (settings.headers && Object.keys(settings.headers).length > 0) {
+    nextProvider.headers = { ...settings.headers };
+  } else if (!preset && settings.replaceProviderOptions) {
+    delete nextProvider.headers;
+  } else if (existingHeaders) {
+    nextProvider.headers = existingHeaders;
+  }
   if (settings.authHeader !== undefined) nextProvider.authHeader = settings.authHeader;
   else if (!preset && settings.replaceProviderOptions) delete nextProvider.authHeader;
   providers[settings.provider] = nextProvider;
-  const nextRoot = { ...root, providers };
-
-  return writeModelsRoot(nextRoot, modelsPath, exists);
+  return writeModelsRoot({ ...root, providers }, modelsPath, exists);
 }
 
 async function writeModelsRoot(
@@ -1766,15 +1996,15 @@ function providerDefaults(provider: ApiProviderId): ProviderDefaults {
   return defaults;
 }
 
-interface ChannelWriteDefaults {
+interface ProviderWriteDefaults {
   api: string;
   contextWindow: number;
   maxTokens: number;
   compat?: Record<string, unknown>;
 }
 
-/** Resolve protocol/limits for a save: presets use PROVIDERS, custom channels use explicit settings. */
-function resolveWriteDefaults(settings: ApiProviderSettings): ChannelWriteDefaults {
+/** Resolve protocol/limits for a save: presets use PROVIDERS, user-defined Providers use explicit settings. */
+function resolveWriteDefaults(settings: ApiProviderSettings): ProviderWriteDefaults {
   const preset = findPreset(settings.provider);
   if (preset) {
     return {
@@ -1800,17 +2030,19 @@ function configuredProviderIds(modelsPath: string): Set<ApiProviderId> {
     const providers = parsed.providers;
     if (!isRecord(providers)) return new Set();
     return new Set(PROVIDERS
-      .filter((provider) => isRecord(providers[provider.id]))
+      .filter((provider) => isEnabledProviderConfig(providers[provider.id]))
       .map((provider) => provider.id));
   } catch {
     return new Set();
   }
 }
 
-function hasConfiguredProviderSync(providerId: string, modelsPath: string): boolean {
+function hasEnabledProviderSync(providerId: string, modelsPath: string): boolean {
   try {
     const parsed = JSON.parse(readFileSync(modelsPath, "utf8")) as unknown;
-    return isRecord(parsed) && isRecord(parsed.providers) && isRecord(parsed.providers[providerId]);
+    if (!isRecord(parsed) || !isRecord(parsed.providers)) return false;
+    const provider = parsed.providers[providerId];
+    return isRecord(provider) && providerEnabled(provider);
   } catch {
     return false;
   }
@@ -1942,18 +2174,19 @@ interface ParsedManagerArgs {
 }
 
 function parseManagerArgs(args: string): ParsedManagerArgs {
-  const values = args.trim().toLowerCase().split(/\s+/).filter(Boolean);
+  const values = args.trim().split(/\s+/).filter(Boolean);
+  const normalized = values.map((value) => value.toLowerCase());
   if (values.length === 0) return {};
-  if (values[0] === "retry") {
+  if (normalized[0] === "retry") {
     if (values.length === 1) return { action: "retry" };
-    if ((values[1] === "show" || values[1] === "status") && values.length === 2) {
+    if ((normalized[1] === "show" || normalized[1] === "status") && values.length === 2) {
       return { action: "retry", retry: { showOnly: true } };
     }
-    if (values[1] === "off" || values[1] === "disable" || values[1] === "disabled") {
+    if (normalized[1] === "off" || normalized[1] === "disable" || normalized[1] === "disabled") {
       if (values.length !== 2) throw usageError();
       return { action: "retry", retry: { enabled: false } };
     }
-    if (values[1] === "on" || values[1] === "enable" || values[1] === "enabled") {
+    if (normalized[1] === "on" || normalized[1] === "enable" || normalized[1] === "enabled") {
       if (values.length > 3) throw usageError();
       return {
         action: "retry",
@@ -1966,28 +2199,31 @@ function parseManagerArgs(args: string): ParsedManagerArgs {
     throw usageError();
   }
   if (values.length === 1) {
-    const action = actionFromArg(values[0]);
+    const action = actionFromArg(normalized[0]);
     if (action) return { action };
     const target = resolveTargetToken(values[0]);
     if (target) return { action: "configure", target };
     throw usageError();
   }
-  const action = actionFromArg(values[0]);
+  const action = actionFromArg(normalized[0]);
   const target = resolveTargetToken(values[1]);
   if (action && target) return { action, target };
   throw usageError();
 }
 
 function resolveTargetToken(value: string): ChannelTarget | undefined {
-  const preset = providerFromArg(value);
+  const normalized = value.toLowerCase();
+  const preset = providerFromArg(normalized);
   if (preset) return { kind: "preset", preset };
-  if (value === "new" || value === "custom" || value === "add-custom") return { kind: "custom", id: "" };
+  if (normalized === "new" || normalized === "custom" || normalized === "add-custom") {
+    return { kind: "custom", id: "" };
+  }
   return { kind: "custom", id: value };
 }
 
 function usageError(): Error {
   return new Error(
-    "用法：/api-manager list | retry [show|on [1-10]|off] | show|set|delete|logout|reset [openai|qwen|anthropic|<自定义渠道 id>|new]",
+    "用法：/api-manager list | retry [show|on [1-10]|off] | show|set|delete|enable|disable|logout|reset [openai|qwen|anthropic|<Provider ID>|new]",
   );
 }
 
@@ -1998,15 +2234,15 @@ async function chooseModelToConfigure(
   modelsPath: string,
 ): Promise<ConfigureModelTarget | undefined> {
   const modelIds = await configuredModelIds(providerId, modelsPath);
-  if (modelIds.length === 0) return { modelId: null, adding: false };
+  if (modelIds.length === 0) return { modelId: null, adding: true };
+  const addLabel = "➕ 新增模型…";
   const choice = await ctx.ui.select(
-    `选择要修改的 ${displayName} model`,
-    [...modelIds, ADD_MODEL_LABEL],
+    `选择要修改的 ${displayName} 模型`,
+    [...modelIds, addLabel],
   );
   if (!choice) return undefined;
-  return choice === ADD_MODEL_LABEL
-    ? { modelId: null, adding: true }
-    : { modelId: choice, adding: false };
+  if (choice === addLabel) return { modelId: null, adding: true };
+  return { modelId: choice, adding: false };
 }
 
 async function chooseProvider(
@@ -2017,12 +2253,24 @@ async function chooseProvider(
   const options: Array<{ label: string; target: ChannelTarget }> = [];
   for (const preset of PROVIDERS) {
     if (!await isProviderConfigured(preset.id, modelsPath)) continue;
-    options.push({ label: preset.name, target: { kind: "preset", preset } });
+    options.push({
+      label: numberedOptionLabel(
+        options.length,
+        `${preset.name} · Provider ID: ${preset.id}（${await isProviderEnabled(preset.id, modelsPath) ? "启用" : "停用"}）`,
+      ),
+      target: { kind: "preset", preset },
+    });
   }
-  for (const id of managedChannelIdsSync(defaultsPath)) {
+  for (const id of managedProviderIdsSync(defaultsPath)) {
     if (findPreset(id) || !await isProviderConfigured(id, modelsPath)) continue;
     const name = await channelDisplayName(id, modelsPath);
-    options.push({ label: `${name}（自定义）`, target: { kind: "custom", id } });
+    options.push({
+      label: numberedOptionLabel(
+        options.length,
+        `${name} · Provider ID: ${id}（用户定义 · ${await isProviderEnabled(id, modelsPath) ? "启用" : "停用"}）`,
+      ),
+      target: { kind: "custom", id },
+    });
   }
   if (options.length === 0) return undefined;
   const choice = await ctx.ui.select("选择 Provider（连接级操作）", options.map((entry) => entry.label));
@@ -2031,15 +2279,14 @@ async function chooseProvider(
 
 type GlobalModelPick =
   | { kind: "model"; providerId: string; modelId: string }
-  | { kind: "add-to"; providerId: string }
-  | { kind: "new-channel" };
+  | { kind: "new-model" };
 
 interface GlobalModelOption {
   label: string;
   pick: GlobalModelPick;
 }
 
-/** Model-centric picker: lists every configured model; format is shown only as an attribute. */
+/** Model picker: lists every configured model under its Provider. */
 async function chooseModelGlobally(
   ctx: ExtensionCommandContext,
   action: "configure" | "show" | "delete",
@@ -2048,14 +2295,14 @@ async function chooseModelGlobally(
 ): Promise<GlobalModelPick | undefined> {
   const options = await buildGlobalModelOptions(action, modelsPath, defaultsPath);
   if (options.length === 0) {
-    ctx.ui.notify("尚未配置任何 model。", "info");
+    ctx.ui.notify("尚未配置任何模型。", "info");
     return undefined;
   }
   const title = action === "configure"
-    ? "选择要修改的 model，或新增"
+    ? "选择要修改的模型，或新增"
     : action === "show"
-      ? "选择要查看的 model"
-      : "选择要删除的 model";
+      ? "选择要查看的模型"
+      : "选择要删除的模型";
   const choice = await ctx.ui.select(title, options.map((entry) => entry.label));
   return options.find((entry) => entry.label === choice)?.pick;
 }
@@ -2068,47 +2315,84 @@ async function buildGlobalModelOptions(
   const root = await readModelsRoot(modelsPath);
   const providers = isRecord(root.providers) ? root.providers : {};
   const options: GlobalModelOption[] = [];
-  for (const providerId of modelCentricChannelOrder(defaultsPath)) {
+  for (const providerId of modelCentricProviderOrder(defaultsPath)) {
     const config = providers[providerId];
     if (!isRecord(config)) continue;
-    const preset = findPreset(providerId);
-    const api = typeof config.api === "string" ? config.api : preset?.api ?? "?";
     const models = Array.isArray(config.models) ? config.models.filter(isRecord) : [];
     for (const model of models) {
       if (typeof model.id !== "string") continue;
       options.push({
-        label: `${providerId}/${model.id} · format: ${api}`,
+        label: numberedOptionLabel(options.length, `${providerId} / ${model.id}`),
         pick: { kind: "model", providerId, modelId: model.id },
       });
     }
   }
   if (action !== "configure") return options;
-  for (const preset of PROVIDERS) {
-    options.push({
-      label: `➕ 新增 model · ${preset.name}（format: ${preset.api}）`,
-      pick: { kind: "add-to", providerId: preset.id },
-    });
-  }
-  for (const providerId of managedChannelIdsSync(defaultsPath)) {
-    if (findPreset(providerId) || !isRecord(providers[providerId])) continue;
-    const config = providers[providerId];
-    const name = typeof config.name === "string" && config.name ? config.name : providerId;
-    const api = typeof config.api === "string" ? config.api : "?";
-    options.push({
-      label: `➕ 新增 model · ${name}（自定义 · format: ${api}）`,
-      pick: { kind: "add-to", providerId },
-    });
-  }
-  options.push({ label: "➕ 新增自定义渠道…", pick: { kind: "new-channel" } });
+  options.push({
+    label: numberedOptionLabel(options.length, "➕ 新增模型…"),
+    pick: { kind: "new-model" },
+  });
   return options;
 }
 
-/** Presets first, then managed custom channels; the listing order for model-centric views. */
-function modelCentricChannelOrder(defaultsPath: string): string[] {
+/** Presets first, then managed user-defined Providers; models remain a flat list. */
+function modelCentricProviderOrder(defaultsPath: string): string[] {
   return [
     ...PROVIDERS.map((preset) => preset.id),
-    ...managedChannelIdsSync(defaultsPath).filter((id) => !findPreset(id)),
+    ...managedProviderIdsSync(defaultsPath).filter((id) => !findPreset(id)),
   ];
+}
+
+/** Pick the target Provider for a new model, then open its add form. */
+async function configureNewModel(
+  pi: ExtensionAPI,
+  ctx: ExtensionCommandContext,
+  modelsPath: string,
+  defaultsPath: string,
+): Promise<void> {
+  const options: Array<{ label: string; target: ChannelTarget }> = [];
+  for (const preset of PROVIDERS) {
+    options.push({
+      label: numberedOptionLabel(
+        options.length,
+        `${preset.name} · Provider ID: ${preset.id}`,
+      ),
+      target: { kind: "preset", preset },
+    });
+  }
+  for (const id of managedProviderIdsSync(defaultsPath)) {
+    if (findPreset(id) || !await isProviderConfigured(id, modelsPath)) continue;
+    const name = await channelDisplayName(id, modelsPath);
+    options.push({
+      label: numberedOptionLabel(options.length, `${name} · Provider ID: ${id}`),
+      target: { kind: "custom", id },
+    });
+  }
+  const customInputLabel = numberedOptionLabel(options.length, "自定义 Provider ID…");
+  const choice = await ctx.ui.select(
+    "新增模型到哪个 Provider？",
+    [...options.map((entry) => entry.label), customInputLabel],
+  );
+  if (choice === undefined) return;
+  const target = options.find((entry) => entry.label === choice)?.target;
+  if (!target && choice !== customInputLabel) return;
+  if (choice === customInputLabel) {
+    const idInput = await ctx.ui.input("Provider ID", "");
+    if (idInput === undefined) return;
+    const providerId = normalizeChannelId(idInput);
+    const preset = findPreset(providerId);
+    if (preset) {
+      await configurePresetModelTarget(pi, preset, { modelId: null, adding: true }, ctx, modelsPath, defaultsPath);
+    } else {
+      await configureCustomModelTarget(pi, providerId, { modelId: null, adding: true }, ctx, modelsPath, defaultsPath);
+    }
+    return;
+  }
+  if (target!.kind === "preset") {
+    await configurePresetModelTarget(pi, target!.preset, { modelId: null, adding: true }, ctx, modelsPath, defaultsPath);
+    return;
+  }
+  await configureCustomModelTarget(pi, target!.id, { modelId: null, adding: true }, ctx, modelsPath, defaultsPath);
 }
 
 async function dispatchGlobalModelPick(
@@ -2118,16 +2402,10 @@ async function dispatchGlobalModelPick(
   ctx: ExtensionCommandContext,
   modelsPath: string,
   defaultsPath: string,
+  settingsPath: string,
 ): Promise<void> {
-  if (pick.kind === "new-channel") {
-    await configureCustomChannel(pi, ctx, modelsPath, defaultsPath);
-    return;
-  }
-  if (pick.kind === "add-to") {
-    const preset = findPreset(pick.providerId);
-    const target: ConfigureModelTarget = { modelId: null, adding: true };
-    if (preset) await configurePresetModelTarget(pi, preset, target, ctx, modelsPath, defaultsPath);
-    else await configureCustomModelTarget(pi, pick.providerId, target, ctx, modelsPath, defaultsPath);
+  if (pick.kind === "new-model") {
+    await configureNewModel(pi, ctx, modelsPath, defaultsPath);
     return;
   }
   const displayName = await channelDisplayName(pick.providerId, modelsPath);
@@ -2136,13 +2414,26 @@ async function dispatchGlobalModelPick(
     return;
   }
   if (action === "delete") {
-    await deleteProviderModel(pi, pick.providerId, displayName, pick.modelId, ctx, modelsPath, defaultsPath);
+    await deleteProviderModel(
+      pi,
+      pick.providerId,
+      displayName,
+      pick.modelId,
+      ctx,
+      modelsPath,
+      defaultsPath,
+      settingsPath,
+    );
     return;
   }
   const preset = findPreset(pick.providerId);
   const target: ConfigureModelTarget = { modelId: pick.modelId, adding: false };
   if (preset) await configurePresetModelTarget(pi, preset, target, ctx, modelsPath, defaultsPath);
   else await configureCustomModelTarget(pi, pick.providerId, target, ctx, modelsPath, defaultsPath);
+}
+
+function numberedOptionLabel(index: number, label: string): string {
+  return `${index + 1}. ${label}`;
 }
 
 async function resolveChannelRef(
@@ -2152,7 +2443,7 @@ async function resolveChannelRef(
 ): Promise<ChannelRef | undefined> {
   if (target.kind === "preset") return { id: target.preset.id, name: target.preset.name };
   if (!target.id) {
-    ctx.ui.notify("请指定自定义渠道 id。", "warning");
+    ctx.ui.notify("请指定 Provider ID。", "warning");
     return undefined;
   }
   return { id: target.id, name: await channelDisplayName(target.id, modelsPath) };
@@ -2169,8 +2460,11 @@ async function channelDisplayName(providerId: string, modelsPath: string): Promi
 }
 
 function normalizeChannelId(value: string): string {
-  const id = required(value, "Channel ID").trim();
-  if (/\s/.test(id)) throw new Error("Channel ID cannot contain whitespace");
+  const id = required(value, "Provider ID").trim();
+  if (/\s/.test(id)) throw new Error("Provider ID cannot contain whitespace");
+  if (id === "__proto__" || id === "prototype" || id === "constructor") {
+    throw new Error(`Provider ID ${id} is reserved`);
+  }
   return id;
 }
 
@@ -2180,16 +2474,17 @@ async function chooseAction(
 ): Promise<ApiProviderAction | undefined> {
   const retry = await loadApiRetrySettings(settingsPath);
   const choices: Array<{ action: ApiProviderAction; label: string }> = [
-    { action: "list", label: "查看全部 model 与渠道" },
-    { action: "configure", label: "新增或修改 model（单表单）" },
-    { action: "show", label: "查看 model 详情" },
-    { action: "delete", label: "删除 model" },
+    { action: "list", label: "查看全部模型" },
+    { action: "configure", label: "新增或修改模型" },
+    { action: "show", label: "查看模型详情" },
+    { action: "toggle", label: "启用或停用 Provider" },
+    { action: "delete", label: "删除模型" },
     {
       action: "retry",
-      label: `Provider 自动重试（当前：${retry.enabled ? `开启 · 最大 ${retry.maxRetries} 次` : "关闭"}）`,
+      label: `自动重试（当前：${retry.enabled ? "开启" : "关闭"}）`,
     },
-    { action: "logout", label: "注销渠道（Provider 级）" },
-    { action: "reset", label: "重置渠道（Provider 级）" },
+    { action: "logout", label: "注销 Provider" },
+    { action: "reset", label: "重置 Provider" },
   ];
   const choice = await ctx.ui.select("选择操作", choices.map((entry) => entry.label));
   return choices.find((entry) => entry.label === choice)?.action;
@@ -2200,6 +2495,8 @@ function actionFromArg(value: string): ApiProviderAction | undefined {
     return "configure";
   }
   if (value === "delete" || value === "remove") return "delete";
+  if (value === "enable" || value === "on") return "enable";
+  if (value === "disable" || value === "off") return "disable";
   if (value === "list" || value === "ls") return "list";
   if (value === "show" || value === "get") return "show";
   if (value === "logout") return "logout";
@@ -2239,7 +2536,7 @@ async function chooseDefaultThinkingLevel(
     : supported[0];
   const selected = supported.includes(current) ? current : fallback;
   const options = [selected, ...supported.filter((level) => level !== selected)];
-  return await ctx.ui.select("默认思考强度（Pi 全局）", options) as ApiThinkingLevel | undefined;
+  return await ctx.ui.select("默认思考强度（当前 model）", options) as ApiThinkingLevel | undefined;
 }
 
 function currentDefaultThinkingLevel(
@@ -2265,18 +2562,38 @@ async function saveDefaultThinkingLevel(
   }
 }
 
+async function clearDeletedDefaultModel(
+  settingsPath: string,
+  providerId: string,
+  modelId: string,
+): Promise<void> {
+  if (!await fileExists(settingsPath)) return;
+  await serializeMutation(settingsPath, async () => {
+    const root = await readModelsRoot(settingsPath);
+    if (root.defaultProvider !== providerId || root.defaultModel !== modelId) return;
+    const next = { ...root };
+    delete next.defaultProvider;
+    delete next.defaultModel;
+    await writeModelsRoot(next, settingsPath, true);
+  });
+}
+
 async function saveDefaultModelAndThinking(
   ctx: ExtensionCommandContext,
   modelsPath: string,
-  // Custom channels are not preset ids, and they save defaults through here too.
+  // User-defined Providers are not preset ids, and they save defaults through here too.
   provider: string,
   modelId: string,
-  level: ApiThinkingLevel,
+  isAdding: boolean,
 ): Promise<void> {
+  // Per-model thinking defaults are persisted separately (saveModelThinkingDefault) and
+  // applied on model_select; settings.json.defaultThinkingLevel is only a global fallback,
+  // so configuring a model must never overwrite it. Only a newly ADDED model becomes the
+  // default model — editing an existing model leaves the current default untouched so
+  // same-format siblings are not affected.
+  if (!isAdding) return;
   const manager = SettingsManager.create(ctx.cwd, dirname(modelsPath));
   manager.setDefaultModelAndProvider(provider, modelId);
-  const setDefaultThinkingLevel = manager.setDefaultThinkingLevel.bind(manager) as (value: ApiThinkingLevel) => void;
-  setDefaultThinkingLevel(level);
   await manager.flush();
   const errors = manager.drainErrors();
   if (errors.length > 0) {
@@ -2300,6 +2617,10 @@ function setPiThinkingLevel(pi: ExtensionAPI, level: ThinkingLevel): void {
 }
 
 function modelThinkingKey(provider: string, modelId: string): string {
+  return `${encodeURIComponent(provider)}/${encodeURIComponent(modelId)}`;
+}
+
+function legacyModelThinkingKey(provider: string, modelId: string): string {
   return `${provider}/${modelId}`;
 }
 
@@ -2310,7 +2631,9 @@ async function loadModelThinkingDefault(
 ): Promise<ThinkingLevel | undefined> {
   const root = await readModelsRoot(defaultsPath);
   if (!isRecord(root.modelDefaults)) return undefined;
-  const value = root.modelDefaults[modelThinkingKey(provider, modelId)];
+  const key = modelThinkingKey(provider, modelId);
+  const legacyKey = legacyModelThinkingKey(provider, modelId);
+  const value = root.modelDefaults[key] ?? root.modelDefaults[legacyKey];
   if (value === "max") return "xhigh";
   return isThinkingLevel(value) ? value : undefined;
 }
@@ -2325,7 +2648,10 @@ async function saveModelThinkingDefault(
     const exists = await fileExists(defaultsPath);
     const root = await readModelsRoot(defaultsPath);
     const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
-    modelDefaults[modelThinkingKey(provider, modelId)] = level;
+    const key = modelThinkingKey(provider, modelId);
+    const legacyKey = legacyModelThinkingKey(provider, modelId);
+    modelDefaults[key] = level;
+    if (legacyKey !== key) delete modelDefaults[legacyKey];
     await writeModelsRoot({ ...root, version: 1, modelDefaults }, defaultsPath, exists);
   });
 }
@@ -2339,7 +2665,10 @@ async function deleteModelThinkingDefault(
   await serializeMutation(defaultsPath, async () => {
     const root = await readModelsRoot(defaultsPath);
     const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
-    delete modelDefaults[modelThinkingKey(provider, modelId)];
+    const key = modelThinkingKey(provider, modelId);
+    const legacyKey = legacyModelThinkingKey(provider, modelId);
+    delete modelDefaults[key];
+    if (legacyKey !== key) delete modelDefaults[legacyKey];
     await writeModelsRoot({ ...root, modelDefaults }, defaultsPath, true);
   });
 }
@@ -2352,7 +2681,7 @@ async function deleteProviderThinkingDefaults(
   await serializeMutation(defaultsPath, async () => {
     const root = await readModelsRoot(defaultsPath);
     const modelDefaults = isRecord(root.modelDefaults) ? { ...root.modelDefaults } : {};
-    const prefix = `${provider}/`;
+    const prefix = `${encodeURIComponent(provider)}/`;
     for (const key of Object.keys(modelDefaults)) {
       if (key.startsWith(prefix)) delete modelDefaults[key];
     }
@@ -2360,42 +2689,52 @@ async function deleteProviderThinkingDefaults(
   });
 }
 
-/**
- * Custom channels created through /api-manager are tracked here so startup can
- * re-register them. Built-in presets are handled separately and never listed.
- */
-function managedChannelIdsSync(defaultsPath: string): string[] {
+function managedProviderIdsSync(defaultsPath: string): string[] {
   try {
     const root = JSON.parse(readFileSync(defaultsPath, "utf8")) as unknown;
-    if (!isRecord(root) || !Array.isArray(root.managedChannels)) return [];
-    return root.managedChannels.filter((id): id is string => typeof id === "string");
+    return isRecord(root) ? managedProviderIds(root) : [];
   } catch {
     return [];
   }
 }
 
-async function addManagedChannel(defaultsPath: string, id: string): Promise<void> {
+function managedProviderIds(root: Record<string, unknown>): string[] {
+  const current = Array.isArray(root.managedProviders) ? root.managedProviders : [];
+  const legacy = Array.isArray(root.managedChannels) ? root.managedChannels : [];
+  return [...new Set([...current, ...legacy].filter((id): id is string => typeof id === "string"))];
+}
+
+function withoutLegacyManagedChannels(root: Record<string, unknown>): Record<string, unknown> {
+  const next = { ...root };
+  delete next.managedChannels;
+  return next;
+}
+
+async function addManagedProvider(defaultsPath: string, id: string): Promise<void> {
   if (findPreset(id)) return;
   await serializeMutation(defaultsPath, async () => {
     const exists = await fileExists(defaultsPath);
     const root = await readModelsRoot(defaultsPath);
-    const current = Array.isArray(root.managedChannels)
-      ? root.managedChannels.filter((value): value is string => typeof value === "string")
-      : [];
-    if (current.includes(id)) return;
-    await writeModelsRoot({ ...root, version: 1, managedChannels: [...current, id] }, defaultsPath, exists);
+    const current = managedProviderIds(root);
+    if (current.includes(id) && Array.isArray(root.managedProviders) && !("managedChannels" in root)) return;
+    await writeModelsRoot({
+      ...withoutLegacyManagedChannels(root),
+      version: 1,
+      managedProviders: current.includes(id) ? current : [...current, id],
+    }, defaultsPath, exists);
   });
 }
 
-async function removeManagedChannel(defaultsPath: string, id: string): Promise<void> {
+async function removeManagedProvider(defaultsPath: string, id: string): Promise<void> {
   if (!await fileExists(defaultsPath)) return;
   await serializeMutation(defaultsPath, async () => {
     const root = await readModelsRoot(defaultsPath);
-    const current = Array.isArray(root.managedChannels)
-      ? root.managedChannels.filter((value): value is string => typeof value === "string")
-      : [];
-    if (!current.includes(id)) return;
-    await writeModelsRoot({ ...root, managedChannels: current.filter((value) => value !== id) }, defaultsPath, true);
+    const current = managedProviderIds(root);
+    if (!current.includes(id) && Array.isArray(root.managedProviders) && !("managedChannels" in root)) return;
+    await writeModelsRoot({
+      ...withoutLegacyManagedChannels(root),
+      managedProviders: current.filter((value) => value !== id),
+    }, defaultsPath, true);
   });
 }
 
@@ -2413,7 +2752,11 @@ function reloadProviderRegistration(
   modelsPath: string,
 ): void {
   ctx.modelRegistry.refresh();
-  pi.registerProvider(providerId, configuredProviderRegistration(providerId, modelsPath));
+  if (hasEnabledProviderSync(providerId, modelsPath)) {
+    pi.registerProvider(providerId, configuredProviderRegistration(providerId, modelsPath));
+  } else {
+    pi.unregisterProvider(providerId);
+  }
 }
 
 async function migrateLegacyProviderThinkingMaps(
@@ -2442,6 +2785,21 @@ async function migrateLegacyProviderThinkingMaps(
     };
     await writeModelsRoot({ ...root, providers }, modelsPath, true);
   });
+}
+
+function isEnabledProviderConfig(value: unknown): value is Record<string, unknown> {
+  return isRecord(value) && providerEnabled(value);
+}
+
+function providerEnabled(config: Record<string, unknown>): boolean {
+  return config.enabled !== false;
+}
+
+async function isProviderEnabled(provider: string, modelsPath: string): Promise<boolean> {
+  const root = await readModelsRoot(modelsPath);
+  return isRecord(root.providers)
+    && isRecord(root.providers[provider])
+    && providerEnabled(root.providers[provider]);
 }
 
 async function isProviderConfigured(provider: string, modelsPath: string): Promise<boolean> {
@@ -2501,7 +2859,7 @@ function compactionPreviewLines(projectRoot: string, contextWindow: number, maxT
 
 function providerThresholdReason(reason: CompactionThresholdReason): string {
   if (reason === "configured") return "由压缩配置预留决定";
-  if (reason === "ratio-floor") return "受上下文窗口 10% 安全底线下调";
+  if (reason === "ratio-floor") return "受上下文窗口 5% 安全底线下调";
   if (reason === "max-output") return "受单次最大输出保护下调";
   return "单次最大输出过大，安全预留已封顶为窗口 90%";
 }
