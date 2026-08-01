@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import * as fs from "node:fs";
 import { handleProxyRequest, checkActiveAgentBudget } from "../src/extension/index.ts";
 import { checkDepthGuard, MAX_DEFAULT_DEPTH } from "../src/runs/execution.ts";
 import type { ActiveAgent, TeammateState } from "../src/shared/types.ts";
@@ -190,4 +191,28 @@ test("a proxied graph reserves every child slot before registration", async () =
     if (previous === undefined) delete process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS;
     else process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS = previous;
   }
+});
+
+test("P4: root and proxy graphs register every task before emitting started events", () => {
+  const source = fs.readFileSync(new URL("../src/extension/index.ts", import.meta.url), "utf-8");
+
+  // Both registration loops must finish the full graph before any synchronous
+  // TEAMMATE_STARTED_EVENT emit, so a listener re-entering admission sees the
+  // complete live tally and cannot pass the budget against a partial count.
+  const rootRegister = source.match(
+    /if \(isMultiTask\) \{\s*\n\s*normalizedTasks\.forEach\(\(task, index\) => \{\s*\n[\s\S]*?state\.activeRuns\.set\(childId, childAgent\);\s*\n\s*if \(task\.name\) bindAgentName\(state, task\.name, childId\);\s*\n\s*\}\);\s*\n\s*\/\/ Register the whole graph before emitting any started event/,
+  );
+  assert.ok(rootRegister, "root graph registration must be separated from started-event emission");
+
+  const proxyRegister = source.match(
+    /normalizedTasks\?\.forEach\(\(task, index\) => \{\s*\n[\s\S]*?state\.activeRuns\.set\(childId, childAgent\);\s*\n\s*if \(task\.name\) bindAgentName\(state, task\.name, childId\);\s*\n\s*\}\);\s*\n\s*\/\/ Same P4 ordering/,
+  );
+  assert.ok(proxyRegister, "proxy graph registration must be separated from started-event emission");
+
+  // The proxy must not expose an external onChildStatus callback before the
+  // whole graph is registered either.
+  const statusAfter = source.match(
+    /\/\/ After the whole graph is registered: an onChildStatus callback can\s*\n\s*\/\/ synchronously trigger further dispatches[\s\S]*?reportChildStatus\("running"\);/,
+  );
+  assert.ok(statusAfter, "proxy onChildStatus must fire after full registration");
 });

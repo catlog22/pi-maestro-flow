@@ -194,3 +194,35 @@ test("all pre-execution graph rejections publish synthetic terminal completions"
     assert.match(results[0].messages[0].content, graphCase.message, graphCase.name);
   }
 });
+
+test("P3: cancelling retry backoff returns a cancellation result, not the provider error", async () => {
+  let spawns = 0;
+  const controller = new AbortController();
+  const spawnChildProcess = (() => {
+    spawns += 1;
+    const child = fakeChild();
+    queueMicrotask(() => child.emit("error", new Error("fetch failed: ECONNRESET")));
+    return child;
+  }) as unknown as SpawnSeam;
+
+  const result = await runSingleTeammate(
+    { agent: "general", task: "retry then cancel", context: "fresh" },
+    {
+      baseCwd: process.cwd(),
+      signal: controller.signal,
+      spawnChildProcess,
+      onRetry() { controller.abort(); },
+      async waitForRetry() { return false; },
+    },
+  );
+
+  assert.equal(spawns, 1);
+  assert.equal(result.exitCode, 1);
+  assert.match(result.messages[0].content, /cancelled during retry backoff/);
+  // The cancellation leads the transcript; the provider diagnostics stay
+  // behind it so the caller still has the root cause for detail.
+  assert.ok(
+    result.messages.some((m) => /ECONNRESET/.test(m.content)),
+    "the original provider failure must remain in the transcript for detail",
+  );
+});

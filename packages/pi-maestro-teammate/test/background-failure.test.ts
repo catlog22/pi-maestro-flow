@@ -70,3 +70,50 @@ test("safeSendMessage drops stale-ctx sends and contains unexpected errors", () 
     console.error = original;
   }
 });
+
+test("P1: safeSendMessage reports non-delivery instead of only swallowing it", () => {
+  const stalePi = {
+    sendMessage: () => {
+      throw new Error(STALE_CTX_MESSAGE);
+    },
+  };
+  assert.equal(safeSendMessage(stalePi as never, { customType: "x", content: "y", display: true }), false);
+  assert.equal(safeSendMessage({ sendMessage() {} } as never, { customType: "x", content: "y", display: true }), true);
+
+  const logged: unknown[] = [];
+  const original = console.warn;
+  console.warn = (...args: unknown[]) => logged.push(args);
+  try {
+    safeSendMessage(stalePi as never, { customType: "x", content: "y", display: true });
+  } finally {
+    console.warn = original;
+  }
+  assert.equal(logged.length, 1);
+  assert.match(String(logged[0]), /notification dropped/);
+});
+
+test("P1: a dropped background failure marks the agent record inspectable", async () => {
+  const correlationId = (await import("node:crypto")).randomUUID();
+  const now = Date.now();
+  const agent = {
+    agent: "general", correlationId, startedAt: now,
+    abortController: new AbortController(), inbox: [], outputLog: [],
+    lastActivityAt: now, depth: 0, status: "running", sleepMs: 0,
+  };
+  const state = {
+    baseCwd: process.cwd(), currentSessionId: null,
+    namedAgents: new Map<string, string>(),
+    activeRuns: new Map<string, typeof agent>([[correlationId, agent]]),
+  };
+  const stalePi = {
+    events: { emit() {} },
+    sendMessage: () => { throw new Error(STALE_CTX_MESSAGE); },
+  };
+
+  notifyBackgroundFailure(stalePi as never, "tool-id", "general", correlationId, new Error("boom"), state as never);
+
+  assert.ok(
+    agent.outputLog.some((line) => /notification dropped/.test(line)),
+    "the settled record must say the completion notification was dropped",
+  );
+});

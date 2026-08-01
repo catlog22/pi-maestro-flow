@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { createIpcSender, type IpcSender } from "../src/extension/index.ts";
+import { sendChildIpcMessage } from "../src/runs/execution.ts";
 
 /**
  * Regression guard for the nested-teammate IPC bug: `proxyCall` used to detach
@@ -64,4 +65,29 @@ test("createIpcSender returns undefined when the channel is down or absent", () 
   assert.equal(createIpcSender(makeFakeIpcProcess(false)), undefined, "disconnected channel");
   assert.equal(createIpcSender({} as never), undefined, "no send method");
   assert.equal(createIpcSender({ connected: true } as never), undefined, "send not a function");
+});
+
+test("P2: an async IPC send failure is logged, not silently dropped", async () => {
+  const { EventEmitter } = await import("node:events");
+  const child = new EventEmitter() as any;
+  child.connected = true;
+  child.send = (_msg: unknown, cb: (error: Error | null) => void) => {
+    queueMicrotask(() => cb(new Error("channel write failed")));
+    return true;
+  };
+
+  const logged: unknown[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => logged.push(args);
+  try {
+    assert.equal(sendChildIpcMessage(child, { type: "teammate_proxy_result", requestId: "r1", result: {} }), true);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  } finally {
+    console.error = original;
+  }
+  assert.ok(logged.length >= 1, "the async failure must surface in the log");
+  assert.ok(
+    logged.some((entry) => /IPC send failed asynchronously/.test(String(entry))),
+    "the async failure entry must mention the IPC send failure",
+  );
 });

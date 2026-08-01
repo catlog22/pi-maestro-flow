@@ -246,3 +246,64 @@ test("the default interaction ceiling is bounded and generous", () => {
   assert.ok(TEAMMATE_INTERACTION_TIMEOUT_MS > 0);
   assert.ok(TEAMMATE_INTERACTION_TIMEOUT_MS >= 60_000, "a human needs time to read the prompt");
 });
+
+function rpcUiEvent(correlationId: string, method: string): Record<string, unknown> {
+  return {
+    type: "teammate_rpc_ui_request",
+    requestId: randomUUID(),
+    id: randomUUID(),
+    method,
+    title: `${method} title`,
+    correlationId,
+  };
+}
+
+test("P0b: an editor that never closes releases the queue tail on timeout", async () => {
+  // The editor has no abortable dialog contract. Before P0b the serial queue
+  // awaited its handler unconditionally, so a never-closing editor captured the
+  // tail forever and every later interaction failed without ever opening.
+  const state = makeState();
+  const first = addAgent(state, "first");
+  const second = addAgent(state, "second");
+  const opened: string[] = [];
+  const ctx = {
+    cwd: process.cwd(),
+    hasUI: true,
+    ui: {
+      editor() {
+        opened.push("editor");
+        return new Promise<string | undefined>(() => {}); // never closes
+      },
+      select() {
+        opened.push("select");
+        return Promise.resolve("ok");
+      },
+    },
+  } as never;
+  const queue = createTeammateInteractionQueue(stubPi, state, 60);
+
+  const secondReplies: Reply[] = [];
+  queue.enqueue(rpcUiEvent(first, "editor"), () => {}, ctx, first);
+  queue.enqueue(rpcUiEvent(second, "select"), (msg) => secondReplies.push(msg as Reply), ctx, second);
+
+  await delay(250);
+
+  assert.deepEqual(opened, ["editor", "select"], "the queued select must open after the editor times out");
+  assert.equal(secondReplies.length, 1, "the queued request must be answered");
+  assert.equal(queue.pendingCount(), 0, "the tail must not stay captured by the stuck editor");
+});
+
+test("P0b: an open editor is recorded as a pending interaction, not stalled", async () => {
+  const state = makeState();
+  const cid = addAgent(state, "editor-user");
+  const queue = createTeammateInteractionQueue(stubPi, state, 60_000);
+
+  queue.enqueue(rpcUiEvent(cid, "editor"), () => {}, unansweredCtx({ count: 0 }), cid);
+
+  const agent = state.activeRuns.get(cid)!;
+  assert.equal(agent.pendingInteractions?.size, 1, "the RPC editor request must pin the agent as awaiting a human");
+  assert.match([...agent.pendingInteractions!.values()][0].interaction, /^rpc:editor$/);
+
+  queue.cancelForAgent(cid, "The teammate was terminated.");
+  assert.equal(agent.pendingInteractions?.size ?? 0, 0, "settling must clear the pending marker");
+});
