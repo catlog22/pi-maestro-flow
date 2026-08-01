@@ -2,10 +2,11 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   analyzeAttachedImage,
   isMultimodalModel,
+  loadVisionDelegationConfig,
   registerVisionDelegation,
   type AttachedImageInput,
 } from "./vision-assist.ts";
@@ -30,6 +31,10 @@ interface ActiveModelRun {
   failureRecorded: boolean;
   lastError?: string;
   lastHttpStatus?: number;
+  /** True when the switch to this model was triggered by an attached image. */
+  imageTriggered?: boolean;
+  /** The model in effect before an image-triggered switch; restored on settle. */
+  originalModel?: string;
 }
 
 export interface ModelFailoverOptions {
@@ -40,6 +45,8 @@ export interface ModelFailoverOptions {
 }
 
 const CONFIG_FILE = "model-failover.json";
+/** Upper bound on attached images auto-analyzed in one turn; prevents linear cost blowup. */
+const MAX_ATTACHED_IMAGES_PER_TURN = 5;
 
 function emptyConfig(): ModelFailoverConfig {
   return { enabled: false, fallbackModels: {} };
@@ -253,31 +260,39 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     config = loadModelFailoverConfig(ctx.cwd, options.homeDir);
     if (active && !active.failureRecorded) breaker.releaseCandidate(active.acquisition);
     active = undefined;
-    if (!config.enabled) return;
 
     const current = modelKey(ctx.model);
     if (!current) return;
     const baseChain = [...new Set([current, ...(config.fallbackModels[current] ?? [])])];
     const images = attachedImages(event);
+    // Attached-image handling is gated by the vision delegation config, not by
+    // model-failover.enabled: the feature must work even when failover is off.
+    const visionEnabled = loadVisionDelegationConfig(options.visionAgentDir ?? getAgentDir()).enabled;
     let injectedMessage: { message: { customType: string; content: string; display: boolean } } | undefined;
 
-    if (images.length > 0 && !isMultimodalModel(ctx.model)) {
+    if (images.length > 0 && !isMultimodalModel(ctx.model) && visionEnabled) {
       const models = availableModels(ctx);
       const visionChain = prioritizeMultimodalChain(baseChain, models);
       if (visionChain.some((reference) => isMultimodalModel(models.get(reference)))) {
         const preferred = await selectCandidate(ctx, visionChain, 0);
         if (preferred && isMultimodalModel(models.get(preferred.model))) {
+          preferred.imageTriggered = true;
+          preferred.originalModel = current;
           active = preferred;
           ctx.ui.notify(`Attached image detected; switched from text-only ${current} to multimodal ${preferred.model}.`, "info");
           return;
         }
       }
 
+      // No healthy multimodal candidate: delegate analysis (bounded + cancellable).
       const analyses: string[] = [];
-      for (const [index, image] of images.entries()) {
+      const signal = ctx.signal;
+      for (const [index, image] of images.slice(0, MAX_ATTACHED_IMAGES_PER_TURN).entries()) {
+        if (signal?.aborted) break;
         try {
           const result = await visionAnalyzer(ctx, image, {
             agentDir: options.visionAgentDir,
+            signal,
             prompt: `Analyze attached image ${index + 1} for the primary coding agent. Extract visible text, structure, UI state, diagrams, and details relevant to the user's request.`,
           });
           analyses.push(`### Attached image ${index + 1} (${result.model})\n${result.text}`);
@@ -295,6 +310,8 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
         };
       }
     }
+
+    if (!config.enabled) return injectedMessage;
 
     const chain = images.length > 0 ? prioritizeMultimodalChain(baseChain, availableModels(ctx)) : baseChain;
     const currentIndex = chain.indexOf(current);
@@ -365,13 +382,25 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     ctx.ui.notify(`Model ${failedModel} failed; retrying with ${fallback.model}.`, "warning");
   });
 
-  pi.on("agent_settled", () => {
-    if (active?.used && !active.failureRecorded && !active.lastError) {
-      breaker.recordSuccess(active.acquisition);
-    } else if (active && !active.failureRecorded) {
-      breaker.releaseCandidate(active.acquisition);
+  pi.on("agent_settled", async (_event, ctx) => {
+    const activeRun = active;
+    if (activeRun?.used && !activeRun.failureRecorded && !activeRun.lastError) {
+      breaker.recordSuccess(activeRun.acquisition);
+    } else if (activeRun && !activeRun.failureRecorded) {
+      breaker.releaseCandidate(activeRun.acquisition);
     }
     active = undefined;
+    // Restore the pre-image model after an image-triggered switch settles so
+    // later text-only turns do not keep paying multimodal cost/behavior.
+    if (activeRun?.imageTriggered && activeRun.originalModel) {
+      const original = availableModels(ctx).get(activeRun.originalModel);
+      if (original) {
+        const restored = await pi.setModel(original);
+        if (restored) {
+          ctx.ui.notify(`Restored text-only model ${activeRun.originalModel} after image analysis.`, "info");
+        }
+      }
+    }
   });
 
   pi.on("session_shutdown", () => {

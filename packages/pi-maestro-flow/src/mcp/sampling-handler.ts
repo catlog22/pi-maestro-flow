@@ -1,5 +1,5 @@
 import { complete } from "@earendil-works/pi-ai/compat";
-import type { Api, AssistantMessage, Message, Model, TextContent } from "@earendil-works/pi-ai";
+import type { Api, AssistantMessage, ImageContent, Message, Model, TextContent } from "@earendil-works/pi-ai";
 import { truncateAtWord } from "./utils.ts";
 import type { ExtensionUIContext, ModelRegistry } from "@earendil-works/pi-coding-agent";
 import type { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -52,7 +52,10 @@ export async function handleSamplingRequest(
   }
 
   const messages = params.messages.map(convertSamplingMessage);
-  const { model, apiKey, headers } = await resolveSamplingModel(options, params.modelPreferences);
+  const hasImage = messages.some((message) => Array.isArray(message.content)
+    ? message.content.some((block) => block.type === "image")
+    : false);
+  const { model, apiKey, headers } = await resolveSamplingModel(options, params.modelPreferences, hasImage);
   await confirmSampling(
     options,
     "Approve MCP sampling request",
@@ -119,6 +122,7 @@ function messageText(message: Message): string {
 async function resolveSamplingModel(
   options: SamplingHandlerOptions,
   modelPreferences: ModelPreferences | undefined,
+  hasImage: boolean,
 ): Promise<{
   model: Model<Api>;
   apiKey?: string;
@@ -133,16 +137,20 @@ async function resolveSamplingModel(
     for (const model of availableModels) {
       const searchableNames = [`${model.provider}/${model.id}`, model.id, model.name];
       if (searchableNames.some((name) => name.toLowerCase().includes(normalizedHint))) {
-        addSamplingCandidate(candidates, model);
+        addSamplingCandidate(candidates, model, hasImage);
       }
     }
   }
 
   const currentModel = options.getCurrentModel();
-  if (currentModel) addSamplingCandidate(candidates, currentModel);
+  if (currentModel) addSamplingCandidate(candidates, currentModel, hasImage);
 
   for (const model of availableModels) {
-    addSamplingCandidate(candidates, model);
+    addSamplingCandidate(candidates, model, hasImage);
+  }
+
+  if (hasImage && !candidates.some(isMultimodal)) {
+    throw new Error("MCP sampling request contains image content but no multimodal model is available");
   }
 
   const errors: string[] = [];
@@ -161,7 +169,12 @@ async function resolveSamplingModel(
   throw new Error("No Pi model is available for MCP sampling");
 }
 
-function addSamplingCandidate(candidates: Model<Api>[], model: Model<Api>): void {
+function isMultimodal(model: Model<Api>): boolean {
+  return Array.isArray(model.input) && model.input.includes("image");
+}
+
+function addSamplingCandidate(candidates: Model<Api>[], model: Model<Api>, hasImage: boolean): void {
+  if (hasImage && !isMultimodal(model)) return;
   if (!candidates.some((candidate) => candidate.provider === model.provider && candidate.id === model.id)) {
     candidates.push(model);
   }
@@ -200,9 +213,12 @@ function convertSamplingMessage(message: SamplingMessage): Message {
   };
 }
 
-function convertUserContent(block: SamplingMessageContentBlock): TextContent {
+function convertUserContent(block: SamplingMessageContentBlock): TextContent | ImageContent {
   if (block.type === "text") {
     return { type: "text", text: block.text };
+  }
+  if (block.type === "image") {
+    return { type: "image", data: block.data, mimeType: block.mimeType };
   }
   throw new Error(`MCP sampling ${block.type} content is not supported`);
 }

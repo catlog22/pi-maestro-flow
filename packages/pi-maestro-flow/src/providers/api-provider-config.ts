@@ -328,7 +328,10 @@ export async function loadApiProviderSettings(
       ? model.contextWindow
       : preset?.contextWindow ?? 128_000,
     reasoning: typeof model?.reasoning === "boolean" ? model.reasoning : true,
-    multimodal: Array.isArray(model?.input) ? model.input.includes("image") : true,
+    // Missing capability metadata must default conservatively to text-only so
+    // runtime routing (isMultimodalModel) and config display agree: an unknown
+    // model is never assumed to accept images.
+    multimodal: Array.isArray(model?.input) && model.input.includes("image"),
     apiKey: typeof config.apiKey === "string" ? config.apiKey : "",
     maxThinking: thinkingLevelMap.xhigh === "max" || thinkingLevelMap.max === "max",
     api,

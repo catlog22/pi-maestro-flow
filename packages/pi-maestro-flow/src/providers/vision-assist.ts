@@ -9,7 +9,12 @@ import type { AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isRetryableProviderError } from "pi-maestro-teammate/v1/retry";
+import {
+  isRetryableProviderError,
+  sharedModelCircuitBreaker,
+  type AcquiredModelCandidate,
+  type ModelCircuitBreaker,
+} from "pi-maestro-teammate/v1/retry";
 import { Type } from "typebox";
 import { loadSsrfConfig, validateRemoteUrl } from "../tools/web-access/ssrf-protection.ts";
 
@@ -38,6 +43,27 @@ export type VisionManagerContext = Pick<ExtensionContext, "ui" | "model" | "mode
 export interface VisionDelegationOptions {
   agentDir?: string;
   completeFn?: typeof complete;
+  /** Circuit breaker for model health; defaults to the shared instance so vision
+   *  failures feed the same health view as the main model chain. */
+  breaker?: ModelCircuitBreaker;
+  /** Optional structured telemetry sink for delegation lifecycle events. */
+  telemetry?: VisionTelemetry;
+}
+
+export type VisionTelemetryEvent =
+  | { type: "delegation_start"; prompt: string }
+  | { type: "attempt"; model: string; attempt: number; timeoutMs: number }
+  | { type: "result"; model: string; cached: boolean; durationMs: number }
+  | { type: "cache_hit"; model: string }
+  | { type: "cache_miss"; model: string }
+  | { type: "candidate_rejected"; model: string; reason: string };
+
+export interface VisionTelemetry {
+  emit(event: VisionTelemetryEvent): void;
+}
+
+export function noopVisionTelemetry(): VisionTelemetry {
+  return { emit() { /* no-op */ } };
 }
 
 export interface AttachedImageInput {
@@ -106,6 +132,19 @@ class VisionCache {
 }
 
 const attachedCaches = new Map<string, VisionCache>();
+
+/** Per-agentDir cache registry shared by the tool and attached-image paths.
+ *  The caller must delete its entry on session shutdown to avoid leaking
+ *  caches across long-running processes. */
+function visionCacheFor(agentDir: string, maxEntries: number): VisionCache {
+  let cache = attachedCaches.get(agentDir);
+  if (!cache) {
+    cache = new VisionCache(maxEntries);
+    attachedCaches.set(agentDir, cache);
+  }
+  cache.configure(maxEntries);
+  return cache;
+}
 
 export function isMultimodalModel(model: Pick<Model<Api>, "input"> | undefined): boolean {
   return model?.input?.includes("image") === true;
@@ -197,18 +236,19 @@ export async function analyzeAttachedImage(
   const config = loadVisionDelegationConfig(agentDir);
   if (!config.enabled) throw new Error("Vision delegation is disabled");
   const image = normalizeAttachedImage(input, config.maxImageBytes);
-  const cache = attachedCaches.get(agentDir) ?? new VisionCache(config.cache.maxEntries);
-  attachedCaches.set(agentDir, cache);
-  cache.configure(config.cache.maxEntries);
-  return delegateImage(ctx, image, options.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, options.signal, options.completeFn ?? complete);
+  const cache = visionCacheFor(agentDir, config.cache.maxEntries);
+  return delegateImage(ctx, image, options.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, options.signal, options.completeFn ?? complete, options.breaker ?? sharedModelCircuitBreaker, options.telemetry ?? noopVisionTelemetry());
 }
 
 export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelegationOptions = {}): void {
   const agentDir = options.agentDir ?? getAgentDir();
   const completeFn = options.completeFn ?? complete;
+  const breaker = options.breaker ?? sharedModelCircuitBreaker;
+  const telemetry = options.telemetry ?? noopVisionTelemetry();
   let config = loadVisionDelegationConfig(agentDir);
-  const cache = new VisionCache(config.cache.maxEntries);
+  const cache = visionCacheFor(agentDir, config.cache.maxEntries);
   let restoreForText = true;
+  let removedByUs = false;
   let previousMultimodal: boolean | undefined;
   let previousEnabled = config.enabled;
 
@@ -217,14 +257,24 @@ export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelega
     if (!controller) return;
     const active = controller.getActiveTools();
     const present = active.includes(DESCRIBE_IMAGE_TOOL_NAME);
+    // Calibrate the user-intent flag only when the tool set was last changed by
+    // the user (not by this module removing it for disabled/multimodal).
     if (sessionBoundary) restoreForText = present;
-    else if (config.enabled && previousEnabled && previousMultimodal === false) restoreForText = present;
+    else if (config.enabled && !removedByUs && previousMultimodal === false) restoreForText = present;
     const multimodal = isMultimodalModel(model);
     if (!config.enabled || multimodal) {
-      if (present) restoreForText = true;
-      if (present) controller.setActiveTools(active.filter((name) => name !== DESCRIBE_IMAGE_TOOL_NAME));
-    } else if (restoreForText && !present) {
-      controller.setActiveTools([...new Set([...active, DESCRIBE_IMAGE_TOOL_NAME])]);
+      if (present) {
+        restoreForText = true;
+        removedByUs = true;
+        controller.setActiveTools(active.filter((name) => name !== DESCRIBE_IMAGE_TOOL_NAME));
+      }
+    } else {
+      // enabled + text-only: module regains control; user changes are visible
+      // through `present` on the next sync.
+      removedByUs = false;
+      if (restoreForText && !present) {
+        controller.setActiveTools([...new Set([...active, DESCRIBE_IMAGE_TOOL_NAME])]);
+      }
     }
     previousMultimodal = multimodal;
     previousEnabled = config.enabled;
@@ -232,25 +282,33 @@ export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelega
 
   pi.on("session_start", (_event, ctx) => {
     config = loadVisionDelegationConfig(agentDir);
-    cache.configure(config.cache.maxEntries);
+    visionCacheFor(agentDir, config.cache.maxEntries);
     cache.clear();
     syncTools(ctx.model, true);
   });
   pi.on("model_select", (event) => {
     config = loadVisionDelegationConfig(agentDir);
-    cache.configure(config.cache.maxEntries);
+    visionCacheFor(agentDir, config.cache.maxEntries);
     syncTools(event.model);
   });
   pi.on("before_agent_start", (event, ctx) => {
     config = loadVisionDelegationConfig(agentDir);
-    cache.configure(config.cache.maxEntries);
+    visionCacheFor(agentDir, config.cache.maxEntries);
     if (!config.cache.enabled) cache.clear();
     syncTools(ctx.model);
-    const guidance = visionDelegationPrompt(ctx.model, config);
+    // Attached images are handled by the failover/attached-image path; injecting
+    // "use describe_image" guidance here would fight that orchestration and
+    // leave a stale hint when the turn switches to a native multimodal model.
+    const hasAttachedImages = Array.isArray((event as { images?: unknown[] }).images)
+      && ((event as { images?: unknown[] }).images?.length ?? 0) > 0;
+    const guidance = hasAttachedImages ? undefined : visionDelegationPrompt(ctx.model, config);
     if (!guidance) return undefined;
     return { systemPrompt: `${event.systemPrompt}\n\n${guidance}` };
   });
-  pi.on("session_shutdown", () => cache.clear());
+  pi.on("session_shutdown", () => {
+    cache.clear();
+    attachedCaches.delete(agentDir);
+  });
 
   const persist = (ctx: ExtensionContext, messageText: string): void => {
     saveVisionDelegationConfig(config, agentDir);
@@ -364,7 +422,7 @@ export function registerVisionDelegation(pi: ExtensionAPI, options: VisionDelega
       if (isMultimodalModel(ctx.model)) return toolError("The active model supports images natively.", "native_model");
       try {
         const image = await loadImage(params.image_path, ctx.cwd, config.maxImageBytes, signal);
-        const result = await delegateImage(ctx, image, params.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, signal, completeFn);
+        const result = await delegateImage(ctx, image, params.prompt?.trim() || DEFAULT_VISION_ANALYSIS_PROMPT, config, cache, signal, completeFn, breaker, telemetry);
         return { content: [{ type: "text", text: result.text }], details: { mode: "delegate", ...result, source: image.source } };
       } catch (error) {
         return toolError(`Vision delegation failed: ${message(error)}`, error instanceof Error && error.name === "AbortError" ? "aborted" : "vision_error");
@@ -495,16 +553,27 @@ async function delegateImage(
   cache: VisionCache,
   signal: AbortSignal | undefined,
   completeFn: typeof complete,
+  breaker: ModelCircuitBreaker = sharedModelCircuitBreaker,
+  telemetry: VisionTelemetry = noopVisionTelemetry(),
 ): Promise<VisionAnalysisResult> {
   const references = candidateReferences(ctx, config);
   if (references.length === 0) throw new Error("no multimodal model is available");
-  const key = createHash("sha256").update(JSON.stringify({ image: image.sourceHash, prompt, system: config.customPrompt ?? "", references })).digest("hex");
+  telemetry.emit({ type: "delegation_start", prompt });
+  // Key deliberately excludes volatile `references`: the same image+prompt
+  // analysis is reusable across fallback reordering or model-list churn.
+  const key = createHash("sha256").update(JSON.stringify({ image: image.sourceHash, prompt, system: config.customPrompt ?? "" })).digest("hex");
   if (config.cache.enabled) {
     const hit = cache.get(key);
-    if (hit) return { ...hit, cached: true };
+    if (hit) {
+      telemetry.emit({ type: "cache_hit", model: hit.model });
+      return { ...hit, cached: true };
+    }
+    telemetry.emit({ type: "cache_miss", model: references[0] });
   }
-  const result = await callCandidates(ctx, references, image, prompt, config, signal, completeFn);
+  const started = Date.now();
+  const result = await callCandidates(ctx, references, image, prompt, config, signal, completeFn, breaker, telemetry);
   if (config.cache.enabled) cache.set(key, result);
+  telemetry.emit({ type: "result", model: result.model, cached: false, durationMs: Date.now() - started });
   return { ...result, cached: false };
 }
 
@@ -516,16 +585,33 @@ async function callCandidates(
   config: VisionDelegationConfig,
   signal: AbortSignal | undefined,
   completeFn: typeof complete,
+  breaker: ModelCircuitBreaker = sharedModelCircuitBreaker,
+  telemetry: VisionTelemetry = noopVisionTelemetry(),
 ): Promise<CachedResult> {
   const failures: string[] = [];
   for (const reference of references) {
     if (signal?.aborted) throw aborted();
+    const acquisition = breaker.acquireCandidate(reference);
+    if (!acquisition.allowed) {
+      failures.push(`${reference}: circuit ${acquisition.state}`);
+      telemetry.emit({ type: "candidate_rejected", model: reference, reason: `circuit ${acquisition.state}` });
+      continue;
+    }
     const [provider, id] = splitReference(reference);
     const model = ctx.modelRegistry.find(provider, id);
-    if (!model || !isMultimodalModel(model)) { failures.push(`${reference}: unavailable or text-only`); continue; }
+    if (!model || !isMultimodalModel(model)) {
+      breaker.releaseCandidate(acquisition);
+      failures.push(`${reference}: unavailable or text-only`);
+      continue;
+    }
     const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-    if (!auth.ok) { failures.push(`${reference}: authentication unavailable (${auth.error})`); continue; }
+    if (!auth.ok) {
+      breaker.releaseCandidate(acquisition);
+      failures.push(`${reference}: authentication unavailable (${auth.error})`);
+      continue;
+    }
     for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
+      telemetry.emit({ type: "attempt", model: reference, attempt, timeoutMs: config.timeoutMs });
       const guard = completionGuard(signal, config.timeoutMs);
       try {
         const running = Promise.resolve().then(() => completeFn(model, {
@@ -537,11 +623,19 @@ async function callCandidates(
         }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: Math.min(model.maxTokens, 8_192), signal: guard.signal }));
         void running.catch(() => undefined);
         const response = await Promise.race([running, guard.deadline]);
+        breaker.recordSuccess(acquisition);
         return { text: assistantText(response), model: reference };
       } catch (error) {
-        if (signal?.aborted) throw aborted();
+        if (signal?.aborted) {
+          breaker.releaseCandidate(acquisition);
+          throw aborted();
+        }
         const retryable = error instanceof VisionTimeoutError || isRetryableProviderError(message(error));
-        if (!retryable || attempt === config.maxRetries) { failures.push(`${reference}: ${message(error)}`); break; }
+        if (!retryable || attempt === config.maxRetries) {
+          breaker.recordRetryableFailure(acquisition);
+          failures.push(`${reference}: ${message(error)}`);
+          break;
+        }
         await delay(Math.min(config.retryBackoffMs * 2 ** attempt, MAX_RETRY_BACKOFF_MS), signal);
       } finally { guard.dispose(); }
     }
@@ -588,10 +682,13 @@ async function loadImage(source: string, cwd: string, maxBytes: number, signal?:
 }
 
 function normalizeAttachedImage(input: AttachedImageInput, maxBytes: number): LoadedImage {
-  const mimeType = normalizeMime(input.mimeType);
   const bytes = Buffer.from(input.data, "base64");
-  if (!mimeType || !SUPPORTED_MIME_TYPES.has(mimeType)) throw new Error(`unsupported attached image MIME type: ${input.mimeType}`);
   if (!bytes.length || bytes.length > maxBytes) throw new Error(`attached image is empty or exceeds ${formatBytes(maxBytes)} limit`);
+  // Attached-image MIME is declared by the client, so it must be verified
+  // against magic bytes rather than trusted (stricter than the tool path,
+  // which can fall back to file extension / content-type hints).
+  const mimeType = magicMime(bytes);
+  if (!mimeType || !SUPPORTED_MIME_TYPES.has(mimeType)) throw new Error(`unsupported attached image MIME type: ${input.mimeType}`);
   return { ...input, mimeType, sourceHash: hash(bytes), source: "attached-image" };
 }
 

@@ -10,6 +10,7 @@ export type {
   ModelCircuitBreakerOptions,
   ModelCircuitSnapshot,
   ModelCircuitState,
+  ModelCircuitTransition,
 } from "../../models/model-circuit-breaker.ts";
 
 /** Version 1 retry policy contract shared by teammate consumers. */

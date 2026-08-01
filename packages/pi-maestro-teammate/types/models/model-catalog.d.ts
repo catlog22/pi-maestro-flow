@@ -5,12 +5,17 @@ export interface AvailableModelEntry {
     name?: string;
     reasoning?: boolean;
     thinkingLevelMap?: Partial<Record<TeammateThinkingLevel, string | null>>;
+    /** Supported input modalities; `image` marks a vision-capable model. */
+    input?: readonly ("text" | "image")[];
 }
 export interface TeammateModelCapability {
     id: string;
     reasoning?: boolean;
     thinkingLevels?: readonly TeammateThinkingLevel[];
+    /** Supported input modalities, when declared. */
+    input?: readonly ("text" | "image")[];
 }
+export declare function isMultimodalEntry(model: AvailableModelEntry | TeammateModelCapability): boolean;
 export interface ModelCatalogSnapshot {
     signature: string;
     systemPrompt: string;

@@ -5,6 +5,15 @@ export interface ModelCircuitBreakerOptions {
     threshold?: number;
     cooldownMs?: number;
     now?: () => number;
+    /** Optional transition hook fired on every CLOSED/OPEN/HALF_OPEN transition. */
+    onTransition?: (transition: ModelCircuitTransition) => void;
+}
+export interface ModelCircuitTransition {
+    model: string;
+    from: ModelCircuitState;
+    to: ModelCircuitState;
+    consecutiveFailures: number;
+    at: number;
 }
 export interface AcquiredModelCandidate {
     allowed: true;
@@ -31,6 +40,7 @@ export declare class ModelCircuitBreaker {
     private readonly threshold;
     private readonly cooldownMs;
     private readonly now;
+    private readonly onTransition;
     private readonly circuits;
     constructor(options?: ModelCircuitBreakerOptions);
     acquireCandidate(model: string): ModelCandidateAcquisition;
@@ -40,6 +50,7 @@ export declare class ModelCircuitBreaker {
     snapshot(): readonly ModelCircuitSnapshot[];
     private getOrCreateCircuit;
     private open;
+    private emitTransition;
     private retryAt;
 }
 export declare const sharedModelCircuitBreaker: ModelCircuitBreaker;

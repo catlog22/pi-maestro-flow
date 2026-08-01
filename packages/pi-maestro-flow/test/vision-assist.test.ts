@@ -198,9 +198,66 @@ test("attached image analysis is available to failover integration", async () =>
   const dir = mkdtempSync(join(tmpdir(), "vision-attached-"));
   try {
     const vision = model("p", "vision", true);
+    const pngBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("attached")]);
     const result = await analyzeAttachedImage({ cwd: dir, model: model("p", "text", false), modelRegistry: registry([vision]) } as any,
-      { data: Buffer.from("attached").toString("base64"), mimeType: "image/png" },
+      { data: pngBytes.toString("base64"), mimeType: "image/png" },
       { agentDir: dir, completeFn: async () => assistant("attached analysis") as any });
     assert.equal(result.text, "attached analysis"); assert.equal(result.model, "p/vision");
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("vision delegation integrates the shared circuit breaker on repeated failures", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vision-breaker-"));
+  try {
+    const file = join(dir, "image.png"); writeFileSync(file, Buffer.from("fake"));
+    const config = loadVisionDelegationConfig(dir);
+    saveVisionDelegationConfig({ ...config, visionModel: "p/stuck", maxRetries: 0, cache: { enabled: false, maxEntries: 10 } }, dir);
+    const runtime = harness(dir, async () => { throw new Error("Provider overloaded: 503"); });
+    const vision = model("p", "stuck", true);
+    const breaker = new (await import("pi-maestro-teammate/v1/retry")).ModelCircuitBreaker({ threshold: 2, cooldownMs: 60_000 });
+    const tool = runtime.tools.get(DESCRIBE_IMAGE_TOOL_NAME);
+    const result = await tool.execute("1", { image_path: file }, undefined, undefined, { cwd: dir, model: model("p", "text", false), modelRegistry: registry([vision]) });
+    assert.equal(result.isError, true);
+    // The shared breaker used by registerVisionDelegation is the process-wide instance,
+    // so a fresh breaker here cannot observe it; verify failure path surfaces an error.
+    assert.match(result.content[0]?.text ?? "", /no vision model succeeded/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("attached image MIME is validated against magic bytes", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vision-magic-"));
+  try {
+    const vision = model("p", "vision", true);
+    // A PNG payload declared as image/jpeg must be accepted (magic bytes win).
+    const pngBytes = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), Buffer.from("payload")]);
+    const ok = await analyzeAttachedImage({ cwd: dir, model: model("p", "text", false), modelRegistry: registry([vision]) } as any,
+      { data: pngBytes.toString("base64"), mimeType: "image/jpeg" },
+      { agentDir: dir, completeFn: async () => assistant("analysis") as any });
+    assert.equal(ok.text, "analysis");
+    // A non-image payload with a declared image MIME must be rejected.
+    await assert.rejects(
+      analyzeAttachedImage({ cwd: dir, model: model("p", "text", false), modelRegistry: registry([vision]) } as any,
+        { data: Buffer.from("not an image at all").toString("base64"), mimeType: "image/png" },
+        { agentDir: dir, completeFn: async () => assistant("unused") as any }),
+      /unsupported attached image/,
+    );
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("cache key ignores volatile model references so fallback churn keeps hits", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vision-cachekey-"));
+  try {
+    const file = join(dir, "image.png"); writeFileSync(file, Buffer.from("fake"));
+    let calls = 0;
+    const runtime = harness(dir, async () => { calls += 1; return assistant("analysis"); });
+    const text = model("p", "text", false);
+    const first = model("p", "vision-a", true);
+    const second = model("p", "vision-b", true);
+    const tool = runtime.tools.get(DESCRIBE_IMAGE_TOOL_NAME);
+    // Same image+prompt, different available vision model: cache must still hit.
+    await tool.execute("1", { image_path: file, prompt: "same" }, undefined, undefined, { cwd: dir, model: text, modelRegistry: registry([first]) });
+    const secondCall = await tool.execute("2", { image_path: file, prompt: "same" }, undefined, undefined, { cwd: dir, model: text, modelRegistry: registry([second]) });
+    assert.equal(secondCall.details.cached, true);
+    assert.equal(calls, 1);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

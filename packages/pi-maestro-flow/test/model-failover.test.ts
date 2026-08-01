@@ -317,3 +317,46 @@ test("agent_end releases the old acquisition when replacing active with a fallba
     fs.rmSync(cwd, { recursive: true, force: true });
   }
 });
+
+test("image-triggered multimodal switch restores the original model on settle", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-restore-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup", "provider/last"] } });
+    const runtime = harness(cwd, undefined, {
+      multimodal: ["provider/last"],
+      visionAnalyzer: async () => ({ text: "unused", model: "helper/vision", cached: false }),
+    });
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", {
+      prompt: "inspect",
+      images: [{ type: "image", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"), mimeType: "image/png" }],
+    });
+    assert.deepEqual(runtime.selected, ["provider/last"]);
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_settled");
+    // The multimodal switch must be undone after the turn settles.
+    assert.deepEqual(runtime.selected, ["provider/last", "provider/primary"]);
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});
+
+test("attached images with vision delegation disabled do not auto-analyze", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-vision-off-"));
+  try {
+    writeProjectConfig(cwd, { enabled: true, fallbackModels: { "provider/primary": ["provider/backup"] } });
+    const visionDir = path.join(cwd, "home", ".pi", "agent");
+    fs.mkdirSync(visionDir, { recursive: true });
+    fs.writeFileSync(path.join(visionDir, "vision-delegation.json"), JSON.stringify({ enabled: false }));
+    let delegated = 0;
+    const runtime = harness(cwd, undefined, {
+      visionAnalyzer: async () => { delegated += 1; return { text: "unused", model: "helper/vision", cached: false }; },
+    });
+    await runtime.emit("session_start");
+    const result = await runtime.emit("before_agent_start", {
+      prompt: "inspect",
+      images: [{ type: "image", data: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).toString("base64"), mimeType: "image/png" }],
+    });
+    assert.equal(delegated, 0);
+    assert.equal(result, undefined);
+    await runtime.emit("session_shutdown");
+  } finally { fs.rmSync(cwd, { recursive: true, force: true }); }
+});

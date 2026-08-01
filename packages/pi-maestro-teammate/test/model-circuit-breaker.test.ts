@@ -251,3 +251,19 @@ test("concurrent acquisitions during half-open: only the first trial is allowed"
   if (first.allowed) breaker.recordSuccess(first);
   assert.equal(breaker.acquireCandidate(model).allowed, true);
 });
+
+test("onTransition fires on CLOSED→OPEN→HALF_OPEN→CLOSED transitions", () => {
+  const transitions: Array<{ model: string; from: string; to: string }> = [];
+  const breaker = new ModelCircuitBreaker({
+    threshold: 1,
+    cooldownMs: 0,
+    onTransition: (transition) => transitions.push({ model: transition.model, from: transition.from, to: transition.to }),
+  });
+  const acquired = breaker.acquireCandidate("provider/model");
+  assert.equal(acquired.allowed, true);
+  if (acquired.allowed) breaker.recordRetryableFailure(acquired); // CLOSED → OPEN
+  const trial = breaker.acquireCandidate("provider/model"); // OPEN → HALF_OPEN (cooldown 0)
+  assert.equal(trial.allowed, true);
+  if (trial.allowed) breaker.recordSuccess(trial); // HALF_OPEN → CLOSED
+  assert.deepEqual(transitions.map((t) => `${t.from}->${t.to}`), ["CLOSED->OPEN", "OPEN->HALF_OPEN", "HALF_OPEN->CLOSED"]);
+});

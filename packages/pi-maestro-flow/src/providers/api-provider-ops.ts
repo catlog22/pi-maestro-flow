@@ -396,7 +396,9 @@ export async function writeApiProviderSettings(
     ? Array.isArray(existingModel.input)
         && existingModel.input.every((value) => value === "text" || value === "image")
       ? [...existingModel.input]
-      : ["text", "image"]
+      // Unknown capability defaults conservatively to text-only, matching
+      // runtime isMultimodalModel and the registration path.
+      : ["text"]
     : settings.multimodal
       ? ["text", "image"]
       : ["text"];

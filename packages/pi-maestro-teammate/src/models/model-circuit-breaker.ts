@@ -7,6 +7,16 @@ export interface ModelCircuitBreakerOptions {
   threshold?: number;
   cooldownMs?: number;
   now?: () => number;
+  /** Optional transition hook fired on every CLOSED/OPEN/HALF_OPEN transition. */
+  onTransition?: (transition: ModelCircuitTransition) => void;
+}
+
+export interface ModelCircuitTransition {
+  model: string;
+  from: ModelCircuitState;
+  to: ModelCircuitState;
+  consecutiveFailures: number;
+  at: number;
 }
 
 export interface AcquiredModelCandidate {
@@ -48,12 +58,14 @@ export class ModelCircuitBreaker {
   private readonly threshold: number;
   private readonly cooldownMs: number;
   private readonly now: () => number;
+  private readonly onTransition: ((transition: ModelCircuitTransition) => void) | undefined;
   private readonly circuits = new Map<string, MutableModelCircuit>();
 
   constructor(options: ModelCircuitBreakerOptions = {}) {
     this.threshold = options.threshold ?? DEFAULT_MODEL_CIRCUIT_BREAKER_THRESHOLD;
     this.cooldownMs = options.cooldownMs ?? DEFAULT_MODEL_CIRCUIT_BREAKER_COOLDOWN_MS;
     this.now = options.now ?? Date.now;
+    this.onTransition = options.onTransition;
 
     if (!Number.isInteger(this.threshold) || this.threshold < 1) {
       throw new RangeError("Model circuit breaker threshold must be a positive integer");
@@ -84,7 +96,7 @@ export class ModelCircuitBreaker {
       if (this.cooldownMs > 0
         && circuit.halfOpenEnteredAt !== undefined
         && this.now() >= circuit.halfOpenEnteredAt + this.cooldownMs) {
-        this.open(circuit);
+        this.open(circuit, model);
         // Fall through to the OPEN branch below (retryAt check).
       } else {
         return {
@@ -105,9 +117,11 @@ export class ModelCircuitBreaker {
       };
     }
 
+    const from = circuit.state;
     circuit.state = "HALF_OPEN";
     circuit.halfOpenTrialInProgress = true;
     circuit.halfOpenEnteredAt = this.now();
+    this.emitTransition(model, from, circuit.state);
     return {
       allowed: true,
       model,
@@ -122,12 +136,14 @@ export class ModelCircuitBreaker {
     if (acquisition.state === "HALF_OPEN" && circuit.state !== "HALF_OPEN") return;
     if (acquisition.state === "CLOSED" && circuit.state !== "CLOSED") return;
 
+    const from = circuit.state;
     circuit.state = "CLOSED";
     circuit.consecutiveFailures = 0;
     circuit.openedAt = undefined;
     circuit.halfOpenTrialInProgress = false;
     circuit.halfOpenEnteredAt = undefined;
     if (acquisition.state === "HALF_OPEN") circuit.generation += 1;
+    this.emitTransition(acquisition.model, from, circuit.state);
   }
 
   recordRetryableFailure(acquisition: AcquiredModelCandidate): void {
@@ -136,20 +152,20 @@ export class ModelCircuitBreaker {
 
     if (acquisition.state === "HALF_OPEN") {
       if (circuit.state !== "HALF_OPEN") return;
-      this.open(circuit);
+      this.open(circuit, acquisition.model);
       return;
     }
 
     if (circuit.state !== "CLOSED") return;
     circuit.consecutiveFailures += 1;
-    if (circuit.consecutiveFailures >= this.threshold) this.open(circuit);
+    if (circuit.consecutiveFailures >= this.threshold) this.open(circuit, acquisition.model);
   }
 
   releaseCandidate(acquisition: AcquiredModelCandidate): void {
     if (acquisition.state !== "HALF_OPEN") return;
     const circuit = this.circuits.get(acquisition.model);
     if (!circuit || circuit.generation !== acquisition.generation || circuit.state !== "HALF_OPEN") return;
-    this.open(circuit);
+    this.open(circuit, acquisition.model);
   }
 
   snapshot(): readonly ModelCircuitSnapshot[] {
@@ -183,12 +199,26 @@ export class ModelCircuitBreaker {
     return circuit;
   }
 
-  private open(circuit: MutableModelCircuit): void {
+  private open(circuit: MutableModelCircuit, model: string): void {
+    const from = circuit.state;
     circuit.state = "OPEN";
     circuit.openedAt = this.now();
     circuit.halfOpenTrialInProgress = false;
     circuit.halfOpenEnteredAt = undefined;
     circuit.generation += 1;
+    this.emitTransition(model, from, circuit.state);
+  }
+
+  private emitTransition(model: string, from: ModelCircuitState, to: ModelCircuitState): void {
+    const circuit = this.circuits.get(model);
+    if (!this.onTransition) return;
+    this.onTransition({
+      model,
+      from,
+      to,
+      consecutiveFailures: circuit?.consecutiveFailures ?? 0,
+      at: this.now(),
+    });
   }
 
   private retryAt(circuit: MutableModelCircuit): number {

@@ -10,12 +10,20 @@ export interface AvailableModelEntry {
   name?: string;
   reasoning?: boolean;
   thinkingLevelMap?: Partial<Record<TeammateThinkingLevel, string | null>>;
+  /** Supported input modalities; `image` marks a vision-capable model. */
+  input?: readonly ("text" | "image")[];
 }
 
 export interface TeammateModelCapability {
   id: string;
   reasoning?: boolean;
   thinkingLevels?: readonly TeammateThinkingLevel[];
+  /** Supported input modalities, when declared. */
+  input?: readonly ("text" | "image")[];
+}
+
+export function isMultimodalEntry(model: AvailableModelEntry | TeammateModelCapability): boolean {
+  return Array.isArray(model.input) && model.input.includes("image");
 }
 
 export interface ModelCatalogSnapshot {
@@ -62,19 +70,21 @@ export function createModelCatalogSnapshot(models: AvailableModelEntry[]): Model
       id: `${model.provider}/${model.id}`,
       reasoning: model.reasoning,
       thinkingLevels,
+      ...(model.input ? { input: [...model.input] } : {}),
     };
   });
   const lines = capabilities.length > 0
     ? capabilities.map((model) => {
       const levels = model.thinkingLevels;
       const thinking = levels ? ` [thinking:${levels.join(",")}]` : model.reasoning ? " [reasoning]" : "";
-      return `- ${model.id}${thinking}`;
+      const vision = isMultimodalEntry(model) ? " [vision]" : "";
+      return `- ${model.id}${thinking}${vision}`;
     })
     : ["- (none; configure provider authentication before selecting a teammate model)"];
 
   return {
     signature: capabilities
-      .map((model) => `${model.id}:${model.reasoning ?? "unknown"}:${model.thinkingLevels?.join(",") ?? "unknown"}`)
+      .map((model) => `${model.id}:${model.reasoning ?? "unknown"}:${model.thinkingLevels?.join(",") ?? "unknown"}:${model.input?.join(",") ?? "unknown"}`)
       .join("\n"),
     modelIds,
     models: capabilities,
