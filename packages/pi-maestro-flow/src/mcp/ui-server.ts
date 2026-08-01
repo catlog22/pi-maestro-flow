@@ -30,6 +30,9 @@ import {
 } from "./types.ts";
 
 const MAX_BODY_SIZE = 2 * 1024 * 1024;
+const MAX_UI_SESSION_MESSAGE_ITEMS = 128;
+const MAX_UI_SESSION_MESSAGE_BYTES = 256 * 1024;
+const MAX_UI_SESSION_MESSAGE_ITEM_BYTES = 32 * 1024;
 const ABANDONED_GRACE_MS = 60_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const MAX_EVENT_LOG = 128;
@@ -67,6 +70,88 @@ export interface UiServerHandle {
   getStreamSummary: () => UiStreamSummary | undefined;
 }
 
+export interface UiSessionMessageBudget {
+  maxItems: number;
+  maxBytes: number;
+  maxItemBytes: number;
+}
+
+export interface UiSessionMessageBuffer {
+  addPrompt(text: string): void;
+  addNotification(text: string): void;
+  addIntent(intent: string, params?: Record<string, unknown>): void;
+  snapshot(): UiSessionMessages;
+}
+
+type UiMessageBucket = "prompts" | "notifications" | "intents";
+
+export function createUiSessionMessageBuffer(
+  budget: UiSessionMessageBudget = {
+    maxItems: MAX_UI_SESSION_MESSAGE_ITEMS,
+    maxBytes: MAX_UI_SESSION_MESSAGE_BYTES,
+    maxItemBytes: MAX_UI_SESSION_MESSAGE_ITEM_BYTES,
+  },
+): UiSessionMessageBuffer {
+  const maxItems = Math.max(1, budget.maxItems);
+  const maxBytes = Math.max(1, budget.maxBytes);
+  const maxItemBytes = Math.max(1, Math.min(budget.maxItemBytes, maxBytes));
+  const messages: UiSessionMessages = { prompts: [], notifications: [], intents: [] };
+  const order: Array<{ bucket: UiMessageBucket; bytes: number }> = [];
+  let retainedBytes = 0;
+  let droppedItems = 0;
+  let truncatedItems = 0;
+
+  const truncateText = (value: string): string => {
+    const encoded = Buffer.from(value, "utf8");
+    if (encoded.byteLength <= maxItemBytes) return value;
+    truncatedItems += 1;
+    return encoded.subarray(0, maxItemBytes).toString("utf8").replace(/\uFFFD+$/u, "");
+  };
+
+  const retain = (bucket: UiMessageBucket, value: string | { intent: string; params?: Record<string, unknown> }): void => {
+    const bytes = Buffer.byteLength(JSON.stringify(value), "utf8");
+    if (bucket === "intents") messages.intents.push(value as { intent: string; params?: Record<string, unknown> });
+    else messages[bucket].push(value as string);
+    order.push({ bucket, bytes });
+    retainedBytes += bytes;
+
+    while (order.length > maxItems || retainedBytes > maxBytes) {
+      const oldest = order.shift();
+      if (!oldest) break;
+      messages[oldest.bucket].shift();
+      retainedBytes -= oldest.bytes;
+      droppedItems += 1;
+    }
+  };
+
+  return {
+    addPrompt(text) { retain("prompts", truncateText(text)); },
+    addNotification(text) { retain("notifications", truncateText(text)); },
+    addIntent(intent, params) {
+      const normalizedIntent = truncateText(intent);
+      let value: { intent: string; params?: Record<string, unknown> } = {
+        intent: normalizedIntent,
+        ...(params === undefined ? {} : { params }),
+      };
+      let serializedBytes = Number.POSITIVE_INFINITY;
+      try { serializedBytes = Buffer.byteLength(JSON.stringify(value), "utf8"); } catch { /* circular values are replaced below */ }
+      if (serializedBytes > maxItemBytes) {
+        truncatedItems += 1;
+        value = { intent: normalizedIntent, params: { _truncated: true } };
+      }
+      retain("intents", value);
+    },
+    snapshot() {
+      return {
+        prompts: [...messages.prompts],
+        notifications: [...messages.notifications],
+        intents: messages.intents.map((entry) => ({ ...entry })),
+        retention: { retainedBytes, droppedItems, truncatedItems },
+      };
+    },
+  };
+}
+
 export async function startUiServer(options: UiServerOptions): Promise<UiServerHandle> {
   const sessionToken = options.sessionToken ?? randomUUID();
   const log = logger.child({
@@ -87,12 +172,9 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
   const eventLog: Array<{ id: number; name: string; payload: unknown }> = [];
   let streamSummary: UiStreamSummary | undefined;
 
-  // Track messages from UI for retrieval
-  const sessionMessages: UiSessionMessages = {
-    prompts: [],
-    notifications: [],
-    intents: [],
-  };
+  // Retain only a bounded tail; each authenticated message request can be up
+  // to MAX_BODY_SIZE, so a session-count cap alone does not bound heap usage.
+  const sessionMessageBuffer = createUiSessionMessageBuffer();
 
   const hostContext: UiHostContext = {
     displayMode: currentDisplayMode,
@@ -373,21 +455,18 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
         // Track messages by type (order: prompt → intent → notify)
         // Must match the order in index.ts onMessage handler
         if (promptText) {
-          sessionMessages.prompts.push(promptText);
+          sessionMessageBuffer.addPrompt(promptText);
           log.debug("UI prompt received", { prompt: promptText.slice(0, 100) });
         } else if (msgParams.type === "intent" || msgParams.intent) {
           const intentName = msgParams.intent ?? "";
           if (intentName) {
-            sessionMessages.intents.push({
-              intent: intentName,
-              params: msgParams.params
-            });
+            sessionMessageBuffer.addIntent(intentName, msgParams.params);
             log.debug("UI intent received", { intent: intentName });
           }
         } else if (msgParams.type === "notify" || msgParams.message) {
           const notifyText = msgParams.message ?? "";
           if (notifyText) {
-            sessionMessages.notifications.push(notifyText);
+            sessionMessageBuffer.addNotification(notifyText);
             log.debug("UI notification", { message: notifyText.slice(0, 100) });
           }
         }
@@ -552,7 +631,7 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
           Object.assign(hostContext, context);
           pushEvent("host-context", context);
         },
-        getSessionMessages: () => ({ ...sessionMessages }),
+        getSessionMessages: () => sessionMessageBuffer.snapshot(),
         getStreamSummary: () => streamSummary ? { ...streamSummary, phases: [...streamSummary.phases] } : undefined,
       };
 

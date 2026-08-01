@@ -293,6 +293,9 @@ export async function maybeStartUiSession(
               prompts: messages.prompts.length,
               intents: messages.intents.length,
               notifications: messages.notifications.length,
+              retainedBytes: messages.retention?.retainedBytes ?? 0,
+              droppedItems: messages.retention?.droppedItems ?? 0,
+              truncatedItems: messages.retention?.truncatedItems ?? 0,
               streamFrames: stream?.frames ?? 0,
             });
           }

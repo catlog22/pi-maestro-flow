@@ -221,6 +221,11 @@ export interface UiSessionMessages {
   prompts: string[];
   notifications: string[];
   intents: Array<{ intent: string; params?: Record<string, unknown> }>;
+  retention?: {
+    retainedBytes: number;
+    droppedItems: number;
+    truncatedItems: number;
+  };
 }
 
 export interface UiModelContextParams {
