@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type {
   ContextUsage,
@@ -22,6 +22,7 @@ import {
   deriveCompactionThreshold,
   deriveLinkedCompactionThreshold,
   effectiveReserveTokens,
+  OUTPUT_CLAMP_BAND_MARGIN_RATIO,
   type CompactionThresholdDerivation,
   type LinkedCompactionThresholdModel,
 } from "./compaction-threshold.ts";
@@ -29,10 +30,12 @@ import {
   autoCompactionIdleStatus,
   COMPACTION_MODE_STATUS_KEY,
   COMPACTION_STATUS_KEY,
+  disableInvalidBudgetThinking,
   formatCompactionStatus,
   resolveConfiguredCompactionModel,
 } from "./maestro-compaction.ts";
 import { loadPiCompactionInternals, type PiCompactionInternals } from "./pi-internals.ts";
+export { disableInvalidBudgetThinking } from "./maestro-compaction.ts";
 import {
   SPILL_THRESHOLD_CHARS,
   SPILL_PREVIEW_CHARS,
@@ -66,7 +69,7 @@ const OUTPUT_LIMIT_CONTINUE_PROMPT = "Your previous response was cut off at the 
 const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
 export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
-const PRUNE_STATE_VERSION = 3;
+const PRUNE_STATE_VERSION = 4;
 
 export type CompactionSettings = Pick<
   EffectiveCompactionSettings,
@@ -92,6 +95,8 @@ export interface PruneManifestEntry {
   introducedAtUsageEpoch?: string;
   spillPath?: string;
   level?: PruneLevel;
+  contentDigest?: string;
+  writerId?: string;
 }
 
 export type PruneLevel = "pruned" | "spill" | "minimal";
@@ -101,6 +106,8 @@ interface PersistedPruneEntry {
   level: PruneLevel;
   spillPath?: string;
   introducedAtUsageEpoch?: string;
+  contentDigest?: string;
+  writerId?: string;
 }
 
 /**
@@ -183,46 +190,6 @@ export interface SoftPressureBands {
   pruneTargetTokens: number;
 }
 
-/**
- * Anthropic budget-based thinking has two hard request invariants:
- * the budget is at least 1024 tokens and remains below max_tokens.
- *
- * Pi 0.82.x can clamp max_tokens after it derives the thinking budget. Its
- * payload builder then revives a clamped zero budget through a `|| 1024`
- * fallback. Guard the final payload seam so context pressure degrades to
- * thinking-off instead of a deterministic provider 400.
- */
-export function disableInvalidBudgetThinking(payload: unknown): unknown {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return payload;
-  const record = payload as Record<string, unknown>;
-  const maxTokens = record.max_tokens;
-  const thinking = record.thinking;
-  if (
-    typeof maxTokens !== "number"
-    || !Number.isSafeInteger(maxTokens)
-    || typeof thinking !== "object"
-    || thinking === null
-    || Array.isArray(thinking)
-  ) {
-    return payload;
-  }
-  const thinkingRecord = thinking as Record<string, unknown>;
-  if (thinkingRecord.type !== "enabled") return payload;
-  const budget = thinkingRecord.budget_tokens;
-  if (
-    typeof budget === "number"
-    && Number.isSafeInteger(budget)
-    && budget >= 1_024
-    && budget < maxTokens
-  ) {
-    return payload;
-  }
-  return {
-    ...record,
-    thinking: { type: "disabled" },
-  };
-}
-
 interface PendingCompactionIntent {
   generation: number;
   triggerKey: string;
@@ -256,6 +223,8 @@ export interface AutoCompactionState {
   pruneManifest: Map<string, PruneManifestEntry>;
   restoredPrunes: Map<string, PersistedPruneEntry>;
   sessionId?: string;
+  /** Per-guard writer namespace prevents one live owner deleting another's spill. */
+  writerId: string;
   persistedPruneKey?: string;
   settingsSnapshot?: CompactionSettings;
   settingsCwd?: string;
@@ -310,7 +279,7 @@ export function commitProjectedCompactionInput(
 }
 
 export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: AutoCompactionDependencies = {}): {
-  onSessionStart(ctx: ExtensionContext): void;
+  onSessionStart(ctx: ExtensionContext, event?: { reason?: string }): void;
   evaluate(messages: AgentMessage[], ctx: ExtensionContext): Promise<AgentMessage[] | undefined>;
   projectCompactionInput(event: SessionBeforeCompactEvent, ctx: ExtensionContext): Promise<ProjectedCompactionInput>;
   beforeProviderRequest(payload: unknown, ctx: ExtensionContext): unknown | undefined;
@@ -328,6 +297,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     internalsWarningShown: false,
     pruneManifest: new Map(),
     restoredPrunes: new Map(),
+    writerId: randomUUID(),
     velocityTracker: EMPTY_VELOCITY_TRACKER,
     breaker: resetCompactionBreaker(),
     breakerNotified: false,
@@ -360,6 +330,9 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     }
     return state.settingsSnapshot;
   }
+  function sameSettings(left: CompactionSettings, right: CompactionSettings): boolean {
+    return JSON.stringify(left) === JSON.stringify(right);
+  }
   async function linkedThresholdFor(
     ctx: ExtensionContext,
     settings: CompactionSettings,
@@ -379,6 +352,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       sessionMaxTokens: sessionModel.maxTokens,
       compactionContextWindow: compactionModel.contextWindow,
       compactionMaxTokens: compactionModel.maxTokens,
+      enforceCompactionHeadroom: settings.model !== undefined,
       soft: settings.soft,
     });
   }
@@ -446,7 +420,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const linkedThreshold = await linkedThresholdFor(ctx, settings);
       if (generation !== state.generation) return undefined;
       if (!settings.enabled || !linkedThreshold.usable || linkedThreshold.contextWindow <= settings.reserveTokens) {
-        if (state.sessionId) void cleanupSpillDir(state.sessionId);
+        if (state.sessionId) void cleanupSpillDir(state.sessionId, state.writerId);
         state.pruneManifest.clear();
         state.restoredPrunes.clear();
         persistPruneManifest(pi, state);
@@ -513,7 +487,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         if (!recordedBeforePolicy.has(callId)) newPruneCallIds.add(callId);
       }
       if (pressure.prunedToolResults > 0 && state.sessionId) {
-        const upgraded = await upgradeNewPrunesWithSpill(messages, pressure.messages, state.pruneManifest, state.sessionId, newPruneCallIds);
+        const upgraded = await upgradeNewPrunesWithSpill(messages, pressure.messages, state.pruneManifest, state.sessionId, newPruneCallIds, state.writerId);
         // reset()/onSessionStart may have run during that await, bumping the
         // generation and clearing the manifest. Writing our stale view back
         // would resurrect prunes for a session that no longer exists.
@@ -551,7 +525,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         // is already pulled down to the truncation point when the output ceiling
         // binds, so reaching this window means pruning cannot relieve pressure.
         const escalate = pressure.action === "prune"
-          && pressure.estimatedTokens >= pressure.thresholdTokens - Math.floor(capacityWindow * 0.03);
+          && pressure.estimatedTokens >= pressure.thresholdTokens
+            - Math.floor(capacityWindow * OUTPUT_CLAMP_BAND_MARGIN_RATIO);
         if (escalate) {
           const estimate = estimateContextTokens(pressure.messages);
           const triggerKey = `${estimate.tokens}:${pressure.thresholdTokens}:${messages.length}`;
@@ -568,8 +543,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             };
             state.lastTriggerKey = triggerKey;
             if (contextExhausted) ctx.abort();
-            if (state.lastNotifyKey !== `escalate:${triggerKey}`) {
-              state.lastNotifyKey = `escalate:${triggerKey}`;
+            // Dedup on the stable threshold, not the volatile triggerKey
+            // (tokens + message count change every evaluation within a turn).
+            if (state.lastNotifyKey !== `escalate:${pressure.thresholdTokens}`) {
+              state.lastNotifyKey = `escalate:${pressure.thresholdTokens}`;
               ctx.ui.notify(
                 `Context remains near the compaction threshold after pruning (${estimate.tokens.toLocaleString("en-US")}/${pressure.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after this turn; responses may be truncated until then.`,
                 "warning",
@@ -612,6 +589,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   async function settlePendingCompaction(ctx: ExtensionContext): Promise<void> {
     const intent = state.pendingIntent;
     if (!intent || state.running || intent.generation !== state.generation) return;
+    if (!sameSettings(settingsFor(ctx), intent.settings)) {
+      state.pendingIntent = undefined;
+      state.lastTriggerKey = undefined;
+      return;
+    }
 
     const clearPending = () => {
       if (state.pendingIntent === intent) state.pendingIntent = undefined;
@@ -782,6 +764,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   async function settlePendingOutputLimit(ctx: ExtensionContext): Promise<boolean> {
     const intent = state.pendingOutputLimitIntent;
     if (!intent || state.running || intent.generation !== state.generation) return false;
+    if (!sameSettings(settingsFor(ctx), intent.settings)) {
+      state.pendingOutputLimitIntent = undefined;
+      return false;
+    }
     const clearPending = () => {
       if (state.pendingOutputLimitIntent === intent) state.pendingOutputLimitIntent = undefined;
     };
@@ -891,17 +877,15 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   }
 
   return {
-    onSessionStart(ctx) {
+    onSessionStart(ctx, event) {
       state.generation += 1;
       const nextSessionId = sessionIdOf(ctx);
-      // Resuming the same session must find its spill resources still on disk,
-      // so only a genuine session switch cleans the previous root.
-      // reset()/onCompact() remain the destructive cleanup paths.
-      if (state.sessionId && state.sessionId !== nextSessionId) void cleanupSpillDir(state.sessionId);
+      // Session replacement normally creates a fresh guard. Alternate hosts may
+      // reuse one, so a reversible switch must never destroy the parked owner.
       releaseInFlight();
       state.pruneManifest.clear();
       state.sessionId = nextSessionId;
-      state.restoredPrunes = loadPersistedPrunes(ctx, state.sessionId);
+      state.restoredPrunes = loadPersistedPrunes(ctx, state.sessionId, event?.reason === "fork");
       state.persistedPruneKey = pruneKey(state.restoredPrunes.values());
       state.settingsSnapshot = undefined;
       state.settingsCwd = undefined;
@@ -1006,8 +990,8 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             await settlePendingCompaction(ctx);
           } else {
             state.lastNoCompactableKey = undefined;
-            if (state.lastNotifyKey !== `defer:${pending.triggerKey}`) {
-              state.lastNotifyKey = `defer:${pending.triggerKey}`;
+            if (state.lastNotifyKey !== `defer:${pending.linkedThreshold.thresholdTokens}`) {
+              state.lastNotifyKey = `defer:${pending.linkedThreshold.thresholdTokens}`;
               ctx.ui.notify(
                 `Context is above the compaction threshold (${pending.estimate.tokens.toLocaleString("en-US")}/${pending.linkedThreshold.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after the next completed turn; responses may be truncated until then.`,
                 "warning",
@@ -1035,22 +1019,30 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         return;
       }
       const usage = ctx.getContextUsage?.();
-      // Gate follows the derived prune band (which the threshold model pulls down
-      // to the output-clamp truncation point when maxTokens binds), so a length
-      // stop after the output budget shrank still compacts instead of being
-      // dismissed as "below the window-ratio prune band".
-      const derivedGate = typeof ctx.model?.contextWindow === "number"
-        ? deriveCompactionThreshold({
-            reserveTokens: settings.reserveTokens,
-            contextWindow: ctx.model.contextWindow,
-            modelMaxTokens: ctx.model.maxTokens,
-            soft: settings.soft,
-          })
+      let linkedGate: LinkedCompactionThresholdModel;
+      try {
+        linkedGate = await linkedThresholdFor(ctx, settings);
+      } catch (error) {
+        state.pendingOutputLimitIntent = undefined;
+        ctx.ui.notify(
+          `Output-limit compaction threshold resolution failed: ${error instanceof Error ? error.message : String(error)}`,
+          "warning",
+        );
+        return;
+      }
+      const gateTokens = linkedGate.usable
+        ? linkedGate.soft?.pruneTokens
+          ?? Math.floor(linkedGate.contextWindow * DEFAULT_OUTPUT_LIMIT_RATIO)
         : undefined;
-      const threshold = derivedGate?.usable && derivedGate.soft
-        ? derivedGate.soft.pruneTokens / derivedGate.contextWindow
+      const usageTokens = usage?.tokens ?? (usage?.percent != null
+        ? Math.floor((usage.percent / 100) * usage.contextWindow)
+        : undefined);
+      const threshold = linkedGate.usable && gateTokens !== undefined
+        ? gateTokens / linkedGate.contextWindow
         : settings.soft?.pruneRatio ?? DEFAULT_OUTPUT_LIMIT_RATIO;
-      if (!usage || usage.percent == null || usage.percent / 100 < threshold) {
+      if (!usage || usageTokens == null || (gateTokens !== undefined
+        ? usageTokens < gateTokens
+        : usage.percent == null || usage.percent / 100 < threshold)) {
         state.pendingOutputLimitIntent = undefined;
         return;
       }
@@ -1089,7 +1081,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const outputLimitCompactions = state.outputLimitCompactions;
       const outputLimitBreakerNotified = state.outputLimitBreakerNotified;
       if (wasPreempted) releaseInFlight();
-      if (state.sessionId) void cleanupSpillDir(state.sessionId);
+      if (state.sessionId) void cleanupSpillDir(state.sessionId, state.writerId);
       state.pruneManifest.clear();
       state.restoredPrunes.clear();
       state.persistedPruneKey = undefined;
@@ -1129,7 +1121,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     reset(ctx) {
       state.generation += 1;
       releaseInFlight();
-      if (state.sessionId) void cleanupSpillDir(state.sessionId);
+      if (state.sessionId) void cleanupSpillDir(state.sessionId, state.writerId);
       state.pruneManifest.clear();
       state.restoredPrunes.clear();
       state.persistedPruneKey = undefined;
@@ -1273,6 +1265,7 @@ function applyRecordedPrunes(messages: AgentMessage[], pruneManifest: PruneManif
     if (!callId) continue;
     const recorded = getRecordedPrune(pruneManifest, callId);
     if (!recorded && !hasRecordedPrune(pruneManifest, callId)) continue;
+    if (recorded?.contentDigest && recorded.contentDigest !== toolResultDigest(transformed[index])) continue;
     const replacement = recorded?.replacement ?? pruneToolResult(transformed[index]);
     if (!replacement) continue;
     const saved = recorded?.savedTokens ?? estimateMessageTokens(transformed[index]) - estimateMessageTokens(replacement);
@@ -1292,6 +1285,8 @@ function persistedEntryOf(callId: string, entry: PruneManifestEntry | undefined)
     level: entry?.level ?? (entry?.spillPath !== undefined ? "spill" : "pruned"),
     ...(entry?.spillPath !== undefined ? { spillPath: entry.spillPath } : {}),
     ...(entry?.introducedAtUsageEpoch !== undefined ? { introducedAtUsageEpoch: entry.introducedAtUsageEpoch } : {}),
+    ...(entry?.contentDigest !== undefined ? { contentDigest: entry.contentDigest } : {}),
+    ...(entry?.writerId !== undefined ? { writerId: entry.writerId } : {}),
   };
 }
 
@@ -1394,6 +1389,10 @@ async function hydrateRestoredPrunes(
     if (!callId) continue;
     const persisted = state.restoredPrunes.get(callId);
     if (!persisted) continue;
+    if (persisted.contentDigest && persisted.contentDigest !== toolResultDigest(message)) {
+      state.restoredPrunes.delete(callId);
+      continue;
+    }
     visible.push({ callId, message, persisted });
   }
   if (visible.length === 0) return false;
@@ -1406,7 +1405,7 @@ async function hydrateRestoredPrunes(
     await Promise.all(visible.map(async (item) => {
       if (!item.persisted.spillPath) return item;
       const live = state.sessionId !== undefined
-        && await validateSpillPath(state.sessionId, item.persisted.spillPath);
+        && await validateSpillPath(state.sessionId, item.persisted.spillPath, item.persisted.writerId);
       if (live) return item;
       return {
         ...item,
@@ -1416,6 +1415,7 @@ async function hydrateRestoredPrunes(
           ...(item.persisted.introducedAtUsageEpoch !== undefined
             ? { introducedAtUsageEpoch: item.persisted.introducedAtUsageEpoch }
             : {}),
+          ...(item.persisted.contentDigest !== undefined ? { contentDigest: item.persisted.contentDigest } : {}),
         },
         downgraded: true,
       };
@@ -1441,6 +1441,8 @@ async function hydrateRestoredPrunes(
       savedTokens,
       introducedAtUsageEpoch: item.persisted.introducedAtUsageEpoch,
       spillPath: item.persisted.spillPath,
+      contentDigest: item.persisted.contentDigest,
+      writerId: item.persisted.writerId,
       level: item.persisted.level,
     });
   }
@@ -1471,7 +1473,11 @@ function persistPruneManifest(pi: ExtensionAPI, state: AutoCompactionState): voi
   state.persistedPruneKey = nextKey;
 }
 
-function loadPersistedPrunes(ctx: ExtensionContext, sessionId: string | undefined): Map<string, PersistedPruneEntry> {
+function loadPersistedPrunes(
+  ctx: ExtensionContext,
+  sessionId: string | undefined,
+  allowInheritedSession = false,
+): Map<string, PersistedPruneEntry> {
   const manager = ctx.sessionManager as {
     getBranch?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
     getEntries?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
@@ -1485,8 +1491,8 @@ function loadPersistedPrunes(ctx: ExtensionContext, sessionId: string | undefine
     spillPaths?: unknown;
     prunes?: unknown;
   } | undefined;
-  if (!data || (sessionId && data.sessionId !== sessionId)) return new Map();
-  if (data.version === PRUNE_STATE_VERSION && Array.isArray(data.prunes)) {
+  if (!data || (sessionId && data.sessionId !== sessionId && !allowInheritedSession)) return new Map();
+  if ((data.version === PRUNE_STATE_VERSION || data.version === 3) && Array.isArray(data.prunes)) {
     const restored = new Map<string, PersistedPruneEntry>();
     for (const value of data.prunes) {
       if (!value || typeof value !== "object") continue;
@@ -1497,6 +1503,8 @@ function loadPersistedPrunes(ctx: ExtensionContext, sessionId: string | undefine
         level: record.level,
         ...(typeof record.spillPath === "string" ? { spillPath: record.spillPath } : {}),
         ...(typeof record.introducedAtUsageEpoch === "string" ? { introducedAtUsageEpoch: record.introducedAtUsageEpoch } : {}),
+        ...(typeof record.contentDigest === "string" ? { contentDigest: record.contentDigest } : {}),
+        ...(typeof record.writerId === "string" ? { writerId: record.writerId } : {}),
       });
     }
     return restored;
@@ -1531,7 +1539,14 @@ function sessionIdOf(ctx: ExtensionContext): string | undefined {
 
 function pruneKey(entries: Iterable<PersistedPruneEntry>): string {
   return JSON.stringify([...entries]
-    .map((entry) => [entry.callId, entry.level, entry.spillPath ?? null, entry.introducedAtUsageEpoch ?? null])
+    .map((entry) => [
+      entry.callId,
+      entry.level,
+      entry.spillPath ?? null,
+      entry.introducedAtUsageEpoch ?? null,
+      entry.contentDigest ?? null,
+      entry.writerId ?? null,
+    ])
     .sort(([a], [b]) => String(a).localeCompare(String(b))));
 }
 
@@ -1736,6 +1751,7 @@ interface PruneCandidate {
   callId: string;
   replacement: AgentMessage;
   saved: number;
+  contentDigest: string;
 }
 
 /**
@@ -1787,17 +1803,19 @@ function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolR
   // walk order is unchanged from the ungated path, so the candidate sequence is
   // identical; only how many of them get applied can differ.
   const candidates: PruneCandidate[] = [];
+  const claimedCallIds = new Set(pruneManifest.keys());
   let projectedTokens = effectiveTokens;
   for (let index = frontierStart - 1; index >= 0 && projectedTokens > pruneTarget; index--) {
     const callId = toolResultCallId(transformed[index]);
-    if (!callId || hasRecordedPrune(pruneManifest, callId)) continue;
+    if (!callId || claimedCallIds.has(callId)) continue;
     const replacement = selector(transformed[index]);
     if (!replacement) continue;
     const before = estimateMessageTokens(transformed[index]);
     const after = estimateMessageTokens(replacement);
     if (after >= before) continue;
     const saved = before - after;
-    candidates.push({ index, callId, replacement, saved });
+    candidates.push({ index, callId, replacement, saved, contentDigest: toolResultDigest(transformed[index]) });
+    claimedCallIds.add(callId);
     projectedTokens -= saved;
   }
 
@@ -1815,6 +1833,7 @@ function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolR
       replacement: candidate.replacement,
       savedTokens: candidate.saved,
       introducedAtUsageEpoch: usageEpoch,
+      contentDigest: candidate.contentDigest,
       level: "pruned",
     });
     savedTokens += candidate.saved;
@@ -1902,6 +1921,16 @@ function compactNewSpilledPrunes(
   return { tokenDelta };
 }
 
+function toolResultDigest(message: AgentMessage): string {
+  const record = message as MessageRecord;
+  return createHash("sha256").update(JSON.stringify({
+    toolCallId: record.toolCallId,
+    toolName: record.toolName,
+    isError: record.isError === true,
+    content: record.content,
+  })).digest("hex");
+}
+
 function extractTextContent(message: AgentMessage): string {
   const content = (message as MessageRecord).content;
   if (typeof content === "string") return content;
@@ -1920,6 +1949,7 @@ async function upgradeNewPrunesWithSpill(
   pruneManifest: PruneManifest,
   sessionId: string,
   newCallIds: Set<string>,
+  writerId?: string,
 ): Promise<{ tokenDelta: number; callIds: Set<string> }> {
   const callIds = new Set<string>();
   let tokenDelta = 0;
@@ -1941,7 +1971,7 @@ async function upgradeNewPrunesWithSpill(
     const toolName = typeof (original as MessageRecord).toolName === "string"
       ? (original as MessageRecord).toolName as string
       : "tool";
-    const spill = await spillToolResult(sessionId, callId, text);
+    const spill = await spillToolResult(sessionId, callId, text, writerId);
     if (!spill.ok) {
       // The write failed, so the payload is not recoverable from disk and the
       // no-path replacement text is a 1.5K preview — strictly worse than the
@@ -1962,6 +1992,7 @@ async function upgradeNewPrunesWithSpill(
     transformedMessages[index] = upgraded;
     entry.replacement = upgraded;
     entry.spillPath = spill.path;
+    entry.writerId = writerId;
     entry.savedTokens = estimateMessageTokens(original) - estimateMessageTokens(upgraded);
     entry.level = "spill";
     callIds.add(callId);
