@@ -41,6 +41,7 @@ import type {
   ActiveAgent,
   AgentProgress,
   AgentProgressSnapshot,
+  AgentTerminalStatus,
   SingleResult,
   TeammateState,
   Usage,
@@ -697,7 +698,7 @@ test("final turn_end publishes a wakeable result before agent_end settles lifecy
   assert.equal(killed, false, "fresh teammate must remain wakeable after lifecycle confirmation");
 });
 
-test("parallel graph waits for authoritative lifecycle after result publication", async () => {
+test("parallel graph settles at result publication and keeps lifecycle running", async () => {
   const stdoutStreams: PassThrough[] = [];
   let killed = 0;
   let spawnIndex = 0;
@@ -735,6 +736,7 @@ test("parallel graph waits for authoritative lifecycle after result publication"
     return child;
   });
 
+  const completions: Array<{ result: SingleResult; status?: AgentTerminalStatus }> = [];
   let graphSettled = false;
   const graphPromise = runGraph(
     Array.from({ length: 4 }, (_, index) => ({
@@ -745,7 +747,12 @@ test("parallel graph waits for authoritative lifecycle after result publication"
       timeoutMs: 2_000,
     })),
     4,
-    { baseCwd: process.cwd(), spawnChildProcess },
+    {
+      baseCwd: process.cwd(),
+      spawnChildProcess,
+      resultReadyGraceMs: 60_000,
+      onTurnComplete(result, status) { completions.push({ result, status }); },
+    },
   ).then((results) => {
     graphSettled = true;
     return results;
@@ -753,16 +760,25 @@ test("parallel graph waits for authoritative lifecycle after result publication"
 
   await new Promise((resolve) => setTimeout(resolve, 30));
   assert.equal(spawnIndex, 4);
-  assert.equal(graphSettled, false, "result-ready must not settle the graph");
-  assert.equal(killed, 0);
-  for (const stream of stdoutStreams) stream.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  // Result publication — not lifecycle confirmation — is the graph's release
+  // boundary (debug-notes-002): the call returns while every child is still
+  // awaiting its agent_end.
+  assert.equal(graphSettled, true, "result publication must settle the graph");
+  assert.equal(completions.length, 0, "no lifecycle confirmation has arrived yet");
+  assert.equal(killed, 0, "publication must not kill the children");
 
   const results = await graphPromise;
   assert.deepEqual(
     results.map((result) => result.messages.at(-1)?.content).sort(),
     ["parallel-0", "parallel-1", "parallel-2", "parallel-3"],
   );
-  assert.equal(results.every((result) => result.lifecyclePending !== true), true);
+  assert.equal(results.every((result) => result.lifecyclePending === true), true);
+  assert.equal(killed, 0);
+
+  for (const stream of stdoutStreams) stream.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(completions.length, 4, "lifecycle confirmation still settles every child");
+  assert.equal(completions.every(({ status }) => status === "completed"), true);
   assert.equal(killed, 0);
 });
 
@@ -884,7 +900,7 @@ test("public runTeammate rejects unavailable configured models before child laun
   }
 });
 
-test("DAG dependencies wait for authoritative upstream lifecycle", async () => {
+test("DAG dependencies release at upstream result publication", async () => {
   const stdoutStreams: PassThrough[] = [];
   let spawnIndex = 0;
   const spawnChildProcess = adaptFakeSpawn(() => {
@@ -913,16 +929,16 @@ test("DAG dependencies wait for authoritative upstream lifecycle", async () => {
   const graph = runGraph([
     { agent: "general", prompt: "produce seed", name: "seed", context: "fresh", timeoutMs: 2_000 },
     { agent: "general", prompt: "consume {seed}", name: "dependent", dependsOn: ["seed"], context: "fresh", timeoutMs: 2_000 },
-  ], 2, { baseCwd: process.cwd(), spawnChildProcess });
+  ], 2, { baseCwd: process.cwd(), spawnChildProcess, resultReadyGraceMs: 60_000 });
 
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(spawnIndex, 1, "dependent waits for upstream agent_end");
-  stdoutStreams[0].write(`${JSON.stringify({ type: "agent_end" })}\n`);
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(spawnIndex, 2);
-  stdoutStreams[1].write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  // The upstream publication releases the dependent and its {seed} variable;
+  // no agent_end is required (debug-notes-002).
+  assert.equal(spawnIndex, 2, "dependent releases at upstream publication");
   const results = await graph;
   assert.deepEqual(results.map((result) => result.messages.at(-1)?.content), ["seed result", "dependent result"]);
+  stdoutStreams[0].write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  stdoutStreams[1].write(`${JSON.stringify({ type: "agent_end" })}\n`);
 });
 
 test("process close after result publication confirms lifecycle exactly once", async () => {

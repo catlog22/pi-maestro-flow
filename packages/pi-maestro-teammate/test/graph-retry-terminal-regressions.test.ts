@@ -9,6 +9,7 @@ import {
   type NormalizedTask,
   type RunTeammateOptions,
 } from "../src/runs/execution.ts";
+import { aggregateTerminalStatuses } from "../src/extension/teammate-core.ts";
 import type { AgentTerminalStatus, SingleResult } from "../src/shared/types.ts";
 import { ModelCircuitBreaker } from "../src/models/model-circuit-breaker.ts";
 import { classifyRetryError } from "../src/runs/retry.ts";
@@ -276,9 +277,10 @@ test("rate_limit_exceeded variants remain retryable provider failures", () => {
   assert.equal(classifyRetryError("429 Too Many Requests"), "provider");
 });
 
-test("DAG dependencies wait for authoritative upstream lifecycle", async () => {
+test("DAG dependencies release at upstream result publication", async () => {
   const streams: PassThrough[] = [];
   let spawns = 0;
+  const completions: Array<{ result: SingleResult; status?: AgentTerminalStatus }> = [];
   const spawnChildProcess = (() => {
     const index = spawns++;
     const child = fakeChild();
@@ -298,16 +300,26 @@ test("DAG dependencies wait for authoritative upstream lifecycle", async () => {
   const graph = runGraph([
     { agent: "general", name: "seed", prompt: "seed", context: "fresh" },
     { agent: "general", name: "dependent", prompt: "use {seed}", dependsOn: ["seed"], context: "fresh" },
-  ], 2, { baseCwd: process.cwd(), spawnChildProcess });
+  ], 2, {
+    baseCwd: process.cwd(),
+    spawnChildProcess,
+    resultReadyGraceMs: 60_000,
+    onTurnComplete(result, status) { completions.push({ result, status }); },
+  });
 
   await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(spawns, 1, "result-ready must not release the dependent");
-  streams[0].write(`${JSON.stringify({ type: "agent_end" })}\n`);
-  await new Promise((resolve) => setTimeout(resolve, 30));
-  assert.equal(spawns, 2);
-  streams[1].write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  // The seed's published result — not its agent_end — releases the dependent
+  // and its {seed} variable (debug-notes-002).
+  assert.equal(spawns, 2, "result publication must release the dependent");
   const results = await graph;
   assert.deepEqual(results.map((entry) => entry.messages.at(-1)?.content), ["seed result", "dependent result"]);
+  assert.equal(completions.length, 0, "neither lifecycle has confirmed yet");
+
+  streams[0].write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  streams[1].write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(completions.length, 2, "lifecycle confirmation still settles both tasks");
+  assert.equal(completions.every(({ status }) => status === "completed"), true);
 });
 
 test("graph rejection settles every task when progress observers throw", async () => {
@@ -325,4 +337,52 @@ test("graph rejection settles every task when progress observers throw", async (
   assert.equal(results.length, 2);
   assert.equal(results.every((entry) => entry.exitCode === 1), true);
   assert.deepEqual(completions.map((entry) => entry.correlationId), ["left-cid", "right-cid"]);
+});
+
+test("post-publish lifecycle failure settles failed without revoking the consumable result", async () => {
+  const children: ChildProcess[] = [];
+  const spawnChildProcess = (() => {
+    const child = fakeChild();
+    children.push(child);
+    queueMicrotask(() => {
+      (child.stdout as PassThrough).write(`${JSON.stringify({
+        type: "turn_end",
+        message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "consumable answer" }] },
+        toolResults: [],
+      })}\n`);
+    });
+    return child;
+  }) as unknown as SpawnSeam;
+  const completions: Array<{ result: SingleResult; status?: AgentTerminalStatus }> = [];
+  const results = await runGraph([
+    { agent: "general", name: "only", prompt: "work", context: "fresh" },
+  ], 1, {
+    baseCwd: process.cwd(),
+    spawnChildProcess,
+    resultReadyGraceMs: 60_000,
+    onTurnComplete(result, status) { completions.push({ result, status }); },
+  });
+
+  // The graph returned the published, consumable result.
+  assert.equal(results[0].exitCode, 0);
+  assert.equal(results[0].lifecyclePending, true);
+  assert.equal(results[0].messages.at(-1)?.content, "consumable answer");
+  assert.equal(completions.length, 0);
+
+  // The child crashes inside the lifecycle confirmation window: the terminal
+  // record carries the failure even though the published result stood.
+  children[0].emit("close", 1, null);
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0].status, "failed");
+  assert.equal(completions[0].result.exitCode, 1);
+});
+
+test("aggregateTerminalStatuses reflects terminal truth, not publish-time results", () => {
+  assert.equal(aggregateTerminalStatuses(["completed", "completed"]), "completed");
+  assert.equal(aggregateTerminalStatuses(["completed", "failed"]), "failed");
+  assert.equal(aggregateTerminalStatuses(["terminated", "completed"]), "terminated");
+  assert.equal(aggregateTerminalStatuses(["failed", "terminated"]), "failed");
+  assert.equal(aggregateTerminalStatuses([undefined, "completed"]), "completed");
+  assert.equal(aggregateTerminalStatuses([]), "completed");
 });

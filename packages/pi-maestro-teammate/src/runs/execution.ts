@@ -1701,10 +1701,10 @@ export async function runGraph(
         return;
       }
 
-      let terminalResult: SingleResult | undefined;
-      let resolveTerminal!: (result: SingleResult) => void;
-      const terminal = new Promise<SingleResult>((resolve) => { resolveTerminal = resolve; });
-      const publishedResult = await runSingleTeammate(
+      // options.onTurnComplete flows through the spread unchanged: lifecycle
+      // confirmation still settles the agent record after publication, but it
+      // must not block this slot.
+      const result = await runSingleTeammate(
         {
           agent: task.agent,
           task: resolvedTask,
@@ -1734,21 +1734,12 @@ export async function runGraph(
                 }
               }
             : undefined,
-          onTurnComplete(result, terminalStatus) {
-            try {
-              options.onTurnComplete?.(result, terminalStatus);
-            } finally {
-              if (!terminalResult) {
-                terminalResult = result;
-                resolveTerminal(result);
-              }
-            }
-          },
         },
       );
-      const result = publishedResult.lifecyclePending === true
-        ? await terminal
-        : terminalResult ?? publishedResult;
+      // Result publication — not lifecycle confirmation — is the release
+      // boundary for parallel slots and DAG dependents (debug-notes-002).
+      // A lifecyclePending result is consumable; agent_end/close/grace keeps
+      // converging the child via options.onTurnComplete after this returns.
       results[idx] = result;
 
       if (result.exitCode === 0) {

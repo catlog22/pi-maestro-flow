@@ -224,6 +224,23 @@ export function aggregateTerminalStatus(results: readonly SingleResult[]): Agent
   return "completed";
 }
 
+/**
+ * Aggregates per-task lifecycle statuses recorded at terminal time. Graph
+ * publications now carry publish-time results (the release boundary), so
+ * container settlement and completion events derive their truth here instead
+ * of from the publication.
+ */
+export function aggregateTerminalStatuses(
+  statuses: Iterable<AgentTerminalStatus | undefined>,
+): AgentTerminalStatus {
+  let sawTerminated = false;
+  for (const status of statuses) {
+    if (status === "failed") return "failed";
+    if (status === "terminated") sawTerminated = true;
+  }
+  return sawTerminated ? "terminated" : "completed";
+}
+
 export function displayMessageForResult(result: SingleResult): string {
   const lastMessage = result.messages.at(-1)?.content
     ?? (result.structuredOutput !== undefined

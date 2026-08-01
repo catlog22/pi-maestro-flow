@@ -228,6 +228,7 @@ import {
   terminalStatusForResult,
   resultIsError,
   aggregateTerminalStatus,
+  aggregateTerminalStatuses,
   handleChildLifecycleEvent,
   AGENT_BUFFER_LIMITS,
   LIVE_AGENT_STATUSES,
@@ -1207,11 +1208,15 @@ export default function registerTeammateExtension(
         if (graphCompletionDelivered || !graphPublication) return;
         if (!taskCorrelationIds.every((taskId) => graphTerminalIds.has(taskId))) return;
         graphCompletionDelivered = true;
-        const terminalStatus = aggregateTerminalStatus(graphPublication.results);
+        // The publication carries publish-time results (the graph's release
+        // boundary); container settlement reflects the per-task lifecycle
+        // statuses recorded at terminal time.
+        const terminalStatus = aggregateTerminalStatuses(graphTerminalStatuses.values());
+        const exitCode = terminalStatus === "completed" ? 0 : 1;
         settleGraphContainerAgent(
           state,
           correlationId,
-          graphPublication.exitCode,
+          exitCode,
           graphPublication.summaries,
           graphPublication.wakeable,
           terminalStatus,
@@ -1221,7 +1226,7 @@ export default function registerTeammateExtension(
           id,
           graphPublication.mode,
           correlationId,
-          graphPublication.exitCode,
+          exitCode,
           graphPublication.totalDur,
           graphPublication.wakeable,
           terminalStatus === "terminated",

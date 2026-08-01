@@ -213,6 +213,7 @@ import {
   terminalStatusForResult,
   resultIsError,
   aggregateTerminalStatus,
+  aggregateTerminalStatuses,
   emitTeammateStarted,
   foregroundWaitWindowMs,
   formatRetryDelay,
@@ -1101,14 +1102,18 @@ export async function handleProxyRequest(
         if (nestedCompletionDelivered || !nestedPublication || !lifecycleTerminal) return;
         nestedCompletionDelivered = true;
         const wakeable = p.context !== "fork";
+        // Publications carry publish-time results (the release boundary);
+        // container settlement reflects lifecycle statuses recorded at
+        // terminal time.
         const terminalStatus = normalizedTasks
-          ? aggregateTerminalStatus(nestedPublication.results)
+          ? aggregateTerminalStatuses(nestedGraphTerminalStatuses.values())
           : nestedSingleTerminalStatus ?? aggregateTerminalStatus(nestedPublication.results);
+        const exitCode = terminalStatus === "completed" ? 0 : 1;
         const settleContainer = normalizedTasks ? settleGraphContainerAgent : settleAgent;
         settleContainer(
           state,
           cid,
-          nestedPublication.exitCode,
+          exitCode,
           nestedPublication.summary,
           wakeable,
           terminalStatus,
@@ -1116,7 +1121,7 @@ export async function handleProxyRequest(
         reportChildStatus(terminalStatus === "terminated"
           ? "terminated"
           : terminalStatus === "failed" ? "failed" : "completed");
-        emitNestedComplete(nestedPublication.exitCode, wakeable, terminalStatus);
+        emitNestedComplete(exitCode, wakeable, terminalStatus);
         if (nestedCompletionNotificationRequested) {
           const delivered = safeSendMessage(
             pi,

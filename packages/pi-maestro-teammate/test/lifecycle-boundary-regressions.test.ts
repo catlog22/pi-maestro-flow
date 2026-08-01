@@ -584,6 +584,10 @@ test("mixed nested graph settlement preserves successful sibling wakeability", a
 
   const successful = [...state.activeRuns.values()].find((agent) => agent.name === "nested-success");
   const failed = [...state.activeRuns.values()].find((agent) => agent.name === "nested-failure");
+  // The reply lands at result publication; the success child's agent_end is a
+  // separate event that settles its lifecycle shortly after.
+  const deadline = Date.now() + 2_000;
+  while (successful?.status !== "sleeping" && Date.now() < deadline) await delay(10);
   assert.equal(successful?.status, "sleeping");
   assert.equal(successful?.abortController.signal.aborted, false);
   assert.equal(failed?.status, "failed");
