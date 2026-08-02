@@ -9,7 +9,7 @@
  */
 
 import { TEAMMATE_STALL_TIMEOUT_MS } from "./limits.ts";
-import type { AgentStatus } from "./types.ts";
+import type { ActiveAgent, AgentActivity, AgentStatus } from "./types.ts";
 
 /**
  * Semantic color slot. The names match both the Pi theme foreground slots
@@ -34,13 +34,13 @@ export type DisplayStatus = AgentStatus | DerivedDisplayStatus;
  * adding a state to `AgentStatus` fails compilation here first.
  */
 export const STATUS_PRESENTATION: Readonly<Record<AgentStatus, StatusPresentation>> = Object.freeze({
-  pending: { icon: "□", text: "pending", tone: "dim" },
+  pending: { icon: "■", text: "running · starting", tone: "dim" },
   running: { icon: "■", text: "running", tone: "warning" },
-  retrying: { icon: "↻", text: "retrying", tone: "warning" },
+  retrying: { icon: "■", text: "running · retrying", tone: "warning" },
   sleeping: { icon: "◉", text: "sleeping", tone: "warning" },
-  completed: { icon: "✓", text: "completed", tone: "success" },
-  failed: { icon: "✗", text: "failed", tone: "error" },
-  terminated: { icon: "×", text: "terminated", tone: "warning" },
+  completed: { icon: "◉", text: "sleeping · completed", tone: "success" },
+  failed: { icon: "◉", text: "sleeping · failed", tone: "error" },
+  terminated: { icon: "◉", text: "sleeping · terminated", tone: "warning" },
 });
 
 export const DERIVED_STATUS_PRESENTATION: Readonly<Record<DerivedDisplayStatus, StatusPresentation>> = Object.freeze({
@@ -85,6 +85,25 @@ export function effectiveDisplayStatus(
       return status;
     default:
       return unhandledStatus(status);
+  }
+}
+
+export function projectAgentActivity(agent: Pick<ActiveAgent, "status" | "restart" | "sessionFile">): AgentActivity {
+  // F-004: Terminal states are not "running". All settled statuses project
+  // as sleeping; only active lifecycle states (pending/running/retrying)
+  // project as running.
+  switch (agent.status) {
+    case "pending":
+    case "running":
+    case "retrying":
+      return "running";
+    case "sleeping":
+    case "completed":
+    case "failed":
+    case "terminated":
+      return "sleeping";
+    default:
+      return "running";
   }
 }
 

@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { PassThrough } from "node:stream";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -13,13 +16,14 @@ import registerTeammateExtension, {
   waitForTeammate,
   type TeammateRuntimeOptions,
 } from "../src/extension/index.ts";
+import type { RunTeammateOptions } from "../src/runs/execution.ts";
 import {
   confirmParked,
   createChildLease,
   requestPark,
   transferToMain,
 } from "../src/runs/session-handoff.ts";
-import type { ActiveAgent, Details, TeammateState } from "../src/shared/types.ts";
+import type { ActiveAgent, AgentProgress, Details, TeammateState } from "../src/shared/types.ts";
 
 type ToolResult = {
   content: Array<{ type: "text"; text: string }>;
@@ -42,6 +46,7 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
     Symbol.for("pi-maestro-teammate.root-registry")
   ];
   let teammate: RegisteredTool | undefined;
+  let teammateSend: RegisteredTool | undefined;
   const emitted: Array<{ event: string; payload: Record<string, unknown> }> = [];
   const messages: Array<Record<string, unknown>> = [];
   const hooks = new Map<string, Array<(...args: any[]) => unknown>>();
@@ -59,6 +64,7 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
     },
     registerTool(tool: RegisteredTool & { name: string }) {
       if (tool.name === "teammate") teammate = tool;
+      if (tool.name === "teammate-send") teammateSend = tool;
     },
     registerCommand(name: string, command: { handler: (args: string, ctx: any) => Promise<void> | void }) {
       commands.set(name, command);
@@ -72,7 +78,8 @@ function createHarness(runtimeOptions: TeammateRuntimeOptions = {}) {
   });
   registerTeammateExtension(pi as unknown as ExtensionAPI, runtimeOptions);
   assert.ok(teammate);
-  return { teammate, emitted, messages, hooks, commands };
+  assert.ok(teammateSend);
+  return { teammate, teammateSend, emitted, messages, hooks, commands };
 }
 
 function context(): Record<string, unknown> {
@@ -294,6 +301,158 @@ test("root emits complete only after result-ready receives lifecycle confirmatio
   assert.equal(completed.length, 1);
   assert.equal(completed[0].payload.exitCode, 0);
   assert.equal(completed[0].payload.wakeable, true);
+});
+
+test("warm wake publishes every subsequent turn completion", async () => {
+  let stdout: PassThrough | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    queueMicrotask(() => {
+      stdout!.write(`${JSON.stringify(resultReadyTurn("first turn"))}\n`);
+      stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const { teammate, teammateSend, emitted, messages } = createHarness({ spawnChildProcess });
+  const ctx = context();
+
+  await teammate.execute(
+    "warm-root",
+    { tasks: [{ agent: "general", name: "warm-worker", prompt: "first" }], background: false },
+    new AbortController().signal,
+    undefined,
+    ctx,
+  );
+  await delay(20);
+  assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 1);
+
+  const sent = await teammateSend.execute(
+    "warm-send",
+    { to: "warm-worker", message: "second", mode: "follow_up" },
+    new AbortController().signal,
+    undefined,
+    ctx,
+  );
+  assert.equal(sent.isError, false);
+  stdout!.write(`${JSON.stringify(resultReadyTurn("second turn"))}\n`);
+  stdout!.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+  await delay(40);
+
+  assert.equal(emitted.filter(({ event }) => event === "teammate:complete").length, 2);
+  assert.ok(messages.some((message) => message.customType === "teammate-complete" && message.content === "second turn"));
+});
+
+test("closed runtime cold-resumes the same logical agent from its persisted session", async () => {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "teammate-cold-resume-"));
+  const parentSession = path.join(tempDir, "parent.jsonl");
+  fs.writeFileSync(parentSession, "{}\n");
+  const spawnArgs: string[][] = [];
+  const children: ChildProcess[] = [];
+  const runOptions: RunTeammateOptions[] = [];
+  let checkpoint = "";
+
+  const spawnChildProcess = ((_command: string, args: string[]) => {
+    spawnArgs.push([...args]);
+    const child = new EventEmitter() as ChildProcess;
+    const stdout = new PassThrough();
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      connected: true,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      send(_message: unknown, callback?: (error: Error | null) => void) {
+        callback?.(null);
+        return true;
+      },
+      kill() { return true; },
+    });
+    children.push(child);
+    queueMicrotask(() => {
+      const sessionDir = args[args.indexOf("--session-dir") + 1];
+      fs.mkdirSync(sessionDir, { recursive: true });
+      checkpoint ||= path.join(sessionDir, "child.jsonl");
+      fs.writeFileSync(checkpoint, "{}\n");
+      child.emit("message", {
+        type: "teammate_session_ready",
+        sessionId: `child-${children.length}`,
+        sessionFile: checkpoint,
+      });
+      stdout.write(`${JSON.stringify(resultReadyTurn(children.length === 1 ? "first" : "restored"))}\n`);
+      stdout.write(`${JSON.stringify({ type: "agent_end" })}\n`);
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+
+  try {
+    const { teammate, teammateSend } = createHarness({
+      spawnChildProcess,
+      resultReadyGraceMs: 500,
+      onRunOptionsCreated(options) { runOptions.push(options); },
+    });
+    const ctx = {
+      ...context(),
+      sessionManager: {
+        getSessionFile: () => parentSession,
+        getSessionId: () => "parent-session",
+      },
+    };
+    const first = await teammate.execute(
+      "cold-root",
+      { tasks: [{ agent: "general", name: "cold-worker", prompt: "first" }], background: false },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+    assert.equal(first.details.results[0].correlationId.length > 0, true);
+    const logicalId = first.details.results[0].correlationId;
+
+    Object.assign(children[0], { exitCode: 0 });
+    children[0].emit("exit", 0, null);
+    children[0].emit("close", 0, null);
+    await delay(30);
+
+    const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+      Symbol.for("pi-maestro-teammate.root-registry")
+    ] as TeammateState;
+    const cold = state.activeRuns.get(logicalId);
+    assert.equal(cold?.status, "sleeping");
+    assert.equal(cold?.stdin, undefined);
+    assert.equal(cold?.sessionFile, checkpoint);
+
+    const delivery = await teammateSend.execute(
+      "cold-send",
+      { to: "cold-worker", message: "continue after close", mode: "follow_up" },
+      new AbortController().signal,
+      undefined,
+      ctx,
+    );
+    assert.equal(delivery.isError, false);
+    assert.equal(spawnArgs.length, 2);
+    const resumeArgs = spawnArgs[1];
+    assert.equal(resumeArgs[resumeArgs.indexOf("--session") + 1], checkpoint);
+    assert.equal(state.namedAgents.get("cold-worker"), logicalId);
+    assert.equal(state.activeRuns.get(logicalId)?.runtimeGeneration, 2);
+    const replacementStdin = state.activeRuns.get(logicalId)?.stdin;
+    runOptions[0].onChildClosed?.(logicalId, 1, { code: 1, signal: null, settled: true });
+    assert.equal(state.activeRuns.get(logicalId)?.runtimeGeneration, 2);
+    assert.equal(state.activeRuns.get(logicalId)?.stdin, replacementStdin, "stale close cannot detach replacement runtime");
+  } finally {
+    fs.rmSync(tempDir, { recursive: true, force: true });
+  }
 });
 
 test("root background spawn failure publishes one completion and clears live state", async () => {
@@ -634,7 +793,8 @@ test("mixed nested graph settlement preserves successful sibling wakeability", a
   while (successful?.status !== "sleeping" && Date.now() < deadline) await delay(10);
   assert.equal(successful?.status, "sleeping");
   assert.equal(successful?.abortController.signal.aborted, false);
-  assert.equal(failed?.status, "failed");
+  assert.equal(failed?.status, "sleeping");
+  assert.equal(failed?.lastOutcome?.status, "failed");
   assert.equal(failed?.abortController.signal.aborted, false);
 });
 
@@ -848,6 +1008,95 @@ test("conversation switch treats a cancelled replacement as failure", async () =
     /cancelled before replacement completed/i,
   );
   assert.equal(switched, false);
+});
+
+test("result-ready survives a throttled settling update until a new turn or terminal state", async () => {
+  let options: RunTeammateOptions | undefined;
+  const spawnChildProcess = (() => {
+    const child = new EventEmitter() as ChildProcess;
+    Object.assign(child, {
+      stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), connected: false,
+      exitCode: null, signalCode: null, pid: undefined, kill() { return true; },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const { teammate } = createHarness({
+    spawnChildProcess,
+    onRunOptionsCreated(created) { options = created; },
+  });
+  await teammate.execute(
+    "result-edge",
+    { tasks: [{ agent: "general", name: "edge-worker", prompt: "wait" }], background: true },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  const agent = [...state.activeRuns.values()].find((entry) => entry.name === "edge-worker")!;
+  const base = {
+    agent: "general",
+    correlationId: agent.correlationId,
+    taskIndex: 0,
+    dependencies: [],
+    status: "running",
+    recentTools: [],
+    toolCount: 0,
+    tokens: 0,
+    durationMs: 1,
+    lastActivityAt: Date.now(),
+    startedAt: Date.now(),
+  } satisfies AgentProgress;
+  const readyAt = Date.now();
+  options!.onProgress?.({ ...base, phase: "result-ready", resultReadyAt: readyAt });
+  options!.onProgress?.({ ...base, phase: "settling", resultReadyAt: undefined });
+  assert.equal(agent.resultReadyAt, readyAt);
+});
+
+test("stale child requests cannot admit work after the parent session generation changes", async () => {
+  let options: RunTeammateOptions | undefined;
+  let spawns = 0;
+  const spawnChildProcess = (() => {
+    spawns++;
+    const child = new EventEmitter() as ChildProcess;
+    Object.assign(child, {
+      stdin: new PassThrough(),
+      stdout: new PassThrough(),
+      stderr: new PassThrough(),
+      connected: false,
+      exitCode: null,
+      signalCode: null,
+      pid: undefined,
+      kill() { return true; },
+    });
+    return child;
+  }) as unknown as NonNullable<TeammateRuntimeOptions["spawnChildProcess"]>;
+  const { teammate } = createHarness({
+    spawnChildProcess,
+    onRunOptionsCreated(created) { options = created; },
+  });
+  await teammate.execute(
+    "stale-request",
+    { tasks: [{ agent: "general", name: "old-parent", prompt: "wait" }], background: true },
+    new AbortController().signal,
+    undefined,
+    context(),
+  );
+  const state = (globalThis as typeof globalThis & Record<symbol, unknown>)[
+    Symbol.for("pi-maestro-teammate.root-registry")
+  ] as TeammateState;
+  state.sessionGeneration = (state.sessionGeneration ?? 0) + 1;
+  let reply: Record<string, unknown> | undefined;
+  options!.onChildRequest?.({
+    type: "teammate_proxy_request",
+    tool: "teammate",
+    requestId: "late-nested",
+    params: { tasks: [{ agent: "general", prompt: "must not spawn" }] },
+  }, (message) => { reply = message as Record<string, unknown>; });
+
+  assert.equal(spawns, 1);
+  assert.match(JSON.stringify(reply), /stale child request rejected/);
 });
 
 test("session shutdown fences delayed root completion from the replacement session", async () => {

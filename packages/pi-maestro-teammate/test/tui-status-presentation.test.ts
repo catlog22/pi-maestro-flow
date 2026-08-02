@@ -46,10 +46,12 @@ test("status presentation covers every canonical status exactly once", () => {
     Object.keys(STATUS_PRESENTATION).sort(),
     ["completed", "failed", "pending", "retrying", "running", "sleeping", "terminated"],
   );
-  // retrying must be visually distinct from both pending and completed.
-  assert.notEqual(STATUS_PRESENTATION.retrying.icon, STATUS_PRESENTATION.pending.icon);
-  assert.notEqual(STATUS_PRESENTATION.retrying.icon, STATUS_PRESENTATION.completed.icon);
-  assert.equal(STATUS_PRESENTATION.retrying.text, "retrying");
+  // Activity is deliberately two-state; internal statuses survive only as phase/outcome text.
+  assert.match(STATUS_PRESENTATION.retrying.text, /^running/);
+  assert.match(STATUS_PRESENTATION.pending.text, /^running/);
+  assert.match(STATUS_PRESENTATION.completed.text, /^sleeping/);
+  assert.match(STATUS_PRESENTATION.failed.text, /^sleeping/);
+  assert.match(STATUS_PRESENTATION.terminated.text, /^sleeping/);
   assert.equal(displayStatusPresentation("stalled"), DERIVED_STATUS_PRESENTATION.stalled);
   assert.equal(displayStatusPresentation("running"), STATUS_PRESENTATION.running);
 });
@@ -85,9 +87,9 @@ test("progress tree renders retrying tasks distinctly instead of pending", () =>
     { agent: "general", name: "waiting", correlationId: "waiting", taskIndex: 1, dependencies: [], status: "pending" },
   ] as AgentProgressSnapshot[], palette);
 
-  assert.match(rows[0].text, /↻ retrying/);
+  assert.match(rows[0].text, /■ running · retrying/);
   assert.doesNotMatch(rows[0].text, /pending/);
-  assert.match(rows[1].text, /□ pending/);
+  assert.match(rows[1].text, /■ running · starting/);
 });
 
 test("streaming child agents render retrying without a success checkmark", () => {
@@ -105,7 +107,7 @@ test("streaming child agents render retrying without a success checkmark", () =>
     },
   }, { expanded: false }, theme as never).render(100).join("\n");
 
-  assert.match(rendered, /↻ @review child agent · retrying/);
+  assert.match(rendered, /■ @review child agent · running · retrying/);
   assert.doesNotMatch(rendered, /✓/);
 });
 
@@ -145,10 +147,10 @@ test("attach overlay task status shows retrying rather than pending", () => {
   try {
     overlay.setProgress(agent.correlationId, progress);
     // The overlay emits raw ANSI between the icon and the label.
-    assert.match(overlay.render(100, 24).join("\n"), /↻.*retrying/);
+    assert.match(overlay.render(100, 24).join("\n"), /■.*running · retrying/);
     overlay.handleInput("1");
     const selected = overlay.render(100, 24).join("\n");
-    assert.match(selected, /Retrying/);
+    assert.match(selected, /running.*retrying/i);
     assert.doesNotMatch(selected, /Pending/);
   } finally {
     overlay.dispose();

@@ -7,6 +7,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -342,6 +343,13 @@ export function createTeammateInteractionQueue(
       }
       finishSettlement();
     };
+    // PERFSEC-003: A duplicate requestId must not silently overwrite the
+    // existing waiter — that orphans the old timer/promise and lets the old
+    // timer's finishSettlement delete the *new* entry via the shared key.
+    // Settle the previous waiter first so its resources are cleaned up.
+    waiting.get(key)?.settle(
+      "Superseded by a duplicate interaction request with the same requestId.",
+    );
     waiting.set(key, { correlationId: correlationFor(event, fallbackCorrelationId), settle });
 
     // RPC UI requests (select/confirm/input/editor) wait on a human answer just
@@ -794,6 +802,14 @@ export async function handleProxyRequest(
   ) => void,
   onChildStatus?: (child: ChildAgentCallSnapshot) => void,
   runtimeOptions: TeammateRuntimeOptions = {},
+  mailboxDeliver?: (request: {
+    senderId: string;
+    recipientId: string;
+    recipientCorrelationId: string;
+    kind: "lifecycle" | "result" | "steer" | "follow_up" | "task" | "control";
+    mode: "steer" | "follow_up" | "abort" | "notify";
+    payload: string;
+  }) => Promise<{ path: string; result: { ok: boolean } }>,
 ): Promise<void> {
   let replied = false;
   const reply = (message: unknown): void => {
@@ -994,6 +1010,8 @@ export async function handleProxyRequest(
         depth: dispatchDepth,
         maxDispatchDepth: childMaxDispatchDepth,
         status: "running",
+        phase: "starting",
+        runtimeGeneration: 1,
         sleepMs: 0,
         lease: createChildLease(),
         promptSeq: 1,
@@ -1083,6 +1101,7 @@ export async function handleProxyRequest(
       let nestedPublication: NestedCompletion | undefined;
       let nestedCompletionNotificationRequested = false;
       let nestedCompletionDelivered = false;
+      const nestedColdRestarting = new Set<string>();
       const finishProxyDispatchTracking = (): boolean => {
         const cancelled = state.cancelledProxyDispatches?.get(requestId) === cid;
         if (state.proxyDispatchByRequest?.get(requestId) === cid) {
@@ -1108,7 +1127,7 @@ export async function handleProxyRequest(
         }
         if (nestedCompletionDelivered || !nestedPublication || !lifecycleTerminal) return;
         nestedCompletionDelivered = true;
-        const wakeable = p.context !== "fork";
+        const wakeable = normalizedTasks ? false : p.context !== "fork";
         // Publications carry publish-time results (the release boundary);
         // container settlement reflects lifecycle statuses recorded at
         // terminal time.
@@ -1159,6 +1178,34 @@ export async function handleProxyRequest(
         nestedCompletionNotificationRequested ||= notify;
         deliverNestedCompletion();
       };
+      const publishAdditionalNestedTurn = (
+        result: SingleResult,
+        terminalStatus: AgentTerminalStatus,
+      ): void => {
+        if (!ownsDispatchGeneration() || nestedColdRestarting.has(result.correlationId)) return;
+        const target = state.activeRuns.get(result.correlationId);
+        const wakeable = result.wakeable !== false || Boolean(target?.restart && target.sessionFile);
+        emitComplete(
+          pi,
+          undefined,
+          target?.agent ?? result.agent,
+          result.correlationId,
+          result.exitCode,
+          result.durationMs,
+          wakeable,
+          terminalStatus === "terminated",
+        );
+        if (!safeSendMessage(
+          pi,
+          {
+            customType: "teammate-complete",
+            content: displayMessageForResult(result),
+            display: true,
+            details: { mode: "single", results: [result] },
+          },
+          { triggerTurn: true },
+        )) markSettledResultInspectable(state, result.correlationId);
+      };
 
       normalizedTasks?.forEach((task, index) => {
         const childId = taskCorrelationIds[index];
@@ -1178,6 +1225,8 @@ export async function handleProxyRequest(
           depth: dispatchDepth,
           maxDispatchDepth: childMaxDispatchDepth,
           status: "pending",
+          phase: "starting",
+          runtimeGeneration: 1,
           sleepMs: 0,
           lease: createChildLease(),
           promptSeq: 1,
@@ -1223,6 +1272,7 @@ export async function handleProxyRequest(
           taskIndex,
           dependencies: data.dependencies ?? existing?.dependencies ?? [],
           status: data.status,
+          phase: data.phase,
           startedAt: new Date(data.startedAt).toISOString(),
           recentTools: data.recentTools,
           toolCount: data.toolCount,
@@ -1253,13 +1303,19 @@ export async function handleProxyRequest(
             correlationId: entry.correlationId,
             resultReadyAt: data.resultReadyAt,
           });
-        } else {
+        } else if (
+          data.phase === "prompting"
+          || data.status === "completed"
+          || data.status === "failed"
+          || data.status === "terminated"
+        ) {
           clearAgentResultReadyState(state, entry.correlationId);
         }
         activeAgent.lastActivityAt = Date.now();
 
         const childAgent = state.activeRuns.get(correlationId);
         if (childAgent) {
+          childAgent.phase = entry.phase;
           childAgent.requestedModel = entry.requestedModel ?? childAgent.requestedModel;
           childAgent.resolvedModel = entry.resolvedModel ?? childAgent.resolvedModel;
           childAgent.attemptedModels = entry.attemptedModels ?? childAgent.attemptedModels;
@@ -1297,6 +1353,7 @@ export async function handleProxyRequest(
           taskIndex: taskIndex >= 0 ? taskIndex : 0,
           dependencies: data.dependencies ?? [],
           status: data.status,
+          phase: data.phase,
           startedAt: new Date(data.startedAt).toISOString(),
           recentTools: data.recentTools,
           toolCount: data.toolCount,
@@ -1393,6 +1450,7 @@ export async function handleProxyRequest(
         depth: dispatchDepth,
         maxDispatchDepth: childMaxDispatchDepth,
         signal: abortCtrl.signal,
+        runtimeGeneration: activeAgent.runtimeGeneration,
         ...(normalizedTasks ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
         parentSessionFile: spawnerAgent?.sessionFile ?? state.mainSessionFile,
         initialLeaseToken: (childId: string) => {
@@ -1405,11 +1463,40 @@ export async function handleProxyRequest(
           target.sendControl = sendControl;
           target.sessionDir = sessionDir;
           target.status = "running";
+          target.phase = "prompting";
           target.retry = undefined;
           target.resultReadyAt = undefined;
           if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
         },
         onChildEvent: (childEvent) => handleChildLifecycleEvent(state, childEvent),
+        onChildClosed: (childId, generation, details) => {
+          const target = state.activeRuns.get(childId);
+          if (!target || (target.runtimeGeneration ?? 0) !== (generation ?? 0)) return;
+          target.stdin = undefined;
+          target.sendControl = undefined;
+          const checkpoint = target.sessionFile;
+          if (
+            target.restart
+            && checkpoint
+            && existsSync(checkpoint)
+            && isSessionPathContained(target.sessionDir, checkpoint)
+          ) {
+            target.status = "sleeping";
+            target.phase = undefined;
+            target.retry = undefined;
+            target.failedAt = undefined;
+            target.sleptAt = Date.now();
+            target.lastActivityAt = Date.now();
+            target.outputLog.push(
+              `[${new Date().toISOString().slice(11, 19)}] ◉ runtime closed; session checkpoint retained for cold resume.`,
+            );
+            trimAgentBuffers(target, true);
+            return;
+          }
+          if (target.status === "sleeping" || target.status === "running" || target.status === "retrying") {
+            killAgent(state, childId, target.name, details.code === 0 ? "completed" : "failed", false);
+          }
+        },
         onRetry: (retry) => {
           applyAgentRetryState(state, retry);
           reportChildStatus(
@@ -1437,6 +1524,9 @@ export async function handleProxyRequest(
             result.wakeable !== false,
             canonicalStatus,
           );
+          const repeatedTurn = normalizedTasks
+            ? nestedGraphTerminalIds.has(result.correlationId)
+            : nestedSingleTerminal;
           if (normalizedTasks) {
             nestedGraphTerminalIds.add(result.correlationId);
             nestedGraphTerminalStatuses.set(result.correlationId, canonicalStatus);
@@ -1450,6 +1540,7 @@ export async function handleProxyRequest(
               : canonicalStatus === "failed" ? "failed" : "completed");
           }
           deliverNestedCompletion();
+          if (repeatedTurn) publishAdditionalNestedTurn(result, canonicalStatus);
         },
         onProgress: (data) => {
           // Refreshed on every branch. This is the only input to every stall
@@ -1457,13 +1548,19 @@ export async function handleProxyRequest(
           // single-task path never wrote it — so the most common nested shape
           // reported itself stalled after 30s of healthy work.
           activeAgent.lastActivityAt = Date.now();
+          const targetId = data.correlationId ?? taskCorrelationIds[data.taskIndex ?? 0] ?? cid;
+          if (data.resultReadyAt !== undefined) {
+            applyAgentResultReadyState(state, { correlationId: targetId, resultReadyAt: data.resultReadyAt });
+          } else if (
+            data.phase === "prompting"
+            || data.status === "completed"
+            || data.status === "failed"
+            || data.status === "terminated"
+          ) {
+            clearAgentResultReadyState(state, targetId);
+          }
 
           if (!normalizedTasks) {
-            if (data.resultReadyAt !== undefined) {
-              applyAgentResultReadyState(state, { correlationId: cid, resultReadyAt: data.resultReadyAt });
-            } else {
-              clearAgentResultReadyState(state, cid);
-            }
             if (data.lastMessage) appendAgentProgressLine(activeAgent, data, cid);
             pendingProgressByTask.set(0, data);
             proxyProgressFlushGate.mark(data.status === "completed" || data.status === "failed");
@@ -1475,6 +1572,18 @@ export async function handleProxyRequest(
           proxyProgressFlushGate.mark(data.status === "completed" || data.status === "failed");
         },
         onChildRequest: (evt, rep) => {
+          if (!ownsDispatchGeneration()) {
+            rep({
+              type: "teammate_proxy_result",
+              requestId: evt.requestId,
+              result: {
+                content: [{ type: "text", text: "Parent session generation changed; stale child request rejected." }],
+                isError: true,
+                details: { mode: "single", results: [] },
+              },
+            });
+            return;
+          }
           if (evt.type === "teammate_interaction_request" || evt.type === "teammate_rpc_ui_request") {
             onInteraction?.(evt, rep, cid);
             return;
@@ -1488,6 +1597,162 @@ export async function handleProxyRequest(
           );
         },
       };
+
+      const installNestedColdRestart = (
+        target: ActiveAgent,
+        task: NormalizedTask,
+      ): void => {
+        target.restart = (message: string): boolean => {
+          const checkpoint = target.sessionFile;
+          if (
+            target.restartPending
+            || !checkpoint
+            || !existsSync(checkpoint)
+            || !isSessionPathContained(target.sessionDir, checkpoint)
+          ) return false;
+
+          const generation = (target.runtimeGeneration ?? 0) + 1;
+          const controller = new AbortController();
+          target.runtimeGeneration = generation;
+          target.abortController = controller;
+          target.graphAbortController = controller;
+          target.lease = createChildLease();
+          target.status = "running";
+          target.phase = "restoring";
+          target.retry = undefined;
+          target.failedAt = undefined;
+          target.resultReadyAt = undefined;
+          target.lastActivityAt = Date.now();
+          nestedColdRestarting.add(target.correlationId);
+          const ownsRuntime = (): boolean =>
+            state.activeRuns.get(target.correlationId) === target
+            && target.runtimeGeneration === generation;
+
+          const restartOptions: RunTeammateOptions = {
+            ...runOpts,
+            correlationId: target.correlationId,
+            taskCorrelationIds: undefined,
+            taskSignals: undefined,
+            signal: controller.signal,
+            resumeSessionFile: checkpoint,
+            runtimeGeneration: generation,
+          };
+          const onChildSpawned = runOpts.onChildSpawned;
+          restartOptions.onChildSpawned = (stdin, sendControl, sessionDir, childId) => {
+            if (ownsRuntime()) onChildSpawned?.(stdin, sendControl, sessionDir, childId ?? target.correlationId);
+          };
+          const onChildEvent = runOpts.onChildEvent;
+          restartOptions.onChildEvent = (event) => {
+            if (ownsRuntime()) onChildEvent?.(event);
+          };
+          const onChildClosed = runOpts.onChildClosed;
+          restartOptions.onChildClosed = (childId, callbackGeneration, details) => {
+            if (ownsRuntime()) onChildClosed?.(childId, callbackGeneration, details);
+          };
+          const onChildRequest = runOpts.onChildRequest;
+          restartOptions.onChildRequest = (event, respond) => {
+            if (ownsRuntime()) onChildRequest?.(event, respond);
+          };
+          restartOptions.onRetry = (retry) => {
+            if (ownsRuntime()) applyAgentRetryState(state, retry);
+          };
+          restartOptions.onProgress = (progress) => {
+            if (!ownsRuntime()) return;
+            target.phase = progress.phase;
+            target.lastActivityAt = progress.lastActivityAt;
+            target.resultReadyAt = progress.resultReadyAt;
+            if (progress.lastMessage) target.lastResult = progress.lastMessage;
+          };
+          const onReclamationOutcome = runOpts.onReclamationOutcome;
+          restartOptions.onReclamationOutcome = (childId, outcome) => {
+            if (ownsRuntime()) onReclamationOutcome?.(childId, outcome);
+          };
+
+          let publishedResult: SingleResult | undefined;
+          let terminalResult: SingleResult | undefined;
+          let completionDelivered = false;
+          const deliverRestartCompletion = (): void => {
+            if (completionDelivered || !ownsRuntime() || !publishedResult || !terminalResult) return;
+            completionDelivered = true;
+            const status = terminalStatusForResult(terminalResult);
+            emitComplete(
+              pi,
+              undefined,
+              target.agent,
+              target.correlationId,
+              terminalResult.exitCode,
+              terminalResult.durationMs,
+              true,
+              status === "terminated",
+            );
+            safeSendMessage(
+              pi,
+              {
+                customType: "teammate-complete",
+                content: displayMessageForResult(terminalResult),
+                display: true,
+                details: { mode: "single", results: [terminalResult] },
+              },
+              { triggerTurn: true },
+            );
+          };
+          const onTurnComplete = runOpts.onTurnComplete;
+          restartOptions.onTurnComplete = (result, status) => {
+            if (!ownsRuntime()) return;
+            onTurnComplete?.(result, status);
+            terminalResult = result;
+            deliverRestartCompletion();
+          };
+
+          target.restartPending = runSingleTeammate(
+            {
+              agent: task.agent,
+              name: task.name,
+              task: message,
+              taskType: task.taskType,
+              context: "fresh",
+              model: task.model,
+              fallbackModels: task.fallbackModels,
+              thinking: task.thinking,
+              cwd: task.cwd,
+              outputSchema: task.outputSchema,
+              timeoutMs: task.timeoutMs,
+              reply_to: p.reply_to,
+            },
+            restartOptions,
+          ).then((result) => {
+            if (!ownsRuntime()) return;
+            publishedResult = result;
+            deliverRestartCompletion();
+          }).catch((error) => {
+            if (!ownsRuntime()) return;
+            const text = error instanceof Error ? error.message : String(error);
+            target.lastResult = text;
+            target.status = "sleeping";
+            target.phase = undefined;
+            target.sleptAt = Date.now();
+            target.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ! cold resume failed: ${text}`);
+            trimAgentBuffers(target, true);
+          }).finally(() => {
+            nestedColdRestarting.delete(target.correlationId);
+            if (!ownsRuntime()) return;
+            if (target.status === "failed" && existsSync(checkpoint)) {
+              target.status = "sleeping";
+              target.phase = undefined;
+              target.failedAt = undefined;
+              target.sleptAt = Date.now();
+            }
+            target.restartPending = undefined;
+          });
+          return true;
+        };
+      };
+
+      if (normalizedTasks) normalizedTasks.forEach((task, index) => {
+        const target = state.activeRuns.get(taskCorrelationIds[index]);
+        if (target) installNestedColdRestart(target, task);
+      });
+      else installNestedColdRestart(activeAgent, singleTask);
 
       const executeNested = async () => {
         if (normalizedTasks) {
@@ -1866,10 +2131,96 @@ export async function handleProxyRequest(
         }});
         return;
       }
+      // Durable mailbox authoritative path: enqueue and let the consumer inject.
+      if (mailboxDeliver && requestedMode !== "abort" && requestedMode !== "steer") {
+        void mailboxDeliver({
+          senderId: parentCid ?? "caller",
+          recipientId: to,
+          recipientCorrelationId: cid,
+          kind: "follow_up",
+          mode: "follow_up",
+          payload: message,
+        }).then((result) => {
+          if (result.result.ok) {
+            const now = Date.now();
+            agent?.inbox.push({
+              id: randomUUID(),
+              from: spawnedBy ?? "proxy",
+              to,
+              kind: "task",
+              payload: message,
+              timestamp: now,
+            });
+            if (agent) {
+              agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ mailbox-follow-up: ${message.slice(0, 100)}`);
+              trimAgentBuffers(agent);
+              agent.lastActivityAt = now;
+            }
+            pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+              correlationId: cid,
+              from: "caller",
+              to,
+              mode: "follow_up",
+              message,
+              lastActivityAt: now,
+              isSend: true,
+            });
+            reply({ type: "teammate_proxy_result", requestId, result: {
+              content: [{ type: "text", text: `Message queued after current turn for "${to}".` }],
+              isError: false, details: { delivered: true },
+            }});
+          } else {
+            // Surface the failure — never silently fall back to direct stdin.
+            const reason = "message" in result.result ? (result.result as { message?: string }).message : "unknown error";
+            console.error(`[pi-maestro-teammate] mailbox delivery failed for ${to}: ${reason}`);
+            reply({ type: "teammate_proxy_result", requestId, result: {
+              content: [{ type: "text", text: `Mailbox delivery failed for "${to}": ${reason}` }],
+              isError: true, details: { delivered: false },
+            }});
+          }
+        }).catch((error) => {
+          console.error(`[pi-maestro-teammate] mailbox delivery failed for ${to}:`, error);
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{ type: "text", text: `Mailbox delivery failed for "${to}".` }],
+            isError: true, details: { delivered: false },
+          }});
+        });
+        return;
+      }
       if (!agent?.stdin?.writable) {
+        const restarted = agent?.status === "sleeping" && agent.restart?.(message) === true;
+        if (!restarted || !agent) {
+          reply({ type: "teammate_proxy_result", requestId, result: {
+            content: [{ type: "text", text: `Agent "${to}" has no restorable runtime.` }],
+            isError: true, details: { delivered: false },
+          }});
+          return;
+        }
+        const now = Date.now();
+        agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+        agent.inbox.push({
+          id: randomUUID(),
+          from: spawnedBy ?? "proxy",
+          to,
+          kind: "task",
+          payload: message,
+          timestamp: now,
+        });
+        agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ cold-resume prompt: ${message.slice(0, 100)}`);
+        trimAgentBuffers(agent);
+        emitTeammateStarted(pi, agent);
+        pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+          correlationId: cid,
+          from: "caller",
+          to,
+          mode: "prompt",
+          message,
+          lastActivityAt: now,
+          isSend: true,
+        });
         reply({ type: "teammate_proxy_result", requestId, result: {
-          content: [{ type: "text", text: `Agent "${to}" is no longer running.` }],
-          isError: true, details: { delivered: false },
+          content: [{ type: "text", text: `Message woken up + prompt for "${to}". Agent restored from session.` }],
+          isError: false, details: { delivered: true },
         }});
         return;
       }

@@ -69,6 +69,8 @@ export declare const AGENT_BUFFER_LIMITS: Readonly<{
     logLineBytes: number;
     logBytes: number;
     lastResultBytes: number;
+    /** PERFSEC-004: Cap per-interaction payload retention (16 concurrent × 256KB = 4MB max). */
+    interactionPayloadBytes: number;
 }>;
 export declare const TEAMMATE_STALL_TIMEOUT_MS = 30000;
 /**
@@ -124,8 +126,10 @@ export declare const COCKPIT_UI_OWNERSHIP_EVENT = "cockpit:ui-ownership";
  */
 export declare function appendAgentProgressLine(agent: ActiveAgent, data: AgentProgress, correlationId: string): void;
 export declare function buildWorkspaceOwnerState(state: TeammateState, sessionName?: string): WorkspaceOwnerState;
-/** Agents that still hold (or are about to hold) a child process. */
+/** Compatibility vocabulary for legacy internal status checks. */
 export declare const LIVE_AGENT_STATUSES: ReadonlySet<AgentStatus>;
+/** Resource admission is independent of the externally projected activity. */
+export declare function agentHoldsRuntimeSlot(agent: ActiveAgent): boolean;
 /**
  * Bounds the whole dispatch tree, not a single call. `maxAgents` caps one
  * dispatch's task count, so nesting multiplies rather than adds: without this

@@ -78,8 +78,8 @@ test("expanded multi-result rows trust results over lifecycle-pending progress s
   const rendered = renderTeammateResult(final, { expanded: true }, theme as never).render(160);
   const joined = rendered.join("\n");
   assert.match(joined, /2\/2 completed/);
-  assert.match(joined, /✓ completed scout/);
-  assert.match(joined, /✓ completed reviewer/);
+  assert.match(joined, /◉ sleeping · completed scout/);
+  assert.match(joined, /◉ sleeping · completed reviewer/);
   assert.doesNotMatch(joined, /■ running/);
 });
 
@@ -144,7 +144,7 @@ test("progress tree renders one row per task index when snapshots repeat", () =>
   ], palette);
 
   assert.equal(rows.length, 1);
-  assert.match(rows[0]?.text ?? "", /✓ completed general/);
+  assert.match(rows[0]?.text ?? "", /◉ sleeping · completed general/);
   assert.match(rows[0]?.text ?? "", /second-c/);
 });
 
@@ -318,7 +318,7 @@ test("streaming teammate result nests child agents under their parent as a tree"
   }, { expanded: false }, theme as never).render(100).join("\n");
 
   const lines = rendered.split("\n");
-  assert.match(rendered, /• 1 □ pending @planner \(general\)/);
+  assert.match(rendered, /• 1 ■ running · starting @planner \(general\)/);
   const reviewLine = lines.find((line) => line.includes("@review"));
   const deepLine = lines.find((line) => line.includes("@deep"));
   assert.ok(reviewLine?.startsWith("  └─ "), `review should nest under task: ${reviewLine}`);

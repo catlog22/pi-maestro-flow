@@ -18,7 +18,7 @@
  *   - `publishProgress`, the `teammate-send` tool, the attach overlay, and
  *     `handleChildInteractionRequest` -> {@link TeammateMessageEvent}
  */
-import type { AgentProgressSnapshot, AgentStatus } from "../../shared/types.ts";
+import type { AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentStatus } from "../../shared/types.ts";
 export { TEAMMATE_COMPLETE_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_STARTED_EVENT, } from "../../shared/types.ts";
 /** Tool identity of one child tool call, as reported inside a progress payload. */
 export interface TeammateEventTool {
@@ -42,15 +42,27 @@ export interface TeammateStartedEvent {
     startedAt: number;
     /** Epoch milliseconds of the latest observed activity. */
     lastActivityAt?: number;
+    /**
+     * Full lifecycle status (F-003: restored to the original `AgentStatus`
+     * union so consumers checking `"completed"` / `"failed"` / `"terminated"`
+     * continue to work).
+     */
     status: AgentStatus;
+    /**
+     * Two-state activity projection (`"running"` | `"sleeping"`). Additive
+     * field for new consumers; absent when the emitter predates this field.
+     */
+    activity?: AgentActivity;
+    phase?: string;
+    lastOutcome?: AgentRunOutcome;
     /** Tool-call id; present only when the run was started by a root `teammate` call. */
     id?: string;
 }
 /**
  * `teammate:complete` — one agent reached a terminal state.
  *
- * `exitCode !== 0` means failure; the failure reason is not carried here and
- * must be read from the last `teammate:message` tail.
+ * `exitCode !== 0` means non-success. Consumers must check `cancelled` before
+ * classifying it as failure; cancellation is a distinct outcome.
  */
 export interface TeammateCompleteEvent {
     /** Tool-call id when a root tool call owns the dispatch; absent for nested IPC. */
@@ -88,7 +100,7 @@ export interface TeammateSendMessageEvent {
     from: "caller";
     /** Target selector exactly as the caller typed it, not a resolved id. */
     to: string;
-    mode: "steer" | "follow_up" | "abort";
+    mode: "prompt" | "steer" | "follow_up" | "abort";
     message: string;
     /** Epoch milliseconds of the send operation. */
     lastActivityAt?: number;

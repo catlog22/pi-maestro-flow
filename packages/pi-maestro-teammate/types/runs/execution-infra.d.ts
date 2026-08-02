@@ -105,6 +105,15 @@ export interface RunTeammateOptions {
     parentSessionFile?: string;
     initialLeaseToken?: LeaseToken | ((correlationId: string) => LeaseToken | undefined);
     onChildSpawned?: (stdin: import("node:stream").Writable, sendControl: (message: Record<string, unknown>) => boolean, sessionDir?: string, correlationId?: string) => void;
+    /** Existing persisted Pi session to load for a cold logical-agent restart. */
+    resumeSessionFile?: string;
+    /** Runtime generation used to fence callbacks from a replaced child process. */
+    runtimeGeneration?: number;
+    onChildClosed?: (correlationId: string, generation: number | undefined, details: {
+        code: number | null;
+        signal: NodeJS.Signals | null;
+        settled: boolean;
+    }) => void;
     onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
     /** Physical child-process reclamation, independent of logical turn settlement. */
     onReclamationOutcome?: (correlationId: string, outcome: ChildReclamationOutcome) => void;
@@ -367,7 +376,7 @@ export declare const MODEL_SPECIFIER_PATTERN: RegExp;
 export declare const MAX_MODEL_SPECIFIER_BYTES = 256;
 export declare function validateModelSpecifier(model: string): string;
 export declare function resolveModelSpecifier(model: string, modelCapabilities?: readonly TeammateModelCapability[]): string;
-export declare function buildPiArgs(agentConfig: AgentConfig, params: RunSingleTeammateParams, systemPromptFile: string, modelOverride?: string, sessionDir?: string, forkSessionFile?: string, schemaFile?: string, modelCapabilities?: readonly TeammateModelCapability[]): string[];
+export declare function buildPiArgs(agentConfig: AgentConfig, params: RunSingleTeammateParams, systemPromptFile: string, modelOverride?: string, sessionDir?: string, forkSessionFile?: string, schemaFile?: string, modelCapabilities?: readonly TeammateModelCapability[], resumeSessionFile?: string): string[];
 export declare const PRIVATE_DIRECTORY_MODE = 448;
 export declare const PRIVATE_FILE_MODE = 384;
 export declare function shouldEnforcePosixMode(): boolean;

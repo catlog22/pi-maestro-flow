@@ -1,0 +1,77 @@
+/**
+ * MailboxService: unified entry point for the durable mailbox system.
+ * Ties together file-store, router, consumer, and GC into a single service
+ * that root, proxy, and workspace agents share.
+ */
+import { EventEmitter } from "node:events";
+import { MailboxConsumer } from "./consumer.ts";
+import { MailboxFileStore } from "./file-store.ts";
+import { MailboxGC, QuotaAdmission } from "./gc.ts";
+import { type MailboxAuthority, MailboxRouter } from "./router.ts";
+import { type MailboxEnvelope, type MailboxEnqueueResult, type MailboxMessageKind, type MailboxDeliveryMode, type MailboxPaths } from "./types.ts";
+export type MailboxCapability = "v1" | "v2";
+export declare const MAILBOX_CAPABILITY_HEADER = "x-mailbox-capability";
+/** Negotiate mailbox capability between two peers. */
+export declare function negotiateCapability(local: MailboxCapability, remote: MailboxCapability | undefined): MailboxCapability;
+export interface MailboxServiceOptions {
+    /** Root directory for mailbox storage. */
+    rootDir: string;
+    /** Authority provider for route/lease validation. */
+    authority: MailboxAuthority;
+    /** Recipient correlation ID this service instance serves. */
+    recipientCorrelationId: string;
+    /** Workspace ID. */
+    workspaceId: string;
+    /** Team ID. */
+    teamId: string;
+    /** Owner ID of this service instance. */
+    ownerId: string;
+    /** Callback invoked when a message is ready for injection into the child. */
+    onDispatch: (envelope: MailboxEnvelope) => Promise<void>;
+    /** Poll interval for the consumer. */
+    pollMs?: number;
+    now?: () => number;
+}
+export declare class MailboxService extends EventEmitter {
+    #private;
+    readonly paths: MailboxPaths;
+    readonly store: MailboxFileStore;
+    readonly router: MailboxRouter;
+    readonly consumer: MailboxConsumer;
+    readonly gc: MailboxGC;
+    readonly quota: QuotaAdmission;
+    readonly capability: MailboxCapability;
+    constructor(options: MailboxServiceOptions);
+    /** Initialize directories and start the consumer. */
+    start(): Promise<void>;
+    /** Stop the consumer. */
+    stop(): Promise<void>;
+    /**
+     * Enqueue a message for delivery.
+     * This is the primary entry point replacing direct stdin delivery.
+     */
+    enqueue(request: {
+        senderId: string;
+        recipientId: string;
+        recipientCorrelationId: string;
+        kind: MailboxMessageKind;
+        mode: MailboxDeliveryMode;
+        payload: string;
+        requestId?: string;
+        correlationId?: string;
+    }): Promise<MailboxEnqueueResult>;
+    /**
+     * Acknowledge IPC confirmation that a message was injected.
+     * Transitions ACCEPTED → APPLIED.
+     */
+    acknowledge(messageId: string): Promise<boolean>;
+    /** Run garbage collection. */
+    runGC(): Promise<{
+        removed: number;
+        errors: string[];
+    }>;
+    /** Check if there is pending mail for the recipient (blocks eviction). */
+    hasPendingMail(): Promise<boolean>;
+    /** Get pending mail count for observability. */
+    pendingCount(): Promise<number>;
+}

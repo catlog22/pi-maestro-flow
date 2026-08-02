@@ -7,6 +7,10 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContext,
@@ -249,6 +253,7 @@ import {
   COCKPIT_UI_OWNERSHIP_EVENT,
 } from "./teammate-core.ts";
 import type { TeammateRuntimeOptions, ProgressFlushGate, AgentWidgetTheme, AgentWidgetRow, AgentSelectorRow, PendingChildProxyRequest, ChildProxyPendingRequests, IpcSender } from "./teammate-core.ts";
+import { MailboxHost, mailboxModeFromEnv, MAILBOX_ENV_VAR } from "./mailbox/host.ts";
 
 
 export default function registerTeammateExtension(
@@ -811,14 +816,44 @@ export default function registerTeammateExtension(
     }
   };
 
-  const deliverLocalAgentMessage = (
+  const injectLocalAgentMessage = (
     correlationId: string,
     targetLabel: string,
     message: string,
     requestedMode: "steer" | "follow_up",
   ): { delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean } => {
     const agent = state.activeRuns.get(correlationId);
-    if (!agent?.stdin?.writable) return { delivered: false, error: `Agent "${targetLabel}" is no longer running.` };
+    if (!agent) return { delivered: false, error: `Agent "${targetLabel}" is no longer available.` };
+    if (!agent.stdin?.writable) {
+      const restarted = agent.status === "sleeping" && agent.restart?.(message) === true;
+      if (!restarted) {
+        return { delivered: false, error: `Agent "${targetLabel}" has no restorable runtime.` };
+      }
+      const now = Date.now();
+      agent.promptSeq = (agent.promptSeq ?? 0) + 1;
+      agent.inbox.push({
+        id: randomUUID(),
+        from: "caller",
+        to: targetLabel,
+        kind: "task",
+        payload: message,
+        timestamp: now,
+      });
+      agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ cold-resume prompt: ${message.slice(0, 100)}`);
+      trimAgentBuffers(agent);
+      emitTeammateStarted(pi, agent);
+      pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+        correlationId,
+        from: "caller",
+        to: targetLabel,
+        mode: "prompt",
+        message,
+        lastActivityAt: now,
+        isSend: true,
+      });
+      markWorkspacePeerDirty();
+      return { delivered: true, mode: "prompt", wasSleeping: true };
+    }
     if (!agent.lease || !canChildWrite(agent.lease)) {
       const ownership = agent.lease ? `${agent.lease.owner} (${agent.lease.state})` : "an unavailable lease";
       return { delivered: false, error: `Agent "${targetLabel}" is currently owned by ${ownership}.` };
@@ -852,6 +887,98 @@ export default function registerTeammateExtension(
     });
     markWorkspacePeerDirty();
     return { delivered: true, mode, wasSleeping };
+  };
+
+  // Durable mailbox host — inert unless PI_TEAMMATE_MAILBOX is set.
+  // Root host only; child processes keep the legacy stdin path.
+  const mailboxMode = mailboxModeFromEnv();
+  let mailboxHost: MailboxHost | undefined;
+  const rootCorrelationId = state.activeRuns.values().next().value?.correlationId;
+  if (!isChild && mailboxMode !== "disabled") {
+    mailboxHost = new MailboxHost({
+      rootDir: join(homedir(), ".pi", "teammate", "mailbox"),
+      state,
+      rootCorrelationId,
+      ownerId: `host-${process.pid}`,
+      workspaceId: state.baseCwd ? createHash("sha256").update(state.baseCwd, "utf8").digest("hex") : "0".repeat(64),
+      teamId: rootCorrelationId ?? "team-root",
+      inject: async (envelope) => {
+        // Re-route the enqueued envelope back into the actual child stdin.
+        const target = state.activeRuns.get(envelope.recipientCorrelationId);
+        if (!target) return;
+        const mode: "steer" | "follow_up" = envelope.mode === "steer" ? "steer" : "follow_up";
+        injectLocalAgentMessage(envelope.recipientCorrelationId, target.name ?? target.correlationId, envelope.payload, mode);
+      },
+      mode: mailboxMode,
+    });
+    if (mailboxMode === "authoritative") {
+      console.info(`[pi-maestro-teammate] mailbox authoritative mode enabled (PI_TEAMMATE_MAILBOX=${mailboxMode})`);
+    }
+  }
+
+  const deliverLocalAgentMessage = (
+    correlationId: string,
+    targetLabel: string,
+    message: string,
+    requestedMode: "steer" | "follow_up",
+  ): { delivered: boolean; error?: string; mode?: RpcMessageMode; wasSleeping?: boolean } => {
+    // Durable mailbox authoritative path: enqueue and let the consumer inject.
+    const host = mailboxHost;
+    if (host && host.mode === "authoritative" && requestedMode !== "steer") {
+      const agent = state.activeRuns.get(correlationId);
+      void host.rollout.deliver({
+        senderId: "caller",
+        recipientId: agent?.name ?? targetLabel,
+        recipientCorrelationId: correlationId,
+        kind: "follow_up",
+        mode: "follow_up",
+        payload: message,
+      }).then((enqueued) => {
+        if (enqueued.result && !enqueued.result.ok) {
+          // Surface the failure — never silently fall back to direct stdin.
+          const reason = "message" in enqueued.result ? (enqueued.result as { message?: string }).message : "unknown error";
+          console.error(`[pi-maestro-teammate] mailbox delivery failed for ${targetLabel}: ${reason}`);
+          pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+            correlationId,
+            from: "caller",
+            to: targetLabel,
+            mode: "follow_up",
+            message,
+            lastActivityAt: Date.now(),
+            isSend: false,
+          });
+          return;
+        }
+        const now = Date.now();
+        agent?.inbox.push({
+          id: randomUUID(),
+          from: "caller",
+          to: targetLabel,
+          kind: "task",
+          payload: message,
+          timestamp: now,
+        });
+        if (agent) {
+          agent.outputLog.push(`[${new Date(now).toISOString().slice(11, 19)}] ◀ mailbox-follow-up: ${message.slice(0, 100)}`);
+          trimAgentBuffers(agent);
+          agent.lastActivityAt = now;
+        }
+        pi.events.emit(TEAMMATE_MESSAGE_EVENT, {
+          correlationId,
+          from: "caller",
+          to: targetLabel,
+          mode: "follow_up",
+          message,
+          lastActivityAt: now,
+          isSend: true,
+        });
+        markWorkspacePeerDirty();
+      }).catch((error) => {
+        console.error(`[pi-maestro-teammate] mailbox delivery failed for ${targetLabel}:`, error);
+      });
+      return { delivered: true, mode: "follow_up" };
+    }
+    return injectLocalAgentMessage(correlationId, targetLabel, message, requestedMode);
   };
 
   const stopWorkspacePeers = async (): Promise<void> => {
@@ -1067,6 +1194,8 @@ export default function registerTeammateExtension(
         depth: 0,
         maxDispatchDepth: childMaxDispatchDepth,
         status: "running",
+        phase: "starting",
+        runtimeGeneration: 1,
         sleepMs: 0,
         lease: createChildLease(),
         promptSeq: 1,
@@ -1123,6 +1252,8 @@ export default function registerTeammateExtension(
             depth: activeAgent.depth,
             maxDispatchDepth: childMaxDispatchDepth,
             status: "pending",
+            phase: "starting",
+            runtimeGeneration: 1,
             sleepMs: 0,
             lease: createChildLease(),
             promptSeq: 1,
@@ -1153,25 +1284,45 @@ export default function registerTeammateExtension(
       let singleTerminalStatus: AgentTerminalStatus | undefined;
       let singleCompletionNotificationRequested = false;
       let singleCompletionDelivered = false;
+      const coldRestarting = new Set<string>();
+      const isLogicallyWakeable = (result: SingleResult): boolean => {
+        const target = state.activeRuns.get(result.correlationId);
+        return result.wakeable !== false || Boolean(target?.restart && target.sessionFile);
+      };
       const deliverSingleCompletion = (): void => {
         if (!ownsDispatchGeneration()) {
           singleCompletionDelivered = true;
           return;
         }
-        if (singleCompletionDelivered || !singlePublishedResult || !singleTerminalResult) return;
-        singleCompletionDelivered = true;
-        emitComplete(
-          pi,
-          id,
-          agentLabel,
-          correlationId,
-          singleTerminalResult.exitCode,
-          singleTerminalResult.durationMs,
-          singleTerminalResult.wakeable,
-          singleTerminalStatus === "terminated",
-        );
+        if (singleCompletionDelivered) return;
+        // DEL-001: For background/detached tasks (notification requested), the
+        // published result is the consumable boundary — deliver immediately
+        // instead of gating on lifecycle settlement (agent_settled / close /
+        // 60s deadline). For foreground tasks the tool call already returned
+        // the result; wait for the terminal result so emitComplete carries
+        // final lifecycle metadata.
         if (singleCompletionNotificationRequested) {
-          const lastMessage = displayMessageForResult(singleTerminalResult);
+          const deliveryResult = singlePublishedResult ?? singleTerminalResult;
+          if (!deliveryResult) return;
+          singleCompletionDelivered = true;
+          const terminal = singleTerminalResult ?? deliveryResult;
+          const status = singleTerminalStatus
+            ?? (terminal.exitCode === 0 ? "completed" as const : "failed" as const);
+          emitComplete(
+            pi,
+            id,
+            agentLabel,
+            correlationId,
+            terminal.exitCode,
+            terminal.durationMs,
+            isLogicallyWakeable(terminal),
+            status === "terminated",
+          );
+          // DEL-002: Use the published result for the notification content.
+          // The terminal result may carry lifecycle diagnostics (e.g. "never
+          // confirmed its lifecycle") that would overwrite the assistant's
+          // actual answer.
+          const lastMessage = displayMessageForResult(singlePublishedResult ?? terminal);
           const delivered = safeSendMessage(
             pi,
             {
@@ -1180,7 +1331,7 @@ export default function registerTeammateExtension(
               display: true,
               details: {
                 mode: "single",
-                results: [singleTerminalResult],
+                results: [terminal],
                 ...(childCalls.size > 0 ? { childCalls: [...childCalls.values()] } : {}),
               },
             },
@@ -1189,6 +1340,20 @@ export default function registerTeammateExtension(
           if (!delivered) {
             markSettledResultInspectable(state, correlationId);
           }
+        } else {
+          // Foreground: wait for both published and terminal results.
+          if (!singlePublishedResult || !singleTerminalResult) return;
+          singleCompletionDelivered = true;
+          emitComplete(
+            pi,
+            id,
+            agentLabel,
+            correlationId,
+            singleTerminalResult.exitCode,
+            singleTerminalResult.durationMs,
+            isLogicallyWakeable(singleTerminalResult),
+            singleTerminalStatus === "terminated",
+          );
         }
       };
       const publishSingleResult = (result: SingleResult, notify: boolean): void => {
@@ -1273,6 +1438,34 @@ export default function registerTeammateExtension(
         graphCompletionNotificationRequested ||= notify;
         deliverGraphCompletion();
       };
+      const publishAdditionalTurnCompletion = (
+        result: SingleResult,
+        terminalStatus: AgentTerminalStatus,
+      ): void => {
+        if (!ownsDispatchGeneration() || coldRestarting.has(result.correlationId)) return;
+        const target = state.activeRuns.get(result.correlationId);
+        const wakeable = isLogicallyWakeable(result);
+        emitComplete(
+          pi,
+          undefined,
+          target?.agent ?? result.agent,
+          result.correlationId,
+          result.exitCode,
+          result.durationMs,
+          wakeable,
+          terminalStatus === "terminated",
+        );
+        if (!safeSendMessage(
+          pi,
+          {
+            customType: "teammate-complete",
+            content: displayMessageForResult(result),
+            display: true,
+            details: { mode: "single", results: [result] },
+          },
+          { triggerTurn: true },
+        )) markSettledResultInspectable(state, result.correlationId);
+      };
 
       const parentSessionFile = ctx.sessionManager?.getSessionFile?.() ?? undefined;
       let progressFlushGate: ProgressFlushGate | undefined;
@@ -1286,6 +1479,7 @@ export default function registerTeammateExtension(
           depth: activeAgent.depth,
           maxDispatchDepth: childMaxDispatchDepth,
           signal: abortController.signal,
+          runtimeGeneration: activeAgent.runtimeGeneration,
           ...(isMultiTask ? { taskSignals: taskAbortControllers.map((controller) => controller.signal) } : {}),
           parentSessionFile,
           initialLeaseToken: (childId: string) => {
@@ -1303,11 +1497,41 @@ export default function registerTeammateExtension(
           target.sendControl = sendControl;
           target.sessionDir = sessionDir;
           target.status = "running";
+          target.phase = "prompting";
           target.retry = undefined;
           target.resultReadyAt = undefined;
           if (target.lease) sendControl({ type: "teammate_lease_update", token: leaseToken(target.lease) });
           },
           onChildEvent: (event: Record<string, unknown>) => handleChildLifecycleEvent(state, event),
+          onChildClosed: (childId, generation, details) => {
+            const target = state.activeRuns.get(childId);
+            if (!target || (target.runtimeGeneration ?? 0) !== (generation ?? 0)) return;
+            target.stdin = undefined;
+            target.sendControl = undefined;
+            const checkpoint = target.sessionFile;
+            const restorable = Boolean(
+              target.restart
+              && checkpoint
+              && existsSync(checkpoint)
+              && isSessionPathContained(target.sessionDir, checkpoint),
+            );
+            if (restorable) {
+              target.status = "sleeping";
+              target.phase = undefined;
+              target.retry = undefined;
+              target.failedAt = undefined;
+              target.sleptAt = Date.now();
+              target.lastActivityAt = Date.now();
+              target.outputLog.push(
+                `[${new Date().toISOString().slice(11, 19)}] ◉ runtime closed; session checkpoint retained for cold resume.`,
+              );
+              trimAgentBuffers(target, true);
+              return;
+            }
+            if (target.status === "sleeping" || target.status === "running" || target.status === "retrying") {
+              killAgent(state, childId, target.name, details.code === 0 ? "completed" : "failed", false);
+            }
+          },
           onRetry: (retry) => applyAgentRetryState(state, retry),
           onReclamationOutcome: (childId, outcome) => {
             recordChildReclamationOutcome(state, childId, outcome);
@@ -1328,6 +1552,9 @@ export default function registerTeammateExtension(
               result.wakeable !== false,
               canonicalStatus,
             );
+            const repeatedTurn = isMultiTask
+              ? graphTerminalIds.has(result.correlationId)
+              : singleTerminalResult !== undefined;
             if (isMultiTask) {
               graphTerminalIds.add(result.correlationId);
               graphTerminalStatuses.set(result.correlationId, canonicalStatus);
@@ -1337,6 +1564,7 @@ export default function registerTeammateExtension(
               singleTerminalStatus = canonicalStatus;
               deliverSingleCompletion();
             }
+            if (repeatedTurn) publishAdditionalTurnCompletion(result, canonicalStatus);
           },
           onProgress: (() => {
           const UPDATE_INTERVAL = 300; // ms — throttle TUI updates
@@ -1367,6 +1595,7 @@ export default function registerTeammateExtension(
               taskIndex: progressKey,
               dependencies: data.dependencies ?? existing?.dependencies ?? [],
               status: data.status,
+              phase: data.phase,
               startedAt: new Date(data.startedAt).toISOString(),
               recentTools: data.recentTools,
               toolCount: data.toolCount,
@@ -1397,11 +1626,17 @@ export default function registerTeammateExtension(
                 correlationId: entry.correlationId,
                 resultReadyAt: data.resultReadyAt,
               });
-            } else {
+            } else if (
+              data.phase === "prompting"
+              || data.status === "completed"
+              || data.status === "failed"
+              || data.status === "terminated"
+            ) {
               clearAgentResultReadyState(state, entry.correlationId);
             }
             const childAgent = state.activeRuns.get(entry.correlationId);
             if (childAgent) {
+              childAgent.phase = entry.phase;
               childAgent.requestedModel = entry.requestedModel ?? childAgent.requestedModel;
               childAgent.resolvedModel = entry.resolvedModel ?? childAgent.resolvedModel;
               childAgent.attemptedModels = entry.attemptedModels ?? childAgent.attemptedModels;
@@ -1546,12 +1781,35 @@ export default function registerTeammateExtension(
 
           return (data: AgentProgress) => {
             activeAgent.lastActivityAt = Date.now();
+            const targetId = data.correlationId ?? taskCorrelationIds[data.taskIndex ?? 0] ?? correlationId;
+            if (data.resultReadyAt !== undefined) {
+              applyAgentResultReadyState(state, { correlationId: targetId, resultReadyAt: data.resultReadyAt });
+            } else if (
+              data.phase === "prompting"
+              || data.status === "completed"
+              || data.status === "failed"
+              || data.status === "terminated"
+            ) {
+              clearAgentResultReadyState(state, targetId);
+            }
             pendingByTask.set(data.taskIndex ?? 0, data);
             latestPendingProgress = data;
             flushGate.mark(data.status === "completed" || data.status === "failed");
           };
           })(),
           onChildRequest: (event: Record<string, unknown>, reply: (msg: unknown) => void) => {
+          if (!ownsDispatchGeneration()) {
+            reply({
+              type: "teammate_proxy_result",
+              requestId: event.requestId,
+              result: {
+                content: [{ type: "text", text: "Parent session generation changed; stale child request rejected." }],
+                isError: true,
+                details: { mode: "single", results: [] },
+              },
+            });
+            return;
+          }
           if (event.type === "teammate_interaction_request" || event.type === "teammate_rpc_ui_request") {
             enqueueChildInteraction(event, reply, ctx, correlationId);
             return;
@@ -1570,6 +1828,9 @@ export default function registerTeammateExtension(
             (request, respond, childId) => enqueueChildInteraction(request, respond, ctx, childId),
             publishChildCallStatus,
             runtimeOptions,
+            mailboxHost && mailboxHost.mode === "authoritative"
+              ? (request) => mailboxHost.rollout.deliver(request).then((r) => ({ path: r.path, result: r.result }))
+              : undefined,
           );
           },
         };
@@ -1580,6 +1841,165 @@ export default function registerTeammateExtension(
         runtimeOptions.onRunOptionsCreated?.(options);
         return options;
       };
+
+      const installColdRestart = (
+        target: ActiveAgent,
+        task: NormalizedTask,
+        taskIndex?: number,
+      ): void => {
+        target.restart = (message: string): boolean => {
+          const checkpoint = target.sessionFile;
+          if (
+            target.restartPending
+            || !checkpoint
+            || !existsSync(checkpoint)
+            || !isSessionPathContained(target.sessionDir, checkpoint)
+          ) return false;
+
+          const generation = (target.runtimeGeneration ?? 0) + 1;
+          const controller = new AbortController();
+          target.runtimeGeneration = generation;
+          target.abortController = controller;
+          target.lease = createChildLease();
+          target.status = "running";
+          target.phase = "restoring";
+          target.retry = undefined;
+          target.failedAt = undefined;
+          target.resultReadyAt = undefined;
+          target.lastActivityAt = Date.now();
+          coldRestarting.add(target.correlationId);
+
+          const ownsRuntime = (): boolean =>
+            state.activeRuns.get(target.correlationId) === target
+            && target.runtimeGeneration === generation;
+          const options = makeOptions();
+          options.correlationId = target.correlationId;
+          options.taskCorrelationIds = undefined;
+          options.taskSignals = undefined;
+          options.signal = controller.signal;
+          options.resumeSessionFile = checkpoint;
+          options.runtimeGeneration = generation;
+
+          const onChildSpawned = options.onChildSpawned;
+          options.onChildSpawned = (stdin, sendControl, sessionDir, childId) => {
+            if (!ownsRuntime()) return;
+            onChildSpawned?.(stdin, sendControl, sessionDir, childId ?? target.correlationId);
+          };
+          const onChildEvent = options.onChildEvent;
+          options.onChildEvent = (event) => {
+            if (ownsRuntime()) onChildEvent?.(event);
+          };
+          const onChildClosed = options.onChildClosed;
+          options.onChildClosed = (childId, callbackGeneration, details) => {
+            if (ownsRuntime()) onChildClosed?.(childId, callbackGeneration, details);
+          };
+          const onRetry = options.onRetry;
+          options.onRetry = (retry) => {
+            if (ownsRuntime()) onRetry?.(retry);
+          };
+          const onProgress = options.onProgress;
+          options.onProgress = (progress) => {
+            if (!ownsRuntime()) return;
+            onProgress?.({
+              ...progress,
+              correlationId: target.correlationId,
+              ...(taskIndex === undefined ? {} : { taskIndex }),
+            });
+          };
+          const onReclamationOutcome = options.onReclamationOutcome;
+          options.onReclamationOutcome = (childId, outcome) => {
+            if (ownsRuntime()) onReclamationOutcome?.(childId, outcome);
+          };
+
+          let publishedResult: SingleResult | undefined;
+          let terminalResult: SingleResult | undefined;
+          let terminalStatus: AgentTerminalStatus | undefined;
+          let delivered = false;
+          const deliverRestartCompletion = (): void => {
+            if (delivered || !ownsRuntime() || !publishedResult || !terminalResult) return;
+            delivered = true;
+            const status = terminalStatusForResult(terminalResult, terminalStatus);
+            emitComplete(
+              pi,
+              undefined,
+              target.agent,
+              target.correlationId,
+              terminalResult.exitCode,
+              terminalResult.durationMs,
+              true,
+              status === "terminated",
+            );
+            const content = displayMessageForResult(terminalResult);
+            if (!safeSendMessage(
+              pi,
+              {
+                customType: "teammate-complete",
+                content,
+                display: true,
+                details: { mode: "single", results: [terminalResult] },
+              },
+              { triggerTurn: true },
+            )) markSettledResultInspectable(state, target.correlationId);
+          };
+          const onTurnComplete = options.onTurnComplete;
+          options.onTurnComplete = (result, status) => {
+            if (!ownsRuntime()) return;
+            onTurnComplete?.(result, status);
+            terminalResult = result;
+            terminalStatus = status;
+            deliverRestartCompletion();
+          };
+
+          const restartParams = {
+            agent: task.agent,
+            name: task.name,
+            task: message,
+            taskType: task.taskType,
+            context: "fresh" as const,
+            model: task.model,
+            fallbackModels: task.fallbackModels,
+            thinking: task.thinking,
+            cwd: task.cwd,
+            outputSchema: task.outputSchema,
+            timeoutMs: task.timeoutMs,
+            reply_to: params.reply_to,
+          };
+          target.restartPending = runWithProgressFlushCleanup(
+            () => runSingleTeammate(restartParams, options),
+            progressFlushGate,
+          ).then((result) => {
+            if (!ownsRuntime()) return;
+            publishedResult = result;
+            deliverRestartCompletion();
+          }).catch((error) => {
+            if (!ownsRuntime()) return;
+            const text = error instanceof Error ? error.message : String(error);
+            target.lastResult = text;
+            target.status = "sleeping";
+            target.phase = undefined;
+            target.sleptAt = Date.now();
+            target.outputLog.push(`[${new Date().toISOString().slice(11, 19)}] ! cold resume failed: ${text}`);
+            trimAgentBuffers(target, true);
+          }).finally(() => {
+            coldRestarting.delete(target.correlationId);
+            if (!ownsRuntime()) return;
+            if (target.status === "failed" && existsSync(checkpoint)) {
+              target.status = "sleeping";
+              target.phase = undefined;
+              target.failedAt = undefined;
+              target.sleptAt = Date.now();
+            }
+            target.restartPending = undefined;
+          });
+          return true;
+        };
+      };
+
+      if (isSingle) installColdRestart(activeAgent, singleTask);
+      else normalizedTasks.forEach((task, index) => {
+        const target = state.activeRuns.get(taskCorrelationIds[index]);
+        if (target) installColdRestart(target, task, index);
+      });
 
       try {
         // --- MULTI-TASK MODE (parallel / chain / graph) ---
@@ -1663,7 +2083,8 @@ export default function registerTeammateExtension(
                 totalDur,
                 exitCode,
                 mode: activeGraphMode,
-                wakeable: params.context !== "fork",
+                // The aggregate owns no child process; only physical task rows are wakeable.
+                wakeable: false,
               }, true);
             }).catch((error) => {
               failGraphDispatch(error);
@@ -1695,7 +2116,8 @@ export default function registerTeammateExtension(
                 totalDur,
                 exitCode: hasError ? 1 : 0,
                 mode: activeGraphMode,
-                wakeable: params.context !== "fork",
+                // The aggregate owns no child process; only physical task rows are wakeable.
+                wakeable: false,
               }, false);
 
               return {

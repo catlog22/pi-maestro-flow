@@ -13,6 +13,7 @@ export * from "./child-extensions.ts";
 export * from "./events.ts";
 export * from "./execution.ts";
 export * from "./extension.ts";
+export * from "./mailbox.ts";
 export * from "./model-routing.ts";
 export * from "./observation.ts";
 export * from "./progress-tree.ts";

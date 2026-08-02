@@ -246,8 +246,8 @@ test("quiet completed graph trusts results over lifecycle-pending progress snaps
     },
   }, { expanded: false }, theme as never).render(160);
   assert.equal(rendered.length, 2);
-  assert.match(rendered[0], /✓ completed @inspection/);
-  assert.match(rendered[1], /✓ completed @review/);
+  assert.match(rendered[0], /◉ sleeping · completed @inspection/);
+  assert.match(rendered[1], /◉ sleeping · completed @review/);
   assert.doesNotMatch(rendered.join("\n"), /running|result ready/);
 });
 
@@ -265,7 +265,7 @@ test("quiet completed graph marks failed results even when the snapshot is still
     },
   }, { expanded: false }, theme as never).render(160);
   assert.equal(rendered.length, 1);
-  assert.match(rendered[0], /✗ failed @inspection/);
+  assert.match(rendered[0], /◉ sleeping · failed @inspection/);
   assert.match(rendered[0], /boom error line/);
   assert.doesNotMatch(rendered[0], /running/);
 });

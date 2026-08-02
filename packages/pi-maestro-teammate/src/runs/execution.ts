@@ -106,6 +106,11 @@ import type {
   TaskOutput,
 } from "./execution-infra.ts";
 
+// Failed attempt processes must be physically reclaimed before the outer retry
+// policy reuses their correlation identity for a replacement child.
+const attemptReclamations = new WeakMap<SingleResult, Promise<unknown>>();
+const INTERRUPTING_STEER_TIMEOUT_MS = 10_000;
+
 // ---------------------------------------------------------------------------
 // Core: run a single teammate agent
 // ---------------------------------------------------------------------------
@@ -305,8 +310,8 @@ export async function runSingleTeammate(
         // Pi core handles in-process provider retry for the general case.
         // Model fallback is always allowed: a different model restarting
         // from the original prompt is safer than certain failure.
-        const retryable = retryableFailure && restartIsSafe;
-        const fallbackEligible = fallbackFailure;
+        let retryable = retryableFailure && restartIsSafe;
+        let fallbackEligible = fallbackFailure;
         if (fallbackEligible && !restartIsSafe) {
           candidateResult.messages.push({
             role: "system",
@@ -321,6 +326,24 @@ export async function runSingleTeammate(
           candidateResult.attemptedModels = attemptedModels.length > 1 ? attemptedModels : undefined;
           commitCompletion();
           return candidateResult;
+        }
+
+        if (retryable || fallbackEligible) {
+          const reclamation = await attemptReclamations.get(candidateResult);
+          if (
+            reclamation
+            && typeof reclamation === "object"
+            && (reclamation as { status?: string }).status === "unreaped"
+          ) {
+            candidateResult.messages.push({
+              role: "system",
+              content:
+                `Teammate did not confirm reclamation of the failed child; `
+                + `retry/fallback was stopped to fence stale callbacks for correlationId=${correlationId}.`,
+            });
+            retryable = false;
+            fallbackEligible = false;
+          }
         }
         if (!retryable || retryCount >= maxRetries) {
           if (fallbackEligible && acquisition?.allowed) { breaker.recordRetryableFailure(acquisition); settled = true; }
@@ -414,6 +437,8 @@ export async function runSingleTeammate(
 interface AttemptSessionContext {
   /** Private per-correlation session directory, when the parent exposes one. */
   sessionDir?: string;
+  /** Existing child session loaded after a cold runtime restart. */
+  resumeSessionFile?: string;
   /** Parent session file the child forks from. */
   forkSessionFile?: string;
   /** Transcript note emitted when an explicit fork could not be honoured. */
@@ -430,14 +455,18 @@ function resolveAttemptSessionContext(
   const parentSession = options.parentSessionFile ?? process.env.PI_TEAMMATE_PARENT_SESSION ?? null;
   const hasParentSession = Boolean(parentSession) && fs.existsSync(parentSession as string);
   const context: AttemptSessionContext = {};
-  if (hasParentSession) {
+  if (options.resumeSessionFile && fs.existsSync(options.resumeSessionFile)) {
+    context.resumeSessionFile = options.resumeSessionFile;
+    context.sessionDir = path.dirname(options.resumeSessionFile);
+  }
+  if (hasParentSession && !context.sessionDir) {
     const sessionRoot = getTeammateSessionRoot(parentSession as string);
     if (sessionRoot) {
       context.sessionDir = path.join(sessionRoot, correlationSessionDirectoryName(correlationId));
       ensurePrivateDirectory(context.sessionDir);
     }
   }
-  if (effectiveContext === "fork") {
+  if (effectiveContext === "fork" && !context.resumeSessionFile) {
     if (hasParentSession) {
       context.forkSessionFile = parentSession as string;
     } else if (params.context === "fork") {
@@ -505,6 +534,15 @@ interface AttemptTimers {
   firstActivity?: ReturnType<typeof setTimeout>;
   resultReadyGrace?: ReturnType<typeof setTimeout>;
   outputLimitRecovery?: ReturnType<typeof setTimeout>;
+  interruptingSteer?: ReturnType<typeof setTimeout>;
+}
+
+interface PendingInterruptingSteer {
+  abortRequestId: string;
+  promptRequestId: string;
+  message: string;
+  token?: LeaseToken;
+  phase: "aborting" | "prompting";
 }
 
 /** Environment handed to the pi child: identity, depth diagnostics and file seams. */
@@ -545,6 +583,13 @@ function bindChildIpcRelay(
   options: RunTeammateOptions,
 ): void {
   child.on("message", (msg: unknown) => {
+    // PERFSEC-001: process.send(null) or malformed envelopes must not crash
+    // the parent — an unguarded property access in an EventEmitter callback is
+    // an uncaught exception.
+    if (msg === null || msg === undefined || typeof msg !== "object") return;
+    // GEN-001: After teardown aborts the signal, a dying child's in-flight
+    // IPC messages must not re-enter the parent and spawn new nested agents.
+    if (options.signal?.aborted) return;
     const m = msg as Record<string, unknown>;
     dispatchChildIpcMessage(
       m,
@@ -584,7 +629,7 @@ async function runSingleAttempt(
   const effectiveContext = params.context ?? agentConfig.defaultContext;
   const wakeable = effectiveContext !== "fork";
   const systemPromptFile = writeSystemPromptFile(agentConfig, correlationId, params.outputSchema);
-  const { sessionDir, forkSessionFile, forkWarning } =
+  const { sessionDir, resumeSessionFile, forkSessionFile, forkWarning } =
     resolveAttemptSessionContext(params, agentConfig, correlationId, options);
 
   // AC6: Structured output
@@ -601,6 +646,7 @@ async function runSingleAttempt(
     forkSessionFile,
     schemaFile,
     options.modelCapabilities,
+    resumeSessionFile,
   );
 
   const usage = emptyUsage();
@@ -651,6 +697,7 @@ async function runSingleAttempt(
   return new Promise<SingleResult>((resolve) => {
     let child: ChildProcess;
     let releaseRetryPersistenceGuard = () => {};
+    let pendingInterruptingSteer: PendingInterruptingSteer | undefined;
 
     const spawnEnv = buildChildSpawnEnv(correlationId, replyTo, options, schemaFile, outputFile);
 
@@ -714,13 +761,6 @@ async function runSingleAttempt(
       sendRpcMessage(child.stdin, params.task, "prompt", initialLeaseToken);
     }
 
-    // Expose stdin for teammate-send message injection
-    if (child.stdin) {
-      options.onChildSpawned?.(child.stdin, (message) => {
-        return sendChildIpcMessage(child, message);
-      }, sessionDir, correlationId);
-    }
-
     // IPC message listener — proxy requests from child extensions
     if (useIpc) bindChildIpcRelay(child, correlationId, options);
 
@@ -743,6 +783,7 @@ async function runSingleAttempt(
       if (timers.firstActivity) clearTimeout(timers.firstActivity);
       if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
       if (timers.outputLimitRecovery) clearTimeout(timers.outputLimitRecovery);
+      if (timers.interruptingSteer) clearTimeout(timers.interruptingSteer);
     };
     timers.firstActivity = setTimeout(() => {
       if (state.initialResultPublished || state.receivedFirstActivity) return;
@@ -777,8 +818,72 @@ async function runSingleAttempt(
       }
     };
     child.stdout?.on("data", (chunk: Buffer) => {
+      pokeLifecycleDeadline();
       for (const line of stdoutLines.write(chunk)) processStdoutLine(line);
     });
+
+    const failInterruptingSteer = (reason: string): void => {
+      if (!pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return;
+      pendingInterruptingSteer = undefined;
+      if (timers.interruptingSteer) {
+        clearTimeout(timers.interruptingSteer);
+        timers.interruptingSteer = undefined;
+      }
+      const diagnostic =
+        `Failed to interrupt and steer teammate (agent=${params.agent}, correlationId=${correlationId}): ${reason}`;
+      state.runtimeFailure = diagnostic;
+      appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
+      completeTurn(readStructuredOutput(true), true, 1);
+    };
+
+    const armInterruptingSteerTimeout = (): void => {
+      if (timers.interruptingSteer) clearTimeout(timers.interruptingSteer);
+      if (!pendingInterruptingSteer) {
+        timers.interruptingSteer = undefined;
+        return;
+      }
+      timers.interruptingSteer = setTimeout(() => {
+        const phase = pendingInterruptingSteer?.phase;
+        failInterruptingSteer(
+          phase === "prompting"
+            ? `Pi did not start the correction prompt within ${INTERRUPTING_STEER_TIMEOUT_MS}ms`
+            : `Pi did not acknowledge the turn abort within ${INTERRUPTING_STEER_TIMEOUT_MS}ms`,
+        );
+      }, INTERRUPTING_STEER_TIMEOUT_MS);
+      timers.interruptingSteer.unref?.();
+    };
+
+    const requestInterruptingSteer = (message: string, token?: LeaseToken): boolean => {
+      if (!child.stdin || pendingInterruptingSteer || state.terminal || state.turnLifecycleSettled) return false;
+      const nonce = randomUUID();
+      pendingInterruptingSteer = {
+        abortRequestId: `teammate-steer-abort-${nonce}`,
+        promptRequestId: `teammate-steer-prompt-${nonce}`,
+        message,
+        token,
+        phase: "aborting",
+      };
+      const sent = writeChildStdinLine(child.stdin, JSON.stringify({
+        id: pendingInterruptingSteer.abortRequestId,
+        type: "abort",
+      }));
+      if (!sent) {
+        pendingInterruptingSteer = undefined;
+        return false;
+      }
+      progress.phase = "continuing";
+      progress.resultReadyAt = undefined;
+      options.onProgress?.(progress);
+      armInterruptingSteerTimeout();
+      return true;
+    };
+
+    if (child.stdin) {
+      interruptingSteerHandlers.set(child.stdin, requestInterruptingSteer);
+      options.onChildSpawned?.(child.stdin, (message) => {
+        return sendChildIpcMessage(child, message);
+      }, sessionDir, correlationId);
+    }
 
     function readStructuredOutput(cleanup: boolean): unknown | undefined {
       let structuredOutput: unknown;
@@ -804,6 +909,7 @@ async function runSingleAttempt(
       releaseRetryPersistenceGuard();
       state.turnLifecycleSettled = true;
       progress.status = terminalStatus;
+      progress.phase = undefined;
       progress.resultReadyAt = undefined;
       progress.durationMs = Date.now() - startTime;
       if (messages.length === 0 && state.lastContent) {
@@ -831,6 +937,7 @@ async function runSingleAttempt(
         attemptedModels: undefined,
         terminalStatus,
       };
+      if (terminateChild) attemptReclamations.set(turnResult, termination.outcome);
       if (!state.initialResultPublished) {
         state.initialResultPublished = true;
         resolve(turnResult);
@@ -870,6 +977,7 @@ async function runSingleAttempt(
         appendBoundedTranscriptMessage(messages, { role: "assistant", content: state.lastContent });
       }
       clearAllTimers();
+      progress.phase = "result-ready";
       state.initialResultPublished = true;
       resolve({
         agent: params.agent,
@@ -894,33 +1002,48 @@ async function runSingleAttempt(
      * absolute run ceiling, and no later event can settle the turn.
      *
      * Publication semantics stay untouched — the result was already handed to
-     * the caller; this only bounds how long we wait for agent_end/close.
+     * the caller; this only bounds how long we wait for agent_settled/close.
+     *
+     * LC-001: The deadline is activity-aware — stdout/stderr activity resets
+     * the window so a child in a legitimate continuation (retry, compaction,
+     * streaming) is not killed while still producing output.
      */
+    let lifecycleDeadlineActive = false;
+    const lifecycleDeadlineMs = (): number => options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS;
+    const lifecycleDeadlineCallback = (): void => {
+      timers.resultReadyGrace = undefined;
+      lifecycleDeadlineActive = false;
+      if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer) return;
+      appendBoundedTranscriptMessage(messages, {
+        role: "system",
+        content:
+          `Teammate published a result but never confirmed its lifecycle within ${lifecycleDeadlineMs()}ms `
+          + `(agent=${params.agent}, correlationId=${correlationId}, expected=agent_settled, `
+          + `tools=${progress.toolCount}, turnTools=${state.turnToolCount}); the child process was terminated.`,
+      });
+      completeTurn(readStructuredOutput(true), true, 0, "terminated");
+    };
     function armLifecycleConfirmationDeadline(): void {
-      if (state.terminal || state.turnLifecycleSettled || timers.resultReadyGrace) return;
-      const deadlineMs = options.resultReadyGraceMs ?? RESULT_READY_GRACE_MS;
-      timers.resultReadyGrace = setTimeout(() => {
-        timers.resultReadyGrace = undefined;
-        if (state.terminal || state.turnLifecycleSettled) return;
-        appendBoundedTranscriptMessage(messages, {
-          role: "system",
-          content:
-            `Teammate published a result but never confirmed its lifecycle within ${deadlineMs}ms `
-            + `(agent=${params.agent}, correlationId=${correlationId}, tools=${progress.toolCount}, `
-            + `turnTools=${state.turnToolCount}); the child process was terminated.`,
-        });
-        completeTurn(readStructuredOutput(true), true, 0, "terminated");
-      }, deadlineMs);
+      if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer || timers.resultReadyGrace) return;
+      lifecycleDeadlineActive = true;
+      timers.resultReadyGrace = setTimeout(lifecycleDeadlineCallback, lifecycleDeadlineMs());
+      timers.resultReadyGrace.unref?.();
+    }
+    /** Reset the lifecycle deadline window on observed child activity. */
+    function pokeLifecycleDeadline(): void {
+      if (!lifecycleDeadlineActive || state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer) return;
+      if (timers.resultReadyGrace) clearTimeout(timers.resultReadyGrace);
+      timers.resultReadyGrace = setTimeout(lifecycleDeadlineCallback, lifecycleDeadlineMs());
       timers.resultReadyGrace.unref?.();
     }
 
     function armResultReadyGrace(): void {
-      if (timers.resultReadyGrace) return;
+      if (pendingInterruptingSteer || timers.resultReadyGrace) return;
       timers.resultReadyGrace = setTimeout(() => {
         timers.resultReadyGrace = undefined;
-        if (state.terminal || state.turnLifecycleSettled) return;
+        if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer) return;
         // The result is already consumable; settle with whatever structured
-        // output was captured instead of blocking on a missing agent_end/close.
+        // output was captured instead of blocking on a missing agent_settled/close.
         const structuredOutput = readStructuredOutput(true);
         if (structuredOutput === undefined) {
           appendStructuredOutputFailure();
@@ -935,11 +1058,16 @@ async function runSingleAttempt(
     }
 
     function armOutputLimitRecoveryDeadline(): void {
-      if (state.terminal || state.turnLifecycleSettled || timers.outputLimitRecovery) return;
+      if (state.terminal || state.turnLifecycleSettled || pendingInterruptingSteer || timers.outputLimitRecovery) return;
       const deadlineMs = options.outputLimitRecoveryTimeoutMs ?? OUTPUT_LIMIT_RECOVERY_TIMEOUT_MS;
       timers.outputLimitRecovery = setTimeout(() => {
         timers.outputLimitRecovery = undefined;
-        if (state.terminal || state.turnLifecycleSettled || !state.outputLimitRecoveryPending) return;
+        if (
+          state.terminal
+          || state.turnLifecycleSettled
+          || pendingInterruptingSteer
+          || !state.outputLimitRecoveryPending
+        ) return;
         state.outputLimitRecoveryPending = false;
         appendBoundedTranscriptMessage(messages, {
           role: "system",
@@ -964,6 +1092,7 @@ async function runSingleAttempt(
     function recordRuntimeEventError(event: JsonLineEvent, phase: string): void {
       const error = extractPiEventError(event);
       if (!error || state.reportedRuntimeErrors.has(error)) return;
+      if (pendingInterruptingSteer && /\babort(?:ed)?\b/i.test(error)) return;
       state.reportedRuntimeErrors.add(error);
       const message = event.message as Record<string, unknown> | undefined;
       const model = typeof message?.model === "string"
@@ -987,6 +1116,13 @@ async function runSingleAttempt(
 
     /** A new agent loop starts: the previous turn's settlement no longer applies. */
     function onTurnBoundary(): void {
+      if (pendingInterruptingSteer?.phase === "prompting") {
+        pendingInterruptingSteer = undefined;
+        if (timers.interruptingSteer) {
+          clearTimeout(timers.interruptingSteer);
+          timers.interruptingSteer = undefined;
+        }
+      }
       if (state.outputLimitRecoveryPending) {
         state.outputLimitRecoveryPending = false;
         if (timers.outputLimitRecovery) {
@@ -994,10 +1130,19 @@ async function runSingleAttempt(
           timers.outputLimitRecovery = undefined;
         }
       }
+      if (timers.resultReadyGrace) {
+        clearTimeout(timers.resultReadyGrace);
+        timers.resultReadyGrace = undefined;
+      }
+      if (timers.outputLimitRecovery) {
+        clearTimeout(timers.outputLimitRecovery);
+        timers.outputLimitRecovery = undefined;
+      }
       state.turnLifecycleSettled = false;
       state.lastAssistantStopReason = undefined;
       state.runtimeFailure = undefined;
       progress.status = "running";
+      progress.phase = "prompting";
       progress.resultReadyAt = undefined;
       progress.recentTools = [];
       state.turnToolCount = 0;
@@ -1091,6 +1236,7 @@ async function runSingleAttempt(
         EXECUTION_BUFFER_LIMITS.toolNameBytes,
       );
       progress.recentTools.push({ name: toolName, status: "running" });
+      progress.phase = "tool-execution";
       if (progress.recentTools.length > EXECUTION_BUFFER_LIMITS.toolItems) {
         progress.recentTools.splice(
           0,
@@ -1113,6 +1259,13 @@ async function runSingleAttempt(
       const lastTool = progress.recentTools[progress.recentTools.length - 1];
       if (lastTool && lastTool.status === "running") {
         lastTool.status = "completed";
+      }
+      if (pendingInterruptingSteer) {
+        state.pendingStructuredOutput = undefined;
+        progress.phase = "continuing";
+        progress.resultReadyAt = undefined;
+        options.onProgress?.(progress);
+        return;
       }
       options.onProgress?.(progress);
       const completedTool = (event.toolName as string | undefined)
@@ -1157,6 +1310,12 @@ async function runSingleAttempt(
      * close, error or the armed deadline may converge the lifecycle.
      */
     function onTurnEnd(event: JsonLineEvent): void {
+      if (pendingInterruptingSteer) {
+        progress.phase = "continuing";
+        progress.resultReadyAt = undefined;
+        options.onProgress?.(progress);
+        return;
+      }
       const msg = event.message as Record<string, unknown> | undefined;
       if (msg?.role === "assistant") {
         if (typeof msg.stopReason === "string") state.lastAssistantStopReason = msg.stopReason;
@@ -1184,26 +1343,8 @@ async function runSingleAttempt(
       }
     }
 
-    /** Pi's authoritative end-of-agent event. Length truncation waits for recovery. */
-    function onAgentEnd(event: JsonLineEvent): void {
-      recordRuntimeEventError(event, "agent_end");
-      const eventMessages = Array.isArray(event.messages) ? event.messages : [];
-      let stopReason = state.lastAssistantStopReason;
-      for (let index = eventMessages.length - 1; index >= 0; index -= 1) {
-        const message = eventMessages[index];
-        if (!message || typeof message !== "object" || (message as Record<string, unknown>).role !== "assistant") continue;
-        const candidate = (message as Record<string, unknown>).stopReason;
-        if (typeof candidate === "string") stopReason = candidate;
-        break;
-      }
-      if (stopReason === "length") {
-        state.outputLimitRecoveryPending = true;
-        progress.status = "running";
-        progress.resultReadyAt = undefined;
-        options.onProgress?.(progress);
-        armOutputLimitRecoveryDeadline();
-        return;
-      }
+    /** Finalize the current run after Pi confirms no retry, compaction, or queued continuation remains. */
+    function settleAgentSession(): void {
       const structuredOutput = readStructuredOutput(false);
       if (params.outputSchema && structuredOutput === undefined) {
         appendStructuredOutputFailure();
@@ -1214,13 +1355,132 @@ async function runSingleAttempt(
         completeTurn(undefined, true, 1);
         return;
       }
-      completeTurn(structuredOutput, !wakeable, state.runtimeFailure ? 1 : 0);
+      const exitCode = state.runtimeFailure ? 1 : 0;
+      completeTurn(structuredOutput, !wakeable || exitCode !== 0, exitCode);
       // Process stays alive. Idle agents must be resumed with an RPC prompt;
       // steer/follow_up only queue while an agent loop is already running.
     }
 
+    /**
+     * `agent_end` closes one low-level loop. AgentSession may still retry,
+     * compact, or drain a queued continuation, so current RPC streams settle
+     * only on `agent_settled`. Streams without `willRetry` are legacy Pi
+     * versions and retain the former agent_end settlement behavior.
+     */
+    function onAgentEnd(event: JsonLineEvent): void {
+      recordRuntimeEventError(event, "agent_end");
+      if (pendingInterruptingSteer) {
+        progress.status = "running";
+        progress.phase = "continuing";
+        progress.resultReadyAt = undefined;
+        options.onProgress?.(progress);
+        return;
+      }
+      const eventMessages = Array.isArray(event.messages) ? event.messages : [];
+      let stopReason = state.lastAssistantStopReason;
+      for (let index = eventMessages.length - 1; index >= 0; index -= 1) {
+        const message = eventMessages[index];
+        if (!message || typeof message !== "object" || (message as Record<string, unknown>).role !== "assistant") continue;
+        const candidate = (message as Record<string, unknown>).stopReason;
+        if (typeof candidate === "string") stopReason = candidate;
+        break;
+      }
+      state.lastAssistantStopReason = stopReason;
+      if (stopReason === "length") {
+        state.outputLimitRecoveryPending = true;
+        progress.status = "running";
+        progress.phase = "continuing";
+        progress.resultReadyAt = undefined;
+        options.onProgress?.(progress);
+        armOutputLimitRecoveryDeadline();
+        return;
+      }
+      progress.phase = "settling";
+      options.onProgress?.(progress);
+      if (typeof event.willRetry !== "boolean") settleAgentSession();
+    }
+
+    /** Pi's authoritative AgentSession idle boundary. */
+    function onAgentSettled(): void {
+      if (pendingInterruptingSteer) {
+        progress.status = "running";
+        progress.phase = "continuing";
+        progress.resultReadyAt = undefined;
+        options.onProgress?.(progress);
+        return;
+      }
+      if (state.outputLimitRecoveryPending) {
+        state.outputLimitRecoveryPending = false;
+        appendBoundedTranscriptMessage(messages, {
+          role: "system",
+          content:
+            `Teammate output-limit recovery settled without a continuation `
+            + `(agent=${params.agent}, correlationId=${correlationId}); the partial response was not accepted as success.`,
+        });
+        state.runtimeFailure = "output-limit recovery settled without continuation";
+        completeTurn(readStructuredOutput(true), true, 1);
+        return;
+      }
+      settleAgentSession();
+    }
+
+    function onAutoRetryStart(event: JsonLineEvent): void {
+      progress.status = "retrying";
+      progress.phase = "retrying";
+      const attempt = typeof event.attempt === "number" ? event.attempt : undefined;
+      const maxAttempts = typeof event.maxAttempts === "number" ? event.maxAttempts : undefined;
+      const errorMessage = typeof event.errorMessage === "string" ? event.errorMessage : undefined;
+      progress.lastMessage = [
+        attempt === undefined ? "Pi is retrying the provider request" : `Pi retry ${attempt}${maxAttempts ? `/${maxAttempts}` : ""}`,
+        errorMessage,
+      ].filter(Boolean).join(": ");
+      options.onProgress?.(progress);
+    }
+
+    function onAutoRetryEnd(event: JsonLineEvent): void {
+      progress.status = "running";
+      progress.phase = event.success === true ? "continuing" : "settling";
+      options.onProgress?.(progress);
+    }
+
+    function onCompactionStart(): void {
+      progress.status = "running";
+      progress.phase = "compacting";
+      options.onProgress?.(progress);
+    }
+
+    function onCompactionEnd(event: JsonLineEvent): void {
+      progress.status = "running";
+      progress.phase = event.willRetry === true ? "continuing" : "settling";
+      options.onProgress?.(progress);
+    }
+
     function onErrorEvent(event: JsonLineEvent): void {
       recordRuntimeEventError(event, "error");
+    }
+
+    function onResponse(event: JsonLineEvent): void {
+      const pending = pendingInterruptingSteer;
+      if (!pending || typeof event.id !== "string") return;
+      if (pending.phase === "aborting" && event.id === pending.abortRequestId) {
+        if (event.success !== true || event.command !== "abort") {
+          failInterruptingSteer("Pi rejected the turn abort command");
+          return;
+        }
+        pending.phase = "prompting";
+        armInterruptingSteerTimeout();
+        if (!child.stdin || !writeChildStdinLine(child.stdin, JSON.stringify({
+          id: pending.promptRequestId,
+          type: "prompt",
+          message: wrapLeasedMessage(pending.message, pending.token),
+        }))) {
+          failInterruptingSteer("the correction prompt could not be written");
+        }
+        return;
+      }
+      if (pending.phase === "prompting" && event.id === pending.promptRequestId && event.success !== true) {
+        failInterruptingSteer("Pi rejected the correction prompt");
+      }
     }
 
     /**
@@ -1238,9 +1498,11 @@ async function runSingleAttempt(
       ["message_end", onAssistantMessage],
       ["assistant", onAssistantMessage],
       ["message_update", onMessageUpdate],
-      ["response", () => {
-        // Pi retry is no longer disabled by the parent; nothing to release.
-      }],
+      ["response", onResponse],
+      ["auto_retry_start", onAutoRetryStart],
+      ["auto_retry_end", onAutoRetryEnd],
+      ["compaction_start", onCompactionStart],
+      ["compaction_end", onCompactionEnd],
       ["tool_execution_start", onToolStart],
       ["tool_execution_end", onToolCompleted],
       ["tool_result_end", onToolCompleted],
@@ -1248,6 +1510,7 @@ async function runSingleAttempt(
       ["usage", onUsageSnapshot],
       ["turn_end", onTurnEnd],
       ["agent_end", onAgentEnd],
+      ["agent_settled", onAgentSettled],
       ["error", onErrorEvent],
     ]);
 
@@ -1276,12 +1539,21 @@ async function runSingleAttempt(
 
     const stderrDecoder = new StringDecoder("utf8");
     child.stderr?.on("data", (chunk: Buffer) => {
+      pokeLifecycleDeadline();
       state.stderrBuffer = appendUtf8Tail(
         state.stderrBuffer,
         stderrDecoder.write(chunk),
         EXECUTION_BUFFER_LIMITS.stderrBytes,
       );
     });
+
+    const notifyChildClosed = (code: number | null, signal: NodeJS.Signals | null): void => {
+      options.onChildClosed?.(correlationId, options.runtimeGeneration, {
+        code,
+        signal,
+        settled: state.turnLifecycleSettled,
+      });
+    };
 
     child.on("close", (code, signal) => {
       releaseRetryPersistenceGuard();
@@ -1300,7 +1572,22 @@ async function runSingleAttempt(
 
       // A lifecycle event may have been present in the final decoded stdout
       // chunk, or terminal structured output may have initiated this close.
-      if (state.turnLifecycleSettled) return;
+      if (state.turnLifecycleSettled) {
+        notifyChildClosed(code, signal);
+        return;
+      }
+
+      if (pendingInterruptingSteer) {
+        const phase = pendingInterruptingSteer.phase;
+        pendingInterruptingSteer = undefined;
+        const diagnostic =
+          `Failed to interrupt and steer teammate (agent=${params.agent}, correlationId=${correlationId}): `
+          + (phase === "prompting"
+            ? "the child exited before the correction prompt started"
+            : "the child exited before acknowledging the turn abort");
+        state.runtimeFailure = diagnostic;
+        appendBoundedTranscriptMessage(messages, { role: "system", content: diagnostic });
+      }
 
       // A length-truncated turn is waiting for child-local continuation; if
       // the child exits instead, the partial response must not settle as
@@ -1368,6 +1655,7 @@ async function runSingleAttempt(
 
       if (state.initialResultPublished) {
         completeTurn(structuredOutput, true, exitCode);
+        notifyChildClosed(code, signal);
         return;
       }
 
@@ -1396,6 +1684,7 @@ async function runSingleAttempt(
           // Completion observers cannot prevent process-close settlement.
         }
       }
+      notifyChildClosed(code, signal);
     });
 
     child.on("error", (error) => {
@@ -1750,7 +2039,7 @@ export async function runGraph(
       );
       // Result publication — not lifecycle confirmation — is the release
       // boundary for parallel slots and DAG dependents (debug-notes-002).
-      // A lifecyclePending result is consumable; agent_end/close/grace keeps
+      // A lifecyclePending result is consumable; agent_settled/close/grace keeps
       // converging the child via options.onTurnComplete after this returns.
       results[idx] = result;
 
@@ -1804,7 +2093,10 @@ export async function runTeammate(
 
 export type RpcMessageMode = "prompt" | "steer" | "follow_up" | "abort";
 
+type InterruptingSteerHandler = (message: string, token?: LeaseToken) => boolean;
+
 const guardedChildStdinStreams = new WeakSet<Writable>();
+const interruptingSteerHandlers = new WeakMap<Writable, InterruptingSteerHandler>();
 
 function guardChildStdin(stdin: Writable): void {
   if (guardedChildStdinStreams.has(stdin)) return;
@@ -1837,6 +2129,10 @@ export function sendRpcMessage(
   const leasedMessage = wrapLeasedMessage(message, token);
   if (mode === "prompt") {
     return writeChildStdinLine(stdin, JSON.stringify({ type: "prompt", message: leasedMessage }));
+  }
+  if (mode === "steer") {
+    const interrupt = interruptingSteerHandlers.get(stdin);
+    if (interrupt) return interrupt(message, token);
   }
   return writeChildStdinLine(stdin, JSON.stringify({ type: mode, message: leasedMessage }));
 }

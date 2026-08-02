@@ -1558,6 +1558,23 @@ test("idle teammate wake-up uses the RPC prompt command", async () => {
   assert.deepEqual(JSON.parse(written.trim()), { type: "prompt", message: "continue the task" });
 });
 
+test("standalone steer transport preserves the leased RPC command", async () => {
+  const stdin = new PassThrough();
+  let written = "";
+  stdin.on("data", (chunk) => { written += chunk.toString(); });
+  const token = leaseToken(createChildLease());
+
+  assert.equal(sendRpcMessage(stdin, "change direction", "steer", token), true);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  const command = JSON.parse(written.trim());
+  assert.equal(command.type, "steer");
+  assert.deepEqual(unwrapLeasedMessage(command.message), {
+    message: "change direction",
+    token,
+  });
+});
+
 test("RPC writes absorb an asynchronous EPIPE from closed child stdin", async () => {
   const stdin = new Writable({
     write(_chunk, _encoding, callback) {
@@ -1708,7 +1725,7 @@ test("teammate-list expands graph tasks and watch keeps sleeping messages visibl
 
   const listed = buildAgentList(state, "active");
   assert.match(listed.text, /◉ \[graph\(2\)\].*id=aaaaaaaa.*model=qwen3\.8-max-preview/);
-  assert.match(listed.text, /└─ ✓ \[scout\] name="api".*id=11111111.*model=qwen3\.8-max-preview/);
+  assert.match(listed.text, /└─ ◉ \[scout\] name="api".*id=11111111.*last=completed.*model=qwen3\.8-max-preview/);
   assert.match(listed.text, /attempted=deepseek\/deepseek-v4-pro,maestro-qwen\/qwen3\.8-max-preview/);
 
   const resolved = resolveWatchTarget(state, "11111111");

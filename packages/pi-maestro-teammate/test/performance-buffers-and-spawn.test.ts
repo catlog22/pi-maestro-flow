@@ -276,7 +276,11 @@ test("root progress cleanup flushes then disposes on success, error, and termina
   const executeEnd = source.indexOf("renderCall(args", executeStart);
   assert.ok(teammateToolStart >= 0 && executeStart > teammateToolStart && executeEnd > executeStart);
   const rootExecute = source.slice(executeStart, executeEnd);
-  assert.equal(rootExecute.match(/runWithProgressFlushCleanup\(/g)?.length, 3);
+  assert.equal(
+    rootExecute.match(/runWithProgressFlushCleanup\(/g)?.length,
+    4,
+    "foreground, background, graph, and cold-restart runs share flush/dispose cleanup",
+  );
   assert.doesNotMatch(rootExecute, /runSingleTeammate\(params, makeOptions\(\)\)/);
 
   for (const outcome of ["success", "error", "termination"] as const) {
@@ -485,6 +489,25 @@ test("Windows Pi fallback is shell-free and preserves hostile-looking argv as on
       /Invalid teammate model specifier/,
     );
   }
+});
+
+test("cold restart loads the persisted session instead of forking it", () => {
+  const args = buildPiArgs(
+    baseAgentConfig,
+    { agent: "general" },
+    "prompt.md",
+    undefined,
+    "C:/sessions/agent",
+    "C:/sessions/parent.jsonl",
+    undefined,
+    [],
+    "C:/sessions/agent/session.jsonl",
+  );
+  const sessionIndex = args.indexOf("--session");
+  assert.notEqual(sessionIndex, -1);
+  assert.equal(args[sessionIndex + 1], "C:/sessions/agent/session.jsonl");
+  assert.equal(args.includes("--fork"), false);
+  assert.equal(args[args.indexOf("--session-dir") + 1], "C:/sessions/agent");
 });
 
 test("teammate child processes are hidden on Windows", async () => {

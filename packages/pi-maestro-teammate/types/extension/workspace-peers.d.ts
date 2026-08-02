@@ -9,7 +9,7 @@ export declare const MAX_OWNER_FILE_BYTES: number;
 export declare const MAX_COMMAND_FILE_BYTES: number;
 export declare const MAX_RESPONSE_FILE_BYTES: number;
 export declare const MAX_COMMAND_MESSAGE_BYTES: number;
-export type WorkspaceAgentStatus = "pending" | "running" | "retrying" | "sleeping";
+export type WorkspaceAgentStatus = "running" | "sleeping";
 export type WorkspaceSettledStatus = "completed" | "failed" | "terminated";
 export type WorkspacePeerCommandAction = "steer" | "follow_up";
 export type WorkspacePeerResponseStatus = "accepted" | "rejected" | "error" | "expired";
@@ -32,6 +32,12 @@ export interface WorkspaceAgentSnapshot {
     name?: string;
     agent: string;
     status: WorkspaceAgentStatus;
+    phase?: string;
+    lastOutcome?: {
+        status: WorkspaceSettledStatus;
+        message?: string;
+        settledAt: number;
+    };
     startedAt: number;
     lastActivityAt: number;
     resultReadyAt?: number;

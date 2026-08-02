@@ -39,6 +39,19 @@ export interface SingleResult {
 
 export type AgentProgressStatus = "pending" | "running" | "retrying" | "completed" | "failed" | "terminated";
 
+export type AgentActivity = "running" | "sleeping";
+
+export type AgentRunPhase =
+  | "starting"
+  | "restoring"
+  | "prompting"
+  | "tool-execution"
+  | "result-ready"
+  | "retrying"
+  | "compacting"
+  | "continuing"
+  | "settling";
+
 export interface AgentProgress {
   agent: string;
   name?: string;
@@ -46,6 +59,7 @@ export interface AgentProgress {
   taskIndex?: number;
   dependencies?: number[];
   status: AgentProgressStatus;
+  phase?: AgentRunPhase;
   recentTools: Array<{ name: string; status: string }>;
   toolCount: number;
   tokens: number;
@@ -73,6 +87,7 @@ export interface AgentProgressSnapshot {
   taskIndex: number;
   dependencies: number[];
   status: AgentProgressStatus;
+  phase?: AgentRunPhase;
   startedAt?: string;
   completedAt?: string;
   recentTools?: Array<{ name: string; status: string }>;
@@ -161,6 +176,11 @@ export interface ActiveAgent {
   ownsChildProcess?: boolean;
   stdin?: import("node:stream").Writable;
   sendControl?: (message: Record<string, unknown>) => boolean;
+  /** Monotonic child-process owner; stale callbacks cannot mutate a replacement runtime. */
+  runtimeGeneration?: number;
+  /** Starts a cold runtime from the last persisted session and delivers one prompt. */
+  restart?: (message: string) => boolean;
+  restartPending?: Promise<void>;
   sessionId?: string;
   sessionFile?: string;
   sessionDir?: string;
@@ -218,6 +238,8 @@ export interface ActiveAgent {
    */
   maxDispatchDepth?: number;
   status: AgentStatus;
+  phase?: AgentRunPhase;
+  lastOutcome?: AgentRunOutcome;
   retry?: AgentRetryState;
   /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
   resultReadyAt?: number;
@@ -279,6 +301,12 @@ export interface TeammateState {
 }
 
 export type AgentTerminalStatus = "completed" | "failed" | "terminated";
+
+export interface AgentRunOutcome {
+  status: AgentTerminalStatus;
+  message?: string;
+  settledAt: number;
+}
 
 export interface SettledAgentRecord {
   correlationId: string;

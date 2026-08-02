@@ -135,8 +135,11 @@ import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overl
 import type {
   Details,
   TeammateState,
+  AgentActivity,
   AgentProgress,
   AgentProgressSnapshot,
+  AgentRunOutcome,
+  AgentRunPhase,
   ChildAgentCallSnapshot,
   ActiveAgent,
   AgentStatus,
@@ -146,6 +149,7 @@ import type {
   SingleResult,
   TeammateInteractionRecord,
 } from "../shared/types.ts";
+import { projectAgentActivity } from "../shared/agent-status.ts";
 
 type TeammateToolResult<T> = AgentToolResult<T> & { isError?: boolean };
 
@@ -227,7 +231,7 @@ import type { TeammateRuntimeOptions } from "./index.ts";
 
 export type AgentListView = "active" | "named" | "all";
 export type TeammateListView = AgentListView | "roles";
-export type ListedAgentStatus = ActiveAgent["status"] | AgentProgressSnapshot["status"];
+export type ListedAgentStatus = AgentActivity;
 
 export interface ListedAgent {
   agent: string;
@@ -243,6 +247,8 @@ export interface ListedAgent {
   depth: number;
   treePrefix: string;
   status: ListedAgentStatus;
+  phase?: AgentRunPhase;
+  lastOutcome?: AgentRunOutcome;
   taskIndex?: number;
   dependencies?: number[];
   toolCount?: number;
@@ -300,7 +306,7 @@ export function buildAgentList(
   const roots: string[] = [];
 
   const physicalVisible = (entry: ActiveAgent): boolean => {
-    if (view === "active" && entry.status === "completed") return false;
+    if (view === "active" && (entry.status === "completed" || entry.status === "failed" || entry.status === "terminated")) return false;
     if (view === "named" && !entry.name && !entry.progress?.some((item) => item.name)) return false;
     return true;
   };
@@ -337,7 +343,9 @@ export function buildAgentList(
       spawnedBy: entry.spawnedBy,
       depth,
       treePrefix,
-      status: entry.status,
+      status: projectAgentActivity(entry),
+      phase: entry.phase,
+      lastOutcome: entry.lastOutcome,
       requestedModel: entry.requestedModel,
       resolvedModel: entry.resolvedModel,
       attemptedModels: entry.attemptedModels,
@@ -383,9 +391,19 @@ export function buildAgentList(
         spawnedBy: cid,
         depth: depth + 1,
         treePrefix: `${descendantsPrefix}${isLast ? "└─ " : "├─ "}`,
-        // A completed container means every task succeeded; trust it over a
-        // lifecycle-pending snapshot that was never rewritten back to terminal.
-        status: entry.status === "completed" ? "completed" : progress.status,
+        status: progress.status === "completed" || progress.status === "failed" || progress.status === "terminated"
+          ? "sleeping"
+          : "running",
+        phase: progress.phase,
+        ...(progress.status === "completed" || progress.status === "failed" || progress.status === "terminated"
+          ? {
+              lastOutcome: {
+                status: progress.status,
+                ...(progress.lastMessage ? { message: progress.lastMessage } : {}),
+                settledAt: progress.completedAt ? new Date(progress.completedAt).getTime() : Date.now(),
+              },
+            }
+          : {}),
         taskIndex: progress.taskIndex,
         dependencies: progress.dependencies,
         toolCount: progress.toolCount,
@@ -402,14 +420,7 @@ export function buildAgentList(
   roots.forEach((cid) => visitPhysical(cid, "", "", 0));
   const listedCorrelationIds = entries.map((entry) => entry.correlationId);
 
-  const iconFor = (status: ListedAgentStatus): string => {
-    if (status === "pending") return "○";
-    if (status === "running") return "●";
-    if (status === "retrying") return "↻";
-    if (status === "sleeping") return "◉";
-    if (status === "failed") return "✗";
-    return "✓";
-  };
+  const iconFor = (status: ListedAgentStatus): string => status === "sleeping" ? "◉" : "●";
   const text = entries.length > 0
     ? entries.map((entry) => {
         const identity = entry.name
@@ -420,11 +431,12 @@ export function buildAgentList(
         // one, so the derived state — result ready, blocked on a prompt, or
         // silent past the stall ceiling — has to be on the line too.
         const idleSeconds = Math.round(entry.idleMs / 1000);
-        const stalled = entry.status !== "completed"
-          && entry.status !== "failed"
+        const stalled = entry.status === "running"
+          && entry.phase !== "retrying"
+          && entry.phase !== "compacting"
           && entry.resultReadyAt === undefined
           && !entry.pendingInteractions
-          && entry.idleMs >= (entry.status === "pending"
+          && entry.idleMs >= (entry.phase === "starting"
             ? TEAMMATE_PENDING_STALL_TIMEOUT_MS
             : TEAMMATE_STALL_TIMEOUT_MS);
         const metadata = [
@@ -434,6 +446,8 @@ export function buildAgentList(
             ? `deps=${entry.dependencies.map((dependency) => dependency + 1).join(",")}`
             : "",
           `${Math.round(entry.durationMs / 1000)}s`,
+          entry.phase ? `phase=${entry.phase}` : "",
+          entry.lastOutcome ? `last=${entry.lastOutcome.status}` : "",
           entry.resultReadyAt !== undefined ? "result ready" : "",
           entry.pendingInteractions
             ? `awaiting ${entry.pendingInteractions} prompt${entry.pendingInteractions > 1 ? "s" : ""}`
@@ -563,8 +577,9 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
     const log = agent.outputLog.slice(-lineCount);
     const uptime = Math.round(agentActiveMs(agent) / 1000);
     const idle = Math.round((Date.now() - agent.lastActivityAt) / 1000);
+    const activity = projectAgentActivity(agent);
     const output = [
-      `[${agent.agent}/${label}] id=${agent.correlationId.slice(0, 8)} | ${agent.status} | up ${uptime}s | idle ${idle}s | log ${agent.outputLog.length} | inbox ${agent.inbox.length}`,
+      `[${agent.agent}/${label}] id=${agent.correlationId.slice(0, 8)} | ${activity}${agent.phase ? `/${agent.phase}` : ""} | up ${uptime}s | idle ${idle}s | log ${agent.outputLog.length} | inbox ${agent.inbox.length}`,
       "---",
       ...log,
     ];
@@ -577,12 +592,15 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
     if (agent.attemptedModels && agent.attemptedModels.length > 1) {
       output.push(`Attempted models: ${agent.attemptedModels.join(", ")}`);
     }
+    if (agent.lastOutcome) {
+      output.push(`Last outcome: ${agent.lastOutcome.status}${agent.lastOutcome.message ? ` — ${agent.lastOutcome.message.split("\n", 1)[0]}` : ""}`);
+    }
     if (agent.status === "retrying" && agent.retry) {
       const retryIn = Math.max(0, Math.ceil((agent.retry.nextRetryAt - Date.now()) / 1000));
       output.push(`Retry ${agent.retry.attempt}/${agent.retry.maxRetries} in ${retryIn}s: ${agent.retry.lastError}`);
     }
     if (agent.resultReadyAt !== undefined && agent.status === "running") {
-      output.push("Pi completed a no-tool assistant turn; final agent_end confirmation is pending.");
+      output.push("Pi completed a no-tool assistant turn; final agent_settled confirmation is pending.");
     }
     const lastResult = agent.lastResult?.trim();
     if (lastResult) {
@@ -624,7 +642,7 @@ export function buildWatchOutput(target: WatchTarget, lineCount: number): string
   }
   const lastMessage = progress.lastMessage?.trim();
   if (progress.resultReadyAt !== undefined && progress.status === "running") {
-    output.push("Pi completed a no-tool assistant turn; final agent_end confirmation is pending.");
+    output.push("Pi completed a no-tool assistant turn; final agent_settled confirmation is pending.");
   }
   if (lastMessage) {
     output.push("--- last message ---", ...lastMessage.split("\n").slice(-lineCount));
@@ -664,7 +682,7 @@ export function waitOutput(status: TeammateWaitStatus, target?: string): string[
   if (status === "completed") return [`${subject} completed.`];
   if (status === "failed") return [`${subject} failed.`];
   if (status === "terminated") return [`${subject} was terminated.`];
-  if (status === "result-ready") return [`${subject} produced a final no-tool assistant turn; final agent_end confirmation is pending.`];
+  if (status === "result-ready") return [`${subject} produced a final no-tool assistant turn; final agent_settled confirmation is pending.`];
   if (status === "stalled") return [`${subject} stopped reporting activity; inspect its captured output before retrying or terminating it.`];
   if (status === "timeout") return [`${subject} did not settle before the wait timeout.`];
   if (status === "aborted") return [`${subject} wait was aborted.`];
@@ -742,7 +760,7 @@ export function statusForWatchTarget(
   const resultReadyAt = target.kind === "agent" ? target.agent.resultReadyAt : target.progress.resultReadyAt;
   const targetCid = target.kind === "agent" ? target.agent.correlationId : target.progress.correlationId;
   if (resultReadyAt !== undefined && claimResultReadyNotice(state, targetCid)) return "result-ready";
-  // A published result remains live until agent_end/close/error confirms its
+  // A published result remains live until agent_settled/close/error confirms its
   // lifecycle. Once the one-shot result-ready notice has been consumed, do not
   // reinterpret that confirmation window as an idle stall.
   if (resultReadyAt !== undefined) return undefined;
@@ -1001,18 +1019,34 @@ export function retireAgent(
   state: TeammateState,
   correlationId: string,
   lastResult?: string,
+  outcome: Extract<AgentTerminalStatus, "completed" | "failed"> = "completed",
 ): void {
   const agent = state.activeRuns.get(correlationId);
   if (!agent) return;
   agent.status = "sleeping";
+  agent.phase = undefined;
   agent.retry = undefined;
   agent.lastResult = lastResult === undefined
     ? undefined
     : truncateUtf8Tail(lastResult, AGENT_BUFFER_LIMITS.lastResultBytes);
+  agent.lastOutcome = {
+    status: outcome,
+    ...(agent.lastResult ? { message: agent.lastResult } : {}),
+    settledAt: Date.now(),
+  };
+  if (outcome === "failed") {
+    state.cancelInteractions?.(correlationId, "The teammate run failed before this interaction was answered.");
+    if (agent.pendingHandoff) {
+      clearTimeout(agent.pendingHandoff.timer);
+      agent.pendingHandoff.resolve(false);
+      agent.pendingHandoff = undefined;
+    }
+    agent.pendingInteractions?.clear();
+  }
   agent.sleptAt = Date.now();
   agent.lastActivityAt = Date.now();
   trimAgentBuffers(agent, true);
-  settleTeammateWaiters(state, correlationId, "completed");
+  settleTeammateWaiters(state, correlationId, outcome);
   enforceWakeableAgentBudget(state);
 }
 
@@ -1030,6 +1064,7 @@ export function applyAgentRetryState(
   const agent = state.activeRuns.get(retry.correlationId);
   if (!agent) return;
   agent.status = "retrying";
+  agent.phase = "retrying";
   agent.retry = {
     attempt: retry.attempt,
     maxRetries: retry.maxRetries,
@@ -1045,6 +1080,7 @@ export function applyAgentRetryState(
     const progress = parent.progress?.find((item) => item.correlationId === retry.correlationId);
     if (!progress) continue;
     progress.status = "retrying";
+    progress.phase = "retrying";
     progress.lastMessage = agent.retry.lastError;
     progress.lastActivityAt = agent.lastActivityAt;
   }
@@ -1063,7 +1099,7 @@ export function applyAgentResultReadyState(
   if (!agent) return;
   agent.resultReadyAt = resultReady.resultReadyAt;
   agent.lastActivityAt = Math.max(agent.lastActivityAt, resultReady.resultReadyAt);
-  const marker = "◆ Pi final assistant turn received; awaiting agent_end.";
+  const marker = "◆ Pi final assistant turn received; awaiting agent_settled.";
   if (agent.outputLog.at(-1) !== marker) agent.outputLog.push(marker);
   trimAgentBuffers(agent);
   for (const parent of state.activeRuns.values()) {
@@ -1151,7 +1187,7 @@ export function reclaimResultReadyAgents(
     if (agent.status !== "running" || agent.resultReadyAt === undefined) continue;
     if (now - agent.resultReadyAt < RESULT_READY_RECLAIM_MS) continue;
     agent.outputLog.push(
-      `[${new Date(now).toISOString().slice(11, 19)}] ◆ result published but agent_end never arrived after ` +
+      `[${new Date(now).toISOString().slice(11, 19)}] ◆ result published but agent_settled never arrived after ` +
       `${Math.round((now - agent.resultReadyAt) / 1000)}s; retiring.`,
     );
     retireAgent(state, correlationId, agent.lastResult);
@@ -1333,8 +1369,17 @@ export function settleAgentLifecycle(
   abortProcess: boolean,
   terminalStatus?: AgentTerminalStatus,
 ): void {
+  const agent = state.activeRuns.get(correlationId);
+  const outcome = terminalStatus ?? (exitCode === 0 ? "completed" : "failed");
+  if (agent) {
+    agent.lastOutcome = {
+      status: outcome,
+      ...(lastResult ? { message: truncateUtf8Tail(lastResult, AGENT_BUFFER_LIMITS.lastResultBytes) } : {}),
+      settledAt: Date.now(),
+    };
+  }
   clearAgentResultReadyState(state, correlationId);
-  if (terminalStatus === "terminated") {
+  if (outcome === "terminated") {
     terminateNestedDispatchesOwnedBy(state, correlationId);
     const agent = state.activeRuns.get(correlationId);
     if (agent && lastResult !== undefined) {
@@ -1343,13 +1388,22 @@ export function settleAgentLifecycle(
     killAgent(state, correlationId, undefined, "terminated", abortProcess);
     return;
   }
-  if (exitCode !== 0) {
+  if (outcome === "failed") {
     terminateNestedDispatchesOwnedBy(state, correlationId);
-    const agent = state.activeRuns.get(correlationId);
-    if (agent && lastResult !== undefined) {
-      agent.lastResult = truncateUtf8Tail(lastResult, AGENT_BUFFER_LIMITS.lastResultBytes);
+    const failedAgent = state.activeRuns.get(correlationId);
+    if (failedAgent && lastResult !== undefined) {
+      failedAgent.lastResult = truncateUtf8Tail(lastResult, AGENT_BUFFER_LIMITS.lastResultBytes);
     }
-    killAgent(state, correlationId, undefined, "failed", abortProcess);
+    const recoverable = Boolean(
+      wakeable
+      && failedAgent
+      && (failedAgent.stdin?.writable || (failedAgent.restart && failedAgent.sessionFile)),
+    );
+    if (recoverable) {
+      retireAgent(state, correlationId, lastResult, "failed");
+    } else {
+      killAgent(state, correlationId, undefined, "failed", abortProcess);
+    }
     return;
   }
   if (wakeable) {
@@ -1454,6 +1508,11 @@ export function killAgent(
 ): void {
   const agent = state.activeRuns.get(correlationId);
   if (!agent) return;
+  agent.lastOutcome = {
+    status: waitStatus,
+    ...(agent.lastResult ? { message: agent.lastResult } : {}),
+    settledAt: Date.now(),
+  };
   recordSettledAgent(state, agent, waitStatus);
   clearAgentResultReadyState(state, correlationId);
   // Before the agent leaves activeRuns: anything it queued on the shared
@@ -1657,11 +1716,25 @@ export async function handleChildInteractionRequest(
     return;
   }
 
+  // PERFSEC-004: Cap retained payload size so a malicious or buggy child
+  // cannot exhaust parent memory via 16 × unbounded IPC payloads.
+  let retainedPayload = payload;
+  try {
+    const serialized = JSON.stringify(payload);
+    if (Buffer.byteLength(serialized, "utf8") > AGENT_BUFFER_LIMITS.interactionPayloadBytes) {
+      retainedPayload = {
+        toolName: payload.toolName,
+        interaction: payload.interaction,
+        truncated: true,
+        originalBytes: Buffer.byteLength(serialized, "utf8"),
+      };
+    }
+  } catch { /* non-serializable payload — retain as-is */ }
   const record: TeammateInteractionRecord = {
     requestId,
     interaction,
     createdAt: Date.now(),
-    payload,
+    payload: retainedPayload,
   };
   if (agent) {
     agent.pendingInteractions ??= new Map();

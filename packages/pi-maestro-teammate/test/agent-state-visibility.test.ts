@@ -434,7 +434,7 @@ test("the Alt+R selector distinguishes retrying from running", () => {
   }));
 
   const panel = renderAgentSelectorPanel(rows, 0, "", 80).join("\n");
-  assert.match(panel, /Retrying/);
+  assert.match(panel, /Running · retrying/);
   // Green is reserved for an agent that is actually making progress.
-  assert.doesNotMatch(panel, /\x1b\[32mRetrying/);
+  assert.doesNotMatch(panel, /\x1b\[32mRunning · retrying/);
 });

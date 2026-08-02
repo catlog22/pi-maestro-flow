@@ -8,11 +8,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { type ChildReclamationOutcome } from "../runs/execution.ts";
 import type { RunTeammateOptions } from "../runs/execution.ts";
-import type { TeammateState, AgentProgressSnapshot, ActiveAgent, AgentTerminalStatus, SettledAgentRecord } from "../shared/types.ts";
+import type { TeammateState, AgentActivity, AgentProgressSnapshot, AgentRunOutcome, AgentRunPhase, ActiveAgent, AgentTerminalStatus, SettledAgentRecord } from "../shared/types.ts";
 import { type AgentSummary } from "../agents/agents.ts";
 export type AgentListView = "active" | "named" | "all";
 export type TeammateListView = AgentListView | "roles";
-export type ListedAgentStatus = ActiveAgent["status"] | AgentProgressSnapshot["status"];
+export type ListedAgentStatus = AgentActivity;
 export interface ListedAgent {
     agent: string;
     name?: string;
@@ -27,6 +27,8 @@ export interface ListedAgent {
     depth: number;
     treePrefix: string;
     status: ListedAgentStatus;
+    phase?: AgentRunPhase;
+    lastOutcome?: AgentRunOutcome;
     taskIndex?: number;
     dependencies?: number[];
     toolCount?: number;
@@ -131,7 +133,7 @@ export declare function notifyBackgroundFailure(pi: ExtensionAPI, id: string, ag
  */
 export declare function markSettledResultInspectable(state: TeammateState, correlationId: string): void;
 export declare function recordChildReclamationOutcome(state: TeammateState, correlationId: string, outcome: ChildReclamationOutcome): void;
-export declare function retireAgent(state: TeammateState, correlationId: string, lastResult?: string): void;
+export declare function retireAgent(state: TeammateState, correlationId: string, lastResult?: string, outcome?: Extract<AgentTerminalStatus, "completed" | "failed">): void;
 export declare function applyAgentRetryState(state: TeammateState, retry: {
     correlationId: string;
     attempt: number;

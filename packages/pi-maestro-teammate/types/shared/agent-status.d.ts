@@ -7,7 +7,7 @@
  * the state up in `STATUS_PRESENTATION` and derive transient display states
  * (`result-ready`, `stalled`) through `effectiveDisplayStatus`.
  */
-import type { AgentStatus } from "./types.ts";
+import type { ActiveAgent, AgentActivity, AgentStatus } from "./types.ts";
 /**
  * Semantic color slot. The names match both the Pi theme foreground slots
  * (`theme.fg(tone, text)`) and the `ProgressPalette` tone mapping used by the
@@ -36,5 +36,6 @@ export declare function displayStatusPresentation(status: DisplayStatus): Status
  * `stalled`. Every other status displays as itself.
  */
 export declare function effectiveDisplayStatus(status: AgentStatus, resultReadyAt: number | undefined, lastActivityAt: number | undefined, now?: number): DisplayStatus;
+export declare function projectAgentActivity(agent: Pick<ActiveAgent, "status" | "restart" | "sessionFile">): AgentActivity;
 /** Whole seconds since the last reported activity; 0 when never reported. */
 export declare function idleSeconds(lastActivityAt: number | undefined, now?: number): number;

@@ -446,11 +446,7 @@ test("official child RPC UI requests are answered through the parent dialog UI",
   assert.deepEqual(replies, [{ type: "extension_ui_response", id: "rpc-select-1", value: "B" }]);
 });
 
-test("terminal failures stay visible for their retention window, then are swept", () => {
-  // Success used to be the only outcome that survived settling: failure was
-  // written to `completed` and deleted in the same frame, which is precisely
-  // the status the widget filter drops. The run that needed attention was the
-  // one that disappeared.
+test("recoverable failures sleep with outcome metadata while unrecoverable failures retain a tombstone", () => {
   const failed = createState();
   let handoffResolved: boolean | undefined;
   failed.agent.stdin = new PassThrough();
@@ -462,28 +458,30 @@ test("terminal failures stay visible for their retention window, then are swept"
     timer: setTimeout(() => {}, 60_000),
   };
   settleAgent(failed.state, failed.agent.correlationId, 1, "boom");
-  assert.equal(failed.agent.status, "failed");
-  assert.equal(failed.state.activeRuns.size, 1, "the failure stays on screen");
-  assert.equal(typeof failed.agent.failedAt, "number");
-  assert.equal(failed.agent.stdin, undefined);
-  assert.equal(failed.agent.sendControl, undefined);
+  assert.equal(failed.agent.status, "sleeping");
+  assert.equal(failed.agent.lastOutcome?.status, "failed");
+  assert.equal(failed.state.activeRuns.size, 1);
+  assert.equal(failed.agent.stdin?.writable, true, "recoverable failure keeps the warm RPC runtime");
+  assert.equal(typeof failed.agent.sendControl, "function");
   assert.equal(failed.agent.pendingHandoff, undefined);
   assert.equal(handoffResolved, false);
   assert.equal(
     resolveAgentCorrelationId(failed.state, failed.agent.correlationId.slice(0, 8)),
     failed.agent.correlationId,
-    "and stays addressable while it is shown",
   );
+  assert.equal(checkActiveAgentBudget(failed.state).active, 1, "warm sleeping runtime still owns a slot");
+  assert.deepEqual(sweepFailedAgents(failed.state, Date.now() + FAILED_AGENT_RETENTION_MS + 1), []);
 
-  // It holds no child process, so it must not consume the concurrency budget.
-  assert.equal(checkActiveAgentBudget(failed.state).active, 0);
-
+  const unrecoverable = createState();
+  settleAgent(unrecoverable.state, unrecoverable.agent.correlationId, 1, "boom", false);
+  assert.equal(unrecoverable.agent.status, "failed");
+  assert.equal(unrecoverable.agent.lastOutcome?.status, "failed");
+  assert.equal(checkActiveAgentBudget(unrecoverable.state).active, 0);
   assert.deepEqual(
-    sweepFailedAgents(failed.state, Date.now() + FAILED_AGENT_RETENTION_MS + 1),
-    [failed.agent.correlationId],
+    sweepFailedAgents(unrecoverable.state, Date.now() + FAILED_AGENT_RETENTION_MS + 1),
+    [unrecoverable.agent.correlationId],
   );
-  assert.equal(failed.state.activeRuns.size, 0);
-  assert.equal(failed.state.namedAgents.size, 0);
+  assert.equal(unrecoverable.state.activeRuns.size, 0);
 
   const successful = createState();
   successful.state.namedAgents.clear();
@@ -505,7 +503,7 @@ test("explicit process ownership excludes graph containers from admission", () =
 
 test("terminal tombstone remains inspectable but rejects proxy commands", async () => {
   const { state, agent } = createState();
-  settleAgent(state, agent.correlationId, 1, "failed terminal");
+  settleAgent(state, agent.correlationId, 1, "failed terminal", false);
   const { pi } = createPi();
   const replies: any[] = [];
   await handleProxyRequest(

@@ -147,6 +147,15 @@ export interface RunTeammateOptions {
     sessionDir?: string,
     correlationId?: string,
   ) => void;
+  /** Existing persisted Pi session to load for a cold logical-agent restart. */
+  resumeSessionFile?: string;
+  /** Runtime generation used to fence callbacks from a replaced child process. */
+  runtimeGeneration?: number;
+  onChildClosed?: (
+    correlationId: string,
+    generation: number | undefined,
+    details: { code: number | null; signal: NodeJS.Signals | null; settled: boolean },
+  ) => void;
   onTurnComplete?: (result: SingleResult, terminalStatus?: AgentTerminalStatus) => void;
   /** Physical child-process reclamation, independent of logical turn settlement. */
   onReclamationOutcome?: (
@@ -1259,6 +1268,7 @@ export function buildPiArgs(
   forkSessionFile?: string,
   schemaFile?: string,
   modelCapabilities: readonly TeammateModelCapability[] = [],
+  resumeSessionFile?: string,
 ): string[] {
   // RPC mode: stdin stays open for bidirectional messaging (steer/follow_up/abort)
   const args: string[] = ["--mode", "rpc"];
@@ -1283,7 +1293,9 @@ export function buildPiArgs(
     args.push("--extension", registration.path);
   }
 
-  if (forkSessionFile) {
+  if (resumeSessionFile) {
+    args.push("--session", resumeSessionFile);
+  } else if (forkSessionFile) {
     args.push("--fork", forkSessionFile);
   }
 
@@ -1490,6 +1502,7 @@ export function createProgress(agent: string, startTime: number): AgentProgress 
   return {
     agent,
     status: "running",
+    phase: "starting",
     recentTools: [],
     toolCount: 0,
     tokens: 0,
@@ -1506,7 +1519,7 @@ export function createProgress(agent: string, startTime: number): AgentProgress 
 export const CHILD_TERMINATION_GRACE_MS = 5_000;
 
 // A result-ready lane settles with its published result if the authoritative
-// lifecycle confirmation (agent_end/close) is this late, so aggregation never
+// lifecycle confirmation (agent_settled/close) is this late, so aggregation never
 // blocks indefinitely on a missing terminal event.
 export const RESULT_READY_GRACE_MS = 60_000;
 

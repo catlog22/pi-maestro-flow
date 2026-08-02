@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
+import { PassThrough } from "node:stream";
 import { handleProxyRequest, checkActiveAgentBudget } from "../src/extension/index.ts";
 import { appendTeammateDepthContext } from "../src/extension/teammate-core.ts";
 import { parseProxyTeammateParams } from "../src/extension/teammate-proxy.ts";
@@ -162,17 +163,27 @@ test("the active-agent budget counts live agents across the whole tree", () => {
   try {
     assert.deepEqual(checkActiveAgentBudget(state), { allowed: true, active: 0, max: 3 });
 
-    for (const status of ["running", "pending", "sleeping"] as const) {
+    for (const status of ["running", "pending"] as const) {
       const cid = randomUUID();
       state.activeRuns.set(cid, makeAgent(cid, 0, { status }));
     }
+    const sleepingCid = randomUUID();
+    state.activeRuns.set(sleepingCid, makeAgent(sleepingCid, 0, {
+      status: "sleeping",
+      stdin: new PassThrough(),
+    }));
     assert.equal(checkActiveAgentBudget(state).active, 3);
     assert.equal(checkActiveAgentBudget(state).allowed, false);
+
+    // A cold sleeping logical agent retains identity without holding a process slot.
+    state.activeRuns.get(sleepingCid)!.stdin = undefined;
+    assert.equal(checkActiveAgentBudget(state).active, 2);
+    assert.equal(checkActiveAgentBudget(state).allowed, true);
 
     // Settled agents release their slot.
     const settled = randomUUID();
     state.activeRuns.set(settled, makeAgent(settled, 0, { status: "failed" }));
-    assert.equal(checkActiveAgentBudget(state).active, 3);
+    assert.equal(checkActiveAgentBudget(state).active, 2);
   } finally {
     if (previous === undefined) delete process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS;
     else process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS = previous;

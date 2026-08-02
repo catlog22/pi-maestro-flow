@@ -145,6 +145,7 @@ import type {
   SingleResult,
   TeammateInteractionRecord,
 } from "../shared/types.ts";
+import { projectAgentActivity } from "../shared/agent-status.ts";
 
 type TeammateToolResult<T> = AgentToolResult<T> & { isError?: boolean };
 
@@ -468,6 +469,8 @@ export const AGENT_BUFFER_LIMITS = Object.freeze({
   logLineBytes: 16 * 1024,
   logBytes: 512 * 1024,
   lastResultBytes: 256 * 1024,
+  /** PERFSEC-004: Cap per-interaction payload retention (16 concurrent × 256KB = 4MB max). */
+  interactionPayloadBytes: 256 * 1024,
 });
 export const TEAMMATE_STALL_TIMEOUT_MS = 30_000;
 
@@ -569,7 +572,9 @@ export function buildWorkspaceOwnerState(
       correlationId: agent.correlationId,
       ...(agent.name ? { name: agent.name } : {}),
       agent: agent.agent,
-      status: agent.status,
+      status: projectAgentActivity(agent),
+      ...(agent.phase ? { phase: agent.phase } : {}),
+      ...(agent.lastOutcome ? { lastOutcome: { ...agent.lastOutcome } } : {}),
       startedAt: agent.startedAt,
       lastActivityAt: agent.lastActivityAt,
       ...(agent.resultReadyAt === undefined ? {} : { resultReadyAt: agent.resultReadyAt }),
@@ -579,7 +584,7 @@ export function buildWorkspaceOwnerState(
       pendingInteractions: agent.pendingInteractions?.size ?? 0,
       depth: agent.depth,
       ...(agent.spawnedBy ? { parentCorrelationId: agent.spawnedBy } : {}),
-      wakeable: agent.status === "sleeping",
+      wakeable: projectAgentActivity(agent) === "sleeping",
     });
   }
   for (const record of state.recentlySettled?.values() ?? []) {
@@ -601,13 +606,21 @@ export function buildWorkspaceOwnerState(
   };
 }
 
-/** Agents that still hold (or are about to hold) a child process. */
+/** Compatibility vocabulary for legacy internal status checks. */
 export const LIVE_AGENT_STATUSES: ReadonlySet<AgentStatus> = new Set<AgentStatus>([
   "pending",
   "running",
   "retrying",
   "sleeping",
 ]);
+
+/** Resource admission is independent of the externally projected activity. */
+export function agentHoldsRuntimeSlot(agent: ActiveAgent): boolean {
+  const ownsChildProcess = agent.ownsChildProcess ?? agent.progress === undefined;
+  if (!ownsChildProcess) return false;
+  if (agent.restartPending || agent.stdin?.writable) return true;
+  return agent.status === "pending" || agent.status === "running" || agent.status === "retrying";
+}
 
 /**
  * Bounds the whole dispatch tree, not a single call. `maxAgents` caps one
@@ -620,8 +633,7 @@ export function checkActiveAgentBudget(
 ): { allowed: boolean; active: number; max: number } {
   let active = 0;
   for (const agent of state.activeRuns.values()) {
-    const ownsChildProcess = agent.ownsChildProcess ?? agent.progress === undefined;
-    if (LIVE_AGENT_STATUSES.has(agent.status) && ownsChildProcess) active += 1;
+    if (agentHoldsRuntimeSlot(agent)) active += 1;
   }
   const max = resolveMaxActiveAgents();
   return { allowed: active + additional <= max, active, max };
@@ -933,7 +945,12 @@ export function emitTeammateStarted(
     spawnedBy: agent.spawnedBy,
     startedAt: agent.startedAt,
     lastActivityAt: agent.lastActivityAt,
+    // F-003: emit the full lifecycle status for backward compatibility and
+    // the two-state activity projection as an additive field.
     status: agent.status,
+    activity: projectAgentActivity(agent),
+    ...(agent.phase ? { phase: agent.phase } : {}),
+    ...(agent.lastOutcome ? { lastOutcome: { ...agent.lastOutcome } } : {}),
   });
 }
 
@@ -945,6 +962,7 @@ export function wakeSleepingAgent(
 ): boolean {
   if (agent.status !== "sleeping") return false;
   agent.status = "running";
+  agent.phase = agent.stdin?.writable ? "prompting" : "restoring";
   if (agent.sleptAt) {
     agent.sleepMs += now - agent.sleptAt;
     agent.sleptAt = undefined;
@@ -1026,11 +1044,9 @@ export function renderAgentSelectorPanel(
   const selected = rows[selectedIndex];
   const statusView = (row: AgentSelectorRow): { icon: string; text: string } => {
     if (row.status === "sleeping") return { icon: yellow("◉"), text: yellow("Sleeping") };
-    if (row.status === "failed") return { icon: red("✗"), text: red("Failed") };
-    if (row.status === "pending") return { icon: dim("□"), text: dim("Pending") };
-    // Retrying fell through to the default and read as a healthy green
-    // "Running" — the one state where the agent is not making progress.
-    if (row.status === "retrying") return { icon: yellow("↻"), text: yellow("Retrying") };
+    if (row.status === "failed") return { icon: red("◉"), text: red("Sleeping · last run failed") };
+    if (row.status === "pending") return { icon: dim("■"), text: dim("Running · starting") };
+    if (row.status === "retrying") return { icon: yellow("■"), text: yellow("Running · retrying") };
     return { icon: green("■"), text: green("Running") };
   };
 

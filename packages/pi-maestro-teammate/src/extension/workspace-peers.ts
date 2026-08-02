@@ -34,7 +34,7 @@ const WORKSPACE_ID_PATTERN = /^[a-f0-9]{64}$/;
 const CORRELATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const NAME_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
-export type WorkspaceAgentStatus = "pending" | "running" | "retrying" | "sleeping";
+export type WorkspaceAgentStatus = "running" | "sleeping";
 export type WorkspaceSettledStatus = "completed" | "failed" | "terminated";
 export type WorkspacePeerCommandAction = "steer" | "follow_up";
 export type WorkspacePeerResponseStatus = "accepted" | "rejected" | "error" | "expired";
@@ -60,6 +60,12 @@ export interface WorkspaceAgentSnapshot {
   name?: string;
   agent: string;
   status: WorkspaceAgentStatus;
+  phase?: string;
+  lastOutcome?: {
+    status: WorkspaceSettledStatus;
+    message?: string;
+    settledAt: number;
+  };
   startedAt: number;
   lastActivityAt: number;
   resultReadyAt?: number;
@@ -348,7 +354,9 @@ export async function writePrivateJsonAtomic(path: string, value: unknown, maxim
       await chmod(path, 0o600);
     } catch (error) {
       const code = (error as NodeJS.ErrnoException).code;
-      if (code !== "ENOSYS" && code !== "EPERM" && code !== "EINVAL") throw error;
+      // TEST-003: ENOENT — a consumer may read and delete the file between
+      // rename and chmod; the write already succeeded, so tolerate it.
+      if (code !== "ENOSYS" && code !== "EPERM" && code !== "EINVAL" && code !== "ENOENT") throw error;
     }
   } catch (error) {
     await handle?.close().catch(() => undefined);
@@ -379,6 +387,11 @@ function validateAgent(value: unknown): WorkspaceAgentSnapshot | undefined {
     || !boundedInteger(value.startedAt)
     || !boundedInteger(value.lastActivityAt)
     || !optional(value.name, (candidate): candidate is string => boundedString(candidate, 256))
+    || !optional(value.phase, (candidate): candidate is string => boundedString(candidate, 64))
+    || !optional(value.lastOutcome, (candidate): candidate is Record<string, unknown> => isRecord(candidate)
+      && ["completed", "failed", "terminated"].includes(String(candidate.status))
+      && boundedInteger(candidate.settledAt)
+      && optional(candidate.message, (message): message is string => boundedString(message, MAX_SUMMARY)))
     || !optional(value.resultReadyAt, boundedInteger)
     || !optional(value.summary, (candidate): candidate is string => boundedString(candidate, MAX_SUMMARY))
     || !optional(value.objective, (candidate): candidate is string => boundedString(candidate, MAX_SUMMARY))
@@ -393,7 +406,15 @@ function validateAgent(value: unknown): WorkspaceAgentSnapshot | undefined {
     correlationId: value.correlationId,
     ...(value.name === undefined ? {} : { name: value.name }),
     agent: value.agent,
-    status: value.status as WorkspaceAgentStatus,
+    status: value.status === "sleeping" ? "sleeping" : "running",
+    ...(value.phase === undefined ? {} : { phase: value.phase }),
+    ...(value.lastOutcome === undefined ? {} : {
+      lastOutcome: {
+        status: value.lastOutcome.status as WorkspaceSettledStatus,
+        ...(value.lastOutcome.message === undefined ? {} : { message: value.lastOutcome.message as string }),
+        settledAt: value.lastOutcome.settledAt as number,
+      },
+    }),
     startedAt: value.startedAt,
     lastActivityAt: value.lastActivityAt,
     ...(value.resultReadyAt === undefined ? {} : { resultReadyAt: value.resultReadyAt }),
@@ -411,7 +432,7 @@ function validateSettled(value: unknown): WorkspaceSettledSnapshot | undefined {
   if (!isRecord(value)
     || !safeCorrelationId(value.correlationId)
     || !boundedString(value.agent, 64)
-    || !["completed", "failed"].includes(String(value.status))
+    || !["completed", "failed", "terminated"].includes(String(value.status))
     || !boundedInteger(value.settledAt)
     || !optional(value.name, (candidate): candidate is string => boundedString(candidate, 256))
     || !optional(value.summary, (candidate): candidate is string => boundedString(candidate, MAX_SUMMARY))) return undefined;
@@ -822,11 +843,17 @@ function delay(milliseconds: number, signal?: AbortSignal): Promise<void> {
       reject(signal.reason ?? new Error("aborted"));
       return;
     }
-    const timer = setTimeout(resolveDelay, milliseconds);
-    signal?.addEventListener("abort", () => {
+    // PERFSEC-002: Remove the abort listener when the timer fires normally
+    // so polling loops don't accumulate listeners on a long-lived signal.
+    const onAbort = (): void => {
       clearTimeout(timer);
-      reject(signal.reason ?? new Error("aborted"));
-    }, { once: true });
+      reject(signal?.reason ?? new Error("aborted"));
+    };
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolveDelay();
+    }, milliseconds);
+    signal?.addEventListener("abort", onAbort, { once: true });
   });
 }
 

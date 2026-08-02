@@ -52,6 +52,10 @@
       "types": "./types/public/v1/model-routing.d.ts",
       "default": "./src/public/v1/model-routing.ts"
     },
+    "./v1/mailbox": {
+      "types": "./types/public/v1/mailbox.d.ts",
+      "default": "./src/public/v1/mailbox.ts"
+    },
     "./v1/observation": {
       "types": "./types/public/v1/observation.d.ts",
       "default": "./src/public/v1/observation.ts"
