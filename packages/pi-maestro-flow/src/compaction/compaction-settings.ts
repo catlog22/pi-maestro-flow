@@ -38,6 +38,23 @@ export interface CacheCompactionSettings {
   enabled: boolean;
 }
 
+export interface LosslessCompactionConfigPatch {
+  enabled?: boolean;
+}
+
+/**
+ * Format-native lossless folding (ported from headroom lossless_compaction).
+ *
+ * Defaults ON: unlike the other soft-layer toggles it only ever *shrinks*
+ * tool output without losing information (run collapse, grep heading folding,
+ * diff index stripping), and every transform self-checks its round-trip, so
+ * the failure mode is "kept the original bytes" rather than corruption or
+ * inflation.
+ */
+export interface LosslessCompactionSettings {
+  enabled: boolean;
+}
+
 export interface SoftCompactionConfigPatch {
   enabled?: boolean;
   nudgeRatio?: number;
@@ -45,6 +62,7 @@ export interface SoftCompactionConfigPatch {
   pruneTargetRatio?: number;
   velocity?: VelocityCompactionConfigPatch;
   cache?: CacheCompactionConfigPatch;
+  lossless?: LosslessCompactionConfigPatch;
 }
 
 export interface SoftCompactionSettings {
@@ -54,6 +72,7 @@ export interface SoftCompactionSettings {
   pruneTargetRatio: number;
   velocity: VelocityCompactionSettings;
   cache: CacheCompactionSettings;
+  lossless: LosslessCompactionSettings;
 }
 
 /**
@@ -65,6 +84,8 @@ export interface SoftCompactionSettings {
  * pay for the cached prefix they invalidate, so the failure mode is "kept a
  * cheap prefix" rather than "compacted unexpectedly". Measured worst case for
  * the ungated path was 2.2K tokens saved against 81K invalidated.
+ *
+ * `lossless` defaults ON: zero-risk format folding (see LosslessCompactionSettings).
  */
 export function createDefaultSoftCompaction(): SoftCompactionSettings {
   return {
@@ -74,6 +95,7 @@ export function createDefaultSoftCompaction(): SoftCompactionSettings {
     pruneTargetRatio: 0.7,
     velocity: { enabled: false, epochsToCritical: 3, minFullness: 0.7 },
     cache: { enabled: true },
+    lossless: { enabled: true },
   };
 }
 
@@ -163,6 +185,8 @@ function readRawSoft(value: unknown): SoftCompactionConfigPatch | undefined {
   if (velocity) soft.velocity = velocity;
   const cache = readRawCache(value.cache);
   if (cache) soft.cache = cache;
+  const lossless = readRawLossless(value.lossless);
+  if (lossless) soft.lossless = lossless;
   return Object.keys(soft).length > 0 ? soft : undefined;
 }
 
@@ -183,6 +207,13 @@ function readRawCache(value: unknown): CacheCompactionConfigPatch | undefined {
   const cache: CacheCompactionConfigPatch = {};
   if (typeof value.enabled === "boolean") cache.enabled = value.enabled;
   return Object.keys(cache).length > 0 ? cache : undefined;
+}
+
+function readRawLossless(value: unknown): LosslessCompactionConfigPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const lossless: LosslessCompactionConfigPatch = {};
+  if (typeof value.enabled === "boolean") lossless.enabled = value.enabled;
+  return Object.keys(lossless).length > 0 ? lossless : undefined;
 }
 
 function ratioNumber(value: unknown): number | undefined {
@@ -243,6 +274,9 @@ export function resolveEffectiveCompactionSettings(
       }
       if (patch.soft.cache !== undefined) {
         if (patch.soft.cache.enabled !== undefined) soft.cache.enabled = patch.soft.cache.enabled;
+      }
+      if (patch.soft.lossless !== undefined) {
+        if (patch.soft.lossless.enabled !== undefined) soft.lossless.enabled = patch.soft.lossless.enabled;
       }
       source.soft = src;
     }

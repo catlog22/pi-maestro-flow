@@ -3609,7 +3609,7 @@ test("L2 spill replacement is byte-identical after a session-state restore", asy
   const firstReplacement = JSON.stringify(first?.[1]);
   assert.match(firstReplacement, /<persisted-output>/);
   const persisted = appended.at(-1);
-  assert.equal((persisted?.data as { version?: number }).version, 4);
+  assert.equal((persisted?.data as { version?: number }).version, 5);
 
   const resumedGuard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
     readSettings: () => settings,

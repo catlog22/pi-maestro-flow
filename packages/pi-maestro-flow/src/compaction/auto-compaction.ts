@@ -46,6 +46,10 @@ import {
   cleanupSpillDir,
   validateSpillPath,
 } from "./tool-result-spill.ts";
+import {
+  compactLossless,
+  type LosslessKind,
+} from "./lossless.ts";
 
 const PROTECTED_THRESHOLD_CHARS = 500;
 const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find"]);
@@ -71,7 +75,7 @@ const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
 export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
 const PENDING_INTENT_ENTRY_TYPE = "maestro-auto-compaction-intent";
-const PRUNE_STATE_VERSION = 4;
+const PRUNE_STATE_VERSION = 5;
 
 export type CompactionSettings = Pick<
   EffectiveCompactionSettings,
@@ -101,7 +105,7 @@ export interface PruneManifestEntry {
   writerId?: string;
 }
 
-export type PruneLevel = "pruned" | "spill" | "minimal";
+export type PruneLevel = "pruned" | "spill" | "minimal" | "lossless";
 
 interface PersistedPruneEntry {
   callId: string;
@@ -1254,10 +1258,33 @@ export function applyContextPressurePolicy(
     cacheGateActive = soft.cache.enabled && !initiallyCritical && !compactionPending
       && latestCacheHitRatio(messages) !== undefined;
     const suffixTokens = cacheGateActive ? suffixTokenSums(transformed) : undefined;
+    // Tier 0 — lossless folding first (reversible, no information loss): it
+    // shrinks output without a decision, and whatever it saves lowers the
+    // pressure so later lossy passes may not even need to run. Shares the same
+    // cache gate: folding a message invalidates the provider prefix from its
+    // index on, exactly like a prune does.
+    let effectiveForLossy = initial;
+    if (soft.lossless?.enabled ?? true) {
+      const lossless = runPrunePass({
+        transformed,
+        pruneManifest,
+        frontierStart,
+        pruneTarget,
+        effectiveTokens: initial,
+        usageEpoch,
+        selector: tryLosslessFold,
+        suffixTokens,
+        level: "lossless",
+      });
+      newlySavedTokens += lossless.savedTokens;
+      savedTokens += lossless.savedTokens;
+      prunedToolResults += lossless.prunedToolResults;
+      effectiveForLossy = lossless.effectiveTokens;
+    }
     // Graduated eviction, cheapest/most-reversible first: pass 1 strips replayable
     // tools (re-runnable); pass 2 strips bulk data tools (bash/edit/write) only if
     // pressure persists. Control tools (e.g. todo) are in neither set and survive.
-    const replayable = runPrunePass({ transformed, pruneManifest, frontierStart, pruneTarget, effectiveTokens: initial, usageEpoch, selector: replaceableToolResult, suffixTokens });
+    const replayable = runPrunePass({ transformed, pruneManifest, frontierStart, pruneTarget, effectiveTokens: effectiveForLossy, usageEpoch, selector: replaceableToolResult, suffixTokens });
     newlySavedTokens += replayable.savedTokens;
     savedTokens += replayable.savedTokens;
     prunedToolResults += replayable.prunedToolResults;
@@ -1374,7 +1401,7 @@ function getRecordedPrune(manifest: PruneManifest, callId: string): PruneManifes
 }
 
 function isPruneLevel(value: unknown): value is PruneLevel {
-  return value === "pruned" || value === "spill" || value === "minimal";
+  return value === "pruned" || value === "spill" || value === "minimal" || value === "lossless";
 }
 
 /**
@@ -1392,6 +1419,12 @@ function recordPrune(manifest: PruneManifest, callId: string, entry: PruneManife
 
 function restorePruneReplacement(message: AgentMessage, persisted: PersistedPruneEntry): AgentMessage | undefined {
   if (persisted.level === "pruned") return pruneToolResult(message);
+  if (persisted.level === "lossless") {
+    // Folding is a deterministic pure function of the content: recompute is
+    // recovery. If the message changed (digest mismatch is checked upstream)
+    // or folding no longer gains, fall back to the ordinary prune path.
+    return tryLosslessFold(message) ?? pruneToolResult(message);
+  }
   if (persisted.level === "minimal") {
     if (!persisted.spillPath) return undefined;
     return minimalSpillReplacement(message, persisted.spillPath);
@@ -1595,7 +1628,7 @@ function loadPersistedPrunes(
       restored.set(record.callId, {
         callId: record.callId,
         level: record.level,
-        ...(data.version === 4 && record.hasSpill === true && typeof record.writerId === "string"
+        ...(data.version >= 4 && record.hasSpill === true && typeof record.writerId === "string"
           ? { spillPath: resolveSpillPath(String(data.sessionId ?? sessionId ?? "unknown"), record.callId, record.writerId) }
           : typeof record.spillPath === "string" ? { spillPath: record.spillPath } : {}),
         ...(typeof record.introducedAtUsageEpoch === "string" ? { introducedAtUsageEpoch: record.introducedAtUsageEpoch } : {}),
@@ -1842,6 +1875,8 @@ interface PrunePassInput {
   priorSavings?: number;
   /** Suffix token sums of the pre-prune array; index i holds tokens[i..end]. */
   suffixTokens?: number[];
+  /** Manifest level recorded for candidates this pass applies. */
+  level?: PruneLevel;
 }
 
 interface PruneCandidate {
@@ -1935,7 +1970,7 @@ function runPrunePass(input: PrunePassInput): { savedTokens: number; prunedToolR
       savedTokens: candidate.saved,
       introducedAtUsageEpoch: usageEpoch,
       contentDigest: candidate.contentDigest,
-      level: "pruned",
+      level: input.level ?? "pruned",
     });
     savedTokens += candidate.saved;
     prunedToolResults++;
@@ -1950,6 +1985,56 @@ function isProtectedToolResult(message: AgentMessage): boolean {
   if (record.isError === true) return true;
   if (typeof record.toolName === "string" && PROTECTED_TOOL_NAMES.has(record.toolName.toLowerCase())) return true;
   return extractTextContent(message).length < PROTECTED_THRESHOLD_CHARS;
+}
+
+/** Map a tool name to the lossless compaction kind it most resembles. */
+function losslessKindForTool(toolName: string | undefined): LosslessKind {
+  switch (toolName?.toLowerCase()) {
+    case "grep":
+    case "ripgrep":
+    case "search":
+      return "search";
+    case "bash":
+    case "shell":
+    case "exec":
+      return "log";
+    case "diff":
+    case "git-diff":
+      return "diff";
+    case "find":
+    case "ls":
+      return "paths";
+    default:
+      return "text";
+  }
+}
+
+/**
+ * Tier-0 lossless folding (algorithm ported from headroom lossless_compaction,
+ * Apache-2.0). Reversibly folds format-native redundancy — log run collapse,
+ * grep heading folding, diff index stripping — with a runtime round-trip
+ * self-check inside compactLossless, so it never loses information and never
+ * inflates. Returns undefined when nothing is gained; the caller falls through
+ * to the lossy prune path.
+ */
+function tryLosslessFold(message: AgentMessage): AgentMessage | undefined {
+  if (isProtectedToolResult(message)) return undefined;
+  const record = message as MessageRecord;
+  const text = extractTextContent(message);
+  if (text.length < PROTECTED_THRESHOLD_CHARS) return undefined;
+  const folded = compactLossless(text, losslessKindForTool(typeof record.toolName === "string" ? record.toolName : undefined));
+  if (folded === text || folded.length >= text.length) return undefined;
+  const replacement = {
+    ...message,
+    content: [{ type: "text", text: folded }],
+  } as AgentMessage;
+  // Token guard in addition to the char guard: a shorter string can still
+  // tokenize larger (marker words vs. raw data). runPrunePass re-checks, but
+  // failing here keeps lossless entries out of the manifest entirely.
+  const before = estimateMessageTokens(message);
+  const after = estimateMessageTokens(replacement);
+  if (after >= before) return undefined;
+  return replacement;
 }
 
 function replaceableToolResult(message: AgentMessage): AgentMessage | undefined {
@@ -2065,6 +2150,10 @@ async function upgradeNewPrunesWithSpill(
     if (!callId || !newCallIds.has(callId)) continue;
     const entry = pruneManifest.get(callId);
     if (!entry || entry.spillPath !== undefined) continue;
+    // Lossless folds carry no recoverability need — the folded text IS the
+    // full content, reversibly so. Spilling it would replace a complete
+    // (folded) payload with a 1.5K preview for no gain.
+    if ((entry.level ?? "pruned") === "lossless") continue;
     const original = originalsByCallId.get(callId);
     if (!original) continue;
     const text = extractTextContent(original);
