@@ -71,6 +71,7 @@ export interface SidebarController {
 	beginResize(): boolean;
 	isResizing(): boolean;
 	getWidth(): number;
+	setWidth(width: number): void;
 	requestRender(): void;
 	dispose(): void;
 }
@@ -299,6 +300,7 @@ export function createSidebarController(options: SidebarControllerOptions): Side
 		beginResize: split.beginResize,
 		isResizing: split.isResizing,
 		getWidth: split.getSidebarWidth,
+		setWidth: split.setSidebarWidth,
 		requestRender() {
 			safely(() => requestOverlayRender?.());
 			safely(split.requestRender);

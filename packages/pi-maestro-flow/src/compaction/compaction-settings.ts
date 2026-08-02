@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { lockSettingsResource } from "../settings/resource-lock.ts";
 import { effectiveReserveTokens } from "./compaction-threshold.ts";
 
 export const DEFAULT_RESERVE_TOKENS = 16_384;
@@ -367,7 +368,11 @@ const writeQueues = new Map<string, Promise<void>>();
 
 function enqueueWrite(path: string, fn: () => Promise<void>): Promise<void> {
   const prev = writeQueues.get(path) ?? Promise.resolve();
-  const next = prev.catch(() => undefined).then(fn);
+  const next = prev.catch(() => undefined).then(async () => {
+    const release = await lockSettingsResource(path);
+    try { await fn(); }
+    finally { await release(); }
+  });
   const settled = next.catch(() => undefined);
   writeQueues.set(path, settled);
   void settled.finally(() => {

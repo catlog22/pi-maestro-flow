@@ -242,7 +242,11 @@ test("root graph budget rejection happens before registry mutation or spawn", as
     assert.equal(result.isError, true);
     assert.match(result.content[0].text, /2 more requested.*max 1/i);
     assert.equal(spawns, 0);
-    assert.equal(emitted.length, 0);
+    assert.deepEqual(
+      emitted.filter(({ event }) => event.startsWith("teammate:")),
+      [],
+      "budget rejection must not mutate teammate lifecycle state; extension-level settings discovery is independent",
+    );
   } finally {
     if (previous === undefined) delete process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS;
     else process.env.PI_TEAMMATE_MAX_ACTIVE_AGENTS = previous;

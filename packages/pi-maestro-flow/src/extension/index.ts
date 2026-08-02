@@ -55,6 +55,7 @@ import { registerMaestroProviders } from "../providers/provider-registry.ts";
 import { registerApiProviderConfigs } from "../providers/api-provider-config.ts";
 import { registerExploreConfigManager } from "../providers/explore-config-manager.ts";
 import { registerModelFailover } from "../providers/model-failover.ts";
+import { showModelFailoverOverlay } from "../tui/model-failover-settings.ts";
 import registerMcpAdapter from "../mcp/index.ts";
 import {
   initGoal,
@@ -187,9 +188,10 @@ import {
   compactionRequestFromInstructions,
   runObservedCompaction,
 } from "../compaction/compaction-arbiter.ts";
-import { registerCompactionSettingsCommand } from "../tui/compaction-settings.ts";
+import { registerCompactionSettingsCommand, showCompactionSettingsOverlay } from "../tui/compaction-settings.ts";
 import { registerMaestroPackageResources } from "../resources/maestro-package.ts";
-import { registerSkillManager } from "../skills/skill-manager.ts";
+import { registerSkillManager, runSkillManager } from "../skills/skill-manager.ts";
+import { SkillManagerStore } from "../skills/skill-manager-store.ts";
 import { registerIntelligenceTools, shutdownIntelligenceTools } from "../tools/intelligence.ts";
 import { registerFff } from "../tools/fff.ts";
 import { registerBashBg } from "../tools/bash-bg.ts";
@@ -203,6 +205,12 @@ import {
   type TeammatePermissionBroker,
 } from "pi-maestro-teammate/v1/child-extensions";
 import { TEAMMATE_STARTED_EVENT, TEAMMATE_MESSAGE_EVENT, TEAMMATE_COMPLETE_EVENT } from "pi-maestro-teammate/v1/types";
+import { sharedModelCircuitBreaker } from "pi-maestro-teammate/v1/retry";
+import { createFlowSettingsProvider, registerFlowSettingsProvider } from "../settings/flow-settings-provider.ts";
+import {
+  createApiManagerSettingsProvider,
+  registerApiManagerSettingsProvider,
+} from "../settings/api-manager-settings-provider.ts";
 
 interface MaestroState {
   baseCwd: string;
@@ -430,12 +438,28 @@ export function appendChineseResponsePrompt(systemPrompt: string): string {
   return `${systemPrompt}\n\n${CHINESE_RESPONSE_PROMPT}`;
 }
 
+export interface ChineseResponseModeHandle {
+  isEnabled(): boolean;
+  setEnabled(value: boolean, ctx: ExtensionContext): void;
+  toggle(ctx: ExtensionContext): void;
+}
+
 export function registerChineseResponseMode(
   pi: ExtensionAPI,
   options: { homeDir?: string } = {},
-): { isEnabled: () => boolean } {
+): ChineseResponseModeHandle {
   let enabled = false;
   const stateHomeDir = options.homeDir ?? homedir();
+  const setEnabled = (value: boolean, ctx: ExtensionContext): void => {
+    enabled = value;
+    pi.appendEntry(CHINESE_RESPONSE_STATE_ENTRY, { enabled });
+    try {
+      saveChineseGlobalState(enabled, stateHomeDir);
+      ctx.ui.notify(`中文回复模式已${enabled ? "开启" : "关闭"}（全局持久化）。`, "info");
+    } catch {
+      ctx.ui.notify(`中文回复模式已${enabled ? "开启" : "关闭"}，但全局配置保存失败。`, "warning");
+    }
+  };
 
   pi.registerCommand("chinese", {
     description: "切换中文回复模式，支持 on、off、status",
@@ -450,18 +474,14 @@ export function registerChineseResponseMode(
         return;
       }
 
-      enabled = action === "on" || action === "enable"
-        ? true
-        : action === "off" || action === "disable"
-          ? false
-          : !enabled;
-      pi.appendEntry(CHINESE_RESPONSE_STATE_ENTRY, { enabled });
-      try {
-        saveChineseGlobalState(enabled, stateHomeDir);
-        ctx.ui.notify(`中文回复模式已${enabled ? "开启" : "关闭"}（全局持久化）。`, "info");
-      } catch {
-        ctx.ui.notify(`中文回复模式已${enabled ? "开启" : "关闭"}，但全局配置保存失败。`, "warning");
-      }
+      setEnabled(
+        action === "on" || action === "enable"
+          ? true
+          : action === "off" || action === "disable"
+            ? false
+            : !enabled,
+        ctx,
+      );
     },
   });
 
@@ -487,7 +507,11 @@ export function registerChineseResponseMode(
     return { systemPrompt: appendChineseResponsePrompt(event.systemPrompt) };
   });
 
-  return { isEnabled: () => enabled };
+  return {
+    isEnabled: () => enabled,
+    setEnabled,
+    toggle: (ctx) => setEnabled(!enabled, ctx),
+  };
 }
 
 export default function registerMaestroExtension(pi: ExtensionAPI): void {
@@ -589,6 +613,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   let maestroUiSessionActive = false;
   let preserveCompletedTurnFromNativeThreshold = false;
   let teammateAttachTodoIsolated = false;
+  let flowSettingsContext: ExtensionContext | undefined;
   const maestroUiPublisher = new MaestroUiPublisher({
     read: () => ({
       workflow: deriveWorkflowViewModel(workflowSnapshotForUi()),
@@ -607,8 +632,9 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   }
 
   // Register dynamic providers from cli-tools.json
+  let apiProviderHandle: ReturnType<typeof registerApiProviderConfigs> | undefined;
   try {
-    registerApiProviderConfigs(pi);
+    apiProviderHandle = registerApiProviderConfigs(pi);
     registerExploreConfigManager(pi);
     registerMaestroProviders(pi);
   } catch (error) {
@@ -627,8 +653,9 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
     );
   }
 
+  let mcpAdapterHandle: ReturnType<typeof registerMcpAdapter> | undefined;
   try {
-    registerMcpAdapter(pi);
+    mcpAdapterHandle = registerMcpAdapter(pi);
   } catch (error) {
     // MCP 注册失败不得阻断 Maestro 现有工具与 Provider。
     console.error(
@@ -1944,6 +1971,68 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       goalCompactionCancelled();
     },
   });
+  const requireFlowSettingsContext = (surface: string): ExtensionContext | undefined => {
+    const ctx = flowSettingsContext;
+    if (!ctx) console.error(`[maestro] Cannot open ${surface}: no active Flow session context`);
+    else if (!ctx.hasUI) ctx.ui.notify(`${surface} requires interactive TUI mode.`, "warning");
+    return ctx?.hasUI ? ctx : undefined;
+  };
+  const flowSettingsProvider = createFlowSettingsProvider({
+    getAgentResponseLanguage: () => chineseResponseMode.isEnabled() ? "zh-CN" : "default",
+    actions: {
+      "compaction.manage": async () => {
+        const ctx = requireFlowSettingsContext("Compaction settings");
+        if (ctx) await showCompactionSettingsOverlay(ctx as ExtensionCommandContext);
+      },
+      "failover.manage": async () => {
+        const ctx = requireFlowSettingsContext("Model failover settings");
+        if (ctx) await showModelFailoverOverlay(ctx, sharedModelCircuitBreaker);
+      },
+      "responseLanguage.manage": () => {
+        const ctx = requireFlowSettingsContext("Agent response language");
+        if (ctx) chineseResponseMode.toggle(ctx);
+      },
+      "permissions.manage": () => {
+        const ctx = requireFlowSettingsContext("Permissions");
+        if (ctx) ctx.ui.notify(permissionController.summary(effectivePermissionMode(approvalMode)), "info");
+      },
+      "skills.manage": async () => {
+        const ctx = requireFlowSettingsContext("Skill manager");
+        if (!ctx) return;
+        const result = await runSkillManager(ctx, new SkillManagerStore(ctx.cwd));
+        if (result.configChanged) ctx.ui.notify("Skill changes will apply after the extension reloads.", "info");
+      },
+      "mcp.manage": async () => {
+        const ctx = requireFlowSettingsContext("MCP manager");
+        if (ctx && mcpAdapterHandle) await mcpAdapterHandle.openManager(ctx);
+        else if (ctx) ctx.ui.notify("MCP adapter is unavailable.", "warning");
+      },
+      "hooks.manage": async () => {
+        const ctx = requireFlowSettingsContext("Hooks manager");
+        if (ctx) await hookAdapter.openSettings(ctx);
+      },
+    },
+  });
+  registerFlowSettingsProvider(pi.events, flowSettingsProvider);
+  const openApiManager = async (args: string, surface: string): Promise<void> => {
+    const ctx = requireFlowSettingsContext(surface);
+    if (ctx && apiProviderHandle) await apiProviderHandle.openManager(ctx as ExtensionCommandContext, args);
+    else if (ctx) ctx.ui.notify("API provider manager is unavailable.", "warning");
+  };
+  const apiManagerSettingsProvider = createApiManagerSettingsProvider({
+    actions: {
+      "api.manage": () => openApiManager("", "API provider manager"),
+      "api.configure": () => openApiManager("configure", "API provider editor"),
+      "api.retry": () => openApiManager("retry", "API retry settings"),
+      "api.list": () => openApiManager("list", "API provider overview"),
+    },
+  });
+  registerApiManagerSettingsProvider(pi.events, apiManagerSettingsProvider);
+  pi.on("session_start", (_event, ctx) => { flowSettingsContext = ctx; });
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (flowSettingsContext === ctx) flowSettingsContext = undefined;
+  });
+
   const teammatePermissionBroker: TeammatePermissionBroker = async (call, ctx) => {
     const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
     if (planBlock) return { action: "deny", reason: planBlock.reason };

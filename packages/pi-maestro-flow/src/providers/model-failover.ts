@@ -3,6 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
 import {
   analyzeAttachedImage,
   isMultimodalModel,
@@ -97,37 +98,42 @@ export function loadModelFailoverConfig(cwd: string, homeDir = os.homedir()): Mo
 
 export function saveProjectModelFailoverConfig(cwd: string, config: ModelFailoverConfig): void {
   const filePath = getProjectModelFailoverPath(cwd);
-  let existing: Record<string, unknown> = {};
-  if (fs.existsSync(filePath)) {
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
-    } catch (error) {
-      throw new Error(`Cannot save over invalid project model failover config: ${error instanceof Error ? error.message : String(error)}`);
-    }
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-      throw new Error("Cannot save over invalid project model failover config: expected a JSON object");
-    }
-    existing = parsed as Record<string, unknown>;
-  }
-
-  const fallbackModels = Object.fromEntries(Object.entries(config.fallbackModels).map(([model, chain]) => [
-    model,
-    [...new Set(chain.filter((candidate) => candidate !== model))],
-  ]));
-  const next = {
-    ...existing,
-    enabled: config.enabled,
-    fallbackModels,
-  };
-  fs.mkdirSync(path.dirname(filePath), { recursive: true });
-  const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  const release = lockSettingsResourceSync(filePath);
   try {
-    fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, "utf8");
-    fs.renameSync(temporary, filePath);
-  } catch (error) {
-    try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
-    throw error;
+    let existing: Record<string, unknown> = {};
+    if (fs.existsSync(filePath)) {
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(fs.readFileSync(filePath, "utf8"));
+      } catch (error) {
+        throw new Error(`Cannot save over invalid project model failover config: ${error instanceof Error ? error.message : String(error)}`);
+      }
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        throw new Error("Cannot save over invalid project model failover config: expected a JSON object");
+      }
+      existing = parsed as Record<string, unknown>;
+    }
+
+    const fallbackModels = Object.fromEntries(Object.entries(config.fallbackModels).map(([model, chain]) => [
+      model,
+      [...new Set(chain.filter((candidate) => candidate !== model))],
+    ]));
+    const next = {
+      ...existing,
+      enabled: config.enabled,
+      fallbackModels,
+    };
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    const temporary = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      fs.writeFileSync(temporary, `${JSON.stringify(next, null, 2)}\n`, "utf8");
+      fs.renameSync(temporary, filePath);
+    } catch (error) {
+      try { fs.rmSync(temporary, { force: true }); } catch { /* best effort */ }
+      throw error;
+    }
+  } finally {
+    release();
   }
 }
 

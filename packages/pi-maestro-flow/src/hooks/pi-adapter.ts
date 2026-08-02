@@ -77,6 +77,7 @@ interface HookState {
 }
 
 export interface CodexHookAdapter {
+  openSettings(ctx: ExtensionContext): Promise<void>;
   beforeToolCall(
     call: PermissionToolCall & { toolCallId?: string },
     ctx: ExtensionContext,
@@ -476,7 +477,14 @@ export function registerCodexHookAdapter(pi: ExtensionAPI, options: AdapterOptio
     pi.sendUserMessage(reason, { deliverAs: "followUp" });
   });
 
-  return { beforeToolCall, requestPermission };
+  return {
+    async openSettings(ctx) {
+      await reload(ctx, false);
+      await runHookInterface(ctx, !state.loaded?.exists || !state.loaded.hash);
+    },
+    beforeToolCall,
+    requestPermission,
+  };
 }
 
 async function showHookReviewOverlay(

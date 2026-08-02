@@ -9,11 +9,14 @@ import test from "node:test";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const teammateRoot = resolve(packageRoot, "..", "pi-maestro-teammate");
+const settingsCoreRoot = resolve(packageRoot, "..", "pi-maestro-settings-core");
 const require = createRequire(import.meta.url);
+const localFlowPackage = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
+const piSdkVersion = localFlowPackage.devDependencies["@earendil-works/pi-coding-agent"];
 const npmCommand = [process.execPath, process.env.npm_execpath ?? require.resolve("npm/bin/npm-cli.js")];
 const packTimeout = 360_000;
 const installTimeout = 600_000;
-const testTimeout = packTimeout * 2 + installTimeout + 120_000;
+const testTimeout = packTimeout * 3 + installTimeout + 120_000;
 
 test("packed child Pi discovers shared Todo without root-only lifecycle tools", { timeout: testTimeout }, () => {
   const base = process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
@@ -25,6 +28,13 @@ test("packed child Pi discovers shared Todo without root-only lifecycle tools", 
   for (const path of [consumer, workspace, home, prefix]) mkdirSync(path, { recursive: true });
 
   try {
+    const settingsCorePack = parseTrailingJson(run(
+      npmCommand,
+      ["pack", "--json", "--pack-destination", root],
+      settingsCoreRoot,
+      process.env,
+      packTimeout,
+    ).stdout);
     const teammatePack = parseTrailingJson(run(
       npmCommand,
       ["pack", "--json", "--pack-destination", root],
@@ -39,8 +49,10 @@ test("packed child Pi discovers shared Todo without root-only lifecycle tools", 
       process.env,
       packTimeout,
     ).stdout);
+    const settingsCoreTarball = join(root, settingsCorePack[0].filename);
     const teammateTarball = join(root, teammatePack[0].filename);
     const flowTarball = join(root, flowPack[0].filename);
+    assert.equal(existsSync(settingsCoreTarball), true);
     assert.equal(existsSync(teammateTarball), true);
     assert.equal(existsSync(flowTarball), true);
 
@@ -53,16 +65,22 @@ test("packed child Pi discovers shared Todo without root-only lifecycle tools", 
     };
     run(npmCommand, [
       "install",
+      settingsCoreTarball,
       teammateTarball,
       flowTarball,
-      "@earendil-works/pi-coding-agent@0.74.0",
+      `@earendil-works/pi-agent-core@${piSdkVersion}`,
+      `@earendil-works/pi-ai@${piSdkVersion}`,
+      `@earendil-works/pi-coding-agent@${piSdkVersion}`,
+      `@earendil-works/pi-tui@${piSdkVersion}`,
       "--no-audit",
       "--no-fund",
     ], consumer, env, installTimeout);
 
     const installedFlow = join(consumer, "node_modules", "pi-maestro-flow");
+    const installedSettingsCore = join(consumer, "node_modules", "pi-maestro-settings-core");
     const installedTeammate = join(consumer, "node_modules", "pi-maestro-teammate");
     assert.equal(lstatSync(installedFlow).isSymbolicLink(), false);
+    assert.equal(lstatSync(installedSettingsCore).isSymbolicLink(), false);
     assert.equal(lstatSync(installedTeammate).isSymbolicLink(), false);
 
     const evidencePath = join(consumer, "child-tools.json");

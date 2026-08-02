@@ -1,5 +1,5 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type ExtensionAPI, type ExtensionCommandContext, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import { AgentsStore, type CompletePayload, type MessagePayload, type StartedPayload } from "./agents-store.ts";
@@ -7,6 +7,14 @@ import { statusText, titleFor, workingMessage, type AmbientState } from "./ambie
 import { BashBgStore } from "./bash-bg-store.ts";
 import { MaestroStore } from "./maestro-store.ts";
 import { createSidebarController, type SidebarController } from "./sidebar-controller.ts";
+import { COCKPIT_SPLIT_PANE_MARKER } from "./split-pane.ts";
+import {
+	COCKPIT_EDITOR_BOTTOM_MARKER,
+	EDITOR_BOTTOM_WIDGET_KEY,
+	createEditorBottomController,
+	createEditorBottomSentinel,
+	type EditorBottomController,
+} from "./editor-bottom.ts";
 import { BashBgOverlay } from "./bash-bg-overlay.ts";
 import { renderBashBgSummary } from "./bash-bg-widget.ts";
 import { registerQuietTools } from "./quiet-tools.ts";
@@ -21,6 +29,10 @@ import { collectExtensionStatuses } from "./extension-status.ts";
 import { ANIMATION_PERIOD_MS, resolveGlyphs, spinFrame } from "./icons.ts";
 import { ensureConfigExists, loadConfig, saveConfig } from "./config.ts";
 import { applyRow, buildRows, rowKeyForAccel, type SaveState } from "./settings-view.ts";
+import { createCockpitSettingsProvider, registerCockpitSettingsProvider } from "./settings/cockpit-provider.ts";
+import { SettingsLocaleState, getMaestroUiPreferencesPath } from "./settings/locale-state.ts";
+import { SettingsProviderRegistry } from "./settings/registry.ts";
+import { showMaestroSettingsShell } from "./settings/settings-shell.ts";
 import {
 	COCKPIT_MAESTRO_QUERY_EVENT,
 	MAESTRO_UI_SNAPSHOT_EVENT,
@@ -115,10 +127,18 @@ export default function (pi: ExtensionAPI): void {
 	const bashBg = new BashBgStore();
 	const todos = new TodoStore();
 	const maestro = new MaestroStore();
+	const settingsRegistry = new SettingsProviderRegistry({
+		on: (event, handler) => pi.events.on(event, handler),
+		emit: (event, payload) => pi.events.emit(event, payload),
+	});
+	settingsRegistry.start();
+	const settingsLocale = new SettingsLocaleState(getMaestroUiPreferencesPath(getAgentDir()), settingsRegistry);
 	let config: CockpitConfig = structuredClone(DEFAULT_CONFIG);
 	let lastCtx: ExtensionContext | undefined;
+	let settingsCommandCtx: ExtensionCommandContext | undefined;
 	let capturedTui: TUI | undefined;
 	let sidebarController: SidebarController | undefined;
+	let editorBottomController: EditorBottomController | undefined;
 	let dockEffectiveVisible = false;
 	let surfaceState: CockpitSurfaceState = "disabled";
 	let running = false;
@@ -331,6 +351,36 @@ export default function (pi: ExtensionAPI): void {
 		ctx.ui.setWidget(AGENT_WIDGET_KEY, undefined);
 	};
 
+	const ensureEditorBottomController = (ctx: ExtensionContext): EditorBottomController => {
+		if (editorBottomController) return editorBottomController;
+		editorBottomController = createEditorBottomController({
+			onError: (error) => ctx.ui.notify(
+				`Bottom-pinned input disabled: ${error instanceof Error ? error.message : String(error)}`,
+				"warning",
+			),
+		});
+		return editorBottomController;
+	};
+
+	const installEditorBottom = (ctx: ExtensionContext): void => {
+		const controller = ensureEditorBottomController(ctx);
+		ctx.ui.setWidget(
+			EDITOR_BOTTOM_WIDGET_KEY,
+			(tui) => {
+				capturedTui = tui;
+				controller.attach(tui);
+				controller.show();
+				return createEditorBottomSentinel();
+			},
+			{ placement: "aboveEditor" },
+		);
+	};
+
+	const clearEditorBottom = (ctx: ExtensionContext): void => {
+		ctx.ui.setWidget(EDITOR_BOTTOM_WIDGET_KEY, undefined);
+		editorBottomController?.hide();
+	};
+
 	const installWidgets = (ctx: ExtensionContext): void => {
 		ctx.ui.setWidget(
 			STACK_WIDGET_KEY,
@@ -406,6 +456,7 @@ export default function (pi: ExtensionAPI): void {
 
 	const syncSidebarMode = (ctx: ExtensionContext): void => {
 		const controller = ensureSidebarController(ctx);
+		controller.setWidth(config.sidebar.width);
 		if (config.sidebar.mode === "off") {
 			dockEffectiveVisible = false;
 			controller.hide();
@@ -415,10 +466,25 @@ export default function (pi: ExtensionAPI): void {
 		reconcileSurface(ctx);
 	};
 
+	const disposeLayoutControllers = (): void => {
+		const render = capturedTui?.render as (TUI["render"] & Record<symbol, unknown>) | undefined;
+		const editorBottomIsTop = Boolean(render?.[COCKPIT_EDITOR_BOTTOM_MARKER]);
+		const splitPaneIsTop = Boolean(render?.[COCKPIT_SPLIT_PANE_MARKER]);
+		if (editorBottomIsTop && !splitPaneIsTop) {
+			editorBottomController?.dispose();
+			sidebarController?.dispose();
+		} else {
+			sidebarController?.dispose();
+			editorBottomController?.dispose();
+		}
+		sidebarController = undefined;
+		editorBottomController = undefined;
+	};
+
 	const uninstallUi = (ctx: ExtensionContext): void => {
 		dockEffectiveVisible = false;
-		sidebarController?.dispose();
-		sidebarController = undefined;
+		clearEditorBottom(ctx);
+		disposeLayoutControllers();
 		clearWidgets(ctx);
 		ctx.ui.setFooter(undefined);
 		surfaceState = "disabled";
@@ -442,6 +508,8 @@ export default function (pi: ExtensionAPI): void {
 			return;
 		}
 		ctx.ui.setWorkingIndicator({ frames: [] });
+		if (config.pinEditorBottom) installEditorBottom(ctx);
+		else clearEditorBottom(ctx);
 		ctx.ui.setFooter((tui, theme, footerData) => {
 			capturedTui = tui;
 			let observedWidth = tui.terminal.columns;
@@ -584,6 +652,8 @@ export default function (pi: ExtensionAPI): void {
 				// notify unavailable
 			}
 		});
+		settingsLocale.reload();
+		settingsRegistry.emitLocale(settingsLocale.locale);
 		invalidateUsageCache();
 		// Quiet mode: register compact tool renderers and fold thinking blocks.
 		// Tools are normally registered at extension load time (above) so they
@@ -816,6 +886,53 @@ export default function (pi: ExtensionAPI): void {
 		return result.ok;
 	};
 
+	const cockpitSettingsProvider = createCockpitSettingsProvider({
+		getRuntimeConfig: () => config,
+		applyRuntimeConfig: async (nextConfig, changedKeys) => {
+			const previous = config;
+			config = nextConfig;
+			const ctx = lastCtx;
+			if (!ctx || !isTuiContext(ctx)) return;
+			if (previous.enabled !== nextConfig.enabled) {
+				if (nextConfig.enabled) {
+					publishUiOwnership();
+					applyUi(ctx);
+				} else {
+					uninstallUi(ctx);
+					publishUiOwnership();
+				}
+				return;
+			}
+			if (!nextConfig.enabled) return;
+			if (previous.staticMode !== nextConfig.staticMode) {
+				syncTick();
+				thinkingTimer.syncMode();
+			}
+			if (previous.quietMode !== nextConfig.quietMode) {
+				applyQuietMode(ctx, previous.quietMode, nextConfig.quietMode);
+			}
+			if (previous.pinEditorBottom !== nextConfig.pinEditorBottom) {
+				if (nextConfig.pinEditorBottom) installEditorBottom(ctx);
+				else clearEditorBottom(ctx);
+			}
+			if (changedKeys.some((key) => key.startsWith("sidebar."))) syncSidebarMode(ctx);
+			publishUiOwnership();
+			req();
+		},
+		getThemeName: () => config.theme || undefined,
+		getThinkingFolded: () => lastCtx ? readHideThinkingBlock(lastCtx.cwd) : undefined,
+		openLegacySettings: async () => { if (settingsCommandCtx) await openSettings(settingsCommandCtx); },
+		openThemeSettings: async () => { if (settingsCommandCtx) await openThemePicker(settingsCommandCtx); },
+		toggleThinkingFold: () => {
+			if (!lastCtx) return;
+			ensureThinkingFolded(capturedTui, lastCtx.cwd, !readHideThinkingBlock(lastCtx.cwd));
+		},
+	});
+	registerCockpitSettingsProvider({
+		on: (event, handler) => pi.events.on(event, handler),
+		emit: (event, payload) => pi.events.emit(event, payload),
+	}, cockpitSettingsProvider);
+
 	pi.registerShortcut(BASH_BG_OVERLAY_KEY, {
 		description: "Open background Bash jobs — live status, command, cwd, duration and output tail",
 		async handler(ctx) {
@@ -834,7 +951,23 @@ export default function (pi: ExtensionAPI): void {
 		},
 	});
 
-	// --- /cockpit: settings plus direct surface controls ---
+	pi.registerCommand("maestro-settings", {
+		description: "Open unified Maestro settings for Cockpit, Flow, Teammate and integrations",
+		async handler(_args, ctx) {
+			if (!ctx.hasUI) {
+				ctx.ui.notify("Maestro settings require interactive TUI mode", "warning");
+				return;
+			}
+			settingsCommandCtx = ctx;
+			try {
+				await showMaestroSettingsShell(ctx, settingsRegistry, settingsLocale);
+			} finally {
+				settingsCommandCtx = undefined;
+			}
+		},
+	});
+
+	// --- /cockpit: legacy settings plus direct surface controls ---
 	pi.registerCommand("cockpit", {
 		description: "Open pi-cockpit settings; /cockpit sidebar controls the dock, /cockpit bg shows jobs",
 		getArgumentCompletions: (prefix) => {
@@ -946,6 +1079,7 @@ export default function (pi: ExtensionAPI): void {
 				const wasEnabled = config.enabled;
 				const wasQuiet = config.quietMode;
 				const wasStatic = config.staticMode;
+				const wasPinEditorBottom = config.pinEditorBottom;
 				const wasSidebarMode = config.sidebar.mode;
 				if (key === "theme") {
 					// Delegate: the picker previews live and reverts on Esc, neither of
@@ -989,7 +1123,12 @@ export default function (pi: ExtensionAPI): void {
 						publishUiOwnership();
 					}
 				} else {
-					if (config.enabled && wasSidebarMode !== config.sidebar.mode) syncSidebarMode(ctx);
+					if (config.enabled && wasPinEditorBottom !== config.pinEditorBottom) {
+						if (config.pinEditorBottom) installEditorBottom(ctx);
+						else clearEditorBottom(ctx);
+					} else if (config.enabled && wasSidebarMode !== config.sidebar.mode) {
+						syncSidebarMode(ctx);
+					}
 					publishUiOwnership();
 				}
 				if (wasQuiet !== config.quietMode) {

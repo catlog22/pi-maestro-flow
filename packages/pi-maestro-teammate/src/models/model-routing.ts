@@ -450,11 +450,13 @@ function processStartObservation(pid: number): ProcessStartObservation | undefin
       const startedAtMs = Number(output);
       return Number.isFinite(startedAtMs) ? { startedAtMs } : undefined;
     }
-    const output = execFileSync("ps", ["-o", "lstart=", "-p", String(pid)], {
+    const output = execFileSync("ps", ["-o", "state=", "-o", "lstart=", "-p", String(pid)], {
       encoding: "utf8",
       timeout: 2_000,
     }).trim();
-    const startedAtMs = Date.parse(output);
+    const [state, ...startedAtParts] = output.split(/\s+/);
+    if (state?.startsWith("Z")) return { identity: "dead:zombie" };
+    const startedAtMs = Date.parse(startedAtParts.join(" "));
     return Number.isFinite(startedAtMs) ? { startedAtMs } : undefined;
   } catch {
     return undefined;
@@ -482,6 +484,7 @@ function lockOwnerIsLive(lockPath: string, owner: ConfigLockOwner): boolean {
   nextIdentityCheck.set(checkKey, now + 1_000);
   const observed = processStartObservation(owner.pid);
   if (!observed) return true;
+  if (observed.identity === "dead:zombie") return false;
   if (owner.startIdentity && observed.identity) return owner.startIdentity === observed.identity;
   if (owner.startObserved && observed.startedAtMs !== undefined) {
     return Math.abs(observed.startedAtMs - owner.startedAtMs) <= 2_000;
@@ -879,6 +882,83 @@ export function loadModelRoutingConfig(
   globalFilePath = getGlobalModelRoutingPath(),
 ): ModelRoutingConfig {
   return readConsistentState(cwd, globalFilePath).config;
+}
+
+export interface ModelRoutingStorePair {
+  global: GlobalModelRoutingStore;
+  project: ProjectModelRoutingStore;
+}
+
+export interface ModelRoutingStoreContentPair {
+  global: string;
+  project: string;
+}
+
+/** @internal Shared persistence bridge for the unified Settings provider. */
+export function loadModelRoutingStores(
+  globalFilePath: string,
+  projectFilePath: string,
+): ModelRoutingStorePair {
+  const resolvedProjectPath = path.resolve(projectFilePath);
+  return withGlobalConfigLock(globalFilePath, () => withConfigLock(resolvedProjectPath, () => ({
+    global: readGlobalStore(globalFilePath),
+    project: readProjectStore(resolvedProjectPath),
+  })));
+}
+
+/** @internal Publish a prepared Settings transaction through the routing lock/journal protocol. */
+export function replaceModelRoutingStores(
+  globalFilePath: string,
+  projectFilePath: string,
+  expected: ModelRoutingStorePair,
+  next: ModelRoutingStorePair,
+  expectedContent?: ModelRoutingStoreContentPair,
+): ModelRoutingStorePair {
+  const resolvedProjectPath = path.resolve(projectFilePath);
+  return withGlobalConfigLock(globalFilePath, () => withConfigLock(resolvedProjectPath, () => {
+    if (expectedContent
+      && (readConfigContent(globalFilePath) !== expectedContent.global
+        || readConfigContent(resolvedProjectPath) !== expectedContent.project)) {
+      throw new Error("Teammate model routing bytes changed after Settings preparation");
+    }
+    const current = {
+      global: readGlobalStore(globalFilePath),
+      project: readProjectStore(resolvedProjectPath),
+    };
+    if (JSON.stringify(current.global) !== JSON.stringify(expected.global)
+      || JSON.stringify(current.project) !== JSON.stringify(expected.project)) {
+      throw new Error("Teammate model routing changed after Settings preparation");
+    }
+    const normalized = {
+      global: normalizeGlobalStore(next.global as unknown as Record<string, unknown>),
+      project: normalizeProjectStore(next.project as unknown as Record<string, unknown>),
+    };
+    const globalChanged = JSON.stringify(current.global) !== JSON.stringify(normalized.global);
+    const projectChanged = JSON.stringify(current.project) !== JSON.stringify(normalized.project);
+    if (globalChanged && projectChanged) {
+      writeGlobalAndProject(
+        globalFilePath,
+        current.global,
+        normalized.global,
+        resolvedProjectPath,
+        normalized.project,
+      );
+    } else if (globalChanged) {
+      writeJson(globalFilePath, normalized.global);
+    } else if (projectChanged) {
+      writeJson(resolvedProjectPath, normalized.project);
+    }
+    return normalized;
+  }));
+}
+
+function readConfigContent(filePath: string): string {
+  try {
+    return fs.readFileSync(filePath, "utf8");
+  } catch (error) {
+    if (errorCode(error) === "ENOENT") return "";
+    throw error;
+  }
 }
 
 export function discoverRoutingTaskTypes(

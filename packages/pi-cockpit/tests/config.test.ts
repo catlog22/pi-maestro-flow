@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mergeConfig } from "../src/config.ts";
+import { mergeConfig, mergeConfigDocument } from "../src/config.ts";
 import { DEFAULT_CONFIG } from "../src/types.ts";
 
 test("staticMode merges as a boolean and keeps the default", () => {
@@ -23,6 +23,13 @@ test("legacy config without quietSymbols keeps the check default", () => {
 	const config = mergeConfig(DEFAULT_CONFIG, { quietMode: true });
 	assert.equal(config.quietMode, true);
 	assert.equal(config.quietSymbols, "check");
+});
+
+test("pinEditorBottom is opt-in and accepts only boolean values", () => {
+	assert.equal(DEFAULT_CONFIG.pinEditorBottom, false);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, {}).pinEditorBottom, false);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { pinEditorBottom: true }).pinEditorBottom, true);
+	assert.equal(mergeConfig(DEFAULT_CONFIG, { pinEditorBottom: "true" }).pinEditorBottom, false);
 });
 
 test("quietSymbols accepts supported modes and rejects unknown values", () => {
@@ -60,6 +67,24 @@ test("sidebar merges supported fields and clamps width to terminal column bounds
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { sidebar: { width: 12 } }).sidebar.width, 32);
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { sidebar: { width: 80 } }).sidebar.width, 56);
 	assert.equal(mergeConfig(DEFAULT_CONFIG, { sidebar: { width: 41.6 } }).sidebar.width, 42);
+});
+
+test("serialized config documents preserve unknown extension fields", () => {
+	const document = mergeConfigDocument({
+		unknownTop: true,
+		icons: { mode: "nerd", future: 1 },
+		sidebar: { mode: "off", width: 36, density: "compact", future: 2 },
+	}, {
+		...DEFAULT_CONFIG,
+		icons: { mode: "ascii" },
+		sidebar: { mode: "on", width: 48, density: "comfortable" },
+	});
+	assert.equal(document.unknownTop, true);
+	assert.equal(document.staticMode, false);
+	assert.equal(document.toolPalette, "family");
+	assert.equal(document.pinEditorBottom, false);
+	assert.deepEqual(document.icons, { mode: "ascii", future: 1 });
+	assert.deepEqual(document.sidebar, { mode: "on", width: 48, density: "comfortable", future: 2 });
 });
 
 test("invalid or partial sidebar fields fall back independently", () => {

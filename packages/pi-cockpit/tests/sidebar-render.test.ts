@@ -131,7 +131,7 @@ test("static mode hides live durations without trailing separators but keeps fro
 });
 
 test("renders all non-empty read-only sections with one full-height left divider", () => {
-	const lines = render();
+	const lines = render({ config: { ...DEFAULT_CONFIG, icons: { mode: "nerd" } } });
 	const text = lines.join("\n");
 	assert.equal(lines.length, 30);
 	for (const line of lines) {
@@ -227,7 +227,14 @@ test("hostile control characters are stripped and every line remains width bound
 });
 
 test("empty inputs omit all section headers while retaining the dock divider", () => {
-	const lines = render({ maestro: undefined, todos: [], agents: [], jobs: [], height: 4 });
+	const lines = render({
+		maestro: undefined,
+		todos: [],
+		agents: [],
+		jobs: [],
+		height: 4,
+		config: { ...DEFAULT_CONFIG, icons: { mode: "nerd" } },
+	});
 	assert.equal(lines.length, 4);
 	assert.ok(lines.every((line) => line.trim() === "│"));
 	assert.doesNotMatch(lines.join("\n"), /Workflow|Goal|Tasks|Agents|Jobs|Swarm/);

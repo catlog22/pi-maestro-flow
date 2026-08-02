@@ -106,10 +106,13 @@
   },
   "dependencies": {
     "cross-spawn": "7.0.6",
+    "pi-maestro-settings-core": "0.1.0",
+    "proper-lockfile": "4.1.2",
     "typebox": "^1.1.24"
   },
   "devDependencies": {
     "@earendil-works/pi-agent-core": "0.82.1",
+    "@types/cross-spawn": "6.0.6",
     "@earendil-works/pi-ai": "0.82.1",
     "@earendil-works/pi-coding-agent": "0.82.1",
     "@earendil-works/pi-tui": "0.82.1"

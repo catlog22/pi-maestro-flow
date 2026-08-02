@@ -16,8 +16,12 @@ import test from "node:test";
 
 const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const localTeammateRoot = resolve(packageRoot, "..", "pi-maestro-teammate");
+const localSettingsCoreRoot = resolve(packageRoot, "..", "pi-maestro-settings-core");
+const localCockpitRoot = resolve(packageRoot, "..", "pi-cockpit");
 const localFlowPackage = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8"));
 const localTeammatePackage = JSON.parse(readFileSync(join(localTeammateRoot, "package.json"), "utf8"));
+const localSettingsCorePackage = JSON.parse(readFileSync(join(localSettingsCoreRoot, "package.json"), "utf8"));
+const localCockpitPackage = JSON.parse(readFileSync(join(localCockpitRoot, "package.json"), "utf8"));
 const piSdkVersion = localFlowPackage.devDependencies["@earendil-works/pi-coding-agent"];
 const piCodingAgentPackage = JSON.parse(readFileSync(
   join(packageRoot, "node_modules", "@earendil-works", "pi-coding-agent", "package.json"),
@@ -32,7 +36,6 @@ const teammatePublicSpecifiers = [
   "pi-maestro-teammate/v1/execution",
   "pi-maestro-teammate/v1/extension",
   "pi-maestro-teammate/v1/model-routing",
-  "pi-maestro-teammate/v1/prompts",
   "pi-maestro-teammate/v1/progress-tree",
   "pi-maestro-teammate/v1/retry",
   "pi-maestro-teammate/v1/types",
@@ -41,7 +44,7 @@ const require = createRequire(import.meta.url);
 const npmCommand = [process.execPath, process.env.npm_execpath ?? require.resolve("npm/bin/npm-cli.js")];
 const packTimeout = 360_000;
 const installTimeout = 600_000;
-const testTimeout = packTimeout * 2 + installTimeout + 600_000;
+const testTimeout = packTimeout * 4 + installTimeout + 600_000;
 
 test("packed consumer installs real tarballs and loads in a fresh Pi process", { timeout: testTimeout }, () => {
   const shortTempRoot = process.env.SystemDrive ? `${process.env.SystemDrive}\\tmp` : tmpdir();
@@ -58,6 +61,20 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
   mkdirSync(npmPrefix, { recursive: true });
 
   try {
+    const settingsCorePacked = parseTrailingJson(run(
+      npmCommand,
+      ["pack", "--json", "--pack-destination", root],
+      localSettingsCoreRoot,
+      process.env,
+      packTimeout,
+    ).stdout);
+    const cockpitPacked = parseTrailingJson(run(
+      npmCommand,
+      ["pack", "--json", "--pack-destination", root],
+      localCockpitRoot,
+      process.env,
+      packTimeout,
+    ).stdout);
     const teammatePacked = parseTrailingJson(run(
       npmCommand,
       ["pack", "--json", "--pack-destination", root],
@@ -72,12 +89,19 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       process.env,
       packTimeout,
     ).stdout);
+    const settingsCoreTarball = join(root, settingsCorePacked[0].filename);
+    const cockpitTarball = join(root, cockpitPacked[0].filename);
     const teammateTarball = join(root, teammatePacked[0].filename);
     const flowTarball = join(root, flowPacked[0].filename);
+    assert.equal(existsSync(settingsCoreTarball), true);
+    assert.equal(existsSync(cockpitTarball), true);
     assert.equal(existsSync(teammateTarball), true);
     assert.equal(existsSync(flowTarball), true);
+    assert.equal(settingsCorePacked[0].version, localSettingsCorePackage.version);
+    assert.equal(cockpitPacked[0].version, localCockpitPackage.version);
     assert.equal(teammatePacked[0].version, localTeammatePackage.version);
     assert.equal(flowPacked[0].version, localFlowPackage.version);
+    assert.ok(settingsCorePacked[0].files.some(({ path }) => path === "src/public/v1/index.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/index.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "src/public/v1/execution.ts"));
     assert.ok(teammatePacked[0].files.some(({ path }) => path === "types/index.d.ts"));
@@ -95,6 +119,8 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       npmCommand,
       [
         "install",
+        settingsCoreTarball,
+        cockpitTarball,
         teammateTarball,
         flowTarball,
         `@earendil-works/pi-agent-core@${piSdkVersion}`,
@@ -119,15 +145,25 @@ test("packed consumer installs real tarballs and loads in a fresh Pi process", {
       installedPackage.dependencies["maestro-flow"],
       localFlowPackage.dependencies["maestro-flow"],
     );
+    assert.equal(installedPackage.dependencies["pi-maestro-settings-core"], localSettingsCorePackage.version);
     assert.equal(installedPackage.dependencies["pi-maestro-teammate"], localTeammatePackage.version);
     const installedMaestro = join(consumer, "node_modules", "maestro-flow");
+    const installedSettingsCore = join(consumer, "node_modules", "pi-maestro-settings-core");
+    const installedCockpit = join(consumer, "node_modules", "pi-cockpit");
     const installedTeammate = join(consumer, "node_modules", "pi-maestro-teammate");
     assert.equal(lstatSync(installed).isSymbolicLink(), false);
     assert.equal(lstatSync(installedMaestro).isSymbolicLink(), false);
+    assert.equal(lstatSync(installedSettingsCore).isSymbolicLink(), false);
+    assert.equal(JSON.parse(readFileSync(join(installedSettingsCore, "package.json"), "utf8")).version, localSettingsCorePackage.version);
+    assert.equal(lstatSync(installedCockpit).isSymbolicLink(), false);
+    const installedCockpitPackage = JSON.parse(readFileSync(join(installedCockpit, "package.json"), "utf8"));
+    assert.equal(installedCockpitPackage.version, localCockpitPackage.version);
+    assert.equal(installedCockpitPackage.dependencies["pi-maestro-settings-core"], localSettingsCorePackage.version);
     assert.equal(lstatSync(installedTeammate).isSymbolicLink(), false);
     const installedTeammatePackage = JSON.parse(readFileSync(join(installedTeammate, "package.json"), "utf8"));
     assert.equal(installedTeammatePackage.version, localTeammatePackage.version);
     assert.equal(installedTeammatePackage.dependencies["cross-spawn"], "7.0.6");
+    assert.equal(installedTeammatePackage.dependencies["pi-maestro-settings-core"], localSettingsCorePackage.version);
     assert.equal(installedTeammatePackage.types, "./types/index.d.ts");
     assert.equal(existsSync(join(installed, ".pi", "skills", "workflow-skill-designer", "SKILL.md")), true);
     assert.equal(existsSync(join(installed, "src", "extension", "index.ts")), true);

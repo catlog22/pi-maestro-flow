@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -19,6 +19,11 @@ const { ModelRuntime } = await import(pathToFileURL(join(piDist, "core/model-run
 async function createModelRegistry(credentials: unknown, modelsPath: string) {
   return new ModelRegistry(await ModelRuntime.create({ credentials, modelsPath }));
 }
+import {
+  DEFAULT_KEEP_RECENT_TOKENS,
+  DEFAULT_RESERVE_TOKENS,
+  DEFAULT_SOFT_COMPACTION,
+} from "../src/compaction/compaction-settings.ts";
 import {
   ALLOW_INSECURE_PROVIDER_HTTP_ENV,
   deleteApiProviderModelSettings,
@@ -588,6 +593,16 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   const tempDir = mkdtempSync(join(tmpdir(), "pi-api-provider-login-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const modelsPath = join(tempDir, "models.json");
+  const projectSettingsPath = join(tempDir, ".pi", "settings.json");
+  mkdirSync(dirname(projectSettingsPath), { recursive: true });
+  writeFileSync(projectSettingsPath, JSON.stringify({
+    compaction: {
+      enabled: true,
+      reserveTokens: DEFAULT_RESERVE_TOKENS,
+      keepRecentTokens: DEFAULT_KEEP_RECENT_TOKENS,
+      soft: DEFAULT_SOFT_COMPACTION,
+    },
+  }));
   const registrations: Array<{ name: string; config: any }> = [];
   const unregistered: string[] = [];
   const appliedThinkingLevels: string[] = [];

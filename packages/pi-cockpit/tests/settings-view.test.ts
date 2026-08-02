@@ -39,6 +39,12 @@ test("static mode row cycles on/off and is reachable by accel", () => {
 	assert.equal(applyRow(applyRow(DEFAULT_CONFIG, "staticMode"), "staticMode").staticMode, false);
 });
 
+test("pin editor bottom uses the layout accelerator without shadowing tool palette", () => {
+	const row = buildRows(DEFAULT_CONFIG).find((candidate) => candidate.key === "pinEditorBottom");
+	assert.equal(row?.accel, "l");
+	assert.equal(rowKeyForAccel(buildRows(DEFAULT_CONFIG), "l"), "pinEditorBottom");
+});
+
 test("quiet controls stay grouped in mode, symbol, thinking order", () => {
 	const keys = buildRows(DEFAULT_CONFIG, { thinkingHidden: false }).map((row) => row.key);
 	const start = keys.indexOf("quietMode");

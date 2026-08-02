@@ -196,10 +196,14 @@ export const mutationQueues = new Map<string, Promise<void>>();
  * owns provider-level connection config (URL, API key, format, headers, auth) and
  * hosts one or more models; models under the same Provider share that connection.
  */
+export interface ApiProviderConfigHandle {
+  openManager(ctx: ExtensionCommandContext, args?: string): Promise<void>;
+}
+
 export function registerApiProviderConfigs(
   pi: ExtensionAPI,
   options: RegisterApiProviderOptions = {},
-): void {
+): ApiProviderConfigHandle {
   const modelsPath = options.modelsPath ?? join(getAgentDir(), "models.json");
   const defaultsPath = options.defaultsPath ?? join(dirname(modelsPath), "api-manager.json");
   const settingsPath = options.settingsPath ?? join(dirname(modelsPath), "settings.json");
@@ -216,15 +220,20 @@ export function registerApiProviderConfigs(
     }
   }
 
-  if (typeof pi.registerCommand !== "function") return;
-  pi.registerCommand("api-manager", {
-    description: "管理 API 模型与 Provider 配置",
-    async handler(args, ctx) {
+  const handle: ApiProviderConfigHandle = {
+    async openManager(ctx, args = "") {
       try {
         await showApiProviderManager(pi, args, ctx, modelsPath, defaultsPath, settingsPath);
       } catch (error) {
         ctx.ui.notify(`API 配置失败：${errorMessage(error)}`, "error");
       }
+    },
+  };
+  if (typeof pi.registerCommand !== "function") return handle;
+  pi.registerCommand("api-manager", {
+    description: "管理 API 模型与 Provider 配置",
+    async handler(args, ctx) {
+      await handle.openManager(ctx, args);
     },
   });
   pi.registerCommand("effort", {
@@ -279,6 +288,7 @@ export function registerApiProviderConfigs(
     pi.on("thinking_level_select", (event, ctx) => syncEffortStatus(ctx, event.level));
     pi.on("session_shutdown", (_event, ctx) => syncEffortStatus(ctx, undefined));
   }
+  return handle;
 }
 
 export async function loadApiProviderSettings(

@@ -86,6 +86,11 @@ test("Chinese response mode restores, persists, and appends its prompt once", as
   assert.deepEqual(JSON.parse(readFileSync(chineseGlobalStatePath(home), "utf8")), { version: 1, enabled: false });
   assert.equal(h.beforeAgentStartHandlers[0]?.({ systemPrompt: "base" }), undefined);
   assert.match(h.notifications.at(-1)?.message ?? "", /已关闭/);
+
+  h.mode.toggle(h.ctx);
+  assert.equal(h.mode.isEnabled(), true);
+  assert.deepEqual(entries.at(-1)?.data, { enabled: true });
+  assert.deepEqual(JSON.parse(readFileSync(chineseGlobalStatePath(home), "utf8")), { version: 1, enabled: true });
 });
 
 test("Chinese response mode stays enabled globally across workspaces", async () => {

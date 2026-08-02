@@ -156,6 +156,8 @@ export interface CockpitConfig {
 	todoMode: ViewMode;
 	todoExpanded: boolean;
 	hideNativeAgents: boolean;
+	/** Experimental: keep the editor/footer block at the terminal bottom while the conversation is short. */
+	pinEditorBottom: boolean;
 	icons: { mode: IconMode };
 	sidebar: SidebarConfig;
 	/**
@@ -175,6 +177,7 @@ export const DEFAULT_CONFIG: CockpitConfig = {
 	todoMode: "list",
 	todoExpanded: false,
 	hideNativeAgents: true,
+	pinEditorBottom: false,
 	icons: { mode: "auto" },
 	sidebar: { mode: "off", width: 40, density: "comfortable" },
 	theme: "",

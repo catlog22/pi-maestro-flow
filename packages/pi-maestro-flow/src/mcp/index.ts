@@ -1,4 +1,4 @@
-import type { ExtensionAPI, ToolInfo } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
 import type { McpExtensionState } from "./state.ts";
 import { Type } from "typebox";
 import { showStatus, showTools, reconnectServers, authenticateServer, logoutServer, openMcpAuthPanel, openMcpManager, openMcpPanel, openMcpSetup } from "./commands.ts";
@@ -12,7 +12,11 @@ import { initializeOAuth, shutdownOAuth } from "./mcp-auth-flow.ts";
 import { createMcpDirectToolCallRenderer, createMcpDirectToolResultRenderer, renderMcpProxyToolCall, renderMcpProxyToolResult } from "./tool-result-renderer.ts";
 import { toolErrorOverride } from "./error-signal.ts";
 
-export default function mcpAdapter(pi: ExtensionAPI) {
+export interface McpAdapterHandle {
+  openManager(ctx: ExtensionContext): Promise<void>;
+}
+
+export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
   let state: McpExtensionState | null = null;
   let initPromise: Promise<McpExtensionState> | null = null;
   let lifecycleGeneration = 0;
@@ -402,4 +406,23 @@ export default function mcpAdapter(pi: ExtensionAPI) {
       },
     });
   }
+
+  return {
+    async openManager(ctx) {
+      if (!state && initPromise) {
+        try {
+          state = await awaitInitializedState();
+        } catch (error) {
+          ctx.ui.notify(`MCP initialization failed: ${error instanceof Error ? error.message : String(error)}`, "error");
+          return;
+        }
+      }
+      if (!state) {
+        ctx.ui.notify("MCP not initialized", "error");
+        return;
+      }
+      const result = await openMcpManager(state, pi, ctx, earlyConfigPath);
+      if (result.configChanged) ctx.ui.notify("MCP changes will apply after the extension reloads.", "info");
+    },
+  };
 }
