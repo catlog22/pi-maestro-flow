@@ -670,6 +670,28 @@ function writeJson(filePath: string, value: unknown): void {
   }
 }
 
+/**
+ * Write a single store and, if the rename already published the new bytes before a
+ * durability-sync failure, immediately restore the previous value so a failed single-file
+ * commit cannot leave a published-but-unreported change on disk.
+ */
+function writeJsonRestoringOnPublish(filePath: string, next: unknown, previous: unknown): void {
+  try {
+    writeJson(filePath, next);
+  } catch (error) {
+    if (!isPublishedWriteError(error)) throw error;
+    try {
+      writeJson(filePath, previous);
+    } catch (restoreError) {
+      throw new AggregateError(
+        [error, restoreError],
+        `Teammate routing was published for ${filePath} but its restore failed`,
+      );
+    }
+    throw error;
+  }
+}
+
 function transactionPath(globalFilePath: string): string {
   return `${globalFilePath}.transaction.json`;
 }
@@ -944,9 +966,9 @@ export function replaceModelRoutingStores(
         normalized.project,
       );
     } else if (globalChanged) {
-      writeJson(globalFilePath, normalized.global);
+      writeJsonRestoringOnPublish(globalFilePath, normalized.global, current.global);
     } else if (projectChanged) {
-      writeJson(resolvedProjectPath, normalized.project);
+      writeJsonRestoringOnPublish(resolvedProjectPath, normalized.project, current.project);
     }
     return normalized;
   }));

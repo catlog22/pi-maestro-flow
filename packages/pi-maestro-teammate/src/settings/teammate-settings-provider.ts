@@ -191,15 +191,28 @@ export function createTeammateSettingsProvider(options: TeammateSettingsProvider
       const current = readResources(request.context.cwd, getGlobalPath, getProjectPath);
       const validation = validateRequest([], state.expectedRevisions, current);
       if (!validation.valid) throw new Error("Teammate model routing changed after Settings preparation");
-      replaceModelRoutingStores(
+      const published = replaceModelRoutingStores(
         state.globalPath,
         state.projectPath,
         state.before,
         state.next,
         state.beforeContent,
       );
-      const resources = readResources(request.context.cwd, getGlobalPath, getProjectPath);
-      state.committedContent = contentPair(resources);
+      // Record rollback metadata at the publish boundary so a post-publish read failure
+      // cannot leave a published-but-unrollable commit.
+      state.committedContent = {
+        global: `${JSON.stringify(published.global, null, 2)}\n`,
+        project: `${JSON.stringify(published.project, null, 2)}\n`,
+      };
+      let resources: RoutingResourceState[];
+      try {
+        resources = readResources(request.context.cwd, getGlobalPath, getProjectPath);
+      } catch {
+        resources = [
+          resourceStateFromContent("global", state.globalPath, published.global, state.committedContent.global),
+          resourceStateFromContent("project", state.projectPath, published.project, state.committedContent.project),
+        ];
+      }
       state.committedRevisions = resources.map((entry) => entry.revision);
       return {
         snapshot: snapshot(resources, instanceId, taskTypes(request.context.cwd)),
@@ -423,6 +436,15 @@ function resourceState(
   raw: GlobalModelRoutingStore | ProjectModelRoutingStore,
 ): RoutingResourceState {
   const content = readContent(filePath);
+  return { scope, path: filePath, document: { content, raw }, revision: revision(scope, filePath, content) };
+}
+
+function resourceStateFromContent(
+  scope: "global" | "project",
+  filePath: string,
+  raw: GlobalModelRoutingStore | ProjectModelRoutingStore,
+  content: string,
+): RoutingResourceState {
   return { scope, path: filePath, document: { content, raw }, revision: revision(scope, filePath, content) };
 }
 

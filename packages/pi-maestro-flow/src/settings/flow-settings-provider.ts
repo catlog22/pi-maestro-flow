@@ -268,6 +268,10 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
         }
       } catch (error) {
         for (const staged of [...renamed].reverse()) restoreResource(staged.resource);
+        for (const staged of state.staged) {
+          try { fs.rmSync(staged.temporaryPath, { force: true }); } catch { /* best effort */ }
+        }
+        prepared.delete(request.prepareToken);
         throw error;
       } finally {
         await Promise.all(state.staged.map((entry) => entry.release().catch(() => undefined)));
@@ -289,6 +293,9 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
     rollback: async (request) => {
       const state = prepared.get(request.prepareToken);
       if (!state || state.transactionId !== request.transactionId) return { rolledBack: false };
+      // A transaction that never committed successfully has no committedRevision, so restoring
+      // staged resources would overwrite any external write made after prepare. Refuse to touch files.
+      if (!state.staged.every((entry) => entry.committedRevision)) return { rolledBack: false };
       const locked: Array<{ staged: StagedResource; release: () => Promise<void> }> = [];
       try {
         for (const staged of [...state.staged].sort((left, right) => left.resource.path.localeCompare(right.resource.path))) {

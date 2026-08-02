@@ -311,8 +311,10 @@ export function createCockpitSettingsProvider(options: CockpitSettingsProviderOp
 		},
 		commit: async (request) => {
 			const state = requirePrepared(prepared, request.prepareToken, request.transactionId);
+			let published = false;
 			try {
 				renameSync(state.temporaryPath, state.path);
+				published = true;
 				const document = readDocument(state.path);
 				state.committedRevision = document.revision;
 				return {
@@ -321,8 +323,23 @@ export function createCockpitSettingsProvider(options: CockpitSettingsProviderOp
 					changedKeys: state.changedKeys,
 					activation: state.activation,
 				};
+			} catch (error) {
+				// Rename already happened: restore the previous bytes while still holding the lock
+				// so a post-publish read/release failure cannot leave a half-applied config.
+				if (published) {
+					try {
+						atomicWrite(state.path, state.beforeContent);
+					} catch (restoreError) {
+						throw new AggregateError(
+							[error, restoreError],
+							"Cockpit config was published but its restore failed",
+						);
+					}
+				}
+				throw error;
 			} finally {
-				await state.release();
+				// Lock release failure must not turn an already-published commit into a reported failure.
+				await state.release().catch(() => undefined);
 			}
 		},
 		abort: async (request) => {
