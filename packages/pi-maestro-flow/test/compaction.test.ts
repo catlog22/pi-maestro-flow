@@ -4191,6 +4191,61 @@ test("cross-turn dedup skips mixed image/text outputs", () => {
   assert.equal((mixed.content as Array<{ type: string }>)[1].type, "image", "image block untouched");
 });
 
+test("lossless fold routes bash output by content (diff shape)", () => {
+  // A bash result that is actually a git diff must be folded with the diff
+  // algorithm (index stripping) even though the tool name maps to "log".
+  const diff = [
+    "diff --git a/src/a.ts b/src/a.ts",
+    "index 1111111..2222222 100644",
+    "--- a/src/a.ts",
+    "+++ b/src/a.ts",
+    "@@ -1,3 +1,4 @@",
+    " const x = 1",
+    "+const y = 2",
+  ].join("\n");
+  const repeated = Array.from({ length: 40 }, (_, i) => `${diff}\nseparator-${i}`).join("\n---\n");
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-diff", name: "bash", arguments: {} }],
+    usage: {
+      input: 160_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 160_000,
+      cost: { total: 0 },
+    },
+  }, {
+    role: "toolResult",
+    toolCallId: "call-diff",
+    toolName: "bash",
+    content: [{ type: "text", text: repeated }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: "continue" }],
+  }, {
+    role: "assistant",
+    content: [{ type: "text", text: "ok" }],
+  }] as never;
+  const manifest = new Map();
+  const result = applyContextPressurePolicy(messages, 200_000, {
+    enabled: true,
+    reserveTokens: 100,
+    keepRecentTokens: 10,
+    soft: {
+      ...DEFAULT_SOFT_COMPACTION,
+      cache: { enabled: false },
+    },
+  }, manifest);
+  const entry = manifest.get("call-diff");
+  assert.ok(entry, "bash diff output is folded losslessly");
+  assert.equal(entry.level, "lossless");
+  const folded = entry.replacement.content as Array<{ text?: string }>;
+  assert.ok((folded[0]?.text ?? "").length < repeated.length, "content detector routed to diff folding");
+  assert.ok(result.prunedToolResults >= 1);
+});
+
 test("cache gate still prunes when the run pays for itself", () => {
   // A dense tool loop reclaims ~0.66 tokens per invalidated token — well past
   // the floor — so gating must not suppress it.

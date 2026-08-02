@@ -50,6 +50,7 @@ import {
   compactLossless,
   type LosslessKind,
 } from "./lossless.ts";
+import { detectContentType } from "./content-detector.ts";
 import { scoreRelevanceBatch, type RelevanceMode } from "./relevance.ts";
 import { dedupBlocks, type DedupBlock } from "./dedup.ts";
 
@@ -2374,6 +2375,27 @@ function isProtectedToolResult(message: AgentMessage): boolean {
   return extractTextContent(message).length < PROTECTED_THRESHOLD_CHARS;
 }
 
+/**
+ * Content-aware kind selection: when the output's shape is unambiguous the
+ * detector wins over the tool name (e.g. `bash` running `git diff`), otherwise
+ * fall back to the tool-name mapping.
+ */
+function losslessKindForContent(text: string): LosslessKind | undefined {
+  const detected = detectContentType(text);
+  switch (detected.contentType) {
+    case "search":
+      return "search";
+    case "diff":
+      return "diff";
+    case "build":
+      return "log";
+    case "source_code":
+      return "text";
+    default:
+      return undefined;
+  }
+}
+
 /** Map a tool name to the lossless compaction kind it most resembles. */
 function losslessKindForTool(toolName: string | undefined): LosslessKind {
   switch (toolName?.toLowerCase()) {
@@ -2409,7 +2431,12 @@ function tryLosslessFold(message: AgentMessage): AgentMessage | undefined {
   const record = message as MessageRecord;
   const text = extractTextContent(message);
   if (text.length < PROTECTED_THRESHOLD_CHARS) return undefined;
-  const folded = compactLossless(text, losslessKindForTool(typeof record.toolName === "string" ? record.toolName : undefined));
+  const folded = compactLossless(
+    text,
+    losslessKindForContent(text) ?? losslessKindForTool(
+      typeof record.toolName === "string" ? record.toolName : undefined,
+    ),
+  );
   if (folded === text || folded.length >= text.length) return undefined;
   const replacement = {
     ...message,
