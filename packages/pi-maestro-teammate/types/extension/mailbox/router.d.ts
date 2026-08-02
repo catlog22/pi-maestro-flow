@@ -39,6 +39,8 @@ export interface MailboxRouterOptions {
     store: MailboxFileStore;
     authority: MailboxAuthority;
     quota: QuotaAdmission;
+    /** Workspace this router belongs to; enqueue requests from other workspaces are rejected. */
+    workspaceId?: string;
     now?: () => number;
 }
 export declare class MailboxRouter {

@@ -47,6 +47,10 @@ export declare class MailboxFileStore {
     listOrphanStateRecords(state: MailboxState): Promise<string[]>;
     /** Remove an orphaned state record without touching any envelope. */
     removeStateRecordOnly(state: MailboxState, messageId: string): Promise<void>;
+    /** Release a claim lock (no-op if absent). */
+    removeClaimLock(messageId: string): Promise<void>;
+    /** True if a claim lock is currently held for the message. */
+    hasClaimLock(messageId: string): Promise<boolean>;
     /** Check if a messageId has been seen (deduplication). */
     isSeen(messageId: string): Promise<boolean>;
     /** Mark a messageId as seen for durable deduplication. */

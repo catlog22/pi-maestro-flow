@@ -89,6 +89,8 @@ export interface MailboxConsumerOptions {
   consumerNonce?: string;
   /** Recipient correlation ID this consumer serves. */
   recipientCorrelationId: string;
+  /** Workspace ID the consumer serves; messages from other workspaces are skipped. */
+  workspaceId: string;
   /** Callback invoked when a message is ready for injection. */
   onDispatch: (envelope: MailboxEnvelope) => Promise<void>;
   /** Poll interval override (default 50ms). */
@@ -99,6 +101,7 @@ export interface MailboxConsumerOptions {
 export class MailboxConsumer extends EventEmitter {
   readonly consumerNonce: string;
   readonly recipientCorrelationId: string;
+  readonly workspaceId: string;
 
   readonly #store: MailboxFileStore;
   readonly #router: MailboxRouter;
@@ -116,6 +119,7 @@ export class MailboxConsumer extends EventEmitter {
     super();
     this.consumerNonce = options.consumerNonce ?? randomUUID();
     this.recipientCorrelationId = options.recipientCorrelationId;
+    this.workspaceId = options.workspaceId;
     this.#store = options.store;
     this.#router = options.router;
     this.#onDispatch = options.onDispatch;
@@ -175,6 +179,7 @@ export class MailboxConsumer extends EventEmitter {
         if (!envelope) continue;
         // Remove from claimed, write back to ready
         await this.#store.remove("claimed", messageId);
+        await this.#store.removeClaimLock(messageId);
         await this.#store.writeStaging(envelope);
         await this.#store.promoteToReady(messageId);
         reclaimed.push(messageId);
@@ -209,6 +214,8 @@ export class MailboxConsumer extends EventEmitter {
     for (const messageId of readyIds) {
       const envelope = await this.#store.readEnvelope("ready", messageId);
       if (!envelope) continue;
+      // Workspace isolation: never consume messages from other workspaces.
+      if (envelope.workspaceId !== this.workspaceId) continue;
       // "*" consumer matches every recipient; otherwise exact match required.
       if (this.recipientCorrelationId !== "*" && envelope.recipientCorrelationId !== this.recipientCorrelationId) continue;
       // Check expiry

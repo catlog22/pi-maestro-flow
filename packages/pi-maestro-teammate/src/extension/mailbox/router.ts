@@ -70,6 +70,8 @@ export interface MailboxRouterOptions {
   store: MailboxFileStore;
   authority: MailboxAuthority;
   quota: QuotaAdmission;
+  /** Workspace this router belongs to; enqueue requests from other workspaces are rejected. */
+  workspaceId?: string;
   now?: () => number;
 }
 
@@ -77,6 +79,7 @@ export class MailboxRouter {
   readonly #store: MailboxFileStore;
   readonly #authority: MailboxAuthority;
   readonly #quota: QuotaAdmission;
+  readonly #workspaceId: string | undefined;
   readonly #now: () => number;
   #senderSeq = 0;
 
@@ -84,6 +87,7 @@ export class MailboxRouter {
     this.#store = options.store;
     this.#authority = options.authority;
     this.#quota = options.quota;
+    this.#workspaceId = options.workspaceId;
     this.#now = options.now ?? Date.now;
   }
 
@@ -93,6 +97,11 @@ export class MailboxRouter {
    */
   async enqueue(request: MailboxEnqueueRequest): Promise<MailboxEnqueueResult> {
     const now = this.#now();
+
+    // 0. Workspace isolation: reject cross-workspace enqueue attempts.
+    if (this.#workspaceId !== undefined && request.workspaceId !== this.#workspaceId) {
+      return { ok: false, code: "route_invalid", message: "workspace mismatch: message from another workspace" };
+    }
 
     // 1. Validate route
     const route = this.#authority.canRoute(request.senderId, request.recipientCorrelationId, request.mode);
@@ -181,6 +190,11 @@ export class MailboxRouter {
    * Returns true if dispatch is allowed, false if blocked.
    */
   async revalidateForDispatch(envelope: MailboxEnvelope): Promise<{ allowed: boolean; action: "dispatch" | "dead" | "hold"; reason?: string }> {
+    // Workspace isolation: a message from another workspace can never dispatch here.
+    if (this.#workspaceId !== undefined && envelope.workspaceId !== this.#workspaceId) {
+      return { allowed: false, action: "dead", reason: "workspace mismatch on dispatch" };
+    }
+
     // Check generation
     const currentGen = this.#authority.currentGeneration();
     if (envelope.sessionGeneration !== currentGen) {

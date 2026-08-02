@@ -298,10 +298,13 @@ test("hasPendingMail returns true when messages are undelivered", async () => {
     payload: "pending",
   });
 
-  // Brief wait but dispatch fails so message stays
-  await new Promise((resolve) => setTimeout(resolve, 50));
-
-  const pending = await service.hasPendingMail();
+  // Brief wait but dispatch fails so message stays (poll until it settles in a live state)
+  const deadline = Date.now() + 3000;
+  let pending = await service.hasPendingMail();
+  while (!pending && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    pending = await service.hasPendingMail();
+  }
   assert.equal(pending, true);
 
   await service.stop();

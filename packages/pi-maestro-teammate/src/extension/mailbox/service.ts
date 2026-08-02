@@ -6,6 +6,7 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { join } from "node:path";
 import { MailboxConsumer } from "./consumer.ts";
 import { MailboxFileStore, createMailboxPaths, ensureMailboxDirectories } from "./file-store.ts";
 import { MailboxGC, QuotaAdmission } from "./gc.ts";
@@ -73,19 +74,24 @@ export class MailboxService extends EventEmitter {
 
   constructor(options: MailboxServiceOptions) {
     super();
-    this.paths = createMailboxPaths(options.rootDir);
+    // Per-workspace isolation: every workspace gets its own directory tree
+    // under rootDir/workspaces/<workspaceId>. Messages from different
+    // workspaces never share state directories or claim locks.
+    this.paths = createMailboxPaths(join(options.rootDir, "workspaces", options.workspaceId));
     this.store = new MailboxFileStore({ paths: this.paths, now: options.now });
     this.quota = new QuotaAdmission({ store: this.store });
     this.router = new MailboxRouter({
       store: this.store,
       authority: options.authority,
       quota: this.quota,
+      workspaceId: options.workspaceId,
       now: options.now,
     });
     this.consumer = new MailboxConsumer({
       store: this.store,
       router: this.router,
       recipientCorrelationId: options.recipientCorrelationId,
+      workspaceId: options.workspaceId,
       onDispatch: options.onDispatch,
       pollMs: options.pollMs,
       now: options.now,

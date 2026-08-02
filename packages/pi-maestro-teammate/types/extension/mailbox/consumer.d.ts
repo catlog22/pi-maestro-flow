@@ -32,6 +32,8 @@ export interface MailboxConsumerOptions {
     consumerNonce?: string;
     /** Recipient correlation ID this consumer serves. */
     recipientCorrelationId: string;
+    /** Workspace ID the consumer serves; messages from other workspaces are skipped. */
+    workspaceId: string;
     /** Callback invoked when a message is ready for injection. */
     onDispatch: (envelope: MailboxEnvelope) => Promise<void>;
     /** Poll interval override (default 50ms). */
@@ -42,6 +44,7 @@ export declare class MailboxConsumer extends EventEmitter {
     #private;
     readonly consumerNonce: string;
     readonly recipientCorrelationId: string;
+    readonly workspaceId: string;
     constructor(options: MailboxConsumerOptions);
     start(): void;
     stop(): Promise<void>;

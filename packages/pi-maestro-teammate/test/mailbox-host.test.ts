@@ -210,9 +210,14 @@ test("MailboxHost authoritative consumer dispatch is acknowledged", async () => 
   });
   assert.ok(result.result.ok);
 
-  // Wait for consumer dispatch → accepted
-  await new Promise((resolve) => setTimeout(resolve, 100));
-  const accepted = await host.service.store.readEnvelope("accepted", (result.result as { messageId: string }).messageId);
+  // Wait for consumer dispatch → accepted (poll until it appears or timeout)
+  const messageId = (result.result as { messageId: string }).messageId;
+  const deadline = Date.now() + 5000;
+  let accepted = await host.service.store.readEnvelope("accepted", messageId);
+  while (!accepted && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    accepted = await host.service.store.readEnvelope("accepted", messageId);
+  }
   assert.ok(accepted, "message should be in accepted state after dispatch");
 
   // Simulate IPC ack

@@ -68,6 +68,10 @@ function stateRecordPath(paths: MailboxPaths, state: MailboxState, messageId: st
   return join(paths[stateDirKey(state)], `${messageId}.state.json`);
 }
 
+function claimLockPath(paths: MailboxPaths, messageId: string): string {
+  return join(paths.claimedDir, `${messageId}.claim.lock`);
+}
+
 function seenPath(paths: MailboxPaths, messageId: string): string {
   return join(paths.seenDir, `${messageId}.seen`);
 }
@@ -215,25 +219,57 @@ export class MailboxFileStore {
   /** Claim a ready envelope. The claimerNonce provides ownership. */
   async claim(messageId: string, claim: MailboxClaim): Promise<boolean> {
     const now = this.#now();
-    return atomicTransition(this.paths, messageId, "ready", "claimed", {
-      messageId,
-      state: "claimed",
-      transitionedAt: now,
-      previousState: "ready",
-      claim,
-    });
+    // Exclusive-create lock: on Windows, concurrent renames of the same source
+    // can both report success, so claims are gated by an atomic "wx" lock file.
+    // Only the consumer that creates the lock may claim; EEXIST losers return
+    // false immediately without any file churn.
+    const lockPath = claimLockPath(this.paths, messageId);
+    try {
+      const handle = await open(lockPath, "wx", 0o600);
+      await handle.writeFile(JSON.stringify({ claimerNonce: claim.claimerNonce, claimedAt: claim.claimedAt }));
+      await handle.sync();
+      await handle.close();
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === "EEXIST") return false; // another consumer holds the lock
+      throw error;
+    }
+
+    try {
+      const transitioned = await atomicTransition(this.paths, messageId, "ready", "claimed", {
+        messageId,
+        state: "claimed",
+        transitionedAt: now,
+        previousState: "ready",
+        claim,
+      });
+      if (!transitioned) {
+        await rm(lockPath, { force: true }).catch(() => undefined);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      // Roll back the lock on any transition failure.
+      await rm(lockPath, { force: true }).catch(() => undefined);
+      throw error;
+    }
   }
 
   /** Accept a claimed envelope (injection dispatched, awaiting IPC ack). */
   async accept(messageId: string, claim: MailboxClaim): Promise<boolean> {
     const now = this.#now();
-    return atomicTransition(this.paths, messageId, "claimed", "accepted", {
+    const transitioned = await atomicTransition(this.paths, messageId, "claimed", "accepted", {
       messageId,
       state: "accepted",
       transitionedAt: now,
       previousState: "claimed",
       claim,
     });
+    if (transitioned) {
+      // Release the claim lock — the message is now owned by the accepted state.
+      await rm(claimLockPath(this.paths, messageId), { force: true }).catch(() => undefined);
+    }
+    return transitioned;
   }
 
   /** Apply an accepted envelope (IPC ack received). */
@@ -250,13 +286,17 @@ export class MailboxFileStore {
   /** Reject an envelope from ready or claimed state. */
   async reject(messageId: string, fromState: "ready" | "claimed", reason: string): Promise<boolean> {
     const now = this.#now();
-    return atomicTransition(this.paths, messageId, fromState, "rejected", {
+    const transitioned = await atomicTransition(this.paths, messageId, fromState, "rejected", {
       messageId,
       state: "rejected",
       transitionedAt: now,
       previousState: fromState,
       reason,
     });
+    if (transitioned && fromState === "claimed") {
+      await rm(claimLockPath(this.paths, messageId), { force: true }).catch(() => undefined);
+    }
+    return transitioned;
   }
 
   /** Expire an envelope from ready state. */
@@ -361,6 +401,21 @@ export class MailboxFileStore {
   /** Remove an orphaned state record without touching any envelope. */
   async removeStateRecordOnly(state: MailboxState, messageId: string): Promise<void> {
     await rm(stateRecordPath(this.paths, state, messageId), { force: true }).catch(() => undefined);
+  }
+
+  /** Release a claim lock (no-op if absent). */
+  async removeClaimLock(messageId: string): Promise<void> {
+    await rm(claimLockPath(this.paths, messageId), { force: true }).catch(() => undefined);
+  }
+
+  /** True if a claim lock is currently held for the message. */
+  async hasClaimLock(messageId: string): Promise<boolean> {
+    try {
+      await readFile(claimLockPath(this.paths, messageId));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /** Check if a messageId has been seen (deduplication). */
