@@ -95,6 +95,7 @@ test("compaction settings ignore malformed files and invalid optional fields", a
         soft: {
           cache: { minRatioRange: [0.8, 0.2] },
           timeBased: { gapThresholdMinutes: -1 },
+          relevance: { mode: "embedding" },
         },
       },
     });
@@ -322,6 +323,7 @@ test("compaction settings read nested hard and soft groups with soft sourced per
           pruneTargetRatio: 0.55,
           cache: { minRatioRange: [0.2, 0.45] },
           timeBased: { enabled: true, gapThresholdMinutes: 30 },
+          relevance: { enabled: true, mode: "keyword" },
         },
       },
     });
@@ -335,6 +337,7 @@ test("compaction settings read nested hard and soft groups with soft sourced per
       pruneTargetRatio: 0.55,
       cache: { enabled: true, minRatioRange: [0.2, 0.45] },
       timeBased: { enabled: true, gapThresholdMinutes: 30 },
+      relevance: { enabled: true, mode: "keyword" },
     });
     assert.equal(effective.source.soft, "project");
   } finally {
@@ -401,6 +404,7 @@ test("cache defaults on because it can only decline prunes, never trigger them",
   const effective = resolveEffectiveCompactionSettings({}, {});
   assert.deepEqual(effective.soft.cache, { enabled: true, minRatioRange: [0.1, 0.5] });
   assert.deepEqual(effective.soft.timeBased, { enabled: false, gapThresholdMinutes: 60 });
+  assert.deepEqual(effective.soft.relevance, { enabled: false, mode: "bm25" });
 });
 
 test("cache gate remains explicitly disablable", () => {
@@ -445,6 +449,7 @@ test("createDefaultSoftCompaction returns independent nested objects", () => {
   assert.equal(b.cache.enabled, true);
   assert.deepEqual(b.cache.minRatioRange, [0.1, 0.5]);
   assert.equal(b.timeBased?.enabled, false);
+  assert.deepEqual(b.relevance, { enabled: false, mode: "bm25" });
   assert.equal(DEFAULT_SOFT_COMPACTION.velocity.enabled, false);
   assert.deepEqual(DEFAULT_SOFT_COMPACTION.cache.minRatioRange, [0.1, 0.5]);
 });
@@ -474,20 +479,23 @@ test("compaction validation rejects invalid velocity signal fields", () => {
   assert.equal(valid.errors.length, 0);
 });
 
-test("compaction validation covers cache ratio and time-based thresholds", () => {
+test("compaction validation covers cache ratio, time-based, and relevance settings", () => {
   const invalid = validateCompactionPatch({
     soft: {
       cache: { minRatioRange: [0.8, 0.2] },
       timeBased: { gapThresholdMinutes: 0 },
+      relevance: { mode: "embedding" as never },
     },
   });
   assert.ok(invalid.errors.includes("soft.cache.minRatioRange must be [lo, hi] with 0 <= lo < hi <= 1"));
   assert.ok(invalid.errors.includes("soft.timeBased.gapThresholdMinutes must be a positive finite number"));
+  assert.ok(invalid.errors.includes(`soft.relevance.mode must be "bm25" or "keyword"`));
 
   const valid = validateCompactionPatch({
     soft: {
       cache: { minRatioRange: [0.1, 0.5] },
       timeBased: { enabled: true, gapThresholdMinutes: 30 },
+      relevance: { enabled: true, mode: "keyword" },
     },
   });
   assert.equal(valid.errors.length, 0);

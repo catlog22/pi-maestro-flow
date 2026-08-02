@@ -50,6 +50,7 @@ import {
   compactLossless,
   type LosslessKind,
 } from "./lossless.ts";
+import { scoreRelevanceBatch, type RelevanceMode } from "./relevance.ts";
 
 const PROTECTED_THRESHOLD_CHARS = 500;
 const REPLAYABLE_TOOL_NAMES = new Set(["read", "grep", "glob", "search", "find"]);
@@ -65,6 +66,7 @@ const PROTECTED_TOOL_NAMES = new Set(["todo", "goal", "run-control", "ask-user-q
 const TOKEN_RATIO_CODE = 3.5;
 const TOKEN_RATIO_WHITESPACE_HEAVY = 6;
 const TOKEN_RATIO_DEFAULT = 4;
+const RELEVANCE_SAMPLE_CHARS = 32_000;
 /** Fixed token estimate per image content block, matching Pi's ESTIMATED_IMAGE_CHARS / 4. */
 const ESTIMATED_IMAGE_TOKENS = 1200;
 const CONTINUE_PROMPT = "Continue the interrupted task from the compacted session checkpoint. Do not wait for another user request.";
@@ -1283,6 +1285,16 @@ export function applyContextPressurePolicy(
     const plannedCandidates: PruneCandidate[] = [];
     let planSavedTokens = 0;
     let planPrunedToolResults = 0;
+    const relevanceQuery = soft.relevance?.enabled === true
+      ? latestRelevanceQuery(messages)
+      : "";
+    const rankCandidates = relevanceQuery
+      ? (candidates: PruneCandidate[]) => rankPruneCandidates(
+        candidates,
+        relevanceQuery,
+        soft.relevance?.mode ?? "bm25",
+      )
+      : undefined;
 
     // Tier 0 — lossless folding first (reversible, no information loss): it
     // shrinks output without a decision, and whatever it saves lowers the
@@ -1297,6 +1309,7 @@ export function applyContextPressurePolicy(
         effectiveTokens: initial,
         usageEpoch,
         selector: tryLosslessFold,
+        rankCandidates,
         level: "lossless",
       });
       plannedCandidates.push(...lossless.candidates);
@@ -1315,6 +1328,7 @@ export function applyContextPressurePolicy(
       effectiveTokens: effectiveForLossy,
       usageEpoch,
       selector: replaceableToolResult,
+      rankCandidates,
     });
     plannedCandidates.push(...replayable.candidates);
     planSavedTokens += replayable.savedTokens;
@@ -1327,6 +1341,7 @@ export function applyContextPressurePolicy(
       effectiveTokens: replayable.effectiveTokens,
       usageEpoch,
       selector: evictableBulkToolResult,
+      rankCandidates,
     });
     plannedCandidates.push(...bulk.candidates);
     planSavedTokens += bulk.savedTokens;
@@ -1919,6 +1934,7 @@ interface PrunePassInput {
   effectiveTokens: number;
   usageEpoch: string | undefined;
   selector: (message: AgentMessage) => AgentMessage | undefined;
+  rankCandidates?: (candidates: PruneCandidate[]) => PruneCandidate[];
   /** Manifest level recorded for candidates this pass applies. */
   level?: PruneLevel;
 }
@@ -1930,6 +1946,8 @@ interface PruneCandidate {
   saved: number;
   contentDigest: string;
   level: PruneLevel;
+  toolName: string;
+  relevanceText: string;
 }
 
 interface PrunePassResult {
@@ -2066,34 +2084,104 @@ function applyPruneCandidates(
   return { savedTokens, prunedToolResults, effectiveTokens, candidates: appliedCandidates };
 }
 
+function rankPruneCandidates(
+  candidates: PruneCandidate[],
+  query: string,
+  mode: RelevanceMode,
+): PruneCandidate[] {
+  if (candidates.length < 2 || !query.trim()) return candidates;
+  const documents = candidates.map((candidate) =>
+    `${candidate.toolName}\n${sampleRelevanceText(candidate.relevanceText)}`);
+  const scores = scoreRelevanceBatch(documents, query, mode);
+  return candidates
+    .map((candidate, position) => ({ candidate, position, score: scores[position] ?? 0 }))
+    .sort((left, right) =>
+      left.score - right.score
+      || right.candidate.index - left.candidate.index
+      || left.position - right.position)
+    .map((item) => item.candidate);
+}
+
+function sampleRelevanceText(text: string): string {
+  if (text.length <= RELEVANCE_SAMPLE_CHARS) return text;
+  const half = RELEVANCE_SAMPLE_CHARS / 2;
+  return `${text.slice(0, half)}\n${text.slice(-half)}`;
+}
+
+function latestRelevanceQuery(messages: AgentMessage[]): string {
+  let userIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index--) {
+    if ((messages[index] as MessageRecord).role === "user") {
+      userIndex = index;
+      break;
+    }
+  }
+  if (userIndex < 0) return "";
+  const parts = [extractTextContent(messages[userIndex]).trim()];
+  const toolNames = new Set<string>();
+  for (let index = userIndex + 1; index < messages.length; index++) {
+    const content = (messages[index] as MessageRecord).content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!block || typeof block !== "object") continue;
+      const call = block as { type?: unknown; name?: unknown };
+      if (call.type === "toolCall" && typeof call.name === "string" && call.name.trim()) {
+        toolNames.add(call.name.trim());
+      }
+    }
+  }
+  parts.push(...toolNames);
+  return parts.filter(Boolean).join("\n");
+}
+
 function runPrunePass(input: PrunePassInput): PrunePassResult {
   const { transformed, pruneManifest, frontierStart, pruneTarget, usageEpoch, selector } = input;
-  let effectiveTokens = input.effectiveTokens;
+  const effectiveTokens = input.effectiveTokens;
 
-  // Collect candidates newest-first without mutating the source plan. The walk
-  // order is unchanged from the historical ungated path.
+  // Default mode preserves the historical newest-first walk and stops once the
+  // target is projected. Relevance mode must collect the whole eligible tier
+  // before sorting, otherwise older low-relevance candidates are invisible.
   const candidates: PruneCandidate[] = [];
   const claimedCallIds = new Set(pruneManifest.keys());
   let projectedTokens = effectiveTokens;
-  for (let index = frontierStart - 1; index >= 0 && projectedTokens > pruneTarget; index--) {
-    const callId = toolResultCallId(transformed[index]);
+  const collectWholeTier = input.rankCandidates !== undefined && projectedTokens > pruneTarget;
+  for (let index = frontierStart - 1;
+    index >= 0 && (collectWholeTier || projectedTokens > pruneTarget);
+    index--) {
+    const original = transformed[index];
+    const callId = toolResultCallId(original);
     if (!callId || claimedCallIds.has(callId)) continue;
-    const replacement = selector(transformed[index]);
+    const replacement = selector(original);
     if (!replacement) continue;
-    const before = estimateMessageTokens(transformed[index]);
+    const before = estimateMessageTokens(original);
     const after = estimateMessageTokens(replacement);
     if (after >= before) continue;
     const saved = before - after;
+    const record = original as MessageRecord;
     candidates.push({
       index,
       callId,
       replacement,
       saved,
-      contentDigest: toolResultDigest(transformed[index]),
+      contentDigest: toolResultDigest(original),
       level: input.level ?? "pruned",
+      toolName: typeof record.toolName === "string" ? record.toolName : "tool",
+      relevanceText: extractTextContent(original),
     });
     claimedCallIds.add(callId);
-    projectedTokens -= saved;
+    if (!collectWholeTier) projectedTokens -= saved;
+  }
+
+  let selected = candidates;
+  if (collectWholeTier && input.rankCandidates) {
+    const ranked = input.rankCandidates(candidates);
+    projectedTokens = effectiveTokens;
+    let depth = 0;
+    while (depth < ranked.length && projectedTokens > pruneTarget) {
+      projectedTokens -= ranked[depth].saved;
+      depth++;
+    }
+    selected = ranked.slice(0, depth);
   }
 
   // A pass always applies its complete ungated candidate run. When cache
@@ -2102,8 +2190,8 @@ function runPrunePass(input: PrunePassInput): PrunePassResult {
   return applyPruneCandidates(
     transformed,
     pruneManifest,
-    candidates,
-    candidates.length,
+    selected,
+    selected.length,
     effectiveTokens,
     usageEpoch,
   );

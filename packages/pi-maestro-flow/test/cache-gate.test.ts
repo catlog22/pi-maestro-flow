@@ -89,6 +89,7 @@ test("settings default exposes the lossless/timeBased/cache toggles", () => {
   assert.equal(soft.timeBased?.enabled, false);
   assert.equal(soft.timeBased?.gapThresholdMinutes, 60);
   assert.deepEqual(soft.cache.minRatioRange, [0.1, 0.5]);
+  assert.deepEqual(soft.relevance, { enabled: false, mode: "bm25" });
 });
 
 test("suffixTokenSums stays monotonic (support for gate math)", () => {

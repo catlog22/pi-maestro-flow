@@ -3935,6 +3935,84 @@ test("cache economics accumulate across replayable and bulk tiers", () => {
   assert.ok(manifest.has("bash-old"));
 });
 
+test("relevance ranking prunes low-signal candidates before a matching result", () => {
+  const importantId = "550e8400-e29b-41d4-a716-446655440000";
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "old", name: "read", arguments: {} }],
+    usage: {
+      input: 90_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 90_000,
+      cost: { total: 0 },
+    },
+  }, {
+    role: "toolResult",
+    toolCallId: "old",
+    toolName: "read",
+    content: [{ type: "text", text: `unrelated-old ${"o".repeat(14_000)}` }],
+    isError: false,
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "important", name: "read", arguments: {} }],
+  }, {
+    role: "toolResult",
+    toolCallId: "important",
+    toolName: "read",
+    content: [{ type: "text", text: `record ${importantId} ${"i".repeat(14_000)}` }],
+    isError: false,
+  }, {
+    role: "assistant",
+    content: [{ type: "toolCall", id: "newest", name: "read", arguments: {} }],
+  }, {
+    role: "toolResult",
+    toolCallId: "newest",
+    toolName: "read",
+    content: [{ type: "text", text: `unrelated-new ${"n".repeat(14_000)}` }],
+    isError: false,
+  }, {
+    role: "user",
+    content: [{ type: "text", text: `keep the record ${importantId}` }],
+  }] as never;
+  const base = {
+    enabled: true,
+    reserveTokens: 10_000,
+    keepRecentTokens: 10,
+  };
+
+  const newestFirstManifest = new Map();
+  applyContextPressurePolicy(messages, 120_000, {
+    ...base,
+    soft: {
+      ...DEFAULT_SOFT_COMPACTION,
+      pruneTargetRatio: 0.79,
+      cache: { enabled: false },
+      lossless: { enabled: false },
+      relevance: { enabled: false, mode: "bm25" },
+    },
+  }, newestFirstManifest);
+  assert.ok(newestFirstManifest.has("newest"));
+  assert.ok(newestFirstManifest.has("important"), "default mode remains newest-first");
+  assert.ok(!newestFirstManifest.has("old"));
+
+  const relevanceManifest = new Map();
+  applyContextPressurePolicy(messages, 120_000, {
+    ...base,
+    soft: {
+      ...DEFAULT_SOFT_COMPACTION,
+      pruneTargetRatio: 0.79,
+      cache: { enabled: false },
+      lossless: { enabled: false },
+      relevance: { enabled: true, mode: "bm25" },
+    },
+  }, relevanceManifest);
+  assert.ok(relevanceManifest.has("newest"));
+  assert.ok(relevanceManifest.has("old"));
+  assert.ok(!relevanceManifest.has("important"), "query-matching output stays verbatim");
+});
+
 test("cache gate still prunes when the run pays for itself", () => {
   // A dense tool loop reclaims ~0.66 tokens per invalidated token — well past
   // the floor — so gating must not suppress it.

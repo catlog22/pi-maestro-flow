@@ -3,6 +3,7 @@ import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { effectiveReserveTokens } from "./compaction-threshold.ts";
+import type { RelevanceMode } from "./relevance.ts";
 
 export const DEFAULT_RESERVE_TOKENS = 16_384;
 export const DEFAULT_KEEP_RECENT_TOKENS = 20_000;
@@ -59,6 +60,16 @@ export interface TimeBasedCompactionSettings {
   gapThresholdMinutes: number;
 }
 
+export interface RelevanceCompactionConfigPatch {
+  enabled?: boolean;
+  mode?: RelevanceMode;
+}
+
+export interface RelevanceCompactionSettings {
+  enabled: boolean;
+  mode: RelevanceMode;
+}
+
 export interface LosslessCompactionConfigPatch {
   enabled?: boolean;
 }
@@ -84,6 +95,7 @@ export interface SoftCompactionConfigPatch {
   velocity?: VelocityCompactionConfigPatch;
   cache?: CacheCompactionConfigPatch;
   timeBased?: TimeBasedCompactionConfigPatch;
+  relevance?: RelevanceCompactionConfigPatch;
   lossless?: LosslessCompactionConfigPatch;
 }
 
@@ -96,6 +108,8 @@ export interface SoftCompactionSettings {
   cache: CacheCompactionSettings;
   /** Optional for source compatibility; resolved defaults provide this group. */
   timeBased?: TimeBasedCompactionSettings;
+  /** Optional for source compatibility; resolved defaults provide this group. */
+  relevance?: RelevanceCompactionSettings;
   lossless: LosslessCompactionSettings;
 }
 
@@ -113,6 +127,8 @@ export interface SoftCompactionSettings {
  * `timeBased` defaults OFF: cache-cold detection only declines the gate when
  * enabled — an unresolved setting must not compact earlier than historical
  * token-ratio-only behavior.
+ * `relevance` defaults OFF: lexical ranking changes which eligible outputs are
+ * pruned first, so historical newest-first ordering remains the safe default.
  */
 export function createDefaultSoftCompaction(): SoftCompactionSettings {
   return {
@@ -123,6 +139,7 @@ export function createDefaultSoftCompaction(): SoftCompactionSettings {
     velocity: { enabled: false, epochsToCritical: 3, minFullness: 0.7 },
     cache: { enabled: true, minRatioRange: [0.1, 0.5] },
     timeBased: { enabled: false, gapThresholdMinutes: 60 },
+    relevance: { enabled: false, mode: "bm25" },
     lossless: { enabled: true },
   };
 }
@@ -215,6 +232,8 @@ function readRawSoft(value: unknown): SoftCompactionConfigPatch | undefined {
   if (cache) soft.cache = cache;
   const timeBased = readRawTimeBased(value.timeBased);
   if (timeBased) soft.timeBased = timeBased;
+  const relevance = readRawRelevance(value.relevance);
+  if (relevance) soft.relevance = relevance;
   const lossless = readRawLossless(value.lossless);
   if (lossless) soft.lossless = lossless;
   return Object.keys(soft).length > 0 ? soft : undefined;
@@ -252,6 +271,14 @@ function readRawTimeBased(value: unknown): TimeBasedCompactionConfigPatch | unde
   const minutes = positiveNumber(value.gapThresholdMinutes);
   if (minutes !== undefined) timeBased.gapThresholdMinutes = minutes;
   return Object.keys(timeBased).length > 0 ? timeBased : undefined;
+}
+
+function readRawRelevance(value: unknown): RelevanceCompactionConfigPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const relevance: RelevanceCompactionConfigPatch = {};
+  if (typeof value.enabled === "boolean") relevance.enabled = value.enabled;
+  if (value.mode === "bm25" || value.mode === "keyword") relevance.mode = value.mode;
+  return Object.keys(relevance).length > 0 ? relevance : undefined;
 }
 
 function readRawLossless(value: unknown): LosslessCompactionConfigPatch | undefined {
@@ -325,6 +352,11 @@ export function resolveEffectiveCompactionSettings(
         const timeBased = soft.timeBased ?? (soft.timeBased = { enabled: false, gapThresholdMinutes: 60 });
         if (patch.soft.timeBased.enabled !== undefined) timeBased.enabled = patch.soft.timeBased.enabled;
         if (patch.soft.timeBased.gapThresholdMinutes !== undefined) timeBased.gapThresholdMinutes = patch.soft.timeBased.gapThresholdMinutes;
+      }
+      if (patch.soft.relevance !== undefined) {
+        const relevance = soft.relevance ?? (soft.relevance = { enabled: false, mode: "bm25" });
+        if (patch.soft.relevance.enabled !== undefined) relevance.enabled = patch.soft.relevance.enabled;
+        if (patch.soft.relevance.mode !== undefined) relevance.mode = patch.soft.relevance.mode;
       }
       if (patch.soft.lossless !== undefined) {
         if (patch.soft.lossless.enabled !== undefined) soft.lossless.enabled = patch.soft.lossless.enabled;
@@ -407,6 +439,10 @@ export function validateCompactionPatch(
       && !isPositiveFiniteNumber(soft.timeBased.gapThresholdMinutes)) {
       errors.push(`soft.timeBased.gapThresholdMinutes must be a positive finite number`);
     }
+    if (soft.relevance?.mode !== undefined
+      && soft.relevance.mode !== "bm25" && soft.relevance.mode !== "keyword") {
+      errors.push(`soft.relevance.mode must be "bm25" or "keyword"`);
+    }
   }
 
   if (contextWindow === undefined) {
@@ -449,6 +485,10 @@ export function validateEffectiveCompactionSettings(settings: EffectiveCompactio
   if (soft.timeBased?.gapThresholdMinutes !== undefined
     && !isPositiveFiniteNumber(soft.timeBased.gapThresholdMinutes)) {
     errors.push(`soft.timeBased.gapThresholdMinutes must be a positive finite number`);
+  }
+  if (soft.relevance?.mode !== undefined
+    && soft.relevance.mode !== "bm25" && soft.relevance.mode !== "keyword") {
+    errors.push(`soft.relevance.mode must be "bm25" or "keyword"`);
   }
   if (!Number.isSafeInteger(settings.reserveTokens) || settings.reserveTokens <= 0) {
     errors.push(`reserveTokens must be a positive safe integer`);
