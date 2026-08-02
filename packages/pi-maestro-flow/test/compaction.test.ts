@@ -786,6 +786,46 @@ test("applyContextPressurePolicy honors output-clamp derived soft bands", () => 
   );
 });
 
+test("nudge warning explains output headroom and survives other notification types without repeating", async () => {
+  const notifications: string[] = [];
+  const guard = createMidTurnAutoCompaction({ sendUserMessage() {} } as never, {
+    readSettings: () => ({
+      enabled: true,
+      reserveTokens: 16_384,
+      keepRecentTokens: 20_000,
+      soft: DEFAULT_SOFT_COMPACTION,
+    }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 372_000, maxTokens: 128_000 },
+    abort() {},
+    compact() {},
+    sessionManager: { getBranch: () => [{ type: "message" }] },
+    ui: {
+      setStatus() {},
+      notify(message: string) { notifications.push(message); },
+    },
+  } as never;
+
+  await guard.evaluate(highUsageToolBatch(238_000), ctx);
+  await guard.evaluate(highUsageToolBatch(354_000), ctx);
+  await guard.onAgentEnd(ctx);
+  await guard.evaluate(highUsageToolBatch(238_000), ctx);
+
+  const nudges = notifications.filter((message) => /response headroom/.test(message));
+  assert.equal(nudges.length, 1, "defer notification must not re-arm the nudge warning");
+  assert.match(nudges[0] ?? "", /Context is at 64%/);
+  assert.match(nudges[0] ?? "", /Automatic pruning starts at 239,904 tokens/);
+  assert.match(nudges[0] ?? "", /hard compaction starts above 353,400 tokens/);
+  assert.doesNotMatch(nudges[0] ?? "", /nearing the compaction threshold/);
+  assert.equal(
+    notifications.filter((message) => /after the next completed turn/.test(message)).length,
+    1,
+    "the distinct defer warning is still emitted once",
+  );
+});
+
 test("mid-turn guard aborts when no compactable history remains after exhausting the model window", async () => {
   let aborted = 0;
   let compacted = 0;
@@ -1685,7 +1725,7 @@ test("mid-turn guard restores persisted prunes before the first resumed provider
   assert.match(JSON.stringify(resumed?.[1]), /stale large output/);
 });
 
-test("custom compaction cancels instead of entering Pi's unguarded summary fallback", async () => {
+test("custom compaction falls back to Pi native summarization on provider error", async () => {
   const notifications: string[] = [];
   const result = await createMaestroCompaction(
     {
@@ -1717,8 +1757,8 @@ test("custom compaction cancels instead of entering Pi's unguarded summary fallb
     },
   );
 
-  assert.deepEqual(result, { cancel: true });
-  assert.match(notifications[0] ?? "", /cancelled before Pi's unguarded fallback/);
+  assert.equal(result, undefined);
+  assert.match(notifications[0] ?? "", /falling back to Pi native compaction/);
 });
 
 test("clean-context compaction bypasses summarization and keeps no old provider messages", async () => {

@@ -238,8 +238,8 @@ export interface AutoCompactionState {
   turnCount: number;
   /** Consecutive completed turns whose threshold intent was deferred instead of run. */
   highPressureDroppedTurns: number;
-  /** Dedup key for one-shot pressure notifications; cleared when pressure falls back. */
-  lastNotifyKey?: string;
+  /** Pressure notifications already emitted in the current compaction cycle. */
+  notifiedPressureKeys: Set<string>;
   outputLimitCompactions: number;
   outputLimitBreakerNotified: boolean;
   /** Provider usage epoch the cache ratio below was sampled at. */
@@ -306,6 +306,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     breakerNotified: false,
     turnCount: 0,
     highPressureDroppedTurns: 0,
+    notifiedPressureKeys: new Set(),
     outputLimitCompactions: 0,
     outputLimitBreakerNotified: false,
   };
@@ -335,6 +336,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
   }
   function sameSettings(left: CompactionSettings, right: CompactionSettings): boolean {
     return JSON.stringify(left) === JSON.stringify(right);
+  }
+  function notifyPressureOnce(ctx: ExtensionContext, key: string, message: string): void {
+    if (state.notifiedPressureKeys.has(key)) return;
+    state.notifiedPressureKeys.add(key);
+    ctx.ui.notify(message, "warning");
   }
   async function linkedThresholdFor(
     ctx: ExtensionContext,
@@ -377,7 +383,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.lastTriggerKey = undefined;
     state.lastNoCompactableKey = undefined;
     state.highPressureDroppedTurns = 0;
-    state.lastNotifyKey = undefined;
+    state.notifiedPressureKeys.clear();
     state.internalsWarningShown = false;
   }
   function resetCycleState(): void {
@@ -385,7 +391,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     state.breaker = resetCompactionBreaker();
     state.breakerNotified = false;
     state.highPressureDroppedTurns = 0;
-    state.lastNotifyKey = undefined;
+    state.notifiedPressureKeys.clear();
     state.outputLimitCompactions = 0;
     state.outputLimitBreakerNotified = false;
     state.cacheEpoch = undefined;
@@ -472,12 +478,16 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       );
       state.velocityTracker = pressure.velocityTracker;
       // One-shot early warning at the nudge band, which is display-only: tell the
-      // user compaction is approaching while there is still room to act.
-      if (pressure.band === "nudge" && softBands && state.lastNotifyKey !== `nudge:${linkedThreshold.thresholdTokens}`) {
-        state.lastNotifyKey = `nudge:${linkedThreshold.thresholdTokens}`;
-        ctx.ui.notify(
-          `Context is at ${Math.round((pressure.estimatedTokens / capacityWindow) * 100)}% — nearing the compaction threshold (${linkedThreshold.thresholdTokens.toLocaleString("en-US")} tokens). Long responses may be truncated; consider /compact or reducing scope.`,
-          "warning",
+      // user output headroom or automatic pruning is approaching.
+      if (pressure.band === "nudge" && softBands && linkedThreshold.soft) {
+        const percent = Math.round((pressure.estimatedTokens / capacityWindow) * 100);
+        const headroomWarning = linkedThreshold.soft.outputConstrained
+          ? " Full-size response headroom is nearly exhausted."
+          : "";
+        notifyPressureOnce(
+          ctx,
+          `nudge:${capacityWindow}:${softBands.nudgeTokens}:${softBands.pruneTokens}:${linkedThreshold.thresholdTokens}`,
+          `Context is at ${percent}% (estimated ${pressure.estimatedTokens.toLocaleString("en-US")}/${capacityWindow.toLocaleString("en-US")} tokens).${headroomWarning} Automatic pruning starts at ${softBands.pruneTokens.toLocaleString("en-US")} tokens; hard compaction starts above ${linkedThreshold.thresholdTokens.toLocaleString("en-US")} tokens.`,
         );
       }
       // Only entries recorded by THIS policy pass may still be escalated to
@@ -549,13 +559,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             if (contextExhausted) ctx.abort();
             // Dedup on the stable threshold, not the volatile triggerKey
             // (tokens + message count change every evaluation within a turn).
-            if (state.lastNotifyKey !== `escalate:${pressure.thresholdTokens}`) {
-              state.lastNotifyKey = `escalate:${pressure.thresholdTokens}`;
-              ctx.ui.notify(
-                `Context remains near the compaction threshold after pruning (${estimate.tokens.toLocaleString("en-US")}/${pressure.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after this turn; responses may be truncated until then.`,
-                "warning",
-              );
-            }
+            notifyPressureOnce(
+              ctx,
+              `escalate:${pressure.thresholdTokens}`,
+              `Context remains near the compaction threshold after pruning (${estimate.tokens.toLocaleString("en-US")}/${pressure.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after this turn; responses may be truncated until then.`,
+            );
           }
         } else {
           state.pendingIntent = undefined;
@@ -1000,13 +1008,11 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
             await settlePendingCompaction(ctx);
           } else {
             state.lastNoCompactableKey = undefined;
-            if (state.lastNotifyKey !== `defer:${pending.linkedThreshold.thresholdTokens}`) {
-              state.lastNotifyKey = `defer:${pending.linkedThreshold.thresholdTokens}`;
-              ctx.ui.notify(
-                `Context is above the compaction threshold (${pending.estimate.tokens.toLocaleString("en-US")}/${pending.linkedThreshold.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after the next completed turn; responses may be truncated until then.`,
-                "warning",
-              );
-            }
+            notifyPressureOnce(
+              ctx,
+              `defer:${pending.linkedThreshold.thresholdTokens}`,
+              `Context is above the compaction threshold (${pending.estimate.tokens.toLocaleString("en-US")}/${pending.linkedThreshold.thresholdTokens.toLocaleString("en-US")} tokens). Compaction will run after the next completed turn; responses may be truncated until then.`,
+            );
           }
         } else {
           state.highPressureDroppedTurns = 0;

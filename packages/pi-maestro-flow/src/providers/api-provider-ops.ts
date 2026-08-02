@@ -23,7 +23,6 @@ import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
 import {
   EFFORT_LEVELS,
   EFFORT_STATUS_KEY,
-  effortProgressBar,
   isThinkingLevel as isCanonicalThinkingLevel,
 } from "../effort-display.ts";
 import { readCompactionSettings } from "../compaction/compaction-settings.ts";
@@ -1174,7 +1173,6 @@ export async function loadModelThinkingDefault(
   const key = modelThinkingKey(provider, modelId);
   const legacyKey = legacyModelThinkingKey(provider, modelId);
   const value = root.modelDefaults[key] ?? root.modelDefaults[legacyKey];
-  if (value === "max") return "xhigh";
   return isThinkingLevel(value) ? value : undefined;
 }
 
@@ -1479,8 +1477,9 @@ export function syncEffortStatus(
   }
 }
 
+// max 已是 canonical level（与 Pi runtime 的 ThinkingLevel 一致），不再降级为 xhigh。
 export function canonicalThinkingLevel(level: ApiThinkingLevel): ThinkingLevel {
-  return level === "max" ? "xhigh" : level;
+  return level;
 }
 
 export function isErrno(error: unknown, code: string): error is NodeJS.ErrnoException {

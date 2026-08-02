@@ -23,7 +23,6 @@ import { NETWORK_RETRY_POLICY } from "pi-maestro-teammate/v1/retry";
 import {
   EFFORT_LEVELS,
   EFFORT_STATUS_KEY,
-  effortProgressBar,
   isThinkingLevel as isCanonicalThinkingLevel,
 } from "../effort-display.ts";
 import { readCompactionSettings } from "../compaction/compaction-settings.ts";
@@ -235,10 +234,15 @@ export function registerApiProviderConfigs(
         return;
       }
       const current = pi.getThinkingLevel();
-      const supported = getSupportedThinkingLevels(ctx.model).filter(isThinkingLevel);
+      const levelMap = ctx.model.thinkingLevelMap;
+      const supportsMax = levelMap?.xhigh === "max" || levelMap?.max === "max";
+      const supported = [...new Set([
+        ...getSupportedThinkingLevels(ctx.model).filter(isThinkingLevel),
+        ...(supportsMax ? ["max" as ThinkingLevel] : []),
+      ])];
       const labels = new Map<string, ThinkingLevel>();
       const options = supported.map((level) => {
-        const label = `${level}${level === current ? "（当前）" : ""} ${effortProgressBar(level)}`;
+        const label = `${level}${level === current ? "（当前）" : ""}`;
         labels.set(label, level);
         return label;
       });
@@ -259,7 +263,7 @@ export function registerApiProviderConfigs(
         return;
       }
       syncEffortStatus(ctx, selected);
-      ctx.ui.notify(`思考强度已设为 ${selected} ${effortProgressBar(selected)}`, "info");
+      ctx.ui.notify(`思考强度已设为 ${selected}`, "info");
     },
   });
   if (typeof pi.on === "function") {
@@ -1610,7 +1614,7 @@ function formBooleanOrDefault(values: ApiModelFormValues, id: string, fallback: 
 
 function formThinkingLevel(values: ApiModelFormValues, id: string): ApiThinkingLevel {
   const value = formText(values, id);
-  if (!(value === "max" || isThinkingLevel(value))) throw new Error(`思考强度 ${value} 无效`);
+  if (!isThinkingLevel(value)) throw new Error(`思考强度 ${value} 无效`);
   return value;
 }
 

@@ -6,8 +6,8 @@ import { request as httpRequest, type IncomingMessage } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { extname, isAbsolute, join, resolve } from "node:path";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { Api, Model } from "@earendil-works/pi-ai";
-import { complete } from "@earendil-works/pi-ai/compat";
+import type { Api, Model, ModelThinkingLevel } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, complete } from "@earendil-works/pi-ai/compat";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   isRetryableProviderError,
@@ -610,6 +610,7 @@ async function callCandidates(
       failures.push(`${reference}: authentication unavailable (${auth.error})`);
       continue;
     }
+    const reasoningEffort = visionReasoningEffort(model, ctx.thinkingLevel);
     for (let attempt = 0; attempt <= config.maxRetries; attempt += 1) {
       telemetry.emit({ type: "attempt", model: reference, attempt, timeoutMs: config.timeoutMs });
       const guard = completionGuard(signal, config.timeoutMs);
@@ -620,7 +621,7 @@ async function callCandidates(
             { type: "image", data: image.data, mimeType: image.mimeType },
             { type: "text", text: prompt },
           ], timestamp: Date.now() }],
-        }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: Math.min(model.maxTokens, 8_192), signal: guard.signal }));
+        }, { apiKey: auth.apiKey, headers: auth.headers, maxTokens: Math.min(model.maxTokens, 8_192), reasoningEffort, signal: guard.signal }));
         void running.catch(() => undefined);
         const response = await Promise.race([running, guard.deadline]);
         breaker.recordSuccess(acquisition);
@@ -813,6 +814,19 @@ function normalizeConfig(config: VisionDelegationConfig): VisionDelegationConfig
 function modelReferences(value: unknown): string[] { return Array.isArray(value) ? [...new Set(value.filter(modelReference).map((v) => v.trim()))] : []; }
 function modelReference(value: unknown): value is string { if (typeof value !== "string") return false; const slash = value.trim().indexOf("/"); return slash > 0 && slash < value.trim().length - 1; }
 function splitReference(value: string): [string, string] { const slash = value.indexOf("/"); return [value.slice(0, slash), value.slice(slash + 1)]; }
+
+/** qwen-family providers derive enable_thinking from reasoningEffort (pi-ai
+ *  openai-completions buildParams), so an absent effort sends
+ *  enable_thinking=false, which DashScope rejects for qwen3.8-max-preview.
+ *  Mirror the main-session convention (createSummarizationOptions): forward the
+ *  session thinking level, clamped to the model's supported levels; fall back
+ *  to a non-off level when the runtime did not provide one. */
+function visionReasoningEffort(model: Model<Api> | undefined, sessionLevel: ModelThinkingLevel | undefined): string | undefined {
+  if (!model?.reasoning) return undefined;
+  const requested: ModelThinkingLevel = sessionLevel && sessionLevel !== "off" ? sessionLevel : "high";
+  const clamped = clampThinkingLevel(model, requested);
+  return clamped === "off" ? undefined : clamped;
+}
 function integer(value: unknown, fallback: number, min: number, max: number): number { return typeof value === "number" && Number.isInteger(value) ? Math.min(max, Math.max(min, value)) : fallback; }
 function normalizeMime(value: string | undefined): string | undefined { if (!value) return undefined; const lower = value.toLowerCase(); return lower === "image/jpg" ? "image/jpeg" : lower; }
 function extensionMime(value: string): string | undefined { return ({ ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif", ".webp": "image/webp" } as Record<string, string>)[value.toLowerCase()]; }

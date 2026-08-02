@@ -181,6 +181,32 @@ test("non-cooperative provider times out and falls back", async () => {
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test("vision delegation forwards the session thinking level as reasoningEffort", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "vision-thinking-"));
+  try {
+    const file = join(dir, "image.png"); writeFileSync(file, Buffer.from("fake"));
+    const config = loadVisionDelegationConfig(dir);
+    saveVisionDelegationConfig({ ...config, visionModel: "p/vision", maxRetries: 0, cache: { enabled: false, maxEntries: 10 } }, dir);
+    let captured: any;
+    const runtime = harness(dir, async (_model: unknown, _context: unknown, options: any) => { captured = options; return assistant("analysis"); });
+    const vision = { ...model("p", "vision", true), reasoning: true };
+    const text = model("p", "text", false);
+    const tool = runtime.tools.get(DESCRIBE_IMAGE_TOOL_NAME);
+    // qwen-family providers derive enable_thinking from reasoningEffort: a
+    // session thinking level must reach the delegated request.
+    await tool.execute("1", { image_path: file }, undefined, undefined, { cwd: dir, model: text, modelRegistry: registry([vision]), thinkingLevel: "high" });
+    assert.equal(captured.reasoningEffort, "high");
+    // A thinking-off session still delegates with a non-off default so qwen
+    // (which rejects enable_thinking=false) remains callable.
+    await tool.execute("2", { image_path: file }, undefined, undefined, { cwd: dir, model: text, modelRegistry: registry([vision]), thinkingLevel: "off" });
+    assert.equal(captured.reasoningEffort, "high");
+    // Text-only helper models receive no reasoning option.
+    const plain = model("p", "vision", true);
+    await tool.execute("3", { image_path: file }, undefined, undefined, { cwd: dir, model: text, modelRegistry: registry([plain]) });
+    assert.equal(captured.reasoningEffort, undefined);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("caller cancellation is reported as aborted", async () => {
   const dir = mkdtempSync(join(tmpdir(), "vision-abort-"));
   try {

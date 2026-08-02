@@ -666,9 +666,9 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.deepEqual(appliedThinkingLevels, []);
   assert.ok(modelSelectHandler);
   await modelSelectHandler!({ model: { provider: "maestro-openai", id: "gpt-5.4" } });
-  assert.deepEqual(appliedThinkingLevels, ["xhigh"]);
+  assert.deepEqual(appliedThinkingLevels, ["max"]);
   const defaults = JSON.parse(readFileSync(join(tempDir, "api-manager.json"), "utf8"));
-  assert.equal(defaults.modelDefaults["maestro-openai/gpt-5.4"], "xhigh");
+  assert.equal(defaults.modelDefaults["maestro-openai/gpt-5.4"], "max");
   assert.ok(selectOptions[1]?.includes("max"));
   assert.doesNotMatch(selectOptions.flat().join("\n"), /环境变量|保留当前 API key/);
   assert.deepEqual(unregistered, []);
@@ -1450,7 +1450,7 @@ test("models.json custom API settings preserve DeepSeek models", async (t) => {
   assert.ok(deepseekAfter.some((model) => model.id === "deepseek-v4-pro"));
 });
 
-test("/effort renders canonical capability order with current marker and progress bars", async (t) => {
+test("/effort renders canonical capability order with current marker", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-canonical-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const defaultsPath = join(tempDir, "api-manager.json");
@@ -1476,7 +1476,7 @@ test("/effort renders canonical capability order with current marker and progres
       async select(nextTitle: string, options: string[]) {
         title = nextTitle;
         rendered = options;
-        return "high [████░]";
+        return "high";
       },
       notify(message: string, type: string) { notifications.push({ message, type }); },
       setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); },
@@ -1484,16 +1484,16 @@ test("/effort renders canonical capability order with current marker and progres
   });
 
   assert.deepEqual(rendered, [
-    "off [░░░░░]",
-    "minimal [█░░░░]",
-    "low [██░░░]",
-    "medium（当前） [███░░]",
-    "high [████░]",
-    "xhigh [█████]",
+    "off",
+    "minimal",
+    "low",
+    "medium（当前）",
+    "high",
+    "xhigh",
   ]);
   assert.equal(title, "选择思考强度（当前：medium）");
   assert.deepEqual(applied, ["high"]);
-  assert.deepEqual(notifications.at(-1), { message: "思考强度已设为 high [████░]", type: "info" });
+  assert.deepEqual(notifications.at(-1), { message: "思考强度已设为 high", type: "info" });
   assert.deepEqual(statuses.at(-1), { key: "maestro-effort", value: "high" });
 });
 
@@ -1520,7 +1520,34 @@ test("/effort filters unsupported canonical levels", async (t) => {
       notify() {},
     },
   });
-  assert.deepEqual(rendered, ["low [██░░░]", "medium（当前） [███░░]", "high [████░]"]);
+  assert.deepEqual(rendered, ["low", "medium（当前）", "high"]);
+});
+
+test("/effort offers max when the model maps a max wire value", async (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-max-level-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const harness = createEffortHarness({
+    modelsPath: join(tempDir, "models.json"),
+    defaultsPath: join(tempDir, "api-manager.json"),
+  });
+  let rendered: string[] = [];
+  await harness.command.handler("", {
+    model: {
+      provider: "maestro-qwen",
+      id: "qwen3.8-max-preview",
+      reasoning: true,
+      thinkingLevelMap: { off: null, xhigh: "max" },
+    },
+    ui: {
+      async select(_title: string, options: string[]) {
+        rendered = options;
+        return undefined;
+      },
+      notify() {},
+    },
+  });
+  assert.ok(rendered.includes("max"));
+  assert.equal(rendered.at(-1), "max");
 });
 
 test("/effort persists API Manager and system providers by model key", async (t) => {
@@ -1546,19 +1573,19 @@ test("/effort persists API Manager and system providers by model key", async (t)
   };
   await invoke(
     { provider: "maestro-openai", id: "gpt-5.4", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    "high [████░]",
+    "high",
   );
   await invoke(
     { provider: "anthropic", id: "claude-sonnet", reasoning: true, thinkingLevelMap: { xhigh: "high" } },
-    "xhigh [█████]",
+    "xhigh",
   );
   await invoke(
     { provider: "team", id: "a/b", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    "low [██░░░]",
+    "low",
   );
   await invoke(
     { provider: "team/a", id: "b", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    "high [████░]",
+    "high",
   );
 
   const defaults = JSON.parse(readFileSync(defaultsPath, "utf8"));
@@ -1679,7 +1706,7 @@ test("legacy Qwen entry path preserves ProviderConfig metadata, compat, and live
   await harness.command.handler("", {
     model: live,
     ui: {
-      async select() { return "xhigh（当前） [█████]"; },
+      async select() { return "xhigh（当前）"; },
       notify() {},
     },
   });
@@ -1788,7 +1815,7 @@ test("/effort persistence failure preserves existing default bytes and runtime",
   await harness.command.handler("", {
     model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
     ui: {
-      async select() { return "high [████░]"; },
+      async select() { return "high"; },
       notify(message: string, type: string) { notifications.push({ message, type }); },
     },
   });
@@ -1798,7 +1825,7 @@ test("/effort persistence failure preserves existing default bytes and runtime",
   assert.match(notifications.at(-1)?.message ?? "", /^思考强度保存失败：/);
 });
 
-test("model_select restores canonical effort, synchronizes the status, and never passes max", async (t) => {
+test("model_select restores canonical effort, synchronizes the status, and passes max through", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-effort-model-select-"));
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const defaultsPath = join(tempDir, "api-manager.json");
@@ -1820,11 +1847,11 @@ test("model_select restores canonical effort, synchronizes the status, and never
   const ctx = { ui: { setStatus(key: string, value: string | undefined) { statuses.push({ key, value }); } } };
   await harness.modelSelect!({ model: { provider: "maestro-openai", id: "gpt-5.4" } }, ctx);
   await harness.modelSelect!({ model: { provider: "anthropic", id: "claude-sonnet" } }, ctx);
-  assert.deepEqual(applied, ["xhigh", "xhigh"]);
-  assert.equal(applied.includes("max"), false);
+  assert.deepEqual(applied, ["max", "max"]);
+  assert.equal(applied.includes("max"), true);
   assert.deepEqual(statuses, [
-    { key: "maestro-effort", value: "xhigh" },
-    { key: "maestro-effort", value: "xhigh" },
+    { key: "maestro-effort", value: "max" },
+    { key: "maestro-effort", value: "max" },
   ]);
 });
 
@@ -1840,7 +1867,7 @@ test("/effort does not change global defaultThinkingLevel", async (t) => {
   await harness.command.handler("", {
     cwd: tempDir,
     model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
-    ui: { async select() { return "high [████░]"; }, notify() {} },
+    ui: { async select() { return "high"; }, notify() {} },
   });
   const settings = JSON.parse(readFileSync(settingsPath, "utf8"));
   assert.equal(settings.defaultThinkingLevel, "medium");
@@ -1860,7 +1887,7 @@ test("/effort reports synchronous runtime apply errors after durable save", asyn
   await harness.command.handler("", {
     model: { provider: "openai", id: "gpt", reasoning: true, thinkingLevelMap: { xhigh: "xhigh" } },
     ui: {
-      async select() { return "high [████░]"; },
+      async select() { return "high"; },
       notify(message: string, type: string) { notifications.push({ message, type }); },
     },
   });

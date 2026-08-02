@@ -1813,10 +1813,10 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
       observed.finalize("error");
       goalCompactionCancelled(ctx);
       ctx.ui.notify(
-        `Compaction failed before host fallback: ${error instanceof Error ? error.message : String(error)}`,
+        `Compaction failed; falling back to Pi native compaction: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
-      return { cancel: true };
+      return undefined;
     }
   });
 
@@ -2074,10 +2074,10 @@ function registerMaestroChildSurface(pi: ExtensionAPI): void {
     } catch (error) {
       observed.finalize("error");
       ctx.ui.notify(
-        `Child compaction failed before provider recovery: ${error instanceof Error ? error.message : String(error)}`,
+        `Child compaction failed; falling back to Pi native compaction: ${error instanceof Error ? error.message : String(error)}`,
         "warning",
       );
-      return { cancel: true };
+      return undefined;
     }
   });
   pi.on("session_compact", (_event, ctx) => {

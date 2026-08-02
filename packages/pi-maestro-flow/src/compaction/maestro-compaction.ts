@@ -94,9 +94,12 @@ export function estimateSummaryRequestTokens(systemPrompt: string, prompt: strin
     if (char.codePointAt(0)! <= 0x7f) asciiChars += 1;
     else nonAsciiChars += 1;
   }
-  // Deliberately conservative versus the usual ~4 chars/token heuristic:
-  // JSON/code is budgeted at 2.5 ASCII chars/token and CJK at 1.5 tokens/char.
-  return Math.ceil(asciiChars / 2.5 + nonAsciiChars * 1.5) + SUMMARY_REQUEST_PROTOCOL_TOKENS;
+  // Conservative versus the usual ~4 chars/token heuristic, but not so
+  // aggressive that a normal conversation exceeds the summary model's window:
+  // JSON/code is budgeted at 3.5 ASCII chars/token and CJK at 1.5 tokens/char.
+  // The previous 2.5 ratio inflated estimates by ~1.76x, causing false
+  // CompactionCapacityError for conversations that actually fit.
+  return Math.ceil(asciiChars / 3.5 + nonAsciiChars * 1.5) + SUMMARY_REQUEST_PROTOCOL_TOKENS;
 }
 
 export function fitSummaryOutputBudget(input: {
@@ -392,7 +395,7 @@ export async function createMaestroCompaction(
   dependencies: CreateCompactionDependencies = {},
 ): Promise<SessionBeforeCompactResult | undefined> {
   const model = ctx.model;
-  if (!model) return { cancel: true };
+  if (!model) return undefined;
 
   const now = dependencies.now?.() ?? new Date();
   const checkpointId = dependencies.checkpointId?.() ?? randomUUID();
@@ -434,7 +437,7 @@ export async function createMaestroCompaction(
 
   if (dependencies.summaryOverride !== undefined) {
     const summary = dependencies.summaryOverride.trim();
-    if (!summary) return { cancel: true };
+    if (!summary) return undefined;
     return {
       compaction: {
         summary,
@@ -460,10 +463,10 @@ export async function createMaestroCompaction(
       : await completeWithCurrentModel(prompt, event, ctx, dependencies.summaryInputTokens);
     if (response.stopReason === "error") {
       ctx.ui.notify(
-        `Maestro compaction summary failed; compaction was cancelled before Pi's unguarded fallback: ${response.errorMessage || "Unknown provider error"}`,
+        `Maestro compaction summary failed; falling back to Pi native compaction: ${response.errorMessage || "Unknown provider error"}`,
         "warning",
       );
-      return { cancel: true };
+      return undefined;
     }
     const summary = response.content
       .filter((part) => part.type === "text" && typeof part.text === "string")
@@ -472,10 +475,10 @@ export async function createMaestroCompaction(
       .trim();
     if (!summary) {
       ctx.ui.notify(
-        "Maestro compaction summary was empty; compaction was cancelled before Pi's unguarded fallback.",
+        "Maestro compaction summary was empty; falling back to Pi native compaction.",
         "warning",
       );
-      return { cancel: true };
+      return undefined;
     }
 
     return {
@@ -488,10 +491,10 @@ export async function createMaestroCompaction(
     };
   } catch (error) {
     ctx.ui.notify(
-      `Maestro compaction summary failed; compaction was cancelled before Pi's unguarded fallback: ${error instanceof Error ? error.message : String(error)}`,
+      `Maestro compaction summary failed; falling back to Pi native compaction: ${error instanceof Error ? error.message : String(error)}`,
       "warning",
     );
-    return { cancel: true };
+    return undefined;
   }
 }
 
