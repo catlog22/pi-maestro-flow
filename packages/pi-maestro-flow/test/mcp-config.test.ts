@@ -160,7 +160,8 @@ test("MCP manager accepts a complete pasted configuration document", async (t) =
 test("MCP adapter await sites use lifecycle-fenced initialization", async () => {
   const adapterSource = readFileSync(new URL("../src/mcp/index.ts", import.meta.url), "utf8");
   assert.doesNotMatch(adapterSource, /state\s*=\s*await initPromise/);
-  assert.equal((adapterSource.match(/await awaitInitializedState\(\)/g) ?? []).length, 3);
+  assert.equal((adapterSource.match(/await awaitInitializedState\(\)/g) ?? []).length, 4);
+  assert.match(adapterSource, /async openManager\(ctx\)/);
 
   const directSource = readFileSync(new URL("../src/mcp/direct-tools.ts", import.meta.url), "utf8");
   assert.doesNotMatch(directSource, /state\s*=\s*await initPromise/);

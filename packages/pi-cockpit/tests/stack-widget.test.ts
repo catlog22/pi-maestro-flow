@@ -178,7 +178,7 @@ test("agent-area widget bridges nested graph descendants to the nearest visible 
 			row({ correlationId: "graph", parentCorrelationId: "worker", agent: "graph(1)", role: "agent", task: "" }),
 			row({ correlationId: "nested", parentCorrelationId: "graph", task: "nested worker" }),
 		],
-		getConfig: () => DEFAULT_CONFIG,
+		getConfig: () => ({ ...DEFAULT_CONFIG, icons: { mode: "nerd" } }),
 		isRunning: () => true,
 	})(tui, theme);
 	const lines = component.render(120);

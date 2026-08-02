@@ -51,6 +51,18 @@ export declare function getGlobalModelRoutingPath(): string;
 export declare function getProjectModelRoutingPath(cwd: string): string;
 export declare function loadModelRoutingState(cwd: string, globalFilePath?: string): ModelRoutingState;
 export declare function loadModelRoutingConfig(cwd: string, globalFilePath?: string): ModelRoutingConfig;
+export interface ModelRoutingStorePair {
+    global: GlobalModelRoutingStore;
+    project: ProjectModelRoutingStore;
+}
+export interface ModelRoutingStoreContentPair {
+    global: string;
+    project: string;
+}
+/** @internal Shared persistence bridge for the unified Settings provider. */
+export declare function loadModelRoutingStores(globalFilePath: string, projectFilePath: string): ModelRoutingStorePair;
+/** @internal Publish a prepared Settings transaction through the routing lock/journal protocol. */
+export declare function replaceModelRoutingStores(globalFilePath: string, projectFilePath: string, expected: ModelRoutingStorePair, next: ModelRoutingStorePair, expectedContent?: ModelRoutingStoreContentPair): ModelRoutingStorePair;
 export declare function discoverRoutingTaskTypes(cwd: string, agents?: readonly {
     taskType?: TeammateTaskType;
 }[], loadedConfig?: ModelRoutingConfig): TeammateTaskType[];

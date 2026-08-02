@@ -47,6 +47,7 @@ export function mergeConfig(base: CockpitConfig, over: unknown): CockpitConfig {
 		todoMode: isMode(o.todoMode) ? o.todoMode : base.todoMode,
 		todoExpanded: typeof o.todoExpanded === "boolean" ? o.todoExpanded : base.todoExpanded,
 		hideNativeAgents: typeof o.hideNativeAgents === "boolean" ? o.hideNativeAgents : base.hideNativeAgents,
+		pinEditorBottom: typeof o.pinEditorBottom === "boolean" ? o.pinEditorBottom : base.pinEditorBottom,
 		icons: { mode: iconsRaw && isIconMode(iconsRaw.mode) ? iconsRaw.mode : base.icons.mode },
 		sidebar: {
 			mode: sidebarRaw && isSidebarMode(sidebarRaw.mode) ? sidebarRaw.mode : base.sidebar.mode,
@@ -96,6 +97,39 @@ export function loadConfig(notify?: (msg: string, level: "warning" | "info") => 
 	}
 }
 
+export function mergeConfigDocument(raw: unknown, config: CockpitConfig): Record<string, unknown> {
+	const root = raw && typeof raw === "object" && !Array.isArray(raw)
+		? { ...(raw as Record<string, unknown>) }
+		: {};
+	const icons = root.icons && typeof root.icons === "object" && !Array.isArray(root.icons)
+		? { ...(root.icons as Record<string, unknown>), mode: config.icons.mode }
+		: { mode: config.icons.mode };
+	const sidebar = root.sidebar && typeof root.sidebar === "object" && !Array.isArray(root.sidebar)
+		? {
+			...(root.sidebar as Record<string, unknown>),
+			mode: config.sidebar.mode,
+			width: config.sidebar.width,
+			density: config.sidebar.density,
+		}
+		: { ...config.sidebar };
+	return {
+		...root,
+		enabled: config.enabled,
+		staticMode: config.staticMode,
+		quietMode: config.quietMode,
+		quietSymbols: config.quietSymbols,
+		toolPalette: config.toolPalette,
+		agentsMode: config.agentsMode,
+		todoMode: config.todoMode,
+		todoExpanded: config.todoExpanded,
+		hideNativeAgents: config.hideNativeAgents,
+		pinEditorBottom: config.pinEditorBottom,
+		icons,
+		sidebar,
+		theme: config.theme,
+	};
+}
+
 export interface SaveResult {
 	ok: boolean;
 	error?: string;
@@ -115,7 +149,9 @@ export function saveConfig(config: CockpitConfig): SaveResult {
 	try {
 		const dir = getAgentDir();
 		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-		writeFileSync(tmp, JSON.stringify(config, null, 2) + "\n", "utf8");
+		let raw: unknown = {};
+		try { if (existsSync(path)) raw = JSON.parse(readFileSync(path, "utf8")); } catch { /* replace malformed config */ }
+		writeFileSync(tmp, JSON.stringify(mergeConfigDocument(raw, config), null, 2) + "\n", "utf8");
 		renameSync(tmp, path);
 		return { ok: true };
 	} catch (err) {

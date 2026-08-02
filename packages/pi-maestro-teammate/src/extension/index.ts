@@ -137,6 +137,7 @@ import {
 } from "../tui/input-text.ts";
 import { showModelMappingOverlay } from "../tui/model-mapping-overlay.ts";
 import { showMonitorOverlay, type MonitorSessionRow } from "../tui/monitor-overlay.ts";
+import { createTeammateSettingsProvider, registerTeammateSettingsProvider } from "../settings/teammate-settings-provider.ts";
 import type {
   Details,
   TeammateState,
@@ -3606,6 +3607,20 @@ export default function registerTeammateExtension(
     });
   }
 
+  let widgetCtx: ExtensionContext | null = null;
+  const teammateSettingsProvider = createTeammateSettingsProvider({
+    openLegacySettings: async () => {
+      if (!widgetCtx) return;
+      await showTeammateControlCenter(widgetCtx);
+      tool.description = buildTeammateToolDescription(widgetCtx.cwd);
+      pi.registerTool(tool);
+    },
+  });
+  registerTeammateSettingsProvider({
+    on: (event, handler) => pi.events.on(event, handler),
+    emit: (event, payload) => pi.events.emit(event, payload),
+  }, teammateSettingsProvider);
+
   pi.registerCommand("teammate-session", {
     description: "Switch the main Pi conversation to a teammate session or return to main",
     async handler(_args, ctx) {
@@ -3858,7 +3873,6 @@ export default function registerTeammateExtension(
     },
   });
 
-  let widgetCtx: ExtensionContext | null = null;
   let cockpitOwnsAgents = false;
 
   function updateAgentWidget(): void {

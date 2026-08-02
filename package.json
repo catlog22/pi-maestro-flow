@@ -140,7 +140,10 @@
     "@types/yargs": "^17.0.35"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev:pi": "./dev-local-pi.sh",
+    "dev:pi:fresh": "./dev-local-pi.sh --fresh",
+    "dev:pi:clean": "./dev-local-pi.sh --clean"
   },
   "repository": {
     "type": "git",

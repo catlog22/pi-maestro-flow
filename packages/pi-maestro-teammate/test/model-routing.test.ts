@@ -274,6 +274,32 @@ test("v1 routing configs migrate without losing models and thinking saves indepe
   }
 });
 
+test("legacy routing saves migrate valid custom task routes atomically", () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-routing-"));
+  try {
+    const configPath = getProjectModelRoutingPath(cwd);
+    fs.mkdirSync(path.dirname(configPath), { recursive: true });
+    fs.writeFileSync(configPath, JSON.stringify({
+      version: 2,
+      mappings: { future: "future/model" },
+      fallbackMappings: { future: ["future/backup"] },
+      thinkingLevels: {},
+    }));
+    saveProjectModelMapping(cwd, "analysis", "openai/gpt-5");
+    saveProjectThinkingLevel(cwd, "analysis", "high");
+    const persisted = JSON.parse(fs.readFileSync(configPath, "utf8"));
+    assert.equal(persisted.version, 3);
+    assert.equal(persisted.applyOverrides, true);
+    assert.equal(persisted.overrides.mappings.future, "future/model");
+    assert.deepEqual(persisted.overrides.fallbackMappings.future, ["future/backup"]);
+    assert.equal(persisted.overrides.mappings.analysis, "openai/gpt-5");
+    assert.equal(persisted.overrides.thinkingLevels.analysis, "high");
+    assert.equal(fs.readdirSync(path.dirname(configPath)).some((entry) => entry.endsWith(".tmp")), false);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("teammate model and thinking saves never mutate the original model configuration", () => {
   const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-teammate-routing-"));
   try {

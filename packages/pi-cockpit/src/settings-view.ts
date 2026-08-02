@@ -76,6 +76,13 @@ export function buildRows(config: CockpitConfig, live?: LiveRowState): SettingsR
 			next: config.staticMode ? "off" : "on",
 		},
 		{
+			key: "pinEditorBottom",
+			accel: "l",
+			label: "pin input bottom",
+			value: config.pinEditorBottom ? "on" : "off",
+			next: config.pinEditorBottom ? "off" : "on",
+		},
+		{
 			key: "quietMode",
 			accel: "q",
 			label: "quiet (reload)",
@@ -234,6 +241,8 @@ export function applyRow(config: CockpitConfig, key: string): CockpitConfig {
 			return { ...config, enabled: !config.enabled };
 		case "staticMode":
 			return { ...config, staticMode: !config.staticMode };
+		case "pinEditorBottom":
+			return { ...config, pinEditorBottom: !config.pinEditorBottom };
 		case "quietMode":
 			return { ...config, quietMode: !config.quietMode };
 		case "quietSymbols":

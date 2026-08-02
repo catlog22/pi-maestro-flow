@@ -26,6 +26,7 @@ import {
   isThinkingLevel as isCanonicalThinkingLevel,
 } from "../effort-display.ts";
 import { readCompactionSettings } from "../compaction/compaction-settings.ts";
+import { lockSettingsResource } from "../settings/resource-lock.ts";
 import { deriveCompactionThreshold, type CompactionThresholdReason } from "../compaction/compaction-threshold.ts";
 import {
   showApiModelEditor,
@@ -511,7 +512,14 @@ export async function readModelsRoot(modelsPath: string): Promise<Record<string,
 
 export async function serializeMutation(path: string, mutate: () => Promise<void>): Promise<void> {
   const previous = mutationQueues.get(path) ?? Promise.resolve();
-  const mutation = previous.catch(() => undefined).then(mutate);
+  const mutation = previous.catch(() => undefined).then(async () => {
+    const release = await lockSettingsResource(path);
+    try {
+      await mutate();
+    } finally {
+      await release();
+    }
+  });
   const settled = mutation.then(() => undefined, () => undefined);
   mutationQueues.set(path, settled);
   try {

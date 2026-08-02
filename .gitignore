@@ -72,6 +72,9 @@ packages/*/.verify-*.ts
 __pycache__/
 *.py[cod]
 
+# Local development sandboxes
+.local/
+
 # Misc
 nul
 .pi/model-failover.json
