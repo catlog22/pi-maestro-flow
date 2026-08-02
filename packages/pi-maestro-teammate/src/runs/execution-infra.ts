@@ -656,11 +656,21 @@ export function validateTaskReferences(
   tasks.forEach((t, i) => {
     const label = t.name ? `tasks[${i}] "${t.name}"` : `tasks[${i}]`;
     for (const name of t.dependsOn ?? []) {
-      if (!taskNames.has(name)) {
+      if (t.name && name === t.name) {
+        errors.push(`${label}: dependsOn references itself — a task cannot depend on itself`);
+      } else if (!taskNames.has(name)) {
         errors.push(`${label}: dependsOn references unknown task name "${name}"`);
       }
     }
     if (taskNames.size === 0) return;
+    // Implicit self-reference: {ownName} in the prompt creates a self-loop
+    // that runGraph's hasCycle would reject for multi-task dispatches, but
+    // single-task dispatch bypasses runGraph entirely — catch it here.
+    if (t.name && extractDependencies(t.prompt, taskNames).includes(t.name)) {
+      errors.push(
+        `${label}: prompt references its own task name "{${t.name}}" — a task cannot depend on itself`,
+      );
+    }
     for (const name of collectUnknownRefs(t.prompt, taskNames)) {
       const threshold = name.length <= 3 ? 1 : 2;
       const close = [...taskNames].find(

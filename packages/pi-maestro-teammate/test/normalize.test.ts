@@ -117,6 +117,40 @@ test("dependsOn with an unknown task name is rejected", () => {
   assert.match(result.error ?? "", /dependsOn references unknown task name "missing"/);
 });
 
+test("dependsOn self-reference is rejected for a single task", () => {
+  const result = normalizeTeammateParams({
+    tasks: [{ name: "self-ref", prompt: "Say hello", dependsOn: ["self-ref"] }],
+  });
+  assert.match(result.error ?? "", /dependsOn references itself/);
+});
+
+test("dependsOn self-reference is rejected in a multi-task graph", () => {
+  const result = normalizeTeammateParams({
+    tasks: [
+      { name: "a", prompt: "do A" },
+      { name: "b", prompt: "do B", dependsOn: ["b"] },
+    ],
+  });
+  assert.match(result.error ?? "", /dependsOn references itself/);
+});
+
+test("implicit prompt self-reference {ownName} is rejected", () => {
+  const result = normalizeTeammateParams({
+    tasks: [{ name: "build", prompt: "Run {build} and check output" }],
+  });
+  assert.match(result.error ?? "", /prompt references its own task name/);
+});
+
+test("referencing other tasks by name is not flagged as self-reference", () => {
+  const result = normalizeTeammateParams({
+    tasks: [
+      { name: "scan", prompt: "list endpoints" },
+      { name: "report", prompt: "summarize {scan} output", dependsOn: ["scan"] },
+    ],
+  });
+  assert.equal(result.error, undefined);
+});
+
 test("collectUnknownRefs separates known and unknown references", () => {
   const names = new Set(["scan", "review"]);
   assert.deepEqual(collectUnknownRefs("use {scan} then {reviw} and {other}", names), ["reviw", "other"]);
