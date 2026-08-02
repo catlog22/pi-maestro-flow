@@ -2,7 +2,7 @@
 
 A responsive **agent cockpit** for [Pi](https://pi.dev): wide terminals get a docked Maestro operations sidebar, narrow terminals automatically fall back to the existing Todo and Agent widgets, and every layout keeps the Starship-style footer.
 
-It is the third plugin of the `pi-maestro-flow` project (alongside `pi-maestro-flow` and `pi-maestro-teammate`). It is installed and registered with `pi-maestro-flow`, but it also runs standalone. Current version: **0.5.1**.
+It is the third plugin of the `pi-maestro-flow` project (alongside `pi-maestro-flow` and `pi-maestro-teammate`). It is installed and registered with `pi-maestro-flow`, but it also runs standalone. Current version: **0.8.0**.
 
 The dock is a non-capturing top-right overlay. Cockpit reserves its columns by wrapping the active TUI renderer at runtime, so the Pi workspace reflows instead of rendering underneath it. No Pi source files are modified.
 

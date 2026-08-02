@@ -45,6 +45,7 @@ After installation:
 - Adaptive foreground/background shell is available through `bash_bg` (auto-backgrounds on timeout, notifies on completion)
 - LSP navigation/refactoring, named-tab browser control, BM25 tool discovery, smart search, and source verification are available through `lsp`, `browser`, `search_tool_bm25`, `smart_search`, and `source_check`
 - Compaction capacity management, API retry settings, and model failover are configured through `/maestro-compaction`, `/api-manager`, and `/model-failover`
+- Vision delegation is active when the primary model is text-only: `describe_image` is auto-activated and routes image analysis to a multimodal model; configure with `/vision`
 - MCP OAuth auto-authentication is managed through `/mcp-auth`
 - Session export is available through `/export-session-info`
 - Companion extensions `pi-maestro-teammate` and `pi-cockpit` are pulled as dependencies and auto-registered into `settings.packages` on postinstall (best-effort; a failure only warns)
@@ -68,6 +69,7 @@ After installation:
 | `/mcp` | MCP server management |
 | `/mcp-auth` | MCP OAuth authentication flow |
 | `/api-manager` | API provider configuration (models, retry settings) |
+| `/vision` | Vision delegation settings (model, fallbacks, cache, retries, timeout) |
 | `/effort` | Thinking effort level |
 | `/model-failover` | Model failover routing configuration |
 | `/model-health` | Circuit breaker health status |

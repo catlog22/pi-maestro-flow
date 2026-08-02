@@ -6,7 +6,7 @@ Pi extension for dispatching one or more role-based teammate tasks through a sin
 
 ## Breaking Changes In 1.0
 
-> Current version: **1.2.0**. The 1.0 breaking changes below remain in effect; versions 1.1 and 1.2 added circuit breaker, retry resilience, quiet state, and duration tracking without breaking the public API.
+> Current version: **1.5.0**. The 1.0 breaking changes below remain in effect; versions 1.1–1.5 added circuit breaker, retry resilience, quiet state, duration tracking, observe `watch`/`until=completed`, per-workspace mailbox isolation, and lifecycle hardening without breaking the public API.
 
 - Every public `teammate` call requires a non-empty `tasks` array.
 - Single-agent work is represented by `tasks` with one item.
@@ -298,6 +298,26 @@ Retryable network and provider errors trigger automatic retries with exponential
 - **Non-retryable errors:** authentication failures, invalid requests, and other permanent errors
 
 A **retry persistence guard** snapshots `settings.json` before child agents issue retry-related RPCs and restores the original value afterward, preventing session-local retry overrides from being persisted to disk. The agent widget shows a live `retry N/M in Xs` countdown during retry waits.
+
+## Observe (status / wait / watch)
+
+`observe` is the single observation interface over mixed teammate and background-bash targets:
+
+```ts
+// Blocking barrier: wait until every target completes its terminal lifecycle
+observe({ action: "wait", targets: [{ kind: "bash_bg", id: "bg-1" }], until: "completed" })
+
+// Persistent observation: poll every target, recording full progression until deadline
+observe({ action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], timeoutMs: 30000 })
+```
+
+- `action`: `status` (one-shot snapshot), `wait` (all/any/count barrier), `watch` (continuous progression).
+- `until`: `"result-ready"` (default) or `"completed"` (terminal lifecycle).
+- `wait` targets must provide a `name` or `waitMs` (schema-enforced).
+
+## Mailbox Message Queue
+
+A durable, per-workspace-isolated message queue backing cross-session delivery (staging → ready → claimed → accepted, atomic writes + idempotent receipts). Cold resume stays synchronous when the mailbox is authoritative; Windows file-lock renames retry automatically and orphaned state records are garbage-collected. External consumers integrate through the `pi-maestro-teammate/v1/mailbox` subpath (host registry + capability negotiation).
 
 ## Runtime
 

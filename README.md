@@ -39,6 +39,10 @@
 - 🎯 **Goal 自主长时目标** — 设定目标与 Token 预算，跨多轮自主循环，完成后由独立验证器审计
 - 📝 **Plan 先批准再动手** — 只读起草 Markdown 计划，用户批准后才放行编辑；支持独立 Plan 模型
 - 🛰️ **Pi Cockpit 可视化** — 实时呈现运行中的 teammate 与 todo 计划，内置 9 套主题；Quiet 模式压缩工具输出与思考折叠
+- 🏷️ **终端标题** — Claude Code 风格 Tab 标题 + 可选 LLM 生成会话摘要
+- 🖼️ **Vision 多模态委托** — 纯文本主模型自动激活 `describe_image`，委托多模态模型分析图片（首选/回退/缓存/重试可配）
+- 📬 **Mailbox 消息队列** — 工作区级隔离的持久消息队列，冷恢复同步
+- 👀 **observe 阻塞观察** — `status`/`wait`/`watch` 三态观察，支持终态阻塞等待
 - ⏱️ **bash_bg 自适应 Shell** — 长命令超时自动转后台，完成时推送通知，不阻塞对话
 - 🧠 **持久化知识系统** — 语义搜索、规范与经验沉淀，跨会话存活
 - 🔄 **Compaction 容量管理** — 主动压缩阈值、链接阈值推导、摘要输出预算，防止上下文窗口溢出
@@ -73,7 +77,7 @@ pi-maestro-flow 是 **Pi 插件**，用 `pi install` 安装（不是普通 npm �
 npm install -g --ignore-scripts @earendil-works/pi-coding-agent   # 宿主运行时
 pi install npm:pi-maestro-flow                                     # 安装插件
 pi list                                                            # 验证
-# 预期: pi-maestro-flow@0.10.0, pi-maestro-teammate@1.2.0, pi-cockpit@0.4.0
+# 预期: pi-maestro-flow@0.13.0, pi-maestro-teammate@1.5.0, pi-cockpit@0.8.0
 ```
 
 安装 `pi-maestro-flow` 会自动拉取并注册 `pi-maestro-teammate` 与 `pi-cockpit`，无需手动配置。
@@ -110,6 +114,8 @@ Maestro Flow 自动分类意图并路由：**简单任务**直接执行 · **多
 | **[用户手册](GUIDE.md)** | 深入教程，每个子系统附示例 |
 | **[Smart Search Provider 配置指南](docs/smart-search-provider-config.md)** | 搜索引擎配置 — 双路径架构、Provider API Key、凭证源语法、TUI 操作、配置同步 |
 | **[发布说明](RELEASE.md)** | 版本历史与变更日志 |
+| **[更新说明](docs/UPDATES.md)** | v0.13.0 → 当前 提交变更汇总 |
+| **[新特性使用说明](docs/new-features-usage.md)** | Vision 委托 · 终端标题 · Mailbox · observe watch 快速上手 |
 | 各插件 README | [flow](packages/pi-maestro-flow/README.md) · [teammate](packages/pi-maestro-teammate/README.md) · [cockpit](packages/pi-cockpit/README.md) |
 
 ---
