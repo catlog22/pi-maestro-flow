@@ -47,14 +47,14 @@ interface Harness {
 		message: { customType?: string; content?: string };
 		options?: { triggerTurn?: boolean; deliverAs?: string };
 	}>;
-	shutdown: () => void;
+	shutdown: () => Promise<void>;
 	startSession: () => void;
 }
 
 function createHarness(options: RegisterBashBgOptions = {}): Harness {
 	let registeredTool: ToolLike | undefined;
 	const eventHandlers = new Map<string, Array<(payload: unknown) => void>>();
-	const lifecycleHandlers = new Map<string, Array<(event?: unknown) => void>>();
+	const lifecycleHandlers = new Map<string, Array<(event?: unknown) => unknown>>();
 	const snapshots: BashBgSnapshotPayload[] = [];
 	const messages: Harness["messages"] = [];
 	const emit = (channel: string, payload?: unknown): void => {
@@ -88,8 +88,8 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 		emit,
 		snapshots,
 		messages,
-		shutdown: () => {
-			for (const handler of lifecycleHandlers.get("session_shutdown") ?? []) handler();
+		shutdown: async () => {
+			await Promise.all((lifecycleHandlers.get("session_shutdown") ?? []).map((handler) => handler()));
 		},
 		startSession: () => {
 			for (const handler of lifecycleHandlers.get("session_start") ?? []) handler({ reason: "startup" });
@@ -97,7 +97,7 @@ function createHarness(options: RegisterBashBgOptions = {}): Harness {
 	};
 }
 
-test("bash_bg quiet render shows a running glyph in flight and an exit-aware glyph when done", () => {
+test("bash_bg quiet render shows a running glyph in flight and an exit-aware glyph when done", async () => {
 	const harness = createHarness();
 	try {
 		setQuietMode(true);
@@ -131,7 +131,7 @@ test("bash_bg quiet render shows a running glyph in flight and an exit-aware gly
 		assert.match(rFail[0], /exit 3/);
 	} finally {
 		setQuietMode(false);
-		harness.shutdown();
+		await harness.shutdown();
 	}
 });
 
@@ -158,7 +158,7 @@ test("bash_bg run completes inline without queueing a redundant turn", async () 
 		assert.doesNotMatch(expanded.join("\n"), /log: |view: /);
 		assert.deepEqual(harness.messages, []);
 	} finally {
-		harness.shutdown();
+		await harness.shutdown();
 	}
 });
 
@@ -180,7 +180,7 @@ test("bash_bg exposes log access only when the returned tail is truncated", asyn
 		const expanded = harness.tool.renderResult(result, { expanded: true }, theme).render(200).join("\n");
 		assert.match(expanded, /line 5[\s\S]*line 6[\s\S]*log: [\s\S]*view: /);
 	} finally {
-		harness.shutdown();
+		await harness.shutdown();
 	}
 });
 
@@ -202,7 +202,7 @@ test("bash_bg treats process exit as completion when a descendant keeps stdio op
 		assert.equal(result.details?.exitCode, 0);
 		assert.deepEqual(harness.messages, []);
 	} finally {
-		harness.shutdown();
+		await harness.shutdown();
 	}
 });
 
@@ -222,7 +222,7 @@ test("bash_bg start queues one completion turn after returning control", async (
 		assert.equal(harness.messages[0]?.options?.deliverAs, undefined);
 		assert.doesNotMatch(harness.messages[0]?.message.content ?? "", /\nlog: |\nview: /);
 	} finally {
-		harness.shutdown();
+		await harness.shutdown();
 	}
 });
 
@@ -240,7 +240,7 @@ test("bash_bg completion includes log access when its notification tail is trunc
 		assert.doesNotMatch(content, /(?:^|\n)line 1(?:\n|$)/);
 		assert.match(content, /line 6[\s\S]*line 25[\s\S]*\nlog: .+\.log\nview: /);
 	} finally {
-		harness.shutdown();
+		await harness.shutdown();
 	}
 });
 
@@ -262,7 +262,32 @@ test("bash_bg run follows teammate detach semantics after the foreground timeout
 		assert.equal(harness.messages[0]?.options?.triggerTurn, true);
 		assert.equal(harness.messages[0]?.options?.deliverAs, undefined);
 	} finally {
-		harness.shutdown();
+		await harness.shutdown();
+	}
+});
+
+test("bash_bg run abort cancels the process tree without background transfer or completion", async () => {
+	const harness = createHarness();
+	try {
+		const controller = new AbortController();
+		const running = harness.tool.execute("abort-run", {
+			action: "run",
+			command: 'node -e "setInterval(()=>{},1000)"',
+			timeout: 30,
+		}, controller.signal);
+		const started = harness.snapshots.at(-1)?.jobs[0];
+		assert.ok(started);
+		assert.equal(started.status, "running");
+
+		controller.abort();
+		await assert.rejects(running, /aborted/);
+		const killed = await waitForStatus(harness.snapshots, started.id, "killed");
+		assert.equal(killed.pid, started.pid);
+		if (process.platform !== "win32") assert.equal(isProcessGroupRunning(started.pid), false);
+		await delay(150);
+		assert.deepEqual(harness.messages, []);
+	} finally {
+		await harness.shutdown();
 	}
 });
 
@@ -308,7 +333,216 @@ test("bash_bg publishes running, completion, failure and killed snapshots", asyn
 		assert.equal(harness.snapshots.length, beforeQuery + 1);
 		assert.equal(harness.snapshots.at(-1)?.jobs.length, 3);
 	} finally {
-		harness.shutdown();
+		await harness.shutdown();
+	}
+});
+
+test("bash_bg kill escalates to SIGKILL when a POSIX child ignores SIGTERM", { skip: process.platform === "win32" }, async () => {
+	const harness = createHarness();
+	try {
+		const command = 'node -e "process.on(\'SIGTERM\',()=>console.log(\'ignored\'));console.log(\'ready\');setInterval(()=>{},1000)"';
+		const started = await harness.tool.execute("ignore-term-kill", { action: "start", command });
+		const jobId = started.details?.jobId;
+		assert.ok(jobId);
+		await waitForOutput(harness.snapshots, jobId, /ready/);
+		const stopStartedAt = Date.now();
+
+		await harness.tool.execute("kill-ignoring-term", { action: "kill", jobId });
+		const elapsedMs = Date.now() - stopStartedAt;
+		const killed = await waitForStatus(harness.snapshots, jobId, "killed");
+		assert.ok(elapsedMs >= 800, `expected SIGTERM grace before escalation, got ${elapsedMs}ms`);
+		assert.equal(isProcessGroupRunning(killed.pid), false);
+	} finally {
+		await harness.shutdown();
+	}
+});
+
+test("bash_bg shutdown escalates and retains POSIX process ownership through the deadline", { skip: process.platform === "win32" }, async () => {
+	const harness = createHarness();
+	try {
+		const command = 'node -e "process.on(\'SIGTERM\',()=>console.log(\'ignored\'));console.log(\'ready\');setInterval(()=>{},1000)"';
+		const started = await harness.tool.execute("ignore-term-shutdown", { action: "start", command });
+		const jobId = started.details?.jobId;
+		assert.ok(jobId);
+		const running = await waitForOutput(harness.snapshots, jobId, /ready/);
+		const shutdownStartedAt = Date.now();
+
+		await harness.shutdown();
+		const elapsedMs = Date.now() - shutdownStartedAt;
+		assert.ok(elapsedMs >= 800, `expected SIGTERM grace before escalation, got ${elapsedMs}ms`);
+		assert.equal(isProcessGroupRunning(running.pid), false);
+		assert.deepEqual(harness.messages, []);
+	} finally {
+		await harness.shutdown();
+	}
+});
+
+test("bash_bg keeps a completed shell active and retained while its same-group POSIX descendant lives", { skip: process.platform === "win32" }, async () => {
+	const harness = createHarness({ maxActiveJobs: 1, maxRetainedCompletedJobs: 0 });
+	try {
+		const started = await harness.tool.execute("completed-shell-kill", {
+			action: "start",
+			command: `node -e ${JSON.stringify("setInterval(()=>{},1000)")} &`,
+		});
+		const jobId = started.details?.jobId;
+		assert.ok(jobId);
+		const completed = await waitForStatus(harness.snapshots, jobId, "completed");
+		await waitForMessage(harness.messages, "bash-bg-complete");
+		assert.equal(isProcessGroupRunning(completed.pid), true);
+
+		await assert.rejects(
+			harness.tool.execute("same-group-quota-bypass", { action: "start", command: 'node -e "process.exit(0)"' }),
+			/Too many active background jobs \(1\/1\)/,
+		);
+		harness.emit(BASH_BG_QUERY_EVENT);
+		assert.equal(harness.snapshots.at(-1)?.jobs.some((job) => job.id === jobId), true);
+		const observed = await observeTargets({
+			action: "status",
+			targets: [{ kind: "bash_bg", id: jobId }],
+		});
+		assert.equal(observed.observations[0]?.nativeStatus, "completed");
+		assert.equal(observed.observations[0]?.phase, "active");
+		assert.equal(observed.observations[0]?.capabilities?.cancel, true);
+		const ownershipWait = observeTargets({
+			action: "wait",
+			targets: [{ kind: "bash_bg", id: jobId }],
+			timeoutMs: 2_000,
+		});
+
+		const result = await harness.tool.execute("kill-completed-shell-group", { action: "kill", jobId });
+		assert.match(result.content[0] && "text" in result.content[0] ? result.content[0].text : "", /Stopped job/);
+		const settled = await ownershipWait;
+		assert.equal(settled.reason, "all");
+		assert.equal(settled.observations[0]?.nativeStatus, "killed");
+		assert.equal(settled.observations[0]?.phase, "settled");
+		await waitForStatus(harness.snapshots, jobId, "killed");
+		assert.equal(isProcessGroupRunning(completed.pid), false);
+	} finally {
+		await harness.shutdown();
+	}
+});
+
+test("bash_bg shutdown owns a retained same-group POSIX descendant after output finalization", { skip: process.platform === "win32" }, async () => {
+	const harness = createHarness({ maxRetainedCompletedJobs: 0 });
+	try {
+		const started = await harness.tool.execute("completed-shell-shutdown", {
+			action: "start",
+			command: `node -e ${JSON.stringify("setInterval(()=>{},1000)")} &`,
+		});
+		const jobId = started.details?.jobId;
+		assert.ok(jobId);
+		const completed = await waitForStatus(harness.snapshots, jobId, "completed");
+		await waitForMessage(harness.messages, "bash-bg-complete");
+		assert.equal(isProcessGroupRunning(completed.pid), true);
+		harness.emit(BASH_BG_QUERY_EVENT);
+		assert.equal(harness.snapshots.at(-1)?.jobs.some((job) => job.id === jobId), true);
+
+		await harness.shutdown();
+		assert.equal(isProcessGroupRunning(completed.pid), false);
+	} finally {
+		await harness.shutdown();
+	}
+});
+
+test("bash_bg pruning conservatively retains history when a POSIX group liveness probe throws", { skip: process.platform === "win32" }, async () => {
+	const harness = createHarness({ maxRetainedCompletedJobs: 0 });
+	const originalKill = process.kill;
+	let processKillPatched = false;
+	try {
+		const started = await harness.tool.execute("probe-error-history", {
+			action: "start",
+			command: 'node -e "setTimeout(()=>{},150)"',
+		});
+		const jobId = started.details?.jobId;
+		const pid = started.details?.pid;
+		assert.ok(jobId);
+		assert.ok(pid);
+
+		process.kill = ((targetPid: number, signal?: string | number) => {
+			if (targetPid === -pid && signal === 0) throw Object.assign(new Error("probe denied"), { code: "EPERM" });
+			return originalKill(targetPid, signal);
+		}) as typeof process.kill;
+		processKillPatched = true;
+		await waitForMessage(harness.messages, "bash-bg-complete");
+		harness.emit(BASH_BG_QUERY_EVENT);
+		assert.equal(harness.snapshots.at(-1)?.jobs.some((job) => job.id === jobId), true);
+	} finally {
+		if (processKillPatched) process.kill = originalKill;
+		await harness.shutdown();
+	}
+});
+
+test("bash_bg records terminal failure when the final POSIX group boundary remains alive", { skip: process.platform === "win32" }, async () => {
+	const harness = createHarness();
+	const originalKill = process.kill;
+	let processKillPatched = false;
+	try {
+		const started = await harness.tool.execute("forced-live-boundary", {
+			action: "start",
+			command: 'node -e "console.log(\'ready\');setInterval(()=>{},1000)"',
+		});
+		const jobId = started.details?.jobId;
+		const pid = started.details?.pid;
+		assert.ok(jobId);
+		assert.ok(pid);
+		await waitForOutput(harness.snapshots, jobId, /ready/);
+
+		process.kill = ((targetPid: number, signal?: string | number) => {
+			if (targetPid === -pid) return true;
+			return originalKill(targetPid, signal);
+		}) as typeof process.kill;
+		processKillPatched = true;
+		await assert.rejects(
+			harness.tool.execute("forced-live-kill", { action: "kill", jobId }),
+			/POSIX process group .* is still alive/,
+		);
+		const failed = await waitForStatus(harness.snapshots, jobId, "failed");
+		assert.equal(failed.pid, pid);
+		const observed = await observeTargets({
+			action: "status",
+			targets: [{ kind: "bash_bg", id: jobId }],
+		});
+		assert.match(observed.observations[0]?.error ?? "", /POSIX process group .* is still alive/);
+		assert.equal(harness.snapshots.some((snapshot) => snapshot.jobs.some((job) => job.id === jobId && job.status === "killed")), false);
+
+		process.kill = originalKill;
+		processKillPatched = false;
+		await delay(0);
+		await harness.tool.execute("retry-live-kill", { action: "kill", jobId });
+		await waitForStatus(harness.snapshots, jobId, "killed");
+		assert.equal(isProcessGroupRunning(pid), false);
+	} finally {
+		if (processKillPatched) process.kill = originalKill;
+		await harness.shutdown();
+	}
+});
+
+test("bash_bg Windows taskkill has a source-enforced timeout", () => {
+	const source = fs.readFileSync(new URL("../src/tools/bash-bg.ts", import.meta.url), "utf8");
+	assert.match(
+		source,
+		/spawnSync\("taskkill"[\s\S]{0,500}timeout: WINDOWS_TASKKILL_TIMEOUT_MS[\s\S]{0,100}killSignal: "SIGKILL"/,
+	);
+});
+
+test("bash_bg Windows taskkill termination behavior is bounded", { skip: process.platform !== "win32" }, async () => {
+	const harness = createHarness();
+	try {
+		const started = await harness.tool.execute("bounded-taskkill", {
+			action: "start",
+			command: 'node -e "setInterval(()=>{},1000)"',
+		});
+		const jobId = started.details?.jobId;
+		const pid = started.details?.pid;
+		assert.ok(jobId);
+		assert.ok(pid);
+		const startedAt = Date.now();
+		await harness.tool.execute("bounded-taskkill-stop", { action: "kill", jobId });
+		assert.ok(Date.now() - startedAt < 8_000, "taskkill plus its final boundary check must remain bounded");
+		await waitForStatus(harness.snapshots, jobId, "killed");
+		assert.equal(isProcessRunning(pid), false);
+	} finally {
+		await harness.shutdown();
 	}
 });
 
@@ -353,7 +587,7 @@ test("bash_bg bounds active processes, retained history, and private log bytes",
 		assert.deepEqual(harness.snapshots.at(-1)?.jobs.map((job) => job.id), [newest.details?.jobId]);
 		assert.equal(fs.existsSync(logPath), false, "evicting completed history reclaims its log file");
 	} finally {
-		harness.shutdown();
+		await harness.shutdown();
 		if (logPath) assert.equal(fs.existsSync(path.dirname(logPath)), false);
 	}
 });
@@ -365,7 +599,7 @@ test("bash_bg teardown fences late callbacks and reinitializes for the next sess
 			action: "start",
 			command: 'node -e "setTimeout(()=>console.log(\'late\'),500)"',
 		});
-		harness.shutdown();
+		await harness.shutdown();
 		const snapshotsAfterShutdown = harness.snapshots.length;
 		const messagesAfterShutdown = harness.messages.length;
 		await new Promise((resolve) => setTimeout(resolve, 700));
@@ -381,7 +615,7 @@ test("bash_bg teardown fences late callbacks and reinitializes for the next sess
 		assert.equal(next.details?.exitCode, 0);
 		assert.match(next.content[0] && "text" in next.content[0] ? next.content[0].text : "", /ready again/);
 	} finally {
-		harness.shutdown();
+		await harness.shutdown();
 	}
 });
 
@@ -399,13 +633,14 @@ test("bash_bg observation wait settles when session shutdown kills the job", asy
 			targets: [{ kind: "bash_bg", id: jobId }],
 			timeoutMs: 2_000,
 		});
-		setTimeout(() => harness.shutdown(), 25);
+		const shutdown = delay(25).then(() => harness.shutdown());
 		const result = await waiting;
+		await shutdown;
 		assert.equal(result.reason, "all");
 		assert.equal(result.observations[0]?.nativeStatus, "killed");
 		assert.equal(result.observations[0]?.waitStatus, "failed");
 	} finally {
-		harness.shutdown();
+		await harness.shutdown();
 	}
 });
 
@@ -466,9 +701,47 @@ test("observe waits for mixed teammate and bash_bg targets through one barrier",
 		assert.match(waited.observations[1]?.summary ?? "", /built|completed/);
 	} finally {
 		disposeTeammate();
-		harness.shutdown();
+		await harness.shutdown();
 	}
 });
+
+function delay(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function waitForOutput(
+	snapshots: readonly BashBgSnapshotPayload[],
+	jobId: string,
+	pattern: RegExp,
+): Promise<BashBgJobSnapshot> {
+	const deadline = Date.now() + 8_000;
+	while (Date.now() < deadline) {
+		for (let index = snapshots.length - 1; index >= 0; index--) {
+			const job = snapshots[index]?.jobs.find((entry) => entry.id === jobId && pattern.test(entry.outputTail));
+			if (job) return job;
+		}
+		await delay(25);
+	}
+	throw new Error(`Timed out waiting for ${jobId} output to match ${pattern}`);
+}
+
+function isProcessGroupRunning(pid: number): boolean {
+	try {
+		process.kill(-pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ESRCH";
+	}
+}
+
+function isProcessRunning(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code !== "ESRCH";
+	}
+}
 
 async function waitForMessage(
 	messages: readonly Harness["messages"][number][],

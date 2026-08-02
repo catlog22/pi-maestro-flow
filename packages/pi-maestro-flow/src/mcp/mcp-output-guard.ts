@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdtemp, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, open, readdir, stat, unlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ContentBlock, McpSettings } from "./types.ts";
@@ -7,7 +7,13 @@ import type { ContentBlock, McpSettings } from "./types.ts";
 export const DEFAULT_MCP_OUTPUT_MAX_BYTES = 50 * 1024;
 export const DEFAULT_MCP_OUTPUT_MAX_LINES = 2000;
 export const DEFAULT_MCP_DETAILS_MAX_BYTES = 16 * 1024;
+export const DEFAULT_MCP_ARTIFACT_MAX_FILES = 32;
+export const DEFAULT_MCP_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024;
+export const DEFAULT_MCP_ARTIFACT_TTL_MS = 24 * 60 * 60 * 1000;
 
+const DEFAULT_MCP_ARTIFACT_DIRECTORY = join(tmpdir(), "pi-mcp-output");
+const ARTIFACT_FILE_PATTERN = /^(?:output|mcp-result)-(\d{13})-[a-zA-Z0-9-]+\.txt$/;
+const JSON_CHUNK_CHARS = 4096;
 const CONTENT_SUMMARY_LIMIT = 20;
 const KEY_PREVIEW_LIMIT = 20;
 const KEY_MAX_CHARS = 120;
@@ -40,6 +46,14 @@ export interface McpResultSummary {
   resultWriteError?: string;
 }
 
+export interface McpArtifactRetentionOptions {
+  /** A single directory used for all retained MCP output artifacts. */
+  directory?: string;
+  maxFiles?: number;
+  maxBytes?: number;
+  ttlMs?: number;
+}
+
 export interface McpOutputGuardOptions {
   enabled?: boolean;
   prefix?: string;
@@ -48,6 +62,7 @@ export interface McpOutputGuardOptions {
   maxBytes?: number;
   maxLines?: number;
   detailsMaxBytes?: number;
+  artifactRetention?: McpArtifactRetentionOptions;
   /**
    * Raw MCP result to expose as details.mcpResult. Kept raw when its JSON
    * fits detailsMaxBytes (or when the guard is disabled); otherwise replaced
@@ -123,7 +138,7 @@ export async function guardMcpOutput(
   let outputGuard: McpOutputGuardDetails | undefined;
 
   if (stats.bytes > maxBytes || stats.lines > maxLines) {
-    const { path: fullOutputPath, error: writeError } = await saveArtifact("output", composedOutput);
+    const { path: fullOutputPath, error: writeError } = await saveTextArtifact("output", composedOutput, options.artifactRetention);
     const notice = formatTruncationNotice(stats, fullOutputPath, writeError);
     const previewBudget = reserveBudget(maxBytes, maxLines, notice);
     const preview = truncateHead(composedOutput, previewBudget.maxBytes, previewBudget.maxLines);
@@ -145,7 +160,7 @@ export async function guardMcpOutput(
 
   const mcpResult = options.rawMcpResult === undefined
     ? undefined
-    : await boundMcpResult(options.rawMcpResult, detailsMaxBytes);
+    : await boundMcpResult(options.rawMcpResult, detailsMaxBytes, options.artifactRetention);
 
   return { content: guardedContent, outputGuard, mcpResult };
 }
@@ -257,26 +272,43 @@ function formatTruncationNotice(
 }
 
 /**
- * Bound details.mcpResult: keep the raw result when its JSON fits within
- * detailsMaxBytes; otherwise replace it with a compact summary and spill the
- * raw JSON to a temp file.
+ * Bound details.mcpResult without serializing the complete value in memory.
+ * The first traversal stops as soon as the configured byte budget is crossed.
  */
-async function boundMcpResult(result: unknown, detailsMaxBytes: number): Promise<unknown> {
-  const raw = safeStringify(result);
-  const rawBytes = byteLength(raw);
-  if (rawBytes <= detailsMaxBytes) return result;
-  return summarizeMcpResult(result, raw, rawBytes);
+async function boundMcpResult(
+  result: unknown,
+  detailsMaxBytes: number,
+  retention: McpArtifactRetentionOptions | undefined,
+): Promise<unknown> {
+  const measured = measureJson(result, detailsMaxBytes);
+  if (!measured.exceeded && !measured.lossy) return result;
+
+  const saved = await saveJsonArtifact("mcp-result", result, retention);
+  return summarizeMcpResult(
+    result,
+    saved.bytes ?? measured.bytes,
+    saved.path,
+    saved.error,
+    measured.lossy || saved.lossy,
+  );
 }
 
-async function summarizeMcpResult(result: unknown, raw: string, rawBytes: number): Promise<McpResultSummary> {
-  const { path: fullResultPath, error: resultWriteError } = await saveArtifact("mcp-result", raw);
-
+function summarizeMcpResult(
+  result: unknown,
+  rawBytes: number,
+  fullResultPath: string | undefined,
+  resultWriteError: string | undefined,
+  lossy: boolean,
+): McpResultSummary {
   const record = asRecord(result);
-  const content = Array.isArray(record?.content) ? record.content : [];
+  const contentValue = record ? dataProperty(record, "content") : undefined;
+  const content = Array.isArray(contentValue) ? contentValue : [];
   const summary: McpResultSummary = {
     omitted: true,
-    reason: "Raw MCP result exceeded the details size limit and was replaced with this summary to keep session context bounded.",
-    isError: record?.isError === true,
+    reason: lossy
+      ? "Raw MCP result was not safely JSON-compatible and was replaced with this summary; the retained artifact uses explicit placeholders for unsupported values."
+      : "Raw MCP result exceeded the details size limit and was replaced with this summary to keep session context bounded.",
+    isError: record ? dataProperty(record, "isError") === true : false,
     contentBlocks: content.length,
     contentSummary: summarizeContent(content),
     rawResultBytes: rawBytes,
@@ -284,18 +316,21 @@ async function summarizeMcpResult(result: unknown, raw: string, rawBytes: number
     resultWriteError,
   };
 
-  if (record && "structuredContent" in record) {
-    summary.structuredContent = summarizeValue(record.structuredContent);
+  if (record && safeKeys(record).includes("structuredContent")) {
+    summary.structuredContent = summarizeValue(dataProperty(record, "structuredContent"));
   }
-  if (record && "_meta" in record) {
-    summary.meta = summarizeValue(record._meta);
+  if (record && safeKeys(record).includes("_meta")) {
+    summary.meta = summarizeValue(dataProperty(record, "_meta"));
   }
   if (record) {
     const standard = new Set(["content", "isError", "structuredContent", "_meta"]);
-    const extraFields = Object.keys(record)
+    const extraFields = safeKeys(record)
       .filter((key) => !standard.has(key))
       .slice(0, KEY_PREVIEW_LIMIT)
-      .map((key) => ({ key: truncateKey(key), type: typeof record[key], estimatedBytes: estimateValueBytes(record[key]), omitted: true }));
+      .map((key) => {
+        const value = dataProperty(record, key);
+        return { key: truncateKey(key), type: typeof value, estimatedBytes: estimateValueBytes(value), omitted: true };
+      });
     if (extraFields.length > 0) summary.extraFields = extraFields;
   }
 
@@ -306,15 +341,19 @@ function summarizeContent(content: unknown[]): Array<Record<string, unknown>> {
   const summaries: Array<Record<string, unknown>> = content.slice(0, CONTENT_SUMMARY_LIMIT).map((block) => {
     const record = asRecord(block);
     if (!record) return { type: typeof block, omitted: true };
-    if (record.type === "text") {
-      const text = typeof record.text === "string" ? record.text : "";
+    const type = dataProperty(record, "type");
+    if (type === "text") {
+      const textValue = dataProperty(record, "text");
+      const text = typeof textValue === "string" ? textValue : "";
       return { type: "text", bytes: byteLength(text), lines: textStats(text).lines, textOmitted: true };
     }
-    if (record.type === "image") {
-      const data = typeof record.data === "string" ? record.data : "";
-      return { type: "image", mimeType: typeof record.mimeType === "string" ? record.mimeType : undefined, dataBytes: byteLength(data), dataOmitted: true };
+    if (type === "image") {
+      const dataValue = dataProperty(record, "data");
+      const mimeTypeValue = dataProperty(record, "mimeType");
+      const data = typeof dataValue === "string" ? dataValue : "";
+      return { type: "image", mimeType: typeof mimeTypeValue === "string" ? mimeTypeValue : undefined, dataBytes: byteLength(data), dataOmitted: true };
     }
-    return { type: typeof record.type === "string" ? record.type : "unknown", estimatedBytes: estimateValueBytes(record), omitted: true };
+    return { type: typeof type === "string" ? type : "unknown", estimatedBytes: estimateValueBytes(record), omitted: true };
   });
   if (content.length > CONTENT_SUMMARY_LIMIT) {
     summaries.push({ type: "omitted", count: content.length - CONTENT_SUMMARY_LIMIT });
@@ -327,7 +366,7 @@ function summarizeValue(value: unknown): Record<string, unknown> {
   if (!record) {
     return { type: value === null ? "null" : typeof value, estimatedBytes: estimateValueBytes(value), omitted: true };
   }
-  const keys = Object.keys(record);
+  const keys = safeKeys(record);
   return {
     type: Array.isArray(value) ? "array" : "object",
     estimatedBytes: estimateValueBytes(value),
@@ -337,41 +376,376 @@ function summarizeValue(value: unknown): Record<string, unknown> {
   };
 }
 
-function estimateValueBytes(value: unknown, depth = 0): number {
-  if (value === null || value === undefined) return 0;
-  if (typeof value === "string") return byteLength(value);
-  if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return byteLength(String(value));
-  const record = asRecord(value);
-  if (!record || depth >= 2) return 0;
-  const values = Array.isArray(value) ? value.slice(0, KEY_PREVIEW_LIMIT) : Object.values(record).slice(0, KEY_PREVIEW_LIMIT);
-  return values.reduce((total, item) => total + estimateValueBytes(item, depth + 1), 0);
+function estimateValueBytes(value: unknown): number {
+  return measureJson(value, DEFAULT_MCP_DETAILS_MAX_BYTES).bytes;
 }
 
 function truncateKey(key: string): string {
   return key.length <= KEY_MAX_CHARS ? key : `${key.slice(0, KEY_MAX_CHARS - 1)}…`;
 }
 
-async function saveArtifact(kind: string, text: string): Promise<{ path?: string; error?: string }> {
-  try {
-    const dir = await mkdtemp(join(tmpdir(), "pi-mcp-output-"));
-    const path = join(dir, `${kind}-${randomBytes(4).toString("hex")}.txt`);
-    await writeFile(path, text, { encoding: "utf8", mode: 0o600 });
-    return { path };
-  } catch (error) {
-    return { error: error instanceof Error ? error.message : String(error) };
+interface JsonSerializationState {
+  lossy: boolean;
+}
+
+function measureJson(value: unknown, maxBytes: number): { exceeded: boolean; bytes: number; lossy: boolean } {
+  const state: JsonSerializationState = { lossy: false };
+  let bytes = 0;
+  for (const chunk of serializeJsonValue(value, state, new Set<object>())) {
+    bytes += byteLength(chunk);
+    if (bytes > maxBytes) return { exceeded: true, bytes, lossy: state.lossy };
   }
+  return { exceeded: false, bytes, lossy: state.lossy };
+}
+
+function* serializeJsonValue(
+  value: unknown,
+  state: JsonSerializationState,
+  ancestors: Set<object>,
+): Generator<string> {
+  if (value === null) {
+    yield "null";
+    return;
+  }
+  if (typeof value === "string") {
+    yield* serializeJsonString(value);
+    return;
+  }
+  if (typeof value === "number") {
+    yield Number.isFinite(value) ? String(value) : "null";
+    return;
+  }
+  if (typeof value === "boolean") {
+    yield value ? "true" : "false";
+    return;
+  }
+  if (typeof value === "bigint") {
+    state.lossy = true;
+    yield* serializeJsonString(`${value}n`);
+    return;
+  }
+  if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol") {
+    state.lossy = true;
+    yield "null";
+    return;
+  }
+
+  if (hasCustomJsonSerializer(value)) state.lossy = true;
+  if (ancestors.has(value)) {
+    state.lossy = true;
+    yield* serializeJsonString("[Circular]");
+    return;
+  }
+
+  ancestors.add(value);
+  try {
+    if (Array.isArray(value)) {
+      yield "[";
+      for (let index = 0; index < value.length; index += 1) {
+        if (index > 0) yield ",";
+        const item = dataProperty(value as unknown as Recordish, String(index));
+        yield* serializeJsonValue(item, state, ancestors);
+      }
+      yield "]";
+      return;
+    }
+
+    yield "{";
+    let emitted = 0;
+    for (const key of serializationKeys(value, state)) {
+      const descriptor = safeDescriptor(value, key);
+      if (descriptor && "value" in descriptor && isJsonObjectOmission(descriptor.value)) continue;
+      if (emitted > 0) yield ",";
+      emitted += 1;
+      yield* serializeJsonString(key);
+      yield ":";
+      if (!descriptor || !("value" in descriptor)) {
+        state.lossy = true;
+        yield* serializeJsonString("[Accessor omitted]");
+      } else {
+        yield* serializeJsonValue(descriptor.value, state, ancestors);
+      }
+    }
+    yield "}";
+  } finally {
+    ancestors.delete(value);
+  }
+}
+
+function* serializeJsonString(value: string): Generator<string> {
+  yield "\"";
+  let chunk = "";
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    let encoded: string;
+    if (code === 0x22) encoded = "\\\"";
+    else if (code === 0x5c) encoded = "\\\\";
+    else if (code === 0x08) encoded = "\\b";
+    else if (code === 0x0c) encoded = "\\f";
+    else if (code === 0x0a) encoded = "\\n";
+    else if (code === 0x0d) encoded = "\\r";
+    else if (code === 0x09) encoded = "\\t";
+    else if (code < 0x20) encoded = `\\u${code.toString(16).padStart(4, "0")}`;
+    else if (code >= 0xd800 && code <= 0xdbff) {
+      const next = value.charCodeAt(index + 1);
+      if (next >= 0xdc00 && next <= 0xdfff) {
+        encoded = value[index] + value[index + 1];
+        index += 1;
+      } else {
+        encoded = `\\u${code.toString(16)}`;
+      }
+    } else if (code >= 0xdc00 && code <= 0xdfff) {
+      encoded = `\\u${code.toString(16)}`;
+    } else {
+      encoded = value[index];
+    }
+    chunk += encoded;
+    if (chunk.length >= JSON_CHUNK_CHARS) {
+      yield chunk;
+      chunk = "";
+    }
+  }
+  if (chunk) yield chunk;
+  yield "\"";
+}
+
+function isJsonObjectOmission(value: unknown): boolean {
+  return typeof value === "undefined" || typeof value === "function" || typeof value === "symbol";
+}
+
+function serializationKeys(value: object, state: JsonSerializationState): string[] {
+  try {
+    return Object.keys(value);
+  } catch {
+    state.lossy = true;
+    return [];
+  }
+}
+
+function hasCustomJsonSerializer(value: object): boolean {
+  let current: object | null = value;
+  try {
+    while (current) {
+      const descriptor = Object.getOwnPropertyDescriptor(current, "toJSON");
+      if (descriptor) return !("value" in descriptor) || typeof descriptor.value === "function";
+      current = Object.getPrototypeOf(current);
+    }
+  } catch {
+    return true;
+  }
+  return false;
+}
+
+function safeKeys(value: object): string[] {
+  try {
+    return Object.keys(value);
+  } catch {
+    return [];
+  }
+}
+
+function safeDescriptor(value: object, key: string): PropertyDescriptor | undefined {
+  try {
+    return Object.getOwnPropertyDescriptor(value, key);
+  } catch {
+    return undefined;
+  }
+}
+
+function dataProperty(record: Recordish, key: string): unknown {
+  const descriptor = safeDescriptor(record, key);
+  return descriptor && "value" in descriptor ? descriptor.value : undefined;
+}
+
+interface ResolvedArtifactRetention {
+  directory: string;
+  maxFiles: number;
+  maxBytes: number;
+  ttlMs: number;
+}
+
+interface ArtifactEntry {
+  path: string;
+  name: string;
+  createdAt: number;
+  modifiedAt: number;
+  bytes: number;
+}
+
+let artifactSequence = 0;
+let artifactOperationQueue: Promise<void> = Promise.resolve();
+const artifactExpiryTimers = new Map<string, NodeJS.Timeout>();
+
+function saveTextArtifact(
+  kind: string,
+  text: string,
+  options: McpArtifactRetentionOptions | undefined,
+): Promise<{ path?: string; error?: string; bytes?: number }> {
+  return retainArtifact(kind, function* chunks() {
+    for (let offset = 0; offset < text.length; offset += 64 * 1024) {
+      yield text.slice(offset, offset + 64 * 1024);
+    }
+  }, options);
+}
+
+async function saveJsonArtifact(
+  kind: string,
+  value: unknown,
+  options: McpArtifactRetentionOptions | undefined,
+): Promise<{ path?: string; error?: string; bytes?: number; lossy: boolean }> {
+  const state: JsonSerializationState = { lossy: false };
+  const saved = await retainArtifact(
+    kind,
+    () => serializeJsonValue(value, state, new Set<object>()),
+    options,
+  );
+  return { ...saved, lossy: state.lossy };
+}
+
+function retainArtifact(
+  kind: string,
+  chunks: () => Iterable<string>,
+  options: McpArtifactRetentionOptions | undefined,
+): Promise<{ path?: string; error?: string; bytes?: number }> {
+  const retention = resolveArtifactRetention(options);
+  return enqueueArtifactOperation(async () => {
+    let path: string | undefined;
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    let bytes = 0;
+    try {
+      await ensurePrivateArtifactDirectory(retention.directory);
+      await pruneArtifacts(retention);
+      const createdAt = Date.now();
+      const sequence = (artifactSequence = (artifactSequence + 1) % 1_000_000);
+      const name = `${kind}-${String(createdAt).padStart(13, "0")}-${process.pid}-${String(sequence).padStart(6, "0")}-${randomBytes(6).toString("hex")}.txt`;
+      path = join(retention.directory, name);
+      handle = await open(path, "wx", 0o600);
+      for (const chunk of chunks()) {
+        bytes += byteLength(chunk);
+        if (bytes > retention.maxBytes) {
+          throw new Error(`Artifact exceeds retention byte limit of ${retention.maxBytes}`);
+        }
+        await handle.write(chunk, undefined, "utf8");
+      }
+      await handle.close();
+      handle = undefined;
+      await chmod(path, 0o600);
+      const retained = await pruneArtifacts(retention, path);
+      if (!retained) throw new Error("Artifact could not be retained within the configured count/byte limits");
+      scheduleArtifactExpiry(path, retention);
+      return { path, bytes };
+    } catch (error) {
+      if (handle) await handle.close().catch(() => undefined);
+      if (path) await removeArtifact(path);
+      return { error: error instanceof Error ? error.message : String(error), bytes: bytes || undefined };
+    }
+  });
+}
+
+function resolveArtifactRetention(options: McpArtifactRetentionOptions | undefined): ResolvedArtifactRetention {
+  return {
+    directory: typeof options?.directory === "string" && options.directory.trim()
+      ? options.directory
+      : DEFAULT_MCP_ARTIFACT_DIRECTORY,
+    maxFiles: positiveInt(options?.maxFiles) ?? DEFAULT_MCP_ARTIFACT_MAX_FILES,
+    maxBytes: positiveInt(options?.maxBytes) ?? DEFAULT_MCP_ARTIFACT_MAX_BYTES,
+    ttlMs: positiveInt(options?.ttlMs) ?? DEFAULT_MCP_ARTIFACT_TTL_MS,
+  };
+}
+
+function enqueueArtifactOperation<T>(operation: () => Promise<T>): Promise<T> {
+  const queued = artifactOperationQueue.then(operation, operation);
+  artifactOperationQueue = queued.then(() => undefined, () => undefined);
+  return queued;
+}
+
+async function ensurePrivateArtifactDirectory(directory: string): Promise<void> {
+  await mkdir(directory, { recursive: true, mode: 0o700 });
+  const info = await lstat(directory);
+  if (!info.isDirectory() || info.isSymbolicLink()) {
+    throw new Error(`Refusing unsafe MCP artifact directory: ${directory}`);
+  }
+  await chmod(directory, 0o700);
+}
+
+async function pruneArtifacts(retention: ResolvedArtifactRetention, protectedPath?: string): Promise<boolean> {
+  const now = Date.now();
+  let entries = await listArtifacts(retention.directory);
+  for (const entry of entries) {
+    if (now - entry.modifiedAt >= retention.ttlMs && entry.path !== protectedPath) {
+      await removeArtifact(entry.path);
+    }
+  }
+
+  entries = await listArtifacts(retention.directory);
+  let totalBytes = entries.reduce((total, entry) => total + entry.bytes, 0);
+  while (entries.length > retention.maxFiles || totalBytes > retention.maxBytes) {
+    const victimIndex = entries.findIndex((entry) => entry.path !== protectedPath);
+    if (victimIndex < 0) {
+      if (protectedPath) await removeArtifact(protectedPath);
+      return false;
+    }
+    const [victim] = entries.splice(victimIndex, 1);
+    totalBytes -= victim.bytes;
+    await removeArtifact(victim.path);
+  }
+  return protectedPath === undefined || entries.some((entry) => entry.path === protectedPath);
+}
+
+async function listArtifacts(directory: string): Promise<ArtifactEntry[]> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const artifacts: ArtifactEntry[] = [];
+  for (const entry of entries) {
+    if (!entry.isFile()) continue;
+    const match = ARTIFACT_FILE_PATTERN.exec(entry.name);
+    if (!match) continue;
+    const path = join(directory, entry.name);
+    try {
+      const info = await stat(path);
+      if (!info.isFile()) continue;
+      artifacts.push({
+        path,
+        name: entry.name,
+        createdAt: Number(match[1]),
+        modifiedAt: info.mtimeMs,
+        bytes: info.size,
+      });
+    } catch {
+      // A concurrent cleanup may remove an entry between readdir and stat.
+    }
+  }
+  return artifacts.sort((left, right) => left.createdAt - right.createdAt || left.name.localeCompare(right.name));
+}
+
+async function removeArtifact(path: string): Promise<void> {
+  const timer = artifactExpiryTimers.get(path);
+  if (timer) clearTimeout(timer);
+  artifactExpiryTimers.delete(path);
+  await unlink(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
+}
+
+function scheduleArtifactExpiry(path: string, retention: ResolvedArtifactRetention): void {
+  const existing = artifactExpiryTimers.get(path);
+  if (existing) clearTimeout(existing);
+  const timer = setTimeout(() => {
+    artifactExpiryTimers.delete(path);
+    void enqueueArtifactOperation(async () => {
+      try {
+        const info = await stat(path);
+        if (Date.now() - info.mtimeMs >= retention.ttlMs) await removeArtifact(path);
+      } catch (error) {
+        if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+      }
+    }).catch(() => undefined);
+  }, retention.ttlMs);
+  timer.unref();
+  artifactExpiryTimers.set(path, timer);
 }
 
 function asRecord(value: unknown): Recordish | undefined {
   return typeof value === "object" && value !== null ? value as Recordish : undefined;
-}
-
-function safeStringify(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
 }
 
 function textStats(text: string): { bytes: number; lines: number } {

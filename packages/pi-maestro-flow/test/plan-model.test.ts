@@ -7,7 +7,9 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import {
   loadPlanModelSetting,
   registerPlanModelSelection,
+  saveLocalPlanModelSetting,
 } from "../src/tools/plan-model.ts";
+import { lockSettingsResource } from "../src/settings/resource-lock.ts";
 
 type Hook = (event: unknown, ctx: ExtensionContext) => Promise<unknown> | unknown;
 type Command = { handler(args: string, ctx: ExtensionContext): Promise<void> | void };
@@ -97,6 +99,32 @@ test("Plan model settings merge user, project, and local scalar overrides", asyn
   } finally {
     if (previous === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Plan model save yields the event loop while waiting for the canonical settings lock", async () => {
+  const root = await mkdtemp(join(tmpdir(), "pi-plan-model-lock-yield-"));
+  const filePath = join(root, ".pi", "settings.local.json");
+  const release = await lockSettingsResource(filePath);
+  let pending: Promise<void> | undefined;
+  try {
+    pending = saveLocalPlanModelSetting(root, "provider/plan");
+    let timerFired = false;
+    await new Promise<void>((resolveTimer) => {
+      setTimeout(() => {
+        timerFired = true;
+        resolveTimer();
+      }, 20);
+    });
+    assert.equal(timerFired, true);
+  } finally {
+    await release();
+  }
+  try {
+    await pending;
+    assert.equal(loadPlanModelSetting(root), "provider/plan");
+  } finally {
     await rm(root, { recursive: true, force: true });
   }
 });

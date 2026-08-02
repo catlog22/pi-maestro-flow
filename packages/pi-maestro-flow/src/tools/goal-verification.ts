@@ -83,13 +83,13 @@ export interface VerifierVerdict {
 
 export const MAX_OBJECTIVE_LENGTH = 4_000;
 export const MAX_COMPLETION_SUMMARY_CHARS = 4_000;
+export const MAX_ACCEPTANCE_COMMANDS = 5;
+export const MAX_ACCEPTANCE_COMMAND_CHARS = 500;
 const VERIFIER_TIMEOUT_MS = 180_000;
 const MAX_VERIFICATION_FAILURES = 3;
 const MAX_VERIFIER_EVIDENCE_ITEMS = 24;
 const MAX_VERIFIER_EVIDENCE_ITEM_CHARS = 1_200;
 const MAX_VERIFIER_EVIDENCE_CHARS = 12_000;
-const MAX_ACCEPTANCE_COMMANDS = 5;
-const MAX_ACCEPTANCE_COMMAND_CHARS = 500;
 const ACCEPTANCE_COMMAND_TIMEOUT_MS = 60_000;
 const ACCEPTANCE_OUTPUT_CHARS = 1_500;
 
@@ -117,9 +117,9 @@ export interface GoalVerificationBridge {
   pauseGoal(goal: ActiveGoal): ActiveGoal;
   updateUsage(goal: ActiveGoal, ctx: GoalContext): void;
   persistGoal(goal: ActiveGoal): void;
+  commitVerifiedCompletion(goal: ActiveGoal, ctx: GoalContext): void;
   updateStatusLine(ctx: GoalContext, goal: ActiveGoal): void;
   updateGoalWidget(ctx: GoalContext, goal: ActiveGoal, phase: "verifying"): void;
-  clearActive(ctx: GoalContext, keepInRegistry?: boolean): void;
   showCompletionStatus(ctx: GoalContext, goal: ActiveGoal): void;
 }
 
@@ -321,14 +321,33 @@ async function runAcceptanceCommands(commands: string[] | undefined, cwd: string
   return results;
 }
 
+export function acceptanceValidationError(value: unknown): string | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) return "Acceptance commands must be an array.";
+  if (value.length > MAX_ACCEPTANCE_COMMANDS) {
+    return `Too many acceptance commands (${value.length}/${MAX_ACCEPTANCE_COMMANDS}).`;
+  }
+  for (let index = 0; index < value.length; index++) {
+    const command = value[index];
+    if (typeof command !== "string" || command.trim().length === 0) {
+      return `Acceptance command ${index + 1} must be a non-empty string.`;
+    }
+    if (command.length > MAX_ACCEPTANCE_COMMAND_CHARS) {
+      return `Acceptance command ${index + 1} too long (${command.length}/${MAX_ACCEPTANCE_COMMAND_CHARS}).`;
+    }
+  }
+  return undefined;
+}
+
+export function redactAcceptanceCommandForDisplay(command: string): string {
+  return boundedSecretText(command, MAX_ACCEPTANCE_COMMAND_CHARS);
+}
+
 export function normalizeAcceptance(value: unknown): string[] | undefined {
-  if (!Array.isArray(value)) return undefined;
-  const commands = value
-    .filter((item): item is string => typeof item === "string")
-    .map((item) => boundedSecretText(item.trim(), MAX_ACCEPTANCE_COMMAND_CHARS))
-    .filter(Boolean)
-    .slice(0, MAX_ACCEPTANCE_COMMANDS);
-  return commands.length > 0 ? commands : undefined;
+  const validationError = acceptanceValidationError(value);
+  if (validationError) throw new Error(validationError);
+  if (!Array.isArray(value) || value.length === 0) return undefined;
+  return [...value] as string[];
 }
 
 function buildVerifierTask(
@@ -824,9 +843,10 @@ type VerificationOutcome =
 async function verifyByAcceptanceCommands(goal: ActiveGoal, ctx: GoalContext): Promise<VerifierVerdict> {
   const bridge = getGoalVerificationBridge();
   const results = await runAcceptanceCommands(goal.acceptance, bridge.baseCwd || ctx.cwd);
+  const displayCommand = redactAcceptanceCommandForDisplay;
   const evidence = results.map((r) => {
     const status = r.timedOut ? "timed out" : `exit ${r.exitCode}`;
-    return boundedSecretText(`[${status}] ${r.command}${r.output ? `\n${r.output}` : ""}`, MAX_VERIFIER_EVIDENCE_ITEM_CHARS);
+    return boundedSecretText(`[${status}] ${displayCommand(r.command)}${r.output ? `\n${r.output}` : ""}`, MAX_VERIFIER_EVIDENCE_ITEM_CHARS);
   });
   const failed = results.filter((r) => r.exitCode !== 0);
   if (failed.length === 0) {
@@ -842,7 +862,10 @@ async function verifyByAcceptanceCommands(goal: ActiveGoal, ctx: GoalContext): P
     status: "fail",
     pass: false,
     reasoning: `${failed.length} of ${results.length} declared acceptance command(s) did not exit 0.`,
-    unmet: failed.map((r) => (r.timedOut ? `${r.command} (timed out)` : `${r.command} (exit ${r.exitCode})`)),
+    unmet: failed.map((r) => {
+      const command = displayCommand(r.command);
+      return r.timedOut ? `${command} (timed out)` : `${command} (exit ${r.exitCode})`;
+    }),
     evidence,
   };
 }
@@ -963,11 +986,16 @@ export async function verifyGoalCompletion(
   }
 
   const goalText = bridge.activeGoal.text;
-  bridge.activeGoal = { ...bridge.activeGoal, status: "done", pauseReason: undefined, infraErrorStreak: 0, lastVerificationFailure: undefined, updatedAt: Date.now() };
-  bridge.updateUsage(bridge.activeGoal, ctx);
-  bridge.persistGoal(bridge.activeGoal);
-  const completedGoal = { ...bridge.activeGoal };
-  bridge.clearActive(ctx, true);
+  const completedGoal = {
+    ...bridge.activeGoal,
+    status: "done" as const,
+    pauseReason: undefined,
+    infraErrorStreak: 0,
+    lastVerificationFailure: undefined,
+    updatedAt: Date.now(),
+  };
+  bridge.updateUsage(completedGoal, ctx);
+  bridge.commitVerifiedCompletion(completedGoal, ctx);
   bridge.showCompletionStatus(ctx, completedGoal);
   ctx.ui.notify(`Goal done (verified): ${goalText}`, "info");
   return { status: "done" };

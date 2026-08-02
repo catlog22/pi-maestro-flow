@@ -1,7 +1,11 @@
 // config.ts - Config loading with import support
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from "node:fs";
+import fs, {
+  existsSync,
+  readFileSync,
+} from "node:fs";
+import { randomBytes } from "node:crypto";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { getAgentPath } from "./agent-dir.ts";
 import { logger } from "./logger.ts";
 import type { McpConfig, ServerEntry, McpSettings, ImportKind, ServerProvenance } from "./types.ts";
@@ -488,11 +492,151 @@ function readRawConfigObject(filePath: string): Record<string, unknown> {
   }
 }
 
+function isNodeError(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+function assertRegularDestination(filePath: string): void {
+  try {
+    const stat = fs.lstatSync(filePath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error(`Refusing to replace non-regular MCP config: ${filePath}`);
+    }
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return;
+    throw error;
+  }
+}
+
+interface ProjectParentGuard {
+  workspaceRoot: string;
+  workspaceRealPath: string;
+  parentDir: string;
+}
+
+function getProjectWorkspaceRoot(filePath: string): string | undefined {
+  const resolvedPath = resolve(filePath);
+  if (basename(resolvedPath) === PROJECT_CONFIG_NAME) {
+    return dirname(resolvedPath);
+  }
+  const parentDir = dirname(resolvedPath);
+  if (basename(resolvedPath) === "mcp.json" && basename(parentDir) === ".pi") {
+    return dirname(parentDir);
+  }
+  return undefined;
+}
+
+function assertSafeProjectDirectory(path: string, expectedRealPath?: string): void {
+  const stat = fs.lstatSync(path);
+  if (stat.isSymbolicLink() || !stat.isDirectory()) {
+    throw new Error(`Refusing unsafe MCP project config directory: ${path}`);
+  }
+  if (expectedRealPath !== undefined && resolve(fs.realpathSync(path)) !== resolve(expectedRealPath)) {
+    throw new Error(`Refusing aliased MCP project config directory: ${path}`);
+  }
+}
+
+function isPathContained(root: string, candidate: string): boolean {
+  const suffix = relative(root, candidate);
+  return suffix === "" || (!isAbsolute(suffix) && suffix !== ".." && !suffix.startsWith(`..${sep}`));
+}
+
+function assertProjectParentContained(guard: ProjectParentGuard): void {
+  assertSafeProjectDirectory(guard.workspaceRoot);
+  const parentRealPath = fs.realpathSync(guard.parentDir);
+  if (!isPathContained(guard.workspaceRealPath, parentRealPath)) {
+    throw new Error(`Refusing MCP project config parent outside workspace: ${guard.parentDir}`);
+  }
+
+  const relativeParent = relative(guard.workspaceRoot, guard.parentDir);
+  let currentPath = guard.workspaceRoot;
+  let expectedRealPath = guard.workspaceRealPath;
+  if (relativeParent !== "") {
+    for (const segment of relativeParent.split(sep)) {
+      currentPath = join(currentPath, segment);
+      expectedRealPath = join(expectedRealPath, segment);
+      assertSafeProjectDirectory(currentPath, expectedRealPath);
+    }
+  }
+}
+
+function prepareProjectParent(filePath: string, workspaceRoot: string): ProjectParentGuard {
+  const resolvedPath = resolve(filePath);
+  const resolvedRoot = resolve(workspaceRoot);
+  const parentDir = dirname(resolvedPath);
+  if (!isPathContained(resolvedRoot, resolvedPath)) {
+    throw new Error(`Refusing MCP project config path outside workspace: ${resolvedPath}`);
+  }
+
+  assertSafeProjectDirectory(resolvedRoot);
+  const workspaceRealPath = fs.realpathSync(resolvedRoot);
+  const relativeParent = relative(resolvedRoot, parentDir);
+  let currentPath = resolvedRoot;
+  let expectedRealPath = workspaceRealPath;
+  if (relativeParent !== "") {
+    for (const segment of relativeParent.split(sep)) {
+      currentPath = join(currentPath, segment);
+      expectedRealPath = join(expectedRealPath, segment);
+      try {
+        assertSafeProjectDirectory(currentPath, expectedRealPath);
+      } catch (error) {
+        if (!isNodeError(error, "ENOENT")) throw error;
+        try {
+          fs.mkdirSync(currentPath, { mode: 0o700 });
+        } catch (mkdirError) {
+          if (!isNodeError(mkdirError, "EEXIST")) throw mkdirError;
+        }
+        assertSafeProjectDirectory(currentPath, expectedRealPath);
+        if (process.platform !== "win32") fs.chmodSync(currentPath, 0o700);
+      }
+    }
+  }
+
+  const guard = { workspaceRoot: resolvedRoot, workspaceRealPath, parentDir };
+  assertProjectParentContained(guard);
+  return guard;
+}
+
 function writeRawConfigObject(filePath: string, raw: Record<string, unknown>): void {
-  mkdirSync(dirname(filePath), { recursive: true });
-  const tmpPath = `${filePath}.${process.pid}.tmp`;
-  writeFileSync(tmpPath, `${JSON.stringify(raw, null, 2)}\n`, "utf-8");
-  renameSync(tmpPath, filePath);
+  const parentDir = dirname(filePath);
+  const workspaceRoot = getProjectWorkspaceRoot(filePath);
+  const projectGuard = workspaceRoot
+    ? prepareProjectParent(filePath, workspaceRoot)
+    : undefined;
+  if (!projectGuard) fs.mkdirSync(parentDir, { recursive: true });
+  assertRegularDestination(filePath);
+
+  const tmpPath = join(
+    parentDir,
+    `.${basename(filePath)}.${process.pid}.${randomBytes(16).toString("hex")}.tmp`,
+  );
+  let fd: number | undefined;
+  try {
+    if (projectGuard) assertProjectParentContained(projectGuard);
+    fd = fs.openSync(tmpPath, "wx", 0o600);
+    fs.fchmodSync(fd, 0o600);
+    fs.writeFileSync(fd, `${JSON.stringify(raw, null, 2)}\n`, "utf-8");
+    fs.fsyncSync(fd);
+    fs.closeSync(fd);
+    fd = undefined;
+
+    assertRegularDestination(filePath);
+    if (projectGuard) assertProjectParentContained(projectGuard);
+    fs.renameSync(tmpPath, filePath);
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        // Preserve the original write failure; the temp path is still unlinked below.
+      }
+    }
+    try {
+      fs.unlinkSync(tmpPath);
+    } catch (error) {
+      if (!isNodeError(error, "ENOENT")) throw error;
+    }
+  }
 }
 
 function getServersObject(raw: Record<string, unknown>): Record<string, ServerEntry> {

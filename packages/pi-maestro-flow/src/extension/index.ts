@@ -107,7 +107,7 @@ import {
   type TodoTask,
 } from "../tools/todo.ts";
 import { WorkflowBridge, buildTodoMirrorSpecs } from "../session/bridge.ts";
-import { guiEnabled, startGuiSubsystem, registerGuiTool, isGuiToolAllowed, getGuiTool, createGuiEventForwarder, GUI_EVENTS, type GuiServerHandle, type GuiPermissionGateway } from "../gui/index.ts";
+import { guiEnabled, startGuiSubsystem, registerGuiTool, isGuiToolAllowed, getGuiTool, createGuiEventForwarder, GUI_EVENTS, bindGuiStartupIfCurrent, guiContextForGeneration, type GuiServerHandle, type GuiPermissionGateway } from "../gui/index.ts";
 import { loadLatestTeamSwarmProjection, type TeamSwarmProjection } from "../swarm/projection.ts";
 import { RunCliAdapter } from "../session/cli-adapter.ts";
 import { publicWorkflowErrorMessage, WorkflowCoordinator } from "../session/coordinator.ts";
@@ -558,6 +558,7 @@ export default function registerMaestroExtension(pi: ExtensionAPI): void {
   const teammateAuthorityOwner = `pi-maestro-flow:${teammateExtensionPath}`;
   let todoRootContext: ExtensionContext | undefined;
   let guiServer: GuiServerHandle | null = null;
+  let guiLifecycleGeneration = 0;
   const guiEvents = createGuiEventForwarder();
   // Forward teammate lifecycle events (shared EventBus) to the GUI SSE stream.
   pi.events.on(TEAMMATE_STARTED_EVENT, (event) => guiEvents.emit(GUI_EVENTS.teammateStarted, event));
@@ -1925,6 +1926,11 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
 
   // === Session lifecycle ===
   pi.on("session_start", async (event, ctx) => {
+    const guiGeneration = ++guiLifecycleGeneration;
+    const previousGuiServer = guiServer;
+    guiServer = null;
+    guiEvents.bind(null);
+    previousGuiServer?.close("session-restart");
     maestroUiPublisher.beginSession();
     maestroUiSessionActive = true;
     disposeTeammateSessionRegistrations();
@@ -1983,16 +1989,22 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     publishMaestroUi();
     activateTeammateSessionRegistrations(ctx);
     if (guiEnabled()) {
-      guiServer?.close("session-restart");
       const guiSessionId =
         (ctx.sessionManager as { getSessionId?: () => string }).getSessionId?.() ?? "unknown";
-      guiServer = await startGuiSubsystem({
+      const getGuiCtx = () => guiContextForGeneration(
+        ctx,
+        guiGeneration,
+        guiLifecycleGeneration,
+        todoRootContext,
+      );
+      const startedGuiServer = await startGuiSubsystem({
         sessionId: guiSessionId,
         cwd: ctx.cwd,
         getHealth: () => ({ approvalMode }),
         listAllTools: () => pi.getAllTools(),
         gateway: buildGuiPermissionGateway(ctx),
-        getCtx: () => ctx,
+        getCtx: getGuiCtx,
+        isCurrent: () => getGuiCtx() !== undefined,
         stateProviders: {
           workflow: () => deriveWorkflowViewModel(workflowSnapshotForUi()),
           todos: () => getVisibleTasks(),
@@ -2021,11 +2033,24 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
           sessionId: () => guiSessionId,
         },
       });
-      guiEvents.bind(guiServer);
+      bindGuiStartupIfCurrent(
+        startedGuiServer,
+        guiGeneration,
+        guiLifecycleGeneration,
+        (server) => {
+          guiServer = server;
+          guiEvents.bind(server);
+        },
+      );
     }
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    guiLifecycleGeneration += 1;
+    const closingGuiServer = guiServer;
+    guiServer = null;
+    guiEvents.bind(null);
+    closingGuiServer?.close("session-shutdown");
     maestroUiSessionActive = false;
     maestroUiPublisher.clear();
     disposeTeammateSessionRegistrations();
@@ -2056,9 +2081,6 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     onSessionShutdownPlan(ctx);
     ctx.ui.setStatus("approval-mode", undefined);
     await shutdownIntelligenceTools();
-    guiServer?.close("session-shutdown");
-    guiServer = null;
-    guiEvents.bind(null);
   });
 
   pi.on("session_before_compact", async (event, ctx) => {
@@ -2358,13 +2380,16 @@ Examples: { action: "status" }, { action: "done", runId: "run-abc", verdict: "do
     const mode = (): PermissionMode => effectivePermissionMode(approvalMode);
     return {
       mode,
-      authorize: async (toolName, input) => {
+      authorize: async (toolName, input, signal) => {
+        signal.throwIfAborted();
         const call = { toolName, input };
         const planBlock = onToolCallPlan(call, approvalMode === "bypassPermissions");
         if (planBlock) return { block: true, reason: planBlock.reason };
         const hookBlock = await hookAdapter.beforeToolCall(call, ctx);
+        signal.throwIfAborted();
         if (hookBlock) return { block: true, reason: hookBlock.reason };
         const block = await permissionController.authorize(call, ctx, mode(), hookAdapter);
+        signal.throwIfAborted();
         if (block) return { block: true, reason: block.reason };
         return undefined;
       },

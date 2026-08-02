@@ -275,17 +275,21 @@ export function buildHostHtmlTemplate(input: HostHtmlTemplateInput): string {
     bridge.onrequestdisplaymode = async (params) => post("/proxy/ui/request-display-mode", params);
     bridge.onopenlink = async (params) => {
       const result = await post("/proxy/ui/open-link", params);
-      if (!result.isError) {
-        window.open(params.url, "_blank", "noopener,noreferrer");
-        // Notify agent about the link open
-        await post("/proxy/ui/message", {
-          type: "intent",
-          intent: "open_link",
-          params: { url: params.url }
-        }).catch((error) => {
-          console.debug("Failed to report open-link intent", error);
-        });
-      }
+      const normalizedUrl = typeof result.url === "string" ? result.url : null;
+      if (result.isError || !normalizedUrl) return { ...result, isError: true };
+
+      const accepted = window.confirm("Open this link in your browser?\\n\\n" + normalizedUrl);
+      if (!accepted) return { ...result, isError: true };
+
+      window.open(normalizedUrl, "_blank", "noopener,noreferrer");
+      // Notify agent about the link open
+      await post("/proxy/ui/message", {
+        type: "intent",
+        intent: "open_link",
+        params: { url: normalizedUrl }
+      }).catch((error) => {
+        console.debug("Failed to report open-link intent", error);
+      });
       return result;
     };
 

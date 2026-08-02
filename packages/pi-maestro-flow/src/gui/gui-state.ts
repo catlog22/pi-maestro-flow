@@ -1,4 +1,4 @@
-import type { GuiServerHandle } from "./types.ts";
+import type { GuiRouteResult, GuiServerHandle } from "./types.ts";
 
 /**
  * Aggregated state snapshot routes for the UCL.
@@ -34,7 +34,28 @@ export function cloneSerializable(value: unknown): unknown {
   }
 }
 
-export function registerStateRoutes(server: GuiServerHandle, providers: GuiStateProviders): void {
+export interface GuiStateRouteOptions {
+  /** Active generation context; stale routes are denied before and after reads. */
+  getCtx?: () => object | undefined;
+}
+
+export function registerStateRoutes(
+  server: GuiServerHandle,
+  providers: GuiStateProviders,
+  options: GuiStateRouteOptions = {},
+): void {
+  const noContext = (): GuiRouteResult => ({
+    status: 503,
+    error: "No active session context",
+    code: "no_context",
+  });
+
+  const staleContext = (): GuiRouteResult => ({
+    status: 409,
+    error: "Session context changed during state read",
+    code: "stale_context",
+  });
+
   const readOne = async (sub: GuiStateSubsystem): Promise<unknown> => {
     const provider = providers[sub];
     if (!provider) return null;
@@ -46,6 +67,9 @@ export function registerStateRoutes(server: GuiServerHandle, providers: GuiState
   };
 
   server.registerRoute("GET", "/state", async () => {
+    const capturedCtx = options.getCtx?.();
+    if (options.getCtx && !capturedCtx) return noContext();
+
     const [workflow, todos, goal, plan, teammates, swarm] = await Promise.all([
       readOne("workflow"),
       readOne("todos"),
@@ -54,6 +78,7 @@ export function registerStateRoutes(server: GuiServerHandle, providers: GuiState
       readOne("teammates"),
       readOne("swarm"),
     ]);
+    if (capturedCtx && options.getCtx?.() !== capturedCtx) return staleContext();
     return {
       result: {
         workflow,
@@ -73,6 +98,11 @@ export function registerStateRoutes(server: GuiServerHandle, providers: GuiState
     if (!(GUI_STATE_SUBSYSTEMS as readonly string[]).includes(sub)) {
       return { status: 404, error: `Unknown state subsystem: ${sub}`, code: "unknown_subsystem" };
     }
-    return { result: { [sub]: await readOne(sub) } };
+
+    const capturedCtx = options.getCtx?.();
+    if (options.getCtx && !capturedCtx) return noContext();
+    const value = await readOne(sub);
+    if (capturedCtx && options.getCtx?.() !== capturedCtx) return staleContext();
+    return { result: { [sub]: value } };
   });
 }

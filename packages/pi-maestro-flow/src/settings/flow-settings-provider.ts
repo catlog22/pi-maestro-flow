@@ -38,6 +38,7 @@ import {
 
 const PROVIDER_ID = "pi-maestro-flow";
 const PROVIDER_VERSION = "1.0.0";
+const DEFAULT_PREPARED_TRANSACTION_TTL_MS = 30_000;
 
 type WritableScope = "global" | "project";
 type ResourceKind = "compaction" | "failover";
@@ -66,6 +67,7 @@ export interface FlowSettingsProviderOptions {
   actions?: Readonly<Record<string, FlowSettingsAction>>;
   getAgentResponseLanguage?: () => "default" | "zh-CN";
   replacementOperations?: Partial<FlowSettingsReplacementOperations>;
+  preparedTransactionTtlMs?: number;
 }
 
 interface JsonDocument {
@@ -95,6 +97,7 @@ interface PreparedFlowChange {
   transactionId: string;
   changedKeys: readonly string[];
   staged: StagedResource[];
+  expiry?: NodeJS.Timeout;
 }
 
 interface ReplacementJournal {
@@ -205,6 +208,7 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
     platform: options.replacementOperations?.platform ?? process.platform,
     renameSync: options.replacementOperations?.renameSync ?? fs.renameSync,
   };
+  const preparedTransactionTtlMs = options.preparedTransactionTtlMs ?? DEFAULT_PREPARED_TRANSACTION_TTL_MS;
   const prepared = new Map<string, PreparedFlowChange>();
 
   const readAllResources = (cwd: string): ResourceState[] => {
@@ -259,7 +263,16 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
         }
         const token = randomUUID();
         const changedKeys = request.changes.map((change) => change.key);
-        prepared.set(token, { token, transactionId: request.transactionId, changedKeys, staged });
+        const state: PreparedFlowChange = { token, transactionId: request.transactionId, changedKeys, staged };
+        prepared.set(token, state);
+        const expiry = setTimeout(() => {
+          if (prepared.get(token) !== state || state.expiry !== expiry) return;
+          state.expiry = undefined;
+          prepared.delete(token);
+          void releaseStaged(state.staged);
+        }, preparedTransactionTtlMs);
+        expiry.unref();
+        state.expiry = expiry;
         return {
           prepared: true,
           prepareToken: token,
@@ -273,6 +286,7 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
     },
     commit: async (request) => {
       const state = requirePrepared(prepared, request.prepareToken, request.transactionId);
+      cancelPreparedExpiry(state);
       const replacementStarted: StagedResource[] = [];
       try {
         for (const staged of state.staged) {
@@ -317,15 +331,25 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
     abort: async (request) => {
       const state = prepared.get(request.prepareToken);
       if (!state) return;
+      if (state.transactionId !== request.transactionId) {
+        throw new Error("prepared Flow settings transaction is unavailable");
+      }
+      cancelPreparedExpiry(state);
       prepared.delete(request.prepareToken);
       await releaseStaged(state.staged);
     },
     rollback: async (request) => {
       const state = prepared.get(request.prepareToken);
       if (!state || state.transactionId !== request.transactionId) return { rolledBack: false };
+      cancelPreparedExpiry(state);
       // A transaction that never committed successfully has no committedRevision, so restoring
-      // staged resources would overwrite any external write made after prepare. Refuse to touch files.
-      if (!state.staged.every((entry) => entry.committedRevision)) return { rolledBack: false };
+      // staged resources would overwrite any external write made after prepare. Consume it without
+      // touching the destination files.
+      if (!state.staged.every((entry) => entry.committedRevision)) {
+        prepared.delete(request.prepareToken);
+        await releaseStaged(state.staged);
+        return { rolledBack: false };
+      }
       const locked: Array<{ staged: StagedResource; release: () => Promise<void> }> = [];
       try {
         for (const staged of [...state.staged].sort((left, right) => left.resource.path.localeCompare(right.resource.path))) {
@@ -348,7 +372,11 @@ export function createFlowSettingsProvider(options: FlowSettingsProviderOptions 
     },
     applyRuntime: (request) => {
       const state = [...prepared.values()].find((entry) => entry.transactionId === request.transactionId);
-      if (state) prepared.delete(state.token);
+      if (state) {
+        cancelPreparedExpiry(state);
+        prepared.delete(state.token);
+        if (!state.staged.every((entry) => entry.committedRevision)) void releaseStaged(state.staged);
+      }
       return { appliedKeys: [], deferred: activationPlans(request.changes.map((change) => change.key)), failed: [] };
     },
     invokeAction: async (request) => {
@@ -870,6 +898,12 @@ function resourceConflict(actual: SettingsResourceRevision, expectedEtag: string
 
 function issue(change: SettingsChange, messageKey: string): SettingsValidationIssue {
   return { severity: "error", messageKey, key: change.key, scope: change.scope };
+}
+
+function cancelPreparedExpiry(state: PreparedFlowChange): void {
+  if (!state.expiry) return;
+  clearTimeout(state.expiry);
+  state.expiry = undefined;
 }
 
 function requirePrepared(prepared: Map<string, PreparedFlowChange>, token: string, transactionId: string): PreparedFlowChange {

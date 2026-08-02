@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import http from "node:http";
-import { mkdtemp, readFile, access } from "node:fs/promises";
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { startGuiServer } from "../src/gui/gui-server.ts";
-import { GUI_DISCOVERY_FILENAME, type GuiDiscoveryFile } from "../src/gui/types.ts";
+import { createGuiServer, startGuiServer } from "../src/gui/gui-server.ts";
+import { registerStateRoutes } from "../src/gui/gui-state.ts";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { bindGuiStartupIfCurrent, guiContextForGeneration } from "../src/gui/index.ts";
+import { GUI_DISCOVERY_FILENAME, type GuiDiscoveryFile, type GuiServerHandle } from "../src/gui/types.ts";
 
 interface JsonResp {
   status: number;
@@ -198,12 +201,22 @@ test("gui-server: writes and removes the discovery file", async () => {
     const raw = await readFile(discoveryPath, "utf-8");
     const discovery = JSON.parse(raw) as GuiDiscoveryFile;
     assert.equal(discovery.version, 1);
+    assert.ok(discovery.ownerToken);
     assert.equal(discovery.port, server.port);
     assert.equal(discovery.token, server.token);
     assert.equal(discovery.sessionId, "sess-4");
     assert.equal(discovery.pid, process.pid);
     assert.ok(discovery.url.includes(`session=${server.token}`));
     assert.ok(discovery.eventsUrl.includes("/events"));
+    assert.deepEqual(
+      (await readdir(join(cwd, ".workflow"))).sort(),
+      [GUI_DISCOVERY_FILENAME],
+      "atomic publication must not leave temporary files",
+    );
+    if (process.platform !== "win32") {
+      assert.equal((await stat(join(cwd, ".workflow"))).mode & 0o777, 0o700);
+      assert.equal((await stat(discoveryPath)).mode & 0o777, 0o600);
+    }
   } finally {
     server.close("test-done");
   }
@@ -211,3 +224,154 @@ test("gui-server: writes and removes the discovery file", async () => {
   await new Promise((resolve) => setTimeout(resolve, 50));
   await assert.rejects(async () => access(discoveryPath));
 });
+
+test("gui-server: an old close cannot remove a replacement discovery owner", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "gui-server-owner-"));
+  const first = await startGuiServer({ sessionId: "first", cwd });
+  const second = await startGuiServer({ sessionId: "second", cwd });
+  const discoveryPath = join(cwd, ".workflow", GUI_DISCOVERY_FILENAME);
+  try {
+    const replacement = JSON.parse(await readFile(discoveryPath, "utf8")) as GuiDiscoveryFile;
+    assert.equal(replacement.ownerToken, JSON.parse(await readFile(second.discoveryPath!, "utf8")).ownerToken);
+    assert.equal(replacement.sessionId, "second");
+
+    first.close("stale-close");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const afterStaleClose = JSON.parse(await readFile(discoveryPath, "utf8")) as GuiDiscoveryFile;
+    assert.equal(afterStaleClose.ownerToken, replacement.ownerToken);
+    assert.equal(afterStaleClose.sessionId, "second");
+  } finally {
+    first.close("done");
+    second.close("done");
+  }
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  await assert.rejects(async () => access(discoveryPath));
+});
+
+test("gui-server: discovery publication rejects symlink and non-regular destinations", async (t) => {
+  const symlinkCwd = await mkdtemp(join(tmpdir(), "gui-server-symlink-"));
+  const symlinkDir = join(symlinkCwd, ".workflow");
+  const symlinkPath = join(symlinkDir, GUI_DISCOVERY_FILENAME);
+  const targetPath = join(symlinkCwd, "target.json");
+  await mkdir(symlinkDir, { mode: 0o700 });
+  await writeFile(targetPath, "sentinel", "utf8");
+  try {
+    await symlink(targetPath, symlinkPath, "file");
+  } catch (error) {
+    if (isPermissionError(error)) {
+      t.skip("Creating symlinks is not permitted in this environment");
+      return;
+    }
+    throw error;
+  }
+
+  const symlinkServer = await startGuiServer({ sessionId: "symlink", cwd: symlinkCwd });
+  try {
+    assert.equal(symlinkServer.discoveryPath, undefined);
+    assert.equal(await readFile(targetPath, "utf8"), "sentinel");
+    assert.equal((await lstat(symlinkPath)).isSymbolicLink(), true);
+  } finally {
+    symlinkServer.close("done");
+  }
+
+  const nonRegularCwd = await mkdtemp(join(tmpdir(), "gui-server-directory-"));
+  const nonRegularDir = join(nonRegularCwd, ".workflow");
+  const nonRegularPath = join(nonRegularDir, GUI_DISCOVERY_FILENAME);
+  await mkdir(nonRegularPath, { recursive: true });
+  const nonRegularServer = await startGuiServer({ sessionId: "directory", cwd: nonRegularCwd });
+  try {
+    assert.equal(nonRegularServer.discoveryPath, undefined);
+    assert.equal((await stat(nonRegularPath)).isDirectory(), true);
+  } finally {
+    nonRegularServer.close("done");
+  }
+});
+
+test("gui extension startup keeps new discovery across reverse completion", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "gui-server-reverse-"));
+  const discoveryPath = join(cwd, ".workflow", GUI_DISCOVERY_FILENAME);
+  let currentGeneration = 1;
+  const oldCtx = {} as ExtensionContext;
+  const newCtx = {} as ExtensionContext;
+  let activeCtx: ExtensionContext | undefined = oldCtx;
+  let bound: GuiServerHandle | null = null;
+  let staleProviderReads = 0;
+  let finishOld!: () => void;
+  const oldFinishGate = new Promise<void>((resolve) => { finishOld = resolve; });
+
+  const oldServer = await createGuiServer({ sessionId: "old", cwd });
+  registerStateRoutes(
+    oldServer,
+    {
+      goal: () => {
+        staleProviderReads += 1;
+        return { departed: true };
+      },
+    },
+    { getCtx: () => guiContextForGeneration(oldCtx, 1, currentGeneration, activeCtx) },
+  );
+  const oldCompletion = (async (): Promise<boolean> => {
+    await oldFinishGate;
+    await oldServer.publishDiscovery(
+      () => guiContextForGeneration(oldCtx, 1, currentGeneration, activeCtx) !== undefined,
+    );
+    return bindGuiStartupIfCurrent(oldServer, 1, currentGeneration, (server) => {
+      bound = server;
+    });
+  })();
+
+  currentGeneration = 2;
+  activeCtx = newCtx;
+  const newServer = await createGuiServer({ sessionId: "new", cwd });
+  try {
+    registerStateRoutes(
+      newServer,
+      { goal: () => ({ current: true }) },
+      { getCtx: () => guiContextForGeneration(newCtx, 2, currentGeneration, activeCtx) },
+    );
+    assert.equal(
+      await newServer.publishDiscovery(
+        () => guiContextForGeneration(newCtx, 2, currentGeneration, activeCtx) !== undefined,
+      ),
+      true,
+    );
+    assert.equal(bindGuiStartupIfCurrent(newServer, 2, currentGeneration, (server) => { bound = server; }), true);
+    assert.equal(bound, newServer, "the new generation must bind before the old one finishes");
+
+    const publishedNew = JSON.parse(await readFile(discoveryPath, "utf8")) as GuiDiscoveryFile;
+    assert.equal(publishedNew.sessionId, "new");
+
+    const staleState = await requestJson(oldServer.port, "/state", { token: oldServer.token });
+    assert.equal(staleState.status, 503);
+    assert.equal(staleState.body.code, "no_context");
+    assert.equal(staleProviderReads, 0, "a stale route must not call departed providers");
+
+    finishOld();
+    assert.equal(await oldCompletion, false);
+    assert.equal(oldServer.discoveryPath, undefined, "stale startup must not publish discovery");
+    assert.equal(bound, newServer, "stale completion must not replace the current binding");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    const afterOldClose = JSON.parse(await readFile(discoveryPath, "utf8")) as GuiDiscoveryFile;
+    assert.equal(afterOldClose.ownerToken, publishedNew.ownerToken);
+    assert.equal(afterOldClose.sessionId, "new");
+  } finally {
+    finishOld();
+    oldServer.close("done");
+    newServer.close("done");
+  }
+
+  // Guard the extension integration invariant: fencing precedes awaits and one
+  // generation-aware context closure owns publication plus route admission.
+  const source = await readFile(new URL("../src/extension/index.ts", import.meta.url), "utf8");
+  const start = source.slice(source.indexOf('pi.on("session_start", async'));
+  assert.ok(start.indexOf("++guiLifecycleGeneration") < start.indexOf("await inputHistorySessionStart"));
+  const shutdown = source.slice(source.indexOf('pi.on("session_shutdown", async'));
+  assert.ok(shutdown.indexOf("guiLifecycleGeneration += 1") < shutdown.indexOf("await inputHistorySessionShutdown"));
+  assert.match(source, /const getGuiCtx = \(\) => guiContextForGeneration\(/);
+  assert.match(source, /getCtx:\s*getGuiCtx,\s*isCurrent:\s*\(\) => getGuiCtx\(\) !== undefined/);
+});
+
+function isPermissionError(error: unknown): boolean {
+  return error instanceof Error && "code" in error && (error.code === "EPERM" || error.code === "EACCES");
+}

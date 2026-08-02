@@ -348,18 +348,96 @@ test("MCP discovery caps cumulative item count", async () => {
   );
 });
 
-test("MCP discovery caps cumulative metadata bytes", async () => {
+test("MCP discovery caps cumulative metadata bytes without full serialization", async () => {
+  let latePropertyRead = false;
+  let stringifyCalls = 0;
+  const originalStringify = JSON.stringify;
+  JSON.stringify = ((value: unknown) => {
+    stringifyCalls += 1;
+    return originalStringify(value);
+  }) as typeof JSON.stringify;
+
+  const resource = {
+    uri: "test://large",
+    name: "large",
+    description: "x".repeat(8 * 1024 * 1024),
+    get lateProperty() {
+      latePropertyRead = true;
+      return "must not be read";
+    },
+  };
   const client = {
     async listResources() {
-      return {
-        resources: [{ uri: "test://large", name: "large", description: "x".repeat(8 * 1024 * 1024) }],
-      };
+      return { resources: [resource] };
+    },
+  };
+
+  try {
+    await assert.rejects(
+      discoveryMethods().fetchAllResources(client),
+      /MCP resources discovery exceeded metadata limit of 8388608 bytes/,
+    );
+  } finally {
+    JSON.stringify = originalStringify;
+  }
+  assert.equal(stringifyCalls, 0, "metadata measurement must not call JSON.stringify");
+  assert.equal(latePropertyRead, false, "measurement stops before traversing later properties");
+});
+
+test("MCP discovery charges cumulative cursor bytes against the metadata limit", async () => {
+  const cursorLength = 4 * 1024 * 1024;
+  const cursors = ["a".repeat(cursorLength), "b".repeat(cursorLength)];
+  let calls = 0;
+  const client = {
+    async listTools() {
+      return { tools: [], nextCursor: cursors[calls++] };
     },
   };
 
   await assert.rejects(
-    discoveryMethods().fetchAllResources(client),
-    /MCP resources discovery exceeded metadata limit of 8388608 bytes/,
+    discoveryMethods().fetchAllTools(client),
+    /MCP tools discovery exceeded metadata limit of 8388608 bytes/,
+  );
+  assert.equal(calls, 2, "the second cursor exceeds the remaining cumulative budget");
+});
+
+test("MCP discovery rejects one oversized multibyte cursor before fetching another page", async () => {
+  let calls = 0;
+  const client = {
+    async listTools() {
+      calls += 1;
+      return { tools: [], nextCursor: "\u20ac".repeat(3 * 1024 * 1024) };
+    },
+  };
+
+  await assert.rejects(
+    discoveryMethods().fetchAllTools(client),
+    /MCP tools discovery exceeded metadata limit of 8388608 bytes/,
+  );
+  assert.equal(calls, 1);
+});
+
+test("MCP discovery rejects cyclic and unsupported metadata deterministically", async () => {
+  const cyclic: Record<string, unknown> = { name: "cycle" };
+  cyclic.self = cyclic;
+  const cyclicClient = {
+    async listTools() {
+      return { tools: [cyclic] };
+    },
+  };
+  await assert.rejects(
+    discoveryMethods().fetchAllTools(cyclicClient),
+    /MCP tools discovery received invalid metadata: cyclic values are not JSON-compatible/,
+  );
+
+  const unsupportedClient = {
+    async listResources() {
+      return { resources: [{ uri: "test://bigint", size: 1n }] };
+    },
+  };
+  await assert.rejects(
+    discoveryMethods().fetchAllResources(unsupportedClient),
+    /MCP resources discovery received invalid metadata: values of type bigint are not JSON-compatible/,
   );
 });
 

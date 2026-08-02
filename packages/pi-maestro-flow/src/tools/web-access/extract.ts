@@ -12,7 +12,16 @@ import { extractWithUrlContext, extractWithGeminiWeb } from "./gemini-url-contex
 import { extractWithParallel, isParallelAvailable } from "./parallel.ts";
 import { extractWithFirecrawl, isFirecrawlAvailable } from "./firecrawl.ts";
 import { isVideoFile, extractVideo, extractVideoFrame, getLocalVideoDuration } from "./video-extract.ts";
-import { fetchRemoteUrl, loadFetchContentDomainPolicy, loadSsrfConfig, validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
+import {
+	fetchRemoteUrl,
+	loadFetchContentDomainPolicy,
+	loadSsrfConfig,
+	readBoundedResponseBytes,
+	readBoundedResponseText,
+	ResponseSizeLimitError,
+	validateRemoteUrl,
+	type Lookup,
+} from "./ssrf-protection.ts";
 import { formatSeconds, getWebSearchConfigPath } from "./utils.ts";
 
 const DEFAULT_TIMEOUT_MS = 30000;
@@ -545,7 +554,15 @@ function isLikelyJSRendered(html: string): boolean {
 	return textContent.length < 500 && scriptCount > 3;
 }
 
-async function extractViaHttp(
+async function cancelResponseBody(response: Response): Promise<void> {
+	try {
+		await response.body?.cancel();
+	} catch {
+		// Preserve the result from the branch that intentionally discarded the body.
+	}
+}
+
+export async function extractViaHttp(
 	url: string,
 	signal?: AbortSignal,
 	options?: ExtractOptions,
@@ -587,6 +604,7 @@ async function extractViaHttp(
 		);
 
 		if (!response.ok) {
+			await cancelResponseBody(response);
 			activityMonitor.logComplete(activityId, response.status);
 			return {
 				url,
@@ -603,6 +621,7 @@ async function extractViaHttp(
 		if (contentLengthHeader) {
 			const contentLength = parseInt(contentLengthHeader, 10);
 			if (contentLength > maxResponseSize) {
+				await cancelResponseBody(response);
 				activityMonitor.logComplete(activityId, response.status);
 				return {
 					url,
@@ -615,7 +634,9 @@ async function extractViaHttp(
 
 		if (isPDFContent) {
 			try {
-				const buffer = await response.arrayBuffer();
+				const bytes = await readBoundedResponseBytes(response, maxResponseSize);
+				const buffer = new ArrayBuffer(bytes.byteLength);
+				new Uint8Array(buffer).set(bytes);
 				const result = await extractPDFToMarkdown(buffer, url);
 				activityMonitor.logComplete(activityId, response.status);
 				return {
@@ -625,6 +646,10 @@ async function extractViaHttp(
 					error: null,
 				};
 			} catch (err) {
+				if (err instanceof ResponseSizeLimitError) {
+					activityMonitor.logComplete(activityId, response.status);
+					return { url, title: "", content: "", error: `Response too large (over ${maxResponseSize / 1024 / 1024}MB)` };
+				}
 				const message = err instanceof Error ? err.message : String(err);
 				activityMonitor.logError(activityId, message);
 				return { url, title: "", content: "", error: `PDF extraction failed: ${message}` };
@@ -636,6 +661,7 @@ async function extractViaHttp(
 			contentType.includes("audio/") ||
 			contentType.includes("video/") ||
 			contentType.includes("application/zip")) {
+			await cancelResponseBody(response);
 			activityMonitor.logComplete(activityId, response.status);
 			return {
 				url,
@@ -645,7 +671,16 @@ async function extractViaHttp(
 			};
 		}
 
-		const text = await response.text();
+		let text: string;
+		try {
+			text = await readBoundedResponseText(response, maxResponseSize);
+		} catch (err) {
+			if (err instanceof ResponseSizeLimitError) {
+				activityMonitor.logComplete(activityId, response.status);
+				return { url, title: "", content: "", error: `Response too large (over ${maxResponseSize / 1024 / 1024}MB)` };
+			}
+			throw err;
+		}
 		const isHTML = contentType.includes("text/html") || contentType.includes("application/xhtml+xml");
 
 		if (!isHTML) {

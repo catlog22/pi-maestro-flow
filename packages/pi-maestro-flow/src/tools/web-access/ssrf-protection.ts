@@ -7,7 +7,58 @@ import { Readable } from "node:stream";
 import { getWebSearchConfigPath } from "./utils.ts";
 
 const DEFAULT_MAX_REDIRECTS = 5;
+const DEFAULT_MAX_REPLAY_BODY_BYTES = 8 * 1024 * 1024;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+// IANA special-purpose address registries, plus multicast and deprecated site-local IPv6.
+// These are denied as non-general-purpose destinations unless allowRanges explicitly exempts them.
+const SPECIAL_PURPOSE_IPV4_RANGES = parseStaticRanges([
+	"0.0.0.0/8",
+	"10.0.0.0/8",
+	"100.64.0.0/10",
+	"127.0.0.0/8",
+	"169.254.0.0/16",
+	"172.16.0.0/12",
+	"192.0.0.0/24",
+	"192.0.2.0/24",
+	"192.31.196.0/24",
+	"192.52.193.0/24",
+	"192.88.99.0/24",
+	"192.168.0.0/16",
+	"192.175.48.0/24",
+	"198.18.0.0/15",
+	"198.51.100.0/24",
+	"203.0.113.0/24",
+	"224.0.0.0/4",
+	"240.0.0.0/4",
+]);
+const GLOBALLY_ROUTABLE_IPV6_RANGES = parseStaticRanges(["2000::/3"]);
+const SPECIAL_PURPOSE_IPV6_RANGES = parseStaticRanges([
+	"::/96",
+	"::ffff:0:0/96",
+	"64:ff9b::/96",
+	"64:ff9b:1::/48",
+	"100::/64",
+	"2001::/23",
+	"2001:db8::/32",
+	"2002::/16",
+	"2620:4f:8000::/48",
+	"3fff::/20",
+	"5f00::/16",
+	"fc00::/7",
+	"fe80::/10",
+	"fec0::/10",
+	"ff00::/8",
+]);
+const REQUEST_BODY_HEADERS = [
+	"content-encoding",
+	"content-language",
+	"content-length",
+	"content-location",
+	"content-type",
+	"transfer-encoding",
+];
+const CROSS_ORIGIN_SENSITIVE_HEADERS = ["authorization", "cookie", "proxy-authorization", "x-api-key"];
 
 export type LookupAddress = { address: string; family: number };
 export type Lookup = (hostname: string) => Promise<LookupAddress[]>;
@@ -140,10 +191,9 @@ interface ValidationOptions {
 	 */
 	allowRanges?: string[];
 	/**
-	 * When true, trust an explicitly-configured HTTP(S) proxy for hostname
-	 * resolution instead of performing local DNS lookups inside the sandbox.
-	 * Literal IPs and localhost remain blocked, and NO_PROXY hosts still use
-	 * the local SSRF preflight. This does not configure proxy transport.
+	 * Retained for configuration compatibility. Environment proxy variables do
+	 * not bypass DNS validation because this transport does not configure or
+	 * validate a proxy itself.
 	 */
 	trustEnvProxy?: boolean;
 }
@@ -158,12 +208,12 @@ interface FetchRemoteOptions extends ValidationOptions {
 	/** Test seam; production requests use the pinned built-in HTTP(S) transport. */
 	fetch?: Fetch;
 	maxRedirects?: number;
+	maxReplayBodyBytes?: number;
 }
 
 interface ValidatedRemoteTarget {
 	url: URL;
-	/** Null only when an explicitly trusted proxy is responsible for DNS. */
-	addresses: LookupAddress[] | null;
+	addresses: LookupAddress[];
 }
 
 async function defaultLookup(hostname: string): Promise<LookupAddress[]> {
@@ -195,8 +245,6 @@ async function resolveRemoteTarget(rawUrl: string | URL, options: ValidationOpti
 		return { url, addresses: [{ address: hostname, family: literalFamily }] };
 	}
 
-	if (shouldTrustEnvProxy(url, options.trustEnvProxy === true)) return { url, addresses: null };
-
 	let resolved: LookupAddress[];
 	try {
 		resolved = await (options.lookup ?? defaultLookup)(hostname);
@@ -219,30 +267,171 @@ export async function fetchRemoteUrl(
 	options: FetchRemoteOptions = {},
 ): Promise<Response> {
 	const maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
+	const maxReplayBodyBytes = options.maxReplayBodyBytes ?? DEFAULT_MAX_REPLAY_BODY_BYTES;
+	if (!Number.isInteger(maxRedirects) || maxRedirects < 0) throw new Error("maxRedirects must be a non-negative integer");
+	if (!Number.isInteger(maxReplayBodyBytes) || maxReplayBodyBytes < 0) {
+		throw new Error("maxReplayBodyBytes must be a non-negative integer");
+	}
+
 	let target = await resolveRemoteTarget(url, options);
-	let requestInit = init;
+	let request = await prepareReplayableRequest(target.url, init, maxReplayBodyBytes);
 
 	for (let redirects = 0; redirects <= maxRedirects; redirects++) {
+		const requestInit = replayRequestInit(request);
 		const response = options.fetch
 			? await options.fetch(target.url, { ...requestInit, redirect: "manual" })
-			: target.addresses === null
-				? await fetch(target.url, { ...requestInit, redirect: "manual" })
-				: await fetchPinned(target.url, requestInit, target.addresses[0]);
+			: await fetchPinned(target.url, requestInit, target.addresses[0]);
 		if (!REDIRECT_STATUSES.has(response.status)) return response;
 
 		const location = response.headers.get("location");
 		if (!location) return response;
+		await cancelResponseBody(response);
 		if (redirects === maxRedirects) throw new Error(`Too many redirects fetching ${target.url.toString()}`);
 
-		await response.body?.cancel();
-		target = await resolveRemoteTarget(new URL(location, target.url), options);
-		if (response.status === 303 || ((response.status === 301 || response.status === 302) && requestInit.method?.toUpperCase() === "POST")) {
-			const { body: _body, ...nextInit } = requestInit;
-			requestInit = { ...nextInit, method: "GET" };
+		const nextUrl = new URL(location, target.url);
+		applyRedirectMethod(response.status, request);
+		if (nextUrl.origin !== target.url.origin) {
+			for (const name of CROSS_ORIGIN_SENSITIVE_HEADERS) request.headers.delete(name);
 		}
+		target = await resolveRemoteTarget(nextUrl, options);
 	}
 
 	throw new Error(`Too many redirects fetching ${target.url.toString()}`);
+}
+
+interface ReplayableRequest {
+	init: Omit<RequestInit, "body" | "headers" | "method">;
+	method: string;
+	headers: Headers;
+	body: Uint8Array | null;
+}
+
+async function prepareReplayableRequest(url: URL, init: RequestInit, maxBodyBytes: number): Promise<ReplayableRequest> {
+	if (isStreamingBody(init.body)) {
+		throw new Error("Streaming request bodies cannot be safely replayed across redirects");
+	}
+	const normalized = new Request(url, { ...init, redirect: "manual" });
+	const body = await readBoundedBody(normalized.body, maxBodyBytes);
+	const { body: _body, headers: _headers, method: _method, ...rest } = init;
+	return { init: rest, method: normalized.method, headers: new Headers(normalized.headers), body };
+}
+
+function isStreamingBody(body: RequestInit["body"]): boolean {
+	if (!body || typeof body !== "object") return false;
+	return body instanceof ReadableStream || Symbol.asyncIterator in body;
+}
+
+async function readBoundedBody(body: ReadableStream<Uint8Array> | null, maxBytes: number): Promise<Uint8Array | null> {
+	if (!body) return null;
+	const reader = body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			total += value.byteLength;
+			if (total > maxBytes) {
+				await reader.cancel();
+				throw new Error(`Request body exceeds replay limit of ${maxBytes} bytes`);
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+	const result = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		result.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return result;
+}
+
+function replayRequestInit(request: ReplayableRequest): RequestInit {
+	return {
+		...request.init,
+		method: request.method,
+		headers: new Headers(request.headers),
+		...(request.body ? { body: request.body.slice() } : {}),
+	};
+}
+
+function applyRedirectMethod(status: number, request: ReplayableRequest): void {
+	const method = request.method.toUpperCase();
+	const switchesToGet = ((status === 301 || status === 302) && method === "POST") ||
+		(status === 303 && method !== "GET" && method !== "HEAD");
+	if (!switchesToGet) return;
+	request.method = "GET";
+	request.body = null;
+	for (const name of REQUEST_BODY_HEADERS) request.headers.delete(name);
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+	try {
+		await response.body?.cancel();
+	} catch {
+		// The redirect is no longer consumed; cleanup failure must not follow it.
+	}
+}
+
+export class ResponseSizeLimitError extends Error {
+	constructor(
+		readonly maxBytes: number,
+		readonly observedBytes: number,
+	) {
+		super(`Response body exceeds limit of ${maxBytes} bytes`);
+		this.name = "ResponseSizeLimitError";
+	}
+}
+
+export async function readBoundedResponseBytes(response: Response, maxBytes: number): Promise<Uint8Array> {
+	if (!Number.isInteger(maxBytes) || maxBytes < 0) throw new Error("maxBytes must be a non-negative integer");
+
+	const declaredLength = response.headers.get("content-length");
+	if (declaredLength && /^\d+$/.test(declaredLength)) {
+		const declaredBytes = Number(declaredLength);
+		if (Number.isSafeInteger(declaredBytes) && declaredBytes > maxBytes) {
+			await cancelResponseBody(response);
+			throw new ResponseSizeLimitError(maxBytes, declaredBytes);
+		}
+	}
+
+	if (!response.body) return new Uint8Array();
+	const reader = response.body.getReader();
+	const chunks: Uint8Array[] = [];
+	let total = 0;
+	try {
+		while (true) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			total += value.byteLength;
+			if (total > maxBytes) {
+				try {
+					await reader.cancel();
+				} catch {
+					// Preserve the size-limit failure even if transport cleanup fails.
+				}
+				throw new ResponseSizeLimitError(maxBytes, total);
+			}
+			chunks.push(value);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+
+	const result = new Uint8Array(total);
+	let offset = 0;
+	for (const chunk of chunks) {
+		result.set(chunk, offset);
+		offset += chunk.byteLength;
+	}
+	return result;
+}
+
+export async function readBoundedResponseText(response: Response, maxBytes: number): Promise<string> {
+	return new TextDecoder().decode(await readBoundedResponseBytes(response, maxBytes));
 }
 
 async function fetchPinned(url: URL, init: RequestInit, address: LookupAddress): Promise<Response> {
@@ -305,84 +494,23 @@ function domainMatches(hostname: string, entry: string): boolean {
 	return hostname === entry || hostname.endsWith(`.${entry}`);
 }
 
-function getProxyForProtocol(protocol: string): string {
-	const candidates = protocol === "http:"
-		? [process.env.HTTP_PROXY, process.env.http_proxy, process.env.ALL_PROXY, process.env.all_proxy]
-		: protocol === "https:"
-			? [process.env.HTTPS_PROXY, process.env.https_proxy, process.env.HTTP_PROXY, process.env.http_proxy, process.env.ALL_PROXY, process.env.all_proxy]
-			: [];
-	for (const candidate of candidates) {
-		const value = candidate?.trim();
-		if (!value) continue;
-		try {
-			const proxyUrl = new URL(value);
-			if ((proxyUrl.protocol === "http:" || proxyUrl.protocol === "https:") && proxyUrl.hostname) return value;
-		} catch {
-			// Invalid proxy env vars should not weaken local DNS SSRF checks.
-		}
-	}
-	return "";
-}
-
-function hostnameMatchesNoProxy(hostname: string, port: string, entry: string): boolean {
-	const trimmed = entry.trim();
-	if (!trimmed) return false;
-	if (trimmed === "*") return true;
-
-	// NO_PROXY entries may include a port. Strip it only after handling
-	// bracketed IPv6 literals, which can contain several colons.
-	let hostEntry = trimmed;
-	let entryPort: string | undefined;
-	if (hostEntry.startsWith("[")) {
-		const closingBracket = hostEntry.indexOf("]");
-		if (closingBracket >= 0) {
-			const suffix = hostEntry.slice(closingBracket + 1);
-			if (/^:\\d+$/.test(suffix)) entryPort = suffix.slice(1);
-			hostEntry = hostEntry.slice(0, closingBracket + 1);
-		}
-	} else {
-		const colon = hostEntry.lastIndexOf(":");
-		if (colon > -1 && /^\d+$/.test(hostEntry.slice(colon + 1))) {
-			entryPort = hostEntry.slice(colon + 1);
-			hostEntry = hostEntry.slice(0, colon);
-		}
-	}
-	if (entryPort !== undefined && entryPort !== port) return false;
-
-	const normalizedEntry = normalizeHostname(hostEntry);
-	if (!normalizedEntry) return false;
-	if (normalizedEntry === hostname) return true;
-	const suffix = normalizedEntry.startsWith("*.")
-		? normalizedEntry.slice(1)
-		: normalizedEntry.startsWith(".")
-			? normalizedEntry
-			: `.${normalizedEntry}`;
-	return hostname.endsWith(suffix);
-}
-
-function shouldTrustEnvProxy(url: URL, enabled: boolean): boolean {
-	if (!enabled || !getProxyForProtocol(url.protocol)) return false;
-	const hostname = normalizeHostname(url.hostname);
-	const port = url.port || (url.protocol === "https:" ? "443" : "80");
-	const noProxy = process.env.NO_PROXY || process.env.no_proxy || "";
-	return !noProxy.split(",").some(entry => hostnameMatchesNoProxy(hostname, port, entry));
-}
-
 function assertPublicAddress(address: string, hostname: string, allowRanges: ParsedCidr[] = []): void {
 	const normalized = normalizeHostname(address);
 	const ipVersion = net.isIP(normalized);
 	if (ipVersion === 0) throw new Error(`Resolved non-IP address for ${hostname}: ${address}`);
-	// Explicitly-allowed ranges bypass the private/reserved checks below. This lets
-	// users exempt synthetic ranges produced by TUN/fake-IP proxies (e.g. 198.18/15).
-	if (isInAllowedRange(normalized, ipVersion, allowRanges)) return;
-	if (ipVersion === 4 && isBlockedIPv4(normalized)) {
-		const hint = isFakeIpProxyAddress(normalized)
+
+	const mappedIPv4 = ipVersion === 6 ? mappedIPv4Address(normalized) : null;
+	if (isInAllowedRange(normalized, ipVersion, allowRanges) ||
+		(mappedIPv4 !== null && isInAllowedRange(mappedIPv4, 4, allowRanges))) return;
+
+	const specialRanges = ipVersion === 4 ? SPECIAL_PURPOSE_IPV4_RANGES : SPECIAL_PURPOSE_IPV6_RANGES;
+	const isGloballyRoutableUnicast = ipVersion === 4 ||
+		isAddressInRanges(normalized, ipVersion, GLOBALLY_ROUTABLE_IPV6_RANGES);
+	if (!isGloballyRoutableUnicast || isAddressInRanges(normalized, ipVersion, specialRanges)) {
+		const hint = ipVersion === 4 && isFakeIpProxyAddress(normalized)
 			? '. This address is in 198.18.0.0/15, commonly used by TUN/fake-IP proxies. If that matches your setup, configure ssrf.allowRanges with ["198.18.0.0/15"] in web-search.json.'
 			: "";
-		throw new Error(`Blocked internal address for ${hostname}: ${normalized}${hint}`);
-	}
-	if (ipVersion === 6 && isBlockedIPv6(normalized)) {
-		throw new Error(`Blocked internal address for ${hostname}: ${normalized}`);
+		throw new Error(`Blocked internal address or special-purpose destination for ${hostname}: ${normalized}${hint}`);
 	}
 }
 
@@ -391,38 +519,24 @@ function isFakeIpProxyAddress(address: string): boolean {
 	return a === 198 && (b === 18 || b === 19);
 }
 
-function isBlockedIPv4(address: string): boolean {
-	const parts = address.split(".").map(part => Number(part));
-	if (parts.length !== 4 || parts.some(part => !Number.isInteger(part) || part < 0 || part > 255)) return true;
-	const [a, b] = parts;
-	return a === 0 ||
-		a === 10 ||
-		a === 127 ||
-		(a === 100 && b >= 64 && b <= 127) ||
-		(a === 169 && b === 254) ||
-		(a === 172 && b >= 16 && b <= 31) ||
-		(a === 192 && b === 168) ||
-		isFakeIpProxyAddress(address) ||
-		a >= 224;
+function mappedIPv4Address(address: string): string | null {
+	const groups = parseIPv6(address);
+	if (!groups || !groups.slice(0, 5).every(group => group === 0) || groups[5] !== 0xffff) return null;
+	return [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join(".");
 }
 
-function isBlockedIPv6(address: string): boolean {
-	const groups = parseIPv6(address);
-	if (!groups) return true;
+function isAddressInRanges(address: string, version: number, ranges: ParsedCidr[]): boolean {
+	const bytes = ipToBytes(address, version);
+	if (!bytes) return true;
+	return ranges.some(range => range.bytes.length === bytes.length && bytesMatchPrefix(bytes, range.bytes, range.prefix));
+}
 
-	const first = groups[0];
-	if (groups.every(group => group === 0)) return true;
-	if (groups.slice(0, 7).every(group => group === 0) && groups[7] === 1) return true;
-	if ((first & 0xfe00) === 0xfc00) return true;
-	if ((first & 0xffc0) === 0xfe80) return true;
-
-	const isMappedIPv4 = groups.slice(0, 5).every(group => group === 0) && groups[5] === 0xffff;
-	if (isMappedIPv4) {
-		const ipv4 = [groups[6] >> 8, groups[6] & 0xff, groups[7] >> 8, groups[7] & 0xff].join(".");
-		return isBlockedIPv4(ipv4);
-	}
-
-	return false;
+function parseStaticRanges(ranges: string[]): ParsedCidr[] {
+	return ranges.map(range => {
+		const parsed = parseCidr(range);
+		if (!parsed) throw new Error(`Invalid built-in special-purpose range: ${range}`);
+		return parsed;
+	});
 }
 
 function parseIPv6(address: string): number[] | null {

@@ -66,8 +66,10 @@ export interface GuiServerHandle {
   address: string;
   token: string;
   sessionId: string;
-  /** Absolute path of the discovery file, when written. */
+  /** Absolute path of the discovery file, when published. */
   discoveryPath?: string;
+  /** Publish discovery after routes and lifecycle ownership are ready. */
+  publishDiscovery: (isCurrent?: () => boolean) => Promise<boolean>;
   close: (reason?: string) => void;
   /** Register lifecycle cleanup that runs synchronously when the server closes. */
   onClose: (handler: (reason: string) => void) => () => void;
@@ -81,6 +83,8 @@ export interface GuiServerHandle {
 /** Shape of the well-known discovery file (`.workflow/gui.json`). */
 export interface GuiDiscoveryFile {
   version: 1;
+  /** Unique publication owner; cleanup removes only its own generation. */
+  ownerToken: string;
   port: number;
   token: string;
   sessionId: string;
@@ -104,6 +108,7 @@ export interface GuiPermissionGateway {
   authorize(
     toolName: string,
     input: Record<string, unknown>,
+    signal: AbortSignal,
   ): Promise<{ block: true; reason: string } | undefined>;
   /** Current effective permission mode (for /health and GUI display). */
   mode(): string;

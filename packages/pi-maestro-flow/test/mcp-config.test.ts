@@ -1,5 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import fs, {
+  chmodSync,
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -12,7 +23,346 @@ import {
   serializeMcpServerJson,
 } from "../src/mcp/mcp-manager-flow.ts";
 import { McpManagerStore, validateServerName } from "../src/mcp/mcp-manager-store.ts";
-import { loadMcpConfig, loadMcpManagementConfig } from "../src/mcp/config.ts";
+import {
+  getAuthEntry,
+  getAuthEntryFilePath,
+  removeAuthEntry,
+  saveAuthEntry,
+} from "../src/mcp/mcp-auth.ts";
+import {
+  loadMcpConfig,
+  loadMcpManagementConfig,
+  writeMcpConfigDocument,
+} from "../src/mcp/config.ts";
+
+test("MCP config writes replace regular files privately without temp residue", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-config-secure-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const configPath = join(tempDir, "mcp.json");
+  writeFileSync(configPath, '{"mcpServers":{}}');
+  if (process.platform !== "win32") chmodSync(configPath, 0o666);
+
+  writeMcpConfigDocument(configPath, JSON.stringify({
+    mcpServers: { secure: { command: "secure-server" } },
+  }));
+
+  assert.equal(lstatSync(configPath).isFile(), true);
+  assert.equal(lstatSync(configPath).isSymbolicLink(), false);
+  if (process.platform !== "win32") {
+    assert.equal(lstatSync(configPath).mode & 0o777, 0o600);
+  }
+  assert.equal(JSON.parse(readFileSync(configPath, "utf8")).mcpServers.secure.command, "secure-server");
+  assert.deepEqual(readdirSync(tempDir).filter((name) => name.endsWith(".tmp")), []);
+});
+
+test("MCP config writes reject symlink and non-regular destinations", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-config-target-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const victimPath = join(tempDir, "victim.json");
+  const linkPath = join(tempDir, "linked.json");
+  writeFileSync(victimPath, '{"unchanged":true}');
+  try {
+    symlinkSync(victimPath, linkPath, "file");
+  } catch (error) {
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+      t.skip("creating symlinks requires Windows Developer Mode or elevated privileges");
+      return;
+    }
+    throw error;
+  }
+
+  assert.throws(
+    () => writeMcpConfigDocument(linkPath, '{"mcpServers":{}}'),
+    /Refusing to replace non-regular MCP config/,
+  );
+  assert.equal(readFileSync(victimPath, "utf8"), '{"unchanged":true}');
+
+  const directoryPath = join(tempDir, "directory.json");
+  mkdirSync(directoryPath);
+  assert.throws(
+    () => writeMcpConfigDocument(directoryPath, '{"mcpServers":{}}'),
+    /Refusing to replace non-regular MCP config/,
+  );
+  assert.deepEqual(readdirSync(tempDir).filter((name) => name.endsWith(".tmp")), []);
+});
+
+test("MCP project config writes create a private .pi directory", (t) => {
+  const workspace = mkdtempSync(join(tmpdir(), "pi-mcp-project-private-"));
+  t.after(() => rmSync(workspace, { recursive: true, force: true }));
+  const piDir = join(workspace, ".pi");
+  const configPath = join(piDir, "mcp.json");
+
+  writeMcpConfigDocument(configPath, '{"mcpServers":{}}');
+
+  assert.equal(lstatSync(piDir).isDirectory(), true);
+  assert.equal(lstatSync(piDir).isSymbolicLink(), false);
+  if (process.platform !== "win32") {
+    assert.equal(lstatSync(piDir).mode & 0o777, 0o700);
+  }
+  assert.equal(lstatSync(configPath).isFile(), true);
+});
+
+test("MCP project config writes reject a symlinked .pi directory", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-project-pi-link-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const workspace = join(tempDir, "workspace");
+  const outside = join(tempDir, "outside");
+  mkdirSync(workspace);
+  mkdirSync(outside);
+  try {
+    symlinkSync(outside, join(workspace, ".pi"), process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+      t.skip("creating symlinks requires Windows Developer Mode or elevated privileges");
+      return;
+    }
+    throw error;
+  }
+
+  assert.throws(
+    () => writeMcpConfigDocument(join(workspace, ".pi", "mcp.json"), '{"mcpServers":{}}'),
+    /Refusing unsafe MCP project config directory/,
+  );
+  assert.deepEqual(readdirSync(outside), []);
+});
+
+test("MCP project config writes reject an aliased workspace intermediate", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-project-alias-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const workspace = join(tempDir, "workspace");
+  const outside = join(tempDir, "outside");
+  const alias = join(workspace, "alias");
+  mkdirSync(workspace);
+  mkdirSync(outside);
+  try {
+    symlinkSync(outside, alias, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+      t.skip("creating symlinks requires Windows Developer Mode or elevated privileges");
+      return;
+    }
+    throw error;
+  }
+
+  assert.throws(
+    () => writeMcpConfigDocument(join(alias, ".pi", "mcp.json"), '{"mcpServers":{}}'),
+    /Refusing unsafe MCP project config directory/,
+  );
+  assert.deepEqual(readdirSync(outside), []);
+});
+
+test("MCP project config writes reject parent replacement before rename", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-project-parent-race-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const workspace = join(tempDir, "workspace");
+  const outside = join(tempDir, "outside");
+  const piDir = join(workspace, ".pi");
+  const originalPiDir = join(workspace, ".pi-original");
+  mkdirSync(piDir, { recursive: true });
+  mkdirSync(outside);
+
+  const originalOpenSync = fs.openSync;
+  let replaced = false;
+  t.mock.method(fs, "openSync", (path, flags, mode) => {
+    if (!replaced) {
+      replaced = true;
+      fs.renameSync(piDir, originalPiDir);
+      symlinkSync(outside, piDir, process.platform === "win32" ? "junction" : "dir");
+    }
+    return originalOpenSync(path, flags, mode);
+  });
+
+  assert.throws(
+    () => writeMcpConfigDocument(join(piDir, "mcp.json"), '{"mcpServers":{}}'),
+    /Refusing MCP project config parent outside workspace/,
+  );
+  assert.equal(existsSync(join(outside, "mcp.json")), false);
+  assert.deepEqual(readdirSync(outside), []);
+});
+
+test("MCP global config writes retain trusted recursive directory creation", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-global-parent-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const configPath = join(tempDir, "trusted-agent", "nested", "mcp.json");
+
+  writeMcpConfigDocument(configPath, '{"mcpServers":{}}');
+
+  assert.equal(lstatSync(configPath).isFile(), true);
+});
+
+test("MCP config writes reject destination replacement before rename", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-config-replacement-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const configPath = join(tempDir, "mcp.json");
+  const victimPath = join(tempDir, "victim.json");
+  writeFileSync(configPath, '{"mcpServers":{"old":{"command":"old"}}}');
+  writeFileSync(victimPath, '{"unchanged":true}');
+
+  const originalFsyncSync = fs.fsyncSync;
+  let replaced = false;
+  t.mock.method(fs, "fsyncSync", (fd) => {
+    originalFsyncSync(fd);
+    if (!replaced) {
+      replaced = true;
+      fs.rmSync(configPath);
+      symlinkSync(victimPath, configPath, "file");
+    }
+  });
+
+  assert.throws(
+    () => writeMcpConfigDocument(configPath, '{"mcpServers":{"next":{"command":"next"}}}'),
+    /Refusing to replace non-regular MCP config/,
+  );
+  assert.equal(readFileSync(victimPath, "utf8"), '{"unchanged":true}');
+  assert.deepEqual(readdirSync(tempDir).filter((name) => name.endsWith(".tmp")), []);
+});
+
+test("MCP config write failures clean up the private temp file", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-config-failure-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const configPath = join(tempDir, "mcp.json");
+  writeFileSync(configPath, '{"mcpServers":{"old":{"command":"old"}}}');
+
+  t.mock.method(fs, "renameSync", () => {
+    throw Object.assign(new Error("forced MCP config rename failure"), { code: "EACCES" });
+  });
+
+  assert.throws(
+    () => writeMcpConfigDocument(configPath, '{"mcpServers":{"next":{"command":"next"}}}'),
+    /forced MCP config rename failure/,
+  );
+  assert.equal(JSON.parse(readFileSync(configPath, "utf8")).mcpServers.old.command, "old");
+  assert.deepEqual(readdirSync(tempDir).filter((name) => name.endsWith(".tmp")), []);
+});
+
+test("MCP OAuth storage repairs private permissions and leaves no temp files", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-oauth-private-"));
+  const previous = process.env.MCP_OAUTH_DIR;
+  process.env.MCP_OAUTH_DIR = tempDir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.MCP_OAUTH_DIR;
+    else process.env.MCP_OAUTH_DIR = previous;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+  if (process.platform !== "win32") chmodSync(tempDir, 0o777);
+
+  saveAuthEntry("secure-server", { tokens: { accessToken: "secret" } }, "https://example.test");
+  const filePath = getAuthEntryFilePath("secure-server");
+  const serverDir = join(filePath, "..");
+  if (process.platform !== "win32") {
+    assert.equal(lstatSync(tempDir).mode & 0o777, 0o700);
+    assert.equal(lstatSync(serverDir).mode & 0o777, 0o700);
+    assert.equal(lstatSync(filePath).mode & 0o777, 0o600);
+    chmodSync(tempDir, 0o777);
+    chmodSync(serverDir, 0o777);
+    chmodSync(filePath, 0o666);
+  }
+
+  assert.equal(getAuthEntry("secure-server")?.tokens?.accessToken, "secret");
+  if (process.platform !== "win32") {
+    assert.equal(lstatSync(tempDir).mode & 0o777, 0o700);
+    assert.equal(lstatSync(serverDir).mode & 0o777, 0o700);
+    assert.equal(lstatSync(filePath).mode & 0o777, 0o600);
+  }
+  assert.deepEqual(readdirSync(serverDir).filter((name) => name.endsWith(".tmp")), []);
+});
+
+test("MCP OAuth storage rejects symlink and non-regular token targets", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-oauth-target-"));
+  const previous = process.env.MCP_OAUTH_DIR;
+  process.env.MCP_OAUTH_DIR = tempDir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.MCP_OAUTH_DIR;
+    else process.env.MCP_OAUTH_DIR = previous;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  saveAuthEntry("linked-file", { tokens: { accessToken: "initial" } });
+  const filePath = getAuthEntryFilePath("linked-file");
+  const serverDir = join(filePath, "..");
+  rmSync(filePath);
+  const victimPath = join(tempDir, "victim.json");
+  writeFileSync(victimPath, '{"unchanged":true}');
+  try {
+    symlinkSync(victimPath, filePath, "file");
+  } catch (error) {
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+      t.skip("creating symlinks requires Windows Developer Mode or elevated privileges");
+      return;
+    }
+    throw error;
+  }
+
+  assert.throws(
+    () => saveAuthEntry("linked-file", { tokens: { accessToken: "replacement" } }),
+    /Refusing unsafe MCP OAuth token file/,
+  );
+  assert.throws(
+    () => removeAuthEntry("linked-file"),
+    /Refusing unsafe MCP OAuth token file/,
+  );
+  assert.equal(readFileSync(victimPath, "utf8"), '{"unchanged":true}');
+  assert.deepEqual(readdirSync(serverDir).filter((name) => name.endsWith(".tmp")), []);
+
+  rmSync(filePath);
+  mkdirSync(filePath);
+  assert.throws(
+    () => saveAuthEntry("linked-file", { tokens: { accessToken: "replacement" } }),
+    /Refusing unsafe MCP OAuth token file/,
+  );
+});
+
+test("MCP OAuth storage rejects symlink server directories", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-oauth-dir-target-"));
+  const previous = process.env.MCP_OAUTH_DIR;
+  process.env.MCP_OAUTH_DIR = tempDir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.MCP_OAUTH_DIR;
+    else process.env.MCP_OAUTH_DIR = previous;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+  const serverDir = join(getAuthEntryFilePath("linked-dir"), "..");
+  const victimDir = join(tempDir, "victim-dir");
+  mkdirSync(victimDir);
+  try {
+    symlinkSync(victimDir, serverDir, process.platform === "win32" ? "junction" : "dir");
+  } catch (error) {
+    if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EPERM") {
+      t.skip("creating symlinks requires Windows Developer Mode or elevated privileges");
+      return;
+    }
+    throw error;
+  }
+
+  assert.throws(
+    () => saveAuthEntry("linked-dir", { tokens: { accessToken: "secret" } }),
+    /Refusing unsafe MCP OAuth server directory/,
+  );
+  assert.deepEqual(readdirSync(victimDir), []);
+});
+
+test("MCP OAuth logout directly unlinks only the validated token file", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-oauth-logout-"));
+  const previous = process.env.MCP_OAUTH_DIR;
+  process.env.MCP_OAUTH_DIR = tempDir;
+  t.after(() => {
+    if (previous === undefined) delete process.env.MCP_OAUTH_DIR;
+    else process.env.MCP_OAUTH_DIR = previous;
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  saveAuthEntry("logout-server", { tokens: { accessToken: "secret" } });
+  const filePath = getAuthEntryFilePath("logout-server");
+  const serverDir = join(filePath, "..");
+  const markerPath = join(serverDir, "keep.txt");
+  writeFileSync(markerPath, "keep");
+
+  removeAuthEntry("logout-server");
+
+  assert.equal(existsSync(filePath), false);
+  assert.equal(readFileSync(markerPath, "utf8"), "keep");
+  assert.equal(existsSync(serverDir), true);
+});
 
 test("MCP manager store preserves unknown config while renaming and deleting servers", async (t) => {
   const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-manager-"));

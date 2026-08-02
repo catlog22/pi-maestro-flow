@@ -82,7 +82,10 @@ const DEFAULT_OUTPUT_LIMIT_RATIO = 0.8;
 export const MAX_OUTPUT_LIMIT_COMPACTIONS = 2;
 const PRUNE_STATE_ENTRY_TYPE = "maestro-auto-prune-state";
 const PENDING_INTENT_ENTRY_TYPE = "maestro-auto-compaction-intent";
-const PRUNE_STATE_VERSION = 5;
+const PRUNE_STATE_VERSION = 6;
+export const MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS = 32;
+export const MAX_OFF_BRANCH_PRUNE_ENTRIES = 128;
+export const MAX_OFF_BRANCH_PRUNE_BYTES = 128 * 1024;
 
 export type CompactionSettings = Pick<
   EffectiveCompactionSettings,
@@ -110,6 +113,8 @@ export interface PruneManifestEntry {
   level?: PruneLevel;
   contentDigest?: string;
   writerId?: string;
+  /** Session entry that made this replacement authoritative on its branch. */
+  checkpointId?: string;
   /** For level "dedup": the referenced tool result that stays in context. */
   refCallId?: string;
 }
@@ -124,6 +129,8 @@ interface PersistedPruneEntry {
   contentDigest?: string;
   writerId?: string;
   refCallId?: string;
+  /** Session entry that made this replacement authoritative on its branch. */
+  checkpointId?: string;
   /** Exact replacement text for context-dependent levels (dedup). */
   replacementText?: string;
 }
@@ -244,6 +251,14 @@ export interface AutoCompactionState {
   /** Per-guard writer namespace prevents one live owner deleting another's spill. */
   writerId: string;
   persistedPruneKey?: string;
+  /** Materialized prune journal at the current branch checkpoint. */
+  persistedPrunes: Map<string, PersistedPruneEntry>;
+  forcePruneCheckpoint: boolean;
+  pruneDeltasSinceCheckpoint: number;
+  activeCheckpointId?: string;
+  reachableCheckpoints: Map<string, number>;
+  restoredPruneAges: Map<string, number>;
+  restoredPruneSequence: number;
   persistedIntentKey?: string;
   settingsSnapshot?: CompactionSettings;
   settingsCwd?: string;
@@ -316,6 +331,12 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     internalsWarningShown: false,
     pruneManifest: new Map(),
     restoredPrunes: new Map(),
+    persistedPrunes: new Map(),
+    forcePruneCheckpoint: false,
+    pruneDeltasSinceCheckpoint: 0,
+    reachableCheckpoints: new Map(),
+    restoredPruneAges: new Map(),
+    restoredPruneSequence: 0,
     writerId: randomUUID(),
     velocityTracker: EMPTY_VELOCITY_TRACKER,
     breaker: resetCompactionBreaker(),
@@ -424,6 +445,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
     ctx: ExtensionContext,
     generation: number,
   ): Promise<AgentMessage[] | undefined> {
+    syncActivePruneBranch(state, ctx);
     const settings = settingsFor(ctx);
     return await runPressureCycle(messages, ctx, generation, settings);
   }
@@ -459,7 +481,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       // downgrade now so a crash before the end-of-cycle persist cannot resume
       // into the old entry that advertised a nonexistent file.
       if (downgraded) persistPruneManifest(pi, state);
-      retainVisiblePrunes(state.pruneManifest, messages, state.restoredPrunes);
+      retainVisiblePrunes(state, messages);
       // The first post-prune cache bill may arrive on a final assistant-text
       // response, which is not a complete tool-result batch. Advance attribution
       // before that gate so a later tool turn cannot be misattributed to the
@@ -918,10 +940,20 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       releaseInFlight();
       state.pruneManifest.clear();
       state.sessionId = nextSessionId;
-      state.restoredPrunes = loadPersistedPrunes(ctx, state.sessionId, event?.reason === "fork");
+      const loadedPrunes = loadPersistedPrunes(ctx, state.sessionId, event?.reason === "fork");
+      state.restoredPrunes = loadedPrunes.prunes;
+      state.restoredPruneAges.clear();
+      state.persistedPrunes = new Map(loadedPrunes.byCallId);
+      state.forcePruneCheckpoint = loadedPrunes.requiresCheckpoint;
+      state.pruneDeltasSinceCheckpoint = loadedPrunes.deltasSinceCheckpoint;
+      const branch = inspectPruneBranch(ctx);
+      state.activeCheckpointId = branch.checkpointId;
+      state.reachableCheckpoints = branch.reachable;
+      touchRestoredPrunes(state, state.restoredPrunes.keys());
+      evictOffBranchRestoredPrunes(state);
       state.pendingIntent = loadPersistedIntent(ctx, state.sessionId, state.generation);
       state.persistedIntentKey = pendingIntentKey(state.pendingIntent);
-      state.persistedPruneKey = pruneKey(state.restoredPrunes.values());
+      state.persistedPruneKey = pruneKey(state.persistedPrunes.values());
       state.settingsSnapshot = undefined;
       state.settingsCwd = undefined;
       resetCycleState();
@@ -940,6 +972,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       const generation = state.generation;
       return await withTransformLock(async () => {
         if (generation !== state.generation) return { event, prunedToolResults: 0 };
+        syncActivePruneBranch(state, ctx);
         const summaryCount = event.preparation.messagesToSummarize.length;
         const messages = [
           ...event.preparation.messagesToSummarize,
@@ -1128,6 +1161,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (state.sessionId) void cleanupSpillDir(state.sessionId, state.writerId);
       state.pruneManifest.clear();
       state.restoredPrunes.clear();
+      state.restoredPruneAges.clear();
+      state.persistedPrunes.clear();
+      state.forcePruneCheckpoint = true;
+      state.pruneDeltasSinceCheckpoint = 0;
       state.persistedPruneKey = undefined;
       state.pendingIntent = undefined;
       state.pendingOutputLimitIntent = undefined;
@@ -1174,6 +1211,10 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
       if (state.sessionId) void cleanupSpillDir(state.sessionId, state.writerId);
       state.pruneManifest.clear();
       state.restoredPrunes.clear();
+      state.restoredPruneAges.clear();
+      state.persistedPrunes.clear();
+      state.forcePruneCheckpoint = true;
+      state.pruneDeltasSinceCheckpoint = 0;
       state.persistedPruneKey = undefined;
       state.settingsSnapshot = undefined;
       state.settingsCwd = undefined;
@@ -1471,6 +1512,7 @@ function persistedEntryOf(callId: string, entry: PruneManifestEntry | undefined)
     ...(entry?.introducedAtUsageEpoch !== undefined ? { introducedAtUsageEpoch: entry.introducedAtUsageEpoch } : {}),
     ...(entry?.contentDigest !== undefined ? { contentDigest: entry.contentDigest } : {}),
     ...(entry?.writerId !== undefined ? { writerId: entry.writerId } : {}),
+    ...(entry?.checkpointId !== undefined ? { checkpointId: entry.checkpointId } : {}),
     ...(entry?.refCallId !== undefined ? { refCallId: entry.refCallId } : {}),
     ...(entry?.level === "dedup" && entry.replacement !== undefined
       ? { replacementText: extractTextContent(entry.replacement) }
@@ -1490,21 +1532,23 @@ function persistedEntryOf(callId: string, entry: PruneManifestEntry | undefined)
  * whole cached prefix at that index.
  */
 function retainVisiblePrunes(
-  pruneManifest: PruneManifest,
+  state: AutoCompactionState,
   messages: AgentMessage[],
-  parked?: Map<string, PersistedPruneEntry>,
 ): void {
-  if (pruneManifest.size === 0) return;
+  if (state.pruneManifest.size === 0) return;
   const visible = new Set<string>();
   for (const message of messages) {
     const callId = toolResultCallId(message);
     if (callId) visible.add(callId);
   }
-  for (const callId of pruneManifest.keys()) {
+  for (const callId of state.pruneManifest.keys()) {
     if (visible.has(callId)) continue;
-    parked?.set(callId, persistedEntryOf(callId, getRecordedPrune(pruneManifest, callId)));
-    pruneManifest.delete(callId);
+    const entry = getRecordedPrune(state.pruneManifest, callId);
+    if (entry && !entry.checkpointId) entry.checkpointId = state.activeCheckpointId;
+    parkRestoredPrune(state, persistedEntryOf(callId, entry));
+    state.pruneManifest.delete(callId);
   }
+  evictOffBranchRestoredPrunes(state);
 }
 
 function hasRecordedPrune(manifest: PruneManifest, callId: string): boolean {
@@ -1587,17 +1631,19 @@ async function hydrateRestoredPrunes(
   generation: number,
 ): Promise<boolean> {
   if (state.restoredPrunes.size === 0) return false;
-  const visible: Array<{ callId: string; message: AgentMessage; persisted: PersistedPruneEntry }> = [];
+  const visible: Array<{ key: string; callId: string; message: AgentMessage; persisted: PersistedPruneEntry }> = [];
   for (const message of messages) {
     const callId = toolResultCallId(message);
-    if (!callId) continue;
-    const persisted = state.restoredPrunes.get(callId);
-    if (!persisted) continue;
+    if (!callId || state.pruneManifest.has(callId)) continue;
+    const found = findRestoredPrune(state, callId, message);
+    if (!found) continue;
+    const { key, persisted } = found;
     if (persisted.contentDigest && persisted.contentDigest !== toolResultDigest(message)) {
-      state.restoredPrunes.delete(callId);
+      state.restoredPrunes.delete(key);
+      state.restoredPruneAges.delete(key);
       continue;
     }
-    visible.push({ callId, message, persisted });
+    visible.push({ key, callId, message, persisted });
   }
   if (visible.length === 0) return false;
   // Validate every referenced spill path before publishing a restored
@@ -1605,7 +1651,7 @@ async function hydrateRestoredPrunes(
   // downgraded to a plain prune, so the resumed prefix only advertises files
   // that exist and never toggles between dead-path and recovered-path text
   // within an epoch.
-  const resolved: Array<{ callId: string; message: AgentMessage; persisted: PersistedPruneEntry; downgraded?: boolean }> =
+  const resolved: Array<{ key: string; callId: string; message: AgentMessage; persisted: PersistedPruneEntry; downgraded?: boolean }> =
     await Promise.all(visible.map(async (item) => {
       if (!item.persisted.spillPath) return item;
       const live = state.sessionId !== undefined
@@ -1619,6 +1665,7 @@ async function hydrateRestoredPrunes(
           ...(item.persisted.introducedAtUsageEpoch !== undefined
             ? { introducedAtUsageEpoch: item.persisted.introducedAtUsageEpoch }
             : {}),
+          ...(item.persisted.checkpointId !== undefined ? { checkpointId: item.persisted.checkpointId } : {}),
           ...(item.persisted.contentDigest !== undefined ? { contentDigest: item.persisted.contentDigest } : {}),
         },
         downgraded: true,
@@ -1634,7 +1681,7 @@ async function hydrateRestoredPrunes(
       downgraded = true;
       // Persist the downgrade, not just the in-memory entry: the caller
       // writes this state so the next resume also sees the plain level.
-      state.restoredPrunes.set(item.callId, item.persisted);
+      state.restoredPrunes.set(restoredPruneKey(item.persisted), item.persisted);
     }
     const replacement = restorePruneReplacement(item.message, item.persisted);
     if (!replacement) continue;
@@ -1648,37 +1695,62 @@ async function hydrateRestoredPrunes(
       contentDigest: item.persisted.contentDigest,
       writerId: item.persisted.writerId,
       level: item.persisted.level,
+      checkpointId: item.persisted.checkpointId,
       refCallId: item.persisted.refCallId,
     });
   }
-  for (const item of resolved) state.restoredPrunes.delete(item.callId);
+  for (const item of resolved) {
+    state.restoredPrunes.delete(item.key);
+    state.restoredPruneAges.delete(item.key);
+  }
   return downgraded;
 }
 
+/**
+ * Periodic full checkpoints bound branch reconstruction to a short delta
+ * suffix. The host journal is append-only, so this does not remove historical
+ * entries or claim a bound on physical session bytes.
+ */
 function persistPruneManifest(pi: ExtensionAPI, state: AutoCompactionState): void {
-  // Live entries plus everything still parked (not yet hydrated, or parked by
-  // retainVisiblePrunes while its message is off-branch). Persisting only the
-  // live half would make a one-frame absence permanent across a resume.
-  const byCallId = new Map<string, PersistedPruneEntry>(state.restoredPrunes);
+  const byCallId = new Map<string, PersistedPruneEntry>();
+  for (const entry of state.restoredPrunes.values()) {
+    if (!isCheckpointReachable(state, entry.checkpointId)) continue;
+    setPreferredPrune(byCallId, entry, state.reachableCheckpoints);
+  }
   for (const [callId, entry] of state.pruneManifest.entries()) {
+    if (!entry.checkpointId) entry.checkpointId = state.activeCheckpointId;
     byCallId.set(callId, persistedEntryOf(callId, entry));
   }
-  const prunes = [...byCallId.values()].sort((a, b) => a.callId.localeCompare(b.callId));
-  const nextKey = pruneKey(prunes);
-  if (nextKey === state.persistedPruneKey || !pi.appendEntry) return;
+  const prunes = [...byCallId.values()].sort(comparePersistedPrunes);
+  const upserts = prunes.filter((entry) => {
+    const previous = state.persistedPrunes.get(entry.callId);
+    return !previous || pruneKey([previous]) !== pruneKey([entry]);
+  });
+  const removals = [...state.persistedPrunes.keys()]
+    .filter((callId) => !byCallId.has(callId))
+    .sort((a, b) => a.localeCompare(b));
+  const checkpoint = state.forcePruneCheckpoint
+    || (state.persistedPrunes.size === 0 && upserts.length > 0)
+    || state.pruneDeltasSinceCheckpoint >= MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS;
+  if (!checkpoint && upserts.length === 0 && removals.length === 0) return;
+  if (!pi.appendEntry) return;
   try {
     pi.appendEntry(PRUNE_STATE_ENTRY_TYPE, {
       version: PRUNE_STATE_VERSION,
       sessionId: state.sessionId,
-      prunes: prunes.map(({ spillPath: _spillPath, ...entry }) => ({
-        ...entry,
-        hasSpill: _spillPath !== undefined,
-      })),
+      checkpointId: state.activeCheckpointId,
+      mode: checkpoint ? "checkpoint" : "delta",
+      ...(checkpoint
+        ? { prunes: prunes.map(serializePersistedPrune) }
+        : { upserts: upserts.map(serializePersistedPrune), removals }),
     });
   } catch {
     return;
   }
-  state.persistedPruneKey = nextKey;
+  state.persistedPrunes = byCallId;
+  state.persistedPruneKey = pruneKey(prunes);
+  state.forcePruneCheckpoint = false;
+  state.pruneDeltasSinceCheckpoint = checkpoint ? 0 : state.pruneDeltasSinceCheckpoint + 1;
 }
 
 function pendingIntentKey(intent: PendingCompactionIntent | undefined): string {
@@ -1726,67 +1798,321 @@ function loadPersistedIntent(
   return { ...pending, generation };
 }
 
+interface LoadedPersistedPrunes {
+  prunes: Map<string, PersistedPruneEntry>;
+  byCallId: Map<string, PersistedPruneEntry>;
+  requiresCheckpoint: boolean;
+  deltasSinceCheckpoint: number;
+}
+
+interface PruneBranchEntry {
+  type?: string;
+  id?: string;
+  customType?: string;
+  data?: unknown;
+}
+
 function loadPersistedPrunes(
   ctx: ExtensionContext,
   sessionId: string | undefined,
   allowInheritedSession = false,
-): Map<string, PersistedPruneEntry> {
+): LoadedPersistedPrunes {
   const manager = ctx.sessionManager as {
-    getBranch?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
-    getEntries?: () => Array<{ type?: string; customType?: string; data?: unknown }>;
+    getBranch?: () => PruneBranchEntry[];
+    getEntries?: () => PruneBranchEntry[];
   } | undefined;
   const entries = manager?.getBranch?.() ?? manager?.getEntries?.() ?? [];
-  const entry = entries.filter((candidate) => candidate.type === "custom" && candidate.customType === PRUNE_STATE_ENTRY_TYPE).pop();
-  const data = entry?.data as {
-    version?: unknown;
-    sessionId?: unknown;
-    toolCallIds?: unknown;
-    spillPaths?: unknown;
-    prunes?: unknown;
-  } | undefined;
-  if (!data || (sessionId && data.sessionId !== sessionId && !allowInheritedSession)) return new Map();
-  if ((data.version === PRUNE_STATE_VERSION || data.version === 3) && Array.isArray(data.prunes)) {
-    const restored = new Map<string, PersistedPruneEntry>();
-    for (const value of data.prunes) {
-      if (!value || typeof value !== "object") continue;
-      const record = value as Record<string, unknown>;
-      if (typeof record.callId !== "string" || !isPruneLevel(record.level)) continue;
-      restored.set(record.callId, {
-        callId: record.callId,
-        level: record.level,
-        ...(data.version >= 4 && record.hasSpill === true && typeof record.writerId === "string"
-          ? { spillPath: resolveSpillPath(String(data.sessionId ?? sessionId ?? "unknown"), record.callId, record.writerId) }
-          : typeof record.spillPath === "string" ? { spillPath: record.spillPath } : {}),
-        ...(typeof record.introducedAtUsageEpoch === "string" ? { introducedAtUsageEpoch: record.introducedAtUsageEpoch } : {}),
-        ...(typeof record.contentDigest === "string" ? { contentDigest: record.contentDigest } : {}),
-        ...(typeof record.writerId === "string" ? { writerId: record.writerId } : {}),
-        ...(typeof record.refCallId === "string" ? { refCallId: record.refCallId } : {}),
-        ...(typeof record.replacementText === "string" ? { replacementText: record.replacementText } : {}),
-      });
+  const suffix: Array<{
+    entry: PruneBranchEntry;
+    data: Record<string, unknown>;
+    sameSession: boolean;
+  }> = [];
+  let foundCheckpoint = false;
+
+  // Checkpoints are emitted at a fixed cadence, so a reverse collection reads
+  // only the latest full state and its bounded delta suffix. Reusing the
+  // collected data below also avoids touching the same journal payload twice.
+  for (let index = entries.length - 1; index >= 0; index--) {
+    const entry = entries[index];
+    if (entry.type !== "custom" || entry.customType !== PRUNE_STATE_ENTRY_TYPE) continue;
+    const data = entry.data as Record<string, unknown> | undefined;
+    if (!data) continue;
+    const sameSession = sessionId === undefined || data.sessionId === sessionId;
+    if (!sameSession && !allowInheritedSession) continue;
+    const version = typeof data.version === "number" ? data.version : 0;
+    const checkpoint = (version === PRUNE_STATE_VERSION
+        && data.mode === "checkpoint"
+        && Array.isArray(data.prunes))
+      || (version >= 3 && version <= 5 && Array.isArray(data.prunes))
+      || ((version === 1 || version === 2) && Array.isArray(data.toolCallIds));
+    const delta = version === PRUNE_STATE_VERSION
+      && data.mode === "delta"
+      && Array.isArray(data.upserts)
+      && Array.isArray(data.removals);
+    if (!checkpoint && !delta) continue;
+    suffix.push({ entry, data, sameSession });
+    if (checkpoint) {
+      foundCheckpoint = true;
+      break;
     }
-    return restored;
   }
-  if ((data.version !== 1 && data.version !== 2) || !Array.isArray(data.toolCallIds)) return new Map();
-  const spillPaths = new Map<string, string>();
-  if (data.version === 2 && Array.isArray(data.spillPaths)) {
-    for (const value of data.spillPaths) {
-      if (!value || typeof value !== "object") continue;
-      const record = value as Record<string, unknown>;
-      if (typeof record.callId === "string" && typeof record.path === "string") {
-        spillPaths.set(record.callId, record.path);
+
+  const byCallId = new Map<string, PersistedPruneEntry>();
+  let applied = false;
+  let hasCurrentSessionEntry = false;
+  let requiresCheckpoint = false;
+  let deltasSinceCheckpoint = 0;
+  for (const { entry, data, sameSession } of suffix.reverse()) {
+    const version = typeof data.version === "number" ? data.version : 0;
+    const checkpointId = typeof data.checkpointId === "string"
+      ? data.checkpointId
+      : typeof entry.id === "string" ? entry.id : undefined;
+    const sourceSessionId = String(data.sessionId ?? sessionId ?? "unknown");
+    if (version === PRUNE_STATE_VERSION) {
+      if (data.mode === "checkpoint" && Array.isArray(data.prunes)) {
+        byCallId.clear();
+        applyPersistedPruneRecords(byCallId, data.prunes, version, sourceSessionId, checkpointId);
+        deltasSinceCheckpoint = 0;
+      } else if (data.mode === "delta" && Array.isArray(data.upserts) && Array.isArray(data.removals)) {
+        for (const callId of data.removals) {
+          if (typeof callId === "string") byCallId.delete(callId);
+        }
+        applyPersistedPruneRecords(byCallId, data.upserts, version, sourceSessionId, checkpointId);
+        deltasSinceCheckpoint += 1;
+      }
+    } else if (version >= 3 && version <= 5 && Array.isArray(data.prunes)) {
+      requiresCheckpoint = true;
+      deltasSinceCheckpoint = 0;
+      byCallId.clear();
+      applyPersistedPruneRecords(byCallId, data.prunes, version, sourceSessionId, checkpointId);
+    } else if ((version === 1 || version === 2) && Array.isArray(data.toolCallIds)) {
+      requiresCheckpoint = true;
+      deltasSinceCheckpoint = 0;
+      byCallId.clear();
+      const spillPaths = new Map<string, string>();
+      if (version === 2 && Array.isArray(data.spillPaths)) {
+        for (const value of data.spillPaths) {
+          if (!value || typeof value !== "object") continue;
+          const record = value as Record<string, unknown>;
+          if (typeof record.callId === "string" && typeof record.path === "string") {
+            spillPaths.set(record.callId, record.path);
+          }
+        }
+      }
+      for (const value of data.toolCallIds) {
+        if (typeof value !== "string") continue;
+        const spillPath = spillPaths.get(value);
+        byCallId.set(value, {
+          callId: value,
+          level: spillPath !== undefined ? "spill" : "pruned",
+          ...(spillPath !== undefined ? { spillPath } : {}),
+          ...(checkpointId !== undefined ? { checkpointId } : {}),
+        });
       }
     }
+    applied = true;
+    if (sameSession) hasCurrentSessionEntry = true;
   }
-  return new Map(data.toolCallIds
-    .filter((value): value is string => typeof value === "string")
-    .map((callId) => {
-      const spillPath = spillPaths.get(callId);
-      return [callId, {
-        callId,
-        level: spillPath !== undefined ? "spill" : "pruned",
-        ...(spillPath !== undefined ? { spillPath } : {}),
-      }];
-    }));
+  const prunes = new Map<string, PersistedPruneEntry>();
+  for (const entry of byCallId.values()) prunes.set(restoredPruneKey(entry), entry);
+  return {
+    prunes,
+    byCallId,
+    deltasSinceCheckpoint,
+    requiresCheckpoint: requiresCheckpoint
+      || (applied && (!hasCurrentSessionEntry || !foundCheckpoint))
+      || deltasSinceCheckpoint > MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS,
+  };
+}
+
+function applyPersistedPruneRecords(
+  target: Map<string, PersistedPruneEntry>,
+  values: unknown[],
+  version: number,
+  sessionId: string,
+  checkpointId: string | undefined,
+): void {
+  for (const value of values) {
+    if (!value || typeof value !== "object") continue;
+    const record = value as Record<string, unknown>;
+    if (typeof record.callId !== "string" || !isPruneLevel(record.level)) continue;
+    const ownerCheckpoint = typeof record.checkpointId === "string" ? record.checkpointId : checkpointId;
+    target.set(record.callId, {
+      callId: record.callId,
+      level: record.level,
+      ...(version >= 4 && record.hasSpill === true && typeof record.writerId === "string"
+        ? { spillPath: resolveSpillPath(sessionId, record.callId, record.writerId) }
+        : typeof record.spillPath === "string" ? { spillPath: record.spillPath } : {}),
+      ...(typeof record.introducedAtUsageEpoch === "string" ? { introducedAtUsageEpoch: record.introducedAtUsageEpoch } : {}),
+      ...(typeof record.contentDigest === "string" ? { contentDigest: record.contentDigest } : {}),
+      ...(typeof record.writerId === "string" ? { writerId: record.writerId } : {}),
+      ...(typeof record.refCallId === "string" ? { refCallId: record.refCallId } : {}),
+      ...(typeof record.replacementText === "string" ? { replacementText: record.replacementText } : {}),
+      ...(ownerCheckpoint !== undefined ? { checkpointId: ownerCheckpoint } : {}),
+    });
+  }
+}
+
+function inspectPruneBranch(ctx: ExtensionContext): {
+  checkpointId: string;
+  reachable: Map<string, number>;
+  latestPruneJournalIndex: number;
+} {
+  const manager = ctx.sessionManager as {
+    getBranch?: () => PruneBranchEntry[];
+    getEntries?: () => PruneBranchEntry[];
+  } | undefined;
+  const entries = manager?.getBranch?.() ?? manager?.getEntries?.() ?? [];
+  const reachable = new Map<string, number>();
+  let checkpointId: string | undefined;
+  let latestPruneJournalIndex = -1;
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    if (typeof entry.id === "string") reachable.set(entry.id, index);
+    if (entry.type === "custom" && entry.customType === PRUNE_STATE_ENTRY_TYPE) {
+      latestPruneJournalIndex = index;
+    }
+    const internalStateEntry = entry.type === "custom"
+      && (entry.customType === PRUNE_STATE_ENTRY_TYPE || entry.customType === PENDING_INTENT_ENTRY_TYPE);
+    if (!internalStateEntry && typeof entry.id === "string") checkpointId = entry.id;
+  }
+  const rootId = `session:${sessionIdOf(ctx) ?? "unknown"}:root`;
+  reachable.set(rootId, -1);
+  return { checkpointId: checkpointId ?? rootId, reachable, latestPruneJournalIndex };
+}
+
+function syncActivePruneBranch(state: AutoCompactionState, ctx: ExtensionContext): void {
+  const branch = inspectPruneBranch(ctx);
+  const previousCheckpointId = state.activeCheckpointId;
+  const previousRank = previousCheckpointId === undefined
+    ? undefined
+    : branch.reachable.get(previousCheckpointId);
+  const switched = previousCheckpointId !== undefined && previousRank === undefined;
+  const advancedAcrossPersistedState = previousCheckpointId !== undefined
+    && previousCheckpointId !== branch.checkpointId
+    && previousRank !== undefined
+    && branch.latestPruneJournalIndex > previousRank;
+  if (switched || advancedAcrossPersistedState) {
+    if (switched) {
+      for (const [callId, entry] of state.pruneManifest) {
+        if (!entry.checkpointId) entry.checkpointId = previousCheckpointId;
+        if (entry.checkpointId && branch.reachable.has(entry.checkpointId)) continue;
+        parkRestoredPrune(state, persistedEntryOf(callId, entry));
+        state.pruneManifest.delete(callId);
+      }
+    }
+    const loaded = loadPersistedPrunes(ctx, state.sessionId);
+    for (const entry of loaded.byCallId.values()) parkRestoredPrune(state, entry);
+    state.persistedPrunes = new Map(loaded.byCallId);
+    state.persistedPruneKey = pruneKey(loaded.byCallId.values());
+    state.forcePruneCheckpoint = loaded.requiresCheckpoint;
+    state.pruneDeltasSinceCheckpoint = loaded.deltasSinceCheckpoint;
+  }
+  state.activeCheckpointId = branch.checkpointId;
+  state.reachableCheckpoints = branch.reachable;
+  evictOffBranchRestoredPrunes(state);
+}
+
+function restoredPruneKey(entry: PersistedPruneEntry): string {
+  return `${entry.checkpointId ?? "legacy"}\u0000${entry.callId}`;
+}
+
+function parkRestoredPrune(state: AutoCompactionState, entry: PersistedPruneEntry): void {
+  const key = restoredPruneKey(entry);
+  state.restoredPrunes.set(key, entry);
+  state.restoredPruneAges.set(key, ++state.restoredPruneSequence);
+}
+
+function touchRestoredPrunes(state: AutoCompactionState, keys: Iterable<string>): void {
+  const age = ++state.restoredPruneSequence;
+  for (const key of keys) state.restoredPruneAges.set(key, age);
+}
+
+function isCheckpointReachable(state: AutoCompactionState, checkpointId: string | undefined): boolean {
+  return checkpointId === undefined || state.reachableCheckpoints.has(checkpointId);
+}
+
+function findRestoredPrune(
+  state: AutoCompactionState,
+  callId: string,
+  message: AgentMessage,
+): { key: string; persisted: PersistedPruneEntry } | undefined {
+  const digest = toolResultDigest(message);
+  return [...state.restoredPrunes.entries()]
+    .filter(([, entry]) => entry.callId === callId && isCheckpointReachable(state, entry.checkpointId))
+    .sort(([leftKey, left], [rightKey, right]) => {
+      const leftDigest = left.contentDigest === undefined || left.contentDigest === digest ? 1 : 0;
+      const rightDigest = right.contentDigest === undefined || right.contentDigest === digest ? 1 : 0;
+      if (leftDigest !== rightDigest) return rightDigest - leftDigest;
+      const leftRank = state.reachableCheckpoints.get(left.checkpointId ?? "") ?? -1;
+      const rightRank = state.reachableCheckpoints.get(right.checkpointId ?? "") ?? -1;
+      return rightRank - leftRank || leftKey.localeCompare(rightKey);
+    })
+    .map(([key, persisted]) => ({ key, persisted }))[0];
+}
+
+/**
+ * Evict whole off-branch checkpoints, oldest touch first. Reachable checkpoints
+ * are never candidates; an evicted branch is reconstructed from its own journal
+ * when it becomes active again.
+ */
+function evictOffBranchRestoredPrunes(state: AutoCompactionState): void {
+  const groups = new Map<string, { keys: string[]; entries: number; bytes: number; age: number }>();
+  for (const [key, entry] of state.restoredPrunes) {
+    if (isCheckpointReachable(state, entry.checkpointId)) continue;
+    const checkpointId = entry.checkpointId ?? "legacy";
+    const group = groups.get(checkpointId) ?? { keys: [], entries: 0, bytes: 0, age: 0 };
+    group.keys.push(key);
+    group.entries += 1;
+    group.bytes += serializedPruneBytes(entry);
+    group.age = Math.max(group.age, state.restoredPruneAges.get(key) ?? 0);
+    groups.set(checkpointId, group);
+  }
+  let entries = [...groups.values()].reduce((total, group) => total + group.entries, 0);
+  let bytes = [...groups.values()].reduce((total, group) => total + group.bytes, 0);
+  const victims = [...groups.entries()].sort(([leftId, left], [rightId, right]) =>
+    left.age - right.age || leftId.localeCompare(rightId));
+  for (const [, group] of victims) {
+    if (entries <= MAX_OFF_BRANCH_PRUNE_ENTRIES && bytes <= MAX_OFF_BRANCH_PRUNE_BYTES) break;
+    for (const key of group.keys) {
+      state.restoredPrunes.delete(key);
+      state.restoredPruneAges.delete(key);
+    }
+    entries -= group.entries;
+    bytes -= group.bytes;
+  }
+}
+
+function serializePersistedPrune(entry: PersistedPruneEntry): Record<string, unknown> {
+  const { spillPath: _spillPath, ...serialized } = entry;
+  return { ...serialized, hasSpill: _spillPath !== undefined };
+}
+
+function serializedPruneBytes(entry: PersistedPruneEntry): number {
+  return Buffer.byteLength(JSON.stringify(serializePersistedPrune(entry)), "utf8");
+}
+
+function comparePersistedPrunes(left: PersistedPruneEntry, right: PersistedPruneEntry): number {
+  return left.callId.localeCompare(right.callId)
+    || String(left.checkpointId ?? "").localeCompare(String(right.checkpointId ?? ""));
+}
+
+function setPreferredPrune(
+  target: Map<string, PersistedPruneEntry>,
+  entry: PersistedPruneEntry,
+  reachable: Map<string, number>,
+): void {
+  const previous = target.get(entry.callId);
+  if (!previous) {
+    target.set(entry.callId, entry);
+    return;
+  }
+  const previousRank = reachable.get(previous.checkpointId ?? "") ?? -1;
+  const nextRank = reachable.get(entry.checkpointId ?? "") ?? -1;
+  if (nextRank > previousRank
+    || (nextRank === previousRank && restoredPruneKey(entry).localeCompare(restoredPruneKey(previous)) < 0)) {
+    target.set(entry.callId, entry);
+  }
 }
 
 function sessionIdOf(ctx: ExtensionContext): string | undefined {
@@ -1803,6 +2129,7 @@ function pruneKey(entries: Iterable<PersistedPruneEntry>): string {
       entry.introducedAtUsageEpoch ?? null,
       entry.contentDigest ?? null,
       entry.writerId ?? null,
+      entry.checkpointId ?? null,
       entry.refCallId ?? null,
       entry.replacementText ?? null,
     ])

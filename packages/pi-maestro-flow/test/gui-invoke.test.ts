@@ -5,6 +5,7 @@ import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import { startGuiServer } from "../src/gui/gui-server.ts";
 import { registerToolRoutes } from "../src/gui/tool-routes.ts";
 import { registerGuiTool, clearGuiTools } from "../src/gui/gui-registry.ts";
@@ -266,6 +267,51 @@ test("POST /tools/:name rejects args outside the registered canonical schema", a
   }
 });
 
+test("POST /tools/:name converts arguments with host TypeBox semantics", async () => {
+  clearGuiTools();
+  const cwd = await mkdtemp(join(tmpdir(), "gui-schema-convert-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  let authorizedArgs: unknown;
+  let executedArgs: unknown;
+  try {
+    registerGuiTool(
+      {
+        ...tool("todo", async (_id, params) => {
+          executedArgs = params;
+          return { content: [], details: {} };
+        }),
+        parameters: Type.Object({
+          count: Type.Integer(),
+          enabled: Type.Boolean(),
+        }, { additionalProperties: false }),
+      } as unknown as ToolDefinition,
+      "pi-maestro-flow",
+    );
+    registerToolRoutes(server, {
+      listAllTools: () => [],
+      gateway: {
+        mode: () => "default",
+        authorize: async (_name, input) => {
+          authorizedArgs = { ...input };
+          return undefined;
+        },
+      },
+      getCtx: () => fakeCtx,
+    });
+
+    const response = await postInvoke(server.port, server.token, "todo", {
+      count: "7",
+      enabled: "false",
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(authorizedArgs, { count: 7, enabled: false });
+    assert.deepEqual(executedArgs, { count: 7, enabled: false });
+  } finally {
+    server.close("done");
+    clearGuiTools();
+  }
+});
+
 test("POST /tools/:name reserves admission while authorization is pending", async () => {
   clearGuiTools();
   const cwd = await mkdtemp(join(tmpdir(), "gui-admission-"));
@@ -301,6 +347,85 @@ test("POST /tools/:name reserves admission while authorization is pending", asyn
     assert.equal((await first).status, 200);
   } finally {
     releaseAuthorization.resolve();
+    server.close("done");
+    clearGuiTools();
+  }
+});
+
+test("cancel settles pending authorization even when the gateway ignores its signal", async () => {
+  clearGuiTools();
+  const cwd = await mkdtemp(join(tmpdir(), "gui-auth-cancel-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  const authorizationStarted = deferred();
+  const lateAuthorization = deferred<{ block: true; reason: string } | undefined>();
+  let gatewaySignal: AbortSignal | undefined;
+  try {
+    registerGuiTool(tool("todo", async () => ({ content: [], details: {} })), "pi-maestro-flow");
+    registerToolRoutes(server, {
+      listAllTools: () => [],
+      gateway: {
+        mode: () => "default",
+        authorize: async (_name, _input, signal) => {
+          gatewaySignal = signal;
+          authorizationStarted.resolve();
+          return await lateAuthorization.promise;
+        },
+      },
+      getCtx: () => fakeCtx,
+    });
+
+    const pending = postInvoke(server.port, server.token, "todo", {}, { invokeId: "pending-auth" });
+    await authorizationStarted.promise;
+    assert.equal((await postCancel(server.port, server.token, "pending-auth")).status, 200);
+    const response = await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("cancel did not settle authorization")), 500)),
+    ]);
+    assert.equal(response.status, 499);
+    assert.equal(response.body.code, "cancelled");
+    assert.equal(gatewaySignal?.aborted, true);
+
+    lateAuthorization.reject(new Error("late gateway rejection"));
+    await new Promise((resolve) => setImmediate(resolve));
+  } finally {
+    lateAuthorization.resolve(undefined);
+    server.close("done");
+    clearGuiTools();
+  }
+});
+
+test("GUI shutdown settles pending authorization even when the gateway never settles", async () => {
+  clearGuiTools();
+  const cwd = await mkdtemp(join(tmpdir(), "gui-auth-shutdown-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  const authorizationStarted = deferred();
+  let gatewaySignal: AbortSignal | undefined;
+  try {
+    registerGuiTool(tool("todo", async () => ({ content: [], details: {} })), "pi-maestro-flow");
+    registerToolRoutes(server, {
+      listAllTools: () => [],
+      gateway: {
+        mode: () => "default",
+        authorize: async (_name, _input, signal) => {
+          gatewaySignal = signal;
+          authorizationStarted.resolve();
+          return await new Promise<never>(() => {});
+        },
+      },
+      getCtx: () => fakeCtx,
+    });
+
+    const pending = postInvoke(server.port, server.token, "todo", {}, { invokeId: "shutdown-auth" });
+    await authorizationStarted.promise;
+    server.close("session-shutdown");
+    const response = await Promise.race([
+      pending,
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("shutdown did not settle authorization")), 500)),
+    ]);
+    assert.equal(response.status, 499);
+    assert.equal(response.body.code, "cancelled");
+    assert.equal(gatewaySignal?.aborted, true);
+  } finally {
     server.close("done");
     clearGuiTools();
   }

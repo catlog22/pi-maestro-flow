@@ -6,6 +6,7 @@
  */
 
 import { Type } from "typebox";
+import { MAX_ACCEPTANCE_COMMAND_CHARS } from "../tools/goal-verification.ts";
 import { TODO_UPDATE_FIELDS } from "../tools/todo-contract.ts";
 
 function StringEnum<T extends string[]>(values: [...T]) {
@@ -123,9 +124,9 @@ export const GoalToolParams = Type.Object({
     Type.String({ description: "Handoff key of the approved Plan this item implements. There is no injector: pass the key that the Plan approval message gave you, or omit it" }),
   ),
   acceptance: Type.Optional(
-    Type.Array(Type.String(), {
+    Type.Array(Type.String({ maxLength: MAX_ACCEPTANCE_COMMAND_CHARS }), {
       maxItems: 5,
-      description: "Acceptance commands (max 5), configurable on create or update. During completion the extension reruns them and their exit status directly determines verification; without commands, completion uses the agent verifier.",
+      description: `Acceptance commands (max 5, ${MAX_ACCEPTANCE_COMMAND_CHARS} characters each), configurable on create or update. During completion the extension reruns them and their exit status directly determines verification; without commands, completion uses the agent verifier.`,
     }),
   ),
 }, { additionalProperties: false });

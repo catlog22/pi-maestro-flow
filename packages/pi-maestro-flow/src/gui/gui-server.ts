@@ -1,7 +1,7 @@
 import http, { type IncomingMessage, type ServerResponse } from "node:http";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile, rm } from "node:fs/promises";
-import { join } from "node:path";
+import { chmod, lstat, mkdir, open, readFile, rename, rm } from "node:fs/promises";
+import { basename, join } from "node:path";
 import { guiLogger as log } from "./logger.ts";
 import {
   GUI_DISCOVERY_FILENAME,
@@ -33,10 +33,124 @@ interface EventLogEntry {
   bytes: number;
 }
 
-export async function startGuiServer(options: GuiServerOptions): Promise<GuiServerHandle> {
+const discoveryOwners = new Map<string, string>();
+const discoveryOperations = new Map<string, Promise<void>>();
+
+function isNodeError(error: unknown, code: string): boolean {
+  return error instanceof Error && "code" in error && error.code === code;
+}
+
+async function withDiscoveryPathLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
+  const previous = discoveryOperations.get(path) ?? Promise.resolve();
+  const current = previous.catch(() => undefined).then(operation);
+  const settled = current.then(() => undefined, () => undefined);
+  discoveryOperations.set(path, settled);
+  try {
+    return await current;
+  } finally {
+    if (discoveryOperations.get(path) === settled) discoveryOperations.delete(path);
+  }
+}
+
+async function ensurePrivateDiscoveryDirectory(path: string): Promise<void> {
+  try {
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`Refusing unsafe GUI discovery directory: ${path}`);
+    }
+  } catch (error) {
+    if (!isNodeError(error, "ENOENT")) throw error;
+    await mkdir(path, { recursive: true, mode: 0o700 });
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`Refusing unsafe GUI discovery directory: ${path}`);
+    }
+  }
+  await chmod(path, 0o700);
+}
+
+async function assertRegularDiscoveryDestination(path: string): Promise<void> {
+  try {
+    const stat = await lstat(path);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error(`Refusing to replace non-regular GUI discovery file: ${path}`);
+    }
+  } catch (error) {
+    if (isNodeError(error, "ENOENT")) return;
+    throw error;
+  }
+}
+
+async function publishDiscoveryFile(
+  directory: string,
+  path: string,
+  discovery: GuiDiscoveryFile,
+  isCurrent: () => boolean,
+): Promise<boolean> {
+  if (!isCurrent()) return false;
+  return withDiscoveryPathLock(path, async () => {
+    if (!isCurrent()) return false;
+    await ensurePrivateDiscoveryDirectory(directory);
+    if (!isCurrent()) return false;
+    await assertRegularDiscoveryDestination(path);
+
+    const tempPath = join(
+      directory,
+      `.${basename(path)}.${process.pid}.${randomUUID()}.tmp`,
+    );
+    let file: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      file = await open(tempPath, "wx", 0o600);
+      await file.chmod(0o600);
+      await file.writeFile(`${JSON.stringify(discovery, null, 2)}\n`, "utf8");
+      await file.sync();
+      await file.close();
+      file = undefined;
+
+      await assertRegularDiscoveryDestination(path);
+      if (!isCurrent()) return false;
+      await rename(tempPath, path);
+      discoveryOwners.set(path, discovery.ownerToken);
+      return true;
+    } finally {
+      if (file) {
+        try {
+          await file.close();
+        } catch {
+          // Preserve the publication failure; the temp path is removed below.
+        }
+      }
+      await rm(tempPath, { force: true });
+    }
+  });
+}
+
+async function removeOwnedDiscovery(path: string, ownerToken: string): Promise<void> {
+  await withDiscoveryPathLock(path, async () => {
+    if (discoveryOwners.get(path) !== ownerToken) return;
+    try {
+      const stat = await lstat(path);
+      if (stat.isSymbolicLink() || !stat.isFile()) return;
+      const parsed = JSON.parse(await readFile(path, "utf8")) as { ownerToken?: unknown };
+      if (parsed.ownerToken !== ownerToken) {
+        discoveryOwners.delete(path);
+        return;
+      }
+      await rm(path);
+      if (discoveryOwners.get(path) === ownerToken) discoveryOwners.delete(path);
+    } catch (error) {
+      if (isNodeError(error, "ENOENT")) {
+        if (discoveryOwners.get(path) === ownerToken) discoveryOwners.delete(path);
+        return;
+      }
+      throw error;
+    }
+  });
+}
+
+export async function createGuiServer(options: GuiServerOptions): Promise<GuiServerHandle> {
   const token = options.token ?? randomUUID();
   const sessionId = options.sessionId;
-  const writeDiscovery = options.writeDiscovery ?? true;
   const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
   const eventLogMaxBytes = Math.max(1, options.eventLogMaxBytes ?? MAX_EVENT_LOG_BYTES);
 
@@ -49,6 +163,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
   let closed = false;
   let heartbeat: NodeJS.Timeout | null = null;
   let discoveryPath: string | undefined;
+  const discoveryOwnerToken = randomUUID();
 
   const serializeEvent = (id: number, name: string, payload: unknown): string =>
     `id: ${id}\nevent: ${name}\ndata: ${JSON.stringify(payload)}\n\n`;
@@ -228,9 +343,10 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
   };
 
   const removeDiscovery = async (): Promise<void> => {
-    if (!discoveryPath) return;
+    const path = discoveryPath;
+    if (!path) return;
     try {
-      await rm(discoveryPath, { force: true });
+      await removeOwnedDiscovery(path, discoveryOwnerToken);
     } catch (error) {
       log.debug("Failed to remove discovery file", { error: error instanceof Error ? error.message : String(error) });
     }
@@ -295,11 +411,13 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
       }, heartbeatMs);
       heartbeat.unref();
 
-      if (writeDiscovery) {
+      const publishDiscovery = async (isCurrent: () => boolean = () => true): Promise<boolean> => {
+        if (closed || !isCurrent()) return false;
         const discoveryDir = options.discoveryDir ?? join(options.cwd, ".workflow");
-        discoveryPath = join(discoveryDir, GUI_DISCOVERY_FILENAME);
+        const path = join(discoveryDir, GUI_DISCOVERY_FILENAME);
         const discovery: GuiDiscoveryFile = {
           version: 1,
+          ownerToken: discoveryOwnerToken,
           port,
           token,
           sessionId,
@@ -309,15 +427,25 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
           startedAt: new Date().toISOString(),
         };
         try {
-          await mkdir(discoveryDir, { recursive: true });
-          await writeFile(discoveryPath, JSON.stringify(discovery, null, 2), { mode: 0o600 });
+          const published = await publishDiscoveryFile(
+            discoveryDir,
+            path,
+            discovery,
+            () => !closed && isCurrent(),
+          );
+          if (!published) return false;
+          if (closed || !isCurrent()) {
+            await removeOwnedDiscovery(path, discoveryOwnerToken);
+            return false;
+          }
+          discoveryPath = path;
+          handle.discoveryPath = path;
+          return true;
         } catch (error) {
           log.warn("Failed to write discovery file", { error: error instanceof Error ? error.message : String(error) });
-          discoveryPath = undefined;
+          return false;
         }
-      }
-
-      log.info("GUI server started", { port, sessionId, discoveryPath });
+      };
 
       const handle: GuiServerHandle = {
         url,
@@ -326,15 +454,23 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
         token,
         sessionId,
         discoveryPath,
+        publishDiscovery,
         close,
         onClose,
         pushEvent,
         registerRoute,
         sseClientCount: () => sseClients.size,
       };
+      log.info("GUI server listening", { port, sessionId });
       resolve(handle);
     });
   });
+}
+
+export async function startGuiServer(options: GuiServerOptions): Promise<GuiServerHandle> {
+  const server = await createGuiServer(options);
+  if (options.writeDiscovery ?? true) await server.publishDiscovery();
+  return server;
 }
 
 function readBody(req: IncomingMessage, res: ServerResponse): Promise<Record<string, unknown> | null> {

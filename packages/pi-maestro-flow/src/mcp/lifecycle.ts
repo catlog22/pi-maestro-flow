@@ -18,12 +18,35 @@ export interface McpLifecycleOptions {
   reconnectBaseDelayMs?: number;
   reconnectMaxDelayMs?: number;
   reconnectFailureNotifyThreshold?: number;
+  shutdownDrainTimeoutMs?: number;
 }
 
 interface ReconnectFailureState {
   attempt: number;
   nextRetryAt: number;
   notified: boolean;
+}
+
+const DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS = 5_000;
+
+async function waitForSettlementUntilDeadline(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<"settled" | "deadline"> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(
+        () => "settled" as const,
+        () => "settled" as const,
+      ),
+      new Promise<"deadline">((resolve) => {
+        timeout = setTimeout(() => resolve("deadline"), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
 }
 
 export class McpLifecycleManager {
@@ -44,6 +67,7 @@ export class McpLifecycleManager {
   private readonly reconnectBaseDelayMs: number;
   private readonly reconnectMaxDelayMs: number;
   private readonly reconnectFailureNotifyThreshold: number;
+  private readonly shutdownDrainTimeoutMs: number;
 
   constructor(manager: McpServerManager, options: McpLifecycleOptions = {}) {
     this.manager = manager;
@@ -51,6 +75,10 @@ export class McpLifecycleManager {
     this.reconnectBaseDelayMs = options.reconnectBaseDelayMs ?? 30_000;
     this.reconnectMaxDelayMs = options.reconnectMaxDelayMs ?? 5 * 60_000;
     this.reconnectFailureNotifyThreshold = options.reconnectFailureNotifyThreshold ?? 3;
+    this.shutdownDrainTimeoutMs = normalizeDrainTimeoutMs(
+      options.shutdownDrainTimeoutMs,
+      DEFAULT_SHUTDOWN_DRAIN_TIMEOUT_MS,
+    );
   }
 
   /**
@@ -193,7 +221,42 @@ export class McpLifecycleManager {
       this.healthCheckInterval = undefined;
     }
     this.reconnectFailures.clear();
-    await this.manager.closeAll();
-    if (pendingHealthCheck) await Promise.allSettled([pendingHealthCheck]);
+
+    const cleanup = Promise.allSettled([
+      this.manager.closeAll(),
+      pendingHealthCheck ?? Promise.resolve(),
+    ]).then((results) => {
+      const failure = results.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failure) throw failure.reason;
+    });
+    const outcome = await waitForSettlementUntilDeadline(
+      cleanup,
+      this.shutdownDrainTimeoutMs,
+    );
+    if (outcome === "settled") {
+      await cleanup;
+      return;
+    }
+
+    this.lifecycleGeneration += 1;
+    void cleanup.catch((error) => {
+      logger.error(
+        "MCP detached lifecycle shutdown cleanup failed",
+        error instanceof Error ? error : new Error(String(error)),
+      );
+    });
+    logger.error(
+      "MCP lifecycle shutdown deadline exceeded; cleanup detached",
+      new Error(`MCP lifecycle shutdown did not settle within ${this.shutdownDrainTimeoutMs}ms.`),
+      { timeoutMs: this.shutdownDrainTimeoutMs },
+    );
   }
+}
+
+function normalizeDrainTimeoutMs(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
 }

@@ -15,11 +15,13 @@ import {
 import {
   MAX_COMPLETION_SUMMARY_CHARS,
   MAX_OBJECTIVE_LENGTH,
+  acceptanceValidationError,
   configureGoalVerification,
   hasMatchingWorkflowBinding,
   isOverflow,
   isRetryableGoalFailure,
   normalizeAcceptance,
+  redactAcceptanceCommandForDisplay,
   verifyGoalCompletion,
   type AgentStopReason,
   type AssistantMessageLike,
@@ -126,8 +128,11 @@ export interface GoalContext {
 const STATUS_KEY = "goal";
 const GOAL_WIDGET_KEY = "goal-panel";
 const GOAL_STATE_ENTRY_TYPE = "goal-state";
+const TODO_STATE_ENTRY_TYPE = "todo-state";
 /** Schema version of the persisted `goal-state` entry, mirrored into compaction metadata. */
 const GOAL_STATE_VERSION = 2;
+const MAX_RETAINED_GOALS = 64;
+const MAX_RETAINED_GOAL_PAYLOAD_BYTES = 64 * 1024;
 const CONTINUATION_MARKER_PREFIX = "maestro-goal-continuation:";
 const LOW_PROGRESS_TOKEN_DELTA = 500;
 const MAX_LOW_PROGRESS_CONTINUATIONS = 3;
@@ -180,9 +185,9 @@ configureGoalVerification({
   pauseGoal,
   updateUsage,
   persistGoal,
+  commitVerifiedCompletion,
   updateStatusLine,
   updateGoalWidget,
-  clearActive,
   showCompletionStatus,
 });
 
@@ -701,6 +706,9 @@ async function handleCreate(
   const err = validateObjective(objective);
   if (err) return { text: err, isError: true };
 
+  const acceptanceError = acceptanceValidationError(acceptance);
+  if (acceptanceError) return { text: acceptanceError, isError: true };
+
   const tokenBudget = budget ? parseTokenBudget(budget) : undefined;
   if (budget && tokenBudget === undefined) return { text: `Invalid token budget: ${budget}`, isError: true };
 
@@ -731,6 +739,8 @@ async function handleUpdate(
   if (!activeGoal) return { text: "No active goal to update.", isError: true };
   const err = validateObjective(objective);
   if (err) return { text: err, isError: true };
+  const acceptanceError = acceptanceValidationError(acceptance);
+  if (acceptanceError) return { text: acceptanceError, isError: true };
 
   const nextGoal = { ...activeGoal };
   updateUsage(nextGoal, ctx);
@@ -1011,7 +1021,12 @@ function registryWithGoal(goal: ActiveGoal): ActiveGoal[] {
 }
 
 function persistGoal(goal: ActiveGoal): void {
-  const nextRegistry = registryWithGoal(goal);
+  const nextRegistry = retainGoalRegistry(
+    registryWithGoal(goal),
+    goal.id,
+    visibleTodoGoalIds(),
+    new Set(pendingTodoDetachGoalIds),
+  );
   try {
     appendGoalState(goal, nextRegistry, pendingTodoDetachGoalIds);
   } catch (error) {
@@ -1033,8 +1048,14 @@ function persistGoalSelection(
   nextRegistry: ActiveGoal[],
   nextPendingTodoDetachGoalIds: string[],
 ): void {
-  appendGoalState(currentGoal, nextRegistry, nextPendingTodoDetachGoalIds);
-  goalRegistry = nextRegistry;
+  const retainedRegistry = retainGoalRegistry(
+    nextRegistry,
+    currentGoal?.id,
+    visibleTodoGoalIds(),
+    new Set(nextPendingTodoDetachGoalIds),
+  );
+  appendGoalState(currentGoal, retainedRegistry, nextPendingTodoDetachGoalIds);
+  goalRegistry = retainedRegistry;
   activeGoal = currentGoal;
   stagedActiveGoal = undefined;
   pendingTodoDetachGoalIds = nextPendingTodoDetachGoalIds;
@@ -1054,6 +1075,112 @@ function appendGoalState(
     currentGoalId: currentGoal?.id,
     ...(pendingDetaches.length > 0 ? { pendingTodoDetachGoalIds: pendingDetaches } : {}),
   });
+}
+
+function commitVerifiedCompletion(goal: ActiveGoal, ctx: GoalContext): void {
+  const referencedGoalIds = visibleTodoGoalIds();
+  const needsTodoDetach = referencedGoalIds.has(goal.id);
+  const pendingWithCompletion = needsTodoDetach
+    ? [...new Set([...pendingTodoDetachGoalIds, goal.id])]
+    : [...pendingTodoDetachGoalIds];
+  const verifiedRegistry = retainGoalRegistry(
+    registryWithGoal(goal),
+    goal.id,
+    referencedGoalIds,
+    new Set(pendingWithCompletion),
+  );
+
+  appendGoalState(goal, verifiedRegistry, pendingWithCompletion);
+  goalRegistry = verifiedRegistry;
+  activeGoal = goal;
+  stagedActiveGoal = undefined;
+  pendingTodoDetachGoalIds = pendingWithCompletion;
+  cancelContinuation();
+  clearRecovery();
+  goalLoopOwner = undefined;
+  latestGoalAttempt = undefined;
+  clearElapsedTimer();
+
+  if (needsTodoDetach) detachTasksFromGoal(goal.id);
+
+  const settledPending = pendingWithCompletion.filter((goalId) => goalId !== goal.id);
+  const settledRegistry = retainGoalRegistry(
+    goalRegistry,
+    undefined,
+    visibleTodoGoalIds(),
+    new Set(settledPending),
+  );
+  appendGoalState(undefined, settledRegistry, settledPending);
+  goalRegistry = settledRegistry;
+  activeGoal = undefined;
+  stagedActiveGoal = undefined;
+  pendingTodoDetachGoalIds = settledPending;
+  onGoalStateChanged?.();
+}
+
+function visibleTodoGoalIds(): Set<string> {
+  return new Set(getVisibleTasks().flatMap((task) => task.goalId ? [task.goalId] : []));
+}
+
+function persistedTodoGoalIds(
+  entries: Array<{ type?: string; customType?: string; data?: unknown }>,
+): Set<string> {
+  const entry = entries
+    .filter((candidate) => candidate.type === "custom" && candidate.customType === TODO_STATE_ENTRY_TYPE)
+    .pop();
+  const data = entry?.data;
+  if (!data || typeof data !== "object") return new Set();
+  const rawTasks = (data as { tasks?: unknown }).tasks;
+  if (!rawTasks || typeof rawTasks !== "object" || Array.isArray(rawTasks)) return new Set();
+  const goalIds = new Set<string>();
+  for (const rawTask of Object.values(rawTasks)) {
+    if (!rawTask || typeof rawTask !== "object") continue;
+    const task = rawTask as { goalId?: unknown; status?: unknown };
+    if (task.status !== "deleted" && typeof task.goalId === "string" && task.goalId) {
+      goalIds.add(task.goalId);
+    }
+  }
+  return goalIds;
+}
+
+function retainedGoalPayloadBytes(goals: ActiveGoal[], currentGoalId: string | undefined): number {
+  const currentGoal = currentGoalId ? goals.find((goal) => goal.id === currentGoalId) : undefined;
+  return Buffer.byteLength(JSON.stringify({
+    goal: currentGoal ?? null,
+    goals,
+    currentGoalId: currentGoal?.id,
+  }), "utf8");
+}
+
+function retainGoalRegistry(
+  goals: ActiveGoal[],
+  currentGoalId: string | undefined,
+  referencedGoalIds: ReadonlySet<string>,
+  pendingDetachGoalIds: ReadonlySet<string>,
+): ActiveGoal[] {
+  const removable = goals
+    .filter((goal) => goal.status === "done"
+      && goal.id !== currentGoalId
+      && (!referencedGoalIds.has(goal.id) || pendingDetachGoalIds.has(goal.id)))
+    .sort((left, right) => (
+      left.startedAt - right.startedAt
+      || left.updatedAt - right.updatedAt
+      || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+    ));
+  let retained = [...goals];
+  for (const goal of removable) {
+    if (retained.length <= MAX_RETAINED_GOALS
+      && retainedGoalPayloadBytes(retained, currentGoalId) <= MAX_RETAINED_GOAL_PAYLOAD_BYTES) break;
+    const index = retained.indexOf(goal);
+    if (index >= 0) retained.splice(index, 1);
+  }
+  const payloadBytes = retainedGoalPayloadBytes(retained, currentGoalId);
+  if (retained.length > MAX_RETAINED_GOALS || payloadBytes > MAX_RETAINED_GOAL_PAYLOAD_BYTES) {
+    throw new Error(
+      `Goal registry exceeds its retained-history bound (${retained.length}/${MAX_RETAINED_GOALS} goals, ${payloadBytes}/${MAX_RETAINED_GOAL_PAYLOAD_BYTES} bytes) and cannot be pruned without dropping an active contract.`,
+    );
+  }
+  return retained;
 }
 
 function recoverPendingGoalTodoDetaches(ctx: GoalContext, todoStateJustLoaded = false): number {
@@ -1089,17 +1216,50 @@ function loadGoalFromSession(ctx: GoalContext, sessionId: string | undefined): A
     pendingTodoDetachGoalIds = [];
     return undefined;
   }
-  pendingTodoDetachGoalIds = Array.isArray(data?.pendingTodoDetachGoalIds)
+  const loadedPendingDetaches = Array.isArray(data?.pendingTodoDetachGoalIds)
     ? data.pendingTodoDetachGoalIds.filter((id): id is string => typeof id === "string" && id.length > 0)
     : [];
+  const referencedGoalIds = persistedTodoGoalIds(entries);
+  for (const goalId of visibleTodoGoalIds()) referencedGoalIds.add(goalId);
+
   if (Array.isArray(data?.goals)) {
-    goalRegistry = data.goals.filter(isGoal).map(normalizeLoadedGoal);
-    const current = goalRegistry.find((goal) => goal.id === data.currentGoalId);
-    return current && current.status !== "done" ? current : undefined;
+    const loadedGoals = data.goals.filter(isGoal).map(normalizeLoadedGoal);
+    const completedReferencedGoalIds = loadedGoals
+      .filter((goal) => goal.status === "done" && referencedGoalIds.has(goal.id))
+      .map((goal) => goal.id);
+    const nextPendingDetaches = [...new Set([...loadedPendingDetaches, ...completedReferencedGoalIds])];
+    const loadedCurrent = loadedGoals.find((goal) => goal.id === data.currentGoalId);
+    const current = loadedCurrent?.status === "done" ? undefined : loadedCurrent;
+    const retainedRegistry = retainGoalRegistry(
+      loadedGoals,
+      current?.id,
+      referencedGoalIds,
+      new Set(nextPendingDetaches),
+    );
+    const needsRepair = nextPendingDetaches.length !== loadedPendingDetaches.length
+      || current?.id !== data.currentGoalId
+      || retainedRegistry.length !== loadedGoals.length;
+    if (needsRepair) appendGoalState(current, retainedRegistry, nextPendingDetaches);
+    goalRegistry = retainedRegistry;
+    pendingTodoDetachGoalIds = nextPendingDetaches;
+    return current;
   }
+
   const legacy = isGoal(data?.goal) ? normalizeLoadedGoal(data.goal) : undefined;
-  goalRegistry = legacy ? [legacy] : [];
-  return legacy && legacy.status !== "done" ? legacy : undefined;
+  const completedReferencedGoalIds = legacy?.status === "done" && referencedGoalIds.has(legacy.id)
+    ? [legacy.id]
+    : [];
+  const nextPendingDetaches = [...new Set([...loadedPendingDetaches, ...completedReferencedGoalIds])];
+  const current = legacy?.status === "done" ? undefined : legacy;
+  const retainedRegistry = legacy
+    ? retainGoalRegistry([legacy], current?.id, referencedGoalIds, new Set(nextPendingDetaches))
+    : [];
+  if (legacy && (nextPendingDetaches.length !== loadedPendingDetaches.length || current !== legacy)) {
+    appendGoalState(current, retainedRegistry, nextPendingDetaches);
+  }
+  goalRegistry = retainedRegistry;
+  pendingTodoDetachGoalIds = nextPendingDetaches;
+  return current;
 }
 
 function normalizeLoadedGoal(goal: ActiveGoal): ActiveGoal {
@@ -1515,7 +1675,7 @@ function toDetailEntry(goal: ActiveGoal, todoSubject: string | undefined): GoalD
     startedAt: goal.startedAt,
     updatedAt: goal.updatedAt,
     verificationFailures: goal.verificationFailures,
-    acceptance: goal.acceptance,
+    acceptance: goal.acceptance?.map(redactAcceptanceCommandForDisplay),
     workflowSessionId: goal.workflowSessionId,
     retryAttempt: goalRecovery?.goalId === goal.id
       ? goalRecovery.attempt
@@ -1642,15 +1802,12 @@ export function parseGoalActionParams(params: Record<string, unknown>): GoalPara
   if (action !== "create" && action !== "update") return undefined;
   if (typeof params.objective !== "string") return undefined;
   const acceptance = params.acceptance;
-  if (acceptance !== undefined && (
-    !Array.isArray(acceptance)
-    || acceptance.some((command) => typeof command !== "string")
-  )) {
+  if (acceptanceValidationError(acceptance)) return undefined;
+  if (acceptance !== undefined
+    && (!Array.isArray(acceptance) || !acceptance.every((command): command is string => typeof command === "string"))) {
     return undefined;
   }
-  const validatedAcceptance = acceptance === undefined ? undefined : acceptance.filter(
-    (command): command is string => typeof command === "string",
-  );
+  const validatedAcceptance = acceptance === undefined ? undefined : acceptance.slice();
   if (action === "update") {
     return {
       action,

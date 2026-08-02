@@ -8,9 +8,22 @@
  * otherwise <Pi agent dir>/mcp-oauth/sha256-<server-hash>/tokens.json
  */
 
-import { createHash } from 'crypto';
-import { mkdirSync, readFileSync, writeFileSync, existsSync, rmSync } from 'fs';
-import { join } from 'path';
+import { createHash, randomBytes } from 'node:crypto';
+import {
+  chmodSync,
+  closeSync,
+  fchmodSync,
+  fsyncSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmdirSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import { getAgentPath } from './agent-dir.ts';
 
 /** OAuth token storage format */
@@ -63,14 +76,79 @@ export function getAuthEntryFilePath(serverName: string): string {
   return join(getServerDir(serverName), 'tokens.json');
 }
 
+function isNodeError(error: unknown, code: string): boolean {
+  return error instanceof Error && 'code' in error && error.code === code;
+}
+
+function validateDirectory(dir: string, label: string): boolean {
+  try {
+    const stat = lstatSync(dir);
+    if (stat.isSymbolicLink() || !stat.isDirectory()) {
+      throw new Error(`Refusing unsafe MCP OAuth ${label}: ${dir}`);
+    }
+    chmodSync(dir, 0o700);
+    return true;
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return false;
+    throw error;
+  }
+}
+
+function ensureAuthBaseDir(): string {
+  const baseDir = getAuthBaseDir();
+  if (!validateDirectory(baseDir, 'base directory')) {
+    mkdirSync(baseDir, { recursive: true, mode: 0o700 });
+    if (!validateDirectory(baseDir, 'base directory')) {
+      throw new Error(`Failed to create MCP OAuth base directory: ${baseDir}`);
+    }
+  }
+  return baseDir;
+}
+
+function validateRegularFile(filePath: string): boolean {
+  try {
+    const stat = lstatSync(filePath);
+    if (stat.isSymbolicLink() || !stat.isFile()) {
+      throw new Error(`Refusing unsafe MCP OAuth token file: ${filePath}`);
+    }
+    chmodSync(filePath, 0o600);
+    return true;
+  } catch (error) {
+    if (isNodeError(error, 'ENOENT')) return false;
+    throw error;
+  }
+}
+
 /**
  * Ensure the server directory exists with secure permissions.
  */
-function ensureServerDir(serverName: string): void {
+function ensureServerDir(serverName: string): string {
+  const baseDir = ensureAuthBaseDir();
   const dir = getServerDir(serverName);
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+  if (dirname(dir) !== baseDir) {
+    throw new Error(`Invalid MCP OAuth server directory: ${dir}`);
   }
+  if (!validateDirectory(dir, 'server directory')) {
+    try {
+      mkdirSync(dir, { mode: 0o700 });
+    } catch (error) {
+      if (!isNodeError(error, 'EEXIST')) throw error;
+    }
+    if (!validateDirectory(dir, 'server directory')) {
+      throw new Error(`Failed to create MCP OAuth server directory: ${dir}`);
+    }
+  }
+  return dir;
+}
+
+function getValidatedServerDir(serverName: string): string | undefined {
+  const baseDir = getAuthBaseDir();
+  if (!validateDirectory(baseDir, 'base directory')) return undefined;
+  const dir = getServerDir(serverName);
+  if (dirname(dir) !== baseDir) {
+    throw new Error(`Invalid MCP OAuth server directory: ${dir}`);
+  }
+  return validateDirectory(dir, 'server directory') ? dir : undefined;
 }
 
 /**
@@ -78,11 +156,10 @@ function ensureServerDir(serverName: string): void {
  * Returns undefined if file doesn't exist.
  */
 function readAuthEntry(serverName: string): AuthEntry | undefined {
-  const filePath = getAuthEntryFilePath(serverName);
   try {
-    if (!existsSync(filePath)) {
-      return undefined;
-    }
+    if (!getValidatedServerDir(serverName)) return undefined;
+    const filePath = getAuthEntryFilePath(serverName);
+    if (!validateRegularFile(filePath)) return undefined;
     const data = readFileSync(filePath, 'utf-8');
     return JSON.parse(data) as AuthEntry;
   } catch (error) {
@@ -95,9 +172,38 @@ function readAuthEntry(serverName: string): AuthEntry | undefined {
  * Write the auth entry for a server to disk with secure permissions.
  */
 function writeAuthEntry(serverName: string, entry: AuthEntry): void {
-  ensureServerDir(serverName);
+  const dir = ensureServerDir(serverName);
   const filePath = getAuthEntryFilePath(serverName);
-  writeFileSync(filePath, JSON.stringify(entry, null, 2), { mode: 0o600 });
+  validateRegularFile(filePath);
+  const tmpPath = join(
+    dir,
+    `.${basename(filePath)}.${process.pid}.${randomBytes(16).toString('hex')}.tmp`,
+  );
+  let fd: number | undefined;
+  try {
+    fd = openSync(tmpPath, 'wx', 0o600);
+    fchmodSync(fd, 0o600);
+    writeFileSync(fd, JSON.stringify(entry, null, 2), 'utf-8');
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+
+    validateRegularFile(filePath);
+    renameSync(tmpPath, filePath);
+  } finally {
+    if (fd !== undefined) {
+      try {
+        closeSync(fd);
+      } catch {
+        // Preserve the original write failure; the temp path is still unlinked below.
+      }
+    }
+    try {
+      unlinkSync(tmpPath);
+    } catch (error) {
+      if (!isNodeError(error, 'ENOENT')) throw error;
+    }
+  }
 }
 
 /**
@@ -140,22 +246,20 @@ export function saveAuthEntry(serverName: string, entry: AuthEntry, serverUrl?: 
  * Also removes the server directory if empty.
  */
 export function removeAuthEntry(serverName: string): void {
+  const dir = getValidatedServerDir(serverName);
+  if (!dir) return;
+
+  const filePath = getAuthEntryFilePath(serverName);
+  if (validateRegularFile(filePath)) {
+    unlinkSync(filePath);
+  }
+
   try {
-    const filePath = getAuthEntryFilePath(serverName);
-    if (existsSync(filePath)) {
-      writeFileSync(filePath, '{}', { mode: 0o600 });
-    }
-    // Try to remove the directory
-    const dir = getServerDir(serverName);
-    if (existsSync(dir)) {
-      try {
-        rmSync(dir, { recursive: true });
-      } catch {
-        // Directory may not be empty, ignore
-      }
-    }
+    rmdirSync(dir);
   } catch (error) {
-    console.error(`Failed to remove auth entry for ${serverName}:`, error);
+    if (!isNodeError(error, 'ENOENT') && !isNodeError(error, 'ENOTEMPTY') && !isNodeError(error, 'EEXIST')) {
+      throw error;
+    }
   }
 }
 

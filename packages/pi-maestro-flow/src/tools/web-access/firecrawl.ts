@@ -2,7 +2,13 @@ import { existsSync, readFileSync } from "node:fs";
 import { activityMonitor } from "./activity.ts";
 import { redactCredential, resolveCredential } from "./credential-source.ts";
 import type { ExtractedContent, ExtractOptions } from "./extract.ts";
-import { validateRemoteUrl, type Lookup } from "./ssrf-protection.ts";
+import {
+	fetchRemoteUrl,
+	readBoundedResponseText,
+	ResponseSizeLimitError,
+	validateRemoteUrl,
+	type Lookup,
+} from "./ssrf-protection.ts";
 import { getWebSearchConfigPath } from "./utils.ts";
 import { registerWebConfigInvalidator } from "./web-config-cache.ts";
 
@@ -10,7 +16,8 @@ const CONFIG_PATH = getWebSearchConfigPath();
 const DEFAULT_API_VERSION = "v2";
 const EXTRACT_TIMEOUT_MS = 60_000;
 const DEFAULT_MAX_REDIRECTS = 5;
-const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+const MAX_FIRECRAWL_RESPONSE_BYTES = 5 * 1024 * 1024;
+const MAX_FIRECRAWL_ERROR_BYTES = 64 * 1024;
 const SUPPORTED_API_VERSIONS = ["v1", "v2"] as const;
 type FirecrawlApiVersion = (typeof SUPPORTED_API_VERSIONS)[number];
 
@@ -160,45 +167,30 @@ function ssrfOptions(options?: FirecrawlExtractOptions): { lookup?: Lookup; allo
 	};
 }
 
-function withoutSensitiveHeaders(headers: Record<string, string>): Record<string, string> {
-	const next = { ...headers };
-	delete next.Authorization;
-	delete next.authorization;
-	delete next.Cookie;
-	delete next.cookie;
-	delete next["X-API-Key"];
-	delete next["x-api-key"];
-	return next;
-}
-
 async function fetchFirecrawlApi(
 	url: string,
 	init: { method: string; headers: Record<string, string>; body: string; signal: AbortSignal },
 	options: FirecrawlExtractOptions | undefined,
 ): Promise<Response> {
-	let current = await validateRemoteUrl(url, ssrfOptions(options));
-	let headers = init.headers;
-	for (let redirects = 0; redirects <= DEFAULT_MAX_REDIRECTS; redirects++) {
-		const response = await fetch(current, { ...init, headers, redirect: "manual" });
-		if (!REDIRECT_STATUSES.has(response.status)) return response;
-
-		const location = response.headers.get("location");
-		if (!location) return response;
-		if (redirects === DEFAULT_MAX_REDIRECTS) throw new Error(`Too many redirects fetching ${current.toString()}`);
-
-		const next = await validateRemoteUrl(new URL(location, current), ssrfOptions(options));
-		if (next.origin !== current.origin) headers = withoutSensitiveHeaders(headers);
-		current = next;
-	}
-	throw new Error(`Too many redirects fetching ${current.toString()}`);
+	return fetchRemoteUrl(url, init, {
+		...ssrfOptions(options),
+		maxRedirects: DEFAULT_MAX_REDIRECTS,
+	});
 }
 
 function scrapeBody(url: string): Record<string, unknown> {
+	if (allowFreshScrape()) {
+		throw new Error(
+			"Firecrawl fresh scrape deferred: local DNS pinning protects only the connection to the Firecrawl API, " +
+			"not Firecrawl's remote dereference of the target URL. Disable firecrawlFreshScrape or use a Firecrawl " +
+			"deployment with an independently enforced target-network policy.",
+		);
+	}
 	return {
 		url,
 		formats: ["markdown"],
 		onlyMainContent: true,
-		...(allowFreshScrape() ? {} : { lockdown: true }),
+		lockdown: true,
 	};
 }
 
@@ -223,12 +215,29 @@ async function firecrawlFetch(
 			signal: requestSignal(options?.timeoutMs ?? EXTRACT_TIMEOUT_MS, signal),
 		}, options);
 		if (!response.ok) {
-			const text = await response.text().catch(() => "");
+			let text: string;
+			try {
+				text = await readBoundedResponseText(response, MAX_FIRECRAWL_ERROR_BYTES);
+			} catch (err) {
+				if (err instanceof ResponseSizeLimitError) {
+					throw new Error(`Firecrawl scrape error ${response.status}: response body exceeds ${MAX_FIRECRAWL_ERROR_BYTES} bytes`);
+				}
+				text = "";
+			}
 			throw new Error(`Firecrawl scrape error ${response.status}: ${redactCredential(text.slice(0, 300), apiKey)}`);
+		}
+		let responseText: string;
+		try {
+			responseText = await readBoundedResponseText(response, MAX_FIRECRAWL_RESPONSE_BYTES);
+		} catch (err) {
+			if (err instanceof ResponseSizeLimitError) {
+				throw new Error(`Firecrawl scrape response exceeds ${MAX_FIRECRAWL_RESPONSE_BYTES} bytes`);
+			}
+			throw err;
 		}
 		let data: unknown;
 		try {
-			data = await response.json();
+			data = JSON.parse(responseText);
 		} catch (err) {
 			throw new Error(`Firecrawl scrape returned invalid JSON: ${errorMessage(err)}`);
 		}

@@ -32,6 +32,7 @@ import {
   type UiResourceContent,
   type UiSessionMessages,
   type UiStreamSummary,
+  type VisualizationStreamFrameType,
 } from "./types.ts";
 
 const MAX_BODY_SIZE = 2 * 1024 * 1024;
@@ -41,6 +42,27 @@ const MAX_UI_SESSION_MESSAGE_ITEM_BYTES = 32 * 1024;
 const ABANDONED_GRACE_MS = 60_000;
 const WATCHDOG_INTERVAL_MS = 5_000;
 const MAX_EVENT_LOG = 128;
+const MAX_EVENT_LOG_BYTES = 512 * 1024;
+const MAX_EVENT_BYTES = 64 * 1024;
+
+type ReplayEntry = {
+  id: number;
+  name: string;
+  payload: unknown;
+  chunk: string;
+  bytes: number;
+  streamId?: string;
+  sequence?: number;
+  frameType?: VisualizationStreamFrameType;
+};
+
+type StreamReplayState = {
+  checkpointEventId: number;
+  checkpointSequence: number;
+  lastSequence: number;
+  evictedThroughEventId?: number;
+  evictedThroughSequence?: number;
+};
 
 export interface UiServerOptions {
   serverName: string;
@@ -56,6 +78,12 @@ export interface UiServerOptions {
   onMessage?: (params: UiMessageParams) => Promise<void> | void;
   onContextUpdate?: (params: UiModelContextParams) => Promise<void> | void;
   onComplete?: (reason: string) => void;
+  /** @internal Override replay limits for deterministic tests. */
+  eventLogMaxEvents?: number;
+  /** @internal Override replay limits for deterministic tests. */
+  eventLogMaxBytes?: number;
+  /** @internal Override replay limits for deterministic tests. */
+  eventLogMaxEventBytes?: number;
 }
 
 export interface UiServerHandle {
@@ -174,8 +202,37 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
   let watchdog: NodeJS.Timeout | null = null;
   let currentDisplayMode: UiDisplayMode = options.hostContext?.displayMode ?? "inline";
   let nextEventId = 1;
-  const eventLog: Array<{ id: number; name: string; payload: unknown }> = [];
+  const maxEventLogEvents = replayLimit(options.eventLogMaxEvents, MAX_EVENT_LOG);
+  const maxEventLogBytes = replayLimit(options.eventLogMaxBytes, MAX_EVENT_LOG_BYTES);
+  const maxEventBytes = Math.min(
+    replayLimit(options.eventLogMaxEventBytes, MAX_EVENT_BYTES),
+    maxEventLogBytes,
+  );
+  const eventLog: ReplayEntry[] = [];
+  const streamReplayStates = new Map<string, StreamReplayState>();
+  const unreplayableStreams = new Set<string>();
+  let eventLogBytes = 0;
   let streamSummary: UiStreamSummary | undefined;
+
+  const trimStreamReplayTracking = () => {
+    while (streamReplayStates.size > maxEventLogEvents) {
+      const oldestStreamId = streamReplayStates.keys().next().value;
+      if (oldestStreamId === undefined) break;
+      streamReplayStates.delete(oldestStreamId);
+      unreplayableStreams.delete(oldestStreamId);
+    }
+    while (unreplayableStreams.size > maxEventLogEvents) {
+      const oldestStreamId = unreplayableStreams.values().next().value;
+      if (oldestStreamId === undefined) break;
+      unreplayableStreams.delete(oldestStreamId);
+    }
+  };
+
+  const markStreamUnreplayable = (streamId: string) => {
+    unreplayableStreams.delete(streamId);
+    unreplayableStreams.add(streamId);
+    trimStreamReplayTracking();
+  };
 
   // Retain only a bounded tail; each authenticated message request can be up
   // to MAX_BODY_SIZE, so a session-count cap alone does not bound heap usage.
@@ -231,63 +288,297 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
     return `id: ${eventId}\nevent: ${name}\ndata: ${JSON.stringify(payload)}\n\n`;
   };
 
-  const getLatestCheckpointIndex = () => {
+  const removeEventLogEntry = (index: number) => {
+    const [removed] = eventLog.splice(index, 1);
+    if (!removed) return;
+    eventLogBytes -= removed.bytes;
+    if (removed.streamId === undefined || removed.sequence === undefined) return;
+    const state = streamReplayStates.get(removed.streamId);
+    if (!state || removed.id < state.checkpointEventId) return;
+    state.evictedThroughEventId = removed.id;
+    state.evictedThroughSequence = removed.sequence;
+  };
+
+  const clearStreamReplayEntries = (streamId: string) => {
     for (let index = eventLog.length - 1; index >= 0; index -= 1) {
-      const entry = eventLog[index];
-      const envelope = getVisualizationStreamEnvelope((entry.payload as { structuredContent?: unknown } | null)?.structuredContent);
-      if (envelope?.frameType === "checkpoint" || envelope?.frameType === "final") {
-        return index;
-      }
+      if (eventLog[index]?.streamId === streamId) removeEventLogEntry(index);
     }
-    return -1;
+  };
+
+  const makeResyncEntry = (
+    eventId: number,
+    reason: "checkpoint-too-large" | "checkpoint-unavailable",
+    streamId?: string,
+  ): ReplayEntry | null => {
+    const payloads: unknown[] = [
+      { reason, ...(streamId ? { streamId } : {}) },
+      { reason },
+      {},
+    ];
+    for (const payload of payloads) {
+      const chunk = serializeEvent(eventId, "resync-required", payload);
+      const bytes = Buffer.byteLength(chunk, "utf8");
+      if (bytes > maxEventBytes || bytes > maxEventLogBytes) continue;
+      return {
+        id: eventId,
+        name: "resync-required",
+        payload,
+        chunk,
+        bytes,
+        streamId,
+      };
+    }
+    return null;
+  };
+
+  const replaceStreamReplayWithResync = (
+    eventId: number,
+    reason: "checkpoint-too-large" | "checkpoint-unavailable",
+    streamId: string,
+  ): ReplayEntry | null => {
+    clearStreamReplayEntries(streamId);
+    const entry = makeResyncEntry(eventId, reason, streamId);
+    if (!entry) return null;
+    eventLog.push(entry);
+    eventLogBytes += entry.bytes;
+    return entry;
   };
 
   const pruneEventLog = () => {
-    if (eventLog.length <= MAX_EVENT_LOG) return;
-    const latestCheckpointIndex = getLatestCheckpointIndex();
+    const overBudget = () => eventLog.length > maxEventLogEvents || eventLogBytes > maxEventLogBytes;
+    while (overBudget() && eventLog.length > 0) removeEventLogEntry(0);
+  };
 
-    if (latestCheckpointIndex > 0) {
-      eventLog.splice(0, latestCheckpointIndex);
+  const makeReplayEntry = (
+    eventId: number,
+    name: string,
+    payload: unknown,
+    chunk: string | null,
+    streamId?: string,
+    sequence?: number,
+    frameType?: VisualizationStreamFrameType,
+  ): ReplayEntry | null => {
+    const originalBytes = Buffer.byteLength(chunk ?? "", "utf8");
+    if (chunk && originalBytes <= maxEventBytes) {
+      return { id: eventId, name, payload, chunk, bytes: originalBytes, streamId, sequence, frameType };
     }
 
-    if (eventLog.length > MAX_EVENT_LOG) {
-      eventLog.splice(0, eventLog.length - MAX_EVENT_LOG);
+    if (frameType !== undefined) {
+      return makeResyncEntry(
+        eventId,
+        frameType === "checkpoint" || frameType === "final"
+          ? "checkpoint-too-large"
+          : "checkpoint-unavailable",
+        streamId,
+      );
     }
+
+    const summaryPayload = {
+      event: name,
+      reason: chunk ? "event-too-large" : "serialization-failed",
+      ...(chunk ? { originalBytes } : {}),
+    };
+    const summaryName = "replay-omitted";
+    const summaryChunk = serializeEvent(eventId, summaryName, summaryPayload);
+    const summaryBytes = Buffer.byteLength(summaryChunk, "utf8");
+    if (summaryBytes > maxEventBytes || summaryBytes > maxEventLogBytes) return null;
+    return {
+      id: eventId,
+      name: summaryName,
+      payload: summaryPayload,
+      chunk: summaryChunk,
+      bytes: summaryBytes,
+    };
+  };
+
+  const disconnectSseClient = (client: ServerResponse) => {
+    sseClients.delete(client);
+    try {
+      client.destroy();
+    } catch {
+      // The response is already unusable; ownership was removed above.
+    }
+  };
+
+  const writeSseChunk = (client: ServerResponse, chunk: string): boolean => {
+    try {
+      if (client.write(chunk)) return true;
+    } catch {
+      // Failed writes are handled by closing the response below.
+    }
+    disconnectSseClient(client);
+    return false;
   };
 
   const pushEvent = (name: string, payload: unknown) => {
     if (completed) return;
     const eventId = nextEventId++;
-    eventLog.push({ id: eventId, name, payload });
     updateStreamSummary(payload);
-    pruneEventLog();
-    const chunk = serializeEvent(eventId, name, payload);
-    for (const client of sseClients) {
-      try {
-        client.write(chunk);
-      } catch {
-        sseClients.delete(client);
+    const envelope = getVisualizationStreamEnvelope(
+      (payload as { structuredContent?: unknown } | null)?.structuredContent,
+    );
+
+    let liveChunk: string | null = null;
+    try {
+      liveChunk = serializeEvent(eventId, name, payload);
+    } catch {
+      // An unserializable payload cannot be delivered, but its omission can
+      // still be represented safely in the bounded replay tail.
+    }
+
+    if (envelope?.frameType === "checkpoint" || envelope?.frameType === "final") {
+      streamReplayStates.delete(envelope.streamId);
+      streamReplayStates.set(envelope.streamId, {
+        checkpointEventId: eventId,
+        checkpointSequence: envelope.sequence,
+        lastSequence: envelope.sequence,
+      });
+      unreplayableStreams.delete(envelope.streamId);
+      trimStreamReplayTracking();
+    } else if (envelope?.frameType === "patch") {
+      const state = streamReplayStates.get(envelope.streamId);
+      if (!state || unreplayableStreams.has(envelope.streamId) || envelope.sequence !== state.lastSequence + 1) {
+        markStreamUnreplayable(envelope.streamId);
+      } else {
+        state.lastSequence = envelope.sequence;
       }
     }
+
+    let replayEntry = makeReplayEntry(
+      eventId,
+      name,
+      payload,
+      liveChunk,
+      envelope?.streamId,
+      envelope?.sequence,
+      envelope?.frameType,
+    );
+    let replacementChunk: string | undefined;
+
+    if (envelope?.frameType === "checkpoint" || envelope?.frameType === "final") {
+      if (replayEntry?.name === "resync-required") {
+        markStreamUnreplayable(envelope.streamId);
+        replayEntry = replaceStreamReplayWithResync(
+          eventId,
+          "checkpoint-too-large",
+          envelope.streamId,
+        );
+        replacementChunk = replayEntry?.chunk;
+        replayEntry = null;
+      }
+    } else if (
+      envelope?.frameType === "patch"
+      && (unreplayableStreams.has(envelope.streamId) || replayEntry?.name === "resync-required")
+    ) {
+      markStreamUnreplayable(envelope.streamId);
+      replayEntry = replaceStreamReplayWithResync(
+        eventId,
+        "checkpoint-unavailable",
+        envelope.streamId,
+      );
+      replacementChunk = replayEntry?.chunk;
+      replayEntry = null;
+    }
+
+    if (replayEntry) {
+      eventLog.push(replayEntry);
+      eventLogBytes += replayEntry.bytes;
+    }
+    pruneEventLog();
+
+    const chunk = liveChunk ?? replayEntry?.chunk ?? replacementChunk;
+    if (!chunk) return;
+    for (const client of sseClients) writeSseChunk(client, chunk);
   };
 
-  const replayEvents = (res: ServerResponse, lastEventIdHeader?: string | null) => {
+  const replayEvents = (res: ServerResponse, lastEventIdHeader?: string | null): boolean => {
     const parsedLastId = lastEventIdHeader ? Number(lastEventIdHeader) : Number.NaN;
-    const eventsToReplay = Number.isFinite(parsedLastId)
+    const hasLastEventId = Number.isFinite(parsedLastId);
+    const eventsToReplay = hasLastEventId
       ? eventLog.filter((entry) => entry.id > parsedLastId)
-      : (() => {
-          const latestCheckpointIndex = getLatestCheckpointIndex();
-          return latestCheckpointIndex >= 0 ? eventLog.slice(latestCheckpointIndex) : eventLog;
-        })();
+      : [...eventLog];
+    const latestCheckpointIndexes = new Map<string, number>();
 
-    for (const entry of eventsToReplay) {
-      try {
-        res.write(serializeEvent(entry.id, entry.name, entry.payload));
-      } catch {
-        sseClients.delete(res);
-        return;
+    for (let index = 0; index < eventsToReplay.length; index += 1) {
+      const entry = eventsToReplay[index];
+      if (
+        entry?.streamId
+        && (entry.frameType === "checkpoint" || entry.frameType === "final")
+      ) {
+        latestCheckpointIndexes.set(entry.streamId, index);
       }
     }
+
+    const replaySequences = new Map<string, number>();
+    if (hasLastEventId) {
+      for (const [streamId, state] of streamReplayStates) {
+        if (state.checkpointEventId > parsedLastId) continue;
+        if (state.evictedThroughEventId === undefined) {
+          replaySequences.set(streamId, state.checkpointSequence);
+        } else if (state.evictedThroughEventId <= parsedLastId) {
+          replaySequences.set(streamId, state.evictedThroughSequence ?? state.checkpointSequence);
+        }
+      }
+
+      for (const entry of eventLog) {
+        if (entry.id > parsedLastId || !entry.streamId) continue;
+        const streamState = streamReplayStates.get(entry.streamId);
+        if (streamState && entry.id < streamState.checkpointEventId) continue;
+        if (entry.name === "resync-required") {
+          replaySequences.delete(entry.streamId);
+        } else if (
+          (entry.frameType === "checkpoint" || entry.frameType === "final")
+          && entry.sequence !== undefined
+        ) {
+          replaySequences.set(entry.streamId, entry.sequence);
+        } else if (entry.frameType === "patch" && entry.sequence !== undefined) {
+          const previousSequence = replaySequences.get(entry.streamId);
+          if (previousSequence === undefined || entry.sequence !== previousSequence + 1) {
+            replaySequences.delete(entry.streamId);
+          } else {
+            replaySequences.set(entry.streamId, entry.sequence);
+          }
+        }
+      }
+    }
+
+    const resyncedStreams = new Set<string>();
+    for (let index = 0; index < eventsToReplay.length; index += 1) {
+      const entry = eventsToReplay[index];
+      if (!entry) continue;
+      if (entry.streamId) {
+        const latestCheckpointIndex = latestCheckpointIndexes.get(entry.streamId);
+        if (latestCheckpointIndex !== undefined && index < latestCheckpointIndex) continue;
+
+        if (entry.name === "resync-required") {
+          replaySequences.delete(entry.streamId);
+          resyncedStreams.add(entry.streamId);
+        } else if (
+          (entry.frameType === "checkpoint" || entry.frameType === "final")
+          && entry.sequence !== undefined
+        ) {
+          replaySequences.set(entry.streamId, entry.sequence);
+          resyncedStreams.delete(entry.streamId);
+        } else if (entry.frameType === "patch") {
+          const previousSequence = replaySequences.get(entry.streamId);
+          if (
+            entry.sequence === undefined
+            || previousSequence === undefined
+            || entry.sequence !== previousSequence + 1
+          ) {
+            if (resyncedStreams.has(entry.streamId)) continue;
+            const resyncEntry = makeResyncEntry(entry.id, "checkpoint-unavailable", entry.streamId);
+            if (resyncEntry && !writeSseChunk(res, resyncEntry.chunk)) return false;
+            replaySequences.delete(entry.streamId);
+            resyncedStreams.add(entry.streamId);
+            continue;
+          }
+          replaySequences.set(entry.streamId, entry.sequence);
+        }
+      }
+      if (!writeSseChunk(res, entry.chunk)) return false;
+    }
+    return true;
   };
 
   const closeSse = () => {
@@ -358,12 +649,15 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
           Connection: "keep-alive",
           "X-Accel-Buffering": "no",
         });
-        res.write(": connected\n\n");
         sseClients.add(res);
-        replayEvents(res, req.headers["last-event-id"] ? String(req.headers["last-event-id"]) : null);
-        req.on("close", () => {
+        const releaseClient = () => {
           sseClients.delete(res);
-        });
+        };
+        req.once("close", releaseClient);
+        res.once("close", releaseClient);
+        res.once("error", releaseClient);
+        if (!writeSseChunk(res, ": connected\n\n")) return;
+        replayEvents(res, req.headers["last-event-id"] ? String(req.headers["last-event-id"]) : null);
         return;
       }
 
@@ -494,12 +788,10 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
           sendJson(res, 400, { ok: false, error: "Invalid open-link params" });
           return;
         }
-        let result: UiOpenLinkResult = {};
-        try {
-          new URL(openParams.url);
-        } catch {
-          result = { isError: true };
-        }
+        const normalizedUrl = normalizeOpenLinkUrl(openParams.url);
+        const result: UiOpenLinkResult = normalizedUrl
+          ? { url: normalizedUrl }
+          : { isError: true };
         sendJson(res, 200, { ok: true, result });
         return;
       }
@@ -642,6 +934,23 @@ export async function startUiServer(options: UiServerOptions): Promise<UiServerH
       resolve(handle);
     });
   });
+}
+
+function replayLimit(value: number | undefined, maximum: number): number {
+  if (value === undefined || !Number.isFinite(value)) return maximum;
+  return Math.max(1, Math.min(maximum, Math.floor(value)));
+}
+
+function normalizeOpenLinkUrl(value: string): string | null {
+  let destination: URL;
+  try {
+    destination = new URL(value);
+  } catch {
+    return null;
+  }
+  if (destination.protocol !== "http:" && destination.protocol !== "https:") return null;
+  if (destination.username || destination.password) return null;
+  return destination.href;
 }
 
 async function parseBody(

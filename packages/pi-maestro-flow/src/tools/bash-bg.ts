@@ -12,6 +12,7 @@ import {
 import { toolCallLine, toolResultLine, resultFirstLine } from "../quiet-render.ts";
 import { Type } from "typebox";
 import { spawn, spawnSync } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -23,6 +24,9 @@ const MAX_RETAINED_COMPLETED_JOBS = 64;
 const MAX_SNAPSHOT_TAIL_LINES = 200;
 const SNAPSHOT_THROTTLE_MS = 100;
 const OUTPUT_DRAIN_GRACE_MS = 100;
+const TERMINATION_GRACE_MS = 1_000;
+const WINDOWS_TASKKILL_TIMEOUT_MS = 5_000;
+const TERMINATION_POLL_MS = 25;
 
 export const BASH_BG_UPDATE_EVENT = "bash-bg:update";
 export const BASH_BG_QUERY_EVENT = "bash-bg:query";
@@ -76,6 +80,7 @@ interface Job {
   command: string;
   cwd: string;
   pid: number;
+  child: ChildProcess;
   outFile: string;
   startedAt: number;
   updatedAt: number;
@@ -92,8 +97,14 @@ interface Job {
   background: boolean;
   completionNotified: boolean;
   outputFinalized: boolean;
+  terminationInProgress: boolean;
+  terminationFailure?: string;
+  termination?: Promise<void>;
+  terminal: Promise<void>;
+  resolveTerminal: () => void;
   cachedSnapshot?: BashBgJobSnapshot;
   releaseProcess?: () => void;
+  finishTermination?: (error?: Error) => void;
   outputDrainTimer?: ReturnType<typeof setTimeout>;
 }
 
@@ -121,6 +132,8 @@ function tailOutput(job: Job, lines: number): TailOutput {
 }
 
 function jobStatus(job: Job): BashBgJobStatus {
+  if (job.terminationFailure) return "failed";
+  if (job.terminationInProgress) return "stopping";
   if (!job.done) return job.stopRequested ? "stopping" : "running";
   if (job.stopRequested) return "killed";
   return job.exitCode === 0 ? "completed" : "failed";
@@ -176,29 +189,49 @@ function jobDetails(job: Job, action: string, truncated = false): BashBgDetails 
     action,
     jobId: job.id,
     pid: job.pid,
-    running: !job.done,
+    running: jobIsActive(job),
     exitCode: job.exitCode,
     command: job.command,
     ...(truncated ? { logPath: job.outFile, viewCommand: viewLogCommand(job) } : {}),
   };
 }
 
-function killTree(pid: number): void {
-  if (pid <= 0) return;
-  if (process.platform === "win32") {
-    // spawnSync: async spawn of taskkill silently fails to complete under pi's jiti loader on Windows.
-    spawnSync("taskkill", ["/pid", String(pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-    return;
-  }
-  try {
-    process.kill(-pid, "SIGTERM");
-  } catch {
+function signalProcessTree(child: ChildProcess, pid: number, signal: NodeJS.Signals): void {
+  if (pid > 0) {
     try {
-      process.kill(pid, "SIGTERM");
+      process.kill(-pid, signal);
+      return;
     } catch {
-      // already gone
+      // Fall back to the direct child when it has already left its process group.
     }
   }
+  try {
+    child.kill(signal);
+  } catch {
+    // already gone
+  }
+}
+
+function processGroupRunning(pid: number): boolean {
+  if (pid <= 0) return false;
+  try {
+    process.kill(-pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+function jobOwnsLiveProcessGroup(job: Job): boolean {
+  return process.platform !== "win32" && job.done && processGroupRunning(job.pid);
+}
+
+function jobIsActive(job: Job): boolean {
+  return !job.done || job.terminationInProgress || jobOwnsLiveProcessGroup(job);
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 /**
@@ -245,7 +278,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       };
     }
     const status = jobStatus(job);
-    const terminal = job.done;
+    const terminal = !jobIsActive(job);
     const output = tailOutput(job, lines).text;
     return {
       target: { kind: "bash_bg", id },
@@ -262,6 +295,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       ] }),
       updatedAt: job.updatedAt,
       capabilities: observationCapabilities,
+      ...(job.terminationFailure ? { error: job.terminationFailure } : {}),
     };
   };
 
@@ -271,21 +305,28 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     return new Promise((resolve) => {
       let settled = false;
       let timer: ReturnType<typeof setTimeout> | undefined;
+      let ownershipPoll: ReturnType<typeof setInterval> | undefined;
       const waiters = observationWaiters.get(id) ?? new Set<() => void>();
       observationWaiters.set(id, waiters);
       const finish = (waitStatus?: "timeout" | "aborted"): void => {
         if (settled) return;
         settled = true;
         if (timer) clearTimeout(timer);
+        if (ownershipPoll) clearInterval(ownershipPoll);
         options.signal.removeEventListener("abort", onAbort);
         waiters.delete(onDone);
         if (waiters.size === 0) observationWaiters.delete(id);
         resolve(observationSnapshot(id, options.detail, options.lines, waitStatus));
       };
-      const onDone = () => finish();
+      const onDone = () => {
+        const snapshot = observationSnapshot(id, options.detail, options.lines);
+        if (!snapshot.found || snapshot.phase === "settled") finish();
+      };
       const onAbort = () => finish("aborted");
       waiters.add(onDone);
       options.signal.addEventListener("abort", onAbort, { once: true });
+      ownershipPoll = setInterval(onDone, TERMINATION_POLL_MS);
+      ownershipPoll.unref?.();
       timer = setTimeout(() => finish("timeout"), Math.max(1, options.deadline - Date.now()));
     });
   };
@@ -305,7 +346,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
 
   const pruneCompletedJobs = (): void => {
     const completed = [...jobs.values()]
-      .filter((job) => job.done && job.outputFinalized)
+      .filter((job) => job.done && job.outputFinalized && !jobIsActive(job))
       .sort((a, b) => (a.finishedAt ?? a.updatedAt) - (b.finishedAt ?? b.updatedAt));
     while (completed.length > maxRetainedCompletedJobs) {
       const evicted = completed.shift();
@@ -371,10 +412,78 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     );
   };
 
+  const waitForTerminationBoundary = async (job: Job, includeProcessGroup: boolean, timeoutMs: number): Promise<boolean> => {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      if (job.done && (!includeProcessGroup || !processGroupRunning(job.pid))) return true;
+      await delay(Math.min(TERMINATION_POLL_MS, Math.max(1, deadline - Date.now())));
+    }
+    return job.done && (!includeProcessGroup || !processGroupRunning(job.pid));
+  };
+
+  const terminateJob = (job: Job): Promise<void> => {
+    if (job.termination) return job.termination;
+    const includeProcessGroup = process.platform !== "win32";
+    const boundaryReached = job.done && (!includeProcessGroup || !processGroupRunning(job.pid));
+    if (boundaryReached) {
+      if (job.stopRequested) job.finishTermination?.();
+      return Promise.resolve();
+    }
+
+    job.stopRequested = true;
+    job.terminationInProgress = true;
+    job.terminationFailure = undefined;
+    job.cachedSnapshot = undefined;
+    job.updatedAt = Date.now();
+    publishSnapshot();
+
+    const termination = (async () => {
+      let terminated = false;
+      let taskkillTimedOut = false;
+      if (process.platform === "win32") {
+        // spawnSync: async spawn of taskkill silently fails to complete under pi's jiti loader on Windows.
+        if (job.pid > 0) {
+          const result = spawnSync("taskkill", ["/pid", String(job.pid), "/T", "/F"], {
+            stdio: "ignore",
+            windowsHide: true,
+            timeout: WINDOWS_TASKKILL_TIMEOUT_MS,
+            killSignal: "SIGKILL",
+          });
+          taskkillTimedOut = (result.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
+        }
+        terminated = await waitForTerminationBoundary(job, false, TERMINATION_GRACE_MS);
+      } else {
+        signalProcessTree(job.child, job.pid, "SIGTERM");
+        terminated = await waitForTerminationBoundary(job, true, TERMINATION_GRACE_MS);
+        if (!terminated) {
+          signalProcessTree(job.child, job.pid, "SIGKILL");
+          terminated = await waitForTerminationBoundary(job, true, TERMINATION_GRACE_MS);
+        }
+      }
+
+      if (!terminated) {
+        const boundary = includeProcessGroup ? `POSIX process group ${job.pid}` : `process ${job.pid}`;
+        const timeout = taskkillTimedOut ? " (taskkill timed out)" : "";
+        throw new Error(`Failed to terminate bash job ${job.id}: ${boundary} is still alive${timeout}.`);
+      }
+      job.finishTermination?.();
+    })().catch((error: unknown) => {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      job.finishTermination?.(failure);
+      throw failure;
+    });
+    job.termination = termination;
+    void termination.then(
+      () => { if (job.termination === termination) job.termination = undefined; },
+      () => { if (job.termination === termination) job.termination = undefined; },
+    );
+    return termination;
+  };
+
   const startJob = (command: string, workdir: string, background: boolean): Job => {
     if (disposed) throw new Error("bash_bg is unavailable outside an active session runtime.");
     const generation = runtimeGeneration;
-    const activeJobs = [...jobs.values()].filter((job) => !job.done).length;
+    const activeJobs = [...jobs.values()].filter(jobIsActive).length;
     if (activeJobs >= maxActiveJobs) {
       throw new Error(`Too many active background jobs (${activeJobs}/${maxActiveJobs}). Wait for or stop an existing job.`);
     }
@@ -397,11 +506,16 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       fs.rmSync(outFile, { force: true });
       throw error;
     }
+    let resolveTerminal!: () => void;
+    const terminal = new Promise<void>((resolve) => {
+      resolveTerminal = resolve;
+    });
     const job: Job = {
       id,
       command,
       cwd: workdir,
       pid: child.pid ?? -1,
+      child,
       outFile,
       startedAt: Date.now(),
       updatedAt: Date.now(),
@@ -417,6 +531,9 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       background,
       completionNotified: false,
       outputFinalized: false,
+      terminationInProgress: false,
+      terminal,
+      resolveTerminal,
     };
     jobs.set(id, job);
     publishSnapshot();
@@ -463,9 +580,12 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       job.exitCode = code;
       job.updatedAt = Date.now();
       job.finishedAt = job.updatedAt;
+      job.resolveTerminal();
       if (disposed || generation !== runtimeGeneration) return;
       publishSnapshot();
-      for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();
+      if (!job.terminationInProgress) {
+        for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();
+      }
     };
     const finalizeOutput = (): void => {
       if (job.outputFinalized) return;
@@ -480,12 +600,32 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       pruneCompletedJobs();
       publishSnapshot();
     };
+    job.finishTermination = (error) => {
+      job.cachedSnapshot = undefined;
+      job.updatedAt = Date.now();
+      if (error) {
+        job.terminationInProgress = false;
+        job.terminationFailure = error.message;
+        job.finishedAt ??= job.updatedAt;
+        publishSnapshot();
+        for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();
+        return;
+      }
+      job.terminationInProgress = false;
+      job.terminationFailure = undefined;
+      const outputWasFinalized = job.outputFinalized;
+      markDone(job.exitCode);
+      finalizeOutput();
+      if (outputWasFinalized && !disposed && generation === runtimeGeneration) publishSnapshot();
+      for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();
+    };
     onExit = (code) => {
       exitCode = code;
       // Process exit is the lifecycle boundary. Waiting indefinitely for close
       // misclassifies a finished shell as running when a descendant inherited
       // its stdout/stderr pipes.
       markDone(code);
+      if (job.terminationInProgress) return;
       if (disposed || generation !== runtimeGeneration) {
         finalizeOutput();
         return;
@@ -495,12 +635,12 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     };
     onClose = (code) => {
       markDone(code ?? exitCode);
-      finalizeOutput();
+      if (!job.terminationInProgress) finalizeOutput();
     };
     onError = (error) => {
       append(Buffer.from(`\n${error.message}\n`));
       markDone(exitCode ?? -1);
-      finalizeOutput();
+      if (!job.terminationInProgress) finalizeOutput();
     };
     child.stdout?.on("data", append);
     child.stderr?.on("data", append);
@@ -510,6 +650,29 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
     // Do not let the child keep pi's loop alive; close still fires while pi is interactive.
     child.unref();
     return job;
+  };
+
+  const waitForRunBoundary = (
+    job: Job,
+    timeoutMs: number,
+    signal: AbortSignal | undefined,
+  ): Promise<"completed" | "timeout" | "aborted"> => {
+    if (signal?.aborted) return Promise.resolve("aborted");
+    if (job.done) return Promise.resolve("completed");
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (outcome: "completed" | "timeout" | "aborted"): void => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", onAbort);
+        resolve(outcome);
+      };
+      const onAbort = () => finish("aborted");
+      const timer = setTimeout(() => finish("timeout"), timeoutMs);
+      signal?.addEventListener("abort", onAbort, { once: true });
+      void job.terminal.then(() => finish("completed"));
+    });
   };
 
   initializeRuntime();
@@ -552,15 +715,13 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
         if (!params.command) throw new Error("bash_bg run requires 'command'.");
         const job = startJob(params.command, params.cwd || process.cwd(), false);
         const windowMs = (params.timeout ?? 30) * 1000;
-        const deadline = Date.now() + windowMs;
-        while (!job.done && Date.now() < deadline) {
-          if (signal?.aborted) {
-            job.background = true;
-            throw new Error("aborted");
-          }
-          await new Promise((resolve) => setTimeout(resolve, 200));
+        const outcome = await waitForRunBoundary(job, windowMs, signal);
+        if (outcome === "aborted") {
+          job.background = false;
+          await terminateJob(job);
+          throw new Error("aborted");
         }
-        if (job.done) {
+        if (outcome === "completed" || job.done) {
           const out = tailOutput(job, params.tail ?? 200);
           return {
             content: [{
@@ -612,14 +773,12 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
       }
 
       if (params.action === "kill") {
-        if (!job.done) {
-          job.stopRequested = true;
-          job.updatedAt = Date.now();
-          publishSnapshot();
-          killTree(job.pid);
-        }
+        const alreadyFinished = job.done
+          && !job.terminationFailure
+          && (process.platform === "win32" || !processGroupRunning(job.pid));
+        await terminateJob(job);
         return {
-          content: [{ type: "text", text: `${job.done ? "Job already finished" : "Stopping job"} ${job.id} (pid ${job.pid}).` }],
+          content: [{ type: "text", text: `${alreadyFinished ? "Job already finished" : job.done ? "Stopped job" : "Stopping job"} ${job.id} (pid ${job.pid}).` }],
           details: jobDetails(job, "kill"),
         };
       }
@@ -676,7 +835,7 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
 
   // Re-announce running jobs after compaction: the in-memory registry survives in-process compaction, but the compacted summary may drop pending-job awareness.
   pi.on("session_compact", () => {
-    const running = [...jobs.values()].filter((job) => !job.done);
+    const running = [...jobs.values()].filter(jobIsActive);
     if (running.length === 0) return;
     const lines = running.map((job) => `- ${job.id} (pid ${job.pid}): ${job.command}`);
     const body = [
@@ -691,29 +850,25 @@ export function registerBashBg(pi: ExtensionAPI, options: RegisterBashBgOptions 
   });
 
   // Session end terminates background jobs (no orphans); completed results already persist as session messages, so resume keeps their history and output.
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", async () => {
     if (disposed) return;
     if (snapshotTimer) {
       clearTimeout(snapshotTimer);
       snapshotTimer = undefined;
     }
     const retiringBaseDir = baseDir;
-    for (const job of jobs.values()) {
-      job.background = false;
-      if (!job.done) {
-        job.done = true; // suppress the kill-triggered completion notification
-        job.stopRequested = true;
-        job.exitCode = null;
-        job.updatedAt = Date.now();
-        job.finishedAt = job.updatedAt;
-        killTree(job.pid);
-      }
+    const retiringJobs = [...jobs.values()];
+    for (const job of retiringJobs) job.background = false;
+    await Promise.all(retiringJobs.map((job) => terminateJob(job)));
+
+    for (const job of retiringJobs) {
       if (job.outputDrainTimer) {
         clearTimeout(job.outputDrainTimer);
         job.outputDrainTimer = undefined;
       }
       job.releaseProcess?.();
       job.releaseProcess = undefined;
+      job.finishTermination = undefined;
       job.outputFinalized = true;
       job.cachedSnapshot = undefined;
       for (const settle of [...(observationWaiters.get(job.id) ?? [])]) settle();

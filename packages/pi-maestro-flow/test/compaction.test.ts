@@ -48,6 +48,9 @@ import {
   effectiveReserveTokens,
   estimateContextTokens,
   MAX_CONSECUTIVE_COMPACTION_FAILURES,
+  MAX_OFF_BRANCH_PRUNE_BYTES,
+  MAX_OFF_BRANCH_PRUNE_ENTRIES,
+  MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS,
   MAX_OUTPUT_LIMIT_COMPACTIONS,
   observeVelocity,
   recordCompactionFailure,
@@ -1426,14 +1429,14 @@ test("prune manifest persistence retries after appendEntry fails", async () => {
   });
   const ctx = {
     cwd: "D:\\repo",
-    model: { contextWindow: 1_000 },
+    model: { contextWindow: 10_000 },
     abort() {},
-    sessionManager: { getBranch: () => [{ type: "message" }] },
+    sessionManager: { getSessionId: () => "retry-prune", getBranch: () => [{ type: "message" }] },
     ui: { setStatus() {}, notify() {} },
   } as never;
 
-  assert.ok(await guard.evaluate(pressureToolBatch(), ctx));
-  assert.ok(await guard.evaluate(pressureToolBatch(), ctx));
+  assert.ok(await guard.evaluate(spillShapedTranscript("retry-call") as never, ctx));
+  assert.ok(await guard.evaluate(spillShapedTranscript("retry-call") as never, ctx));
   assert.equal(appendAttempts, 2, "failed persistence must not publish the manifest key");
 });
 
@@ -3707,7 +3710,7 @@ test("L2 spill replacement is byte-identical after a session-state restore", asy
   const firstReplacement = JSON.stringify(first?.[1]);
   assert.match(firstReplacement, /<persisted-output>/);
   const persisted = appended.at(-1);
-  assert.equal((persisted?.data as { version?: number }).version, 5);
+  assert.equal((persisted?.data as { version?: number }).version, 6);
 
   const resumedGuard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
     readSettings: () => settings,
@@ -4693,6 +4696,229 @@ test("a prune survives a tool result leaving and re-entering the window", async 
   // content — not a freshly recomputed one, and certainly not the original text.
   const back = await guard.evaluate(branchA, ctx);
   assert.equal(JSON.stringify(back?.[1]), stableReplacement);
+});
+
+function lowPressureSpillTranscript(callId: string): unknown[] {
+  const messages = spillShapedTranscript(callId);
+  const latest = messages[3] as { usage: { input: number; totalTokens: number } };
+  latest.usage = { ...latest.usage, input: 100, totalTokens: 100 };
+  return messages;
+}
+
+test("periodic prune checkpoints bound long-journal reload suffix and preserve exact replacements", async () => {
+  const manager = SessionManager.inMemory("D:\\repo", { id: "bounded-prune-journal" });
+  manager.appendMessage({ role: "user", content: "root" } as never);
+  const appended: unknown[] = [];
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) {
+      if (type === "maestro-auto-prune-state") appended.push(data);
+      manager.appendCustomEntry(type, data);
+    },
+    sendUserMessage() {},
+  } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    sessionManager: manager,
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+
+  guard.onSessionStart(ctx);
+  const generations = MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS * 2 + 16;
+  let firstReplacement = "";
+  for (let index = 0; index < generations; index++) {
+    const transformed = await guard.evaluate(spillShapedTranscript(`bounded-${index}`) as never, ctx);
+    assert.ok(transformed, `generation ${index} should record a prune`);
+    if (index === 0) firstReplacement = JSON.stringify(transformed[1]);
+  }
+
+  const journals = appended as Array<{
+    mode?: string;
+    prunes?: unknown[];
+    upserts?: unknown[];
+    removals?: unknown[];
+  }>;
+  const checkpointIndexes = journals.flatMap((entry, index) => entry.mode === "checkpoint" ? [index] : []);
+  assert.deepEqual(checkpointIndexes, [
+    0,
+    MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS + 1,
+    (MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS + 1) * 2,
+  ]);
+  assert.equal(journals.length, generations, "the append-only host retains every journal record");
+  assert.ok(journals.every((entry, index) => entry.mode === "checkpoint"
+    ? entry.prunes?.length === index + 1
+    : entry.upserts?.length === 1 && entry.removals?.length === 0));
+  for (let index = 1; index < checkpointIndexes.length; index++) {
+    assert.ok(
+      checkpointIndexes[index] - checkpointIndexes[index - 1] - 1 <= MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS,
+      "checkpoint cadence bounds each delta run",
+    );
+  }
+
+  let journalReads = 0;
+  const replayManager = {
+    getSessionId: () => manager.getSessionId(),
+    getBranch: () => manager.getBranch().map((entry) => {
+      if (entry.type !== "custom" || entry.customType !== "maestro-auto-prune-state") return entry;
+      return {
+        type: entry.type,
+        id: entry.id,
+        customType: entry.customType,
+        get data() {
+          journalReads += 1;
+          return entry.data;
+        },
+      };
+    }),
+  };
+  const replayAppended: Array<{ mode?: string }> = [];
+  const replayGuard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) {
+      if (type === "maestro-auto-prune-state") replayAppended.push(data as { mode?: string });
+      manager.appendCustomEntry(type, data);
+    },
+    sendUserMessage() {},
+  } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 }),
+  });
+  const replayCtx = { ...ctx, sessionManager: replayManager } as never;
+  replayGuard.onSessionStart(replayCtx);
+  const lastCheckpointIndex = checkpointIndexes.at(-1)!;
+  assert.equal(journalReads, journals.length - lastCheckpointIndex, "reload reads only the latest checkpoint suffix once");
+  assert.ok(journalReads <= MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS + 1);
+
+  const restored = await replayGuard.evaluate(lowPressureSpillTranscript("bounded-0") as never, replayCtx);
+  assert.equal(JSON.stringify(restored?.[1]), firstReplacement, "an old reachable prune remains byte-identical");
+
+  const loadedDeltaCount = journals.length - lastCheckpointIndex - 1;
+  const remainingDeltas = MAX_PRUNE_DELTAS_BETWEEN_CHECKPOINTS - loadedDeltaCount;
+  for (let index = 0; index < remainingDeltas; index++) {
+    assert.ok(await replayGuard.evaluate(spillShapedTranscript(`resumed-${index}`) as never, replayCtx));
+  }
+  assert.ok(replayAppended.every((entry) => entry.mode === "delta"));
+  assert.ok(await replayGuard.evaluate(spillShapedTranscript("resumed-checkpoint") as never, replayCtx));
+  assert.equal(replayAppended.at(-1)?.mode, "checkpoint", "loaded delta count continues the checkpoint cadence");
+});
+
+test("off-branch prune cache is count-bounded and evicted branches reload exactly", async () => {
+  const manager = SessionManager.inMemory("D:\\repo", { id: "count-bounded-prunes" });
+  const rootId = manager.appendMessage({ role: "user", content: "root" } as never);
+  let hidePruneJournal = false;
+  const persistedPayloads: unknown[] = [];
+  const sessionManager = {
+    getSessionId: () => manager.getSessionId(),
+    getBranch: () => manager.getBranch().filter((entry) => !hidePruneJournal
+      || entry.type !== "custom"
+      || entry.customType !== "maestro-auto-prune-state"),
+  };
+  const guard = createMidTurnAutoCompaction({
+    appendEntry(type: string, data: unknown) {
+      if (type === "maestro-auto-prune-state") persistedPayloads.push(data);
+      manager.appendCustomEntry(type, data);
+    },
+    sendUserMessage() {},
+  } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 10_000 },
+    sessionManager,
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const branches: Array<{ tip: string; replacement: string }> = [];
+
+  for (let index = 0; index < MAX_OFF_BRANCH_PRUNE_ENTRIES + 8; index++) {
+    manager.branch(rootId);
+    manager.appendMessage({ role: "user", content: `branch-${index}` } as never);
+    const transformed = await guard.evaluate(spillShapedTranscript(`branch-call-${index}`) as never, ctx);
+    assert.ok(transformed, `branch ${index} should record a prune`);
+    branches.push({ tip: manager.getLeafId()!, replacement: JSON.stringify(transformed[1]) });
+  }
+
+  const persisted = persistedPayloads as Array<{ prunes?: unknown[]; upserts?: unknown[] }>;
+  assert.ok(persisted.every((entry) => (entry.prunes?.length ?? entry.upserts?.length ?? 0) <= 1));
+
+  hidePruneJournal = true;
+  manager.branch(branches[0].tip);
+  const evicted = await guard.evaluate(lowPressureSpillTranscript("branch-call-0") as never, ctx);
+  assert.equal(evicted, undefined, "the deterministic oldest checkpoint is evicted from memory");
+
+  const recentIndex = branches.length - 2;
+  manager.branch(branches[recentIndex].tip);
+  const cached = await guard.evaluate(lowPressureSpillTranscript(`branch-call-${recentIndex}`) as never, ctx);
+  assert.equal(JSON.stringify(cached?.[1]), branches[recentIndex].replacement, "a recent off-branch checkpoint stays cached");
+
+  hidePruneJournal = false;
+  manager.branch(rootId);
+  await guard.evaluate([{ role: "user", content: "ancestor" }] as never, ctx);
+  manager.branch(branches[0].tip);
+  const reloaded = await guard.evaluate(lowPressureSpillTranscript("branch-call-0") as never, ctx);
+  assert.equal(
+    JSON.stringify(reloaded?.[1]),
+    branches[0].replacement,
+    "ancestor-to-descendant navigation reloads the evicted descendant while the ancestor remains reachable",
+  );
+});
+
+test("off-branch prune cache is serialized-byte bounded by whole checkpoint", async () => {
+  const manager = SessionManager.inMemory("D:\\repo", { id: "byte-bounded-prunes" });
+  const rootId = manager.appendMessage({ role: "user", content: "root" } as never);
+  const branches: string[] = [];
+  const replacementText = "r".repeat(Math.floor(MAX_OFF_BRANCH_PRUNE_BYTES / 5));
+  for (let index = 0; index < 8; index++) {
+    manager.branch(rootId);
+    const checkpointId = manager.appendMessage({ role: "user", content: `bytes-${index}` } as never);
+    manager.appendCustomEntry("maestro-auto-prune-state", {
+      version: 6,
+      sessionId: manager.getSessionId(),
+      checkpointId,
+      mode: "checkpoint",
+      prunes: [{ callId: `bytes-call-${index}`, level: "dedup", checkpointId, replacementText }],
+    });
+    branches.push(manager.getLeafId()!);
+  }
+  let hidePruneJournal = false;
+  const sessionManager = {
+    getSessionId: () => manager.getSessionId(),
+    getBranch: () => manager.getBranch().filter((entry) => !hidePruneJournal
+      || entry.type !== "custom"
+      || entry.customType !== "maestro-auto-prune-state"),
+  };
+  const guard = createMidTurnAutoCompaction({ appendEntry() {}, sendUserMessage() {} } as never, {
+    readSettings: () => ({ enabled: true, reserveTokens: 1_000, keepRecentTokens: 1_000 }),
+  });
+  const ctx = {
+    cwd: "D:\\repo",
+    model: { contextWindow: 100_000 },
+    sessionManager,
+    ui: { setStatus() {}, notify() {} },
+  } as never;
+  const idle = [{ role: "user", content: [{ type: "text", text: "idle" }] }] as never;
+  for (const tip of branches) {
+    manager.branch(tip);
+    await guard.evaluate(idle, ctx);
+  }
+
+  hidePruneJournal = true;
+  manager.branch(branches[0]);
+  const raw = [{
+    role: "toolResult",
+    toolCallId: "bytes-call-0",
+    toolName: "read",
+    content: [{ type: "text", text: "x".repeat(replacementText.length + 8_000) }],
+    isError: false,
+  }, { role: "user", content: [{ type: "text", text: "resume" }] }] as never;
+  assert.equal(await guard.evaluate(raw, ctx), undefined, "the oldest oversized checkpoint is evicted as a unit");
+
+  hidePruneJournal = false;
+  manager.branch(branches.at(-1)!);
+  await guard.evaluate(idle, ctx);
+  manager.branch(branches[0]);
+  const reloaded = await guard.evaluate(raw, ctx);
+  assert.equal((reloaded?.[0] as { content?: Array<{ text?: string }> })?.content?.[0]?.text, replacementText);
 });
 
 // ---------------------------------------------------------------------------

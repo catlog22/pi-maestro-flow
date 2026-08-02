@@ -48,12 +48,14 @@ import {
   type GoalContext,
 } from "../src/tools/goal.ts";
 
-test("goal acceptance schema documents create/update and deterministic verification", () => {
-  const description = GoalToolParams.properties.acceptance.description ?? "";
+test("goal acceptance schema documents create/update, deterministic verification, and the command length boundary", () => {
+  const acceptanceSchema = GoalToolParams.properties.acceptance;
+  const description = acceptanceSchema.description ?? "";
   assert.match(description, /create or update/);
   assert.match(description, /directly determines verification/);
   assert.match(description, /without commands.*agent verifier/);
   assert.doesNotMatch(description, /create only/);
+  assert.equal((acceptanceSchema.items as { maxLength?: number }).maxLength, 500);
 });
 import { buildTodoMirrorSpecs } from "../src/session/bridge.ts";
 import {
@@ -223,6 +225,204 @@ test("Goal create, update, and clear publish nothing when appendEntry fails", as
     if (getActiveGoal()) await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
     setGoalStateChangeListener(undefined);
+  }
+});
+
+test("verified completion done append failure publishes no completion state", async () => {
+  let appendCalls = 0;
+  let failAt = 2;
+  let listenerCalls = 0;
+  const statuses: Array<string | undefined> = [];
+  const notifications: string[] = [];
+  const usePersistence = () => initGoal({
+    appendEntry() {
+      appendCalls++;
+      if (appendCalls === failAt) throw new Error("done append failed");
+    },
+    sendMessage() {},
+  } as never);
+  setAcceptanceRunnerForTest(async (command) => ({ command, exitCode: 0, output: "passed" }));
+  setGoalStateChangeListener(() => { listenerCalls++; });
+  usePersistence();
+  const ctx = createContext({
+    isIdle: () => false,
+    sessionManager: { getEntries: () => [] },
+    ui: {
+      notify(message) { notifications.push(message); },
+      setStatus(_key, value) { statuses.push(value); },
+    },
+  });
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    await executeGoal({ action: "create", objective: "Persist completion atomically", acceptance: ["test:goal"] }, ctx);
+    const listenerCallsBeforeCompletion = listenerCalls;
+    await assert.rejects(
+      executeGoal({ action: "complete", summary: "Focused Goal tests passed." }, ctx),
+      /done append failed/,
+    );
+    assert.equal(getActiveGoal()?.status, "active");
+    assert.equal(listenerCalls, listenerCallsBeforeCompletion);
+    assert.equal(statuses.includes("done"), false);
+    assert.equal(notifications.some((message) => message.startsWith("Goal done")), false);
+  } finally {
+    failAt = Number.POSITIVE_INFINITY;
+    usePersistence();
+    if (getActiveGoal()) await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalStateChangeListener(undefined);
+    setAcceptanceRunnerForTest(undefined);
+  }
+});
+
+test("verified completion deselection append failure defers completion UI and listener publication", async () => {
+  let appendCalls = 0;
+  let failAt = 3;
+  let listenerCalls = 0;
+  const statuses: Array<string | undefined> = [];
+  const notifications: string[] = [];
+  const usePersistence = () => initGoal({
+    appendEntry() {
+      appendCalls++;
+      if (appendCalls === failAt) throw new Error("deselection append failed");
+    },
+    sendMessage() {},
+  } as never);
+  setAcceptanceRunnerForTest(async (command) => ({ command, exitCode: 0, output: "passed" }));
+  setGoalStateChangeListener(() => { listenerCalls++; });
+  usePersistence();
+  const ctx = createContext({
+    isIdle: () => false,
+    sessionManager: { getEntries: () => [] },
+    ui: {
+      notify(message) { notifications.push(message); },
+      setStatus(_key, value) { statuses.push(value); },
+    },
+  });
+  onSessionStart(ctx, { reason: "new" });
+  try {
+    await executeGoal({ action: "create", objective: "Publish completion after deselection", acceptance: ["test:goal"] }, ctx);
+    const listenerCallsBeforeCompletion = listenerCalls;
+    await assert.rejects(
+      executeGoal({ action: "complete", summary: "Focused Goal tests passed." }, ctx),
+      /deselection append failed/,
+    );
+    assert.equal(getActiveGoal()?.status, "done", "the successful done append remains the durable current state");
+    assert.equal(listenerCalls, listenerCallsBeforeCompletion);
+    assert.equal(statuses.includes("done"), false);
+    assert.equal(notifications.some((message) => message.startsWith("Goal done")), false);
+  } finally {
+    failAt = Number.POSITIVE_INFINITY;
+    usePersistence();
+    if (getActiveGoal()) await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+    setGoalStateChangeListener(undefined);
+    setAcceptanceRunnerForTest(undefined);
+  }
+});
+
+test("verified completion durably detaches its Todo quality gate before publishing completion", async () => {
+  type SessionEntry = { type: "custom"; customType: string; data: unknown };
+  const entries: SessionEntry[] = [];
+  const appendEntry = (customType: string, data: unknown) => {
+    entries.push({ type: "custom", customType, data });
+  };
+  const sessionManager = { getSessionId: () => "verified-detach", getEntries: () => entries };
+  const goalCtx = createContext({ isIdle: () => false, sessionManager });
+  const todoCtx = { cwd: goalCtx.cwd, sessionManager, ui: { setStatus() {} } } as unknown as TodoContext;
+  const todoToolCtx = { cwd: goalCtx.cwd, ui: { notify() {}, setStatus() {} } } as never;
+  initGoal({ appendEntry } as never);
+  initTodo({ appendEntry } as never);
+  setAcceptanceRunnerForTest(async (command) => ({ command, exitCode: 0, output: "passed" }));
+  await onSessionStart(goalCtx, { reason: "new" });
+  todoOnSessionStart(todoCtx);
+
+  try {
+    const goal = addGoal("Verified quality gate", goalCtx, { acceptance: ["test:goal"] });
+    await executeTodo({ action: "create", subject: "Bound until verified", goalId: goal.id }, todoToolCtx);
+    const completionEntryStart = entries.length;
+
+    const result = await executeGoal({ action: "complete", summary: "Focused checks passed." }, goalCtx);
+
+    assert.equal(result.isError, false);
+    assert.equal(getActiveGoal(), undefined);
+    assert.equal(getVisibleTasks()[0]?.goalId, undefined);
+    assert.deepEqual(
+      entries.slice(completionEntryStart).map((entry) => entry.customType),
+      ["goal-state", "todo-state", "goal-state"],
+    );
+    const verified = entries[completionEntryStart]?.data as {
+      goal?: { id?: string; status?: string };
+      pendingTodoDetachGoalIds?: string[];
+    };
+    assert.equal(verified.goal?.id, goal.id);
+    assert.equal(verified.goal?.status, "done");
+    assert.deepEqual(verified.pendingTodoDetachGoalIds, [goal.id]);
+    const settled = entries.at(-1)?.data as { pendingTodoDetachGoalIds?: string[]; currentGoalId?: string };
+    assert.equal(settled.pendingTodoDetachGoalIds, undefined);
+    assert.equal(settled.currentGoalId, undefined);
+  } finally {
+    setAcceptanceRunnerForTest(undefined);
+    todoOnSessionShutdown(todoCtx);
+    onSessionShutdown(goalCtx);
+  }
+});
+
+test("verified completion Todo persistence failure leaves a durable detach marker recoverable after restart", async () => {
+  type SessionEntry = { type: "custom"; customType: string; data: unknown };
+  const entries: SessionEntry[] = [];
+  const appendEntry = (customType: string, data: unknown) => {
+    entries.push({ type: "custom", customType, data });
+  };
+  const sessionManager = { getSessionId: () => "verified-detach-restart", getEntries: () => entries };
+  const firstGoalCtx = createContext({ isIdle: () => false, sessionManager });
+  const firstTodoCtx = { cwd: firstGoalCtx.cwd, sessionManager, ui: { setStatus() {} } } as unknown as TodoContext;
+  const todoToolCtx = { cwd: firstGoalCtx.cwd, ui: { notify() {}, setStatus() {} } } as never;
+  initGoal({ appendEntry } as never);
+  initTodo({ appendEntry } as never);
+  setAcceptanceRunnerForTest(async (command) => ({ command, exitCode: 0, output: "passed" }));
+  await onSessionStart(firstGoalCtx, { reason: "new" });
+  todoOnSessionStart(firstTodoCtx);
+
+  let secondGoalCtx: GoalContext | undefined;
+  let secondTodoCtx: TodoContext | undefined;
+  try {
+    const goal = addGoal("Recover verified detach", firstGoalCtx, { acceptance: ["test:goal"] });
+    await executeTodo({ action: "create", subject: "Durably bound task", goalId: goal.id }, todoToolCtx);
+    const taskId = getVisibleTasks()[0]!.id;
+    initTodo({ appendEntry() { throw new Error("todo completion detach failed"); } } as never);
+
+    await assert.rejects(
+      executeGoal({ action: "complete", summary: "Acceptance passed." }, firstGoalCtx),
+      /todo completion detach failed/,
+    );
+    assert.equal(getActiveGoal()?.status, "done");
+    assert.equal(getVisibleTasks()[0]?.goalId, goal.id);
+    const interrupted = entries.filter((entry) => entry.customType === "goal-state").at(-1)?.data as {
+      goal?: { status?: string };
+      pendingTodoDetachGoalIds?: string[];
+    };
+    assert.equal(interrupted.goal?.status, "done");
+    assert.deepEqual(interrupted.pendingTodoDetachGoalIds, [goal.id]);
+
+    onSessionShutdown(firstGoalCtx);
+    todoOnSessionShutdown(firstTodoCtx);
+    initGoal({ appendEntry } as never);
+    initTodo({ appendEntry } as never);
+    secondGoalCtx = createContext({ sessionManager });
+    secondTodoCtx = { cwd: secondGoalCtx.cwd, sessionManager, ui: { setStatus() {} } } as unknown as TodoContext;
+    await onSessionStart(secondGoalCtx, { reason: "startup" });
+    todoOnSessionStart(secondTodoCtx);
+    recoverPendingGoalTodoDetachesAfterTodoStart(secondGoalCtx);
+
+    assert.equal(getVisibleTasks().find((task) => task.id === taskId)?.goalId, undefined);
+    const recovered = entries.filter((entry) => entry.customType === "goal-state").at(-1)?.data as {
+      pendingTodoDetachGoalIds?: string[];
+    };
+    assert.equal(recovered.pendingTodoDetachGoalIds, undefined);
+  } finally {
+    setAcceptanceRunnerForTest(undefined);
+    if (secondTodoCtx) todoOnSessionShutdown(secondTodoCtx);
+    if (secondGoalCtx) onSessionShutdown(secondGoalCtx);
   }
 });
 
@@ -431,6 +631,98 @@ function makeGoalRecord(id: string, text: string, status: "active" | "paused" | 
     iteration: 0, tokensUsed: 0, timeUsedSeconds: 0, baselineTokens: 0,
   };
 }
+
+test("Goal history restart durably detaches many completed Todo gates before enforcing absolute bounds", () => {
+  type SessionEntry = { type: "custom"; customType: string; data: unknown };
+  const entries: SessionEntry[] = [];
+  const sessionId = "bounded-goal-history";
+  const activeObjective = "a".repeat(4_000);
+  const activeAcceptance = Array.from({ length: 5 }, (_, index) => `${index}`.repeat(500));
+  const completedGoals = Array.from({ length: 96 }, (_, index) => ({
+    ...makeGoalRecord(`done-${String(index).padStart(3, "0")}`, "history".repeat(300), "done", index + 1),
+    acceptance: ["x".repeat(500)],
+  }));
+  const active = {
+    ...makeGoalRecord("active-current", activeObjective, "active", 10_000),
+    acceptance: activeAcceptance,
+  };
+  const tasks = Object.fromEntries([
+    ...completedGoals.map((goal, index) => [
+      `bound-${index}`,
+      { id: `bound-${index}`, subject: `Bound ${index}`, status: "pending", goalId: goal.id },
+    ]),
+    ["active-bound", { id: "active-bound", subject: "Active contract", status: "pending", goalId: active.id }],
+  ]);
+  entries.push({
+    type: "custom",
+    customType: "goal-state",
+    data: {
+      version: 2,
+      sessionId,
+      goal: active,
+      goals: [...completedGoals, active],
+      currentGoalId: active.id,
+    },
+  });
+  entries.push({ type: "custom", customType: "todo-state", data: { version: 5, tasks } });
+  const appendEntry = (customType: string, data: unknown) => {
+    entries.push({ type: "custom", customType, data });
+  };
+  const sessionManager = { getSessionId: () => sessionId, getEntries: () => entries };
+  const goalCtx = createContext({ sessionManager });
+  const todoCtx = { cwd: goalCtx.cwd, sessionManager, ui: { setStatus() {} } } as unknown as TodoContext;
+  initGoal({ appendEntry } as never);
+  initTodo({ appendEntry } as never);
+  onSessionStart(goalCtx, { reason: "startup" });
+
+  const repaired = entries.filter((entry) => entry.customType === "goal-state").at(-1)?.data as {
+    goal?: ReturnType<typeof makeGoalRecord> & { acceptance?: string[] };
+    goals?: Array<ReturnType<typeof makeGoalRecord> & { acceptance?: string[] }>;
+    pendingTodoDetachGoalIds?: string[];
+  };
+  const repairedPayloadBytes = Buffer.byteLength(JSON.stringify({
+    goal: repaired.goal ?? null,
+    goals: repaired.goals ?? [],
+    currentGoalId: repaired.goal?.id,
+  }), "utf8");
+  assert.equal(getActiveGoal()?.text, activeObjective);
+  assert.deepEqual(getActiveGoal()?.acceptance, activeAcceptance);
+  assert.ok((repaired.goals?.length ?? 0) <= 64);
+  assert.ok(repairedPayloadBytes <= 64 * 1024);
+  assert.deepEqual(repaired.pendingTodoDetachGoalIds, completedGoals.map((goal) => goal.id));
+
+  todoOnSessionStart(todoCtx);
+  recoverPendingGoalTodoDetachesAfterTodoStart(goalCtx);
+  assert.equal(
+    getVisibleTasks().filter((task) => task.id.startsWith("bound-") && task.goalId !== undefined).length,
+    0,
+  );
+  assert.equal(getVisibleTasks().find((task) => task.id === "active-bound")?.goalId, active.id);
+  const settled = entries.filter((entry) => entry.customType === "goal-state").at(-1)?.data as {
+    goals?: Array<ReturnType<typeof makeGoalRecord>>;
+    pendingTodoDetachGoalIds?: string[];
+  };
+  assert.equal(settled.pendingTodoDetachGoalIds, undefined);
+  assert.ok((settled.goals?.length ?? 0) <= 64);
+
+  onSessionShutdown(goalCtx);
+  todoOnSessionShutdown(todoCtx);
+  initGoal({ appendEntry } as never);
+  initTodo({ appendEntry } as never);
+  const restartedGoalCtx = createContext({ sessionManager });
+  const restartedTodoCtx = { cwd: restartedGoalCtx.cwd, sessionManager, ui: { setStatus() {} } } as unknown as TodoContext;
+  onSessionStart(restartedGoalCtx, { reason: "startup" });
+  todoOnSessionStart(restartedTodoCtx);
+  try {
+    assert.equal(getActiveGoal()?.id, active.id);
+    assert.ok(getGoalList().length <= 64);
+    assert.equal(getVisibleTasks().find((task) => task.id === "active-bound")?.goalId, active.id);
+    assert.equal(getVisibleTasks().some((task) => task.id.startsWith("bound-") && task.goalId), false);
+  } finally {
+    todoOnSessionShutdown(restartedTodoCtx);
+    onSessionShutdown(restartedGoalCtx);
+  }
+});
 
 test("goal-state load normalizes legacy single-goal, null, and v2 multi-goal entries", () => {
   initGoal({ appendEntry() {} } as never);
@@ -1517,18 +1809,109 @@ test("a timed-out acceptance command fails completion with a timed-out unmet ent
   }
 });
 
-test("acceptance commands beyond the limit are truncated to the first five", async () => {
+test("acceptance command count and length violations are rejected without mutating Goal state", async () => {
   initGoal({ appendEntry() {}, sendMessage() {} } as never);
   const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
   onSessionStart(ctx);
   try {
-    await executeGoal({
+    const tooMany = await executeGoal({
       action: "create",
-      objective: "Cap acceptance commands",
-      acceptance: ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6", "cmd-7"],
+      objective: "Reject excessive acceptance commands",
+      acceptance: ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5", "cmd-6"],
     }, ctx);
-    assert.deepEqual(getActiveGoal()?.acceptance, ["cmd-1", "cmd-2", "cmd-3", "cmd-4", "cmd-5"]);
+    assert.equal(tooMany.isError, true);
+    assert.match(tooMany.text, /Too many acceptance commands \(6\/5\)/);
+    assert.equal(getActiveGoal(), undefined);
+
+    const overlong = "x".repeat(501);
+    const tooLong = await executeGoal({
+      action: "create",
+      objective: "Reject overlong acceptance command",
+      acceptance: [overlong],
+    }, ctx);
+    assert.equal(tooLong.isError, true);
+    assert.match(tooLong.text, /Acceptance command 1 too long \(501\/500\)/);
+    assert.equal(getActiveGoal(), undefined);
+
+    const accepted = await executeGoal({
+      action: "create",
+      objective: "Preserve valid acceptance",
+      acceptance: ["v".repeat(500)],
+    }, ctx);
+    assert.equal(accepted.isError, false);
+    const beforeUpdate = getActiveGoal();
+    const rejectedUpdate = await executeGoal({
+      action: "update",
+      objective: "Must not replace the existing Goal",
+      acceptance: [overlong],
+    }, ctx);
+    assert.equal(rejectedUpdate.isError, true);
+    assert.deepEqual(getActiveGoal(), beforeUpdate);
   } finally {
+    if (getActiveGoal()) await executeGoalCommand({ action: "clear" }, ctx);
+    onSessionShutdown(ctx);
+  }
+});
+
+test("accepted commands persist across restart and execute byte-for-byte", async () => {
+  type SessionEntry = { type: "custom"; customType: string; data: unknown };
+  const entries: SessionEntry[] = [];
+  const command = "  node -e \"process.exit(0)\" --token='literal-secret-value'  ";
+  const executed: string[] = [];
+  const appendEntry = (customType: string, data: unknown) => entries.push({ type: "custom", customType, data });
+  const sessionManager = { getSessionId: () => "exact-acceptance", getEntries: () => entries };
+  initGoal({ appendEntry, sendMessage() {} } as never);
+  const firstCtx = createContext({ isIdle: () => false, sessionManager });
+  onSessionStart(firstCtx, { reason: "new" });
+  await executeGoal({ action: "create", objective: "Preserve exact acceptance", acceptance: [command] }, firstCtx);
+  assert.deepEqual(getActiveGoal()?.acceptance, [command]);
+  onSessionShutdown(firstCtx);
+
+  initGoal({ appendEntry, sendMessage() {} } as never);
+  const restartedCtx = createContext({ isIdle: () => false, sessionManager });
+  onSessionStart(restartedCtx, { reason: "startup" });
+  setAcceptanceRunnerForTest(async (received) => {
+    executed.push(received);
+    return { command: received, exitCode: 0, output: "passed" };
+  });
+  try {
+    assert.deepEqual(getActiveGoal()?.acceptance, [command]);
+    const result = await executeGoal({ action: "complete", summary: "Exact command passed." }, restartedCtx);
+    assert.equal(result.isError, false);
+    assert.deepEqual(executed, [command]);
+    const persistedCommands = entries
+      .filter((entry) => entry.customType === "goal-state")
+      .flatMap((entry) => {
+        const data = entry.data as { goals?: Array<{ acceptance?: string[] }> };
+        return data.goals?.flatMap((goal) => goal.acceptance ?? []) ?? [];
+      });
+    assert.ok(persistedCommands.includes(command));
+  } finally {
+    setAcceptanceRunnerForTest(undefined);
+    onSessionShutdown(restartedCtx);
+  }
+});
+
+test("acceptance secrets remain exact in the contract but are redacted from displayed failure output", async () => {
+  const command = "printf 'Authorization: Bearer command-secret-value'";
+  setAcceptanceRunnerForTest(async (received) => ({
+    command: received,
+    exitCode: 1,
+    output: "password=output-secret-value",
+  }));
+  initGoal({ appendEntry() {}, sendMessage() {} } as never);
+  const ctx = createContext({ isIdle: () => false, sessionManager: { getEntries: () => [] } });
+  onSessionStart(ctx);
+  try {
+    await executeGoal({ action: "create", objective: "Redact display only", acceptance: [command] }, ctx);
+    const result = await executeGoal({ action: "complete", summary: "Exercise redaction." }, ctx);
+    assert.deepEqual(getActiveGoal()?.acceptance, [command]);
+    assert.doesNotMatch(getGoalPanelEntries()[0]?.acceptance?.[0] ?? "", /command-secret-value/);
+    assert.match(getGoalPanelEntries()[0]?.acceptance?.[0] ?? "", /\[REDACTED\]/);
+    assert.doesNotMatch(result.text, /command-secret-value|output-secret-value/);
+    assert.match(result.text, /\[REDACTED\]/);
+  } finally {
+    setAcceptanceRunnerForTest(undefined);
     await executeGoalCommand({ action: "clear" }, ctx);
     onSessionShutdown(ctx);
   }

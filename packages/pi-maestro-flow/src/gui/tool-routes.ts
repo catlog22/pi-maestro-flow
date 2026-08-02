@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { ExtensionContext, ToolInfo } from "@earendil-works/pi-coding-agent";
-import { Check } from "typebox/value";
+import type { ExtensionContext, ToolDefinition, ToolInfo } from "@earendil-works/pi-coding-agent";
+import { Check, Convert } from "typebox/value";
 import type { GuiPermissionGateway, GuiServerHandle } from "./types.ts";
 import { getGuiTool, listGuiTools } from "./gui-registry.ts";
 
@@ -32,6 +32,42 @@ interface SerializedToolResult {
   content: unknown;
   details: unknown;
   terminate?: boolean;
+}
+
+const AUTHORIZATION_ABORTED = Symbol("authorization-aborted");
+
+async function authorizeUntilAbort(
+  authorization: Promise<{ block: true; reason: string } | undefined>,
+  signal: AbortSignal,
+): Promise<{ block: true; reason: string } | undefined | typeof AUTHORIZATION_ABORTED> {
+  // Promise.race observes the winner only. Keep the gateway rejection handled
+  // when cancellation wins before or during an uncooperative gateway call.
+  void authorization.catch(() => undefined);
+  if (signal.aborted) return AUTHORIZATION_ABORTED;
+
+  let onAbort: (() => void) | undefined;
+  const aborted = new Promise<typeof AUTHORIZATION_ABORTED>((resolve) => {
+    onAbort = () => resolve(AUTHORIZATION_ABORTED);
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([authorization, aborted]);
+  } finally {
+    if (onAbort) signal.removeEventListener("abort", onAbort);
+  }
+}
+
+function convertToolArguments(
+  parameters: ToolDefinition["parameters"],
+  rawArgs: unknown,
+): Record<string, unknown> | undefined {
+  try {
+    const args = structuredClone(rawArgs);
+    Convert(parameters, args);
+    return Check(parameters, args) ? args as Record<string, unknown> : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function serializeToolResult(result: AgentToolResult<unknown>): SerializedToolResult {
@@ -116,10 +152,10 @@ export function registerToolRoutes(server: GuiServerHandle, deps: ToolRouteDeps)
       return { status: 503, error: `No parameter schema for GUI tool: ${name}`, code: "schema_unavailable" };
     }
     const rawArgs = req.body && Object.hasOwn(req.body, "args") ? req.body.args : {};
-    if (!Check(parameters, rawArgs)) {
+    const args = convertToolArguments(parameters, rawArgs);
+    if (!args) {
       return { status: 400, error: "Invalid tool arguments", code: "invalid_args" };
     }
-    const args = rawArgs as Record<string, unknown>;
 
     const toolCallId = randomUUID();
     const invokeId =
@@ -142,8 +178,9 @@ export function registerToolRoutes(server: GuiServerHandle, deps: ToolRouteDeps)
     let executionStarted = false;
     let invokeOk = false;
     try {
-      const block = await gateway.authorize(name, args);
-      if (controller.signal.aborted) {
+      const authorization = gateway.authorize(name, args, controller.signal);
+      const block = await authorizeUntilAbort(authorization, controller.signal);
+      if (block === AUTHORIZATION_ABORTED) {
         return { status: 499, error: "Invocation cancelled", code: "cancelled" };
       }
       if (block) {

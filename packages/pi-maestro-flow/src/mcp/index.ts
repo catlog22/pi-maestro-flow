@@ -16,10 +16,205 @@ export interface McpAdapterHandle {
   openManager(ctx: ExtensionContext): Promise<void>;
 }
 
+export interface McpSessionLifecycleOptions {
+  initializationDrainTimeoutMs?: number;
+}
+
+const DEFAULT_INITIALIZATION_DRAIN_TIMEOUT_MS = 5_000;
+
+async function waitUntilDeadline(
+  promise: Promise<void>,
+  timeoutMs: number,
+): Promise<"settled" | "deadline"> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(() => "settled" as const),
+      new Promise<"deadline">((resolve) => {
+        timeout = setTimeout(() => resolve("deadline"), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+interface InitializationRecord<T> {
+  generation: number;
+  controller: AbortController;
+  promise: Promise<T>;
+  completion: Promise<void>;
+  cleanupReason: string;
+}
+
+export class McpSessionLifecycle<T> {
+  private generation = 0;
+  private operationTail: Promise<void> = Promise.resolve();
+  private state: T | null = null;
+  private initialization: InitializationRecord<T> | null = null;
+
+  constructor(
+    private readonly dispose: (state: T, reason: string) => Promise<void>,
+    private readonly onStateChange: (state: T | null) => void,
+    private readonly onInitPromiseChange: (promise: Promise<T> | null) => void,
+    private readonly onReady: (state: T) => void,
+    private readonly onError: (message: string, error: unknown) => void,
+    options: McpSessionLifecycleOptions = {},
+  ) {
+    this.initializationDrainTimeoutMs = normalizeDrainTimeoutMs(
+      options.initializationDrainTimeoutMs,
+      DEFAULT_INITIALIZATION_DRAIN_TIMEOUT_MS,
+    );
+  }
+
+  private readonly initializationDrainTimeoutMs: number;
+
+  restart(
+    reason: string,
+    prepare: () => Promise<void>,
+    initialize: (signal: AbortSignal) => Promise<T>,
+  ): Promise<void> {
+    const generation = ++this.generation;
+    this.abortInitialization(reason);
+    return this.enqueue(async () => {
+      await this.disposeOwned(reason);
+      if (generation !== this.generation) return;
+      await prepare();
+      if (generation !== this.generation) return;
+      this.beginInitialization(generation, initialize);
+    });
+  }
+
+  shutdown(reason: string, prepare: () => Promise<void>): Promise<void> {
+    ++this.generation;
+    this.abortInitialization(reason);
+    return this.enqueue(async () => {
+      const results = await Promise.allSettled([
+        this.disposeOwned(reason),
+        prepare(),
+      ]);
+      const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+      if (failure) throw failure.reason;
+    });
+  }
+
+  async awaitInitializedState(): Promise<T | null> {
+    if (this.state) return this.state;
+    const record = this.initialization;
+    if (!record) return null;
+    const resolved = await record.promise;
+    if (record.generation !== this.generation || this.initialization !== record) return this.state;
+    return this.state ?? resolved;
+  }
+
+  private enqueue(operation: () => Promise<void>): Promise<void> {
+    const result = this.operationTail.then(operation, operation);
+    this.operationTail = result.catch(() => {});
+    return result;
+  }
+
+  private abortInitialization(reason: string): void {
+    const record = this.initialization;
+    if (!record) return;
+    record.cleanupReason = reason;
+    record.controller.abort(new Error(`MCP initialization aborted: ${reason}`));
+  }
+
+  private beginInitialization(
+    generation: number,
+    initialize: (signal: AbortSignal) => Promise<T>,
+  ): void {
+    const controller = new AbortController();
+    const promise = initialize(controller.signal);
+    const record: InitializationRecord<T> = {
+      generation,
+      controller,
+      promise,
+      completion: Promise.resolve(),
+      cleanupReason: "stale_session_start",
+    };
+    this.initialization = record;
+    this.onInitPromiseChange(promise);
+
+    record.completion = promise.then(async (nextState) => {
+      if (generation !== this.generation || this.initialization !== record) {
+        await this.dispose(nextState, record.cleanupReason);
+        return;
+      }
+      this.state = nextState;
+      this.initialization = null;
+      this.onStateChange(nextState);
+      this.onInitPromiseChange(null);
+      try {
+        this.onReady(nextState);
+      } catch (error) {
+        this.onError("MCP initialization completion failed", error);
+      }
+    }, (error) => {
+      if (this.initialization === record) {
+        this.initialization = null;
+        this.onInitPromiseChange(null);
+      }
+      if (!controller.signal.aborted) {
+        this.onError("MCP initialization failed", error);
+      }
+    });
+  }
+
+  private async disposeOwned(reason: string): Promise<void> {
+    const currentState = this.state;
+    const record = this.initialization;
+    this.state = null;
+    this.initialization = null;
+    this.onStateChange(null);
+    this.onInitPromiseChange(null);
+    if (record) {
+      record.cleanupReason = reason;
+      record.controller.abort(new Error(`MCP initialization aborted: ${reason}`));
+    }
+
+    const results = await Promise.allSettled([
+      currentState ? this.dispose(currentState, reason) : Promise.resolve(),
+      record ? this.drainInitialization(record, reason) : Promise.resolve(),
+    ]);
+    const failure = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+    if (failure) throw failure.reason;
+  }
+
+  private async drainInitialization(record: InitializationRecord<T>, reason: string): Promise<void> {
+    const completion = record.completion;
+    const outcome = await waitUntilDeadline(completion, this.initializationDrainTimeoutMs);
+    if (outcome === "settled") return;
+
+    void completion.catch((error) => {
+      this.emitTerminalDiagnostic("MCP detached initialization cleanup failed", error);
+    });
+    this.emitTerminalDiagnostic(
+      "MCP initialization cleanup deadline exceeded",
+      new Error(
+        `MCP initialization did not settle within ${this.initializationDrainTimeoutMs}ms during ${reason}; late cleanup detached.`,
+      ),
+    );
+  }
+
+  private emitTerminalDiagnostic(message: string, error: unknown): void {
+    try {
+      this.onError(message, error);
+    } catch (diagnosticError) {
+      console.error(`${message}: diagnostic handler failed`, diagnosticError);
+    }
+  }
+}
+
+function normalizeDrainTimeoutMs(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
+}
+
 export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
   let state: McpExtensionState | null = null;
   let initPromise: Promise<McpExtensionState> | null = null;
-  let lifecycleGeneration = 0;
 
   async function shutdownState(currentState: McpExtensionState | null, reason: string): Promise<void> {
     if (!currentState) return;
@@ -51,16 +246,16 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
     }
   }
 
+  const sessionLifecycle = new McpSessionLifecycle<McpExtensionState>(
+    shutdownState,
+    (nextState) => { state = nextState; },
+    (nextPromise) => { initPromise = nextPromise; },
+    updateStatusBar,
+    (message, error) => { console.error(`${message}:`, error); },
+  );
+
   async function awaitInitializedState(): Promise<McpExtensionState | null> {
-    if (state) return state;
-    const promise = initPromise;
-    if (!promise) return null;
-    const generation = lifecycleGeneration;
-    const resolved = await promise;
-    if (generation !== lifecycleGeneration) return state;
-    if (initPromise !== promise && state !== resolved) return state;
-    state ??= resolved;
-    return state;
+    return sessionLifecycle.awaitInitializedState();
   }
 
   const earlyConfigPath = getConfigPathFromArgv();
@@ -107,67 +302,37 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    const generation = ++lifecycleGeneration;
-    const previousState = state;
-    state = null;
-    initPromise = null;
-
     try {
-      await Promise.all([
-        shutdownState(previousState, "session_restart"),
-        shutdownOAuth(),
-      ]);
+      await sessionLifecycle.restart(
+        "session_restart",
+        async () => {
+          await shutdownOAuth();
+          await initializeOAuth().catch(err => {
+            console.error("MCP OAuth initialization failed:", err);
+          });
+        },
+        (lifecycleSignal) => {
+          const signal = ctx.signal
+            ? AbortSignal.any([ctx.signal, lifecycleSignal])
+            : lifecycleSignal;
+          const initContext = new Proxy(ctx, {
+            get(target, property) {
+              if (property === "signal") return signal;
+              const value = Reflect.get(target, property, target);
+              return typeof value === "function" ? value.bind(target) : value;
+            },
+          });
+          return initializeMcp(pi, initContext);
+        },
+      );
     } catch (error) {
-      console.error("MCP: failed to shut down previous session state", error);
+      console.error("MCP: failed to replace previous session state", error);
     }
-
-    if (generation !== lifecycleGeneration) {
-      return;
-    }
-
-    await initializeOAuth().catch(err => {
-      console.error("MCP OAuth initialization failed:", err);
-    });
-
-    const promise = initializeMcp(pi, ctx);
-    initPromise = promise;
-
-    promise.then(async (nextState) => {
-      if (generation !== lifecycleGeneration || initPromise !== promise) {
-        try {
-          await shutdownState(nextState, "stale_session_start");
-        } catch (error) {
-          console.error("MCP: failed to clean stale session state", error);
-        }
-        return;
-      }
-
-      state = nextState;
-      updateStatusBar(nextState);
-      initPromise = null;
-    }).catch(err => {
-      if (generation !== lifecycleGeneration) {
-        return;
-      }
-      if (initPromise !== promise && initPromise !== null) {
-        return;
-      }
-      console.error("MCP initialization failed:", err);
-      initPromise = null;
-    });
   });
 
   pi.on("session_shutdown", async () => {
-    ++lifecycleGeneration;
-    const currentState = state;
-    state = null;
-    initPromise = null;
-
     try {
-      await Promise.all([
-        shutdownState(currentState, "session_shutdown"),
-        shutdownOAuth(),
-      ]);
+      await sessionLifecycle.shutdown("session_shutdown", shutdownOAuth);
     } catch (error) {
       console.error("MCP: session shutdown cleanup failed", error);
     }

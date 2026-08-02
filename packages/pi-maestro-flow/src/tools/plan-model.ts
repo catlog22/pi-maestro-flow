@@ -1,19 +1,13 @@
 import { randomUUID } from "node:crypto";
 import {
-  closeSync,
   existsSync,
-  fsyncSync,
-  mkdirSync,
-  openSync,
   readFileSync,
-  renameSync,
-  rmSync,
-  writeFileSync,
 } from "node:fs";
+import { mkdir, open, readFile, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { lockSettingsResourceSync } from "../settings/resource-lock.ts";
+import { lockSettingsResource } from "../settings/resource-lock.ts";
 import { isPlanMode } from "./plan.ts";
 
 interface PlanModelPatch {
@@ -61,15 +55,15 @@ export function loadPlanModelSetting(cwd: string, projectTrusted = true): string
   return model;
 }
 
-export function saveLocalPlanModelSetting(cwd: string, model: string | null): void {
+export async function saveLocalPlanModelSetting(cwd: string, model: string | null): Promise<void> {
   const filePath = join(cwd, ".pi", "settings.local.json");
-  const release = lockSettingsResourceSync(filePath);
+  const release = await lockSettingsResource(filePath);
   let temporary: string | undefined;
-  let descriptor: number | undefined;
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
     let root: Record<string, unknown> = {};
     if (existsSync(filePath)) {
-      const parsed = JSON.parse(readFileSync(filePath, "utf8")) as unknown;
+      const parsed = JSON.parse(await readFile(filePath, "utf8")) as unknown;
       if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
         throw new Error("settings.local.json must contain a JSON object");
       }
@@ -80,23 +74,23 @@ export function saveLocalPlanModelSetting(cwd: string, model: string | null): vo
       : {};
     plan.model = model;
     root.plan = plan;
-    mkdirSync(dirname(filePath), { recursive: true });
+    await mkdir(dirname(filePath), { recursive: true });
     temporary = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
-    descriptor = openSync(temporary, "wx", 0o600);
-    writeFileSync(descriptor, `${JSON.stringify(root, null, 2)}\n`, "utf8");
-    fsyncSync(descriptor);
-    closeSync(descriptor);
-    descriptor = undefined;
-    renameSync(temporary, filePath);
+    handle = await open(temporary, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(root, null, 2)}\n`, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
+    await rename(temporary, filePath);
     temporary = undefined;
   } finally {
-    if (descriptor !== undefined) {
-      try { closeSync(descriptor); } catch { /* best effort */ }
+    if (handle) {
+      try { await handle.close(); } catch { /* best effort */ }
     }
-    if (temporary !== undefined) {
-      try { rmSync(temporary, { force: true }); } catch { /* best effort */ }
+    if (temporary) {
+      try { await rm(temporary, { force: true }); } catch { /* best effort */ }
     }
-    release();
+    await release();
   }
 }
 
@@ -147,7 +141,7 @@ export function registerPlanModelSelection(
         return;
       }
       try {
-        saveLocalPlanModelSetting(ctx.cwd, selected);
+        await saveLocalPlanModelSetting(ctx.cwd, selected);
         warnedMessages.clear();
         ctx.ui.notify(selected ? `Plan model: ${selected}` : "Plan model follows the session model.", "info");
       } catch (error) {

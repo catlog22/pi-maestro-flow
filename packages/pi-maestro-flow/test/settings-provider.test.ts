@@ -20,7 +20,7 @@ import {
   registerApiManagerSettingsProvider,
 } from "../src/settings/api-manager-settings-provider.ts";
 
-function fixture(options: Pick<FlowSettingsProviderOptions, "replacementOperations"> = {}) {
+function fixture(options: Pick<FlowSettingsProviderOptions, "replacementOperations" | "preparedTransactionTtlMs"> = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "flow-settings-provider-"));
   const globalSettings = path.join(root, "home", "settings.json");
   const projectSettings = path.join(root, "project", ".pi", "settings.json");
@@ -191,6 +191,58 @@ test("Flow provider commits multiple physical resources while preserving unknown
   assert.equal(failover.unknownFailover, true);
   assert.equal(failover.enabled, true);
   assert.deepEqual(failover.fallbackModels, { "openai/main": ["qwen/fallback"] });
+});
+
+test("Flow provider abort rejects a mismatched transaction without consuming the prepared change", async () => {
+  const { provider, context, globalSettings } = fixture();
+  writeJson(globalSettings, { compaction: { enabled: false } });
+  const baseline = await provider.read({ context });
+  const prepared = await provider.prepare!({
+    context,
+    transactionId: "abort-owner",
+    expectedRevisions: baseline.configured.resources,
+    changes: [{ operation: "set", key: "compaction.enabled", scope: "global", value: true }],
+  });
+
+  await assert.rejects(
+    provider.abort!({ context, transactionId: "abort-other", prepareToken: prepared.prepareToken! }),
+    /prepared Flow settings transaction is unavailable/,
+  );
+  await provider.commit!({ context, transactionId: "abort-owner", prepareToken: prepared.prepareToken! });
+  assert.equal(JSON.parse(fs.readFileSync(globalSettings, "utf8")).compaction.enabled, true);
+});
+
+test("Flow provider expires abandoned prepares and releases staged files and locks", async () => {
+  const { provider, context, globalSettings } = fixture({ preparedTransactionTtlMs: 30 });
+  writeJson(globalSettings, { compaction: { enabled: false } });
+  const baseline = await provider.read({ context });
+  const prepared = await provider.prepare!({
+    context,
+    transactionId: "abandoned",
+    expectedRevisions: baseline.configured.resources,
+    changes: [{ operation: "set", key: "compaction.enabled", scope: "global", value: true }],
+  });
+  const directory = path.dirname(globalSettings);
+  assert.ok(fs.readdirSync(directory).some((entry) => entry.endsWith(".tmp")));
+  assert.ok(fs.readdirSync(directory).some((entry) => entry.endsWith(".lock")));
+
+  await new Promise((resolve) => setTimeout(resolve, 100));
+
+  assert.deepEqual(fs.readdirSync(directory), [path.basename(globalSettings)]);
+  await assert.rejects(
+    provider.commit!({ context, transactionId: "abandoned", prepareToken: prepared.prepareToken! }),
+    /prepared Flow settings transaction is unavailable/,
+  );
+  assert.equal(JSON.parse(fs.readFileSync(globalSettings, "utf8")).compaction.enabled, false);
+
+  const retry = await provider.prepare!({
+    context,
+    transactionId: "after-expiry",
+    changes: [{ operation: "set", key: "compaction.enabled", scope: "global", value: true }],
+  });
+  assert.equal(retry.prepared, true);
+  await provider.abort!({ context, transactionId: "after-expiry", prepareToken: retry.prepareToken! });
+  assert.deepEqual(fs.readdirSync(directory), [path.basename(globalSettings)]);
 });
 
 test("Flow provider unsets project overrides without removing neighboring configuration", async () => {
@@ -429,8 +481,8 @@ test("Flow provider rollback after a failed commit does not overwrite the extern
   assert.equal(fs.readFileSync(globalSettings, "utf8"), external);
 });
 
-test("Flow provider rollback restores exact original bytes", async () => {
-  const { provider, context, projectSettings, projectFailover } = fixture();
+test("Flow provider rollback restores exact original bytes after the prepare expiry window", async () => {
+  const { provider, context, projectSettings, projectFailover } = fixture({ preparedTransactionTtlMs: 30 });
   const settingsBytes = '{"unknown":1,"compaction":{"enabled":false}}\n';
   const failoverBytes = '{"enabled":false,"fallbackModels":{},"unknown":2}\n';
   fs.mkdirSync(path.dirname(projectSettings), { recursive: true });
@@ -443,6 +495,7 @@ test("Flow provider rollback restores exact original bytes", async () => {
   ];
   const prepared = await provider.prepare!({ context, transactionId: "rollback", changes, expectedRevisions: baseline.configured.resources });
   const committed = await provider.commit!({ context, transactionId: "rollback", prepareToken: prepared.prepareToken! });
+  await new Promise((resolve) => setTimeout(resolve, 60));
   const rolledBack = await provider.rollback!({
     context,
     transactionId: "rollback",

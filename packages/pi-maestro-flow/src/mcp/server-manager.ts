@@ -54,22 +54,255 @@ export interface ServerConnectionLease {
  * signal), so one caller aborting its wait never cancels the shared startup.
  * `close()` aborts the controller to fence the pending startup.
  */
+interface CloseableResource {
+  close(): Promise<void>;
+}
+
+interface TrackedStartupResource {
+  description: string;
+  closePromise?: Promise<void>;
+}
+
 interface PendingConnect {
   promise: Promise<ServerConnection>;
   controller: AbortController;
+  resources: Map<CloseableResource, TrackedStartupResource>;
+  forcedClosing: boolean;
 }
+
+export interface McpServerManagerOptions {
+  startupDrainTimeoutMs?: number;
+  connectionLeaseDrainTimeoutMs?: number;
+  resourceCloseTimeoutMs?: number;
+}
+
+type TrackStartupResource = (resource: CloseableResource, description: string) => void;
 
 type UiStreamListener = (serverName: string, notification: ServerStreamResultPatchNotification["params"]) => void;
 
 const MCP_DISCOVERY_MAX_PAGES = 100;
 const MCP_DISCOVERY_MAX_ITEMS = 10_000;
 const MCP_DISCOVERY_MAX_METADATA_BYTES = 8 * 1024 * 1024;
+const DEFAULT_STARTUP_DRAIN_TIMEOUT_MS = 5_000;
+const DEFAULT_CONNECTION_LEASE_DRAIN_TIMEOUT_MS = 5_000;
+const DEFAULT_RESOURCE_CLOSE_TIMEOUT_MS = 5_000;
 
 class McpDiscoveryPaginationError extends Error {}
+
+class McpMetadataLimitExceeded extends Error {}
+
+class McpMetadataValueError extends Error {}
 
 interface McpDiscoveryPage<T> {
   items: T[];
   nextCursor?: string;
+}
+
+type JsonByteCountFrame =
+  | { kind: "value"; value: unknown }
+  | { kind: "array"; value: unknown[]; index: number }
+  | { kind: "object"; value: Record<string, unknown>; keys: string[]; index: number };
+
+function countJsonStringBytes(value: string, addBytes: (bytes: number) => void): void {
+  addBytes(2); // Quotes.
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit === 0x22 || codeUnit === 0x5c) {
+      addBytes(2);
+    } else if (codeUnit <= 0x1f) {
+      addBytes(
+        codeUnit === 0x08
+          || codeUnit === 0x09
+          || codeUnit === 0x0a
+          || codeUnit === 0x0c
+          || codeUnit === 0x0d
+          ? 2
+          : 6,
+      );
+    } else if (codeUnit <= 0x7f) {
+      addBytes(1);
+    } else if (codeUnit <= 0x7ff) {
+      addBytes(2);
+    } else if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const nextCodeUnit = value.charCodeAt(index + 1);
+      if (nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff) {
+        addBytes(4);
+        index += 1;
+      } else {
+        addBytes(6);
+      }
+    } else if (codeUnit >= 0xdc00 && codeUnit <= 0xdfff) {
+      addBytes(6);
+    } else {
+      addBytes(3);
+    }
+  }
+}
+
+function countUtf8StringBytes(value: string, maxBytes: number): number {
+  let bytes = 0;
+  const addBytes = (additionalBytes: number): void => {
+    if (additionalBytes > maxBytes - bytes) throw new McpMetadataLimitExceeded();
+    bytes += additionalBytes;
+  };
+
+  for (let index = 0; index < value.length; index += 1) {
+    const codeUnit = value.charCodeAt(index);
+    if (codeUnit <= 0x7f) {
+      addBytes(1);
+    } else if (codeUnit <= 0x7ff) {
+      addBytes(2);
+    } else if (codeUnit >= 0xd800 && codeUnit <= 0xdbff) {
+      const nextCodeUnit = value.charCodeAt(index + 1);
+      if (nextCodeUnit >= 0xdc00 && nextCodeUnit <= 0xdfff) {
+        addBytes(4);
+        index += 1;
+      } else {
+        addBytes(3);
+      }
+    } else {
+      addBytes(3);
+    }
+  }
+  return bytes;
+}
+
+function countJsonCompatibleBytes(value: unknown, maxBytes: number): number {
+  let bytes = 0;
+  const activeObjects = new Set<object>();
+  const frames: JsonByteCountFrame[] = [{ kind: "value", value }];
+  const addBytes = (additionalBytes: number): void => {
+    if (additionalBytes > maxBytes - bytes) throw new McpMetadataLimitExceeded();
+    bytes += additionalBytes;
+  };
+
+  while (frames.length > 0) {
+    const frame = frames.pop()!;
+    if (frame.kind === "array") {
+      if (frame.index >= frame.value.length) {
+        addBytes(1);
+        activeObjects.delete(frame.value);
+        continue;
+      }
+      if (frame.index > 0) addBytes(1);
+      const index = frame.index;
+      frame.index += 1;
+      frames.push(frame, { kind: "value", value: frame.value[index] });
+      continue;
+    }
+
+    if (frame.kind === "object") {
+      if (frame.index >= frame.keys.length) {
+        addBytes(1);
+        activeObjects.delete(frame.value);
+        continue;
+      }
+      if (frame.index > 0) addBytes(1);
+      const key = frame.keys[frame.index];
+      frame.index += 1;
+      countJsonStringBytes(key, addBytes);
+      addBytes(1);
+      frames.push(frame, { kind: "value", value: frame.value[key] });
+      continue;
+    }
+
+    const current = frame.value;
+    if (current === null) {
+      addBytes(4);
+      continue;
+    }
+    switch (typeof current) {
+      case "string":
+        countJsonStringBytes(current, addBytes);
+        continue;
+      case "boolean":
+        addBytes(current ? 4 : 5);
+        continue;
+      case "number":
+        if (!Number.isFinite(current)) {
+          throw new McpMetadataValueError("non-finite numbers are not JSON-compatible");
+        }
+        addBytes(String(current).length);
+        continue;
+      case "object": {
+        if (activeObjects.has(current)) {
+          throw new McpMetadataValueError("cyclic values are not JSON-compatible");
+        }
+        activeObjects.add(current);
+        if (Array.isArray(current)) {
+          addBytes(1);
+          frames.push({ kind: "array", value: current, index: 0 });
+          continue;
+        }
+
+        let prototype: object | null;
+        let keys: string[];
+        try {
+          prototype = Object.getPrototypeOf(current);
+          keys = Object.keys(current);
+        } catch {
+          throw new McpMetadataValueError("metadata objects must be inspectable");
+        }
+        if (prototype !== Object.prototype && prototype !== null) {
+          throw new McpMetadataValueError("objects with non-JSON prototypes are not supported");
+        }
+        addBytes(1);
+        frames.push({
+          kind: "object",
+          value: current as Record<string, unknown>,
+          keys,
+          index: 0,
+        });
+        continue;
+      }
+      default:
+        throw new McpMetadataValueError(`values of type ${typeof current} are not JSON-compatible`);
+    }
+  }
+
+  return bytes;
+}
+
+function metadataLimitError(kind: "tools" | "resources"): McpDiscoveryPaginationError {
+  return new McpDiscoveryPaginationError(
+    `MCP ${kind} discovery exceeded metadata limit of ${MCP_DISCOVERY_MAX_METADATA_BYTES} bytes.`,
+  );
+}
+
+function countMcpPageMetadataBytes(
+  kind: "tools" | "resources",
+  value: unknown,
+  remainingBytes: number,
+): number {
+  try {
+    return countJsonCompatibleBytes(value, remainingBytes);
+  } catch (error) {
+    if (error instanceof McpMetadataLimitExceeded) throw metadataLimitError(kind);
+    if (error instanceof McpMetadataValueError) {
+      throw new McpDiscoveryPaginationError(
+        `MCP ${kind} discovery received invalid metadata: ${error.message}.`,
+      );
+    }
+    throw error;
+  }
+}
+
+function countMcpCursorBytes(
+  kind: "tools" | "resources",
+  cursor: string,
+  remainingBytes: number,
+): number {
+  if (typeof cursor !== "string") {
+    throw new McpDiscoveryPaginationError(
+      `MCP ${kind} discovery received an invalid non-string pagination cursor.`,
+    );
+  }
+  try {
+    return countUtf8StringBytes(cursor, remainingBytes);
+  } catch (error) {
+    if (error instanceof McpMetadataLimitExceeded) throw metadataLimitError(kind);
+    throw error;
+  }
 }
 
 async function collectPaginatedMcpItems<T>(
@@ -101,12 +334,11 @@ async function collectPaginatedMcpItems<T>(
       );
     }
 
-    metadataBytes += Buffer.byteLength(JSON.stringify(page.items), "utf8");
-    if (metadataBytes > MCP_DISCOVERY_MAX_METADATA_BYTES) {
-      throw new McpDiscoveryPaginationError(
-        `MCP ${kind} discovery exceeded metadata limit of ${MCP_DISCOVERY_MAX_METADATA_BYTES} bytes.`,
-      );
-    }
+    metadataBytes += countMcpPageMetadataBytes(
+      kind,
+      page.items,
+      MCP_DISCOVERY_MAX_METADATA_BYTES - metadataBytes,
+    );
     items.push(...page.items);
 
     const nextCursor = page.nextCursor;
@@ -116,22 +348,81 @@ async function collectPaginatedMcpItems<T>(
         `MCP ${kind} discovery received a repeated pagination cursor.`,
       );
     }
+    metadataBytes += countMcpCursorBytes(
+      kind,
+      nextCursor,
+      MCP_DISCOVERY_MAX_METADATA_BYTES - metadataBytes,
+    );
     seenCursors.add(nextCursor);
     cursor = nextCursor;
   }
 }
 
 async function closeResource(
-  resource: { close(): Promise<void> },
+  resource: CloseableResource,
   description: string,
+  timeoutMs = DEFAULT_RESOURCE_CLOSE_TIMEOUT_MS,
 ): Promise<void> {
+  let closePromise: Promise<void>;
   try {
-    await resource.close();
+    closePromise = resource.close();
+  } catch (error) {
+    closePromise = Promise.reject(error);
+  }
+  const outcome = await waitForSettlementUntilDeadline(closePromise, timeoutMs);
+  if (outcome === "deadline") {
+    void closePromise.catch((error) => {
+      logger.debug(`Failed to close detached ${description}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    });
+    logger.error(
+      "MCP resource close deadline exceeded; cleanup detached",
+      new Error(`${description} did not close within ${timeoutMs}ms.`),
+      { timeoutMs },
+    );
+    return;
+  }
+
+  try {
+    await closePromise;
   } catch (error) {
     logger.debug(`Failed to close ${description}`, {
       error: error instanceof Error ? error.message : String(error),
     });
   }
+}
+
+async function waitForSettlementUntilDeadline(
+  promise: Promise<unknown>,
+  timeoutMs: number,
+): Promise<"settled" | "deadline"> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise.then(
+        () => "settled" as const,
+        () => "settled" as const,
+      ),
+      new Promise<"deadline">((resolve) => {
+        timeout = setTimeout(() => resolve("deadline"), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function closeTrackedStartupResource(
+  resources: Map<CloseableResource, TrackedStartupResource>,
+  resource: CloseableResource,
+  description: string,
+): Promise<void> {
+  const tracked = resources.get(resource);
+  if (tracked?.closePromise) return tracked.closePromise;
+  const closePromise = closeResource(resource, tracked?.description ?? description);
+  if (tracked) tracked.closePromise = closePromise;
+  return closePromise;
 }
 
 export class McpServerManager {
@@ -144,9 +435,28 @@ export class McpServerManager {
   private connectionDrainWaiters = new WeakMap<ServerConnection, Set<() => void>>();
   private connectionLeaseCounts = new WeakMap<ServerConnection, number>();
   private defaultRequestTimeoutMs: number | undefined;
+  private readonly startupDrainTimeoutMs: number;
+  private readonly connectionLeaseDrainTimeoutMs: number;
+  private readonly resourceCloseTimeoutMs: number;
 
   /** Default cwd for stdio servers without an explicit config `cwd`. */
-  constructor(private readonly defaultCwd?: string) {}
+  constructor(
+    private readonly defaultCwd?: string,
+    options: McpServerManagerOptions = {},
+  ) {
+    this.startupDrainTimeoutMs = normalizeDrainTimeoutMs(
+      options.startupDrainTimeoutMs,
+      DEFAULT_STARTUP_DRAIN_TIMEOUT_MS,
+    );
+    this.connectionLeaseDrainTimeoutMs = normalizeDrainTimeoutMs(
+      options.connectionLeaseDrainTimeoutMs,
+      DEFAULT_CONNECTION_LEASE_DRAIN_TIMEOUT_MS,
+    );
+    this.resourceCloseTimeoutMs = normalizeDrainTimeoutMs(
+      options.resourceCloseTimeoutMs,
+      DEFAULT_RESOURCE_CLOSE_TIMEOUT_MS,
+    );
+  }
 
   setSamplingConfig(config: ServerSamplingConfig | undefined): void {
     this.samplingConfig = config;
@@ -220,14 +530,27 @@ export class McpServerManager {
     // The startup is owned by a manager lifecycle controller, not by the first
     // caller's signal. close() aborts this controller to fence the startup.
     const controller = new AbortController();
-    const startup = this.createConnection(name, definition, controller.signal).then(
+    const startupResources = new Map<CloseableResource, TrackedStartupResource>();
+    let pendingState: PendingConnect | undefined;
+    const trackStartupResource: TrackStartupResource = (resource, description) => {
+      startupResources.set(resource, { description });
+      if (pendingState?.forcedClosing) {
+        void closeTrackedStartupResource(startupResources, resource, description);
+      }
+    };
+    const startup = this.createConnection(
+      name,
+      definition,
+      controller.signal,
+      trackStartupResource,
+    ).then(
       async (connection) => {
         if (this.connectPromises.get(name)?.controller !== controller) {
           // Fenced by close(): reclaim the late resource and fail waiters rather
           // than inserting into or overwriting a newer generation's registry.
           await Promise.all([
-            closeResource(connection.client, `${name} client`),
-            closeResource(connection.transport, `${name} transport`),
+            closeTrackedStartupResource(startupResources, connection.client, `${name} client`),
+            closeTrackedStartupResource(startupResources, connection.transport, `${name} transport`),
           ]);
           throw new Error(`Server "${name}" was closed during startup.`);
         }
@@ -245,7 +568,13 @@ export class McpServerManager {
     );
     // Prevent an unhandled rejection when the startup is fenced with no waiters.
     startup.catch(() => {});
-    this.connectPromises.set(name, { promise: startup, controller });
+    pendingState = {
+      promise: startup,
+      controller,
+      resources: startupResources,
+      forcedClosing: false,
+    };
+    this.connectPromises.set(name, pendingState);
     return abortable(startup, signal);
   }
 
@@ -253,9 +582,11 @@ export class McpServerManager {
     name: string,
     definition: ServerDefinition,
     signal?: AbortSignal,
+    trackStartupResource?: TrackStartupResource,
   ): Promise<ServerConnection> {
     throwIfAborted(signal);
     const client = this.createClient(name);
+    trackStartupResource?.(client, `${name} client`);
 
     let transport: Transport;
 
@@ -279,9 +610,16 @@ export class McpServerManager {
         cwd: resolveConfigPath(definition.cwd) ?? this.defaultCwd,
         stderr: definition.debug ? "inherit" : "ignore",
       });
+      trackStartupResource?.(transport, `${name} transport`);
     } else if (definition.url) {
       // HTTP transport with fallback
-      transport = await this.createHttpTransport(definition, name, signal);
+      transport = await this.createHttpTransport(
+        definition,
+        name,
+        signal,
+        trackStartupResource,
+      );
+      trackStartupResource?.(transport, `${name} transport`);
     } else {
       throw new Error(`Server ${name} has no command or url`);
     }
@@ -408,6 +746,7 @@ export class McpServerManager {
     definition: ServerDefinition,
     serverName: string,
     signal?: AbortSignal,
+    trackStartupResource?: TrackStartupResource,
   ): Promise<Transport> {
     throwIfAborted(signal);
     const url = new URL(definition.url!);
@@ -447,10 +786,12 @@ export class McpServerManager {
       requestInit,
       authProvider,
     });
+    trackStartupResource?.(streamableTransport, `${serverName} Streamable HTTP probe transport`);
 
     try {
       // Create a test client to verify the transport works
       const testClient = new Client({ name: "pi-mcp-probe", version: "2.1.2" });
+      trackStartupResource?.(testClient, `${serverName} Streamable HTTP probe client`);
       await testClient.connect(streamableTransport, this.buildRequestOptions(definition, signal));
       await closeResource(testClient, "Streamable HTTP probe client");
       // Close probe transport before creating fresh one
@@ -474,7 +815,9 @@ export class McpServerManager {
       }
 
       // SSE is the legacy transport
-      return new SSEClientTransport(url, { requestInit, authProvider });
+      const sseTransport = new SSEClientTransport(url, { requestInit, authProvider });
+      trackStartupResource?.(sseTransport, `${serverName} SSE transport`);
+      return sseTransport;
     }
   }
 
@@ -559,20 +902,58 @@ export class McpServerManager {
 
     const pending = this.connectPromises.get(name);
     if (pending) {
-      // Fence: abort the manager-owned startup and drop the reservation so its
-      // completion can no longer insert into or overwrite the registry.
-      pending.controller.abort();
+      // Fence first: abort and remove the reservation before any deadline wait,
+      // so its completion can never publish into this or a replacement lifecycle.
+      pending.controller.abort(new Error(`Server "${name}" startup aborted during close.`));
       this.connectPromises.delete(name);
-      // Cancel/settle: wait for the fenced startup to reclaim its own resource.
-      await pending.promise.catch(() => {});
+      const outcome = await waitForSettlementUntilDeadline(
+        pending.promise,
+        this.startupDrainTimeoutMs,
+      );
+      if (outcome === "deadline") {
+        logger.error(
+          "MCP server startup drain deadline exceeded; cleanup detached",
+          new Error(`Server "${name}" startup ignored shutdown for ${this.startupDrainTimeoutMs}ms.`),
+          { server: name, timeoutMs: this.startupDrainTimeoutMs },
+        );
+        this.forceClosePendingResources(pending);
+      }
     }
 
     if (!connection) return;
     connection.lifecycle ??= new AbortController();
     connection.lifecycle.abort(new Error(`Server "${name}" is closing.`));
-    await this.waitForConnectionDrain(connection);
-    await closeResource(connection.client, `${name} client`);
-    await closeResource(connection.transport, `${name} transport`);
+    const drainOutcome = await waitForSettlementUntilDeadline(
+      this.waitForConnectionDrain(connection),
+      this.connectionLeaseDrainTimeoutMs,
+    );
+    if (drainOutcome === "deadline") {
+      logger.error(
+        "MCP connection lease drain deadline exceeded; forcing resource close",
+        new Error(
+          `Server "${name}" retained ${this.connectionLeaseCounts.get(connection) ?? 0} lease(s) after ${this.connectionLeaseDrainTimeoutMs}ms.`,
+        ),
+        { server: name, timeoutMs: this.connectionLeaseDrainTimeoutMs },
+      );
+      this.forceCloseConnection(connection, name);
+      return;
+    }
+    await Promise.all([
+      closeResource(connection.client, `${name} client`, this.resourceCloseTimeoutMs),
+      closeResource(connection.transport, `${name} transport`, this.resourceCloseTimeoutMs),
+    ]);
+  }
+
+  private forceClosePendingResources(pending: PendingConnect): void {
+    pending.forcedClosing = true;
+    for (const [resource, tracked] of pending.resources) {
+      void closeTrackedStartupResource(pending.resources, resource, tracked.description);
+    }
+  }
+
+  private forceCloseConnection(connection: ServerConnection, name: string): void {
+    void closeResource(connection.client, `${name} client`, this.resourceCloseTimeoutMs);
+    void closeResource(connection.transport, `${name} transport`, this.resourceCloseTimeoutMs);
   }
 
   async closeAll(): Promise<void> {
@@ -684,4 +1065,10 @@ function normalizeRequestTimeoutMs(timeoutMs: number | undefined): number | unde
   return typeof timeoutMs === "number" && Number.isFinite(timeoutMs) && timeoutMs > 0
     ? timeoutMs
     : undefined;
+}
+
+function normalizeDrainTimeoutMs(value: number | undefined, fallback: number): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
 }

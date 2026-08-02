@@ -461,7 +461,7 @@ test("plan-model and permissions preserve both sections across concurrent proces
     'writeFileSync(join(barrierDirectory, `ready-${role}`), "");',
     'while (!existsSync(join(barrierDirectory, "go"))) await new Promise((resolve) => setTimeout(resolve, 5));',
     'if (role === "plan") {',
-    '  for (let index = 0; index < 40; index += 1) settings.saveLocalPlanModelSetting(cwd, `provider/plan-${index}`);',
+    '  for (let index = 0; index < 40; index += 1) await settings.saveLocalPlanModelSetting(cwd, `provider/plan-${index}`);',
     '} else {',
     '  const filePath = join(cwd, ".pi", "settings.local.json");',
     '  for (let index = 0; index < 40; index += 1) await settings.addPermissionRule(filePath, "allow", `Bash(command-${index})`);',

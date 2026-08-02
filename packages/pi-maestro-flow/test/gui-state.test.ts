@@ -3,6 +3,7 @@ import test from "node:test";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { startGuiServer } from "../src/gui/gui-server.ts";
 import { registerStateRoutes, cloneSerializable } from "../src/gui/gui-state.ts";
 
@@ -78,6 +79,53 @@ test("GET /state/:sub returns one subsystem and 404s unknown", async () => {
     assert.equal(unknown.status, 404);
     assert.equal(unknown.body.code, "unknown_subsystem");
   } finally {
+    server.close("done");
+  }
+});
+
+test("GET /state denies missing and replaced active contexts", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "gui-state-context-"));
+  const server = await startGuiServer({ sessionId: "s", cwd, writeDiscovery: false });
+  const firstCtx = {} as ExtensionContext;
+  const secondCtx = {} as ExtensionContext;
+  let currentCtx: ExtensionContext | undefined;
+  let providerReads = 0;
+  let providerStarted!: () => void;
+  let releaseProvider!: () => void;
+  const started = new Promise<void>((resolve) => { providerStarted = resolve; });
+  const release = new Promise<void>((resolve) => { releaseProvider = resolve; });
+  try {
+    registerStateRoutes(
+      server,
+      {
+        goal: async () => {
+          providerReads += 1;
+          providerStarted();
+          await release;
+          return { departed: true };
+        },
+      },
+      { getCtx: () => currentCtx },
+    );
+
+    const missing = await getJson(server.port, server.token, "/state/goal");
+    assert.equal(missing.status, 503);
+    assert.equal(missing.body.code, "no_context");
+    assert.equal(providerReads, 0);
+
+    currentCtx = firstCtx;
+    const pending = getJson(server.port, server.token, "/state/goal");
+    await started;
+    currentCtx = secondCtx;
+    releaseProvider();
+
+    const stale = await pending;
+    assert.equal(stale.status, 409);
+    assert.equal(stale.body.code, "stale_context");
+    assert.equal(stale.body.result, undefined, "departed provider state must not be exposed");
+    assert.equal(providerReads, 1);
+  } finally {
+    releaseProvider();
     server.close("done");
   }
 });
