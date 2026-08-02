@@ -25,7 +25,7 @@ Skills (63, maintained by [Maestro Flow](https://github.com/catlog22/maestro-flo
 ## Prerequisites
 
 - **Pi coding agent** — the host runtime
-- **Maestro CLI** — `maestro search` and `maestro load` for the project knowledge system
+- **Maestro Flow** — the project knowledge system (`maestro search` / `maestro load`) (dependency, auto-installed and auto-registered)
 - **pi-maestro-teammate** — the execution engine for exploration, analysis, planning, development, review, and testing dispatch (dependency, auto-installed and auto-registered)
 - **pi-cockpit** — the status-stack / footer UI (dependency, auto-installed and auto-registered; optional at runtime)
 

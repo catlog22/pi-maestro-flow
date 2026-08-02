@@ -53,7 +53,8 @@
 |------|---------|
 | Node.js | ≥ 22.19.0 |
 | [Pi Coding Agent](https://github.com/earendil-works/pi) | ≥ 0.74.0 |
-| [Maestro CLI](https://github.com/catlog22/maestro2) | ≥ 1.0.0（知识系统功能） |
+
+> [Maestro Flow](https://github.com/catlog22/maestro-flow)（知识系统）作为依赖随插件自动安装，无需单独前置安装。
 
 ### 安装
 
