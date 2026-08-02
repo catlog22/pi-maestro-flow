@@ -39,6 +39,14 @@ export declare class MailboxFileStore {
     readStateRecord(state: MailboxState, messageId: string): Promise<MailboxStateRecord | undefined>;
     /** List message IDs in a specific state directory. */
     listMessages(state: MailboxState): Promise<string[]>;
+    /**
+     * List message IDs that have a state record but no envelope in the same
+     * directory. These are orphaned by interrupted transitions or manual removal
+     * and should be garbage collected.
+     */
+    listOrphanStateRecords(state: MailboxState): Promise<string[]>;
+    /** Remove an orphaned state record without touching any envelope. */
+    removeStateRecordOnly(state: MailboxState, messageId: string): Promise<void>;
     /** Check if a messageId has been seen (deduplication). */
     isSeen(messageId: string): Promise<boolean>;
     /** Mark a messageId as seen for durable deduplication. */

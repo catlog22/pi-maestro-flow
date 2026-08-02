@@ -369,3 +369,23 @@ test("remove deletes envelope and state record", async () => {
   assert.equal(await store.readEnvelope("ready", id), undefined);
   assert.equal(await store.readStateRecord("ready", id), undefined);
 });
+
+// --- Overwrite resilience ---
+
+test("writeJsonAtomic overwrites an existing state record (rename over existing)", async () => {
+  const envelope = makeEnvelope({ messageId: "00000000-0000-4000-8000-000000000030" });
+  await store.writeStaging(envelope);
+  await store.promoteToReady(envelope.messageId);
+
+  // Simulate a duplicate claim record write to the same path (overwrite)
+  const claim1 = makeClaim(envelope.messageId);
+  await store.claim(envelope.messageId, claim1);
+  const claim2 = { ...claim1, lastHeartbeatAt: nowMs + 5_000 };
+  await store.renewClaim(envelope.messageId, claim2);
+
+  // Renew writes the same claimed state record path; both writes must succeed
+  const record = await store.readStateRecord("claimed", envelope.messageId);
+  assert.ok(record);
+  assert.ok(record.claim);
+  assert.equal(record.claim.lastHeartbeatAt, nowMs + 5_000);
+});

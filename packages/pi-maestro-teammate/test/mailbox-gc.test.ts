@@ -291,3 +291,68 @@ test("quota admits normal messages below the reserve boundary", async () => {
     live: 1,
   });
 });
+
+// --- Orphan state record cleanup ---
+
+test("run removes orphaned state records without an envelope", async () => {
+  // Write a full envelope into dead, then remove only the envelope to create an orphan record
+  const env = makeEnvelope(700);
+  await putInState("dead", env);
+  await store.remove("dead", env.messageId); // removes envelope + its state.json together
+  // Now simulate an interrupted transition: write a state record with no envelope
+  const orphanId = messageId(701);
+  const orphanRecord = {
+    messageId: orphanId,
+    state: "dead" as const,
+    transitionedAt: nowMs,
+    previousState: "ready" as const,
+    reason: "orphan",
+  };
+  await writeFile(join(paths.deadDir, `${orphanId}.state.json`), JSON.stringify(orphanRecord) + "\n");
+
+  const result = await new MailboxGC({ store, now: () => nowMs }).run();
+  assert.ok(result.removed >= 1);
+  assert.deepEqual(result.errors, []);
+
+  // Orphan state record is gone
+  const orphans = await store.listOrphanStateRecords("dead");
+  assert.ok(!orphans.includes(orphanId));
+});
+
+test("listOrphanStateRecords detects records without envelopes", async () => {
+  const env = makeEnvelope(710);
+  await putInState("dead", env);
+
+  // No orphans initially
+  assert.deepEqual(await store.listOrphanStateRecords("dead"), []);
+
+  // Remove envelope only — but store.remove removes both. Simulate by writing
+  // a state record for an ID with no envelope.
+  const orphanId = messageId(711);
+  const orphanRecord = {
+    messageId: orphanId,
+    state: "dead" as const,
+    transitionedAt: nowMs,
+    previousState: "ready" as const,
+  };
+  await writeFile(join(paths.deadDir, `${orphanId}.state.json`), JSON.stringify(orphanRecord) + "\n");
+
+  const orphans = await store.listOrphanStateRecords("dead");
+  assert.ok(orphans.includes(orphanId));
+  assert.ok(!orphans.includes(env.messageId));
+});
+
+test("orphan state records in live directories are cleaned too", async () => {
+  const orphanId = messageId(720);
+  const orphanRecord = {
+    messageId: orphanId,
+    state: "accepted" as const,
+    transitionedAt: nowMs,
+    previousState: "claimed" as const,
+  };
+  await writeFile(join(paths.acceptedDir, `${orphanId}.state.json`), JSON.stringify(orphanRecord) + "\n");
+
+  const result = await new MailboxGC({ store, now: () => nowMs }).run();
+  assert.ok(result.removed >= 1);
+  assert.deepEqual(await store.listOrphanStateRecords("accepted"), []);
+});

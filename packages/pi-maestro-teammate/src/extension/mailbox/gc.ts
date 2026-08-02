@@ -63,6 +63,37 @@ export class MailboxGC {
       }
     }
 
+    // Clean orphaned state records (state.json without an envelope) across all
+    // live and terminal directories. These accumulate from interrupted
+    // transitions or manual envelope removal and would otherwise block a
+    // future writeJsonAtomic rename on Windows (EPERM) or count toward quota
+    // scans.
+    const orphanStates: MailboxState[] = [
+      "staging",
+      "ready",
+      "claimed",
+      "accepted",
+      "applied",
+      "rejected",
+      "expired",
+      "dead",
+    ];
+    for (const state of orphanStates) {
+      try {
+        const orphans = await this.#store.listOrphanStateRecords(state);
+        for (const messageId of orphans) {
+          try {
+            await this.#store.removeStateRecordOnly(state, messageId);
+            removed += 1;
+          } catch (error) {
+            errors.push(`${state}/${messageId}: ${errorMessage(error)}`);
+          }
+        }
+      } catch (error) {
+        errors.push(`${state}: ${errorMessage(error)}`);
+      }
+    }
+
     return { removed, errors };
   }
 

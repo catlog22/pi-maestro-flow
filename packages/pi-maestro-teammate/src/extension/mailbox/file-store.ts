@@ -90,6 +90,28 @@ async function fsyncDirectory(dirPath: string): Promise<void> {
 
 // --- Atomic Write ---
 
+const RENAME_RETRY_MS = 25;
+const RENAME_MAX_RETRIES = 5;
+
+async function renameWithRetry(temporary: string, path: string): Promise<void> {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await rename(temporary, path);
+      return;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      // Windows may transiently lock the destination (antivirus scan, concurrent
+      // GC removal). Retry briefly before giving up — never silently corrupt.
+      if ((code === "EPERM" || code === "EACCES" || code === "EEXIST")
+        && attempt < RENAME_MAX_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, RENAME_RETRY_MS * (attempt + 1)));
+        continue;
+      }
+      throw error;
+    }
+  }
+}
+
 async function writeJsonAtomic(path: string, value: unknown, maxBytes: number): Promise<void> {
   const payload = Buffer.from(`${JSON.stringify(value)}\n`, "utf8");
   if (payload.byteLength > maxBytes) {
@@ -104,7 +126,7 @@ async function writeJsonAtomic(path: string, value: unknown, maxBytes: number): 
     await handle.sync();
     await handle.close();
     handle = undefined;
-    await rename(temporary, path);
+    await renameWithRetry(temporary, path);
     await fsyncDirectory(dirname(path));
   } catch (error) {
     await handle?.close().catch(() => undefined);
@@ -310,6 +332,35 @@ export class MailboxFileStore {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
       throw error;
     }
+  }
+
+  /**
+   * List message IDs that have a state record but no envelope in the same
+   * directory. These are orphaned by interrupted transitions or manual removal
+   * and should be garbage collected.
+   */
+  async listOrphanStateRecords(state: MailboxState): Promise<string[]> {
+    try {
+      const files = await readdir(this.paths[stateDirKey(state)]);
+      const envelopes = new Set(
+        files
+          .filter((f) => f.endsWith(".json") && !f.endsWith(".state.json") && !f.endsWith(".tmp"))
+          .map((f) => f.slice(0, -5)),
+      );
+      return files
+        .filter((f) => f.endsWith(".state.json"))
+        .map((f) => f.slice(0, -".state.json".length))
+        .filter((messageId) => !envelopes.has(messageId))
+        .sort();
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      throw error;
+    }
+  }
+
+  /** Remove an orphaned state record without touching any envelope. */
+  async removeStateRecordOnly(state: MailboxState, messageId: string): Promise<void> {
+    await rm(stateRecordPath(this.paths, state, messageId), { force: true }).catch(() => undefined);
   }
 
   /** Check if a messageId has been seen (deduplication). */
