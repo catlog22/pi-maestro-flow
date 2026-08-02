@@ -314,9 +314,11 @@ For background work, wait for the automatic teammate-complete notification. Do n
 
 ## Observation
 
-Use observe for teammate and background Bash status or barrier waits:
+Use observe for teammate and background Bash status, barrier waits, or transition watching:
 - { action: "status", targets: [{ kind: "teammate", id: "reviewer" }] } — one-shot snapshot
 - { action: "wait", targets: [{ kind: "teammate", id: "reviewer" }, { kind: "bash_bg", id: "bg-id" }], waitMode: "all" } — mixed barrier wait
+- { action: "wait", until: "completed", targets: [{ kind: "teammate", id: "reviewer" }] } — block until the agent fully terminates (not just first result)
+- { action: "watch", targets: [{ kind: "teammate", id: "reviewer" }], timeoutMs: 30000 } — follow status transitions until timeout
 
 Configured task-type model routing for ${cwd}:
 ${formatModelRoutingConfig(cwd, discoverAgents(cwd))}`;
@@ -366,9 +368,10 @@ export const OBSERVE_DESCRIPTION = `Observe mixed teammate and background Bash t
 - "watch": poll every target until timeoutMs, returning the full status-transition timeline (richer than status, no barrier required)
 
 Targets use { kind, id }, where kind is currently "teammate" or "bash_bg". Legacy teammate observation tools remain available internally but are hidden from the default LLM tool catalog.`;
-export const OBSERVE_SNIPPET = "Observe or wait for mixed teammate and background Bash targets.";
+export const OBSERVE_SNIPPET = "Observe, wait for, or watch mixed teammate and background Bash targets.";
 export const OBSERVE_GUIDELINES = [
   "Use observe for mixed or multi-target status and waits; use one bounded wait instead of polling status.",
+  "Use action=watch to follow status transitions over time; use action=wait until=completed to block until agents fully terminate.",
   "Use detail=full only when recent output is required; summary is the compact default.",
 ];
 
