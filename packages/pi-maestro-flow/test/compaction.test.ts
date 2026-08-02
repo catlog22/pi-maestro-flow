@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { SessionManager } from "@earendil-works/pi-coding-agent";
+import { SessionManager, convertToLlm, serializeConversation } from "@earendil-works/pi-coding-agent";
 import {
   buildMaestroCompactionPrompt,
   buildSummaryCompletionOptions,
@@ -12,13 +12,18 @@ import {
   createMaestroCompaction,
   CompactionCapacityError,
   estimateSummaryRequestTokens,
+  fitSummaryInputToWindow,
   fitSummaryOutputBudget,
   formatCompactionStatus,
+  groupSummaryMessagesByApiRound,
+  isPromptTooLongError,
   mergeCompactionReferences,
   MAESTRO_COMPACTION_SYSTEM_PROMPT,
+  MAX_PROMPT_TOO_LONG_RETRIES,
   persistMaestroCompactionKnowhow,
   resolveConfiguredCompactionModel,
   runWithCompactionStatus,
+  trimSummaryInputForPromptTooLong,
   type MaestroCompactionDetails,
 } from "../src/compaction/maestro-compaction.ts";
 import {
@@ -817,7 +822,7 @@ test("nudge warning explains output headroom and survives other notification typ
   assert.equal(nudges.length, 1, "defer notification must not re-arm the nudge warning");
   assert.match(nudges[0] ?? "", /Context is at 64%/);
   assert.match(nudges[0] ?? "", /Automatic pruning starts at 239,904 tokens/);
-  assert.match(nudges[0] ?? "", /hard compaction starts above 353,400 tokens/);
+  assert.match(nudges[0] ?? "", /hard compaction starts above 333,400 tokens/);
   assert.doesNotMatch(nudges[0] ?? "", /nearing the compaction threshold/);
   assert.equal(
     notifications.filter((message) => /after the next completed turn/.test(message)).length,
@@ -2115,7 +2120,9 @@ test("linked compaction threshold follows the tighter summary-model window", () 
   assert.ok(smallerSummaryModel.usable);
   assert.equal(smallerSummaryModel.limiter, "compaction");
   assert.equal(smallerSummaryModel.contextWindow, 400_000);
-  assert.equal(smallerSummaryModel.thresholdTokens, 380_000);
+  assert.equal(smallerSummaryModel.reason, "self-hosted");
+  assert.equal(smallerSummaryModel.thresholdTokens, 182_797);
+  assert.equal(smallerSummaryModel.selfHostedThresholdTokens, 182_797);
 
   const largerSummaryModel = deriveLinkedCompactionThreshold({
     reserveTokens: 16_384,
@@ -2126,7 +2133,7 @@ test("linked compaction threshold follows the tighter summary-model window", () 
   });
   assert.ok(largerSummaryModel.usable);
   assert.equal(largerSummaryModel.limiter, "session");
-  assert.equal(largerSummaryModel.thresholdTokens, 380_000);
+  assert.equal(largerSummaryModel.thresholdTokens, 360_000);
   const oversizedReserve = deriveLinkedCompactionThreshold({
     reserveTokens: 150_000,
     sessionContextWindow: 1_000_000,
@@ -2140,7 +2147,8 @@ test("linked compaction threshold follows the tighter summary-model window", () 
 
 test("summary request budget shrinks at the boundary and fails closed before overflow", () => {
   const expandedRequestTokens = estimateSummaryRequestTokens("system", "中".repeat(1_000));
-  assert.ok(expandedRequestTokens > 1_500, "CJK expansion is counted from the final request text");
+  assert.ok(expandedRequestTokens > 1_000, "CJK is counted at one token per character from the final request text");
+  assert.ok(expandedRequestTokens < 1_100, "CJK no longer inflates at 1.5 tokens per character");
   assert.equal(fitSummaryOutputBudget({
     tokensBefore: 100,
     estimatedRequestTokens: expandedRequestTokens,
@@ -2180,6 +2188,127 @@ test("summary request budget shrinks at the boundary and fails closed before ove
   );
 });
 
+test("summary request estimate counts the real prompt text, not inflated JSON escapes", () => {
+  // A JSON-escaped sequence (\\n, \\", \\\\, \\t) collapses to its content
+  // character, so a payload full of escaped sequences estimates like the same
+  // payload written with the real characters.
+  const escapedSequences = estimateSummaryRequestTokens("system", "\\n".repeat(100));
+  const realNewlines = estimateSummaryRequestTokens("system", "\n".repeat(100));
+  assert.ok(Math.abs(escapedSequences - realNewlines) <= 2, "escaped sequences count as their content characters");
+  const escapedQuotes = estimateSummaryRequestTokens("system", "\\\"".repeat(100));
+  const realQuotes = estimateSummaryRequestTokens("system", "\"".repeat(100));
+  assert.ok(Math.abs(escapedQuotes - realQuotes) <= 2, "escaped quotes collapse to plain quotes");
+  const whitespaceHeavy = estimateSummaryRequestTokens("system", ("a ".repeat(2_000)));
+  assert.ok(
+    whitespaceHeavy < estimateSummaryRequestTokens("system", "a".repeat(4_000)),
+    "whitespace-heavy content uses the sparser 6 chars/token ratio",
+  );
+});
+
+test("fitSummaryInputToWindow drops oldest API rounds and preserves runtime state until fail-closed", () => {
+  const rounds: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < 300; index++) {
+    rounds.push({
+      role: "assistant",
+      content: [{ type: "toolCall", id: `call-${index}`, name: "read", arguments: {} }],
+    });
+    rounds.push({
+      role: "toolResult",
+      toolCallId: `call-${index}`,
+      toolName: "read",
+      content: [{ type: "text", text: "x".repeat(2_000) }],
+      isError: false,
+    });
+  }
+  const buildPrompt = (messages: unknown[], droppedRounds: number) => JSON.stringify({
+    conversationText: `[marker-${droppedRounds}] ${serializeConversation(convertToLlm(messages as never))}`,
+    previousSummary: null,
+    runtimeState: { big: "s".repeat(1_000_000) },
+    operatorFocus: null,
+  }, null, 2);
+  const source = { messages: rounds as never, buildPrompt };
+
+  // 1M-char runtime state (~286K tokens) plus a 300-round conversation exceeds
+  // the 372K window; trimming drops oldest rounds until the request fits.
+  const fit = fitSummaryInputToWindow({
+    source,
+    tokensBefore: 400_000,
+    reserveTokens: 16_384,
+    contextWindow: 372_000,
+    modelMaxTokens: 65_536,
+  });
+  assert.ok(fit.droppedRounds > 50, `expected oldest rounds dropped, got ${fit.droppedRounds}`);
+  assert.ok(fit.maxTokens >= 1_024, "output budget survives trimming");
+  assert.ok(fit.messages.length > 0, "at least one round is retained");
+  assert.ok(fit.prompt.includes("[marker-0]") === false, "prompt is rebuilt with the drop count marker");
+  assert.match(fit.prompt, /\[marker-[1-9][0-9]*\]/);
+  assert.ok(fit.prompt.includes("s".repeat(1_000)), "runtime state JSON stays fully present");
+
+  // 1.5M-char runtime state alone exceeds the window: fail closed even after
+  // every conversation round is trimmed.
+  assert.throws(
+    () => fitSummaryInputToWindow({
+      source: { messages: rounds as never, buildPrompt: (messages: unknown[], droppedRounds: number) => JSON.stringify({
+        conversationText: `[marker-${droppedRounds}] ${serializeConversation(convertToLlm(messages as never))}`,
+        previousSummary: null,
+        runtimeState: { big: "s".repeat(1_500_000) },
+        operatorFocus: null,
+      }, null, 2) },
+      tokensBefore: 400_000,
+      reserveTokens: 16_384,
+      contextWindow: 372_000,
+      modelMaxTokens: 65_536,
+    }),
+    (error: unknown) => error instanceof CompactionCapacityError && /stopped locally/.test(error.message),
+  );
+});
+
+test("summary input groups by API round and trims 20% on prompt-too-long", () => {
+  const user = { role: "user", content: [{ type: "text", text: "go" }] };
+  const assistantA = { role: "assistant", content: [{ type: "toolCall", id: "a", name: "read", arguments: {} }] };
+  const resultA = { role: "toolResult", toolCallId: "a", toolName: "read", content: [{ type: "text", text: "r" }], isError: false };
+  const assistantB = { role: "assistant", content: [{ type: "toolCall", id: "b", name: "read", arguments: {} }] };
+  const resultB = { role: "toolResult", toolCallId: "b", toolName: "read", content: [{ type: "text", text: "r" }], isError: false };
+  const groups = groupSummaryMessagesByApiRound([user, assistantA, resultA, assistantB, resultB] as never);
+  assert.equal(groups.length, 3, "preamble plus one group per assistant round");
+  assert.deepEqual(groups[0], [user]);
+  assert.deepEqual(groups[1], [assistantA, resultA]);
+  assert.deepEqual(groups[2], [assistantB, resultB]);
+
+  const tenRounds: Array<Record<string, unknown>> = [];
+  for (let index = 0; index < 10; index++) {
+    tenRounds.push({ role: "user", content: [{ type: "text", text: `u${index}` }] });
+    tenRounds.push({ role: "assistant", content: [{ type: "toolCall", id: `c${index}`, name: "read", arguments: {} }] });
+    tenRounds.push({ role: "toolResult", toolCallId: `c${index}`, toolName: "read", content: [{ type: "text", text: "r" }], isError: false });
+  }
+  const trimmed = trimSummaryInputForPromptTooLong(tenRounds as never);
+  assert.ok(trimmed, "a multi-round input can trim");
+  assert.ok(trimmed.droppedRounds >= 2, "~20% of 30 groups drops at least two");
+  assert.ok(trimmed.messages.length < tenRounds.length);
+  assert.equal(trimSummaryInputForPromptTooLong([assistantA, resultA] as never), undefined, "single round cannot trim");
+
+  assert.equal(isPromptTooLongError(new Error("Request too large for model context window")), true);
+  assert.equal(isPromptTooLongError(new Error("rate limited")), false);
+  assert.equal(isPromptTooLongError({ error: { message: "prompt is too long (max 200000)" } }), true);
+});
+
+test("fitSummaryOutputBudget prefers the measured request estimate over tokensBefore", () => {
+  // The old max() formula would have used the inflated 500K tokensBefore and
+  // thrown; the measured 100K request estimate fits, so the budget survives
+  // and lands on the configured summary-output cap.
+  assert.equal(
+    fitSummaryOutputBudget({
+      tokensBefore: 500_000,
+      estimatedRequestTokens: 100_000,
+      reserveTokens: 16_384,
+      contextWindow: 400_000,
+      modelMaxTokens: 128_000,
+    }),
+    13_107,
+    "the real prompt estimate (not the inflated image-inclusive tokensBefore) drives capacity",
+  );
+});
+
 test("effective reserve uses configured headroom and a five-percent floor, not the model output ceiling", () => {
   assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 8_000), 20_000);
   assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 400_000, 64_000), 20_000);
@@ -2188,7 +2317,7 @@ test("effective reserve uses configured headroom and a five-percent floor, not t
   assert.equal(effectiveReserveTokens({ reserveTokens: 16_384 }, 100_000), 16_384, "small window keeps the absolute reserve");
 });
 
-test("deriveCompactionThreshold does not pre-reserve an oversized model output ceiling", () => {
+test("deriveCompactionThreshold reserves the summary output budget ahead of the trigger", () => {
   const model = deriveCompactionThreshold({
     reserveTokens: 16_384,
     contextWindow: 250_000,
@@ -2197,8 +2326,9 @@ test("deriveCompactionThreshold does not pre-reserve an oversized model output c
   });
   assert.ok(model.usable);
   assert.equal(model.effectiveReserveTokens, 16_384);
-  assert.equal(model.thresholdTokens, 233_616);
-  assert.equal(model.thresholdPercent, 93);
+  assert.equal(model.summaryReserveTokens, 20_000);
+  assert.equal(model.thresholdTokens, 213_616);
+  assert.equal(model.thresholdPercent, 85);
   assert.equal(model.reason, "configured");
   assert.ok(model.soft);
   assert.equal(model.soft.nudgeReachable, true);
@@ -2207,7 +2337,7 @@ test("deriveCompactionThreshold does not pre-reserve an oversized model output c
   assert.equal(model.soft.pruneTargetReachable, true);
 });
 
-test("deriveCompactionThreshold lets a 400K model compact near 380K with dynamic output clamping", () => {
+test("deriveCompactionThreshold lets a 400K model compact near 360K with dynamic output clamping", () => {
   const model = deriveCompactionThreshold({
     reserveTokens: 16_384,
     contextWindow: 400_000,
@@ -2216,8 +2346,9 @@ test("deriveCompactionThreshold lets a 400K model compact near 380K with dynamic
   });
   assert.ok(model.usable);
   assert.equal(model.effectiveReserveTokens, 20_000);
-  assert.equal(model.thresholdTokens, 380_000);
-  assert.equal(model.thresholdPercent, 95);
+  assert.equal(model.summaryReserveTokens, 20_000);
+  assert.equal(model.thresholdTokens, 360_000);
+  assert.equal(model.thresholdPercent, 90);
   assert.equal(model.reason, "ratio-floor");
   assert.ok(model.soft);
   assert.equal(model.soft.nudgeTokens, 259_904);
@@ -2236,7 +2367,7 @@ test("deriveCompactionThreshold lets a 400K model compact near 380K with dynamic
   });
   assert.ok(explicit370K.usable);
   assert.equal(explicit370K.effectiveReserveTokens, 30_000);
-  assert.equal(explicit370K.thresholdTokens, 370_000);
+  assert.equal(explicit370K.thresholdTokens, 350_000);
   assert.equal(explicit370K.reason, "configured");
 });
 
@@ -2248,7 +2379,8 @@ test("deriveCompactionThreshold keeps safe headroom on the current 372K model", 
   });
   assert.ok(model.usable);
   assert.equal(model.effectiveReserveTokens, 18_600);
-  assert.equal(model.thresholdTokens, 353_400);
+  assert.equal(model.summaryReserveTokens, 20_000);
+  assert.equal(model.thresholdTokens, 333_400);
   assert.equal(model.reason, "ratio-floor");
 });
 
@@ -2256,10 +2388,12 @@ test("deriveCompactionThreshold uses the first integer token that can reach a fr
   const model = deriveCompactionThreshold({
     reserveTokens: 1,
     contextWindow: 3,
+    modelMaxTokens: 1,
     soft: { nudgeRatio: 0.7, pruneRatio: 0.8, pruneTargetRatio: 0.7 },
   });
   assert.ok(model.usable && model.soft);
-  assert.equal(model.thresholdTokens, 2);
+  assert.equal(model.summaryReserveTokens, 1, "a 1-token model ceiling caps the summary reservation");
+  assert.equal(model.thresholdTokens, 1);
   assert.equal(model.soft.nudgeTokens, 3, "ceil(3 * 0.7) is the first integer satisfying ratio >= 0.7");
   assert.equal(model.soft.pruneTokens, 3);
   assert.equal(model.soft.nudgeReachable, false);
@@ -2270,6 +2404,7 @@ test("deriveCompactionThreshold reports configured and ratio-floor reasons", () 
   const ratio = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: 400_000 });
   assert.ok(ratio.usable);
   assert.equal(ratio.effectiveReserveTokens, 20_000);
+  assert.equal(ratio.summaryReserveTokens, 0, "no model ceiling, no summary reservation");
   assert.equal(ratio.thresholdTokens, 380_000);
   assert.equal(ratio.reason, "ratio-floor");
   const configured = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: 100_000 });
@@ -2280,6 +2415,8 @@ test("deriveCompactionThreshold reports configured and ratio-floor reasons", () 
   const explicit = deriveCompactionThreshold({ reserveTokens: 80_000, contextWindow: 400_000, modelMaxTokens: 64_000 });
   assert.ok(explicit.usable);
   assert.equal(explicit.effectiveReserveTokens, 80_000);
+  assert.equal(explicit.summaryReserveTokens, 20_000, "a real model ceiling enables the summary reservation");
+  assert.equal(explicit.thresholdTokens, 300_000);
   assert.equal(explicit.reason, "configured");
 });
 
@@ -2300,28 +2437,28 @@ test("deriveCompactionThreshold degrades without a usable context window", () =>
 test("compaction trigger is strict: an estimate exactly at the derived threshold does not compact", () => {
   const model = deriveCompactionThreshold({ reserveTokens: 16_384, contextWindow: 400_000, modelMaxTokens: 64_000 });
   assert.ok(model.usable);
-  assert.equal(model.thresholdTokens, 380_000);
+  assert.equal(model.thresholdTokens, 360_000);
   assert.equal(model.trigger, "strictly-above-threshold");
   const settings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 10 };
   const trailing = estimateContextTokens(highUsageToolBatch(0)).tokens;
-  const exact = highUsageToolBatch(380_000 - trailing);
-  assert.equal(estimateContextTokens(exact).tokens, 380_000, "sanity: estimate lands exactly on the trigger");
+  const exact = highUsageToolBatch(360_000 - trailing);
+  assert.equal(estimateContextTokens(exact).tokens, 360_000, "sanity: estimate lands exactly on the trigger");
   assert.equal(
     shouldCompactMidTurn({ messages: exact, contextWindow: 400_000, settings, modelMaxTokens: 64_000 }),
     false,
     "estimate exactly at the threshold is not exceeded, so no compaction",
   );
   assert.equal(
-    shouldCompactMidTurn({ messages: highUsageToolBatch(380_001 - trailing), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }),
+    shouldCompactMidTurn({ messages: highUsageToolBatch(360_001 - trailing), contextWindow: 400_000, settings, modelMaxTokens: 64_000 }),
     true,
     "one token above the threshold compacts",
   );
 });
 
-test("shouldCompactMidTurn triggers around 95% on a large window", () => {
+test("shouldCompactMidTurn triggers around 90% on a large window", () => {
   const settings = { enabled: true, reserveTokens: 16_384, keepRecentTokens: 10 };
   assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(385_000), contextWindow: 400_000, settings }), true, "96.25% exceeds the proactive threshold");
-  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(370_000), contextWindow: 400_000, settings }), false, "92.5% stays below the proactive threshold");
+  assert.equal(shouldCompactMidTurn({ messages: highUsageToolBatch(350_000), contextWindow: 400_000, settings }), false, "87.5% stays below the proactive threshold");
 });
 
 test("shouldCompactMidTurn treats model max output as a dynamic ceiling", () => {

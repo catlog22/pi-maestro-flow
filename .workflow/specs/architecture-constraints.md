@@ -313,3 +313,25 @@ graph task 与 graph 容器共享 AbortController 时，task 的自然成功、n
 单一 /effort 命令 MUST 以当前 ctx.model 的 provider/modelId 为键复用 modelDefaults，覆盖 API Manager 与 Pi 系统原生 provider；UI MUST 只展示当前模型支持的 Pi canonical levels（off/minimal/low/medium/high/xhigh/max）。max 仅在模型 thinkingLevelMap 声明 max wire（xhigh→"max" 或 max→"max"）时展示，并作为正式 level 持久化与传给 setThinkingLevel；不支持 max 的模型由 Pi runtime clamp 到 xhigh。thinkingLevelMap 内的 Provider wire value 仍只作映射，不得与 canonical level 混淆。选择提交 MUST 先原子持久化再应用 runtime，取消或失败不得改变当前状态。
 
 </spec-entry>
+<spec-entry category="arch" keywords="compaction,压缩,阈值,摘要预留,自举,裁剪,prompt-too-long,ptl,估算" date="2026-08-02" sid="S-20260802-mpct" title="压缩触发阈值预留摘要输出；摘要请求发前裁剪 + 发后 PTL 重试（runtime state 不精简）" description="锁定压缩触发阈值语义、摘要请求容量策略与 runtime-state 全量注入约束" source="workflow: compression optimization plan (approved)">
+
+### 压缩触发阈值预留摘要输出；摘要请求发前裁剪 + 发后 PTL 重试（runtime state 不精简）
+
+背景实测：`CTX CRITICAL 371482/353400 prune-insufficient` 后强制压缩失败 `estimated request 740833/372000`。摘要请求估算 740833 ≈ 会话估算 371482 的 2 倍（JSON 转义 + 保守比率 + runtime-state JSON）；Pi 原生兜底无本地守卫能成功，证明 Maestro 本地估算虚高误杀。
+
+**触发阈值（compaction-threshold.ts）**
+1. 摘要输出预留：`thresholdTokens = 窗口 − effectiveReserve − summaryReserve`，`summaryReserve = min(20_000, modelMaxTokens)`（Claude Code 实测 p99.99 摘要输出 17,387）；模型输出上限未知时预留为 0（纯推导/小窗口退化，避免阈值塌缩）。
+2. 压缩模型自举：配置压缩模型窗口 < 会话窗口时，触发 = `floor(压缩窗口 × 0.5) − summaryReserve − 4096`（reason "self-hosted"），使摘要请求（≈2× 会话估算）能装进压缩模型自身窗口，避免每次执行 fallback 到会话模型。372K 压缩模型 → ~169K 触发；120K → ~48K。
+3. runtime 策略 MUST 消费派生阈值（applyContextPressurePolicy 的 thresholdOverrideTokens），critical 判定、prune target、escalate 窗口不得回退到 `窗口 − reserve` 旧公式。
+
+**摘要请求容量（maestro-compaction.ts）**
+1. 发前估算贴近真实：折叠 JSON 转义序列（`\\n`/`\\"`/`\\\\` 按内容字符计）、CJK 按 1 token/char（原 1.5 误杀中文会话）、空白密集按 6 chars/token；`fitSummaryOutputBudget` 输入以 `estimatedRequestTokens` 为准（`tokensBefore` 仅 fallback，消除图片含入虚高）。
+2. 发前预算裁剪：按 API round 分组（assistant 轮次 + 其 toolResults 成组）从最旧丢弃，至少保留一组；runtime state 每轮原样重建。裁剪后仍超窗才抛 `CompactionCapacityError`（fail-closed 语义不变，见 debug-notes S-20260727-7vnv）。
+3. 发后 PTL 反应式重试：provider 返回 prompt-too-long 时按 20% 最旧分组裁剪重试 ≤2 次，仍失败走 native fallback。
+4. 配置模型容量/认证失败 MUST 从原始输入回退会话模型，不得继承配置模型的裁剪结果。
+
+**锁定约束**
+- runtime-state JSON（todo/goal/plan/activeSkills/references）全量注入 checkpoint prompt，**不做精简**。
+- prune 跨 turn 稳定、cache gate 语义不变（本文件 S-20260724-cbhh 与 coding-conventions 同款规则）。
+
+</spec-entry>

@@ -27,7 +27,7 @@ test("compaction TUI renders safely at narrow, boundary, and wide widths", () =>
   }
   assert.match(overlay.render(80).join("\n"), /Maestro 压缩设置/);
   assert.match(overlay.render(80).join("\n"), /压缩阈值/);
-  assert.match(overlay.render(80).join("\n"), /实际 >285,000 \/ 300,000 \(95\.0%\)/);
+  assert.match(overlay.render(80).join("\n"), /实际 >269,000 \/ 300,000 \(89\.7%\)/);
   assert.match(overlay.render(80).join("\n"), /配置阈值 · 290,000 Token \(96\.7%\)/);
   assert.match(overlay.render(20).join("\n"), /Esc关闭 Enter修改/);
   overlay.handleInput("\r");
@@ -44,7 +44,7 @@ test("compaction TUI supports direct threshold editing, scope tabs, toggle, inhe
   });
 
   overlay.handleInput("U");
-  assert.match(overlay.render(80).join("\n"), /实际硬压缩阈值 · 实际 >280,000 \/ 300,000 \(93\.3%\) · 继承自用户/);
+  assert.match(overlay.render(80).join("\n"), /实际硬压缩阈值 · 实际 >264,000 \/ 300,000 \(88\.0%\) · 继承自用户/);
   assert.match(overlay.render(80).join("\n"), /配置阈值 · 280,000 Token \(93\.3%\)/);
   assert.match(overlay.render(20).join("\n"), /Esc关闭 Ctrl\+S保存/);
   overlay.handleInput("\x1b[B");
@@ -85,7 +85,7 @@ test("compaction TUI keeps draft and selection after a failed save", async () =>
 
   const rendered = overlay.render(80).join("\n");
   assert.equal(attempts, 1);
-  assert.match(rendered, /250,000 \/ 300,000 \(83\.3%\)/);
+  assert.match(rendered, /234,000 \/ 300,000 \(78\.0%\)/);
   assert.match(rendered, /保存失败 · disk full/);
   assert.match(rendered, /压缩阈值/);
 });
@@ -110,7 +110,7 @@ test("compaction TUI validates inline and uses layered Esc without saving", asyn
   overlay.handleInput("299999");
   overlay.handleInput("\r");
   const nearLimit = overlay.render(80).join("\n");
-  assert.match(nearLimit, /实际 >285,000 \/ 300,000 \(95\.0%\)/);
+  assert.match(nearLimit, /实际 >269,000 \/ 300,000 \(89\.7%\)/);
   assert.doesNotMatch(nearLimit, /△ 提醒/);
   assert.equal(saves, 0);
 
@@ -137,7 +137,7 @@ test("compaction TUI shows the stepwise effective-reserve derivation while editi
   assert.match(rendered, /窗口 5% 底线 · 15,000 Token/);
   assert.match(rendered, /模型输出上限 · 16,000 Token · 按剩余窗口动态收缩/);
   assert.match(rendered, /实际安全预留 · 15,000 Token/);
-  assert.match(rendered, /实际硬压缩 · 超过 285,000 Token \(95\.0%\)/);
+  assert.match(rendered, /实际硬压缩 · 超过 269,000 Token \(89\.7%\)/);
   assert.match(rendered, /生效原因 · 窗口 5% 安全底线下调/);
 });
 
@@ -230,7 +230,7 @@ test("compaction TUI pressure preview derives from the effective soft ratios", (
 test("compaction TUI treats maxTokens as a dynamically clamped output ceiling", () => {
   const overlay = createOverlay({ contextWindow: 250_000, maxTokens: 250_000 });
   const rendered = overlay.render(120).join("\n");
-  assert.match(rendered, /实际硬压缩阈值 · 实际 >237,500 \/ 250,000 \(95\.0%\)/);
+  assert.match(rendered, /实际硬压缩阈值 · 实际 >217,500 \/ 250,000 \(87\.0%\)/);
   assert.match(rendered, /配置阈值 · 240,000 Token \(96\.0%\)/);
   assert.match(rendered, /实际安全预留 · 12,500 Token · 窗口 5% 安全底线下调/);
   assert.match(rendered, /模型输出上限 · 250,000 Token · 按剩余窗口动态收缩/);
@@ -252,7 +252,7 @@ test("compaction TUI selects a compaction model from the catalog and saves it", 
   overlay.handleInput("\x1b[B"); // -> second catalog model (qwen)
   overlay.handleInput("\r");
   assert.match(overlay.render(80).join("\n"), /压缩模型 · maestro-qwen\/qwen3\.8-max-preview · 项目/);
-  assert.match(overlay.render(80).join("\n"), /实际 >110,000 \/ 120,000 \(91\.7%\)/);
+  assert.match(overlay.render(80).join("\n"), /实际 >47,904 \/ 120,000 \(39\.9%\)/);
   overlay.handleInput("\x13");
   await flushAsync();
   const projectSave = saves.find((save) => save.scope === "project");

@@ -349,11 +349,11 @@ test("API Manager retry defaults are enabled and preserve explicit overrides", a
   t.after(() => rmSync(tempDir, { recursive: true, force: true }));
   const settingsPath = join(tempDir, "settings.json");
 
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 10 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 5 });
   await ensureApiRetryDefaults(settingsPath);
   assert.deepEqual(JSON.parse(readFileSync(settingsPath, "utf8")).retry, {
     enabled: true,
-    maxRetries: 10,
+    maxRetries: 5,
     baseDelayMs: 1_000,
   });
 
@@ -370,7 +370,7 @@ test("API Manager retry defaults are enabled and preserve explicit overrides", a
   assert.equal(saved.theme, "custom");
   assert.deepEqual(saved.retry, {
     enabled: false,
-    maxRetries: 10,
+    maxRetries: 5,
     baseDelayMs: 3_000,
     provider: { maxRetries: 0, maxRetryDelayMs: 600_000 },
   });
@@ -396,7 +396,7 @@ test("API Manager retry save validates the shared cap and preserves sibling sett
   });
   await assert.rejects(
     () => saveApiRetrySettings({ enabled: true, maxRetries: 11 }, settingsPath),
-    /1-10/,
+    /1-5/,
   );
 });
 
@@ -423,11 +423,11 @@ test("/api-manager manages retry from commands and the interactive menu", async 
 
   assert.ok(sessionStart);
   await sessionStart!({}, baseContext);
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 10 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 5 });
 
   const manager = commands.get("api-manager");
   await manager.handler("retry off", baseContext);
-  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 10 });
+  assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: false, maxRetries: 5 });
   await manager.handler("retry on 4", baseContext);
   assert.deepEqual(await loadApiRetrySettings(settingsPath), { enabled: true, maxRetries: 4 });
   await manager.handler("retry show", baseContext);
@@ -678,7 +678,7 @@ test("/api-manager creates or updates URL, model, reasoning, and API key", async
   assert.equal(registrations.at(-1)?.config.models[0].id, "gpt-5.4");
   assert.match(confirmations[0] ?? "", /上下文窗口 contextWindow：400,000 Token/);
   assert.match(confirmations[0] ?? "", /单次最大输出 maxTokens：128,000 Token/);
-  assert.match(confirmations[0] ?? "", /预计实际硬压缩：上下文超过 380,000 Token/);
+  assert.match(confirmations[0] ?? "", /预计实际硬压缩：上下文超过 360,000 Token/);
   assert.match(confirmations[0] ?? "", /受上下文窗口 5% 安全底线下调/);
   assert.doesNotMatch(confirmations[0] ?? "", /软提醒不可达|软裁剪/);
   assert.match(notifications.at(-1)?.message ?? "", /已保存 1 个模型：maestro-openai\/gpt-5\.4/);

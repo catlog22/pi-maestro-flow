@@ -475,6 +475,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
         state.velocityTracker,
         false,
         softBands,
+        linkedThreshold.thresholdTokens,
       );
       state.velocityTracker = pressure.velocityTracker;
       // One-shot early warning at the nudge band, which is display-only: tell the
@@ -958,6 +959,7 @@ export function createMidTurnAutoCompaction(pi: ExtensionAPI, dependencies: Auto
           state.velocityTracker,
           true,
           softBands,
+          linkedThreshold.usable ? linkedThreshold.thresholdTokens : undefined,
         );
         persistPruneManifest(pi, state);
         if (pressure.prunedToolResults === 0) {
@@ -1184,8 +1186,14 @@ export function applyContextPressurePolicy(
   velocityTracker: VelocityTracker = EMPTY_VELOCITY_TRACKER,
   compactionPending = false,
   softBands?: SoftPressureBands,
+  /**
+   * Derived trigger threshold (summary-reserve B1 and self-hosting B2 applied).
+   * Undefined keeps the legacy `window - reserve` formula so direct callers and
+   * older tests keep byte-identical behavior.
+   */
+  thresholdOverrideTokens?: number,
 ): ContextPressureResult {
-  const thresholdTokens = contextWindow - settings.reserveTokens;
+  const thresholdTokens = thresholdOverrideTokens ?? (contextWindow - settings.reserveTokens);
   const applied = applyRecordedPrunes(messages, pruneManifest);
   // applyRecordedPrunes hands back the caller's array untouched when nothing is
   // recorded. New pruning writes elements in place, so it copies first (below)
@@ -1660,7 +1668,7 @@ export function shouldCompactMidTurn(input: {
         pruneTargetTokens: derived.soft.pruneTargetTokens,
       }
     : undefined;
-  return applyContextPressurePolicy(input.messages, input.contextWindow, effectiveSettings, undefined, undefined, false, softBands).band === "critical";
+  return applyContextPressurePolicy(input.messages, input.contextWindow, effectiveSettings, undefined, undefined, false, softBands, derived.usable ? derived.thresholdTokens : undefined).band === "critical";
 }
 
 export function estimateContextTokens(messages: AgentMessage[]): ContextEstimate {

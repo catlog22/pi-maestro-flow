@@ -32,6 +32,28 @@ export const SUMMARY_CAPACITY_MARGIN_TOKENS = 4_096;
 export const MIN_SUMMARY_OUTPUT_TOKENS = 1_024;
 export const SUMMARY_MINIMUM_HEADROOM_TOKENS = SUMMARY_CAPACITY_MARGIN_TOKENS + MIN_SUMMARY_OUTPUT_TOKENS;
 
+/**
+ * Summary-output headroom reserved ahead of the compaction trigger (B1).
+ * Claude Code's measured p99.99 compact summary output is 17,387 tokens; cap
+ * the reservation at 20,000. A trigger at ~95% of a window whose checkpoint
+ * summary request already exceeds that window is the 740833/372000 failure
+ * mode — reserving the summary budget in the trigger keeps the trigger
+ * self-hosting so the later summary has real output room.
+ */
+export const SUMMARY_OUTPUT_RESERVE_CAP = 20_000;
+
+/**
+ * Measured inflation from session-context estimate to summary-request estimate
+ * in the failing session: 740833/371482 ≈ 2× (JSON escaping, conservative
+ * ratios, runtime-state JSON). The compaction-model self-hosting threshold
+ * (B2) divides the compaction window by this so a configured small-window
+ * summary model can host its own request.
+ */
+export const SUMMARY_REQUEST_INFLATION_RATIO = 2;
+
+/** Window fraction the compaction model reserves for hosting its own summary request. */
+export const SELF_HOSTED_CAPACITY_RATIO = 0.5;
+
 /** Output budget used by the checkpoint summarizer. */
 export function summaryOutputTokenLimit(reserveTokens: number, modelMaxTokens?: number): number {
   const configuredLimit = Math.max(1, Math.floor(reserveTokens * SUMMARY_OUTPUT_RATIO));
@@ -61,7 +83,8 @@ export type CompactionThresholdReason =
   | "configured"
   | "ratio-floor"
   | "max-output"
-  | "max-output-capped";
+  | "max-output-capped"
+  | "self-hosted";
 
 /** Soft pressure boundaries derived against the same window. */
 export interface SoftThresholdDerivation {
@@ -98,6 +121,8 @@ export interface CompactionThresholdDerivation {
   configuredReserveTokens: number;
   ratioFloorTokens: number;
   effectiveReserveTokens: number;
+  /** Summary-output tokens reserved ahead of the trigger (B1); always the cap when the model ceiling is unknown. */
+  summaryReserveTokens: number;
   thresholdTokens: number;
   reason: CompactionThresholdReason;
   reservePercent: number;
@@ -117,6 +142,13 @@ export type CompactionThresholdLimiter = "session" | "compaction";
 
 export type LinkedCompactionThresholdModel = CompactionThresholdModel & {
   limiter: CompactionThresholdLimiter;
+  /**
+   * B2 self-hosting threshold for a configured summary model whose window is
+   * smaller than the session's: the trigger fires early enough that the
+   * summary request (~INFLATION_RATIO × session estimate) fits the summary
+   * model. Undefined when not applicable or not the binding threshold.
+   */
+  selfHostedThresholdTokens?: number;
 };
 
 export interface CompactionThresholdInput {
@@ -153,7 +185,15 @@ export function deriveCompactionThreshold(input: CompactionThresholdInput): Comp
   }
   const ratioFloorTokens = Math.floor(contextWindow * MIN_RESERVE_RATIO);
   const effective = effectiveReserveTokens({ reserveTokens: configuredReserveTokens }, contextWindow, input.modelMaxTokens);
-  const thresholdTokens = contextWindow - effective;
+  // Reserve the checkpoint summary's output budget ahead of the trigger (B1)
+  // so the trigger itself stays self-hosting for the later summary call.
+  // A real model always carries a maxTokens ceiling below its context window;
+  // when the ceiling is unknown (pure derivation without a model) no summary
+  // reservation is assumed, keeping legacy small-window callers unchanged.
+  const summaryReserveTokens = typeof input.modelMaxTokens === "number" && input.modelMaxTokens > 0
+    ? Math.min(SUMMARY_OUTPUT_RESERVE_CAP, input.modelMaxTokens)
+    : 0;
+  const thresholdTokens = Math.max(0, contextWindow - effective - summaryReserveTokens);
   const reason: CompactionThresholdReason = ratioFloorTokens > configuredReserveTokens
     ? "ratio-floor"
     : "configured";
@@ -163,6 +203,7 @@ export function deriveCompactionThreshold(input: CompactionThresholdInput): Comp
     configuredReserveTokens,
     ratioFloorTokens,
     effectiveReserveTokens: effective,
+    summaryReserveTokens,
     thresholdTokens,
     reason,
     reservePercent: Math.round((effective / contextWindow) * 100),
@@ -244,8 +285,44 @@ export function deriveLinkedCompactionThreshold(
     modelMaxTokens: summaryOutputTokenLimit(input.reserveTokens, input.compactionMaxTokens),
     soft: input.soft,
   });
-  if (compaction.usable && compaction.thresholdTokens < session.thresholdTokens) {
-    return { ...compaction, limiter: "compaction" };
+  if (!compaction.usable) return { ...session, limiter: "session" };
+  if (compaction.thresholdTokens < session.thresholdTokens) {
+    // B2: when the configured summary model's own window is smaller than the
+    // session window, a threshold at ~95% of the summary window always falls
+    // back — the summary request is ~INFLATION_RATIO × the session estimate.
+    // Fire early enough (a fraction of the summary window minus its summary
+    // output reserve and margin) that the summary model can host its request.
+    let linked: LinkedCompactionThresholdModel = { ...compaction, limiter: "compaction" };
+    if (input.sessionContextWindow !== undefined
+      && input.compactionContextWindow < input.sessionContextWindow) {
+      const selfHostedTokens = Math.max(0, Math.floor(input.compactionContextWindow * SELF_HOSTED_CAPACITY_RATIO)
+        - compaction.summaryReserveTokens - SUMMARY_CAPACITY_MARGIN_TOKENS);
+      // A non-positive self-hosting threshold is meaningless (any estimate
+      // would trigger but the summary model cannot host it) — keep the plain
+      // B1 threshold and let the runtime capacity fallback to the session
+      // model report the mismatch instead of entering an instant-trigger,
+      // cannot-host loop.
+      if (selfHostedTokens > 0 && selfHostedTokens < compaction.thresholdTokens) {
+        // Re-derive the soft reachability flags against the lowered threshold
+        // so TUI previews do not claim bands that the hard trigger preempts.
+        const soft = compaction.soft ? {
+          ...compaction.soft,
+          nudgeReachable: compaction.soft.nudgeTokens <= selfHostedTokens,
+          pruneReachable: compaction.soft.pruneTokens <= selfHostedTokens,
+          pruneTargetReachable: compaction.soft.pruneTargetTokens < selfHostedTokens,
+        } : undefined;
+        linked = {
+          ...compaction,
+          thresholdTokens: selfHostedTokens,
+          reason: "self-hosted",
+          thresholdPercent: Math.round((selfHostedTokens / input.compactionContextWindow) * 100),
+          selfHostedThresholdTokens: selfHostedTokens,
+          ...(soft ? { soft } : {}),
+          limiter: "compaction",
+        };
+      }
+    }
+    return linked;
   }
   return { ...session, limiter: "session" };
 }

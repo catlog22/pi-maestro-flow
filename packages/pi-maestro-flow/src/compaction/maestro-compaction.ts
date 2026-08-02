@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { chmod, lstat, mkdir, realpath, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, join, normalize, relative, resolve } from "node:path";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
 import type { Api, Model } from "@earendil-works/pi-ai";
 import { complete } from "@earendil-works/pi-ai/compat";
 import {
@@ -43,6 +44,9 @@ const PRIVATE_FILE_MODE = 0o600;
 const resolvedCompactionModels = new WeakMap<object, Map<string, Model<Api>>>();
 export { MIN_SUMMARY_OUTPUT_TOKENS, SUMMARY_CAPACITY_MARGIN_TOKENS } from "./compaction-threshold.ts";
 export const SUMMARY_REQUEST_PROTOCOL_TOKENS = 64;
+export const MAX_PROMPT_TOO_LONG_RETRIES = 2;
+const PROMPT_TOO_LONG_RETRY_FRACTION = 0.2;
+const SUMMARY_INPUT_TRUNCATION_MARKER = "[Earlier conversation omitted to fit the compaction model. Use previousSummary and runtimeState as the authoritative earlier checkpoint.]";
 
 /**
  * Enforce the final Anthropic budget-thinking invariants after Pi has clamped
@@ -88,18 +92,39 @@ export class CompactionCapacityError extends Error {
 }
 
 export function estimateSummaryRequestTokens(systemPrompt: string, prompt: string): number {
+  const text = `${systemPrompt}\n${prompt}`;
   let asciiChars = 0;
   let nonAsciiChars = 0;
-  for (const char of `${systemPrompt}\n${prompt}`) {
-    if (char.codePointAt(0)! <= 0x7f) asciiChars += 1;
-    else nonAsciiChars += 1;
+  let whitespaceChars = 0;
+  // The prompt is already JSON.stringify() output. Collapse JSON escape
+  // sequences before applying token ratios so `\\n`, `\\"` and `\\\\` do not
+  // count as two independent content characters. CJK is not escaped by
+  // JSON.stringify and remains visible to the tokenizer estimate.
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index];
+    if (char === "\\" && index + 1 < text.length) {
+      const escape = text[index + 1];
+      asciiChars += 1;
+      if (escape === "n" || escape === "r" || escape === "t") whitespaceChars += 1;
+      if (escape === "u" && /^[0-9a-fA-F]{4}$/.test(text.slice(index + 2, index + 6))) index += 5;
+      else index += 1;
+      continue;
+    }
+    const codePoint = text.codePointAt(index)!;
+    if (codePoint <= 0x7f) {
+      asciiChars += 1;
+      if (char === " " || char === "\n" || char === "\t" || char === "\r") whitespaceChars += 1;
+    } else {
+      nonAsciiChars += 1;
+      if (codePoint > 0xffff) index += 1;
+    }
   }
-  // Conservative versus the usual ~4 chars/token heuristic, but not so
-  // aggressive that a normal conversation exceeds the summary model's window:
-  // JSON/code is budgeted at 3.5 ASCII chars/token and CJK at 1.5 tokens/char.
-  // The previous 2.5 ratio inflated estimates by ~1.76x, causing false
-  // CompactionCapacityError for conversations that actually fit.
-  return Math.ceil(asciiChars / 3.5 + nonAsciiChars * 1.5) + SUMMARY_REQUEST_PROTOCOL_TOKENS;
+  const totalChars = asciiChars + nonAsciiChars;
+  const asciiRatio = totalChars > 0 && whitespaceChars / totalChars > 0.3 ? 6 : 3.5;
+  // CJK is budgeted at one token per character. The previous 1.5x multiplier
+  // caused false CompactionCapacityError failures in Chinese-heavy sessions;
+  // prompt-too-long retry below remains the fail-safe for tokenizer drift.
+  return Math.ceil(asciiChars / asciiRatio + nonAsciiChars) + SUMMARY_REQUEST_PROTOCOL_TOKENS;
 }
 
 export function fitSummaryOutputBudget(input: {
@@ -110,7 +135,7 @@ export function fitSummaryOutputBudget(input: {
   modelMaxTokens?: number;
 }): number {
   const desired = summaryOutputTokenLimit(input.reserveTokens, input.modelMaxTokens);
-  const inputTokens = Math.max(input.tokensBefore, input.estimatedRequestTokens ?? 0);
+  const inputTokens = input.estimatedRequestTokens ?? input.tokensBefore;
   const available = Math.floor(input.contextWindow - inputTokens - SUMMARY_CAPACITY_MARGIN_TOKENS);
   if (available < MIN_SUMMARY_OUTPUT_TOKENS) {
     throw new CompactionCapacityError(
@@ -118,6 +143,103 @@ export function fitSummaryOutputBudget(input: {
     );
   }
   return Math.min(desired, available);
+}
+
+export interface SummaryInputFit {
+  messages: AgentMessage[];
+  prompt: string;
+  estimatedRequestTokens: number;
+  maxTokens: number;
+  droppedRounds: number;
+}
+
+export interface SummaryPromptSource {
+  messages: AgentMessage[];
+  buildPrompt(messages: AgentMessage[], droppedRounds: number): string;
+}
+
+/**
+ * Group serialized-summary input by API round. The leading user/preamble forms
+ * group 0; each later assistant message starts the next group and owns its
+ * following tool results/user continuation until the next assistant message.
+ * Dropping a group therefore never separates one assistant tool-call batch from
+ * its results. The summary path serializes these groups to text, so an
+ * assistant-first retained group remains valid API input.
+ */
+export function groupSummaryMessagesByApiRound(messages: AgentMessage[]): AgentMessage[][] {
+  const groups: AgentMessage[][] = [];
+  let current: AgentMessage[] = [];
+  for (const message of messages) {
+    const role = (message as { role?: unknown }).role;
+    if (role === "assistant" && current.length > 0) {
+      groups.push(current);
+      current = [];
+    }
+    current.push(message);
+  }
+  if (current.length > 0) groups.push(current);
+  return groups;
+}
+
+/**
+ * Fit a full checkpoint prompt to one model window. Runtime state is rebuilt
+ * unchanged on every attempt; only the oldest conversation rounds are removed.
+ * At least one round is retained. Failure after that final round preserves the
+ * fail-closed capacity boundary.
+ */
+export function fitSummaryInputToWindow(input: {
+  source: SummaryPromptSource;
+  tokensBefore: number;
+  reserveTokens: number;
+  contextWindow: number;
+  modelMaxTokens?: number;
+  droppedRoundsBase?: number;
+}): SummaryInputFit {
+  const groups = groupSummaryMessagesByApiRound(input.source.messages);
+  const maxDrop = Math.max(0, groups.length - 1);
+  let capacityError: CompactionCapacityError | undefined;
+  for (let dropCount = 0; dropCount <= maxDrop; dropCount++) {
+    const messages = groups.length > 0 ? groups.slice(dropCount).flat() : [];
+    const droppedRounds = (input.droppedRoundsBase ?? 0) + dropCount;
+    const prompt = input.source.buildPrompt(messages, droppedRounds);
+    const estimatedRequestTokens = estimateSummaryRequestTokens(MAESTRO_COMPACTION_SYSTEM_PROMPT, prompt);
+    try {
+      const maxTokens = fitSummaryOutputBudget({
+        tokensBefore: input.tokensBefore,
+        estimatedRequestTokens,
+        reserveTokens: input.reserveTokens,
+        contextWindow: input.contextWindow,
+        modelMaxTokens: input.modelMaxTokens,
+      });
+      return { messages, prompt, estimatedRequestTokens, maxTokens, droppedRounds };
+    } catch (error) {
+      if (!(error instanceof CompactionCapacityError)) throw error;
+      capacityError = error;
+    }
+  }
+  throw capacityError ?? new CompactionCapacityError(
+    `Compaction summary stopped locally: runtime state alone cannot fit the ${input.contextWindow}-token summary window.`,
+  );
+}
+
+/** Drop roughly 20% of the oldest API-round groups after a provider PTL. */
+export function trimSummaryInputForPromptTooLong(messages: AgentMessage[]): { messages: AgentMessage[]; droppedRounds: number } | undefined {
+  const groups = groupSummaryMessagesByApiRound(messages);
+  if (groups.length < 2) return undefined;
+  const droppedRounds = Math.min(groups.length - 1, Math.max(1, Math.floor(groups.length * PROMPT_TOO_LONG_RETRY_FRACTION)));
+  return { messages: groups.slice(droppedRounds).flat(), droppedRounds };
+}
+
+export function isPromptTooLongError(error: unknown): boolean {
+  const record = error && typeof error === "object" ? error as Record<string, unknown> : undefined;
+  const nested = record?.error && typeof record.error === "object" ? record.error as Record<string, unknown> : undefined;
+  const text = [
+    error instanceof Error ? error.message : typeof error === "string" ? error : undefined,
+    typeof record?.message === "string" ? record.message : undefined,
+    typeof record?.errorMessage === "string" ? record.errorMessage : undefined,
+    typeof nested?.message === "string" ? nested.message : undefined,
+  ].filter((value): value is string => Boolean(value)).join(" ");
+  return /prompt(?:\s+is)?\s+too\s+long|request\s+too\s+large|context(?!\s+deadline)[^.\n]*(?:exceed|too\s+long|too\s+large|limit)|too\s+many\s+tokens|maximum\s+context/i.test(text);
 }
 
 export interface WorkflowRecoveryIdentity {
@@ -449,18 +571,24 @@ export async function createMaestroCompaction(
   }
 
   const messages = [...event.preparation.messagesToSummarize, ...event.preparation.turnPrefixMessages];
-  const conversationText = serializeConversation(convertToLlm(messages));
-  const prompt = buildMaestroCompactionPrompt({
-    conversationText,
-    previousSummary: event.preparation.previousSummary,
-    runtimeState: details,
-    customInstructions: event.customInstructions,
-  });
+  const buildPromptFor = (sourceMessages: AgentMessage[], droppedRounds: number): string => {
+    let conversationText = serializeConversation(convertToLlm(sourceMessages));
+    if (droppedRounds > 0) {
+      conversationText = `${SUMMARY_INPUT_TRUNCATION_MARKER}\n\n${conversationText}`;
+    }
+    return buildMaestroCompactionPrompt({
+      conversationText,
+      previousSummary: event.preparation.previousSummary,
+      runtimeState: details,
+      customInstructions: event.customInstructions,
+    });
+  };
+  const prompt = buildPromptFor(messages, 0);
 
   try {
     const response = dependencies.completeSummary
       ? await dependencies.completeSummary(prompt, event, ctx)
-      : await completeWithCurrentModel(prompt, event, ctx, dependencies.summaryInputTokens);
+      : await completeWithCurrentModel({ messages, buildPrompt: buildPromptFor }, event, ctx, dependencies.summaryInputTokens);
     if (response.stopReason === "error") {
       ctx.ui.notify(
         `Maestro compaction summary failed; falling back to Pi native compaction: ${response.errorMessage || "Unknown provider error"}`,
@@ -685,7 +813,7 @@ function cloneWorkflowIdentity(identity: WorkflowRecoveryIdentity): WorkflowReco
 }
 
 async function completeWithCurrentModel(
-  prompt: string,
+  source: SummaryPromptSource,
   event: SessionBeforeCompactEvent,
   ctx: ExtensionContext,
   summaryInputTokens?: number,
@@ -693,18 +821,25 @@ async function completeWithCurrentModel(
   const currentModel = ctx.model;
   if (!currentModel) throw new Error("No model selected for Maestro compaction");
   const settings = readEffectiveCompactionSettings(ctx.cwd);
-  const estimatedRequestTokens = estimateSummaryRequestTokens(MAESTRO_COMPACTION_SYSTEM_PROMPT, prompt);
   const budgetInputTokens = summaryInputTokens ?? event.preparation.tokensBefore;
+  const reserveTokens = event.preparation.settings.reserveTokens;
+  const fitForModel = (
+    targetModel: Model<Api>,
+    attemptSource: SummaryPromptSource = source,
+    droppedRoundsBase = 0,
+  ): SummaryInputFit => fitSummaryInputToWindow({
+    source: attemptSource,
+    tokensBefore: budgetInputTokens,
+    reserveTokens,
+    contextWindow: targetModel.contextWindow,
+    modelMaxTokens: targetModel.maxTokens,
+    droppedRoundsBase,
+  });
+
   let model = await resolveConfiguredCompactionModel(settings.model, currentModel, ctx);
-  let maxTokens: number;
+  let fit: SummaryInputFit;
   try {
-    maxTokens = fitSummaryOutputBudget({
-      tokensBefore: budgetInputTokens,
-      estimatedRequestTokens,
-      reserveTokens: event.preparation.settings.reserveTokens,
-      contextWindow: model.contextWindow,
-      modelMaxTokens: model.maxTokens,
-    });
+    fit = fitForModel(model);
   } catch (error) {
     if (!(error instanceof CompactionCapacityError) || sameModel(model, currentModel)) throw error;
     ctx.ui.notify(
@@ -712,14 +847,11 @@ async function completeWithCurrentModel(
       "warning",
     );
     model = currentModel;
-    maxTokens = fitSummaryOutputBudget({
-      tokensBefore: budgetInputTokens,
-      estimatedRequestTokens,
-      reserveTokens: event.preparation.settings.reserveTokens,
-      contextWindow: model.contextWindow,
-      modelMaxTokens: model.maxTokens,
-    });
+    // A larger session model may fit more history; restart from the original
+    // source rather than carrying the configured model's trimming forward.
+    fit = fitForModel(model);
   }
+
   let auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   if ((!auth.ok || !auth.apiKey) && !sameModel(model, currentModel)) {
     invalidateCompactionModel(settings.model, currentModel, ctx);
@@ -728,33 +860,58 @@ async function completeWithCurrentModel(
       "warning",
     );
     model = currentModel;
-    maxTokens = fitSummaryOutputBudget({
-      tokensBefore: budgetInputTokens,
-      estimatedRequestTokens,
-      reserveTokens: event.preparation.settings.reserveTokens,
-      contextWindow: model.contextWindow,
-      modelMaxTokens: model.maxTokens,
-    });
+    fit = fitForModel(model);
     auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
   }
   if (!auth.ok || !auth.apiKey) throw new Error("Compaction model authentication is unavailable");
-  return complete(
-    model,
-    {
-      systemPrompt: MAESTRO_COMPACTION_SYSTEM_PROMPT,
-      messages: [{
-        role: "user",
-        content: [{ type: "text", text: prompt }],
-        timestamp: Date.now(),
-      }],
-    },
-    buildSummaryCompletionOptions({
-      apiKey: auth.apiKey,
-      headers: auth.headers,
-      maxTokens,
-      signal: event.signal,
-    }),
-  );
+
+  const fitPromptTooLongRetry = (current: SummaryInputFit): SummaryInputFit | undefined => {
+    const trimmed = trimSummaryInputForPromptTooLong(current.messages);
+    if (!trimmed) return undefined;
+    return fitForModel(
+      model,
+      { messages: trimmed.messages, buildPrompt: source.buildPrompt },
+      current.droppedRounds + trimmed.droppedRounds,
+    );
+  };
+
+  let promptTooLongRetries = 0;
+  for (;;) {
+    let response: SummaryResponse;
+    try {
+      response = await complete(
+        model,
+        {
+          systemPrompt: MAESTRO_COMPACTION_SYSTEM_PROMPT,
+          messages: [{
+            role: "user",
+            content: [{ type: "text", text: fit.prompt }],
+            timestamp: Date.now(),
+          }],
+        },
+        buildSummaryCompletionOptions({
+          apiKey: auth.apiKey,
+          headers: auth.headers,
+          maxTokens: fit.maxTokens,
+          signal: event.signal,
+        }),
+      );
+    } catch (error) {
+      if (!isPromptTooLongError(error) || promptTooLongRetries >= MAX_PROMPT_TOO_LONG_RETRIES) throw error;
+      const retryFit = fitPromptTooLongRetry(fit);
+      if (!retryFit) throw error;
+      fit = retryFit;
+      promptTooLongRetries += 1;
+      continue;
+    }
+
+    if (response.stopReason !== "error" || !isPromptTooLongError(response.errorMessage)) return response;
+    if (promptTooLongRetries >= MAX_PROMPT_TOO_LONG_RETRIES) return response;
+    const retryFit = fitPromptTooLongRetry(fit);
+    if (!retryFit) return response;
+    fit = retryFit;
+    promptTooLongRetries += 1;
+  }
 }
 
 function compactionModelCacheKey(reference: string, currentModel: Model<Api>): string {

@@ -838,6 +838,7 @@ function thresholdReasonLabel(reason: CompactionThresholdReason): string {
   if (reason === "configured") return "由配置预留决定";
   if (reason === "ratio-floor") return "窗口 5% 安全底线下调";
   if (reason === "max-output") return "模型最大输出保护下调";
+  if (reason === "self-hosted") return "摘要模型窗口自举，硬压缩提前触发";
   return "模型最大输出过大，安全预留封顶为窗口 90%";
 }
 
