@@ -1865,6 +1865,16 @@ export async function handleProxyRequest(
       const runningLabel = singleTask.name ?? activeAgent.agent;
 
       const completeNestedInBackground = (): void => {
+        // Background/detached nested dispatches promise a teammate-complete
+        // notification on settle; a stall (never terminal) would otherwise
+        // strand the parent — and the main caller of the top-level dispatch —
+        // without any notification. Mark container and children so the stall
+        // sweep can wake the caller.
+        activeAgent.notifyOnStall = true;
+        for (const childId of taskCorrelationIds ?? []) {
+          const child = state.activeRuns.get(childId);
+          if (child) child.notifyOnStall = true;
+        }
         void nestedPromise.then((completed) => {
           if (!ownsDispatchGeneration()) {
             finishProxyDispatchTracking();

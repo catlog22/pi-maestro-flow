@@ -99,8 +99,25 @@ export declare function settleTeammateWaiters(state: TeammateState, correlationI
  * back immediately, forever, and could never reach `completed`.
  */
 export declare function claimResultReadyNotice(state: TeammateState | undefined, correlationId: string): boolean;
-export declare function watchTargetStalledAt(target: WatchTarget, state?: TeammateState): number;
-export declare function statusForWatchTarget(target: WatchTarget, now?: number, state?: TeammateState): Extract<TeammateWaitStatus, "completed" | "failed" | "terminated" | "result-ready" | "stalled"> | undefined;
+export declare function watchTargetStalledAt(target: WatchTarget, state?: TeammateState, idleCeilingOverrideMs?: number): number;
+export declare function statusForWatchTarget(target: WatchTarget, now?: number, state?: TeammateState, idleCeilingOverrideMs?: number): Extract<TeammateWaitStatus, "completed" | "failed" | "terminated" | "result-ready" | "stalled"> | undefined;
+/**
+ * Sweep for caller-facing stall notifications (edge-triggered, one-shot per
+ * episode). Consumes the same canonical verdict as `teammate-wait`/`observe`
+ * (`statusForWatchTarget`) with a longer confirmation window
+ * (`TEAMMATE_STALL_NOTIFY_IDLE_MS`), so the push channel never drifts into its
+ * own stall heuristic — the exemptions (pending interaction, result-ready,
+ * retry window) are shared with the wait path.
+ *
+ * Only agents dispatched in background/detached mode (`notifyOnStall`) are
+ * candidates: foreground callers are blocked in their tool call and get the
+ * verdict from the wait path. An agent with an active waiter is skipped — the
+ * waiter resolves `stalled` itself, so a pushed turn would be redundant.
+ *
+ * `notify` fires at most once per stall episode; clearing the marker happens
+ * when the agent resumes activity or leaves the stall candidate set.
+ */
+export declare function sweepStalledAgents(state: TeammateState, notify: (message: string, agent: ActiveAgent) => void, now?: number): void;
 export declare function waitDelayForWatchTarget(target: WatchTarget, timeoutAt: number | undefined, state?: TeammateState, until?: "result-ready" | "completed"): number;
 export declare function waitForTeammate(state: TeammateState, params: {
     name?: string;

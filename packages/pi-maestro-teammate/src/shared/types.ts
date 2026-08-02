@@ -244,6 +244,15 @@ export interface ActiveAgent {
   /** Pi emitted a final no-tool assistant turn; agent_end has not necessarily arrived yet. */
   resultReadyAt?: number;
   lastResult?: string;
+  /**
+   * This dispatch runs in background/detached mode and will send a
+   * `teammate-complete` notification on terminal settle. If it goes silent
+   * past the stall confirmation window instead, the caller must be woken with
+   * a `teammate-stalled` message — otherwise a stalled agent leaves the caller
+   * waiting forever for a notification that never fires. Set when the dispatch
+   * becomes background/detached; foreground in-window dispatches never set it.
+   */
+  notifyOnStall?: boolean;
   sleptAt?: number;
   sleepMs: number;
   progress?: AgentProgressSnapshot[];
@@ -280,6 +289,13 @@ export interface TeammateState {
    * `result-ready` back immediately, every time.
    */
   resultReadyNotified?: Set<string>;
+  /**
+   * Agents whose stall edge has already been reported to the caller (one-shot
+   * per episode, mirroring `resultReadyNotified`). Cleared when the agent
+   * resumes activity or leaves the stall candidate set, so a later stall
+   * episode can notify again.
+   */
+  stallNotified?: Set<string>;
   /**
    * Teammate proxy requests reserved before the handler's first asynchronous
    * boundary. Cancellation removes the reservation so the resumed request

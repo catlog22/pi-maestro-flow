@@ -74,6 +74,15 @@ export declare const AGENT_BUFFER_LIMITS: Readonly<{
 }>;
 export declare const TEAMMATE_STALL_TIMEOUT_MS = 30000;
 /**
+ * Idle confirmation window for the caller-facing stall notification. The wait
+ * path reports a stall after `TEAMMATE_STALL_TIMEOUT_MS` (30s), which is right
+ * for a caller actively blocking on a result. Pushing a new turn at that speed
+ * would wake the caller on long-but-healthy model/tool calls that emit no
+ * progress events, so the push channel requires a longer, monitor-aligned
+ * confirmation window before it wakes the caller.
+ */
+export declare const TEAMMATE_STALL_NOTIFY_IDLE_MS = 60000;
+/**
  * Stall ceiling for queued work. A `pending` graph task is waiting on a
  * dependency or a concurrency slot, which is expected — it just must not wait
  * without any ceiling at all.

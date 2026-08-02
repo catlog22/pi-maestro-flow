@@ -1209,6 +1209,19 @@ export default function registerTeammateExtension(
       };
       state.activeRuns.set(correlationId, activeAgent);
 
+      // Background/detached dispatches promise a teammate-complete notification
+      // on settle; mark them so a stall (which is not a terminal state and
+      // never fires that notification) wakes the caller instead. Foreground
+      // in-window dispatches stay unmarked: the caller is blocked in the tool
+      // call and gets the stall verdict from the wait path.
+      const markStallNotification = (): void => {
+        activeAgent.notifyOnStall = true;
+        for (const childId of taskCorrelationIds) {
+          const child = state.activeRuns.get(childId);
+          if (child) child.notifyOnStall = true;
+        }
+      };
+
       const childCalls = new Map<string, ChildAgentCallSnapshot>();
       const publishChildCallStatus = (child: ChildAgentCallSnapshot): void => {
         childCalls.set(child.correlationId, {
@@ -2217,6 +2230,7 @@ export default function registerTeammateExtension(
           }
 
           // Manual and timed detach share the same background completion path.
+          markStallNotification();
           detached = true;
           runPromise.then((result) => {
             if (!ownsDispatchGeneration()) return;
@@ -2246,6 +2260,7 @@ export default function registerTeammateExtension(
         }
 
         // --- BACKGROUND (default) ---
+        markStallNotification();
         const options = makeOptions();
         const bgPromise = runWithProgressFlushCleanup(
           () => runSingleTeammate(singleRunParams, options),
@@ -3838,6 +3853,27 @@ export default function registerTeammateExtension(
   let widgetTimer: ReturnType<typeof setInterval> | null = null;
   let wakeableEvictionTimer: ReturnType<typeof setTimeout> | null = null;
 
+  /**
+   * Wakes the caller when a background/detached agent goes silent past the
+   * stall confirmation window. One-shot per episode (edge-triggered in
+   * sweepStalledAgents); on delivery failure the marker stays set so the
+   * notification is not retried on every tick — the agent remains inspectable
+   * via observe/teammate-watch and safeSendMessage already logged the drop.
+   */
+  const notifyStalled = (message: string, agent: ActiveAgent): void => {
+    safeSendMessage(pi, {
+      customType: "teammate-stalled",
+      content: message,
+      display: true,
+      details: {
+        mode: agent.spawnedBy ? "nested" : "single",
+        correlationId: agent.correlationId,
+        name: agent.name,
+        agent: agent.agent,
+      },
+    }, { triggerTurn: true });
+  };
+
   function startWidgetTimer(): void {
     if (widgetTimer) return;
     stopWakeableEvictionTimer();
@@ -3847,6 +3883,9 @@ export default function registerTeammateExtension(
       // retirement keeps delta-only consumers (cockpit roster) in sync.
       reclaimResultReadyAgents(state, pi);
       sweepFailedAgents(state);
+      // Before the wakeable budget can retire a silent agent, surface the stall
+      // to the caller that is waiting on a notification that will never fire.
+      sweepStalledAgents(state, notifyStalled);
       enforceWakeableAgentBudget(state);
       if (!hasTeammateWidgetWork(state)) {
         stopWidgetTimer();
@@ -3993,6 +4032,7 @@ import {
   settleGraphTaskAgent,
   statusForWatchTarget,
   sweepFailedAgents,
+  sweepStalledAgents,
   ts,
   waitForTeammate,
   waitOutput,

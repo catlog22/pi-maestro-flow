@@ -200,6 +200,7 @@ import {
   TEAMMATE_INTERACTION_QUEUE_LIMIT,
   TEAMMATE_INTERACTION_TIMEOUT_MS,
   TEAMMATE_PENDING_STALL_TIMEOUT_MS,
+  TEAMMATE_STALL_NOTIFY_IDLE_MS,
   TEAMMATE_STALL_TIMEOUT_MS,
   TEAMMATE_WAIT_DEFAULT_TIMEOUT_MS,
   TEAMMATE_WAIT_POLL_FLOOR_MS,
@@ -743,14 +744,18 @@ export function claimResultReadyNotice(state: TeammateState | undefined, correla
   return true;
 }
 
-export function watchTargetStalledAt(target: WatchTarget, state?: TeammateState): number {
+export function watchTargetStalledAt(
+  target: WatchTarget,
+  state?: TeammateState,
+  idleCeilingOverrideMs?: number,
+): number {
   const status = target.kind === "agent" ? target.agent.status : target.progress.status;
   const lastActivityAt = target.kind === "agent"
     ? target.agent.lastActivityAt
     : target.progress.lastActivityAt ?? target.agent.lastActivityAt;
   const idleCeiling = status === "pending"
     ? TEAMMATE_PENDING_STALL_TIMEOUT_MS
-    : TEAMMATE_STALL_TIMEOUT_MS;
+    : (idleCeilingOverrideMs ?? TEAMMATE_STALL_TIMEOUT_MS);
   const baseStalledAt = lastActivityAt + idleCeiling;
   if (status !== "retrying") return baseStalledAt;
   const correlationId = target.kind === "agent"
@@ -768,6 +773,7 @@ export function statusForWatchTarget(
   target: WatchTarget,
   now = Date.now(),
   state?: TeammateState,
+  idleCeilingOverrideMs?: number,
 ): Extract<TeammateWaitStatus, "completed" | "failed" | "terminated" | "result-ready" | "stalled"> | undefined {
   const status = target.kind === "agent" ? target.agent.status : target.progress.status;
   if (status === "sleeping" || status === "completed") return "completed";
@@ -784,8 +790,73 @@ export function statusForWatchTarget(
   // not stalled. Reporting it as stalled told callers to terminate a healthy
   // agent; the wait's own timeout remains the backstop.
   if (target.kind === "agent" && (target.agent.pendingInteractions?.size ?? 0) > 0) return undefined;
-  if (now >= watchTargetStalledAt(target, state)) return "stalled";
+  if (now >= watchTargetStalledAt(target, state, idleCeilingOverrideMs)) return "stalled";
   return undefined;
+}
+
+/**
+ * Sweep for caller-facing stall notifications (edge-triggered, one-shot per
+ * episode). Consumes the same canonical verdict as `teammate-wait`/`observe`
+ * (`statusForWatchTarget`) with a longer confirmation window
+ * (`TEAMMATE_STALL_NOTIFY_IDLE_MS`), so the push channel never drifts into its
+ * own stall heuristic — the exemptions (pending interaction, result-ready,
+ * retry window) are shared with the wait path.
+ *
+ * Only agents dispatched in background/detached mode (`notifyOnStall`) are
+ * candidates: foreground callers are blocked in their tool call and get the
+ * verdict from the wait path. An agent with an active waiter is skipped — the
+ * waiter resolves `stalled` itself, so a pushed turn would be redundant.
+ *
+ * `notify` fires at most once per stall episode; clearing the marker happens
+ * when the agent resumes activity or leaves the stall candidate set.
+ */
+export function sweepStalledAgents(
+  state: TeammateState,
+  notify: (message: string, agent: ActiveAgent) => void,
+  now = Date.now(),
+): void {
+  const notified = state.stallNotified ??= new Set<string>();
+  for (const agent of state.activeRuns.values()) {
+    if (!agent.notifyOnStall) continue;
+    const cid = agent.correlationId;
+    // The caller is actively waiting on this agent: the wait already reports
+    // the stall verdict, so a pushed turn would be redundant. Drop any marker
+    // so a later episode (after this wait ends) can still notify.
+    const waiters = teammateWaiters.get(state)?.get(cid);
+    if (waiters && waiters.size > 0) {
+      notified.delete(cid);
+      continue;
+    }
+    // A consumable result is never a stall; check the field directly so this
+    // sweep does not consume the one-shot result-ready notice that a later
+    // waiter is entitled to (claimResultReadyNotice runs inside
+    // statusForWatchTarget).
+    if (agent.resultReadyAt !== undefined) {
+      notified.delete(cid);
+      continue;
+    }
+    const verdict = statusForWatchTarget(
+      { kind: "agent", agent },
+      now,
+      state,
+      TEAMMATE_STALL_NOTIFY_IDLE_MS,
+    );
+    if (verdict === "stalled") {
+      if (notified.has(cid)) continue;
+      notified.add(cid);
+      const idleSeconds = Math.max(0, Math.round((now - agent.lastActivityAt) / 1000));
+      const label = agent.name ?? agent.agent;
+      notify(
+        `Agent "${label}" (${cid.slice(0, 8)}) stopped reporting activity (idle ${idleSeconds}s); `
+          + `inspect its captured output (teammate-watch) before retrying or terminating it.`,
+        agent,
+      );
+    } else {
+      // Active again, result-ready, or settled: the episode is over, so the
+      // next silent spell is a fresh episode that may notify again.
+      notified.delete(cid);
+    }
+  }
 }
 
 export function waitDelayForWatchTarget(
