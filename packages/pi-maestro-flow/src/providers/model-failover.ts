@@ -47,6 +47,13 @@ export interface ModelFailoverOptions {
 const CONFIG_FILE = "model-failover.json";
 /** Upper bound on attached images auto-analyzed in one turn; prevents linear cost blowup. */
 const MAX_ATTACHED_IMAGES_PER_TURN = 5;
+/**
+ * Injected as a follow-up user message after a fallback switch so Pi re-runs
+ * the failed turn on the new model. agent_end is terminal: without this the
+ * switch would only apply to the next manual prompt. Continuations are bounded
+ * by chain length because each failure advances the candidate index.
+ */
+const FAILOVER_RETRY_PROMPT = "The previous model failed with a transient network or provider error, and the session just switched to a fallback model. Retry the original user request from the beginning and complete it. Do not wait for another user request.";
 
 function emptyConfig(): ModelFailoverConfig {
   return { enabled: false, fallbackModels: {} };
@@ -379,7 +386,18 @@ export function registerModelFailover(pi: ExtensionAPI, options: ModelFailoverOp
     }
     if (!fallback) return;
     active = fallback;
-    ctx.ui.notify(`Model ${failedModel} failed; retrying with ${fallback.model}.`, "warning");
+    // Queued messages already continue the run and will pick up the switched
+    // model; an aborted run must not be resurrected by the failover handler.
+    if (ctx.signal?.aborted || ctx.hasPendingMessages()) {
+      ctx.ui.notify(`Model ${failedModel} failed; switched to ${fallback.model} for the next turn.`, "warning");
+      return;
+    }
+    try {
+      pi.sendUserMessage(FAILOVER_RETRY_PROMPT, { deliverAs: "followUp" });
+      ctx.ui.notify(`Model ${failedModel} failed; continuing the turn with ${fallback.model}.`, "warning");
+    } catch {
+      ctx.ui.notify(`Model ${failedModel} failed; switched to ${fallback.model} for the next turn.`, "warning");
+    }
   });
 
   pi.on("agent_settled", async (_event, ctx) => {

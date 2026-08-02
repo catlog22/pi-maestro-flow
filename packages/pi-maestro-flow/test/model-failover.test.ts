@@ -17,12 +17,13 @@ type Handler = (event: any, ctx: ExtensionContext) => unknown;
 function harness(
   cwd: string,
   breaker = new ModelCircuitBreaker({ threshold: 1, cooldownMs: 60_000 }),
-  options: { multimodal?: string[]; visionAnalyzer?: any } = {},
+  options: { multimodal?: string[]; visionAnalyzer?: any; hasPendingMessages?: boolean } = {},
 ) {
   const handlers = new Map<string, Handler[]>();
   const commands: string[] = [];
   const selected: string[] = [];
   const notifications: string[] = [];
+  const sentMessages: Array<{ content: string; options?: { deliverAs?: string } }> = [];
   const multimodal = new Set(options.multimodal ?? []);
   const models = [
     { provider: "provider", id: "primary", input: multimodal.has("provider/primary") ? ["text", "image"] : ["text"] },
@@ -35,6 +36,7 @@ function harness(
     modelRegistry: {
       getAvailable: () => models,
     },
+    hasPendingMessages: () => options.hasPendingMessages ?? false,
     ui: {
       notify(message: string) { notifications.push(message); },
     },
@@ -51,6 +53,9 @@ function harness(
       (ctx as unknown as { model: typeof model }).model = model;
       return true;
     },
+    sendUserMessage(content: string, messageOptions?: { deliverAs?: string }) {
+      sentMessages.push({ content, options: messageOptions });
+    },
   } as unknown as ExtensionAPI;
 
   registerModelFailover(pi, {
@@ -64,7 +69,7 @@ function harness(
     for (const handler of handlers.get(event) ?? []) result = await handler({ type: event, ...payload }, ctx);
     return result;
   };
-  return { breaker, commands, ctx, emit, notifications, selected };
+  return { breaker, commands, ctx, emit, notifications, selected, sentMessages };
 }
 
 function writeProjectConfig(cwd: string, value: unknown): void {
@@ -179,7 +184,10 @@ test("retryable agent failure switches model before Pi performs its own continua
     });
 
     assert.deepEqual(runtime.selected, ["provider/backup"]);
-    assert.match(runtime.notifications[0] ?? "", /retrying with provider\/backup/);
+    assert.match(runtime.notifications[0] ?? "", /continuing the turn with provider\/backup/);
+    assert.equal(runtime.sentMessages.length, 1);
+    assert.equal(runtime.sentMessages[0]?.options?.deliverAs, "followUp");
+    assert.match(runtime.sentMessages[0]?.content ?? "", /Retry the original user request/);
     assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "OPEN");
 
     await runtime.emit("turn_start", { turnIndex: 1 });
@@ -191,6 +199,52 @@ test("retryable agent failure switches model before Pi performs its own continua
     });
     await runtime.emit("agent_settled");
     assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/backup")?.state, "CLOSED");
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("a bare terminated transport error switches model and continues the turn", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const runtime = harness(cwd);
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "Error: terminated" }],
+    });
+
+    assert.deepEqual(runtime.selected, ["provider/backup"]);
+    assert.equal(runtime.sentMessages.length, 1);
+    assert.match(runtime.notifications[0] ?? "", /continuing the turn with provider\/backup/);
+  } finally {
+    fs.rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("queued messages suppress the failover continuation because Pi already continues", async () => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "pi-model-failover-"));
+  try {
+    writeProjectConfig(cwd, {
+      enabled: true,
+      fallbackModels: { "provider/primary": ["provider/backup"] },
+    });
+    const runtime = harness(cwd, undefined, { hasPendingMessages: true });
+    await runtime.emit("session_start");
+    await runtime.emit("before_agent_start", { prompt: "work" });
+    await runtime.emit("turn_start", { turnIndex: 0 });
+    await runtime.emit("agent_end", {
+      messages: [{ role: "assistant", stopReason: "error", errorMessage: "fetch failed" }],
+    });
+
+    assert.deepEqual(runtime.selected, ["provider/backup"]);
+    assert.equal(runtime.sentMessages.length, 0);
+    assert.match(runtime.notifications[0] ?? "", /switched to provider\/backup for the next turn/);
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
   }
@@ -236,6 +290,7 @@ test("non-retryable authentication failures do not switch or poison model health
     await runtime.emit("agent_settled");
 
     assert.deepEqual(runtime.selected, []);
+    assert.equal(runtime.sentMessages.length, 0);
     assert.equal(runtime.breaker.snapshot().find((entry) => entry.model === "provider/primary")?.state, "CLOSED");
   } finally {
     fs.rmSync(cwd, { recursive: true, force: true });
