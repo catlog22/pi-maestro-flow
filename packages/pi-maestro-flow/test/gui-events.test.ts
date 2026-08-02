@@ -148,3 +148,55 @@ test("forwarder events reach SSE clients through a real server", async () => {
     server.close("done");
   }
 });
+
+test("GUI SSE replay log enforces a total byte budget", async () => {
+  const cwd = await mkdtemp(join(tmpdir(), "gui-event-budget-"));
+  const server = await startGuiServer({
+    sessionId: "budget",
+    cwd,
+    writeDiscovery: false,
+    eventLogMaxBytes: 180,
+  });
+  try {
+    server.pushEvent("first", { text: "x".repeat(100) });
+    server.pushEvent("second", { text: "y".repeat(100) });
+
+    const received = await new Promise<{ event: string; data: unknown }>((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error("timed out waiting for replay event")), 2_000);
+      const req = http.get({ host: "127.0.0.1", port: server.port, path: `/events?session=${server.token}` }, (res) => {
+        let buffer = "";
+        let current: Partial<{ event: string; data: string }> = {};
+        res.on("data", (chunk: Buffer) => {
+          buffer += chunk.toString("utf8");
+          let index: number;
+          while ((index = buffer.indexOf("\n")) >= 0) {
+            const line = buffer.slice(0, index);
+            buffer = buffer.slice(index + 1);
+            if (line.startsWith(":")) continue;
+            if (line === "") {
+              if (current.event && current.data !== undefined) {
+                clearTimeout(timer);
+                req.destroy();
+                resolve({ event: current.event, data: JSON.parse(current.data) });
+                return;
+              }
+              current = {};
+              continue;
+            }
+            const colon = line.indexOf(":");
+            const field = colon >= 0 ? line.slice(0, colon) : line;
+            const value = colon >= 0 ? line.slice(colon + 1).trimStart() : "";
+            if (field === "event") current.event = value;
+            else if (field === "data") current.data = value;
+          }
+        });
+      });
+      req.on("error", reject);
+    });
+
+    assert.equal(received.event, "second", "the oldest serialized frame is evicted by bytes");
+    assert.deepEqual(received.data, { text: "y".repeat(100) });
+  } finally {
+    server.close("done");
+  }
+});

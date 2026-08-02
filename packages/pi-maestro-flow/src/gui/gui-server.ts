@@ -18,6 +18,7 @@ import {
 const MAX_BODY_SIZE = 2 * 1024 * 1024;
 const DEFAULT_HEARTBEAT_MS = 15_000;
 const MAX_EVENT_LOG = 256;
+const MAX_EVENT_LOG_BYTES = 2 * 1024 * 1024;
 
 interface RouteEntry {
   method: GuiHttpMethod;
@@ -28,7 +29,8 @@ interface RouteEntry {
 interface EventLogEntry {
   id: number;
   name: string;
-  payload: unknown;
+  chunk: string;
+  bytes: number;
 }
 
 export async function startGuiServer(options: GuiServerOptions): Promise<GuiServerHandle> {
@@ -36,10 +38,12 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
   const sessionId = options.sessionId;
   const writeDiscovery = options.writeDiscovery ?? true;
   const heartbeatMs = options.heartbeatMs ?? DEFAULT_HEARTBEAT_MS;
+  const eventLogMaxBytes = Math.max(1, options.eventLogMaxBytes ?? MAX_EVENT_LOG_BYTES);
 
   const sseClients = new Set<ServerResponse>();
   const routes: RouteEntry[] = [];
   const eventLog: EventLogEntry[] = [];
+  let eventLogBytes = 0;
   let nextEventId = 1;
   let closed = false;
   let heartbeat: NodeJS.Timeout | null = null;
@@ -51,9 +55,17 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
   const pushEvent = (name: string, payload: unknown): void => {
     if (closed) return;
     const id = nextEventId++;
-    eventLog.push({ id, name, payload });
-    if (eventLog.length > MAX_EVENT_LOG) eventLog.splice(0, eventLog.length - MAX_EVENT_LOG);
     const chunk = serializeEvent(id, name, payload);
+    const bytes = Buffer.byteLength(chunk, "utf8");
+    if (bytes <= eventLogMaxBytes) {
+      eventLog.push({ id, name, chunk, bytes });
+      eventLogBytes += bytes;
+      while (eventLog.length > MAX_EVENT_LOG || eventLogBytes > eventLogMaxBytes) {
+        const evicted = eventLog.shift();
+        if (!evicted) break;
+        eventLogBytes -= evicted.bytes;
+      }
+    }
     for (const client of sseClients) {
       try {
         client.write(chunk);
@@ -70,7 +82,7 @@ export async function startGuiServer(options: GuiServerOptions): Promise<GuiServ
       : eventLog;
     for (const entry of toReplay) {
       try {
-        res.write(serializeEvent(entry.id, entry.name, entry.payload));
+        res.write(entry.chunk);
       } catch {
         sseClients.delete(res);
         return;

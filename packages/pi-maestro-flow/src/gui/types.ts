@@ -52,6 +52,8 @@ export interface GuiServerOptions {
   writeDiscovery?: boolean;
   /** SSE keep-alive interval in ms (default 15000). */
   heartbeatMs?: number;
+  /** @internal Override retained SSE replay bytes for deterministic tests. */
+  eventLogMaxBytes?: number;
   /** Extra fields merged into the /health result. */
   getHealth?: () => Record<string, unknown> | Promise<Record<string, unknown>>;
 }
