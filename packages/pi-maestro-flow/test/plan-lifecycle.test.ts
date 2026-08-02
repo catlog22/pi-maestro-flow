@@ -236,6 +236,9 @@ test("Plan tool descriptions match the prompt-only mode lifecycle", async () => 
     assert.doesNotMatch(harness.tools.get("plan-exit")?.description ?? "", /restore the exact prior active tool set/);
     assert.match(harness.tools.get("plan-status")?.description ?? "", /while Plan mode is active/);
     assert.match(harness.tools.get("plan-review")?.description ?? "", /interactive UI/);
+    const updateParams = harness.tools.get("plan-update")?.parameters as { properties?: Record<string, { description?: string }> };
+    assert.match(updateParams?.properties?.expectedRevision?.description ?? "", /optimistic concurrency/);
+    assert.match(updateParams?.properties?.expectedRevision?.description ?? "", /currently loaded revision/);
   } finally {
     onSessionShutdownPlan(harness.ctx);
     await rm(root, { recursive: true, force: true });

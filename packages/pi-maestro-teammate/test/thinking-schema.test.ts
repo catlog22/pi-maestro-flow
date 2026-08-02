@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { Check } from "typebox/value";
 import {
+  TaskSpec,
   TeammateListParams,
   TeammateParams,
   TeammateSendParams,
@@ -57,6 +58,14 @@ test("max is an input alias that canonicalizes to xhigh", () => {
 test("teammate schema rejects unsupported thinking depths", () => {
   assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work" }], thinking: "ultra" }), false);
   assert.equal(Check(TeammateParams, { tasks: [{ prompt: "work", thinking: "ultra" }] }), false);
+});
+
+test("dependsOn and maxAgents descriptions document the runtime guards", () => {
+  const dependsOn = (TaskSpec.properties.dependsOn as { description?: string }).description ?? "";
+  assert.match(dependsOn, /Unknown names and self-references are rejected/);
+  const maxAgents = (TeammateParams.properties.maxAgents as { description?: string }).description ?? "";
+  assert.match(maxAgents, /single dispatch \(default: 15\)/);
+  assert.match(maxAgents, /PI_TEAMMATE_MAX_ACTIVE_AGENTS/);
 });
 
 test("teammate-list schema exposes discovered role listing", () => {

@@ -89,7 +89,13 @@ const ALL_PLAN_TOOL_NAMES = new Set([PLAN_ENTER_TOOL, ...PLAN_MODE_TOOL_NAMES]);
 
 const PlanUpdateParams = Type.Object({
   markdown: Type.String({ description: "Complete Markdown text for current.md" }),
-  expectedRevision: Type.Optional(Type.Integer({ minimum: 0 })),
+  expectedRevision: Type.Optional(
+    Type.Integer({
+      minimum: 0,
+      description:
+        "Expected current revision for optimistic concurrency; the save fails if the draft has moved past it. Defaults to the currently loaded revision.",
+    }),
+  ),
 });
 const EmptyPlanParams = Type.Object({});
 

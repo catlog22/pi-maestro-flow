@@ -61,7 +61,7 @@ export const TaskSpec = Type.Object({
   dependsOn: Type.Optional(
     Type.Array(Type.String(), {
       description:
-        "Explicit dependency task names. Merged with implicit {name} references. Use when ordering is needed without injecting the referenced task's output. Unknown names are rejected.",
+        "Explicit dependency task names. Merged with implicit {name} references. Use when ordering is needed without injecting the referenced task's output. Unknown names and self-references are rejected.",
     }),
   ),
   context: Type.Optional(
@@ -156,7 +156,7 @@ export const TeammateParams = Type.Object({
     Type.Integer({
       minimum: 1,
       description:
-        "Maximum number of tasks allowed in a single dispatch (default: 15). Override globally via PI_TEAMMATE_MAX_AGENTS.",
+        "Maximum number of tasks allowed in a single dispatch (default: 15). Override globally via PI_TEAMMATE_MAX_AGENTS. A separate runtime budget caps live agents across the whole dispatch tree (default 32, configurable via PI_TEAMMATE_MAX_ACTIVE_AGENTS).",
     }),
   ),
 
