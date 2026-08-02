@@ -64,7 +64,9 @@ export default function mcpAdapter(pi: ExtensionAPI): McpAdapterHandle {
   }
 
   const earlyConfigPath = getConfigPathFromArgv();
-  const earlyConfig = loadMcpConfig(earlyConfigPath);
+  // Extension registration happens before a session context can establish workspace trust.
+  // Only explicit/global MCP config may contribute direct tools at this stage.
+  const earlyConfig = loadMcpConfig(earlyConfigPath, process.cwd(), { includeProject: false });
   const earlyCache = loadMetadataCache();
   const prefix = earlyConfig.settings?.toolPrefix ?? "server";
 

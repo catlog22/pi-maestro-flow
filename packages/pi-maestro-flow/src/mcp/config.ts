@@ -181,8 +181,17 @@ export function getMcpDiscoverySummary(overridePath?: string, cwd = process.cwd(
   };
 }
 
-export function loadMcpConfig(overridePath?: string, cwd = process.cwd()): McpConfig {
-  const config = loadMcpManagementConfig(overridePath, cwd);
+export interface McpConfigLoadOptions {
+  /** Project-owned config and imports may execute commands; require workspace trust. */
+  includeProject?: boolean;
+}
+
+export function loadMcpConfig(
+  overridePath?: string,
+  cwd = process.cwd(),
+  options: McpConfigLoadOptions = {},
+): McpConfig {
+  const config = loadMcpManagementConfig(overridePath, cwd, options);
   return {
     ...config,
     mcpServers: Object.fromEntries(
@@ -195,13 +204,18 @@ export function loadMcpConfig(overridePath?: string, cwd = process.cwd()): McpCo
  * Loads every configured server, including servers disabled through the manager.
  * Runtime code must use loadMcpConfig so disabled entries are never connected.
  */
-export function loadMcpManagementConfig(overridePath?: string, cwd = process.cwd()): McpConfig {
+export function loadMcpManagementConfig(
+  overridePath?: string,
+  cwd = process.cwd(),
+  options: McpConfigLoadOptions = {},
+): McpConfig {
   let config: McpConfig = { mcpServers: {} };
 
   for (const source of getConfigSources(overridePath, cwd)) {
+    if (options.includeProject === false && source.scope === "project") continue;
     const loaded = readValidatedConfig(source.readPath, `MCP config from ${source.readPath}`);
     if (!loaded) continue;
-    config = mergeConfigs(config, expandImports(loaded, cwd));
+    config = mergeConfigs(config, expandImports(loaded, cwd, options));
   }
 
   return config;
@@ -288,11 +302,16 @@ function mergeImports(left: ImportKind[] | undefined, right: ImportKind[] | unde
   return [...new Set(merged)];
 }
 
-function expandImports(config: McpConfig, cwd = process.cwd()): McpConfig {
+function expandImports(
+  config: McpConfig,
+  cwd = process.cwd(),
+  options: McpConfigLoadOptions = {},
+): McpConfig {
   if (!config.imports?.length) return config;
 
   const importedServers: Record<string, ServerEntry> = {};
   for (const importKind of config.imports) {
+    if (options.includeProject === false && isProjectRelativeImport(importKind)) continue;
     const importPath = resolveImportPath(importKind, cwd);
     if (!importPath) continue;
 
@@ -314,6 +333,10 @@ function expandImports(config: McpConfig, cwd = process.cwd()): McpConfig {
     settings: config.settings,
     mcpServers: mergeServerMaps(importedServers, config.mcpServers),
   };
+}
+
+function isProjectRelativeImport(importKind: ImportKind): boolean {
+  return (IMPORT_PATHS[importKind] ?? []).some((candidate) => candidate.startsWith("."));
 }
 
 function resolveImportPath(importKind: ImportKind, cwd = process.cwd()): string | null {

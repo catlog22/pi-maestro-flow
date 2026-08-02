@@ -36,7 +36,7 @@ export async function initializeMcp(
   ctx: ExtensionContext
 ): Promise<McpExtensionState> {
   const configPath = pi.getFlag("mcp-config") as string | undefined;
-  const config = loadMcpConfig(configPath, ctx.cwd);
+  const config = loadMcpConfig(configPath, ctx.cwd, { includeProject: ctx.isProjectTrusted() });
 
   const manager = new McpServerManager(ctx.cwd);
   manager.setDefaultRequestTimeoutMs(config.settings?.requestTimeoutMs);

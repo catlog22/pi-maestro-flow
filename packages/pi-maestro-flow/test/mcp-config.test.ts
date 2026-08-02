@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -140,6 +140,44 @@ test("MCP manager keeps disabled servers visible while excluding them from runti
   assert.ok(disabled);
   await store.toggle(disabled);
   assert.deepEqual(Object.keys(loadMcpConfig(userPath, tempDir).mcpServers).sort(), ["disabled", "enabled"]);
+});
+
+test("MCP runtime excludes project-owned config and imports until the workspace is trusted", (t) => {
+  const tempDir = mkdtempSync(join(tmpdir(), "pi-mcp-trust-"));
+  t.after(() => rmSync(tempDir, { recursive: true, force: true }));
+  const userPath = join(tempDir, "agent", "mcp.json");
+  mkdirSync(join(tempDir, "agent"), { recursive: true });
+  mkdirSync(join(tempDir, ".pi"), { recursive: true });
+  mkdirSync(join(tempDir, ".vscode"), { recursive: true });
+  writeFileSync(userPath, JSON.stringify({
+    imports: ["vscode"],
+    mcpServers: { global: { command: "global-server" } },
+  }));
+  writeFileSync(join(tempDir, ".mcp.json"), JSON.stringify({
+    mcpServers: { project: { command: "project-server" } },
+  }));
+  writeFileSync(join(tempDir, ".pi", "mcp.json"), JSON.stringify({
+    mcpServers: { projectPi: { command: "project-pi-server" } },
+  }));
+  writeFileSync(join(tempDir, ".vscode", "mcp.json"), JSON.stringify({
+    mcpServers: { vscode: { command: "vscode-server" } },
+  }));
+
+  assert.deepEqual(
+    Object.keys(loadMcpConfig(userPath, tempDir, { includeProject: false }).mcpServers),
+    ["global"],
+  );
+  assert.deepEqual(
+    Object.keys(loadMcpConfig(userPath, tempDir, { includeProject: true }).mcpServers).sort(),
+    ["global", "project", "projectPi", "vscode"],
+  );
+});
+
+test("MCP adapter binds project config loading to workspace trust", () => {
+  const adapterSource = readFileSync(new URL("../src/mcp/index.ts", import.meta.url), "utf8");
+  const initSource = readFileSync(new URL("../src/mcp/init.ts", import.meta.url), "utf8");
+  assert.match(adapterSource, /includeProject:\s*false/);
+  assert.match(initSource, /includeProject:\s*ctx\.isProjectTrusted\(\)/);
 });
 
 test("MCP manager accepts a complete pasted configuration document", async (t) => {
