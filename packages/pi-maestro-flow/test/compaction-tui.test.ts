@@ -239,6 +239,115 @@ test("compaction TUI toggles soft mechanism switches and saves the soft group", 
   });
 });
 
+test("compaction TUI toggles soft mechanisms on the user scope and saves there", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  const overlay = createOverlay({
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+  overlay.handleInput("\t"); // -> user
+  for (let index = 0; index < 7; index++) overlay.handleInput("\x1b[B"); // -> softRelevance
+  overlay.handleInput(" ");
+  assert.match(overlay.render(80).join("\n"), /相关性排序 · 已开启 · 用户/);
+  overlay.handleInput("\x13");
+  await flushAsync();
+  const userSave = saves.find((save) => save.scope === "user");
+  assert.deepEqual(userSave?.values, {
+    enabled: false,
+    reserveTokens: 20_000,
+    soft: { relevance: { enabled: true } },
+  });
+});
+
+test("compaction TUI saves several mechanism toggles in one soft group", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  const overlay = createOverlay({
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+  for (let index = 0; index < 6; index++) overlay.handleInput("\x1b[B"); // -> softTimeBased
+  overlay.handleInput(" ");
+  overlay.handleInput("\x1b[B"); // -> softRelevance
+  overlay.handleInput(" ");
+  overlay.handleInput("\x1b[B"); // -> softDedup
+  overlay.handleInput(" ");
+  overlay.handleInput("\x13");
+  await flushAsync();
+  const projectSave = saves.find((save) => save.scope === "project");
+  assert.deepEqual(projectSave?.values, {
+    reserveTokens: 10_000,
+    keepRecentTokens: 12_000,
+    soft: {
+      timeBased: { enabled: true },
+      relevance: { enabled: true },
+      crossTurnDedup: { enabled: true },
+    },
+  });
+});
+
+test("compaction TUI keeps a mechanism toggle draft after a failed save", async () => {
+  const overlay = createOverlay({
+    async saveScope() { throw new Error("disk full"); },
+  });
+  for (let index = 0; index < 7; index++) overlay.handleInput("\x1b[B"); // -> softRelevance
+  overlay.handleInput(" ");
+  overlay.handleInput("\x13");
+  await flushAsync();
+  const rendered = overlay.render(80).join("\n");
+  assert.match(rendered, /相关性排序 · 已开启 · 项目/);
+  assert.match(rendered, /保存失败 · disk full/);
+});
+
+test("compaction TUI discards a mechanism toggle on layered Esc", async () => {
+  let result: CompactionSettingsResult | undefined;
+  const overlay = createOverlay({
+    done(next) { result = next; },
+  });
+  for (let index = 0; index < 7; index++) overlay.handleInput("\x1b[B"); // -> softRelevance
+  overlay.handleInput(" ");
+  overlay.handleInput("\x1b"); // arms discard
+  assert.match(overlay.render(80).join("\n"), /有未保存的修改/);
+  overlay.handleInput("\x1b");
+  assert.deepEqual(result, { saved: false });
+});
+
+test("compaction TUI 'u' on the only mechanism toggle clears the whole soft group", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  const overlay = createOverlay({
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+  for (let index = 0; index < 8; index++) overlay.handleInput("\x1b[B"); // -> softDedup
+  overlay.handleInput(" ");
+  assert.match(overlay.render(80).join("\n"), /跨轮去重 · 已开启 · 项目/);
+  overlay.handleInput("u");
+  assert.match(overlay.render(80).join("\n"), /跨轮去重 · 已关闭 · 继承自默认值/);
+  overlay.handleInput("\x13");
+  await flushAsync();
+  assert.equal(saves.length, 0, "fully reverting a mechanism toggle is clean, nothing to save");
+});
+
+test("compaction TUI tiny render labels the selected mechanism", () => {
+  const overlay = createOverlay();
+  for (let index = 0; index < 8; index++) overlay.handleInput("\x1b[B"); // -> softDedup
+  assert.match(overlay.render(12).join("\n"), /去重/);
+  for (let index = 0; index < 2; index++) overlay.handleInput("\x1b[A"); // -> softTimeBased
+  assert.match(overlay.render(12).join("\n"), /时间/);
+});
+
+test("compaction TUI mechanism toggles stay on the user scope for a readonly project", async () => {
+  const saves: Array<{ scope: CompactionScope; values: Record<string, unknown> }> = [];
+  const overlay = createOverlay({
+    projectReadonlyReason: "workspace is not writable",
+    async saveScope(scope, values) { saves.push({ scope, values }); },
+  });
+  assert.match(overlay.render(80).join("\n"), /Maestro 压缩设置 · 项目\s+\[用户\]/);
+  for (let index = 0; index < 7; index++) overlay.handleInput("\x1b[B"); // -> softRelevance
+  overlay.handleInput(" ");
+  assert.match(overlay.render(80).join("\n"), /相关性排序 · 已开启 · 用户/);
+  overlay.handleInput("\x13");
+  await flushAsync();
+  const userSave = saves.find((save) => save.scope === "user");
+  assert.deepEqual(userSave?.values.soft, { relevance: { enabled: true } });
+});
+
 test("compaction TUI pressure preview derives from the effective soft ratios", () => {
   const overlay = createOverlay({
     snapshot: {

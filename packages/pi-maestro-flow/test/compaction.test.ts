@@ -4246,6 +4246,175 @@ test("lossless fold routes bash output by content (diff shape)", () => {
   assert.ok(result.prunedToolResults >= 1);
 });
 
+test("dedup folds survive an active cache gate with cumulative economics", () => {
+  const bigBlock = Array.from({ length: 30 }, (_, i) => `line-${i} ${`payload-${i}`.padEnd(30, "x")}`).join("\n");
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-a", name: "read", arguments: {} }],
+    usage: {
+      input: 160_000,
+      output: 0,
+      cacheRead: 8_000,
+      cacheWrite: 0,
+      totalTokens: 168_000,
+      cost: { total: 0 },
+    },
+  }, {
+    role: "toolResult", toolCallId: "call-a", toolName: "read",
+    content: [{ type: "text", text: bigBlock }], isError: false,
+  }, {
+    role: "assistant", content: [{ type: "toolCall", id: "call-b", name: "read", arguments: {} }],
+  }, {
+    role: "toolResult", toolCallId: "call-b", toolName: "read",
+    content: [{ type: "text", text: bigBlock }], isError: false,
+  }, {
+    role: "user", content: [{ type: "text", text: "continue" }],
+  }, {
+    role: "assistant", content: [{ type: "text", text: "ok" }],
+  }] as never;
+  const manifest = new Map();
+  const result = applyContextPressurePolicy(messages, 200_000, {
+    enabled: true,
+    reserveTokens: 100,
+    keepRecentTokens: 10,
+    soft: {
+      ...DEFAULT_SOFT_COMPACTION,
+      lossless: { enabled: false },
+      cache: { enabled: true },
+      crossTurnDedup: { enabled: true, minLines: 3, minChars: 40 },
+    },
+  }, manifest);
+  assert.equal(manifest.get("call-b")?.level, "dedup");
+  assert.ok(result.prunedToolResults >= 1, "dedup fold participates in the gated plan");
+  assert.ok(!result.reasons.includes("cache-veto"));
+  assert.equal((result.messages[1] as { content?: unknown }).content, (messages[1] as { content?: unknown }).content,
+    "the reference target stays verbatim under an active gate");
+});
+
+test("dedup pointers stay byte-stable across a second evaluation", () => {
+  const bigBlock = Array.from({ length: 30 }, (_, i) => `line-${i} ${`payload-${i}`.padEnd(30, "x")}`).join("\n");
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-a", name: "read", arguments: {} }],
+    usage: {
+      input: 160_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 160_000,
+      cost: { total: 0 },
+    },
+  }, {
+    role: "toolResult", toolCallId: "call-a", toolName: "read",
+    content: [{ type: "text", text: bigBlock }], isError: false,
+  }, {
+    role: "assistant", content: [{ type: "toolCall", id: "call-b", name: "read", arguments: {} }],
+  }, {
+    role: "toolResult", toolCallId: "call-b", toolName: "read",
+    content: [{ type: "text", text: bigBlock }], isError: false,
+  }, {
+    role: "user", content: [{ type: "text", text: "continue" }],
+  }, {
+    role: "assistant", content: [{ type: "text", text: "ok" }],
+  }] as never;
+  const manifest = new Map();
+  const soft = () => ({
+    ...DEFAULT_SOFT_COMPACTION,
+    lossless: { enabled: false },
+    cache: { enabled: false },
+    crossTurnDedup: { enabled: true, minLines: 3, minChars: 40 },
+  });
+  const first = applyContextPressurePolicy(messages, 200_000, {
+    enabled: true, reserveTokens: 100, keepRecentTokens: 10, soft: soft(),
+  }, manifest);
+  const firstPointer = JSON.stringify(first.messages[3]);
+  assert.match(firstPointer, /same as msg call-a/);
+  const second = applyContextPressurePolicy(messages, 200_000, {
+    enabled: true, reserveTokens: 100, keepRecentTokens: 10, soft: soft(),
+  }, manifest);
+  assert.equal(JSON.stringify(second.messages[3]), firstPointer, "frozen pointer replays byte-identically");
+  assert.equal(manifest.get("call-b")?.level, "dedup");
+});
+
+test("all mechanisms disabled degrades to the plain lossy baseline", () => {
+  const messages = toolLoopTranscript(60, 12_000) as never;
+  const mechanismsOff = ({
+    ...DEFAULT_SOFT_COMPACTION,
+    lossless: { enabled: false },
+    cache: { enabled: false },
+    timeBased: { enabled: true, gapThresholdMinutes: 1 },
+    relevance: { enabled: true, mode: "bm25" },
+    crossTurnDedup: { enabled: true, minLines: 2, minChars: 1 },
+  });
+  const offManifest = new Map();
+  const off = applyContextPressurePolicy(messages, 200_000, {
+    enabled: true, reserveTokens: 20_000, keepRecentTokens: 20_000,
+    soft: { ...mechanismsOff, enabled: false },
+  }, offManifest);
+  const baseManifest = new Map();
+  const base = applyContextPressurePolicy(messages, 200_000, {
+    enabled: true, reserveTokens: 20_000, keepRecentTokens: 20_000,
+    soft: { enabled: false },
+  }, baseManifest);
+  assert.equal(JSON.stringify(off.messages), JSON.stringify(base.messages));
+  assert.equal(off.prunedToolResults, 0);
+  assert.equal(off.prunedToolResults, base.prunedToolResults);
+  assert.equal(offManifest.size, 0);
+});
+
+test("dedup-protected references survive relevance-ranked pruning", () => {
+  const bigBlock = Array.from({ length: 30 }, (_, i) => `line-${i} ${`payload-${i}`.padEnd(30, "x")}`).join("\n");
+  const unrelated = Array.from({ length: 400 }, (_, i) => `noise-${i} ${`zzz-${i}`.padEnd(30, "y")}`).join("\n");
+  const messages = [{
+    role: "assistant",
+    content: [{ type: "toolCall", id: "call-a", name: "read", arguments: {} }],
+    usage: {
+      input: 160_000,
+      output: 0,
+      cacheRead: 0,
+      cacheWrite: 0,
+      totalTokens: 160_000,
+      cost: { total: 0 },
+    },
+  }, {
+    role: "toolResult", toolCallId: "call-a", toolName: "read",
+    content: [{ type: "text", text: bigBlock }], isError: false,
+  }, {
+    role: "assistant", content: [{ type: "toolCall", id: "call-b", name: "read", arguments: {} }],
+  }, {
+    role: "toolResult", toolCallId: "call-b", toolName: "read",
+    content: [{ type: "text", text: bigBlock }], isError: false,
+  }, {
+    role: "assistant", content: [{ type: "toolCall", id: "call-c", name: "read", arguments: {} }],
+  }, {
+    role: "toolResult", toolCallId: "call-c", toolName: "read",
+    content: [{ type: "text", text: unrelated }], isError: false,
+  }, {
+    role: "user", content: [{ type: "text", text: `find line-0 payload-0` }],
+  }, {
+    role: "assistant", content: [{ type: "text", text: "ok" }],
+  }] as never;
+  const manifest = new Map();
+  const result = applyContextPressurePolicy(messages, 200_000, {
+    enabled: true,
+    reserveTokens: 100,
+    keepRecentTokens: 2,
+    soft: {
+      ...DEFAULT_SOFT_COMPACTION,
+      lossless: { enabled: false },
+      cache: { enabled: false },
+      relevance: { enabled: true, mode: "bm25" },
+      crossTurnDedup: { enabled: true, minLines: 3, minChars: 40 },
+    },
+  }, manifest);
+  // call-b folds to a pointer; call-c (unrelated, low relevance) is lossy-pruned;
+  // call-a (the dedup reference target) survives verbatim.
+  assert.equal(manifest.get("call-b")?.level, "dedup");
+  assert.ok(manifest.has("call-c"));
+  assert.ok(!manifest.has("call-a"));
+  assert.equal(JSON.stringify(result.messages[1]), JSON.stringify(messages[1]));
+});
+
 test("cache gate still prunes when the run pays for itself", () => {
   // A dense tool loop reclaims ~0.66 tokens per invalidated token — well past
   // the floor — so gating must not suppress it.

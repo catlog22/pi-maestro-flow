@@ -244,6 +244,7 @@ export class CompactionSettingsOverlay implements Component, Focusable {
           if (Object.keys(group).length === 0) delete soft[key];
           else soft[key] = group;
         }
+        if (soft && Object.keys(soft).length === 0) delete this.drafts[this.scope].soft;
       } else {
         delete this.drafts[this.scope][configFieldForItem(item)];
       }
